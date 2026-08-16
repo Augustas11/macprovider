@@ -9,7 +9,7 @@ User policy: 0 CRITICAL + 0 HIGH + 0 MEDIUM target.
 
 ## What landed in Step 3
 
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf` — new
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` — new
   `location /catalog/ { proxy_pass 127.0.0.1:8443 ... }` block. Mirrors
   the v0.2 `/v1/receipt-keys/` proxy. Declared BEFORE the catch-all
   `location / { return 404; }`.
@@ -19,7 +19,7 @@ User policy: 0 CRITICAL + 0 HIGH + 0 MEDIUM target.
   `Makefile`'s `test-dist` target.
 - `phase4-coordinator/dist/coordinator.yaml.example` — new `tier2:`
   block with `public_catalog_base_url` populated for Pearl
-  (`https://coordinator.streamvc.live`) and commented placeholders for
+  (`https://coordinator.malibu.tech`) and commented placeholders for
   the other §M.4 / SPEC-008 catalog config.
 
 ## Severity definitions
@@ -54,7 +54,7 @@ User policy: 0 CRITICAL + 0 HIGH + 0 MEDIUM target.
 
 1. `specs/SPEC-015-receipts.md` §M.4 (catalog endpoints).
 2. `specs/BUILD_SPEC_015_v0_3_MODELHASH_IMPL_PROMPT.md` Step 3.
-3. `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf` —
+3. `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` —
    the new `/catalog/` block and surrounding ordering.
 4. `phase4-coordinator/dist/test/check_nginx_catalog_routes_test.sh`
    — the new static check.

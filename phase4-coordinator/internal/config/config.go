@@ -579,7 +579,7 @@ type ProxyConfig struct {
 	// per-source rate-limit key for `/v1/pool/check`, `/v1/receipt-keys/*`,
 	// and `/catalog/*`. Default `["127.0.0.0/8", "::1/128"]` matches the
 	// production nginx-on-localhost topology (see
-	// `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`).
+	// `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`).
 	// Invalid CIDRs and default-route prefixes (`0.0.0.0/0`, `::/0`)
 	// fail `config.Load` at startup via `TrustedProxyPrefixes`.
 	TrustedProxies []string `yaml:"trusted_proxies"`
@@ -1348,7 +1348,7 @@ func Default() Config {
 		Onboarding: OnboardingConfig{
 			AppTrackRegisterEnabled: false,
 			BundleID:                "tech.malibu.app",
-			CoordinatorDomain:       "coordinator.streamvc.live",
+			CoordinatorDomain:       "coordinator.malibu.tech",
 		},
 		MalibuEmission: MalibuEmissionConfig{
 			Enabled:                     false,

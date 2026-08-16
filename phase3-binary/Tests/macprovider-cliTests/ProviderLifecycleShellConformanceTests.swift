@@ -1452,7 +1452,7 @@ final class ProviderLifecycleShellConformanceTests: XCTestCase {
 private final class LeaseHandoffHarness: @unchecked Sendable {
     static let targetPath = "/Applications/MacProvider.app/Contents/MacOS/macprovider-cli"
     static let targetSHA256 = String(repeating: "a", count: 64)
-    static let serviceIdentity = "live.streamvc.macprovider"
+    static let serviceIdentity = "live.malibu.provider"
 
     // A pid that is guaranteed NOT to be alive on the host, so the shell
     // reconciler's owner-liveness check fails and preservation can only come

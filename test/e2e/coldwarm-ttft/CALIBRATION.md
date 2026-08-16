@@ -104,7 +104,7 @@ From `buyer_stream.cold`:
 
 ## Findings from carrying against prod (2026-07-10)
 
-First warm accumulation against live prod (`api.streamvc.live`, provider `mac`,
+First warm accumulation against live prod (`api.malibu.tech`, provider `mac`,
 20 samples/regime) surfaced three things worth recording:
 
 1. **The "warm 30B ≈ 6s" assumption baked into the gate config is wrong.** The

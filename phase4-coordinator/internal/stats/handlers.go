@@ -14,8 +14,8 @@ import (
 
 // Handler is the SPEC-017 §5 handler bundle. Owned by the
 // `stats_reader` `*sql.DB` injection. Mounted from
-// cmd/coordinator/main.go on both coordinator.streamvc.live
-// and stats.streamvc.live via the same binary.
+// cmd/coordinator/main.go on both coordinator.malibu.tech
+// and stats.malibu.tech via the same binary.
 type Handler struct {
 	Store        *store.Store
 	CORS         CORSConfig
@@ -893,7 +893,7 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, body any, gen
 	// `Access-Control-Allow-Origin` on EVERY cross-origin
 	// response (including 304), so a browser issuing a
 	// conditional GET with `If-None-Match` from
-	// console.streamvc.live / portal.streamvc.live would
+	// console.malibu.tech / portal.malibu.tech would
 	// otherwise reject the response as a CORS failure even
 	// though the response is functionally correct. SPEC §5.7's
 	// CORS table carves out no 304 exception. Move the CORS

@@ -57,7 +57,7 @@ Add or modify (codex MUST decide actual file split based on Swift package bounda
 
 9. **`ops/macprovider-watchdog/watchdog.sh`** (modify) — scan trusted state root for pending.json on each tick. If marker present + lock not held + observer-process not running → orphaned-recovery (validate backup hash, restore via launchctl bootstrap of prior binary, atomically clear marker). Add the various failure_class emissions.
 
-10. **`ops/macprovider-watchdog/live.streamvc.macprovider-watchdog.plist.template`** (probably modify) — if the watchdog gets new dependencies / paths to scan.
+10. **`ops/macprovider-watchdog/live.malibu.provider-watchdog.plist.template`** (probably modify) — if the watchdog gets new dependencies / paths to scan.
 
 11. **Tests** — Swift tests under `phase3-binary/Tests/macprovider-cliTests/` covering AC-V0.1-1 through AC-V0.1-23. Coordinator Go tests under `phase4-coordinator/internal/...` for the wire extensions. Smoke shell script(s) under `phase3-binary/Scripts/` or `test/integration/` if useful.
 

@@ -68,7 +68,7 @@ The optimization function for SPEC-006 is:
 >   - operator is one person
 >   - no payment infrastructure currently exists
 >   - no abuse defense currently exists
->   - existing coordinator at coordinator.streamvc.live serves
+>   - existing coordinator at coordinator.malibu.tech serves
 >     OpenAI-compat /v1/chat/completions today
 >   - existing Vercel demo at web-three-lime-59.vercel.app is the
 >     natural front-door
@@ -188,9 +188,9 @@ become under SPEC-006?
       the API product
 - (b) Gets a signup flow added — chat demo becomes the conversion
       funnel for API access
-- (c) Replaced by a new site at api.streamvc.live with docs + signup
-- (d) Multiple surfaces (chat at streamvc.live, API at api.streamvc.live,
-      docs at docs.streamvc.live)
+- (c) Replaced by a new site at api.malibu.tech with docs + signup
+- (d) Multiple surfaces (chat at malibu.tech, API at api.malibu.tech,
+      docs at docs.malibu.tech)
 
 What's a one-person-operator's minimum?
 
@@ -230,7 +230,7 @@ unavailable), what does the buyer experience?
 - (a) HTTP 503 immediately
 - (b) Queue request for up to N seconds, then 503
 - (c) Friendly error explaining the network state, suggest retry
-- (d) Health page (https://streamvc.live/status) showing live state
+- (d) Health page (https://malibu.tech/status) showing live state
 
 Tied to Q5; also a chance to make Mac Provider's nature ("real Macs,
 sometimes asleep") part of the product experience rather than an
@@ -267,7 +267,7 @@ embarrassment.
 3. `/Users/augstar/macprovider-poc/specs/SPEC-002-coordinator.md`
    — focus on § 3 (mode resolution), § 5 (routing), § 7 (HTTP
    surfaces). The coordinator already exposes
-   `/v1/chat/completions` on `https://coordinator.streamvc.live`;
+   `/v1/chat/completions` on `https://coordinator.malibu.tech`;
    SPEC-006 layers auth + billing + signup on top of that, not a new
    protocol underneath.
 

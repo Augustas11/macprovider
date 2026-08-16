@@ -14,8 +14,8 @@ Low findings are non-blocking and documented below. No Critical, High, or Medium
 - Pinned OpenAI SDK compatibility fixture under `test/integration/spec015/sdk_compat/`.
 - Go fixture tests in `test/integration/spec015_sdk_fixture_test.go`.
 - nginx receipt header buffer directives in:
-  - `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
-  - `phase5-gateway/dist/nginx-api.streamvc.live.conf`
+  - `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
+  - `phase5-gateway/dist/nginx-api.malibu.tech.conf`
 - deploy gates:
   - `phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh`
   - `phase4-coordinator/dist/test/check_nginx_receipt_header_live_test.sh`

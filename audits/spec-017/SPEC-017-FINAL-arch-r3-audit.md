@@ -28,7 +28,7 @@ Required reading:
 - `phase4-coordinator/internal/stats/migrations/*.up.sql`
 - `phase4-coordinator/internal/stats/{auth.go,middleware.go,mux.go,handlers.go,store/*.go,metrics/metrics.go,step4c_integration_test.go}`
 - `phase4-coordinator/internal/config/config.go`
-- `phase4-coordinator/dist/{deploy-pearl-vps.sh,nginx-coordinator.streamvc.live.conf,nginx-stats.streamvc.live.conf,nginx-snippets/*.conf,test/check_nginx_stats_test.sh}`
+- `phase4-coordinator/dist/{deploy-pearl-vps.sh,nginx-coordinator.malibu.tech.conf,nginx-stats.malibu.tech.conf,nginx-snippets/*.conf,test/check_nginx_stats_test.sh}`
 
 Commands run:
 

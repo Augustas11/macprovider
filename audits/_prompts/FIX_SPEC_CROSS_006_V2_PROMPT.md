@@ -137,9 +137,9 @@ Format each branch as a separate "branch:" sub-bullet:
 ```
 AC-26 (OAuth callback URL allowlist):
   Precondition: gateway running with auth.oauth.callback_allowlist
-  configured to ["https://api.streamvc.live/auth/github/callback"].
+  configured to ["https://api.malibu.tech/auth/github/callback"].
   Branch A (matching callback):
-    Action: GET /auth/github/callback?code=<valid>&state=<valid>&redirect_uri=https://api.streamvc.live/auth/github/callback
+    Action: GET /auth/github/callback?code=<valid>&state=<valid>&redirect_uri=https://api.malibu.tech/auth/github/callback
     Expected: HTTP 302 redirect to /account
     Verification: curl -i -o /dev/null -w "%{http_code}\n" "..." | grep -q "302"
   Branch B (mismatched callback):

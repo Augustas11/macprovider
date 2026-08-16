@@ -195,7 +195,7 @@ Fix-stash-test verification required (same pattern as Bug 1 test above).
 
 ### What was observed
 
-Phase B probe B4: 20 concurrent connections to `https://api.streamvc.live/v1/usage`
+Phase B probe B4: 20 concurrent connections to `https://api.malibu.tech/v1/usage`
 all completed with HTTP 401 (no auth). Zero nginx `limit_conn` events. The existing
 `limit_conn ws_provider_conn 5` in the nginx config protects only the
 `/ws/provider` WebSocket endpoint. The buyer-facing `/v1/` path is unprotected —
@@ -203,12 +203,12 @@ an attacker can open unlimited slow-loris connections.
 
 ### Fix required
 
-Edit `/etc/nginx/sites-available/api.streamvc.live` on Pearl VPS
+Edit `/etc/nginx/sites-available/api.malibu.tech` on Pearl VPS
 (`159.223.165.194`). The local copy tracked in the repo is at:
 `phase4-coordinator/dist/deploy-pearl-vps.sh` (which templates the nginx config
 inline). **Both the live file on Pearl AND the repo template must be updated.**
 
-At the top of the `api.streamvc.live` vhost file, alongside the existing
+At the top of the `api.malibu.tech` vhost file, alongside the existing
 `limit_conn_zone` and `limit_req_zone` directives, add:
 
 ```nginx
@@ -239,7 +239,7 @@ grep -r "location /v1/" /Users/augstar/macprovider-poc --include="*.conf" --incl
 Deploy verification: after applying the change, run from Pearl loopback:
 
 ```bash
-ab -n 30 -c 25 -H 'Authorization: Bearer invalid' https://api.streamvc.live/v1/usage
+ab -n 30 -c 25 -H 'Authorization: Bearer invalid' https://api.malibu.tech/v1/usage
 ```
 
 Confirm that connections beyond 20 receive HTTP 429, and that `grep 'limiting connections' /var/log/nginx/error.log` shows events. Record the ab output.
@@ -268,9 +268,9 @@ Confirm that connections beyond 20 receive HTTP 429, and that `grep 'limiting co
    ```
 4. **Nginx fix**: apply the config change to Pearl, run `nginx -t`, `systemctl reload nginx`.
 5. **Smoke-test** immediately after deploy:
-   - `curl -sf https://api.streamvc.live/healthz` → 200
-   - `curl -sf -H 'Authorization: Bearer <buyer_key>' https://api.streamvc.live/v1/usage` → 200 with quota JSON
-   - `curl -sf -H 'Authorization: Bearer bad' https://api.streamvc.live/v1/usage` → 401
+   - `curl -sf https://api.malibu.tech/healthz` → 200
+   - `curl -sf -H 'Authorization: Bearer <buyer_key>' https://api.malibu.tech/v1/usage` → 200 with quota JSON
+   - `curl -sf -H 'Authorization: Bearer bad' https://api.malibu.tech/v1/usage` → 401
 6. **Commit** (from repo root, Augustas11 account):
    ```
    git add phase5-gateway/... phase4-coordinator/dist/...

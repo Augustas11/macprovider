@@ -26,7 +26,7 @@ a characterized shorter one.
 
 **This is the same hardware blocker as P2.** The whole point of #584 is that sustained synthetic
 load *degrades and disconnects the single prod mac*. You must **not** run a 45–60 min soak against
-`api.streamvc.live` / the prod coordinator with the prod provider in the pool — you would
+`api.malibu.tech` / the prod coordinator with the prod provider in the pool — you would
 reproduce the outage. P3 requires a **dedicated lab Mac** serving into a **lab coordinator+gateway
 stack** (or the prod stack with the lab provider as the *only* pool member and prod buyers routed
 away). Until a lab Mac exists, P3 is **parked at the campaign step** — but the instrument (scenario
@@ -66,7 +66,7 @@ The instrument is not the deliverable. The deliverables are:
    - `duration: 2700s`–`3600s` (45–60 min), 2 buyers, `stream: true`, `pattern: interval` paced so
      the provider stays continuously busy (short inter-request floor) but within `N_eff` — reuse
      07's pacing math (`wall_p95 + interval` floor keeps `mean_active < N_eff`; see 07's header).
-   - Target the **lab** stack (lab gateway/coordinator URLs), not `streamvc.live`.
+   - Target the **lab** stack (lab gateway/coordinator URLs), not `malibu.tech`.
    - One model per soak run (start with the 30B, since that is the prod model class that collapsed;
      add smaller classes as separate runs). Realistic `max_tokens` (64) so decode dominates.
 2. **New benchmark invariant `B8` — "sustained TPS retention"** in `benchmark.go`:

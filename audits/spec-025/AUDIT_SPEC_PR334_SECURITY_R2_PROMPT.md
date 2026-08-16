@@ -96,7 +96,7 @@ Same list as CODE R2 §"New surfaces to audit" — most importantly:
 5. Entitlements: verify `network.client` alone is sufficient for a
    menu-bar app that only:
    - Talks to a local Unix socket (no entitlement needed).
-   - Opens https://portal.streamvc.live via `NSWorkspace.open` (no
+   - Opens https://portal.malibu.tech via `NSWorkspace.open` (no
      network entitlement in-app; the browser handles the request).
    - Registers a login item via SMAppService (no entitlement).
    Argument: could we drop `network.client` entirely until Sparkle

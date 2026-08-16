@@ -267,8 +267,8 @@ endpoints:
 
 providers:
   - provider_id: "m4-anon"
-    endpoint_url: "https://m4.streamvc.live"
+    endpoint_url: "https://m4.malibu.tech"
     display_name: "M4 partner (Qwen 7B)"
   - provider_id: "m1-anon"
-    endpoint_url: "https://m1.streamvc.live"
+    endpoint_url: "https://m1.malibu.tech"
     display_name: "M1 partner (Llama 3B)"

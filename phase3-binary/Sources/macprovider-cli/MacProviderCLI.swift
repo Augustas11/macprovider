@@ -1987,7 +1987,7 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
-    static let providerLaunchdServiceIdentity = "live.streamvc.macprovider"
+    static let providerLaunchdServiceIdentity = "live.malibu.provider"
 
     @discardableResult
     static func fenceAuthorizedSelfUpdateReloadJobsAtStartup(

@@ -339,12 +339,12 @@ Specifically:
 
 **Problem:** OQ-3 asks "How does the binary reach contributors?
 Options: GitHub Releases, Homebrew tap, direct link." SPEC-003 v0.2
-§ 4 (FR-C1/FR-C2) answers this: GitHub Releases + get.streamvc.live/
+§ 4 (FR-C1/FR-C2) answers this: GitHub Releases + get.malibu.tech/
 install.sh.
 
 **Fix:** Close SPEC-001 v1.2.1 OQ-3 as "RESOLVED in SPEC-003 v0.2
 FR-C1, FR-C2. Distribution channel is GitHub Releases via
-https://get.streamvc.live/install.sh." Either remove from the open-
+https://get.malibu.tech/install.sh." Either remove from the open-
 questions list or move to a "Resolved questions" appendix.
 
 ### MINOR — fix opportunistically

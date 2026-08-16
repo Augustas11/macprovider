@@ -5,16 +5,16 @@ import XCTest
 final class PayoutAddressClientTests: XCTestCase {
     func testEndpointsFromWSSCoordinatorURL() {
         let urls = PayoutAddressClient.endpoints(
-            from: "wss://coordinator.streamvc.live/v2/provider?x=1",
+            from: "wss://coordinator.malibu.tech/v2/provider?x=1",
             providerID: "prov-1"
         )
         XCTAssertEqual(
             urls?.challenge.absoluteString,
-            "https://coordinator.streamvc.live/providers/prov-1/payout-address/challenge"
+            "https://coordinator.malibu.tech/providers/prov-1/payout-address/challenge"
         )
         XCTAssertEqual(
             urls?.register.absoluteString,
-            "https://coordinator.streamvc.live/providers/prov-1/payout-address"
+            "https://coordinator.malibu.tech/providers/prov-1/payout-address"
         )
     }
 
@@ -22,16 +22,16 @@ final class PayoutAddressClientTests: XCTestCase {
         // http:// and ws:// bases (which would carry the bearer token
         // over cleartext) must not produce endpoints at all.
         XCTAssertNil(PayoutAddressClient.endpoints(
-            from: "http://coordinator.streamvc.live/v2/provider",
+            from: "http://coordinator.malibu.tech/v2/provider",
             providerID: "prov-1"
         ))
         XCTAssertNil(PayoutAddressClient.endpoints(
-            from: "ws://coordinator.streamvc.live/v2/provider",
+            from: "ws://coordinator.malibu.tech/v2/provider",
             providerID: "prov-1"
         ))
         // https:// and wss:// remain valid.
         XCTAssertNotNil(PayoutAddressClient.endpoints(
-            from: "https://coordinator.streamvc.live",
+            from: "https://coordinator.malibu.tech",
             providerID: "prov-1"
         ))
         // Constructing via the throwing initializer surfaces the

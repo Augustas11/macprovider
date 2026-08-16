@@ -436,8 +436,8 @@ final class ConfigApplierTests: XCTestCase {
 
         XCTAssertTrue(hint.contains("launchctl bootout"))
         XCTAssertTrue(hint.contains("launchctl bootstrap"))
-        XCTAssertTrue(hint.contains("~/Library/LaunchAgents/live.streamvc.macprovider.plist"))
-        XCTAssertTrue(hint.contains("gui/$UID/live.streamvc.macprovider"))
+        XCTAssertTrue(hint.contains("~/Library/LaunchAgents/live.malibu.provider.plist"))
+        XCTAssertTrue(hint.contains("gui/$UID/live.malibu.provider"))
     }
 
     private func sampleConfig() -> String {

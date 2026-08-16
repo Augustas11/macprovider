@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # M4 cooperative-cron entry. Fires the cooperative batch list against
-# https://m4.streamvc.live and regenerates today's report.
+# https://m4.malibu.tech and regenerates today's report.
 set -euo pipefail
 BETA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$BETA_DIR/.." && pwd)"

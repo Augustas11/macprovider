@@ -22,7 +22,7 @@ the change-log / rollback runbook the script's comments cross-reference.
 `deploy-pearl-vps.sh` assumes these are already in place on Pearl:
 
 - The `macprovider` system user, `/opt/macprovider/`, and Pearl's
-  certbot-managed certificate for `api.streamvc.live` — set up alongside the
+  certbot-managed certificate for `api.malibu.tech` — set up alongside the
   coordinator's first deploy (`phase4-coordinator/dist/deploy-pearl-vps.sh`).
 - `/etc/macprovider/gateway.env` with:
   - `COORDINATOR_OPERATOR_KEY`
@@ -57,10 +57,10 @@ Then validate the effective config and restart via the deploy script:
 ## Smoke checks after deploy
 
 ```bash
-curl -i https://api.streamvc.live/healthz       # 200, includes "version"
-curl -i https://api.streamvc.live/v1/models     # 401 without auth
+curl -i https://api.malibu.tech/healthz       # 200, includes "version"
+curl -i https://api.malibu.tech/v1/models     # 401 without auth
 curl -i -H "Authorization: Bearer <key>" \
-  https://api.streamvc.live/v1/models           # 200 with valid key
+  https://api.malibu.tech/v1/models           # 200 with valid key
 ```
 
 SPEC-015 receipt checks after provider/coordinator/gateway are all live. Run these from the repo root:
@@ -69,12 +69,12 @@ SPEC-015 receipt checks after provider/coordinator/gateway are all live. Run the
 (
   cd test/integration && \
   SPEC015_SDK_COMPAT_LIVE=1 \
-  MACPROVIDER_SPEC015_GATEWAY_URL=https://api.streamvc.live \
+  MACPROVIDER_SPEC015_GATEWAY_URL=https://api.malibu.tech \
   MACPROVIDER_SPEC015_API_KEY=$MP_API_KEY \
     go test . -run TestSpec015SDKCompatLiveRunner -count=1
 )
 
-SPEC015_NGINX_ECHO_URL='https://api.streamvc.live/operator-echo-url' make test-dist
+SPEC015_NGINX_ECHO_URL='https://api.malibu.tech/operator-echo-url' make test-dist
 ```
 
 The nginx echo URL must be replaced with an operator-controlled endpoint that returns the received `X-MacProvider-Receipt` response header byte-for-byte; leave it unset for the default static deploy-config gate.
@@ -95,7 +95,7 @@ If the nginx site changed and that broke the rollout, revert the nginx
 config separately:
 
 ```bash
-ssh root@159.223.165.194 'git -C /etc/nginx/sites-available checkout HEAD~1 api.streamvc.live && nginx -t && systemctl reload nginx'
+ssh root@159.223.165.194 'git -C /etc/nginx/sites-available checkout HEAD~1 api.malibu.tech && nginx -t && systemctl reload nginx'
 ```
 
 (That requires the operator to have started a git history in
@@ -103,6 +103,6 @@ ssh root@159.223.165.194 'git -C /etc/nginx/sites-available checkout HEAD~1 api.
 edited by hand.)
 
 Operator endpoints under `/admin/*` remain intentionally not exposed by
-the public `api.streamvc.live` nginx site. Use loopback on the Pearl host
+the public `api.malibu.tech` nginx site. Use loopback on the Pearl host
 or a separate trusted operator channel for kill-switch, feedback summary,
 and capacity controls.

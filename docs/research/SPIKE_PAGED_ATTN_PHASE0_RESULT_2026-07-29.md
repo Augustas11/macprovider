@@ -128,8 +128,8 @@ Order-of-magnitude: a **multi-week** build, dominated by per-model attention inj
 The spike ran inside a **bounded off-peak maintenance window** on the live-provider M5. Full stop/restore executed safely (watchdog first; **no broad pkill**; graceful `launchctl bootout`/`bootstrap`). Restore state snapshot saved to `scratchpad/spike-paged-attn-restore-state-20260729T105503.txt`.
 
 - **Redundancy check before stop:** coordinator pool healthy at `pool_size:3, pool_ready:3`; `requests_total:0` (≈zero live traffic). Window opened ~10:55 EEST, just past the 04:00–10:00 peak.
-- **Stopped (WATCHDOG FIRST):** `live.streamvc.macprovider-watchdog` → `live.streamvc.macprovider` → `coldwarm-warm` → `coldwarm-postreboot-watch` → `catalog-canary-tunnel`. Verified provider process gone, RAM freed (76 MB → ~16.5 GB), coordinator pool cleanly `3 → 2` (survivors served buyers throughout).
+- **Stopped (WATCHDOG FIRST):** `live.malibu.provider-watchdog` → `live.malibu.provider` → `coldwarm-warm` → `coldwarm-postreboot-watch` → `catalog-canary-tunnel`. Verified provider process gone, RAM freed (76 MB → ~16.5 GB), coordinator pool cleanly `3 → 2` (survivors served buyers throughout).
 - **Restored:** all 5 agents `bootstrap`'d back (provider first). Cold model reload took ~5 min; then port `61920` listening, coordinator pool recovered **2 → 3 (3/3 ready)**, watchdog rescheduled.
-- **Verified serving:** real buyer inference through `api.streamvc.live` returned exactly `spike-restore-ok` (`model_hash_observed` present, `total_tokens:21`). Machine left exactly as found.
+- **Verified serving:** real buyer inference through `api.malibu.tech` returned exactly `spike-restore-ok` (`model_hash_observed` present, `total_tokens:21`). Machine left exactly as found.
 
 **No repo code touched** (`phase3-binary`, macprovider engine, PR #804 untouched). The throwaway package stays under `~/spikes`.

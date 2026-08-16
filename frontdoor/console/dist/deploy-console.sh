@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy-console.sh — deploy the Mac Provider front-door static site to
-# console.streamvc.live on the Pearl VPS.
+# console.malibu.tech on the Pearl VPS.
 #
 # Run from the operator's Mac. Idempotent: re-running against an
 # already-deployed console is a safe no-op (DNS create skipped if the
@@ -11,7 +11,7 @@
 #   0. freshness check — compare local repo / Pearl-deployed / origin/main
 #      sha256 for index.html; refuse to silently overwrite Pearl drift
 #   1. confirm SSH
-#   2. ensure DNS A record console.streamvc.live -> VPS (Cloudflare API,
+#   2. ensure DNS A record console.malibu.tech -> VPS (Cloudflare API,
 #      DNS-only) — created if missing, skipped if present
 #   3. wait for the name to resolve to the VPS (required before certbot)
 #   4. install a port-80 stub vhost (ACME challenge), reload nginx
@@ -21,7 +21,7 @@
 #   8. verify the public endpoint + cert
 #
 # Architecture (decision Bδ): browser -> static HTML on nginx -> direct
-# fetch() to https://api.streamvc.live (strict-allowlist CORS). No Vercel,
+# fetch() to https://api.malibu.tech (strict-allowlist CORS). No Vercel,
 # no proxy hop.
 #
 # Usage:
@@ -31,10 +31,10 @@
 #   SSH_KEY    default: ~/.ssh/pearl_operator_ed25519
 #   VPS_HOST   default: 159.223.165.194
 #   VPS_USER   default: root
-#   DOMAIN     default: console.streamvc.live
+#   DOMAIN     default: console.malibu.tech
 #   EMAIL      default: augstar@gmail.com (Let's Encrypt)
 #   CF_TOKEN_FILE default: ~/.config/macprovider/cloudflare-api-token
-#                  (Cloudflare API token scoped to Zone:DNS:Edit on streamvc.live;
+#                  (Cloudflare API token scoped to Zone:DNS:Edit on malibu.tech;
 #                   only needed if the DNS record does not already exist)
 #   FORCE_OVERWRITE=1  bypass the step-0 freshness gate when local diverges
 #                      from origin/main (intentional hot-fix deploy)
@@ -45,15 +45,15 @@ set -euo pipefail
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
 VPS_HOST="${VPS_HOST:-159.223.165.194}"
 VPS_USER="${VPS_USER:-root}"
-DOMAIN="${DOMAIN:-console.streamvc.live}"
+DOMAIN="${DOMAIN:-console.malibu.tech}"
 EMAIL="${EMAIL:-augstar@gmail.com}"
 CF_TOKEN_FILE="${CF_TOKEN_FILE:-$HOME/.config/macprovider/cloudflare-api-token}"
-CF_ZONE_NAME="streamvc.live"
+CF_ZONE_NAME="malibu.tech"
 
 DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
 INDEX="$DIST_DIR/../index.html"
 FAVICON="$DIST_DIR/../favicon.svg"
-NGINX_SITE="$DIST_DIR/nginx-console.streamvc.live.conf"
+NGINX_SITE="$DIST_DIR/nginx-console.malibu.tech.conf"
 
 for f in "$INDEX" "$FAVICON" "$NGINX_SITE"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }

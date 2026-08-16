@@ -4,7 +4,8 @@
 set -euo pipefail
 
 WATCHDOG_DIR="${MACPROVIDER_WATCHDOG_DIR:-$HOME/.local/share/macprovider-watchdog}"
-PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+LEGACY_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
 DRY_RUN=0
 
 log() { printf "[macprovider-watchdog-uninstall] %s\n" "$*"; }
@@ -45,11 +46,18 @@ if [ "$candidate" != "$expected_prefix" ]; then
   exit 1
 fi
 
-if [ -f "$PLIST_PATH" ]; then
-  run launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
-  run rm -f "$PLIST_PATH"
+removed_plist=0
+for plist in "$PLIST_PATH" "$LEGACY_PLIST_PATH"; do
+  if [ -f "$plist" ]; then
+    run launchctl bootout "gui/$UID" "$plist" >/dev/null 2>&1 || true
+    run rm -f "$plist"
+    removed_plist=1
+  fi
+done
+if [ "$removed_plist" -eq 0 ]; then
+  log "No watchdog plist found at $PLIST_PATH or $LEGACY_PLIST_PATH"
 else
-  log "No watchdog plist found at $PLIST_PATH"
+  run launchctl disable "gui/$UID/live.streamvc.macprovider-watchdog" >/dev/null 2>&1 || true
 fi
 
 if [ -d "$WATCHDOG_DIR" ]; then

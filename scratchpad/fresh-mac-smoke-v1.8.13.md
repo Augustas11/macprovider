@@ -19,9 +19,9 @@ Run on a Mac that has **never** had macprovider or Malibu installed. Check each 
 
 ## Background provider
 
-- [ ] `launchctl list | rg macprovider` shows `live.streamvc.macprovider` with PID
+- [ ] `launchctl list | rg macprovider` shows `live.malibu.provider` with PID
 - [ ] `curl -s http://127.0.0.1:$(grep '^port:' ~/.config/macprovider/config.yaml | awk '{print $2}')/v1/health` → `"status":"ready"` (after model load)
-- [ ] `curl -s "https://coordinator.streamvc.live/v1/pool/check?provider_id=$(cat ~/.config/macprovider/provider_id)"` → `"state":"ready"`
+- [ ] `curl -s "https://coordinator.malibu.tech/v1/pool/check?provider_id=$(cat ~/.config/macprovider/provider_id)"` → `"state":"ready"`
 
 ## Reboot
 

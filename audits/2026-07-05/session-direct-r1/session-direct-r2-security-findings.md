@@ -26,8 +26,8 @@ No CRITICAL, HIGH, or MEDIUM security findings. I checked the SEC-M-1 token-exfi
 
 ### SEC-R2-L-1 (LOW) WebSocket path is only non-empty, not exact-pinned
 - File: phase3-binary/app/Sources/Malibu/System/RegisterClient.swift:218
-- Threat model: A network attacker who can tamper with the register response but must still pass same-origin validation can choose an arbitrary non-empty same-origin path such as `wss://coordinator.streamvc.live/somewhere-else`.
-- Evidence: `validateCoordinatorWSURL` rejects scheme/host/port/userinfo/empty path, but it does not require `/v2/provider`. Coordinator production config returns `wss://<domain>/v2/provider` in `phase4-coordinator/cmd/coordinator/main.go:647`; nginx has an exact `/v2/provider` route to `/ws/provider` in `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:126`. Because the origin remains the coordinator origin, this does not recreate SEC-M-1 token exfiltration to an attacker origin. The residual impact is fail-closed connection failure or accidental same-origin handler exposure.
+- Threat model: A network attacker who can tamper with the register response but must still pass same-origin validation can choose an arbitrary non-empty same-origin path such as `wss://coordinator.malibu.tech/somewhere-else`.
+- Evidence: `validateCoordinatorWSURL` rejects scheme/host/port/userinfo/empty path, but it does not require `/v2/provider`. Coordinator production config returns `wss://<domain>/v2/provider` in `phase4-coordinator/cmd/coordinator/main.go:647`; nginx has an exact `/v2/provider` route to `/ws/provider` in `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:126`. Because the origin remains the coordinator origin, this does not recreate SEC-M-1 token exfiltration to an attacker origin. The residual impact is fail-closed connection failure or accidental same-origin handler exposure.
 - Recommendation: Pin the path to `/v2/provider` unless there is an intentional migration story for alternate provider WebSocket paths. If migration flexibility is needed, use an explicit allowlist.
 
 ### SEC-R2-L-2 (LOW) Config writer still interpolates YAML scalars directly
@@ -44,7 +44,7 @@ No CRITICAL, HIGH, or MEDIUM security findings. I checked the SEC-M-1 token-exfi
 
 ### SEC-R2-I-2 (INFO) TLS trust remains standard system-CA trust, not certificate pinning
 - File: phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:33
-- Threat model: A compromised CA or locally trusted malicious root intercepts the later `wss://coordinator.streamvc.live/...` connection even after URL validation accepts the correct origin.
+- Threat model: A compromised CA or locally trusted malicious root intercepts the later `wss://coordinator.malibu.tech/...` connection even after URL validation accepts the correct origin.
 - Evidence: The provider WebSocket uses a normal `URLSessionConfiguration.default` session with a redirect-denying delegate, not a pinning delegate. This is outside the URL-string validator's scope: the validator controls what URL is persisted, not the TLS trust decision or the actual network route after DNS/TCP/TLS.
 - Recommendation: Treat certificate pinning as a separate product/security decision. Do not count it as part of SEC-M-1 closure unless a future requirement explicitly calls for pinning.
 

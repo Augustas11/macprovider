@@ -168,6 +168,8 @@ struct UninstallCommand: AsyncParsableCommand {
     // can bootstrap or kickstart the provider during uninstall. The fixed list
     // also prevents a user-writable manifest from targeting unrelated jobs.
     static let managedLaunchdStopOrder = [
+        "live.malibu.provider-watchdog",
+        "live.malibu.provider",
         "live.streamvc.macprovider-watchdog",
         "live.streamvc.macprovider",
     ]
@@ -218,8 +220,8 @@ struct UninstallCommand: AsyncParsableCommand {
             binary: home.appendingPathComponent(".local/bin/macprovider-cli"),
             supportDirectory: home.appendingPathComponent("macprovider"),
             logsDirectory: home.appendingPathComponent("Library/Logs/macprovider"),
-            plist: home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist"),
-            watchdogPlist: home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"),
+            plist: home.appendingPathComponent("Library/LaunchAgents/live.malibu.provider.plist"),
+            watchdogPlist: home.appendingPathComponent("Library/LaunchAgents/live.malibu.provider-watchdog.plist"),
             watchdogDirectory: home.appendingPathComponent(".local/share/macprovider-watchdog"),
             applicationSupportDirectory: home.appendingPathComponent("Library/Application Support/macprovider", isDirectory: true),
             manifest: home.appendingPathComponent("Library/Application Support/macprovider/install_manifest.json"),
@@ -259,7 +261,7 @@ struct UninstallCommand: AsyncParsableCommand {
         let paths = artifactPaths(home: home)
         return InstallManifest(
             installPrefix: paths.supportDirectory.path,
-            launchdLabels: ["live.streamvc.macprovider", "live.streamvc.macprovider-watchdog"],
+            launchdLabels: ["live.malibu.provider", "live.malibu.provider-watchdog"],
             dataDirs: [
                 paths.supportDirectory.path,
                 paths.logsDirectory.path,
@@ -271,6 +273,8 @@ struct UninstallCommand: AsyncParsableCommand {
             launchdPlists: [
                 paths.plist.path,
                 paths.watchdogPlist.path,
+                home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist").path,
+                home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist").path,
             ]
         )
     }
@@ -329,6 +333,8 @@ struct UninstallCommand: AsyncParsableCommand {
             plists: [
                 paths.plist.path,
                 paths.watchdogPlist.path,
+                home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist").path,
+                home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist").path,
             ],
             symlinks: [
                 paths.binary.path,

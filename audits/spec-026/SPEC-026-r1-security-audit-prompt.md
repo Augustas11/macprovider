@@ -17,7 +17,7 @@ handling, and settlement / payout-binding trust boundaries.
 ## Threat model to hold in mind
 
 The pre-existing state: provider onboarding requires a GitHub OAuth step
-at `portal.streamvc.live/onboard`. That step is being retired for the
+at `portal.malibu.tech/onboard`. That step is being retired for the
 App track. The claim SPEC-026 makes is that a layered stack (§5, §11)
 replaces the sybil resistance the GitHub gate was providing.
 
@@ -81,8 +81,8 @@ Rank each finding CRITICAL / HIGH / MEDIUM / LOW / INFO.
    over `JCS({provider_id, wallet, chain_id, nonce, ts_utc, coordinator_domain})`.
    - `coordinator_domain` is included — good, prevents cross-domain
      replay. Is it a canonical string the App and coordinator both
-     agree on? "coordinator.streamvc.live" vs
-     "https://coordinator.streamvc.live" vs with-trailing-slash = fork.
+     agree on? "coordinator.malibu.tech" vs
+     "https://coordinator.malibu.tech" vs with-trailing-slash = fork.
    - Is `chain_id` bound into the settlement contract call, or only
      into the identity signature? An attacker controlling the
      coordinator (insider threat) with a valid identity signature but

@@ -163,7 +163,7 @@ single-PR plan in commit `92c8672`.
 ## Stranger-phase context (informs UX edges, not Step 2 code)
 
 The user is preparing for stranger-phase rollout. SPEC-014 v0.8 (provider
-portal) is shipped at `portal.streamvc.live`. SPEC-014 v0.9 (payout-address
+portal) is shipped at `portal.malibu.tech`. SPEC-014 v0.9 (payout-address
 registration screen + earnings-with-payout-ETA banner) is NOT YET written
 — it consumes the endpoints Step 2 builds. The Step 2 endpoint shapes
 matter because v0.9 will be authored against them. If Step 2 IMPL surfaces

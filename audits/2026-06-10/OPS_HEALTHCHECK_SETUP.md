@@ -17,8 +17,8 @@ external accounts; everything below is a human action.
 
 | Endpoint | URL | What it proves |
 |---|---|---|
-| Coordinator | `https://coordinator.streamvc.live/healthz` | Pearl up + nginx up + coordinator process up + can serve a request |
-| Gateway     | `https://api.streamvc.live/healthz`         | Pearl up + nginx up + gateway process up + can serve a request |
+| Coordinator | `https://coordinator.malibu.tech/healthz` | Pearl up + nginx up + coordinator process up + can serve a request |
+| Gateway     | `https://api.malibu.tech/healthz`         | Pearl up + nginx up + gateway process up + can serve a request |
 
 Both must be up to serve any buyer traffic. If only the gateway is up, every
 inference 502s downstream; if only the coordinator is up, no buyer can reach

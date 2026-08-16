@@ -115,11 +115,11 @@ The codebase is in solid shape for a money-moving early-network system: there ar
 ### [MEDIUM] Console dashboard interpolates server-controlled `/v1/status` into `innerHTML` under `unsafe-inline` CSP
 
 - **Component:** Web Demo + Scripts (web-scripts)
-- **File(s):** `frontdoor/console/index.html:1093` (sink), 781-786 (`fetchStatus`), 1086 (`ps.status`); `nginx-console.streamvc.live.conf:27` (CSP)
+- **File(s):** `frontdoor/console/index.html:1093` (sink), 781-786 (`fetchStatus`), 1086 (`ps.status`); `nginx-console.malibu.tech.conf:27` (CSP)
 - **Category:** xss
 - **What:** `renderDashboard` sets `row.innerHTML` from a template literal interpolating `val`. The Status row's `val` is `ps.status`, raw unsanitized JSON fetched from `/v1/status`. Every other dynamic value uses `textContent` or numeric coercion; this is the lone HTML sink. CSP is `script-src 'unsafe-inline'`, so an injected `<img onerror=…>` inline handler executes.
 - **Impact:** If `/v1/status` is ever attacker-influenced (compromised/malicious upstream), JS runs in-origin and can read the `demo_token` and exfiltrate localStorage chat history. Requires a malicious upstream — hence medium, defense-in-depth.
-- **Evidence:** Confirmed `index.html:1093` interpolates `${val}` into `innerHTML` with no escaping; `val = ps.status` (1086) where `ps = poolStatus` assigned raw from `await r.json()` of `/v1/status` (781-783). Numeric rows are coerced via `String(... || 0)`; model tags use `textContent`; only `val` is the vector. CSP `script-src 'unsafe-inline'` confirmed at `nginx-console.streamvc.live.conf:27`; `fetchStatus` re-fires every 30s. Confirmed.
+- **Evidence:** Confirmed `index.html:1093` interpolates `${val}` into `innerHTML` with no escaping; `val = ps.status` (1086) where `ps = poolStatus` assigned raw from `await r.json()` of `/v1/status` (781-783). Numeric rows are coerced via `String(... || 0)`; model tags use `textContent`; only `val` is the vector. CSP `script-src 'unsafe-inline'` confirmed at `nginx-console.malibu.tech.conf:27`; `fetchStatus` re-fires every 30s. Confirmed.
 - **Recommendation:** Render Status via `textContent`/`className`, HTML-escape `val`, and drop `unsafe-inline` from `script-src`.
 
 ### [LOW] Token revocation by 6-char prefix can revoke unrelated tokens and kick the wrong provider
@@ -249,7 +249,7 @@ The codebase is in solid shape for a money-moving early-network system: there ar
 - **Category:** timing-side-channel
 - **What:** The admin gate at `endpoints.go:61` uses `r.Header.Get("Authorization") != "Bearer "+h.operatorKey` (native `!=`), with no `crypto/subtle` path anywhere in `internal/billing` or `internal/auth`. Protects every `/admin/ledger/*` endpoint (summary, providers, reconcile).
 - **Impact:** Same class as above. Lower still: the gated endpoints are admin-only and read-mostly (reconcile only writes a benign `reconciliation_runs` row, not fund movement). The `operatorKey==""` open path is unreachable because `config.go:399` enforces the key be set.
-- **Evidence:** Confirmed native `!=`; grep for `crypto/subtle` across `internal/billing`/`internal/auth` returns nothing. Empty-key case unreachable per `config.go:399`. **Downgraded MEDIUM→LOW:** remote target (`coordinator.streamvc.live`) where network jitter dwarfs per-byte timing, high-entropy key, read-mostly admin endpoints. Confirmed.
+- **Evidence:** Confirmed native `!=`; grep for `crypto/subtle` across `internal/billing`/`internal/auth` returns nothing. Empty-key case unreachable per `config.go:399`. **Downgraded MEDIUM→LOW:** remote target (`coordinator.malibu.tech`) where network jitter dwarfs per-byte timing, high-entropy key, read-mostly admin endpoints. Confirmed.
 - **Recommendation:** Use `subtle.ConstantTimeCompare([]byte(authHeader), []byte("Bearer "+h.operatorKey)) == 1` after a length-independent guard. *(Cross-cutting non-constant-time cluster.)*
 
 ### [LOW] Operator admin token compared with non-constant-time string equality (gateway — auth lens of the gw-router MEDIUM)

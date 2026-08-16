@@ -12,10 +12,10 @@ Verdict: NOT READY TO LOCK —
 ## Validation evidence
 - Required reading completed: `SPEC-017-network-stats-api.md` v0.1.8 §5.6 / §5.7 / §6.6.2 / §7.1 / §7.4 / §8.5, `BUILD_SPEC_017_IMPL_PROMPT.md` Step 4.B + AC matrix, Step 3 convergence record, the coordinator nginx vhost, and the new stats nginx vhost.
 - `git status -sb` — branch `impl/spec-017-step-1...origin/impl/spec-017-step-1`; pre-existing untracked Step 4.C prompt files ignored.
-- `git diff 51b9736..HEAD -- phase4-coordinator/dist/` — Step 4.B adds `nginx-stats.streamvc.live.conf` and the coordinator `/v1/stats/*` allow-through block.
+- `git diff 51b9736..HEAD -- phase4-coordinator/dist/` — Step 4.B adds `nginx-stats.malibu.tech.conf` and the coordinator `/v1/stats/*` allow-through block.
 - `grep -RInE 'limit_req_zone|limit_req |proxy_cache|proxy_no_cache|\$http_authorization' phase4-coordinator/dist/nginx-*.conf` — confirmed map/zone/cache/auth directives.
 - Static brace-depth check over both nginx files — PASS, balanced braces.
-- Static context check — `map`, `limit_req_zone`, `proxy_cache_path`, and `log_format` are outside any `server` block in `nginx-stats.streamvc.live.conf`.
+- Static context check — `map`, `limit_req_zone`, `proxy_cache_path`, and `log_format` are outside any `server` block in `nginx-stats.malibu.tech.conf`.
 - Local `nginx -t` was not executable: `nginx` is not installed locally, and Docker is present but the Docker daemon socket is unavailable. Static deploy-path evidence below is therefore the load-bearing syntax finding.
 - Existing dist nginx tests run:
   - `bash phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh` — PASS.
@@ -25,7 +25,7 @@ Verdict: NOT READY TO LOCK —
 ## Category Verdicts
 A. `nginx -t` compatibility: FAIL — directive spelling/context is otherwise stock nginx, but the deploy-installed coordinator site can reference undeclared `stats_*` limit zones.
 
-B. map directive correctness: PASS within `nginx-stats.streamvc.live.conf` — `map $http_authorization $public_rl_key` precedes the three `limit_req_zone` declarations and uses empty-key bypass for Authorization-present requests.
+B. map directive correctness: PASS within `nginx-stats.malibu.tech.conf` — `map $http_authorization $public_rl_key` precedes the three `limit_req_zone` declarations and uses empty-key bypass for Authorization-present requests.
 
 C. limit_req_zone declarations: FAIL in deployment shape — declarations exist at http context in the stats vhost file, but the coordinator deploy script does not install/enable that file before testing the coordinator vhost that references those zones.
 
@@ -51,11 +51,11 @@ L. Test harness: FAIL — no Step 4.B stats nginx harness was shipped or wired i
 
 ### CRITICAL
 1. `phase4-coordinator/dist/deploy-pearl-vps.sh:36`
-   - Evidence: the deploy script only requires and uploads `NGINX_SITE="$DIST_DIR/nginx-coordinator.streamvc.live.conf"`, then installs `/tmp/nginx-coordinator-full.conf` to `/etc/nginx/sites-available/$DOMAIN` and runs `nginx -t` at lines 373-384. It never copies, installs, or enables `phase4-coordinator/dist/nginx-stats.streamvc.live.conf`.
-   - Evidence: the coordinator vhost now references `limit_req zone=stats_overview`, `stats_leaderboard`, and `stats_health` at `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:213`, `:232`, and `:251`.
-   - Evidence: the matching `limit_req_zone` declarations exist only in `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:45-47`.
+   - Evidence: the deploy script only requires and uploads `NGINX_SITE="$DIST_DIR/nginx-coordinator.malibu.tech.conf"`, then installs `/tmp/nginx-coordinator-full.conf` to `/etc/nginx/sites-available/$DOMAIN` and runs `nginx -t` at lines 373-384. It never copies, installs, or enables `phase4-coordinator/dist/nginx-stats.malibu.tech.conf`.
+   - Evidence: the coordinator vhost now references `limit_req zone=stats_overview`, `stats_leaderboard`, and `stats_health` at `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:213`, `:232`, and `:251`.
+   - Evidence: the matching `limit_req_zone` declarations exist only in `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:45-47`.
    - Why this is CRITICAL: the Step 4.B deploy path can install a coordinator vhost whose `limit_req` zones are undeclared in the active nginx config. That is a stock nginx syntax failure class and violates category A/C. It also means the new coordinator `/v1/stats/*` exception can break `nginx -t` before the stats vhost ever serves traffic.
-   - Fix: move the shared `map`, three `limit_req_zone` declarations, `proxy_cache_path`, and `log_format` into an http-level snippet installed before any site that references them, and update deploy automation to install/enable that snippet plus the stats vhost before running `nginx -t`. Alternatively, update the deploy script to install/enable `stats.streamvc.live` first and prove include order, but a dedicated snippet is less fragile.
+   - Fix: move the shared `map`, three `limit_req_zone` declarations, `proxy_cache_path`, and `log_format` into an http-level snippet installed before any site that references them, and update deploy automation to install/enable that snippet plus the stats vhost before running `nginx -t`. Alternatively, update the deploy script to install/enable `stats.malibu.tech` first and prove include order, but a dedicated snippet is less fragile.
 
 ### HIGH
 None.
@@ -71,16 +71,16 @@ None.
 None.
 
 ### INFO
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:40-47` uses the preferred shape (a) map-based Authorization-aware public limiter.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:45-47` declares separate `stats_overview`, `stats_leaderboard`, and `stats_health` zones with `rate=60r/m`.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:116`, `:143`, and `:165` use `limit_req zone=<endpoint> nodelay` with no `burst=`.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:117`, `:144`, and `:166` set `limit_req_status 429`.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:56-57` declares `proxy_cache_path /var/cache/nginx/stats levels=1:2 keys_zone=stats_public:10m max_size=128m inactive=300s use_temp_path=off`.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:134-135`, `:157-158`, and `:179-180` pair `proxy_cache_bypass` with `proxy_no_cache` on `$http_authorization`.
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:227-228`, `:246-247`, and `:265-266` mirror the same cache bypass/no-cache pair on the coordinator hostname.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:66-70` defines a redacted stats log format that omits `$http_authorization`.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:119`, `:146`, and `:168` proxy stats endpoints to `127.0.0.1:8444` with no trailing slash.
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:212-277` places the three stats exact locations before the `/v1/` catch-all.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:40-47` uses the preferred shape (a) map-based Authorization-aware public limiter.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:45-47` declares separate `stats_overview`, `stats_leaderboard`, and `stats_health` zones with `rate=60r/m`.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:116`, `:143`, and `:165` use `limit_req zone=<endpoint> nodelay` with no `burst=`.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:117`, `:144`, and `:166` set `limit_req_status 429`.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:56-57` declares `proxy_cache_path /var/cache/nginx/stats levels=1:2 keys_zone=stats_public:10m max_size=128m inactive=300s use_temp_path=off`.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:134-135`, `:157-158`, and `:179-180` pair `proxy_cache_bypass` with `proxy_no_cache` on `$http_authorization`.
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:227-228`, `:246-247`, and `:265-266` mirror the same cache bypass/no-cache pair on the coordinator hostname.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:66-70` defines a redacted stats log format that omits `$http_authorization`.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:119`, `:146`, and `:168` proxy stats endpoints to `127.0.0.1:8444` with no trailing slash.
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:212-277` places the three stats exact locations before the `/v1/` catch-all.
 - `phase4-coordinator/cmd/coordinator/main.go:523-542` mounts the Step 3 stats mux on `providerMux` at `/v1/stats/`, matching the nginx target port `8444`.
 
 ## Final Verdict

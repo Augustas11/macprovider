@@ -38,7 +38,7 @@ var spec015ACs = []acceptanceCriterion{
 		CIJobs:   []string{"phase3-binary (swift test)"},
 		Evidence: []evidenceAnchor{
 			{"phase3-binary/Tests/macprovider-cliTests/ReceiptKeyStoreTests.swift", "testKeychainFirstLaunchGeneratesAndFreshLaunchLoadsSamePrivateKey"},
-			{"phase3-binary/Tests/macprovider-cliTests/ReceiptKeyStoreTests.swift", "com.streamvc.macprovider.receipt-key"},
+			{"phase3-binary/Tests/macprovider-cliTests/ReceiptKeyStoreTests.swift", "com.malibu.provider.receipt-key"},
 		},
 	},
 	{

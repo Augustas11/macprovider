@@ -77,11 +77,11 @@ alternatives. They are the answers to the ten questions in
 
 ### Public API surface
 
-- Canonical buyer URL: `https://api.streamvc.live`.
-- Internal coordinator URL: `https://coordinator.streamvc.live` stays
+- Canonical buyer URL: `https://api.malibu.tech`.
+- Internal coordinator URL: `https://coordinator.malibu.tech` stays
   in service for M4/M1 legacy direct-tunnel buyer paths and operator
   endpoints (`/admin/*`, `/poolz`, `/healthz`).
-- Endpoints exposed at `api.streamvc.live`:
+- Endpoints exposed at `api.malibu.tech`:
     - `GET /v1/models`
     - `POST /v1/chat/completions` (including SSE streaming via
       `stream: true`)
@@ -92,7 +92,7 @@ alternatives. They are the answers to the ten questions in
       `/auth/email/callback` if email magic link is implemented)
     - Signup/key-management UI at `/account` (or operator-chosen path
       consistent with the Vercel demo's structure)
-- Endpoints NOT exposed at `api.streamvc.live` (kept internal):
+- Endpoints NOT exposed at `api.malibu.tech` (kept internal):
     - `/admin/*`, `/poolz`, `/healthz`, `/ws/provider` — all remain on
       coordinator port
 
@@ -281,8 +281,8 @@ MUST cancel the upstream request to coordinator within 500ms.
 - Existing demo at `web-three-lime-59.vercel.app` becomes the front
   door.
 - Updates required:
-    - Repoint chat backend from `m4.streamvc.live` / `m1.streamvc.live`
-      direct tunnels to `https://api.streamvc.live/v1/chat/completions`
+    - Repoint chat backend from `m4.malibu.tech` / `m1.malibu.tech`
+      direct tunnels to `https://api.malibu.tech/v1/chat/completions`
       (via demo-only unauthenticated quota).
     - Add "Get API key" flow (GitHub OAuth, optionally email).
     - Add `/account` page showing usage, quota remaining, regenerate
@@ -355,7 +355,7 @@ SPEC-001 or SPEC-002 in this spec. Cross-spec dependencies are
 read-only references.
 
 **2. OpenAI compatibility is normative.** Any OpenAI Python or
-JavaScript SDK call against `https://api.streamvc.live/v1/chat/completions`
+JavaScript SDK call against `https://api.malibu.tech/v1/chat/completions`
 with a valid bearer key MUST succeed for supported models. Deviation
 from OpenAI's chat completion request/response shape MUST be
 documented as a known divergence.
@@ -378,8 +378,8 @@ validation is achievable in <1ms at p95 against the storage layer.
 (This is a design constraint that informs schema indexing decisions.)
 
 **8. Backward-compat for legacy direct-tunnel buyers.** M4 and M1
-partner Macs currently serve direct buyers at `m4.streamvc.live` and
-`m1.streamvc.live` outside the coordinator. Those paths stay
+partner Macs currently serve direct buyers at `m4.malibu.tech` and
+`m1.malibu.tech` outside the coordinator. Those paths stay
 operational. Gateway does NOT intercept them.
 
 ## Required reading

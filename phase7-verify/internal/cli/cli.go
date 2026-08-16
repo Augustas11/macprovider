@@ -34,7 +34,7 @@ const (
 	exitDataErr      = 65
 	exitSoftware     = 70
 
-	defaultCoordinator = "coordinator.streamvc.live"
+	defaultCoordinator = "coordinator.malibu.tech"
 	maxCacheLineBytes  = 1 * 1024 * 1024
 )
 

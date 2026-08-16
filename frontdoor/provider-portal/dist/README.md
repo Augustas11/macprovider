@@ -1,6 +1,6 @@
 # provider-portal/dist — operator deploy artifacts
 
-Reproducibility source-of-truth for the live `https://portal.streamvc.live/`
+Reproducibility source-of-truth for the live `https://portal.malibu.tech/`
 deploy (decision-log Entry 86, 2026-06-24). The files on Pearl are
 byte-identical copies of these.
 
@@ -11,7 +11,7 @@ spec-owned doc.
 
 ## Files
 
-- `nginx-portal.streamvc.live.conf` — full nginx site (port 80 → 301
+- `nginx-portal.malibu.tech.conf` — full nginx site (port 80 → 301
   redirect; port 443 TLS + static portal serve + two SPEC-014 §3 / Open Q9
   reverse-proxy locations).
 - `nginx-snippets/portal-security-headers.conf` — HSTS, CSP,
@@ -36,7 +36,7 @@ spec-owned doc.
    `add_header Cache-Control` shadows ALL server-level `add_header`
    directives (HSTS, CSP, etc.), even when `always` is set. The snippet
    pattern (extracted security headers + `include` in every location) is
-   the workaround. Latent in `console.streamvc.live` too — currently
+   the workaround. Latent in `console.malibu.tech` too — currently
    works only because that site has no location-level add_header
    overrides; the moment someone adds one, all security headers vanish.
 
@@ -57,8 +57,8 @@ ssh root@$PEARL 'chown www-data:www-data /var/www/portal/*; chmod 0644 /var/www/
 # 2. Stage nginx config + security-headers snippet
 scp frontdoor/provider-portal/dist/nginx-snippets/portal-security-headers.conf \
   root@$PEARL:/etc/nginx/snippets/portal-security-headers.conf
-scp frontdoor/provider-portal/dist/nginx-portal.streamvc.live.conf \
-  root@$PEARL:/etc/nginx/sites-available/portal.streamvc.live
+scp frontdoor/provider-portal/dist/nginx-portal.malibu.tech.conf \
+  root@$PEARL:/etc/nginx/sites-available/portal.malibu.tech
 
 # 3. Issue Let's Encrypt cert via webroot. The default-server
 # acme-challenge location does NOT match arbitrary Host headers, so
@@ -66,24 +66,24 @@ scp frontdoor/provider-portal/dist/nginx-portal.streamvc.live.conf \
 # Host. Stage a temporary HTTP-only stub, certbot, then swap to the
 # full HTTPS-enabled config.
 ssh root@$PEARL bash <<'STUB'
-cat > /etc/nginx/sites-available/portal.streamvc.live.cert-stub <<EOF
+cat > /etc/nginx/sites-available/portal.malibu.tech.cert-stub <<EOF
 server {
     listen 80;
     listen [::]:80;
-    server_name portal.streamvc.live;
+    server_name portal.malibu.tech;
     location /.well-known/acme-challenge/ { root /var/www/html; }
     location / { return 404; }
 }
 EOF
-ln -sf /etc/nginx/sites-available/portal.streamvc.live.cert-stub \
-  /etc/nginx/sites-enabled/portal.streamvc.live.cert-stub
+ln -sf /etc/nginx/sites-available/portal.malibu.tech.cert-stub \
+  /etc/nginx/sites-enabled/portal.malibu.tech.cert-stub
 nginx -t && systemctl reload nginx
 certbot certonly --webroot --webroot-path /var/www/html \
-  -d portal.streamvc.live \
+  -d portal.malibu.tech \
   --non-interactive --agree-tos --email ops@example.com --no-eff-email
-rm -f /etc/nginx/sites-enabled/portal.streamvc.live.cert-stub
-ln -sf /etc/nginx/sites-available/portal.streamvc.live \
-  /etc/nginx/sites-enabled/portal.streamvc.live
+rm -f /etc/nginx/sites-enabled/portal.malibu.tech.cert-stub
+ln -sf /etc/nginx/sites-available/portal.malibu.tech \
+  /etc/nginx/sites-enabled/portal.malibu.tech
 nginx -t && systemctl reload nginx
 STUB
 ```
@@ -95,18 +95,18 @@ recently, your local resolver may have NXDOMAIN cached (macOS:
 `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder`).
 
 ```bash
-curl -sI https://portal.streamvc.live/
+curl -sI https://portal.malibu.tech/
 # Expect: HTTP/2 200 + Strict-Transport-Security + Content-Security-Policy
 #         + X-Content-Type-Options + Referrer-Policy + Permissions-Policy
 
-curl -s https://portal.streamvc.live/portal-config.json
+curl -s https://portal.malibu.tech/portal-config.json
 # Expect: production portal-config values
 
 curl -s -o /dev/null -w "%{http_code}\n" \
-  https://portal.streamvc.live/providers/x/earnings
+  https://portal.malibu.tech/providers/x/earnings
 # Expect: 401 (auth required; proves /providers/*/earnings proxy works)
 
-curl -s "https://portal.streamvc.live/v1/pool/check?provider_id=<id>"
+curl -s "https://portal.malibu.tech/v1/pool/check?provider_id=<id>"
 # Expect: real coordinator response (provider_not_found if id not in pool;
 # JSON pool-state if id is healthy)
 ```

@@ -15,7 +15,7 @@ bash test/integration/tool_calling/run_e2e.sh
 Run through the public gateway after pinning an upgraded provider:
 
 ```sh
-MACPROVIDER_TOOL_E2E_BASE_URL=https://api.streamvc.live/v1 \
+MACPROVIDER_TOOL_E2E_BASE_URL=https://api.malibu.tech/v1 \
 MACPROVIDER_TOOL_E2E_API_KEY=<real buyer key> \
 MACPROVIDER_TOOL_E2E_PIN_PROVIDER=<provider-id-running-this-branch> \
 MACPROVIDER_TOOL_E2E_MODEL=mlx-community/Qwen2.5-7B-Instruct-4bit \

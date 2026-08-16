@@ -50,7 +50,7 @@ detect an existing `macprovider-cli serve` BEFORE attempting to
 spawn an autotune candidate. SPEC-013 v0.3 §5.5 FR-E.1 defines:
 
 - **Launchd-managed install** (the dominant SPEC-003 install path):
-  service label `live.streamvc.macprovider` loaded via
+  service label `live.malibu.provider` loaded via
   `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/<plist>`.
   Detection via `launchctl list | grep`; drain via
   `launchctl bootout gui/$UID/<label>`; restore via
@@ -96,7 +96,7 @@ launchd state. This is the load-bearing testability decision.
      path" (SIGTERM only; opt-in restart-foreground flag).
 
 4. SPEC-003 v0.9.2 §FR-C5 — the launchd label
-   (`live.streamvc.macprovider`) and bootstrap command. Verify
+   (`live.malibu.provider`) and bootstrap command. Verify
    Step 5's hardcoded label matches SPEC-003 byte-for-byte
    (this was the round-1 audit E.1 finding from the SPEC-013
    v0.1 review).
@@ -157,7 +157,7 @@ launchd state. This is the load-bearing testability decision.
 
 ### Category A: launchd detection correctness (FR-E.1)
 
-A.1  Label match: `ProviderConflictDetector.launchdLabel = "live.streamvc.macprovider"`.
+A.1  Label match: `ProviderConflictDetector.launchdLabel = "live.malibu.provider"`.
      Cross-check against:
      - SPEC-003 v0.9.2 §FR-C5
      - `phase3-binary/dist/launchd-plist-template.plist` line ~7
@@ -176,11 +176,11 @@ A.2  `parseLaunchdManagedPID(from:)`: parses `launchctl list`
        match — good).
      - Returns the first field as PID, or nil if `-`.
      Verify with each plausible launchctl output variant:
-     - `1234\trunning\tlive.streamvc.macprovider`
-     - `-\t-\tlive.streamvc.macprovider` (inactive)
+     - `1234\trunning\tlive.malibu.provider`
+     - `-\t-\tlive.malibu.provider` (inactive)
      - empty output (no service installed)
      - the label appears as a SUBSTRING of another label
-       (e.g. `live.streamvc.macprovider.helper`) — the
+       (e.g. `live.malibu.provider.helper`) — the
        `fields.contains(Substring(launchdLabel))` check uses
        whole-field equality, so substring won't match. Good.
      If any of these isn't handled = MAJOR.
@@ -324,7 +324,7 @@ D.1  Launchd restore: `launchctlRunner(launchctlPath, ["bootstrap", launchdDomai
 
 D.2  Plist URL default:
      `FileManager.default.homeDirectoryForCurrentUser
-       .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")`.
+       .appendingPathComponent("Library/LaunchAgents/live.malibu.provider.plist")`.
      Cross-check against
      `phase3-binary/dist/install.sh` line ~728 and
      `UninstallCommand.swift` line ~54. Any path drift =

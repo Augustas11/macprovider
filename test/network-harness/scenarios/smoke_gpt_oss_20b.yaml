@@ -1,5 +1,5 @@
 # smoke_gpt_oss_20b.yaml — SCN-226-01 live-network smoke for gpt-oss-20b.
-# Two streaming requests via api.streamvc.live → coordinator → provider
+# Two streaming requests via api.malibu.tech → coordinator → provider
 # serving mlx-community/gpt-oss-20b-MXFP4-Q8. Measures network-delivered
 # TPS, TTFT, and route_distribution (confirms coordinator routes to the
 # correct provider).
@@ -22,8 +22,8 @@ expected_shape: |
      35 tok/s due to gateway/coord overhead).
 
 target:
-  gateway_url: https://api.streamvc.live
-  coordinator_url: https://coordinator.streamvc.live
+  gateway_url: https://api.malibu.tech
+  coordinator_url: https://coordinator.malibu.tech
   buyer_token: ${BUYER_TOKEN}
   coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
   gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db

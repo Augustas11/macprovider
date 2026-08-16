@@ -15,8 +15,8 @@ Environment:
   SSH_KNOWN_HOSTS     default: ~/.ssh/known_hosts
   REMOTE_CONFIG       default: /opt/macprovider/coordinator.yaml
   SERVICE             default: macprovider-coordinator
-  COORDINATOR_ORIGIN  must remain https://coordinator.streamvc.live
-  GATEWAY_ORIGIN      must remain https://api.streamvc.live
+  COORDINATOR_ORIGIN  must remain https://coordinator.malibu.tech
+  GATEWAY_ORIGIN      must remain https://api.malibu.tech
   DEMO_TOKEN          required by --apply
   OPERATOR_KEY        required by --apply
   PROOF_TAG           must be the sealed Pearl coordinator tag v1.8.60
@@ -52,8 +52,8 @@ SSH_PORT="${SSH_PORT:-22}"
 SSH_KNOWN_HOSTS="${SSH_KNOWN_HOSTS:-$HOME/.ssh/known_hosts}"
 REMOTE_CONFIG="${REMOTE_CONFIG:-/opt/macprovider/coordinator.yaml}"
 SERVICE="${SERVICE:-macprovider-coordinator}"
-COORDINATOR_ORIGIN="${COORDINATOR_ORIGIN:-https://coordinator.streamvc.live}"
-GATEWAY_ORIGIN="${GATEWAY_ORIGIN:-https://api.streamvc.live}"
+COORDINATOR_ORIGIN="${COORDINATOR_ORIGIN:-https://coordinator.malibu.tech}"
+GATEWAY_ORIGIN="${GATEWAY_ORIGIN:-https://api.malibu.tech}"
 VERIFY_SCRIPT="${VERIFY_SCRIPT:-$SCRIPT_DIR/verify-tier2-live.sh}"
 LOCAL_UPDATER="${LOCAL_UPDATER:-$SCRIPT_DIR/../ops/pearl-updater/macprovider-pearl-update}"
 LOCAL_WATCHDOG="${LOCAL_WATCHDOG:-$SCRIPT_DIR/../ops/pearl-updater/macprovider-tier2-enforcement-watchdog}"
@@ -419,8 +419,8 @@ apply_changes() {
   [ -n "${PROOF_TAG:-}" ] || die "PROOF_TAG is required by --apply"
   [ "$PROOF_TAG" = "v1.8.60" ] || die "PROOF_TAG must be the sealed Pearl coordinator tag v1.8.60"
   [ -z "${VERIFY_TIER2_FIXTURES:-}" ] || die "VERIFY_TIER2_FIXTURES is forbidden by --apply"
-  [ "$COORDINATOR_ORIGIN" = "https://coordinator.streamvc.live" ] || die "COORDINATOR_ORIGIN is pinned in production apply"
-  [ "$GATEWAY_ORIGIN" = "https://api.streamvc.live" ] || die "GATEWAY_ORIGIN is pinned in production apply"
+  [ "$COORDINATOR_ORIGIN" = "https://coordinator.malibu.tech" ] || die "COORDINATOR_ORIGIN is pinned in production apply"
+  [ "$GATEWAY_ORIGIN" = "https://api.malibu.tech" ] || die "GATEWAY_ORIGIN is pinned in production apply"
 
   SSH=(
     "$SSH_BIN"

@@ -20,6 +20,6 @@ LOW (1):
 
 QUESTIONS (1):
   Q1. The prompt table says `gateway_base_url` is a literal public URL, but the workspace file has it empty
-      Evidence: `phase4-coordinator/dist/coordinator.yaml:68` is `gateway_base_url: ""`; the only live URL scalar in the file is `public_catalog_base_url: "https://coordinator.streamvc.live"` at `phase4-coordinator/dist/coordinator.yaml:157`. No admin/backdoor hostname or URL with a `user:pass@` component appears in the YAML. DNS currently resolves `coordinator.streamvc.live` and `stats.streamvc.live` to `159.223.165.194`; `gateway.streamvc.live` did not return an A/AAAA answer in this worktree check.
+      Evidence: `phase4-coordinator/dist/coordinator.yaml:68` is `gateway_base_url: ""`; the only live URL scalar in the file is `public_catalog_base_url: "https://coordinator.malibu.tech"` at `phase4-coordinator/dist/coordinator.yaml:157`. No admin/backdoor hostname or URL with a `user:pass@` component appears in the YAML. DNS currently resolves `coordinator.malibu.tech` and `stats.malibu.tech` to `159.223.165.194`; `gateway.malibu.tech` did not return an A/AAAA answer in this worktree check.
       Attack:  Audit prompts that describe a different deployed URL can cause reviewers to miss real config drift or recon-surface changes.
       Fix:     Align the audit prompt/source table with the tracked YAML, or set the intended public gateway URL before merge if buyer panels are supposed to be enabled.

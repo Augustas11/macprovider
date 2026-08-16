@@ -144,20 +144,28 @@ enum InstalledProviderMonitor {
         return candidate
     }
 
-    static let providerLaunchdLabel = "live.streamvc.macprovider"
-    static let watchdogLaunchdLabel = "live.streamvc.macprovider-watchdog"
+    static let providerLaunchdLabel = "live.malibu.provider"
+    static let watchdogLaunchdLabel = "live.malibu.provider-watchdog"
+    static let legacyProviderLaunchdLabel = "live.streamvc.macprovider"
+    static let legacyWatchdogLaunchdLabel = "live.streamvc.macprovider-watchdog"
 
     static func launchdServicePID(
         uid: uid_t = getuid(),
         launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl")
     ) -> Int? {
-        guard let inspection = inspectLaunchdService(
-            uid: uid,
-            label: providerLaunchdLabel,
-            launchctlURL: launchctlURL
-        ),
-              inspection.loaded else { return nil }
-        return parseLaunchdServicePID(inspection.output)
+        for label in [providerLaunchdLabel, legacyProviderLaunchdLabel] {
+            guard let inspection = inspectLaunchdService(
+                uid: uid,
+                label: label,
+                launchctlURL: launchctlURL
+            ),
+                  inspection.loaded,
+                  let pid = parseLaunchdServicePID(inspection.output) else {
+                continue
+            }
+            return pid
+        }
+        return nil
     }
 
     enum LaunchdServiceRepairState: Equatable {
@@ -202,12 +210,35 @@ enum InstalledProviderMonitor {
         expectedPlist: URL? = nil,
         fileManager: FileManager = .default
     ) -> LaunchdServiceRepairState {
+        let legacyFallback: () -> LaunchdServiceRepairState? = {
+            guard label == providerLaunchdLabel else { return nil }
+            let legacyPlist = homeDirectory
+                .appendingPathComponent("Library/LaunchAgents")
+                .appendingPathComponent("\(legacyProviderLaunchdLabel).plist")
+            let state = launchdServiceRepairState(
+                uid: uid,
+                label: legacyProviderLaunchdLabel,
+                launchctlURL: launchctlURL,
+                homeDirectory: homeDirectory,
+                expectedProgram: expectedProgram,
+                alternateProgram: alternateProgram,
+                expectedPlist: legacyPlist,
+                fileManager: fileManager
+            )
+            switch state {
+            case .unavailable, .notLoaded:
+                return nil
+            case .validExecutable, .legacyExecutable, .missingExecutable,
+                 .unexpectedExecutable, .unexpectedPlist:
+                return state
+            }
+        }
         guard let inspection = inspectLaunchdService(
             uid: uid,
             label: label,
             launchctlURL: launchctlURL
         ) else {
-            return .unavailable
+            return legacyFallback() ?? .unavailable
         }
         let managedProgram = (expectedProgram ?? configuredProviderProgram(
             homeDirectory: homeDirectory,
@@ -227,7 +258,7 @@ enum InstalledProviderMonitor {
                 fileManager: fileManager
             ), let plistIdentity = parseLaunchdPlistIdentity(plistData),
                   plistIdentity.label == label else {
-                return .notLoaded
+                return legacyFallback() ?? .notLoaded
             }
             guard plistIdentity.program == managedProgram || plistIdentity.program == legacyProgram else {
                 return .unexpectedExecutable(path: plistIdentity.program)
@@ -238,7 +269,7 @@ enum InstalledProviderMonitor {
             if plistIdentity.program == legacyProgram {
                 return .legacyExecutable(path: plistIdentity.program)
             }
-            return .notLoaded
+            return legacyFallback() ?? .notLoaded
         }
         guard let identity = parseLaunchdServiceIdentity(inspection.output) else {
             return .unavailable

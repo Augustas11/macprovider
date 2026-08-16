@@ -945,7 +945,7 @@ enum ProviderCredentialHandoffRunner {
               let staticCode else {
             throw Error.invalidCLI("code object could not be created")
         }
-        let requirementText = "identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\""
+        let requirementText = "identifier \"live.malibu.provider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\""
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(requirementText as CFString, [], &requirement) == errSecSuccess,
               let requirement,

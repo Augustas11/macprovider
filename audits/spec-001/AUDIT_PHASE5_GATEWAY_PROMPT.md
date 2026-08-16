@@ -189,7 +189,7 @@ In order:
     `TestOAuthCallbackAllowlist`,
     `TestOAuthStateCSRF`.
 
-12. `phase5-gateway/dist/nginx-api.streamvc.live.conf` — the nginx
+12. `phase5-gateway/dist/nginx-api.malibu.tech.conf` — the nginx
     config. Verify:
     - /admin/ and /v1/pool/check return 404 from public surface
     - XFF spoofing blocked by overwriting X-Forwarded-For

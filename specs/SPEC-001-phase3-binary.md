@@ -79,7 +79,7 @@ legacy path/query form and validates the fragment before projecting it.
 **Change log v1.8.1 (2026-07-14, issue #585 — Option 2 credential-custody slice):**
 - The launchd-managed `macprovider-cli` becomes the authority for the provider bearer.
   It stores the bearer in the macOS login Keychain under service
-  `live.streamvc.macprovider.provider-token.v1`, account `<provider_id>`, using the
+  `live.malibu.provider.provider-token.v1`, account `<provider_id>`, using the
   legacy login-Keychain default ACL/designated requirement and non-interactive reads.
   It deliberately does not claim a Data-Protection-Keychain accessibility class.
 - Existing layered YAML/environment input remains a compatibility source. On startup,
@@ -93,7 +93,7 @@ legacy path/query form and validates the fragment before projecting it.
   redacted `credential` lifecycle object; no token bytes or token-derived identifier
   are exposed.
 - The release carrying this behavior is `binary_version` **1.8.34** (Malibu build 34).
-- Release signing pins the stable CLI identifier `live.streamvc.macprovider.cli` so the
+- Release signing pins the stable CLI identifier `live.malibu.provider.cli` so the
   default Keychain ACL is based on a stable designated-requirement identity across
   signed updates. Real signed vN→vN+1, reboot, login, and locked-Keychain validation is
   still a rollout gate under issue #585.
@@ -1975,7 +1975,7 @@ connect loop's natural retry.
 
 The provider MUST NOT terminate its local buyer HTTP server in
 response to this message. The local server continues to serve
-direct-to-tunnel buyer traffic (e.g., `https://m4.streamvc.live/...`)
+direct-to-tunnel buyer traffic (e.g., `https://m4.malibu.tech/...`)
 across the coordinator's drain/restart cycle. Coordinator drain is
 about pool membership, not provider lifetime.
 
@@ -3863,7 +3863,7 @@ and there is no open revisit.
 
 **OQ-3. Binary distribution method.** RESOLVED in SPEC-003 v0.3
 FR-C1, FR-C2. Distribution channel is GitHub Releases via
-`https://get.streamvc.live/install.sh`. No longer an open question.
+`https://get.malibu.tech/install.sh`. No longer an open question.
 
 **OQ-4. WS frame size limit for large completions.**
 A 32K-token streaming response at ~5 bytes/token generates ~160 KB of

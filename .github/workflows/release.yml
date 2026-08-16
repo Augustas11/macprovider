@@ -709,7 +709,7 @@ jobs:
           codesign --force \
             --options runtime \
             --timestamp \
-            --identifier live.streamvc.macprovider.cli \
+            --identifier live.malibu.provider.cli \
             --sign "$SIGNING_ID" \
             "$WORK/macprovider-cli"
 
@@ -718,12 +718,12 @@ jobs:
           # quota.
           codesign --verify --strict --verbose=2 "$WORK/macprovider-cli"
           CLI_REQUIREMENT=$(codesign -d -r- "$WORK/macprovider-cli" 2>&1)
-          printf '%s\n' "$CLI_REQUIREMENT" | grep -F 'identifier "live.streamvc.macprovider.cli"' >/dev/null || {
+          printf '%s\n' "$CLI_REQUIREMENT" | grep -F 'identifier "live.malibu.provider.cli"' >/dev/null || {
             echo "::error::CLI designated requirement lacks the stable release identifier" >&2
             exit 1
           }
           codesign --verify --strict --verbose=2 \
-            -R="identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" \
+            -R="identifier \"live.malibu.provider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" \
             "$WORK/macprovider-cli" || {
             echo "::error::CLI designated requirement is not pinned to the release Team ID" >&2
             exit 1
@@ -807,7 +807,7 @@ jobs:
             printf '%s\n' \
               '#!/bin/sh' \
               'echo "macprovider-cli.pkg is a signed delivery container for install.sh." >&2' \
-              'echo "Install with: curl -fsSL https://get.streamvc.live/install.sh | bash" >&2' \
+              'echo "Install with: curl -fsSL https://get.malibu.tech/install.sh | bash" >&2' \
               'exit 1' \
               > "$PKG_SCRIPTS/preinstall"
             chmod 755 "$PKG_SCRIPTS/preinstall"
@@ -817,7 +817,7 @@ jobs:
             pkgbuild \
               --root "$PKG_ROOT" \
               --scripts "$PKG_SCRIPTS" \
-              --identifier live.streamvc.macprovider.cli \
+              --identifier live.malibu.provider.cli \
               --version "${tag#v}" \
               --install-location "/" \
               "$UNSIGNED_PKG"
@@ -967,12 +967,12 @@ jobs:
             exit 1
           fi
           BUNDLED_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
-          printf '%s\n' "$BUNDLED_CLI_REQUIREMENT" | grep -F 'identifier "live.streamvc.macprovider.cli"' >/dev/null || {
+          printf '%s\n' "$BUNDLED_CLI_REQUIREMENT" | grep -F 'identifier "live.malibu.provider.cli"' >/dev/null || {
             echo "::error::Bundling changed the CLI designated requirement identifier" >&2
             exit 1
           }
           codesign --verify --strict --verbose=2 \
-            -R="identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" \
+            -R="identifier \"live.malibu.provider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" \
             "$APP/Contents/MacOS/macprovider-cli" || {
             echo "::error::Bundled CLI designated requirement is not pinned to the release Team ID" >&2
             exit 1
@@ -1897,7 +1897,7 @@ jobs:
               --tag "$tag" \
               --pearl-release-json pearl-release.json \
               --trusted-keys trusted-keys.json \
-              --coordinator-url https://coordinator.streamvc.live \
+              --coordinator-url https://coordinator.malibu.tech \
               --openssl "$OPENSSL_BIN" \
               "${prepublication_recommendation_args[@]}" \
               --publication-phase pre-publication

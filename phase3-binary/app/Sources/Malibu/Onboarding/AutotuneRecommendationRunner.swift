@@ -162,7 +162,7 @@ enum AutotuneRecommendationRunner {
         uid: uid_t = getuid(),
         launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl"),
         plistURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+            .appendingPathComponent("Library/LaunchAgents/live.malibu.provider.plist")
     ) {
         let process = Process()
         process.executableURL = launchctlURL

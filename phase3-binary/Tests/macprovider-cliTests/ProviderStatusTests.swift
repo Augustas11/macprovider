@@ -474,7 +474,7 @@ final class ProviderStatusTests: XCTestCase {
         let body = RouterHandler.statusResponse(
             await status.snapshot(),
             providerID: "provider-a",
-            coordinatorURL: "wss://coordinator.streamvc.live/provider/ws",
+            coordinatorURL: "wss://coordinator.malibu.tech/provider/ws",
             catalogStatus: context,
             coordinatorBuyerServing: true
         )
@@ -544,7 +544,7 @@ final class ProviderStatusTests: XCTestCase {
         let body = RouterHandler.statusResponse(
             await status.snapshot(),
             providerID: "provider-a",
-            coordinatorURL: "wss://coordinator.streamvc.live/ws/provider",
+            coordinatorURL: "wss://coordinator.malibu.tech/ws/provider",
             catalogStatus: context,
             coordinatorBuyerServing: true
         )
@@ -575,13 +575,13 @@ final class ProviderStatusTests: XCTestCase {
         let unknown = RouterHandler.statusResponse(
             await status.snapshot(),
             providerID: "provider-a",
-            coordinatorURL: "wss://coordinator.streamvc.live/ws/provider",
+            coordinatorURL: "wss://coordinator.malibu.tech/ws/provider",
             catalogStatus: context
         )
         let rejected = RouterHandler.statusResponse(
             await status.snapshot(),
             providerID: "provider-a",
-            coordinatorURL: "wss://coordinator.streamvc.live/ws/provider",
+            coordinatorURL: "wss://coordinator.malibu.tech/ws/provider",
             catalogStatus: context,
             coordinatorBuyerServing: false
         )
@@ -594,14 +594,14 @@ final class ProviderStatusTests: XCTestCase {
 
     func testCoordinatorReadinessURLUsesPublicReadinessEndpoint() throws {
         let url = try XCTUnwrap(CoordinatorReadinessClient.readinessURL(
-            coordinatorURL: "wss://coordinator.streamvc.live/v1/ws/provider?ignored=true",
+            coordinatorURL: "wss://coordinator.malibu.tech/v1/ws/provider?ignored=true",
             providerID: "provider a",
             assignedID: "session-a"
         ))
         let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
 
         XCTAssertEqual(components.scheme, "https")
-        XCTAssertEqual(components.host, "coordinator.streamvc.live")
+        XCTAssertEqual(components.host, "coordinator.malibu.tech")
         XCTAssertEqual(components.path, "/v1/pool/check")
         XCTAssertEqual(Dictionary(uniqueKeysWithValues: components.queryItems?.map { ($0.name, $0.value) } ?? []), [
             "provider_id": "provider a",
@@ -609,7 +609,7 @@ final class ProviderStatusTests: XCTestCase {
             "details": "readiness",
         ])
         XCTAssertNil(CoordinatorReadinessClient.readinessURL(
-            coordinatorURL: "http://coordinator.streamvc.live/v1/ws/provider",
+            coordinatorURL: "http://coordinator.malibu.tech/v1/ws/provider",
             providerID: "provider-a",
             assignedID: "session-a"
         ))
@@ -617,7 +617,7 @@ final class ProviderStatusTests: XCTestCase {
 
     func testCoordinatorReadinessVerdictRejectsRedirectsAndNonAdmittedServingClaims() throws {
         let requestURL = try XCTUnwrap(CoordinatorReadinessClient.readinessURL(
-            coordinatorURL: "wss://coordinator.streamvc.live/v1/ws/provider",
+            coordinatorURL: "wss://coordinator.malibu.tech/v1/ws/provider",
             providerID: "provider-a",
             assignedID: "session-a"
         ))
@@ -667,7 +667,7 @@ final class ProviderStatusTests: XCTestCase {
 
     func testCoordinatorReadinessVerdictRequiresExactCatalogEnvelopeForUpdateCommit() throws {
         let requestURL = try XCTUnwrap(CoordinatorReadinessClient.readinessURL(
-            coordinatorURL: "wss://coordinator.streamvc.live/v1/ws/provider",
+            coordinatorURL: "wss://coordinator.malibu.tech/v1/ws/provider",
             providerID: "provider-a",
             assignedID: "assigned-a"
         ))

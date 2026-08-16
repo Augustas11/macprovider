@@ -415,7 +415,7 @@ final class ReceiptKeyStoreTests: XCTestCase {
         let query = KeychainReceiptKeyStore.baseQuery(providerId: "provider-a")
 
         XCTAssertEqual(query[kSecClass as String] as! CFString, kSecClassGenericPassword)
-        XCTAssertEqual(query[kSecAttrService as String] as? String, "com.streamvc.macprovider.receipt-key")
+        XCTAssertEqual(query[kSecAttrService as String] as? String, "com.malibu.provider.receipt-key")
         XCTAssertEqual(query[kSecAttrAccount as String] as? String, "provider-a")
         let context = try XCTUnwrap(query[kSecUseAuthenticationContext as String] as? LAContext)
         XCTAssertTrue(context.interactionNotAllowed)
@@ -428,7 +428,7 @@ final class ReceiptKeyStoreTests: XCTestCase {
         let query = KeychainReceiptKeyStore.addQuery(providerId: "provider-a", privateKey: key)
 
         XCTAssertEqual(query[kSecClass as String] as! CFString, kSecClassGenericPassword)
-        XCTAssertEqual(query[kSecAttrService as String] as? String, "com.streamvc.macprovider.receipt-key")
+        XCTAssertEqual(query[kSecAttrService as String] as? String, "com.malibu.provider.receipt-key")
         XCTAssertEqual(query[kSecAttrAccount as String] as? String, "provider-a")
         let context = try! XCTUnwrap(query[kSecUseAuthenticationContext as String] as? LAContext)
         XCTAssertTrue(context.interactionNotAllowed)

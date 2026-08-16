@@ -61,12 +61,12 @@ ADMIN_HARDWARE_TRUST_WAITING = "http://127.0.0.1:8444/admin/hardware-trust/waiti
 GW_STATUS = "http://127.0.0.1:9443/v1/status"
 ANONYMOUS_PROVIDER_ID = "_anonymous"
 STATIC_FEEDS = (
-    "https://coordinator.streamvc.live/v1/rate-card",
-    "https://coordinator.streamvc.live/v1/rate-card.sig",
-    "https://coordinator.streamvc.live/v1/autotune-candidates",
-    "https://coordinator.streamvc.live/v1/autotune-candidates.sig",
-    "https://coordinator.streamvc.live/v1/demand-rank",
-    "https://coordinator.streamvc.live/v1/demand-rank.sig",
+    "https://coordinator.malibu.tech/v1/rate-card",
+    "https://coordinator.malibu.tech/v1/rate-card.sig",
+    "https://coordinator.malibu.tech/v1/autotune-candidates",
+    "https://coordinator.malibu.tech/v1/autotune-candidates.sig",
+    "https://coordinator.malibu.tech/v1/demand-rank",
+    "https://coordinator.malibu.tech/v1/demand-rank.sig",
 )
 TIMEOUT = 8
 HOST = socket.gethostname()

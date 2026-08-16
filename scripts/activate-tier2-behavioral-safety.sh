@@ -19,8 +19,8 @@ Environment:
   SSH_PORT                        default: 22
   REMOTE_CONFIG                   default: /opt/macprovider/coordinator.yaml
   SERVICE                         default: macprovider-coordinator
-  COORDINATOR_ORIGIN              default: https://coordinator.streamvc.live
-  GATEWAY_ORIGIN                  default: https://api.streamvc.live
+  COORDINATOR_ORIGIN              default: https://coordinator.malibu.tech
+  GATEWAY_ORIGIN                  default: https://api.malibu.tech
   DEMO_TOKEN                      required by --apply
   OPERATOR_KEY                    required by --apply
   VERIFY_SCRIPT                   default: scripts/verify-tier2-live.sh
@@ -63,8 +63,8 @@ VPS_USER="${VPS_USER:-root}"
 SSH_PORT="${SSH_PORT:-22}"
 REMOTE_CONFIG="${REMOTE_CONFIG:-/opt/macprovider/coordinator.yaml}"
 SERVICE="${SERVICE:-macprovider-coordinator}"
-COORDINATOR_ORIGIN="${COORDINATOR_ORIGIN:-https://coordinator.streamvc.live}"
-GATEWAY_ORIGIN="${GATEWAY_ORIGIN:-https://api.streamvc.live}"
+COORDINATOR_ORIGIN="${COORDINATOR_ORIGIN:-https://coordinator.malibu.tech}"
+GATEWAY_ORIGIN="${GATEWAY_ORIGIN:-https://api.malibu.tech}"
 VERIFY_SCRIPT="${VERIFY_SCRIPT:-$SCRIPT_DIR/verify-tier2-live.sh}"
 SSH_BIN="${SSH_BIN:-ssh}"
 

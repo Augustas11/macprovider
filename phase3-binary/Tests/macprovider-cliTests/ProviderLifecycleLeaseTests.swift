@@ -558,7 +558,7 @@ final class ProviderLifecycleLeaseTests: XCTestCase {
         XCTAssertThrowsError(try fixture.store.adoptStartupHandoff(
             operationID: "provider-restart-1",
             providerID: "provider-a",
-            serviceIdentity: "live.streamvc.other"
+            serviceIdentity: "live.malibu.other"
         )) { error in
             XCTAssertEqual(error as? ProviderLifecycleLeaseError, .handoffMismatch("service_identity"))
         }
@@ -830,7 +830,7 @@ private struct LeaseFixture {
 private final class LeaseTestEnvironment: @unchecked Sendable {
     static let targetPath = "/Applications/MacProvider.app/Contents/MacOS/macprovider-cli"
     static let targetSHA256 = String(repeating: "a", count: 64)
-    static let serviceIdentity = "live.streamvc.macprovider"
+    static let serviceIdentity = "live.malibu.provider"
 
     private let lock = NSLock()
     private var wall: Int64 = 1_784_016_000_000

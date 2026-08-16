@@ -246,7 +246,7 @@ a regression — the scenario's divergent per-turn prompts avoid it.
 - **Invariants**: B1, B2, B3, B4, B5, **B10** (sustained-TPS retention).
 - **LAB PROVIDER ONLY.** Targets `${LAB_GATEWAY_URL}`/`${LAB_COORDINATOR_URL}`
   (unset by default → validation fails rather than firing at a default).
-  Never run against `streamvc.live` — a soak degrades and disconnects the
+  Never run against `malibu.tech` — a soak degrades and disconnects the
   single prod mac (that IS #584). Parked at the campaign step until a
   dedicated lab Mac exists; the instrument (scenario + B10 + thermal
   capture) ships now, calibration follows the first lab run.

@@ -76,8 +76,8 @@ boundary"). The gateway is new infrastructure; coordinator stays the
 router SPEC-002 v1.1.3 defines.
 
 **2. Backward-compat for legacy direct-tunnel buyers.** M4 and M1
-partners' Macs serve direct buyer traffic at `m4.streamvc.live` and
-`m1.streamvc.live` outside the coordinator. Those paths MUST remain
+partners' Macs serve direct buyer traffic at `m4.malibu.tech` and
+`m1.malibu.tech` outside the coordinator. Those paths MUST remain
 operational. If SPEC-006 contains any clause that breaks them, CRITICAL.
 
 **3. d-inference clean-room.** Do NOT inspect d-inference source.
@@ -247,7 +247,7 @@ B.7  Horizontal scalability: spec should specify behavior under
 ### Category C: OpenAI SDK compatibility
 
 C.1  OpenAI Python SDK + OpenAI JavaScript SDK with `base_url =
-     "https://api.streamvc.live/v1"` and `api_key = "mp_..."`
+     "https://api.malibu.tech/v1"` and `api_key = "mp_..."`
      MUST work drop-in for `chat.completions.create()` and
      `models.list()`. If the spec specifies any request/response
      shape that breaks SDK assumptions = CRITICAL.
@@ -491,12 +491,12 @@ L.3  Quantified thresholds in ACs: where the AC specifies
 
 ### Category M: Backward-compat with the rest of the project
 
-M.1  Legacy direct-tunnel buyer paths (m4.streamvc.live,
-     m1.streamvc.live) must remain operational. Any clause
+M.1  Legacy direct-tunnel buyer paths (m4.malibu.tech,
+     m1.malibu.tech) must remain operational. Any clause
      that breaks them = CRITICAL.
 
 M.2  Existing coordinator endpoints
-     (coordinator.streamvc.live/v1/*, /healthz, /admin/*,
+     (coordinator.malibu.tech/v1/*, /healthz, /admin/*,
      /poolz, /ws/provider) — gateway introduction must not
      break any of these. Spec must specify nginx routing
      ensuring coordinator continues to serve its own

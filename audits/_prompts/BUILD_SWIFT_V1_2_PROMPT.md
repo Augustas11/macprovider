@@ -48,7 +48,7 @@ being built by BUILD_COORDINATOR. You do NOT touch either.
 
 Mac Provider is a pooled-inference network. As of 2026-05-28:
 
-  - `coordinator.streamvc.live` (Pearl VPS) live with pool N=2
+  - `coordinator.malibu.tech` (Pearl VPS) live with pool N=2
   - M4 partner (Qwen 7B) on phase3-binary v1.1.4
   - M1 partner (Llama 3.2 3B) on phase3-binary v1.1.3
   - Both communicate with coord via HTTP-forwarding (their hellos do
@@ -388,7 +388,7 @@ You do NOT have:
   - install.sh / launchd plist (BUILD_DISTRIBUTION is in parallel)
 
 You DO have:
-  - The current v1.0.4 coordinator at coordinator.streamvc.live —
+  - The current v1.0.4 coordinator at coordinator.malibu.tech —
     DO NOT use this to test your changes (it doesn't send § 6.6 yet)
   - The mock-coordinator test harness YOU build
 

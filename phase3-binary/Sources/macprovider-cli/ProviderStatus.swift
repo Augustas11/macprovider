@@ -46,7 +46,7 @@ final class SystemProviderWorkloadTelemetryMonitor: ProviderWorkloadTelemetryPro
     init(powerSource: PowerSourceReporting = SystemPowerSourceReporter()) {
         self.powerSource = powerSource
         self.gpuSampler = DispatchSource.makeTimerSource(
-            queue: DispatchQueue(label: "live.streamvc.macprovider.gpu-telemetry", qos: .utility)
+            queue: DispatchQueue(label: "live.malibu.provider.gpu-telemetry", qos: .utility)
         )
         self.priorCPUSeconds = Self.processCPUSeconds()
         self.priorWallTime = ProcessInfo.processInfo.systemUptime
@@ -133,7 +133,7 @@ final class SystemMemoryPressureMonitor: MemoryPressureProviding, @unchecked Sen
     private init() {
         source = DispatchSource.makeMemoryPressureSource(
             eventMask: [.normal, .warning, .critical],
-            queue: DispatchQueue(label: "live.streamvc.macprovider.memory-pressure")
+            queue: DispatchQueue(label: "live.malibu.provider.memory-pressure")
         )
         source.setEventHandler { [weak self, weak source] in
             guard let self, let event = source?.data else { return }

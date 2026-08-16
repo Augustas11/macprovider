@@ -456,7 +456,7 @@ sudo tail -Fn0 /var/lib/macprovider-pearl-updater/audit.jsonl | \
    rolls the backend transaction back:
 
 ```bash
-curl -fsSL https://get.streamvc.live/install.sh | \
+curl -fsSL https://get.malibu.tech/install.sh | \
   MACPROVIDER_VERSION=v1.8.39 MACPROVIDER_NO_PROMPT=1 bash
 ```
 

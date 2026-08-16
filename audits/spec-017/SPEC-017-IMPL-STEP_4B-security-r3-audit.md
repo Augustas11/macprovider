@@ -11,7 +11,7 @@ Prior round checked: `specs/SPEC-017-IMPL-STEP_4B-security-r2-audit.md`.
 
 **Not locked: 0 CRITICAL / 0 HIGH / 1 MEDIUM / 1 LOW / 8 INFO.**
 
-The r2 `add_header` inheritance issue is closed: both stats 429 named locations now include `stats-security-headers.conf` before the response-specific `Retry-After` / `Cache-Control` headers. The r2 TLS/deploy concern from ARCH/CODE is also closed from the security lane's posture: `deploy-pearl-vps.sh` now treats `stats.streamvc.live` as a first-class certbot target and installs/uncomments the stats vhost cert lines before `nginx -t`.
+The r2 `add_header` inheritance issue is closed: both stats 429 named locations now include `stats-security-headers.conf` before the response-specific `Retry-After` / `Cache-Control` headers. The r2 TLS/deploy concern from ARCH/CODE is also closed from the security lane's posture: `deploy-pearl-vps.sh` now treats `stats.malibu.tech` as a first-class certbot target and installs/uncomments the stats vhost cert lines before `nginx -t`.
 
 The security lane still cannot lock because the shipped nginx behavior harness still does not prove the exact SECURITY r5 C1 `proxy_no_cache` write-suppression invariant required by this prompt: after a keyed request, no cache entry exists for that URL on disk. The harness now makes keyed and anonymous bodies distinguishable and verifies an anonymous follow-up is not served the partner body, which is good leak coverage, but it never inspects the mounted cache directory and does not assert `MISS` / `BYPASS` / no cache file.
 
@@ -20,7 +20,7 @@ The security lane still cannot lock because the shipped nginx behavior harness s
 - `gh pr view 173 --repo Augustas11/macprovider --json ...` - PR head is `impl/spec-017-step-1` at `ecc02ad049fdb0ade3b3539c0c6f1b59f3c66ce2`; base is `main`.
 - `ls specs/SPEC-017-IMPL-STEP_4B-*` - prior Step 4.B security rounds are r1 and r2; this is r3.
 - Required contract reads completed: SPEC §5.4.7, §5.6, §5.7, §6.6.2, §7.1, §7.4, §10 AC-3/8/15/22; BUILD Step 4.B including SECURITY r5 C1, keyed-through-nginx bypass, `proxy_no_cache` write-suppression, Cloudflare, subdomain trust, and AC-15 nginx redaction.
-- Required implementation reads completed: `phase4-coordinator/dist/nginx-stats.streamvc.live.conf`, `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`, `phase4-coordinator/dist/nginx-snippets/stats-shared.conf`, `phase4-coordinator/dist/nginx-snippets/stats-security-headers.conf`, `phase4-coordinator/dist/deploy-pearl-vps.sh`, `phase4-coordinator/dist/test/check_nginx_stats_test.sh`, Pearl console security-header snippet, and Step 4.B ARCH/CODE/security prior rounds.
+- Required implementation reads completed: `phase4-coordinator/dist/nginx-stats.malibu.tech.conf`, `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`, `phase4-coordinator/dist/nginx-snippets/stats-shared.conf`, `phase4-coordinator/dist/nginx-snippets/stats-security-headers.conf`, `phase4-coordinator/dist/deploy-pearl-vps.sh`, `phase4-coordinator/dist/test/check_nginx_stats_test.sh`, Pearl console security-header snippet, and Step 4.B ARCH/CODE/security prior rounds.
 - `bash phase4-coordinator/dist/test/check_nginx_stats_test.sh` - SKIP locally: `docker daemon not reachable; CI runs this test`.
 - `docker info` - FAIL locally: Docker client exists, but the daemon socket is missing.
 - `make test-dist` - PASS overall, with `check_nginx_stats_test.sh` skipped for the same Docker-daemon reason and the optional SPEC-015 live nginx smoke skipped by design.
@@ -64,7 +64,7 @@ A. Partner-projection cache hygiene: **STATIC PASS, DYNAMIC PARTIAL / FAIL FOR D
 
 B. Public-tier rate-limit bypass for Authorization: **STATIC PASS, HARNESS PRESENT BUT NOT RUN LOCALLY.** `stats-shared.conf:24-27` maps any present Authorization header to an empty `$public_rl_key`; lines 31-33 declare separate 60 rpm zones. The script now attempts 100 valid-keyed leaderboard requests without edge 429, but local Docker is unavailable, so this audit did not observe the live pass.
 
-C. Access-log redaction: **STATIC PASS, HARNESS PRESENT BUT NOT RUN LOCALLY.** `stats_redacted` omits `$http_authorization`, and `stats.streamvc.live` writes `/var/log/nginx/stats.streamvc.live-access.log stats_redacted`. The script scans for the exact raw token, its 43-character body, and `token_hash`; it does not perform a broader base64url regex scan, but the committed format has no field that should carry Authorization material.
+C. Access-log redaction: **STATIC PASS, HARNESS PRESENT BUT NOT RUN LOCALLY.** `stats_redacted` omits `$http_authorization`, and `stats.malibu.tech` writes `/var/log/nginx/stats.malibu.tech-access.log stats_redacted`. The script scans for the exact raw token, its 43-character body, and `token_hash`; it does not perform a broader base64url regex scan, but the committed format has no field that should carry Authorization material.
 
 D. `add_header` inheritance trap: **PASS.** The stats and coordinator `@stats_rate_limited` locations include `/etc/nginx/conf.d/stats-security-headers.conf` before their location-level `add_header` directives. The snippet redeclares `X-Content-Type-Options`, `X-Frame-Options`, and `Referrer-Policy` with `always`.
 
@@ -72,13 +72,13 @@ E. Method allowlist: **PASS.** No `limit_except` block or method-specific HEAD h
 
 F. TLS posture parity: **PASS.** Stats vhost pins TLSv1.2/TLSv1.3. The deploy script now installs ACME stubs for both `$DOMAIN` and `$STATS_DOMAIN`, runs certbot for both, installs the stats vhost, uncomments its certificate directives, then runs `nginx -t`. No `ssl_session_tickets` directive appears in the adjacent coordinator vhost either, so Step 4.B does not regress that inherited posture.
 
-G. Cloudflare / external-CDN compatibility: **PASS BY ABSENCE.** No Cloudflare cache override appears in this PR. Step 3 remains responsible for partner `Cache-Control: private`, and no repo evidence shows Cloudflare in front of `stats.streamvc.live`.
+G. Cloudflare / external-CDN compatibility: **PASS BY ABSENCE.** No Cloudflare cache override appears in this PR. Step 3 remains responsible for partner `Cache-Control: private`, and no repo evidence shows Cloudflare in front of `stats.malibu.tech`.
 
-H. Subdomain-trust boundary: **PASS.** The stats nginx files contain no Origin-based `if`, `map`, `return 444`, `return 200`, or `Access-Control-Allow-Origin` directive. `Origin: https://evil.streamvc.live` is forwarded to the coordinator for application-layer rejection.
+H. Subdomain-trust boundary: **PASS.** The stats nginx files contain no Origin-based `if`, `map`, `return 444`, `return 200`, or `Access-Control-Allow-Origin` directive. `Origin: https://evil.malibu.tech` is forwarded to the coordinator for application-layer rejection.
 
 I. AC-15 nginx access-log redaction: **STATIC PASS, HARNESS PRESENT BUT NOT RUN LOCALLY.** The access-log format omits Authorization and the script scans the mounted stats access log after a keyed request. Local execution skipped because Docker is unavailable.
 
-J. error_log posture: **PASS.** The stats vhost sets `error_log /var/log/nginx/stats.streamvc.live-error.log warn;`; no committed stats nginx `error_log debug` directive was found.
+J. error_log posture: **PASS.** The stats vhost sets `error_log /var/log/nginx/stats.malibu.tech-error.log warn;`; no committed stats nginx `error_log debug` directive was found.
 
 ## Closed Since r2
 

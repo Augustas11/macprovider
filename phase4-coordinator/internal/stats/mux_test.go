@@ -14,7 +14,7 @@ func TestPreflightRateLimitIsSeparateOriginBucket(t *testing.T) {
 		nil,
 		CORSConfig{
 			AccessControlMaxAgeSeconds: 60,
-			PartnerOriginAllowlist:     []string{"https://console.streamvc.live", "https://portal.streamvc.live"},
+			PartnerOriginAllowlist:     []string{"https://console.malibu.tech", "https://portal.malibu.tech"},
 		},
 		"",
 		"",
@@ -26,12 +26,12 @@ func TestPreflightRateLimitIsSeparateOriginBucket(t *testing.T) {
 	h := mux.Handler()
 
 	for i := 0; i < 2; i++ {
-		resp := doPreflight(t, h, "https://console.streamvc.live")
+		resp := doPreflight(t, h, "https://console.malibu.tech")
 		if resp.Code != http.StatusNoContent {
 			t.Fatalf("preflight %d status=%d want 204 body=%s", i+1, resp.Code, resp.Body.String())
 		}
 	}
-	limited := doPreflight(t, h, "https://console.streamvc.live")
+	limited := doPreflight(t, h, "https://console.malibu.tech")
 	if limited.Code != http.StatusTooManyRequests {
 		t.Fatalf("third same-origin preflight status=%d want 429", limited.Code)
 	}
@@ -39,7 +39,7 @@ func TestPreflightRateLimitIsSeparateOriginBucket(t *testing.T) {
 		t.Fatalf("429 Retry-After=%q want 60", got)
 	}
 
-	otherOrigin := doPreflight(t, h, "https://portal.streamvc.live")
+	otherOrigin := doPreflight(t, h, "https://portal.malibu.tech")
 	if otherOrigin.Code != http.StatusTooManyRequests {
 		t.Fatalf("different-origin preflight status=%d want same client/endpoint 429 bucket", otherOrigin.Code)
 	}

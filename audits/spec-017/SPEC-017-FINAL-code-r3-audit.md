@@ -115,7 +115,7 @@ C. Context cancellation correctness: PASS. Rollup ticks pass the runner context 
 
 D. Error-path label leaks: PASS. Rollup health failure stores `redactErrMsg(err.Error())` at `phase4-coordinator/internal/stats/rollup/runner.go:260-262`; the redactor strips DSNs, `mpk_*`, `token_hash=...`, and long hex runs at `phase4-coordinator/internal/stats/rollup/runner.go:342-362`. Panic classification is type-only at `phase4-coordinator/internal/stats/rollup/runner.go:307-309`.
 
-E. Off-by-one / boundary bugs: PASS. The shipped nginx stats locations use `burst=59 nodelay` on all six public-tier directives: `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:110`, `:138`, `:161` and `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:213`, `:233`, `:253`. Under nginx semantics, `burst=59` plus one in-rate request admits exactly 60 immediate requests and rejects the 61st.
+E. Off-by-one / boundary bugs: PASS. The shipped nginx stats locations use `burst=59 nodelay` on all six public-tier directives: `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:110`, `:138`, `:161` and `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:213`, `:233`, `:253`. Under nginx semantics, `burst=59` plus one in-rate request admits exactly 60 immediate requests and rejects the 61st.
 
 F. Money math: PASS. Drift detection uses absolute delta over `max(rebuild, 1)` at `phase4-coordinator/internal/stats/rollup/rebuild.go:224-235`, avoiding divide-by-zero and sign-flip misses. Targeted tests for zero, sub-unit, threshold-exclusive, and dollar values passed.
 

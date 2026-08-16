@@ -8,7 +8,7 @@ by the same internal e2e network-harness pass and three-lane audit
 ## Change-log entry
 
 > Codifies four gateway-side observations from internal e2e testing
-> against `https://api.streamvc.live`. R-G1 re-affirms §17.7
+> against `https://api.malibu.tech`. R-G1 re-affirms §17.7
 > settlement matrix against an empirically observed violation. R-G2
 > specifies the per-account-rate-limit response header set; the
 > numeric N is the only surviving open product decision. R-G3

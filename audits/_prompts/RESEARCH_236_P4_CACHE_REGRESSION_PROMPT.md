@@ -26,7 +26,7 @@ Unlike P2 and P3 — which need a lab Mac because they drive cold-loads / sustai
 degrade the single prod provider (see [#584](https://github.com/Augustas11/macprovider/issues/584))
 — **P4 is a light probe**: ~15–20 requests, a couple of multi-turn sticky conversations, order of
 **cents** in cost, no sustained pressure. It can run against the **prod** stack
-(`api.streamvc.live` / prod coordinator) now, and it is the natural continuous/CI regression gate.
+(`api.malibu.tech` / prod coordinator) now, and it is the natural continuous/CI regression gate.
 The only prerequisite is that **sticky routing is ON on both sides** — verify before measuring.
 
 ## What already exists (do not rebuild)
@@ -67,7 +67,7 @@ The only prerequisite is that **sticky routing is ON on both sides** — verify 
   distinct prefix** (or a fresh conversation) as the *uncached* control for the TTFT-advantage half.
 - One model class (start with the 30B, `mlx-community/Qwen3-32B-4bit`, matching 03/08). Small
   `max_tokens` (the completion is irrelevant; the prompt-cache is the subject).
-- Target prod (`api.streamvc.live`) — this is the prod-safe scenario.
+- Target prod (`api.malibu.tech`) — this is the prod-safe scenario.
 
 ### Deliverable 2 — capture `cached_prompt_tokens` in the harness (build, if missing)
 

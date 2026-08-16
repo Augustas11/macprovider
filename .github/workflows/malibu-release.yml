@@ -267,7 +267,7 @@ jobs:
           test "$("$cli" --version)" = "$CLI_VERSION"
           codesign --verify --strict --verbose=2 "$cli"
           codesign --verify --strict --verbose=2 \
-            -R="identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\"" \
+            -R="identifier \"live.malibu.provider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\"" \
             "$cli"
           codesign -dv --verbose=4 "$cli" 2>&1 | grep -qx "TeamIdentifier=$TEAM_ID"
           codesign -dv --verbose=4 "$cli" 2>&1 | grep -q '^Runtime Version='
@@ -659,7 +659,7 @@ jobs:
           test "$(shasum -a 256 "$cli" | awk '{print $1}')" = "$CLI_SHA256"
           test "$("$cli" --version)" = "$CLI_VERSION"
           codesign --verify --strict --verbose=2 \
-            -R="identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\"" \
+            -R="identifier \"live.malibu.provider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\"" \
             "$cli"
           codesign -dv --verbose=4 "$cli" 2>&1 | grep -qx "TeamIdentifier=$TEAM_ID"
           codesign -dv --verbose=4 "$cli" 2>&1 | grep -q '^Runtime Version='

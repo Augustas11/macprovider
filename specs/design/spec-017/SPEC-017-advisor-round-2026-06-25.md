@@ -6,7 +6,7 @@
 
 ## Original task
 
-I'm designing a public Network Stats API for macprovider — a decentralized AI inference network on Apple Silicon Macs. The dashboard shows two views: Overview (tokens served, requests, nodes online, bandwidth, GPU/CPU cores, RAM, utilization, models, rpm/tpm timeseries) and Leaderboard (pseudonymized provider rankings by earnings/tokens/jobs over 24h/7d/30d/all windows, with $ amounts split into 'work' and 'rewards'). Goal: serve console.streamvc.live, portal.streamvc.live, AND external partners from the same endpoints.
+I'm designing a public Network Stats API for macprovider — a decentralized AI inference network on Apple Silicon Macs. The dashboard shows two views: Overview (tokens served, requests, nodes online, bandwidth, GPU/CPU cores, RAM, utilization, models, rpm/tpm timeseries) and Leaderboard (pseudonymized provider rankings by earnings/tokens/jobs over 24h/7d/30d/all windows, with $ amounts split into 'work' and 'rewards'). Goal: serve console.malibu.tech, portal.malibu.tech, AND external partners from the same endpoints.
 
 Proposed shape: GET /v1/overview, GET /v1/leaderboard?window=&sort=&limit=, GET /v1/health. Edge-cached 30-60s. Pseudonymized provider IDs like beamy-puppy-4259.
 
@@ -18,13 +18,13 @@ Q2 — Auth model. (a) fully public, rate-limited by IP at nginx/CF, (b) public 
 
 Q3 — Earnings sensitivity. Leaderboard shows $ per pseudonym (e.g. beamy-puppy-4259 → $52 = Work $3.87 + Rewards $48 over 7d). (a) fine as-is, pseudonyms break the link, (b) opt-in flag — providers hide $ but keep tokens/jobs visible, (c) strip all $ from public API, same-origin only sees them. Pseudonyms are stable-ish, sophisticated correlation could deanonymize, $ to top providers may get sensitive once money scales.
 
-Q4 — Hosting. (a) embed in existing coordinator Go binary at coordinator.streamvc.live/v1/stats/*, (b) split out separate stats-api Go service at stats.streamvc.live behind nginx, (c) static JSON snapshot every 30s via cron, served from CF/Vercel with no live backend. Lean fewer services unless load/security forces split.
+Q4 — Hosting. (a) embed in existing coordinator Go binary at coordinator.malibu.tech/v1/stats/*, (b) split out separate stats-api Go service at stats.malibu.tech behind nginx, (c) static JSON snapshot every 30s via cron, served from CF/Vercel with no live backend. Lean fewer services unless load/security forces split.
 
 For each: pick ONE, 2-3 sentence justification grounded in constraints, flag what I'm missing. End with one sentence on SPEC-NNN doc first vs straight IMPL prompt.
 
 ## Final prompt
 
-I'm designing a public Network Stats API for macprovider — a decentralized AI inference network on Apple Silicon Macs. The dashboard shows two views: Overview (tokens served, requests, nodes online, bandwidth, GPU/CPU cores, RAM, utilization, models, rpm/tpm timeseries) and Leaderboard (pseudonymized provider rankings by earnings/tokens/jobs over 24h/7d/30d/all windows, with $ amounts split into 'work' and 'rewards'). Goal: serve console.streamvc.live, portal.streamvc.live, AND external partners from the same endpoints.
+I'm designing a public Network Stats API for macprovider — a decentralized AI inference network on Apple Silicon Macs. The dashboard shows two views: Overview (tokens served, requests, nodes online, bandwidth, GPU/CPU cores, RAM, utilization, models, rpm/tpm timeseries) and Leaderboard (pseudonymized provider rankings by earnings/tokens/jobs over 24h/7d/30d/all windows, with $ amounts split into 'work' and 'rewards'). Goal: serve console.malibu.tech, portal.malibu.tech, AND external partners from the same endpoints.
 
 Proposed shape: GET /v1/overview, GET /v1/leaderboard?window=&sort=&limit=, GET /v1/health. Edge-cached 30-60s. Pseudonymized provider IDs like beamy-puppy-4259.
 
@@ -36,7 +36,7 @@ Q2 — Auth model. (a) fully public, rate-limited by IP at nginx/CF, (b) public 
 
 Q3 — Earnings sensitivity. Leaderboard shows $ per pseudonym (e.g. beamy-puppy-4259 → $52 = Work $3.87 + Rewards $48 over 7d). (a) fine as-is, pseudonyms break the link, (b) opt-in flag — providers hide $ but keep tokens/jobs visible, (c) strip all $ from public API, same-origin only sees them. Pseudonyms are stable-ish, sophisticated correlation could deanonymize, $ to top providers may get sensitive once money scales.
 
-Q4 — Hosting. (a) embed in existing coordinator Go binary at coordinator.streamvc.live/v1/stats/*, (b) split out separate stats-api Go service at stats.streamvc.live behind nginx, (c) static JSON snapshot every 30s via cron, served from CF/Vercel with no live backend. Lean fewer services unless load/security forces split.
+Q4 — Hosting. (a) embed in existing coordinator Go binary at coordinator.malibu.tech/v1/stats/*, (b) split out separate stats-api Go service at stats.malibu.tech behind nginx, (c) static JSON snapshot every 30s via cron, served from CF/Vercel with no live backend. Lean fewer services unless load/security forces split.
 
 For each: pick ONE, 2-3 sentence justification grounded in constraints, flag what I'm missing. End with one sentence on SPEC-NNN doc first vs straight IMPL prompt.
 
@@ -53,7 +53,7 @@ The data is already public, so requiring keys for everything adds friction witho
 Stable pseudonyms plus earnings become sensitive once the network has meaningful revenue; pseudonymization alone is not a privacy model. Keep tokens/jobs visible for network transparency, but let providers suppress dollar amounts publicly, ideally showing bucketed/ranked earnings instead of exact values when hidden. Missing: default policy; I would default new providers to showing aggregate/rank but require explicit consent for exact public dollar display.
 
 **Q4 — Pick A: embed in the existing coordinator Go binary for now.**  
-With 30-60s edge caching and precomputed `stats_*` tables, this is a small read-only surface and does not justify another service yet. Keep it under something like `coordinator.streamvc.live/v1/stats/*` or reverse-proxy a public hostname to the same binary; split only if traffic, security isolation, or partner auth complexity starts affecting coordinator operations. Missing: whether the coordinator already has clean read replicas, nginx/CF rate limits, and handler-level isolation from sensitive coordinator internals.
+With 30-60s edge caching and precomputed `stats_*` tables, this is a small read-only surface and does not justify another service yet. Keep it under something like `coordinator.malibu.tech/v1/stats/*` or reverse-proxy a public hostname to the same binary; split only if traffic, security isolation, or partner auth complexity starts affecting coordinator operations. Missing: whether the coordinator already has clean read replicas, nginx/CF rate limits, and handler-level isolation from sensitive coordinator internals.
 
 Write the `SPEC-NNN` first: this API will become partner-facing, cacheable, privacy-sensitive surface area, so lock schema, windows, visibility rules, rate limits, and freshness guarantees before the implementation prompt.
 
@@ -70,7 +70,7 @@ reasoning summaries: none
 session id: 019f0000-d751-7953-b8c2-2d6205f0567b
 --------
 user
-I'm designing a public Network Stats API for macprovider — a decentralized AI inference network on Apple Silicon Macs. The dashboard shows two views: Overview (tokens served, requests, nodes online, bandwidth, GPU/CPU cores, RAM, utilization, models, rpm/tpm timeseries) and Leaderboard (pseudonymized provider rankings by earnings/tokens/jobs over 24h/7d/30d/all windows, with $ amounts split into 'work' and 'rewards'). Goal: serve console.streamvc.live, portal.streamvc.live, AND external partners from the same endpoints.
+I'm designing a public Network Stats API for macprovider — a decentralized AI inference network on Apple Silicon Macs. The dashboard shows two views: Overview (tokens served, requests, nodes online, bandwidth, GPU/CPU cores, RAM, utilization, models, rpm/tpm timeseries) and Leaderboard (pseudonymized provider rankings by earnings/tokens/jobs over 24h/7d/30d/all windows, with $ amounts split into 'work' and 'rewards'). Goal: serve console.malibu.tech, portal.malibu.tech, AND external partners from the same endpoints.
 
 Proposed shape: GET /v1/overview, GET /v1/leaderboard?window=&sort=&limit=, GET /v1/health. Edge-cached 30-60s. Pseudonymized provider IDs like beamy-puppy-4259.
 
@@ -82,7 +82,7 @@ Q2 — Auth model. (a) fully public, rate-limited by IP at nginx/CF, (b) public 
 
 Q3 — Earnings sensitivity. Leaderboard shows $ per pseudonym (e.g. beamy-puppy-4259 → $52 = Work $3.87 + Rewards $48 over 7d). (a) fine as-is, pseudonyms break the link, (b) opt-in flag — providers hide $ but keep tokens/jobs visible, (c) strip all $ from public API, same-origin only sees them. Pseudonyms are stable-ish, sophisticated correlation could deanonymize, $ to top providers may get sensitive once money scales.
 
-Q4 — Hosting. (a) embed in existing coordinator Go binary at coordinator.streamvc.live/v1/stats/*, (b) split out separate stats-api Go service at stats.streamvc.live behind nginx, (c) static JSON snapshot every 30s via cron, served from CF/Vercel with no live backend. Lean fewer services unless load/security forces split.
+Q4 — Hosting. (a) embed in existing coordinator Go binary at coordinator.malibu.tech/v1/stats/*, (b) split out separate stats-api Go service at stats.malibu.tech behind nginx, (c) static JSON snapshot every 30s via cron, served from CF/Vercel with no live backend. Lean fewer services unless load/security forces split.
 
 For each: pick ONE, 2-3 sentence justification grounded in constraints, flag what I'm missing. End with one sentence on SPEC-NNN doc first vs straight IMPL prompt.
 warning: failed to parse hooks config /Users/augstar/.codex/hooks.json: unknown field `state`, expected `hooks` at line 2 column 9
@@ -97,7 +97,7 @@ The data is already public, so requiring keys for everything adds friction witho
 Stable pseudonyms plus earnings become sensitive once the network has meaningful revenue; pseudonymization alone is not a privacy model. Keep tokens/jobs visible for network transparency, but let providers suppress dollar amounts publicly, ideally showing bucketed/ranked earnings instead of exact values when hidden. Missing: default policy; I would default new providers to showing aggregate/rank but require explicit consent for exact public dollar display.
 
 **Q4 — Pick A: embed in the existing coordinator Go binary for now.**  
-With 30-60s edge caching and precomputed `stats_*` tables, this is a small read-only surface and does not justify another service yet. Keep it under something like `coordinator.streamvc.live/v1/stats/*` or reverse-proxy a public hostname to the same binary; split only if traffic, security isolation, or partner auth complexity starts affecting coordinator operations. Missing: whether the coordinator already has clean read replicas, nginx/CF rate limits, and handler-level isolation from sensitive coordinator internals.
+With 30-60s edge caching and precomputed `stats_*` tables, this is a small read-only surface and does not justify another service yet. Keep it under something like `coordinator.malibu.tech/v1/stats/*` or reverse-proxy a public hostname to the same binary; split only if traffic, security isolation, or partner auth complexity starts affecting coordinator operations. Missing: whether the coordinator already has clean read replicas, nginx/CF rate limits, and handler-level isolation from sensitive coordinator internals.
 
 Write the `SPEC-NNN` first: this API will become partner-facing, cacheable, privacy-sensitive surface area, so lock schema, windows, visibility rules, rate limits, and freshness guarantees before the implementation prompt.
 tokens used

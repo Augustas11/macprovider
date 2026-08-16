@@ -914,7 +914,7 @@ func TestOnboardingDefaultsProductionDisabled(t *testing.T) {
 	if cfg.Onboarding.BundleID != "tech.malibu.app" {
 		t.Fatalf("bundle_id=%q", cfg.Onboarding.BundleID)
 	}
-	if cfg.Onboarding.CoordinatorDomain != "coordinator.streamvc.live" {
+	if cfg.Onboarding.CoordinatorDomain != "coordinator.malibu.tech" {
 		t.Fatalf("coordinator_domain=%q", cfg.Onboarding.CoordinatorDomain)
 	}
 }
@@ -1019,7 +1019,7 @@ func TestCLIOnlyOperatorKeysAllowPartialConfigurationWhileRoutesFailClosed(t *te
 
 func TestOnboardingCoordinatorDomainMustBeBareLowercaseHost(t *testing.T) {
 	cfg := validTestConfig()
-	cfg.Onboarding.CoordinatorDomain = "https://Coordinator.streamvc.live/"
+	cfg.Onboarding.CoordinatorDomain = "https://Coordinator.malibu.tech/"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "bare lowercase host") {
 		t.Fatalf("domain validation err=%v", err)
 	}

@@ -59,7 +59,7 @@ This PR adds:
 
 The binary's threat model:
 - Operator is trusted (they own the hardware)
-- Coordinator (`coordinator.streamvc.live`) is trusted
+- Coordinator (`coordinator.malibu.tech`) is trusted
 - Buyers are UNTRUSTED (they send arbitrary inference requests
   over the WS-tunneled path)
 - Local processes other than `macprovider-cli` are UNTRUSTED
@@ -246,7 +246,7 @@ Focus areas:
 - **Heartbeat extension info leak** — `model_hash` is the
   SHA-256 of the model weights manifest. The coordinator is
   trusted with this. But is the WS connection guaranteed
-  TLS-only? Yes — `coordinator.streamvc.live` is HTTPS-only.
+  TLS-only? Yes — `coordinator.malibu.tech` is HTTPS-only.
   Verify the WS scheme is `wss://` not `ws://`.
 
 Findings format:

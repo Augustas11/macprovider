@@ -165,7 +165,7 @@
       "sha256": "822590b704f5363f092a142b0a442d8b3b8b47b19f65b324883ddd400208da88"
     },
     "launchd_after": {
-      "service_label": "live.streamvc.macprovider",
+      "service_label": "live.malibu.provider",
       "state": "running",
       "program": "/Users/admin/macprovider/macprovider-cli",
       "pid": 84469,
@@ -230,7 +230,7 @@
     }
   },
   "buyer_probe": {
-    "base": "https://api.streamvc.live",
+    "base": "https://api.malibu.tech",
     "requested_model": "mlx-community/Qwen3-8B-4bit",
     "operator_request_header": "spec020-air5-qwen-full-20260727T042219Z-1653",
     "http_status": 200,
@@ -300,8 +300,8 @@
     "ssh pearl 'backup /etc/macprovider-stats/stats-hardware-inventory.yaml and /opt/macprovider/coordinator.yaml; add apple m3 chip profile; set latest_binary_version to 1.8.61; restart macprovider-coordinator.service'",
     "ssh pearl 'POST /admin/hardware-trust/approve/{pending_id}/approve with second operator token; start stats-hardware-verifier.service'",
     "ssh -i ~/.ssh/macprovider_prebeta_newmac_ed25519 admin@MacBook-Air-5.local 'open /Users/admin/Desktop/spec020-air5-v1861-install.command'",
-    "ssh -i ~/.ssh/macprovider_prebeta_newmac_ed25519 admin@MacBook-Air-5.local 'macprovider-cli --version; macprovider-cli status; launchctl print gui/$(id -u)/live.streamvc.macprovider; curl http://127.0.0.1:8080/v1/models'",
+    "ssh -i ~/.ssh/macprovider_prebeta_newmac_ed25519 admin@MacBook-Air-5.local 'macprovider-cli --version; macprovider-cli status; launchctl print gui/$(id -u)/live.malibu.provider; curl http://127.0.0.1:8080/v1/models'",
     "ssh pearl 'curl -H Authorization:Bearer-REDACTED http://127.0.0.1:8444/poolz'",
-    "curl -H Authorization:Bearer-REDACTED https://api.streamvc.live/v1/chat/completions with model mlx-community/Qwen3-8B-4bit"
+    "curl -H Authorization:Bearer-REDACTED https://api.malibu.tech/v1/chat/completions with model mlx-community/Qwen3-8B-4bit"
   ]
 }

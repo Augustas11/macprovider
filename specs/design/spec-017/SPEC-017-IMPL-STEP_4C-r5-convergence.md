@@ -158,7 +158,7 @@ All three lanes locked. Step 4.C **CONVERGED** on HEAD `fef509c`.
   family-presence inventory check. **Closed in round 4**: bearer
   is now a SPEC-shaped `mpk_` + 43-char body; deny list now
   includes `{bearer, prefix, "mpk_", "mpk_garbage", "garbage",
-  "evil.streamvc.live", "Bearer ", "token_hash"}`; before the
+  "evil.malibu.tech", "Bearer ", "token_hash"}`; before the
   label scan the test asserts every required family
   (`stats_request_total`, `stats_partner_key_request_total`,
   `stats_rollup_lag_seconds`, `stats_rollup_errors_total`,

@@ -3,7 +3,7 @@
 /// `#if arch(arm64)` or check `SecureEnclaveIdentity.isAvailable` at runtime.
 ///
 /// Access-group note: The production access group is
-/// `<TEAM_ID>.live.streamvc.macprovider`. Set it via env var
+/// `<TEAM_ID>.live.malibu.provider`. Set it via env var
 /// `MACPROVIDER_KEYCHAIN_ACCESS_GROUP` or use the `accessGroup:` parameter.
 /// A binary missing the `keychain-access-groups` entitlement receives
 /// errSecMissingEntitlement (-34018), which surfaces as
@@ -72,7 +72,7 @@ enum MacProviderKeychainAccessGroup {
         // During local dev/CI, set MACPROVIDER_KEYCHAIN_ACCESS_GROUP to a signed
         // test group or leave unset — loadOrCreate will throw missingEntitlement,
         // which the generator treats as graceful SE-unavailable.
-        return "REPLACEME.live.streamvc.macprovider"
+        return "REPLACEME.live.malibu.provider"
     }
 }
 
@@ -88,7 +88,7 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
 
     /// Current label. Keys here use `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
     /// so background attestation-challenge signing works while the screen is locked.
-    static let defaultLabel = "live.streamvc.macprovider.attestation-signing.v1"
+    static let defaultLabel = "live.malibu.provider.attestation-signing.v1"
 
     /// Raw P-256 public key (64 bytes: X || Y, without the 0x04 prefix).
     var publicKeyRaw: Data { _publicKeyRaw }

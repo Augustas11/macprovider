@@ -1,9 +1,9 @@
-# Build prompt — Phase 6 front-door (console.streamvc.live)
+# Build prompt — Phase 6 front-door (console.malibu.tech)
 
 Operator-paste prompt to ship a credible buyer-facing surface on top of
 the live Phase 5 gateway. Closes the UX gap surfaced in Decision log
 Entry 27: the gateway is OpenAI-compatible and live at
-`api.streamvc.live`, but the `/account` page is a 3-line HTML string,
+`api.malibu.tech`, but the `/account` page is a 3-line HTML string,
 there is no demo-without-signup surface on a real branded URL, no docs,
 no Copy button, no trust signal for the Tier 1 disclosure.
 
@@ -21,7 +21,7 @@ UX against the spec corpus as-is, with one scoped gateway code change
 Output: living infrastructure plus committed code:
 
 - `frontdoor/console/` — new repo subdir with the static HTML/CSS/JS
-  served at `console.streamvc.live`
+  served at `console.malibu.tech`
 - `phase5-gateway/internal/router/server.go` — CORS middleware for
   4 demo-path endpoints (strict origin allowlist)
 - `phase5-gateway/internal/router/server.go` — `/account` HTML
@@ -29,15 +29,15 @@ Output: living infrastructure plus committed code:
   code snippets, collapsible Tier 1 disclosure
 - `phase5-gateway/internal/router/server.go` — `/docs` route serving
   a static markdown-rendered page
-- `frontdoor/console/dist/nginx-console.streamvc.live.conf` — nginx
+- `frontdoor/console/dist/nginx-console.malibu.tech.conf` — nginx
   vhost
 - `beta/DECISION_CRITERIA.md` — Entry 28 capturing the arc
 
 Architecture decision **Bδ** is locked:
 
-  Browser at `https://console.streamvc.live` →
+  Browser at `https://console.malibu.tech` →
     static HTML served by nginx on Pearl from `/var/www/console` →
-    direct `fetch()` calls to `https://api.streamvc.live/v1/...` →
+    direct `fetch()` calls to `https://api.malibu.tech/v1/...` →
     gateway with strict-allowlist CORS for the 4 demo endpoints
 
 No Vercel functions. No proxy hop. No new vendors. Direct browser →
@@ -57,9 +57,9 @@ into a fresh session rooted at `/Users/augstar/macprovider-poc`.
 ```
 === BEGIN PROMPT ===
 
-You are shipping the Mac Provider front-door at console.streamvc.live,
+You are shipping the Mac Provider front-door at console.malibu.tech,
 following the SPEC-006 v0.6 buyer-API contract that is already live on
-api.streamvc.live. The gateway works, the API works, the OAuth signup
+api.malibu.tech. The gateway works, the API works, the OAuth signup
 works, an `mp_` key was minted live in Decision log Entry 27. What is
 missing is the buyer-facing UX layer.
 
@@ -82,8 +82,8 @@ touch the streaming path, do NOT modify the quota or feedback or admin
 surfaces. Drift outside this scope is grounds for audit rejection.
 
 **3. CORS allowlist is strict.** Allowed origins are EXACTLY:
-   - `https://console.streamvc.live`
-   - `https://streamvc.live`
+   - `https://console.malibu.tech`
+   - `https://malibu.tech`
 No wildcards. No `null`. No localhost in production builds. Local dev
 allowlist (e.g. `http://localhost:5173`) is gated by a build-time flag
 or by env var; never in production binary.
@@ -179,13 +179,13 @@ asserts the State B rendering and confirms the API key is NOT present
 anywhere in the response body.
 
 **AC-3 PASS:** Lighthouse Accessibility score ≥ 90 (run via
-`npx --yes lighthouse https://api.streamvc.live/account
+`npx --yes lighthouse https://api.malibu.tech/account
 --only-categories=accessibility --output=json` against the deployed
 binary; verification is MANUAL after deploy).
 
 **AC-4 PASS:** Page weight (HTML + inline CSS + inline JS) under 20KB
 uncompressed. Measure with `curl -s
-https://api.streamvc.live/account | wc -c`.
+https://api.malibu.tech/account | wc -c`.
 
 **AC-5 PARTIAL acceptable:** Copy button works via Clipboard API in
 modern browsers; document the fallback path explicitly in a code
@@ -210,8 +210,8 @@ Add CORS handling to the gateway HTTP server. Implementation MUST be:
   ```
   cors:
     allowed_origins:
-      - https://console.streamvc.live
-      - https://streamvc.live
+      - https://console.malibu.tech
+      - https://malibu.tech
   ```
 - The allowlist is matched EXACTLY (case-sensitive string match, no
   prefix matching, no wildcard expansion).
@@ -234,19 +234,19 @@ allowlist case-sensitive (mixed case fails).
 
 **AC-8 PASS:** Curl-based integration test from a non-allowed origin:
 `curl -i -H "Origin: https://attacker.com"
-https://api.streamvc.live/v1/status` returns the response WITHOUT
+https://api.malibu.tech/v1/status` returns the response WITHOUT
 `Access-Control-Allow-Origin` header.
 
 **AC-9 PASS:** Curl preflight from allowed origin: `curl -i -X OPTIONS
--H "Origin: https://console.streamvc.live" -H
+-H "Origin: https://console.malibu.tech" -H
 "Access-Control-Request-Method: POST"
-https://api.streamvc.live/v1/chat/completions` returns 204 with
+https://api.malibu.tech/v1/chat/completions` returns 204 with
 correct allow-methods including POST.
 
 **AC-10 PASS:** Endpoints not in the demo allowlist (e.g. `/account`,
 `/auth/github/callback`, `/admin/feedback-summary`) do NOT add CORS
 headers even for allowed origins. Test by curling from
-`https://console.streamvc.live` Origin.
+`https://console.malibu.tech` Origin.
 
 **AC-11 PASS:** Audit category A (CORS misconfiguration) is added to
 the phase-end handback. Specifically scan for: wildcard `*`,
@@ -272,14 +272,14 @@ scratch:
 
   /Users/augstar/macprovider-poc/frontdoor/console/
     index.html                            (forked from beta/web/index.html)
-    dist/nginx-console.streamvc.live.conf (new)
+    dist/nginx-console.malibu.tech.conf (new)
     README.md                             (new — deploy + iteration notes)
 
 The two Vercel edge functions (`beta/web/api/chat.js`,
 `beta/web/api/providers.js`) are **explicitly not migrated** under
 the Bδ architecture: Bδ removes the proxy hop, so the browser calls
-`api.streamvc.live` directly via CORS. The edge functions remain in
-`beta/web/` as the Phase 2 fallback while the new console.streamvc.live
+`api.malibu.tech` directly via CORS. The edge functions remain in
+`beta/web/` as the Phase 2 fallback while the new console.malibu.tech
 deployment soaks.
 
 `index.html` after the fork is a single self-contained file (HTML +
@@ -293,15 +293,15 @@ The starting file already has the chat UI, dark theme, and prompt /
 response flow. The delta to apply:
 
 1. **Replace `fetch('/api/providers')`** (line ~177 in current
-   beta/web/index.html) with `fetch('https://api.streamvc.live/v1/status')`
+   beta/web/index.html) with `fetch('https://api.malibu.tech/v1/status')`
    and adapt the response parsing (provider list becomes the
    `models` array; the sidebar shows model names + slots_free
    instead of M1/M4 tunnel hostnames).
 2. **Replace `fetch('/api/chat', {body: JSON.stringify({provider,
    prompt, max_tokens: 384})})`** (line ~226) with a two-step flow:
-   first mint a demo token via `POST https://api.streamvc.live/auth/demo-session`
+   first mint a demo token via `POST https://api.malibu.tech/auth/demo-session`
    (deferred until first user input event per AC-14), then POST to
-   `https://api.streamvc.live/v1/chat/completions` with the
+   `https://api.malibu.tech/v1/chat/completions` with the
    `X-Demo-Token` header and OpenAI-shape body.
 3. **Replace SSE parsing**: the current demo expects a custom
    newline-delimited stream from the edge function. Replace with
@@ -317,7 +317,7 @@ response flow. The delta to apply:
    inference network" — provider identity is intentionally hidden
    per SPEC-006 v0.6 § 8 redaction.
 6. **Add the "Sign in" CTA** in the header pointing to
-   `https://api.streamvc.live/auth/github/start`.
+   `https://api.malibu.tech/auth/github/start`.
 7. **Add suggested-prompt pills** above the textarea (3 pills:
    translation, summarization, code generation) per O-6c-2 (fill-
    but-don't-send).
@@ -330,7 +330,7 @@ response flow. The delta to apply:
 **Header (sticky):**
 - Logo / wordmark: "Mac Provider"
 - Right side: `Status: ● up` (live from `/v1/status`), `Sign in`
-  button → `https://api.streamvc.live/auth/github/start`
+  button → `https://api.malibu.tech/auth/github/start`
 
 **Main column (left, ~70%):**
 - Chat interface:
@@ -352,22 +352,22 @@ response flow. The delta to apply:
   data was last refreshed
 
 **Footer:**
-- Links: `Documentation` (→ api.streamvc.live/docs),
-  `Status` (→ api.streamvc.live/v1/status),
+- Links: `Documentation` (→ api.malibu.tech/docs),
+  `Status` (→ api.malibu.tech/v1/status),
   `API reference` (→ docs#api),
   `Disclosures` (→ docs#disclosures)
 
 ### Client-side flow
 
 1. On page load:
-   - `GET https://api.streamvc.live/v1/status` to populate sidebar
-   - `GET https://api.streamvc.live/v1/models` to learn which models
+   - `GET https://api.malibu.tech/v1/status` to populate sidebar
+   - `GET https://api.malibu.tech/v1/models` to learn which models
      are available (no auth — but wait, `/v1/models` currently
      requires bearer — see open question O-6c-1 below)
-   - `POST https://api.streamvc.live/auth/demo-session` to mint a
+   - `POST https://api.malibu.tech/auth/demo-session` to mint a
      demo token, store in memory only (NOT localStorage, NOT cookies)
 2. On user prompt:
-   - `POST https://api.streamvc.live/v1/chat/completions` with
+   - `POST https://api.malibu.tech/v1/chat/completions` with
      `X-Demo-Token: <token>`, `Accept: text/event-stream`
    - Render SSE chunks into the response area
 3. On error:
@@ -407,7 +407,7 @@ confused when they hit quota faster than expected.
 
 **AC-13 PASS:** Page loads with NO requests to third-party origins
 (no Google Fonts, no analytics, no CDN-hosted JS). Verify in dev tools
-Network tab → only requests to `api.streamvc.live`.
+Network tab → only requests to `api.malibu.tech`.
 
 **AC-14 PASS:** First-render does NOT make any API calls until either
 (a) page is interactive or (b) the user scrolls into the sidebar. The
@@ -415,7 +415,7 @@ initial `/v1/status` call is acceptable; the `/auth/demo-session`
 call MUST be deferred until first user input event.
 
 **AC-15 PASS:** Chat round-trip works end-to-end against
-`https://api.streamvc.live` via CORS, for at least 3 consecutive
+`https://api.malibu.tech` via CORS, for at least 3 consecutive
 prompts. Measure that demo-token quota is decremented (verify by
 hitting `/v1/usage` with the demo token — if that endpoint accepts
 demo tokens; otherwise PARTIAL with a manual SQL check on
@@ -433,13 +433,13 @@ mobile emulation.
 Performance ≥ 90 (the Performance bar is loose on intentionally
 minimal pages; mainly verifying we don't ship a 5MB image). MANUAL.
 
-## Phase 6d — console.streamvc.live infrastructure (0.5 day)
+## Phase 6d — console.malibu.tech infrastructure (0.5 day)
 
 ### Scope
 
-- Cloudflare DNS A record: `console.streamvc.live` →
+- Cloudflare DNS A record: `console.malibu.tech` →
   `159.223.165.194`, DNS-only (proxied:false), TTL 300s
-- nginx vhost at `/etc/nginx/sites-available/console.streamvc.live`
+- nginx vhost at `/etc/nginx/sites-available/console.malibu.tech`
   serving `/var/www/console/index.html` over TLS
 - Let's Encrypt cert via certbot --webroot bootstrap pattern (proven
   in Entry 27 — reuse the same procedure)
@@ -450,15 +450,15 @@ minimal pages; mainly verifying we don't ship a 5MB image). MANUAL.
 
 ### Acceptance criteria
 
-**AC-19 PASS:** `curl -sI https://console.streamvc.live/` returns
+**AC-19 PASS:** `curl -sI https://console.malibu.tech/` returns
 HTTP 200, valid TLS cert, HSTS header, `Cache-Control: public,
 max-age=300`. MANUAL verification.
 
-**AC-20 PASS:** `curl -sI http://console.streamvc.live/` returns
-HTTP 301 with `Location: https://console.streamvc.live/`. MANUAL.
+**AC-20 PASS:** `curl -sI http://console.malibu.tech/` returns
+HTTP 301 with `Location: https://console.malibu.tech/`. MANUAL.
 
 **AC-21 PASS:** `certbot renew --dry-run` passes for the
-`console.streamvc.live` cert. MANUAL.
+`console.malibu.tech` cert. MANUAL.
 
 ## Phase 6e — Gateway /docs page (0.5 day)
 
@@ -476,7 +476,7 @@ to `go.mod` with version pinning).
 - **# Getting started**
   - Sign up via GitHub
   - Save your `mp_` key
-  - Use any OpenAI SDK with `base_url=https://api.streamvc.live/v1`
+  - Use any OpenAI SDK with `base_url=https://api.malibu.tech/v1`
 - **# Quickstart code samples**
   - curl
   - openai-python
@@ -541,7 +541,7 @@ Entry 27) covering:
 
 **Category A (CORS misconfiguration):** Specifically scan for:
 - Wildcard `*` in any CORS header
-- Prefix-match (e.g. `https://*.streamvc.live`) which is exploitable
+- Prefix-match (e.g. `https://*.malibu.tech`) which is exploitable
 - Credentials + permissive origins
 - Missing `Vary: Origin`
 - Allowlist leakage via error message
@@ -632,7 +632,7 @@ Decision log Entry 28 captures the full arc.
 
 **Dependencies that must be true before starting:**
 
-- `api.streamvc.live` live with valid TLS (✅ as of Entry 27)
+- `api.malibu.tech` live with valid TLS (✅ as of Entry 27)
 - Gateway G1+G2+G3 deployed (✅ as of Entry 27)
 - Pool with N≥2 healthy providers (✅ as of last check)
 - Cloudflare API token available for the DNS step (✅ stored at
@@ -642,7 +642,7 @@ Decision log Entry 28 captures the full arc.
 **What this phase does NOT include (file as Phase 7 backlog):**
 
 - Buyer dashboard (key list, regenerate, revoke, usage chart)
-- Marketing landing at `streamvc.live` root
+- Marketing landing at `malibu.tech` root
 - Billing / metering surface
 - Pricing decision (currently "free during beta")
 - Multiple keys per account
@@ -680,4 +680,4 @@ After reviewing this draft, the operator workflow is:
 
 Expected calendar duration: **3 working days** at focused-session pace,
 plus 1 audit cycle + 1 FIX cycle = total ~4-5 days end-to-end before
-console.streamvc.live ships green.
+console.malibu.tech ships green.

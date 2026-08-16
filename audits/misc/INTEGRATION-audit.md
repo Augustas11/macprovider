@@ -82,7 +82,7 @@ Top three integration risks:
 | launchd invokes `--coordinator` | `install.sh` and plist pass `--coordinator` | `ServeCommand` defines `@Option var coordinator` | matches |
 | launchd may invoke `--endpoint-url` | Public install does not pass it; template does not include it | `ServeCommand` defines `endpointURL`; ArgumentParser maps to `--endpoint-url` | matches if future installer adds it |
 | local AC-1 checks `/v1/models` | `wait_for_local_model` curls `127.0.0.1:${PORT}/v1/models` and greps model/owner | Swift `HTTPServer` serves OpenAI-style model list with `owned_by: macprovider` | matches |
-| coordinator AC-1 checks `/v1/models` for provider ID | `wait_for_coordinator` curls `https://coordinator.streamvc.live/v1/models` and greps `provider_id` | Go buyer `/v1/models` returns aggregate model entries without provider IDs | mismatch |
+| coordinator AC-1 checks `/v1/models` for provider ID | `wait_for_coordinator` curls `https://coordinator.malibu.tech/v1/models` and greps `provider_id` | Go buyer `/v1/models` returns aggregate model entries without provider IDs | mismatch |
 | coordinator pool visibility via `/poolz` | README says pool visibility check, but `install.sh` never calls `/poolz` | Go `/poolz` exists on provider/operator surface and requires `Authorization: Bearer <operator_key>` | mismatch |
 | `/poolz` auth header | no operator key support in public install | Go expects `Authorization: Bearer <operator_key>` unless auth disabled | mismatch for stranger install |
 | buyer `/v1/models` route | public URL `/v1/models` expected | Go buyer server registers `GET /v1/models` | matches |
@@ -158,7 +158,7 @@ Affected files:
 - `phase4-coordinator/internal/ws/server.go`
 - `README.md`
 
-What's wrong: `wait_for_coordinator` curls `https://coordinator.streamvc.live/v1/models` and waits for the selected `provider_id`. Go's `/v1/models` aggregates models and returns fields like `id`, `provider_count`, `max_context_tokens`, and `total_slots`; it never includes `provider_id`. The endpoint that contains provider IDs is `/poolz`, but that route is mounted on the operator/provider surface and requires `Authorization: Bearer <operator_key>`. A clean public install can have a healthy WS connection and still fail AC-1 after 30 seconds.
+What's wrong: `wait_for_coordinator` curls `https://coordinator.malibu.tech/v1/models` and waits for the selected `provider_id`. Go's `/v1/models` aggregates models and returns fields like `id`, `provider_count`, `max_context_tokens`, and `total_slots`; it never includes `provider_id`. The endpoint that contains provider IDs is `/poolz`, but that route is mounted on the operator/provider surface and requires `Authorization: Bearer <operator_key>`. A clean public install can have a healthy WS connection and still fail AC-1 after 30 seconds.
 
 Fix direction: Stream C should not grep provider IDs in `/v1/models`. Either check model visibility only, use local `/v1/status` coordinator connection state, or add/use a deliberately public onboarding-safe coordinator visibility contract. If `/poolz` remains the check, Stream C must supply the auth contract and correct port/proxy path, but exposing operator credentials to public installers is not acceptable.
 

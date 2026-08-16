@@ -47,7 +47,7 @@ maintenance. Other lenses cover correctness (CODE) and security posture
    or (b) keep the name to preserve signed-catalog compatibility with
    any offline / air-gapped provider. Recommend.
 3. **Baked vs. live catalog drift.** The live feed at
-   `coordinator.streamvc.live/static/autotune-candidates.json`
+   `coordinator.malibu.tech/static/autotune-candidates.json`
    contains only `runtime_status=recommendable` rows (5 models); the
    baked catalog in `AutotuneRecommend.swift` also contains
    `runtime_status=listed` (qwen3-32b, qwen2.5-coder) and

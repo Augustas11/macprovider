@@ -14,7 +14,7 @@
 #   SSH_KEY                 default ~/.ssh/pearl_operator_ed25519
 #   VPS_HOST                default 159.223.165.194
 #   VPS_USER                default root
-#   DOMAIN                  default coordinator.streamvc.live
+#   DOMAIN                  default coordinator.malibu.tech
 #   FORCE_RESTART           default 0
 #   SKIP_BUILD              default 0
 #   SKIP_MIGRATE            default 0 — set 1 if migrations already applied
@@ -41,7 +41,7 @@ MERGE_PY="$DIST_DIR/merge-yaml-overlay.py"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
 VPS_HOST="${VPS_HOST:-159.223.165.194}"
 VPS_USER="${VPS_USER:-root}"
-DOMAIN="${DOMAIN:-coordinator.streamvc.live}"
+DOMAIN="${DOMAIN:-coordinator.malibu.tech}"
 FORCE_RESTART="${FORCE_RESTART:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_MIGRATE="${SKIP_MIGRATE:-0}"

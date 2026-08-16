@@ -119,7 +119,7 @@ REPAIR_INSTALL_DIR="$REPAIR_HOME/macprovider"
 REPAIR_CONFIG_PATH="$REPAIR_HOME/.config/macprovider/config.yaml"
 REPAIR_PROVIDER_ID_PATH="$REPAIR_HOME/.config/macprovider/provider_id"
 REPAIR_MANIFEST_PATH="$REPAIR_HOME/Library/Application Support/macprovider/install_manifest.json"
-REPAIR_PLIST_PATH="$REPAIR_HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
+REPAIR_PLIST_PATH="$REPAIR_HOME/Library/LaunchAgents/live.malibu.provider.plist"
 REPAIR_BINARY_PATH="$REPAIR_HOME/.local/bin/macprovider-cli"
 REPAIR_PROVIDER_ID="mp-0123456789abcdef0123456789abcdef"
 cat > "$REPAIR_CONFIG_PATH" <<EOF
@@ -132,7 +132,7 @@ cat > "$REPAIR_MANIFEST_PATH" <<EOF
 {
   "install_prefix": "$REPAIR_INSTALL_DIR",
   "binary_path": "$REPAIR_INSTALL_DIR/macprovider-cli",
-  "launchd_labels": ["live.streamvc.macprovider"],
+  "launchd_labels": ["live.malibu.provider"],
   "launchd_plists": ["$REPAIR_PLIST_PATH"]
 }
 EOF
@@ -140,7 +140,7 @@ cat > "$REPAIR_PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>Label</key><string>live.streamvc.macprovider</string>
+<key>Label</key><string>live.malibu.provider</string>
 <key>Program</key><string>$REPAIR_INSTALL_DIR/macprovider-cli</string>
 </dict></plist>
 EOF
@@ -157,7 +157,7 @@ chmod 644 "$REPAIR_PLIST_PATH"
   PROVIDER_ID_PATH="$REPAIR_PROVIDER_ID_PATH"
   MANIFEST_PATH="$REPAIR_MANIFEST_PATH"
   PLIST_PATH="$REPAIR_PLIST_PATH"
-  PROVIDER_LABEL="live.streamvc.macprovider"
+  PROVIDER_LABEL="live.malibu.provider"
   DRY_RUN=0
   EMERGENCY_ROLLBACK=0
   REFERRAL_REPLACE_INCUMBENT=0
@@ -180,7 +180,7 @@ if (
   PROVIDER_ID_PATH="$REPAIR_PROVIDER_ID_PATH"
   MANIFEST_PATH="$REPAIR_MANIFEST_PATH"
   PLIST_PATH="$REPAIR_PLIST_PATH"
-  PROVIDER_LABEL="live.streamvc.macprovider"
+  PROVIDER_LABEL="live.malibu.provider"
   DRY_RUN=0
   EMERGENCY_ROLLBACK=0
   REFERRAL_REPLACE_INCUMBENT=0
@@ -205,7 +205,7 @@ if (
   PROVIDER_ID_PATH="$REPAIR_PROVIDER_ID_PATH"
   MANIFEST_PATH="$REPAIR_MANIFEST_PATH"
   PLIST_PATH="$REPAIR_PLIST_PATH"
-  PROVIDER_LABEL="live.streamvc.macprovider"
+  PROVIDER_LABEL="live.malibu.provider"
   DRY_RUN=0
   EMERGENCY_ROLLBACK=0
   REFERRAL_REPLACE_INCUMBENT=0
@@ -351,8 +351,8 @@ CONFIG_PATH="$LIVE_CONFIG_PATH"
 PROVIDER_ID_PATH="$LIVE_PROVIDER_ID_PATH"
 CUTOVER_STARTED=0
 INSTALL_TX_WATCHDOG_WAS_ACTIVE=0
-WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
-WATCHDOG_PLIST_PATH="$TMP/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+WATCHDOG_LABEL="live.malibu.provider-watchdog"
+WATCHDOG_PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
 log() { :; }
 
 skip_restore_called="$TMP/skip-restore-called"

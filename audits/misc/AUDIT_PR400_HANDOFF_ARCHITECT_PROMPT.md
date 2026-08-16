@@ -151,7 +151,7 @@ already committed the "consumed" flag. Two race concerns:
 
 ### ARCH-8. Cookie surface unchanged for legacy path
 The legacy `mp_new_api_key` cookie + `/account` redirect still fires
-when `returnTo == "" && fullKey != ""`. Confirm the console.streamvc.live
+when `returnTo == "" && fullKey != ""`. Confirm the console.malibu.tech
 provider portal flow (which does NOT pass `return_to`) is unchanged.
 Flag if any assumption in the console portal about the cookie's
 presence or path is broken by the refactor (e.g. Path=`/account`

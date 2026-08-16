@@ -22,7 +22,7 @@ closed, and a parallel BUILD prompt drift at line 462. Lock bar
 - `phase4-coordinator/internal/stats/handlers_integration_test.go:379-408`
   test `TestAC12_304IfNoneMatch_CORSHeadersPresent` exercises
   both `/v1/stats/overview` and `/v1/stats/leaderboard` with
-  `Origin: https://console.streamvc.live` and asserts
+  `Origin: https://console.malibu.tech` and asserts
   `Access-Control-Allow-Origin` on the 304 response. Both
   subtests PASS on a clean run.
 - Sanity check inside the test also asserts the 200 response

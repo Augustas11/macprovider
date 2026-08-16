@@ -469,11 +469,11 @@ svg{display:block;flex-shrink:0}
         <svg width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="1" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="8" y="1" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1" y="8" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="8" y="8" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>
         Dashboard
       </a>
-      <a class="nav-item" href="https://api.streamvc.live/docs#api-reference" target="_blank" rel="noopener">
+      <a class="nav-item" href="https://api.malibu.tech/docs#api-reference" target="_blank" rel="noopener">
         <svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 4h10M2 7h6M2 10h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
         API Docs
       </a>
-      <a class="nav-item" href="https://portal.streamvc.live/" target="_blank" rel="noopener">
+      <a class="nav-item" href="https://portal.malibu.tech/" target="_blank" rel="noopener">
         <svg width="14" height="14" viewBox="0 0 14 14"><rect x="1.5" y="2" width="11" height="9" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M1.5 5h11" stroke="currentColor" stroke-width="1.3"/></svg>
         Provider portal →
       </a>
@@ -485,7 +485,7 @@ svg{display:block;flex-shrink:0}
         <span id="sbPoolLabel">checking…</span>
       </div>
       <div id="userArea">
-        <a class="sign-in-link" href="https://api.streamvc.live/auth/github/start">Sign in with GitHub</a>
+        <a class="sign-in-link" href="https://api.malibu.tech/auth/github/start">Sign in with GitHub</a>
       </div>
     </div>
   </nav>
@@ -570,7 +570,7 @@ svg{display:block;flex-shrink:0}
 
 <script>
 // ── Constants ────────────────────────────────────────
-const API = 'https://api.streamvc.live'
+const API = 'https://api.malibu.tech'
 const MAX_SESSIONS = 50
 const SUGGESTIONS = [
   'Show me a minimal Python snippet that streams chat completions using the openai SDK pointed at this endpoint.',
@@ -1336,9 +1336,9 @@ function renderDashboard() {
   const links = document.createElement('div')
   links.className = 'quick-links'
   ;[
-    { label: 'API Docs', href: 'https://api.streamvc.live/docs#api-reference' },
-    { label: 'Status', href: 'https://api.streamvc.live/v1/status' },
-    { label: 'Get API key', href: 'https://api.streamvc.live/auth/github/start' },
+    { label: 'API Docs', href: 'https://api.malibu.tech/docs#api-reference' },
+    { label: 'Status', href: 'https://api.malibu.tech/v1/status' },
+    { label: 'Get API key', href: 'https://api.malibu.tech/auth/github/start' },
   ].forEach(({ label, href }) => {
     const a = document.createElement('a')
     a.className = 'quick-link'
@@ -1507,7 +1507,7 @@ function renderArm64golf() {
 
   const stamp = document.createElement('p')
   stamp.className = 'a64-stamp'
-  stamp.textContent = `Snapshot dated ${ARM64_DATA.last_update}. Live page: arm64golf.streamvc.live (private preview).`
+  stamp.textContent = `Snapshot dated ${ARM64_DATA.last_update}. Live page: arm64golf.malibu.tech (private preview).`
   body.appendChild(stamp)
 }
 

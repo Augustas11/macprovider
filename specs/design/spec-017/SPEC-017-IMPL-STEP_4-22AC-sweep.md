@@ -122,7 +122,7 @@ declares the zones as
     limit_req_zone $public_rl_key zone=stats_leaderboard:10m rate=60r/m;
     limit_req_zone $public_rl_key zone=stats_health:10m      rate=60r/m;
 
-and the vhost (`dist/nginx-stats.streamvc.live.conf`) applies them
+and the vhost (`dist/nginx-stats.malibu.tech.conf`) applies them
 with `limit_req zone=stats_overview nodelay;` — **no `burst=N`**.
 
 With `burst=0`, nginx enforces strict 1-request-per-second (1000ms
@@ -228,7 +228,7 @@ layer, not at the *production-behavior* layer:
   behavior (nginx rate-limiting on `/v1/stats/*`) is structurally
   in place (the zones + limit_req directives exist in
   `dist/nginx-snippets/stats-shared.conf` and
-  `dist/nginx-stats.streamvc.live.conf`), but the contract between
+  `dist/nginx-stats.malibu.tech.conf`), but the contract between
   the SPEC text and the config's `burst` parameter needs to be
   reconciled before the test can pass.
 

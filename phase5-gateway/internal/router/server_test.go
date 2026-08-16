@@ -50,7 +50,7 @@ func TestOAuthCallbackAllowlist(t *testing.T) {
 	}
 	assertErrorCode(t, resp.Body.String(), "oauth_callback_not_allowed")
 
-	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
+	state, cookie := startOAuth(t, h, "https://api.malibu.tech/auth/github/callback")
 	req = httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp = httptest.NewRecorder()
@@ -65,7 +65,7 @@ func TestOAuthCallbackAllowlist(t *testing.T) {
 
 func TestOAuthStateCSRF(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{ProviderUserID: "43", Scopes: []string{"read:user"}}})
-	_, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
+	_, cookie := startOAuth(t, h, "https://api.malibu.tech/auth/github/callback")
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state=forged", nil)
 	req.AddCookie(cookie)
@@ -76,7 +76,7 @@ func TestOAuthStateCSRF(t *testing.T) {
 	}
 	assertErrorCode(t, resp.Body.String(), "oauth_state_invalid")
 
-	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
+	state, cookie := startOAuth(t, h, "https://api.malibu.tech/auth/github/callback")
 	req = httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp = httptest.NewRecorder()
@@ -126,7 +126,7 @@ func TestGitHubOAuthHandlersFailClosedWhenDisabled(t *testing.T) {
 
 func TestOAuthScopeMinimization(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{ProviderUserID: "44", Scopes: []string{"read:user"}}})
-	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
+	state, cookie := startOAuth(t, h, "https://api.malibu.tech/auth/github/callback")
 	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp := httptest.NewRecorder()
@@ -136,7 +136,7 @@ func TestOAuthScopeMinimization(t *testing.T) {
 	}
 
 	h, _, dbPath, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{ProviderUserID: "45", Scopes: []string{"repo"}}})
-	state, cookie = startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
+	state, cookie = startOAuth(t, h, "https://api.malibu.tech/auth/github/callback")
 	req = httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=bad&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp = httptest.NewRecorder()
@@ -150,7 +150,7 @@ func TestOAuthScopeMinimization(t *testing.T) {
 	}
 
 	h, _, _, _ = newTestHarness(t, fakeOAuth{err: auth.ErrForbiddenScope})
-	state, cookie = startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
+	state, cookie = startOAuth(t, h, "https://api.malibu.tech/auth/github/callback")
 	req = httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=bad&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp = httptest.NewRecorder()
@@ -219,9 +219,9 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 		t.Fatalf("included paid entrypoints=%v", settlement.IncludedPaidEntrypoints)
 	}
 	if len(settlement.ExcludedPaidEntrypoints) == 0 ||
-		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "coordinator.streamvc.live") ||
-		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "m4.streamvc.live") ||
-		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "m1.streamvc.live") {
+		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "coordinator.malibu.tech") ||
+		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "m4.malibu.tech") ||
+		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "m1.malibu.tech") {
 		t.Fatalf("excluded paid entrypoints must name legacy/direct paths: %+v", settlement.ExcludedPaidEntrypoints)
 	}
 	for _, got := range []string{
@@ -1015,8 +1015,8 @@ func TestStatusRedactionAndPoolzCacheFlush(t *testing.T) {
 		}
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
 			"pool":[
-				{"provider_id":"m4-secret","assigned_id":"route-secret","hostname":"m4.local","endpoint_url":"https://m4.streamvc.live","model_id":"llama","state":"ready","slots_free":1,"slots_total":2,"max_context_tokens":8192,"memory_bytes":123,"cpu_count":10,"operator_identity":"operator"},
-				{"provider_id":"m1-secret","assigned_id":"route-2","hostname":"m1.local","endpoint_url":"https://m1.streamvc.live","model_id":"llama","state":"unavailable","slots_free":0,"slots_total":1,"max_context_tokens":4096}
+				{"provider_id":"m4-secret","assigned_id":"route-secret","hostname":"m4.local","endpoint_url":"https://m4.malibu.tech","model_id":"llama","state":"ready","slots_free":1,"slots_total":2,"max_context_tokens":8192,"memory_bytes":123,"cpu_count":10,"operator_identity":"operator"},
+				{"provider_id":"m1-secret","assigned_id":"route-2","hostname":"m1.local","endpoint_url":"https://m1.malibu.tech","model_id":"llama","state":"unavailable","slots_free":0,"slots_total":1,"max_context_tokens":4096}
 			],
 			"summary":{"total_providers":2,"ready":1,"total_slots":3,"free_slots":1}
 		}`), nil
@@ -1027,7 +1027,7 @@ func TestStatusRedactionAndPoolzCacheFlush(t *testing.T) {
 	}, WithHTTPClient(client))
 	resp := assertStatus(t, h, http.MethodGet, "/v1/status", "", "", "", http.StatusOK)
 	body := resp.Body.String()
-	for _, forbidden := range []string{"m4-secret", "route-secret", "m4.local", "streamvc.live", "memory_bytes", "operator"} {
+	for _, forbidden := range []string{"m4-secret", "route-secret", "m4.local", "malibu.tech", "memory_bytes", "operator"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("status leaked %q in %s", forbidden, body)
 		}
@@ -6447,7 +6447,7 @@ func newTestHarnessConfig(t *testing.T, oauth auth.OAuthProvider, mutate func(*c
 	cfg.Coordinator.ServiceToken = "service-token"
 	cfg.Explorer.Enabled = true
 	cfg.Proxy.TrustedCIDRs = []string{"127.0.0.0/8", "::1/128", "192.0.2.0/24"}
-	cfg.Auth.OAuth.CallbackAllowlist = []string{"https://api.streamvc.live/auth/github/callback"}
+	cfg.Auth.OAuth.CallbackAllowlist = []string{"https://api.malibu.tech/auth/github/callback"}
 	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
 	if mutate != nil {
 		mutate(&cfg)
@@ -6691,7 +6691,7 @@ listen:
   bind_address: 127.0.0.1
   port: 9443
 public:
-  base_url: https://api.streamvc.live
+  base_url: https://api.malibu.tech
   account_path: /account
 coordinator:
   buyer_url: http://coordinator.test
@@ -6710,7 +6710,7 @@ auth:
   email_magic_link_enabled: false
   oauth:
     callback_allowlist:
-      - https://api.streamvc.live/auth/github/callback
+      - https://api.malibu.tech/auth/github/callback
     github:
       client_id: client-id
       client_secret: client-secret

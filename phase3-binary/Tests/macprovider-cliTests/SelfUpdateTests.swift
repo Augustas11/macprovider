@@ -545,17 +545,17 @@ final class SelfUpdateTests: XCTestCase {
                 label: SelfUpdate.launchdLabel,
                 serviceLoaded: true,
                 uid: 501,
-                plistPath: "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"
+                plistPath: "/Users/provider/Library/LaunchAgents/live.malibu.provider.plist"
             ),
             [
-                ["bootout", "gui/501/live.streamvc.macprovider"],
-                ["bootstrap", "gui/501", "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"],
+                ["bootout", "gui/501/live.malibu.provider"],
+                ["bootstrap", "gui/501", "/Users/provider/Library/LaunchAgents/live.malibu.provider.plist"],
             ]
         )
     }
 
     func testLaunchdReloadBootstrapsOnlyWhenServiceIsNotLoaded() {
-        let plist = "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"
+        let plist = "/Users/provider/Library/LaunchAgents/live.malibu.provider.plist"
 
         XCTAssertEqual(
             SelfUpdate.launchdReloadArguments(
@@ -591,17 +591,17 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(commands.count, 4)
         XCTAssertEqual(
             commands[0].0,
-            ["bootout", "gui/501/live.streamvc.macprovider-compatibility-reload"]
+            ["bootout", "gui/501/live.malibu.provider-compatibility-reload"]
         )
         XCTAssertTrue(commands[0].1)
-        XCTAssertEqual(commands[1].0, ["bootout", "gui/501/live.streamvc.macprovider-watchdog"])
+        XCTAssertEqual(commands[1].0, ["bootout", "gui/501/live.malibu.provider-watchdog"])
         XCTAssertFalse(commands[1].1)
         XCTAssertEqual(
             commands[2].0,
             [
                 "bootstrap",
                 "gui/501",
-                launchAgents.appendingPathComponent("live.streamvc.macprovider-watchdog.plist").path,
+                launchAgents.appendingPathComponent("live.malibu.provider-watchdog.plist").path,
             ]
         )
         XCTAssertEqual(
@@ -610,7 +610,7 @@ final class SelfUpdateTests: XCTestCase {
                 "bootstrap",
                 "gui/501",
                 launchAgents.appendingPathComponent(
-                    "live.streamvc.macprovider-compatibility-reload.plist"
+                    "live.malibu.provider-compatibility-reload.plist"
                 ).path,
             ]
         )
@@ -618,7 +618,7 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertFalse(commands.flatMap(\.0).contains("submit"))
 
         let helperURL = launchAgents.appendingPathComponent(
-            "live.streamvc.macprovider-compatibility-reload.plist"
+            "live.malibu.provider-compatibility-reload.plist"
         )
         let helper = try XCTUnwrap(
             PropertyListSerialization.propertyList(
@@ -635,18 +635,18 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(Array(arguments.prefix(2)), ["/bin/sh", "-c"])
         let script = try XCTUnwrap(arguments.last)
         XCTAssertEqual(
-            script.components(separatedBy: "bootout 'gui/501/live.streamvc.macprovider'").count - 1,
+            script.components(separatedBy: "bootout 'gui/501/live.malibu.provider'").count - 1,
             1
         )
         let bootoutRange = try XCTUnwrap(
-            script.range(of: "bootout 'gui/501/live.streamvc.macprovider'")
+            script.range(of: "bootout 'gui/501/live.malibu.provider'")
         )
         let absenceRange = try XCTUnwrap(
-            script.range(of: "print 'gui/501/live.streamvc.macprovider'")
+            script.range(of: "print 'gui/501/live.malibu.provider'")
         )
         let bootstrapRange = try XCTUnwrap(
             script.range(
-                of: "bootstrap 'gui/501' '\(launchAgents.appendingPathComponent("live.streamvc.macprovider.plist").path)'"
+                of: "bootstrap 'gui/501' '\(launchAgents.appendingPathComponent("live.malibu.provider.plist").path)'"
             )
         )
         XCTAssertLessThan(bootoutRange.lowerBound, absenceRange.lowerBound)
@@ -657,7 +657,7 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertTrue(script.contains("[ \"$provider_absent\" -eq 1 ] || exit 75"))
         XCTAssertEqual(
             script.components(
-                separatedBy: "bootstrap 'gui/501' '\(launchAgents.appendingPathComponent("live.streamvc.macprovider.plist").path)'"
+                separatedBy: "bootstrap 'gui/501' '\(launchAgents.appendingPathComponent("live.malibu.provider.plist").path)'"
             ).count - 1,
             1
         )
@@ -670,14 +670,14 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(
             result.log,
             [
-                "bootout gui/501/live.streamvc.macprovider",
-                "print gui/501/live.streamvc.macprovider",
+                "bootout gui/501/live.malibu.provider",
+                "print gui/501/live.malibu.provider",
                 "sleep 0.1",
-                "print gui/501/live.streamvc.macprovider",
+                "print gui/501/live.malibu.provider",
                 "sleep 0.1",
-                "print gui/501/live.streamvc.macprovider",
+                "print gui/501/live.malibu.provider",
                 "bootstrap gui/501 \(result.providerPlistPath)",
-                "bootout gui/501/live.streamvc.macprovider-compatibility-reload",
+                "bootout gui/501/live.malibu.provider-compatibility-reload",
             ]
         )
         XCTAssertEqual(result.log.filter { $0.hasPrefix("bootstrap ") }.count, 1)
@@ -689,7 +689,7 @@ final class SelfUpdateTests: XCTestCase {
 
         XCTAssertEqual(result.status, 75)
         XCTAssertEqual(
-            result.log.filter { $0 == "print gui/501/live.streamvc.macprovider" }.count,
+            result.log.filter { $0 == "print gui/501/live.malibu.provider" }.count,
             3
         )
         XCTAssertEqual(result.log.filter { $0 == "sleep 0.1" }.count, 2)
@@ -706,7 +706,7 @@ final class SelfUpdateTests: XCTestCase {
 
         XCTAssertEqual(result.status, 5)
         XCTAssertEqual(
-            result.log.filter { $0 == "print gui/501/live.streamvc.macprovider" }.count,
+            result.log.filter { $0 == "print gui/501/live.malibu.provider" }.count,
             1
         )
         XCTAssertFalse(result.log.contains { $0.hasPrefix("bootstrap ") })
@@ -768,7 +768,7 @@ final class SelfUpdateTests: XCTestCase {
         try Data("provider".utf8).write(
             to: launchAgents.appendingPathComponent("\(SelfUpdate.launchdLabel).plist")
         )
-        let legacyLabel = "live.streamvc.macprovider-compatibility-reload.12345678-1234-1234-1234-123456789abc"
+        let legacyLabel = "live.malibu.provider-compatibility-reload.12345678-1234-1234-1234-123456789abc"
         var loaded = Set([legacyLabel])
         var commands: [([String], Bool)] = []
 
@@ -789,7 +789,7 @@ final class SelfUpdateTests: XCTestCase {
             commands.map(\.0),
             [
                 ["bootout", "gui/501/\(legacyLabel)"],
-                ["bootout", "gui/501/live.streamvc.macprovider-compatibility-reload"],
+                ["bootout", "gui/501/live.malibu.provider-compatibility-reload"],
             ]
         )
         XCTAssertTrue(commands[0].1)
@@ -925,7 +925,7 @@ final class SelfUpdateTests: XCTestCase {
 
         XCTAssertEqual(
             commands.map(\.0),
-            [["bootout", "gui/501/live.streamvc.macprovider-compatibility-reload"]]
+            [["bootout", "gui/501/live.malibu.provider-compatibility-reload"]]
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: helperPlist.path))
     }
@@ -1108,10 +1108,10 @@ final class SelfUpdateTests: XCTestCase {
     func testCompatibilityReloadFencesOnlyExactLegacyUUIDLabels() throws {
         let output = """
         PID\tStatus\tLabel
-        -\t0\tlive.streamvc.macprovider-compatibility-reload.12345678-1234-1234-1234-123456789abc
-        -\t0\tlive.streamvc.macprovider-compatibility-reload.not-a-uuid
-        -\t0\tattacker.live.streamvc.macprovider-compatibility-reload.12345678-1234-1234-1234-123456789abc
-        42\t0\tlive.streamvc.macprovider
+        -\t0\tlive.malibu.provider-compatibility-reload.12345678-1234-1234-1234-123456789abc
+        -\t0\tlive.malibu.provider-compatibility-reload.not-a-uuid
+        -\t0\tattacker.live.malibu.provider-compatibility-reload.12345678-1234-1234-1234-123456789abc
+        42\t0\tlive.malibu.provider
         """
 
         let labels = SelfUpdate.launchctlServiceLabels(from: output)
@@ -1123,7 +1123,7 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertFalse(SelfUpdate.isLegacyProviderReloadLabel(labels[3]))
         XCTAssertFalse(
             SelfUpdate.isLegacyProviderReloadLabel(
-                "live.streamvc.macprovider-compatibility-reload.12345678-1234-1234-1234-123456789ABC"
+                "live.malibu.provider-compatibility-reload.12345678-1234-1234-1234-123456789ABC"
             )
         )
     }
@@ -1215,10 +1215,10 @@ final class SelfUpdateTests: XCTestCase {
 
         let command = SelfUpdate.launchdRestartRecoveryCommand(homeDirectory: home, uid: 501)
 
-        XCTAssertTrue(command.contains("launchctl bootout gui/501/live.streamvc.macprovider-watchdog"))
-        XCTAssertTrue(command.contains("launchctl bootstrap gui/501 /Users/provider/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"))
-        XCTAssertTrue(command.contains("launchctl bootout gui/501/live.streamvc.macprovider"))
-        XCTAssertTrue(command.contains("launchctl bootstrap gui/501 /Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"))
+        XCTAssertTrue(command.contains("launchctl bootout gui/501/live.malibu.provider-watchdog"))
+        XCTAssertTrue(command.contains("launchctl bootstrap gui/501 /Users/provider/Library/LaunchAgents/live.malibu.provider-watchdog.plist"))
+        XCTAssertTrue(command.contains("launchctl bootout gui/501/live.malibu.provider"))
+        XCTAssertTrue(command.contains("launchctl bootstrap gui/501 /Users/provider/Library/LaunchAgents/live.malibu.provider.plist"))
     }
 
     func testUpdateRequiresSignedChecksumAsset() async throws {
@@ -1354,9 +1354,9 @@ private func runReloadHelperScenario(
     let launchctlURL = root.appendingPathComponent("launchctl")
     let sleepURL = root.appendingPathComponent("sleep")
     let commandSleepURL = root.appendingPathComponent("command-sleep")
-    let providerPlist = root.appendingPathComponent("live.streamvc.macprovider.plist")
+    let providerPlist = root.appendingPathComponent("live.malibu.provider.plist")
     let helperPlist = root.appendingPathComponent(
-        "live.streamvc.macprovider-compatibility-reload.plist"
+        "live.malibu.provider-compatibility-reload.plist"
     )
     let absentAt = absentAfterCheck ?? (maxChecks + 1)
     let forcedPrintFailure = printFailureStatus.map { "exit \($0)" } ?? ":"

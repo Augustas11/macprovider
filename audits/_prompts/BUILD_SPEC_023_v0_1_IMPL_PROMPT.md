@@ -56,7 +56,7 @@ Files likely touched:
 
 - `phase4-coordinator/internal/buyer/server.go`
 - `phase4-coordinator/cmd/coordinator/main.go` only if construction needs option wiring
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
 - `phase4-coordinator/internal/buyer/*_test.go`
 
 Requirements:
@@ -109,13 +109,13 @@ Requirements:
    - stored `last-recommendation.json`
 2. Add baked snapshots compiled into the CLI release. The baked candidate catalog must include at least the SPEC §3.2 rows. Every non-`blocked` baked row must include immutable `model_revision` and canonical `model_sha256`.
 3. Add a CLI rate-card input fetcher:
-   - Fetch `https://coordinator.streamvc.live/v1/rate-card`.
+   - Fetch `https://coordinator.malibu.tech/v1/rate-card`.
    - Validate the §3.3 schema before use.
    - Fall back to the baked rate-card snapshot on timeout, non-2xx, malformed JSON, schema-validation failure, missing required fields, non-finite/negative values, or unavailable network.
    - Emit `rate_card_fallback_used` to JSON `warnings[]` and stderr when baked fallback is used.
    - Persist the selected `rate_card_version` in `last-recommendation.json`.
    - Tests must cover AC-5, including failed fetch and schema-validation failure.
-4. Implement static fetch from `https://get.streamvc.live/{demand-rank,autotune-candidates}.json` plus `{name}.json.sig`.
+4. Implement static fetch from `https://get.malibu.tech/{demand-rank,autotune-candidates}.json` plus `{name}.json.sig`.
 5. Verify detached Ed25519 sidecar exactly:
 
 ```json

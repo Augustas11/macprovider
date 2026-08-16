@@ -99,7 +99,7 @@ immediate migration.
      validation?
    - Is there any pre-upgrade rate-limit hook?
 
-3. `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
+3. `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
    (or wherever the production nginx config lives) — see what's
    currently configured for `/ws/provider` path:
    - Is there a `limit_req_zone` declared?
@@ -233,14 +233,14 @@ application to `/ws/provider`:
 limit_req_zone $binary_remote_addr zone=ws_provider_rate:10m rate=10r/m;
 limit_conn_zone $binary_remote_addr zone=ws_provider_conn:10m;
 
-# api.streamvc.live → gateway (buyer surface)
+# api.malibu.tech → gateway (buyer surface)
 location /v1/chat/completions { proxy_pass http://127.0.0.1:9443; }
 location /v1/models { proxy_pass http://127.0.0.1:9443; }
 location /v1/usage { proxy_pass http://127.0.0.1:9443; }
 location /v1/feedback { proxy_pass http://127.0.0.1:9443; }
 location /v1/status { proxy_pass http://127.0.0.1:9443; }
 
-# coordinator.streamvc.live → coordinator (operator + legacy buyer surface)
+# coordinator.malibu.tech → coordinator (operator + legacy buyer surface)
 location /v1/pool/check { proxy_pass http://127.0.0.1:8443; }
 location /healthz { proxy_pass http://127.0.0.1:8443; }
 location /poolz { proxy_pass http://127.0.0.1:8444; }
@@ -357,7 +357,7 @@ Operator's review checklist (~15 min):
 
 ## Operational migration when SPEC-006 launches
 
-When BUILD_PHASE5 ships and api.streamvc.live opens to the public,
+When BUILD_PHASE5 ships and api.malibu.tech opens to the public,
 PG-1 must be executed:
 
 1. Generate bearer tokens for M4, M1, augustass-macbook-air

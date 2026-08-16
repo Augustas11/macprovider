@@ -163,7 +163,7 @@ window, before the first confirmed payout flips
 `payout_bootstrap_complete=1`):
 
 ```bash
-curl -X POST https://coordinator.streamvc.live/admin/payout/record-funding \
+curl -X POST https://coordinator.malibu.tech/admin/payout/record-funding \
   -H "Authorization: Bearer <operator_key>" \
   -H "Idempotency-Key: <tx_hash>" \
   -H "Content-Type: application/json" \
@@ -286,7 +286,7 @@ order**. Do NOT shortcut.
 ### Step 1 — Pause registration
 
 ```bash
-curl -X POST https://coordinator.streamvc.live/admin/payout/pause-registration \
+curl -X POST https://coordinator.malibu.tech/admin/payout/pause-registration \
   -H "Authorization: Bearer <operator_key>" \
   -d '{"reason": "scheduled hot wallet rotation"}'
 ```
@@ -326,7 +326,7 @@ sed -i 's/payout.enabled: false/payout.enabled: true/' dist/coordinator.yaml
 systemctl restart macprovider-coordinator
 
 # Resume the §3.3 surface.
-curl -X POST https://coordinator.streamvc.live/admin/payout/resume-registration \
+curl -X POST https://coordinator.malibu.tech/admin/payout/resume-registration \
   -H "Authorization: Bearer <operator_key>" \
   -d '{"reason": "wallet rotation complete"}'
 ```
@@ -335,7 +335,7 @@ Verify provider payout addresses still resolve to the
 correct downstream wallets via §7.3:
 
 ```bash
-curl https://coordinator.streamvc.live/providers/<id>/payouts \
+curl https://coordinator.malibu.tech/providers/<id>/payouts \
   -H "Authorization: Bearer <provider_token>"
 ```
 

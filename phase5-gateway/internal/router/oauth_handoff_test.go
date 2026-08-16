@@ -60,7 +60,7 @@ func TestReturnToAllowedRejectsPrefixAndTraversal(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/auth/github/start?return_to="+url.QueryEscape(tc.target)+"&redirect_uri="+url.QueryEscape("https://api.streamvc.live/auth/github/callback"), nil)
+			req := httptest.NewRequest(http.MethodGet, "/auth/github/start?return_to="+url.QueryEscape(tc.target)+"&redirect_uri="+url.QueryEscape("https://api.malibu.tech/auth/github/callback"), nil)
 			resp := httptest.NewRecorder()
 			h.ServeHTTP(resp, req)
 			if tc.allowed {
@@ -84,7 +84,7 @@ func TestOAuthHandoffFlowRoundTrip(t *testing.T) {
 	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{identity: identity}, withMalibuReturnTo)
 	returnTo := "https://malibu.tech/console/auth/callback.html"
 
-	startPath := "/auth/github/start?redirect_uri=" + url.QueryEscape("https://api.streamvc.live/auth/github/callback") + "&return_to=" + url.QueryEscape(returnTo)
+	startPath := "/auth/github/start?redirect_uri=" + url.QueryEscape("https://api.malibu.tech/auth/github/callback") + "&return_to=" + url.QueryEscape(returnTo)
 	startReq := httptest.NewRequest(http.MethodGet, startPath, nil)
 	startResp := httptest.NewRecorder()
 	h.ServeHTTP(startResp, startReq)
@@ -180,7 +180,7 @@ func TestOAuthHandoffPersistenceFailureRedirectsToAccount(t *testing.T) {
 	cfg.Auth.OAuth.GitHub.ClientSecret = "client-secret"
 	cfg.Coordinator.OperatorKey = "operator-key"
 	cfg.Coordinator.ServiceToken = "service-token"
-	cfg.Auth.OAuth.CallbackAllowlist = []string{"https://api.streamvc.live/auth/github/callback"}
+	cfg.Auth.OAuth.CallbackAllowlist = []string{"https://api.malibu.tech/auth/github/callback"}
 	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
 	withMalibuReturnTo(&cfg)
 
@@ -193,7 +193,7 @@ func TestOAuthHandoffPersistenceFailureRedirectsToAccount(t *testing.T) {
 	h := New(cfg, wrapped, fakeOAuth{identity: identity}, WithNow(fixedNow)).Handler()
 
 	returnTo := "https://malibu.tech/console/auth/callback.html"
-	startPath := "/auth/github/start?redirect_uri=" + url.QueryEscape("https://api.streamvc.live/auth/github/callback") + "&return_to=" + url.QueryEscape(returnTo)
+	startPath := "/auth/github/start?redirect_uri=" + url.QueryEscape("https://api.malibu.tech/auth/github/callback") + "&return_to=" + url.QueryEscape(returnTo)
 	startReq := httptest.NewRequest(http.MethodGet, startPath, nil)
 	startResp := httptest.NewRecorder()
 	h.ServeHTTP(startResp, startReq)
@@ -259,8 +259,8 @@ func TestHandoffExchangeErrorSurface(t *testing.T) {
 // see the OAuth flow silently break on the browser-side exchange.
 func TestReturnToConfigRequiresMatchingCORSOrigin(t *testing.T) {
 	cfg := baselineValidConfig(t)
-	cfg.Auth.OAuth.ReturnToAllowlist = []string{"https://malibu.tech/console/auth/callback.html"}
-	// Deliberately DO NOT add malibu.tech to CORS.AllowedOrigins.
+	cfg.Auth.OAuth.ReturnToAllowlist = []string{"https://accounts.malibu.tech/console/auth/callback.html"}
+	// Deliberately DO NOT add accounts.malibu.tech to CORS.AllowedOrigins.
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("Validate must reject a return_to entry without matching CORS origin")
@@ -269,7 +269,7 @@ func TestReturnToConfigRequiresMatchingCORSOrigin(t *testing.T) {
 		t.Fatalf("error=%v want missing-cors-origins message", err)
 	}
 
-	cfg.CORS.AllowedOrigins = append(cfg.CORS.AllowedOrigins, "https://malibu.tech")
+	cfg.CORS.AllowedOrigins = append(cfg.CORS.AllowedOrigins, "https://accounts.malibu.tech")
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate with matching CORS origin failed: %v", err)
 	}
@@ -284,6 +284,6 @@ func baselineValidConfig(t *testing.T) config.Config {
 	cfg.Auth.OAuth.GitHub.ClientSecret = "client-secret"
 	cfg.Coordinator.OperatorKey = "operator-key"
 	cfg.Coordinator.ServiceToken = "service-token"
-	cfg.Auth.OAuth.CallbackAllowlist = []string{"https://api.streamvc.live/auth/github/callback"}
+	cfg.Auth.OAuth.CallbackAllowlist = []string{"https://api.malibu.tech/auth/github/callback"}
 	return cfg
 }

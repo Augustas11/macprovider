@@ -1,6 +1,6 @@
 # smoke_qwen3_coder_30b_a3b.yaml — SCN-226-Qwen3-Coder live-network smoke.
 # Developer-coding-lane row from RESEARCH_227. One buyer, two streaming
-# code-generation prompts via api.streamvc.live → coordinator → provider
+# code-generation prompts via api.malibu.tech → coordinator → provider
 # serving mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit. Measures
 # network-delivered TPS + route_distribution.
 
@@ -22,8 +22,8 @@ expected_shape: |
      34 tok/s due to gateway/coord overhead).
 
 target:
-  gateway_url: https://api.streamvc.live
-  coordinator_url: https://coordinator.streamvc.live
+  gateway_url: https://api.malibu.tech
+  coordinator_url: https://coordinator.malibu.tech
   buyer_token: ${BUYER_TOKEN}
   coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
   gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db

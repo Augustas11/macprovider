@@ -39,7 +39,7 @@ HARDWARE_TRUST_WAITING_STALE_MINUTES=5
 
 ```bash
 curl -sS -H "Authorization: Bearer $OPERATOR_TOKEN" \
-  https://coordinator.streamvc.live/admin/hardware-trust/waiting | jq '.count, .waiting_trust'
+  https://coordinator.malibu.tech/admin/hardware-trust/waiting | jq '.count, .waiting_trust'
 ```
 
 ## In-app copy (Malibu)

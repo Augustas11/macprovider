@@ -1,7 +1,7 @@
 # Coordinator rollback procedure
 
 **Scope**: swap the live `/opt/macprovider/coordinator` binary on the Pearl
-VPS (`coordinator.streamvc.live`) back to the previous build, in under
+VPS (`coordinator.malibu.tech`) back to the previous build, in under
 30 seconds, when the deploy script's provenance check shows the wrong
 version or when a smoke test against the new binary fails.
 
@@ -38,7 +38,7 @@ ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 '
 Verify from the operator Mac:
 
 ```bash
-curl -fsS https://coordinator.streamvc.live/healthz \
+curl -fsS https://coordinator.malibu.tech/healthz \
   | python3 -m json.tool
 # Expect:  "version": "<previous git-describe>"
 ```

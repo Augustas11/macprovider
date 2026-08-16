@@ -47,7 +47,7 @@ The architect lens cares about: module boundaries, single source of truth, abstr
 ### ARCH-6. Acceptance criteria altitude
 - AC-1 through AC-18: are these at the right altitude for an architect to verify? Are any too low-level (implementation detail that should be in a test, not a SPEC AC)? Are any too high-level (mechanically un-verifiable)?
 - AC-16 includes a footnote: "SPEC-018 v0.1 does not certify the second provider turn after tool execution because AC-14 ratifies the current provider limitation." Is this a real limitation that breaks the Ring-1 product story? If a Cline user cannot complete a multi-turn tool loop, does §1's product framing overclaim?
-- AC-18 names `https://api.streamvc.live/v1` directly. Is hard-coding a deployment URL into a normative AC appropriate, or should it be parametric ("any production gateway deployment")?
+- AC-18 names `https://api.malibu.tech/v1` directly. Is hard-coding a deployment URL into a normative AC appropriate, or should it be parametric ("any production gateway deployment")?
 
 ### ARCH-7. §10 reservation overlap
 - "Token-incremental streaming verification and promotion" (§10 item 2) — does this overlap with any SPEC-001 or SPEC-002 streaming concern?

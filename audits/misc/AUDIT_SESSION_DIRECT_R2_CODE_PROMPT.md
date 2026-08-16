@@ -72,9 +72,9 @@ touched surface.
 
 - `validateCoordinatorWSURL(_:expectedBase:)` — trace every branch on
   paper against these inputs and confirm the return path:
-  - base `https://coordinator.streamvc.live`, url
-    `wss://coordinator.streamvc.live/v2/provider` → OK.
-  - base `https://coordinator.streamvc.live`, url with explicit
+  - base `https://coordinator.malibu.tech`, url
+    `wss://coordinator.malibu.tech/v2/provider` → OK.
+  - base `https://coordinator.malibu.tech`, url with explicit
     default `:443` port → OK (defaultExpectedPort logic).
   - base `http://127.0.0.1:8080`, url `ws://127.0.0.1:8080/v2/provider`
     → OK.

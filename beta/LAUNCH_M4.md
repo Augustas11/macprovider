@@ -181,7 +181,7 @@ Paste this and follow the agent's lead:
 
 sudo cloudflared service install <PASTE M1 TOKEN HERE>
 
-After installation, your hostname m4.streamvc.live will go live within
+After installation, your hostname m4.malibu.tech will go live within
 about 60 seconds. Tell the agent to verify and run step 8.
 
 === END MESSAGE 3 ===
@@ -195,15 +195,15 @@ When the M4 user confirms "done," run these from your M1:
 
 ```bash
 # DNS resolves to Cloudflare edge — should be quick
-dig +short A m4.streamvc.live @1.1.1.1
+dig +short A m4.malibu.tech @1.1.1.1
 
 # Public hostname round-trip — should return mlx models JSON, NOT HTTP 530
-curl -sS https://m4.streamvc.live/v1/models | python3 -m json.tool | head -20
+curl -sS https://m4.malibu.tech/v1/models | python3 -m json.tool | head -20
 
 # Harness smoke test — point a temp config at their hostname
 cd /Users/augstar/macprovider-poc/beta
 TMP=$(mktemp)
-sed -E 's|^tunnel_url:.*|tunnel_url: "https://m4.streamvc.live"|; s|^model:.*|model: "<MODEL_ID_THEY_REPORTED>"|' config.yaml > "$TMP"
+sed -E 's|^tunnel_url:.*|tunnel_url: "https://m4.malibu.tech"|; s|^model:.*|model: "<MODEL_ID_THEY_REPORTED>"|' config.yaml > "$TMP"
 python harness.py --config "$TMP" --once short_chat --verbose
 rm "$TMP"
 ```

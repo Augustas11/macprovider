@@ -61,17 +61,19 @@ enum ReceiptKeyStoreError: Error, Equatable {
 }
 
 struct KeychainReceiptKeyStore: ReceiptKeyStoring, AdmissionIdentityRecoveryKeyStoring {
-    static let currentService = "com.streamvc.macprovider.receipt-key"
-    static let previousService = "com.streamvc.macprovider.receipt-key.prev"
+    static let currentService = "com.malibu.provider.receipt-key"
+    static let previousService = "com.malibu.provider.receipt-key.prev"
     // Keep the existing service name so upgraded providers retain the same
     // identity. The key is admission identity for every provider, not only
     // the historical mp-* bootstrap path.
-    static let bootstrapIdentityService = "com.streamvc.macprovider.bootstrap-identity-key"
+    static let bootstrapIdentityService = "com.malibu.provider.bootstrap-identity-key"
     static let admissionIdentityService = bootstrapIdentityService
-    static let pendingAdmissionIdentityService = "com.streamvc.macprovider.admission-identity-key.pending"
-    static let previousAdmissionIdentityService = "com.streamvc.macprovider.admission-identity-key.prev"
-    static let previousAdmissionIdentityValidUntilService = "com.streamvc.macprovider.admission-identity-key.prev-valid-until"
-    static let admissionIdentityRecoveryMarkerService = "com.streamvc.macprovider.admission-identity-recovery.marker"
+    static let pendingAdmissionIdentityService = "com.malibu.provider.admission-identity-key.pending"
+    static let previousAdmissionIdentityService = "com.malibu.provider.admission-identity-key.prev"
+    static let previousAdmissionIdentityValidUntilService = "com.malibu.provider.admission-identity-key.prev-valid-until"
+    static let admissionIdentityRecoveryMarkerService = "com.malibu.provider.admission-identity-recovery.marker"
+    private static let legacyServicePrefix = "com.streamvc.macprovider"
+    private static let currentServicePrefix = "com.malibu.provider"
     static let previousRetention: TimeInterval = 7 * 24 * 60 * 60
 
     private static let mutationLock = NSLock()
@@ -455,6 +457,18 @@ struct KeychainReceiptKeyStore: ReceiptKeyStoring, AdmissionIdentityRecoveryKeyS
     }
 
     private func loadKey(providerId: String, service: String) throws -> Curve25519.Signing.PrivateKey? {
+        if let privateKey = try loadKeyExact(providerId: providerId, service: service) {
+            return privateKey
+        }
+        guard let legacyService = Self.legacyService(for: service),
+              let legacyKey = try loadKeyExact(providerId: providerId, service: legacyService) else {
+            return nil
+        }
+        try? migrateLegacyKeyIfAbsent(providerId: providerId, service: service, privateKey: legacyKey)
+        return legacyKey
+    }
+
+    private func loadKeyExact(providerId: String, service: String) throws -> Curve25519.Signing.PrivateKey? {
         let query = Self.baseQuery(providerId: providerId, service: service)
             .merging([
                 kSecReturnData as String: kCFBooleanTrue as Any,
@@ -478,6 +492,18 @@ struct KeychainReceiptKeyStore: ReceiptKeyStoring, AdmissionIdentityRecoveryKeyS
     }
 
     private func loadData(providerId: String, service: String) throws -> Data? {
+        if let data = try loadDataExact(providerId: providerId, service: service) {
+            return data
+        }
+        guard let legacyService = Self.legacyService(for: service),
+              let legacyData = try loadDataExact(providerId: providerId, service: legacyService) else {
+            return nil
+        }
+        try? migrateLegacyDataIfAbsent(providerId: providerId, service: service, data: legacyData)
+        return legacyData
+    }
+
+    private func loadDataExact(providerId: String, service: String) throws -> Data? {
         let query = Self.baseQuery(providerId: providerId, service: service)
             .merging([
                 kSecReturnData as String: kCFBooleanTrue as Any,
@@ -495,6 +521,44 @@ struct KeychainReceiptKeyStore: ReceiptKeyStoring, AdmissionIdentityRecoveryKeyS
             return nil
         default:
             throw ReceiptKeyStoreError.keychainReadFailed(providerId: providerId, status: status)
+        }
+    }
+
+    private static func legacyService(for service: String) -> String? {
+        guard service.hasPrefix(currentServicePrefix) else { return nil }
+        return legacyServicePrefix + service.dropFirst(currentServicePrefix.count)
+    }
+
+    private func migrateLegacyKeyIfAbsent(
+        providerId: String,
+        service: String,
+        privateKey: Curve25519.Signing.PrivateKey
+    ) throws {
+        let status = SecItemAdd(Self.addQuery(
+            providerId: providerId,
+            service: service,
+            privateKey: privateKey
+        ) as CFDictionary, nil)
+        switch status {
+        case errSecSuccess, errSecDuplicateItem:
+            return
+        default:
+            throw ReceiptKeyStoreError.keychainWriteFailed(providerId: providerId, status: status)
+        }
+    }
+
+    private func migrateLegacyDataIfAbsent(providerId: String, service: String, data: Data) throws {
+        let add = Self.baseQuery(providerId: providerId, service: service)
+            .merging([
+                kSecAttrSynchronizable as String: false,
+                kSecValueData as String: data,
+            ]) { _, new in new }
+        let status = SecItemAdd(add as CFDictionary, nil)
+        switch status {
+        case errSecSuccess, errSecDuplicateItem:
+            return
+        default:
+            throw ReceiptKeyStoreError.keychainWriteFailed(providerId: providerId, status: status)
         }
     }
 

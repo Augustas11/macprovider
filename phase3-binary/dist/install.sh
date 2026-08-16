@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Public Mac Provider installer for https://get.streamvc.live/install.sh.
+# Public Mac Provider installer for https://get.malibu.tech/install.sh.
 #
 # Launchd template substitutions performed by this script:
 #   __USER_HOME__       -> absolute installing user's HOME
@@ -27,8 +27,8 @@ unset MACPROVIDER_REPAIR_EXISTING_INSTALL
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
 MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
-COORDINATOR_URL_DEFAULT="wss://coordinator.streamvc.live/ws/provider"
-COORDINATOR_BASE_DEFAULT="https://coordinator.streamvc.live"
+COORDINATOR_URL_DEFAULT="wss://coordinator.malibu.tech/ws/provider"
+COORDINATOR_BASE_DEFAULT="https://coordinator.malibu.tech"
 INSTALL_DIR="${MACPROVIDER_INSTALL_DIR:-$HOME/macprovider}"
 BIN_DIR="$HOME/.local/bin"
 BINARY_PATH="$BIN_DIR/macprovider-cli"
@@ -42,7 +42,7 @@ INSTALL_LOCK_PATH="$CONFIG_DIR/install.lock"
 PROVIDER_MUTATION_ROOT="$HOME/.local/share/macprovider/autoupdate"
 PROVIDER_MUTATION_LOCK_PATH="$PROVIDER_MUTATION_ROOT/update.lock"
 PROVIDER_MUTATION_PENDING_PATH="$PROVIDER_MUTATION_ROOT/pending.json"
-INSTALL_RECOVERY_LABEL="live.streamvc.macprovider-install-recovery"
+INSTALL_RECOVERY_LABEL="live.malibu.provider-install-recovery"
 INSTALL_RECOVERY_PLIST_PATH="$HOME/Library/LaunchAgents/${INSTALL_RECOVERY_LABEL}.plist"
 LIVE_CONFIG_PATH="$CONFIG_PATH"
 LIVE_PROVIDER_ID_PATH="$PROVIDER_ID_PATH"
@@ -64,8 +64,10 @@ LIFECYCLE_LEASE_PATH="$MANIFEST_DIR/lifecycle/lease.json"
 LIFECYCLE_STATE_LOCK_PATH="$MANIFEST_DIR/lifecycle/.state-v1.json.lock"
 LIFECYCLE_LEASE_LOCK_PATH="$MANIFEST_DIR/lifecycle/.lease.json.lock"
 EXISTING_INSTALL_WAS_PRESENT=0
-PROVIDER_LABEL="live.streamvc.macprovider"
-PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
+PROVIDER_LABEL="live.malibu.provider"
+LEGACY_PROVIDER_LABEL="live.streamvc.macprovider"
+PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider.plist"
+LEGACY_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
 # Issue #191: ship the macprovider-watchdog LaunchAgent alongside
 # the main provider so every operator gets the silent-disconnect
@@ -76,8 +78,10 @@ WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
 # Installed without a .sh suffix so macOS Login Items shows a readable
 # background-item name instead of "watchdog.sh".
 WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
-WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
-WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
+WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+WATCHDOG_LABEL="live.malibu.provider-watchdog"
+LEGACY_WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+LEGACY_WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
 NO_WATCHDOG="${MACPROVIDER_NO_WATCHDOG:-0}"
 DRY_RUN=0
 NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
@@ -2239,7 +2243,7 @@ for recovery_marker in cutover-started provider-service-created watchdog-service
 done
 # shellcheck disable=SC1091
 . "$RECOVERY_DIR/state.sh" || exit 70
-REC_PROVIDER_LABEL="${REC_PROVIDER_LABEL:-live.streamvc.macprovider}"
+REC_PROVIDER_LABEL="${REC_PROVIDER_LABEL:-live.malibu.provider}"
 
 recovery_log() { printf '[macprovider-recovery] %s\n' "$*" >&2; }
 acquire_recovery_claim() {
@@ -5845,10 +5849,10 @@ begin_install_transaction() {
   if [ "$INSTALL_TX_HAD_INSTALL_DIR" -eq 1 ] || [ "$INSTALL_TX_HAD_BINARY_PATH" -eq 1 ] || [ "$INSTALL_TX_HAD_MANIFEST" -eq 1 ]; then
     EXISTING_INSTALL_WAS_PRESENT=1
   fi
-  if launchctl print "gui/$UID/live.streamvc.macprovider" >/dev/null 2>&1; then
+  if launchctl print "gui/$UID/live.malibu.provider" >/dev/null 2>&1; then
     INSTALL_TX_SERVICE_WAS_ACTIVE=1
   fi
-  if launchd_label_is_disabled "live.streamvc.macprovider"; then
+  if launchd_label_is_disabled "live.malibu.provider"; then
     INSTALL_TX_SERVICE_WAS_DISABLED=1
   fi
   if launchctl print "gui/$UID/$WATCHDOG_LABEL" >/dev/null 2>&1; then
@@ -6515,6 +6519,8 @@ ensure_port_free() {
     fi
     reclaim_launchd_service "$PROVIDER_LABEL" \
       || die 5 "could not reclaim existing provider launchd service"
+    reclaim_legacy_launchd_service "$LEGACY_PROVIDER_LABEL" "$LEGACY_PLIST_PATH" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
+      || die 5 "could not reclaim legacy provider launchd service"
     sleep 2
     if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
       log "Port $PORT still held after launchctl bootout; stopping each revalidated macprovider-cli PID."
@@ -6535,7 +6541,7 @@ ensure_port_free() {
   log "ERROR: port $PORT is already in use by ${holding_cmd:-another process}."
   log "Either stop that process, or set MACPROVIDER_PORT to a free port and re-run."
   log "Note: env var must be on the bash side of the pipe, not the curl side:"
-  log "  curl -fsSL https://get.streamvc.live/install.sh | MACPROVIDER_PORT=18080 bash"
+  log "  curl -fsSL https://get.malibu.tech/install.sh | MACPROVIDER_PORT=18080 bash"
   die 6 "port $PORT busy; macprovider-cli cannot bind"
 }
 
@@ -6618,6 +6624,42 @@ reclaim_launchd_service() {
   launchctl bootout "$service_target" >/dev/null 2>&1
 }
 
+reclaim_legacy_launchd_service() {
+  local label="$1"
+  local expected_plist="$2"
+  local expected_program="$3"
+  local legacy_program="$4"
+  local service_target="gui/$UID/$label"
+  local service_details
+  if ! service_details="$(launchctl print "$service_target" 2>/dev/null | head -c 65537)"; then
+    return 0
+  fi
+  [ -n "$service_details" ] || return 1
+  [ "${#service_details}" -le 65536 ] || return 1
+  local program_line
+  program_line="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*program = //p' | head -n 1)"
+  local program_count
+  program_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*program = / { count++ } END { print count + 0 }')"
+  local plist_path
+  plist_path="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*path = //p' | head -n 1)"
+  local plist_path_count
+  plist_path_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*path = / { count++ } END { print count + 0 }')"
+  if [ "$program_count" -ne 1 ] || [ "$plist_path_count" -ne 1 ]; then
+    log "Refusing to reclaim legacy $label because launchd returned an ambiguous identity."
+    return 1
+  fi
+  if [ "$plist_path" != "$expected_plist" ]; then
+    log "Refusing to reclaim legacy $label because launchd plist identity is unexpected: ${plist_path:-<missing>}"
+    return 1
+  fi
+  if [ "$program_line" != "$expected_program" ] && [ "$program_line" != "$legacy_program" ]; then
+    log "Refusing to reclaim legacy $label with unexpected executable: $program_line"
+    return 1
+  fi
+  log "Reclaiming legacy $label launchd service before installing Malibu labels."
+  launchctl bootout "$service_target" >/dev/null 2>&1
+}
+
 prompt_yes_no() {
   prompt="$1"
   default="$2"
@@ -6682,7 +6724,7 @@ urlencode() {
 coordinator_http_base() {
   coordinator_url="$1"
   case "$coordinator_url" in
-    wss://coordinator.streamvc.live/ws/provider) printf "%s" "$COORDINATOR_BASE_DEFAULT" ;;
+    wss://coordinator.malibu.tech/ws/provider) printf "%s" "$COORDINATOR_BASE_DEFAULT" ;;
     wss://*) printf "https://%s" "${coordinator_url#wss://}" | sed -E 's#/ws/provider/?$##' ;;
     *) die 7 "coordinator URL must start with wss://" ;;
   esac
@@ -8728,6 +8770,8 @@ install_plist() {
 
   reclaim_launchd_service "$PROVIDER_LABEL" \
     || die 5 "could not reclaim existing provider launchd service"
+  reclaim_legacy_launchd_service "$LEGACY_PROVIDER_LABEL" "$LEGACY_PLIST_PATH" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
+    || die 5 "could not reclaim legacy provider launchd service"
   render_plist "$model" "$provider_id" "$coordinator_url" \
     | write_atomic_install_file "$PLIST_PATH" \
     || die 5 "could not publish rendered launchd plist safely"
@@ -8757,7 +8801,7 @@ render_plist() {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>live.streamvc.macprovider</string>
+  <string>live.malibu.provider</string>
   <key>ProgramArguments</key>
   <array>
     <string>$binary_path</string>
@@ -8816,10 +8860,10 @@ write_watchdog_script() {
 
 set -euo pipefail
 
-LABEL="${MACPROVIDER_WATCHDOG_LABEL:-live.streamvc.macprovider}"
+LABEL="${MACPROVIDER_WATCHDOG_LABEL:-live.malibu.provider}"
 CONFIG_PATH="${MACPROVIDER_CONFIG_PATH:-$HOME/.config/macprovider/config.yaml}"
 BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
-COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.streamvc.live}"
+COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.malibu.tech}"
 COORDINATOR_PORT="${MACPROVIDER_COORDINATOR_PORT:-443}"
 LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
 LOG_PATH="$LOG_DIR/watchdog.log"
@@ -9097,7 +9141,7 @@ lifecycle_root = os.path.expanduser("~/Library/Application Support/macprovider/l
 lifecycle_lock_path = os.path.join(lifecycle_root, ".lease.json.lock")
 uid = os.getuid()
 provider_user = pwd.getpwuid(uid).pw_name
-reload_helper_label = "live.streamvc.macprovider-compatibility-reload"
+reload_helper_label = "live.malibu.provider-compatibility-reload"
 legacy_reload_helper_label = re.compile(
     rf"^{re.escape(reload_helper_label)}\."
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -9470,7 +9514,7 @@ def known_binary_dir():
     configured = os.environ.get("MACPROVIDER_BINARY_DIR", "")
     if configured:
         return os.path.realpath(configured)
-    plist_path = os.path.expanduser("~/Library/LaunchAgents/live.streamvc.macprovider.plist")
+    plist_path = os.path.expanduser("~/Library/LaunchAgents/live.malibu.provider.plist")
     try:
         result = subprocess.run(
             ["/usr/libexec/PlistBuddy", "-c", "Print ProgramArguments:0", plist_path],
@@ -9848,9 +9892,9 @@ def owned_release_resource(name):
 def external_local_members():
     home = os.path.expanduser("~")
     return [
-        ("launchd", os.path.join(home, "Library/LaunchAgents/live.streamvc.macprovider.plist"), "provider.plist"),
+        ("launchd", os.path.join(home, "Library/LaunchAgents/live.malibu.provider.plist"), "provider.plist"),
         ("watchdog_script", os.path.join(home, ".local/share/macprovider-watchdog/macprovider-health-monitor"), "watchdog.sh"),
-        ("watchdog_plist", os.path.join(home, "Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"), "watchdog.plist"),
+        ("watchdog_plist", os.path.join(home, "Library/LaunchAgents/live.malibu.provider-watchdog.plist"), "watchdog.plist"),
     ]
 
 def validate_external_local_backup(backup_directory):
@@ -10112,7 +10156,7 @@ def restore(marker, failure_class):
     record_watchdog_recovery(marker, failure_class)
     try:
         bootstrap = subprocess.run(
-            ["launchctl", "bootstrap", f"gui/{uid}", os.path.expanduser("~/Library/LaunchAgents/live.streamvc.macprovider.plist")],
+            ["launchctl", "bootstrap", f"gui/{uid}", os.path.expanduser("~/Library/LaunchAgents/live.malibu.provider.plist")],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -10409,7 +10453,7 @@ render_watchdog_plist() {
          minimal PATH. -->
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>MACPROVIDER_WATCHDOG_LABEL</key>
-    <string>live.streamvc.macprovider</string>
+    <string>live.malibu.provider</string>
     <key>MACPROVIDER_CONFIG_PATH</key>
     <string>$config_path</string>
     <key>MACPROVIDER_BINARY_PATH</key>
@@ -10449,6 +10493,8 @@ install_watchdog() {
   mkdir -p "$WATCHDOG_DIR" "$LOG_DIR" "$(dirname "$WATCHDOG_PLIST_PATH")"
   reclaim_launchd_service "$WATCHDOG_LABEL" \
     || die 5 "could not reclaim existing watchdog launchd service"
+  reclaim_legacy_launchd_service "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_PATH" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
+    || die 5 "could not reclaim legacy watchdog launchd service"
   legacy_watchdog="$WATCHDOG_DIR/watchdog.sh"
   if [ -f "$legacy_watchdog" ] && [ "$legacy_watchdog" != "$WATCHDOG_PATH" ]; then
     rm -f "$legacy_watchdog"
@@ -10483,11 +10529,11 @@ write_install_manifest() {
   mkdir -p "$MANIFEST_DIR"
   labels_json="[]"
   if [ "$LAUNCHD_INSTALLED" -eq 1 ] && [ "$WATCHDOG_INSTALLED" -eq 1 ]; then
-    labels_json='["live.streamvc.macprovider","live.streamvc.macprovider-watchdog"]'
+    labels_json='["live.malibu.provider","live.malibu.provider-watchdog"]'
   elif [ "$LAUNCHD_INSTALLED" -eq 1 ]; then
-    labels_json='["live.streamvc.macprovider"]'
+    labels_json='["live.malibu.provider"]'
   elif [ "$WATCHDOG_INSTALLED" -eq 1 ]; then
-    labels_json='["live.streamvc.macprovider-watchdog"]'
+    labels_json='["live.malibu.provider-watchdog"]'
   fi
   write_atomic_install_file "$MANIFEST_PATH" 0600 <<EOF
 {
@@ -10855,7 +10901,7 @@ print_pid() {
     printf "%s\n" "$MANUAL_PID"
     return
   fi
-  launchctl print "gui/$(id -u)/live.streamvc.macprovider" 2>/dev/null \
+  launchctl print "gui/$(id -u)/live.malibu.provider" 2>/dev/null \
     | awk 'NF == 3 && $1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ { print $3 }'
 }
 
@@ -11431,7 +11477,7 @@ main() {
   log "Logs: tail -f $LOG_DIR/macprovider.out.log $LOG_DIR/macprovider.err.log"
   log "Coordinator pool check: $coordinator_base/v1/pool/check?provider_id=$(urlencode "$provider_id")"
   print_autotune_handoff
-  log "Uninstall: bash <(curl -fsSL https://get.streamvc.live/uninstall.sh)"
+  log "Uninstall: bash <(curl -fsSL https://get.malibu.tech/uninstall.sh)"
 }
 
 main "$@"

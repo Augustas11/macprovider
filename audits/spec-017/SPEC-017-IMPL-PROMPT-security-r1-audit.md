@@ -113,11 +113,11 @@ M2. CORS origin matching does not explicitly forbid subdomain wildcards
 
    **Location:** `BUILD_SPEC_017_IMPL_PROMPT.md` lines 103-104, 153; locked SPEC §5.4.1 lines 751-754 and §5.7 lines 897-930.
 
-   **Finding:** The prompt says to enforce `allowed_origins` and smoke-test one allowlist origin, but does not restate the locked exact-match origin requirement or forbid wildcard sibling-subdomain trust such as `*.streamvc.live`.
+   **Finding:** The prompt says to enforce `allowed_origins` and smoke-test one allowlist origin, but does not restate the locked exact-match origin requirement or forbid wildcard sibling-subdomain trust such as `*.malibu.tech`.
 
-   **Why it matters:** `console.streamvc.live`, `portal.streamvc.live`, and `stats.streamvc.live` are sibling subdomains with different trust roles. Wildcard matching would let a compromise or future app on one sibling origin satisfy another origin's allowlist.
+   **Why it matters:** `console.malibu.tech`, `portal.malibu.tech`, and `stats.malibu.tech` are sibling subdomains with different trust roles. Wildcard matching would let a compromise or future app on one sibling origin satisfy another origin's allowlist.
 
-   **Suggested fix:** Add exact-origin matching language and tests for sibling-origin rejection: allow `https://portal.streamvc.live` only when that exact string is configured; reject `https://evil.streamvc.live`, scheme changes, suffix matches, and wildcard patterns.
+   **Suggested fix:** Add exact-origin matching language and tests for sibling-origin rejection: allow `https://portal.malibu.tech` only when that exact string is configured; reject `https://evil.malibu.tech`, scheme changes, suffix matches, and wildcard patterns.
 
 M3. 503 stale responses are not pinned for rate-limit accounting
 

@@ -21,7 +21,7 @@ Round 6 did not pass. The three requested audit lanes reported the following cri
 Finding: the spec defined public `GET /v1/rate-card`, but the coordinator has split buyer/provider ports and nginx returns 404 for generic `/v1/` unless explicit exceptions are declared before the catch-all block.
 
 Resolution:
-- §3.3 now pins the installer fetch URL to `https://coordinator.streamvc.live/v1/rate-card`.
+- §3.3 now pins the installer fetch URL to `https://coordinator.malibu.tech/v1/rate-card`.
 - §3.3 requires the handler to live on the coordinator buyer HTTP mux (`buyer_port: 8443`), not the provider/operator mux (`provider_port: 8444`).
 - §3.3 requires an exact nginx `location = /v1/rate-card` allow-through before the generic `/v1/` 404 block.
 - AC-37 verifies unauthenticated public reachability through nginx to the buyer mux.

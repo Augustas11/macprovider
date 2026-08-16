@@ -24,7 +24,7 @@ Why? Every test using model classes uses inline mock relays that **ignore the
 request body's `model` field entirely** — they just return canned responses
 regardless of what was sent. Real providers do not.
 
-The bug was caught in ~30s of live exercise (`curl https://api.streamvc.live/v1/chat/completions
+The bug was caught in ~30s of live exercise (`curl https://api.malibu.tech/v1/chat/completions
 -d '{"model":"mlx-accurate", ...}'` returned 503 instead of routing to air5
 who serves Qwen-7B). Pillar B was rolled back (`model_classes: {}`) on the
 live coord pending this fix.
@@ -264,7 +264,7 @@ before merge per the discipline that's been catching bugs every round.
 
 3. **Live verification after deploy**:
    ```
-   curl -X POST https://api.streamvc.live/v1/chat/completions \
+   curl -X POST https://api.malibu.tech/v1/chat/completions \
      -H "Authorization: Bearer <key>" -H "content-type: application/json" \
      -d '{"model":"mlx-accurate","messages":[{"role":"user","content":"hi"}],"max_tokens":8}'
    ```

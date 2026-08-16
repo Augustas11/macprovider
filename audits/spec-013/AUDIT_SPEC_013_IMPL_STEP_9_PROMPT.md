@@ -548,8 +548,8 @@ K.1  Verify `RecommendationEmitter.launchdRestartHint()` (or
      - `launchctl bootout`
      - `launchctl bootstrap`
      - The plist path
-       `~/Library/LaunchAgents/live.streamvc.macprovider.plist`
-     - The service identifier (`live.streamvc.macprovider`).
+       `~/Library/LaunchAgents/live.malibu.provider.plist`
+     - The service identifier (`live.malibu.provider`).
 
 K.2  `testLaunchdRestartHintIncludesBootoutAndBootstrap` —
      verify the assertions cover the substrings above.

@@ -64,7 +64,7 @@ Panic events log type-only classification in `phase4-coordinator/internal/stats/
 
 E. Off-by-one / boundary bugs: PASS.
 
-The Round 2 spec-blessed nginx setting is present: `burst=59 nodelay` appears in `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:110`, `:138`, `:161`, and in `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:213`, `:233`, `:253`. The smoke script asserts 60 successes and the 61st 429 at `phase4-coordinator/dist/test/check_nginx_stats_test.sh:194-205`.
+The Round 2 spec-blessed nginx setting is present: `burst=59 nodelay` appears in `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:110`, `:138`, `:161`, and in `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:213`, `:233`, `:253`. The smoke script asserts 60 successes and the 61st 429 at `phase4-coordinator/dist/test/check_nginx_stats_test.sh:194-205`.
 
 F. Money math: PASS.
 

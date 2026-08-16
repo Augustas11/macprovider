@@ -16,7 +16,7 @@ You are the **code** lane of a four-lane round-2 audit of `specs/SPEC-018-agenti
    - **M-2** Python duplicate cite: §3.4 now cites `:96-123` + `:266-448`. Verify both ranges contain the cited behavior.
    - **M-3** InferenceRelay non-streaming cite: §8.2 now adds `:269-309`. Verify that range contains the non-streaming `data` forward.
    - **Q-1** AC-15 split: AC-15a is CI-verifiable code default + validation; AC-15b is deploy artifact. Are both mechanically verifiable in their lanes?
-   - **Q-2** AC-18 parametric: AC-18 no longer names `api.streamvc.live`. Verify the parametric phrasing is mechanically verifiable.
+   - **Q-2** AC-18 parametric: AC-18 no longer names `api.malibu.tech`. Verify the parametric phrasing is mechanically verifiable.
    - **Q-3** AC-4 collision: AC-4 now says "observed unique within the test response" and "non-collision is invariant by construction." Does this remove the false-precision problem from r1?
 
 2. **Verify all new citations in v0.1.1.** The SPEC added or moved several `Source:` lines:

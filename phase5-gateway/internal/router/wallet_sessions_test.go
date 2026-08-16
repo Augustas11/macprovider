@@ -227,7 +227,7 @@ func TestWalletSessionManagementRejectsAmbiguousCredentials(t *testing.T) {
 func TestWalletSessionExpiredBearerWritesAudit(t *testing.T) {
 	current := fixedNow()
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
-		cfg.Public.BaseURL = "https://api.streamvc.test"
+		cfg.Public.BaseURL = "https://api.malibu.test"
 		cfg.Auth.WalletSessions.Enabled = true
 		cfg.Auth.WalletSessions.BearerHashKeys = map[string]string{"k1": strings.Repeat("b", 32)}
 		cfg.Auth.WalletSessions.CurrentBearerHashKeyID = "k1"
@@ -293,7 +293,7 @@ func TestWalletSessionExhaustionReturnsPaymentRequired(t *testing.T) {
 
 func TestWalletSessionRegistrationActiveCapReturnsConflict(t *testing.T) {
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
-		cfg.Public.BaseURL = "https://api.streamvc.test"
+		cfg.Public.BaseURL = "https://api.malibu.test"
 		cfg.Auth.WalletSessions.Enabled = true
 		cfg.Auth.WalletSessions.BearerHashKeys = map[string]string{"k1": strings.Repeat("b", 32)}
 		cfg.Auth.WalletSessions.CurrentBearerHashKeyID = "k1"
@@ -409,7 +409,7 @@ func TestWalletSessionSettlementReconcileClosesWalletHeldReservations(t *testing
 			}))
 			defer coordinator.Close()
 			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
-				cfg.Public.BaseURL = "https://api.streamvc.test"
+				cfg.Public.BaseURL = "https://api.malibu.test"
 				cfg.Auth.WalletSessions.Enabled = true
 				cfg.Auth.WalletSessions.BearerHashKeys = map[string]string{"k1": strings.Repeat("b", 32)}
 				cfg.Auth.WalletSessions.CurrentBearerHashKeyID = "k1"
@@ -488,7 +488,7 @@ func TestWalletSessionSettlementReconcileClosesWalletHeldReservations(t *testing
 func TestWalletSessionAnthropicMessagesAcceptsXAPIKeyBearer(t *testing.T) {
 	clientHTTP := walletInferenceClient()
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
-		cfg.Public.BaseURL = "https://api.streamvc.test"
+		cfg.Public.BaseURL = "https://api.malibu.test"
 		cfg.Auth.WalletSessions.Enabled = true
 		cfg.Auth.WalletSessions.BearerHashKeys = map[string]string{"k1": strings.Repeat("b", 32)}
 		cfg.Auth.WalletSessions.CurrentBearerHashKeyID = "k1"
@@ -572,7 +572,7 @@ func TestWalletSessionRejectsAmbiguousCredentials(t *testing.T) {
 func newWalletSessionHarness(t *testing.T, client *http.Client) (http.Handler, *sqlite.Store, string, config.Config) {
 	t.Helper()
 	return newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
-		cfg.Public.BaseURL = "https://api.streamvc.test"
+		cfg.Public.BaseURL = "https://api.malibu.test"
 		cfg.Auth.WalletSessions.Enabled = true
 		cfg.Auth.WalletSessions.BearerHashKeys = map[string]string{"k1": strings.Repeat("b", 32)}
 		cfg.Auth.WalletSessions.CurrentBearerHashKeyID = "k1"

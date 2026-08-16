@@ -219,8 +219,8 @@ Publish one stable HTTP contract — under `/v1/stats/*` on the
 coordinator — for the macprovider network's read-only summary
 statistics, consumed by three classes of clients:
 
-1. `console.streamvc.live` — buyer-facing public web surface.
-2. `portal.streamvc.live` — seller-facing provider portal
+1. `console.malibu.tech` — buyer-facing public web surface.
+2. `portal.malibu.tech` — seller-facing provider portal
    (SPEC-014). The portal consumes the same public contract for
    network stats; own-provider exact earnings come from SPEC-014-owned
    surfaces, NOT from a special projection here.
@@ -401,8 +401,8 @@ for the uniformity invariant.
 ### 2.4 Hosting — embed in coordinator binary (Q4: pick A)
 
 `/v1/stats/*` mounts inside the existing coordinator Go binary on the
-Pearl VPS, behind the existing nginx fronting `coordinator.streamvc.live`
-and a new `stats.streamvc.live` server-block that reverse-proxies to the
+Pearl VPS, behind the existing nginx fronting `coordinator.malibu.tech`
+and a new `stats.malibu.tech` server-block that reverse-proxies to the
 same binary on the same path. No new long-running service.
 
 **Why this and not (b) split service or (c) static snapshot:**
@@ -423,8 +423,8 @@ same binary on the same path. No new long-running service.
 
 Any HTTP client reading `/v1/stats/*`. Three classes:
 
-- **Console** — `console.streamvc.live` (buyer-facing public web).
-- **Portal** — `portal.streamvc.live` (provider portal, SPEC-014).
+- **Console** — `console.malibu.tech` (buyer-facing public web).
+- **Portal** — `portal.malibu.tech` (provider portal, SPEC-014).
 - **Partner** — any third-party origin; treated as fully external.
 
 ### 3.2 Rollup window
@@ -498,11 +498,11 @@ response but MUST NOT lengthen it.
 ### 4.1 Service topology
 
 ```
-   ┌─ console.streamvc.live ─┐
+   ┌─ console.malibu.tech ─┐
    │                          │
-   │ portal.streamvc.live ────┼──► nginx (Pearl) ──► coordinator binary
+   │ portal.malibu.tech ────┼──► nginx (Pearl) ──► coordinator binary
    │                          │     (TLS, rate-zone,    │
-   │ stats.streamvc.live ─────┘      edge cache)         ├─► /admin/explorer/* (existing)
+   │ stats.malibu.tech ─────┘      edge cache)         ├─► /admin/explorer/* (existing)
    │                                                     │
    │ <partner origins>  ────────► Cloudflare ──► nginx ──┴─► /v1/stats/*  (new)
    └──────────────────────────                                │
@@ -530,7 +530,7 @@ explorer. Both reach Postgres but via distinct DB roles; see §7.2.
   SPEC-017-owned side tables needed at request time); explicitly
   denied on billing/session/pool tables. Created by a new migration
   in §7.2.
-- nginx server-block for `stats.streamvc.live` reverse-proxying to the
+- nginx server-block for `stats.malibu.tech` reverse-proxying to the
   same coordinator backend on `/v1/stats/*`, with a dedicated rate-limit
   zone (§5.6).
 
@@ -1302,8 +1302,8 @@ try. Preflight uses a permissive, key-agnostic rule:
   per §5.4.3 rule 5. If the normalized Origin matches **any** entry
   in the operator-configured global partner-origin allowlist
   (collected as the union of every active `partner_keys.allowed_origins`
-  array, plus the well-known origins `https://console.streamvc.live`
-  and `https://portal.streamvc.live`), echo the normalized Origin
+  array, plus the well-known origins `https://console.malibu.tech`
+  and `https://portal.malibu.tech`), echo the normalized Origin
   and also emit `Access-Control-Allow-Credentials: true`. Otherwise
   emit `*` and DO NOT emit `Allow-Credentials`.
 
@@ -1347,7 +1347,7 @@ headers from §5.7 (`Access-Control-Allow-Origin`,
 (2026-06-26): the Fetch spec requires `Access-Control-Allow-Origin`
 on every cross-origin response including 304; a 304 without ACAO
 silently fails as a CORS error in browsers issuing conditional
-GETs from `console.streamvc.live` / `portal.streamvc.live`. The
+GETs from `console.malibu.tech` / `portal.malibu.tech`. The
 earlier text omitted CORS from the 304 carveout, which would
 break browser-side partner integrations. All other non-2xx
 responses MUST use the exact shape below.
@@ -1593,7 +1593,7 @@ NOT begin until **all** of the following are true on the live
 Pearl coordinator:
 
 1. SPEC-014 v0.9 has merged and is deployed to
-   `portal.streamvc.live`.
+   `portal.malibu.tech`.
 2. The §6.6.2 disclosure copy (above) is being shown on the
    provider-account creation page AND on a static portal page that
    every existing provider is shown on their next portal login
@@ -1638,13 +1638,13 @@ for v0.1).
 
 - Primary mount: `/v1/stats/*` on the coordinator binary's HTTP server,
   alongside `/admin/explorer/*` and existing surfaces.
-- Public hostname: `stats.streamvc.live` — new nginx server-block on
-  Pearl, TLS via the same cert pipeline as the other `*.streamvc.live`
+- Public hostname: `stats.malibu.tech` — new nginx server-block on
+  Pearl, TLS via the same cert pipeline as the other `*.malibu.tech`
   vhosts, proxies to the coordinator backend on the same `/v1/stats/*`
   path.
-- `coordinator.streamvc.live/v1/stats/*` MUST also work (no host
+- `coordinator.malibu.tech/v1/stats/*` MUST also work (no host
   rewrite) so that internal consumers can hit the surface without DNS
-  changes. Partners are documented to use `stats.streamvc.live`.
+  changes. Partners are documented to use `stats.malibu.tech`.
 
 ### 7.2 DB role isolation
 
@@ -1928,7 +1928,7 @@ Once a `/v1/*` endpoint enters deprecation, every response MUST carry:
 - `Sunset: Fri, 25 Dec 2026 00:00:00 GMT` — RFC 8594 / RFC 7231
   IMF-fixdate format with correct day-of-week giving the planned
   removal date.
-- `Link: <https://docs.streamvc.live/network-stats-api/v2-migration>;
+- `Link: <https://docs.malibu.tech/network-stats-api/v2-migration>;
   rel="deprecation"` — RFC 9745 `rel="deprecation"` link relation
   pointing at the partner-facing migration guide.
 
@@ -2486,8 +2486,8 @@ challenge each and propose pins for v0.2.
   endpoint twice? Single-window keeps the cache key simple.
 - **Q6 — Hostname pattern.** Locked decision is "embed in coordinator
   binary" (§2.4) but the public hostname is open between (a) using
-  `coordinator.streamvc.live/v1/stats/*` only, (b) adding a separate
-  `stats.streamvc.live` server-block, or (c) both. §7.1 currently pins
+  `coordinator.malibu.tech/v1/stats/*` only, (b) adding a separate
+  `stats.malibu.tech` server-block, or (c) both. §7.1 currently pins
   (c); audit may push back.
 - **Q7 — Backfill on cutover.** §9.7 allows partial-history rollout
   with a `partial_history_since` field. Is that acceptable for partner

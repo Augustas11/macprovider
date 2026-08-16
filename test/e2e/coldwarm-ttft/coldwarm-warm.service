@@ -27,7 +27,7 @@ EnvironmentFile=-/etc/macprovider/coldwarm-ttft.env
 # Point at the LAB gateway, NOT prod — cold cycles churn the provider (see
 # cold-cycle.sh). Warm accumulation against prod read-only is fine, but keep the
 # store consistent by using one base per store.
-Environment=COLDWARM_BASE=https://api.streamvc.live
+Environment=COLDWARM_BASE=https://api.malibu.tech
 Environment=COLDWARM_NODE_BIN=/usr/bin/node
 Environment=COLDWARM_STORE=/var/lib/macprovider/coldwarm-ttft/coldwarm-samples.ndjson
 Environment=COLDWARM_METRICS_OUT=/var/lib/macprovider/coldwarm-ttft/coldwarm.prom

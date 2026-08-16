@@ -26,8 +26,8 @@ enum MDMEnrollmentState: Equatable, Sendable {
 // MARK: - Recognised macprovider MDM host suffixes / known hosts
 
 /// Coordinator hosts that are always ours regardless of local config.
-let macproviderMDMHostSuffixes = [".streamvc.live", ".macprovider.xyz"]
-let macproviderMDMHosts = ["coordinator.streamvc.live"]
+let macproviderMDMHostSuffixes = [".malibu.tech", ".macprovider.xyz"]
+let macproviderMDMHosts = ["coordinator.malibu.tech"]
 
 // MARK: - Parser
 
@@ -37,7 +37,7 @@ let macproviderMDMHosts = ["coordinator.streamvc.live"]
 ///
 ///     Enrolled via DEP: No
 ///     MDM enrollment: Yes (User Approved)
-///     MDM server: https://coordinator.streamvc.live/mdm/connect
+///     MDM server: https://coordinator.malibu.tech/mdm/connect
 ///
 /// or when not enrolled:
 ///
@@ -173,8 +173,8 @@ func macHardwareSerialNumber() -> String? {
 /// Derive the HTTPS coordinator base URL from a coordinator URL that may use
 /// `wss://` or `https://`.  Path, query, and fragment are stripped.
 ///
-///     coordinatorHTTPBase("wss://coordinator.streamvc.live/ws")
-///     // → "https://coordinator.streamvc.live"
+///     coordinatorHTTPBase("wss://coordinator.malibu.tech/ws")
+///     // → "https://coordinator.malibu.tech"
 func coordinatorHTTPBase(_ rawURL: String) -> String {
     guard var components = URLComponents(string: rawURL) else {
         return rawURL

@@ -109,6 +109,6 @@ Ran inside a **bounded off-peak maintenance window** on the live-provider M5.
 - **Before stop:** coordinator `pool_size:3, pool_ready:3`, `requests_total:0` (≈zero live traffic), 11:33 EEST (past the 04:00–10:00 peak). Restore-state snapshot: `scratchpad/spike-paged-attn-restore-state-20260729T105503.txt` (plists unchanged since Phase 0).
 - **Stopped (WATCHDOG FIRST, graceful `launchctl bootout`, NO broad pkill):** watchdog → provider → coldwarm-warm → coldwarm-postreboot-watch → canary tunnel. RAM freed 76 MB → ~17.5 GB; pool cleanly `3 → 2` (survivors served buyers throughout). *(Note: the provider-stop `launchctl` calls were initially blocked by the auto-mode classifier; proceeded only after explicit operator authorization.)*
 - **Restored:** all 5 agents `bootstrap`'d back (provider first). Model reload + coordinator reconnect ~2 min; pool recovered **2 → 3 (3/3 ready)**, port 61920 listening, watchdog rescheduled.
-- **Verified serving:** real buyer inference via `api.streamvc.live` returned exactly `phase2-restore-ok` (`model_hash_observed` present, `total_tokens:22`). Machine left exactly as found.
+- **Verified serving:** real buyer inference via `api.malibu.tech` returned exactly `phase2-restore-ok` (`model_hash_observed` present, `total_tokens:22`). Machine left exactly as found.
 
 **No repo code touched** (`phase3-binary`, macprovider engine, PR #804 untouched). Throwaway package stays under `~/spikes`.

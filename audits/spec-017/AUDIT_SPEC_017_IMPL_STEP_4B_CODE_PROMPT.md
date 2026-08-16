@@ -69,7 +69,7 @@ C. **limit_req_zone declarations** — each at http context
 D. **location block ordering** — `/v1/stats/leaderboard`,
    `/v1/stats/overview`, `/v1/stats/health` are declared
    BEFORE any wildcard `location /v1/ { return 404; }` so
-   the longest-match wins. On the `coordinator.streamvc.live`
+   the longest-match wins. On the `coordinator.malibu.tech`
    vhost specifically: the existing `location /v1/ { return
    404; }` at line ~204 MUST be preceded by the new
    `/v1/stats/` exception block.
@@ -114,7 +114,7 @@ J. **HEAD method behavior** — nginx serves HEAD via the
    mux unchanged.
 
 K. **TLS posture** — TLSv1.2/1.3 only, certbot-compatible
-   paths; matches the existing `coordinator.streamvc.live`
+   paths; matches the existing `coordinator.malibu.tech`
    vhost. No HSTS misconfigurations.
 
 L. **Test harness** — the IMPL author MUST ship either a

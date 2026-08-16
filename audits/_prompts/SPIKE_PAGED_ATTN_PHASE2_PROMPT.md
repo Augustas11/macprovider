@@ -15,9 +15,9 @@ Can a **real mlx-swift-lm model's forward pass be routed through the paged-atten
 ## Machine + MANDATORY resource isolation (same as Phase 0)
 - **Run on this M5 / 32 GB / macOS 26.5 / Swift 6.3.3 / Metal present.** This spike loads a **real model** into memory (Llama-3.2-3B-4bit ≈ a few GB), so pausing the live provider (which holds ~17 GB for the 30B) is even more necessary than in Phase 0.
 - **⚠ This M5 runs the LIVE PRODUCTION provider. Stop/pause it first — never run two model-loaded instances together.** Full procedure is in `audits/_prompts/SPIKE_PAGED_ATTN_PHASE0_PROMPT.md` ("STOP the production provider SAFELY"); the critical bits, repeated:
-  - Stop the **watchdog first** (`live.streamvc.macprovider-watchdog`) or it respawns the provider mid-spike, then `live.streamvc.macprovider`, then the cold/warm watchers + canary tunnel — via graceful `launchctl bootout gui/$(id -u)/<label>`. **NEVER broad `pkill -9 -f serve`** (`incident-2026-07-27`).
+  - Stop the **watchdog first** (`live.malibu.provider-watchdog`) or it respawns the provider mid-spike, then `live.malibu.provider`, then the cold/warm watchers + canary tunnel — via graceful `launchctl bootout gui/$(id -u)/<label>`. **NEVER broad `pkill -9 -f serve`** (`incident-2026-07-27`).
   - Record state for exact restore; treat as a **bounded off-peak maintenance window** (this is the prod provider → buyer 503s while down).
-  - **After:** `launchctl bootstrap`/`kickstart` the provider + watchdog + watchers, verify it reconnects to `coordinator.streamvc.live` and serves a test inference, confirm the watchdog is back. Restore before ending.
+  - **After:** `launchctl bootstrap`/`kickstart` the provider + watchdog + watchers, verify it reconnects to `coordinator.malibu.tech` and serves a test inference, confirm the watchdog is back. Restore before ending.
 - **Metallib gotcha (from Phase 0):** plain `swift build` doesn't regenerate `default.metallib`; copy the version-matched `mlx-swift_Cmlx.bundle/.../default.metallib` next to the built binary (mlx-swift 0.31.6, as the provider already ships).
 
 ## The spike

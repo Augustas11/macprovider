@@ -304,7 +304,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
 
     func testLaunchdPIDParserRequiresExactServiceField() {
         let output = """
-        gui/501/live.streamvc.macprovider = {
+        gui/501/live.malibu.provider = {
             state = running
             pid = 4321
             runs = 9
@@ -318,7 +318,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
 
     func testParseLaunchdServiceProgramPath() {
         let output = """
-        gui/501/live.streamvc.macprovider = {
+        gui/501/live.malibu.provider = {
             program = /Users/provider/macprovider/macprovider-cli
             pid = 123
         }
@@ -333,9 +333,9 @@ final class InstalledProviderMonitorTests: XCTestCase {
 
     func testParseLaunchdServiceIdentityRequiresOneProgramAndCanonicalPathField() {
         let output = """
-        gui/501/live.streamvc.macprovider = {
+        gui/501/live.malibu.provider = {
             program = /Users/provider/macprovider/macprovider-cli
-            path = /Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist
+            path = /Users/provider/Library/LaunchAgents/live.malibu.provider.plist
         }
         """
 
@@ -343,7 +343,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
             InstalledProviderMonitor.parseLaunchdServiceIdentity(output),
             InstalledProviderMonitor.LaunchdServiceIdentity(
                 program: "/Users/provider/macprovider/macprovider-cli",
-                path: "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"
+                path: "/Users/provider/Library/LaunchAgents/live.malibu.provider.plist"
             )
         )
         XCTAssertNil(
@@ -355,7 +355,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
             InstalledProviderMonitor.parseLaunchdServiceIdentity(
                 "program = /Users/provider/macprovider/macprovider-cli\n"
                     + "program = /Users/other/macprovider-cli\n"
-                    + "path = /Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"
+                    + "path = /Users/provider/Library/LaunchAgents/live.malibu.provider.plist"
             )
         )
     }
@@ -451,14 +451,14 @@ final class InstalledProviderMonitorTests: XCTestCase {
         let providerDirectory = root.appendingPathComponent("macprovider")
         let launchAgents = root.appendingPathComponent("Library/LaunchAgents")
         let program = providerDirectory.appendingPathComponent("macprovider-cli")
-        let plist = launchAgents.appendingPathComponent("live.streamvc.macprovider.plist")
+        let plist = launchAgents.appendingPathComponent("live.malibu.provider.plist")
         let launchctl = root.appendingPathComponent("launchctl")
         try FileManager.default.createDirectory(at: providerDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
         try """
         <?xml version="1.0" encoding="UTF-8"?>
         <plist version="1.0"><dict>
-        <key>Label</key><string>live.streamvc.macprovider</string>
+        <key>Label</key><string>live.malibu.provider</string>
         <key>ProgramArguments</key><array><string>\(program.path)</string></array>
         </dict></plist>
         """.write(to: plist, atomically: true, encoding: .utf8)
@@ -504,14 +504,14 @@ final class InstalledProviderMonitorTests: XCTestCase {
             .appendingPathComponent("malibu-launchd-unloaded-tests-\(UUID().uuidString)")
         let launchAgents = root.appendingPathComponent("Library/LaunchAgents")
         let program = root.appendingPathComponent("macprovider/macprovider-cli")
-        let plist = launchAgents.appendingPathComponent("live.streamvc.macprovider.plist")
+        let plist = launchAgents.appendingPathComponent("live.malibu.provider.plist")
         let launchctl = root.appendingPathComponent("launchctl")
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
         try """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0"><dict>
-          <key>Label</key><string>live.streamvc.macprovider</string>
+          <key>Label</key><string>live.malibu.provider</string>
           <key>ProgramArguments</key><array><string>\(program.path)</string></array>
         </dict></plist>
         """.write(to: plist, atomically: true, encoding: .utf8)
@@ -532,7 +532,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
             .appendingPathComponent("malibu-legacy-unloaded-tests-\(UUID().uuidString)")
         let launchAgents = root.appendingPathComponent("Library/LaunchAgents")
         let legacyProgram = root.appendingPathComponent(".local/bin/macprovider-cli")
-        let plist = launchAgents.appendingPathComponent("live.streamvc.macprovider.plist")
+        let plist = launchAgents.appendingPathComponent("live.malibu.provider.plist")
         let launchctl = root.appendingPathComponent("launchctl")
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: legacyProgram.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -541,7 +541,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
         try """
         <?xml version="1.0" encoding="UTF-8"?>
         <plist version="1.0"><dict>
-          <key>Label</key><string>live.streamvc.macprovider</string>
+          <key>Label</key><string>live.malibu.provider</string>
           <key>ProgramArguments</key><array><string>\(legacyProgram.path)</string></array>
         </dict></plist>
         """.write(to: plist, atomically: true, encoding: .utf8)
@@ -564,7 +564,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
             .appendingPathComponent("malibu-legacy-loaded-tests-\(UUID().uuidString)")
         let launchAgents = root.appendingPathComponent("Library/LaunchAgents")
         let legacyProgram = root.appendingPathComponent(".local/bin/macprovider-cli")
-        let plist = launchAgents.appendingPathComponent("live.streamvc.macprovider.plist")
+        let plist = launchAgents.appendingPathComponent("live.malibu.provider.plist")
         let launchctl = root.appendingPathComponent("launchctl")
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: legacyProgram.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -573,7 +573,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
         try """
         <?xml version="1.0" encoding="UTF-8"?>
         <plist version="1.0"><dict>
-          <key>Label</key><string>live.streamvc.macprovider</string>
+          <key>Label</key><string>live.malibu.provider</string>
           <key>ProgramArguments</key><array><string>\(legacyProgram.path)</string></array>
         </dict></plist>
         """.write(to: plist, atomically: true, encoding: .utf8)

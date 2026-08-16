@@ -292,7 +292,7 @@ def main() -> int:
     parser.add_argument("--trusted-keys", required=True, help="release trusted-keys.json")
     parser.add_argument(
         "--coordinator-url",
-        default="https://coordinator.streamvc.live",
+        default="https://coordinator.malibu.tech",
         help="public coordinator origin",
     )
     parser.add_argument(

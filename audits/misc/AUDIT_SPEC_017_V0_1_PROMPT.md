@@ -131,7 +131,7 @@ append to or overwrite previous rounds.
    under-specified.
 
 7. **Same-origin behavior is uniform.** Per §6.4, the endpoint MUST
-   NOT special-case `Origin: portal.streamvc.live` to surface exact-$.
+   NOT special-case `Origin: portal.malibu.tech` to surface exact-$.
    The portal exposes own-provider exact earnings via its OWN
    surfaces (SPEC-014), not via this endpoint. Any clause that makes
    `/v1/stats/leaderboard` Origin-sensitive for `$` exposure = MAJOR
@@ -340,8 +340,8 @@ D.1  Mount path collision (§7.1): `/v1/stats/*` does not collide with
      `/admin/explorer/*`, `/poolz`, `/healthz`, or any other SPEC-002
      v1.4 path. Verify by grepping the locked SPEC-002 file.
 
-D.2  Hostname pattern (§7.1 + Q6): both `stats.streamvc.live` and
-     `coordinator.streamvc.live/v1/stats/*` work. Verify the spec
+D.2  Hostname pattern (§7.1 + Q6): both `stats.malibu.tech` and
+     `coordinator.malibu.tech/v1/stats/*` work. Verify the spec
      does not pin a CNAME that doesn't exist yet (operator action) —
      the SPEC may describe the future hostname; it MUST NOT condition
      LOCK on it.

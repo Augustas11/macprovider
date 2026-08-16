@@ -117,7 +117,7 @@ enum BundledInstallContractVerifier {
               Set(launchd.keys) == ["activation", "contract", "install_contract", "label", "plist_template"],
               launchd["activation"] as? String == "local",
               launchd["contract"] as? String == "macprovider.launch-agent.v1",
-              launchd["label"] as? String == "live.streamvc.macprovider",
+              launchd["label"] as? String == "live.malibu.provider",
               let contract = launchd["install_contract"] as? [String: Any],
               Set(contract.keys) == ["path", "sha256"],
               contract["path"] as? String == "compatibility-set-local/install.sh",

@@ -49,14 +49,14 @@ merge as-is and iterate for two quarters).
    own updater).
    - Sparkle updates the whole app bundle, which contains the CLI
      binary. But the CLI is also distributed independently at
-     `get.streamvc.live`. Two tracks now update the same binary via
+     `get.malibu.tech`. Two tracks now update the same binary via
      different code paths.
    - What's the version story: does the CLI's `binaryVersion`
      constant get read by both tracks? Do we now need a dual-track
      matrix in release-notes for the same version number?
    - What signals when the "managed" CLI diverges in behavior from
      the standalone CLI (e.g. a bug fix that ships in
-     get.streamvc.live/install.sh but hasn't been rolled into a
+     get.malibu.tech/install.sh but hasn't been rolled into a
      Sparkle appcast)? Any observability?
 
 3. **Layering / responsibility boundaries** in `MalibuAgent`:
@@ -120,7 +120,7 @@ merge as-is and iterate for two quarters).
      flag, and the app enters an infinite reconnect loop (see
      restart-backoff). Is there compatibility negotiation?
    - No PATH fallback / no discovery of a system-installed
-     `macprovider-cli` (from `get.streamvc.live/install.sh`).
+     `macprovider-cli` (from `get.malibu.tech/install.sh`).
      Intentional? Documented?
 
 8. **Test surface**:

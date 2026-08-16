@@ -120,9 +120,9 @@ seed_transaction() {
     "$SYSTEMD/timers.target.wants/stats-hardware-verifier.timer" \
     "$NGINX_ROOT/conf.d/stats-shared.conf" "$NGINX_ROOT/conf.d/stats-security-headers.conf" \
     "$NGINX_ROOT/conf.d/cors-429.conf" "$NGINX_ROOT/conf.d/stats-proxy-public.conf" \
-    "$NGINX_ROOT/conf.d/stats-proxy-partner.conf" "$NGINX_ROOT/sites-available/coordinator.streamvc.live" \
-    "$NGINX_ROOT/sites-available/stats.streamvc.live" "$NGINX_ROOT/sites-enabled/coordinator.streamvc.live" \
-    "$NGINX_ROOT/sites-enabled/stats.streamvc.live" "$NGINX_ROOT/sites-available/coordinator.streamvc.live.full"
+    "$NGINX_ROOT/conf.d/stats-proxy-partner.conf" "$NGINX_ROOT/sites-available/coordinator.malibu.tech" \
+    "$NGINX_ROOT/sites-available/stats.malibu.tech" "$NGINX_ROOT/sites-enabled/coordinator.malibu.tech" \
+    "$NGINX_ROOT/sites-enabled/stats.malibu.tech" "$NGINX_ROOT/sites-available/coordinator.malibu.tech.full"
   mkdir -p "$ROLLBACK" "$ROOT/autotune/releases/new"
   printf old-binary >"$ROLLBACK/coordinator"
   printf old-config >"$ROLLBACK/coordinator.yaml"
@@ -166,7 +166,7 @@ seed_transaction() {
   done
   printf old-coordinator-site >"$ROLLBACK/nginx-coordinator.site"
   printf old-stats-site >"$ROLLBACK/nginx-stats.site"
-  ln -s ../sites-available/coordinator.streamvc.live "$ROLLBACK/nginx-coordinator.enabled"
+  ln -s ../sites-available/coordinator.malibu.tech "$ROLLBACK/nginx-coordinator.enabled"
   touch "$ROLLBACK/had-nginx-stats-shared" "$ROLLBACK/had-nginx-stats-security-headers" \
     "$ROLLBACK/had-nginx-stats-cors-429" "$ROLLBACK/had-nginx-stats-proxy-public" \
     "$ROLLBACK/had-nginx-stats-proxy-partner" "$ROLLBACK/had-nginx-coordinator-site" \
@@ -205,9 +205,9 @@ seed_transaction() {
   for nginx_file in stats-shared.conf stats-security-headers.conf cors-429.conf stats-proxy-public.conf stats-proxy-partner.conf; do
     printf 'new-%s' "$nginx_file" >"$NGINX_ROOT/conf.d/$nginx_file"
   done
-  printf new-coordinator-site >"$NGINX_ROOT/sites-available/coordinator.streamvc.live"
-  printf new-stats-site >"$NGINX_ROOT/sites-available/stats.streamvc.live"
-  ln -s ../sites-available/stats.streamvc.live "$NGINX_ROOT/sites-enabled/stats.streamvc.live"
+  printf new-coordinator-site >"$NGINX_ROOT/sites-available/coordinator.malibu.tech"
+  printf new-stats-site >"$NGINX_ROOT/sites-available/stats.malibu.tech"
+  ln -s ../sites-available/stats.malibu.tech "$NGINX_ROOT/sites-enabled/stats.malibu.tech"
   ln -s ../wrong.service "$SYSTEMD/multi-user.target.wants/macprovider-coordinator.service"
   ln -sfn releases/new "$ROOT/autotune/current"
   printf releases/new >"$ROOT/autotune/.previous-target"
@@ -237,8 +237,8 @@ run_recover
 [ -L "$SYSTEMD/timers.target.wants/stats-inventory-sync.timer" ] || fail "prior stats timer enablement was not restored"
 [ ! -e "$SYSTEMD/timers.target.wants/stats-billing-mirror.timer" ] || fail "new stats timer enablement was not removed"
 [ "$(cat "$NGINX_ROOT/conf.d/stats-shared.conf")" = old-stats-shared.conf ] || fail "nginx snippet was not restored"
-[ "$(cat "$NGINX_ROOT/sites-available/coordinator.streamvc.live")" = old-coordinator-site ] || fail "coordinator nginx site was not restored"
-[ ! -e "$NGINX_ROOT/sites-enabled/stats.streamvc.live" ] || fail "new stats nginx enablement was not removed"
+[ "$(cat "$NGINX_ROOT/sites-available/coordinator.malibu.tech")" = old-coordinator-site ] || fail "coordinator nginx site was not restored"
+[ ! -e "$NGINX_ROOT/sites-enabled/stats.malibu.tech" ] || fail "new stats nginx enablement was not removed"
 grep -qx -- "--restore=$ROLLBACK/request-log-db.acl" "$SETFACL_LOG" || fail "request-log ACL was not restored"
 [ "$(readlink "$ROOT/autotune/current")" = releases/old ] || fail "catalog current was not restored"
 [ "$(cat "$ROOT/tier2-catalog.json")" = old-tier2-catalog ] &&

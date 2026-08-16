@@ -51,7 +51,7 @@ Specifically check:
    sink)? Minor concern but worth a one-line note.
 6. **DNS resolution trust.** `resolve_coordinator_ip` uses
    dscacheutil → host. A poisoned DNS cache could resolve
-   `coordinator.streamvc.live` to an attacker-controlled IP. Then
+   `coordinator.malibu.tech` to an attacker-controlled IP. Then
    netstat won't match (no ESTABLISHED to that IP) and the
    watchdog will kickstart every 60s. This is a DoS, not an auth
    bypass — but worth flagging as the failure mode of trusting

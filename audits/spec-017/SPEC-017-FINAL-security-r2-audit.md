@@ -57,8 +57,8 @@ Paths inspected:
 - `phase4-coordinator/internal/stats/rollup/health.go`
 - `phase4-coordinator/internal/stats/rollup/runner.go`
 - `phase4-coordinator/dist/nginx-snippets/stats-shared.conf`
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf`
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf`
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
 - `phase4-coordinator/dist/test/check_nginx_stats_test.sh`
 
 ## Findings
@@ -173,7 +173,7 @@ No structured-event newline injection found because events are JSON-encoded. Raw
 
 ### H. `proxy_cache` hostility
 
-Both stats vhosts pair `proxy_cache_bypass $http_authorization` with `proxy_no_cache $http_authorization` on each stats location (`phase4-coordinator/dist/nginx-stats.streamvc.live.conf:129`, `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:228`). The nginx smoke proved public cache warm-up works, keyed responses add zero cache files, and anonymous follow-up receives the public projection. No cache poisoning path found.
+Both stats vhosts pair `proxy_cache_bypass $http_authorization` with `proxy_no_cache $http_authorization` on each stats location (`phase4-coordinator/dist/nginx-stats.malibu.tech.conf:129`, `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:228`). The nginx smoke proved public cache warm-up works, keyed responses add zero cache files, and anonymous follow-up receives the public projection. No cache poisoning path found.
 
 ### I. CORS reflection on auth-failed paths
 

@@ -57,7 +57,7 @@ func TestHandleAppTrackRegisterSuccess(t *testing.T) {
 	if resp.ProviderID != providerID || resp.ProviderToken != "provider-token" || resp.TrustTier != "provisional" {
 		t.Fatalf("unexpected response: %+v", resp)
 	}
-	if resp.CoordinatorWSURL != "wss://coordinator.streamvc.live/v2/provider" {
+	if resp.CoordinatorWSURL != "wss://coordinator.malibu.tech/v2/provider" {
 		t.Fatalf("coordinator_ws_url=%q", resp.CoordinatorWSURL)
 	}
 }
@@ -1393,14 +1393,14 @@ func testRegisterHandler(stats *fakeStatsDB, authStore *fakeAuthStore, metrics *
 	return &Handler{
 		StatsDB:                         stats,
 		AuthTokenStore:                  authStore,
-		CoordinatorDomain:               "coordinator.streamvc.live",
-		CoordinatorWSURL:                "wss://coordinator.streamvc.live/v2/provider",
+		CoordinatorDomain:               "coordinator.malibu.tech",
+		CoordinatorWSURL:                "wss://coordinator.malibu.tech/v2/provider",
 		IPRateLimiter:                   limiter,
 		CommittedRetryRateLimiter:       allowLimiter{},
 		CommittedRetryGlobalRateLimiter: allowLimiter{},
 		ASNRateLimiter:                  allowLimiter{},
 		AppAttestConfig: AppAttestConfig{
-			BundleID: "live.streamvc.Malibu",
+			BundleID: "live.malibu.Malibu",
 			TeamID:   "MALIBU1234",
 		},
 		Metrics: metrics,

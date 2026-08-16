@@ -19,7 +19,7 @@ mkdir -p "$HOME"
 
 # shellcheck source=/dev/null
 source "$TMP/render.sh"
-plist="$(render_plist 'mlx-community/Qwen2.5-7B-Instruct-4bit' 'provider-1' 'wss://coordinator.streamvc.live/ws/provider')"
+plist="$(render_plist 'mlx-community/Qwen2.5-7B-Instruct-4bit' 'provider-1' 'wss://coordinator.malibu.tech/ws/provider')"
 
 printf "%s\n" "$plist" | grep -A1 '<key>WorkingDirectory</key>' | grep -F '<string>/opt/mp</string>' >/dev/null
 printf "%s\n" "$plist" | grep -A8 '<key>ProgramArguments</key>' | grep -F '<string>serve</string>' >/dev/null

@@ -832,7 +832,7 @@ if publish.find("Publish Malibu download alias to Pearl") < publish.find(
 ):
     raise SystemExit("Pearl alias must publish only after immutable GitHub publication")
 team_requirement = (
-    '-R="identifier \\"live.streamvc.macprovider.cli\\" and anchor apple generic '
+    '-R="identifier \\"live.malibu.provider.cli\\" and anchor apple generic '
     'and certificate leaf[subject.OU] = \\"$APPLE_NOTARY_TEAM_ID\\""'
 )
 if publish.count(team_requirement) != 2:

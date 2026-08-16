@@ -277,7 +277,7 @@ func Default() Config {
 	return Config{
 		Listen: ListenConfig{BindAddress: "127.0.0.1", Port: 9443},
 		Proxy:  ProxyConfig{TrustedCIDRs: []string{"127.0.0.0/8", "::1/128"}},
-		Public: PublicConfig{BaseURL: "https://api.streamvc.live", AccountPath: "/account"},
+		Public: PublicConfig{BaseURL: "https://api.malibu.tech", AccountPath: "/account"},
 		Coordinator: CoordinatorConfig{
 			BuyerURL: "http://127.0.0.1:8443", OperatorURL: "http://127.0.0.1:8444", PoolzPollInterval: 10,
 		},
@@ -288,7 +288,7 @@ func Default() Config {
 			GitHubOAuthEnabled:    true,
 			EmailMagicLinkEnabled: false,
 			OAuth: OAuthConfig{StateMaxPerIP: 20, CallbackAllowlist: []string{
-				"https://api.streamvc.live/auth/github/callback",
+				"https://api.malibu.tech/auth/github/callback",
 			}, GitHub: GitHubOAuthConfig{
 				AuthorizeURL: "https://github.com/login/oauth/authorize",
 				TokenURL:     "https://github.com/login/oauth/access_token",
@@ -393,7 +393,7 @@ func Default() Config {
 			JournalRecoveryBatchLimit:      100,
 			JournalRecoveryGraceSeconds:    60,
 		},
-		CORS:     CORSConfig{AllowedOrigins: []string{"https://console.streamvc.live", "https://streamvc.live"}},
+		CORS:     CORSConfig{AllowedOrigins: []string{"https://console.malibu.tech", "https://malibu.tech"}},
 		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
 		Retry503: Retry503Config{Enabled: true, MaxAttempts: 3, BackoffBaseMs: 100, BackoffMaxMs: 500},
 		Explorer: ExplorerConfig{Enabled: false},

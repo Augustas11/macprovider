@@ -15,7 +15,7 @@ import (
 func newTestEnrollHandler() *onboarding.EnrollHandler {
 	return &onboarding.EnrollHandler{
 		MDMConfig: mdm.Config{
-			EnrollmentBaseURL: "https://coordinator.streamvc.live",
+			EnrollmentBaseURL: "https://coordinator.malibu.tech",
 			PushTopic:         "com.apple.mgmt.External.test",
 		},
 		Logger: zerolog.Nop(),
@@ -123,9 +123,9 @@ func TestHandleEnroll_InvalidJSON(t *testing.T) {
 func TestHandleEnroll_ServerURLFromConfig(t *testing.T) {
 	h := &onboarding.EnrollHandler{
 		MDMConfig: mdm.Config{
-			EnrollmentBaseURL: "https://coordinator.streamvc.live",
-			MDMServerURL:      "https://mdm.streamvc.live/mdm/connect",
-			SCEPUrl:           "https://mdm.streamvc.live/scep",
+			EnrollmentBaseURL: "https://coordinator.malibu.tech",
+			MDMServerURL:      "https://mdm.malibu.tech/mdm/connect",
+			SCEPUrl:           "https://mdm.malibu.tech/scep",
 		},
 		Logger: zerolog.Nop(),
 	}
@@ -139,10 +139,10 @@ func TestHandleEnroll_ServerURLFromConfig(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	resp := w.Body.String()
-	if !strings.Contains(resp, "https://mdm.streamvc.live/mdm/connect") {
+	if !strings.Contains(resp, "https://mdm.malibu.tech/mdm/connect") {
 		t.Error("profile does not contain configured MDM ServerURL")
 	}
-	if !strings.Contains(resp, "https://mdm.streamvc.live/scep") {
+	if !strings.Contains(resp, "https://mdm.malibu.tech/scep") {
 		t.Error("profile does not contain configured SCEP URL")
 	}
 }

@@ -310,7 +310,7 @@ non-trivial. Best landed once D/B/C's routing pipeline is stable.
 **Scope (nginx — for the operator's deploy runbook, not in this code build).**
 The operator will update the nginx vhost on Pearl to strip
 `X-MacProvider-Internal-*` on the public buyer-facing path. Document this
-in `phase5-gateway/dist/nginx-api.streamvc.live.conf` with a normative
+in `phase5-gateway/dist/nginx-api.malibu.tech.conf` with a normative
 comment block; the code build's gateway strip is the primary defense,
 nginx is defense-in-depth.
 

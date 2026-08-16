@@ -393,7 +393,7 @@ func TestSetBillingConfigReloadsRateCardUSDCredits(t *testing.T) {
 }
 
 func TestNginxRateCardAllowThroughBeforeV1CatchAll(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("..", "..", "dist", "nginx-coordinator.streamvc.live.conf"))
+	b, err := os.ReadFile(filepath.Join("..", "..", "dist", "nginx-coordinator.malibu.tech.conf"))
 	if err != nil {
 		t.Fatalf("read nginx config: %v", err)
 	}
@@ -2603,7 +2603,7 @@ func TestNonStreamingBillingDiscountsCachedPromptTokensOnSingleProviderStickyHit
 // gate made the provider-side ConversationCache architecturally incapable
 // of populating (turn 1 is always a sticky miss, so the provider never got
 // a key to store the KV state under; turn 2 was a hit and looked up an
-// empty cache). Prod verify against api.streamvc.live on 2026-07-03 with
+// empty cache). Prod verify against api.malibu.tech on 2026-07-03 with
 // binary v1.7.9 + coord fe175d0 reproduced this: sticky_hit confirmed in
 // coord logs, both turns on same provider mac, but cached_prompt_tokens=0
 // on turn 2. This test codifies the fix.

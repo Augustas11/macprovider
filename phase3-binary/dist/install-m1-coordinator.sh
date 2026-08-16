@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # install-m1-coordinator.sh — upgrade M1 phase3-binary to the v1.1.2 build
 # that supports stable provider_id, AND wire it to the production coordinator
-# at wss://coordinator.streamvc.live/ws/provider.
+# at wss://coordinator.malibu.tech/ws/provider.
 #
 # Functionally equivalent to install-m1-notmux.sh except it adds:
 #   --provider-id m1-anon
-#   --coordinator wss://coordinator.streamvc.live/ws/provider
+#   --coordinator wss://coordinator.malibu.tech/ws/provider
 #
 # Usage:
 #   bash install-m1-coordinator.sh ~/Downloads/phase3-binary-m1-v1.1.2-providerid.tar.gz
@@ -23,7 +23,7 @@ INSTALL_DIR="$HOME/phase3-binary-m1"
 MODEL="${MODEL:-mlx-community/Llama-3.2-3B-Instruct-4bit}"
 PORT="${PORT:-8080}"
 PROVIDER_ID="${PROVIDER_ID:-m1-anon}"
-COORDINATOR_URL="${COORDINATOR_URL:-wss://coordinator.streamvc.live/ws/provider}"
+COORDINATOR_URL="${COORDINATOR_URL:-wss://coordinator.malibu.tech/ws/provider}"
 TIMEOUT_S=120
 PIDFILE=/tmp/phase3-binary-m1.pid
 LOGFILE=/tmp/phase3-binary-m1.log
@@ -133,7 +133,7 @@ if [ $linked -eq 1 ]; then
   log "  $COORD_MODELS_URL shows our model:"
   echo "$coord_models" | python3 -m json.tool 2>/dev/null | head -15 | sed 's/^/    /'
   echo
-  log "Done. m1.streamvc.live serves phase3-binary, and the same binary now"
+  log "Done. m1.malibu.tech serves phase3-binary, and the same binary now"
   log "registers with the production coordinator as provider_id=$PROVIDER_ID."
   log "  binary PID: $BINARY_PID  (kept in $PIDFILE)"
   log "  view logs:  tail -f $LOGFILE"

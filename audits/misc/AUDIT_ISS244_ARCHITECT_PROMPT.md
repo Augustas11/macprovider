@@ -24,7 +24,7 @@ ARCHITECT LANE: focus on whether the fix design is well-bounded, whether invaria
 Specifically consider:
 - The classification at step 4b creates state that flows through 3 distinct script phases — is the state model clear or brittle?
 - The defensive-sed no-op leaves two "sources of truth" for cert directives (the conf file + the script's expectation) — does that create future drift?
-- The end-of-script exit policy treats `$DOMAIN` as money-path and `$STATS_DOMAIN` as non-money-path. SPEC-017 names stats.streamvc.live as a "first-class public hostname" — is the asymmetry justified?
+- The end-of-script exit policy treats `$DOMAIN` as money-path and `$STATS_DOMAIN` as non-money-path. SPEC-017 names stats.malibu.tech as a "first-class public hostname" — is the asymmetry justified?
 - The fix does not add a test for the failure-mode (script can't be unit-tested without a remote VPS). Should there be a `--dry-run` flag or a unit-testable helper extraction?
 - Idempotency: re-running the script after a partial-failure recovery — does the state model handle that cleanly?
 - Comments around SPEC-017 v0.1.8 Step 4.B + round-4 ARCH r2 H1 / CODE r2 C1 still reference the old "uncomment via sed" approach — are they now misleading?
@@ -48,7 +48,7 @@ If no findings at a severity, write the severity header followed by "(none)".
 ## Files in scope
 
 - `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/deploy-pearl-vps.sh`
-- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
-- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-stats.streamvc.live.conf`
+- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
+- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-stats.malibu.tech.conf`
 
 Diff: `git -C /Users/augstar/macprovider-iss244 show HEAD`.

@@ -15,7 +15,7 @@ The product-design lens cares about: anchor-example fidelity (does the user's ac
 A developer (your representative user) opens Cline (or Cursor, Aider, Claude Code, Continue, Zed, OpenCode — any OpenAI-shape agent framework). They configure:
 
 ```bash
-export OPENAI_BASE_URL=https://api.streamvc.live/v1
+export OPENAI_BASE_URL=https://api.malibu.tech/v1
 export OPENAI_API_KEY=<buyer-token>
 ```
 

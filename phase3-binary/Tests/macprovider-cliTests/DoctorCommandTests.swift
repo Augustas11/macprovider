@@ -7,7 +7,7 @@ import XCTest
 final class DoctorCommandTests: XCTestCase {
     private func runner(
         binaryVersion: String = "1.8.65",
-        coordinatorURL: String? = "wss://coordinator.streamvc.live/ws/provider",
+        coordinatorURL: String? = "wss://coordinator.malibu.tech/ws/provider",
         offline: Bool = false,
         fetch: @escaping @Sendable (URL) async -> DoctorHealthz?
     ) -> DoctorRunner {
@@ -27,8 +27,8 @@ final class DoctorCommandTests: XCTestCase {
 
     func testHealthzURLDerivation() {
         XCTAssertEqual(
-            DoctorRunner.healthzURL(coordinatorURL: "wss://coordinator.streamvc.live/ws/provider")?.absoluteString,
-            "https://coordinator.streamvc.live/healthz"
+            DoctorRunner.healthzURL(coordinatorURL: "wss://coordinator.malibu.tech/ws/provider")?.absoluteString,
+            "https://coordinator.malibu.tech/healthz"
         )
         XCTAssertEqual(
             DoctorRunner.healthzURL(coordinatorURL: "ws://127.0.0.1:8444/ws/provider")?.absoluteString,
@@ -36,8 +36,8 @@ final class DoctorCommandTests: XCTestCase {
         )
         // Plaintext is loopback-only, credentials are refused, and a garbage or
         // absent URL yields nil rather than a guessed endpoint.
-        XCTAssertNil(DoctorRunner.healthzURL(coordinatorURL: "ws://coordinator.streamvc.live/ws/provider"))
-        XCTAssertNil(DoctorRunner.healthzURL(coordinatorURL: "wss://user:pass@coordinator.streamvc.live/ws/provider"))
+        XCTAssertNil(DoctorRunner.healthzURL(coordinatorURL: "ws://coordinator.malibu.tech/ws/provider"))
+        XCTAssertNil(DoctorRunner.healthzURL(coordinatorURL: "wss://user:pass@coordinator.malibu.tech/ws/provider"))
         XCTAssertNil(DoctorRunner.healthzURL(coordinatorURL: "not a url"))
         XCTAssertNil(DoctorRunner.healthzURL(coordinatorURL: nil))
     }
@@ -66,7 +66,7 @@ final class DoctorCommandTests: XCTestCase {
         XCTAssertFalse(probed.get(), "--offline must not touch the network")
         XCTAssertEqual(report.floorStanding, .notChecked)
         XCTAssertEqual(report.binaryVersion, "1.8.65")
-        XCTAssertEqual(report.coordinatorURL, "wss://coordinator.streamvc.live/ws/provider")
+        XCTAssertEqual(report.coordinatorURL, "wss://coordinator.malibu.tech/ws/provider")
         XCTAssertNil(report.requiredBinaryVersion)
     }
 
@@ -75,7 +75,7 @@ final class DoctorCommandTests: XCTestCase {
         XCTAssertEqual(report.floorStanding, .unreachable)
         // Local facts are still reported — that is the point of offline-first.
         XCTAssertEqual(report.binaryVersion, "1.8.65")
-        XCTAssertEqual(report.healthzURL, "https://coordinator.streamvc.live/healthz")
+        XCTAssertEqual(report.healthzURL, "https://coordinator.malibu.tech/healthz")
     }
 
     func testMissingCoordinatorURLIsNotChecked() async {

@@ -209,7 +209,7 @@ Non-gating audit export for Proof-of-Model research. **Do not gate routing on Ma
        --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml --validate-config'
    ```
 5. Restart: `systemctl restart macprovider-coordinator`
-6. Verify: `curl -sf https://coordinator.streamvc.live/healthz`, `/poolz` on WS port 8444 with operator bearer.
+6. Verify: `curl -sf https://coordinator.malibu.tech/healthz`, `/poolz` on WS port 8444 with operator bearer.
 
 **Rollback:** restore backup binary; remove overlay keys; restart.
 

@@ -291,7 +291,7 @@ G.3  Non-Machine surfaces render a one-line `"Coming in Phase 1B"`
      / `"Coming in Phase 1C"` stub. Clicking switches the active
      surface.
 
-G.4  Sidebar footer: external link `https://api.streamvc.live/docs`
+G.4  Sidebar footer: external link `https://api.malibu.tech/docs`
      with `target="_blank" rel="noopener noreferrer"`; "Sign out"
      button.
 

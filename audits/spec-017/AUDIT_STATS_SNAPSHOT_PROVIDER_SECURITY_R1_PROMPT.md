@@ -18,7 +18,7 @@ to the code lane; API-shape questions go to architect.
 
 Before this PR, `/v1/stats/overview` returned zero for every
 §5.1.1 live-snapshot field. The endpoint is documented as public
-(`stats.streamvc.live/v1/stats/overview`, 30s CDN cache, 60 rpm/IP,
+(`stats.malibu.tech/v1/stats/overview`, 30s CDN cache, 60 rpm/IP,
 CORS on, no auth). This PR wires 5 fields (nodes_online,
 nodes_hardware_attested, unified_ram_gb_total, models_serving,
 network_utilization_pct) to be aggregated from

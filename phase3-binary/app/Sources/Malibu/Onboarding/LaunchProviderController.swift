@@ -430,7 +430,7 @@ final class LaunchProviderController: ObservableObject {
             "Library/Application Support/macprovider/install_manifest.json"
         )
         let launchd = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+            "Library/LaunchAgents/live.malibu.provider.plist"
         )
         return fileManager.isReadableFile(atPath: manifest.path)
             && fileManager.isReadableFile(atPath: launchd.path)
@@ -630,7 +630,7 @@ struct StartupState: Equatable {
         let fm = fileManager
         let home = homeDirectory
         let manifest = home.appendingPathComponent("Library/Application Support/macprovider/install_manifest.json")
-        let launchd = home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+        let launchd = home.appendingPathComponent("Library/LaunchAgents/live.malibu.provider.plist")
         func trusted(_ url: URL) -> Bool {
             InstalledProviderMonitor.isSafePrivateDirectoryChain(
                 url.deletingLastPathComponent(),
@@ -660,7 +660,7 @@ struct StartupState: Equatable {
             "Library/Application Support/macprovider/install_manifest.json"
         )
         let launchd = homeDirectory.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+            "Library/LaunchAgents/live.malibu.provider.plist"
         )
         func trusted(_ url: URL, maxBytes: Int = 1024 * 1024) -> Bool {
             InstalledProviderMonitor.isSafePrivateDirectoryChain(

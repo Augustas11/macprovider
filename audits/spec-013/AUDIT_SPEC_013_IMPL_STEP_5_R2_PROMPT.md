@@ -99,7 +99,7 @@ For each of the 3 round-1 MINOR closures (and the 1 deferral):
 - **G.1 (MINOR)** Inactive launchd PID untested → 3adddbf
   added `testParseLaunchdManagedInactivePIDReturnsNil` in
   `ProviderConflictDetectorTests`. Verify:
-  - The test inputs `-\t-\tlive.streamvc.macprovider\n` to
+  - The test inputs `-\t-\tlive.malibu.provider\n` to
     `parseLaunchdManagedPID(from:)`.
   - Asserts `(found: true, pid: nil)` — both fields.
   - Lives in the DETECTOR test class (not the drainer class).

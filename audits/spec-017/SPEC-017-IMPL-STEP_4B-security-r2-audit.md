@@ -20,11 +20,11 @@ The security lane still cannot lock. The r1 deployment LOW is closed, but the re
 - `gh pr view 173 --repo Augustas11/macprovider --json number,state,headRefName,headRefOid,baseRefName,updatedAt,title,url` - PR is open; head `impl/spec-017-step-1`; head OID `435858e157ba9e4fa69bb192982d7a7227870d00`; updated `2026-06-26T15:43:12Z`.
 - `find specs -maxdepth 1 -name 'SPEC-017-IMPL-STEP_4B-security-r*-audit.md'` - prior security round is r1 only; this is r2.
 - Required contract reads: SPEC §5.4.7, §5.6, §5.7, §6.4, §6.6.2, §7.4, §10 AC-8/15/21/22; BUILD Step 4.B SECURITY r5 C1 and AC-15 nginx redaction text; the Step 4.B security prompt; prior ARCH/CODE/security r1 audits.
-- Static reads: `phase4-coordinator/dist/nginx-stats.streamvc.live.conf`, `phase4-coordinator/dist/nginx-snippets/stats-shared.conf`, `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`, `phase4-coordinator/dist/deploy-pearl-vps.sh`, `phase4-coordinator/dist/test/check_nginx_stats_test.sh`, `.github/workflows/ci.yml`, `Makefile`, Pearl console/portal security-header snippets, and decision-log Entry 86.
+- Static reads: `phase4-coordinator/dist/nginx-stats.malibu.tech.conf`, `phase4-coordinator/dist/nginx-snippets/stats-shared.conf`, `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`, `phase4-coordinator/dist/deploy-pearl-vps.sh`, `phase4-coordinator/dist/test/check_nginx_stats_test.sh`, `.github/workflows/ci.yml`, `Makefile`, Pearl console/portal security-header snippets, and decision-log Entry 86.
 - `bash phase4-coordinator/dist/test/check_nginx_stats_test.sh` - SKIP locally: `docker daemon not reachable; CI runs this test`.
 - `find phase4-coordinator -path '*nginx_fixture_test.go' -print` - no fixture exists.
 - `rg 'coordinator-nginx-integration|nginx_fixture_test' .github Makefile phase4-coordinator` - only `check_nginx_stats_test.sh` comments mention them; no CI job or target exists.
-- `git diff --check origin/main...HEAD -- phase4-coordinator/dist/nginx-stats.streamvc.live.conf phase4-coordinator/dist/nginx-snippets/stats-shared.conf phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf phase4-coordinator/dist/test/check_nginx_stats_test.sh` - PASS.
+- `git diff --check origin/main...HEAD -- phase4-coordinator/dist/nginx-stats.malibu.tech.conf phase4-coordinator/dist/nginx-snippets/stats-shared.conf phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf phase4-coordinator/dist/test/check_nginx_stats_test.sh` - PASS.
 
 ## Findings
 
@@ -46,9 +46,9 @@ Add and wire a real nginx integration harness. It must run the composed config, 
 
 Evidence:
 - The Step 4.B security prompt lines 53-59 require the Pearl security-header snippet+include pattern or no `add_header` blocks at all in the stats vhost, because location-level `add_header` shadows inherited server-level headers.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:80-86` declares named location `@stats_rate_limited` with `add_header Retry-After "60" always;` and `add_header Cache-Control "no-store" always;`.
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:302-307` mirrors the same location-level `add_header` block.
-- The stats vhost has no stats security-header snippet include. Adjacent Pearl vhosts demonstrate the required pattern: `frontdoor/console/dist/nginx-console.streamvc.live.conf:15-20` documents the inheritance trap, and `frontdoor/console/dist/nginx-snippets/console-security-headers.conf:1-5` carries the header set.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:80-86` declares named location `@stats_rate_limited` with `add_header Retry-After "60" always;` and `add_header Cache-Control "no-store" always;`.
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:302-307` mirrors the same location-level `add_header` block.
+- The stats vhost has no stats security-header snippet include. Adjacent Pearl vhosts demonstrate the required pattern: `frontdoor/console/dist/nginx-console.malibu.tech.conf:15-20` documents the inheritance trap, and `frontdoor/console/dist/nginx-snippets/console-security-headers.conf:1-5` carries the header set.
 
 Why it matters:
 This does not leak tokens and is not the cache CRITICAL/HIGH class. It is still a prompt-level security hardening failure: the vhost now contains exactly the location-level `add_header` shape the prompt told the audit to reject unless every security header is re-declared via snippet/include. Future server-level HSTS/X-Content-Type-Options/CSP additions would silently disappear on the edge-generated 429 path.
@@ -71,7 +71,7 @@ A. Partner-projection cache hygiene: **STATIC PASS, DYNAMIC GAP.** `stats-shared
 
 B. Public-tier rate-limit bypass for Authorization: **STATIC PASS, DYNAMIC GAP.** `stats-shared.conf:24-27` maps any present Authorization header to an empty `$public_rl_key`; lines 31-33 define separate 60 rpm zones. All stats locations use `limit_req zone=... nodelay` with no stats `burst=`. No 100-request valid-keyed nginx proof exists; covered by MEDIUM 1.
 
-C. Access-log redaction: **STATIC PASS, DYNAMIC GAP.** `stats_redacted` omits `$http_authorization`, and the stats vhost uses `/var/log/nginx/stats.streamvc.live-access.log stats_redacted`. The coordinator vhost adds no custom `$http_authorization` log format. No live keyed-request log scan exists; covered by MEDIUM 1.
+C. Access-log redaction: **STATIC PASS, DYNAMIC GAP.** `stats_redacted` omits `$http_authorization`, and the stats vhost uses `/var/log/nginx/stats.malibu.tech-access.log stats_redacted`. The coordinator vhost adds no custom `$http_authorization` log format. No live keyed-request log scan exists; covered by MEDIUM 1.
 
 D. `add_header` inheritance trap: **FAIL.** The new stats and coordinator named 429 locations declare location-level `add_header` without the required Pearl snippet/include pattern; covered by MEDIUM 2.
 
@@ -79,13 +79,13 @@ E. Method allowlist: **PASS.** No `limit_except` block is present. Exact stats l
 
 F. TLS posture parity: **PASS WITH NOTE.** Stats vhost pins `ssl_protocols TLSv1.2 TLSv1.3` and follows the certbot path used by coordinator/api vhosts. No `ssl_session_tickets` directive appears in the existing coordinator vhost either, so Step 4.B does not regress that posture. HSTS is not handled for stats yet; MEDIUM 2 covers the required header-snippet pattern.
 
-G. Cloudflare / external-CDN compatibility: **PASS BY ABSENCE.** No repo evidence shows Cloudflare in front of `stats.streamvc.live`; Step 3 handler emits partner projection `Cache-Control: private, max-age=30, s-maxage=30`, and Step 4.B adds no Cloudflare cache override.
+G. Cloudflare / external-CDN compatibility: **PASS BY ABSENCE.** No repo evidence shows Cloudflare in front of `stats.malibu.tech`; Step 3 handler emits partner projection `Cache-Control: private, max-age=30, s-maxage=30`, and Step 4.B adds no Cloudflare cache override.
 
-H. Subdomain-trust boundary: **PASS.** The nginx files contain no Origin-based `if`, `map`, `return 444`, `return 200`, or `Access-Control-Allow-Origin` directive. `Origin: https://evil.streamvc.live` is forwarded to the coordinator for Step 3 CORS rejection on the exact stats locations.
+H. Subdomain-trust boundary: **PASS.** The nginx files contain no Origin-based `if`, `map`, `return 444`, `return 200`, or `Access-Control-Allow-Origin` directive. `Origin: https://evil.malibu.tech` is forwarded to the coordinator for Step 3 CORS rejection on the exact stats locations.
 
 I. AC-15 nginx access-log redaction: **STATIC PASS, DYNAMIC GAP.** The dedicated stats log omits Authorization by format, but no harness produces a valid `mpk_*` request, waits for flush, and scans for raw token, 43-char body, extra `mpk_...`, or `token_hash`; covered by MEDIUM 1.
 
-J. error_log posture: **PASS.** The stats vhost sets `error_log /var/log/nginx/stats.streamvc.live-error.log warn;`. No committed stats nginx `error_log debug` directive was found.
+J. error_log posture: **PASS.** The stats vhost sets `error_log /var/log/nginx/stats.malibu.tech-error.log warn;`. No committed stats nginx `error_log debug` directive was found.
 
 ## Closed Since r1
 

@@ -9,7 +9,7 @@ import (
 
 func TestGenerateEnrollmentProfile_ContainsSCEPAndMDMPayloads(t *testing.T) {
 	cfg := mdm.Config{
-		EnrollmentBaseURL: "https://coordinator.streamvc.live",
+		EnrollmentBaseURL: "https://coordinator.malibu.tech",
 		PushTopic:         "com.apple.mgmt.External.test-topic",
 	}
 	profile := mdm.GenerateEnrollmentProfile("C02XYZ1234AB", cfg)
@@ -26,7 +26,7 @@ func TestGenerateEnrollmentProfile_ContainsSCEPAndMDMPayloads(t *testing.T) {
 func TestGenerateEnrollmentProfile_SerialInProfile(t *testing.T) {
 	const serial = "C02XYZ1234AB"
 	cfg := mdm.Config{
-		EnrollmentBaseURL: "https://coordinator.streamvc.live",
+		EnrollmentBaseURL: "https://coordinator.malibu.tech",
 	}
 	profile := mdm.GenerateEnrollmentProfile(serial, cfg)
 
@@ -37,40 +37,40 @@ func TestGenerateEnrollmentProfile_SerialInProfile(t *testing.T) {
 
 func TestGenerateEnrollmentProfile_ServerURLFromConfig(t *testing.T) {
 	cfg := mdm.Config{
-		EnrollmentBaseURL: "https://coordinator.streamvc.live",
-		MDMServerURL:      "https://mdm.streamvc.live/mdm/connect",
-		SCEPUrl:           "https://mdm.streamvc.live/scep",
+		EnrollmentBaseURL: "https://coordinator.malibu.tech",
+		MDMServerURL:      "https://mdm.malibu.tech/mdm/connect",
+		SCEPUrl:           "https://mdm.malibu.tech/scep",
 		PushTopic:         "com.apple.mgmt.External.abc",
 	}
 	profile := mdm.GenerateEnrollmentProfile("SERIALTEST1", cfg)
 
-	if !strings.Contains(profile, "https://mdm.streamvc.live/mdm/connect") {
+	if !strings.Contains(profile, "https://mdm.malibu.tech/mdm/connect") {
 		t.Error("profile does not contain the configured MDM ServerURL")
 	}
-	if !strings.Contains(profile, "https://mdm.streamvc.live/scep") {
+	if !strings.Contains(profile, "https://mdm.malibu.tech/scep") {
 		t.Error("profile does not contain the configured SCEP URL")
 	}
 }
 
 func TestGenerateEnrollmentProfile_FallbackURLs(t *testing.T) {
 	cfg := mdm.Config{
-		EnrollmentBaseURL: "https://coordinator.streamvc.live",
+		EnrollmentBaseURL: "https://coordinator.malibu.tech",
 	}
 	profile := mdm.GenerateEnrollmentProfile("SERIALTEST2", cfg)
 
 	// When MDMServerURL/SCEPUrl are empty, they should fall back to
 	// EnrollmentBaseURL + path suffixes.
-	if !strings.Contains(profile, "https://coordinator.streamvc.live/mdm/connect") {
+	if !strings.Contains(profile, "https://coordinator.malibu.tech/mdm/connect") {
 		t.Error("profile missing fallback MDM ServerURL")
 	}
-	if !strings.Contains(profile, "https://coordinator.streamvc.live/scep") {
+	if !strings.Contains(profile, "https://coordinator.malibu.tech/scep") {
 		t.Error("profile missing fallback SCEP URL")
 	}
 }
 
 func TestGenerateEnrollmentProfile_AccessRights1041(t *testing.T) {
 	cfg := mdm.Config{
-		EnrollmentBaseURL: "https://coordinator.streamvc.live",
+		EnrollmentBaseURL: "https://coordinator.malibu.tech",
 	}
 	profile := mdm.GenerateEnrollmentProfile("SERIALTEST3", cfg)
 
@@ -82,7 +82,7 @@ func TestGenerateEnrollmentProfile_AccessRights1041(t *testing.T) {
 
 func TestGenerateEnrollmentProfile_MacproviderNamespace(t *testing.T) {
 	cfg := mdm.Config{
-		EnrollmentBaseURL: "https://coordinator.streamvc.live",
+		EnrollmentBaseURL: "https://coordinator.malibu.tech",
 	}
 	profile := mdm.GenerateEnrollmentProfile("SERIALTEST4", cfg)
 
@@ -90,25 +90,25 @@ func TestGenerateEnrollmentProfile_MacproviderNamespace(t *testing.T) {
 	if strings.Contains(profile, "darkbloom") || strings.Contains(profile, "Darkbloom") {
 		t.Error("profile contains Darkbloom branding — must use macprovider namespace")
 	}
-	if !strings.Contains(profile, "live.streamvc.macprovider.enroll") {
-		t.Error("profile missing live.streamvc.macprovider.enroll namespace")
+	if !strings.Contains(profile, "live.malibu.provider.enroll") {
+		t.Error("profile missing live.malibu.provider.enroll namespace")
 	}
 }
 
 func TestGenerateEnrollmentProfile_CheckInURL(t *testing.T) {
 	cfg := mdm.Config{
-		EnrollmentBaseURL: "https://coordinator.streamvc.live",
+		EnrollmentBaseURL: "https://coordinator.malibu.tech",
 	}
 	profile := mdm.GenerateEnrollmentProfile("SERIALTEST5", cfg)
 
-	if !strings.Contains(profile, "https://coordinator.streamvc.live/mdm/checkin") {
+	if !strings.Contains(profile, "https://coordinator.malibu.tech/mdm/checkin") {
 		t.Error("profile missing CheckInURL")
 	}
 }
 
 func TestGenerateEnrollmentProfile_IdentityCertUUIDMatchesSCEPPayloadUUID(t *testing.T) {
 	cfg := mdm.Config{
-		EnrollmentBaseURL: "https://coordinator.streamvc.live",
+		EnrollmentBaseURL: "https://coordinator.malibu.tech",
 	}
 	profile := mdm.GenerateEnrollmentProfile("SERIALTEST6", cfg)
 
@@ -124,7 +124,7 @@ func TestGenerateEnrollmentProfile_IdentityCertUUIDMatchesSCEPPayloadUUID(t *tes
 func TestGenerateEnrollmentProfile_PushTopic(t *testing.T) {
 	const topic = "com.apple.mgmt.External.99999-test"
 	cfg := mdm.Config{
-		EnrollmentBaseURL: "https://coordinator.streamvc.live",
+		EnrollmentBaseURL: "https://coordinator.malibu.tech",
 		PushTopic:         topic,
 	}
 	profile := mdm.GenerateEnrollmentProfile("SERIALTEST7", cfg)

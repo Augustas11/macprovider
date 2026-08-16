@@ -508,7 +508,7 @@ final class ProviderConfigParserTests: XCTestCase {
         # keep operator note
         provider_id: p_linked
         link_state: linked
-        coordinator_url: https://coordinator.streamvc.live
+        coordinator_url: https://coordinator.malibu.tech
         model: stale
         model_artifact_sha256: \(String(repeating: "0", count: 64))
         """.write(to: paths.configFile, atomically: true, encoding: .utf8)
@@ -520,7 +520,7 @@ final class ProviderConfigParserTests: XCTestCase {
         XCTAssertTrue(contents.contains("# keep operator note"))
         XCTAssertTrue(contents.contains("provider_id: p_linked"))
         XCTAssertTrue(contents.contains("link_state: linked"))
-        XCTAssertTrue(contents.contains("coordinator_url: https://coordinator.streamvc.live"))
+        XCTAssertTrue(contents.contains("coordinator_url: https://coordinator.malibu.tech"))
         XCTAssertTrue(contents.contains("model: meta-llama/llama-3.1-8b-instruct"))
         XCTAssertTrue(contents.contains("model_artifact_path: /Users/test/snapshots/241a666dad6cb93c8ff213d39a7f34a36bf26db4"))
         XCTAssertTrue(contents.contains("model_catalog_hash: \(String(repeating: "b", count: 64))"))

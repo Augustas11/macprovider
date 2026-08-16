@@ -12,7 +12,7 @@ R1 fix-pass landed as `634de32`:
    no root chmod/chown on daemon-writable paths. Closes CRITICAL.
 2. New step 2b enforces `/opt/macprovider` root:macprovider 0750
    idempotently — closes state-dependent HIGH.
-3. `DOMAIN != api.streamvc.live` refused early — closes MED.
+3. `DOMAIN != api.malibu.tech` refused early — closes MED.
 4. OPS.md step-by-step bullets rewritten to match current flow.
 
 ## Your job

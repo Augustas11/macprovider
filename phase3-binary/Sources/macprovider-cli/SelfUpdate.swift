@@ -42,10 +42,12 @@ private enum ReleaseSignatureEncoding {
 
 struct SelfUpdate {
     static let defaultReleasesAPIURL = "https://api.github.com/repos/Augustas11/macprovider/releases/latest"
-    static let launchdLabel = "live.streamvc.macprovider"
-    static let watchdogLaunchdLabel = "live.streamvc.macprovider-watchdog"
+    static let launchdLabel = "live.malibu.provider"
+    static let watchdogLaunchdLabel = "live.malibu.provider-watchdog"
     static let providerReloadLaunchdLabel = "\(launchdLabel)-compatibility-reload"
     static let legacyProviderReloadLaunchdLabelPrefix = "\(providerReloadLaunchdLabel)."
+    static let legacyLaunchdLabel = "live.streamvc.macprovider"
+    static let legacyWatchdogLaunchdLabel = "live.streamvc.macprovider-watchdog"
     // Eleven samples at the two-second poll interval prove 20 seconds of
     // uninterrupted health, exceeding launchd's observed ten-second retry
     // cadence for legacy `submit` jobs.
@@ -1018,8 +1020,16 @@ struct SelfUpdate {
         timeout: TimeInterval = 90
     ) async -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let plist = home.appendingPathComponent("Library/LaunchAgents/\(launchdLabel).plist")
-        guard FileManager.default.fileExists(atPath: plist.path) else { return true }
+        let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        let hasProviderPlist = [
+            launchdLabel,
+            legacyLaunchdLabel,
+        ].contains { label in
+            FileManager.default.fileExists(
+                atPath: launchAgents.appendingPathComponent("\(label).plist").path
+            )
+        }
+        guard hasProviderPlist else { return true }
         let config = try? ConfigLoader.load(cli: CLIOverrides())
         guard let port = config?.port else { return false }
         let deadline = Date().addingTimeInterval(timeout)
@@ -1078,9 +1088,16 @@ struct SelfUpdate {
 
     private func restartLaunchdIfInstalled() throws {
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
-        let plist = homeDirectory
-            .appendingPathComponent("Library/LaunchAgents/\(Self.launchdLabel).plist")
-        guard FileManager.default.fileExists(atPath: plist.path) else {
+        let launchAgents = homeDirectory.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        let hasProviderPlist = [
+            Self.launchdLabel,
+            Self.legacyLaunchdLabel,
+        ].contains { label in
+            FileManager.default.fileExists(
+                atPath: launchAgents.appendingPathComponent("\(label).plist").path
+            )
+        }
+        guard hasProviderPlist else {
             return
         }
         do {
@@ -1106,10 +1123,16 @@ struct SelfUpdate {
 
     private func fenceProviderReloadJobsIfLaunchdInstalled() throws {
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
-        let providerPlist = homeDirectory.appendingPathComponent(
-            "Library/LaunchAgents/\(Self.launchdLabel).plist"
-        )
-        guard FileManager.default.fileExists(atPath: providerPlist.path) else {
+        let launchAgents = homeDirectory.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        let hasProviderPlist = [
+            Self.launchdLabel,
+            Self.legacyLaunchdLabel,
+        ].contains { label in
+            FileManager.default.fileExists(
+                atPath: launchAgents.appendingPathComponent("\(label).plist").path
+            )
+        }
+        guard hasProviderPlist else {
             return
         }
         try Self.fenceProviderReloadLaunchdJobs(
@@ -1685,7 +1708,7 @@ struct SelfUpdate {
         else {
             throw UpdateError.stagedCLIIdentityInvalid("code_object_unavailable")
         }
-        let requirementText = "identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\""
+        let requirementText = "identifier \"live.malibu.provider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\""
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(requirementText as CFString, [], &requirement) == errSecSuccess,
               let requirement,

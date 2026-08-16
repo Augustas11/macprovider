@@ -139,7 +139,7 @@ last-locked: 2026-08-02
      `chmod 0600`); the resign script at
      `scripts/resign-autotune-static.sh` refuses to run if the key
      file is world-readable. Runtime signature verification remains
-     unchanged: the client then fetched from `coordinator.streamvc.live/static/*`,
+     unchanged: the client then fetched from `coordinator.malibu.tech/static/*`,
      verifies against the baked v3 pubkey, and falls back to the
      compiled-in baked catalog on verification failure. Older v1.7.9-
      clients that still bake the v2 pubkey `sidecarIsValid`-fail on
@@ -149,7 +149,7 @@ last-locked: 2026-08-02
      model and the v3 → v4 rotation procedure.
   3. **Live catalog `min_sustained_tps` cuts.** With gates now
      advisory, the v3-signed live catalog at
-     `coordinator.streamvc.live/static/autotune-candidates.json` was
+     `coordinator.malibu.tech/static/autotune-candidates.json` was
      re-published with M-Base-realistic advisory values so
      `tps_below_gate` becomes a rare warning rather than the common
      case on M-Base hardware:
@@ -258,7 +258,7 @@ Candidate metadata is a separate signed control-plane input. Demand rank may sco
 Primary source:
 
 ```text
-https://coordinator.streamvc.live/v1/autotune-candidates
+https://coordinator.malibu.tech/v1/autotune-candidates
 ```
 
 Fallback source:
@@ -394,14 +394,14 @@ The current signed catalog carries these in-band `bench_gate.provenance` classif
 
 ### 3.3 Rate card
 
-The recommendation engine fetches the current rate card from `https://coordinator.streamvc.live/v1/rate-card` and its detached sidecar from `https://coordinator.streamvc.live/v1/rate-card.sig`. Live rate-card bytes MUST be verified before paid recommendation uses them. Transport/HTTP unavailability may use the baked rate-card snapshot compiled into the installer/CLI release and emit `rate_card_fallback_used`; missing/malformed sidecar, unknown signer, invalid signature, invalid schema, policy mismatch, valid older-than-baked bytes, future bytes, or expired bytes MUST additionally emit `rate_card_integrity_failure` or `rate_card_update_required` as applicable and block paid recommendation.
+The recommendation engine fetches the current rate card from `https://coordinator.malibu.tech/v1/rate-card` and its detached sidecar from `https://coordinator.malibu.tech/v1/rate-card.sig`. Live rate-card bytes MUST be verified before paid recommendation uses them. Transport/HTTP unavailability may use the baked rate-card snapshot compiled into the installer/CLI release and emit `rate_card_fallback_used`; missing/malformed sidecar, unknown signer, invalid signature, invalid schema, policy mismatch, valid older-than-baked bytes, future bytes, or expired bytes MUST additionally emit `rate_card_integrity_failure` or `rate_card_update_required` as applicable and block paid recommendation.
 
 `GET /v1/rate-card` is a read-only coordinator endpoint. It MUST NOT alter billing, settlement, routing, provider state, request logs, `RateCardEntry`, settlement arithmetic, or coordinator-held signing material. It is public-read because it exposes only prices already used for buyer/provider economics; no provider or buyer credential is required. Production serves literal signed `rate-card.json` bytes loaded from disk after Ed25519 verification at startup. Unconfigured local/development coordinators may compute the same recommendation-only projection from `Rewards.RateCard`, `Rewards.ProviderShare`, `Rewards.GlobalMultiplier`, and `stats.rollup.usd_per_million_credits`; clients still require the sidecar before trusting live bytes.
 
 Repository routing contract:
 
 - The handler lives on the coordinator buyer HTTP mux (`buyer_port: 8443`), not the provider/operator mux (`provider_port: 8444`).
-- Production nginx MUST include exact `location = /v1/rate-card` and `location = /v1/rate-card.sig` allow-through blocks before the generic `location /v1/ { return 404; }` block in `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`.
+- Production nginx MUST include exact `location = /v1/rate-card` and `location = /v1/rate-card.sig` allow-through blocks before the generic `location /v1/ { return 404; }` block in `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`.
 - The nginx locations proxy to `http://127.0.0.1:8443/v1/rate-card$is_args$args` and `http://127.0.0.1:8443/v1/rate-card.sig$is_args$args`, forward `Host`, `X-Real-IP`, `X-Forwarded-For`, and `X-Forwarded-Proto`, and do not require `Authorization`.
 
 The v0.1 rate-card JSON schema is:
@@ -435,7 +435,7 @@ The v0.1 rate-card JSON schema is:
 
 ### 3.4 Demand signal
 
-The recommendation engine fetches `https://coordinator.streamvc.live/v1/demand-rank` and falls back to a baked snapshot when the signed feed fetch fails, times out, fails Ed25519 detached-signature verification, or fails schema validation. The demand signal is operator-curated OpenRouter-prior metadata, not a coordinator demand endpoint.
+The recommendation engine fetches `https://coordinator.malibu.tech/v1/demand-rank` and falls back to a baked snapshot when the signed feed fetch fails, times out, fails Ed25519 detached-signature verification, or fails schema validation. The demand signal is operator-curated OpenRouter-prior metadata, not a coordinator demand endpoint.
 
 The v0.1 demand-rank JSON schema is locked as:
 
@@ -480,7 +480,7 @@ Field rules:
 
 Fetched `rate-card.json`, `demand-rank.json`, and `autotune-candidates.json` MUST be verified before parsing into the recommendation engine:
 
-1. Fetch `rate-card` and detached `rate-card.sig` from `https://coordinator.streamvc.live/v1/rate-card` and `https://coordinator.streamvc.live/v1/rate-card.sig`; fetch `autotune-candidates` and detached `autotune-candidates.sig` from `https://coordinator.streamvc.live/v1/autotune-candidates` and `https://coordinator.streamvc.live/v1/autotune-candidates.sig`; fetch `demand-rank` and detached `demand-rank.sig` from `https://coordinator.streamvc.live/v1/demand-rank` and `https://coordinator.streamvc.live/v1/demand-rank.sig`.
+1. Fetch `rate-card` and detached `rate-card.sig` from `https://coordinator.malibu.tech/v1/rate-card` and `https://coordinator.malibu.tech/v1/rate-card.sig`; fetch `autotune-candidates` and detached `autotune-candidates.sig` from `https://coordinator.malibu.tech/v1/autotune-candidates` and `https://coordinator.malibu.tech/v1/autotune-candidates.sig`; fetch `demand-rank` and detached `demand-rank.sig` from `https://coordinator.malibu.tech/v1/demand-rank` and `https://coordinator.malibu.tech/v1/demand-rank.sig`.
 2. Parse the detached `{name}.sig` sidecar as UTF-8 JSON exactly in this shape:
 
 ```json
@@ -881,7 +881,7 @@ Run: macprovider-cli autotune --recommend
 | M12 | Hard eligibility gates | §5 requires RAM, benchmark, no-swap, no-thermal, and rate-card gates before scoring. |
 | M16 | Deployability gate | §3.2 and §3.4 define deployability via `runtime_status` + `recommendable`; §5 enforces both. |
 | M18 | Full-utilization wording | §4 separates ranking from displayed capacity; §7 uses per-token rates only. |
-| M20 | Static JSON demand control plane | §3.4 requires `coordinator.streamvc.live/v1/demand-rank` with baked fallback and version metadata. |
+| M20 | Static JSON demand control plane | §3.4 requires `coordinator.malibu.tech/v1/demand-rank` with baked fallback and version metadata. |
 
 ## 11. Acceptance criteria
 
@@ -961,7 +961,7 @@ AC-35: Bandwidth-tier eligibility is deterministic: a Tier-C Mac fails a row wit
 
 AC-36: A downloaded model snapshot containing symlinks, hardlinks with link count greater than one, special files, absolute paths, path escapes, or `..` path segments fails artifact verification before benchmark, recommendation, local donor-mode commit, or provider run.
 
-AC-37 **[amended v0.8.6]**: Unauthenticated `GET https://coordinator.streamvc.live/v1/rate-card` and `GET https://coordinator.streamvc.live/v1/rate-card.sig` reach the coordinator buyer mux through nginx and return the §3.3 schema/sidecar; both nginx routes are declared before the generic `/v1/` 404 block.
+AC-37 **[amended v0.8.6]**: Unauthenticated `GET https://coordinator.malibu.tech/v1/rate-card` and `GET https://coordinator.malibu.tech/v1/rate-card.sig` reach the coordinator buyer mux through nginx and return the §3.3 schema/sidecar; both nginx routes are declared before the generic `/v1/` 404 block.
 
 AC-38: `rate_card_version` changes when the recommendation projection rows, provider share, global multiplier, or `usd_per_million_credits` change, and does not change when unrelated quarantine, request-log, operator, ledger runtime, or settlement runtime state changes.
 

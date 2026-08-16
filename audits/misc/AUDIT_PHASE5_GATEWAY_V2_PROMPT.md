@@ -134,7 +134,7 @@ the claims.
      `store_test.go` — reaper logic (F-M4) + storage tests
    - `phase5-gateway/cmd/gateway/main.go` — reaper goroutine
      startup + panic recovery setup
-   - `phase5-gateway/dist/nginx-api.streamvc.live.conf` — F-M6
+   - `phase5-gateway/dist/nginx-api.malibu.tech.conf` — F-M6
      limit_req_zone + limit_conn_zone + F-M7 envelope on
      denied routes
    - `phase5-gateway/dist/deploy-pearl-vps.md` — F-M6 documented

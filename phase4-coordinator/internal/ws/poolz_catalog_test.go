@@ -29,7 +29,7 @@ func TestPoolzEmitsCatalogFieldsWhenCatalogActive(t *testing.T) {
 	ts := newProviderServer(t, func(cfg *config.Config) {
 		cfg.Tier2.CatalogPath = path
 		cfg.Tier2.CatalogPublicKey = pubkey
-		cfg.Tier2.PublicCatalogBaseURL = "https://coordinator.streamvc.live"
+		cfg.Tier2.PublicCatalogBaseURL = "https://coordinator.malibu.tech"
 	})
 	defer ts.Close()
 	if err := tier2.Configure(config.Tier2Config{
@@ -51,10 +51,10 @@ func TestPoolzEmitsCatalogFieldsWhenCatalogActive(t *testing.T) {
 	if parsed.CatalogID == nil || *parsed.CatalogID != "test-catalog-2026-06-24" {
 		t.Fatalf("catalog_id = %v", parsed.CatalogID)
 	}
-	if parsed.CatalogURL == nil || *parsed.CatalogURL != "https://coordinator.streamvc.live/catalog/test-catalog-2026-06-24" {
+	if parsed.CatalogURL == nil || *parsed.CatalogURL != "https://coordinator.malibu.tech/catalog/test-catalog-2026-06-24" {
 		t.Fatalf("catalog_url = %v", parsed.CatalogURL)
 	}
-	if parsed.CatalogPubkeyURL == nil || *parsed.CatalogPubkeyURL != "https://coordinator.streamvc.live/catalog/pubkey" {
+	if parsed.CatalogPubkeyURL == nil || *parsed.CatalogPubkeyURL != "https://coordinator.malibu.tech/catalog/pubkey" {
 		t.Fatalf("catalog_pubkey_url = %v", parsed.CatalogPubkeyURL)
 	}
 }
@@ -118,7 +118,7 @@ func TestPoolzOmitsCatalogFieldsWhenCatalogLoadFails(t *testing.T) {
 			ts := newProviderServer(t, func(cfg *config.Config) {
 				cfg.Tier2.CatalogPath = path
 				cfg.Tier2.CatalogPublicKey = pubkey
-				cfg.Tier2.PublicCatalogBaseURL = "https://coordinator.streamvc.live"
+				cfg.Tier2.PublicCatalogBaseURL = "https://coordinator.malibu.tech"
 			})
 			defer ts.Close()
 			// Configure with strict=false so a failed catalog leaves
@@ -156,10 +156,10 @@ func TestPoolzCatalogURLConstructionEdgeCases(t *testing.T) {
 	}{
 		{
 			name:           "trailing-slash-base",
-			baseURL:        "https://coordinator.streamvc.live/",
-			hostHeader:     "coordinator.streamvc.live",
-			wantCatalogURL: "https://coordinator.streamvc.live/catalog/test-catalog",
-			wantPubkeyURL:  "https://coordinator.streamvc.live/catalog/pubkey",
+			baseURL:        "https://coordinator.malibu.tech/",
+			hostHeader:     "coordinator.malibu.tech",
+			wantCatalogURL: "https://coordinator.malibu.tech/catalog/test-catalog",
+			wantPubkeyURL:  "https://coordinator.malibu.tech/catalog/pubkey",
 		},
 		{
 			name:           "host-with-port-fallback",

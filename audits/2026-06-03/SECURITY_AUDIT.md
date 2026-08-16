@@ -108,7 +108,7 @@ The system's cryptographic and authorization primitives are largely sound — op
 - **Category:** dos
 - **What:** The internet-facing `http.Server` sets only `ReadHeaderTimeout: 10s` — no `ReadTimeout`, `IdleTimeout`, `WriteTimeout`, or `MaxHeaderBytes` (`main.go:64-68`). `handleFeedback` decodes the JSON body (`server.go:568`) **before** authenticating the non-playground scope (`server.go:609`), so `/v1/feedback` is reachable unauthenticated and blocks in `json.Decode` on a slow body. `MaxBytesReader` caps bytes, not wall-clock time.
 - **Impact:** An unauthenticated remote attacker opens many connections, sends headers within 10s, then trickles bodies, each pinning a goroutine indefinitely; enough parallel connections degrade or deny service.
-- **Evidence:** Struct literal confirmed with only `ReadHeaderTimeout`; `handleFeedback` ordering confirmed (Decode at `:568`, `requireBearer` at `:609`). The coordinator `http.Client` timeouts (`main.go:56-61`) bound the outbound client, not inbound bodies. Medium: resource-exhaustion only, typically also fronted by an upstream LB at `coordinator.streamvc.live`.
+- **Evidence:** Struct literal confirmed with only `ReadHeaderTimeout`; `handleFeedback` ordering confirmed (Decode at `:568`, `requireBearer` at `:609`). The coordinator `http.Client` timeouts (`main.go:56-61`) bound the outbound client, not inbound bodies. Medium: resource-exhaustion only, typically also fronted by an upstream LB at `coordinator.malibu.tech`.
 - **Recommendation:** Set `ReadTimeout` (~30s), `IdleTimeout` (~120s), and `MaxHeaderBytes` (`1<<16`). Do **not** set a global `WriteTimeout` (SSE streams are long-lived) — bound non-streaming handlers individually or via per-request context deadlines, and apply a request-scoped read deadline before the unauthenticated `json.Decode` in `handleFeedback`.
 
 ### [MEDIUM] Connection-scoped SQLite PRAGMAs can be silently lost on pool connection recreation
@@ -404,9 +404,9 @@ The system's cryptographic and authorization primitives are largely sound — op
 ### [LOW] DOM-XSS: coordinator-controlled /v1/status `status` interpolated raw into innerHTML under a permissive CSP
 
 - **Component:** Web Demo + Install/Deploy Scripts + Python
-- **File(s):** `frontdoor/console/index.html:782-789`, `:1086`, `:1093` (sink); `dist/nginx-console.streamvc.live.conf:27` (CSP); mitigating source `phase5-gateway/internal/router/server.go:1751-1806`, `:549`
+- **File(s):** `frontdoor/console/index.html:782-789`, `:1086`, `:1093` (sink); `dist/nginx-console.malibu.tech.conf:27` (CSP); mitigating source `phase5-gateway/internal/router/server.go:1751-1806`, `:549`
 - **Category:** xss
-- **What:** `fetchStatus()` stores the raw `/v1/status` JSON as `poolStatus` (`:782-783`); `renderDashboard()` writes a row via `row.innerHTML = '...'+val+'...'` (`:1093`) where `val = ps.status` is taken verbatim (`:1086`) — unlike the sibling numeric rows wrapped in `String(...)` and the model list using `textContent` (`:1106-1110`). The console CSP sets `script-src 'unsafe-inline'` (`nginx-console.streamvc.live.conf:27`), so an injected `<img src=x onerror=...>` would execute.
+- **What:** `fetchStatus()` stores the raw `/v1/status` JSON as `poolStatus` (`:782-783`); `renderDashboard()` writes a row via `row.innerHTML = '...'+val+'...'` (`:1093`) where `val = ps.status` is taken verbatim (`:1086`) — unlike the sibling numeric rows wrapped in `String(...)` and the model list using `textContent` (`:1106-1110`). The console CSP sets `script-src 'unsafe-inline'` (`nginx-console.malibu.tech.conf:27`), so an injected `<img src=x onerror=...>` would execute.
 - **Impact:** If `/v1/status` is attacker-influenced (first-party compromise or TLS-strip MITM), the `status` string renders as live HTML on the money-bearing console origin, with access to `localStorage` and the demo-token / chat flow.
 - **Evidence:** Sink and missing escaping confirmed (no `escapeHtml`/`sanitize`/`DOMPurify` anywhere); CSP confirmed (`img-src 'self'` blocks the bogus load, which is exactly what fires `onerror`). Downgraded medium→low: `aggregateStatus` sets `out.Status` only from a fixed enum — `"up"`/`"idle"`/`"degraded"`/`"down"` (`server.go:1755,1802,1805,549`), never reflecting client input; exploitation requires controlling the first-party response.
 - **Recommendation:** Build the row with `createElement` + `textContent` (as the model list already does), not `innerHTML` from server data; additionally drop `script-src 'unsafe-inline'` (move the inline script to an external file with a nonce/hash) so inline-handler injection cannot execute even if a sink is missed.
@@ -477,7 +477,7 @@ The system's cryptographic and authorization primitives are largely sound — op
 - **File(s):** `phase5-gateway/internal/router/server.go:228-231`, `:240-247`, `:1964-1967`, `:137`, `:252`; `phase5-gateway/internal/auth/oauth.go:134-136`; `phase5-gateway/internal/config/config.go:144`, `:236`, `:303-316`
 - **Category:** oauth
 - **What:** The `mp_oauth_session` cookie is correctly Path-scoped, HttpOnly, SameSite=Lax, single-use/time-bounded with a sound CSRF/state binding (`ConsumeOAuthState`, `:247`). Two minor notes: (1) `handleGitHubCallback` does not inspect GitHub's `error`/`error_description` query params (user-denied surfaces as a generic `oauth_state_invalid`); (2) `secureCookies()` returns true only when `Public.BaseURL` is https (`:1964-1967`), so a misconfigured http `base_url` would silently drop the Secure flag, and `Config.Validate` does not assert https (`config.go:303-316`).
-- **Impact:** No security impact under the shipped production config (`BaseURL` defaults to `https://api.streamvc.live`, `config.go:144`). Recorded so the OAuth surface is documented as reviewed.
+- **Impact:** No security impact under the shipped production config (`BaseURL` defaults to `https://api.malibu.tech`, `config.go:144`). Recorded so the OAuth surface is documented as reviewed.
 - **Evidence:** Cookie attributes, state binding, and both observations confirmed. Info.
 - **Recommendation:** Optionally handle GitHub's `error` query param for clearer UX; validate in `Config.Validate` that `Public.BaseURL` is https when OAuth/demo auth is enabled so Secure cookies cannot be silently disabled.
 
@@ -506,10 +506,10 @@ The system's cryptographic and authorization primitives are largely sound — op
 - **Component:** Web Demo + Install/Deploy Scripts + Python
 - **File(s):** `beta/web/api/chat.js:9-18`, `:20-23` (`:21`), `:39-83` (`:39-41`, `:50`, `:56`, `:79`); `beta/web/api/providers.js:18`
 - **Category:** ssrf
-- **What:** `chat.js` is an unauthenticated POST that forwards a caller prompt to a fixed host (`m1`/`m4.streamvc.live` — `provider` selects from a hardcoded `PROVIDERS` map, so not arbitrary-URL SSRF), `max_tokens` clamped to 512. Both `chat.js:21` and `providers.js:18` hard-gate behind `MACPROVIDER_ENABLE_LEGACY_BETA_PROXY !== '1'` and return HTTP 410 by default.
+- **What:** `chat.js` is an unauthenticated POST that forwards a caller prompt to a fixed host (`m1`/`m4.malibu.tech` — `provider` selects from a hardcoded `PROVIDERS` map, so not arbitrary-URL SSRF), `max_tokens` clamped to 512. Both `chat.js:21` and `providers.js:18` hard-gate behind `MACPROVIDER_ENABLE_LEGACY_BETA_PROXY !== '1'` and return HTTP 410 by default.
 - **Impact:** If the flag is ever set to `'1'`, the endpoint becomes an anonymous, unmetered relay to the contributor Macs (capacity/cost DoS) and discloses tunnel hostnames via `X-Provider-Tunnel`. Off by default.
 - **Evidence:** 410 gate, fixed-host map, 512 clamp, unauthenticated relay, and tunnel-header disclosure all confirmed; no secrets in either file. Info — abuse path exists only if an operator explicitly sets the flag.
-- **Recommendation:** Keep the flag off in production (current state). If re-enabled, add an Origin/Referer allowlist, per-IP rate limit, and remove `X-Provider-Tunnel`. Consider deleting the legacy files entirely now that the front-door console talks directly to `api.streamvc.live`.
+- **Recommendation:** Keep the flag off in production (current state). If re-enabled, add an Origin/Referer allowlist, per-IP rate limit, and remove `X-Provider-Tunnel`. Consider deleting the legacy files entirely now that the front-door console talks directly to `api.malibu.tech`.
 
 ## Cross-cutting themes
 

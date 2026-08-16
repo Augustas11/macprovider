@@ -85,7 +85,7 @@ this stay open as a MEDIUM until closed?
 - The validator lives in `RegisterClient` — an HTTP client
   responsibility. That's the right place. But note the register base
   URL is set by the caller (LaunchProviderController), NOT constant-
-  pinned to `coordinator.streamvc.live`. The validator only enforces
+  pinned to `coordinator.malibu.tech`. The validator only enforces
   "same origin as registrar base URL", not "= production coordinator".
   Is that the right contract? Pros: dev/test flexibility. Cons: if
   someone accidentally instantiates `RegisterClient(coordinatorBaseURL:

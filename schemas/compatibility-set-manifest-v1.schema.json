@@ -107,7 +107,7 @@
       "type": "object"
     }
   },
-  "$id": "https://streamvc.live/schemas/compatibility-set-manifest-v1.schema.json",
+  "$id": "https://malibu.tech/schemas/compatibility-set-manifest-v1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -208,7 +208,10 @@
                   "type": "object"
                 },
                 "label": {
-                  "const": "live.streamvc.macprovider"
+                  "enum": [
+                    "live.malibu.provider",
+                    "live.streamvc.macprovider"
+                  ]
                 },
                 "plist_template": {
                   "additionalProperties": false,
@@ -277,7 +280,10 @@
                   "const": "local"
                 },
                 "designated_identifier": {
-                  "const": "live.streamvc.macprovider.cli"
+                  "enum": [
+                    "live.malibu.provider.cli",
+                    "live.streamvc.macprovider.cli"
+                  ]
                 },
                 "platform": {
                   "const": "darwin-arm64"
@@ -346,7 +352,10 @@
                   "const": "macprovider.exact-service-pid-watchdog.v1"
                 },
                 "monitored_label": {
-                  "const": "live.streamvc.macprovider"
+                  "enum": [
+                    "live.malibu.provider",
+                    "live.streamvc.macprovider"
+                  ]
                 },
                 "plist_template": {
                   "additionalProperties": false,
@@ -381,7 +390,10 @@
                   "type": "object"
                 },
                 "service_label": {
-                  "const": "live.streamvc.macprovider-watchdog"
+                  "enum": [
+                    "live.malibu.provider-watchdog",
+                    "live.streamvc.macprovider-watchdog"
+                  ]
                 }
               },
               "required": [

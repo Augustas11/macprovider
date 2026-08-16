@@ -131,7 +131,7 @@ card with a title, a 1-2-line description, and a single
 copy-to-clipboard snippet:
 
   Step 1 — "Install":
-    Snippet: `curl -fsSL https://get.streamvc.live/install.sh | bash`
+    Snippet: `curl -fsSL https://get.malibu.tech/install.sh | bash`
     Cite: SPEC-003 §4 / FR-C2.
 
   Step 2 — "Verify routable":

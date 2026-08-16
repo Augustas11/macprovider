@@ -535,7 +535,7 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         guard let value = raw as? [String: Any] else { throw UpdateError.compatibilityManifestInvalid("provider_cli") }
         try requireExactKeys(value, ["activation", "designated_identifier", "platform", "status_contract", "version"], "provider_cli")
         try requireString(value["activation"], equals: "local", "cli_activation")
-        try requireString(value["designated_identifier"], equals: "live.streamvc.macprovider.cli", "cli_identifier")
+        try requireString(value["designated_identifier"], oneOf: ["live.malibu.provider.cli", "live.streamvc.macprovider.cli"], "cli_identifier")
         try requireString(value["platform"], equals: "darwin-arm64", "cli_platform")
         try requireString(value["status_contract"], equals: "macprovider.local-status.v1", "cli_status_contract")
         return try requirePattern(value["version"], #"^[0-9]+\.[0-9]+\.[0-9]+$"#, "cli_version")
@@ -546,7 +546,7 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         try requireExactKeys(value, ["activation", "contract", "install_contract", "label", "plist_template"], "launchd")
         try requireString(value["activation"], equals: "local", "launchd_activation")
         try requireString(value["contract"], equals: "macprovider.launch-agent.v1", "launchd_contract")
-        try requireString(value["label"], equals: "live.streamvc.macprovider", "launchd_label")
+        try requireString(value["label"], oneOf: ["live.malibu.provider", "live.streamvc.macprovider"], "launchd_label")
         try validateArtifact(
             value["install_contract"],
             expectedPath: "compatibility-set-local/install.sh",
@@ -566,8 +566,8 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         try requireExactKeys(value, ["activation", "contract", "monitored_label", "plist_template", "script", "service_label"], "watchdog")
         try requireString(value["activation"], equals: "local", "watchdog_activation")
         try requireString(value["contract"], equals: "macprovider.exact-service-pid-watchdog.v1", "watchdog_contract")
-        try requireString(value["monitored_label"], equals: "live.streamvc.macprovider", "watchdog_monitored_label")
-        try requireString(value["service_label"], equals: "live.streamvc.macprovider-watchdog", "watchdog_service_label")
+        try requireString(value["monitored_label"], oneOf: ["live.malibu.provider", "live.streamvc.macprovider"], "watchdog_monitored_label")
+        try requireString(value["service_label"], oneOf: ["live.malibu.provider-watchdog", "live.streamvc.macprovider-watchdog"], "watchdog_service_label")
         try validateArtifact(
             value["script"],
             expectedPath: "compatibility-set-local/watchdog.sh",
@@ -743,6 +743,12 @@ struct CompatibilitySetManifest: Equatable, Sendable {
 
     private static func requireString(_ raw: Any?, equals expected: String, _ label: String) throws {
         guard raw as? String == expected else { throw UpdateError.compatibilityManifestInvalid(label) }
+    }
+
+    private static func requireString(_ raw: Any?, oneOf expected: Set<String>, _ label: String) throws {
+        guard let value = raw as? String, expected.contains(value) else {
+            throw UpdateError.compatibilityManifestInvalid(label)
+        }
     }
 
     @discardableResult

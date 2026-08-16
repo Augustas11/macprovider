@@ -20,7 +20,7 @@ Severity: MEDIUM
 
 Problem: The new `/poolz` URL builder has no tests for trailing-slash `PublicCatalogBaseURL` or host-derived fallback URLs.
 
-The implementation trims configured base URLs before appending `/catalog/<id>` and `/catalog/pubkey`, and falls back to `scheme://r.Host` when `PublicCatalogBaseURL` is empty. The only positive test uses `https://coordinator.streamvc.live` without a trailing slash, so it does not lock the slash-normalization path, host-with-port path, IPv6 host path, or empty-config fallback path called out in the CODE lens. This is not a current functional failure in the inspected code, but it leaves the URL-construction acceptance surface under-specified.
+The implementation trims configured base URLs before appending `/catalog/<id>` and `/catalog/pubkey`, and falls back to `scheme://r.Host` when `PublicCatalogBaseURL` is empty. The only positive test uses `https://coordinator.malibu.tech` without a trailing slash, so it does not lock the slash-normalization path, host-with-port path, IPv6 host path, or empty-config fallback path called out in the CODE lens. This is not a current functional failure in the inspected code, but it leaves the URL-construction acceptance surface under-specified.
 
 Suggested resolution direction: Extend `poolz_catalog_test.go` with table cases for configured base URL with a trailing slash, no configured base with `Host: example.test:8443`, and an IPv6 host such as `[2001:db8::1]:8443`.
 

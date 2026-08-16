@@ -64,6 +64,7 @@ names = {
     "launchd_label_is_disabled", "capture_manual_provider_for_recovery",
     "pid_is_live_non_zombie", "stop_owned_manual_provider",
     "validate_port_value", "ensure_port_free", "reclaim_launchd_service",
+    "reclaim_legacy_launchd_service",
 }
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 i = 0
@@ -82,6 +83,12 @@ while i < len(lines):
             break
 PY
 printf '%s\n' 'REFERRAL_REPLACE_INCUMBENT="${REFERRAL_REPLACE_INCUMBENT:-0}"' >> "$TMP/functions.sh"
+printf '%s\n' 'PROVIDER_LABEL="${PROVIDER_LABEL:-live.malibu.provider}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_PROVIDER_LABEL="${LEGACY_PROVIDER_LABEL:-live.streamvc.macprovider}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_PLIST_PATH="${LEGACY_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist}"' >> "$TMP/functions.sh"
+printf '%s\n' 'WATCHDOG_LABEL="${WATCHDOG_LABEL:-live.malibu.provider-watchdog}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_WATCHDOG_LABEL="${LEGACY_WATCHDOG_LABEL:-live.streamvc.macprovider-watchdog}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_WATCHDOG_PLIST_PATH="${LEGACY_WATCHDOG_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist}"' >> "$TMP/functions.sh"
 
 # Emit a FULL-schema lifecycle-state record matching the real store's
 # JSONEncoder(.sortedKeys) output (compact, alphabetically sorted keys). This is
@@ -398,7 +405,7 @@ def _version_value(raw, default):
 override_handoff_operation = os.environ.get("PREPARED_OVERRIDE_HANDOFF_OPERATION", "")
 handoff_operation_id = override_handoff_operation or operation_id
 override_service_identity = os.environ.get("PREPARED_OVERRIDE_SERVICE_IDENTITY", "")
-service_identity = override_service_identity or "live.streamvc.macprovider"
+service_identity = override_service_identity or "live.malibu.provider"
 override_target_path = os.environ.get("PREPARED_OVERRIDE_TARGET_PATH", "")
 target_executable_path = (
     override_target_path
@@ -523,20 +530,20 @@ make_case() {
   printf '%s\n' \
     '<?xml version="1.0" encoding="UTF-8"?>' \
     '<plist version="1.0"><dict>' \
-    '<key>Label</key><string>live.streamvc.macprovider</string>' \
+    '<key>Label</key><string>live.malibu.provider</string>' \
     '<key>ProgramArguments</key><array>' \
     "<string>$home/macprovider/macprovider-cli</string>" \
     '</array><key>Comment</key><string>old-provider-plist</string>' \
-    '</dict></plist>' > "$home/Library/LaunchAgents/live.streamvc.macprovider.plist"
+    '</dict></plist>' > "$home/Library/LaunchAgents/live.malibu.provider.plist"
   printf 'old-watchdog\n' > "$home/.local/share/macprovider-watchdog/macprovider-health-monitor"
   printf '%s\n' \
     '<?xml version="1.0" encoding="UTF-8"?>' \
     '<plist version="1.0"><dict>' \
-    '<key>Label</key><string>live.streamvc.macprovider-watchdog</string>' \
+    '<key>Label</key><string>live.malibu.provider-watchdog</string>' \
     '<key>ProgramArguments</key><array>' \
     "<string>$home/.local/share/macprovider-watchdog/macprovider-health-monitor</string>" \
     '</array><key>Comment</key><string>old-watchdog-plist</string>' \
-    '</dict></plist>' > "$home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+    '</dict></plist>' > "$home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
   printf '{"version":"old"}\n' > "$home/Library/Application Support/macprovider/install_manifest.json"
   # Seed a prior lifecycle-state file by default so rollback must restore its
   # exact prior contents; the lifecycle_absent_* cases delete it to exercise the
@@ -563,11 +570,11 @@ printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
 service_file="$CASE_ROOT/service-active"
 disabled_file="$CASE_ROOT/service-disabled"
 case "$*" in
-  *macprovider-install-recovery*)
+  *macprovider-install-recovery*|*malibu.provider-install-recovery*)
     service_file="$CASE_ROOT/recovery-service-active"
     disabled_file="$CASE_ROOT/recovery-service-disabled"
     ;;
-  *macprovider-watchdog*)
+  *macprovider-watchdog*|*malibu.provider-watchdog*)
     service_file="$CASE_ROOT/watchdog-service-active"
     disabled_file="$CASE_ROOT/watchdog-service-disabled"
     ;;
@@ -576,22 +583,22 @@ case "$1" in
   print)
     [ -f "$service_file" ] || exit 1
     case "$*" in
-      *macprovider-watchdog*)
+      *macprovider-watchdog*|*malibu.provider-watchdog*)
         printf 'program = %s\npath = %s\n' \
           "$CASE_ROOT/home/.local/share/macprovider-watchdog/macprovider-health-monitor" \
-          "$CASE_ROOT/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+          "$CASE_ROOT/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
         ;;
       *)
         printf 'program = %s\npath = %s\n' \
           "$CASE_ROOT/home/macprovider/macprovider-cli" \
-          "$CASE_ROOT/home/Library/LaunchAgents/live.streamvc.macprovider.plist"
+          "$CASE_ROOT/home/Library/LaunchAgents/live.malibu.provider.plist"
         ;;
     esac
     ;;
   print-disabled)
     printf 'disabled services = {\n'
-    [ ! -f "$CASE_ROOT/service-disabled" ] || printf '  "live.streamvc.macprovider" => true\n'
-    [ ! -f "$CASE_ROOT/watchdog-service-disabled" ] || printf '  "live.streamvc.macprovider-watchdog" => true\n'
+    [ ! -f "$CASE_ROOT/service-disabled" ] || printf '  "live.malibu.provider" => true\n'
+    [ ! -f "$CASE_ROOT/watchdog-service-disabled" ] || printf '  "live.malibu.provider-watchdog" => true\n'
     printf '}\n'
     ;;
   bootout)
@@ -599,7 +606,7 @@ case "$1" in
     rm -f "$service_file"
     ;;
   bootstrap)
-    if printf '%s' "$*" | grep -q 'macprovider-install-recovery'; then
+    if printf '%s' "$*" | grep -Eq 'macprovider-install-recovery|malibu[.]provider-install-recovery'; then
       : > "$service_file"
       exit 0
     fi
@@ -611,7 +618,7 @@ case "$1" in
     : > "$service_file"
     ;;
   kickstart)
-    if printf '%s' "$*" | grep -q 'macprovider-install-recovery'; then
+    if printf '%s' "$*" | grep -Eq 'macprovider-install-recovery|malibu[.]provider-install-recovery'; then
       exit 0
     fi
     if [ "${FAIL_ONCE_ACTION:-}" = "kickstart" ] && [ -f "$CASE_ROOT/fail-once" ]; then
@@ -877,11 +884,11 @@ run_case() {
     missing-provider-plist)
       # A loaded provider without a recoverable plist must fail before durable
       # recovery is published; rollback cannot safely recreate that service.
-      rm -f "$root/home/Library/LaunchAgents/live.streamvc.macprovider.plist"
+      rm -f "$root/home/Library/LaunchAgents/live.malibu.provider.plist"
       ;;
     missing-watchdog-plist)
       # Apply the same pre-publication invariant to a loaded watchdog.
-      rm -f "$root/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+      rm -f "$root/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
       ;;
     serve-snapshot)
       # A-01: a serve-written snapshot restores byte-exact (serve can always
@@ -937,14 +944,14 @@ run_case() {
       PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
       RECOMMENDATION_PATH="$CONFIG_DIR/last-recommendation.json"
       INSTALL_LOCK_PATH="$CONFIG_DIR/install.lock"
-      INSTALL_RECOVERY_LABEL="live.streamvc.macprovider-install-recovery"
+      INSTALL_RECOVERY_LABEL="live.malibu.provider-install-recovery"
       INSTALL_RECOVERY_PLIST_PATH="$HOME/Library/LaunchAgents/${INSTALL_RECOVERY_LABEL}.plist"
-      PROVIDER_LABEL="live.streamvc.macprovider"
-      PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
+      PROVIDER_LABEL="live.malibu.provider"
+      PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider.plist"
       WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
       WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
-      WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
-      WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
+      WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+      WATCHDOG_LABEL="live.malibu.provider-watchdog"
       MANIFEST_PATH="$HOME/Library/Application Support/macprovider/install_manifest.json"
       LIFECYCLE_STATE_PATH="$HOME/Library/Application Support/macprovider/lifecycle/state-v1.json"
       LIFECYCLE_LEASE_PATH="$HOME/Library/Application Support/macprovider/lifecycle/lease.json"
@@ -1078,7 +1085,7 @@ run_case() {
           launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
           launchctl bootstrap "gui/$UID" "$PLIST_PATH"
           : > "$CASE_ROOT/fail-once"
-          FAIL_ONCE_ACTION=kickstart launchctl kickstart -k "gui/$UID/live.streamvc.macprovider"
+          FAIL_ONCE_ACTION=kickstart launchctl kickstart -k "gui/$UID/live.malibu.provider"
           ;;
         manual-self-test) exit 9 ;;
         new-manual-self-test)
@@ -1097,12 +1104,12 @@ MANUAL
         self-test|credential-self-test|ordinary-token-self-test)
           launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
           launchctl bootout "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || true
-          launchctl enable "gui/$UID/live.streamvc.macprovider"
+          launchctl enable "gui/$UID/live.malibu.provider"
           launchctl enable "gui/$UID/$WATCHDOG_LABEL"
           printf "transaction-created\n" > "$INSTALL_TX_BACKUP/provider-service-created"
           printf "transaction-created\n" > "$INSTALL_TX_BACKUP/watchdog-service-created"
           launchctl bootstrap "gui/$UID" "$PLIST_PATH"
-          launchctl kickstart -k "gui/$UID/live.streamvc.macprovider"
+          launchctl kickstart -k "gui/$UID/live.malibu.provider"
           launchctl bootstrap "gui/$UID" "$WATCHDOG_PLIST_PATH"
           launchctl kickstart -k "gui/$UID/$WATCHDOG_LABEL"
           exit 9
@@ -1148,9 +1155,9 @@ assert_old_install_files() {
   grep -F 'model: old-model' "$home/.config/macprovider/config.yaml" >/dev/null
   grep -F 'upgrade-provider' "$home/.config/macprovider/provider_id" >/dev/null
   grep -F '"model_id":"old-model"' "$home/.config/macprovider/last-recommendation.json" >/dev/null
-  grep -F 'old-provider-plist' "$home/Library/LaunchAgents/live.streamvc.macprovider.plist" >/dev/null
+  grep -F 'old-provider-plist' "$home/Library/LaunchAgents/live.malibu.provider.plist" >/dev/null
   grep -F 'old-watchdog' "$home/.local/share/macprovider-watchdog/macprovider-health-monitor" >/dev/null
-  grep -F 'old-watchdog-plist' "$home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" >/dev/null
+  grep -F 'old-watchdog-plist' "$home/Library/LaunchAgents/live.malibu.provider-watchdog.plist" >/dev/null
   grep -F '"version":"old"' "$home/Library/Application Support/macprovider/install_manifest.json" >/dev/null
   [ "$(readlink "$home/.local/bin/macprovider-cli")" = "$home/macprovider/macprovider-cli" ]
 }
@@ -1180,7 +1187,7 @@ assert_recovery_preserved() {
   [ -s "$recovery/state.sh" ]
   [ -s "$recovery/recover.sh" ]
   [ -x "$recovery/observe.sh" ]
-  grep -F 'REC_INSTALL_RECOVERY_LABEL=live.streamvc.macprovider-install-recovery' "$recovery/state.sh" >/dev/null
+  grep -F 'REC_INSTALL_RECOVERY_LABEL=live.malibu.provider-install-recovery' "$recovery/state.sh" >/dev/null
   grep -F 'fcntl.flock(lock_fd, fcntl.LOCK_EX)' "$recovery/observe.sh" >/dev/null
   grep -F "Run exactly: bash '$recovery/recover.sh'" "$root/stderr.log" >/dev/null
 }
@@ -1292,7 +1299,7 @@ assert_old_install "$TMP/pre_cutover_prefetch_failure"
 [ -f "$TMP/pre_cutover_prefetch_failure/watchdog-service-active" ]
 [ -z "$(recovery_dir "$TMP/pre_cutover_prefetch_failure")" ]
 if grep -F 'bootout gui/' "$TMP/pre_cutover_prefetch_failure/launchctl.log" \
-    | grep -F 'live.streamvc.macprovider.plist' >/dev/null; then
+    | grep -F 'live.malibu.provider.plist' >/dev/null; then
   echo "pre-cutover failure stopped the incumbent provider" >&2
   exit 1
 fi
@@ -1378,7 +1385,7 @@ grep -F 'provider_id: "mp-0123456789abcdef0123456789abcdef"' \
 grep -F 'provider_token: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   "$root/home/.config/macprovider/config.yaml" >/dev/null
 [ "$(cat "$root/home/.config/macprovider/provider_id")" = 'mp-0123456789abcdef0123456789abcdef' ]
-grep -F 'old-provider-plist' "$root/home/Library/LaunchAgents/live.streamvc.macprovider.plist" >/dev/null
+grep -F 'old-provider-plist' "$root/home/Library/LaunchAgents/live.malibu.provider.plist" >/dev/null
 grep -F 'old-watchdog' "$root/home/.local/share/macprovider-watchdog/macprovider-health-monitor" >/dev/null
 grep -F '"version":"old"' "$root/home/Library/Application Support/macprovider/install_manifest.json" >/dev/null
 [ -z "$(recovery_dir "$root")" ]
@@ -1447,7 +1454,7 @@ assert_snapshot_aborted_pre_mutation() {
   grep -F "$reason" "$root/stderr.log" >/dev/null
   # The incumbent provider was never stopped.
   if grep -F 'bootout gui/' "$root/launchctl.log" \
-      | grep -F 'live.streamvc.macprovider.plist' >/dev/null; then
+      | grep -F 'live.malibu.provider.plist' >/dev/null; then
     echo "snapshot failure stopped the incumbent provider" >&2
     exit 1
   fi
@@ -1477,13 +1484,13 @@ assert_snapshot_aborted_pre_mutation "$TMP/lifecycle_oversized" lifecycle_state_
 run_case loaded_provider_without_plist "" "" "" self-test active bind missing-provider-plist
 root="$TMP/loaded_provider_without_plist"
 assert_snapshot_aborted_pre_mutation "$root" 'loaded provider has no recoverable launchd plist'
-[ ! -e "$root/home/Library/LaunchAgents/live.streamvc.macprovider.plist" ]
+[ ! -e "$root/home/Library/LaunchAgents/live.malibu.provider.plist" ]
 [ -z "$(find "$root/home/.config/macprovider" -maxdepth 1 -type d -name 'install-recovery-*.staging' -print -quit)" ]
 
 run_case loaded_watchdog_without_plist "" "" "" self-test active bind missing-watchdog-plist
 root="$TMP/loaded_watchdog_without_plist"
 assert_snapshot_aborted_pre_mutation "$root" 'loaded watchdog has no recoverable launchd plist'
-[ ! -e "$root/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" ]
+[ ! -e "$root/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist" ]
 [ -z "$(find "$root/home/.config/macprovider" -maxdepth 1 -type d -name 'install-recovery-*.staging' -print -quit)" ]
 
 # ---------------------------------------------------------------------------
@@ -2029,7 +2036,7 @@ fi
 # -> REMOVED (Finding 2). The Swift store only ever writes launchd-label service
 # identities, which never contain a space.
 lease_fixture="$TMP/lease_prepared_handoff_service_identity_space.json"
-PREPARED_OVERRIDE_SERVICE_IDENTITY="live.streamvc macprovider" \
+PREPARED_OVERRIDE_SERVICE_IDENTITY="live.malibu provider" \
   write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-7" 999999 valid
 MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
   run_case lease_prepared_handoff_service_identity_space "" "" "" self-test

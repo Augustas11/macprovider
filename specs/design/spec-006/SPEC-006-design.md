@@ -14,7 +14,7 @@ turning the coordinator into an abuse magnet.
 ### Current Network
 As of the May 28, 2026 decision log, Mac Provider has crossed from
 prototype into a small live network.
-The coordinator is live at `https://coordinator.streamvc.live`.
+The coordinator is live at `https://coordinator.malibu.tech`.
 The coordinator exposes an OpenAI-compatible buyer API:
 - `GET /v1/models`
 - `POST /v1/chat/completions`
@@ -23,7 +23,7 @@ The provider side has moved to outbound WebSocket tunneling for new
 providers.
 That is the important infrastructure fact.
 Providers do not need public inbound URLs in the current architecture.
-They connect out to `wss://coordinator.streamvc.live/ws/provider`.
+They connect out to `wss://coordinator.malibu.tech/ws/provider`.
 The coordinator routes buyer HTTP requests over that provider WebSocket
 when needed.
 Pinned providers can still run via legacy direct tunnel paths.
@@ -43,7 +43,7 @@ The coordinator has also demonstrated:
 - Provider reconnect after coordinator restart.
 - Basic provider-side capacity fields.
 - Request logs in SQLite.
-- Public provider onboarding through `get.streamvc.live/install.sh`.
+- Public provider onboarding through `get.malibu.tech/install.sh`.
 ### What Buyers Can Use Today
 The buyer can call the coordinator with standard OpenAI-shaped chat
 requests.
@@ -448,7 +448,7 @@ Key shape:
 Authentication flow:
 - Unauthenticated demo traffic allowed only through the front door proxy
   and a tiny per-IP quota.
-- API traffic to `api.streamvc.live` or a protected coordinator path
+- API traffic to `api.malibu.tech` or a protected coordinator path
   uses `Authorization: Bearer <key>`.
 - Invalid/missing key receives an OpenAI-shaped 401.
 This is standard, easy, and enough for v1.
@@ -608,7 +608,7 @@ Question: what does the existing Vercel demo become?
 #### Existing Demo Reality
 The repo contains `beta/web`.
 It is a Vercel single-page chat UI.
-It currently proxies to `m1.streamvc.live` and `m4.streamvc.live`
+It currently proxies to `m1.malibu.tech` and `m4.malibu.tech`
 through edge functions.
 It proves "seeing is believing":
 - choose a Mac.
@@ -637,7 +637,7 @@ The same surface teaches:
 - the API is simple.
 - the limits are visible.
 #### Option C: New API Site
-A clean API site at `api.streamvc.live` or `streamvc.live/api` is
+A clean API site at `api.malibu.tech` or `malibu.tech/api` is
 appealing.
 Building it from scratch is unnecessary if the Vercel demo is already
 the natural front door.
@@ -657,9 +657,9 @@ Turn the existing Vercel demo into the front door:
 - Keep one canonical public URL.
 Recommended domain shape:
 - Front door: existing Vercel demo initially, optionally mapped to
-  `streamvc.live`.
-- API base: `https://coordinator.streamvc.live` for v1 if auth proxy is
-  added there, or `https://api.streamvc.live` if a small API gateway is
+  `malibu.tech`.
+- API base: `https://coordinator.malibu.tech` for v1 if auth proxy is
+  added there, or `https://api.malibu.tech` if a small API gateway is
   cleaner.
 - Avoid separate docs subdomain in v1.
 One person needs one surface.
@@ -985,7 +985,7 @@ A gateway is cleaner only if modifying the coordinator risks destabilizing
 the provider routing path.
 ## 5. Open Questions For Operator
 1. Where should the canonical public API live?
-`coordinator.streamvc.live` is already real; `api.streamvc.live` may be
+`coordinator.malibu.tech` is already real; `api.malibu.tech` may be
 cleaner as a buyer-facing name.
 2. Is GitHub OAuth acceptable as the first identity method?
 It is lower support than email magic links, but excludes users without

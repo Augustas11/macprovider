@@ -51,7 +51,7 @@ struct AutotuneRecommendSimulator: @unchecked Sendable {
     var bakedCandidateCatalogBytes: () throws -> Data
     var bakedDemandRankBytes: () throws -> Data
 
-    static let liveRateCardURL = URL(string: "https://coordinator.streamvc.live/v1/rate-card")!
+    static let liveRateCardURL = URL(string: "https://coordinator.malibu.tech/v1/rate-card")!
 
     // Dedicated URLSession that refuses HTTP redirects. Reuses the vetted
     // NoRedirectURLSessionDelegate from CoordinatorClient.swift so a 3xx
@@ -73,10 +73,10 @@ struct AutotuneRecommendSimulator: @unchecked Sendable {
     static let production = AutotuneRecommendSimulator(
         fetchRateCard: { url in
             guard url.scheme == "https",
-                  url.host == "coordinator.streamvc.live",
+                  url.host == "coordinator.malibu.tech",
                   url.path == "/v1/rate-card"
             else {
-                throw ValidationError("@LIVE rate-card URL must be pinned to coordinator.streamvc.live/v1/rate-card")
+                throw ValidationError("@LIVE rate-card URL must be pinned to coordinator.malibu.tech/v1/rate-card")
             }
             let (data, response) = try await noRedirectRateCardSession.data(from: url)
             if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {

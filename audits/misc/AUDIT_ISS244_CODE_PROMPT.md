@@ -14,7 +14,7 @@ The script is a one-shot bash deploy-from-operator-Mac wrapper that SSHes into a
 
 ### The fix (three layered changes)
 
-(a) `dist/nginx-{coordinator,stats}.streamvc.live.conf` ship with `ssl_certificate` lines UNCOMMENTED. The deploy-script sed-surgery `s|# ssl_certificate|...|g` stays as a defensive no-op.
+(a) `dist/nginx-{coordinator,stats}.malibu.tech.conf` ship with `ssl_certificate` lines UNCOMMENTED. The deploy-script sed-surgery `s|# ssl_certificate|...|g` stays as a defensive no-op.
 
 (b) Step 5 no longer touches the per-domain config of any domain that already has a valid cert at `/etc/letsencrypt/live/<domain>/fullchain.pem`. A new step 4b classifies domains into `DOMAINS_HAVE_CERT` vs `DOMAINS_NEED_CERT` via one SSH round-trip.
 
@@ -22,7 +22,7 @@ The script is a one-shot bash deploy-from-operator-Mac wrapper that SSHes into a
 
 Step 6b installs the full TLS vhost ONLY for `DOMAINS_HAVE_CERT ∪ DOMAINS_ISSUED_OK`. Failed-issuance domains keep their ACME stub from step 5.
 
-End-of-script policy: non-zero exit 9 ONLY if the PRIMARY `$DOMAIN` itself failed. Non-primary failures (e.g. stats.streamvc.live NXDOMAIN) are WARN-only because step 8 has already verified `$DOMAIN/healthz`.
+End-of-script policy: non-zero exit 9 ONLY if the PRIMARY `$DOMAIN` itself failed. Non-primary failures (e.g. stats.malibu.tech NXDOMAIN) are WARN-only because step 8 has already verified `$DOMAIN/healthz`.
 
 ## Your job
 
@@ -50,8 +50,8 @@ If no findings at a severity, write the severity header followed by "(none)".
 
 Read and audit:
 - `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/deploy-pearl-vps.sh` (full file)
-- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
-- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-stats.streamvc.live.conf`
+- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
+- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-stats.malibu.tech.conf`
 
 Reference the prior state via `git -C /Users/augstar/macprovider-iss244 show HEAD~1:phase4-coordinator/dist/deploy-pearl-vps.sh` if useful.
 

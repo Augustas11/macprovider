@@ -1,4 +1,4 @@
-# smoke.yaml — basic live sanity scenario against api.streamvc.live.
+# smoke.yaml — basic live sanity scenario against api.malibu.tech.
 # One buyer, three sequential non-streaming prompts, conservative
 # max_tokens so a run costs cents, not dollars.
 #
@@ -15,7 +15,7 @@
 name: smoke
 description: |
   Live sanity scenario: one buyer fires three sequential non-streaming
-  chat completions against api.streamvc.live. Confirms harness pipeline
+  chat completions against api.malibu.tech. Confirms harness pipeline
   end-to-end against the live network.
 
 expected_shape: |
@@ -27,8 +27,8 @@ expected_shape: |
    - No silent hangs, no orphan 5xx.
 
 target:
-  gateway_url: https://api.streamvc.live
-  coordinator_url: https://coordinator.streamvc.live
+  gateway_url: https://api.malibu.tech
+  coordinator_url: https://coordinator.malibu.tech
   buyer_token: ${BUYER_TOKEN}
   # Pearl SSH alias from ~/.ssh/config. DB files belong to the
   # `macprovider` service user; db_sudo_user wraps sqlite3 in sudo -u.

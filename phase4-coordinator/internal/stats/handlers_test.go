@@ -52,7 +52,7 @@ func TestProviderNoRowUsesFreshComponentSnapshot(t *testing.T) {
 	h.handleProvider(rec, req, authResult{
 		projection:    "partner",
 		originPresent: true,
-		originValue:   "https://console.streamvc.live",
+		originValue:   "https://console.malibu.tech",
 		matchedKey: &store.PartnerKey{
 			ID:         17,
 			ProviderID: sql.NullString{String: "p_empty", Valid: true},
@@ -88,7 +88,7 @@ func TestProviderIdlePrewarmFailureReturnsEmptyOptionalBlock(t *testing.T) {
 	h.handleProvider(rec, req, authResult{
 		projection:    "partner",
 		originPresent: true,
-		originValue:   "https://console.streamvc.live",
+		originValue:   "https://console.malibu.tech",
 		matchedKey: &store.PartnerKey{
 			ID:         17,
 			ProviderID: sql.NullString{String: "p_empty", Valid: true},
@@ -123,7 +123,7 @@ func TestProviderIdlePrewarmReadIsBounded(t *testing.T) {
 	h.handleProvider(rec, req, authResult{
 		projection:    "partner",
 		originPresent: true,
-		originValue:   "https://console.streamvc.live",
+		originValue:   "https://console.malibu.tech",
 		matchedKey: &store.PartnerKey{
 			ID:         17,
 			ProviderID: sql.NullString{String: "p_empty", Valid: true},

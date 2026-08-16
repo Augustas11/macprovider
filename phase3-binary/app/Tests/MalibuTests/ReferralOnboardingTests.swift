@@ -25,7 +25,7 @@ final class ReferralOnboardingTests: XCTestCase {
         for input in [
             "http://malibu.tech/j/\(validCode)",
             "https://evil.example/j/\(validCode)",
-            "https://coordinator.streamvc.live/j/\(validCode)",
+            "https://coordinator.malibu.tech/j/\(validCode)",
             "https://user@malibu.tech/j/\(validCode)",
             "https://malibu.tech:443/j/\(validCode)",
             "https://malibu.tech/j#/\(validCode)?next=evil",
@@ -244,7 +244,7 @@ final class ReferralOnboardingTests: XCTestCase {
                             "path": "compatibility-set-local/install.sh",
                             "sha256": digest,
                         ],
-                        "label": "live.streamvc.macprovider",
+                        "label": "live.malibu.provider",
                         "plist_template": [:],
                     ],
                     "malibu_app": [:],

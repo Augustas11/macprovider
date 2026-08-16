@@ -8,7 +8,7 @@ enum ProviderConflict: Equatable {
 }
 
 struct ProviderConflictDetector {
-    static let launchdLabel = "live.streamvc.macprovider"
+    static let launchdLabel = "live.malibu.provider"
 
     private let launchctlList: () throws -> String
     private let processList: () throws -> [(pid: Int32, argv: [String])]
@@ -193,7 +193,7 @@ struct ProviderDrainer {
     init(
         uid: uid_t = getuid(),
         plistURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist"),
+            .appendingPathComponent("Library/LaunchAgents/live.malibu.provider.plist"),
         launchctlRunner: @escaping LaunchctlRunner = ProviderDrainer.defaultLaunchctlRunner,
         signalSender: @escaping SignalSender = { Darwin.kill($0, $1) },
         processIsRunning: @escaping ProcessRunningProbe = ProviderDrainer.defaultProcessIsRunning,

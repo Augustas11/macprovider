@@ -122,7 +122,7 @@ the rotatable receipt key. **Grep-verified sweep (zero unqualified receipt-key-a
 sites remain):** §3 banner, §3 table, §4.1, §4.3 `identity_signature` field def, and §6.1
 step 7e now all state that the durable `mp-*` admission identity is the **bootstrap
 identity** — described in that revision as a stable, non-rotating snapshot of the first receipt key in slot
-`com.streamvc.macprovider.bootstrap-identity-key` (`ReceiptKeyStore.swift:23,66`;
+`com.malibu.provider.bootstrap-identity-key` (`ReceiptKeyStore.swift:23,66`;
 `identity_signature.go:127`) — while the rotatable `.receipt-key` signs receipts and is
 only a legacy verify fallback. §3 table now lists all three Keychain services with
 lifetimes. **Fidelity:** startup-route table adds the two missing fallback routes
@@ -142,7 +142,7 @@ binding/swap SPEC-027-gated in §9.2 + AC-026-06 too (uniform `501`). **Fidelity
 token-backup deletion documented as best-effort/may-persist (§2/§8.4 aligned to §7);
 "coexists unchanged" carries the import token-custody caveat; retry short-circuits when
 healthy (not unconditional rerun); receipt-key Keychain coordinates corrected
-(`com.streamvc.macprovider.receipt-key`, account `<provider_id>` — not
+(`com.malibu.provider.receipt-key`, account `<provider_id>` — not
 `tech.malibu.receipt`/`receipt_key_v1`); §6.2 auto-reopen covers the missing-launchd
 route; App Attest AAGUID non-enforcement documented as a carried coordinator gap. (See
 SPEC-025 v0.5 for the app-side bundle/distribution/Sparkle reconciliations.)
@@ -966,7 +966,7 @@ against v0.1. v0.2 closes each. Load-bearing changes:
 - **App track** — `Malibu.app`, the signed `.dmg` menu-bar wrapper
   introduced by [SPEC-025](./SPEC-025-native-mac-app.md). Brand is
   Malibu; user-visible strings never say "MacProvider",
-  `streamvc.live`, or "node".
+  `malibu.tech`, or "node".
 - **CLI track** — existing `macprovider-cli` binary launched via
   `install.sh` by developer users. As of v0.22, App import stages the YAML bearer in
   CLI Keychain and keeps the private YAML until a restarted launchd process is admitted;
@@ -1012,7 +1012,7 @@ and without entering a wallet address unless they want to.
 ### 1.1 Success criteria
 
 - **Zero external surfaces during onboarding.** No browser tab opens.
-  No `portal.streamvc.live` URL appears in the UI or logs. No GitHub
+  No `portal.malibu.tech` URL appears in the UI or logs. No GitHub
   OAuth screen. No wallet-signing prompt.
 - **≤ 1 click of user intent.** After launch, a single button starts
   every background step. **Reconciled v0.15 to the shipped CLI-wrapper:**
@@ -1109,8 +1109,8 @@ and without entering a wallet address unless they want to.
   `ProviderConfig.isConfigured`) and drives a **monitor**, not a spawn (§7.6).
 - **Reconciled v0.14/v0.18 — NO CLI child is launched.** The app does not launch a CLI
   child with `MACPROVIDER_PROVIDER_TOKEN`; the launchd **provider service**
-  `live.streamvc.macprovider` (KeepAlive) runs AND performs routine restarts of the CLI; a
-  separate companion watchdog `live.streamvc.macprovider-watchdog` only health-observes on
+  `live.malibu.provider` (KeepAlive) runs AND performs routine restarts of the CLI; a
+  separate companion watchdog `live.malibu.provider-watchdog` only health-observes on
   routine ticks (its restart request is a no-op — `install.sh:3575`), except it force-restarts
   the provider service during auto-update rollback recovery (`install.sh:4086,4113`; SPEC-025
   §8) — both installed by `install.sh` — and the app monitors it over HTTP (SPEC-025 §5).
@@ -1141,7 +1141,7 @@ generates, signs with, rotates, or deletes these keys.
 > `install.sh` → `bootstrap-auth` → tokenless WS admission. The `mp-*` provider's durable
 > admission identity begins as the **bootstrap identity** — a snapshot of the FIRST
 > installer receipt key, stored in its own current Keychain slot
-> `com.streamvc.macprovider.bootstrap-identity-key` (`ReceiptKeyStore.swift:23,66-92`).
+> `com.malibu.provider.bootstrap-identity-key` (`ReceiptKeyStore.swift:23,66-92`).
 > Ordinary `identity_signature` for `mp-*` is verified against that bootstrap identity
 > (`CoordinatorClient.swift:1842`; coordinator `identity_signature.go:127`), NOT the
 > rotatable `.receipt-key`, which signs SPEC-015 receipts and may rotate. The current
@@ -1186,7 +1186,7 @@ THREE services — see the bootstrap-identity note below the table):
 
 | Concern              | Identity key (SPEC-026)            | Receipt key (SPEC-015)      |
 |----------------------|-------------------------------------|-----------------------------|
-| Keychain slot        | account `provider_identity_v1` (App identity, dormant §3) | receipt services `com.streamvc.macprovider.receipt-key` / `.prev`, plus admission services `com.streamvc.macprovider.bootstrap-identity-key` (current; legacy name retained), `com.streamvc.macprovider.admission-identity-key.pending`, and `.prev`, all account `<provider_id>` |
+| Keychain slot        | account `provider_identity_v1` (App identity, dormant §3) | receipt services `com.malibu.provider.receipt-key` / `.prev`, plus admission services `com.malibu.provider.bootstrap-identity-key` (current; legacy name retained), `com.malibu.provider.admission-identity-key.pending`, and `.prev`, all account `<provider_id>` |
 | Generated by         | App target on first `Malibu.app` launch | CLI during `bootstrap-auth`, **before** first `serve` (the bootstrap identity snapshots this first key — `BootstrapAuthCommand.swift:50`) |
 | Rotation             | Dormant App-derived `p_*` identity: not rotated | Receipt key: SPEC-015 `rotate-key`; CLI admission key: §4.3 generation-CAS rotation/recovery |
 | Signs                | `/register` body only (dormant App contract) | receipt frames |
@@ -1194,7 +1194,7 @@ THREE services — see the bootstrap-identity note below the table):
 | Exposed to child processes | NO                          | Via SPEC-015 mechanisms unchanged |
 
 **Admission-identity lifecycle (v0.23 — distinct from receipt-key rotation).** The
-`com.streamvc.macprovider.bootstrap-identity-key` service retains its historical name
+`com.malibu.provider.bootstrap-identity-key` service retains its historical name
 and begins as a one-time snapshot of the FIRST receipt key taken at `bootstrap-auth`.
 It is the current admission key and signs `identity_signature`, not receipt frames.
 Admission rotation uses dedicated `.pending` and `.prev` services and the coordinator
@@ -1503,7 +1503,7 @@ Coordinator MUST:
      "trust_tier":          "provisional",
      "trust":               { "attested": false,
                               "rate_limit_bucket": "new_ip" },
-     "coordinator_ws_url":  "wss://coordinator.streamvc.live/v2/provider"
+     "coordinator_ws_url":  "wss://coordinator.malibu.tech/v2/provider"
    }
    ```
 
@@ -1859,7 +1859,7 @@ field names.
 
 ### 4.4 Retire portal OAuth for the App track
 
-The `portal.streamvc.live/onboard` GitHub OAuth flow is retired **for
+The `portal.malibu.tech/onboard` GitHub OAuth flow is retired **for
 the App track only** on the release that ships this spec's
 implementation. CLI track continues to use it during migration.
 Portal deletion is out of scope; portal maintainers mark the endpoint
@@ -1868,7 +1868,7 @@ deprecated in its public docs.
 **Retirement observability:**
 `provider_register_source{track="app"|"cli"|"portal"}` counter is
 incremented on every new-provider registration.
-`portal.streamvc.live/onboard` completions are labeled
+`portal.malibu.tech/onboard` completions are labeled
 `track="portal"`. Retirement trigger for the portal endpoint
 itself: `portal` counter < 10/day for 14 consecutive days.
 **Owner: operator.** Review cadence: monthly. When the trigger
@@ -2051,7 +2051,7 @@ clientDataHash = SHA256(JCS({
   provider_id,
   identity_pubkey,
   register_nonce,          // = the /register `nonce` field
-  coordinator_domain,      // canonical "coordinator.streamvc.live" (bare host, lowercase, no scheme, no trailing slash)
+  coordinator_domain,      // canonical "coordinator.malibu.tech" (bare host, lowercase, no scheme, no trailing slash)
   bundle_id,               // "tech.malibu.app"
   team_id,                 // Apple Developer Team ID that signed the app
   ts_utc                   // member NAME stays `ts_utc`; VALUE is the Unix-SECONDS integer (int64) from parsing /register `ts_utc` — matches coordinator apptrack.go:518-527; NOT the RFC3339 string (see §5.3 hash-contract banner)
@@ -2167,7 +2167,7 @@ slower payout release. Not required for this spec to ship.
 
    a. **Short-circuit:** if a local provider is already healthy AND has a provider
       id, a port, and readable launchd evidence (`install_manifest.json` /
-      `live.streamvc.macprovider.plist`), skip the installer and attach
+      `live.malibu.provider.plist`), skip the installer and attach
       (`CLIInstallRunner.swift:89-103`; `LaunchProviderController.swift:79-87`).
    b. **Run the bundled `install.sh`** (`.runningCLIInstall`) by authenticating
       the exact bundled regular-file bytes and supplying those same bytes to
@@ -2467,7 +2467,7 @@ Instead, install/onboarding state is derived from local evidence at startup
 (`StartupState.detect().route()`, §7.6): the `.installed-by-app` marker,
 `config.yaml`, the conditional provider-ID-bound CLI-custody marker, the redacted CLI
 status contract, and the **launchd install evidence** (`install_manifest.json` /
-`live.streamvc.macprovider.plist`). There is no `v2` vs `v1` schema flag on the live
+`live.malibu.provider.plist`). There is no `v2` vs `v1` schema flag on the live
 path.
 
 The historical v2 JSON shape (retained for provenance):
@@ -2494,7 +2494,7 @@ guard await ProviderConfig.isConfigured else { … }                    // :74-7
 ```
 
 - `launchdInstallEvidenceExists()` is true iff `install_manifest.json` OR
-  `live.streamvc.macprovider.plist` is readable
+  `live.malibu.provider.plist` is readable
   (`LaunchProviderController.swift:374-380`). When it is false the agent **refuses to
   poll** and shows "Click Launch Provider to run the installer" — a legacy app-marker
   config (config + marker but no launchd) routes to onboarding, not a reconnect loop
@@ -2537,7 +2537,7 @@ precedence is (evaluated top-down):
 | 1 | `config.yaml` present but **no** `.installed-by-app` marker (CLI-owned) → **wins even when the launchd provider is healthy** | `.showImportDialog` (§8.4) |
 | 2 | app-owned (marker present) but not yet `isConfigured` (config identity/custody evidence incomplete) | `.showOnboarding` (run `install.sh`) |
 | 3 | App-owned + `isConfigured` AND launchd install evidence present (healthy or attachable) | `.startAgent` (monitor) |
-| 4 | App-owned + `isConfigured` but **launchd install evidence missing** (e.g. the provider-service plist `live.streamvc.macprovider.plist` / `install_manifest.json` removed — the app's gate checks these, NOT the watchdog) | `.showOnboarding` (re-run `install.sh`) |
+| 4 | App-owned + `isConfigured` but **launchd install evidence missing** (e.g. the provider-service plist `live.malibu.provider.plist` / `install_manifest.json` removed — the app's gate checks these, NOT the watchdog) | `.showOnboarding` (re-run `install.sh`) |
 | 5 | launchd install evidence present but **no config** | `.showOnboarding` |
 | 6 | nothing configured | `.showOnboarding` |
 
@@ -3000,7 +3000,7 @@ criteria in §5.2 by 25%.
   100 Mbps connection, with the model download counted.
 - **AC-026-02 (reconciled v0.15).** No user-visible string in the App's
   OWN chrome (window headers, buttons, success card) during the
-  fresh-install flow contains "node", "streamvc.live", "portal", or
+  fresh-install flow contains "node", "malibu.tech", "portal", or
   "sign in". **Exception:** the transient progress line scraped from
   `install.sh` may surface "Downloading provider release from GitHub…"
   (`CLIInstallRunner.swift:124`), and the onboarding body references the

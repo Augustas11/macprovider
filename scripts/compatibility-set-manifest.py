@@ -328,7 +328,7 @@ def validate_payload(value: object) -> dict:
     if not isinstance(cli, dict):
         fail("components.provider_cli: must be an object")
     exact_keys(cli, {"activation", "designated_identifier", "platform", "status_contract", "version"}, "components.provider_cli")
-    if cli["activation"] != "local" or cli["designated_identifier"] != "live.streamvc.macprovider.cli" or cli["platform"] != "darwin-arm64" or cli["status_contract"] != "macprovider.local-status.v1":
+    if cli["activation"] != "local" or cli["designated_identifier"] != "live.malibu.provider.cli" or cli["platform"] != "darwin-arm64" or cli["status_contract"] != "macprovider.local-status.v1":
         fail("components.provider_cli: unsupported executable identity or contract")
     string(cli["version"], "components.provider_cli.version", SEMVER)
 
@@ -336,7 +336,7 @@ def validate_payload(value: object) -> dict:
     if not isinstance(launchd, dict):
         fail("components.launchd: must be an object")
     exact_keys(launchd, {"activation", "contract", "install_contract", "label", "plist_template"}, "components.launchd")
-    if launchd.get("activation") != "local" or launchd.get("contract") != "macprovider.launch-agent.v1" or launchd.get("label") != "live.streamvc.macprovider":
+    if launchd.get("activation") != "local" or launchd.get("contract") != "macprovider.launch-agent.v1" or launchd.get("label") != "live.malibu.provider":
         fail("components.launchd: unsupported service contract")
     validate_artifact(launchd["install_contract"], "compatibility-set-local/install.sh", "components.launchd.install_contract")
     validate_artifact(
@@ -352,8 +352,8 @@ def validate_payload(value: object) -> dict:
     if (
         watchdog.get("activation") != "local"
         or watchdog.get("contract") != "macprovider.exact-service-pid-watchdog.v1"
-        or watchdog.get("monitored_label") != "live.streamvc.macprovider"
-        or watchdog.get("service_label") != "live.streamvc.macprovider-watchdog"
+        or watchdog.get("monitored_label") != "live.malibu.provider"
+        or watchdog.get("service_label") != "live.malibu.provider-watchdog"
     ):
         fail("components.watchdog: unsupported supervision contract")
     validate_artifact(watchdog["script"], "compatibility-set-local/watchdog.sh", "components.watchdog.script")
@@ -604,7 +604,7 @@ def build_manifest(args: argparse.Namespace) -> dict:
                 "activation": "local",
                 "contract": "macprovider.launch-agent.v1",
                 "install_contract": local_artifact(local_directory, "install_contract"),
-                "label": "live.streamvc.macprovider",
+                "label": "live.malibu.provider",
                 "plist_template": local_artifact(local_directory, "provider_plist_template"),
             },
             "malibu_app": {
@@ -621,7 +621,7 @@ def build_manifest(args: argparse.Namespace) -> dict:
             },
             "provider_cli": {
                 "activation": "local",
-                "designated_identifier": "live.streamvc.macprovider.cli",
+                "designated_identifier": "live.malibu.provider.cli",
                 "platform": "darwin-arm64",
                 "status_contract": "macprovider.local-status.v1",
                 "version": provider_cli_version,
@@ -635,10 +635,10 @@ def build_manifest(args: argparse.Namespace) -> dict:
             "watchdog": {
                 "activation": "local",
                 "contract": "macprovider.exact-service-pid-watchdog.v1",
-                "monitored_label": "live.streamvc.macprovider",
+                "monitored_label": "live.malibu.provider",
                 "plist_template": local_artifact(local_directory, "watchdog_plist_template"),
                 "script": local_artifact(local_directory, "watchdog_script"),
-                "service_label": "live.streamvc.macprovider-watchdog",
+                "service_label": "live.malibu.provider-watchdog",
             },
         },
         "release": {

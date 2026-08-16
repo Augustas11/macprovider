@@ -13,7 +13,7 @@ expected_shape: |
      at_least_one_eligible_row tiers and eligible=0 for donor_only_by_ram tiers.
 
 target:
-  coordinator_url: https://coordinator.streamvc.live
+  coordinator_url: https://coordinator.malibu.tech
   cli_bin: ../../phase3-binary/.build/release/macprovider-cli
 
 hardware_matrix:

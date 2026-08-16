@@ -11,7 +11,7 @@
 # Run alongside config-m4.yaml and config-m1.yaml, NOT instead of — direct
 # baselines remain the control group.
 
-tunnel_url: "https://coordinator.streamvc.live"
+tunnel_url: "https://coordinator.malibu.tech"
 
 # Model rotation: coordinator pool may serve multiple models. Pick whatever
 # is most useful for comparison. Default below matches M4's current model

@@ -285,7 +285,7 @@ release-verify.yml should surface a failing check.
   profile embedding. Not needed for our distribution model
   (direct-download from GitHub Releases).
 - **Sparkle auto-update wiring.** Sparkle needs an EdDSA signing key
-  and appcast.xml hosted at `get.streamvc.live`. Follow-up.
+  and appcast.xml hosted at `get.malibu.tech`. Follow-up.
 - **In-App update prompt after release.** No in-App update UI yet;
   users re-download from the Releases page. Follow-up when Sparkle
   lands.

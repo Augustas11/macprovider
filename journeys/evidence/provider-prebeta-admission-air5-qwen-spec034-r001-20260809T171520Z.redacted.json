@@ -252,7 +252,7 @@
       ]
     },
     "public_referral_validation": {
-      "endpoint": "https://coordinator.streamvc.live/v1/referrals/validate",
+      "endpoint": "https://coordinator.malibu.tech/v1/referrals/validate",
       "allowed_origin": "https://malibu.tech",
       "active_invite_code_sha256": "047a648f4557d2f7887b14f91de2a70344a95a0301a5e4547753f083a6374292",
       "active_invite_url_sha256": "60334d5942ad918704bfd1eac373d29143674c46963adbfa5a7654071192fd9c",
@@ -432,7 +432,7 @@
     },
     "buyer_serving_smoke": {
       "observed_at": "2026-08-09T16:40:59.820242898Z",
-      "gateway": "https://api.streamvc.live/v1/chat/completions",
+      "gateway": "https://api.malibu.tech/v1/chat/completions",
       "http_status": 200,
       "model": "mlx-community/Qwen3-8B-4bit",
       "request_id_sha256": "4809d2dfa1806f7040bbc77d05256173ffb434880aedb0a8ab6079e016f76e83",

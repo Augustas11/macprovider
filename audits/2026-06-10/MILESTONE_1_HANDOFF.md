@@ -20,7 +20,7 @@ All PRs:
 | M1-2 | [#36](https://github.com/Augustas11/macprovider/pull/36) | `fix/m1-2-failover-divergences` | ARCH-1, CODE-1 | `phase4-coordinator/internal/buyer/server.go`, `…/server_test.go` |
 | M1-5 | [#37](https://github.com/Augustas11/macprovider/pull/37) | `fix/m1-5-fail-closed-auth` | SECU-5, TEST-5 | `phase4-coordinator/internal/ws/server.go`, `…/billing/endpoints.go`, `…/auth/tokens.go`, two new tests |
 | M1-8 | [#38](https://github.com/Augustas11/macprovider/pull/38) | `fix/m1-8-demo-concurrency-cap` | PERF-6 | `phase5-gateway/internal/router/server.go`, `…/internal/config/config.go`, `gateway.yaml.example`, new test |
-| M1-4 | [#39](https://github.com/Augustas11/macprovider/pull/39) | `fix/m1-4-coordinator-ws-rate-limit` | SECU-1 | `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`, `…/internal/ws/server.go`, `…/internal/config/config.go`, new test |
+| M1-4 | [#39](https://github.com/Augustas11/macprovider/pull/39) | `fix/m1-4-coordinator-ws-rate-limit` | SECU-1 | `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`, `…/internal/ws/server.go`, `…/internal/config/config.go`, new test |
 | M1-6 | [#40](https://github.com/Augustas11/macprovider/pull/40) | `fix/m1-6-deploy-gate-hardening` | DEVE-4, DEVE-5, SECU-3 | `phase5-gateway/dist/deploy-pearl-vps.sh` (new), `…/dist/deploy-pearl-vps.md` (rewritten), `phase4-coordinator/dist/check-deploy-config.sh`, `…/dist/deploy-pearl-vps.sh` |
 | M1-1 | [#41](https://github.com/Augustas11/macprovider/pull/41) | `feat/m1-1-provider-tokens-pinned-tier` | XSEC-1 | `phase3-binary/Sources/MacProviderCore/Config.swift`, `…/macprovider-cli/MacProviderCLI.swift`, `…/macprovider-cli/CoordinatorClient.swift`, three new tests, `specs/SPEC-001-phase3-binary.md` v1.3.1 |
 | M1-7 | [#42](https://github.com/Augustas11/macprovider/pull/42) | `chore/m1-7-modernc-sqlite-bump` | DEPE-1 | `phase4-coordinator/go.mod`, `…/go.sum` |
@@ -99,7 +99,7 @@ verbatim procedure.
     5. Old v1.2.x binaries cannot send tokens — the flag flip IS the
        compatibility cutoff. Document this in `beta/DECISION_CRITERIA.md`.
 4. **M1-4 nginx rollout** (after #39 merges): copy
-   `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf` to Pearl,
+   `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` to Pearl,
    `nginx -t`, `systemctl reload nginx`. Verify rate-limit headers and that no
    legitimate provider trips the 10 req/min cap.
 5. **M1-6 first scripted gateway deploy** (after #40 merges): run

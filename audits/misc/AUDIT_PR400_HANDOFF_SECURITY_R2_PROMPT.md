@@ -55,7 +55,7 @@ every `fullKey != ""` case, regardless of `returnTo`. The cookie is
 `MaxAge=300`.
 
 Security concerns to check:
-- Cookie is scoped to the gateway origin (`api.streamvc.live`) and
+- Cookie is scoped to the gateway origin (`api.malibu.tech`) and
   path `/account`, so no Malibu page can read it — even a compromised
   Malibu return_to page could not exfiltrate the fallback via
   document.cookie.

@@ -60,7 +60,7 @@ const REQ_TIMEOUT_MS = Number(args.get('timeout-ms') || 120000);
 const TOKEN = process.env.MACPROVIDER_BUYER_TOKEN || '';
 
 // §6 production fence: KVS-01a MUST run against a local provider only.
-if (/streamvc\.live|coordinator\.|api\./i.test(BASE) && process.env.KVS01A_ALLOW_REMOTE !== '1') {
+if (/malibu\.tech|coordinator\.|api\./i.test(BASE) && process.env.KVS01A_ALLOW_REMOTE !== '1') {
   process.stderr.write(`kvs-01a: refusing non-local base ${BASE} (§6 production fence)\n`);
   process.exit(3);
 }

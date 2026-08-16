@@ -131,7 +131,7 @@ Attempted to locate cached models for a dry-run benchmark:
 | `mlx-community/gpt-oss-20b-MXFP4-Q8` | snapshots present (20B, 3-shard) |
 | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` | snapshots present (30B) |
 
-At bench time, `live.streamvc.macprovider` was **running** (launchctl state=running,
+At bench time, `live.malibu.provider` was **running** (launchctl state=running,
 PID 64586). Per `.cursor/rules/autotune-benchmarks.mdc`, running decode-bench
 concurrently with the production 30B model on 32 GB risks GPU/RAM contention
 and MLX crashes.
@@ -143,7 +143,7 @@ pass criterion.
 **To run the bench (after draining production provider):**
 ```bash
 # 1. Drain production provider (bench will run a separate model instance)
-launchctl bootout "gui/$(id -u)/live.streamvc.macprovider" 2>/dev/null || true
+launchctl bootout "gui/$(id -u)/live.malibu.provider" 2>/dev/null || true
 
 # 2. Run bench
 .build/arm64-apple-macosx/release/macprovider-cli decode-bench \
@@ -154,8 +154,8 @@ launchctl bootout "gui/$(id -u)/live.streamvc.macprovider" 2>/dev/null || true
   --output state/perf/baseline-qwen25-7b-mlxlm-3.31.4.json
 
 # 3. Restore production provider
-launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/live.streamvc.macprovider.plist 2>/dev/null || true
-launchctl kickstart -k "gui/$(id -u)/live.streamvc.macprovider"
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/live.malibu.provider.plist 2>/dev/null || true
+launchctl kickstart -k "gui/$(id -u)/live.malibu.provider"
 ```
 
 JSON output will be committed to `audits/2026-07-07/decode-bench-harness/` in T0-02.
@@ -230,7 +230,7 @@ in this T0-01 harness. T2-01 will introduce compiled decode and flip
 ## 10. Blockers for T0-02
 
 None from harness side. T0-02 needs:
-1. A maintenance window with `live.streamvc.macprovider` drained
+1. A maintenance window with `live.malibu.provider` drained
 2. `mlx-community/Qwen2.5-7B-Instruct-4bit` downloaded (not yet cached locally)
 3. `mlx-community/gemma-4-26b-a4b-it-4bit` downloaded (not yet cached)
 4. Same for `mlx-community/gpt-oss-20b-MXFP4-Q8` — weights ARE cached; can use immediately

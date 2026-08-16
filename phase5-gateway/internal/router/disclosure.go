@@ -241,7 +241,7 @@ func makeVerifiedModelSettlementDisclosure(includeResponses, includeAnthropicMes
 	return verifiedModelSettlementDisclosure{
 		IncludedPaidEntrypoints: included,
 		ExcludedPaidEntrypoints: []string{
-			"legacy direct-tunnel buyer paths at coordinator.streamvc.live, m4.streamvc.live, and m1.streamvc.live unless separately disabled or migrated behind the gateway paid ledger",
+			"legacy direct-tunnel buyer paths at coordinator.malibu.tech, m4.malibu.tech, and m1.malibu.tech unless separately disabled or migrated behind the gateway paid ledger",
 		},
 		ModelIdentity:       settlementModelIdentityDisclosure,
 		ModelIdentityCaveat: settlementModelIdentityCaveatDisclosure,

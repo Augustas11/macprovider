@@ -201,7 +201,7 @@ An optional day-range filter is accepted: `?from=YYYY-MM-DD&to=YYYY-MM-DD`
 
 ```bash
 curl -s -H "Authorization: Bearer $PROVIDER_TOKEN" \
-  https://coordinator.streamvc.live/providers/$PROVIDER_ID/earnings
+  https://coordinator.malibu.tech/providers/$PROVIDER_ID/earnings
 ```
 
 ---

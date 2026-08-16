@@ -29,7 +29,7 @@ CRITICAL / HIGH / MEDIUM / LOW / INFO with file:line. Merge bar: 0 C / 0 H /
 - **Prod-host reachability (was HIGH).** `rejectProdHost` in
   `internal/scenario/schema.go` now hard-fails validation for any scenario
   declaring `B10` whose `gateway_url` or `coordinator_url` host is
-  `streamvc.live` or a subdomain. Verify a B10 scenario cannot be pointed at
+  `malibu.tech` or a subdomain. Verify a B10 scenario cannot be pointed at
   prod by any URL/env value, subdomain/apex/case variations are covered, and a
   non-B10 scenario is unaffected (test `TestB10_LabOnly_RejectsProdHost`). The
   README prod-stack exception was removed.

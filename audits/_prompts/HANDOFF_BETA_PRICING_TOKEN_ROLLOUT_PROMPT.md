@@ -175,9 +175,9 @@ admission rejection with full context for ops debugging. Add metric
 counters keyed by `(model, tier, decision)`. Estimated 50-100 LOC.
 
 #### 2g — provider portal copy
-Update [portal repo / page] (operator: confirm portal source location; 
-RESEARCH_224 named `portal.streamvc.live` but didn't locate the source). 
-New page explaining tier eligibility. Must run before tier filter goes live 
+Update [portal repo / page] (operator: confirm portal source location;
+RESEARCH_224 named `portal.malibu.tech` but didn't locate the source).
+New page explaining tier eligibility. Must run before tier filter goes live
 so M4 Air owners aren't surprised they can't take 32B-dense.
 
 **Audit loop per [[feedback-build-audit-loop]]**: write SCN-226 + 
@@ -263,13 +263,13 @@ listing every decision the operator must make before Wave 3 ships:
 4. **Cohort cap split** — confirm 20S/50A/30B/20C or change
 5. **Vesting** — confirm 90-day cliff + 12-month linear or change
 6. **Grandfathering** — any existing providers get a tier boost?
-7. **Bench gate thresholds** — RESEARCH_226 set 30 tok/s + 2500-3000ms 
+7. **Bench gate thresholds** — RESEARCH_226 set 30 tok/s + 2500-3000ms
    TTFT; confirm or change
-8. **Portal source location** — where does `portal.streamvc.live` source 
+8. **Portal source location** — where does `portal.malibu.tech` source
    live (Vercel repo? in-tree?), needed for TRACK 2g
-9. **Pearl deploy mechanics** — who clicks `systemctl reload coordinator` 
+9. **Pearl deploy mechanics** — who clicks `systemctl reload coordinator`
    for Wave 1 hot-reload
-10. **PR review pattern for money-path** — 3-lane codex audit is the 
+10. **PR review pattern for money-path** — 3-lane codex audit is the
     automation; do you also want a human pre-merge review beyond 
     antfleet-ops auto-approve?
 
@@ -393,12 +393,12 @@ Stop and ask the operator if you find yourself:
    subsidy across 398 providers — empirical proof that token subsidy is 
    structurally required (not optional).
 3. **MoE-with-small-active-params is the architectural unlock for M4 
-   Air-class hardware** — bandwidth math is over active params, not 
-   nominal. GPT-OSS-20B (3.6B active) runs at 30-50 tok/s on M4 Air vs 
+   Air-class hardware** — bandwidth math is over active params, not
+   nominal. GPT-OSS-20B (3.6B active) runs at 30-50 tok/s on M4 Air vs
    ~8 tok/s for dense Qwen-32B on same hardware.
-4. **Production coordinator** is `coordinator.streamvc.live` (Pearl VPS). 
-   Public installer redirect is `get.streamvc.live/install.sh`.
-5. **The decision log (`beta/DECISION_CRITERIA.md`) is the source of 
+4. **Production coordinator** is `coordinator.malibu.tech` (Pearl VPS).
+   Public installer redirect is `get.malibu.tech/install.sh`.
+5. **The decision log (`beta/DECISION_CRITERIA.md`) is the source of
    truth** for what was decided and why. If you find yourself making 
    a decision that isn't in there, write the entry first, then ship 
    the code.

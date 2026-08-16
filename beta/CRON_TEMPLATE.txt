@@ -27,7 +27,7 @@
 # 7-59/15 9-22 * * *  /Users/augstar/macprovider-poc/beta/scripts/m1-cooperative.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
 
 # Coordinator path — the only active cooperative lane. Every 15 min,
-# fires the cooperative batch through https://coordinator.streamvc.live.
+# fires the cooperative batch through https://coordinator.malibu.tech.
 */15 9-22 * * *  /Users/augstar/macprovider-poc/beta/scripts/coord-cooperative.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
 
 # ─── adversarial (daily) ───────────────────────────────────────────────

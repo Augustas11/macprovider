@@ -23,7 +23,7 @@ per [SPEC-014](../../specs/SPEC-014-provider-portal.md).
    portal host root (served at `/portal-config.json`). Edit the three
    keys to match your deployment:
    - `coordinator_base_url` — the coordinator origin (e.g.
-     `https://coordinator.streamvc.live`).
+     `https://coordinator.malibu.tech`).
    - `releases_repo_owner_name` — GitHub `owner/name` slug (must match
      `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`).
    - `require_provider_tokens` — strict boolean `true`. The portal
@@ -39,7 +39,7 @@ per [SPEC-014](../../specs/SPEC-014-provider-portal.md).
    `/v1/provider/malibu-accrual`, and `/providers/{id}/earnings` to the
    coordinator (SPEC-014 §3 + Open Q9). The MALIBU accrual route must
    preserve the provider `Authorization` header and use the buyer-mux
-   coordinator port, as shown in `dist/nginx-portal.streamvc.live.conf`.
+   coordinator port, as shown in `dist/nginx-portal.malibu.tech.conf`.
    For GitHub auth mode, also forward `/v1/auth/github/*`,
    `/v1/auth/me/*`, `/v1/auth/logout`, and
    `/v1/install/pair/refresh`. If the proxy is missing, the portal

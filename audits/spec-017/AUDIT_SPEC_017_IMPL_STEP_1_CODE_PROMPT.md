@@ -154,7 +154,7 @@ D.3  Each opened pool has a deferred Close in startup so SIGTERM
      drains cleanly. Missing Close is HIGH.
 D.4  Pool tuning (max open conns, max idle, conn max lifetime)
      is at least set explicitly to non-default values matching
-     a coordinator instance running at coordinator.streamvc.live
+     a coordinator instance running at coordinator.malibu.tech
      load. Pool defaults are pgx/lib/pq's defaults, which are
      typically not safe for production. Unset is MEDIUM (no
      SLA target in Step 1).

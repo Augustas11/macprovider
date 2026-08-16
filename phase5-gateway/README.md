@@ -59,7 +59,7 @@ curl -i -H "Authorization: Bearer $MP_API_KEY" \
 OpenAI SDK configuration uses:
 
 ```text
-base_url = https://api.streamvc.live/v1
+base_url = https://api.malibu.tech/v1
 api_key = <mp_* key>
 ```
 
@@ -84,12 +84,12 @@ SPEC-015 receipt compatibility live checks are opt-in because they require a run
 (
   cd test/integration && \
   SPEC015_SDK_COMPAT_LIVE=1 \
-  MACPROVIDER_SPEC015_GATEWAY_URL=https://api.streamvc.live \
+  MACPROVIDER_SPEC015_GATEWAY_URL=https://api.malibu.tech \
   MACPROVIDER_SPEC015_API_KEY=$MP_API_KEY \
     go test . -run TestSpec015SDKCompatLiveRunner -count=1
 )
 
-SPEC015_NGINX_ECHO_URL='https://api.streamvc.live/operator-echo-url' make test-dist
+SPEC015_NGINX_ECHO_URL='https://api.malibu.tech/operator-echo-url' make test-dist
 ```
 
 Issue #379 HTTP/2 live checks are also opt-in. The default `make test-dist`
@@ -98,7 +98,7 @@ quota. Run the read-only ALPN and `/healthz` probe with:
 
 ```sh
 MACPROVIDER_HTTP2_LIVE=1 \
-MACPROVIDER_HTTP2_GATEWAY_URL=https://api.streamvc.live \
+MACPROVIDER_HTTP2_GATEWAY_URL=https://api.malibu.tech \
   bash phase4-coordinator/dist/test/check_nginx_http2_live_test.sh
 ```
 
@@ -115,7 +115,7 @@ MACPROVIDER_HTTP2_RUN_CHAT_BENCH=1 \
 MACPROVIDER_HTTP2_RUN_SSE=1 \
 MACPROVIDER_HTTP2_MODEL='<live model id if /v1/models is empty>' \
 MACPROVIDER_HTTP2_API_KEY_FILE=~/.config/macprovider/buyer-api-key \
-MACPROVIDER_HTTP2_GATEWAY_URL=https://api.streamvc.live \
+MACPROVIDER_HTTP2_GATEWAY_URL=https://api.malibu.tech \
   bash phase4-coordinator/dist/test/check_nginx_http2_live_test.sh
 ```
 
@@ -142,7 +142,7 @@ evidence.
 For non-default `MACPROVIDER_HTTP2_GATEWAY_URL` values, pass the target token
 explicitly as `MACPROVIDER_HTTP2_API_KEY_FILE` or
 `MACPROVIDER_HTTP2_API_KEY`; generic key fallbacks are only used for
-`https://api.streamvc.live` unless
+`https://api.malibu.tech` unless
 `MACPROVIDER_HTTP2_ALLOW_GENERIC_KEY_FOR_CUSTOM_GATEWAY=1` is set.
 
 Pair that with the existing SDK streaming compatibility runner when a live
@@ -152,7 +152,7 @@ provider is advertising a model:
 (
   cd test/integration && \
   SPEC015_SDK_COMPAT_LIVE=1 \
-  MACPROVIDER_SPEC015_GATEWAY_URL=https://api.streamvc.live \
+  MACPROVIDER_SPEC015_GATEWAY_URL=https://api.malibu.tech \
   MACPROVIDER_SPEC015_MODEL="$MACPROVIDER_HTTP2_MODEL" \
   MACPROVIDER_SPEC015_API_KEY=$MP_API_KEY \
     go test . -run TestSpec015SDKCompatLiveRunner -count=1
@@ -164,7 +164,7 @@ provider is advertising a model:
 Templates:
 
 - `dist/macprovider-gateway.service`
-- `dist/nginx-api.streamvc.live.conf`
+- `dist/nginx-api.malibu.tech.conf`
 - `dist/deploy-pearl-vps.md`
 
 Production deployment is a separate operator-authorized step. The intended Pearl layout is:
@@ -174,7 +174,7 @@ Production deployment is a separate operator-authorized step. The intended Pearl
 - `/var/lib/macprovider/gateway.db`
 - `/etc/macprovider/gateway.env`
 - `/etc/systemd/system/macprovider-gateway.service`
-- `/etc/nginx/sites-available/api.streamvc.live`
+- `/etc/nginx/sites-available/api.malibu.tech`
 
 Required deployment checks:
 
@@ -182,10 +182,10 @@ Required deployment checks:
 systemd-analyze verify /etc/systemd/system/macprovider-gateway.service
 nginx -t
 /opt/macprovider/gateway --config /opt/macprovider/gateway.yaml --check
-curl -i https://api.streamvc.live/v1/status
+curl -i https://api.malibu.tech/v1/status
 ```
 
-The API nginx site proxies public `/v1/*`, `/auth/*`, `/account`, and `/healthz` to `127.0.0.1:9443`, except `/v1/pool/check` returns a JSON 404 envelope. Operator `/admin/*` endpoints stay off the public API nginx site and should be reached only through a trusted operator path such as loopback or a private tunnel. Coordinator `/poolz` is not exposed on `api.streamvc.live`. The `/ws/provider` route is present only with SPEC-002 PG-2 nginx `limit_req` and `limit_conn` controls before the WebSocket upgrade.
+The API nginx site proxies public `/v1/*`, `/auth/*`, `/account`, and `/healthz` to `127.0.0.1:9443`, except `/v1/pool/check` returns a JSON 404 envelope. Operator `/admin/*` endpoints stay off the public API nginx site and should be reached only through a trusted operator path such as loopback or a private tunnel. Coordinator `/poolz` is not exposed on `api.malibu.tech`. The `/ws/provider` route is present only with SPEC-002 PG-2 nginx `limit_req` and `limit_conn` controls before the WebSocket upgrade.
 
 The gateway trusts nginx-set `X-Real-IP` only when the TCP peer is inside `proxy.trusted_cidrs` for buyer identity and rate-limit binding. The nginx site must overwrite `X-Forwarded-For` and set `X-Real-IP`; if the gateway is reached directly, from an untrusted peer, or nginx is misconfigured, raw buyer-supplied forwarding headers are ignored and the TCP remote address is used.
 

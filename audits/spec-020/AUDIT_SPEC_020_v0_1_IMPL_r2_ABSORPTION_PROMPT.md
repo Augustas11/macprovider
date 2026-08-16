@@ -68,7 +68,7 @@ Logic:
 2. Compute `now = date -u +%s` and `deadline = date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$deadline_str" +%s`.
 3. If `now < deadline`: still inside post-start window. Do NOT roll back. Exit cleanly.
 4. If `now >= deadline`: classify the rollback reason:
-   - Check `launchctl print gui/<uid>/live.streamvc.macprovider`:
+   - Check `launchctl print gui/<uid>/live.malibu.provider`:
      - If last exit status non-zero / process not running → `post_start_crash`.
      - If running but `/healthz` probe fails → `post_start_health_failed`.
      - If running + healthy but `binary_version` (from `--version` or healthz response) != NORMALIZED_TARGET → `post_start_rejoin_timeout`.
@@ -135,7 +135,7 @@ In `ops/macprovider-watchdog/watchdog.sh`:
 
 - Read `MACPROVIDER_BINARY_DIR` from env OR detect from launchd plist `ProgramArguments[0]`:
   ```sh
-  plist_path="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
+  plist_path="$HOME/Library/LaunchAgents/live.malibu.provider.plist"
   binary_dir=$(/usr/libexec/PlistBuddy -c 'Print ProgramArguments:0' "$plist_path" 2>/dev/null | xargs dirname)
   ```
 - In `restore`: require `realpath(dirname(target_path)) == realpath(binary_dir)`. Reject otherwise with `failure_class:"unsupported_install_topology"`.

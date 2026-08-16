@@ -248,7 +248,7 @@ Spec ref: SPEC-001 v1.2 OQ-3; SPEC-003 v0.2 FR-C1/FR-C2
 
 Quoted spec text: `How does the binary reach contributors? Options: GitHub Releases download, Homebrew tap, direct link from operator.`
 
-What's wrong: SPEC-003 v0.2 answers this: GitHub Releases plus `https://get.streamvc.live/install.sh`. Leaving SPEC-001 OQ-3 open creates an artificial OQ that conflicts with the redistributed distribution spec.
+What's wrong: SPEC-003 v0.2 answers this: GitHub Releases plus `https://get.malibu.tech/install.sh`. Leaving SPEC-001 OQ-3 open creates an artificial OQ that conflicts with the redistributed distribution spec.
 
 Fix direction: Close OQ-3 in SPEC-001 as resolved-by-SPEC-003, or remove it from the open-question list.
 

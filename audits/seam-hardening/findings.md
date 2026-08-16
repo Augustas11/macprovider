@@ -289,7 +289,7 @@ claim-once across every transport.
 `case 4004` (`phase3-binary/.../CoordinatorClient.swift`) → a below-floor close fell through the
 close-code switch to `default: nil`, so the raw transport error propagated and the reconnect loop
 retried forever. The operator saw an unexplained flap, not an upgrade directive. (Confirmed live at
-fix time: `https://coordinator.streamvc.live/healthz` published a recommendation and no floor.)
+fix time: `https://coordinator.malibu.tech/healthz` published a recommendation and no floor.)
 **Fix (shipped):** three parts.
 1. `required_binary_version: "1.8.33"` in the committed prod overlay
 (`phase4-coordinator/dist/coordinator.yaml`). 1.8.33 is the first release that declares a

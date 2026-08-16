@@ -104,7 +104,7 @@ final class ProviderTokenPersistTests: XCTestCase {
         let existing = """
         port: 8080
         model: mlx-community/Qwen2.5-7B-Instruct-4bit
-        coordinator_url: wss://coordinator.streamvc.live/ws/provider
+        coordinator_url: wss://coordinator.malibu.tech/ws/provider
         """
         let result = ProviderTokenPersist.applyProviderTokenLine(
             in: existing,
@@ -115,7 +115,7 @@ final class ProviderTokenPersistTests: XCTestCase {
         // Original keys preserved verbatim.
         XCTAssertTrue(result.contains("port: 8080"))
         XCTAssertTrue(result.contains("model: mlx-community/Qwen2.5-7B-Instruct-4bit"))
-        XCTAssertTrue(result.contains("coordinator_url: wss://coordinator.streamvc.live/ws/provider"))
+        XCTAssertTrue(result.contains("coordinator_url: wss://coordinator.malibu.tech/ws/provider"))
     }
 
     func testApplyProviderTokenLineReplacesExisting() {

@@ -25,7 +25,7 @@
 
 - [ ] `main` includes `coordinator stats-migrate` + C3 accrual read mount
 - [ ] Pearl SSH: `~/.ssh/pearl_operator_ed25519` (or `SSH_KEY`)
-- [ ] Pearl host: `159.223.165.194` (`coordinator.streamvc.live`)
+- [ ] Pearl host: `159.223.165.194` (`coordinator.malibu.tech`)
 - [ ] `/etc/macprovider/coordinator.env` on Pearl
 - [ ] OPoI canaries recommended (Session A) before enabling accrual ticks
 - [ ] Prefer zero connected providers at restart, or `FORCE_RESTART=1`
@@ -136,7 +136,7 @@ Expect: `malibu_emission DISABLED via config (default)` — read pool still open
 
 ```bash
 curl -sS -H "Authorization: Bearer $PROVIDER_TOKEN" \
-  https://coordinator.streamvc.live/v1/provider/malibu-accrual | jq
+  https://coordinator.malibu.tech/v1/provider/malibu-accrual | jq
 ```
 
 Expect `200` with `accrued_malibu`, `trust_tier`, `trust_criteria_*`, `wallet_bound`.
@@ -153,7 +153,7 @@ ssh pearl 'set -a && . /etc/macprovider/coordinator.env && set +a \
 
 `GET /v1/provider/malibu-accrual` lives on buyer port **8443**. Without an exact-match nginx location, the public URL returns **404**.
 
-Install from repo template (or copy the `location = /v1/provider/malibu-accrual` block from `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`):
+Install from repo template (or copy the `location = /v1/provider/malibu-accrual` block from `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`):
 
 ```bash
 # On Pearl — merge block after /v1/provider/wallet, then:
@@ -163,7 +163,7 @@ nginx -t && systemctl reload nginx
 Unauthenticated probe should return **401** (not 404):
 
 ```bash
-curl -sS -o /dev/null -w "%{http_code}\n" https://coordinator.streamvc.live/v1/provider/malibu-accrual
+curl -sS -o /dev/null -w "%{http_code}\n" https://coordinator.malibu.tech/v1/provider/malibu-accrual
 ```
 
 ---

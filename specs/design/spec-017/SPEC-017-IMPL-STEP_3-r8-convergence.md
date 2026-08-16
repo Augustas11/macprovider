@@ -227,8 +227,8 @@ on every error path.
   `/v1/stats/` iff `cfg.Stats.Enabled`. Injects
   `statsstore.New(statsPools.Reader)` only (no admin DSN,
   no rollup pool). Same binary serves both
-  `coordinator.streamvc.live/v1/stats/*` and
-  `stats.streamvc.live/v1/stats/*` per BUILD §2 Step 3
+  `coordinator.malibu.tech/v1/stats/*` and
+  `stats.malibu.tech/v1/stats/*` per BUILD §2 Step 3
   (nginx vhost routing is Step 4.B).
 
 ## Audit cycle observations

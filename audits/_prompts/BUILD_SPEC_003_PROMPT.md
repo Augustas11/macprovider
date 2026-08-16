@@ -24,11 +24,11 @@ will implement.
 
 ## Mission of SPEC-003
 
-The Phase 4 coordinator is live in production at https://coordinator.streamvc.live
+The Phase 4 coordinator is live in production at https://coordinator.malibu.tech
 and the network works (two providers, two models, real multi-model
 routing, ~2.5s end-to-end inference). But the supply side is
 operator-locked: a stranger reading a GitHub README cannot become a
-provider without three operator interventions (subdomain on streamvc.live,
+provider without three operator interventions (subdomain on malibu.tech,
 Cloudflare tunnel token, manual config.providers[] enumeration in
 coordinator.yaml). That works for 2 vetted partners; it breaks at 5;
 it's impossible at 50.
@@ -37,7 +37,7 @@ SPEC-003 is the architectural pivot to make Mac Provider a downloadable
 product. After SPEC-003 ships, the user experience for joining the
 network is:
 
-  curl -fsSL https://get.streamvc.live/install.sh | bash
+  curl -fsSL https://get.malibu.tech/install.sh | bash
 
 — one line, zero operator action, provider in the pool within 2 minutes
 (excluding the multi-GB model download on first run).
@@ -57,7 +57,7 @@ spec because each fails without the others:
           rejected (banned).
 
   Part C: Distribution + lifecycle. GitHub Releases, curl-pipe-bash
-          install script at get.streamvc.live, `macprovider-cli update`
+          install script at get.malibu.tech, `macprovider-cli update`
           subcommand, launchd plist for reboot survival, optional
           coordinator-advertised version nudge.
 
@@ -326,7 +326,7 @@ One section per implementation phase:
   - 12.2 coordinator v0.2 (WS-tunneled inference relay,
     multiplexing/cancellation/backpressure, dynamic admission,
     new admin endpoints)
-  - 12.3 install.sh + get.streamvc.live hosting (Cloudflare Pages
+  - 12.3 install.sh + get.malibu.tech hosting (Cloudflare Pages
     or similar)
   - 12.4 macprovider-cli update + status + uninstall subcommands
   - 12.5 GitHub Releases automation (Action or runbook)

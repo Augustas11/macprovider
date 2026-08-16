@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # coord-cooperative.sh — cron entry that fires the cooperative batch
-# against https://coordinator.streamvc.live and regenerates today's report.
+# against https://coordinator.malibu.tech and regenerates today's report.
 # Runs alongside m4-cooperative.sh and m1-cooperative.sh; tunnel_url in the
 # runs.sqlite row distinguishes coordinator-routed traffic from direct.
 set -euo pipefail

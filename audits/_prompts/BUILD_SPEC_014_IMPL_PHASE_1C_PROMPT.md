@@ -30,7 +30,7 @@ returns 0 CRITICAL/HIGH/MEDIUM and `check-bundle.sh` exits 0).
   hardware / runtime fields. NO rotation, NO removal, NO
   notification toggles.
 - §3 sidebar polish: sign-out clears in-memory session and stops
-  pollers; "API Docs" link to `https://api.streamvc.live/docs`
+  pollers; "API Docs" link to `https://api.malibu.tech/docs`
   with `target="_blank" rel="noopener noreferrer"`; mobile (<720
   px) hamburger / hide behavior already from Phase 1A, verified.
 - NEW `frontdoor/provider-portal/check-bundle.sh` — build-time
@@ -197,7 +197,7 @@ them still binds.
       cross-session leakage of cached release data), and
       `state.authFailBySurface`; sets `state.route = "machine"`;
       re-renders to the sign-in screen.
-    - "API Docs" footer link: `href="https://api.streamvc.live/docs"`,
+    - "API Docs" footer link: `href="https://api.malibu.tech/docs"`,
       `target="_blank"`, `rel="noopener noreferrer"` (the rel
       attribute is mandatory to prevent reverse-tabnabbing).
     - Mobile (<720 px) hamburger: tapping it toggles

@@ -5,9 +5,9 @@ exception register and #609 Tier-2 hash containment. No public release, no
 Pearl coordinator/binary promote, and no flip of
 `tier2.require_hash_verified` or `require_autotune_hello_gate`.
 
-Host: `coordinator.streamvc.live` / `159.223.165.194`  
-Coordinator binary: **v1.8.49** (active)  
-Clearance timestamp: **2026-07-22T10:45:27Z**  
+Host: `coordinator.malibu.tech` / `159.223.165.194`
+Coordinator binary: **v1.8.49** (active)
+Clearance timestamp: **2026-07-22T10:45:27Z**
 Backup dir on Pearl: `/var/tmp/macprovider-ops-clearance-20260722T104527Z`
 
 ## What changed on Pearl

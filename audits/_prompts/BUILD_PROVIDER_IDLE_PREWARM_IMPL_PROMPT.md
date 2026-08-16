@@ -8,7 +8,7 @@ idle:
 
 | Path | Cold TTFT | Warm TTFT | Idle delta |
 |---|---:|---:|---:|
-| Buyer → api.streamvc.live | 5.6-6.6 s | 1.4 s | ~4-5 s |
+| Buyer → api.malibu.tech | 5.6-6.6 s | 1.4 s | ~4-5 s |
 | M5 → 127.0.0.1:18080 (direct) | 0.61 s wall | 0.17 s wall | ~440 ms |
 | Gateway `wall_ms` on cold request | 5590 ms | ~1200 ms | ~4390 ms |
 

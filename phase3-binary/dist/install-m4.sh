@@ -89,7 +89,7 @@ if [ $ok -eq 1 ]; then
     echo
     echo "$models_json" | python3 -m json.tool 2>&1 || true
     echo
-    log "Done. m4.streamvc.live now serves via phase3-binary."
+    log "Done. m4.malibu.tech now serves via phase3-binary."
     log "View binary logs: $TMUX_BIN attach -t mlx     (Ctrl-B then D to detach)"
     log "  OR:             tail -f /tmp/phase3-binary-m4.log"
     log "To rollback if something feels off: bash rollback-m4.sh"

@@ -97,7 +97,7 @@ without operator approval.
    — the binary's normative surface. Pay attention to:
    - The existing `serve` flag set (PR #105 added `--kv-bits`,
      `--max-context`, `--max-batch` which autotune wraps)
-   - The launchd label `live.streamvc.macprovider` (FR-E.1)
+   - The launchd label `live.malibu.provider` (FR-E.1)
    - The config YAML key names (FR-F.3 owns
      `model`, `kv_bits`, `max_context_override`,
      `max_concurrency_override`)
@@ -270,7 +270,7 @@ Port `:18080` is free post-stop within the grace.
 **Step 5. Provider-conflict pre-flight (FR-E.1).**
 Implement the pre-flight check:
 - Detect launchd-managed install via
-  `launchctl list | grep live.streamvc.macprovider`.
+  `launchctl list | grep live.malibu.provider`.
 - Detect foreground install via PID + argv match on
   `macprovider-cli serve` excluding the autotune's own argv
   (whole-word match on `serve`).

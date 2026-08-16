@@ -1517,7 +1517,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     <li>Added <code>ProviderConflictDetector</code> for the two SPEC-013
     FR-E.1 install paths. The launchd path reads
     <code>launchctl list</code> output and detects the exact
-    <code>live.streamvc.macprovider</code> label, preserving the PID column
+    <code>live.malibu.provider</code> label, preserving the PID column
     when launchctl reports one and allowing <code>nil</code> for inactive
     jobs.</li>
     <li>The foreground path scans process snapshots as argv arrays and only
@@ -1537,9 +1537,9 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     <li>Added <code>ProviderDrainer</code> with injected launchctl runner,
     signal sender, process-running probe, port probe, foreground restarter,
     and warning writer. Production launchd drain uses
-    <code>launchctl bootout gui/$UID/live.streamvc.macprovider</code>;
+    <code>launchctl bootout gui/$UID/live.malibu.provider</code>;
     launchd restore uses <code>launchctl bootstrap gui/$UID
-    ~/Library/LaunchAgents/live.streamvc.macprovider.plist</code>.</li>
+    ~/Library/LaunchAgents/live.malibu.provider.plist</code>.</li>
     <li>Foreground drain sends exactly <code>SIGTERM</code> to the detected
     PID and never escalates to <code>SIGKILL</code> in v1. It waits through
     the grace window for both port release and process exit; if the port is
@@ -1573,7 +1573,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   <code>testParseLaunchdManagedInactivePIDReturnsNil</code> in
   <code>ProviderConflictDetectorTests</code> that exercises
   <code>parseLaunchdManagedPID(from:)</code> with a
-  <code>-\t-\tlive.streamvc.macprovider</code> line and asserts
+  <code>-\t-\tlive.malibu.provider</code> line and asserts
   <code>(found: true, pid: nil)</code>.</p>
   <p><strong>G.2 MINOR fix</strong> (helper-binary false-positive
   class untested). Added
@@ -2043,8 +2043,8 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   renamed <code>testLaunchdRestartHintIncludesBootoutAndBootstrap</code> to
   <code>testLaunchdRestartHintIncludesAllRequiredSubstrings</code> and added
   assertions for the plist path
-  (<code>~/Library/LaunchAgents/live.streamvc.macprovider.plist</code>) and
-  the service identifier (<code>gui/$UID/live.streamvc.macprovider</code>).</p>
+  (<code>~/Library/LaunchAgents/live.malibu.provider.plist</code>) and
+  the service identifier (<code>gui/$UID/live.malibu.provider</code>).</p>
   <p><strong>testApplyWriteIsAtomic adjustment</strong>: the test now asserts
   <code>tempPaths.count == 1</code> (was 2) since the backup write no longer
   uses the temp+rename path. The config write still uses temp+rename and the

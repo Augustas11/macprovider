@@ -15,16 +15,16 @@ Verdict: NOT READY TO LOCK -
   - `specs/SPEC-017-network-stats-api.md` v0.1.8 sections 5.6, 5.7, 6.6.2, 7.1, 7.4, and 8.5.
   - `specs/BUILD_SPEC_017_IMPL_PROMPT.md` Step 4.B block and AC-to-step matrix.
   - `specs/SPEC-017-IMPL-STEP_3-r8-convergence.md`.
-  - `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`.
-  - `phase4-coordinator/dist/nginx-stats.streamvc.live.conf`.
+  - `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`.
+  - `phase4-coordinator/dist/nginx-stats.malibu.tech.conf`.
   - No prior `SPEC-017-IMPL-STEP_4B-arch-r*-audit.md` files were present.
-- `nginx -t -c /Users/augstar/macprovider-spec017-step1/phase4-coordinator/dist/nginx-stats.streamvc.live.conf` - NOT EXECUTED in this environment; `/bin/bash: nginx: command not found`.
+- `nginx -t -c /Users/augstar/macprovider-spec017-step1/phase4-coordinator/dist/nginx-stats.malibu.tech.conf` - NOT EXECUTED in this environment; `/bin/bash: nginx: command not found`.
 - `grep -E 'limit_req_zone|limit_req |proxy_cache|proxy_no_cache|\$http_authorization' phase4-coordinator/dist/nginx-*.conf` - PASS for structural sweep: found per-endpoint `limit_req_zone` declarations, per-location `limit_req ... nodelay`, `proxy_cache_bypass`, `proxy_no_cache`, and forwarded `Authorization`.
-- `git diff 51b9736..HEAD -- phase4-coordinator/dist/` - PASS for scope: two files changed, `nginx-coordinator.streamvc.live.conf` and new `nginx-stats.streamvc.live.conf`.
+- `git diff 51b9736..HEAD -- phase4-coordinator/dist/` - PASS for scope: two files changed, `nginx-coordinator.malibu.tech.conf` and new `nginx-stats.malibu.tech.conf`.
 - `rg -n "Retry-After|rate_limited|error_page|limit_req_status|add_header" phase4-coordinator/dist/nginx-*.conf` - FAIL for nginx limiter response shape: only `limit_req_status 429` appears; no `Retry-After`, JSON `rate_limited` body, or `error_page` mapping exists for stats limit rejections.
 
 ## Category verdicts
-A. Vhost surface: PASS. `stats.streamvc.live` has 80 redirect + 443 TLS server blocks, and `coordinator.streamvc.live` now exposes exact `/v1/stats/{overview,leaderboard,health}` locations before the `/v1/` 404 catch-all.
+A. Vhost surface: PASS. `stats.malibu.tech` has 80 redirect + 443 TLS server blocks, and `coordinator.malibu.tech` now exposes exact `/v1/stats/{overview,leaderboard,health}` locations before the `/v1/` 404 catch-all.
 B. Per-endpoint rate-limit zones: FAIL. Zone isolation and no-burst `nodelay` shape are correct, but nginx-generated 429s do not satisfy the locked stats error-envelope/Retry-After contract.
 C. Authorization-aware keying: PASS. The author chose shape (a): `map $http_authorization $public_rl_key` with empty key for Authorization-bearing requests.
 D. Cache hygiene: PASS. `proxy_cache_path` is present, and every stats location has both `proxy_cache_bypass $http_authorization` and `proxy_no_cache $http_authorization`.
@@ -38,7 +38,7 @@ H. Cloudflare / Pearl posture: PASS. No Cloudflare-specific cache/header directi
 None.
 
 ### HIGH
-1. `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:116` and `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:213`
+1. `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:116` and `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:213`
    - Evidence:
      ```nginx
      limit_req zone=stats_overview nodelay;
@@ -56,14 +56,14 @@ None.
 None.
 
 ### INFO
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:40` implements the preferred map-based Authorization bypass shape from BUILD Step 4.B.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:45` through `:47` define separate `stats_overview`, `stats_leaderboard`, and `stats_health` zones at `rate=60r/m`.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:56` uses `/var/cache/nginx/stats`, a normal disk-backed nginx cache path rather than an obvious tmpfs-only path.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:66` defines `stats_redacted` without `$http_authorization`.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:93` through `:95` mirrors the existing certbot-compatible commented cert path pattern used by the coordinator vhost.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:134` and `:135` include both cache read-bypass and write-suppression for Authorization-bearing overview responses; leaderboard and health mirror the same pair.
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:212` places `/v1/stats/overview` before the `/v1/` 404 catch-all at `:277`.
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:231` and `:250` do the same for leaderboard and health.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:40` implements the preferred map-based Authorization bypass shape from BUILD Step 4.B.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:45` through `:47` define separate `stats_overview`, `stats_leaderboard`, and `stats_health` zones at `rate=60r/m`.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:56` uses `/var/cache/nginx/stats`, a normal disk-backed nginx cache path rather than an obvious tmpfs-only path.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:66` defines `stats_redacted` without `$http_authorization`.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:93` through `:95` mirrors the existing certbot-compatible commented cert path pattern used by the coordinator vhost.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:134` and `:135` include both cache read-bypass and write-suppression for Authorization-bearing overview responses; leaderboard and health mirror the same pair.
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:212` places `/v1/stats/overview` before the `/v1/` 404 catch-all at `:277`.
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:231` and `:250` do the same for leaderboard and health.
 - No `Access-Control-Allow-Origin`, `Access-Control-Allow-Headers`, or `Access-Control-Allow-Methods` directives appear in the changed nginx stats blocks.
 - No `add_header Cache-Control` or other Cloudflare-specific cache shadowing directive appears in the changed stats vhost.
 

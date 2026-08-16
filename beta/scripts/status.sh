@@ -4,7 +4,7 @@
 
 set -uo pipefail
 
-for host in m4.streamvc.live m1.streamvc.live; do
+for host in m4.malibu.tech m1.malibu.tech; do
   code=$(curl -sS -o /tmp/.macprovider-status -w "%{http_code}" --max-time 6 "https://${host}/v1/models" || echo "ERR")
   body=$(head -c 120 /tmp/.macprovider-status 2>/dev/null | tr '\n' ' ')
   case "$code" in

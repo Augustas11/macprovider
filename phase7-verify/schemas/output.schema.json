@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://streamvc.live/schemas/macprovider-verify-output.schema.json",
+  "$id": "https://malibu.tech/schemas/macprovider-verify-output.schema.json",
   "title": "macprovider-verify output",
   "description": "SPEC-015 v0.3 macprovider-verify one-line JSON output. model_hash_verified is the v0.3 \u00a7M.3.2.1 tri-state.",
   "oneOf": [

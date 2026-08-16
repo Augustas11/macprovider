@@ -1,7 +1,7 @@
 # Phase 3 binary swap — M4 partner instructions
 
 Hey — we're ready to swap your `mlx_lm.server` for the new Phase 3 binary
-we've built. Same hostname (`m4.streamvc.live`), same port (8080), same
+we've built. Same hostname (`m4.malibu.tech`), same port (8080), same
 model (Qwen2.5-7B-Instruct-4bit). The Cloudflare tunnel is untouched.
 
 **Total time: ~5 minutes of your attention.** Rollback in 30 seconds if
@@ -22,7 +22,7 @@ Three files (via Signal/Telegram/whatever channel we've been using):
 The install script handles the swap automatically. You should NOT:
 
 - **Stop or uninstall `cloudflared`** — it's a system service (`launchd`).
-  It keeps relaying `m4.streamvc.live` to `localhost:8080`. The swap
+  It keeps relaying `m4.malibu.tech` to `localhost:8080`. The swap
   reuses the same port so cloudflared doesn't notice.
 - **Delete `~/macprovider`** — that's your Python venv with
   `mlx_lm.server`. The rollback script reuses it.
@@ -67,7 +67,7 @@ traffic; our buyer harness hits the new binary instead of `mlx_lm.server`.
 ## Expected brief outage during swap
 
 There's a ~60-90 second window between killing `mlx_lm.server` and
-phase3-binary finishing model load where `m4.streamvc.live` returns
+phase3-binary finishing model load where `m4.malibu.tech` returns
 HTTP 502 (cloudflared up, no origin process responding). This is
 expected — the operator's harness may log a few error rows during
 this window and that's fine.

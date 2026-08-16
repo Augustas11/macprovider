@@ -1,17 +1,17 @@
 # Getting started
 
-Mac Provider exposes an OpenAI-compatible API at `https://api.streamvc.live/v1`.
+Mac Provider exposes an OpenAI-compatible API at `https://api.malibu.tech/v1`.
 
 1. Sign up with GitHub at `/auth/github/start`.
 2. Save your `mp_` key on the one-shot account page.
-3. Use any OpenAI SDK with `base_url=https://api.streamvc.live/v1`.
+3. Use any OpenAI SDK with `base_url=https://api.malibu.tech/v1`.
 
 ## Quickstart code samples
 
 ### curl
 
 ```sh
-curl https://api.streamvc.live/v1/chat/completions \
+curl https://api.malibu.tech/v1/chat/completions \
   -H 'Authorization: Bearer mp_your_key' \
   -H 'Content-Type: application/json' \
   -d '{"model":"mlx-community/Llama-3.2-3B-Instruct-4bit","messages":[{"role":"user","content":"Say hello"}],"max_tokens":64}'
@@ -22,7 +22,7 @@ curl https://api.streamvc.live/v1/chat/completions \
 ```python
 from openai import OpenAI
 
-client = OpenAI(api_key="mp_your_key", base_url="https://api.streamvc.live/v1")
+client = OpenAI(api_key="mp_your_key", base_url="https://api.malibu.tech/v1")
 resp = client.chat.completions.create(
     model="mlx-community/Llama-3.2-3B-Instruct-4bit",
     messages=[{"role": "user", "content": "Say hello"}],
@@ -38,7 +38,7 @@ import OpenAI from "openai";
 
 const client = new OpenAI({
   apiKey: "mp_your_key",
-  baseURL: "https://api.streamvc.live/v1",
+  baseURL: "https://api.malibu.tech/v1",
 });
 const resp = await client.chat.completions.create({
   model: "mlx-community/Llama-3.2-3B-Instruct-4bit",
@@ -53,7 +53,7 @@ console.log(resp.choices[0].message.content);
 ```go
 client := openai.NewClient(
     option.WithAPIKey("mp_your_key"),
-    option.WithBaseURL("https://api.streamvc.live/v1"),
+    option.WithBaseURL("https://api.malibu.tech/v1"),
 )
 completion, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
     Model: "mlx-community/Llama-3.2-3B-Instruct-4bit",
@@ -134,7 +134,7 @@ Covered paid settlement claims are limited to `POST /v1/chat/completions`, plus 
 
 When the Responses compatibility flag is enabled, covered paid settlement claims include `POST /v1/responses` and `POST /v1/chat/completions`.
 
-Excluded legacy/direct paths are outside this SPEC-022 gateway settlement claim unless separately disabled or migrated behind the gateway paid ledger: `coordinator.streamvc.live`, `m4.streamvc.live`, and `m1.streamvc.live`.
+Excluded legacy/direct paths are outside this SPEC-022 gateway settlement claim unless separately disabled or migrated behind the gateway paid ledger: `coordinator.malibu.tech`, `m4.malibu.tech`, and `m1.malibu.tech`.
 
 Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.
 

@@ -18,7 +18,7 @@ const (
 	outputProviderID      = "m1-anon"
 	outputModelID         = "qwen2.5-7b-instruct-q4"
 	outputSignedAt        = int64(1719144000)
-	outputCoordinatorHost = "coordinator.streamvc.live"
+	outputCoordinatorHost = "coordinator.malibu.tech"
 )
 
 func TestRenderJSONExamples(t *testing.T) {
@@ -30,7 +30,7 @@ func TestRenderJSONExamples(t *testing.T) {
 		{
 			name:   "valid",
 			result: validOutputFixture(nil),
-			want:   `{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","model_hash_verified":null}` + "\n",
+			want:   `{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.malibu.tech","model_hash_verified":null}` + "\n",
 		},
 		{
 			name: "invalid",
@@ -48,7 +48,7 @@ func TestRenderJSONExamples(t *testing.T) {
 					Receipt:  "cd34...",
 				},
 			},
-			want: `{"result":"invalid","reason":"output_hash_mismatch","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","model_hash_verified":null,"details":{"field":"output_hash","computed":"ab12...","receipt":"cd34..."}}` + "\n",
+			want: `{"result":"invalid","reason":"output_hash_mismatch","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.malibu.tech","model_hash_verified":null,"details":{"field":"output_hash","computed":"ab12...","receipt":"cd34..."}}` + "\n",
 		},
 		{
 			name: "inconclusive",
@@ -90,7 +90,7 @@ func TestRenderHumanExamples(t *testing.T) {
 		{
 			name:   "valid",
 			result: validOutputFixture(nil),
-			want: fmt.Sprintf("valid (m1-anon · qwen2.5-7b-instruct-q4 · signed %s · trust=live@coordinator.streamvc.live)\n",
+			want: fmt.Sprintf("valid (m1-anon · qwen2.5-7b-instruct-q4 · signed %s · trust=live@coordinator.malibu.tech)\n",
 				time.Unix(outputSignedAt, 0).UTC().Format(time.RFC3339),
 			),
 		},
@@ -114,7 +114,7 @@ func TestRenderHumanExamples(t *testing.T) {
 				Reason:          "cache_stale_and_live_unreachable",
 				CoordinatorHost: outputCoordinatorHost,
 			},
-			want: "inconclusive: cache stale and /v1/receipt-keys unreachable on coordinator.streamvc.live\n",
+			want: "inconclusive: cache stale and /v1/receipt-keys unreachable on coordinator.malibu.tech\n",
 		},
 	}
 	for _, tt := range tests {
@@ -310,7 +310,7 @@ func TestSchemaRejectsTopLevelProviderIDUnresolvable(t *testing.T) {
 
 func TestSchemaRejectsExtraProperty(t *testing.T) {
 	schema := loadOutputSchema(t)
-	raw := []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","model_hash_verified":null,"foo":"bar"}`)
+	raw := []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.malibu.tech","model_hash_verified":null,"foo":"bar"}`)
 	if err := validateRawJSON(schema, raw); err == nil {
 		t.Fatal("schema accepted extra top-level property")
 	}
@@ -332,7 +332,7 @@ func TestSchemaRejectsTrustSourceCoordinatorHostMismatches(t *testing.T) {
 		},
 		{
 			name: "valid explicit pubkey coordinator",
-			raw:  []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"explicit_pubkey","coordinator_host":"coordinator.streamvc.live","model_hash_verified":null}`),
+			raw:  []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"explicit_pubkey","coordinator_host":"coordinator.malibu.tech","model_hash_verified":null}`),
 		},
 		{
 			name: "inconclusive live null coordinator",
@@ -340,7 +340,7 @@ func TestSchemaRejectsTrustSourceCoordinatorHostMismatches(t *testing.T) {
 		},
 		{
 			name: "inconclusive none coordinator",
-			raw:  []byte(`{"result":"inconclusive","reason":"cache_stale_and_live_unreachable","trust_source":"none","coordinator_host":"coordinator.streamvc.live","model_hash_verified":null}`),
+			raw:  []byte(`{"result":"inconclusive","reason":"cache_stale_and_live_unreachable","trust_source":"none","coordinator_host":"coordinator.malibu.tech","model_hash_verified":null}`),
 		},
 	}
 	for _, tt := range tests {

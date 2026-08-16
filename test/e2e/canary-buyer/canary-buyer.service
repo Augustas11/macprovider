@@ -1,6 +1,6 @@
 # macprovider canary buyer probe — systemd oneshot (Linux/always-on host).
 #
-# Companion to com.streamvc.canary-buyer.plist (the lab-Mac launchd variant).
+# Companion to com.malibu.canary-buyer.plist (the lab-Mac launchd variant).
 # Prefer this on an always-on host (VPS) so a sleeping Mac can't create blind
 # spots. Triggered by canary-buyer.timer.
 #
@@ -34,8 +34,8 @@ LoadCredential=buyer_token:/etc/macprovider/canary-buyer.token
 LoadCredential=heartbeat_url:/etc/macprovider/canary-buyer.heartbeat
 LoadCredential=operator_token:/etc/macprovider/canary-buyer.operator-token
 LoadCredential=expected_fleet:/etc/macprovider/canary-buyer.expected-fleet.json
-Environment=CANARY_BASE=https://api.streamvc.live
-Environment=CANARY_POOLZ_URL=https://coordinator.streamvc.live/poolz
+Environment=CANARY_BASE=https://api.malibu.tech
+Environment=CANARY_POOLZ_URL=https://coordinator.malibu.tech/poolz
 Environment=CANARY_NODE_BIN=/usr/bin/node
 Environment=CANARY_METRICS_OUT=/var/lib/macprovider-canary-buyer/canary_buyer.prom
 Environment=CANARY_JSON_OUT=/var/lib/macprovider-canary-buyer/artifacts

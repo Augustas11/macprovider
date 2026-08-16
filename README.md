@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://console.streamvc.live"><strong>Console</strong></a> &middot;
+  <a href="https://console.malibu.tech"><strong>Console</strong></a> &middot;
   <a href="#for-providers"><strong>Join as Provider</strong></a> &middot;
   <a href="#for-buyers"><strong>API Access</strong></a> &middot;
   <a href="https://github.com/augustas11/macprovider/releases"><strong>Releases</strong></a>
@@ -28,16 +28,16 @@ A lot of the most interesting LLM applications — long-running personal agents,
 | Run MLX models locally on any M1+ Mac | OpenAI-compatible `/v1/chat/completions` endpoint |
 | Outbound WebSocket only — no port-forwarding needed | Route to the full pool or pin to a specific provider |
 | Choose which models to serve from your Mac | Pay only for compute, no subscription required |
-| Manage your provider at [portal.streamvc.live](https://portal.streamvc.live) | Chat and monitor at [console.streamvc.live](https://console.streamvc.live) |
+| Manage your provider at [portal.malibu.tech](https://portal.malibu.tech) | Chat and monitor at [console.malibu.tech](https://console.malibu.tech) |
 
 ## Console
 
-**[console.streamvc.live](https://console.streamvc.live)** is the buyer-facing front end. Today it ships two views:
+**[console.malibu.tech](https://console.malibu.tech)** is the buyer-facing front end. Today it ships two views:
 
 - **Browser chat.** Send requests to the network directly from the browser, with session history.
 - **Pool dashboard.** Monitor live provider pool status and which models are warm.
 
-**[portal.streamvc.live](https://portal.streamvc.live)** is the provider-facing front end. Sign in with your `provider_id` + `provider_token` to see your Mac's setup, earnings, identity, and the latest installer release. See [SPEC-014](specs/SPEC-014-provider-portal.md) for the surface contract.
+**[portal.malibu.tech](https://portal.malibu.tech)** is the provider-facing front end. Sign in with your `provider_id` + `provider_token` to see your Mac's setup, earnings, identity, and the latest installer release. See [SPEC-014](specs/SPEC-014-provider-portal.md) for the surface contract.
 
 ## Architecture
 
@@ -48,7 +48,7 @@ Provider Mac (MLX)
                              │
                ┌─────────────┴─────────────┐
                │                           │
-    api.streamvc.live/v1          console.streamvc.live
+    api.malibu.tech/v1          console.malibu.tech
     (OpenAI-compatible)               (web front end)
 ```
 
@@ -71,7 +71,7 @@ auth:
 Run on any Apple Silicon Mac (M1 or newer, macOS 14+):
 
 ```bash
-curl -fsSL https://get.streamvc.live/install.sh | bash
+curl -fsSL https://get.malibu.tech/install.sh | bash
 ```
 
 The installer:
@@ -96,7 +96,7 @@ If the installed CLI is still public **1.8.48** and cannot reach the coordinator
 **Security note:** `curl | bash` gives the downloaded script control of your user account. Inspect first if you prefer:
 
 ```bash
-curl -fsSL https://get.streamvc.live/install.sh -o install.sh
+curl -fsSL https://get.malibu.tech/install.sh -o install.sh
 less install.sh
 bash install.sh
 ```
@@ -105,7 +105,7 @@ The binary is checksum-verified against a signed release manifest. macOS quarant
 
 ## For Buyers
 
-Base URL: `https://api.streamvc.live`
+Base URL: `https://api.malibu.tech`
 
 The API is OpenAI-compatible — swap in your existing client:
 
@@ -113,7 +113,7 @@ The API is OpenAI-compatible — swap in your existing client:
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="https://api.streamvc.live/v1",
+    base_url="https://api.malibu.tech/v1",
     api_key="<your-api-key>",
 )
 
@@ -124,8 +124,8 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-Get an API key → [api.streamvc.live/auth/github/start](https://api.streamvc.live/auth/github/start)  
-API reference → [api.streamvc.live/docs#api-reference](https://api.streamvc.live/docs#api-reference)  
+Get an API key → [api.malibu.tech/auth/github/start](https://api.malibu.tech/auth/github/start)
+API reference → [api.malibu.tech/docs#api-reference](https://api.malibu.tech/docs#api-reference)
 Cookbook (tool calling, structured output, sticky conversations, receipt verification) → [docs/using-macprovider-with-openai-sdk.md](docs/using-macprovider-with-openai-sdk.md)
 
 ### What the OpenAI-shape surface covers

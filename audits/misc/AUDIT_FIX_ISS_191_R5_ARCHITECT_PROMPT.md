@@ -10,7 +10,7 @@ R4 was `0/1H/0/1L/0`. Fixes applied:
 
 1. **R4 HIGH (LaunchAgent PATH missing /usr/sbin)** — both the
    inlined `render_watchdog_plist` in install.sh and the standalone
-   `live.streamvc.macprovider-watchdog.plist.template` now use
+   `live.malibu.provider-watchdog.plist.template` now use
    `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
    Verified live: under the fixed PATH the watchdog arms and writes
    the boot UUID; under the pre-fix PATH the watchdog silently

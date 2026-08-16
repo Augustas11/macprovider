@@ -7,7 +7,7 @@ architect) of PR #400 (branch `feat/malibu-oauth-handoff`, commit
 ## Why this diff is security-load-bearing
 
 The diff introduces two new attacker-reachable surfaces on the
-production gateway (`api.streamvc.live`):
+production gateway (`api.malibu.tech`):
 
 1. `GET /auth/github/start?return_to=<url>` — accepts an attacker-
    controlled URL and, on successful OAuth callback, HTTP-redirects the

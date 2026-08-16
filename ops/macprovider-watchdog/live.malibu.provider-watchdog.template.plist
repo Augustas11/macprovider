@@ -4,7 +4,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>live.streamvc.macprovider-watchdog</string>
+  <string>live.malibu.provider-watchdog</string>
 
   <key>ProgramArguments</key>
   <array>

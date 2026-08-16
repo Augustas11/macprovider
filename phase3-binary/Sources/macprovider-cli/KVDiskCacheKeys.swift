@@ -77,7 +77,7 @@ protocol KVKeychain: Sendable {
 /// a service prefix so uninstall can enumerate + delete without trusting metadata.
 struct KVKeychainNaming: Sendable {
     /// Product-wide root for all KV disk-cache Keychain items.
-    static let root = "live.streamvc.macprovider.kv-cache.v1"
+    static let root = "live.malibu.provider.kv-cache.v1"
 
     let namespaceID: String
 

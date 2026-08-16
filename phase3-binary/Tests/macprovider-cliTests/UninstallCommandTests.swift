@@ -93,35 +93,56 @@ final class UninstallCommandTests: XCTestCase {
     func testStopLaunchdServicesAcceptsVerifiedAbsentJob() throws {
         var calls: [[String]] = []
 
-        try UninstallCommand.stopLaunchdServices(labels: ["live.streamvc.macprovider"], uid: 501) { arguments in
+        try UninstallCommand.stopLaunchdServices(labels: ["live.malibu.provider"], uid: 501) { arguments in
             calls.append(arguments)
             return arguments.first == "bootout" ? 3 : 113
         }
 
         XCTAssertEqual(calls, [
+            ["bootout", "gui/501/live.malibu.provider-watchdog"],
+            ["print", "gui/501/live.malibu.provider-watchdog"],
+            ["bootout", "gui/501/live.malibu.provider"],
+            ["print", "gui/501/live.malibu.provider"],
             ["bootout", "gui/501/live.streamvc.macprovider-watchdog"],
             ["print", "gui/501/live.streamvc.macprovider-watchdog"],
             ["bootout", "gui/501/live.streamvc.macprovider"],
             ["print", "gui/501/live.streamvc.macprovider"],
+            ["print", "gui/501/live.malibu.provider-watchdog"],
+            ["print", "gui/501/live.malibu.provider"],
             ["print", "gui/501/live.streamvc.macprovider-watchdog"],
             ["print", "gui/501/live.streamvc.macprovider"],
         ])
     }
 
+    func testStopLaunchdServicesAcceptsLegacyStreamVCLabelsForMigration() throws {
+        var calls: [[String]] = []
+
+        try UninstallCommand.stopLaunchdServices(
+            labels: ["live.streamvc.macprovider", "live.streamvc.macprovider-watchdog"],
+            uid: 501
+        ) { arguments in
+            calls.append(arguments)
+            return 113
+        }
+
+        XCTAssertTrue(calls.contains(["bootout", "gui/501/live.streamvc.macprovider-watchdog"]))
+        XCTAssertTrue(calls.contains(["bootout", "gui/501/live.streamvc.macprovider"]))
+    }
+
     func testStopLaunchdServicesRejectsJobThatRemainsLoaded() {
         XCTAssertThrowsError(
             try UninstallCommand.stopLaunchdServices(
-                labels: ["live.streamvc.macprovider"],
+                labels: ["live.malibu.provider"],
                 uid: 501,
                 run: { arguments in
                     guard arguments.first == "print" else { return 0 }
-                    return arguments.last?.hasSuffix("/live.streamvc.macprovider-watchdog") == true ? 113 : 0
+                    return arguments.last?.hasSuffix("/live.malibu.provider-watchdog") == true ? 113 : 0
                 }
             )
         ) { error in
             XCTAssertEqual(
                 error as? UninstallCommand.UninstallError,
-                .serviceStillLoaded("live.streamvc.macprovider")
+                .serviceStillLoaded("live.malibu.provider")
             )
         }
     }
@@ -130,7 +151,7 @@ final class UninstallCommandTests: XCTestCase {
         var printCount = 0
         XCTAssertThrowsError(
             try UninstallCommand.stopLaunchdServices(
-                labels: ["live.streamvc.macprovider"],
+                labels: ["live.malibu.provider"],
                 uid: 501,
                 run: { arguments in
                     guard arguments.first == "print" else { return 5 }
@@ -141,7 +162,7 @@ final class UninstallCommandTests: XCTestCase {
         ) { error in
             XCTAssertEqual(
                 error as? UninstallCommand.UninstallError,
-                .serviceAbsenceVerificationFailed("live.streamvc.macprovider-watchdog", 64)
+                .serviceAbsenceVerificationFailed("live.malibu.provider-watchdog", 64)
             )
         }
     }
@@ -152,12 +173,12 @@ final class UninstallCommandTests: XCTestCase {
 
         XCTAssertThrowsError(
             try UninstallCommand.stopLaunchdServices(
-                labels: ["live.streamvc.macprovider", "live.streamvc.macprovider-watchdog"],
+                labels: ["live.malibu.provider", "live.malibu.provider-watchdog"],
                 uid: 501,
                 run: { arguments in
                     calls.append(arguments)
                     guard arguments.first == "print" else { return 0 }
-                    if arguments.last?.hasSuffix("/live.streamvc.macprovider") == true {
+                    if arguments.last?.hasSuffix("/live.malibu.provider") == true {
                         providerPrints += 1
                         return providerPrints == 1 ? 113 : 0
                     }
@@ -167,13 +188,13 @@ final class UninstallCommandTests: XCTestCase {
         ) { error in
             XCTAssertEqual(
                 error as? UninstallCommand.UninstallError,
-                .serviceStillLoaded("live.streamvc.macprovider")
+                .serviceStillLoaded("live.malibu.provider")
             )
         }
 
         XCTAssertEqual(Array(calls.suffix(2)), [
-            ["print", "gui/501/live.streamvc.macprovider-watchdog"],
-            ["print", "gui/501/live.streamvc.macprovider"],
+            ["print", "gui/501/live.malibu.provider-watchdog"],
+            ["print", "gui/501/live.malibu.provider"],
         ])
     }
 
@@ -204,8 +225,8 @@ final class UninstallCommandTests: XCTestCase {
         XCTAssertEqual(paths.binary.path, "/Users/tester/.local/bin/macprovider-cli")
         XCTAssertEqual(paths.supportDirectory.path, "/Users/tester/macprovider")
         XCTAssertEqual(paths.logsDirectory.path, "/Users/tester/Library/Logs/macprovider")
-        XCTAssertEqual(paths.plist.path, "/Users/tester/Library/LaunchAgents/live.streamvc.macprovider.plist")
-        XCTAssertEqual(paths.watchdogPlist.path, "/Users/tester/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist")
+        XCTAssertEqual(paths.plist.path, "/Users/tester/Library/LaunchAgents/live.malibu.provider.plist")
+        XCTAssertEqual(paths.watchdogPlist.path, "/Users/tester/Library/LaunchAgents/live.malibu.provider-watchdog.plist")
         XCTAssertEqual(paths.watchdogDirectory.path, "/Users/tester/.local/share/macprovider-watchdog")
         XCTAssertEqual(paths.manifest.path, "/Users/tester/Library/Application Support/macprovider/install_manifest.json")
         XCTAssertEqual(paths.cacheDirectory.path, "/Users/tester/.cache/macprovider")
@@ -222,8 +243,8 @@ final class UninstallCommandTests: XCTestCase {
           "install_prefix": "\(root.path)/custom",
           "binary_path": "\(root.path)/custom/macprovider-cli",
           "symlink_path": "\(root.path)/.local/bin/macprovider-cli",
-          "launchd_labels": ["live.streamvc.macprovider", "live.streamvc.macprovider-watchdog"],
-          "launchd_plists": ["\(root.path)/Library/LaunchAgents/live.streamvc.macprovider.plist"],
+          "launchd_labels": ["live.malibu.provider", "live.malibu.provider-watchdog"],
+          "launchd_plists": ["\(root.path)/Library/LaunchAgents/live.malibu.provider.plist"],
           "data_dirs": ["\(root.path)/custom", "\(root.path)/Library/Logs/macprovider"],
           "version": "v1.8.10"
         }
@@ -231,7 +252,7 @@ final class UninstallCommandTests: XCTestCase {
 
         let loaded = UninstallCommand.loadManifest(home: root)
         XCTAssertEqual(loaded?.installPrefix, "\(root.path)/custom")
-        XCTAssertEqual(loaded?.launchdLabels, ["live.streamvc.macprovider", "live.streamvc.macprovider-watchdog"])
+        XCTAssertEqual(loaded?.launchdLabels, ["live.malibu.provider", "live.malibu.provider-watchdog"])
         XCTAssertEqual(loaded?.dataDirs, ["\(root.path)/custom", "\(root.path)/Library/Logs/macprovider"])
         XCTAssertEqual(loaded?.symlinkPath, "\(root.path)/.local/bin/macprovider-cli")
     }
@@ -240,10 +261,10 @@ final class UninstallCommandTests: XCTestCase {
         let home = URL(fileURLWithPath: "/Users/legacy")
         let manifest = UninstallCommand.legacyManifest(home: home)
 
-        XCTAssertEqual(manifest.launchdLabels, ["live.streamvc.macprovider", "live.streamvc.macprovider-watchdog"])
+        XCTAssertEqual(manifest.launchdLabels, ["live.malibu.provider", "live.malibu.provider-watchdog"])
         XCTAssertTrue(manifest.dataDirs.contains("/Users/legacy/macprovider"))
         XCTAssertTrue(manifest.dataDirs.contains("/Users/legacy/.local/share/macprovider-watchdog"))
-        XCTAssertTrue(manifest.launchdPlists.contains("/Users/legacy/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"))
+        XCTAssertTrue(manifest.launchdPlists.contains("/Users/legacy/Library/LaunchAgents/live.malibu.provider-watchdog.plist"))
     }
 
     func testManifestRemovalAllowlistRejectsTraversalAndUnexpectedPrefixPaths() throws {
@@ -260,12 +281,12 @@ final class UninstallCommandTests: XCTestCase {
         let home = URL(fileURLWithPath: "/Users/tester")
         let manifest = UninstallCommand.InstallManifest(
             installPrefix: "/opt/macprovider",
-            launchdLabels: ["live.streamvc.macprovider"],
+            launchdLabels: ["live.malibu.provider"],
             dataDirs: ["/opt/macprovider"],
             version: "v1.8.10",
             binaryPath: "/opt/macprovider/macprovider-cli",
             symlinkPath: "/Users/tester/.local/bin/macprovider-cli",
-            launchdPlists: ["/Users/tester/Library/LaunchAgents/live.streamvc.macprovider.plist"]
+            launchdPlists: ["/Users/tester/Library/LaunchAgents/live.malibu.provider.plist"]
         )
         let allowed = try UninstallCommand.allowedRemovalPaths(home: home, manifest: manifest)
 

@@ -8,7 +8,7 @@ proxy:
     - ::1/128
 
 public:
-  base_url: https://api.streamvc.live
+  base_url: https://api.malibu.tech
   account_path: /account
 
 coordinator:
@@ -36,7 +36,7 @@ auth:
   oauth:
     state_max_per_ip: 20
     callback_allowlist:
-      - https://api.streamvc.live/auth/github/callback
+      - https://api.malibu.tech/auth/github/callback
       - http://localhost:9443/auth/github/callback
     return_to_allowlist:
       - https://malibu.tech/console/auth/callback.html
@@ -180,8 +180,8 @@ features:
 
 cors:
   allowed_origins:
-    - https://console.streamvc.live
-    - https://streamvc.live
+    - https://console.malibu.tech
+    - https://malibu.tech
     - https://malibu.tech
     - https://www.malibu.tech
     - http://127.0.0.1:5173

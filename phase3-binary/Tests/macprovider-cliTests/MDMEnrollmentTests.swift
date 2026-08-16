@@ -19,22 +19,22 @@ final class MDMEnrollmentTests: XCTestCase {
         let output = """
         Enrolled via DEP: No
         MDM enrollment: Yes (User Approved)
-        MDM server: https://coordinator.streamvc.live/mdm/connect
+        MDM server: https://coordinator.malibu.tech/mdm/connect
         """
         XCTAssertEqual(
             parseMDMEnrollmentStatus(output),
-            .enrolledMacprovider(serverURL: "https://coordinator.streamvc.live/mdm/connect")
+            .enrolledMacprovider(serverURL: "https://coordinator.malibu.tech/mdm/connect")
         )
     }
 
     func testParse_EnrolledMacprovider_KnownSuffix() {
         let output = """
         MDM enrollment: Yes
-        MDM server: https://custom.streamvc.live/mdm
+        MDM server: https://custom.malibu.tech/mdm
         """
         XCTAssertEqual(
             parseMDMEnrollmentStatus(output),
-            .enrolledMacprovider(serverURL: "https://custom.streamvc.live/mdm")
+            .enrolledMacprovider(serverURL: "https://custom.malibu.tech/mdm")
         )
     }
 
@@ -97,11 +97,11 @@ final class MDMEnrollmentTests: XCTestCase {
     func testParse_CaseInsensitiveMDMLine() {
         let output = """
         MDM Enrollment: YES
-        MDM Server: https://coordinator.streamvc.live/mdm
+        MDM Server: https://coordinator.malibu.tech/mdm
         """
         XCTAssertEqual(
             parseMDMEnrollmentStatus(output),
-            .enrolledMacprovider(serverURL: "https://coordinator.streamvc.live/mdm")
+            .enrolledMacprovider(serverURL: "https://coordinator.malibu.tech/mdm")
         )
     }
 
@@ -109,11 +109,11 @@ final class MDMEnrollmentTests: XCTestCase {
         // "Yes (User Approved)" must still be treated as enrolled.
         let output = """
         MDM enrollment: Yes (User Approved)
-        MDM server: https://coordinator.streamvc.live/mdm
+        MDM server: https://coordinator.malibu.tech/mdm
         """
         XCTAssertEqual(
             parseMDMEnrollmentStatus(output),
-            .enrolledMacprovider(serverURL: "https://coordinator.streamvc.live/mdm")
+            .enrolledMacprovider(serverURL: "https://coordinator.malibu.tech/mdm")
         )
     }
 
@@ -121,15 +121,15 @@ final class MDMEnrollmentTests: XCTestCase {
 
     func testCoordinatorHTTPBase_WSS_DropsPath() {
         XCTAssertEqual(
-            coordinatorHTTPBase("wss://coordinator.streamvc.live/ws"),
-            "https://coordinator.streamvc.live"
+            coordinatorHTTPBase("wss://coordinator.malibu.tech/ws"),
+            "https://coordinator.malibu.tech"
         )
     }
 
     func testCoordinatorHTTPBase_HTTPS_DropsPath() {
         XCTAssertEqual(
-            coordinatorHTTPBase("https://coordinator.streamvc.live/api"),
-            "https://coordinator.streamvc.live"
+            coordinatorHTTPBase("https://coordinator.malibu.tech/api"),
+            "https://coordinator.malibu.tech"
         )
     }
 
@@ -155,9 +155,9 @@ final class MDMEnrollmentTests: XCTestCase {
     }
 
     func testEnrollEndpoint_Derived() {
-        let base = coordinatorHTTPBase("wss://coordinator.streamvc.live/ws")
+        let base = coordinatorHTTPBase("wss://coordinator.malibu.tech/ws")
         let endpoint = URL(string: "\(base)/v1/enroll")
-        XCTAssertEqual(endpoint?.absoluteString, "https://coordinator.streamvc.live/v1/enroll")
+        XCTAssertEqual(endpoint?.absoluteString, "https://coordinator.malibu.tech/v1/enroll")
     }
 
     func testEnrollEndpoint_SelfHosted() {
@@ -176,11 +176,11 @@ final class MDMEnrollmentTests: XCTestCase {
     }
 
     func testEnrollRunner_AlreadyEnrolledMacprovider_PrintsStatusAndExits() async throws {
-        let config = try makeConfig(coordinatorURL: "wss://coordinator.streamvc.live/ws")
+        let config = try makeConfig(coordinatorURL: "wss://coordinator.malibu.tech/ws")
         let runner = EnrollCommandRunner(
             config: config,
             openSystemSettings: false,
-            checker: { _ in .enrolledMacprovider(serverURL: "https://coordinator.streamvc.live/mdm") },
+            checker: { _ in .enrolledMacprovider(serverURL: "https://coordinator.malibu.tech/mdm") },
             serialReader: { "C02TESTSERIAL" }
         )
         // Should not throw — already enrolled is an exit-0 idempotent case.
@@ -188,7 +188,7 @@ final class MDMEnrollmentTests: XCTestCase {
     }
 
     func testEnrollRunner_ForeignMDM_Throws() async throws {
-        let config = try makeConfig(coordinatorURL: "wss://coordinator.streamvc.live/ws")
+        let config = try makeConfig(coordinatorURL: "wss://coordinator.malibu.tech/ws")
         let runner = EnrollCommandRunner(
             config: config,
             openSystemSettings: false,
@@ -204,7 +204,7 @@ final class MDMEnrollmentTests: XCTestCase {
     }
 
     func testEnrollRunner_MissingSerial_Throws() async throws {
-        let config = try makeConfig(coordinatorURL: "wss://coordinator.streamvc.live/ws")
+        let config = try makeConfig(coordinatorURL: "wss://coordinator.malibu.tech/ws")
         let runner = EnrollCommandRunner(
             config: config,
             openSystemSettings: false,

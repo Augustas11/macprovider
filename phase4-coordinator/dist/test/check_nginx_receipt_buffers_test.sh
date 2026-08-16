@@ -4,8 +4,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 FILES=(
-  "$REPO_ROOT/phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf"
-  "$REPO_ROOT/phase5-gateway/dist/nginx-api.streamvc.live.conf"
+  "$REPO_ROOT/phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf"
+  "$REPO_ROOT/phase5-gateway/dist/nginx-api.malibu.tech.conf"
 )
 FAIL=0
 require_directive() {

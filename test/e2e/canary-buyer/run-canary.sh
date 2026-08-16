@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Wrapper for the canary buyer probe. Resolves credentials, runs exactly one
 # bounded probe, and writes a Prometheus textfile + a rotated JSON artifact. Intended to be
-# invoked by launchd (com.streamvc.canary-buyer.plist) on a lab Mac, or by hand.
+# invoked by launchd (com.malibu.canary-buyer.plist) on a lab Mac, or by hand.
 #
 # Token resolution order:
 #   1. $MACPROVIDER_BUYER_TOKEN (if already exported)
@@ -12,7 +12,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-: "${CANARY_BASE:=https://api.streamvc.live}"
+: "${CANARY_BASE:=https://api.malibu.tech}"
 : "${CANARY_TOKEN_FILE:=${HOME:-/nonexistent}/.config/macprovider/buyer-api-key}"
 : "${CANARY_OPERATOR_TOKEN_FILE:=${HOME:-/nonexistent}/.config/macprovider/operator-api-key}"
 : "${CANARY_HEARTBEAT_FILE:=${HOME:-/nonexistent}/.config/macprovider/canary-heartbeat-url}"

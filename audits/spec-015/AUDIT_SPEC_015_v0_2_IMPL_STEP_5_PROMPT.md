@@ -65,7 +65,7 @@ Use the existing mock-server tests as the source of network behavior evidence.
 7. Non-default coordinator visibility
    - Every returned `ResolvedRoot`, including explicit, cache, live, and none
      paths, must carry `non_default_coordinator` when the coordinator host is not
-     `coordinator.streamvc.live`.
+     `coordinator.malibu.tech`.
 
 ## Expected Output
 

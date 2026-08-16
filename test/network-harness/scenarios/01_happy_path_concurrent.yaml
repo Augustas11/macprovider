@@ -31,8 +31,8 @@ expected_shape: |
      unexpectedly slow, dig into provider-side throughput_tps drift.
 
 target:
-  gateway_url: https://api.streamvc.live
-  coordinator_url: https://coordinator.streamvc.live
+  gateway_url: https://api.malibu.tech
+  coordinator_url: https://coordinator.malibu.tech
   buyer_token: ${BUYER_TOKEN}
   coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
   gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db

@@ -73,7 +73,7 @@ specs/SPEC-004-smart-router.md audit pattern).
   unjustified numeric thresholds (other than the four OQ-flagged
   ones), ambiguous failure semantics, knob-axis claims that don't
   match the actual PR #105 mlx-swift wiring, JSON schema gaps that
-  break `console.streamvc.live` ingestion, or contract precision
+  break `console.malibu.tech` ingestion, or contract precision
   gaps that an implementer would hit on day one.
 
 - **MINOR** — quality issues that don't block v0.1 but should be
@@ -163,7 +163,7 @@ flag any such reference as CRITICAL.)
 
 **9. Telemetry / privacy invariant.** NFR-4 states "Nothing leaves
 the machine" in v1, no opt-in/opt-out. If any clause elsewhere
-(JSON ingestion via `console.streamvc.live`, recipe_hash sharing,
+(JSON ingestion via `console.malibu.tech`, recipe_hash sharing,
 coordinator-side comparison in v2 references, telemetry-adjacent
 log fields) silently violates this = CRITICAL. The recipe_hash
 emission to a local file is fine; auto-upload of any kind is not.
@@ -524,7 +524,7 @@ F.1  FR-F.1 terminal output: verify the seven required elements
 
 F.2  FR-F.2 JSON schema completeness:
      - Does the schema include every field needed for v1
-       `console.streamvc.live` ingestion? If a field name is
+       `console.malibu.tech` ingestion? If a field name is
        wrong (e.g. `tps_median` vs `median_tps`), or a unit is
        wrong (`ttft_p95_ms` is milliseconds; recipe_hash format
        is "sha256:<32-byte-hex>" — but SHA-256 is 32 BYTES =

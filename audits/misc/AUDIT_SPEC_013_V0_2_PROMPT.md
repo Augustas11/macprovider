@@ -127,7 +127,7 @@ Additionally for round 2:
      fixed.
    - `phase3-binary/dist/install.sh` lines ~749 and ~923 +
      `phase3-binary/dist/launchd-plist-template.plist` — verify
-     v0.2 FR-E.1's launchd label `live.streamvc.macprovider`
+     v0.2 FR-E.1's launchd label `live.malibu.provider`
      and the bootout/bootstrap drain sequence match
      SPEC-003 v0.9.2 + the install scripts.
    - `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift`
@@ -164,7 +164,7 @@ Round-1 MAJORs:
   Verify the contract is now sufficient without depending on a
   not-yet-existing `models pull` subcommand.
 - **E.1** launchd label wrong → v0.2 binds to
-  `live.streamvc.macprovider` and the SPEC-003 bootout/bootstrap
+  `live.malibu.provider` and the SPEC-003 bootout/bootstrap
   sequence. Verify against `phase3-binary/dist/`.
 - **F.1** `--apply` wrote wrong YAML keys → v0.2 updates to
   `max_context_override` / `max_concurrency_override`. Verify

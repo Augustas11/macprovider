@@ -332,7 +332,7 @@ I.1  Hardcoded URLs / paths / ports — does any stream hardcode
      something that should match another stream?
        - WS path: /ws/provider — referenced where?
        - Buyer port 8443, provider port 8444 — consistent?
-       - install.sh hits coordinator.streamvc.live; does Stream A
+       - install.sh hits coordinator.malibu.tech; does Stream A
          use that as default too?
 
 I.2  Timeouts/limits — do values match?

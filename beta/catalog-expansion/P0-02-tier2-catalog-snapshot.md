@@ -10,9 +10,9 @@
 
 | Source | URL / path | Result |
 |--------|------------|--------|
-| Live autotune | `https://coordinator.streamvc.live/static/autotune-candidates.json` | HTTP 200 |
-| Live tier-2 (preferred API) | `https://coordinator.streamvc.live/catalog/current` | HTTP 200 — signed catalog served |
-| Tier-2 pubkey | `https://coordinator.streamvc.live/catalog/pubkey` | HTTP 200 — Ed25519 pubkey only (redacted below) |
+| Live autotune | `https://coordinator.malibu.tech/static/autotune-candidates.json` | HTTP 200 |
+| Live tier-2 (preferred API) | `https://coordinator.malibu.tech/catalog/current` | HTTP 200 — signed catalog served |
+| Tier-2 pubkey | `https://coordinator.malibu.tech/catalog/pubkey` | HTTP 200 — Ed25519 pubkey only (redacted below) |
 | Pearl VPS SSH | `/opt/macprovider/tier2-catalog.json` | Not attempted (no SSH in this session) |
 | Repo deploy hint | `phase4-coordinator/dist/coordinator.yaml:202` → `/opt/macprovider/tier2-catalog.json` | Confirms on-disk path; `/catalog/current` is the read-only equivalent |
 | Local autotune copy | `phase3-binary/dist/static/autotune-candidates.json` | Byte-identical to live fetch at pull time |

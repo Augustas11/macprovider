@@ -2,7 +2,7 @@
 
 **You are starting a fresh session in `/Users/augstar/macprovider-poc`. You have no memory of prior conversations. Read this prompt end-to-end before writing anything.**
 
-Your job is to write `specs/SPEC-017-network-stats-api.md` v0.1 — a normative spec for a **public, partner-consumable Network Stats HTTP API** that serves the existing dashboards on `console.streamvc.live` and `portal.streamvc.live`, AND is contractually stable enough for external partners to embed on their own sites.
+Your job is to write `specs/SPEC-017-network-stats-api.md` v0.1 — a normative spec for a **public, partner-consumable Network Stats HTTP API** that serves the existing dashboards on `console.malibu.tech` and `portal.malibu.tech`, AND is contractually stable enough for external partners to embed on their own sites.
 
 ## Why this exists (read first)
 
@@ -22,7 +22,7 @@ These four were settled via a codex advisor round on 2026-06-25 (artifact at `.o
 1. **Data source — separate rollup pipeline.** A scheduled job (define cadence, suggest 30s for hot windows, 5m for `30d`/`all`) reads coordinator OLTP tables and writes narrow `stats_overview_*`, `stats_leaderboard_*`, `stats_timeseries_*` tables that the API queries cheaply. The stats API MUST NOT issue ad-hoc aggregate queries against billing/session tables on the request path.
 2. **Auth model — public overview, optional API keys for leaderboard.** `/v1/overview` and `/v1/health` are fully public (rate-limited by IP at nginx/Cloudflare). `/v1/leaderboard` is public for a baseline shape but accepts an `Authorization: Bearer <key>` for partners that need higher rate limits or extra (contractually stable) fields.
 3. **Earnings sensitivity — provider opt-out with bucketed default.** Default policy for new providers: `$` earnings are exposed as **bucketed/ranked** values in the public API (e.g. `$$$ / $$ / $`, or rank-only); exact `$` requires explicit provider opt-in. Existing providers default to bucketed at v0.1 cutover. `tokens` and `jobs` remain visible unconditionally. Same-origin authenticated portal/console views see exact `$` for the provider's own row regardless of opt-in state.
-4. **Hosting — embed in the existing coordinator Go binary.** Routes mount under `coordinator.streamvc.live/v1/stats/*` (or a reverse-proxied public hostname pointing at the same binary; specify the chosen pattern). No new service. Handler-level isolation MUST be specified so a stats handler bug cannot reach billing/session internals (suggest a separate `internal/stats` package with read-only DB role).
+4. **Hosting — embed in the existing coordinator Go binary.** Routes mount under `coordinator.malibu.tech/v1/stats/*` (or a reverse-proxied public hostname pointing at the same binary; specify the chosen pattern). No new service. Handler-level isolation MUST be specified so a stats handler bug cannot reach billing/session internals (suggest a separate `internal/stats` package with read-only DB role).
 
 ## Repo conventions you MUST honour
 
@@ -51,7 +51,7 @@ For each of `GET /v1/overview`, `GET /v1/leaderboard`, `GET /v1/health`:
 - Cache behaviour: documented `max-age` per endpoint, whether `Authorization` varies the cache (MUST specify; default recommendation: API key does NOT vary the standard cache but unlocks a separate `?fields=extra` projection that has its own cache key), `stale-while-revalidate` allowance.
 - Error envelope: a single consistent shape (`{"error": {"code": "...", "message": "..."}}`).
 
-The `/v1/overview` JSON MUST cover every field on the rendered Overview tab (see screenshots referenced in the [[macprovider-vercel-demo]] context and current console.streamvc.live source). The `/v1/leaderboard` JSON MUST cover the Rankings table including the work/rewards split, with the bucketed-vs-exact `$` field handled per §6.
+The `/v1/overview` JSON MUST cover every field on the rendered Overview tab (see screenshots referenced in the [[macprovider-vercel-demo]] context and current console.malibu.tech source). The `/v1/leaderboard` JSON MUST cover the Rankings table including the work/rewards split, with the bucketed-vs-exact `$` field handled per §6.
 
 ### §4 Rollup pipeline
 
@@ -68,7 +68,7 @@ Define the `stats_*` table shapes and refresh cadence:
 
 - Public tier: documented per-IP rate limit (suggest 60 req/min per endpoint, 600 burst), enforced at nginx or Cloudflare; the SPEC MUST pick a layer and justify.
 - Partner tier: `Authorization: Bearer <key>` format, key issuance procedure (operator-issued, stored where, rotation policy), per-key rate limit (suggest 600 req/min, 6000 burst), and a stable list of "extra fields" a key unlocks (define them in the leaderboard schema with a `partner_only: true` annotation).
-- CORS allowlist: `*` for public endpoints? Just `console.streamvc.live` + `portal.streamvc.live` for the keyed-extra-fields projection? Pin.
+- CORS allowlist: `*` for public endpoints? Just `console.malibu.tech` + `portal.malibu.tech` for the keyed-extra-fields projection? Pin.
 - Contract stability statement: which fields are partner-stable (covered by a documented deprecation policy with X-month notice), which are explicitly experimental (and how is that surfaced — `_experimental_` field prefix?).
 
 ### §6 Earnings visibility
@@ -81,7 +81,7 @@ Define the `stats_*` table shapes and refresh cadence:
 
 ### §7 Hosting & isolation
 
-- Mount path: `/v1/stats/*` under the coordinator binary (default) or a separate public hostname (`stats.streamvc.live`) reverse-proxied to the same binary. Pin one.
+- Mount path: `/v1/stats/*` under the coordinator binary (default) or a separate public hostname (`stats.malibu.tech`) reverse-proxied to the same binary. Pin one.
 - DB access: stats handlers MUST connect with a read-only Postgres role that has SELECT on `stats_*` only and is denied access to billing/session OLTP tables. Define the role name and the migration that creates it.
 - Failure isolation: a stats handler panic MUST NOT kill the coordinator process. Specify the recover middleware boundary.
 - nginx/Cloudflare config: document the cache directive overrides, rate-limit zones, and any header stripping (e.g. strip `Authorization` from logs on the public tier).
@@ -142,7 +142,7 @@ Surface these in a final §"Open questions" section so the audit loop has a clea
 - **Q3 — Leaderboard pagination.** Single-shot `limit=N` (suggest `N≤100`) or proper cursor-based pagination? Probably the former for v0.1, but pin the upper bound.
 - **Q4 — Anonymization stability.** Are pseudonyms stable across versions/restarts, and what's the rotation policy if a provider requests a new pseudonym (e.g. after a near-deanonymization incident)?
 - **Q5 — Mixed-window queries.** Should `/v1/leaderboard?window=24h,7d` (comma list) be supported for partner efficiency, or do partners hit the endpoint twice?
-- **Q6 — `stats.streamvc.live` vs `/v1/stats/*` on coordinator host.** Locked decision is "embed in coordinator binary" but the public hostname pattern is still open. Audit will challenge.
+- **Q6 — `stats.malibu.tech` vs `/v1/stats/*` on coordinator host.** Locked decision is "embed in coordinator binary" but the public hostname pattern is still open. Audit will challenge.
 - **Q7 — Backfill on cutover.** When SPEC-017 ships, do `7d`/`30d`/`all` windows compute from full historical billing data (backfill required), or from rollup-start-date forward (cleaner but partner-facing values look small for the first 30 days)?
 
 ## Quality bar

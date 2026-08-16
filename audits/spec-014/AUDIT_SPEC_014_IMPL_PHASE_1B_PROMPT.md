@@ -153,7 +153,7 @@ C.1  Exactly 3 steps in order: Install, Verify routable, Optional
      Autotune.
 
 C.2  Step 1 snippet is exactly
-     `curl -fsSL https://get.streamvc.live/install.sh | bash` and
+     `curl -fsSL https://get.malibu.tech/install.sh | bash` and
      cites SPEC-003 §4 / FR-C2.
 
 C.3  Step 2 snippet is exactly `macprovider-cli status` and cites

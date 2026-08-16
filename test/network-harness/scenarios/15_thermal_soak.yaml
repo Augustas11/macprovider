@@ -10,7 +10,7 @@
 # pre-beta in #463 with a characterized shorter burn.
 #
 # ############################################################################
-# ## LAB PROVIDER ONLY — NEVER RUN THIS AGAINST streamvc.live / prod.       ##
+# ## LAB PROVIDER ONLY — NEVER RUN THIS AGAINST malibu.tech / prod.       ##
 # ## #584 is the receipt: a 45–60 min soak DEGRADES AND DISCONNECTS the     ##
 # ## single prod mac. This scenario targets ${LAB_GATEWAY_URL} /            ##
 # ## ${LAB_COORDINATOR_URL}, which are intentionally UNSET by default so a  ##

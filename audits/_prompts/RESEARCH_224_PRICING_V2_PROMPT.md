@@ -306,7 +306,7 @@ new code, contract deployment, or pure operator messaging:
     eng cost, requires contract audit)
   - Recommend one + name the trade-off
 - **Provider portal copy**: which page(s) need updating —
-  portal.streamvc.live `pages/` or wherever; flag the tier-filter
+  portal.malibu.tech `pages/` or wherever; flag the tier-filter
   explanation page as new
 
 Flag what's hot-reloadable, what needs a coordinator restart, what's

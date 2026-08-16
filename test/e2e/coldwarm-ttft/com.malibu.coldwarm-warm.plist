@@ -8,18 +8,18 @@
     1. Edit REPLACE_REPO_PATH below to the absolute checkout path.
     2. Put the buyer token at ~/.config/macprovider/buyer-api-key (run-coldwarm.sh
        resolves it) OR export MACPROVIDER_BUYER_TOKEN in EnvironmentVariables.
-    3. cp com.streamvc.coldwarm-warm.plist ~/Library/LaunchAgents/
-    4. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.streamvc.coldwarm-warm.plist
-    5. launchctl kickstart -p gui/$(id -u)/com.streamvc.coldwarm-warm   # run once now
+    3. cp com.malibu.coldwarm-warm.plist ~/Library/LaunchAgents/
+    4. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.malibu.coldwarm-warm.plist
+    5. launchctl kickstart -p gui/$(id -u)/com.malibu.coldwarm-warm   # run once now
 
   Uninstall:
-    launchctl bootout gui/$(id -u)/com.streamvc.coldwarm-warm
-    rm ~/Library/LaunchAgents/com.streamvc.coldwarm-warm.plist
+    launchctl bootout gui/$(id -u)/com.malibu.coldwarm-warm
+    rm ~/Library/LaunchAgents/com.malibu.coldwarm-warm.plist
 -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.streamvc.coldwarm-warm</string>
+  <string>com.malibu.coldwarm-warm</string>
 
   <key>ProgramArguments</key>
   <array>
@@ -34,7 +34,7 @@
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>COLDWARM_BASE</key>
-    <string>https://api.streamvc.live</string>
+    <string>https://api.malibu.tech</string>
     <!-- Pin the model explicitly to keep the store's matrix keys consistent.
          Use the FULL catalog model id the provider advertises (what /v1/status
          returns), NOT the short rate-card key: post-#510 the provider advertises

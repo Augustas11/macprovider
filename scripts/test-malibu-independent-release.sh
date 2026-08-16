@@ -48,7 +48,7 @@ required = (
     "Print :CFBundleVersion",
     "stat -f '%Lp'",
     'identifier \\"tech.malibu.app\\"',
-    'identifier \\"live.streamvc.macprovider.cli\\"',
+    'identifier \\"live.malibu.provider.cli\\"',
     'git merge-base --is-ancestor "$SOURCE_COMMIT" refs/remotes/origin/main',
     'final-draft-cli.json',
     'immutable-release-by-id.json',

@@ -144,7 +144,7 @@ Numbered, mechanical. Examples (write the actual list; these are seeds):
 - AC-4: Ambiguous-duplicate-key arguments yield `malformed_tool_call`, not silent first-key-wins.
 - AC-5: Streaming SSE deltas reconstruct the non-streaming `arguments` byte-for-byte under concatenation.
 - AC-6: Coordinator pass-through preserves provider-minted `id` across the WS hop.
-- AC-7: Public-gateway e2e against api.streamvc.live succeeds for a non-streaming Qwen3-Coder tool-call response within `coordinator_header_timeout_seconds >= 60`.
+- AC-7: Public-gateway e2e against api.malibu.tech succeeds for a non-streaming Qwen3-Coder tool-call response within `coordinator_header_timeout_seconds >= 60`.
 - AC-8: An OpenAI-shape Python client (`openai==1.x`) pointed at the buyer URL completes the canonical "get_weather" tool-loop example end-to-end without modification.
 - … extend as needed.
 

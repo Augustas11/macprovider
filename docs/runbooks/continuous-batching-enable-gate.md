@@ -112,8 +112,8 @@ labels and paths from the test host, and capture sanitized output.
 
 ```bash
 pgrep -af 'macprovider|Malibu'
-launchctl bootout gui/$(id -u)/live.streamvc.macprovider-watchdog
-launchctl bootout gui/$(id -u)/live.streamvc.macprovider
+launchctl bootout gui/$(id -u)/live.malibu.provider-watchdog
+launchctl bootout gui/$(id -u)/live.malibu.provider
 ```
 
 After the proof or rollback, restore the provider and watchdog through the

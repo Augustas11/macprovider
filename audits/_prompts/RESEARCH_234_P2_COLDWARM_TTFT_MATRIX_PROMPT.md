@@ -98,8 +98,8 @@ merging the harness PR while it's still accumulating data.
   cannot self-approve). Merge with `GH_TOKEN=$(gh auth token -u Augustas11)`.
 
 ## Key references
-- **Prod:** coordinator `coordinator.streamvc.live` (Pearl VPS, systemd
-  `macprovider-coordinator`), gateway `api.streamvc.live`. Provider `mac` serves
+- **Prod:** coordinator `coordinator.malibu.tech` (Pearl VPS, systemd
+  `macprovider-coordinator`), gateway `api.malibu.tech`. Provider `mac` serves
   `qwen3-coder-30b-a3b-instruct`.
 - **P1 harness (build on this):** `test/e2e/canary-buyer/` (probe.mjs, run-canary.sh,
   canary-buyer.{service,timer}, README.md). Deployed on Pearl under

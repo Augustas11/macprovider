@@ -41,9 +41,9 @@ Optionally update:
 ## Critical constraints
 
 **1. install.sh distribution stays decoupled per SPEC-003 v0.5 § 4.**
-install.sh is served from main via `get.streamvc.live` → raw.github
+install.sh is served from main via `get.malibu.tech` → raw.github
 redirect. No tarball repackaging required for install.sh-only fixes;
-the next `curl get.streamvc.live/install.sh | bash` carries the fix.
+the next `curl get.malibu.tech/install.sh | bash` carries the fix.
 
 **2. SPEC-001, SPEC-002, SPEC-006 stay UNTOUCHED.** Verify with
 `git diff` after edits.
@@ -88,7 +88,7 @@ gate" below). The gate is mechanical, not discretionary.
 **Location:** install.sh, `PORT` initialization at the top.
 
 **Reproduction:** operator self-canary today; running
-`curl get.streamvc.live/install.sh | bash` on a Mac with existing
+`curl get.malibu.tech/install.sh | bash` on a Mac with existing
 v1.2.3 on port 18080 defaulted to port 8080 (because MACPROVIDER_PORT
 wasn't set in env) → port collision detected, install refused.
 
@@ -363,10 +363,10 @@ v0.7 ready without all three green.**
 
 ```bash
 # Simulate clean state by removing prior install
-launchctl bootout gui/$UID ~/Library/LaunchAgents/live.streamvc.macprovider.plist 2>/dev/null
-rm -rf ~/macprovider/ ~/.config/macprovider/ ~/.local/bin/macprovider-cli ~/Library/LaunchAgents/live.streamvc.macprovider.plist
+launchctl bootout gui/$UID ~/Library/LaunchAgents/live.malibu.provider.plist 2>/dev/null
+rm -rf ~/macprovider/ ~/.config/macprovider/ ~/.local/bin/macprovider-cli ~/Library/LaunchAgents/live.malibu.provider.plist
 # Run install fresh
-curl -fsSL https://get.streamvc.live/install.sh | bash
+curl -fsSL https://get.malibu.tech/install.sh | bash
 # Expected: clean fresh install, model downloads, binary starts, joins pool
 ```
 
@@ -375,7 +375,7 @@ curl -fsSL https://get.streamvc.live/install.sh | bash
 ```bash
 # With existing v1.2.4 install on augustass-macbook-air (where this
 # session is running), re-run install.sh.
-curl -fsSL https://get.streamvc.live/install.sh | bash
+curl -fsSL https://get.malibu.tech/install.sh | bash
 # Expected: detect existing port (18080); bootout existing service;
 # upgrade in place; service comes back on same port with same config
 ```
@@ -458,7 +458,7 @@ Operator's review checklist (~20 min):
 2. `git diff phase3-binary/dist/install.sh` — all 6 fixes with F-* labels.
 3. `git diff specs/SPEC-001-phase3-binary.md specs/SPEC-002-coordinator.md specs/SPEC-006-buyer-api.md` — all empty.
 4. Review the verification gate output. If any scenario failed, investigate before commit.
-5. If all green: commit + push (install.sh lands immediately via the get.streamvc.live redirect; no release needed).
+5. If all green: commit + push (install.sh lands immediately via the get.malibu.tech redirect; no release needed).
 
 Then commit. Suggested message:
 
@@ -487,7 +487,7 @@ in place, mixed-state dir warning).
 
 SPEC-001 v1.2.3, SPEC-002 v1.1.4, SPEC-006 v0.5 untouched.
 
-install.sh changes land immediately via get.streamvc.live →
+install.sh changes land immediately via get.malibu.tech →
 raw.githubusercontent.com redirect. No release tag bump needed.
 ```
 

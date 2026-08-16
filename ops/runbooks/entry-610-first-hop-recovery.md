@@ -82,7 +82,7 @@ already-public signed installer (no internal binary extraction, no launchctl
 surgery):
 
 ```bash
-curl -fsSL https://get.streamvc.live/install.sh | MACPROVIDER_VERSION=v1.8.56 bash
+curl -fsSL https://get.malibu.tech/install.sh | MACPROVIDER_VERSION=v1.8.56 bash
 macprovider-cli --version
 macprovider-cli status
 ```

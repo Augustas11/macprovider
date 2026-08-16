@@ -373,7 +373,7 @@ the `settled` column on existing rows (0 → 1) when it emits a
 other state changes are new rows.
 
 **9. Stranger-readable.** SPEC-005's docs surface (the part visible
-to providers via `get.streamvc.live/install.sh` link and provider
+to providers via `get.malibu.tech/install.sh` link and provider
 docs) MUST be honest about v1 limits: "v1 records provider credits
 as an accrual ledger. Real payout requires SPEC-007 (AntFeed rail).
 v1 may or may not pay out depending on operator decision." No

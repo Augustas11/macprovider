@@ -41,10 +41,10 @@ The CLI prints the URL — that's what you send to the M4 contributor.
 After deploy, open the URL and:
 
 1. Pick **M1** in the dropdown → send "ping". Tokens should stream in.
-   The receipt panel should show `tunnel: m1.streamvc.live`,
+   The receipt panel should show `tunnel: m1.malibu.tech`,
    `model: …llama-3.2-3b…`, a TTFT, and a tok/s.
 2. Flip to **M4** → send the same prompt. Tunnel should flip to
-   `m4.streamvc.live`, model to `…Qwen2.5-7B…`, and tok/s should change
+   `m4.malibu.tech`, model to `…Qwen2.5-7B…`, and tok/s should change
    noticeably (different hardware + different model).
 
 The side-by-side behavior difference is the proof that two physically

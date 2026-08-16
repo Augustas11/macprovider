@@ -524,7 +524,7 @@ def require_stable_gate(
         tag_arg,
         pearl_release_arg,
         trusted_keys_arg,
-        "--coordinator-url https://coordinator.streamvc.live",
+        "--coordinator-url https://coordinator.malibu.tech",
         "--openssl \"$OPENSSL_BIN\"",
         "scripts/release-staged-version-policy.sh",
         "prepublication_recommendation_args",
@@ -595,7 +595,7 @@ def require_rollout(workflow_path):
         "compatibility-artifact-index.json",
         "macprovider-release-discovery.json",
         "--require-immutable",
-        "https://coordinator.streamvc.live",
+        "https://coordinator.malibu.tech",
     ):
         if required not in workflow:
             raise SystemExit(f"rollout proof omits {required}")

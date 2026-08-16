@@ -16,8 +16,8 @@ Scope:
 - `phase4-coordinator/internal/stats/rollup/incremental.go`
 - `phase4-coordinator/internal/buyer/streaming_downgrade.go`
 - `phase4-coordinator/internal/buyer/streaming_timing.go`
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf`
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf`
 - `phase4-coordinator/dist/nginx-snippets/cors-429.conf`
 - `specs/SPEC-017-network-stats-api.md`
 

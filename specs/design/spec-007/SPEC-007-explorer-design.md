@@ -912,7 +912,7 @@ Relevant repo context:
 - `beta/web/` and `web-three-lime-59.vercel.app` existed as the earlier
   Vercel demo path.
 - `frontdoor/console/` is the current static console surface deployed at
-  `console.streamvc.live`.
+  `console.malibu.tech`.
 
 The build prompt says operator preference leans toward Next.js from the Vercel history.
 
@@ -939,7 +939,7 @@ cockpit on public infrastructure.
 
 Shape:
 
-Host `explorer.streamvc.live`.
+Host `explorer.malibu.tech`.
 
 Pros:
 

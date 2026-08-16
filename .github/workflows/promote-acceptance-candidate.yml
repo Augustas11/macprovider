@@ -484,7 +484,7 @@ jobs:
             --tag "$TAG" \
             --pearl-release-json "$accepted/pearl-release.json" \
             --trusted-keys "$accepted/trusted-keys.json" \
-            --coordinator-url https://coordinator.streamvc.live \
+            --coordinator-url https://coordinator.malibu.tech \
             --openssl "$OPENSSL_BIN" \
             "${prepublication_recommendation_args[@]}" \
             --publication-phase pre-publication

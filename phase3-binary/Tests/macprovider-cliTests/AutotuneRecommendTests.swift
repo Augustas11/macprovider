@@ -1953,7 +1953,7 @@ final class AutotuneRecommendTests: XCTestCase {
     // Locks the 2026-07-03 fix that removed the keychain code path from
     // AutotuneHMACSecretStore.loadOrCreate. Any future refactor that
     // reintroduces `SecItemCopyMatching` / `SecItemAdd` calls against the
-    // legacy `live.streamvc.macprovider.autotune` service in this file
+    // legacy `live.malibu.provider.autotune` service in this file
     // will fail this test. Keychain access is what caused every
     // auto-updated provider to see a "login keychain password" prompt on
     // interactive autotune runs after a version bump, because the ACL of
@@ -1971,7 +1971,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let source = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         XCTAssertFalse(source.contains("SecItemCopyMatching"), "AutotuneRecommend.swift must not call SecItemCopyMatching — see 2026-07-03 keychain-prompt fix")
         XCTAssertFalse(source.contains("SecItemAdd"), "AutotuneRecommend.swift must not call SecItemAdd — see 2026-07-03 keychain-prompt fix")
-        // Note: the legacy service literal `live.streamvc.macprovider.autotune`
+        // Note: the legacy service literal `live.malibu.provider.autotune`
         // is intentionally allowed in comments (so operators can grep the
         // source for the name they need to delete via `security` CLI).
         // Only the runtime `kSecAttrService:` binding must not reappear.

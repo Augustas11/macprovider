@@ -190,7 +190,7 @@ In `ops/macprovider-watchdog/watchdog.sh`, the `restore` function MUST:
 In `phase3-binary/Sources/macprovider-cli/AutoUpdater.swift`:
 
 - Replace `fileExists(watchdogPlist)` check with active enablement
-  detection: run `launchctl print gui/<uid>/live.streamvc.macprovider-watchdog`
+  detection: run `launchctl print gui/<uid>/live.malibu.provider-watchdog`
   and verify the service is loaded AND not disabled. If unavailable,
   fail closed with `failure_class:"rollback_observer_unavailable"`.
 - For the main LaunchAgent: `restartLaunchdIfInstalled` MUST NOT

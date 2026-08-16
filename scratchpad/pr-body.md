@@ -26,7 +26,7 @@ This is that guard.
 
 ### Calibration (from a real prod baseline, not guessed)
 
-Ran scenario 16 against prod (`api.streamvc.live`, 30B-Coder) on 2026-07-22 with
+Ran scenario 16 against prod (`api.malibu.tech`, 30B-Coder) on 2026-07-22 with
 sticky routing verified live on both sides. Measured **median reuse 0.725** over
 7 warm turns (corroborating #376's ~0.64, range 0.638–0.70); cached turns ~5×
 faster (p50 ~2.1s vs ~10s). Thresholds transcribed from that baseline with

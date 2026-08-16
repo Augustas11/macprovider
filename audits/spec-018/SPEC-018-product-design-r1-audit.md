@@ -48,7 +48,7 @@ The product-design lens cares about: anchor-example fidelity (does the user's ac
 A developer (your representative user) opens Cline (or Cursor, Aider, Claude Code, Continue, Zed, OpenCode — any OpenAI-shape agent framework). They configure:
 
 ```bash
-export OPENAI_BASE_URL=https://api.streamvc.live/v1
+export OPENAI_BASE_URL=https://api.malibu.tech/v1
 export OPENAI_API_KEY=<buyer-token>
 ```
 
@@ -216,7 +216,7 @@ QUESTIONS: 1
 - SPEC location: AC-16, AC-14, §1.
 - Current SPEC framing: AC-16 certifies only first assistant response parsing for a `get_weather`-style loop and explicitly excludes the second turn.
 - Reality from anchor example: the second turn is where agent frameworks prove compatibility: `tool_call_id` echo, history shape, tool-result formatting, and next tool-call generation.
-- Recommended fix to SPEC body: either rename AC-16 to “first-turn wire-shape smoke test” or add a required AC for a real framework: configure at least one of Cline/Aider/OpenCode/Continue against `OPENAI_BASE_URL=https://api.streamvc.live/v1`, run a two-tool-turn coding workflow, and require no response adapters. If v0.1 remains first-turn-only, §1 must not imply framework-level drop-in operation.
+- Recommended fix to SPEC body: either rename AC-16 to “first-turn wire-shape smoke test” or add a required AC for a real framework: configure at least one of Cline/Aider/OpenCode/Continue against `OPENAI_BASE_URL=https://api.malibu.tech/v1`, run a two-tool-turn coding workflow, and require no response adapters. If v0.1 remains first-turn-only, §1 must not imply framework-level drop-in operation.
 
 ### H-2 — §10 mixes Ring-1 blockers with nice-to-have future work
 - User impact: buyers cannot tell whether multi-turn and streaming are imminent product blockers or just wishlist items beside SDK wrappers and prefix cache.

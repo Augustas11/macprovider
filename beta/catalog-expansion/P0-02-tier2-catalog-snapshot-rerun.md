@@ -11,8 +11,8 @@
 
 | Source | URL / path | Result |
 |--------|------------|--------|
-| Live autotune | `https://coordinator.streamvc.live/static/autotune-candidates.json` | HTTP 200 |
-| Live tier-2 | `https://coordinator.streamvc.live/catalog/current` | HTTP 200 |
+| Live autotune | `https://coordinator.malibu.tech/static/autotune-candidates.json` | HTTP 200 |
+| Live tier-2 | `https://coordinator.malibu.tech/catalog/current` | HTTP 200 |
 | Pearl on-disk | `/opt/macprovider/tier2-catalog.json` | Updated 2026-07-07T06:12:04Z (P0-06 deploy) |
 
 ---

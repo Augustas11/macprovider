@@ -20,7 +20,7 @@
 - § 17.7 quota-refund matrix gains a `500 route_snapshot_failed` row: a genuine no-provider failure is a **no-charge refund** (was: settled on the prompt estimate — SPEC-022 "Known limitations (A)", now resolved), gated on the coordinator's POSITIVE `X-MacProvider-Settlement-No-Prior-Dispatch` marker plus no finality header plus no gateway-retry prior dispatch. The coordinator stamps that marker centrally (`noPriorDispatchResponseWriter`) on any terminal response written while no provider has been **billably credited** for the request. "Credited" is the LEDGER-EXACT signal, not a request-log ordinal: `providerCredited` is set inside `recordRow` the instant a provider-bound billable row persists (`providerAssignedID != "" AND status != 503`), and `dispatchedThisAttempt` (reset per attempt, set before the provider relay) covers the current terminal attempt whose own billing row is recorded AFTER its write on the WS paths — a dispatched attempt whose terminal status is non-503 WILL be billed, so it is left unmarked; a dispatched attempt that terminates 503 (queue-full / relay-unavailable) is NOT billed and stays marked. This replaces the earlier `attemptN == 0` source, which over-counted (incremented on non-billed 503 rows → over-charge) and under-covered (incremented after the terminal WS write → under-charge). The positive-marker design (not absence-of-negative) makes a gateway-first deploy / coordinator rollback safe — an unmarked response settles on the estimate. Two unmarked/settled cases preserve provider work credited in `observe` mode: (1) coordinator-internal failover (marker withheld once a provider is credited); (2) gateway retry of an unmarked earlier response — a provider-dispatched `provider_*` 502 or a `no_provider` 503 from failover exhaustion after a billed attempt (a genuinely cold retried 502/503 is marked and does not poison the refund). § 17.1 notes the coordinator `500 route_snapshot_failed` is passed through verbatim. **Coordinator + gateway behavior change — deploy coordinator first, roll back in reverse.** SPEC-022 item (A) reconciled to resolved.
 
 **Change log v0.9.9 (2026-07-14, SPEC-018 AC-45 gateway-strip reconciliation):**
-- Added `X-MacProvider-Streaming-Mode` to the § 5.4 response-pass-through allowlist (and its outbound-strip-summary duplicate). The coordinator has always set this SPEC-018 AC-45 buyer-visible streaming-mode diagnostic on streaming `200` responses, but the gateway's blanket `X-MacProvider-*` strip removed it before the buyer on `api.streamvc.live`, making AC-45's "header absent" fail condition live in production. The gateway now forwards it, validated against AC-45's closed enum (`incremental` / `buffered_kill_switch` / `buffered_provider_downgrade`) and dropped otherwise (defense-in-depth against header-content injection past the strip). Resolves runbook item 15 / the SPEC-018 v0.2.4 "Known open gap" note. No wire-contract change beyond un-stripping an already-specified header; the header remains observation-only.
+- Added `X-MacProvider-Streaming-Mode` to the § 5.4 response-pass-through allowlist (and its outbound-strip-summary duplicate). The coordinator has always set this SPEC-018 AC-45 buyer-visible streaming-mode diagnostic on streaming `200` responses, but the gateway's blanket `X-MacProvider-*` strip removed it before the buyer on `api.malibu.tech`, making AC-45's "header absent" fail condition live in production. The gateway now forwards it, validated against AC-45's closed enum (`incremental` / `buffered_kill_switch` / `buffered_provider_downgrade`) and dropped otherwise (defense-in-depth against header-content injection past the strip). Resolves runbook item 15 / the SPEC-018 v0.2.4 "Known open gap" note. No wire-contract change beyond un-stripping an already-specified header; the header remains observation-only.
 
 **Change log v0.9.8 (2026-07-12, SPEC-024 prefix-cache provider-visibility carve-out):**
 - Narrowed § 1.3 Tier-2 survivability invariant (b): the raw buyer tag / `account_id` remain unrecoverable by the provider (one-way HMAC, non-side-channel-derivable), but the *derived opaque* `conv:` value MAY be provided to the provider in the inference request for provider-local prefix caching (SPEC-004 v0.3.2 FR-SR-2 / SPEC-008 v0.4.1 §2.2). No wire-contract change.
@@ -154,7 +154,7 @@
 **Change log v0.1:**
 - Initial draft following design exploration in specs/design/spec-006/SPEC-006-design.md.
 - Locked design choices captured from operator pre-commitments (see Section 2).
-- Defines the separate Go gateway service at phase5-gateway/ and the buyer-facing HTTP surface at https://api.streamvc.live.
+- Defines the separate Go gateway service at phase5-gateway/ and the buyer-facing HTTP surface at https://api.malibu.tech.
 - Defines authentication, key issuance, quota enforcement, usage accounting, feedback capture, status transparency, kill switches, capacity-burst protection, storage contracts, front-door contracts, instrumentation, failure modes, audit categories, and acceptance criteria.
 - Defers implementation to a later BUILD_PHASE5 or BUILD_PHASE6 prompt.
 
@@ -173,7 +173,7 @@ The public API is served by a separate Go gateway service in `phase5-gateway/`.
 The canonical buyer URL is:
 
 ```text
-https://api.streamvc.live
+https://api.malibu.tech
 ```
 
 The gateway fronts the Phase 4 coordinator and exposes only buyer-safe endpoints.
@@ -189,7 +189,7 @@ The gateway is responsible for buyer identity, buyer API keys, quota, public sta
 SPEC-006 covers:
 
 - A separate Go gateway service under `phase5-gateway/`.
-- Public endpoint routing at `api.streamvc.live`.
+- Public endpoint routing at `api.malibu.tech`.
 - Public `/v1/models`.
 - Public `/v1/chat/completions`.
 - Experimental operator-gated public `/v1/messages` facade.
@@ -329,7 +329,7 @@ SPEC-006 MUST require the coordinator buyer listener to be reachable only from l
 
 SPEC-006 MUST require the gateway to use a configurable coordinator backend list.
 
-SPEC-006 MUST NOT expose SPEC-002 operator endpoints at `api.streamvc.live`.
+SPEC-006 MUST NOT expose SPEC-002 operator endpoints at `api.malibu.tech`.
 
 SPEC-006 normatively cannot mutate SPEC-001 or SPEC-002 during SPEC-006-only implementation or fix cycles.
 
@@ -393,7 +393,7 @@ SPEC-006 MUST NOT propose unilateral changes to SPEC-001 or SPEC-002 outside a c
 
 OpenAI compatibility is normative.
 
-Any OpenAI Python or JavaScript SDK call against `https://api.streamvc.live/v1/chat/completions` with a valid bearer key MUST succeed for supported models.
+Any OpenAI Python or JavaScript SDK call against `https://api.malibu.tech/v1/chat/completions` with a valid bearer key MUST succeed for supported models.
 
 Deviation from OpenAI's chat completion request/response shape MUST be documented as a known divergence.
 
@@ -421,7 +421,7 @@ No hot-path storage design MAY require row updates for usage, feedback, or audit
 
 Bearer-token validation MUST be achievable in less than 1 ms p95 against the storage layer.
 
-M4 and M1 partner Macs currently serving direct buyers at `m4.streamvc.live` and `m1.streamvc.live` remain operational.
+M4 and M1 partner Macs currently serving direct buyers at `m4.malibu.tech` and `m1.malibu.tech` remain operational.
 
 Gateway does not intercept those legacy direct-tunnel paths.
 
@@ -455,9 +455,9 @@ This section is read-only design input and MUST NOT be treated as a place to pro
 
 ### 2.2 Public API surface
 
-- Canonical buyer URL: `https://api.streamvc.live`.
-- Internal coordinator URL: `https://coordinator.streamvc.live` stays in service for M4/M1 legacy direct-tunnel buyer paths and operator endpoints (`/admin/*`, `/poolz`, `/healthz`).
-- Endpoints exposed at `api.streamvc.live`:
+- Canonical buyer URL: `https://api.malibu.tech`.
+- Internal coordinator URL: `https://coordinator.malibu.tech` stays in service for M4/M1 legacy direct-tunnel buyer paths and operator endpoints (`/admin/*`, `/poolz`, `/healthz`).
+- Endpoints exposed at `api.malibu.tech`:
   - `GET /v1/models`
   - `POST /v1/chat/completions` (including SSE streaming via `stream: true`)
   - `POST /v1/messages` only when `features.anthropic_messages_enabled` is true
@@ -466,7 +466,7 @@ This section is read-only design input and MUST NOT be treated as a place to pro
   - `POST /v1/feedback`
   - OAuth callbacks at `/auth/github/callback` (and `/auth/email/callback` if email magic link is implemented)
   - Signup/key-management UI at `/account` (or operator-chosen path consistent with the Vercel demo's structure)
-- Endpoints NOT exposed at `api.streamvc.live` (kept internal):
+- Endpoints NOT exposed at `api.malibu.tech` (kept internal):
   - `/admin/*`, `/poolz`, `/healthz`, `/ws/provider` -- all remain on coordinator port.
 
 ### 2.3 Identity
@@ -604,7 +604,7 @@ Streaming cancellation: when client disconnects mid-SSE, gateway MUST cancel the
 
 - Existing demo at `web-three-lime-59.vercel.app` becomes the front door.
 - Updates required:
-  - Repoint chat backend from `m4.streamvc.live` / `m1.streamvc.live` direct tunnels to `https://api.streamvc.live/v1/chat/completions` (via demo-only unauthenticated quota).
+  - Repoint chat backend from `m4.malibu.tech` / `m1.malibu.tech` direct tunnels to `https://api.malibu.tech/v1/chat/completions` (via demo-only unauthenticated quota).
   - Add "Get API key" flow (GitHub OAuth, optionally email).
   - Add `/account` page showing usage, quota remaining, regenerate key, revoke key.
   - Add single-page docs section: curl examples, OpenAI Python and JavaScript SDK snippets, error code explanations, quota docs, "real Macs, sometimes asleep" caveats.
@@ -716,8 +716,8 @@ The v1 deployment MUST contain:
 
 - `phase4-coordinator` running the SPEC-002 router.
 - `phase5-gateway` running the SPEC-006 public gateway.
-- TLS termination for `api.streamvc.live` in front of the gateway.
-- TLS termination for `coordinator.streamvc.live` in front of coordinator operator/provider paths.
+- TLS termination for `api.malibu.tech` in front of the gateway.
+- TLS termination for `coordinator.malibu.tech` in front of coordinator operator/provider paths.
 - SQLite storage for gateway v1 state on Pearl VPS.
 - Front-door Vercel demo calling the gateway.
 
@@ -731,7 +731,7 @@ The gateway MUST be restartable independently of the coordinator.
 
 ### 4.2 Public and private boundaries
 
-`https://api.streamvc.live` MUST expose only:
+`https://api.malibu.tech` MUST expose only:
 
 - `GET /v1/models`
 - `POST /v1/chat/completions`
@@ -743,7 +743,7 @@ The gateway MUST be restartable independently of the coordinator.
 - `/auth/email/callback` if email magic link ships
 - `/account` or equivalent account UI path
 
-`https://api.streamvc.live` MUST NOT expose:
+`https://api.malibu.tech` MUST NOT expose:
 
 - `/admin/*`
 - `/poolz`
@@ -757,7 +757,7 @@ The gateway MUST be restartable independently of the coordinator.
 - Operator keys.
 - Internal coordinator backend URLs.
 
-`https://coordinator.streamvc.live` MAY remain in service for:
+`https://coordinator.malibu.tech` MAY remain in service for:
 
 - M4/M1 legacy direct-tunnel buyer paths.
 - Operator endpoints.
@@ -773,7 +773,7 @@ Public `/v1/*` traffic MUST flow through the gateway.
 
 Direct public access to coordinator `/v1/*` MUST NOT be required for new buyers.
 
-Legacy direct-tunnel buyers at `m4.streamvc.live` and `m1.streamvc.live` remain outside gateway interception.
+Legacy direct-tunnel buyers at `m4.malibu.tech` and `m1.malibu.tech` remain outside gateway interception.
 
 ### 4.4 Request flow: authenticated chat
 
@@ -781,7 +781,7 @@ Authenticated chat flow:
 
 ```text
 Buyer
-  -> TLS api.streamvc.live
+  -> TLS api.malibu.tech
   -> gateway auth middleware
   -> kill-switch check
   -> request validation
@@ -939,7 +939,7 @@ When an SSE client disconnects, the gateway MUST cancel the upstream coordinator
 Any OpenAI Python or JavaScript SDK call against:
 
 ```text
-https://api.streamvc.live/v1/chat/completions
+https://api.malibu.tech/v1/chat/completions
 ```
 
 with a valid bearer key and supported model MUST succeed for supported request shapes.
@@ -1129,7 +1129,7 @@ Response shape:
     "verified_model_settlement": {
       "included_paid_entrypoints": ["POST /v1/chat/completions"],
       "excluded_paid_entrypoints": [
-        "legacy direct-tunnel buyer paths at coordinator.streamvc.live, m4.streamvc.live, and m1.streamvc.live unless separately disabled or migrated behind the gateway paid ledger"
+        "legacy direct-tunnel buyer paths at coordinator.malibu.tech, m4.malibu.tech, and m1.malibu.tech unless separately disabled or migrated behind the gateway paid ledger"
       ],
       "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
       "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
@@ -1204,7 +1204,7 @@ The `/v1/models` response MUST include a top-level field:
   "verified_model_settlement": {
     "included_paid_entrypoints": ["POST /v1/chat/completions"],
     "excluded_paid_entrypoints": [
-      "legacy direct-tunnel buyer paths at coordinator.streamvc.live, m4.streamvc.live, and m1.streamvc.live unless separately disabled or migrated behind the gateway paid ledger"
+      "legacy direct-tunnel buyer paths at coordinator.malibu.tech, m4.malibu.tech, and m1.malibu.tech unless separately disabled or migrated behind the gateway paid ledger"
     ],
     "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
     "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
@@ -1524,7 +1524,7 @@ Response shape:
   "settlement_disclosure": {
     "included_paid_entrypoints": ["POST /v1/chat/completions"],
     "excluded_paid_entrypoints": [
-      "legacy direct-tunnel buyer paths at coordinator.streamvc.live, m4.streamvc.live, and m1.streamvc.live unless separately disabled or migrated behind the gateway paid ledger"
+      "legacy direct-tunnel buyer paths at coordinator.malibu.tech, m4.malibu.tech, and m1.malibu.tech unless separately disabled or migrated behind the gateway paid ledger"
     ],
     "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
     "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
@@ -1730,7 +1730,7 @@ Callbacks MUST:
 The GitHub OAuth app MUST be configured with a strict callback URL allowlist containing only:
 
 ```text
-https://api.streamvc.live/auth/github/callback
+https://api.malibu.tech/auth/github/callback
 ```
 
 Local development MAY use `http://localhost:{port}/auth/github/callback` as a separate OAuth app with its own callback registration.
@@ -1783,7 +1783,7 @@ Scopes for repository, organization, gist, or write access MUST NOT be requested
 
 The OAuth app's registered scope list MUST match this minimum scope set.
 
-The GitHub OAuth app MUST be configured with a strict callback URL allowlist containing only `https://api.streamvc.live/auth/github/callback` for production.
+The GitHub OAuth app MUST be configured with a strict callback URL allowlist containing only `https://api.malibu.tech/auth/github/callback` for production.
 
 The gateway MUST reject callbacks whose `redirect_uri` does not exactly match an allowlisted value.
 
@@ -2412,7 +2412,7 @@ Operator-readable aggregation endpoint:
 /admin/feedback-summary
 ```
 
-This endpoint MUST NOT be exposed publicly at `api.streamvc.live` without operator auth.
+This endpoint MUST NOT be exposed publicly at `api.malibu.tech` without operator auth.
 
 The endpoint MUST support `?window=7d` and `?window=14d`; missing `window` defaults to `7d`.
 
@@ -2471,7 +2471,7 @@ The existing Vercel demo under `beta/web/` currently calls direct provider tunne
 SPEC-006 front-door work MUST repoint demo chat traffic to:
 
 ```text
-https://api.streamvc.live/v1/chat/completions
+https://api.malibu.tech/v1/chat/completions
 ```
 
 ### 12.2 Gateway endpoints consumed by front door
@@ -2589,7 +2589,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="mp_replace_me",
-    base_url="https://api.streamvc.live/v1",
+    base_url="https://api.malibu.tech/v1",
 )
 
 resp = client.chat.completions.create(
@@ -2608,7 +2608,7 @@ import OpenAI from "openai";
 
 const client = new OpenAI({
   apiKey: process.env.MACPROVIDER_API_KEY,
-  baseURL: "https://api.streamvc.live/v1",
+  baseURL: "https://api.malibu.tech/v1",
 });
 
 const resp = await client.chat.completions.create({
@@ -2760,7 +2760,7 @@ listen:
   port: 9443
 
 public:
-  base_url: https://api.streamvc.live
+  base_url: https://api.malibu.tech
   account_path: /account
 
 coordinators:
@@ -2790,7 +2790,7 @@ auth:
   email_magic_link_enabled: false
   oauth:
     callback_allowlist:
-      - https://api.streamvc.live/auth/github/callback
+      - https://api.malibu.tech/auth/github/callback
   demo:
     signing_secret: env:MACPROVIDER_DEMO_SIGNING_SECRET
 
@@ -3113,7 +3113,7 @@ Pass condition:
 
 Verification:
 
-1. Call every allowed endpoint at `api.streamvc.live`.
+1. Call every allowed endpoint at `api.malibu.tech`.
 2. Call `/admin/foo`, `/poolz`, `/healthz`, and `/ws/provider`.
 3. Inspect responses.
 
@@ -3154,7 +3154,7 @@ Pass condition:
 
 Verification:
 
-1. Use OpenAI Python SDK with `base_url=https://api.streamvc.live/v1`.
+1. Use OpenAI Python SDK with `base_url=https://api.malibu.tech/v1`.
 2. Call `chat.completions.create` with a valid model.
 3. Use OpenAI JavaScript SDK with the same base URL.
 4. Call the same endpoint.
@@ -3389,8 +3389,8 @@ Pass condition:
 Verification:
 
 1. Inspect deployed front-door network calls.
-2. Confirm chat calls `api.streamvc.live/v1/chat/completions`.
-3. Confirm no direct browser or Vercel call goes to `m1.streamvc.live` or `m4.streamvc.live` for the main demo.
+2. Confirm chat calls `api.malibu.tech/v1/chat/completions`.
+3. Confirm no direct browser or Vercel call goes to `m1.malibu.tech` or `m4.malibu.tech` for the main demo.
 
 Pass condition:
 
@@ -3411,18 +3411,18 @@ Pass condition:
 
 Precondition:
 
-- Gateway config contains only `https://api.streamvc.live/auth/github/callback` in `auth.oauth.callback_allowlist`.
+- Gateway config contains only `https://api.malibu.tech/auth/github/callback` in `auth.oauth.callback_allowlist`.
 
 Branches:
 
 - Branch A, matching callback:
-  - Action: `GET /auth/github/callback?code=<valid-code>&state=<valid-state>&redirect_uri=https://api.streamvc.live/auth/github/callback`
+  - Action: `GET /auth/github/callback?code=<valid-code>&state=<valid-state>&redirect_uri=https://api.malibu.tech/auth/github/callback`
   - Expected: HTTP 302 redirect response with `Location: /account`; body MAY be empty and MUST NOT contain an OpenAI error envelope.
-  - Verification: `curl -i -o /dev/null -w "%{http_code} %{redirect_url}\n" "https://api.streamvc.live/auth/github/callback?code=<valid-code>&state=<valid-state>&redirect_uri=https://api.streamvc.live/auth/github/callback" | grep -Eq '^302 .*/account'`
+  - Verification: `curl -i -o /dev/null -w "%{http_code} %{redirect_url}\n" "https://api.malibu.tech/auth/github/callback?code=<valid-code>&state=<valid-state>&redirect_uri=https://api.malibu.tech/auth/github/callback" | grep -Eq '^302 .*/account'`
 - Branch B, mismatched callback:
   - Action: `GET /auth/github/callback?code=<valid-code>&state=<valid-state>&redirect_uri=https://evil.example/callback`
   - Expected: HTTP 400 with JSON `{"error":{"type":"invalid_request_error","code":"oauth_callback_not_allowed"}}`; no account or key is issued.
-  - Verification: `curl -si "https://api.streamvc.live/auth/github/callback?code=<valid-code>&state=<valid-state>&redirect_uri=https://evil.example/callback" | grep -q "HTTP/.* 400" && curl -s "https://api.streamvc.live/auth/github/callback?code=<valid-code>&state=<valid-state>&redirect_uri=https://evil.example/callback" | jq -e '.error.type == "invalid_request_error" and .error.code == "oauth_callback_not_allowed"'`
+  - Verification: `curl -si "https://api.malibu.tech/auth/github/callback?code=<valid-code>&state=<valid-state>&redirect_uri=https://evil.example/callback" | grep -q "HTTP/.* 400" && curl -s "https://api.malibu.tech/auth/github/callback?code=<valid-code>&state=<valid-state>&redirect_uri=https://evil.example/callback" | jq -e '.error.type == "invalid_request_error" and .error.code == "oauth_callback_not_allowed"'`
 
 Go verification: `go test ./phase5-gateway/... -run TestOAuthCallbackAllowlist`
 
@@ -3445,7 +3445,7 @@ Expected outcome:
 Verification command:
 
 ```text
-curl -i -H "Authorization: Bearer <revoked-key>" https://api.streamvc.live/v1/models
+curl -i -H "Authorization: Bearer <revoked-key>" https://api.malibu.tech/v1/models
 go test ./phase5-gateway/... -run TestKeyRevocationLatency
 ```
 
@@ -3469,7 +3469,7 @@ Expected outcome:
 Verification command:
 
 ```text
-curl -i -H "Authorization: Bearer <key>" https://api.streamvc.live/v1/chat/completions
+curl -i -H "Authorization: Bearer <key>" https://api.malibu.tech/v1/chat/completions
 go test ./phase5-gateway/... -run TestKillSwitchPersistsAcrossRestart
 ```
 
@@ -3482,13 +3482,13 @@ Precondition:
 Branches:
 
 - Branch A, forged or unbound state:
-  - Action: `GET /auth/github/callback?code=<valid-code>&state=<forged-state>&redirect_uri=https://api.streamvc.live/auth/github/callback`
+  - Action: `GET /auth/github/callback?code=<valid-code>&state=<forged-state>&redirect_uri=https://api.malibu.tech/auth/github/callback`
   - Expected: HTTP 400 with JSON `{"error":{"type":"invalid_request_error","code":"oauth_state_invalid"}}`; no account is created.
-  - Verification: `curl -si "https://api.streamvc.live/auth/github/callback?code=<valid-code>&state=<forged-state>&redirect_uri=https://api.streamvc.live/auth/github/callback" | grep -q "HTTP/.* 400" && curl -s "https://api.streamvc.live/auth/github/callback?code=<valid-code>&state=<forged-state>&redirect_uri=https://api.streamvc.live/auth/github/callback" | jq -e '.error.type == "invalid_request_error" and .error.code == "oauth_state_invalid"'`
+  - Verification: `curl -si "https://api.malibu.tech/auth/github/callback?code=<valid-code>&state=<forged-state>&redirect_uri=https://api.malibu.tech/auth/github/callback" | grep -q "HTTP/.* 400" && curl -s "https://api.malibu.tech/auth/github/callback?code=<valid-code>&state=<forged-state>&redirect_uri=https://api.malibu.tech/auth/github/callback" | jq -e '.error.type == "invalid_request_error" and .error.code == "oauth_state_invalid"'`
 - Branch B, valid session-bound state:
-  - Action: `GET /auth/github/callback?code=<valid-code>&state=<stored-state>&redirect_uri=https://api.streamvc.live/auth/github/callback`
+  - Action: `GET /auth/github/callback?code=<valid-code>&state=<stored-state>&redirect_uri=https://api.malibu.tech/auth/github/callback`
   - Expected: HTTP 302 redirect response with `Location: /account`; body MAY be empty and MUST NOT contain `oauth_state_invalid`.
-  - Verification: `curl -i -o /dev/null -w "%{http_code} %{redirect_url}\n" "https://api.streamvc.live/auth/github/callback?code=<valid-code>&state=<stored-state>&redirect_uri=https://api.streamvc.live/auth/github/callback" | grep -Eq '^302 .*/account'`
+  - Verification: `curl -i -o /dev/null -w "%{http_code} %{redirect_url}\n" "https://api.malibu.tech/auth/github/callback?code=<valid-code>&state=<stored-state>&redirect_uri=https://api.malibu.tech/auth/github/callback" | grep -Eq '^302 .*/account'`
 
 Go verification: `go test ./phase5-gateway/... -run TestOAuthStateCSRF`
 
@@ -3503,11 +3503,11 @@ Branches:
 - Branch A, allowed `read:user` scope:
   - Action: simulate a callback with granted scope exactly `read:user`.
   - Expected: HTTP 302 redirect response with `Location: /account`; body MAY be empty and MUST NOT contain an OpenAI error envelope.
-  - Verification: `curl -i -o /dev/null -w "%{http_code} %{redirect_url}\n" "https://api.streamvc.live/auth/github/callback?code=<valid-code>&state=<valid-state>&redirect_uri=https://api.streamvc.live/auth/github/callback" | grep -Eq '^302 .*/account'`
+  - Verification: `curl -i -o /dev/null -w "%{http_code} %{redirect_url}\n" "https://api.malibu.tech/auth/github/callback?code=<valid-code>&state=<valid-state>&redirect_uri=https://api.malibu.tech/auth/github/callback" | grep -Eq '^302 .*/account'`
 - Branch B, elevated repository, organization, gist, or write scope:
   - Action: simulate a callback whose granted scope includes an elevated scope.
   - Expected: HTTP 403 with JSON `{"error":{"type":"permission_error","code":"oauth_scope_forbidden"}}` and an audit event with `event_type: "oauth_scope_rejected"`.
-  - Verification: `curl -si "https://api.streamvc.live/auth/github/callback?code=<elevated-scope-code>&state=<valid-state>&redirect_uri=https://api.streamvc.live/auth/github/callback" | grep -q "HTTP/.* 403" && curl -s "https://api.streamvc.live/auth/github/callback?code=<elevated-scope-code>&state=<valid-state>&redirect_uri=https://api.streamvc.live/auth/github/callback" | jq -e '.error.type == "permission_error" and .error.code == "oauth_scope_forbidden"'`
+  - Verification: `curl -si "https://api.malibu.tech/auth/github/callback?code=<elevated-scope-code>&state=<valid-state>&redirect_uri=https://api.malibu.tech/auth/github/callback" | grep -q "HTTP/.* 403" && curl -s "https://api.malibu.tech/auth/github/callback?code=<elevated-scope-code>&state=<valid-state>&redirect_uri=https://api.malibu.tech/auth/github/callback" | jq -e '.error.type == "permission_error" and .error.code == "oauth_scope_forbidden"'`
 
 Go verification: `go test ./phase5-gateway/... -run TestOAuthScopeMinimization`
 
@@ -3532,8 +3532,8 @@ Expected outcome:
 Verification command:
 
 ```text
-curl -i -H "Authorization: Bearer <old-key>" https://api.streamvc.live/v1/usage
-curl -i -H "Authorization: Bearer <new-key>" https://api.streamvc.live/v1/usage
+curl -i -H "Authorization: Bearer <old-key>" https://api.malibu.tech/v1/usage
+curl -i -H "Authorization: Bearer <new-key>" https://api.malibu.tech/v1/usage
 go test ./phase5-gateway/... -run TestKeyRotationPreservesHistory
 ```
 
@@ -3597,11 +3597,11 @@ Branches:
 - Branch A, successful upstream:
   - Action: send a gateway chat request containing `X-MacProvider-Provider`, `X-MacProvider-Session`, and `X-MacProvider-Pref`, then capture the forwarded coordinator request.
   - Expected: forwarded request contains none of those headers; buyer response is HTTP 200 with OpenAI chat completion JSON or SSE body, and response headers contain no `X-MacProvider-Provider`, `X-MacProvider-Route`, or undocumented `X-MacProvider-*`.
-  - Verification: `curl -si -H "Authorization: Bearer <key>" -H "X-MacProvider-Provider: pinned" -H "X-MacProvider-Session: pinned" -H "X-MacProvider-Pref: fast" https://api.streamvc.live/v1/chat/completions | tee /tmp/ac34-success.txt && grep -q "HTTP/.* 200" /tmp/ac34-success.txt && ! grep -Eiq '^X-MacProvider-(Provider|Route|Session|Pref):' /tmp/ac34-success.txt`
+  - Verification: `curl -si -H "Authorization: Bearer <key>" -H "X-MacProvider-Provider: pinned" -H "X-MacProvider-Session: pinned" -H "X-MacProvider-Pref: fast" https://api.malibu.tech/v1/chat/completions | tee /tmp/ac34-success.txt && grep -q "HTTP/.* 200" /tmp/ac34-success.txt && ! grep -Eiq '^X-MacProvider-(Provider|Route|Session|Pref):' /tmp/ac34-success.txt`
 - Branch B, upstream failure:
   - Action: repeat the same request while the mock upstream returns provider failure.
   - Expected: HTTP 502 with OpenAI error envelope `{"error":{"type":"api_error","code":"upstream_provider_error"}}`; response body and headers contain no provider or route identifiers.
-  - Verification: `curl -si -H "Authorization: Bearer <key>" -H "X-MacProvider-Provider: pinned" -H "X-MacProvider-Session: pinned" -H "X-MacProvider-Pref: fast" https://api.streamvc.live/v1/chat/completions | tee /tmp/ac34-error.txt && grep -q "HTTP/.* 502" /tmp/ac34-error.txt && ! grep -Eiq 'X-MacProvider-|provider_id|route_id' /tmp/ac34-error.txt && sed -n '/^{/,$p' /tmp/ac34-error.txt | jq -e '.error.type == "api_error" and .error.code == "upstream_provider_error"'`
+  - Verification: `curl -si -H "Authorization: Bearer <key>" -H "X-MacProvider-Provider: pinned" -H "X-MacProvider-Session: pinned" -H "X-MacProvider-Pref: fast" https://api.malibu.tech/v1/chat/completions | tee /tmp/ac34-error.txt && grep -q "HTTP/.* 502" /tmp/ac34-error.txt && ! grep -Eiq 'X-MacProvider-|provider_id|route_id' /tmp/ac34-error.txt && sed -n '/^{/,$p' /tmp/ac34-error.txt | jq -e '.error.type == "api_error" and .error.code == "upstream_provider_error"'`
 
 Go verification: `go test ./phase5-gateway/... -run TestProviderPinningHeadersStripped`
 
@@ -3625,7 +3625,7 @@ Expected outcome:
 Verification command:
 
 ```text
-curl -i -X POST https://api.streamvc.live/auth/demo-session
+curl -i -X POST https://api.malibu.tech/auth/demo-session
 go test ./phase5-gateway/... -run TestDemoTokenValidation
 ```
 
@@ -3648,7 +3648,7 @@ Expected outcome:
 Verification command:
 
 ```text
-curl -i -H "Authorization: Bearer <key>" https://api.streamvc.live/v1/usage
+curl -i -H "Authorization: Bearer <key>" https://api.malibu.tech/v1/usage
 go test ./phase5-gateway/... -run TestQuotaSettlement504ZeroCompletion
 ```
 
@@ -3670,11 +3670,11 @@ Branches:
 - Branch A, v1.2.4+ provider actuals:
   - Action: route the same streaming call to the v1.2.4+ provider; buyer disconnects after receiving about 30 completion tokens, about 120 bytes.
   - Expected: buyer stream starts with HTTP 200 and `Content-Type: text/event-stream; charset=utf-8`; gateway sends `cancel_request`; provider `inference_response_end` has `status:"cancelled"` and `usage={prompt_tokens:N, completion_tokens:30, total_tokens:N+30}`; `/v1/usage` returns HTTP 200 with daily quota decremented by exactly `N+30`.
-  - Verification: `curl -i -N -X POST -H "Authorization: Bearer <key>" -H "Content-Type: application/json" -d '{"model":"<model>","stream":true,"max_tokens":200,"messages":[{"role":"user","content":"count slowly"}]}' https://api.streamvc.live/v1/chat/completions & sleep 2 && kill %1; curl -s -H "Authorization: Bearer <key>" https://api.streamvc.live/v1/usage | jq -e '.daily_used == <expected_exact>'`
+  - Verification: `curl -i -N -X POST -H "Authorization: Bearer <key>" -H "Content-Type: application/json" -d '{"model":"<model>","stream":true,"max_tokens":200,"messages":[{"role":"user","content":"count slowly"}]}' https://api.malibu.tech/v1/chat/completions & sleep 2 && kill %1; curl -s -H "Authorization: Bearer <key>" https://api.malibu.tech/v1/usage | jq -e '.daily_used == <expected_exact>'`
 - Branch B, pre-v1.2.4 provider fallback estimation:
   - Action: route the same streaming call to the pre-v1.2.4 provider; buyer disconnects after about 120 bytes of SSE chunk content.
   - Expected: buyer stream starts with HTTP 200 and `Content-Type: text/event-stream; charset=utf-8`; gateway sends `cancel_request`; provider `inference_response_end` has `status:"cancelled"` and omits `usage`; gateway estimates `ceil(120/4) = 30` completion tokens; `/v1/usage` returns HTTP 200 with daily quota decremented by `N+30`, with +/-5 token tolerance acknowledged for real text.
-  - Verification: `curl -i -N -X POST -H "Authorization: Bearer <key>" -H "Content-Type: application/json" -d '{"model":"<model>","stream":true,"max_tokens":200,"messages":[{"role":"user","content":"count slowly"}]}' https://api.streamvc.live/v1/chat/completions & sleep 2 && kill %1; curl -s -H "Authorization: Bearer <key>" https://api.streamvc.live/v1/usage | jq -e '.daily_used >= <expected_estimated_minus_5> and .daily_used <= <expected_estimated_plus_5>'`
+  - Verification: `curl -i -N -X POST -H "Authorization: Bearer <key>" -H "Content-Type: application/json" -d '{"model":"<model>","stream":true,"max_tokens":200,"messages":[{"role":"user","content":"count slowly"}]}' https://api.malibu.tech/v1/chat/completions & sleep 2 && kill %1; curl -s -H "Authorization: Bearer <key>" https://api.malibu.tech/v1/usage | jq -e '.daily_used >= <expected_estimated_minus_5> and .daily_used <= <expected_estimated_plus_5>'`
 
 Expected outcome:
 
@@ -3786,7 +3786,7 @@ They MUST NOT reopen the locked decisions in Section 2.
 
 Adapted from the 2026-05-29 independent security audit's "Production Gate Recommendations" section.
 
-The operator MUST execute all 9 items before SPEC-006 v0.8 is deployed to production with public buyer access at `api.streamvc.live`. PG-9 is conditional and applies before, not after, flipping `routing.sticky_enabled: true` in production.
+The operator MUST execute all 9 items before SPEC-006 v0.8 is deployed to production with public buyer access at `api.malibu.tech`. PG-9 is conditional and applies before, not after, flipping `routing.sticky_enabled: true` in production.
 
 1. Provider tokens MUST be mandatory in production. [SPEC-002 v1.1.5 § 7.X PG-1]
 2. Provider WebSocket endpoints MUST be shielded by proxy-level rate limits and connection caps. [SPEC-002 v1.1.5 § 7.X PG-2]

@@ -172,7 +172,7 @@ Go `json.Unmarshal` yields empty `Code`. The check `nak.Code == "unknown_message
 | 3. Verify signature | **BLOCKED** — placeholder public key causes `die 3` |
 | 4. Extract to `~/macprovider/` | OK — tarball entries validated |
 | 5. Render plist | OK — CLI flags accepted by Swift |
-| 6. Load plist | OK — label `live.streamvc.macprovider` consistent |
+| 6. Load plist | OK — label `live.malibu.provider` consistent |
 | 7. Hello to coordinator | OK — provisional admission, WS-tunneled |
 | 8. hello_ack | OK — `tier: "provisional"` |
 | 9. Local /v1/models | OK |
@@ -441,12 +441,12 @@ should already fail. Auditor suspects the former — masking C1.
 
 ---
 
-**Q2. Does coordinator.streamvc.live reverse proxy route /v1/models to buyer port?**
+**Q2. Does coordinator.malibu.tech reverse proxy route /v1/models to buyer port?**
 
 Category: H.1
 
 Go serves `/v1/models` on buyer port 8443. install.sh hits
-`https://coordinator.streamvc.live/v1/models` (port 443). The reverse proxy
+`https://coordinator.malibu.tech/v1/models` (port 443). The reverse proxy
 (Caddy) must route to 8443, not 8444. Infrastructure concern, not code.
 
 ---

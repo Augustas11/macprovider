@@ -18,7 +18,7 @@ func TestWalletProofVectorAndVerification(t *testing.T) {
 	proof := WalletProof{
 		Version:            WalletProofVersion,
 		ChallengeID:        "wch_01HZX6Y7K4C2Q9E6J8Q0V7Z2PF",
-		Audience:           "https://api.streamvc.live",
+		Audience:           "https://api.malibu.tech",
 		AccountID:          "acct_cafe\u0301",
 		WalletNamespace:    WalletNamespaceEd25519,
 		WalletPublicKey:    base64.RawURLEncoding.EncodeToString(walletPub),
@@ -34,20 +34,20 @@ func TestWalletProofVectorAndVerification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonical proof: %v", err)
 	}
-	const wantCanonical = `{"account_id":"acct_café","aud":"https://api.streamvc.live","challenge_id":"wch_01HZX6Y7K4C2Q9E6J8Q0V7Z2PF","expires_at_unix":1782864000,"model_allowlist":["llama","café"],"nonce":"AQIDBAUGBwgJCgsMDQ4PEA","per_request_token_cap":512,"session_public_key":"oJql9HpnWYAv-VX43C0qFKXJnSO-l_hkEn_5ODRVpPA","total_token_cap":5000,"version":"wallet-session-proof-v1","wallet_namespace":"ed25519","wallet_public_key":"0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc"}`
+	const wantCanonical = `{"account_id":"acct_café","aud":"https://api.malibu.tech","challenge_id":"wch_01HZX6Y7K4C2Q9E6J8Q0V7Z2PF","expires_at_unix":1782864000,"model_allowlist":["llama","café"],"nonce":"AQIDBAUGBwgJCgsMDQ4PEA","per_request_token_cap":512,"session_public_key":"oJql9HpnWYAv-VX43C0qFKXJnSO-l_hkEn_5ODRVpPA","total_token_cap":5000,"version":"wallet-session-proof-v1","wallet_namespace":"ed25519","wallet_public_key":"0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc"}`
 	if string(canonical) != wantCanonical {
 		t.Fatalf("canonical proof bytes:\n%s\nwant:\n%s", canonical, wantCanonical)
 	}
 	sum := sha256.Sum256(canonical)
-	const wantSHA256 = "Xuzk7gOqjJ7bBq3-Rmuwdn1bvzoFEBlcLXMu8hCqcNc"
+	const wantSHA256 = "K2sdPyrm41z8Y-TkfKENbj1bkYEwZYEjL5ppIcbPex8"
 	if got := base64.RawURLEncoding.EncodeToString(sum[:]); got != wantSHA256 {
 		t.Fatalf("proof sha256=%s want %s", got, wantSHA256)
 	}
 
 	signature := base64.RawURLEncoding.EncodeToString(ed25519.Sign(walletPriv, canonical))
-	const wantSignature = "IkFpQo-Qx3RBW8R9g_qW3DfWUEcKDpSR4GxkGALrysWmhKZH8SPLX6ylsYWEdojI5TM1DWdM-RaP9w6s61WIAw"
+	const wantSignature = "RjnPlsn-zQMbVNvpmpYPQ73CNqyJgNl4f32fKOb7Qlju5V6EryddcRB76nxeNaTqHKYOxd3DdV6gcvTwfopQBg"
 	if signature != wantSignature {
-		t.Fatal("proof signature vector mismatch")
+		t.Fatalf("proof signature=%s want %s", signature, wantSignature)
 	}
 	if err := VerifyWalletProof(proof, signature); err != nil {
 		t.Fatalf("verify proof: %v", err)
@@ -126,7 +126,7 @@ func TestWalletJSONRejectionRules(t *testing.T) {
 		t.Fatalf("challenge unsupported algorithm err=%v", err)
 	}
 
-	valid := `{"version":"wallet-session-proof-v1","challenge_id":"wch_1","aud":"https://api.streamvc.live","account_id":"acct_1","wallet_namespace":"ed25519","wallet_public_key":"` + base64.RawURLEncoding.EncodeToString(walletPub) + `","session_public_key":"` + base64.RawURLEncoding.EncodeToString(sessionPub) + `","nonce":"AQID","expires_at_unix":1782864000,"per_request_token_cap":512,"total_token_cap":5000,"model_allowlist":["llama"]}`
+	valid := `{"version":"wallet-session-proof-v1","challenge_id":"wch_1","aud":"https://api.malibu.tech","account_id":"acct_1","wallet_namespace":"ed25519","wallet_public_key":"` + base64.RawURLEncoding.EncodeToString(walletPub) + `","session_public_key":"` + base64.RawURLEncoding.EncodeToString(sessionPub) + `","nonce":"AQID","expires_at_unix":1782864000,"per_request_token_cap":512,"total_token_cap":5000,"model_allowlist":["llama"]}`
 	if _, _, err := DecodeWalletProofJSON([]byte(valid)); err != nil {
 		t.Fatalf("valid proof json: %v", err)
 	}

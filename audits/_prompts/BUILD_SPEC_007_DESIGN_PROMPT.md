@@ -143,10 +143,10 @@ or fetched directly by the explorer from the gateway's `/admin/*`.
 Three candidate hosting paths — explore each and recommend:
   a) New route in the existing Vercel project (`web-three-lime-59.vercel.app`)
      behind operator auth. Pro: zero new infra. Con: mixes demo and ops.
-  b) Separate Vercel project (`explorer.streamvc.live`). Pro: clean
+  b) Separate Vercel project (`explorer.malibu.tech`). Pro: clean
      separation. Con: extra deploy target, extra DNS.
   c) Coordinator-served static dashboard at
-     `coordinator.streamvc.live/admin/explorer/`. Pro: no external
+     `coordinator.malibu.tech/admin/explorer/`. Pro: no external
      dependency, operator auth piggy-backs on existing `/admin/*` gate.
      Con: Pearl VPS now serves UI assets; coordinator binary grows.
 

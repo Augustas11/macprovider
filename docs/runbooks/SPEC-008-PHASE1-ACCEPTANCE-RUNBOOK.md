@@ -152,7 +152,7 @@ provider_id="$(cat ~/.config/macprovider/provider_id 2>/dev/null || true)"
 model="$(awk -F'"' '/^model:/ {print $2; exit}' ~/.config/macprovider/config.yaml 2>/dev/null || true)"
 printf 'provider_id=%s\nmodel=%s\n' "$provider_id" "$model"
 
-curl -fsSL https://get.streamvc.live/install.sh | \
+curl -fsSL https://get.malibu.tech/install.sh | \
   MACPROVIDER_NO_PROMPT=1 \
   MACPROVIDER_MODEL="$model" \
   bash
@@ -184,7 +184,7 @@ After the provider command returns, verify locally on that Mac:
 
 ```bash
 ~/macprovider/macprovider-cli --version
-launchctl list | grep live.streamvc.macprovider
+launchctl list | grep live.malibu.provider
 curl -fsS http://127.0.0.1:8080/v1/models
 tail -n 80 ~/Library/Logs/macprovider/macprovider.err.log
 ```

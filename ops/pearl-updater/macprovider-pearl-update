@@ -115,8 +115,8 @@ MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
 MAX_BUYER_PROOF_STREAM_BYTES = 1024 * 1024
 MAX_BUYER_PROOF_STREAM_LINE_BYTES = 64 * 1024
-CANARY_AUTHORITY_VERSION = "issue-825-canary-fleet-r6"
-CANARY_AUTHORITY_COMMIT = "b907cd7e9111318745196c02a0666dfb725e452d"
+CANARY_AUTHORITY_VERSION = "malibu-domain-migration-r1"
+CANARY_AUTHORITY_COMMIT = "9abc82072e87415614b7256cb05e429e3ab1f45c"
 CANARY_UNIT_BUDGET_S = 180
 JOURNAL_SCHEMA_VERSION = 1
 CURRENT_RELEASE_SCHEMA_VERSION = 1
@@ -134,11 +134,11 @@ ROLLBACK_STEPS = (
     "canary_timer",
 )
 CANARY_AUTHORITY_FILES = {
-    Path("/opt/macprovider-canary-buyer/probe.mjs"): "9c33f4522845bffcef0365185c54753e4e18f7ee8b21b62b0493a5cc016caf79",
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): "2edaa6bf1b0030360f6992c2ca9f94545e7e077fbe84dc0e43af61af6c33c641",
     Path("/opt/macprovider-canary-buyer/safety.mjs"): "75f814d5d9582528ce5218b4e7c0aead78d5b1cc04ef798427d9bf4e172bb800",
-    Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6c5b31fce3b477aed8a85c7a0750e924360ed4828da49ca42ea693482e635585",
-    Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "1380122e76b3b66ad812849e3684b38eaaed0790f0e6011e3f194bd215ab1c7e",
-    Path("/etc/systemd/system/canary-buyer.service"): "df5ef235382a90eebff046e43aeb45b88623f4f4a82637584f9000de40bf9c2b",
+    Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6bb54915e805a240614ec414648dcb01fbff25a348e4fed517828ddcd9c6e340",
+    Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "3506731e8b68ea40a03a94815f2138239b1950019bdd6637dc7e39a79acbbcbe",
+    Path("/etc/systemd/system/canary-buyer.service"): "3c8298aa53a7ffa57d93738d8173894c8e7ae2736a1b594da23ee97b78d92e6f",
     Path("/etc/systemd/system/canary-buyer.timer"): "deb5e3acf67b8d713f61b3167224e908c6754e65e143d84840dba8fea3eb7a18",
 }
 CANARY_AUTHORITY_FILE_MODES = {
@@ -4392,8 +4392,8 @@ class Updater:
         )
 
     def public_identity_ready(self, identity: RuntimeIdentity) -> bool:
-        coordinator = self.get_json("https://coordinator.streamvc.live/healthz")
-        gateway = self.get_json("https://api.streamvc.live/healthz")
+        coordinator = self.get_json("https://coordinator.malibu.tech/healthz")
+        gateway = self.get_json("https://api.malibu.tech/healthz")
         return (
             self.coordinator_identity_ready(coordinator, identity)
             and gateway.get("status") == "ok"
@@ -4451,7 +4451,7 @@ class Updater:
         self.wait_for(
             "public exact catalog admission",
             self.config.service_health_timeout_s,
-            lambda: self.catalog_admission_ready(release, "https://coordinator.streamvc.live/v1/autotune-release"),
+            lambda: self.catalog_admission_ready(release, "https://coordinator.malibu.tech/v1/autotune-release"),
         )
         self.audit(
             "exact_catalog_admission_canary",
@@ -4661,7 +4661,7 @@ class Updater:
         quoted_id = urllib.parse.quote(provider_id, safe="")
         quoted_assigned_id = urllib.parse.quote(assigned_id, safe="")
         url = (
-            "https://coordinator.streamvc.live/v1/pool/check?provider_id="
+            "https://coordinator.malibu.tech/v1/pool/check?provider_id="
             + quoted_id
             + "&assigned_id="
             + quoted_assigned_id
@@ -4762,7 +4762,7 @@ class Updater:
         provider_id: str,
         model_id: str,
     ) -> dict[str, str]:
-        url = "https://api.streamvc.live/v1/chat/completions"
+        url = "https://api.malibu.tech/v1/chat/completions"
         request_id = str(uuid.uuid4())
         requested_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
         body = {
@@ -4941,7 +4941,7 @@ class Updater:
         if not self.previous_protected_providers:
             return True
         poolz = self.get_authorized_json(
-            "https://coordinator.streamvc.live/poolz",
+            "https://coordinator.malibu.tech/poolz",
             self.coordinator_operator_token(),
         )
         summary = poolz.get("summary")

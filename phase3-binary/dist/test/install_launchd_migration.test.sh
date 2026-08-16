@@ -13,6 +13,7 @@ names = [
     "xml_escape",
     "write_atomic_install_file",
     "reclaim_launchd_service",
+    "reclaim_legacy_launchd_service",
     "render_plist",
     "render_watchdog_plist",
     "install_plist",
@@ -35,6 +36,12 @@ for name in names:
     else:
         raise SystemExit(f"could not extract {name}")
 PY
+printf '%s\n' 'PROVIDER_LABEL="${PROVIDER_LABEL:-live.malibu.provider}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_PROVIDER_LABEL="${LEGACY_PROVIDER_LABEL:-live.streamvc.macprovider}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_PLIST_PATH="${LEGACY_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist}"' >> "$TMP/functions.sh"
+printf '%s\n' 'WATCHDOG_LABEL="${WATCHDOG_LABEL:-live.malibu.provider-watchdog}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_WATCHDOG_LABEL="${LEGACY_WATCHDOG_LABEL:-live.streamvc.macprovider-watchdog}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_WATCHDOG_PLIST_PATH="${LEGACY_WATCHDOG_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist}"' >> "$TMP/functions.sh"
 
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/plutil" <<'EOF'
@@ -63,12 +70,12 @@ case "${1:-}" in
       exit 1
     fi
     case "$2" in
-      *live.streamvc.macprovider-watchdog*)
-        printf 'gui/%s/live.streamvc.macprovider-watchdog = {\n  program = %s\n  path = %s\n}\n' \
+      *live.malibu.provider-watchdog*)
+        printf 'gui/%s/live.malibu.provider-watchdog = {\n  program = %s\n  path = %s\n}\n' \
           "$(id -u)" "$WATCHDOG_PROGRAM" "${PRINTED_PLIST_PATH:-$WATCHDOG_PLIST_PATH}"
         ;;
       *)
-        printf 'gui/%s/live.streamvc.macprovider = {\n  program = %s\n  path = %s\n}\n' \
+        printf 'gui/%s/live.malibu.provider = {\n  program = %s\n  path = %s\n}\n' \
           "$(id -u)" "$PROVIDER_PROGRAM" "${PRINTED_PLIST_PATH:-$PLIST_PATH}"
         ;;
     esac
@@ -98,14 +105,14 @@ run_reclaim() {
   LAUNCHD_STATE="$TMP/launchd-state"
   LAUNCHD_LOG="$TMP/launchd.log"
   FUNCTION_PATH="$TMP/functions.sh" \
-    PROVIDER_LABEL="live.streamvc.macprovider" \
-    WATCHDOG_LABEL="live.streamvc.macprovider-watchdog" \
+    PROVIDER_LABEL="live.malibu.provider" \
+    WATCHDOG_LABEL="live.malibu.provider-watchdog" \
     INSTALL_DIR="$TMP/home/macprovider" \
     BINARY_PATH="$TMP/home/.local/bin/macprovider-cli" \
     WATCHDOG_DIR="$TMP/home/.local/share/macprovider-watchdog" \
     WATCHDOG_PATH="$TMP/home/.local/share/macprovider-watchdog/macprovider-health-monitor" \
-    PLIST_PATH="$TMP/home/Library/LaunchAgents/live.streamvc.macprovider.plist" \
-    WATCHDOG_PLIST_PATH="$TMP/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" \
+    PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider.plist" \
+    WATCHDOG_PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist" \
     PROVIDER_PROGRAM="$TMP/home/.local/bin/macprovider-cli" \
     WATCHDOG_PROGRAM="$TMP/home/.local/share/macprovider-watchdog/watchdog.sh" \
     PATH="$TMP/bin:$PATH" \
@@ -134,7 +141,7 @@ run_reclaim() {
 
 touch "$TMP/launchd-state"
 run_reclaim
-grep -Fx "bootout gui/$(id -u)/live.streamvc.macprovider" "$TMP/launchd.log" >/dev/null
+grep -Fx "bootout gui/$(id -u)/live.malibu.provider" "$TMP/launchd.log" >/dev/null
 [ ! -f "$TMP/launchd-state" ]
 
 rm -f "$TMP/launchd-state" "$TMP/launchd.log"
@@ -159,8 +166,8 @@ set -e
 
 rm -f "$TMP/launchd-state" "$TMP/launchd.log"
 mkdir -p "$TMP/home/Library/LaunchAgents" "$TMP/home/.local/bin" "$TMP/home/.local/share/macprovider-watchdog"
-printf '<plist>old</plist>\n' > "$TMP/home/Library/LaunchAgents/live.streamvc.macprovider.plist"
-printf '<plist>old-watchdog</plist>\n' > "$TMP/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+printf '<plist>old</plist>\n' > "$TMP/home/Library/LaunchAgents/live.malibu.provider.plist"
+printf '<plist>old-watchdog</plist>\n' > "$TMP/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
 touch "$TMP/launchd-state"
 HOME="$TMP/home" \
   FUNCTION_PATH="$TMP/functions.sh" \
@@ -183,10 +190,10 @@ HOME="$TMP/home" \
     WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
     CONFIG_PATH="$HOME/.config/macprovider/config.yaml"
     LOG_DIR="$HOME/Library/Logs/macprovider"
-    PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
-    WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
-    PROVIDER_LABEL="live.streamvc.macprovider"
-    WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
+    PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider.plist"
+    WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+    PROVIDER_LABEL="live.malibu.provider"
+    WATCHDOG_LABEL="live.malibu.provider-watchdog"
     DRY_RUN=0
     NO_LAUNCHD=0
     NO_WATCHDOG=0
@@ -202,23 +209,23 @@ HOME="$TMP/home" \
     install_watchdog "https://coordinator.example"
     [ "$WATCHDOG_INSTALLED" -eq 1 ]
   '
-grep -F 'enable gui/' "$TMP/launchd.log" | grep -F 'live.streamvc.macprovider' >/dev/null
-grep -F 'bootstrap gui/' "$TMP/launchd.log" | grep -F 'live.streamvc.macprovider.plist' >/dev/null
-grep -F 'enable gui/' "$TMP/launchd.log" | grep -F 'live.streamvc.macprovider-watchdog' >/dev/null
-grep -F 'bootstrap gui/' "$TMP/launchd.log" | grep -F 'live.streamvc.macprovider-watchdog.plist' >/dev/null
+grep -F 'enable gui/' "$TMP/launchd.log" | grep -F 'live.malibu.provider' >/dev/null
+grep -F 'bootstrap gui/' "$TMP/launchd.log" | grep -F 'live.malibu.provider.plist' >/dev/null
+grep -F 'enable gui/' "$TMP/launchd.log" | grep -F 'live.malibu.provider-watchdog' >/dev/null
+grep -F 'bootstrap gui/' "$TMP/launchd.log" | grep -F 'live.malibu.provider-watchdog.plist' >/dev/null
 
 rm -f "$TMP/launchd-state" "$TMP/launchd.log"
 touch "$TMP/launchd-state"
 set +e
 FUNCTION_PATH="$TMP/functions.sh" \
-  PROVIDER_LABEL="live.streamvc.macprovider" \
-  WATCHDOG_LABEL="live.streamvc.macprovider-watchdog" \
+  PROVIDER_LABEL="live.malibu.provider" \
+  WATCHDOG_LABEL="live.malibu.provider-watchdog" \
   INSTALL_DIR="$TMP/home/macprovider" \
   BINARY_PATH="$TMP/home/.local/bin/macprovider-cli" \
   WATCHDOG_DIR="$TMP/home/.local/share/macprovider-watchdog" \
   WATCHDOG_PATH="$TMP/home/.local/share/macprovider-watchdog/macprovider-health-monitor" \
-  PLIST_PATH="$TMP/home/Library/LaunchAgents/live.streamvc.macprovider.plist" \
-  WATCHDOG_PLIST_PATH="$TMP/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" \
+  PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider.plist" \
+  WATCHDOG_PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist" \
   PROVIDER_PROGRAM="$TMP/unexpected-provider" \
   WATCHDOG_PROGRAM="$TMP/home/.local/share/macprovider-watchdog/watchdog.sh" \
   PATH="$TMP/bin:$PATH" LAUNCHD_STATE="$TMP/launchd-state" LAUNCHD_LOG="$TMP/launchd.log" \

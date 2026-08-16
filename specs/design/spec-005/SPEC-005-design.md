@@ -84,7 +84,7 @@ compute rewards from what is already in the wire format.
 ### 2.3 From SPEC-003 v0.7 (open onboarding)
 
 - Provider onboarding is now stranger-shaped through
-  `get.streamvc.live/install.sh`. There is no out-of-band agreement
+  `get.malibu.tech/install.sh`. There is no out-of-band agreement
   with the provider about compensation. Whatever SPEC-005 commits to,
   strangers will read in the docs.
 - §"Rewards / billing — deferred to SPEC-005" is the operator's
@@ -483,7 +483,7 @@ auditability.** Concretely:
 - The split is NOT exposed publicly in v1 (per the same logic as the
   rate card). It IS exposed in the provider's own dashboard endpoint
   so providers can see what share they're getting.
-- v1 launch copy in `get.streamvc.live/install.sh` and provider docs
+- v1 launch copy in `get.malibu.tech/install.sh` and provider docs
   states: "Providers earn the majority of network value (currently
   90%). Exact rates are tunable in config and visible in your
   per-provider dashboard."

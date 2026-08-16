@@ -1,7 +1,7 @@
 # Network benchmark v0.2 — e2e run (2026-06-29)
 
 Internal. Source: harness scenarios 01-10 against live
-`api.streamvc.live` at gateway `v1.6.1-44-g5f73eee`. Provider fleet:
+`api.malibu.tech` at gateway `v1.6.1-44-g5f73eee`. Provider fleet:
 2 ready (Qwen3-32B-4bit on M4 Air; Qwen2.5-Coder-7B-Instruct-4bit on
 air5). 35-minute total wall-clock for 11 scenarios.
 

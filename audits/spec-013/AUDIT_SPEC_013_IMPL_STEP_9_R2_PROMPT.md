@@ -182,8 +182,8 @@ renames the test and adds two assertions. Verify:
   asserts ALL of:
   - `launchctl bootout`
   - `launchctl bootstrap`
-  - `~/Library/LaunchAgents/live.streamvc.macprovider.plist`
-  - `gui/$UID/live.streamvc.macprovider`
+  - `~/Library/LaunchAgents/live.malibu.provider.plist`
+  - `gui/$UID/live.malibu.provider`
 - The implementation at
   `RecommendationEmitter.launchdRestartHint()` still
   contains all four substrings (didn't drift).
