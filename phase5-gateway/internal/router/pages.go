@@ -31,7 +31,7 @@ var tier1DisclosureText = []disclosureItem{
 	},
 	{
 		Key:  "hardware_attestation",
-		Text: "There is no hardware attestation or runtime integrity check on providers. The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.8 does NOT cryptographically verify this.",
+		Text: "There is no hardware attestation or runtime integrity check on providers. The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 does NOT cryptographically verify this.",
 	},
 	{
 		Key:  "model_identity",
@@ -40,6 +40,10 @@ var tier1DisclosureText = []disclosureItem{
 	{
 		Key:  "model_verification_limit",
 		Text: modelVerificationLimitDisclosure,
+	},
+	{
+		Key:  "settlement_integrity",
+		Text: settlementIntegrityReceiptBindingDisclosure + " " + settlementIntegrityComputeDisclosure + " " + settlementIntegrityClaimLimitDisclosure,
 	},
 	{
 		Key:  "settlement_mode",

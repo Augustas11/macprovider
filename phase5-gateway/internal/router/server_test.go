@@ -341,6 +341,9 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	for _, got := range []string{
 		settlement.ModelIdentity,
 		settlement.ModelIdentityCaveat,
+		settlement.SettlementIntegrity.ReceiptBinding,
+		settlement.SettlementIntegrity.ComputeIntegrity,
+		settlement.SettlementIntegrity.ClaimLimit,
 		settlement.ObserveMode,
 		settlement.EnforceMode,
 		settlement.Outcomes.Quarantined,
@@ -355,6 +358,12 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	}
 	if !strings.Contains(settlement.ModelIdentityCaveat, "provider-reported request-start model hash") ||
 		!strings.Contains(settlement.ModelIdentityCaveat, "does not provide hardware attestation") ||
+		settlement.SettlementIntegrity.SchemaVersion != "buyer_settlement_integrity_disclosure_v1" ||
+		!strings.Contains(settlement.SettlementIntegrity.ReceiptBinding, "SPEC-022 enforce mode") ||
+		!strings.Contains(settlement.SettlementIntegrity.ReceiptBinding, "disclosure-only") ||
+		!strings.Contains(settlement.SettlementIntegrity.ComputeIntegrity, "SPEC-036 compute integrity") ||
+		!strings.Contains(settlement.SettlementIntegrity.ComputeIntegrity, "buyer-visible compute-integrity settlement effect remains unavailable") ||
+		!strings.Contains(settlement.SettlementIntegrity.ClaimLimit, "proof of honest computation") ||
 		!strings.Contains(settlement.ObserveMode, "cannot claim verified model integrity") ||
 		!strings.Contains(settlement.EnforceMode, "mixed pools are not described as fully verified") ||
 		!strings.Contains(settlement.Outcomes.Quarantined, "not charged") ||
@@ -600,6 +609,10 @@ func TestUsageIncludesSPEC022SettlementDisclosure(t *testing.T) {
 	disclosure := body.SettlementDisclosure
 	if !strings.Contains(disclosure.PendingReservation, "quota or balance can remain reserved") ||
 		!strings.Contains(disclosure.PendingReservation, "Non-verified terminal outcomes release or refund") ||
+		disclosure.SettlementIntegrity.SchemaVersion != "buyer_settlement_integrity_disclosure_v1" ||
+		!strings.Contains(disclosure.SettlementIntegrity.ReceiptBinding, "SPEC-022 enforce mode") ||
+		!strings.Contains(disclosure.SettlementIntegrity.ComputeIntegrity, "buyer-visible compute-integrity settlement effect remains unavailable") ||
+		!strings.Contains(disclosure.SettlementIntegrity.ClaimLimit, "malicious-provider resistance") ||
 		!strings.Contains(disclosure.Outcomes.Pending, "not final usage") ||
 		!strings.Contains(disclosure.Outcomes.Quarantined, "not charged") ||
 		!strings.Contains(disclosure.Outcomes.Quarantined, "not labeled as buyer fault") ||
