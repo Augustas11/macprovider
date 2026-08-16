@@ -1,7 +1,12 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.13 (2026-07-30, experimental default-off Anthropic Messages facade)
+**Version:** 0.9.14 (2026-08-16, public rate-card and stats overview on the buyer host)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.14 (2026-08-16, issue #1004 — public rate-card and stats overview on `api.malibu.tech`):**
+- §2.2 and §4.2 now include unauthenticated `GET /v1/rate-card`, `GET /v1/rate-card.sig`, and `GET /v1/stats/overview` on the buyer host, plus the compatibility alias `GET /v1/network-stats` (same body as overview). These payloads already existed on coordinator/stats vhosts; buyers using `base_url=https://api.malibu.tech/v1` could not read them because the gateway mux never mounted the paths.
+- These buyer-host feeds remain public API under §9.2: `kill_switch.all_public_api` MUST 503 them. Only `/v1/status` stays carved out.
+- §4.2 MUST NOT list gains `GET /v1/stats/leaderboard` and other SPEC-017 partner/exact-$ projections. Those stay off the buyer host.
 
 **Change log v0.9.13 (2026-07-30, issue #829 — experimental Anthropic Messages facade):**
 - Adds an operator-gated `features.anthropic_messages_enabled` flag, default `false`. When disabled, `POST /v1/messages` is not mounted. When enabled, the gateway accepts a narrow Anthropic Messages compatibility subset and translates it through the existing billed `POST /v1/chat/completions` path; it is not a separate proxy, ledger, routing, or settlement implementation.
@@ -463,11 +468,15 @@ This section is read-only design input and MUST NOT be treated as a place to pro
   - `POST /v1/messages` only when `features.anthropic_messages_enabled` is true
   - `GET /v1/usage`
   - `GET /v1/status`
+  - `GET /v1/rate-card` and `GET /v1/rate-card.sig` (unauthenticated public recommendation feed; same bytes as coordinator)
+  - `GET /v1/stats/overview` (unauthenticated public SPEC-017 snapshot; same body as stats host)
+  - `GET /v1/network-stats` (compatibility alias for `/v1/stats/overview`)
   - `POST /v1/feedback`
   - OAuth callbacks at `/auth/github/callback` (and `/auth/email/callback` if email magic link is implemented)
   - Signup/key-management UI at `/account` (or operator-chosen path consistent with the Vercel demo's structure)
 - Endpoints NOT exposed at `api.malibu.tech` (kept internal):
   - `/admin/*`, `/poolz`, `/healthz`, `/ws/provider` -- all remain on coordinator port.
+  - `GET /v1/stats/leaderboard` and other SPEC-017 partner / exact-$ projections.
 
 ### 2.3 Identity
 
@@ -738,6 +747,10 @@ The gateway MUST be restartable independently of the coordinator.
 - `POST /v1/messages` only when `features.anthropic_messages_enabled` is true
 - `GET /v1/usage`
 - `GET /v1/status`
+- `GET /v1/rate-card`
+- `GET /v1/rate-card.sig`
+- `GET /v1/stats/overview`
+- `GET /v1/network-stats` as an alias of `/v1/stats/overview`
 - `POST /v1/feedback`
 - `/auth/github/callback`
 - `/auth/email/callback` if email magic link ships
@@ -750,6 +763,7 @@ The gateway MUST be restartable independently of the coordinator.
 - `/v1/pool/check`
 - `/healthz`
 - `/ws/provider`
+- `GET /v1/stats/leaderboard` and other SPEC-017 partner or exact-$ projections
 - Coordinator debug paths.
 - Provider identifiers.
 - Provider hostnames.
