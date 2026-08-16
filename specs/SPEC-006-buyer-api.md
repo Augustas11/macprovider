@@ -5,6 +5,7 @@
 
 **Change log v0.9.14 (2026-08-16, issue #1004 — public rate-card and stats overview on `api.malibu.tech`):**
 - §2.2 and §4.2 now include unauthenticated `GET /v1/rate-card`, `GET /v1/rate-card.sig`, and `GET /v1/stats/overview` on the buyer host, plus the compatibility alias `GET /v1/network-stats` (same body as overview). These payloads already existed on coordinator/stats vhosts; buyers using `base_url=https://api.malibu.tech/v1` could not read them because the gateway mux never mounted the paths.
+- These buyer-host feeds remain public API under §9.2: `kill_switch.all_public_api` MUST 503 them. Only `/v1/status` stays carved out.
 - §4.2 MUST NOT list gains `GET /v1/stats/leaderboard` and other SPEC-017 partner/exact-$ projections. Those stay off the buyer host.
 
 **Change log v0.9.13 (2026-07-30, issue #829 — experimental Anthropic Messages facade):**

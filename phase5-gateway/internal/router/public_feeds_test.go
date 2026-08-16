@@ -194,21 +194,10 @@ func TestPublicFeedsMoneyPathStillAuthenticated(t *testing.T) {
 	assertErrorCode(t, resp.Body.String(), "missing_bearer_token")
 }
 
-func TestPublicFeedsSurvivePublicAPIPause(t *testing.T) {
-	upstreamHits := 0
+func TestPublicFeedsHonorPublicAPIPause(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		upstreamHits++
-		switch r.URL.Path {
-		case "/v1/rate-card":
-			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testRateCardBody), nil
-		case "/v1/rate-card.sig":
-			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testRateCardSig), nil
-		case "/v1/stats/overview":
-			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testStatsBody), nil
-		default:
-			t.Errorf("unexpected upstream %s", r.URL.String())
-			return responseWithBody(http.StatusNotFound, nil, ""), nil
-		}
+		t.Errorf("paused public API must not contact upstream %s", r.URL.String())
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{}`), nil
 	})}
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://buyer.test"
@@ -217,14 +206,19 @@ func TestPublicFeedsSurvivePublicAPIPause(t *testing.T) {
 	}, WithHTTPClient(client))
 	fullKey := createAccountAndKey(t, store, cfg, "acct_public_feeds_pause")
 
-	assertStatus(t, h, http.MethodGet, "/v1/rate-card", "", "", "192.0.2.10", http.StatusOK)
-	assertStatus(t, h, http.MethodGet, "/v1/rate-card.sig", "", "", "192.0.2.10", http.StatusOK)
-	assertStatus(t, h, http.MethodGet, "/v1/stats/overview", "", "", "192.0.2.10", http.StatusOK)
-	assertStatus(t, h, http.MethodGet, "/v1/network-stats", "", "", "192.0.2.10", http.StatusOK)
-	paused := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "192.0.2.10", http.StatusServiceUnavailable)
-	assertErrorCode(t, paused.Body.String(), "public_api_paused")
-	if upstreamHits != 3 {
-		t.Fatalf("upstream hits=%d want 3 public-feed fetches", upstreamHits)
+	for _, path := range []string{
+		"/v1/rate-card",
+		"/v1/rate-card.sig",
+		"/v1/stats/overview",
+		"/v1/network-stats",
+		"/v1/models",
+	} {
+		key := ""
+		if path == "/v1/models" {
+			key = fullKey
+		}
+		resp := assertStatus(t, h, http.MethodGet, path, key, "", "192.0.2.10", http.StatusServiceUnavailable)
+		assertErrorCode(t, resp.Body.String(), "public_api_paused")
 	}
 }
 
