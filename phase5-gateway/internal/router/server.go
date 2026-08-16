@@ -58,10 +58,11 @@ type Server struct {
 	// fires a coordinator roundtrip (the SPEC-004 audit's HIGH perf finding).
 	// 5s TTL — coordinator config only changes on reload, so staleness is
 	// harmless; cap on bursts.
-	routingMeta     routingMetaCache
-	retry503Metrics *retry503Metrics
-	adminMetrics    *adminStateWriteMetrics
-	chatStartLimits *requestRateLimiter
+	routingMeta              routingMetaCache
+	retry503Metrics          *retry503Metrics
+	adminMetrics             *adminStateWriteMetrics
+	chatStartLimits          *requestRateLimiter
+	relayBlindMetadataLimits *requestRateLimiter
 	// idlessDedupe backs the #762 id-less retry replay/coalesce cache. It is
 	// per-process and non-authoritative; see idless_dedupe.go.
 	idlessDedupe *idlessDedupeIndex
@@ -92,6 +93,7 @@ type Store interface {
 	storage.AuthStore
 	storage.UsageStore
 	storage.WalletSessionStore
+	storage.RelayBlindStore
 	storage.AuditStore
 	storage.FeedbackStore
 	storage.CapacityStore
@@ -170,22 +172,23 @@ func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Optio
 		trustedProxyNets = nil
 	}
 	s := &Server{
-		cfg:              cfg,
-		store:            store,
-		keyMgr:           auth.NewKeyManager(cfg.Auth.KeyPrefix, cfg.Auth.KeyHash, cfg.Auth.KeyHashSecret),
-		demoMgr:          auth.NewDemoManager(cfg.Auth.Demo.SigningSecret),
-		oauth:            oauth,
-		now:              func() time.Time { return time.Now().UTC() },
-		client:           http.DefaultClient,
-		trustedProxyNets: trustedProxyNets,
-		version:          "dev",
-		retry503Metrics:  newRetry503Metrics(),
-		adminMetrics:     newAdminStateWriteMetrics(),
-		chatStartLimits:  newRequestRateLimiter(),
-		idlessDedupe:     newIdlessDedupeIndex(),
-		journal:          discardSettlementJournal{},
-		journalAttempts:  newSettlementJournalAttempts(),
-		publicFeedCache:  make(map[string]publicFeedCacheEntry),
+		cfg:                      cfg,
+		store:                    store,
+		keyMgr:                   auth.NewKeyManager(cfg.Auth.KeyPrefix, cfg.Auth.KeyHash, cfg.Auth.KeyHashSecret),
+		demoMgr:                  auth.NewDemoManager(cfg.Auth.Demo.SigningSecret),
+		oauth:                    oauth,
+		now:                      func() time.Time { return time.Now().UTC() },
+		client:                   http.DefaultClient,
+		trustedProxyNets:         trustedProxyNets,
+		version:                  "dev",
+		retry503Metrics:          newRetry503Metrics(),
+		adminMetrics:             newAdminStateWriteMetrics(),
+		chatStartLimits:          newRequestRateLimiter(),
+		relayBlindMetadataLimits: newRequestRateLimiter(),
+		idlessDedupe:             newIdlessDedupeIndex(),
+		journal:                  discardSettlementJournal{},
+		journalAttempts:          newSettlementJournalAttempts(),
+		publicFeedCache:          make(map[string]publicFeedCacheEntry),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -227,11 +230,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/models", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleModels)))
 	mux.HandleFunc("/v1/usage", s.handleUsage)
 	mux.Handle("/v1/chat/completions", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleChatCompletions)))
+	mux.Handle("/v1/relay-blind/route-reservations", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleRelayBlindRouteReservations)))
 	if s.cfg.Features.ResponsesAPIEnabled {
 		mux.Handle("/v1/responses", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleResponses)))
+	} else {
+		mux.Handle("/v1/responses", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleRelayBlindResponsesDisabled)))
 	}
 	if s.cfg.Features.AnthropicMessagesEnabled {
 		mux.Handle("/v1/messages", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleAnthropicMessages)))
+	} else {
+		mux.Handle("/v1/messages", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleRelayBlindMessagesDisabled)))
 	}
 	mux.Handle("/v1/sticky", s.withCORS(http.MethodDelete, http.HandlerFunc(s.handleStickyDelete)))
 	mux.Handle("/v1/status", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleStatus)))
@@ -974,12 +982,16 @@ var gatewayRetryableByCode = map[string]bool{
 	// rate_limit_exceeded code left true only because the round-3 revert
 	// didn't name it; runbook item 20 reverted it to false alongside its
 	// three siblings — see gatewayPermanentCodes.)
-	"account_request_rate_exceeded":   true,
-	"account_concurrency_exceeded":    true,
-	"demo_concurrency_exceeded":       true,
-	"quota_exhausted":                 true,
-	"wallet_session_rate_limited":     true,
-	"wallet_session_storage_conflict": true,
+	"account_request_rate_exceeded":     true,
+	"account_concurrency_exceeded":      true,
+	"demo_concurrency_exceeded":         true,
+	"quota_exhausted":                   true,
+	"wallet_session_rate_limited":       true,
+	"wallet_session_storage_conflict":   true,
+	"relay_blind_metadata_rate_limited": true,
+	"relay_blind_key_expired":           true,
+	"relay_blind_decrypt_failed":        true,
+	"relay_blind_provider_unsupported":  true,
 	// Operator-controlled capacity pauses (M-R2-3 + sweep): the wording on
 	// all three ("paused"/"closed ... while capacity catches up") already
 	// promises the buyer this resolves with time; the code must agree.
@@ -1049,6 +1061,15 @@ var gatewayPermanentCodes = map[string]bool{
 	"wallet_session_store_failed":              true,
 	"wallet_sessions_disabled":                 true,
 	"wallet_account_mismatch":                  true,
+	"relay_blind_disabled":                     true,
+	"relay_blind_envelope_invalid":             true,
+	"relay_blind_route_reservation_invalid":    true,
+	"relay_blind_replay":                       true,
+	"relay_blind_downgrade_rejected":           true,
+	"relay_blind_endpoint_unsupported":         true,
+	"relay_blind_required_unavailable":         true,
+	"relay_blind_ciphertext_invalid":           true,
+	"relay_blind_committed_failed":             true,
 	// Round-3 SECURITY MEDIUM revert: round-2 classified these three true
 	// as part of the rate_limit_exceeded family, but unlike
 	// account_request_rate_exceeded/account_concurrency_exceeded/

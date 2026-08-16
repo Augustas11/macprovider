@@ -26,6 +26,7 @@ var (
 	_ storage.KeyStore           = (*Store)(nil)
 	_ storage.UsageStore         = (*Store)(nil)
 	_ storage.WalletSessionStore = (*Store)(nil)
+	_ storage.RelayBlindStore    = (*Store)(nil)
 	_ storage.FeedbackStore      = (*Store)(nil)
 	_ storage.AuditStore         = (*Store)(nil)
 	_ storage.CapacityStore      = (*Store)(nil)
@@ -107,6 +108,7 @@ func (s *Store) Ping(ctx context.Context) error {
 //	     feedback ceilings.
 //	v9 — oauth return_to + oauth_handoffs support.
 //	v10 — SPEC-040 wallet-native buyer session tables.
+//	v11 — SPEC-041 relay-blind replay ledger.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -117,7 +119,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 10
+const maxKnownSchemaVersion = 11
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -150,6 +152,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, walletSessionDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, relayBlindReplayDDL); err != nil {
 		return err
 	}
 	if err := s.ensureWalletSessionRequestMapModelIDColumn(ctx); err != nil {
@@ -224,6 +229,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(10, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(11, ?)", now); err != nil {
 		return err
 	}
 	return nil
@@ -2153,6 +2161,108 @@ func (s *Store) AdmitWalletSessionMetadata(ctx context.Context, req storage.Wall
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) RecordRelayBlindReplay(ctx context.Context, replay storage.RelayBlindReplayMaterial) error {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if replay.CreatedAt.IsZero() {
+		replay.CreatedAt = time.Now().UTC()
+	}
+	now := replay.CreatedAt.UTC()
+	if replay.RetentionExpiresAt.IsZero() || !replay.RetentionExpiresAt.After(now) {
+		return storage.ErrRelayBlindReplay
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM relay_blind_replays WHERE retention_expires_at <= ?`, encodeTime(now)); err != nil {
+		return err
+	}
+	seen, err := relayBlindReplaySeenTx(ctx, tx, replay)
+	if err != nil {
+		return err
+	}
+	if seen {
+		return storage.ErrRelayBlindReplay
+	}
+	if replay.MaxReplayRows > 0 || replay.MaxReplayBytes > 0 {
+		var rows int
+		var bytes int64
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*), COALESCE(SUM(envelope_bytes), 0)
+			FROM relay_blind_replays
+			WHERE account_id = ? AND wallet_session_id = ?`,
+			replay.AccountID, replay.WalletSessionID).Scan(&rows, &bytes); err != nil {
+			return err
+		}
+		if (replay.MaxReplayRows > 0 && rows >= replay.MaxReplayRows) ||
+			(replay.MaxReplayBytes > 0 && bytes+replay.EnvelopeBytes > replay.MaxReplayBytes) {
+			return storage.ErrRateLimit
+		}
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO relay_blind_replays(
+			account_id, wallet_session_id, request_id, request_replay_nonce_digest, buyer_ephemeral_public_key_digest,
+			provider_binding_digest, kid_digest, envelope_digest, envelope_bytes, retention_expires_at, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		replay.AccountID, replay.WalletSessionID, replay.RequestID, replay.RequestReplayNonceDigest, replay.BuyerEphemeralPublicKeyDigest,
+		replay.ProviderBindingDigest, replay.KIDDigest, replay.EnvelopeDigest, replay.EnvelopeBytes, encodeTime(replay.RetentionExpiresAt.UTC()), encodeTime(now))
+	if err != nil {
+		if isUniqueConstraintError(err) {
+			return storage.ErrRelayBlindReplay
+		}
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) RelayBlindReplaySeen(ctx context.Context, replay storage.RelayBlindReplayMaterial) (bool, error) {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if replay.CreatedAt.IsZero() {
+		replay.CreatedAt = time.Now().UTC()
+	}
+	now := replay.CreatedAt.UTC()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM relay_blind_replays WHERE retention_expires_at <= ?`, encodeTime(now)); err != nil {
+		return false, err
+	}
+	seen, err := relayBlindReplaySeenTx(ctx, tx, replay)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return seen, nil
+}
+
+func relayBlindReplaySeenTx(ctx context.Context, tx *immediateTx, replay storage.RelayBlindReplayMaterial) (bool, error) {
+	var seen int
+	err := tx.QueryRowContext(ctx, `
+		SELECT 1
+		FROM relay_blind_replays
+		WHERE account_id = ?
+			AND wallet_session_id = ?
+			AND (
+				request_id = ?
+				OR request_replay_nonce_digest = ?
+				OR buyer_ephemeral_public_key_digest = ?
+				OR envelope_digest = ?
+			)
+		LIMIT 1`,
+		replay.AccountID, replay.WalletSessionID, replay.RequestID, replay.RequestReplayNonceDigest,
+		replay.BuyerEphemeralPublicKeyDigest, replay.EnvelopeDigest).Scan(&seen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) ArmWalletSessionDispatch(ctx context.Context, arm storage.WalletSessionDispatchArm) error {

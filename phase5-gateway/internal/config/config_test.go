@@ -35,6 +35,96 @@ func TestWalletSessionsDefaultOffDoesNotRequireSecrets(t *testing.T) {
 	}
 }
 
+func TestRelayBlindRequestsDefaultOffDoesNotRequireBounds(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Features.RelayBlindRequests = RelayBlindRequestsConfig{
+		Algorithms: []string{"future-disabled-algorithm"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() rejected default-off relay-blind requests without bounds or known algorithms: %v", err)
+	}
+}
+
+func TestRelayBlindRequestsValidation(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mutate func(*Config)
+		want   string
+	}{
+		"unsupported algorithm when enabled": {
+			mutate: func(cfg *Config) {
+				cfg.Features.RelayBlindRequests.Enabled = true
+				cfg.Features.RelayBlindRequests.Algorithms = []string{"unknown"}
+			},
+			want: "relay_blind_requests.algorithms",
+		},
+		"empty algorithms when enabled": {
+			mutate: func(cfg *Config) {
+				cfg.Features.RelayBlindRequests.Enabled = true
+				cfg.Features.RelayBlindRequests.Algorithms = nil
+			},
+			want: "relay_blind_requests.algorithms",
+		},
+		"zero replay retention": {
+			mutate: func(cfg *Config) {
+				cfg.Features.RelayBlindRequests.Enabled = true
+				cfg.Features.RelayBlindRequests.ReplayRetentionSeconds = 0
+			},
+			want: "relay_blind_requests.replay_retention_seconds",
+		},
+		"skew not below replay retention": {
+			mutate: func(cfg *Config) {
+				cfg.Features.RelayBlindRequests.Enabled = true
+				cfg.Features.RelayBlindRequests.TimestampMaxSkewSeconds = cfg.Features.RelayBlindRequests.ReplayRetentionSeconds
+			},
+			want: "timestamp skew",
+		},
+		"ttl above replay retention": {
+			mutate: func(cfg *Config) {
+				cfg.Features.RelayBlindRequests.Enabled = true
+				cfg.Features.RelayBlindRequests.RouteReservationTTLSeconds = cfg.Features.RelayBlindRequests.ReplayRetentionSeconds + 1
+			},
+			want: "route_reservation_ttl_seconds",
+		},
+		"encrypted request cap above body cap": {
+			mutate: func(cfg *Config) {
+				cfg.Features.RelayBlindRequests.Enabled = true
+				cfg.Features.RelayBlindRequests.MaxEncryptedRequestBytes = cfg.Limits.RequestBodyBytes + 1
+			},
+			want: "max_encrypted_request_bytes",
+		},
+		"zero metadata rate limit": {
+			mutate: func(cfg *Config) {
+				cfg.Features.RelayBlindRequests.Enabled = true
+				cfg.Features.RelayBlindRequests.MetadataRequestsPerMinute = 0
+			},
+			want: "metadata replay limits",
+		},
+		"zero replay row cap": {
+			mutate: func(cfg *Config) {
+				cfg.Features.RelayBlindRequests.Enabled = true
+				cfg.Features.RelayBlindRequests.ReplayMaxRowsPerAccount = 0
+			},
+			want: "metadata replay limits",
+		},
+		"zero replay byte cap": {
+			mutate: func(cfg *Config) {
+				cfg.Features.RelayBlindRequests.Enabled = true
+				cfg.Features.RelayBlindRequests.ReplayMaxBytesPerAccount = 0
+			},
+			want: "metadata replay limits",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate() error=%v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestWalletSessionsEnabledRequiresSecrets(t *testing.T) {
 	cfg := validWalletSessionTestConfig()
 	cfg.Auth.WalletSessions.BearerHashKeys = nil

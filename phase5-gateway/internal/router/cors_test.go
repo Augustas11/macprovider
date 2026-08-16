@@ -75,10 +75,29 @@ func TestCORSPreflight(t *testing.T) {
 		t.Fatalf("max-age=%q", got)
 	}
 	allowHeaders := resp.Header().Get("Access-Control-Allow-Headers")
-	for _, want := range []string{"Anthropic-Beta", "Anthropic-Version", "X-Api-Key", "X-Demo-Token", "X-MacProvider-Session-Signature", "X-MacProvider-Session-Timestamp"} {
+	for _, want := range []string{"Anthropic-Beta", "Anthropic-Version", "Idempotency-Key", "X-Api-Key", "X-Demo-Token", "X-MacProvider-Session-Signature", "X-MacProvider-Session-Timestamp"} {
 		if !strings.Contains(allowHeaders, want) {
 			t.Fatalf("allow-headers=%q missing %s", allowHeaders, want)
 		}
+	}
+}
+
+func TestCORSRelayBlindRouteReservationPreflightAllowsIdempotencyKey(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(modelsOKClient()))
+	req := httptest.NewRequest(http.MethodOptions, "/v1/relay-blind/route-reservations", nil)
+	req.Header.Set("Origin", "https://console.malibu.tech")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "Authorization, Content-Type, Idempotency-Key")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("preflight status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("Access-Control-Allow-Origin"); got != "https://console.malibu.tech" {
+		t.Fatalf("allow-origin=%q", got)
+	}
+	if allowHeaders := resp.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(allowHeaders, "Idempotency-Key") {
+		t.Fatalf("allow-headers=%q missing Idempotency-Key", allowHeaders)
 	}
 }
 

@@ -184,6 +184,28 @@ CREATE TABLE IF NOT EXISTS wallet_session_request_map (
 CREATE INDEX IF NOT EXISTS idx_wallet_request_map_session ON wallet_session_request_map(session_id, request_id);
 `
 
+const relayBlindReplayDDL = `
+CREATE TABLE IF NOT EXISTS relay_blind_replays (
+	account_id TEXT NOT NULL,
+	wallet_session_id TEXT NOT NULL DEFAULT '',
+	request_id TEXT NOT NULL,
+	request_replay_nonce_digest BLOB NOT NULL,
+	buyer_ephemeral_public_key_digest BLOB NOT NULL,
+	provider_binding_digest BLOB NOT NULL,
+	kid_digest BLOB NOT NULL,
+	envelope_digest BLOB NOT NULL,
+	envelope_bytes INTEGER NOT NULL DEFAULT 0 CHECK (envelope_bytes >= 0),
+	retention_expires_at TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	PRIMARY KEY (account_id, wallet_session_id, request_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_blind_replay_nonce ON relay_blind_replays(account_id, wallet_session_id, request_replay_nonce_digest);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_blind_replay_buyer_key ON relay_blind_replays(account_id, wallet_session_id, buyer_ephemeral_public_key_digest);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relay_blind_replay_digest ON relay_blind_replays(account_id, wallet_session_id, envelope_digest);
+CREATE INDEX IF NOT EXISTS idx_relay_blind_replay_expires ON relay_blind_replays(retention_expires_at);
+`
+
 // demoUsageEventsAuxiliaryDDL covers the secondary index + append-only
 // triggers for demo_usage_events. Mirrors usageEventsAuxiliaryDDL.
 const demoUsageEventsAuxiliaryDDL = `

@@ -25,18 +25,56 @@ func TestWalletSessionMigrationIdempotent(t *testing.T) {
 		"wallet_session_replays",
 		"wallet_session_reservations",
 		"wallet_session_request_map",
+		"relay_blind_replays",
 	} {
 		var name string
 		if err := store.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name); err != nil {
 			t.Fatalf("missing table %s: %v", table, err)
 		}
 	}
-	var applied int
-	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 10`).Scan(&applied); err != nil {
-		t.Fatalf("schema version query: %v", err)
+	for _, version := range []int{10, 11} {
+		var applied int
+		if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, version).Scan(&applied); err != nil {
+			t.Fatalf("schema version query v%d: %v", version, err)
+		}
+		if applied != 1 {
+			t.Fatalf("schema v%d rows=%d want 1", version, applied)
+		}
 	}
-	if applied != 1 {
-		t.Fatalf("schema v10 rows=%d want 1", applied)
+}
+
+func TestRelayBlindReplayDuplicateWinsOverCapacity(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_relay_blind_replay_precedence")
+	now := fixedTime()
+	replay := storage.RelayBlindReplayMaterial{
+		AccountID:                     "acct_relay_blind_replay_precedence",
+		RequestID:                     "req-relay-blind-precedence",
+		RequestReplayNonceDigest:      []byte("nonce-digest"),
+		BuyerEphemeralPublicKeyDigest: []byte("buyer-key-digest"),
+		ProviderBindingDigest:         []byte("provider-binding-digest"),
+		KIDDigest:                     []byte("kid-digest"),
+		EnvelopeDigest:                []byte("envelope-digest"),
+		EnvelopeBytes:                 128,
+		RetentionExpiresAt:            now.Add(time.Minute),
+		MaxReplayRows:                 1,
+		MaxReplayBytes:                1024,
+		CreatedAt:                     now,
+	}
+	if err := store.RecordRelayBlindReplay(ctx, replay); err != nil {
+		t.Fatalf("RecordRelayBlindReplay first: %v", err)
+	}
+	if err := store.RecordRelayBlindReplay(ctx, replay); !errors.Is(err, storage.ErrRelayBlindReplay) {
+		t.Fatalf("RecordRelayBlindReplay duplicate err=%v want ErrRelayBlindReplay", err)
+	}
+	unique := replay
+	unique.RequestID = "req-relay-blind-precedence-2"
+	unique.RequestReplayNonceDigest = []byte("nonce-digest-2")
+	unique.BuyerEphemeralPublicKeyDigest = []byte("buyer-key-digest-2")
+	unique.EnvelopeDigest = []byte("envelope-digest-2")
+	if err := store.RecordRelayBlindReplay(ctx, unique); !errors.Is(err, storage.ErrRateLimit) {
+		t.Fatalf("RecordRelayBlindReplay unique over cap err=%v want ErrRateLimit", err)
 	}
 }
 

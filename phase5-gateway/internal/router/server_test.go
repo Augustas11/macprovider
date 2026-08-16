@@ -6139,6 +6139,8 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 		// header, outside the chat-path clamp).
 		"account_request_rate_exceeded", "account_concurrency_exceeded",
 		"demo_concurrency_exceeded", "quota_exhausted",
+		"relay_blind_metadata_rate_limited", "relay_blind_key_expired",
+		"relay_blind_decrypt_failed", "relay_blind_provider_unsupported",
 		// Round-2 sweep (M-R2-3 + capacity-pause extension): wording on all
 		// three already promises the buyer this resolves with time.
 		"public_api_paused", "demo_paused", "capacity_signup_closed",
@@ -6157,6 +6159,11 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 		// would invite SDK auto-retry hot-looping (DoS amplifier).
 		"feedback_rate_limited", "oauth_state_rate_limited", "demo_session_rate_limited",
 		"signup_rate_limited",
+		"relay_blind_disabled", "relay_blind_envelope_invalid", "relay_blind_replay",
+		"relay_blind_route_reservation_invalid", "relay_blind_required_unavailable",
+		"relay_blind_downgrade_rejected", "relay_blind_endpoint_unsupported",
+		"relay_blind_ciphertext_invalid",
+		"relay_blind_committed_failed",
 	}
 	for _, code := range permanent {
 		if gatewayRetryable(code) {
@@ -6205,6 +6212,12 @@ var gatewayEmittedErrorCodes = []string{
 	"oauth_scope_forbidden", "oauth_state_invalid", "oauth_state_rate_limited",
 	"oauth_state_store_failed", "provider_disconnected", "provider_timeout",
 	"public_api_paused", "query_timeout", "quota_exhausted",
+	"relay_blind_ciphertext_invalid", "relay_blind_committed_failed",
+	"relay_blind_decrypt_failed", "relay_blind_disabled", "relay_blind_downgrade_rejected",
+	"relay_blind_endpoint_unsupported", "relay_blind_envelope_invalid",
+	"relay_blind_key_expired", "relay_blind_metadata_rate_limited",
+	"relay_blind_replay", "relay_blind_required_unavailable",
+	"relay_blind_route_reservation_invalid",
 	"quota_reservation_failed", "request_content_encoding_unsupported", "request_too_large",
 	"session_generation_failed", "session_id_untyped", "settlement_failed",
 	"settlement_reconcile_load_failed", "signup_event_failed", "signup_limit_check_failed",

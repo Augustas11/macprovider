@@ -142,6 +142,11 @@ type WalletSessionStore interface {
 	MarkWalletSessionReservationStaleHeld(ctx context.Context, accountID, sessionID, requestID string, staleAt time.Time) error
 }
 
+type RelayBlindStore interface {
+	RelayBlindReplaySeen(ctx context.Context, replay RelayBlindReplayMaterial) (bool, error)
+	RecordRelayBlindReplay(ctx context.Context, replay RelayBlindReplayMaterial) error
+}
+
 type HealthStore interface {
 	Ping(ctx context.Context) error
 }
