@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
@@ -103,6 +104,9 @@ func TestPublicFeedsForwardClientIPNotCredentials(t *testing.T) {
 		if r.URL.Path == "/v1/rate-card" {
 			rateCardReq = cloned
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testRateCardBody), nil
+		}
+		if r.URL.Path == "/v1/rate-card.sig" {
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testRateCardSig), nil
 		}
 		if r.URL.Path == "/v1/stats/overview" {
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testStatsBody), nil
@@ -316,6 +320,58 @@ func TestPublicFeedsHeadHasNoBody(t *testing.T) {
 	}
 }
 
+func TestPublicFeedsRateCardAndSigCacheTogether(t *testing.T) {
+	const rotatedBody = `{"version":"rotated","policy_version":"autotune-policy-v1","rows":{}}` + "\n"
+	const rotatedSig = `{"key_id":"test","signature":"cafebabe"}` + "\n"
+	var (
+		mu       sync.Mutex
+		body     = testRateCardBody
+		sig      = testRateCardSig
+		pathHits = map[string]int{}
+	)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		pathHits[r.URL.Path]++
+		currentBody, currentSig := body, sig
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/v1/rate-card":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, currentBody), nil
+		case "/v1/rate-card.sig":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, currentSig), nil
+		default:
+			t.Errorf("unexpected upstream %s", r.URL.String())
+			return responseWithBody(http.StatusNotFound, nil, ""), nil
+		}
+	})}
+	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://buyer.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+
+	first := assertStatus(t, h, http.MethodGet, "/v1/rate-card", "", "", "192.0.2.10", http.StatusOK)
+	if first.Body.String() != testRateCardBody {
+		t.Fatalf("first body=%q", first.Body.String())
+	}
+
+	mu.Lock()
+	body = rotatedBody
+	sig = rotatedSig
+	mu.Unlock()
+
+	cachedBody := assertStatus(t, h, http.MethodGet, "/v1/rate-card", "", "", "192.0.2.10", http.StatusOK)
+	cachedSig := assertStatus(t, h, http.MethodGet, "/v1/rate-card.sig", "", "", "192.0.2.10", http.StatusOK)
+	if cachedBody.Body.String() != testRateCardBody {
+		t.Fatalf("cached body drifted to %q", cachedBody.Body.String())
+	}
+	if cachedSig.Body.String() != testRateCardSig {
+		t.Fatalf("cached sig drifted to %q; body and signature must refresh as one unit", cachedSig.Body.String())
+	}
+	if pathHits["/v1/rate-card"] != 1 || pathHits["/v1/rate-card.sig"] != 1 {
+		t.Fatalf("upstream hits=%v want one paired fetch", pathHits)
+	}
+}
+
 func TestPublicFeedsCacheCollapsesRepeatReads(t *testing.T) {
 	hits := 0
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -347,6 +403,8 @@ func TestPublicFeedsRejectRedirectsAndOversizedBodies(t *testing.T) {
 			return responseWithBody(http.StatusFound, http.Header{
 				"Location": []string{"https://evil.example/rate-card"},
 			}, "redirect"), nil
+		case "/v1/rate-card.sig":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testRateCardSig), nil
 		case "/v1/stats/overview":
 			return &http.Response{
 				StatusCode: http.StatusOK,

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,6 +20,12 @@ const (
 	publicUpstreamTimeout  = 10 * time.Second
 	publicStatsCacheTTL    = 30 * time.Second
 	publicRateCardCacheTTL = 5 * time.Minute
+)
+
+const (
+	publicRateCardPath    = "/v1/rate-card"
+	publicRateCardSigPath = "/v1/rate-card.sig"
+	publicStatsPath       = "/v1/stats/overview"
 )
 
 var errInvalidPublicUpstream = errors.New("invalid public upstream")
@@ -50,32 +57,44 @@ type publicFeedCacheEntry struct {
 	body      []byte
 }
 
+type publicFeedFetch struct {
+	status       int
+	header       http.Header
+	body         []byte
+	transportErr bool
+	gatewayErr   bool
+}
+
 func isPublicFeedPath(path string) bool {
 	switch path {
-	case "/v1/rate-card", "/v1/rate-card.sig", "/v1/stats/overview", "/v1/network-stats":
+	case publicRateCardPath, publicRateCardSigPath, publicStatsPath, "/v1/network-stats":
 		return true
 	default:
 		return false
 	}
 }
 
+func isRateCardPairPath(path string) bool {
+	return path == publicRateCardPath || path == publicRateCardSigPath
+}
+
 func publicFeedCacheTTL(upstreamPath string) time.Duration {
-	if upstreamPath == "/v1/stats/overview" {
+	if upstreamPath == publicStatsPath {
 		return publicStatsCacheTTL
 	}
 	return publicRateCardCacheTTL
 }
 
 func (s *Server) handlePublicRateCard(w http.ResponseWriter, r *http.Request) {
-	s.proxyPublicUpstream(w, r, s.coordinatorBuyerURL(), "/v1/rate-card", "coordinator_rate_card_error", "Coordinator rate-card error")
+	s.proxyPublicUpstream(w, r, s.coordinatorBuyerURL(), publicRateCardPath, "coordinator_rate_card_error", "Coordinator rate-card error")
 }
 
 func (s *Server) handlePublicRateCardSig(w http.ResponseWriter, r *http.Request) {
-	s.proxyPublicUpstream(w, r, s.coordinatorBuyerURL(), "/v1/rate-card.sig", "coordinator_rate_card_error", "Coordinator rate-card error")
+	s.proxyPublicUpstream(w, r, s.coordinatorBuyerURL(), publicRateCardSigPath, "coordinator_rate_card_error", "Coordinator rate-card error")
 }
 
 func (s *Server) handlePublicStatsOverview(w http.ResponseWriter, r *http.Request) {
-	s.proxyPublicUpstream(w, r, s.coordinatorOperatorURL(), "/v1/stats/overview", "coordinator_stats_error", "Coordinator stats error")
+	s.proxyPublicUpstream(w, r, s.coordinatorOperatorURL(), publicStatsPath, "coordinator_stats_error", "Coordinator stats error")
 }
 
 func (s *Server) proxyPublicUpstream(w http.ResponseWriter, r *http.Request, baseURL, upstreamPath, errorCode, errorMessage string) {
@@ -87,52 +106,109 @@ func (s *Server) proxyPublicUpstream(w http.ResponseWriter, r *http.Request, bas
 		writePublicFeed(w, r.Method, cached.status, cached.header, cached.body)
 		return
 	}
-	target, err := publicUpstreamURL(baseURL, upstreamPath)
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
+	if isRateCardPairPath(upstreamPath) {
+		s.proxyRateCardPair(w, r, baseURL, upstreamPath, errorCode, errorMessage)
 		return
 	}
+	s.proxySinglePublicFeed(w, r, baseURL, upstreamPath, errorCode, errorMessage)
+}
+
+func (s *Server) proxySinglePublicFeed(w http.ResponseWriter, r *http.Request, baseURL, upstreamPath, errorCode, errorMessage string) {
 	ctx, cancel := context.WithTimeout(r.Context(), publicUpstreamTimeout)
 	defer cancel()
-	upReq, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
+	fetched := s.fetchPublicFeed(ctx, r, baseURL, upstreamPath, true)
+	s.writeFetchedPublicFeed(w, r, fetched, errorCode, errorMessage)
+	if fetched.status == http.StatusOK && !fetched.transportErr && !fetched.gatewayErr {
+		s.storePublicFeed(upstreamPath, fetched.status, fetched.header, fetched.body)
+	}
+}
+
+func (s *Server) proxyRateCardPair(w http.ResponseWriter, r *http.Request, baseURL, requestedPath, errorCode, errorMessage string) {
+	ctx, cancel := context.WithTimeout(r.Context(), publicUpstreamTimeout)
+	defer cancel()
+
+	var (
+		bodyFetch publicFeedFetch
+		sigFetch  publicFeedFetch
+		wg        sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		bodyFetch = s.fetchPublicFeed(ctx, r, baseURL, publicRateCardPath, requestedPath == publicRateCardPath)
+	}()
+	go func() {
+		defer wg.Done()
+		sigFetch = s.fetchPublicFeed(ctx, r, baseURL, publicRateCardSigPath, requestedPath == publicRateCardSigPath)
+	}()
+	wg.Wait()
+
+	if bodyFetch.status == http.StatusOK && !bodyFetch.transportErr && !bodyFetch.gatewayErr &&
+		sigFetch.status == http.StatusOK && !sigFetch.transportErr && !sigFetch.gatewayErr {
+		s.storeRateCardPair(bodyFetch, sigFetch)
+	}
+
+	requested := bodyFetch
+	if requestedPath == publicRateCardSigPath {
+		requested = sigFetch
+	}
+	s.writeFetchedPublicFeed(w, r, requested, errorCode, errorMessage)
+}
+
+func (s *Server) writeFetchedPublicFeed(w http.ResponseWriter, r *http.Request, fetched publicFeedFetch, errorCode, errorMessage string) {
+	if fetched.transportErr {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
 	}
-	upReq.Header.Set("X-Request-ID", requestID(r))
-	if accept := strings.TrimSpace(r.Header.Get("Accept")); accept != "" {
+	if fetched.gatewayErr {
+		writeError(w, http.StatusBadGateway, "api_error", errorCode, errorMessage)
+		return
+	}
+	writePublicFeed(w, r.Method, fetched.status, fetched.header, fetched.body)
+}
+
+func (s *Server) fetchPublicFeed(ctx context.Context, clientReq *http.Request, baseURL, upstreamPath string, forwardIfNoneMatch bool) publicFeedFetch {
+	target, err := publicUpstreamURL(baseURL, upstreamPath)
+	if err != nil {
+		return publicFeedFetch{transportErr: true}
+	}
+	upReq, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return publicFeedFetch{transportErr: true}
+	}
+	upReq.Header.Set("X-Request-ID", requestID(clientReq))
+	if accept := strings.TrimSpace(clientReq.Header.Get("Accept")); accept != "" {
 		upReq.Header.Set("Accept", accept)
 	}
-	if match := strings.TrimSpace(r.Header.Get("If-None-Match")); match != "" {
-		upReq.Header.Set("If-None-Match", match)
+	if forwardIfNoneMatch {
+		if match := strings.TrimSpace(clientReq.Header.Get("If-None-Match")); match != "" {
+			upReq.Header.Set("If-None-Match", match)
+		}
 	}
-	if ip := s.clientIP(r); ip != "" {
+	if ip := s.clientIP(clientReq); ip != "" {
 		upReq.Header.Set("X-Real-IP", ip)
 		upReq.Header.Set("X-Forwarded-For", ip)
 	}
 	resp, err := s.doPublicUpstream(upReq)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
-		return
+		return publicFeedFetch{transportErr: true}
 	}
 	defer resp.Body.Close()
 	if isDisallowedPublicUpstreamStatus(resp.StatusCode) {
-		writeError(w, http.StatusBadGateway, "api_error", errorCode, errorMessage)
-		return
+		return publicFeedFetch{gatewayErr: true}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, publicUpstreamMaxBytes+1))
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "api_error", errorCode, errorMessage)
-		return
+		return publicFeedFetch{gatewayErr: true}
 	}
 	if int64(len(body)) > publicUpstreamMaxBytes {
-		writeError(w, http.StatusBadGateway, "api_error", errorCode, errorMessage)
-		return
+		return publicFeedFetch{gatewayErr: true}
 	}
-	if resp.StatusCode == http.StatusOK {
-		s.storePublicFeed(upstreamPath, resp.StatusCode, resp.Header, body)
+	return publicFeedFetch{
+		status: resp.StatusCode,
+		header: resp.Header,
+		body:   body,
 	}
-	writePublicFeed(w, r.Method, resp.StatusCode, resp.Header, body)
 }
 
 func (s *Server) lookupPublicFeed(upstreamPath string) (publicFeedCacheEntry, bool) {
@@ -144,12 +220,27 @@ func (s *Server) lookupPublicFeed(upstreamPath string) (publicFeedCacheEntry, bo
 		now = s.now()
 	}
 	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if isRateCardPairPath(upstreamPath) {
+		body, okBody := s.publicFeedCache[publicRateCardPath]
+		sig, okSig := s.publicFeedCache[publicRateCardSigPath]
+		if !okBody || !okSig || !publicFeedCacheFresh(body, now) || !publicFeedCacheFresh(sig, now) {
+			return publicFeedCacheEntry{}, false
+		}
+		if upstreamPath == publicRateCardPath {
+			return body, true
+		}
+		return sig, true
+	}
 	entry, ok := s.publicFeedCache[upstreamPath]
-	s.mu.RUnlock()
-	if !ok || entry.expiresAt.IsZero() || !now.Before(entry.expiresAt) {
+	if !ok || !publicFeedCacheFresh(entry, now) {
 		return publicFeedCacheEntry{}, false
 	}
 	return entry, true
+}
+
+func publicFeedCacheFresh(entry publicFeedCacheEntry, now time.Time) bool {
+	return !entry.expiresAt.IsZero() && now.Before(entry.expiresAt)
 }
 
 func (s *Server) storePublicFeed(upstreamPath string, status int, header http.Header, body []byte) {
@@ -160,13 +251,37 @@ func (s *Server) storePublicFeed(upstreamPath string, status int, header http.He
 	if s.now != nil {
 		now = s.now()
 	}
-	clonedBody := append([]byte(nil), body...)
 	s.mu.Lock()
 	s.publicFeedCache[upstreamPath] = publicFeedCacheEntry{
 		expiresAt: now.Add(publicFeedCacheTTL(upstreamPath)),
 		status:    status,
 		header:    cloneHeader(header),
-		body:      clonedBody,
+		body:      append([]byte(nil), body...),
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) storeRateCardPair(body, sig publicFeedFetch) {
+	if s == nil || s.publicFeedCache == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if s.now != nil {
+		now = s.now()
+	}
+	expiresAt := now.Add(publicRateCardCacheTTL)
+	s.mu.Lock()
+	s.publicFeedCache[publicRateCardPath] = publicFeedCacheEntry{
+		expiresAt: expiresAt,
+		status:    body.status,
+		header:    cloneHeader(body.header),
+		body:      append([]byte(nil), body.body...),
+	}
+	s.publicFeedCache[publicRateCardSigPath] = publicFeedCacheEntry{
+		expiresAt: expiresAt,
+		status:    sig.status,
+		header:    cloneHeader(sig.header),
+		body:      append([]byte(nil), sig.body...),
 	}
 	s.mu.Unlock()
 }
