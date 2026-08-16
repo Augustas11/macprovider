@@ -79,7 +79,7 @@ Evidence:
 - `specs/SPEC-017-network-stats-api.md:32-40` says v0.1.8 "drops the burst column entirely" and AC-8 is achievable with `limit_req zone=<name> nodelay;` and "no `burst=`."
 - `specs/SPEC-017-network-stats-api.md:1116-1120` states "v0.1.8 drops the burst column entirely", "no burst absorption", and "`limit_req zone=<name> nodelay;` (no `burst=` parameter)."
 - `specs/BUILD_SPEC_017_IMPL_PROMPT.md:567-570` says the production location block "MUST use `limit_req zone=<name> nodelay;` with NO `burst=` parameter."
-- The implementation uses `burst=59 nodelay` in all public stats locations: `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:109-110`, `137-138`, `160-161`; and the coordinator vhost mirrors it at `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:212-214`, `232-234`, `252-254`.
+- The implementation uses `burst=59 nodelay` in all public stats locations: `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:109-110`, `137-138`, `160-161`; and the coordinator vhost mirrors it at `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:212-214`, `232-234`, `252-254`.
 - `specs/SPEC-017-IMPL-STEP_4-22AC-sweep.md:65-71` argues the change preserves sustained throughput, but the locked SPEC forbids burst absorption at the implementation level, not only long-term average throughput.
 
 Risk:

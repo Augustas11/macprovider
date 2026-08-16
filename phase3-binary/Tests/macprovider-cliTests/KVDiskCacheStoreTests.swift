@@ -1617,7 +1617,7 @@ final class KVDiskCacheStoreTests: XCTestCase {
     func testRealKeychainAdapterSkipsGracefully() throws {
         let keychain = KVSecItemKeychain()
         do {
-            _ = try keychain.enumerate(servicePrefix: "live.streamvc.macprovider.kv-cache.v1.probe.")
+            _ = try keychain.enumerate(servicePrefix: "live.malibu.provider.kv-cache.v1.probe.")
         } catch let e as KVKeychainError {
             if case .unavailable = e {
                 throw XCTSkip("Data-Protection keychain/entitlement unavailable in this environment")

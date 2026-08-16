@@ -962,8 +962,8 @@ func main() {
 	// only when stats.enabled = true. The handler stack uses
 	// the stats_reader pool exclusively (no admin DSN, no
 	// rollup pool). Per BUILD §2 Step 3 the same binary serves
-	// both coordinator.streamvc.live/v1/stats/* and
-	// stats.streamvc.live/v1/stats/*; nginx vhost config
+	// both coordinator.malibu.tech/v1/stats/* and
+	// stats.malibu.tech/v1/stats/*; nginx vhost config
 	// (Step 4.B) routes both to this provider port.
 	if statsPools != nil {
 		// SPEC-017 v0.1.8 Step 4.C — Prometheus metrics. The

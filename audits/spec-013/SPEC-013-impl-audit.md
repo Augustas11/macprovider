@@ -523,7 +523,7 @@ READY TO PROCEED TO STEP 5.
 
 ### Executive summary
 
-READY TO PROCEED TO STEP 6. I found no CRITICAL or MAJOR contract violations in the Step 5 provider-conflict primitives. The launchd label byte-matches SPEC-003, SPEC-013, the plist template, install.sh, UninstallCommand, and SelfUpdate as `live.streamvc.macprovider`; bootout uses the service target form `gui/<uid>/live.streamvc.macprovider`, while bootstrap correctly uses domain target `gui/<uid>` plus plist path. Foreground detection uses argv-element matching rather than substring grep and excludes argv containing the exact `autotune` subcommand, so the self-refusal class is covered by implementation and tests.
+READY TO PROCEED TO STEP 6. I found no CRITICAL or MAJOR contract violations in the Step 5 provider-conflict primitives. The launchd label byte-matches SPEC-003, SPEC-013, the plist template, install.sh, UninstallCommand, and SelfUpdate as `live.malibu.provider`; bootout uses the service target form `gui/<uid>/live.malibu.provider`, while bootstrap correctly uses domain target `gui/<uid>` plus plist path. Foreground detection uses argv-element matching rather than substring grep and excludes argv containing the exact `autotune` subcommand, so the self-refusal class is covered by implementation and tests.
 
 The side-effect surface is closure-injected for the drainer and injectable at the detector snapshot boundaries. I found no real launchctl mutation, real signal delivery, real restart, or real socket dependency in the Step 5 unit tests; the only real launchctl call is behind the integration-gated test. No SIGKILL escalation, `Process.interrupt()`, or `kill(_, SIGKILL)` path exists in the Step 5 implementation; `SIGKILL` appears only in the v1-disabled warning text.
 
@@ -536,7 +536,7 @@ Verification: `swift test --package-path phase3-binary` passed on 2026-06-18 wit
 (no findings)
 
 Verification notes:
-- `ProviderConflictDetector.launchdLabel` is `live.streamvc.macprovider` at `phase3-binary/Sources/macprovider-cli/ProviderConflictDetector.swift:11`.
+- `ProviderConflictDetector.launchdLabel` is `live.malibu.provider` at `phase3-binary/Sources/macprovider-cli/ProviderConflictDetector.swift:11`.
 - The same byte string appears in SPEC-003 at `specs/SPEC-003-open-onboarding.md:346`, `:426`, and `:870`; SPEC-013 at `specs/SPEC-013-cli-autotune.md:724`; the plist template at `phase3-binary/dist/launchd-plist-template.plist:7`; install.sh at `phase3-binary/dist/install.sh:749` and `:923`; UninstallCommand at `phase3-binary/Sources/macprovider-cli/UninstallCommand.swift:23`; and SelfUpdate at `phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:207` and `:217`.
 - `parseLaunchdManagedPID(from:)` tokenizes on space or tab, requires whole-field equality for the label, returns the first field as PID, and returns nil for `-`, matching the expected launchctl list shapes.
 - `defaultLaunchctlList()` executes `/bin/launchctl list`, captures stdout only, waits for exit, and throws on non-zero status.
@@ -555,7 +555,7 @@ Verification notes:
 (no findings)
 
 Verification notes:
-- Launchd drain calls the injected launchctl runner with `["bootout", "gui/<uid>/live.streamvc.macprovider"]` at `ProviderConflictDetector.swift:217`, matching SPEC-013's service-target drain command at `specs/SPEC-013-cli-autotune.md:756`.
+- Launchd drain calls the injected launchctl runner with `["bootout", "gui/<uid>/live.malibu.provider"]` at `ProviderConflictDetector.swift:217`, matching SPEC-013's service-target drain command at `specs/SPEC-013-cli-autotune.md:756`.
 - Foreground drain sends exactly `SIGTERM` via the injected `signalSender` at `ProviderConflictDetector.swift:219`.
 - Drain polling waits for port-free and, on foreground conflicts, process exit; if the foreground process remains after grace, the warning explicitly says SIGKILL is disabled in v1.
 
@@ -565,7 +565,7 @@ Verification notes:
 
 Verification notes:
 - Launchd restore calls `["bootstrap", "gui/<uid>", plistURL.path]` at `ProviderConflictDetector.swift:236`, matching the bootstrap domain-target + plist syntax in SPEC-013 and install.sh.
-- The default plist path is `~/Library/LaunchAgents/live.streamvc.macprovider.plist` at `ProviderConflictDetector.swift:193`, byte-aligned with SPEC-003, SPEC-013, install.sh, UninstallCommand, and SelfUpdate.
+- The default plist path is `~/Library/LaunchAgents/live.malibu.provider.plist` at `ProviderConflictDetector.swift:193`, byte-aligned with SPEC-003, SPEC-013, install.sh, UninstallCommand, and SelfUpdate.
 - Foreground restore is opt-in through `restartForeground`; otherwise it returns `.skipped`.
 
 #### Category E: DI surface completeness
@@ -593,7 +593,7 @@ Verification notes:
 - **Location:** `phase3-binary/Sources/macprovider-cli/ProviderConflictDetector.swift:39`; `phase3-binary/Tests/macprovider-cliTests/ProviderConflictDetectorTests.swift:7`
 - **What:** The parser correctly returns `(found: true, pid: nil)` for launchctl rows whose PID field is `-`, but the test suite does not pin that inactive-service case.
 - **Why:** Inactive loaded jobs are an expected launchctl list variant and Step 5's enum explicitly allows `launchdManaged(pid: nil)`. The implementation is straightforward and reviewed as correct, so this is a coverage gap, not a blocker.
-- **Recommendation:** Add a detector test with `-\t-\tlive.streamvc.macprovider` and assert `.launchdManaged(pid: nil)`.
+- **Recommendation:** Add a detector test with `-\t-\tlive.malibu.provider` and assert `.launchdManaged(pid: nil)`.
 
 **G.2 (MINOR) — Helper-binary foreground false-positive coverage is incomplete.**
 - **Location:** `phase3-binary/Sources/macprovider-cli/ProviderConflictDetector.swift:61`; `phase3-binary/Tests/macprovider-cliTests/ProviderConflictDetectorTests.swift:54`
@@ -652,7 +652,7 @@ H.1 remains intentionally deferred, and the deferral is sound for Step 5. The im
 
 ### Round-1 finding closures
 
-**G.1 (MINOR) — CLOSED.** `testParseLaunchdManagedInactivePIDReturnsNil` lives in `ProviderConflictDetectorTests` and feeds `"-\t-\tlive.streamvc.macprovider\n"` directly to `ProviderConflictDetector.parseLaunchdManagedPID(from:)`. It asserts both halves of the parser contract with `XCTAssertTrue(parsed.found)` and `XCTAssertNil(parsed.pid)`. This is meaningful coverage: if future parser changes stop treating `-` as a loaded-but-inactive launchd row, the test will fail.
+**G.1 (MINOR) — CLOSED.** `testParseLaunchdManagedInactivePIDReturnsNil` lives in `ProviderConflictDetectorTests` and feeds `"-\t-\tlive.malibu.provider\n"` directly to `ProviderConflictDetector.parseLaunchdManagedPID(from:)`. It asserts both halves of the parser contract with `XCTAssertTrue(parsed.found)` and `XCTAssertNil(parsed.pid)`. This is meaningful coverage: if future parser changes stop treating `-` as a loaded-but-inactive launchd row, the test will fail.
 
 **G.2 (MINOR) — CLOSED.** `testHelperBinaryDoesNotMatchForegroundServe` lives in `ProviderConflictDetectorTests`, constructs a detector with a process list containing `["/usr/local/bin/macprovider-cli-helper", "serve"]`, and asserts `try detector.detect()` returns `.none`. This is not tautological because it reaches the detector's argv scanner; changing `isForegroundServe(argv:)` from `lastPathComponent == "macprovider-cli"` to substring matching would make the helper binary look like a foreground serve process and fail this test.
 
@@ -1458,9 +1458,9 @@ Verification notes:
 
 **K.1 (MINOR) — launchd hint test does not assert all required substrings.**
 - **Location:** `phase3-binary/Tests/macprovider-cliTests/ConfigApplierTests.swift:134-139`; implementation at `phase3-binary/Sources/macprovider-cli/RecommendationEmitter.swift:87-92`.
-- **What:** `testLaunchdRestartHintIncludesBootoutAndBootstrap` asserts only `launchctl bootout` and `launchctl bootstrap`. The implementation currently also includes `~/Library/LaunchAgents/live.streamvc.macprovider.plist` and `live.streamvc.macprovider`, but the test would not catch a future regression that drops either path/service token.
+- **What:** `testLaunchdRestartHintIncludesBootoutAndBootstrap` asserts only `launchctl bootout` and `launchctl bootstrap`. The implementation currently also includes `~/Library/LaunchAgents/live.malibu.provider.plist` and `live.malibu.provider`, but the test would not catch a future regression that drops either path/service token.
 - **Why:** FR-F.3 requires the hint to contain both commands, the plist path, and the service identifier. Step 10 will decide stderr routing, so Step 9 only needs the helper content to be locked.
-- **Recommendation:** Extend the test to assert `~/Library/LaunchAgents/live.streamvc.macprovider.plist` and `live.streamvc.macprovider` in addition to bootout/bootstrap.
+- **Recommendation:** Extend the test to assert `~/Library/LaunchAgents/live.malibu.provider.plist` and `live.malibu.provider` in addition to bootout/bootstrap.
 
 Verification notes:
 - Step 9 only returns the hint string; it does not print, so stdout/stderr routing remains correctly deferred to Step 10 (`RecommendationEmitter.swift:87-92`).
@@ -1527,7 +1527,7 @@ Verification passed. `swift test --package-path phase3-binary` executed 348 test
 
 **I.1 (MINOR) — CLOSED.** `ConfigApplierTests` now imports `MacProviderCore` (`ConfigApplierTests.swift:1-4`). `testApplyPreservesNonOwnedLinesByteIdentically` uses comments, blank lines, an inline comment, and a SPEC-013 marker, then compares filtered non-owned line arrays pre/post (`ConfigApplierTests.swift:156-185`). The helper removes only non-indented top-level owned lines for `model`, `kv_bits`, `max_context_override`, and `max_concurrency_override`; indented same-name lines remain in the preserved non-owned set (`ConfigApplierTests.swift:248-262`). `testApplyResultIsParseableByConfigLoader` loads the post-apply file through `ConfigLoader.load(cli:environment:)` and asserts the four runtime config values resolve to the recommendation values (`ConfigApplierTests.swift:187-199`).
 
-**K.1 (MINOR) — CLOSED.** The renamed `testLaunchdRestartHintIncludesAllRequiredSubstrings` asserts `launchctl bootout`, `launchctl bootstrap`, `~/Library/LaunchAgents/live.streamvc.macprovider.plist`, and `gui/$UID/live.streamvc.macprovider` (`ConfigApplierTests.swift:202-209`). The implementation still contains those substrings in the returned hint (`RecommendationEmitter.swift:87-92`).
+**K.1 (MINOR) — CLOSED.** The renamed `testLaunchdRestartHintIncludesAllRequiredSubstrings` asserts `launchctl bootout`, `launchctl bootstrap`, `~/Library/LaunchAgents/live.malibu.provider.plist`, and `gui/$UID/live.malibu.provider` (`ConfigApplierTests.swift:202-209`). The implementation still contains those substrings in the returned hint (`RecommendationEmitter.swift:87-92`).
 
 ### Round-2 new findings
 

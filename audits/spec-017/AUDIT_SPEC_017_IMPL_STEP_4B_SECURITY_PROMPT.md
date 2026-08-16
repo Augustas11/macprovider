@@ -112,7 +112,7 @@ G. **Cloudflare / external-CDN compatibility** — IF a
    record that.
 
 H. **Subdomain-trust boundary** — `Origin: https://evil.
-   streamvc.live` requests are FORWARDED to the coordinator
+   malibu.tech` requests are FORWARDED to the coordinator
    (NOT short-circuited at the edge). The Step 3 CORS test
    verifies the application-layer reject; the edge-layer
    forwarding posture is what the SECURITY lane verifies

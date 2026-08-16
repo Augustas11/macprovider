@@ -108,7 +108,7 @@ in-process inside the harness binary against the configured
 `target.gateway_url`. Caller is responsible for pointing that URL at a
 live stack or at test binaries booted by `test/integration` helpers.
 
-**Default for phase A is the live network** at `https://api.streamvc.live`
+**Default for phase A is the live network** at `https://api.malibu.tech`
 with the user's own M-series providers attached. All committed buyer-fleet
 scenarios target this. **I1 runs only when DB sources are configured**:
 local file paths use `target.coordinator_db_path` / `target.gateway_db_path`;
@@ -150,10 +150,10 @@ A scenario can include a `chaos_events` timeline:
 chaos_events:
   - at: 5s
     description: "Kill provider mid-stream"
-    command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
+    command: launchctl kickstart -k gui/$(id -u)/live.malibu.provider
   - at: 30s
     description: "Restart provider"
-    command: launchctl kickstart gui/$(id -u)/live.streamvc.macprovider
+    command: launchctl kickstart gui/$(id -u)/live.malibu.provider
 ```
 
 Each entry runs via `/bin/sh -c` at the specified offset from scenario

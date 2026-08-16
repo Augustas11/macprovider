@@ -108,8 +108,8 @@ type CORSConfig struct {
 	// this; Step 1 only declares it.
 	AccessControlMaxAgeSeconds int
 	// PartnerOriginAllowlist is the union of operator-pinned
-	// browser origins (e.g. https://console.streamvc.live,
-	// https://portal.streamvc.live) that Step 3 echoes on the
+	// browser origins (e.g. https://console.malibu.tech,
+	// https://portal.malibu.tech) that Step 3 echoes on the
 	// public-tier preflight per SPEC §5.7.
 	PartnerOriginAllowlist []string
 }
@@ -172,7 +172,7 @@ var driverName = "postgres"
 //
 // Pool tuning (max open, max idle, conn lifetime) is set per
 // BUILD §D.4 to non-default values matching a coordinator
-// instance under coordinator.streamvc.live load.
+// instance under coordinator.malibu.tech load.
 func Open(ctx context.Context, cfg Config) (*Pools, error) {
 	if !cfg.Enabled {
 		return nil, ErrDisabled

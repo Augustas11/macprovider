@@ -140,10 +140,10 @@ beta/catalog-expansion/
 
 ### Procedure
 
-1. Fetch live autotune catalog: `https://coordinator.streamvc.live/static/autotune-candidates.json` (see `AutotuneRecommend.swift:749`).
+1. Fetch live autotune catalog: `https://coordinator.malibu.tech/static/autotune-candidates.json` (see `AutotuneRecommend.swift:749`).
 2. Obtain production tier-2 catalog:
    - **Preferred:** read-only from Pearl VPS `/opt/macprovider/tier2-catalog.json` (`coordinator.yaml:202`), OR
-   - `GET https://coordinator.streamvc.live/catalog/current` / pubkey endpoints per `buyer/server.go`.
+   - `GET https://coordinator.malibu.tech/catalog/current` / pubkey endpoints per `buyer/server.go`.
 3. Diff: catalog keys, `model_id`, `sha256`, `min_ram_gb` per `tier2/catalog.go:32–40`.
 4. Note whether `google-gemma-4-26b-a4b-it` or Gemma MLX IDs appear in tier-2 but not autotune (split-brain risk).
 

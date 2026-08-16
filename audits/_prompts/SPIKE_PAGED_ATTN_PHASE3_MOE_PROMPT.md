@@ -18,9 +18,9 @@ Read `ml-explore/mlx-swift` + `mlx-swift-lm` source (MIT — your own deps) free
 ## Machine + MANDATORY resource isolation (memory is the real constraint here)
 - **This M5 / 32 GB.** The target is the **30B MoE (~17 GB in 4-bit weights)** — so pausing the live provider (which holds ~17 GB for the *same* model) is **not optional, it's a memory requirement**: you cannot load a second copy of the 30B alongside the running provider on 32 GB. **Stop the provider first; the freed ~17.5 GB is exactly what the spike needs.**
 - **⚠ This M5 runs the LIVE PRODUCTION provider.** Full stop/restore procedure in `audits/_prompts/SPIKE_PAGED_ATTN_PHASE0_PROMPT.md`; critical bits (same as Phase 2, which executed it cleanly):
-  - **Watchdog FIRST** (`live.streamvc.macprovider-watchdog`), then `live.streamvc.macprovider`, then cold/warm watchers + canary tunnel — graceful `launchctl bootout gui/$(id -u)/<label>`. **NEVER broad `pkill`** (`incident-2026-07-27`).
-  - Record restore state; **bounded off-peak window** (past 04:00–10:00 EEST peak; check `coordinator.streamvc.live` traffic is ~idle first). The provider-stop `launchctl` calls are auto-mode-classifier-blocked → proceed only after the operator authorizes (as in Phase 2).
-  - **After: `launchctl bootstrap`/`kickstart` provider + watchdog + watchers, verify it reconnects to the coordinator (pool 3/3 ready, port 61920 listening) and serves a real buyer inference via `api.streamvc.live`. Confirm watchdog rescheduled. Leave the machine exactly as found.**
+  - **Watchdog FIRST** (`live.malibu.provider-watchdog`), then `live.malibu.provider`, then cold/warm watchers + canary tunnel — graceful `launchctl bootout gui/$(id -u)/<label>`. **NEVER broad `pkill`** (`incident-2026-07-27`).
+  - Record restore state; **bounded off-peak window** (past 04:00–10:00 EEST peak; check `coordinator.malibu.tech` traffic is ~idle first). The provider-stop `launchctl` calls are auto-mode-classifier-blocked → proceed only after the operator authorizes (as in Phase 2).
+  - **After: `launchctl bootstrap`/`kickstart` provider + watchdog + watchers, verify it reconnects to the coordinator (pool 3/3 ready, port 61920 listening) and serves a real buyer inference via `api.malibu.tech`. Confirm watchdog rescheduled. Leave the machine exactly as found.**
 - **Metallib gotcha:** copy the version-matched `default.metallib` (`mlx-swift 0.31.4`) next to the built binary; plain `swift build` doesn't regenerate it.
 
 ## The spike

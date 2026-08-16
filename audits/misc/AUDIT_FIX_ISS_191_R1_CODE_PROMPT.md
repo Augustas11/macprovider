@@ -10,7 +10,7 @@ Files in scope:
 - `ops/macprovider-watchdog/watchdog.sh` (new)
 - `ops/macprovider-watchdog/install.sh` (new standalone installer)
 - `ops/macprovider-watchdog/uninstall.sh` (new)
-- `ops/macprovider-watchdog/live.streamvc.macprovider-watchdog.plist.template` (new)
+- `ops/macprovider-watchdog/live.malibu.provider-watchdog.plist.template` (new)
 - `ops/macprovider-watchdog/README.md` (new)
 - `phase3-binary/dist/install.sh` (existing; added `install_watchdog` function + call site)
 - `phase3-binary/dist/uninstall.sh` (existing; added watchdog removal block)
@@ -20,13 +20,13 @@ Files in scope:
 
 Closes issue #191: the internal `ops/macprovider-watchdog/`
 LaunchAgent — a netstat-based 60s check for ESTABLISHED outbound
-TCP to coordinator.streamvc.live — was hardcoded to one operator's
+TCP to coordinator.malibu.tech — was hardcoded to one operator's
 provider id. This PR generalizes it across every fleet operator by:
 
 1. Reading `provider_id` from `~/.config/macprovider/config.yaml`
    at every tick.
 2. Inlining the watchdog into the public
-   `get.streamvc.live/install.sh` flow so every install gets it.
+   `get.malibu.tech/install.sh` flow so every install gets it.
 3. Removing the watchdog when the main provider uninstaller runs.
 
 The watchdog is companion to PR #204 (in-process bounded send +

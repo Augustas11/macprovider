@@ -820,24 +820,37 @@ struct AutoUpdater: Sendable {
         if ProcessInfo.processInfo.environment["MACPROVIDER_ROLLBACK_OBSERVER_TEST_AVAILABLE"] == "1" {
             return true
         }
-        return launchctlServiceLoaded(label: "live.streamvc.macprovider-watchdog")
+        return launchctlServiceLoaded(label: SelfUpdate.watchdogLaunchdLabel)
+            || launchctlServiceLoaded(label: SelfUpdate.legacyWatchdogLaunchdLabel)
     }
 
     static func defaultLaunchdProviderAvailable() -> Bool {
         if ProcessInfo.processInfo.environment["MACPROVIDER_LAUNCHD_PROVIDER_TEST_AVAILABLE"] == "1" {
             return true
         }
-        let plist = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
-        return FileManager.default.fileExists(atPath: plist.path)
-            && launchctlServiceLoaded(label: "live.streamvc.macprovider")
+        let launchAgents = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        return [
+            (SelfUpdate.launchdLabel, launchAgents.appendingPathComponent("\(SelfUpdate.launchdLabel).plist")),
+            (SelfUpdate.legacyLaunchdLabel, launchAgents.appendingPathComponent("\(SelfUpdate.legacyLaunchdLabel).plist")),
+        ].contains { label, plist in
+            FileManager.default.fileExists(atPath: plist.path)
+                && launchctlServiceLoaded(label: label)
+        }
     }
 
     static func restartLaunchdIfInstalled() throws {
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
-        let plist = homeDirectory
-            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
-        guard FileManager.default.fileExists(atPath: plist.path) else {
+        let launchAgents = homeDirectory.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        let hasProviderPlist = [
+            SelfUpdate.launchdLabel,
+            SelfUpdate.legacyLaunchdLabel,
+        ].contains { label in
+            FileManager.default.fileExists(
+                atPath: launchAgents.appendingPathComponent("\(label).plist").path
+            )
+        }
+        guard hasProviderPlist else {
             throw AutoUpdateError.other("unsupported_install_topology")
         }
         try SelfUpdate.reloadCompatibilityLaunchdJobs(
@@ -856,9 +869,16 @@ struct AutoUpdater: Sendable {
 
     static func fenceReloadJobsIfInstalled() throws {
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
-        let plist = homeDirectory
-            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
-        guard FileManager.default.fileExists(atPath: plist.path) else {
+        let launchAgents = homeDirectory.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        let hasProviderPlist = [
+            SelfUpdate.launchdLabel,
+            SelfUpdate.legacyLaunchdLabel,
+        ].contains { label in
+            FileManager.default.fileExists(
+                atPath: launchAgents.appendingPathComponent("\(label).plist").path
+            )
+        }
+        guard hasProviderPlist else {
             return
         }
         try SelfUpdate.fenceProviderReloadLaunchdJobs(

@@ -165,7 +165,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	// on every fullKey!="" path (not just the legacy /account redirect)
 	// keeps the fallback: if the handoff persistence fails after we have
 	// already consumed the OAuth state and issued the key, the user can
-	// still recover the key by visiting api.streamvc.live/account.
+	// still recover the key by visiting api.malibu.tech/account.
 	if fullKey != "" {
 		http.SetCookie(w, &http.Cookie{
 			Name: "mp_new_api_key", Value: fullKey, Path: "/account", HttpOnly: true,

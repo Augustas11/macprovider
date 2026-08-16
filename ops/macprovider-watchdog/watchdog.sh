@@ -11,10 +11,10 @@
 
 set -euo pipefail
 
-LABEL="${MACPROVIDER_WATCHDOG_LABEL:-live.streamvc.macprovider}"
+LABEL="${MACPROVIDER_WATCHDOG_LABEL:-live.malibu.provider}"
 CONFIG_PATH="${MACPROVIDER_CONFIG_PATH:-$HOME/.config/macprovider/config.yaml}"
 BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
-COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.streamvc.live}"
+COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.malibu.tech}"
 COORDINATOR_PORT="${MACPROVIDER_COORDINATOR_PORT:-443}"
 LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
 LOG_PATH="$LOG_DIR/watchdog.log"
@@ -292,7 +292,7 @@ lifecycle_root = os.path.expanduser("~/Library/Application Support/macprovider/l
 lifecycle_lock_path = os.path.join(lifecycle_root, ".lease.json.lock")
 uid = os.getuid()
 provider_user = pwd.getpwuid(uid).pw_name
-reload_helper_label = "live.streamvc.macprovider-compatibility-reload"
+reload_helper_label = "live.malibu.provider-compatibility-reload"
 legacy_reload_helper_label = re.compile(
     rf"^{re.escape(reload_helper_label)}\."
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -665,7 +665,7 @@ def known_binary_dir():
     configured = os.environ.get("MACPROVIDER_BINARY_DIR", "")
     if configured:
         return os.path.realpath(configured)
-    plist_path = os.path.expanduser("~/Library/LaunchAgents/live.streamvc.macprovider.plist")
+    plist_path = os.path.expanduser("~/Library/LaunchAgents/live.malibu.provider.plist")
     try:
         result = subprocess.run(
             ["/usr/libexec/PlistBuddy", "-c", "Print ProgramArguments:0", plist_path],
@@ -1043,9 +1043,9 @@ def owned_release_resource(name):
 def external_local_members():
     home = os.path.expanduser("~")
     return [
-        ("launchd", os.path.join(home, "Library/LaunchAgents/live.streamvc.macprovider.plist"), "provider.plist"),
+        ("launchd", os.path.join(home, "Library/LaunchAgents/live.malibu.provider.plist"), "provider.plist"),
         ("watchdog_script", os.path.join(home, ".local/share/macprovider-watchdog/macprovider-health-monitor"), "watchdog.sh"),
-        ("watchdog_plist", os.path.join(home, "Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"), "watchdog.plist"),
+        ("watchdog_plist", os.path.join(home, "Library/LaunchAgents/live.malibu.provider-watchdog.plist"), "watchdog.plist"),
     ]
 
 def validate_external_local_backup(backup_directory):
@@ -1307,7 +1307,7 @@ def restore(marker, failure_class):
     record_watchdog_recovery(marker, failure_class)
     try:
         bootstrap = subprocess.run(
-            ["launchctl", "bootstrap", f"gui/{uid}", os.path.expanduser("~/Library/LaunchAgents/live.streamvc.macprovider.plist")],
+            ["launchctl", "bootstrap", f"gui/{uid}", os.path.expanduser("~/Library/LaunchAgents/live.malibu.provider.plist")],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

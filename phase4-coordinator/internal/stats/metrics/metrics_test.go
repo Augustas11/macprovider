@@ -56,7 +56,7 @@ var (
 	// Round-1 ARCH M1 / CODE M1 fix: also scan for an
 	// Origin-fragment to prove no attacker-controlled string
 	// from the request `Origin` header lands in a label value.
-	denyTokens = []string{"mpk_", "token_hash", "Authorization", "evil.streamvc.live"}
+	denyTokens = []string{"mpk_", "token_hash", "Authorization", "evil.malibu.tech"}
 )
 
 func TestLabelHygiene(t *testing.T) {

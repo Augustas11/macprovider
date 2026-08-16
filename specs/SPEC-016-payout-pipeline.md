@@ -4695,9 +4695,9 @@ discharged:
 7. **Nginx routing on Pearl VPS** updated to proxy
    `/providers/{id}/payout-address`,
    `/providers/{id}/payouts`, and the new `/admin/payout/*`
-   endpoints through `coordinator.streamvc.live → :8444`;
-   portal CORS verified. The `coordinator.streamvc.live`
-   config is the touchpoint, NOT `portal.streamvc.live`.
+   endpoints through `coordinator.malibu.tech → :8444`;
+   portal CORS verified. The `coordinator.malibu.tech`
+   config is the touchpoint, NOT `portal.malibu.tech`.
 8. **Backup + restore** for the encrypted wallet file AND
    the KEK on separate media (NOT the same VPS). Loss of
    EITHER = total loss of access to hot-wallet funds. The

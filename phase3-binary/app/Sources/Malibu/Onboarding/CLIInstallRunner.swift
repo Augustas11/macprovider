@@ -210,7 +210,7 @@ enum CLIInstallRunner {
             .appendingPathComponent("Library/Application Support/macprovider/install_manifest.json")
         let hasManifest = FileManager.default.isReadableFile(atPath: manifest.path)
         let launchdPlist = FileManager.default.isReadableFile(
-            atPath: NSHomeDirectory() + "/Library/LaunchAgents/live.streamvc.macprovider.plist"
+            atPath: NSHomeDirectory() + "/Library/LaunchAgents/live.malibu.provider.plist"
         )
         guard hasManifest || launchdPlist else { return false }
         guard InstalledProviderMonitor.launchdServiceRepairState() == .validExecutable else {

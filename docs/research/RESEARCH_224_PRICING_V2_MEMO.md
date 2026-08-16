@@ -500,7 +500,7 @@ Search/update the provider portal pages that describe:
 - Beta token rewards.
 - Hardware eligibility / tier explanation.
 
-The prompt names `portal.streamvc.live`; if that portal source is outside this repo, this is pure operator messaging rather than a repo change. If it is in-repo, update the relevant `pages/` route and add a new hardware-tier explanation page.
+The prompt names `portal.malibu.tech`; if that portal source is outside this repo, this is pure operator messaging rather than a repo change. If it is in-repo, update the relevant `pages/` route and add a new hardware-tier explanation page.
 
 ### What is hot-reloadable vs new code
 

@@ -83,7 +83,7 @@ Each step lands on its own `impl/spec-015-v0-3-step-NN` branch. Each step goes t
 3. `phase7-verify/` builds clean (`cd phase7-verify && go build ./...`).
 4. `phase3-binary/` builds clean (`cd phase3-binary && swift build`).
 5. `phase4-coordinator/` builds clean and tests pass (`cd phase4-coordinator && go test ./...`).
-6. Pearl production coordinator is at a known version (`curl -s https://coordinator.streamvc.live/healthz` returns `version` field).
+6. Pearl production coordinator is at a known version (`curl -s https://coordinator.malibu.tech/healthz` returns `version` field).
 7. No SPEC-001 / 002 / 005 / 006 / 008 / 010 / 011 / 013 line-3 versions have shifted since v0.3 SPEC lock (`git diff main -- specs/SPEC-{001,002,005,006,008,010,011,013}-*.md` shows no line-3 changes).
 
 **Tracking issue:** open one GitHub issue titled "SPEC-015 v0.3 IMPL — model-hash binding" listing Steps 1-6 as a checklist. Update as each step lands.
@@ -182,7 +182,7 @@ Each step lands on its own `impl/spec-015-v0-3-step-NN` branch. Each step goes t
 
 1. `phase4-coordinator/dist/nginx-coordinator.conf` (or wherever the Pearl coordinator nginx conf lives) extended to proxy `/catalog/<id>` and `/catalog/pubkey` to the buyer port (NOT the operator port). Mirror the existing `/v1/receipt-keys/` route shape from PR #129.
 2. `check-deploy-config.sh` extended to assert the new nginx routes exist before Pearl deploy (the C2 gate pattern from M1-6).
-3. `Tier2Config.PublicCatalogBaseURL` config field added to `coordinator.yaml.example` with a Pearl-appropriate default `https://coordinator.streamvc.live`.
+3. `Tier2Config.PublicCatalogBaseURL` config field added to `coordinator.yaml.example` with a Pearl-appropriate default `https://coordinator.malibu.tech`.
 4. NO change to `Tier2Config.RequireHashVerified` default (preserves Entry 80).
 
 **Tests:**

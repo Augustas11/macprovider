@@ -1,7 +1,7 @@
 # OPS.md — MacProvider production operations
 
 > **Audience:** the on-call operator. This is the canonical operations doc for
-> the live `streamvc.live` stack. Phase-1 runbooks (`RUNBOOK.md`,
+> the live `malibu.tech` stack. Phase-1 runbooks (`RUNBOOK.md`,
 > `CONTINUE_RUNBOOK.md`) are superseded — see banners on those files.
 >
 > **Authoring note (M2-8):** several sections below depend on procedures
@@ -20,16 +20,16 @@ Both Go services are co-hosted on one DigitalOcean-style VPS named **Pearl**
 
 | Hostname | Bind | Backend | systemd unit | Audit refs |
 |---|---|---|---|---|
-| `coordinator.streamvc.live` | `127.0.0.1:8444` (provider port) | `phase4-coordinator` | `macprovider-coordinator.service` | nginx-coordinator.streamvc.live.conf |
-| `api.streamvc.live` | `127.0.0.1:9443` | `phase5-gateway` | `macprovider-gateway.service` | nginx-api.streamvc.live.conf |
+| `coordinator.malibu.tech` | `127.0.0.1:8444` (provider port) | `phase4-coordinator` | `macprovider-coordinator.service` | nginx-coordinator.malibu.tech.conf |
+| `api.malibu.tech` | `127.0.0.1:9443` | `phase5-gateway` | `macprovider-gateway.service` | nginx-api.malibu.tech.conf |
 | n/a (loopback) | `127.0.0.1:8443` (buyer port) | `phase4-coordinator` | (same unit) | reached only from gateway over loopback |
-| `console.streamvc.live` | static (Cloudflare Pages) | none | n/a | static `frontdoor/console/` build |
-| `portal.streamvc.live` | static (`/var/www/portal/`) + nginx reverse-proxy to coordinator | n/a (static + proxy) | n/a (nginx-only) | `frontdoor/provider-portal/dist/nginx-portal.streamvc.live.conf` (decision-log Entry 86) |
+| `console.malibu.tech` | static (Cloudflare Pages) | none | n/a | static `frontdoor/console/` build |
+| `portal.malibu.tech` | static (`/var/www/portal/`) + nginx reverse-proxy to coordinator | n/a (static + proxy) | n/a (nginx-only) | `frontdoor/provider-portal/dist/nginx-portal.malibu.tech.conf` (decision-log Entry 86) |
 
-Provider Macs connect outbound to `wss://coordinator.streamvc.live/ws/provider`.
-Buyers hit `https://api.streamvc.live/v1/*`. Operator endpoints (`/poolz`,
+Provider Macs connect outbound to `wss://coordinator.malibu.tech/ws/provider`.
+Buyers hit `https://api.malibu.tech/v1/*`. Operator endpoints (`/poolz`,
 `/admin/*`, `/ledger/*`) are reachable only via SSH tunnel into the VPS — they
-are not exposed on the public `api.streamvc.live` nginx site (the SSL config
+are not exposed on the public `api.malibu.tech` nginx site (the SSL config
 deliberately allowlists public paths).
 
 External monitor: a Python `macprovider-monitor.py` runs on the same VPS as a
@@ -106,7 +106,7 @@ Observed timing from the first M0-5/M1-6 production deploy (2026-06-11,
 v1.3.0-24-g87b3a6b -> v1.3.1-5-gba04cd4): there is no retry loop. Step 7
 does `systemctl restart` -> `sleep 3` -> `systemctl is-active` (active on
 first check). Step 8 does `sleep 2` -> a single `curl --max-time 10` GET
-on `https://coordinator.streamvc.live/healthz`. Total window between
+on `https://coordinator.malibu.tech/healthz`. Total window between
 restart command and the provenance assert is about 5 seconds; `/healthz`
 responded immediately at `uptime_s=12` with the version field set. No
 tweaks were needed.
@@ -717,7 +717,7 @@ a TSV that pipes cleanly into `awk` / `grep` / `column`.
 ## 10. SPEC-017 Network Stats API — operator runbook
 
 SPEC-017 v0.1.8 ships the public Network Stats API at
-`https://stats.streamvc.live/v1/stats/{overview,leaderboard,health}`.
+`https://stats.malibu.tech/v1/stats/{overview,leaderboard,health}`.
 The handler is in-process (same `coordinator` binary), the rollup
 runs on a per-table cadence, and nginx fronts the public surface
 with rate-limit + cache directives per BUILD §2 Step 4.B.
@@ -864,10 +864,10 @@ ships, this OPS.md section is the authoritative copy.
 
 The operator MUST NOT issue any partner key against the production
 coordinator until ALL THREE conditions are satisfied on
-`portal.streamvc.live`:
+`portal.malibu.tech`:
 
 1. SPEC-014 v0.9 has merged AND is deployed to
-   `portal.streamvc.live`.
+   `portal.malibu.tech`.
 2. The §6.6.2 disclosure copy above is shown on the
    provider-account-creation page AND on a static portal page
    that every existing provider sees on their next portal login.
@@ -900,7 +900,7 @@ gate executed AFTER the merge.
 ## 11. Operator-side provider watchdog (issue #189 / #191)
 
 Every install of `macprovider-cli` via the public
-`get.streamvc.live/install.sh` flow now ships an external LaunchAgent
+`get.malibu.tech/install.sh` flow now ships an external LaunchAgent
 that catches a class of silent half-open-TCP wedge originally tracked
 in issue #189 (the in-process bounded send + Darwin.exit(1) liveness
 watchdog landed in PR #204 prevents the wedge on fresh builds; this
@@ -910,16 +910,16 @@ on older binaries and a long-tail catch for any future regression).
 ### What it does
 
 `~/.local/share/macprovider-watchdog/watchdog.sh` runs every 60s via
-launchd (label `live.streamvc.macprovider-watchdog`). It:
+launchd (label `live.malibu.provider-watchdog`). It:
 
 1. Reads the operator's `provider_id` from
    `~/.config/macprovider/config.yaml`.
-2. Resolves `coordinator.streamvc.live` via dscacheutil (with `host`
+2. Resolves `coordinator.malibu.tech` via dscacheutil (with `host`
    fallback).
 3. Runs `netstat -an -p tcp` and looks for an ESTABLISHED outbound
    row to `<coord_ip>.443`.
 4. If absent, runs
-   `launchctl kickstart -k gui/$UID/live.streamvc.macprovider` to
+   `launchctl kickstart -k gui/$UID/live.malibu.provider` to
    restart the provider LaunchAgent.
 
 Healthy ticks are silent so the log file does not bloat. Detection
@@ -941,7 +941,7 @@ ticks and kicks write to `~/Library/Logs/macprovider/watchdog.log`.
   + reconnect). Cold-cache adds the full model-load window (often
   10-20 min); the grace period is sized to absorb that.
 - **Known limitation**: the netstat check matches *any* local
-  ESTABLISHED connection to `coordinator.streamvc.live.443`, not
+  ESTABLISHED connection to `coordinator.malibu.tech.443`, not
   specifically the provider's process. A separate process (a
   browser tab on the portal, another shell with curl, etc.)
   holding a long-lived connection to the coordinator host can mask
@@ -951,7 +951,7 @@ ticks and kicks write to `~/Library/Logs/macprovider/watchdog.log`.
 
 ### Install
 
-Automatic via the public installer (`curl -fsSL get.streamvc.live/install.sh | sh`).
+Automatic via the public installer (`curl -fsSL get.malibu.tech/install.sh | sh`).
 To install or re-install manually from the repo:
 
 ```bash
@@ -964,7 +964,7 @@ the watchdog (expert / debug override only).
 ### Inspect
 
 ```bash
-launchctl list | grep live.streamvc.macprovider-watchdog
+launchctl list | grep live.malibu.provider-watchdog
 cat ~/Library/Logs/macprovider/watchdog.log
 ```
 
@@ -972,7 +972,7 @@ To force a tick out-of-cadence (useful for testing the kick path
 without waiting 60s):
 
 ```bash
-launchctl kickstart -k gui/$UID/live.streamvc.macprovider-watchdog
+launchctl kickstart -k gui/$UID/live.malibu.provider-watchdog
 ```
 
 ### Uninstall

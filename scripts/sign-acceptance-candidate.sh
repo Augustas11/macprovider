@@ -193,13 +193,13 @@ signing_identity="$(security find-identity -v -p codesigning "$keychain" | awk -
 codesign --force \
   --options runtime \
   --timestamp \
-  --identifier live.streamvc.macprovider.cli \
+  --identifier live.malibu.provider.cli \
   --keychain "$keychain" \
   --sign "$signing_identity" \
   "$cli_work/macprovider-cli"
 codesign --verify --strict --verbose=2 "$cli_work/macprovider-cli"
 cli_requirement="$(codesign -d -r- "$cli_work/macprovider-cli" 2>&1)"
-grep -F 'identifier "live.streamvc.macprovider.cli"' <<<"$cli_requirement" >/dev/null ||
+grep -F 'identifier "live.malibu.provider.cli"' <<<"$cli_requirement" >/dev/null ||
   die "signed CLI lacks the stable designated requirement"
 
 cli_notary="$signing_tmp/macprovider-cli-notary.zip"

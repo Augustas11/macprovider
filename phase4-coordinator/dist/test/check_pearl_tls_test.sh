@@ -105,68 +105,68 @@ _classify_ok() {
 }
 
 # T01 HAVE + HAVE → no stub, no certbot
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T01" "HAVE coordinator.streamvc.live
-HAVE stats.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T01" "HAVE coordinator.malibu.tech
+HAVE stats.malibu.tech"
 _assert_eq "T01 have_cert count"    "2" "${#DOMAINS_HAVE_CERT[@]}"
 _assert_eq "T01 need_cert count"    "0" "${#DOMAINS_NEED_CERT[@]}"
 _assert_eq "T01 need_stub count"    "0" "${#DOMAINS_NEED_STUB[@]}"
 
 # T02 RENEW + HAVE → certbot RENEW, no stub
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T02" "RENEW coordinator.streamvc.live
-HAVE stats.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T02" "RENEW coordinator.malibu.tech
+HAVE stats.malibu.tech"
 _assert_eq "T02 have_cert count"    "1" "${#DOMAINS_HAVE_CERT[@]}"
 _assert_eq "T02 need_cert count"    "1" "${#DOMAINS_NEED_CERT[@]}"
 _assert_eq "T02 need_stub count"    "0" "${#DOMAINS_NEED_STUB[@]}"
-_assert_eq "T02 need_cert domain"   "coordinator.streamvc.live" "${DOMAINS_NEED_CERT[0]}"
+_assert_eq "T02 need_cert domain"   "coordinator.malibu.tech" "${DOMAINS_NEED_CERT[0]}"
 
 # T03 EXPIRED + HAVE → stub + certbot for EXPIRED
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T03" "EXPIRED coordinator.streamvc.live
-HAVE stats.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T03" "EXPIRED coordinator.malibu.tech
+HAVE stats.malibu.tech"
 _assert_eq "T03 have_cert count"    "1" "${#DOMAINS_HAVE_CERT[@]}"
 _assert_eq "T03 need_cert count"    "1" "${#DOMAINS_NEED_CERT[@]}"
 _assert_eq "T03 need_stub count"    "1" "${#DOMAINS_NEED_STUB[@]}"
-_assert_eq "T03 need_stub domain"   "coordinator.streamvc.live" "${DOMAINS_NEED_STUB[0]}"
+_assert_eq "T03 need_stub domain"   "coordinator.malibu.tech" "${DOMAINS_NEED_STUB[0]}"
 
 # T04 MISSING + HAVE → stub + certbot for MISSING
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T04" "MISSING coordinator.streamvc.live
-HAVE stats.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T04" "MISSING coordinator.malibu.tech
+HAVE stats.malibu.tech"
 _assert_eq "T04 need_stub count"    "1" "${#DOMAINS_NEED_STUB[@]}"
-_assert_eq "T04 need_stub domain"   "coordinator.streamvc.live" "${DOMAINS_NEED_STUB[0]}"
+_assert_eq "T04 need_stub domain"   "coordinator.malibu.tech" "${DOMAINS_NEED_STUB[0]}"
 
 # T05 EXPIRED + MISSING → stub for both, certbot for both
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T05" "EXPIRED coordinator.streamvc.live
-MISSING stats.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T05" "EXPIRED coordinator.malibu.tech
+MISSING stats.malibu.tech"
 _assert_eq "T05 have_cert count"    "0" "${#DOMAINS_HAVE_CERT[@]}"
 _assert_eq "T05 need_cert count"    "2" "${#DOMAINS_NEED_CERT[@]}"
 _assert_eq "T05 need_stub count"    "2" "${#DOMAINS_NEED_STUB[@]}"
 
 # T06 RENEW + RENEW → certbot both, no stubs
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T06" "RENEW coordinator.streamvc.live
-RENEW stats.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T06" "RENEW coordinator.malibu.tech
+RENEW stats.malibu.tech"
 _assert_eq "T06 need_cert count"    "2" "${#DOMAINS_NEED_CERT[@]}"
 _assert_eq "T06 need_stub count"    "0" "${#DOMAINS_NEED_STUB[@]}"
 
 # T07 primary MISSING + certbot fail → PRIMARY_FAILED=1
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T07" "MISSING coordinator.streamvc.live
-HAVE stats.streamvc.live"
-DOMAINS_ISSUED_FAIL=("coordinator.streamvc.live")
-pearl_tls_check_issuance_failures "coordinator.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T07" "MISSING coordinator.malibu.tech
+HAVE stats.malibu.tech"
+DOMAINS_ISSUED_FAIL=("coordinator.malibu.tech")
+pearl_tls_check_issuance_failures "coordinator.malibu.tech"
 _assert_eq "T07 primary_failed"     "1" "$PEARL_TLS_PRIMARY_FAILED"
 _assert_eq "T07 nonprimary_failed"  "0" "$PEARL_TLS_NONPRIMARY_FAILED"
 
 # T08 non-primary MISSING + fail → NONPRIMARY_FAILED=1
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T08" "HAVE coordinator.streamvc.live
-MISSING stats.streamvc.live"
-DOMAINS_ISSUED_FAIL=("stats.streamvc.live")
-pearl_tls_check_issuance_failures "coordinator.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T08" "HAVE coordinator.malibu.tech
+MISSING stats.malibu.tech"
+DOMAINS_ISSUED_FAIL=("stats.malibu.tech")
+pearl_tls_check_issuance_failures "coordinator.malibu.tech"
 _assert_eq "T08 primary_failed"     "0" "$PEARL_TLS_PRIMARY_FAILED"
 _assert_eq "T08 nonprimary_failed"  "1" "$PEARL_TLS_NONPRIMARY_FAILED"
 
@@ -174,151 +174,151 @@ _assert_eq "T08 nonprimary_failed"  "1" "$PEARL_TLS_NONPRIMARY_FAILED"
 # R1 CODE LOW + ARCH MED: original T09 set ISSUED_FAIL=() and only
 # checked count — a bug that included ISSUED_FAIL would pass. Now
 # populate a real failed domain and assert exact contents.
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T09" "EXPIRED coordinator.streamvc.live
-HAVE stats.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T09" "EXPIRED coordinator.malibu.tech
+HAVE stats.malibu.tech"
 DOMAINS_ISSUED_OK=()
-DOMAINS_ISSUED_FAIL=("coordinator.streamvc.live")   # certbot failed for primary
+DOMAINS_ISSUED_FAIL=("coordinator.malibu.tech")   # certbot failed for primary
 pearl_tls_plan_full_tls
 _assert_eq "T09 full_tls count (fail excluded)"  "1" "${#DOMAINS_FULL_TLS[@]}"
-_assert_eq "T09 full_tls content"                "stats.streamvc.live" "${DOMAINS_FULL_TLS[0]}"
+_assert_eq "T09 full_tls content"                "stats.malibu.tech" "${DOMAINS_FULL_TLS[0]}"
 
 # T09b plan_full_tls with HAVE ∪ ISSUED_OK when a RENEW succeeds
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T09b" "RENEW coordinator.streamvc.live
-HAVE stats.streamvc.live"
-DOMAINS_ISSUED_OK=("coordinator.streamvc.live")
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T09b" "RENEW coordinator.malibu.tech
+HAVE stats.malibu.tech"
+DOMAINS_ISSUED_OK=("coordinator.malibu.tech")
 DOMAINS_ISSUED_FAIL=()
 pearl_tls_plan_full_tls
 _assert_eq "T09b full_tls count"                 "2" "${#DOMAINS_FULL_TLS[@]}"
-_assert_eq "T09b full_tls has HAVE first"        "stats.streamvc.live" "${DOMAINS_FULL_TLS[0]}"
-_assert_eq "T09b full_tls has ISSUED_OK second"  "coordinator.streamvc.live" "${DOMAINS_FULL_TLS[1]}"
+_assert_eq "T09b full_tls has HAVE first"        "stats.malibu.tech" "${DOMAINS_FULL_TLS[0]}"
+_assert_eq "T09b full_tls has ISSUED_OK second"  "coordinator.malibu.tech" "${DOMAINS_FULL_TLS[1]}"
 
 # T10 certbot_fail_warn: RENEW mentions "keeps serving"
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T10" "RENEW coordinator.streamvc.live
-HAVE stats.streamvc.live"
-warn=$(pearl_tls_certbot_fail_warn "coordinator.streamvc.live")
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T10" "RENEW coordinator.malibu.tech
+HAVE stats.malibu.tech"
+warn=$(pearl_tls_certbot_fail_warn "coordinator.malibu.tech")
 _assert_contains "T10 renew warn" "was RENEW" "$warn"
 _assert_contains "T10 renew warn body" "keeps serving" "$warn"
 
 # T11 certbot_fail_warn: MISSING mentions "HTTPS unavailable"
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T11" "MISSING coordinator.streamvc.live
-HAVE stats.streamvc.live"
-warn=$(pearl_tls_certbot_fail_warn "coordinator.streamvc.live")
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T11" "MISSING coordinator.malibu.tech
+HAVE stats.malibu.tech"
+warn=$(pearl_tls_certbot_fail_warn "coordinator.malibu.tech")
 _assert_contains "T11 missing warn" "was MISSING" "$warn"
 _assert_contains "T11 missing warn body" "HTTPS unavailable" "$warn"
 
 # T12 primary_abort_msg RENEW mentions "existing TLS vhost"
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T12" "RENEW coordinator.streamvc.live
-HAVE stats.streamvc.live"
-abort=$(pearl_tls_primary_abort_msg "coordinator.streamvc.live")
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T12" "RENEW coordinator.malibu.tech
+HAVE stats.malibu.tech"
+abort=$(pearl_tls_primary_abort_msg "coordinator.malibu.tech")
 _assert_contains "T12 abort RENEW" "existing TLS vhost left in place" "$abort"
 
 # T13 primary_abort_msg MISSING mentions "ACME stub is in place"
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T13" "MISSING coordinator.streamvc.live
-HAVE stats.streamvc.live"
-abort=$(pearl_tls_primary_abort_msg "coordinator.streamvc.live")
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T13" "MISSING coordinator.malibu.tech
+HAVE stats.malibu.tech"
+abort=$(pearl_tls_primary_abort_msg "coordinator.malibu.tech")
 _assert_contains "T13 abort MISSING" "ACME stub is in place" "$abort"
 
 # R1 ARCH MED — add missing prior-state × certbot-fail × primary/non-primary combos.
 # T13a: RENEW + certbot fail on PRIMARY → PRIMARY_FAILED=1, abort text "existing TLS vhost"
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T13a" "RENEW coordinator.streamvc.live
-HAVE stats.streamvc.live"
-DOMAINS_ISSUED_FAIL=("coordinator.streamvc.live")
-pearl_tls_check_issuance_failures "coordinator.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T13a" "RENEW coordinator.malibu.tech
+HAVE stats.malibu.tech"
+DOMAINS_ISSUED_FAIL=("coordinator.malibu.tech")
+pearl_tls_check_issuance_failures "coordinator.malibu.tech"
 _assert_eq "T13a RENEW primary_failed"     "1" "$PEARL_TLS_PRIMARY_FAILED"
 _assert_eq "T13a RENEW nonprimary_failed"  "0" "$PEARL_TLS_NONPRIMARY_FAILED"
-abort=$(pearl_tls_primary_abort_msg "coordinator.streamvc.live")
+abort=$(pearl_tls_primary_abort_msg "coordinator.malibu.tech")
 _assert_contains "T13a RENEW abort text" "existing TLS vhost left in place" "$abort"
 
 # T13b: EXPIRED + certbot fail on PRIMARY → PRIMARY_FAILED=1, abort text "ACME stub"
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T13b" "EXPIRED coordinator.streamvc.live
-HAVE stats.streamvc.live"
-DOMAINS_ISSUED_FAIL=("coordinator.streamvc.live")
-pearl_tls_check_issuance_failures "coordinator.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T13b" "EXPIRED coordinator.malibu.tech
+HAVE stats.malibu.tech"
+DOMAINS_ISSUED_FAIL=("coordinator.malibu.tech")
+pearl_tls_check_issuance_failures "coordinator.malibu.tech"
 _assert_eq "T13b EXPIRED primary_failed"     "1" "$PEARL_TLS_PRIMARY_FAILED"
-abort=$(pearl_tls_primary_abort_msg "coordinator.streamvc.live")
+abort=$(pearl_tls_primary_abort_msg "coordinator.malibu.tech")
 _assert_contains "T13b EXPIRED abort text" "ACME stub is in place" "$abort"
 
 # T13c: RENEW + certbot fail on NON-PRIMARY (stats) → NONPRIMARY_FAILED=1 only
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T13c" "HAVE coordinator.streamvc.live
-RENEW stats.streamvc.live"
-DOMAINS_ISSUED_FAIL=("stats.streamvc.live")
-pearl_tls_check_issuance_failures "coordinator.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T13c" "HAVE coordinator.malibu.tech
+RENEW stats.malibu.tech"
+DOMAINS_ISSUED_FAIL=("stats.malibu.tech")
+pearl_tls_check_issuance_failures "coordinator.malibu.tech"
 _assert_eq "T13c RENEW nonprim primary_failed"     "0" "$PEARL_TLS_PRIMARY_FAILED"
 _assert_eq "T13c RENEW nonprim nonprimary_failed"  "1" "$PEARL_TLS_NONPRIMARY_FAILED"
 # Non-primary WARN text
-warn=$(pearl_tls_certbot_fail_warn "stats.streamvc.live")
+warn=$(pearl_tls_certbot_fail_warn "stats.malibu.tech")
 _assert_contains "T13c nonprim RENEW warn" "was RENEW" "$warn"
 
 # T13d: EXPIRED + certbot fail on NON-PRIMARY
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T13d" "HAVE coordinator.streamvc.live
-EXPIRED stats.streamvc.live"
-DOMAINS_ISSUED_FAIL=("stats.streamvc.live")
-pearl_tls_check_issuance_failures "coordinator.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T13d" "HAVE coordinator.malibu.tech
+EXPIRED stats.malibu.tech"
+DOMAINS_ISSUED_FAIL=("stats.malibu.tech")
+pearl_tls_check_issuance_failures "coordinator.malibu.tech"
 _assert_eq "T13d EXPIRED nonprim primary_failed"     "0" "$PEARL_TLS_PRIMARY_FAILED"
 _assert_eq "T13d EXPIRED nonprim nonprimary_failed"  "1" "$PEARL_TLS_NONPRIMARY_FAILED"
-warn=$(pearl_tls_certbot_fail_warn "stats.streamvc.live")
+warn=$(pearl_tls_certbot_fail_warn "stats.malibu.tech")
 _assert_contains "T13d nonprim EXPIRED warn" "was EXPIRED" "$warn"
 
 # T13e: BOTH primary + non-primary fail simultaneously → both flags set
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T13e" "MISSING coordinator.streamvc.live
-MISSING stats.streamvc.live"
-DOMAINS_ISSUED_FAIL=("coordinator.streamvc.live" "stats.streamvc.live")
-pearl_tls_check_issuance_failures "coordinator.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T13e" "MISSING coordinator.malibu.tech
+MISSING stats.malibu.tech"
+DOMAINS_ISSUED_FAIL=("coordinator.malibu.tech" "stats.malibu.tech")
+pearl_tls_check_issuance_failures "coordinator.malibu.tech"
 _assert_eq "T13e both primary_failed"     "1" "$PEARL_TLS_PRIMARY_FAILED"
 _assert_eq "T13e both nonprimary_failed"  "1" "$PEARL_TLS_NONPRIMARY_FAILED"
 
 # T14 malformed line (extra field) → non-zero + stderr mentions "extra field"
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-err=$(pearl_tls_classify "HAVE coordinator.streamvc.live extra
-HAVE stats.streamvc.live" 2>&1) && rc=0 || rc=$?
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+err=$(pearl_tls_classify "HAVE coordinator.malibu.tech extra
+HAVE stats.malibu.tech" 2>&1) && rc=0 || rc=$?
 _assert_eq "T14 rc"       "1" "$rc"
 _assert_contains "T14 stderr" "extra field" "$err"
 
 # T15 unknown state token → non-zero
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-err=$(pearl_tls_classify "BOGUS coordinator.streamvc.live
-HAVE stats.streamvc.live" 2>&1) && rc=0 || rc=$?
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+err=$(pearl_tls_classify "BOGUS coordinator.malibu.tech
+HAVE stats.malibu.tech" 2>&1) && rc=0 || rc=$?
 _assert_eq "T15 rc"       "1" "$rc"
 _assert_contains "T15 stderr" "unknown cert-status state" "$err"
 
 # T16 unexpected domain → non-zero
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
 err=$(pearl_tls_classify "HAVE some.other.host
-HAVE stats.streamvc.live" 2>&1) && rc=0 || rc=$?
+HAVE stats.malibu.tech" 2>&1) && rc=0 || rc=$?
 _assert_eq "T16 rc"       "1" "$rc"
 _assert_contains "T16 stderr" "unexpected domain" "$err"
 
 # T17 duplicate line → non-zero
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-err=$(pearl_tls_classify "HAVE coordinator.streamvc.live
-HAVE coordinator.streamvc.live" 2>&1) && rc=0 || rc=$?
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+err=$(pearl_tls_classify "HAVE coordinator.malibu.tech
+HAVE coordinator.malibu.tech" 2>&1) && rc=0 || rc=$?
 _assert_eq "T17 rc"       "1" "$rc"
 _assert_contains "T17 stderr" "duplicate cert-status line" "$err"
 
 # T18 coverage gap → non-zero
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-err=$(pearl_tls_classify "HAVE coordinator.streamvc.live" 2>&1) && rc=0 || rc=$?
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+err=$(pearl_tls_classify "HAVE coordinator.malibu.tech" 2>&1) && rc=0 || rc=$?
 _assert_eq "T18 rc"       "1" "$rc"
 _assert_contains "T18 stderr" "cert-status missing for domain" "$err"
 
 # T19 bash-3.2 + set -u guard: empty DOMAINS_ISSUED_FAIL iteration doesn't unbound
-_reset "coordinator.streamvc.live" "stats.streamvc.live"
-_classify_ok "T19" "HAVE coordinator.streamvc.live
-HAVE stats.streamvc.live"
+_reset "coordinator.malibu.tech" "stats.malibu.tech"
+_classify_ok "T19" "HAVE coordinator.malibu.tech
+HAVE stats.malibu.tech"
 DOMAINS_ISSUED_FAIL=()
 # Turn set -u on locally to prove the ${arr[@]+"${arr[@]}"} guard works
-(set -u; pearl_tls_check_issuance_failures "coordinator.streamvc.live") && rc=0 || rc=$?
+(set -u; pearl_tls_check_issuance_failures "coordinator.malibu.tech") && rc=0 || rc=$?
 _assert_eq "T19 empty-array under set -u" "0" "$rc"
 
 # T20-T24 exercise the actual remote probe script against local fixtures.

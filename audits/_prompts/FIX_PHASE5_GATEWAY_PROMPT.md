@@ -102,7 +102,7 @@ smoke remain operator-side post-FIX work.
 7. `phase5-gateway/internal/storage/sqlite/store.go` — the quota
    reservation logic for F-M4 (reaper).
 
-8. `phase5-gateway/dist/nginx-api.streamvc.live.conf` — for F-M6
+8. `phase5-gateway/dist/nginx-api.malibu.tech.conf` — for F-M6
    (PG-2 rate limits + connection caps).
 
 9. `phase5-gateway/docs/AC_STATUS.md` — to update post-fix status.
@@ -322,7 +322,7 @@ can spoof their IP.
 
 **F-M6 — nginx /ws/provider rate-limit + connection-cap.**
 
-**Location:** `phase5-gateway/dist/nginx-api.streamvc.live.conf`.
+**Location:** `phase5-gateway/dist/nginx-api.malibu.tech.conf`.
 
 **Problem:** SPEC-002 v1.1.5 § 7.X PG-2 normatively requires
 nginx `limit_req_zone` + `limit_conn_zone` directives applied to
@@ -355,7 +355,7 @@ required for production launch per SPEC-002 v1.1.5 PG-2 invariant.
 **F-M7 — Unknown routes + nginx-denied use OpenAI error envelope.**
 
 **Location:** `phase5-gateway/internal/router/server.go` 404
-handler + `dist/nginx-api.streamvc.live.conf` 404 responses.
+handler + `dist/nginx-api.malibu.tech.conf` 404 responses.
 
 **Problem:** SPEC-006 v0.5 § 5.2 requires all errors to use the
 OpenAI envelope. Current 404 responses for unknown routes return

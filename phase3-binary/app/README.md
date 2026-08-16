@@ -102,7 +102,7 @@ Malibu **Quit and Uninstall** runs, in order:
 CLI-only uninstall remains:
 
 ```bash
-bash <(curl -fsSL https://get.streamvc.live/uninstall.sh)
+bash <(curl -fsSL https://get.malibu.tech/uninstall.sh)
 # or
 macprovider-cli uninstall --yes
 ```

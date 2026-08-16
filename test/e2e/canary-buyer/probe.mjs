@@ -15,7 +15,7 @@
  *
  * Emits Prometheus text-exposition metrics (node_exporter textfile collector or
  * pushgateway) plus a per-run JSON artifact. Designed to run every 30–60 min on
- * a lab Mac via launchd (see com.streamvc.canary-buyer.plist).
+ * a lab Mac via launchd (see com.malibu.canary-buyer.plist).
  *
  * Zero dependencies (Node >= 18 built-in fetch), matching smoke.mjs.
  *
@@ -27,7 +27,7 @@
  *
  * Config (env; safety inputs are required and fail closed):
  *   MACPROVIDER_BUYER_TOKEN | MALIBU_API_KEY   buyer bearer token (liveness)
- *   CANARY_BASE            gateway base URL (default https://api.streamvc.live)
+ *   CANARY_BASE            gateway base URL (default https://api.malibu.tech)
  *   CANARY_MODELS         qualification model id (liveness derives live models)
  *   CANARY_POOLZ_URL      authenticated coordinator /poolz URL
  *   CANARY_OPERATOR_TOKEN operator bearer token
@@ -83,7 +83,7 @@ const LIVENESS_MAX_TOKENS_PER_MODEL = 8;
 
 const CONFIG = {
   mode: selectedMode,
-  base: (env('CANARY_BASE') || 'https://api.streamvc.live').replace(/\/$/, ''),
+  base: (env('CANARY_BASE') || 'https://api.malibu.tech').replace(/\/$/, ''),
   isolatedProviderBase: env('CANARY_ISOLATED_PROVIDER_BASE').replace(/\/$/, ''),
   isolatedProviderID: env('CANARY_ISOLATED_PROVIDER_ID'),
   token: env('MACPROVIDER_BUYER_TOKEN') || env('MALIBU_API_KEY') || '',

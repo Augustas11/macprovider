@@ -13,7 +13,7 @@ headers, observability requirements).
 ## Audit provenance
 
 This addendum is the result of an internal e2e network-harness pass
-against the live `https://api.streamvc.live` stack (2026-06-27),
+against the live `https://api.malibu.tech` stack (2026-06-27),
 followed by a three-lane audit:
 
 - **Architect lane (codex via `omc ask codex`)** — 16 findings, 3
@@ -31,7 +31,7 @@ runs observed violations of.
 
 > **v1.4.2 (2026-06-27, additive — internal e2e audit):**
 > Codifies five coordinator-side observations from internal e2e
-> testing against the live `https://api.streamvc.live` stack. R-1,
+> testing against the live `https://api.malibu.tech` stack. R-1,
 > R-2, R-3 are **re-affirmations of existing locked contracts**
 > (§ 7.2, § 11, FR-B6) that empirical runs observed violations of;
 > the violations are filed as separate code-side issues. R-4

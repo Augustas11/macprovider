@@ -189,7 +189,7 @@
         "update_check_output": "Recommendation stale: recommendation inputs changed since 2026-07-26T09:55:44Z. Run: macprovider-cli autotune --recommend. Already up to date (v1.8.61)."
       },
       "launchd": {
-        "service_label": "live.streamvc.macprovider",
+        "service_label": "live.malibu.provider",
         "state": "running",
         "pid": 13834,
         "runs": 4,
@@ -301,10 +301,10 @@
       "state_after_rollback": {
         "captured_at": "2026-07-27T03:41:46Z",
         "binary_version": "1.8.56",
-        "launchd_service_label": "live.streamvc.macprovider",
+        "launchd_service_label": "live.malibu.provider",
         "launchd_pid": 79832,
         "launchd_runs": 2,
-        "watchdog_service": "live.streamvc.macprovider-watchdog",
+        "watchdog_service": "live.malibu.provider-watchdog",
         "coordinator_state": "ready",
         "routing_eligible": true,
         "auth_state": "bearer_validated",
@@ -354,7 +354,7 @@
       "scope": "before_air5_update_attempts",
       "source_artifact_on_pearl": "/var/lib/macprovider-canary-buyer/artifacts/canary-2026-07-27T03-22-50-000Z.json",
       "source_artifact_sha256": "f6badd3ddb07c986c021a27cd9c9d624f4cb1b65e374e8f0fefaa528e83ac40c",
-      "base": "https://api.streamvc.live",
+      "base": "https://api.malibu.tech",
       "mode": "liveness",
       "result": {
         "outcome": "healthy",
@@ -407,7 +407,7 @@
       "scope": "after_air5_rollback_single_qwen_request",
       "source_artifact_on_pearl": "/var/lib/macprovider-canary-buyer/artifacts/spec020-qwen-postrollback-2026-07-27T03-46-34-000Z.json",
       "source_artifact_sha256": "2eb2c9d271f2a77f24e99d6d4d5fee5d745004cce01b6301c2a955e69da71670",
-      "base": "https://api.streamvc.live",
+      "base": "https://api.malibu.tech",
       "request": {
         "model": "mlx-community/Qwen3-8B-4bit",
         "max_tokens": 8
@@ -502,7 +502,7 @@
     "ssh pearl 'systemctl show macprovider-coordinator.service macprovider-gateway.service'",
     "ssh pearl 'curl -H Authorization:Bearer-REDACTED http://127.0.0.1:8444/poolz'",
     "ssh pearl '/opt/macprovider-canary-buyer/run-canary.sh --mode liveness with temporary expected-fleet override'",
-    "ssh pearl 'curl https://api.streamvc.live/v1/chat/completions for mlx-community/Qwen3-8B-4bit with buyer token redacted'",
+    "ssh pearl 'curl https://api.malibu.tech/v1/chat/completions for mlx-community/Qwen3-8B-4bit with buyer token redacted'",
     "ssh augstar@Augustass-MacBook-Air.local 'macprovider-cli update --check'",
     "gh release view v1.8.61 --repo Augustas11/macprovider --json tagName,isPrerelease,isDraft,publishedAt,targetCommitish,assets"
   ]

@@ -78,7 +78,7 @@ macprovider-verify --bundle receipt-bundle.json --json
 | `--json` | Emit exactly one line of JSON conforming to `schemas/output.schema.json`. Warnings remain in the JSON `warnings` array even with `--quiet`. |
 | `--offline` | Disable live coordinator fetches. With `--pubkey`, verification can still be `valid`. Without `--pubkey`, cache misses or stale cache entries produce `inconclusive`. |
 | `--quiet` | Suppress stderr diagnostics, `warning:` lines, and `--explain` text. Does not suppress JSON `warnings` records and does not change the exit code. |
-| `--coordinator <host>` | Coordinator host for `/v1/receipt-keys`. Defaults to `coordinator.streamvc.live` or `MACPROVIDER_COORDINATOR` when that environment variable is set. Non-default hosts emit a `non_default_coordinator` warning. |
+| `--coordinator <host>` | Coordinator host for `/v1/receipt-keys`. Defaults to `coordinator.malibu.tech` or `MACPROVIDER_COORDINATOR` when that environment variable is set. Non-default hosts emit a `non_default_coordinator` warning. |
 | `--explain` | After a `valid` result, print the SPEC-015 trust-boundary text to stderr unless `--quiet` is also set. Does not change the result or exit code. |
 
 ### Running against a private coordinator

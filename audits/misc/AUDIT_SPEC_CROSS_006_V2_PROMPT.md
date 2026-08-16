@@ -216,8 +216,8 @@ A.17 **F-602-6** (buyer port rebind doc) — § 7 deployment notes must
 
 A.18 **F-603-1** (installer /v1/pool/check) — § 5 must reference
      SPEC-002 v1.1.4 § 7.5 /v1/pool/check definition. Must clarify
-     installer calls coordinator.streamvc.live (NOT
-     api.streamvc.live) for this path.
+     installer calls coordinator.malibu.tech (NOT
+     api.malibu.tech) for this path.
 
 A.19 **F-603-2** (dependency line) — line 4 must say "Depends on:
      SPEC-001 v1.2.2, SPEC-002 v1.1.4" (was older).

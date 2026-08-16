@@ -15,11 +15,11 @@ Verdict: NOT READY TO LOCK -
   - `specs/SPEC-017-network-stats-api.md` v0.1.8 sections 5.6, 5.7, 6.6.2, 7.1, 7.4, and 8.5.
   - `specs/BUILD_SPEC_017_IMPL_PROMPT.md` Step 4.B block and AC-to-step matrix.
   - `specs/SPEC-017-IMPL-STEP_3-r8-convergence.md`.
-  - `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`.
-  - `phase4-coordinator/dist/nginx-stats.streamvc.live.conf`.
+  - `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`.
+  - `phase4-coordinator/dist/nginx-stats.malibu.tech.conf`.
   - `phase4-coordinator/dist/nginx-snippets/stats-shared.conf`.
   - Prior Step 4.B ARCH audit round r1.
-- `nginx -t -c /Users/augstar/macprovider-spec017-step1/phase4-coordinator/dist/nginx-stats.streamvc.live.conf` - NOT EXECUTABLE in this environment; `/bin/bash: nginx: command not found`.
+- `nginx -t -c /Users/augstar/macprovider-spec017-step1/phase4-coordinator/dist/nginx-stats.malibu.tech.conf` - NOT EXECUTABLE in this environment; `/bin/bash: nginx: command not found`.
 - `bash phase4-coordinator/dist/test/check_nginx_stats_test.sh` - SKIPPED locally because the Docker daemon is not reachable. The script itself only performs composed `nginx -t`; its comments reference a Go fixture / CI job that is not present in this tree.
 - `grep -E 'limit_req_zone|limit_req |proxy_cache|proxy_no_cache|\$http_authorization' phase4-coordinator/dist/nginx-*.conf` - PASS for per-location stats `limit_req`, cache, `proxy_no_cache`, and `Authorization` forwarding. The per-endpoint `limit_req_zone` declarations now live in `phase4-coordinator/dist/nginx-snippets/stats-shared.conf`, so this exact grep no longer sees the http-context declarations.
 - Expanded grep including `phase4-coordinator/dist/nginx-snippets/*.conf` - PASS for the shared `map`, three per-endpoint `limit_req_zone` declarations, `proxy_cache_path`, and redacted log format.
@@ -27,7 +27,7 @@ Verdict: NOT READY TO LOCK -
 - `git diff --check 51b9736..HEAD -- phase4-coordinator/dist/` - PASS.
 
 ## Category verdicts
-A. Vhost surface: FAIL. The static stats vhost has port 80 redirect and port 443 TLS blocks, and the coordinator vhost exposes all three stats endpoints before the `/v1/` 404 catch-all. The deploy pipeline, however, installs the stats TLS vhost without obtaining or activating a `stats.streamvc.live` certificate.
+A. Vhost surface: FAIL. The static stats vhost has port 80 redirect and port 443 TLS blocks, and the coordinator vhost exposes all three stats endpoints before the `/v1/` 404 catch-all. The deploy pipeline, however, installs the stats TLS vhost without obtaining or activating a `stats.malibu.tech` certificate.
 B. Per-endpoint rate-limit zones: PASS. The shared http-context snippet declares `stats_overview`, `stats_leaderboard`, and `stats_health` separately at `rate=60r/m`, and all stats locations reference their own zone with `nodelay` and no `burst=`.
 C. Authorization-aware keying: PASS. The author chose shape (a): `map $http_authorization $public_rl_key` with an empty key for Authorization-bearing requests.
 D. Cache hygiene: PASS. `proxy_cache_path` is declared once in the shared snippet, and every stats location in both vhosts has both `proxy_cache_bypass $http_authorization` and `proxy_no_cache $http_authorization`.
@@ -41,11 +41,11 @@ H. Cloudflare / Pearl posture: PASS. No Cloudflare-specific cache or CORS direct
 None.
 
 ### HIGH
-1. `phase4-coordinator/dist/deploy-pearl-vps.sh:386`, `phase4-coordinator/dist/deploy-pearl-vps.sh:396`, `phase4-coordinator/dist/deploy-pearl-vps.sh:404`, `phase4-coordinator/dist/deploy-pearl-vps.sh:414`, and `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:53`
-   - Evidence: the deploy script obtains a Let's Encrypt cert only for `$DOMAIN`, whose default is `coordinator.streamvc.live`. It then installs `/etc/nginx/sites-available/stats.streamvc.live` and enables it, but the only certificate-uncommenting sed commands target `/etc/nginx/sites-available/$DOMAIN`. The stats vhost still ships with its `ssl_certificate` and `ssl_certificate_key` lines commented.
-   - Why: SPEC-017 Section 7.1 requires `stats.streamvc.live` as the public hostname with TLS via the same cert pipeline as the other `*.streamvc.live` vhosts, and BUILD Step 4.B requires TLS per the existing cert pipeline. Installing a `listen 443 ssl` stats vhost before acquiring and wiring a `stats.streamvc.live` certificate does not match that pipeline.
-   - Risk: first deploy can fail `nginx -t` / reload because the stats TLS server has no active certificate, or it can come up with an inherited/default certificate that does not validate for `stats.streamvc.live`. Either outcome leaves the primary public surface broken and forces an operator reconfiguration before cutover.
-   - Fix: extend the deploy sequence to treat `stats.streamvc.live` as a first-class cert target: DNS-check it, install an HTTP-01 stub for it, run certbot for the stats hostname, then install the full stats TLS vhost with its `ssl_certificate` lines activated before the final `nginx -t`. Keep the shared snippet installation before either vhost references `stats_*` zones.
+1. `phase4-coordinator/dist/deploy-pearl-vps.sh:386`, `phase4-coordinator/dist/deploy-pearl-vps.sh:396`, `phase4-coordinator/dist/deploy-pearl-vps.sh:404`, `phase4-coordinator/dist/deploy-pearl-vps.sh:414`, and `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:53`
+   - Evidence: the deploy script obtains a Let's Encrypt cert only for `$DOMAIN`, whose default is `coordinator.malibu.tech`. It then installs `/etc/nginx/sites-available/stats.malibu.tech` and enables it, but the only certificate-uncommenting sed commands target `/etc/nginx/sites-available/$DOMAIN`. The stats vhost still ships with its `ssl_certificate` and `ssl_certificate_key` lines commented.
+   - Why: SPEC-017 Section 7.1 requires `stats.malibu.tech` as the public hostname with TLS via the same cert pipeline as the other `*.malibu.tech` vhosts, and BUILD Step 4.B requires TLS per the existing cert pipeline. Installing a `listen 443 ssl` stats vhost before acquiring and wiring a `stats.malibu.tech` certificate does not match that pipeline.
+   - Risk: first deploy can fail `nginx -t` / reload because the stats TLS server has no active certificate, or it can come up with an inherited/default certificate that does not validate for `stats.malibu.tech`. Either outcome leaves the primary public surface broken and forces an operator reconfiguration before cutover.
+   - Fix: extend the deploy sequence to treat `stats.malibu.tech` as a first-class cert target: DNS-check it, install an HTTP-01 stub for it, run certbot for the stats hostname, then install the full stats TLS vhost with its `ssl_certificate` lines activated before the final `nginx -t`. Keep the shared snippet installation before either vhost references `stats_*` zones.
 
 ### MEDIUM
 None.
@@ -62,11 +62,11 @@ None.
 - `phase4-coordinator/dist/nginx-snippets/stats-shared.conf:31` through `:33` define separate per-endpoint zones, preserving the required endpoint dimension.
 - `phase4-coordinator/dist/nginx-snippets/stats-shared.conf:39` uses `/var/cache/nginx/stats`, a normal disk-backed cache path rather than an obvious tmpfs path.
 - `phase4-coordinator/dist/nginx-snippets/stats-shared.conf:45` defines `stats_redacted` without `$http_authorization`.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:91`, `:119`, and `:142` use exact endpoint locations for overview, leaderboard, and health.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:111` and `:112` pair cache read-bypass and write-suppression for Authorization-bearing overview responses; leaderboard and health mirror the same pair.
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:212` places `/v1/stats/overview` before the `/v1/` 404 catch-all at `:280`; leaderboard and health are likewise before the catch-all.
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:220` and `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:99` forward `X-Forwarded-For` using `$proxy_add_x_forwarded_for`.
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:222` and `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:101` forward `Authorization` to the coordinator so the in-process partner dispatcher remains authoritative.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:91`, `:119`, and `:142` use exact endpoint locations for overview, leaderboard, and health.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:111` and `:112` pair cache read-bypass and write-suppression for Authorization-bearing overview responses; leaderboard and health mirror the same pair.
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:212` places `/v1/stats/overview` before the `/v1/` 404 catch-all at `:280`; leaderboard and health are likewise before the catch-all.
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:220` and `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:99` forward `X-Forwarded-For` using `$proxy_add_x_forwarded_for`.
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:222` and `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:101` forward `Authorization` to the coordinator so the in-process partner dispatcher remains authoritative.
 - No `Access-Control-Allow-Origin`, `Access-Control-Allow-Headers`, or `Access-Control-Allow-Methods` directives appear in the changed nginx stats files.
 - No `Vary: Authorization` directive appears in the changed nginx stats files; Vary remains an application-layer response concern.
 

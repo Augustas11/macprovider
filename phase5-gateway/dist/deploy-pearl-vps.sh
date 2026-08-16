@@ -8,7 +8,7 @@
 # audits/2026-06-10/REPO_AUDIT.md.
 #
 # Run this from the operator's Mac. It SSHes into Pearl VPS, installs the
-# gateway behind the existing nginx + Let's Encrypt for api.streamvc.live,
+# gateway behind the existing nginx + Let's Encrypt for api.malibu.tech,
 # and verifies the public endpoint.
 #
 # Prerequisites:
@@ -19,9 +19,9 @@
 #       MACPROVIDER_DEMO_SIGNING_SECRET,
 #       GITHUB_OAUTH_CLIENT_ID, GITHUB_OAUTH_CLIENT_SECRET
 #     This deploy script does NOT touch that file — secrets stay on the VPS.
-#   - nginx site for api.streamvc.live already exists; we reinstall it from
-#     dist/nginx-api.streamvc.live.conf on every deploy.
-#   - DNS A record api.streamvc.live -> $VPS_HOST.
+#   - nginx site for api.malibu.tech already exists; we reinstall it from
+#     dist/nginx-api.malibu.tech.conf on every deploy.
+#   - DNS A record api.malibu.tech -> $VPS_HOST.
 #
 # Usage:
 #   bash deploy-pearl-vps.sh
@@ -30,7 +30,7 @@
 #   SSH_KEY          default: ~/.ssh/pearl_operator_ed25519
 #   VPS_HOST         default: 159.223.165.194
 #   VPS_USER         default: root
-#   DOMAIN           default: api.streamvc.live
+#   DOMAIN           default: api.malibu.tech
 #   EMAIL            default: augstar@gmail.com
 #   --dry-run-local  developer-only: run the old local-config C2 check using
 #                    GATEWAY_CONFIG and exit before any SSH mutation.
@@ -72,7 +72,7 @@ done
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
 VPS_HOST="${VPS_HOST:-159.223.165.194}"
 VPS_USER="${VPS_USER:-root}"
-DOMAIN="${DOMAIN:-api.streamvc.live}"
+DOMAIN="${DOMAIN:-api.malibu.tech}"
 EMAIL="${EMAIL:-augstar@gmail.com}"
 
 # #290 (mirrors #244 R2 CODE MED): validate DOMAIN + EMAIL up front so a
@@ -115,14 +115,14 @@ case "$EMAIL" in
 esac
 
 # #290 R1 (CODE+SEC+ARCH convergent MED) — the baked-in vhost template
-# `nginx-api.streamvc.live.conf` hardcodes `server_name api.streamvc.live`
+# `nginx-api.malibu.tech.conf` hardcodes `server_name api.malibu.tech`
 # and matching Let's Encrypt paths. Refuse if $DOMAIN was overridden to
 # something else; otherwise we'd install a vhost with a non-matching
 # server_name / cert path against a live gateway binary. Mirrors the
-# same guard on the coordinator side (chat_proxy has domain=coordinator.streamvc.live).
-if [ "$DOMAIN" != "api.streamvc.live" ]; then
+# same guard on the coordinator side (chat_proxy has domain=coordinator.malibu.tech).
+if [ "$DOMAIN" != "api.malibu.tech" ]; then
   echo "aborting deploy: DOMAIN override ($DOMAIN) does not match the baked-in vhost template" >&2
-  echo "  dist/nginx-api.streamvc.live.conf has server_name=api.streamvc.live hardcoded." >&2
+  echo "  dist/nginx-api.malibu.tech.conf has server_name=api.malibu.tech hardcoded." >&2
   echo "  Edit the conf file in lockstep, or remove the DOMAIN env override." >&2
   exit 1
 fi
@@ -130,7 +130,7 @@ fi
 DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
 BINARY="$DIST_DIR/gateway-linux-amd64"
 SERVICE="$DIST_DIR/macprovider-gateway.service"
-NGINX_SITE="$DIST_DIR/nginx-api.streamvc.live.conf"
+NGINX_SITE="$DIST_DIR/nginx-api.malibu.tech.conf"
 
 # M1-6 follow-up (codex audits 2026-06-11): no .example fallback. Sample
 # config is documentation, not an operational input — passing C2 against
@@ -161,12 +161,18 @@ fi
 # the expected `server_name` + Let's Encrypt paths before we upload +
 # sed-uncomment it on the remote. Rejects an accidentally edited /
 # stale checked-in conf that would point to a different vhost / cert.
-if ! grep -qE '^[[:space:]]*server_name[[:space:]]+api\.streamvc\.live;' "$NGINX_SITE"; then
-  echo "aborting deploy: nginx template $NGINX_SITE is missing 'server_name api.streamvc.live;'" >&2
+if ! grep -qE '^[[:space:]]*server_name[[:space:]]+api\.malibu\.tech;' "$NGINX_SITE"; then
+  echo "aborting deploy: nginx template $NGINX_SITE is missing 'server_name api.malibu.tech;'" >&2
   exit 5
 fi
-if ! grep -qE '# ssl_certificate[[:space:]]+/etc/letsencrypt/live/api\.streamvc\.live/' "$NGINX_SITE"; then
-  echo "aborting deploy: nginx template $NGINX_SITE cert path drifted from expected /etc/letsencrypt/live/api.streamvc.live/" >&2
+if grep -qE '^[[:space:]]*limit_(req|conn)_zone[[:space:]]+' "$NGINX_SITE"; then
+  echo "aborting deploy: nginx template $NGINX_SITE declares http-context limit zones" >&2
+  echo "  Keep shared memory zones outside the per-host site so api.malibu.tech can" >&2
+  echo "  coexist with the legacy API vhost during compatibility." >&2
+  exit 5
+fi
+if ! grep -qE '# ssl_certificate[[:space:]]+/etc/letsencrypt/live/api\.malibu\.tech/' "$NGINX_SITE"; then
+  echo "aborting deploy: nginx template $NGINX_SITE cert path drifted from expected /etc/letsencrypt/live/api.malibu.tech/" >&2
   exit 5
 fi
 
@@ -668,18 +674,18 @@ log "  staging dir: $DEPLOY_TMP (root:root 0700)"
 
 $SCP "$BINARY"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/gateway-linux-amd64"
 $SCP "$SERVICE"    "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/macprovider-gateway.service"
-$SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-api.streamvc.live.conf"
+$SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-api.malibu.tech.conf"
 
 $SSH "set -e
   # #290 (mirrors #244 R5 SEC MED) — binary is root:macprovider 0750.
   # macprovider daemon can execute + read via group; only root can write.
   install -o root -g macprovider -m 0750 $DEPLOY_TMP/gateway-linux-amd64 /opt/macprovider/gateway
   install -o root -g root -m 0644 $DEPLOY_TMP/macprovider-gateway.service /etc/systemd/system/macprovider-gateway.service
-  install -o root -g root -m 0644 $DEPLOY_TMP/nginx-api.streamvc.live.conf /etc/nginx/sites-available/$DOMAIN
+  install -o root -g root -m 0644 $DEPLOY_TMP/nginx-api.malibu.tech.conf /etc/nginx/sites-available/$DOMAIN
   # EXIT trap will rm -rf \$DEPLOY_TMP after script exits (success or
   # failure). Explicit cleanup here is not required.
   ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
-  # Mirror the coordinator script's step 6b: nginx-api.streamvc.live.conf ships
+  # Mirror the coordinator script's step 6b: nginx-api.malibu.tech.conf ships
   # with the ssl_certificate / ssl_certificate_key lines commented (so a
   # first-deploy clean run before certbot doesn't fail nginx -t with a missing
   # cert). The cert exists by the time we get here on every subsequent deploy;

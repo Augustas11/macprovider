@@ -32,7 +32,7 @@ You do NOT touch Swift code (BUILD_SWIFT owns it) or shell/YAML
 (BUILD_DISTRIBUTION owns it).
 
 The current production coordinator v1.0.4 is LIVE at
-coordinator.streamvc.live serving M4 and M1 partners. Your changes
+coordinator.malibu.tech serving M4 and M1 partners. Your changes
 are non-breaking — the legacy HTTP-forwarding path stays — but you
 will deploy v1.1.2 only after BUILD_SWIFT lands so v1.2 phase3-binary
 exists to exercise the WS-tunneled path.
@@ -42,7 +42,7 @@ exists to exercise the WS-tunneled path.
 Mac Provider routes buyer inference requests across a pool of
 volunteer Apple Silicon Macs. As of 2026-05-28:
 
-  - `coordinator.streamvc.live` (Pearl VPS, 159.223.165.194) live
+  - `coordinator.malibu.tech` (Pearl VPS, 159.223.165.194) live
     with pool N=2 (M4 Qwen 7B, M1 Llama 3.2 3B)
   - Current coordinator v1.0.4 uses HTTP-forwarding path only —
     coordinator GETs to provider.endpoint_url
@@ -346,7 +346,7 @@ why in implementation-notes and proceed cautiously.
 - Unit tests for each new package (admission_test.go, relay_test.go)
 - Acceptance test scripts run against local coordinator + mockprovider
 - DO NOT test against the production coordinator at
-  coordinator.streamvc.live — your changes are unverified until
+  coordinator.malibu.tech — your changes are unverified until
   AC scripts pass locally
 - After all ACs pass, document any deviations in implementation-notes
 - Integration test with v1.2 phase3-binary happens post-merge (when

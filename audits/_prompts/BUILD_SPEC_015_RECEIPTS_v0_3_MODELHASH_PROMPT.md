@@ -87,7 +87,7 @@ The coordinator's `/poolz` response MUST gain two optional fields per SPEC-002 (
 - `catalog_pubkey_url` (string) — URL where the verifier can fetch the catalog's public key (suggest `/catalog/pubkey`)
 - `catalog_url` (string) — URL to fetch the catalog itself (suggest `/catalog/<catalog_id>`)
 
-These allow a verify CLI to do `macprovider-verify --bundle X --catalog-url https://coordinator.streamvc.live/catalog/macprovider-tier2-model-catalog-2026-05-31 --catalog-pubkey-url https://coordinator.streamvc.live/catalog/pubkey` with the verifier pulling everything it needs in two requests.
+These allow a verify CLI to do `macprovider-verify --bundle X --catalog-url https://coordinator.malibu.tech/catalog/macprovider-tier2-model-catalog-2026-05-31 --catalog-pubkey-url https://coordinator.malibu.tech/catalog/pubkey` with the verifier pulling everything it needs in two requests.
 
 ### §M.5 — Acceptance criteria (extend numbering from v0.2)
 

@@ -150,14 +150,14 @@ Journal: `tier2 config reloaded`, `catalog_loaded` with `model_count=8`, `catalo
 ### Post-deploy verification (Step 8)
 
 ```bash
-curl -sS https://coordinator.streamvc.live/catalog/current | python3 -m json.tool
+curl -sS https://coordinator.malibu.tech/catalog/current | python3 -m json.tool
 # → catalog_id macprovider-tier2-model-catalog-2026-07-07-p1-gemma, 8 models, Gemma present
 
-curl -sS https://coordinator.streamvc.live/static/autotune-candidates.json | python3 -c \
+curl -sS https://coordinator.malibu.tech/static/autotune-candidates.json | python3 -c \
   "import sys,json; d=json.load(sys.stdin); print(d['version'], len(d['rows']), d['rows']['google-gemma-4-26b-a4b-it']['runtime_status'])"
 # → published-2026-07-07-p1-gemma 8 recommendable
 
-curl -sS https://coordinator.streamvc.live/v1/rate-card | python3 -c \
+curl -sS https://coordinator.malibu.tech/v1/rate-card | python3 -c \
   "import sys,json; r=json.load(sys.stdin)['rows']; print(r['google-gemma-4-26b-a4b-it'])"
 # → completion_rate_per_mtok 240000
 ```

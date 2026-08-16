@@ -45,8 +45,8 @@ If a severity has no findings, write "(none)".
 ## Files in scope
 
 - `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/deploy-pearl-vps.sh`
-- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
-- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-stats.streamvc.live.conf`
+- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
+- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-stats.malibu.tech.conf`
 
 R1→R2 diff: `git -C /Users/augstar/macprovider-iss244 show HEAD`
 R0→R2 cumulative diff: `git -C /Users/augstar/macprovider-iss244 diff HEAD~2 HEAD`

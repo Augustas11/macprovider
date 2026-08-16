@@ -76,7 +76,7 @@ Recommendation: operator should decide whether signature/hash/integrity failures
 ### E.1  launchd service identity and restore semantics do not match SPEC-003   [MAJOR]
 Location: §5.5 FR-E.1 lines 492-513; SPEC-003 §FR-C5 lines 415-478
 
-SPEC-013 names the launchd-managed install as `com.macprovider.cli` and requires drain to restore plist state on exit. SPEC-003's launchd label/path are `live.streamvc.macprovider` and `~/Library/LaunchAgents/live.streamvc.macprovider.plist`, with `KeepAlive.SuccessfulExit = false`.
+SPEC-013 names the launchd-managed install as `com.macprovider.cli` and requires drain to restore plist state on exit. SPEC-003's launchd label/path are `live.malibu.provider` and `~/Library/LaunchAgents/live.malibu.provider.plist`, with `KeepAlive.SuccessfulExit = false`.
 
 Why it matters: the common operator install path is launchd-managed. If the implementation looks for the wrong service label or does not define whether it uses `bootout/bootstrap`, clean SIGTERM, or a direct process handle, `--drain` can fail to stop the live provider or fail to restore it after tuning.
 
@@ -263,7 +263,7 @@ Recommendation: add a short "post-lock documentation/update checklist" or captur
 
 Verdict: **LOCK READY under the round-2 threshold, with one narrow v0.3 cleanup strongly recommended before implementation.**
 
-v0.2 closes the substance of the round-1 audit. The biggest-fit framing, STOP-on-first-feasible model iteration, in-model Stage 2 hill-climb, operator-supplied order contract, config-key mapping, launchd label, SQLite `stage` migration, and deterministic recipe hash are now implementable. The code spot-checks support the key factual repairs: `Config.swift` reads `max_context_override`, `max_concurrency_override`, and `kv_bits`; the install artifacts use `live.streamvc.macprovider`; `ModelRuntime.configuration(for:)` checks the local HF snapshot before falling back to `LLMModelFactory.shared.configuration(id:)`; and the PR #103 prototype starts `serve` / waits for `/v1/models` rather than pre-downloading weights.
+v0.2 closes the substance of the round-1 audit. The biggest-fit framing, STOP-on-first-feasible model iteration, in-model Stage 2 hill-climb, operator-supplied order contract, config-key mapping, launchd label, SQLite `stage` migration, and deterministic recipe hash are now implementable. The code spot-checks support the key factual repairs: `Config.swift` reads `max_context_override`, `max_concurrency_override`, and `kv_bits`; the install artifacts use `live.malibu.provider`; `ModelRuntime.configuration(for:)` checks the local HF snapshot before falling back to `LLMModelFactory.shared.configuration(id:)`; and the PR #103 prototype starts `serve` / waits for `/v1/models` rather than pre-downloading weights.
 
 The remaining round-2 issue is a new precision gap introduced by the D.1 closure. FR-D now permits Shape B, where autotune relies on the runtime's online fallback during model load, but NFR-4 and AC-8 still speak as if the only allowed pre-warm network path is `macprovider-cli models pull`. That is not a product or architecture failure, but it is a day-one contract conflict for the implementing PR. The other findings are minor editorial/testability cleanups.
 
@@ -273,7 +273,7 @@ A.1 -> CLOSED. v0.2 replaces metrics-bearing `fallbacks` with name-only `alterna
 
 D.1 -> OVER-CLOSED. The original missing `models pull` precondition is no longer load-bearing: FR-D.1 makes the operative contract "weights are present before measurement" and permits Shape A or Shape B (lines 575-626), matching the current runtime fallback behavior in `ModelRuntime.swift` lines 559-566 and 622-641. However, that Shape B closure introduces the new N-D.1 precision gap below because NFR-4 and AC-8 still assume the only pre-warm network/failure surface is `models pull`.
 
-E.1 -> CLOSED. FR-E.1 now binds to `live.streamvc.macprovider`, `~/Library/LaunchAgents/live.streamvc.macprovider.plist`, `launchctl bootout`, and `launchctl bootstrap` (lines 663-712). The code spot-check matches: `install.sh` renders the same label at lines 748-749, loads the plist via launchctl at lines 728-729, detects it at line 923, and the plist template has `KeepAlive.SuccessfulExit = false` at lines 25-28.
+E.1 -> CLOSED. FR-E.1 now binds to `live.malibu.provider`, `~/Library/LaunchAgents/live.malibu.provider.plist`, `launchctl bootout`, and `launchctl bootstrap` (lines 663-712). The code spot-check matches: `install.sh` renders the same label at lines 748-749, loads the plist via launchctl at lines 728-729, detects it at line 923, and the plist template has `KeepAlive.SuccessfulExit = false` at lines 25-28.
 
 F.1 -> CLOSED. FR-F.2 and FR-F.3 now use YAML key names `kv_bits`, `max_context_override`, and `max_concurrency_override` (lines 857-866, 935-947). `Config.swift` confirms those are parsed at lines 239-241. The JSON surface and CLI `serve_command` keep CLI flag names separate, which closes the "apply writes unread keys" failure mode.
 

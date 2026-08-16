@@ -263,5 +263,5 @@ Runbook: `docs/runbooks/provider-cli-release-verification.md`.
   not hardcode versions in this file — they drift; the spec headers
   and the constant do not. See also `specs/README.md` for a generated
   index (also subject to drift, source of truth is each spec header).
-- Production coordinator: `coordinator.streamvc.live` (Pearl VPS).
-  Public installer redirect: `get.streamvc.live/install.sh`.
+- Production coordinator: `coordinator.malibu.tech` (Pearl VPS).
+  Public installer redirect: `get.malibu.tech/install.sh`.

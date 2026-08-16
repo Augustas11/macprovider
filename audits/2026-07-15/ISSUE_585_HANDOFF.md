@@ -87,7 +87,7 @@ The release pointer was restored to:
 
 - Malibu: `/Applications/Malibu.app`, version 1.8.39
 - active CLI: `/Users/augstar/macprovider/macprovider-cli`, version 1.8.30
-- launchd service: `live.streamvc.macprovider`, running at the final check
+- launchd service: `live.malibu.provider`, running at the final check
 - local health: ready
 - model: Qwen3-Coder-30B loaded
 - coordinator: connected

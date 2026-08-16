@@ -7,7 +7,7 @@ the first-run findings in
 
 ## Run conditions
 
-- Target: live `https://api.streamvc.live` + `wss://coordinator.streamvc.live`,
+- Target: live `https://api.malibu.tech` + `wss://coordinator.malibu.tech`,
   deployed at `v1.6.1-36-gaf907bb` (today's main with all 7 phase-A PRs).
 - Buyer: `~/.config/macprovider/buyer-api-key` (operator's own account).
 - Providers attached at time of run: 2/2 ready
@@ -145,7 +145,7 @@ with no logs. Fleet vulnerability.
 **Re-run observation.** Both providers reconnected within the 90s
 window after the deploy-induced drain. The local Mac (this
 machine) is now running `v1.6.1` Swift binary; once the operator
-re-installs from the current `get.streamvc.live/install.sh` flow
+re-installs from the current `get.malibu.tech/install.sh` flow
 they get the in-process bounded-send/watchdog AND the external
 LaunchAgent (PR #204 + #207).
 

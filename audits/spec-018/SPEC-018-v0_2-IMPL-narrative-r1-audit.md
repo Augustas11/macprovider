@@ -247,7 +247,7 @@ The file covers only NTP. The BUILD prompt enumerates an operator
 checklist that includes the kill switch flag, the streaming mode
 header semantics, and the AC-44 skew enforcement workflow. The deploy
 doc is a real artifact that operators will read first when an issue
-opens against `coordinator.streamvc.live`; it should be the
+opens against `coordinator.malibu.tech`; it should be the
 single-source operator runbook for v0.2.
 Fix: expand to cover kill switch, header values, downgrade thresholds,
 and `/metrics/streaming` Prometheus surface.

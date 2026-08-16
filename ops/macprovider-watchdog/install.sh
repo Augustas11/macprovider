@@ -11,14 +11,17 @@ set -euo pipefail
 WATCHDOG_DIR_DEFAULT="$HOME/.local/share/macprovider-watchdog"
 WATCHDOG_DIR="${MACPROVIDER_WATCHDOG_DIR:-$WATCHDOG_DIR_DEFAULT}"
 WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
-PLIST_TEMPLATE_PATH="${MACPROVIDER_WATCHDOG_TEMPLATE:-$(cd "$(dirname "$0")" && pwd)/live.streamvc.macprovider-watchdog.template.plist}"
+PLIST_TEMPLATE_PATH="${MACPROVIDER_WATCHDOG_TEMPLATE:-$(cd "$(dirname "$0")" && pwd)/live.malibu.provider-watchdog.template.plist}"
 SOURCE_WATCHDOG="$(cd "$(dirname "$0")" && pwd)/watchdog.sh"
-PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+LEGACY_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
 LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
 CONFIG_PATH="${MACPROVIDER_CONFIG_PATH:-$HOME/.config/macprovider/config.yaml}"
 BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
-COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.streamvc.live}"
-SERVICE_LABEL="${MACPROVIDER_SERVICE_LABEL:-live.streamvc.macprovider}"
+COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.malibu.tech}"
+SERVICE_LABEL="${MACPROVIDER_SERVICE_LABEL:-live.malibu.provider}"
+WATCHDOG_LABEL="live.malibu.provider-watchdog"
+LEGACY_WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
 DRY_RUN=0
 
 log() { printf "[macprovider-watchdog-install] %s\n" "$*"; }
@@ -100,7 +103,10 @@ plutil -lint "$PLIST_PATH" >/dev/null || die "rendered watchdog plist is invalid
 # before bootstrapping the new one. This is the same pattern the
 # main installer uses for the provider LaunchAgent.
 launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
-launchctl enable "gui/$UID/live.streamvc.macprovider-watchdog" || die "failed to enable watchdog"
+launchctl bootout "gui/$UID/$LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1 || true
+rm -f "$LEGACY_PLIST_PATH"
+launchctl disable "gui/$UID/$LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1 || true
+launchctl enable "gui/$UID/$WATCHDOG_LABEL" || die "failed to enable watchdog"
 launchctl bootstrap "gui/$UID" "$PLIST_PATH" || die "failed to bootstrap watchdog"
 
 log "Watchdog installed. Inspect logs at $LOG_DIR/watchdog.log"

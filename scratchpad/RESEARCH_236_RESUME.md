@@ -25,7 +25,7 @@ Task prompt: `audits/_prompts/RESEARCH_236_P4_CACHE_REGRESSION_PROMPT.md` (on or
 - D3 B8/B9 invariants in benchmark.go — DONE (B8 armed gate; B9 record-only). SPEC §3.5/§4.5/§5 rows. Unit tests.
 - D4 baseline + calibrate + arm — DONE.
 
-### Measured baseline (2026-07-22, prod api.streamvc.live, 30B-Coder, all 8 req ok)
+### Measured baseline (2026-07-22, prod api.malibu.tech, 30B-Coder, all 8 req ok)
 - **Reuse median = 0.725** over 7 warm turns (min=mean=median=0.725, deterministic). Corroborates #376 ~0.64-0.70.
 - B9 record-only latency: cached p50 ~2.1s vs uncached ~10s (ratio ~0.21).
 - Evidence artifacts: `audits/2026-07-22/RESEARCH_236_baseline/`.

@@ -351,7 +351,7 @@ SPEC-039 handoff): `serve` self-re-execs into the INSTALLED binary, and a worktr
 runtime bridge, #887, before any batched cache-reuse path can serve).
 **Provider safety on the dev Mac:** it runs the
 LIVE production provider — never broad `pkill`; use narrow `pgrep`; bootout the
-watchdog (`live.streamvc.macprovider-watchdog`) then the provider via graceful
+watchdog (`live.malibu.provider-watchdog`) then the provider via graceful
 `launchctl bootout`, off-peak, and restore + verify serving after. Never print the
 buyer token.
 

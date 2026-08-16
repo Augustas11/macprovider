@@ -51,7 +51,7 @@ into a fresh session rooted at `/Users/augstar/macprovider-poc`.
 === BEGIN PROMPT ===
 
 You are closing four engineering robustness findings from Decision
-log Entry 27. The product is live at api.streamvc.live with three
+log Entry 27. The product is live at api.malibu.tech with three
 guardrails (G1+G2+G3) in place; your job is to remove the need for
 those guardrails by fixing the underlying bugs and adding the test
 discipline that would have caught them pre-launch.

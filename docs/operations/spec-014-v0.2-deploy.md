@@ -50,7 +50,7 @@ Run all coordinator migrations before moving to the next step. The new tables ma
 Ship the Phase 2B and Phase 2C binary/CLI through the normal release channel:
 
 ```bash
-get.streamvc.live/install.sh
+get.malibu.tech/install.sh
 ```
 
 Expected behavior with the coordinator flag off:

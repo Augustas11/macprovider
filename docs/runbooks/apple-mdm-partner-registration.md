@@ -72,7 +72,7 @@ This certificate is **not** the same as:
 
 - App Store / Developer push certs for Malibu
 - Signing / notarization certs for `macprovider-cli`
-- TLS certs for `coordinator.streamvc.live`
+- TLS certs for `coordinator.malibu.tech`
 
 It is specifically an **MDM** APNs certificate. Topic always looks like `com.apple.mgmt.…`.
 

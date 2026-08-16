@@ -114,7 +114,7 @@ fairness materially.
 ### D-CROSS-2 (resolves M1, M2.6, Q1: /v1/pool/check ownership)
 
 **Lock:** `/v1/pool/check` is a coordinator-owned operator/health-check
-surface. It stays publicly exposed at coordinator.streamvc.live
+surface. It stays publicly exposed at coordinator.malibu.tech
 (nginx routes /v1/pool/check to coordinator, NOT to gateway).
 SPEC-002 v1.1.4 normatively defines /v1/pool/check as part of its
 operator surface (NOT buyer surface). SPEC-003 v0.6 installer
@@ -426,21 +426,21 @@ Fix: Add:
 > provider-registered health check.
 >
 > This endpoint is OPERATOR/HEALTH surface, NOT buyer surface. It
-> stays publicly accessible at coordinator.streamvc.live (nginx
+> stays publicly accessible at coordinator.malibu.tech (nginx
 > routes /v1/pool/check to coordinator directly, NOT to gateway).
 > SPEC-006 v0.3 gateway does NOT intercept this path.
 
 Add nginx routing example block:
 
 ```nginx
-# api.streamvc.live → gateway (buyer surface)
+# api.malibu.tech → gateway (buyer surface)
 location /v1/chat/completions { proxy_pass http://127.0.0.1:9443; }
 location /v1/models { proxy_pass http://127.0.0.1:9443; }
 location /v1/usage { proxy_pass http://127.0.0.1:9443; }
 location /v1/feedback { proxy_pass http://127.0.0.1:9443; }
 location /v1/status { proxy_pass http://127.0.0.1:9443; }
 
-# coordinator.streamvc.live → coordinator (operator + legacy buyer surface)
+# coordinator.malibu.tech → coordinator (operator + legacy buyer surface)
 location /v1/pool/check { proxy_pass http://127.0.0.1:8443; }
 location /healthz { proxy_pass http://127.0.0.1:8443; }
 location /poolz { proxy_pass http://127.0.0.1:8444; }
@@ -497,7 +497,7 @@ Location: § 7 deployment notes.
 Fix: Add: "When deployed alongside SPEC-006 gateway, coordinator's
 buyer port (8443) MUST be rebound from 0.0.0.0 to 127.0.0.1.
 Public TLS termination happens at nginx/gateway. The provider port
-(8444) MAY remain 0.0.0.0 if coordinator.streamvc.live serves
+(8444) MAY remain 0.0.0.0 if coordinator.malibu.tech serves
 /admin/*, /poolz, /healthz directly."
 
 ### SPEC-003 v0.5 → v0.6 (1 MAJOR + 1 MINOR)
@@ -511,11 +511,11 @@ SPEC-002 v1.1.4 § 7.5.X normative /v1/pool/check definition.
 Concretely:
 
 > The installer's self-test calls
-> `https://coordinator.streamvc.live/v1/pool/check?provider_id=<sanitized>`
+> `https://coordinator.malibu.tech/v1/pool/check?provider_id=<sanitized>`
 > after WS connect. This is the canonical post-SPEC-006-deployment
 > verification path: /v1/pool/check stays on coordinator's operator
 > surface, NOT behind the gateway. The installer MUST NOT attempt to
-> reach this endpoint via api.streamvc.live (the gateway does not
+> reach this endpoint via api.malibu.tech (the gateway does not
 > proxy /v1/pool/check).
 
 No change to install.sh code; this is a spec text clarification.

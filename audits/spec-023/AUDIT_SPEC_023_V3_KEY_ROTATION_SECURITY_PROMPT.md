@@ -30,7 +30,7 @@ list and CODE-lane context.
   path, refuses to run if the file permissions are wider than 0600, and
   signs each JSON exactly as it lives on disk.
 - The v3-signed feed will replace the v2 feed at
-  `coordinator.streamvc.live/static/*` after this PR merges + is
+  `coordinator.malibu.tech/static/*` after this PR merges + is
   deployed.
 
 ## SECURITY lens — what to audit
@@ -76,7 +76,7 @@ correctness and architecture.
    existing `testPinnedPublicKeyIsValidCurve25519SigningKey` test
    asserts this — verify it's been updated to v3 and still passes).
 5. **Rotation replay.** With v2 replaced by v3 at
-   `coordinator.streamvc.live/static/*`, argue whether an attacker
+   `coordinator.malibu.tech/static/*`, argue whether an attacker
    who kept a copy of a valid v2-signed catalog could serve it back
    via TLS MITM and cause v1.7.9- clients (still trusting v2) to
    accept a stale catalog:
@@ -93,7 +93,7 @@ correctness and architecture.
    the operator's laptop is compromised and the v3 private key leaks.
    Enumerate the concrete attacks:
    - Sign a malicious catalog. But delivery still requires TLS MITM
-     against `coordinator.streamvc.live` OR compromising the Pearl
+     against `coordinator.malibu.tech` OR compromising the Pearl
      VPS filesystem (both harder than key theft).
    - The attacker cannot recommend a novel model — `model_sha256`
      is verified against the HuggingFace-downloaded artifact bytes.

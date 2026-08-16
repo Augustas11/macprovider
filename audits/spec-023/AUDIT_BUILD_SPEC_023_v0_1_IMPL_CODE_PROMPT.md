@@ -19,7 +19,7 @@ Read these files fully before auditing:
   - `phase4-coordinator/internal/buyer/server.go`
   - `phase4-coordinator/cmd/coordinator/main.go`
   - `phase4-coordinator/internal/billing/formula.go`
-  - `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
+  - `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
 
 ## Scope
 

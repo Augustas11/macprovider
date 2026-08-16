@@ -22,7 +22,7 @@ NEEDS FIX PASS
 
 Severity: HIGH
 
-The implementation prompt described the coordinator `GET /v1/rate-card` endpoint and rate-card lookup, but did not explicitly require the Swift CLI to fetch `https://coordinator.streamvc.live/v1/rate-card`, validate the schema, fall back to a baked snapshot, emit `rate_card_fallback_used`, persist `rate_card_version`, and test AC-5 fallback paths.
+The implementation prompt described the coordinator `GET /v1/rate-card` endpoint and rate-card lookup, but did not explicitly require the Swift CLI to fetch `https://coordinator.malibu.tech/v1/rate-card`, validate the schema, fall back to a baked snapshot, emit `rate_card_fallback_used`, persist `rate_card_version`, and test AC-5 fallback paths.
 
 Fix applied: Slice B now requires a CLI rate-card input fetcher, schema validation, baked fallback on network/HTTP/malformed/schema/value failures, warning emission, stored `rate_card_version`, and tests for failed fetch plus schema-validation failure.
 

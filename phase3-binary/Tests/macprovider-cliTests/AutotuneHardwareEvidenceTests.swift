@@ -8,14 +8,14 @@ import XCTest
 final class AutotuneHardwareEvidenceTests: XCTestCase {
     func testEndpointConvertsCoordinatorWebSocketURL() {
         let url = AutotuneHardwareEvidenceSubmitter.hardwareEvidenceEndpoint(
-            from: "wss://coordinator.streamvc.live/v2/provider?x=1"
+            from: "wss://coordinator.malibu.tech/v2/provider?x=1"
         )
-        XCTAssertEqual(url?.absoluteString, "https://coordinator.streamvc.live/v1/providers/hardware-evidence")
+        XCTAssertEqual(url?.absoluteString, "https://coordinator.malibu.tech/v1/providers/hardware-evidence")
     }
 
     func testEndpointRejectsCleartextCoordinatorURL() {
-        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.hardwareEvidenceEndpoint(from: "http://coordinator.streamvc.live/v2/provider"))
-        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.hardwareEvidenceEndpoint(from: "ws://coordinator.streamvc.live/v2/provider"))
+        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.hardwareEvidenceEndpoint(from: "http://coordinator.malibu.tech/v2/provider"))
+        XCTAssertNil(AutotuneHardwareEvidenceSubmitter.hardwareEvidenceEndpoint(from: "ws://coordinator.malibu.tech/v2/provider"))
     }
 
     func testPayloadIncludesHardwareAndBenchmarks() throws {
@@ -541,7 +541,7 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
             .appendingPathComponent("tokenless-autotune-config-\(UUID().uuidString).yaml")
         let yaml = """
         provider_id: "\(providerID)"
-        coordinator_url: "wss://coordinator.streamvc.live/ws/provider"
+        coordinator_url: "wss://coordinator.malibu.tech/ws/provider"
         """
         try Data(yaml.utf8).write(to: configURL, options: .atomic)
         addTeardownBlock {

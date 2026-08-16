@@ -28,7 +28,7 @@ func TestAccountTemplateDisplaysKeyAndSnippets(t *testing.T) {
 		`id="tab-curl"`,
 		`id="tab-python"`,
 		`id="tab-node"`,
-		`curl https://api.streamvc.live/v1/chat/completions`,
+		`curl https://api.malibu.tech/v1/chat/completions`,
 		`OpenAI(`,
 		`new OpenAI`,
 	} {

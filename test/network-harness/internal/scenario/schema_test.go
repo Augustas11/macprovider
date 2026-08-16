@@ -229,7 +229,7 @@ func TestValidateSKUEconPinsCoordinatorURL(t *testing.T) {
 		Name: "sku",
 		Mode: "sku-econ",
 		Target: Target{
-			CoordinatorURL: "https://coordinator.streamvc.live",
+			CoordinatorURL: "https://coordinator.malibu.tech",
 			CLIBin:         "/path/to/cli",
 		},
 		HardwareMatrix: []HardwareMatrixRow{
@@ -257,14 +257,14 @@ func TestValidateSKUEconPinsCoordinatorURL(t *testing.T) {
 		url    string
 		wantIn string
 	}{
-		{"http scheme rejected", "http://coordinator.streamvc.live", "https scheme"},
-		{"attacker host rejected", "https://evil.example.com", "coordinator.streamvc.live"},
-		{"path-only wrong host rejected", "https://coordinator.streamvc.dev", "coordinator.streamvc.live"},
-		{"userinfo rejected", "https://user:pass@coordinator.streamvc.live", "userinfo"},
-		{"non-root path rejected", "https://coordinator.streamvc.live/admin", "empty or /"},
-		{"deep path rejected", "https://coordinator.streamvc.live/attacker/v1", "empty or /"},
-		{"query string rejected", "https://coordinator.streamvc.live/?evil=1", "query or fragment"},
-		{"fragment rejected", "https://coordinator.streamvc.live/#evil", "query or fragment"},
+		{"http scheme rejected", "http://coordinator.malibu.tech", "https scheme"},
+		{"attacker host rejected", "https://evil.example.com", "coordinator.malibu.tech"},
+		{"path-only wrong host rejected", "https://coordinator.malibu.invalid", "coordinator.malibu.tech"},
+		{"userinfo rejected", "https://user:pass@coordinator.malibu.tech", "userinfo"},
+		{"non-root path rejected", "https://coordinator.malibu.tech/admin", "empty or /"},
+		{"deep path rejected", "https://coordinator.malibu.tech/attacker/v1", "empty or /"},
+		{"query string rejected", "https://coordinator.malibu.tech/?evil=1", "query or fragment"},
+		{"fragment rejected", "https://coordinator.malibu.tech/#evil", "query or fragment"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -362,7 +362,7 @@ func TestLoadNoEnvRejectsSKUEconPlaceholders(t *testing.T) {
 name: "${GH_TOKEN}"
 mode: sku-econ
 target:
-  coordinator_url: https://coordinator.streamvc.live
+  coordinator_url: https://coordinator.malibu.tech
   cli_bin: /tmp/macprovider-cli
 hardware_matrix:
   - {label: m4, chip: "Apple M4", memoryGB: 32, bandwidthTier: C, expected: at_least_one_eligible_row}
@@ -468,15 +468,15 @@ func TestB10_LabOnly_RejectsProdHost(t *testing.T) {
 		{"localhost ok", "http://localhost:18080", "http://localhost:19090", false},
 		{"private LAN ok", "http://192.168.1.20:18080", "http://10.0.0.5:19090", false},
 		{"ipv6 loopback ok", "http://[::1]:18080", "http://[::1]:19090", false},
-		{"prod gateway rejected", "https://api.streamvc.live", "http://127.0.0.1:19090", true},
-		{"prod coordinator rejected", "http://127.0.0.1:18080", "https://coordinator.streamvc.live", true},
-		{"prod subdomain rejected", "https://foo.streamvc.live", "http://127.0.0.1:19090", true},
-		{"apex prod rejected", "https://streamvc.live", "http://127.0.0.1:19090", true},
+		{"prod gateway rejected", "https://api.malibu.tech", "http://127.0.0.1:19090", true},
+		{"prod coordinator rejected", "http://127.0.0.1:18080", "https://coordinator.malibu.tech", true},
+		{"prod subdomain rejected", "https://foo.malibu.tech", "http://127.0.0.1:19090", true},
+		{"apex prod rejected", "https://malibu.tech", "http://127.0.0.1:19090", true},
 		// Bypass variants the R1 denylist missed (R2 HIGH):
-		{"trailing-dot prod rejected", "https://api.streamvc.live./", "http://127.0.0.1:19090", true},
-		{"uppercase prod rejected", "https://API.STREAMVC.LIVE", "http://127.0.0.1:19090", true},
-		{"fullwidth-dot prod rejected", "https://api．streamvc．live", "http://127.0.0.1:19090", true},
-		{"ideographic-dot prod rejected", "https://api。streamvc。live", "http://127.0.0.1:19090", true},
+		{"trailing-dot prod rejected", "https://api.malibu.tech./", "http://127.0.0.1:19090", true},
+		{"uppercase prod rejected", "https://API.MALIBU.TECH", "http://127.0.0.1:19090", true},
+		{"fullwidth-dot prod rejected", "https://api．malibu．tech", "http://127.0.0.1:19090", true},
+		{"ideographic-dot prod rejected", "https://api。malibu。tech", "http://127.0.0.1:19090", true},
 		// Any public host (not just prod) is rejected — positive allowlist.
 		{"arbitrary public host rejected", "https://example.com", "http://127.0.0.1:19090", true},
 	}
@@ -491,7 +491,7 @@ func TestB10_LabOnly_RejectsProdHost(t *testing.T) {
 	// The guard applies even when benchmark.enabled=false — the sustained
 	// buyer load runs regardless of scoring (R2 HIGH).
 	t.Run("disabled benchmark still guards B10", func(t *testing.T) {
-		s := mk("https://api.streamvc.live", "http://127.0.0.1:19090")
+		s := mk("https://api.malibu.tech", "http://127.0.0.1:19090")
 		s.Benchmark.Enabled = false
 		if err := s.Validate(); err == nil {
 			t.Fatal("B10 + benchmark.enabled=false + prod host must still be rejected")
@@ -500,7 +500,7 @@ func TestB10_LabOnly_RejectsProdHost(t *testing.T) {
 	// A non-B10 scenario may still target prod (the other scenarios do).
 	t.Run("non-B10 may target prod", func(t *testing.T) {
 		s := validTestScenario()
-		s.Target.GatewayURL = "https://api.streamvc.live"
+		s.Target.GatewayURL = "https://api.malibu.tech"
 		s.Benchmark = Benchmark{Enabled: true, Invariants: []string{"B1", "B2"}, ProviderSlots: 3}
 		if err := s.Validate(); err != nil {
 			t.Fatalf("non-B10 scenario must still allow prod host, got %v", err)

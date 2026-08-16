@@ -60,8 +60,8 @@ func setupStatsHandler(t *testing.T) (http.Handler, *sql.DB) {
 		stats.CORSConfig{
 			AccessControlMaxAgeSeconds: 60,
 			PartnerOriginAllowlist: []string{
-				"https://console.streamvc.live",
-				"https://portal.streamvc.live",
+				"https://console.malibu.tech",
+				"https://portal.malibu.tech",
 			},
 		},
 		"partial",
@@ -406,7 +406,7 @@ func TestAC12_304IfNoneMatch(t *testing.T) {
 // MUST carry `Access-Control-Allow-Origin` per the Fetch spec.
 // SPEC §5.7 carves out no 304 exception. Without this header
 // a browser issuing a `If-None-Match` request from
-// console.streamvc.live / portal.streamvc.live silently
+// console.malibu.tech / portal.malibu.tech silently
 // rejects the response as a CORS failure even though the
 // response is functionally correct. Run BOTH cacheable
 // endpoints (/overview AND /leaderboard) so the SPEC-AC-12
@@ -416,7 +416,7 @@ func TestAC12_304IfNoneMatch_CORSHeadersPresent(t *testing.T) {
 	for _, path := range []string{"/v1/stats/overview", "/v1/stats/leaderboard"} {
 		t.Run(path, func(t *testing.T) {
 			hdr1 := http.Header{}
-			hdr1.Set("Origin", "https://console.streamvc.live")
+			hdr1.Set("Origin", "https://console.malibu.tech")
 			first := mustDoWithHeaders(t, h, http.MethodGet, path, hdr1)
 			if first.StatusCode != http.StatusOK {
 				t.Fatalf("first request not 200, got %d body=%s", first.StatusCode, readBody(t, first))
@@ -429,7 +429,7 @@ func TestAC12_304IfNoneMatch_CORSHeadersPresent(t *testing.T) {
 				t.Fatalf("ETag missing on first response")
 			}
 			hdr2 := http.Header{}
-			hdr2.Set("Origin", "https://console.streamvc.live")
+			hdr2.Set("Origin", "https://console.malibu.tech")
 			hdr2.Set("If-None-Match", etag)
 			second := mustDoWithHeaders(t, h, http.MethodGet, path, hdr2)
 			if second.StatusCode != http.StatusNotModified {
@@ -1544,7 +1544,7 @@ func TestSection_5_7_CORSMatrix(t *testing.T) {
 		store.New(reader),
 		stats.CORSConfig{
 			AccessControlMaxAgeSeconds: 60,
-			PartnerOriginAllowlist:     []string{"https://portal.streamvc.live"},
+			PartnerOriginAllowlist:     []string{"https://portal.malibu.tech"},
 		},
 		"partial",
 		"",
@@ -1633,7 +1633,7 @@ func TestPreflightActiveKeyOriginUnion(t *testing.T) {
 		stats.CORSConfig{
 			AccessControlMaxAgeSeconds: 60,
 			// Note: newpartner.example is NOT in static list.
-			PartnerOriginAllowlist: []string{"https://portal.streamvc.live"},
+			PartnerOriginAllowlist: []string{"https://portal.malibu.tech"},
 		},
 		"partial",
 		"",
@@ -1718,19 +1718,19 @@ func TestValidPartnerKey500ReqNoAuthFailureCap(t *testing.T) {
 }
 
 // ===========================================================================
-// Sibling-subdomain reject — Origin: https://evil.streamvc.live
+// Sibling-subdomain reject — Origin: https://evil.malibu.tech
 // MUST NOT be echoed (no wildcard / no sibling-match).
 // ===========================================================================
 func TestSiblingSubdomainReject(t *testing.T) {
 	h, _ := setupStatsHandler(t)
 	hdr := http.Header{}
-	hdr.Set("Origin", "https://evil.streamvc.live")
+	hdr.Set("Origin", "https://evil.malibu.tech")
 	resp := mustDoWithHeaders(t, h, http.MethodOptions, "/v1/stats/leaderboard", hdr)
 	defer resp.Body.Close()
 	// Should fall through to ACAO: * (no match in static or
 	// partner_keys; sibling-subdomain is NOT auto-trusted).
 	acao := resp.Header.Get("Access-Control-Allow-Origin")
-	if acao == "https://evil.streamvc.live" {
+	if acao == "https://evil.malibu.tech" {
 		t.Errorf("preflight echoed sibling subdomain %q — sibling-domain trust is FORBIDDEN", acao)
 	}
 	if acao != "*" {

@@ -217,7 +217,7 @@ QUESTIONS: 3
 ### Q-2 — AC-18 is a live production smoke, not a CI-local AC
 - SPEC location: AC-18
 - Code location: `test/integration/tool_calling/openai_tool_call_e2e.py:14-18`, `:147-165`; runner docs `test/integration/tool_calling/README.md:15-23`
-- What the SPEC claims: A non-streaming Qwen3-Coder-class response completes through `https://api.streamvc.live/v1` when header timeout is `>= 60`.
+- What the SPEC claims: A non-streaming Qwen3-Coder-class response completes through `https://api.malibu.tech/v1` when header timeout is `>= 60`.
 - What the code does: The runner can verify a public gateway with env-provided base URL, key, provider pin, and model, but this depends on live infra and credentials. Its default model is Qwen2.5, not Qwen3-Coder-class.
 - Drift summary: Verifiable as a manual/release smoke artifact, not as normal CI.
 - Recommended fix to SPEC body: Mark AC-18 as “release smoke/manual live evidence” and require the JSON artifact from the integration runner with explicit Qwen3-Coder-class env values.

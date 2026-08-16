@@ -278,7 +278,7 @@ In `UninstallCommand.swift`:
   - Keep the binary path as `~/.local/bin/macprovider-cli`
   - Also remove `~/macprovider/` (the support dir) and
     `~/Library/Logs/macprovider/`
-  - Remove launchd plist at `~/Library/LaunchAgents/live.streamvc.macprovider.plist`
+  - Remove launchd plist at `~/Library/LaunchAgents/live.malibu.provider.plist`
 
 (Stream C will align install.sh — see below.)
 
@@ -394,7 +394,7 @@ file-removal lists are identical:
   - Binary: ~/.local/bin/macprovider-cli
   - Support dir: ~/macprovider/
   - Logs: ~/Library/Logs/macprovider/
-  - Plist: ~/Library/LaunchAgents/live.streamvc.macprovider.plist
+  - Plist: ~/Library/LaunchAgents/live.malibu.provider.plist
   - Optional: ~/.cache/macprovider/ (warn user, don't auto-remove
     by default — addresses m4)
 

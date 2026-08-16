@@ -10,7 +10,7 @@ You are the **product-design** lane of a round-3 audit of `specs/SPEC-018-agenti
 
 ## The anchor example (unchanged)
 
-A developer opens Cline / Cursor / Aider. Configures `OPENAI_BASE_URL=https://api.streamvc.live/v1` + buyer token. Picks Qwen3-Coder. Asks for a refactor.
+A developer opens Cline / Cursor / Aider. Configures `OPENAI_BASE_URL=https://api.malibu.tech/v1` + buyer token. Picks Qwen3-Coder. Asks for a refactor.
 
 ## Round-3 lane scope
 
@@ -60,7 +60,7 @@ You are the **product-design** lane of a round-3 audit of `specs/SPEC-018-agenti
 
 ## The anchor example (unchanged)
 
-A developer opens Cline / Cursor / Aider. Configures `OPENAI_BASE_URL=https://api.streamvc.live/v1` + buyer token. Picks Qwen3-Coder. Asks for a refactor.
+A developer opens Cline / Cursor / Aider. Configures `OPENAI_BASE_URL=https://api.malibu.tech/v1` + buyer token. Picks Qwen3-Coder. Asks for a refactor.
 
 ## Round-3 lane scope
 
@@ -116,7 +116,7 @@ QUESTIONS: 0
 None.
 
 ## Anchor-example walk-through (v0.1.2)
-A buyer using Cline / Cursor / Aider with `OPENAI_BASE_URL=https://api.streamvc.live/v1`, a buyer token, and a Qwen3-Coder-class model can now read §3.1 plus the SKU note and understand that Qwen2.5, Qwen3, and Coder variants share the Qwen family grammar when the `modelID` contains `qwen2.5` or `qwen3`.
+A buyer using Cline / Cursor / Aider with `OPENAI_BASE_URL=https://api.malibu.tech/v1`, a buyer token, and a Qwen3-Coder-class model can now read §3.1 plus the SKU note and understand that Qwen2.5, Qwen3, and Coder variants share the Qwen family grammar when the `modelID` contains `qwen2.5` or `qwen3`.
 
 The product promise is also honest: v0.1.2 supports first-turn OpenAI wire-shape parsing, not a full coding-agent loop. The user should expect the first assistant tool-call response to parse, buffered streaming to pause until the complete tool call is available, and turn 2 to fail with `unsupported_tool_messages` until v0.2.
 

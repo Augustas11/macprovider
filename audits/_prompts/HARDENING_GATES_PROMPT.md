@@ -312,7 +312,7 @@ whether the coordinator exposes a token-issuance admin endpoint:
 
 ```bash
 curl -s -H "Authorization: Bearer $OPERATOR_KEY" \
-  https://coordinator.streamvc.live/admin/token-issue
+  https://coordinator.malibu.tech/admin/token-issue
 ```
 
 If that endpoint exists, issue tokens for each provider_id (M1, M4)
@@ -349,7 +349,7 @@ Pre-condition: fresh-quota dedicated test account, non-midnight window.
 wrk -t4 -c50 -d90s \
   -H "Authorization: Bearer $TEST_ACCOUNT_KEY" \
   -s post.lua \
-  https://api.streamvc.live/v1/chat/completions &
+  https://api.malibu.tech/v1/chat/completions &
 
 # At T+20s: restart coordinator
 sleep 20 && sudo systemctl restart macprovider-coordinator

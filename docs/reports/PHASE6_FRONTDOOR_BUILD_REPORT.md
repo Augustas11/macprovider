@@ -4,13 +4,13 @@ Date: 2026-05-29
 
 ## Summary
 
-Implemented the buyer-facing front door for `console.streamvc.live` and the scoped gateway support work:
+Implemented the buyer-facing front door for `console.malibu.tech` and the scoped gateway support work:
 
 - New static console in `frontdoor/console/`
 - Endpoint-scoped CORS for the four demo/browser endpoints
 - Embedded `/account` template with one-shot key UX, copy button, save checkbox, snippets, and Tier 1 disclosures before key presentation
 - Embedded `/docs` markdown page rendered by the gateway with `goldmark`
-- nginx vhost for `console.streamvc.live`
+- nginx vhost for `console.malibu.tech`
 - Decision log Entry 28
 
 No locked spec files were modified.
@@ -19,7 +19,7 @@ No locked spec files were modified.
 
 - `frontdoor/console/index.html`
 - `frontdoor/console/README.md`
-- `frontdoor/console/dist/nginx-console.streamvc.live.conf`
+- `frontdoor/console/dist/nginx-console.malibu.tech.conf`
 - `phase5-gateway/gateway.yaml.example`
 - `phase5-gateway/go.mod`
 - `phase5-gateway/go.sum`
@@ -40,7 +40,7 @@ No locked spec files were modified.
 |---|---|---|
 | AC-1 | PASS | `TestAccountTemplateDisplaysKeyAndSnippets` checks key `<code>`, checkbox, and three tabs. |
 | AC-2 | PASS | `TestAccountTemplateWithoutCookieDoesNotLeakKey` checks State B and no `mp_` text. |
-| AC-3 | MANUAL | Requires deployed Lighthouse run against `https://api.streamvc.live/account`. |
+| AC-3 | MANUAL | Requires deployed Lighthouse run against `https://api.malibu.tech/account`. |
 | AC-4 | PASS | Account template is 6,425 bytes unrendered, below 20KB. |
 | AC-5 | PASS | Copy button uses Clipboard API with `document.execCommand` Safari fallback comment. |
 | AC-6 | PASS | `TestTier1DisclosureMatchesSpecSection16` compares disclosure text against SPEC-006 section 1.6. |
@@ -50,7 +50,7 @@ No locked spec files were modified.
 | AC-10 | PASS | `TestCORSNotAppliedToNonDemoEndpoints` covers `/account`, OAuth callback, and admin summary. |
 | AC-11 | PASS | Static scan found no wildcard CORS, no prefix match, `Vary: Origin` is set, credentials is `false`, and disallowed origins get no CORS headers. |
 | AC-12 | PASS | `frontdoor/console/index.html` is 10,076 bytes. |
-| AC-13 | PASS | Static URL scan shows only `https://api.streamvc.live` external references. |
+| AC-13 | PASS | Static URL scan shows only `https://api.malibu.tech` external references. |
 | AC-14 | PASS | Console calls `/v1/status` on load; `/auth/demo-session` is deferred until first prompt input or send. |
 | AC-15 | MANUAL | Requires deployed CORS + live demo-token smoke. |
 | AC-16 | PASS | Console sidebar contains the SPEC-006 section 1.6 disclosure text. |

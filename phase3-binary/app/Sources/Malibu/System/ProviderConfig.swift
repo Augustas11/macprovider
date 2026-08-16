@@ -390,7 +390,7 @@ enum ProviderConfig {
 
         let importMarker = ImportPendingMarker(
             from: paths.configFile.path,
-            to: "keychain://live.streamvc.macprovider.provider-token.v1/\(providerID)",
+            to: "keychain://live.malibu.provider.provider-token.v1/\(providerID)",
             timestamp: importTimestampString(Date()),
             providerID: providerID,
             tokenSHA256: sha256String(token),
@@ -458,7 +458,7 @@ enum ProviderConfig {
             return
         }
         let expectedKeychainDestinations = [
-            "keychain://live.streamvc.macprovider.provider-token.v1/\(marker.providerID)",
+            "keychain://live.malibu.provider.provider-token.v1/\(marker.providerID)",
             "keychain://tech.malibu.provider/\(marker.providerID)",
         ]
         guard marker.from == paths.configFile.path,

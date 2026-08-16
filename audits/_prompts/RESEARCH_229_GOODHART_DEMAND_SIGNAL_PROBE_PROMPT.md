@@ -6,7 +6,7 @@ This is a **scoped pre-SPEC probe**, not a full research memo. Single codex call
 
 ## Context
 
-macprovider is a P2P Apple-Silicon LLM inference network. Buyers call `https://api.streamvc.live/v1/chat/completions`, gateway routes to coordinator, coordinator picks a provider Mac running the requested model. Providers earn per-token rate-card revenue.
+macprovider is a P2P Apple-Silicon LLM inference network. Buyers call `https://api.malibu.tech/v1/chat/completions`, gateway routes to coordinator, coordinator picks a provider Mac running the requested model. Providers earn per-token rate-card revenue.
 
 Wave 0c (the SPEC-018 surface) introduces a provider-side install/autotune recommendation: when a new operator runs `macprovider install` on their Mac, the script scores each rate-card-eligible model on their hardware and recommends the one with the highest expected `$/hr` so they earn the most:
 
@@ -68,8 +68,8 @@ Given (a) beta has ~120 providers in 6 months, (b) macprovider currently has ~2 
 
 Options to evaluate (rank them):
 - (a) OpenRouter top-50 rank, baked into binary at release time (refreshed on `macprovider upgrade`)
-- (b) OpenRouter top-50 rank, fetched live at install/autotune from a static URL (`get.streamvc.live/demand-rank.json`)
-- (c) Coord stats rollup of last-7-day macprovider buyer requests, fetched live (`coordinator.streamvc.live/v1/demand-signal`)
+- (b) OpenRouter top-50 rank, fetched live at install/autotune from a static URL (`get.malibu.tech/demand-rank.json`)
+- (c) Coord stats rollup of last-7-day macprovider buyer requests, fetched live (`coordinator.malibu.tech/v1/demand-signal`)
 - (d) Constant 1.0 — let price compete naturally
 - (e) Hybrid: (a) or (b) for v0.1; switch to (c) at v0.2 once 60+ days of real macprovider buyer history exist
 

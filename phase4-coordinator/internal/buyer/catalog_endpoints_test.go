@@ -233,7 +233,7 @@ func TestCatalogEndpointRateLimited(t *testing.T) {
 
 // SPEC-015 v0.3 bundle audit round 1 SECURITY HIGH-1 fix:
 // catalog endpoints sit behind nginx on loopback (see
-// phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf), so
+// phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf), so
 // every public buyer's r.RemoteAddr is 127.0.0.1. Keying the bucket
 // solely off RemoteAddr collapses every public buyer into one shared
 // pool and lets a single caller starve everyone else. The fix to

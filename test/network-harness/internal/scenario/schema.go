@@ -25,7 +25,7 @@ import (
 // Exported so the sku-econ runner can build fetch URLs from the same
 // constant rather than concatenating the scenario-supplied field, per
 // SEC-H-1 (r2 security audit) defense-in-depth.
-const SKUEconCoordinatorHost = "coordinator.streamvc.live"
+const SKUEconCoordinatorHost = "coordinator.malibu.tech"
 
 // envVarPattern matches `${VAR}` references for safe expansion at load
 // time. Lets scenarios reference secrets like ${BUYER_TOKEN} without
@@ -721,7 +721,7 @@ func (s *Scenario) validateSKUEcon() error {
 	}
 	if u.Path != "" && u.Path != "/" {
 		// SEC-H-1 / CODE-M-1 (r2 audit): a scenario-supplied path would
-		// be concatenated with `/v1/rate-card`, so `https://coordinator.streamvc.live/admin`
+		// be concatenated with `/v1/rate-card`, so `https://coordinator.malibu.tech/admin`
 		// would fetch `/admin/v1/rate-card`. Path must be empty or root.
 		return fmt.Errorf("target.coordinator_url must have empty or / path (got %q)", u.Path)
 	}

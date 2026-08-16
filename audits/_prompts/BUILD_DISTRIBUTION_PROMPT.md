@@ -8,7 +8,7 @@ Go code** and is fully parallelizable with the Swift stream
 
 What this stream produces:
   - `install.sh` (the curl-pipe-bash installer hosted at
-    `get.streamvc.live`)
+    `get.malibu.tech`)
   - launchd plist template
   - GitHub Actions workflow for Releases automation
   - README "Join the Network" section
@@ -41,17 +41,17 @@ run MLX inference, a VPS-hosted coordinator routes buyer requests,
 and the network is presented as one seller to the Antseed marketplace
 (deferred). Production state as of 2026-05-28:
 
-  - `coordinator.streamvc.live` live on Pearl VPS (159.223.165.194)
+  - `coordinator.malibu.tech` live on Pearl VPS (159.223.165.194)
   - Pool N=2: M4 partner (Qwen 7B, MacBook Air) + M1 partner
     (Llama 3.2 3B, the M1 partner's Mac)
   - Multi-model end-to-end working (2.3-2.5s real inference)
   - Current onboarding is operator-locked: every contributor needs
-    a subdomain on streamvc.live + a Cloudflare tunnel token + a
+    a subdomain on malibu.tech + a Cloudflare tunnel token + a
     config edit on the VPS. Three hard blocks. This stream is part
     of removing those blocks.
 
 SPEC-003 v0.4 specifies a curl-pipe-bash installer that a stranger
-can run with no operator action: `curl -fsSL get.streamvc.live/
+can run with no operator action: `curl -fsSL get.malibu.tech/
 install.sh | bash`. The provider binary they download supports
 WS-tunneled inference (no public URL needed), opens an outbound
 WebSocket to the coordinator, and joins the pool as a
@@ -112,7 +112,7 @@ Create (new files):
   /Users/augstar/macprovider-poc/phase3-binary/dist/uninstall.sh
     Removes binary, launchd plist, logs, models. With confirmation.
   /Users/augstar/macprovider-poc/phase3-binary/dist/launchd-plist-template.plist
-    Template for `~/Library/LaunchAgents/live.streamvc.macprovider.plist`
+    Template for `~/Library/LaunchAgents/live.malibu.provider.plist`
     that install.sh fills in per-user.
   /Users/augstar/macprovider-poc/.github/workflows/release.yml
     GitHub Actions workflow for Releases automation. Wraps
@@ -168,17 +168,17 @@ Behavior:
   7. Run `xattr -dr com.apple.quarantine` per OQ-5 workaround
      (FR-C7).
   8. Install launchd plist to
-     `~/Library/LaunchAgents/live.streamvc.macprovider.plist`
+     `~/Library/LaunchAgents/live.malibu.provider.plist`
      (FR-C4).
   9. Load via `launchctl bootstrap gui/$UID
-     ~/Library/LaunchAgents/live.streamvc.macprovider.plist`.
+     ~/Library/LaunchAgents/live.malibu.provider.plist`.
  10. Run self-test (FR-D4):
        - Wait for binary to bind port (60s timeout)
        - Verify `curl http://127.0.0.1:8080/v1/models` returns the
          expected model with `owned_by:macprovider`
        - Wait up to 30s for coordinator pool to show this
          provider_id (curl
-         `https://coordinator.streamvc.live/v1/models` and check
+         `https://coordinator.malibu.tech/v1/models` and check
          for the model). This is the SPEC-003 v0.4 AC-1 pass
          condition: model + coord connection both succeed.
        - If pool doesn't reflect the binary within 30s, print
@@ -211,11 +211,11 @@ Template variables (replaced by install.sh at install time):
   __USER_HOME__       → `$HOME` of installing user
   __BINARY_PATH__     → `~/macprovider/macprovider-cli` (absolute)
   __PROVIDER_ID__     → user's chosen handle (from prompt)
-  __COORDINATOR_URL__ → wss://coordinator.streamvc.live/ws/provider
+  __COORDINATOR_URL__ → wss://coordinator.malibu.tech/ws/provider
   __LOG_DIR__         → `~/Library/Logs/macprovider/`
 
 Plist contents (XML):
-  - Label: `live.streamvc.macprovider`
+  - Label: `live.malibu.provider`
   - ProgramArguments: [BINARY_PATH, --port, 8080, --model, <MODEL>,
                        --provider-id, PROVIDER_ID, --coordinator,
                        COORDINATOR_URL]
@@ -239,15 +239,15 @@ Build to FR-D5 in SPEC-003 v0.4.
 Behavior:
   1. Confirm with user (yes/no prompt) — list what will be removed
   2. `launchctl bootout gui/$UID
-     ~/Library/LaunchAgents/live.streamvc.macprovider.plist`
-  3. Remove `~/Library/LaunchAgents/live.streamvc.macprovider.plist`
+     ~/Library/LaunchAgents/live.malibu.provider.plist`
+  3. Remove `~/Library/LaunchAgents/live.malibu.provider.plist`
   4. Remove `~/macprovider/` (binary, models, logs)
   5. Remove `~/Library/Logs/macprovider/`
   6. Print: "If you want to fully uninstall MLX-cached models from
      ~/.cache/huggingface/, do that manually."
 
 DO NOT remove anything outside the ~/macprovider/ + ~/Library/
-LaunchAgents/live.streamvc.macprovider.plist + ~/Library/Logs/
+LaunchAgents/live.malibu.provider.plist + ~/Library/Logs/
 macprovider/ paths.
 
 ### Step 4: .github/workflows/release.yml

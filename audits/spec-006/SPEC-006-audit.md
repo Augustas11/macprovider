@@ -265,7 +265,7 @@ The operator should decide whether partial tokens count when the buyer disconnec
 - J Front-door contract: no direct incompatibility with `beta/web/`, but the demo-token/session implementation remains underspecified through the feedback/status issues above.
 - K Scope discipline: no premium pricing, no SPEC-001/002 mutation, no Tier-3 deprecation found.
 - L Acceptance criteria: one MAJOR coverage finding.
-- M Backward compatibility: legacy `m4.streamvc.live` and `m1.streamvc.live` are explicitly preserved.
+- M Backward compatibility: legacy `m4.malibu.tech` and `m1.malibu.tech` are explicitly preserved.
 - N Security: callback allowlist is CRITICAL; storage/tamper/XSS-adjacent details need follow-up. Comment rendering is safe only if the UI uses text escaping; the spec should require escaping when rendering feedback comments, but I counted that under M15 rather than a separate finding.
 
 ### Self-verification
@@ -307,7 +307,7 @@ Round 1 (Codex) was thorough. This round confirms most of its findings, upgrades
 **Finding:** Identical to round 1 C2. The spec requires `state` parameter validation (good — CSRF defense) but does not require a strict `redirect_uri` allowlist.
 **Why it matters:** Without explicit callback URL validation, an implementer could register a permissive callback pattern in the GitHub OAuth app, enabling authorization code interception. GitHub OAuth does enforce `redirect_uri` matching when configured, but the spec must mandate the configuration.
 **Mitigating factor:** GitHub's OAuth implementation requires callback URL registration in app settings and rejects mismatched `redirect_uri` by default.
-**Suggested fix:** Add to Section 5.8: "The GitHub OAuth app MUST be configured with a strict callback URL allowlist containing only `https://api.streamvc.live/auth/github/callback`. The gateway MUST reject callbacks whose `redirect_uri` does not exactly match. Local development MAY use `http://localhost:{port}/auth/github/callback` as a separate OAuth app."
+**Suggested fix:** Add to Section 5.8: "The GitHub OAuth app MUST be configured with a strict callback URL allowlist containing only `https://api.malibu.tech/auth/github/callback`. The gateway MUST reject callbacks whose `redirect_uri` does not exactly match. Local development MAY use `http://localhost:{port}/auth/github/callback` as a separate OAuth app."
 
 ---
 

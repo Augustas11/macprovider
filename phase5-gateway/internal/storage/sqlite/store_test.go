@@ -229,7 +229,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 
 	stateHash := keyHash("oauth-state")
 	if err := store.StoreOAuthState(ctx, storage.OAuthState{
-		StateHash: stateHash[:], SessionID: "session_1", RedirectURI: "https://api.streamvc.live/auth/github/callback",
+		StateHash: stateHash[:], SessionID: "session_1", RedirectURI: "https://api.malibu.tech/auth/github/callback",
 		ClientIP: "1.2.3.4", Action: "mint", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
 	}); err != nil {
 		t.Fatalf("StoreOAuthState: %v", err)
@@ -238,7 +238,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConsumeOAuthState: %v", err)
 	}
-	if redirectURI != "https://api.streamvc.live/auth/github/callback" {
+	if redirectURI != "https://api.malibu.tech/auth/github/callback" {
 		t.Fatalf("redirectURI=%q", redirectURI)
 	}
 	if action != "mint" {
@@ -253,7 +253,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 
 	expiredHash := keyHash("expired-oauth-state")
 	if err := store.StoreOAuthState(ctx, storage.OAuthState{
-		StateHash: expiredHash[:], SessionID: "session_2", RedirectURI: "https://api.streamvc.live/auth/github/callback",
+		StateHash: expiredHash[:], SessionID: "session_2", RedirectURI: "https://api.malibu.tech/auth/github/callback",
 		ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(time.Minute),
 	}); err != nil {
 		t.Fatalf("StoreOAuthState expired: %v", err)
@@ -265,7 +265,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	// Default (unset) action persists as empty string and round-trips cleanly.
 	plainHash := keyHash("plain-oauth-state")
 	if err := store.StoreOAuthState(ctx, storage.OAuthState{
-		StateHash: plainHash[:], SessionID: "session_3", RedirectURI: "https://api.streamvc.live/auth/github/callback",
+		StateHash: plainHash[:], SessionID: "session_3", RedirectURI: "https://api.malibu.tech/auth/github/callback",
 		ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
 	}); err != nil {
 		t.Fatalf("StoreOAuthState plain: %v", err)
@@ -314,7 +314,7 @@ func TestOAuthStateCapAndPrune(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		hash := keyHash(fmt.Sprintf("state-%02d", i))
 		if err := store.StoreOAuthStateWithCap(ctx, storage.OAuthState{
-			StateHash: hash[:], SessionID: fmt.Sprintf("session_%02d", i), RedirectURI: "https://api.streamvc.live/auth/github/callback",
+			StateHash: hash[:], SessionID: fmt.Sprintf("session_%02d", i), RedirectURI: "https://api.malibu.tech/auth/github/callback",
 			ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
 		}, 20, now); err != nil {
 			t.Fatalf("StoreOAuthStateWithCap %d: %v", i, err)
@@ -322,7 +322,7 @@ func TestOAuthStateCapAndPrune(t *testing.T) {
 	}
 	overflow := keyHash("state-overflow")
 	if err := store.StoreOAuthStateWithCap(ctx, storage.OAuthState{
-		StateHash: overflow[:], SessionID: "session_overflow", RedirectURI: "https://api.streamvc.live/auth/github/callback",
+		StateHash: overflow[:], SessionID: "session_overflow", RedirectURI: "https://api.malibu.tech/auth/github/callback",
 		ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
 	}, 20, now); !errors.Is(err, storage.ErrOAuthStateCap) {
 		t.Fatalf("overflow err=%v want ErrOAuthStateCap", err)
@@ -343,7 +343,7 @@ func TestOAuthStateReturnToRoundTrip(t *testing.T) {
 	stateHash := keyHash("oauth-state-returnto")
 	returnTo := "https://malibu.tech/console/auth/callback.html"
 	if err := store.StoreOAuthStateWithCap(ctx, storage.OAuthState{
-		StateHash: stateHash[:], SessionID: "sess_r", RedirectURI: "https://api.streamvc.live/auth/github/callback",
+		StateHash: stateHash[:], SessionID: "sess_r", RedirectURI: "https://api.malibu.tech/auth/github/callback",
 		ReturnTo: returnTo, ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
 	}, 5, now); err != nil {
 		t.Fatalf("StoreOAuthStateWithCap: %v", err)

@@ -19,7 +19,7 @@ command -v python3 >/dev/null || {
   exit 1
 }
 
-GATEWAY_URL="${MACPROVIDER_HTTP2_GATEWAY_URL:-https://api.streamvc.live}"
+GATEWAY_URL="${MACPROVIDER_HTTP2_GATEWAY_URL:-https://api.malibu.tech}"
 GATEWAY_ORIGIN="${GATEWAY_URL%/}"
 CURL_CONNECT_TIMEOUT="${MACPROVIDER_HTTP2_CONNECT_TIMEOUT:-10}"
 CURL_HEALTH_MAX_TIME="${MACPROVIDER_HTTP2_HEALTH_MAX_TIME:-20}"
@@ -121,7 +121,7 @@ if [ -z "$API_KEY" ] && [ -n "$ENV_API_KEY_FILE" ]; then
   API_KEY="$(tr -d '\n' < "$ENV_API_KEY_FILE")"
 fi
 if [ -z "$API_KEY" ]; then
-  if [ "$GATEWAY_ORIGIN" != "https://api.streamvc.live" ] && [ "${MACPROVIDER_HTTP2_ALLOW_GENERIC_KEY_FOR_CUSTOM_GATEWAY:-}" != "1" ]; then
+  if [ "$GATEWAY_ORIGIN" != "https://api.malibu.tech" ] && [ "${MACPROVIDER_HTTP2_ALLOW_GENERIC_KEY_FOR_CUSTOM_GATEWAY:-}" != "1" ]; then
     echo "FAIL: non-default gateway URLs require MACPROVIDER_HTTP2_API_KEY_FILE or MACPROVIDER_HTTP2_API_KEY (or MACPROVIDER_HTTP2_ALLOW_GENERIC_KEY_FOR_CUSTOM_GATEWAY=1)" >&2
     exit 1
   fi

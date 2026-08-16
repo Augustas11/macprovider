@@ -64,7 +64,7 @@ None.
      `mpk_step4c_partner_secret_token` (`phase4-coordinator/internal/stats/step4c_integration_test.go:80`),
      not a 47-character SPEC-shaped `mpk_` token with a 43-character body.
    - The wired test's deny list is
-     `{"mpk_garbage", "garbage", "evil.streamvc.live", "Bearer ", "token_hash"}`
+     `{"mpk_garbage", "garbage", "evil.malibu.tech", "Bearer ", "token_hash"}`
      (`step4c_integration_test.go:130`). It does not include the actual
      seeded bearer token and does not include the general forbidden substring
      `mpk_`.

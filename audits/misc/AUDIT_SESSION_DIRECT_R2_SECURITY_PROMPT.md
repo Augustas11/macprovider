@@ -41,13 +41,13 @@ Verify:
   port). Confirm.
 - Case sensitivity: DNS is case-insensitive on host; `lowercased()`
   applied to both. `scheme` also lowercased. Confirm the attacker
-  can't defeat validation via `WSS://COORDINATOR.STREAMVC.LIVE` case
+  can't defeat validation via `WSS://COORDINATOR.MALIBU.TECH` case
   differences or Unicode homoglyphs. What about IDN? URL.host on an
   attacker-controlled ASCII-punycode host (`xn--…`) — would the
   comparison match against a non-punycode expected host?
 - Path validation is "non-empty". An attacker who successfully
   compromised the registrar could still steer the CLI to
-  `wss://coordinator.streamvc.live/attacker-controlled-path`. Is the
+  `wss://coordinator.malibu.tech/attacker-controlled-path`. Is the
   path attacker-influenceable in a way that matters to the WebSocket
   handshake (e.g. does the coordinator route path-based to different
   handler chains)? If yes, path should be pinned to `/v2/provider`
@@ -139,7 +139,7 @@ posture?
   path). Currently only the validator itself is tested in isolation.
 - Test for IDN / punycode host mismatch.
 - Test for scheme comparison being case-insensitive (both
-  `wss://coordinator.streamvc.live` and `WSS://coordinator.streamvc.live`
+  `wss://coordinator.malibu.tech` and `WSS://coordinator.malibu.tech`
   accepted, but a comparison bug that makes the URL scheme parse fail
   for uppercase would show up here).
 

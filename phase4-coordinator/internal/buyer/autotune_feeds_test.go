@@ -819,7 +819,7 @@ func removeFirstBenchGateProvenance(t *testing.T, raw []byte) []byte {
 
 func TestNginxAutotuneFeedsAllowThroughBeforeV1CatchAll(t *testing.T) {
 	t.Parallel()
-	b, err := os.ReadFile(filepath.Join("..", "..", "dist", "nginx-coordinator.streamvc.live.conf"))
+	b, err := os.ReadFile(filepath.Join("..", "..", "dist", "nginx-coordinator.malibu.tech.conf"))
 	if err != nil {
 		t.Fatalf("read nginx config: %v", err)
 	}

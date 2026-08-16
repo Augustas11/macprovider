@@ -3,8 +3,8 @@
 ## Context
 
 You are working on **macprovider-poc** — a P2P Mac inference marketplace. The
-coordinator runs at `coordinator.streamvc.live` (Pearl VPS, `159.223.165.194`).
-The buyer-facing API gateway runs at `api.streamvc.live` (same VPS). Providers
+coordinator runs at `coordinator.malibu.tech` (Pearl VPS, `159.223.165.194`).
+The buyer-facing API gateway runs at `api.malibu.tech` (same VPS). Providers
 are Mac machines (M1/M4) running the phase3-binary Swift CLI, each serving one
 MLX model via a WebSocket connection to the coordinator.
 
@@ -131,7 +131,7 @@ Deploy:
 
 After restart/reload:
 - Coordinator logs should show `tier2 catalog loaded` with model count
-- `GET https://api.streamvc.live/v1/models` (with `X-Demo-Token`) should show
+- `GET https://api.malibu.tech/v1/models` (with `X-Demo-Token`) should show
   Tier-2 disclosure fields including `tier2.model_hash.state`
 - Providers without model_hash will show `uncatalogued` (expected until Task 2)
 
@@ -214,7 +214,7 @@ Phase 1 activation is complete when:
 Use `specs/SPEC-008-PHASE1-ACCEPTANCE-RUNBOOK.md` as the executable activation
 and verification handoff.
 
-1. `GET https://api.streamvc.live/v1/models` with `X-Demo-Token` returns
+1. `GET https://api.malibu.tech/v1/models` with `X-Demo-Token` returns
    `tier2` disclosure block (not just `tier1_disclosure`) with
    `tier2.model_hash.state` field present.
 

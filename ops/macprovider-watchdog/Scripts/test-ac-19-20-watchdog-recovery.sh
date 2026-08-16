@@ -30,10 +30,10 @@ cat > "$FAKE_BIN/launchctl" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = "list" ]; then
   printf '%s\n' \
-    "-	0	live.streamvc.macprovider-compatibility-reload" \
-    "-	0	live.streamvc.macprovider-compatibility-reload.01234567-89ab-4cde-8fab-0123456789ab" \
-    "-	0	live.streamvc.macprovider-compatibility-reload.01234567-89AB-4CDE-8FAB-0123456789AB" \
-    "-	0	live.streamvc.macprovider-compatibility-reload.not-a-uuid"
+    "-	0	live.malibu.provider-compatibility-reload" \
+    "-	0	live.malibu.provider-compatibility-reload.01234567-89ab-4cde-8fab-0123456789ab" \
+    "-	0	live.malibu.provider-compatibility-reload.01234567-89AB-4CDE-8FAB-0123456789AB" \
+    "-	0	live.malibu.provider-compatibility-reload.not-a-uuid"
 elif [ "${1:-}" = "bootout" ]; then
   printf 'bootout:%s\n' "${2:-}" >> "${TEST_LAUNCHCTL_LOG:?}"
 elif [ "${1:-}" = "print" ] && [[ "${2:-}" == *"-compatibility-reload"* ]]; then
@@ -175,7 +175,7 @@ with open(os.path.join(release_backup, "compatibility-set-local", "install.sh"),
 members = [
     (
         "launchd",
-        os.path.join(home, "Library/LaunchAgents/live.streamvc.macprovider.plist"),
+        os.path.join(home, "Library/LaunchAgents/live.malibu.provider.plist"),
         "provider.plist",
         "old-provider-plist\n",
         "new-provider-plist\n",
@@ -191,7 +191,7 @@ members = [
     ),
     (
         "watchdog_plist",
-        os.path.join(home, "Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"),
+        os.path.join(home, "Library/LaunchAgents/live.malibu.provider-watchdog.plist"),
         "watchdog.plist",
         "old-watchdog-plist\n",
         "new-watchdog-plist\n",
@@ -381,7 +381,7 @@ run_watchdog_tick() {
   MACPROVIDER_LOG_DIR="$LOG_DIR" \
   MACPROVIDER_WATCHDOG_STATE_DIR="$WATCHDOG_STATE" \
   TEST_LAUNCHCTL_LOG="$TMP_ROOT/launchctl.log" \
-  TEST_STABLE_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider-compatibility-reload.plist" \
+  TEST_STABLE_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.malibu.provider-compatibility-reload.plist" \
   TEST_RELOAD_HELPER_INSPECTION_ERROR="${TEST_RELOAD_HELPER_INSPECTION_ERROR:-0}" \
   TEST_LIFECYCLE_LEASE_KIND="${TEST_LIFECYCLE_LEASE_KIND:-}" \
   TEST_LIFECYCLE_LEASE_OWNER_PID="${TEST_LIFECYCLE_LEASE_OWNER_PID:-}" \
@@ -401,15 +401,15 @@ run_watchdog_tick_with_health() {
   MACPROVIDER_LOG_DIR="$LOG_DIR" \
   MACPROVIDER_WATCHDOG_STATE_DIR="$WATCHDOG_STATE" \
   TEST_LAUNCHCTL_LOG="$TMP_ROOT/launchctl.log" \
-  TEST_STABLE_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider-compatibility-reload.plist" \
+  TEST_STABLE_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.malibu.provider-compatibility-reload.plist" \
   TEST_RELOAD_HELPER_INSPECTION_ERROR="${TEST_RELOAD_HELPER_INSPECTION_ERROR:-0}" \
   bash "$WATCHDOG"
 }
 
 mkdir -p "$HOME_DIR/Library/LaunchAgents"
-STABLE_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider-compatibility-reload.plist"
-LEGACY_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider-compatibility-reload.01234567-89ab-4cde-8fab-0123456789ab.plist"
-NEAR_MATCH_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider-compatibility-reload.not-a-uuid.plist"
+STABLE_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.malibu.provider-compatibility-reload.plist"
+LEGACY_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.malibu.provider-compatibility-reload.01234567-89ab-4cde-8fab-0123456789ab.plist"
+NEAR_MATCH_RELOAD_PLIST="$HOME_DIR/Library/LaunchAgents/live.malibu.provider-compatibility-reload.not-a-uuid.plist"
 touch "$STABLE_RELOAD_PLIST" "$LEGACY_RELOAD_PLIST" "$NEAR_MATCH_RELOAD_PLIST"
 
 write_fixture $'old-version\n' $'new-version\n'
@@ -430,8 +430,8 @@ if [ "$(ls -di "$STATE_ROOT/update.lock" | awk '{print $1}')" != "$LOCK_INODE_BE
   echo "AC-19 FAIL: recovery split the stable update.lock inode" >&2
   exit 1
 fi
-grep -q "bootout:gui/$(id -u)/live.streamvc.macprovider-compatibility-reload$" "$TMP_ROOT/launchctl.log"
-grep -q "bootout:gui/$(id -u)/live.streamvc.macprovider-compatibility-reload.01234567-89ab-4cde-8fab-0123456789ab$" "$TMP_ROOT/launchctl.log"
+grep -q "bootout:gui/$(id -u)/live.malibu.provider-compatibility-reload$" "$TMP_ROOT/launchctl.log"
+grep -q "bootout:gui/$(id -u)/live.malibu.provider-compatibility-reload.01234567-89ab-4cde-8fab-0123456789ab$" "$TMP_ROOT/launchctl.log"
 if grep -q 'bootout:.*89AB-4CDE' "$TMP_ROOT/launchctl.log" || \
    grep -q 'bootout:.*not-a-uuid' "$TMP_ROOT/launchctl.log"; then
   echo "AC-19 FAIL: reload fence targeted a non-canonical helper label" >&2
@@ -457,7 +457,7 @@ if [ "$(cat "$TARGET")" != $'new-version' ] || \
   echo "AC-19 FAIL: helper fence inspection error did not fail closed before restore" >&2
   exit 1
 fi
-grep -q '"reason":"reload_helper_inspection_failed:live.streamvc.macprovider-compatibility-reload:78"' "$LOG_DIR/watchdog.log"
+grep -q '"reason":"reload_helper_inspection_failed:live.malibu.provider-compatibility-reload:78"' "$LOG_DIR/watchdog.log"
 
 rm -f "$LOG_DIR/watchdog.log"
 write_fixture $'old-version\n' $'new-version\n'
@@ -469,9 +469,9 @@ if [ "$(cat "$BIN_DIR/compatibility-set-local/install.sh")" != $'old-install-con
   cat "$LOG_DIR/watchdog.log" >&2
   exit 1
 fi
-if [ "$(cat "$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider.plist")" != $'old-provider-plist' ] || \
+if [ "$(cat "$HOME_DIR/Library/LaunchAgents/live.malibu.provider.plist")" != $'old-provider-plist' ] || \
    [ "$(cat "$HOME_DIR/.local/share/macprovider-watchdog/macprovider-health-monitor")" != $'old-watchdog-script' ] || \
-   [ "$(cat "$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist")" != $'old-watchdog-plist' ]; then
+   [ "$(cat "$HOME_DIR/Library/LaunchAgents/live.malibu.provider-watchdog.plist")" != $'old-watchdog-plist' ]; then
   echo "AC-19 FAIL: external compatibility-set members were not restored" >&2
   exit 1
 fi

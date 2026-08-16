@@ -33,8 +33,8 @@ expected_shape: |
    - PHASE B TRIAGE: decide on a "ready" state for routability.
 
 target:
-  gateway_url: https://api.streamvc.live
-  coordinator_url: https://coordinator.streamvc.live
+  gateway_url: https://api.malibu.tech
+  coordinator_url: https://coordinator.malibu.tech
   buyer_token: ${BUYER_TOKEN}
   coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
   gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
@@ -59,7 +59,7 @@ prompts:
 chaos_events:
   - at: 0s
     description: "Kill local provider to force a cold start"
-    command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
+    command: launchctl kickstart -k gui/$(id -u)/live.malibu.provider
   # Buyer fleet waits initial_delay=2s, then fires while the 32B model
   # is still expected to be reloading. The 90s request_timeout / 120s
   # duration give the cold start ~110s of room.

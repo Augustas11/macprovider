@@ -14,7 +14,7 @@
     "mlx_swift_lm_pin": "3.31.4 (rev bd4b7434e6bd)",
     "bench_binary": "phase3-binary/.build/release/macprovider-cli (swift build -c release)",
     "metallib_source": "built from mlx-swift 0.31.6 checkout via scripts/build-mlx-metallib.sh",
-    "production_provider_during_bench": "STOPPED — live.streamvc.macprovider (PID 71387, qwen3-coder-30b-a3b-instruct on port 61919) was safely bootout via launchctl before bench; restored after."
+    "production_provider_during_bench": "STOPPED — live.malibu.provider (PID 71387, qwen3-coder-30b-a3b-instruct on port 61919) was safely bootout via launchctl before bench; restored after."
   },
   "swap_observed": false,
   "models": [

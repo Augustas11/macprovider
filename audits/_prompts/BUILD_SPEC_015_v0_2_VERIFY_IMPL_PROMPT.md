@@ -255,7 +255,7 @@ Each step lands on its own `impl/spec-015-v0-2-step-NN` branch. Each step goes t
 
 **Audit prompt:** `specs/AUDIT_SPEC_015_v0_2_IMPL_STEP_5_PROMPT.md` — focus: cache file race conditions, redirect bypass attempts, "no network beyond /v1/receipt-keys" invariant (no DNS calls for telemetry, no retries, no version-check beacons).
 
-**Done when:** 0 CRITICAL/MAJOR; manual smoke: hit a real `coordinator.streamvc.live` `/v1/receipt-keys/<id>` after Step 0 ships, parse response, populate cache.
+**Done when:** 0 CRITICAL/MAJOR; manual smoke: hit a real `coordinator.malibu.tech` `/v1/receipt-keys/<id>` after Step 0 ships, parse response, populate cache.
 
 ---
 
@@ -457,7 +457,7 @@ Before opening the final PR to `main`:
 
 ## Operator-pending items to anticipate (not in this BUILD scope)
 
-- **Pearl VPS coordinator deployment:** after Step 0 lands, the `/v1/receipt-keys/<provider_id>` endpoint must be deployed to the production coordinator (`coordinator.streamvc.live`). This is an operator step, not a BUILD step.
+- **Pearl VPS coordinator deployment:** after Step 0 lands, the `/v1/receipt-keys/<provider_id>` endpoint must be deployed to the production coordinator (`coordinator.malibu.tech`). This is an operator step, not a BUILD step.
 - **nginx route exposure:** the buyer port nginx config must route `/v1/receipt-keys/*` through to the coordinator. Check `nginx.conf` placement when Step 0 is reviewed.
 - **Public binary distribution decision:** GitHub Release vs Homebrew tap vs both. v0.2 ships GitHub Release only per BUILD prompt; Homebrew tap is deferred to v0.3.
 - **README/docs updates:** the "verifiable inference" claim at README line 22 can finally drop its "planned, not yet implemented" caveat once v0.2 ships. Operator decision on exact wording.

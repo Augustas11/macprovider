@@ -208,7 +208,7 @@ curl -i -sS \
   -H 'Origin: https://malibu.tech.evil.test' \
   -H 'Content-Type: application/json' \
   --data '{"code":"<REDACTED_TEST_CODE>"}' \
-  https://coordinator.streamvc.live/v1/referrals/validate
+  https://coordinator.malibu.tech/v1/referrals/validate
 ```
 
 Expected: HTTP 403 and no `Access-Control-Allow-Origin` header.
@@ -220,7 +220,7 @@ curl -i -sS \
   -H 'Origin: https://malibu.tech' \
   -H 'Content-Type: application/json' \
   --data '{"code":"<REDACTED_TEST_CODE>"}' \
-  https://coordinator.streamvc.live/v1/referrals/validate
+  https://coordinator.malibu.tech/v1/referrals/validate
 ```
 
 Expected: no credentials CORS header, `Cache-Control: no-store`, JSON response, and no challenge or fragment material in the URL.
@@ -329,7 +329,7 @@ curl -i -sS \
   -H 'Origin: https://malibu.tech' \
   -H 'Content-Type: application/json' \
   --data '{"code":"<REDACTED_TEST_CODE>"}' \
-  https://coordinator.streamvc.live/v1/referrals/validate
+  https://coordinator.malibu.tech/v1/referrals/validate
 ```
 
 When `enable_public_validation=false`, confirm the public validate route is no longer mounted by the coordinator. The nginx exact route may still proxy, but the coordinator should return the normal disabled/not-found behavior rather than live validation.

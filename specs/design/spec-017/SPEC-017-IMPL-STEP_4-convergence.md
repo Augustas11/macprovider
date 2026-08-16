@@ -136,13 +136,13 @@ Files:
 
 ### Step 4.B — nginx edge
 
-- `nginx-stats.streamvc.live.conf` — shape-(a) standalone vhost
-  on `stats.streamvc.live`; TLS + HSTS + security headers via
+- `nginx-stats.malibu.tech.conf` — shape-(a) standalone vhost
+  on `stats.malibu.tech`; TLS + HSTS + security headers via
   shared snippet; per-endpoint rate-limit zones; `proxy_cache`
   for public projection only with `proxy_cache_bypass` +
   `proxy_no_cache` paired on `$http_authorization`
   (SECURITY r5 C1).
-- `nginx-coordinator.streamvc.live.conf` — shape-(b) embedded
+- `nginx-coordinator.malibu.tech.conf` — shape-(b) embedded
   `/v1/stats/*` block in the existing coordinator vhost; same
   zones / cache / security headers.
 - `nginx-snippets/stats-shared.conf` — `$public_rl_key` map
@@ -160,8 +160,8 @@ Files:
   sustained 60/min (the §5.6 contract).
 
 Files:
-[`dist/nginx-stats.streamvc.live.conf`](../phase4-coordinator/dist/nginx-stats.streamvc.live.conf),
-[`dist/nginx-coordinator.streamvc.live.conf`](../phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf),
+[`dist/nginx-stats.malibu.tech.conf`](../phase4-coordinator/dist/nginx-stats.malibu.tech.conf),
+[`dist/nginx-coordinator.malibu.tech.conf`](../phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf),
 [`dist/nginx-snippets/`](../phase4-coordinator/dist/nginx-snippets/),
 [`dist/test/check_nginx_stats_test.sh`](../phase4-coordinator/dist/test/check_nginx_stats_test.sh).
 

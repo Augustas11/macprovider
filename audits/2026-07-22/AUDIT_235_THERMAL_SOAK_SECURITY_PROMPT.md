@@ -22,7 +22,7 @@ provider-side capture scripts that run on a LAB Mac. No soak has run.
      an unset lab URL → empty gateway_url → validation ERROR (fail-closed), so
      you cannot accidentally fire at a baked-in prod default. Is there ANY
      path (default value, fallback, other scenario field) by which this
-     scenario could hit `streamvc.live`?
+     scenario could hit `malibu.tech`?
    - The committed-scenarios test (`schema_test.go`) seeds
      `LAB_GATEWAY_URL`/`LAB_COORDINATOR_URL` placeholders so the structural
      test passes. Confirm that seeding is test-scoped (`t.Setenv`) and does

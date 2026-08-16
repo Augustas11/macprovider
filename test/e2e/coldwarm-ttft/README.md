@@ -122,7 +122,7 @@ probe, which derives models from `/v1/status`.
 **systemd** (always-on lab Linux host): `coldwarm-warm.{service,timer}` accumulate
 the warm baseline every 30 min; `coldwarm-matrix.{service,timer}` rebuild the
 matrix every 15 min. See the service headers for install steps. **launchd** (lab
-Mac): `com.streamvc.coldwarm-warm.plist` for the warm baseline. Cold cycles stay
+Mac): `com.malibu.coldwarm-warm.plist` for the warm baseline. Cold cycles stay
 operator-driven regardless.
 
 ## Output — the matrix
@@ -147,7 +147,7 @@ The JSON `recommendations` / `slo` blocks carry the calibration; see
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `MACPROVIDER_BUYER_TOKEN` / `MALIBU_API_KEY` | — | buyer bearer (required to probe) |
-| `COLDWARM_BASE` | `https://api.streamvc.live` | gateway base URL |
+| `COLDWARM_BASE` | `https://api.malibu.tech` | gateway base URL |
 | `COLDWARM_STORE` | `./coldwarm-samples.ndjson` | append-only NDJSON sample store |
 | `COLDWARM_SAMPLES` | `20` | warm samples per regime |
 | `COLDWARM_CANARY_MAX_TOKENS` | `16` | non-streaming `max_tokens` — keep == the coordinator's `canary_max_tokens` so the regime matches the gate |

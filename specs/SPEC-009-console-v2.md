@@ -1,14 +1,14 @@
 # SPEC-009 — MacProvider Console v2
 
-**Version:** 0.1  
-**Status:** Implemented & shipped — live at console.streamvc.live for weeks. Later iterations added a real gateway GitHub OAuth sign-in and "Get API key" flow that exceed this spec's localStorage-only placeholder scope (buyer-auth surface not yet specced here).  
+**Version:** 0.1
+**Status:** Implemented & shipped — live at console.malibu.tech for weeks. Later iterations added a real gateway GitHub OAuth sign-in and "Get API key" flow that exceed this spec's localStorage-only placeholder scope (buyer-auth surface not yet specced here).
 **Replaces:** `frontdoor/console/index.html` (the current v1 single-panel demo page)
 
 ---
 
 ## 1. Goals
 
-Redesign `console.streamvc.live` from a bare demo widget into a developer-grade chat console modelled after Cursor's UI/UX.  Target users are heavy developers; first impression must read as "best-in-class tooling", not "weekend POC".
+Redesign `console.malibu.tech` from a bare demo widget into a developer-grade chat console modelled after Cursor's UI/UX.  Target users are heavy developers; first impression must read as "best-in-class tooling", not "weekend POC".
 
 Non-goals for v0.1:
 - Multi-file upload, tool-use display, agentic workflows
@@ -55,7 +55,7 @@ Non-goals for v0.1:
 | New Chat button | Creates a new session; switches view to chat; clears message thread; focuses input. |
 | Recent history list | Last 10 sessions from `localStorage`. Shows auto-generated title (first 40 chars of first user turn). Clicking restores messages. |
 | Dashboard nav | `onclick` route swap (no page reload). |
-| API Docs nav | External link to `https://api.streamvc.live/docs`. |
+| API Docs nav | External link to `https://api.malibu.tech/docs`. |
 | Pool status | Small dot (green=up, amber=idle, red=down) + one-word label. Updated on load + every 30 s. |
 | User area | Unauthenticated: "Sign in with GitHub" link. Authenticated: avatar initials chip + username. |
 
@@ -128,7 +128,7 @@ mp_models     → JSON: string[]    (model id cache; refreshed on status fetch)
 
 ## 5. API contract
 
-All calls go to `https://api.streamvc.live`.
+All calls go to `https://api.malibu.tech`.
 
 | Call | When |
 |------|------|

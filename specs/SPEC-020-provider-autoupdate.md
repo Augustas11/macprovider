@@ -530,7 +530,7 @@ plist. A timeout or any unrecognized inspection result MUST fail closed
 without bootstrap. Before drain or live mutation, before rollback restoration,
 and before arming a new helper, the updater MUST boot out the stable helper
 label and every exact legacy
-`live.streamvc.macprovider-compatibility-reload.<lowercase-UUID>` label. A
+`live.malibu.provider-compatibility-reload.<lowercase-UUID>` label. A
 prefix-confusable or malformed label MUST NOT be touched. Failure to prove a
 matching loaded helper absent MUST fail closed before mutation or restoration.
 `launchctl submit` is forbidden for this restart because its inferred retry

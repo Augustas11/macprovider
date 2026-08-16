@@ -3,7 +3,7 @@
 External LaunchAgent that observes the installed Mac provider process
 and runs auto-update rollback recovery. It ships alongside every
 install of `macprovider-cli` via the public
-`get.streamvc.live/install.sh` flow.
+`get.malibu.tech/install.sh` flow.
 
 ## What it does
 
@@ -21,7 +21,7 @@ When the provider has already been observed healthy in the current boot,
 the watchdog requests a bounded restart with:
 
 ```bash
-launchctl kickstart -k gui/$UID/live.streamvc.macprovider
+launchctl kickstart -k gui/$UID/live.malibu.provider
 ```
 
 It also requests the same restart when launchd has no validated provider
@@ -45,8 +45,8 @@ operator without any hardcoded provider id.
 | File | Purpose |
 |---|---|
 | `watchdog.sh` | The poll script source (installed as `macprovider-health-monitor`). Idempotent; safe to invoke repeatedly. |
-| `live.streamvc.macprovider-watchdog.template.plist` | LaunchAgent template; substituted by `install.sh`. |
-| `install.sh` | Idempotent installer. Invoked by both the main `get.streamvc.live/install.sh` flow and by an operator running this directory by hand. |
+| `live.malibu.provider-watchdog.template.plist` | LaunchAgent template; substituted by `install.sh`. |
+| `install.sh` | Idempotent installer. Invoked by both the main `get.malibu.tech/install.sh` flow and by an operator running this directory by hand. |
 | `uninstall.sh` | Removes the LaunchAgent and the `~/.local/share/macprovider-watchdog` directory. |
 
 ## Operator runbook
@@ -72,13 +72,13 @@ silent so the log does not bloat). To see whether the LaunchAgent is
 loaded:
 
 ```bash
-launchctl list | grep live.streamvc.macprovider-watchdog
+launchctl list | grep live.malibu.provider-watchdog
 ```
 
 To manually fire a tick out-of-cadence:
 
 ```bash
-launchctl kickstart -k gui/$UID/live.streamvc.macprovider-watchdog
+launchctl kickstart -k gui/$UID/live.malibu.provider-watchdog
 ```
 
 ### Uninstall
@@ -94,7 +94,7 @@ remove the watchdog without removing the provider.
 ## Why this is bounded recovery, not competing runtime ownership
 
 The provider process owns in-process liveness checks, and the main
-`live.streamvc.macprovider` LaunchAgent owns routine restarts through
+`live.malibu.provider` LaunchAgent owns routine restarts through
 `KeepAlive`. This external LaunchAgent only asks launchd to restart the
 provider after a local-health regression that follows a previously
 healthy tick, or when launchd has no validated provider PID outside a
@@ -111,9 +111,9 @@ Both `install.sh` and `watchdog.sh` accept env overrides for testing:
 | `MACPROVIDER_WATCHDOG_DIR` | `~/.local/share/macprovider-watchdog` |
 | `MACPROVIDER_CONFIG_PATH` | `~/.config/macprovider/config.yaml` |
 | `MACPROVIDER_LOG_DIR` | `~/Library/Logs/macprovider` |
-| `MACPROVIDER_COORDINATOR_HOST` | `coordinator.streamvc.live` |
-| `MACPROVIDER_SERVICE_LABEL` | `live.streamvc.macprovider` (installer) |
-| `MACPROVIDER_WATCHDOG_LABEL` | `live.streamvc.macprovider` (watchdog target) |
+| `MACPROVIDER_COORDINATOR_HOST` | `coordinator.malibu.tech` |
+| `MACPROVIDER_SERVICE_LABEL` | `live.malibu.provider` (installer) |
+| `MACPROVIDER_WATCHDOG_LABEL` | `live.malibu.provider` (watchdog target) |
 | `MACPROVIDER_WATCHDOG_KICK_GRACE_SECONDS` | `300` |
 | `MACPROVIDER_LAUNCHCTL` | `launchctl` |
 

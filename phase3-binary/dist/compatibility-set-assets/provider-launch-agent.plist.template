@@ -4,7 +4,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>live.streamvc.macprovider</string>
+  <string>live.malibu.provider</string>
   <key>ProgramArguments</key>
   <array>
     <string>__INSTALL_DIR__/macprovider-cli</string>

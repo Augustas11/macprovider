@@ -17,7 +17,7 @@ Read these files fully before auditing:
   - `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift`
   - `phase3-binary/Sources/macprovider-cli/ConfigApplier.swift`
   - `phase4-coordinator/internal/buyer/server.go`
-  - `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
+  - `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
 
 ## Scope
 

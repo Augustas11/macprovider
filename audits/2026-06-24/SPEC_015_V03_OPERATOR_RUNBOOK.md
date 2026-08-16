@@ -9,7 +9,7 @@
 - **SPEC**: `specs/SPEC-015-receipts.md` at v0.3.3 LOCKED.
 - **Provider** (`phase3-binary/`): emits v0.3 9-field receipts. Tuple shape: `model_hash`, `model_id`, `output_hash`, `prompt_hash`, `provider_pubkey`, `receipt_version="3"`, `tokens_out`, `ttft_ms`, `unix_ts` (JCS canonical order). `model_hash` is the SHA-256 of the loaded MLX container at the request-start snapshot, OR JSON `null` when warm-swap is disabled.
 - **Coordinator** (`phase4-coordinator/`): `/poolz` emits new top-level `catalog_id`, `catalog_url`, `catalog_pubkey_url` fields when a tier-2 catalog is effectively active. New public endpoints `GET /catalog/<catalog_id>` and `GET /catalog/pubkey` on the buyer port (8443).
-- **Nginx**: `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf` proxies `/catalog/` to 127.0.0.1:8443. Deploy gate `check_nginx_catalog_routes_test.sh` asserts the block is present + correctly ordered before any remote mutation.
+- **Nginx**: `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` proxies `/catalog/` to 127.0.0.1:8443. Deploy gate `check_nginx_catalog_routes_test.sh` asserts the block is present + correctly ordered before any remote mutation.
 - **Verifier** (`phase7-verify/`): 5 new CLI flags (`--catalog`, `--catalog-url`, `--catalog-pubkey`, `--catalog-pubkey-url`, `--require-model-hash`). Tri-state `model_hash_verified` in JSON output. Catalog-cache layer (§M.3.4 three-band TTL).
 
 ## Pre-deploy checklist
@@ -42,11 +42,11 @@ If any of the above fails, do NOT proceed with the deploy.
 
 ### 1. Coordinator binary + nginx conf
 
-The Pearl coordinator at `coordinator.streamvc.live` needs:
+The Pearl coordinator at `coordinator.malibu.tech` needs:
 
 - The new binary built from the IMPL bundle.
-- The updated `nginx-coordinator.streamvc.live.conf` with the `/catalog/` proxy block.
-- The `coordinator.yaml` field `tier2.public_catalog_base_url: "https://coordinator.streamvc.live"`. The five tier-2 `require_*` flags STAY at the Entry 80 defaults (all `false`).
+- The updated `nginx-coordinator.malibu.tech.conf` with the `/catalog/` proxy block.
+- The `coordinator.yaml` field `tier2.public_catalog_base_url: "https://coordinator.malibu.tech"`. The five tier-2 `require_*` flags STAY at the Entry 80 defaults (all `false`).
 
 Use the existing `phase4-coordinator/dist/deploy-pearl-vps.sh` script. It now runs `check_nginx_catalog_routes_test.sh` in step 0 (pre-SSH) — if the local nginx conf is stale, it exits 5 with `aborting deploy: nginx /catalog/ routes missing or misconfigured`.
 
@@ -62,16 +62,16 @@ After SSH + binary install + nginx reload:
 ```bash
 # /poolz should include catalog_id, catalog_url, catalog_pubkey_url
 OP=$(gh secret list ...)  # operator key
-curl -s -H "Authorization: Bearer $OP" https://coordinator.streamvc.live/poolz | jq 'keys'
+curl -s -H "Authorization: Bearer $OP" https://coordinator.malibu.tech/poolz | jq 'keys'
 # Expect: ["catalog_id", "catalog_pubkey_url", "catalog_url", "pool", "summary"]
 
 # /catalog/pubkey should return the operator-configured pubkey
-curl -s https://coordinator.streamvc.live/catalog/pubkey
+curl -s https://coordinator.malibu.tech/catalog/pubkey
 # Expect: {"pubkey":"<43-char base64url>","alg":"Ed25519"}
 
 # /catalog/<id> should return the on-disk signed catalog bytes verbatim
-CID=$(curl -s -H "Authorization: Bearer $OP" https://coordinator.streamvc.live/poolz | jq -r '.catalog_id')
-curl -s "https://coordinator.streamvc.live/catalog/$CID" | jq '.catalog_id, .version, (.models | length)'
+CID=$(curl -s -H "Authorization: Bearer $OP" https://coordinator.malibu.tech/poolz | jq -r '.catalog_id')
+curl -s "https://coordinator.malibu.tech/catalog/$CID" | jq '.catalog_id, .version, (.models | length)'
 ```
 
 If `/poolz` does NOT include the three new fields, check:
@@ -97,7 +97,7 @@ For warm-swap-enabled providers, every receipt will carry the loaded MLX contain
 Buyers should:
 
 - Upgrade to `macprovider-verify` v1.1.0+. The v1.0.x line VERIFIES v0.1/v0.2 receipts only and will REPORT v0.3 receipts as `invalid` (§M.1.2 forward-incompat).
-- Optionally pass `--catalog-url https://coordinator.streamvc.live/catalog/<id>` + `--catalog-pubkey-url https://coordinator.streamvc.live/catalog/pubkey` to get model-hash attestation when the receipt carries a non-null hash.
+- Optionally pass `--catalog-url https://coordinator.malibu.tech/catalog/<id>` + `--catalog-pubkey-url https://coordinator.malibu.tech/catalog/pubkey` to get model-hash attestation when the receipt carries a non-null hash.
 - Buyers wanting STRICT hash attestation (fail-closed on null hash, fail-closed on missing catalog match) should add `--require-model-hash`. This rejects every receipt from a warm-swap-disabled provider.
 
 ## Monitoring
@@ -133,14 +133,14 @@ ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 \
 ```
 
 **Nginx rollback.** The deploy script does NOT automatically snapshot
-`/etc/nginx/sites-available/coordinator.streamvc.live.conf` before the
+`/etc/nginx/sites-available/coordinator.malibu.tech.conf` before the
 new conf is installed. If you want a runtime rollback for the nginx
 site, snapshot it BEFORE the deploy:
 
 ```bash
 ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 \
-  "cp /etc/nginx/sites-available/coordinator.streamvc.live.conf \
-      /etc/nginx/sites-available/coordinator.streamvc.live.conf.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+  "cp /etc/nginx/sites-available/coordinator.malibu.tech.conf \
+      /etc/nginx/sites-available/coordinator.malibu.tech.conf.bak-$(date -u +%Y%m%dT%H%M%SZ)"
 ```
 
 To roll back nginx, restore the timestamped backup you took above,

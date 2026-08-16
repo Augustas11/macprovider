@@ -174,11 +174,11 @@ Journal: `catalog_loaded` with `catalog_id=macprovider-tier2-model-catalog-2026-
 
 ```bash
 # Tier-2 (public)
-curl -sS https://coordinator.streamvc.live/catalog/current
+curl -sS https://coordinator.malibu.tech/catalog/current
 # → catalog_id macprovider-tier2-model-catalog-2026-07-07-p2-qwen3-8b, 9 models, Qwen3-8B present
 
 # Rate card (public)
-curl -sS https://coordinator.streamvc.live/v1/rate-card | python3 -c \
+curl -sS https://coordinator.malibu.tech/v1/rate-card | python3 -c \
   "import sys,json; print(json.load(sys.stdin)['rows']['qwen3-8b'])"
 # → completion_rate_per_mtok 27000
 

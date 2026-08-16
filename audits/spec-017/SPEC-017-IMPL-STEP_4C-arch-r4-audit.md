@@ -94,7 +94,7 @@ None.
    - The wired label denylist at
      `phase4-coordinator/internal/stats/step4c_integration_test.go:129-144`
      checks the 43-character body shape, `mpk_garbage`, `garbage`,
-     `evil.streamvc.live`, `Bearer `, and `token_hash`; it does not include
+     `evil.malibu.tech`, `Bearer `, and `token_hash`; it does not include
      the actual raw token `mpk_step4c_partner_secret_token`, the actual prefix
      `mpk_step`, or a generic `mpk_` prefix fragment.
    - The same test gathers the registry at lines 125-128 and scans labels, but

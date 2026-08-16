@@ -212,7 +212,7 @@ D.1  "Sign out" stops `pool`, `earn`, `stamp` timers; clears
      `state.route = "machine"`; re-renders to sign-in.
 
 D.2  "API Docs" link uses
-     `href="https://api.streamvc.live/docs"`, `target="_blank"`,
+     `href="https://api.malibu.tech/docs"`, `target="_blank"`,
      `rel="noopener noreferrer"`. Verify both rel tokens (the
      two are independent — `noopener` prevents reverse-tabnabbing;
      `noreferrer` strips the Referer header).

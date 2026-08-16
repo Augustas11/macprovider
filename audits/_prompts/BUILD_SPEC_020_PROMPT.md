@@ -34,7 +34,7 @@ auth payload. The provider currently does notify-only:
 prints `"A newer version is available... Run 'macprovider-cli update'
 to upgrade."` and continues. Operators must manually run the update.
 
-A `live.streamvc.macprovider-watchdog` LaunchAgent already exists at
+A `live.malibu.provider-watchdog` LaunchAgent already exists at
 `ops/macprovider-watchdog/` and probes the provider's WS-to-coord
 state every 10 minutes. It can serve as a rollback observer.
 

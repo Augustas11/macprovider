@@ -53,7 +53,7 @@ M1. Overview field count is internally inconsistent
 
 M2. Same-origin exact-dollar wording reintroduces portal-special ambiguity
     **Location:** SPEC-017 §2.3 lines 163-170; §6.4 lines 700-708
-    **Finding:** §2.3 says same-origin authenticated portal views see exact `$` for the logged-in provider's own row regardless of mode. §6.4 later says the stats endpoint has no special behavior for `Origin: portal.streamvc.live` and the portal must use SPEC-014 surfaces for own-provider exact earnings.
+    **Finding:** §2.3 says same-origin authenticated portal views see exact `$` for the logged-in provider's own row regardless of mode. §6.4 later says the stats endpoint has no special behavior for `Origin: portal.malibu.tech` and the portal must use SPEC-014 surfaces for own-provider exact earnings.
     **Why it matters:** The audit constraints require same-origin behavior to be uniform on `/v1/stats/leaderboard`. The current text leaves room for one implementation to add a portal-only exact-dollar branch while another keeps the endpoint uniform.
     **Suggested fix:** Reword §2.3 to say the portal gets own-provider exact earnings from SPEC-014-owned surfaces, not from a special stats projection.
 

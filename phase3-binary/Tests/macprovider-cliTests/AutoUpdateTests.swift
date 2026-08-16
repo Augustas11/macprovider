@@ -541,9 +541,9 @@ final class AutoUpdateTests: XCTestCase {
         let watchdogDirectory = fixture.url.appendingPathComponent(".local/share/macprovider-watchdog", isDirectory: true)
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: watchdogDirectory, withIntermediateDirectories: true)
-        let providerPlist = launchAgents.appendingPathComponent("live.streamvc.macprovider.plist")
+        let providerPlist = launchAgents.appendingPathComponent("live.malibu.provider.plist")
         let watchdogScript = watchdogDirectory.appendingPathComponent("macprovider-health-monitor")
-        let watchdogPlist = launchAgents.appendingPathComponent("live.streamvc.macprovider-watchdog.plist")
+        let watchdogPlist = launchAgents.appendingPathComponent("live.malibu.provider-watchdog.plist")
         try Data("old-provider-plist".utf8).write(to: providerPlist)
         try Data("old-watchdog".utf8).write(to: watchdogScript)
         try installedWatchdogPlist(home: fixture.url, installDirectory: live).write(to: watchdogPlist)
@@ -563,8 +563,8 @@ final class AutoUpdateTests: XCTestCase {
             "new-compatibility-set"
         )
         XCTAssertEqual(try String(contentsOf: watchdogScript), "new-watchdog")
-        XCTAssertTrue(try String(contentsOf: providerPlist).contains("live.streamvc.macprovider"))
-        XCTAssertTrue(try String(contentsOf: watchdogPlist).contains("live.streamvc.macprovider-watchdog"))
+        XCTAssertTrue(try String(contentsOf: providerPlist).contains("live.malibu.provider"))
+        XCTAssertTrue(try String(contentsOf: watchdogPlist).contains("live.malibu.provider-watchdog"))
 
         try store.restoreBackup(marker)
         XCTAssertEqual(try String(contentsOf: liveBinary), "old-binary")
@@ -848,7 +848,7 @@ final class AutoUpdateTests: XCTestCase {
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let plist = try PropertyListSerialization.data(
             fromPropertyList: [
-                "Label": "live.streamvc.macprovider",
+                "Label": "live.malibu.provider",
                 "ProgramArguments": [
                     otherBinary.path,
                     "serve",
@@ -860,7 +860,7 @@ final class AutoUpdateTests: XCTestCase {
             format: .xml,
             options: 0
         )
-        try plist.write(to: launchAgents.appendingPathComponent("live.streamvc.macprovider.plist"))
+        try plist.write(to: launchAgents.appendingPathComponent("live.malibu.provider.plist"))
 
         let localBin = fixture.url.appendingPathComponent(".local/bin", isDirectory: true)
         try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -1336,9 +1336,9 @@ final class AutoUpdateTests: XCTestCase {
             let watchdogDirectory = fixture.url.appendingPathComponent(".local/share/macprovider-watchdog", isDirectory: true)
             try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: watchdogDirectory, withIntermediateDirectories: true)
-            let providerPlist = launchAgents.appendingPathComponent("live.streamvc.macprovider.plist")
+            let providerPlist = launchAgents.appendingPathComponent("live.malibu.provider.plist")
             let watchdogScript = watchdogDirectory.appendingPathComponent("macprovider-health-monitor")
-            let watchdogPlist = launchAgents.appendingPathComponent("live.streamvc.macprovider-watchdog.plist")
+            let watchdogPlist = launchAgents.appendingPathComponent("live.malibu.provider-watchdog.plist")
             let oldWatchdogPlist = try installedWatchdogPlist(home: fixture.url, installDirectory: live)
             try Data("old-provider-plist".utf8).write(to: providerPlist)
             try Data("old-watchdog".utf8).write(to: watchdogScript)
@@ -2809,7 +2809,7 @@ final class AutoUpdateTests: XCTestCase {
         """
         <?xml version="1.0" encoding="UTF-8"?>
         <plist version="1.0"><dict>
-        <key>Label</key><string>live.streamvc.macprovider</string>
+        <key>Label</key><string>live.malibu.provider</string>
         <key>ProgramArguments</key><array><string>__INSTALL_DIR__/macprovider-cli</string><string>serve</string><string>--config</string><string>__HOME__/.config/macprovider/config.yaml</string></array>
         <key>WorkingDirectory</key><string>__INSTALL_DIR__</string>
         </dict></plist>
@@ -2820,7 +2820,7 @@ final class AutoUpdateTests: XCTestCase {
         """
         <?xml version="1.0" encoding="UTF-8"?>
         <plist version="1.0"><dict>
-        <key>Label</key><string>live.streamvc.macprovider-watchdog</string>
+        <key>Label</key><string>live.malibu.provider-watchdog</string>
         <key>ProgramArguments</key><array><string>__HOME__/.local/share/macprovider-watchdog/macprovider-health-monitor</string></array>
         <key>EnvironmentVariables</key><dict>
         <key>MACPROVIDER_BINARY_PATH</key><string>__INSTALL_DIR__/macprovider-cli</string>
@@ -2833,7 +2833,7 @@ final class AutoUpdateTests: XCTestCase {
     private func installedWatchdogPlist(home: URL, installDirectory: URL) throws -> Data {
         try PropertyListSerialization.data(
             fromPropertyList: [
-                "Label": "live.streamvc.macprovider-watchdog",
+                "Label": "live.malibu.provider-watchdog",
                 "EnvironmentVariables": ["MACPROVIDER_COORDINATOR_HOST": "coordinator.example.test"],
             ],
             format: .xml,

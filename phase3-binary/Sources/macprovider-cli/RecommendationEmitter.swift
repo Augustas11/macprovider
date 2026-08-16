@@ -96,8 +96,8 @@ struct RecommendationEmitter {
     static func launchdRestartHint() -> String {
         """
         hint: to apply the new recipe live, restart the serve process:
-          launchctl bootout gui/$UID/live.streamvc.macprovider && \\
-            launchctl bootstrap gui/$UID ~/Library/LaunchAgents/live.streamvc.macprovider.plist
+          launchctl bootout gui/$UID/live.malibu.provider && \\
+            launchctl bootstrap gui/$UID ~/Library/LaunchAgents/live.malibu.provider.plist
         """
     }
 

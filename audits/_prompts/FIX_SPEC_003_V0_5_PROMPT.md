@@ -22,7 +22,7 @@ Three additions, one small shell-script polish:
 
   B. **§ 4 distribution-channel decoupling** — make explicit the
      architecture property that `install.sh` is served from `main` via
-     `get.streamvc.live` and is NOT bundled into the release tarball.
+     `get.malibu.tech` and is NOT bundled into the release tarball.
      A one-line install.sh patch lands without re-running the GitHub
      release action. (This is what made today's same-day landing of
      four bugs cheap; worth preserving as a spec property.)
@@ -121,7 +121,7 @@ install.sh so you don't accidentally regress.
 **5. Test end-to-end with curl-pipe-bash after the install.sh
 change.** Uninstall, then run:
 
-    curl -fsSL https://get.streamvc.live/install.sh | \\
+    curl -fsSL https://get.malibu.tech/install.sh | \\
       MACPROVIDER_PORT=18080 MACPROVIDER_NO_PROMPT=1 bash
 
 The install MUST go green end-to-end in <30s on warm cache. If you
@@ -213,7 +213,7 @@ lifecycle)
 process (GitHub Releases + signed tarball) but does not state, as an
 intentional architecture property, that `install.sh` is served
 separately from the release tarball — via `main` branch through the
-`get.streamvc.live` → raw.githubusercontent.com redirect. This
+`get.malibu.tech` → raw.githubusercontent.com redirect. This
 property is what allowed the v1.2.2 install.sh fix to land in seconds
 without a 5-10 minute release-action rerun, and it's worth naming
 because future contributors might be tempted to "tidy up" by bundling
@@ -224,7 +224,7 @@ after the release-artifact list:
 
 > **§ 4.X Distribution channel decoupling.**
 >
-> `install.sh` is served from `main` via the `get.streamvc.live` →
+> `install.sh` is served from `main` via the `get.malibu.tech` →
 > `raw.githubusercontent.com/<owner>/<repo>/main/phase3-binary/dist/install.sh`
 > redirect. It is NOT bundled into the release tarball. This is an
 > intentional architecture property:
@@ -235,7 +235,7 @@ after the release-artifact list:
 > - Binary releases are tagged + signed + immutable; an installer
 >   patch does not require re-running the GitHub Action or
 >   re-signing.
-> - Strangers running `curl get.streamvc.live/install.sh | bash`
+> - Strangers running `curl get.malibu.tech/install.sh | bash`
 >   always get the latest installer, but the installer fetches a
 >   specific signed binary release tag and verifies it.
 >
@@ -416,7 +416,7 @@ A. § 5  Self-test failure path MUST print first 200 bytes of
         root-cause attribution from two retest cycles to zero.
 
 B. § 4  Distribution-channel decoupling explicit: install.sh is
-        served from main via get.streamvc.live; NOT bundled into
+        served from main via get.malibu.tech; NOT bundled into
         the release tarball. Preserves the same-day-fix property.
 
 C. Audit  New category: "shell-script paths that touch real OS

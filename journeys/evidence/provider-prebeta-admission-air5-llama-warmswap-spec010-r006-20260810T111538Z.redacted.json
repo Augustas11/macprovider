@@ -115,8 +115,8 @@
     "pearl": {
       "class": "Pearl production coordinator",
       "public_health": {
-        "coordinator_url": "https://coordinator.streamvc.live/healthz",
-        "gateway_url": "https://api.streamvc.live/healthz",
+        "coordinator_url": "https://coordinator.malibu.tech/healthz",
+        "gateway_url": "https://api.malibu.tech/healthz",
         "coordinator_status": "ok",
         "gateway_status": "ok",
         "coordinator_version": "v1.8.92",

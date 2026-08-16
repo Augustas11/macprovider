@@ -119,7 +119,7 @@ fi
 
 # §6 production fence — never kill-cycle a production coordinator/provider.
 case "$KVS01A_BASE" in
-  *streamvc.live*|*coordinator.*|*api.*)
+  *malibu.tech*|*coordinator.*|*api.*)
     if [[ "${KVS01A_ALLOW_REMOTE:-0}" != "1" ]]; then
       echo "kvs-01a: refusing non-local base '$KVS01A_BASE' (§6 production fence)" >&2
       exit 3

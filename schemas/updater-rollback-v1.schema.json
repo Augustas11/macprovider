@@ -1,5 +1,5 @@
 {
-  "$id": "https://streamvc.live/schemas/updater-rollback-v1.schema.json",
+  "$id": "https://malibu.tech/schemas/updater-rollback-v1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {

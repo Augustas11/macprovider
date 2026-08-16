@@ -38,8 +38,8 @@ Paths inspected:
 - `phase4-coordinator/internal/stats/store/store.go`
 - `phase4-coordinator/internal/stats/migrations/001_stats_tables.up.sql`
 - `phase4-coordinator/dist/nginx-snippets/stats-shared.conf`
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf`
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf`
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
 - `phase4-coordinator/dist/test/check_nginx_stats_test.sh`
 - `OPS.md`
 
@@ -72,7 +72,7 @@ Fix: validate CLI free-form fields as printable single-line strings with a lengt
 - `stats_components_health.last_error_message` can persist arbitrary rollup `err.Error()` strings (`rollup/health.go:51-65`, `rollup/runner.go:233-241`), but the rollup path does not touch partner request tokens, and panic payloads are classified by type only (`runner.go:272-287`).
 - `partner_keys.token_hash` stores SHA-256 of the raw token by design (`partnerkeys.go:245-277`, `auth.go:214-217`); no request response, metric, or structured event exposes it.
 - AC-18’s 100-sample test is not a cryptographic proof against 10,000-sample attackers, but the inspected code path performs the same SHA-256 plus indexed DB SELECT before rows 5/6/7 branch (`auth.go:214-264`), which is the important constant-work property.
-- Nginx `proxy_cache_bypass` plus `proxy_no_cache` is correctly paired on all stats locations (`nginx-stats.streamvc.live.conf:122-154`, `160-177`) and has a smoke test proving keyed responses add zero cache files and anonymous follow-up receives public content (`check_nginx_stats_test.sh:251-306`).
+- Nginx `proxy_cache_bypass` plus `proxy_no_cache` is correctly paired on all stats locations (`nginx-stats.malibu.tech.conf:122-154`, `160-177`) and has a smoke test proving keyed responses add zero cache files and anonymous follow-up receives public content (`check_nginx_stats_test.sh:251-306`).
 
 ## Category sweep
 
@@ -120,7 +120,7 @@ Structured JSON event line injection is defeated by `json.Encoder` (`partnerkeys
 
 ### H. `proxy_cache` hostility
 
-The config pairs read bypass and write suppression on Authorization (`nginx-stats.streamvc.live.conf:129-154`, `176-177`; coordinator vhost mirrors this at `nginx-coordinator.streamvc.live.conf:228-269`). The smoke test warms anonymous cache, sends keyed request, verifies no cache-file count increase, then verifies anonymous follow-up is public (`check_nginx_stats_test.sh:251-306`). I did not find a race that would write the partner projection under this config.
+The config pairs read bypass and write suppression on Authorization (`nginx-stats.malibu.tech.conf:129-154`, `176-177`; coordinator vhost mirrors this at `nginx-coordinator.malibu.tech.conf:228-269`). The smoke test warms anonymous cache, sends keyed request, verifies no cache-file count increase, then verifies anonymous follow-up is public (`check_nginx_stats_test.sh:251-306`). I did not find a race that would write the partner projection under this config.
 
 ### I. CORS reflection on auth-failed paths
 

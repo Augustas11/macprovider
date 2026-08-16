@@ -98,13 +98,13 @@
   },
   {
    "key": "gateway",
-   "area": "phase5-gateway \u2014 buyer-facing OpenAI-compatible API gateway (api.streamvc.live)",
+   "area": "phase5-gateway \u2014 buyer-facing OpenAI-compatible API gateway (api.malibu.tech)",
    "purpose": "Go (stdlib-only HTTP) service that sits between buyers and the phase4 coordinator. It owns buyer identity (GitHub OAuth signup, API keys, demo tokens), token quotas/concurrency limits with reserve-settle-refund accounting in SQLite, and proxies /v1/chat/completions and /v1/models to the coordinator's buyer URL. It also serves the /account and /docs HTML pages, an operator admin plane (kill switch, capacity tiers, feedback summary, explorer), and a buyer-anonymized /v1/status aggregated from the coordinator's /poolz. Notably, despite the project's \"signed inference receipts\" pitch, there is NO receipt issuance/verification code anywhere in this module (grep for \"receipt\" across phase5-gateway/*.go returns zero hits; same for phase4-coordinator/internal and phase3-binary/Sources) \u2014 receipts are aspirational, not implemented here.",
    "entryPoints": [
     "phase5-gateway/cmd/gateway/main.go:19 \u2014 main(): flags -config (gateway.yaml) and -check (migrate-and-exit); opens sqlite store, builds router.New(...), starts HTTP server with graceful shutdown",
     "phase5-gateway/cmd/gateway/main.go:49,96-121 \u2014 background reservation reaper goroutine (hourly default) expiring stale quota reservations",
     "phase5-gateway/internal/router/server.go:134-164 \u2014 Handler(): full route table (auth/*, /account, /docs, /v1/*, /healthz, /admin/*, optional /admin/explorer/*)",
-    "phase5-gateway/dist/ \u2014 deploy surface: gateway-linux-amd64 binary, macprovider-gateway.service systemd unit, nginx-api.streamvc.live.conf, deploy-pearl-vps.md"
+    "phase5-gateway/dist/ \u2014 deploy surface: gateway-linux-amd64 binary, macprovider-gateway.service systemd unit, nginx-api.malibu.tech.conf, deploy-pearl-vps.md"
    ],
    "keyModules": [
     {
@@ -145,7 +145,7 @@
     },
     {
      "path": "phase5-gateway/internal/config/config.go",
-     "role": "YAML config with hardcoded production defaults (Default() at 132-177: api.streamvc.live, coordinator on localhost 8443/8444, 100k daily tokens, 4096 max_tokens); 'env:NAME' secret indirection (195-208); strict fail-closed Validate() (210-329)"
+     "role": "YAML config with hardcoded production defaults (Default() at 132-177: api.malibu.tech, coordinator on localhost 8443/8444, 100k daily tokens, 4096 max_tokens); 'env:NAME' secret indirection (195-208); strict fail-closed Validate() (210-329)"
     },
     {
      "path": "phase5-gateway/internal/router/pages.go",
@@ -153,7 +153,7 @@
     },
     {
      "path": "phase5-gateway/internal/router/cors.go",
-     "role": "Exact-origin CORS allowlist (console.streamvc.live, streamvc.live by default), credentials=false, applied per-route via withCORS"
+     "role": "Exact-origin CORS allowlist (console.malibu.tech, malibu.tech by default), credentials=false, applied per-route via withCORS"
     },
     {
      "path": "phase5-gateway/internal/router/explorer.go",
@@ -272,12 +272,12 @@
   {
    "key": "ops",
    "area": "Operational surface: beta/ harness + cron, scripts/ (release signing + tier-2 ops), frontdoor/ (console + install front door), .github/workflows/release.yml, phase4-coordinator/dist+scripts, phase5-gateway/dist",
-   "purpose": "This is the deploy/upgrade/monitoring layer of MacProvider. Provider Macs get the Swift binary via a curl-pipe-bash installer chain (get.streamvc.live -> raw GitHub main -> signed GitHub Releases built by the one CI workflow). The coordinator and console are pushed from the operator's laptop to a single root-SSH VPS (159.223.165.194 \"Pearl\") by idempotent bash deploy scripts; the gateway is deployed by hand from a markdown runbook. Monitoring is a 3-minute systemd-timer Python poller on the VPS plus an operator-side cron harness that fires synthetic buyer traffic through the production coordinator every 15 minutes.",
+   "purpose": "This is the deploy/upgrade/monitoring layer of MacProvider. Provider Macs get the Swift binary via a curl-pipe-bash installer chain (get.malibu.tech -> raw GitHub main -> signed GitHub Releases built by the one CI workflow). The coordinator and console are pushed from the operator's laptop to a single root-SSH VPS (159.223.165.194 \"Pearl\") by idempotent bash deploy scripts; the gateway is deployed by hand from a markdown runbook. Monitoring is a 3-minute systemd-timer Python poller on the VPS plus an operator-side cron harness that fires synthetic buyer traffic through the production coordinator every 15 minutes.",
    "entryPoints": [
-    "phase3-binary/dist/install.sh \u2014 public provider installer served at get.streamvc.live/install.sh (828 lines; main() at lines 766-826)",
+    "phase3-binary/dist/install.sh \u2014 public provider installer served at get.malibu.tech/install.sh (828 lines; main() at lines 766-826)",
     ".github/workflows/release.yml \u2014 the ONLY CI workflow; builds/signs/publishes the darwin-arm64 provider binary on v*.*.* tag push or workflow_dispatch",
     "phase4-coordinator/dist/deploy-pearl-vps.sh \u2014 coordinator deploy: scp binary+config to root@159.223.165.194, systemd + nginx + certbot (9 steps, idempotent)",
-    "frontdoor/console/dist/deploy-console.sh \u2014 console.streamvc.live static-site deploy incl. Cloudflare DNS record creation",
+    "frontdoor/console/dist/deploy-console.sh \u2014 console.malibu.tech static-site deploy incl. Cloudflare DNS record creation",
     "phase5-gateway/dist/deploy-pearl-vps.md \u2014 gateway deploy is a MANUAL runbook, no script",
     "phase4-coordinator/dist/monitor/macprovider-monitor.py \u2014 Pearl-side observability poller, run by macprovider-monitor.timer every 3 min",
     "beta/CRON_TEMPLATE.txt \u2014 operator-M1 crontab: coord-cooperative.sh every 15 min 9am-10pm, coord-adversarial.sh daily 16:00 (lines 31, 40)",
@@ -307,7 +307,7 @@
      "role": "Only production alerting: polls loopback /healthz, /poolz (bearer = operator_key regex-parsed from coordinator.yaml, lines 56-62), gateway /v1/status; transition-based alerts (pool ready==0 CRITICAL, provider degraded/unavailable WARN, lines 131-157); journald always + Gmail app-password email if /etc/macprovider/monitor.env configured (lines 174-195)"
     },
     {
-     "path": "phase5-gateway/dist/nginx-api.streamvc.live.conf",
+     "path": "phase5-gateway/dist/nginx-api.malibu.tech.conf",
      "role": "Public buyer edge: rate/conn-limit zones (lines 10-12), blanks client-supplied internal affinity headers (lines 58-59), explicit 404 for /admin/, /poolz, /v1/pool/check (lines 46-49, 106-114), /ws/provider proxied to coordinator 8444 with 10r/m + 5-conn limits (lines 124-134)"
     },
     {
@@ -323,8 +323,8 @@
      "role": "Console deploy: Cloudflare API DNS-record creation from ~/.config/macprovider/cloudflare-api-token (lines 65-92), certbot webroot, static /var/www/console install"
     },
     {
-     "path": "frontdoor/console/dist/nginx-console.streamvc.live.conf",
-     "role": "Console vhost: strict CSP connect-src limited to api.streamvc.live (line 27), 5-min cache"
+     "path": "frontdoor/console/dist/nginx-console.malibu.tech.conf",
+     "role": "Console vhost: strict CSP connect-src limited to api.malibu.tech (line 27), 5-min cache"
     },
     {
      "path": "beta/web/api/chat.js",
@@ -339,19 +339,19 @@
      "role": "Partner-Mac recovery script (kill + nohup restart with hardcoded model/provider-id/coordinator args, lines 12-18) \u2014 pre-launchd era ops for the two known partner Macs"
     }
    ],
-   "dataFlow": "Release: operator tags v*.*.* -> release.yml builds on macos-15 via package.sh, signs checksums.txt with the GitHub-secret PEM, publishes GitHub Release, then re-downloads and verifies it (verify-tier2-provider-release.sh). Provider install: stranger runs curl get.streamvc.live/install.sh | bash; get.streamvc.live redirects to raw.githubusercontent.com main (SPEC-003 FR-C1a \u2014 mutable installer, immutable signed binaries); install.sh fetches latest release, verifies signature+hash, installs, launchd-bootstraps, self-tests, confirms pool membership. Coordinator/console: laptop cross-compiles, deploy scripts scp to root@Pearl, systemd restart behind nginx/Let's Encrypt; gateway deployed manually per runbook with secrets in /etc/macprovider/gateway.env. Production config changes (tier-2 flips) SSH in, mutate one YAML key, SIGHUP, verify, auto-rollback. Monitoring: monitor.py (3-min timer) polls loopback endpoints and emails transitions; operator cron fires harness batches through coordinator into beta/runs.sqlite -> report.py HTML.",
+   "dataFlow": "Release: operator tags v*.*.* -> release.yml builds on macos-15 via package.sh, signs checksums.txt with the GitHub-secret PEM, publishes GitHub Release, then re-downloads and verifies it (verify-tier2-provider-release.sh). Provider install: stranger runs curl get.malibu.tech/install.sh | bash; get.malibu.tech redirects to raw.githubusercontent.com main (SPEC-003 FR-C1a \u2014 mutable installer, immutable signed binaries); install.sh fetches latest release, verifies signature+hash, installs, launchd-bootstraps, self-tests, confirms pool membership. Coordinator/console: laptop cross-compiles, deploy scripts scp to root@Pearl, systemd restart behind nginx/Let's Encrypt; gateway deployed manually per runbook with secrets in /etc/macprovider/gateway.env. Production config changes (tier-2 flips) SSH in, mutate one YAML key, SIGHUP, verify, auto-rollback. Monitoring: monitor.py (3-min timer) polls loopback endpoints and emails transitions; operator cron fires harness batches through coordinator into beta/runs.sqlite -> report.py HTML.",
    "conventions": [
     "Deploy scripts are idempotent and gate-first: check-deploy-config.sh runs as step 0 of deploy-pearl-vps.sh (lines 46-52); tier-2 scripts default to --plan and require --apply plus DEMO_TOKEN/OPERATOR_KEY env (scripts/enforce-tier2-hash.sh lines 1-37)",
     "Secrets never in git: root .gitignore lines 43-45 ignore the real coordinator.yaml (plaintext operator_key); beta/.gitignore line 10 ignores CONTRIBUTOR_TUNNEL_TOKENS.txt; gateway secrets injected via EnvironmentFile=/etc/macprovider/gateway.env (macprovider-gateway.service line 12); release private key exists only as a GitHub secret and is rm'd after signing (release.yml lines 96-99)",
     "systemd units are hardened uniformly: NoNewPrivileges, ProtectSystem=strict, MemoryMax caps sized for the RAM-constrained VPS (coordinator 512M line 36, gateway 384M line 35)",
-    "Defense-in-depth nginx: every public vhost explicitly 404s operator surfaces (/admin/, /poolz, /internal/) rather than relying on app auth alone (nginx-coordinator.streamvc.live.conf lines 114-135, nginx-api.streamvc.live.conf lines 106-114)",
+    "Defense-in-depth nginx: every public vhost explicitly 404s operator surfaces (/admin/, /poolz, /internal/) rather than relying on app auth alone (nginx-coordinator.malibu.tech.conf lines 114-135, nginx-api.malibu.tech.conf lines 106-114)",
     "Failure-mode comments cite spec finding IDs (F-603-V7-*, FR-P11a C2, SPEC-002 \u00a76.5) directly in shell scripts \u2014 scripts double as the incident record (install.sh lines 46-48, 126, deploy-pearl-vps.sh lines 143-150)",
     "Ops lessons get encoded as guards: port-collision upgrade-in-place detection (install.sh lines 127-169), provider-connected restart refusal, stub-then-full nginx to avoid the in-place-sed corruption from v1 (deploy-pearl-vps.sh lines 84-93)"
    ],
    "surprises": [
     "fact (Low): logs/ (13 files) and results/ (32 files) are git-tracked one-time Phase 1 bring-up artifacts dated 2026-05-26 (verified via git ls-files; e.g. results/REPORT.md, logs/03-mlx-server.log). harness.py line 15 references results/REPORT.md as the Phase 1 record, so REPORT.md is load-bearing, but the raw curl/tunnel logs are clutter. Everything else suspect is correctly ignored: runs.sqlite/cron.log/reports (beta/.gitignore lines 1-7), default.profraw (.gitignore line 34), dist binaries (.gitignore lines 37-41), release tarballs (phase3-binary/.gitignore line 6 per git check-ignore).",
     "fact (Medium): the gateway \u2014 the money-path service \u2014 is the only component with NO scripted deploy or pre-deploy config gate; phase5-gateway/dist/deploy-pearl-vps.md lines 1-30 is a manual checklist ('operator runbook draft'), while coordinator and console both have idempotent scripts with fail-closed checks. check-deploy-config.sh's C2 timer cross-check is also skipped unless the operator remembers to pass gateway.yaml as arg 2 (check-deploy-config.sh lines 18-19, 73-74).",
-    "fact (judgment-adjacent, Medium): there are two public WebSocket entry points for providers \u2014 coordinator.streamvc.live/ws/provider (nginx-coordinator.streamvc.live.conf lines 65-84, no rate limit) and api.streamvc.live/ws/provider (nginx-api.streamvc.live.conf lines 124-134, rate-limited 10r/m + 5 conns). The unlimited coordinator-domain path undercuts the PG-2 limits applied on the api domain; an abuser would simply use the coordinator hostname.",
+    "fact (judgment-adjacent, Medium): there are two public WebSocket entry points for providers \u2014 coordinator.malibu.tech/ws/provider (nginx-coordinator.malibu.tech.conf lines 65-84, no rate limit) and api.malibu.tech/ws/provider (nginx-api.malibu.tech.conf lines 124-134, rate-limited 10r/m + 5 conns). The unlimited coordinator-domain path undercuts the PG-2 limits applied on the api domain; an abuser would simply use the coordinator hostname.",
     "fact (Low): macprovider-monitor.service runs as root (macprovider-monitor.service line 8) while coordinator/gateway run as the macprovider system user; the monitor only needs read access to coordinator.yaml and loopback HTTP. Also alerting silently degrades to journal-only until a Gmail app password is configured (macprovider-monitor.py lines 178-180) \u2014 consistent with memory that email was still pending.",
     "fact: the install chain's trust root is an ECDSA P-256 public key hardcoded inside install.sh (lines 396-402), overridable via MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM env (lines 392-395), while the tier-2 model catalog uses a separate Ed25519 key (scripts/sign-catalog.go lines 86-99). Since install.sh is served from mutable main (SPEC-003-open-onboarding.md lines 261-275), compromise of the repo's main branch = compromise of both installer and its pinned key; this is an accepted PoC trade-off documented in the spec, worth re-examining as provider count grows.",
     "fact (Low): release.yml's tier-2 preflight passes PROVIDER_SHA256=\"\" (line 76), and scripts/check-tier2-provider-artifact.sh line 11 has a hardcoded v1.2.6 default SHA \u2014 CI relies on the empty override to skip pin-matching for new tags; the hardcoded pin only protects local manual runs.",
@@ -363,7 +363,7 @@
   {
    "key": "specsdocs",
    "area": "Documentation and spec corpus (README, runbooks, AGENTS.md, specs/, beta/DECISION_CRITERIA.md)",
-   "purpose": "As documented in README.md:20-31, MacProvider makes any Apple Silicon Mac (M1+, macOS 14+) a remote-addressable MLX inference endpoint: OpenAI-compatible /v1/chat/completions at api.streamvc.live, with every response carrying an ed25519-signed receipt binding (prompt, output, provider). Intended users are two-sided: Providers (Mac owners installing via curl get.streamvc.live/install.sh, outbound-WS only, managed at console.streamvc.live) and Buyers (drop-in OpenAI client swap, pay-per-compute). The docs corpus shows a spec-driven, multi-round-audited 2-person PoC that has outgrown its own human-facing documentation: the normative specs are current and rigorous, while README/HANDOFF/specs-index lag by 2-6 versions.",
+   "purpose": "As documented in README.md:20-31, MacProvider makes any Apple Silicon Mac (M1+, macOS 14+) a remote-addressable MLX inference endpoint: OpenAI-compatible /v1/chat/completions at api.malibu.tech, with every response carrying an ed25519-signed receipt binding (prompt, output, provider). Intended users are two-sided: Providers (Mac owners installing via curl get.malibu.tech/install.sh, outbound-WS only, managed at console.malibu.tech) and Buyers (drop-in OpenAI client swap, pay-per-compute). The docs corpus shows a spec-driven, multi-round-audited 2-person PoC that has outgrown its own human-facing documentation: the normative specs are current and rigorous, while README/HANDOFF/specs-index lag by 2-6 versions.",
    "entryPoints": [
     "README.md \u2014 public-facing front door: provider install, buyer API, receipt schema, architecture diagram",
     "HANDOFF.md:5-7 \u2014 declares itself 'Next session entry point: This document', but status is frozen at 2026-05-26 ('Phase 1 PoC complete... Awaiting M4 user')",
@@ -840,17 +840,17 @@
    "title": "Public coordinator hostname exposes an unrate-limited /ws/provider path that bypasses the gateway's PG-2 connection limits",
    "severity": "Medium",
    "kind": "fact",
-   "what": "Two public nginx vhosts proxy WebSocket provider upgrades to the same coordinator port 8444. api.streamvc.live/ws/provider is rate-limited (limit_req 10r/m burst 5, limit_conn 5 per IP) at nginx-api.streamvc.live.conf:10-11,124-134. But coordinator.streamvc.live/ws/provider has NO limit_req or limit_conn directives at all (nginx-coordinator.streamvc.live.conf:65-84). An abuser simply uses the coordinator hostname to bypass every nginx-layer provider-connection limit. The only remaining backstop is the coordinator's global unauthenticated-connection semaphore (default 64, config.go:273, ws/server.go:148,220-224) \u2014 which is a single global counter with no per-IP dimension, so one source can hold all 64 slots and starve legitimate provider admissions.",
+   "what": "Two public nginx vhosts proxy WebSocket provider upgrades to the same coordinator port 8444. api.malibu.tech/ws/provider is rate-limited (limit_req 10r/m burst 5, limit_conn 5 per IP) at nginx-api.malibu.tech.conf:10-11,124-134. But coordinator.malibu.tech/ws/provider has NO limit_req or limit_conn directives at all (nginx-coordinator.malibu.tech.conf:65-84). An abuser simply uses the coordinator hostname to bypass every nginx-layer provider-connection limit. The only remaining backstop is the coordinator's global unauthenticated-connection semaphore (default 64, config.go:273, ws/server.go:148,220-224) \u2014 which is a single global counter with no per-IP dimension, so one source can hold all 64 slots and starve legitimate provider admissions.",
    "where": [
-    "phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:65-84",
-    "phase5-gateway/dist/nginx-api.streamvc.live.conf:10-11",
-    "phase5-gateway/dist/nginx-api.streamvc.live.conf:124-134",
+    "phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:65-84",
+    "phase5-gateway/dist/nginx-api.malibu.tech.conf:10-11",
+    "phase5-gateway/dist/nginx-api.malibu.tech.conf:124-134",
     "phase4-coordinator/internal/ws/server.go:220-224",
     "phase4-coordinator/internal/config/config.go:273"
    ],
-   "why": "A single abusive host can open up to 64 concurrent half-open handshakes against coordinator.streamvc.live and exhaust the global unauthenticated-connection pool, blocking the N=3 real providers from (re)connecting. With only 3 providers, losing admission capacity is a full inference outage \u2014 directly money-affecting in the live beta.",
+   "why": "A single abusive host can open up to 64 concurrent half-open handshakes against coordinator.malibu.tech and exhaust the global unauthenticated-connection pool, blocking the N=3 real providers from (re)connecting. With only 3 providers, losing admission capacity is a full inference outage \u2014 directly money-affecting in the live beta.",
    "confidence": "high",
-   "suggestedFix": "Add the same limit_req zone=ws_provider_rate and limit_conn ws_provider_conn directives to the coordinator.streamvc.live /ws/provider location that already exist on api.streamvc.live; or stop exposing /ws/provider on the coordinator hostname entirely and route all provider WS through the rate-limited api path. Additionally, make the coordinator's unauthenticated-conn cap per-IP rather than a single global counter.",
+   "suggestedFix": "Add the same limit_req zone=ws_provider_rate and limit_conn ws_provider_conn directives to the coordinator.malibu.tech /ws/provider location that already exist on api.malibu.tech; or stop exposing /ws/provider on the coordinator hostname entirely and route all provider WS through the rate-limited api path. Additionally, make the coordinator's unauthenticated-conn cap per-IP rather than a single global counter.",
    "id": "SECU-1",
    "dimension": "security",
    "verdict": {
@@ -858,8 +858,8 @@
     "citationAccurate": true,
     "severityVerdict": "upgrade",
     "correctedSeverity": "High",
-    "correction": "The finding is accurate as stated. The only correction is to the severity: Medium understates the risk for a live 3-provider beta. Exhausting the 64-slot global unauthenticated semaphore blocks all provider reconnects \u2014 with only 3 providers, that is a complete inference outage affecting real billing today, which meets the High bar (real correctness/security risk likely to bite in beta). The nginx-coordinator.streamvc.live.conf:65-84 block is confirmed to have no limit_req or limit_conn; the api.streamvc.live conf:124-134 is confirmed to have both; config.go:273 confirms MaxUnauthenticatedConn default of 64; ws/server.go:148 and 820-831 confirm the semaphore is a single buffered channel with no per-IP tracking.",
-    "reasoning": "Every cited file and line was read and confirmed. nginx-coordinator.streamvc.live.conf:65-84 has the /ws/provider location with zero rate-limiting directives. nginx-api.streamvc.live.conf:10-11 defines the zones; lines 124-134 apply limit_req and limit_conn to /ws/provider on the api hostname only. config.go:273 sets MaxUnauthenticatedConn=64. ws/server.go:148 creates a buffered channel of that capacity; lines 824-831 show reserveUnauthenticatedConn is a non-blocking channel send with no IP accounting. No counter-evidence found in middleware, deploy scripts, or admission logic. The bypass path is real and exploitable with a plain TLS connection to the coordinator hostname."
+    "correction": "The finding is accurate as stated. The only correction is to the severity: Medium understates the risk for a live 3-provider beta. Exhausting the 64-slot global unauthenticated semaphore blocks all provider reconnects \u2014 with only 3 providers, that is a complete inference outage affecting real billing today, which meets the High bar (real correctness/security risk likely to bite in beta). The nginx-coordinator.malibu.tech.conf:65-84 block is confirmed to have no limit_req or limit_conn; the api.malibu.tech conf:124-134 is confirmed to have both; config.go:273 confirms MaxUnauthenticatedConn default of 64; ws/server.go:148 and 820-831 confirm the semaphore is a single buffered channel with no per-IP tracking.",
+    "reasoning": "Every cited file and line was read and confirmed. nginx-coordinator.malibu.tech.conf:65-84 has the /ws/provider location with zero rate-limiting directives. nginx-api.malibu.tech.conf:10-11 defines the zones; lines 124-134 apply limit_req and limit_conn to /ws/provider on the api hostname only. config.go:273 sets MaxUnauthenticatedConn=64. ws/server.go:148 creates a buffered channel of that capacity; lines 824-831 show reserveUnauthenticatedConn is a non-blocking channel send with no IP accounting. No counter-evidence found in middleware, deploy scripts, or admission logic. The bypass path is real and exploitable with a plain TLS connection to the coordinator hostname."
    }
   },
   {
@@ -907,7 +907,7 @@
     "citationAccurate": true,
     "severityVerdict": "keep",
     "reasoning": "All three cited locations hold up exactly. config.go:283-305 shows all five tier-2 flags defaulting false. ws/server.go:320-323 confirms v1 plaintext providers are only rejected when RequireEncryptedLeg is set. The gitignored production coordinator.yaml on disk (phase4-coordinator/dist/coordinator.yaml) sets only require_hash_verified: false under tier2 \u2014 no encrypted-leg, attestation, or behavioral-safety keys present. check-deploy-config.sh checks operator_key, heartbeat thresholds, and C2 timers but no tier-2 flags. The activate-tier2 scripts are gated runbooks for future intentional activation, confirming current production state is pre-activation. The finding's consequence is real: a default-config redeploy silently drops all tier-2 guarantees and the deploy gate won't catch it. Medium is correctly calibrated \u2014 nginx TLS terminates the external leg; the three current providers are known/trusted; this is not exploitable today but becomes a genuine risk as the network scales to anonymous provisioned providers.",
-    "correction": "Minor clarification only: the \"plaintext provider protocol\" concern applies to the coordinator WebSocket leg (provider\u2194coordinator), which traverses an encrypted Cloudflare tunnel (providers use wss:// to coordinator.streamvc.live), so end-to-end transport is not cleartext. The risk is specifically about per-session payload encryption (Pillar B encrypted leg) and the absence of hash/attestation enforcement, not raw TCP plaintext."
+    "correction": "Minor clarification only: the \"plaintext provider protocol\" concern applies to the coordinator WebSocket leg (provider\u2194coordinator), which traverses an encrypted Cloudflare tunnel (providers use wss:// to coordinator.malibu.tech), so end-to-end transport is not cleartext. The risk is specifically about per-session payload encryption (Pillar B encrypted leg) and the absence of hash/attestation enforcement, not raw TCP plaintext."
    }
   },
   {
@@ -1119,7 +1119,7 @@
     "citationAccurate": true,
     "severityVerdict": "keep",
     "correctedSeverity": "Medium",
-    "correction": "The finding is real and the citations hold, but the description of the money path is imprecise. The gateway and coordinator do NOT share a ledger; they maintain independent SQLite stores (gateway: quota_reservations/usage_events for buyer-quota; coordinator: billing store for provider payouts). The protocol-drift risk is real \u2014 the sticky-route path at gateway/server.go:1401-1405 forwards Authorization: Bearer + X-MacProvider-Account + X-MacProvider-Internal-Conv to the coordinator, and neither service's unit tests cover the cross-service contract for these headers. The harness.py in beta/ does NOT exercise the gateway\u2192coordinator path: config.yaml targets a direct provider tunnel and config-coord.yaml targets coordinator.streamvc.live directly, bypassing the gateway entirely. The tools/mockprovider exists in the coordinator repo and could complete a triangle test. Severity Medium is correct: a protocol drift would not cause immediate money loss (stores are independent and append-only), but could cause billing discrepancy or silent sticky-route failure during the beta.",
+    "correction": "The finding is real and the citations hold, but the description of the money path is imprecise. The gateway and coordinator do NOT share a ledger; they maintain independent SQLite stores (gateway: quota_reservations/usage_events for buyer-quota; coordinator: billing store for provider payouts). The protocol-drift risk is real \u2014 the sticky-route path at gateway/server.go:1401-1405 forwards Authorization: Bearer + X-MacProvider-Account + X-MacProvider-Internal-Conv to the coordinator, and neither service's unit tests cover the cross-service contract for these headers. The harness.py in beta/ does NOT exercise the gateway\u2192coordinator path: config.yaml targets a direct provider tunnel and config-coord.yaml targets coordinator.malibu.tech directly, bypassing the gateway entirely. The tools/mockprovider exists in the coordinator repo and could complete a triangle test. Severity Medium is correct: a protocol drift would not cause immediate money loss (stores are independent and append-only), but could cause billing discrepancy or silent sticky-route failure during the beta.",
     "reasoning": "Read integration_test.go:19-82 (gateway uses roundTripFunc stub for coordinator) and buyer/server_test.go:1-30 (coordinator mocks provider relay) \u2014 both citations accurate. Searched entire repo: no cross-service test directory exists. Confirmed gateway settles to its own SQLite store (store.go:435-477) and coordinator has its own billing.Store. The sticky-route operator-key forwarding at server.go:1401-1405 writes Authorization + account headers that coordinator's internalBearerAuthorized (server.go:2694) must validate \u2014 zero test coverage across the boundary. harness.py targets tunnel directly, not the full gateway stack."
    }
   },
@@ -1358,7 +1358,7 @@
    "title": "Publicly distributed provider binary ships with zero third-party license attribution despite Apache-2.0 static linking",
    "severity": "Medium",
    "kind": "fact",
-   "what": "package.sh builds the release tarball containing only the binary plus Metal/NIO resource bundles (lines 52-60: `macprovider-cli`, `mlx-swift_Cmlx.bundle`, `swift-nio_NIOPosix.bundle`) \u2014 no LICENSE, NOTICE, or third-party attribution files. The binary statically links Apache-2.0 dependencies (swift-nio, swift-argument-parser, swift-log per Package.swift:24-35, plus transitive swift-transformers, swift-collections, swift-atomics per Package.resolved) and MIT dependencies (mlx-swift, mlx-swift-examples, Yams, GzipSwift). Apache-2.0 \u00a74 requires providing a copy of the license with binary redistributions; MIT requires notice retention. This tarball is distributed to strangers via GitHub Releases and the public curl|bash installer chain (get.streamvc.live).",
+   "what": "package.sh builds the release tarball containing only the binary plus Metal/NIO resource bundles (lines 52-60: `macprovider-cli`, `mlx-swift_Cmlx.bundle`, `swift-nio_NIOPosix.bundle`) \u2014 no LICENSE, NOTICE, or third-party attribution files. The binary statically links Apache-2.0 dependencies (swift-nio, swift-argument-parser, swift-log per Package.swift:24-35, plus transitive swift-transformers, swift-collections, swift-atomics per Package.resolved) and MIT dependencies (mlx-swift, mlx-swift-examples, Yams, GzipSwift). Apache-2.0 \u00a74 requires providing a copy of the license with binary redistributions; MIT requires notice retention. This tarball is distributed to strangers via GitHub Releases and the public curl|bash installer chain (get.malibu.tech).",
    "where": [
     "phase3-binary/dist/package.sh:52",
     "phase3-binary/Package.swift:19",
@@ -1498,7 +1498,7 @@
     "phase4-coordinator/dist/monitor/macprovider-monitor.timer:1-11 (3-min timer)"
    ],
    "why": "Real buyers and a real money path now depend on one swap-pressured VPS. If Pearl goes down at 3am \u2014 the one failure mode the monitor structurally cannot report \u2014 the operator learns about it from a user complaint. Even a provider-pool-empty CRITICAL may reach no human if the Gmail app password was never configured (the code's silent-degrade design makes that state invisible), and if the one email send fails, the alert is gone forever. The minimum bar for live money is one alerting path that does not live on the monitored host.",
-   "suggestedFix": "Two cheap moves: (1) add a free external uptime check (healthchecks.io or UptimeRobot) on https://coordinator.streamvc.live/healthz and https://api.streamvc.live/healthz with email/push \u2014 this covers VPS-down, nginx-down, and monitor-dead in one stroke; (2) in monitor.py, only save_state() for a transition after the alert was delivered to at least one channel beyond journald (or retry on next poll while the condition persists), and confirm the Gmail app password is actually set in production.",
+   "suggestedFix": "Two cheap moves: (1) add a free external uptime check (healthchecks.io or UptimeRobot) on https://coordinator.malibu.tech/healthz and https://api.malibu.tech/healthz with email/push \u2014 this covers VPS-down, nginx-down, and monitor-dead in one stroke; (2) in monitor.py, only save_state() for a transition after the alert was delivered to at least one channel beyond journald (or retry on next poll while the condition persists), and confirm the Gmail app password is actually set in production.",
    "confidence": "high",
    "id": "DEVE-2",
    "dimension": "devexops",
@@ -1675,7 +1675,7 @@
    "title": "README console feature list claims management and billing features the deployed console does not have",
    "severity": "Medium",
    "kind": "fact",
-   "what": "README.md:31 says providers 'Manage your node at console.streamvc.live' and README.md:35-40 lists console capabilities including 'Manage provider status and pool visibility' and 'Review billing and earnings'. The actual console (frontdoor/console/index.html) contains exactly three views \u2014 viewChat (line 493), viewDashboard (line 530), viewArm64golf (line 539). Grep over the file finds zero occurrences of 'earnings', 'payout', 'credits', 'billing', 'manage', 'pool visibility', or 'provider status'. Browser chat and pool monitoring are real; node management and billing review are not.",
+   "what": "README.md:31 says providers 'Manage your node at console.malibu.tech' and README.md:35-40 lists console capabilities including 'Manage provider status and pool visibility' and 'Review billing and earnings'. The actual console (frontdoor/console/index.html) contains exactly three views \u2014 viewChat (line 493), viewDashboard (line 530), viewArm64golf (line 539). Grep over the file finds zero occurrences of 'earnings', 'payout', 'credits', 'billing', 'manage', 'pool visibility', or 'provider status'. Browser chat and pool monitoring are real; node management and billing review are not.",
    "where": [
     "README.md:31",
     "README.md:35-40",
@@ -1692,7 +1692,7 @@
     "isReal": true,
     "citationAccurate": true,
     "severityVerdict": "keep",
-    "reasoning": "README.md:31 and :35-40 were read directly and exactly match the claimed overclaims. frontdoor/console/index.html:493/530/539 confirmed only three views (viewChat, viewDashboard, viewArm64golf) with zero occurrences of billing/management terms. The nginx config (frontdoor/console/dist/nginx-console.streamvc.live.conf:29) confirms console.streamvc.live serves /var/www/console (the static index.html), not the coordinator's internal explorer which does have ledger/settlement handlers. The gap is real: billing/payout data exists server-side but no UI surfaces it at the advertised URL. Medium severity is correctly calibrated \u2014 not exploitable, but materially misleads providers at onboarding time."
+    "reasoning": "README.md:31 and :35-40 were read directly and exactly match the claimed overclaims. frontdoor/console/index.html:493/530/539 confirmed only three views (viewChat, viewDashboard, viewArm64golf) with zero occurrences of billing/management terms. The nginx config (frontdoor/console/dist/nginx-console.malibu.tech.conf:29) confirms console.malibu.tech serves /var/www/console (the static index.html), not the coordinator's internal explorer which does have ledger/settlement handlers. The gap is real: billing/payout data exists server-side but no UI surfaces it at the advertised URL. Medium severity is correctly calibrated \u2014 not exploitable, but materially misleads providers at onboarding time."
    }
   },
   {
@@ -1790,7 +1790,7 @@
     "isReal": true,
     "citationAccurate": true,
     "severityVerdict": "keep",
-    "reasoning": "All four cited locations were read and confirm the claim. The /providers/{id}/earnings endpoint exists at billing/endpoints.go:51-52 with real provider_share_bps and payout data, but: frontdoor/console/index.html has zero references to earnings/payout/credits (confirmed by grep); phase3-binary/README.md (all 51 lines) covers only installation and trust caveats; README.md:55 has exactly the single \"can be promoted to pinned\" clause with no criteria; docs.md:130 gives buyers one sentence on availability. No counter-evidence found in dist/install.sh, RUNBOOK.md, HANDOFF.md, or any other public surface. The README \"Review billing and earnings\" bullet (line 40) is aspirational UI copy pointing at console.streamvc.live, but the console HTML itself contains no earnings UI whatsoever. Medium severity is correctly calibrated for a 3-provider beta \u2014 not Critical since disputes are manual today, but a real friction point for provider recruitment."
+    "reasoning": "All four cited locations were read and confirm the claim. The /providers/{id}/earnings endpoint exists at billing/endpoints.go:51-52 with real provider_share_bps and payout data, but: frontdoor/console/index.html has zero references to earnings/payout/credits (confirmed by grep); phase3-binary/README.md (all 51 lines) covers only installation and trust caveats; README.md:55 has exactly the single \"can be promoted to pinned\" clause with no criteria; docs.md:130 gives buyers one sentence on availability. No counter-evidence found in dist/install.sh, RUNBOOK.md, HANDOFF.md, or any other public surface. The README \"Review billing and earnings\" bullet (line 40) is aspirational UI copy pointing at console.malibu.tech, but the console HTML itself contains no earnings UI whatsoever. Medium severity is correctly calibrated for a 3-provider beta \u2014 not Critical since disputes are manual today, but a real friction point for provider recruitment."
    }
   },
   {

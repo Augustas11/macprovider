@@ -1045,7 +1045,7 @@ func TestRotationThroughHandler_Subprocess(t *testing.T) {
 
 	probe := func(token string) int {
 		req := httptest.NewRequest(http.MethodGet,
-			"http://stats.streamvc.live/v1/stats/leaderboard?window=24h", nil)
+			"http://stats.malibu.tech/v1/stats/leaderboard?window=24h", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)

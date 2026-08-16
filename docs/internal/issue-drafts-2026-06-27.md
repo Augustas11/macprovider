@@ -104,10 +104,10 @@ Each issue below is ready to file via `gh issue create` against
 > External LaunchAgent watchdog: `ops/macprovider-watchdog/` (internal
 > repo). Polls `netstat` every 60s for an ESTABLISHED TCP to coord
 > IP; on detection of half-open state, runs
-> `launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider`.
+> `launchctl kickstart -k gui/$(id -u)/live.malibu.provider`.
 > Installed and verified on augustass-macbook-air. Not a substitute
 > for the Swift-side fix; documented for fleet-wide install via
-> `get.streamvc.live/install.sh` follow-up.
+> `get.malibu.tech/install.sh` follow-up.
 
 ---
 
@@ -222,7 +222,7 @@ harness only)**:
 >
 > To ship fleet-wide:
 > 1. Read provider id from `~/.config/macprovider/config.yaml`.
-> 2. Ship as part of `get.streamvc.live/install.sh`.
+> 2. Ship as part of `get.malibu.tech/install.sh`.
 > 3. Make the launchd label / process matcher configurable.
 > 4. Decide whether the watchdog also cross-checks coordinator's
 >    `/v1/models` (catches the case where WS is established at TCP

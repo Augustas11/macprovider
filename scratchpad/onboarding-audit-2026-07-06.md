@@ -19,7 +19,7 @@ Read-only audit of CLI-track vs App-track onboarding in current tree. Code is so
 
 ## 2. Onboarding path A — CLI-track
 
-Fresh Mac, `curl https://get.streamvc.live/install.sh | bash`:
+Fresh Mac, `curl https://get.malibu.tech/install.sh | bash`:
 
 | Step | Code | Artifacts | Coordinator | Failure UX |
 |------|------|-----------|-------------|------------|
@@ -29,7 +29,7 @@ Fresh Mac, `curl https://get.streamvc.live/install.sh | bash`:
 | 4. Install binary | `install_binary:1341-1375` | Real: `$HOME/macprovider/macprovider-cli` + MLX bundles; symlink `~/.local/bin/macprovider-cli` | — | Exit 5 |
 | 5. Write config | `write_config:1161-1181` | `~/.config/macprovider/config.yaml`, `provider_id` file; preserves existing `provider_token:` line | — | — |
 | 6. Autotune | `run_autotune_recommend_apply:1246` | Updates config (model, artifact paths, `donor_mode`) | Catalog via CLI subprocess | Donor prompt or `SKIP_PROVIDER_START=1`; exit 6 |
-| 7. LaunchAgent | `install_plist:1422-1447`, `render_plist:1449-1508` | `~/Library/LaunchAgents/live.streamvc.macprovider.plist`, logs under `~/Library/Logs/macprovider/` | — | Exit 5: launchctl bootstrap fail (AMFI on adhoc, macOS 26+) |
+| 7. LaunchAgent | `install_plist:1422-1447`, `render_plist:1449-1508` | `~/Library/LaunchAgents/live.malibu.provider.plist`, logs under `~/Library/Logs/macprovider/` | — | Exit 5: launchctl bootstrap fail (AMFI on adhoc, macOS 26+) |
 | 8. Watchdog | `install_watchdog:2220-2246` | `~/.local/share/macprovider-watchdog/`, second plist | — | Same |
 | 9. Manifest | `write_install_manifest:2249` | `~/Library/Application Support/macprovider/install_manifest.json` | — | — |
 | 10. Self-test | `wait_for_local_model:2386`, `wait_for_coordinator:2495` | — | `GET /v1/pool/check?provider_id=…` | Exit 6: timeout diagnostics (`print_local_self_test_diagnostics:2456`) |
@@ -80,7 +80,7 @@ Fresh Mac, launch `Malibu.app`:
 | `~/Library/Application Support/Malibu/onboarding.json` | — | V2 state machine | App-only |
 | Keychain `tech.malibu.provider/{provider_id}` | — (import migrates CLI token here) | Bearer token | App track; CLI reads YAML/env |
 | Keychain `tech.malibu.app` / `provider_identity_v1` | — | Ed25519 identity | App-only (SPEC-026 §3.1) |
-| LaunchAgent `live.streamvc.macprovider` | `install.sh` | **Not used** (SPEC-025: SMAppService instead) | Independent |
+| LaunchAgent `live.malibu.provider` | `install.sh` | **Not used** (SPEC-025: SMAppService instead) | Independent |
 | Control socket `…/Malibu/agent.sock` | Not set by launchd plist | Malibu child only (`CLIChildProcess.swift:57-61`) | App child path only |
 
 **SPEC vs code:** SPEC-026 v0.13 makes App-track register + Keychain authoritative for new providers. SPEC-025 v0.1 §12 describes conflict detection — **`ProviderConflictDetector` exists in CLI** (`ProviderConflictDetector.swift`) but **Malibu app does not invoke it** on startup.
@@ -126,7 +126,7 @@ Fresh Mac, launch `Malibu.app`:
 
 1. **Production Malibu build:** Is `onboardingFlow=v2` baked into release `UserDefaults` or only dev manual `defaults write`? Not found in `project.yml`.
 2. **Coordinator behavior** when two CLIs connect with same `provider_id` — not fully traceable from phase3-binary alone.
-3. **Operator `/tmp` plist origin** — likely manual/dev run, not `install.sh`; label `v1810` vs fixed `live.streamvc.macprovider` in script (`install.sh:26`).
+3. **Operator `/tmp` plist origin** — likely manual/dev run, not `install.sh`; label `v1810` vs fixed `live.malibu.provider` in script (`install.sh:26`).
 4. **Wallet / USDC earn path** post-onboarding — `setPayoutWallet` throws SPEC-027 stub (`LaunchProviderController.swift:277-279`); earning requires separate wallet flow not audited here.
 
 ---

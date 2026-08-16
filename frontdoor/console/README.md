@@ -1,21 +1,21 @@
 # Mac Provider console
 
-Static front-door for `console.streamvc.live`.
+Static front-door for `console.malibu.tech`.
 
 - Single file: `index.html`
 - No build step, frameworks, CDNs, fonts, analytics, or third-party requests
-- Browser requests go directly to `https://api.streamvc.live`
+- Browser requests go directly to `https://api.malibu.tech`
 - Demo tokens are kept in memory only and sent via `X-Demo-Token`
 - Demo-session minting is deferred until the first prompt input or send action
-- CORS is limited to operator-controlled first-party origins: `https://console.streamvc.live` and the reserved apex `https://streamvc.live`
+- CORS is limited to operator-controlled first-party origins: `https://console.malibu.tech` and the reserved apex `https://malibu.tech`
 
 Deploy target:
 
 ```sh
 sudo mkdir -p /var/www/console
 sudo cp index.html /var/www/console/index.html
-sudo cp dist/nginx-console.streamvc.live.conf /etc/nginx/sites-available/console.streamvc.live
-sudo ln -s /etc/nginx/sites-available/console.streamvc.live /etc/nginx/sites-enabled/console.streamvc.live
+sudo cp dist/nginx-console.malibu.tech.conf /etc/nginx/sites-available/console.malibu.tech
+sudo ln -s /etc/nginx/sites-available/console.malibu.tech /etc/nginx/sites-enabled/console.malibu.tech
 sudo nginx -t && sudo systemctl reload nginx
 ```
 

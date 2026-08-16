@@ -166,7 +166,7 @@ class PearlUpdaterTests(unittest.TestCase):
             request_id: str,
             provider_id: str = "catalog-canary",
             status: int = 200,
-            url: str = "https://api.streamvc.live/v1/chat/completions",
+            url: str = "https://api.malibu.tech/v1/chat/completions",
             lines: list[bytes] | None = None,
         ):
             self.headers = {"X-Provider-Id": provider_id, "X-Request-Id": request_id}
@@ -1959,7 +1959,7 @@ class PearlUpdaterTests(unittest.TestCase):
             self.updater.catalog_admission_ready.call_args_list,
             [
                 mock.call(release, "http://127.0.0.1:8443/v1/autotune-release"),
-                mock.call(release, "https://coordinator.streamvc.live/v1/autotune-release"),
+                mock.call(release, "https://coordinator.malibu.tech/v1/autotune-release"),
             ],
         )
 
@@ -2299,7 +2299,7 @@ class PearlUpdaterTests(unittest.TestCase):
             )
 
         request = opener.requests[0]
-        self.assertEqual(request.full_url, "https://api.streamvc.live/v1/chat/completions")
+        self.assertEqual(request.full_url, "https://api.malibu.tech/v1/chat/completions")
         self.assertEqual(request.get_header("Authorization"), "Bearer buyer-token-value")
         self.assertEqual(request.get_header("Accept"), "text/event-stream")
         payload = json.loads(request.data)
@@ -2390,7 +2390,7 @@ class PearlUpdaterTests(unittest.TestCase):
             (
                 lambda request: self.BuyerProofResponse(
                     request_id=request.get_header("X-request-id"),
-                    url="https://api.streamvc.live/redirected",
+                    url="https://api.malibu.tech/redirected",
                 ),
                 "exact HTTP 200",
             ),
@@ -2979,7 +2979,7 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.assertTrue(self.updater.protected_provider_fleet_ready())
         self.updater.get_authorized_json.assert_called_once_with(
-            "https://coordinator.streamvc.live/poolz",
+            "https://coordinator.malibu.tech/poolz",
             "operator-token",
         )
 

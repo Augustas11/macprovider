@@ -18,19 +18,19 @@ Build ONLY from public, licensed sources: `mlx-swift`/`mlx` (MIT), `mlx-lm` `Bat
 The provider is launchd-managed and has a **watchdog that will respawn it** if you just kill the process. Discovered labels (verify current state first):
 | Label | Role | Action order |
 |---|---|---|
-| `live.streamvc.macprovider-watchdog` | **watchdog — respawns the provider** | **STOP FIRST** |
-| `live.streamvc.macprovider` | the provider (was PID 25228) | stop second |
-| `com.streamvc.coldwarm-postreboot-watch`, `com.streamvc.coldwarm-warm` | cold/warm watchers (may load a model / contend) | stop |
-| `live.streamvc.macprovider-catalog-canary-tunnel` | canary tunnel | stop |
+| `live.malibu.provider-watchdog` | **watchdog — respawns the provider** | **STOP FIRST** |
+| `live.malibu.provider` | the provider (was PID 25228) | stop second |
+| `com.malibu.coldwarm-postreboot-watch`, `com.malibu.coldwarm-warm` | cold/warm watchers (may load a model / contend) | stop |
+| `live.malibu.provider-catalog-canary-tunnel` | canary tunnel | stop |
 
 Procedure:
-1. **Confirm buyer impact.** This M5 is (likely) the sole/primary prod provider — pausing it takes the pool down → buyer 503s. Treat the spike as a **bounded, off-peak maintenance window.** Check the `coordinator.streamvc.live` pool for redundancy first; if it's the only provider, get the operator's go-ahead and pick a low-traffic window.
+1. **Confirm buyer impact.** This M5 is (likely) the sole/primary prod provider — pausing it takes the pool down → buyer 503s. Treat the spike as a **bounded, off-peak maintenance window.** Check the `coordinator.malibu.tech` pool for redundancy first; if it's the only provider, get the operator's go-ahead and pick a low-traffic window.
 2. **Record state for exact restore:** `launchctl list | grep streamvc` (labels + PIDs) and the plist paths in `~/Library/LaunchAgents/`. Save it.
 3. **Stop gracefully, WATCHDOG FIRST, then provider, then watchers/tunnel** — `launchctl bootout gui/$(id -u)/<label>` (graceful). **NEVER `pkill -9 -f "macprovider-cli serve"` broadly** — a broad pkill downed the live provider before (`incident-2026-07-27`). If you must signal a PID, match it exactly and narrowly.
 4. Verify the provider process is gone and RAM is freed (`ps`, memory pressure) before building.
 
 ### RESTORE the provider AFTER the spike (non-negotiable)
-1. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/live.streamvc.macprovider.plist` (+ the watchdog + watchers + tunnel), or `launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider`.
+1. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/live.malibu.provider.plist` (+ the watchdog + watchers + tunnel), or `launchctl kickstart -k gui/$(id -u)/live.malibu.provider`.
 2. Verify it **reconnects to the coordinator** (pool shows it / `/healthz` version) and **serves a test inference**.
 3. Confirm the **watchdog** is back. Leave the machine exactly as found. Keep the outage window bounded.
 

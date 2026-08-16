@@ -4392,8 +4392,8 @@ class Updater:
         )
 
     def public_identity_ready(self, identity: RuntimeIdentity) -> bool:
-        coordinator = self.get_json("https://coordinator.streamvc.live/healthz")
-        gateway = self.get_json("https://api.streamvc.live/healthz")
+        coordinator = self.get_json("https://coordinator.malibu.tech/healthz")
+        gateway = self.get_json("https://api.malibu.tech/healthz")
         return (
             self.coordinator_identity_ready(coordinator, identity)
             and gateway.get("status") == "ok"
@@ -4451,7 +4451,7 @@ class Updater:
         self.wait_for(
             "public exact catalog admission",
             self.config.service_health_timeout_s,
-            lambda: self.catalog_admission_ready(release, "https://coordinator.streamvc.live/v1/autotune-release"),
+            lambda: self.catalog_admission_ready(release, "https://coordinator.malibu.tech/v1/autotune-release"),
         )
         self.audit(
             "exact_catalog_admission_canary",
@@ -4661,7 +4661,7 @@ class Updater:
         quoted_id = urllib.parse.quote(provider_id, safe="")
         quoted_assigned_id = urllib.parse.quote(assigned_id, safe="")
         url = (
-            "https://coordinator.streamvc.live/v1/pool/check?provider_id="
+            "https://coordinator.malibu.tech/v1/pool/check?provider_id="
             + quoted_id
             + "&assigned_id="
             + quoted_assigned_id
@@ -4762,7 +4762,7 @@ class Updater:
         provider_id: str,
         model_id: str,
     ) -> dict[str, str]:
-        url = "https://api.streamvc.live/v1/chat/completions"
+        url = "https://api.malibu.tech/v1/chat/completions"
         request_id = str(uuid.uuid4())
         requested_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
         body = {
@@ -4941,7 +4941,7 @@ class Updater:
         if not self.previous_protected_providers:
             return True
         poolz = self.get_authorized_json(
-            "https://coordinator.streamvc.live/poolz",
+            "https://coordinator.malibu.tech/poolz",
             self.coordinator_operator_token(),
         )
         summary = poolz.get("summary")

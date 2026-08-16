@@ -265,7 +265,7 @@ func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 }
 
 func TestNginxProviderRoutesBeforeV1CatchAll(t *testing.T) {
-	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	body, err := os.ReadFile("../../dist/nginx-coordinator.malibu.tech.conf")
 	if err != nil {
 		t.Fatalf("read nginx config: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestNginxProviderRoutesBeforeV1CatchAll(t *testing.T) {
 }
 
 func TestNginxWalletRouteBeforeV1CatchAll(t *testing.T) {
-	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	body, err := os.ReadFile("../../dist/nginx-coordinator.malibu.tech.conf")
 	if err != nil {
 		t.Fatalf("read nginx config: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestNginxWalletRouteBeforeV1CatchAll(t *testing.T) {
 }
 
 func TestNginxMalibuAccrualRouteBeforeV1CatchAll(t *testing.T) {
-	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	body, err := os.ReadFile("../../dist/nginx-coordinator.malibu.tech.conf")
 	if err != nil {
 		t.Fatalf("read nginx config: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestNginxMalibuAccrualRouteBeforeV1CatchAll(t *testing.T) {
 }
 
 func TestNginxV2ProviderAliasesExistingWSHandler(t *testing.T) {
-	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	body, err := os.ReadFile("../../dist/nginx-coordinator.malibu.tech.conf")
 	if err != nil {
 		t.Fatalf("read nginx config: %v", err)
 	}
@@ -559,9 +559,9 @@ func TestReloadCoordinatorConfigHotTogglesProofOfWeightsGate(t *testing.T) {
 	next.Onboarding.AuthPolicyCutoverDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
 	next.Onboarding.HardwareTrustRequestDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
 	next.Onboarding.HardwareTrustApproveDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
-	next.Onboarding.BundleID = "live.streamvc.MacProvider"
+	next.Onboarding.BundleID = "live.malibu.Provider"
 	next.Onboarding.AppleTeamID = "ABCDE12345"
-	next.Onboarding.CoordinatorDomain = "coordinator.streamvc.live"
+	next.Onboarding.CoordinatorDomain = "coordinator.malibu.tech"
 	next.Onboarding.ASNPrefixes = map[string]string{"192.0.2.0/24": "AS64512"}
 	next.Auth.OperatorKeys = map[string]string{
 		"alice": "alice-secret-0123456789abcdef0123456789",

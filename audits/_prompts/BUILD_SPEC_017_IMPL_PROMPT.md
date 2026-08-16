@@ -52,7 +52,7 @@ Your job is to implement [`specs/SPEC-017-network-stats-api.md`](SPEC-017-networ
 
 ## 1. Pre-flight checklist — operator-action prerequisites
 
-SPEC-017 has no operator-prerequisite section analogous to SPEC-016's hot-wallet gate. The locked SPEC already pins behavior for both hostname patterns (§7.1: both `coordinator.streamvc.live/v1/stats/*` and `stats.streamvc.live` work) and both backfill postures (§9.7 Path A default + Path B opt-in). The IMPL author MUST implement BOTH paths and BOTH backfill modes; operator selection applies at cutover/config, not at code-write time.
+SPEC-017 has no operator-prerequisite section analogous to SPEC-016's hot-wallet gate. The locked SPEC already pins behavior for both hostname patterns (§7.1: both `coordinator.malibu.tech/v1/stats/*` and `stats.malibu.tech` work) and both backfill postures (§9.7 Path A default + Path B opt-in). The IMPL author MUST implement BOTH paths and BOTH backfill modes; operator selection applies at cutover/config, not at code-write time.
 
 That said, four items need confirmation BEFORE kickoff (two implementation-shape items + two security-gate items), and four items are HARD prereqs before production cutover (deploy gates, not code gates).
 
@@ -69,7 +69,7 @@ That said, four items need confirmation BEFORE kickoff (two implementation-shape
 **Production-cutover deploy gates (operator side, MUST be discharged before nginx flip — but DO NOT block IMPL code-write or staging deploys):**
 
 5. **Postgres roles + DSN provisioning (HARD before any Pearl deploy of stats code).** Operator creates the Postgres roles and their passwords on the Pearl Postgres instance, applies the §9.1 / §6.1 / §6.5 / §5.4.1 migrations, and installs the four DSNs (`stats_reader_dsn`, `stats_rollup_dsn`, `provider_portal_dsn`, optionally `partner_keys_writer_dsn`) in the coordinator config/secrets store. Step 1's startup smoke verifies the DSNs and roles via a staging deploy BEFORE any Pearl rollout. The coordinator binary MUST be fail-closed: on startup, if `stats.enabled = true` and any required DSN is missing or any required role fails connection smoke, the process MUST refuse to start. If `stats.enabled = false` (default until cutover), the `/v1/stats/*` mux subtree is NOT registered with the HTTP router — requests to `/v1/stats/*` return a standard `404 Not Found` from the coordinator's existing mux fallback (NOT a custom JSON envelope with `code: "stats_disabled"`, which would violate the §5.9 closed code vocabulary). The rest of the coordinator runs normally.
-6. **DNS for `stats.streamvc.live`.** Operator points the new vhost at the same Pearl VPS IP as `coordinator.streamvc.live`. SOFT prereq — IMPL builds and unit-tests without DNS in place; integration smoke needs it.
+6. **DNS for `stats.malibu.tech`.** Operator points the new vhost at the same Pearl VPS IP as `coordinator.malibu.tech`. SOFT prereq — IMPL builds and unit-tests without DNS in place; integration smoke needs it.
 7. **Cloudflare configuration.** If Cloudflare fronts the new vhost (recommended per §5.6 / §7.4), operator configures rate-limit zones and bot-management rules before public cutover. SOFT prereq.
 8. **Nginx server-block on Pearl.** Operator deploys the new server-block (§7.4 + Step 4 directives below) and verifies TLS, cache directives, header strip on `Authorization`, dedicated `limit_req_zone`, fail-closed burst (§5.6 enforced via `nodelay`). SOFT prereq for IMPL but a HARD prereq for production cutover.
 
@@ -282,7 +282,7 @@ The rebuild MUST NOT interleave per-provider UPSERT operations against the live 
 
 **Bootstrap rule (pin this — v0.1.7 has 7 components, not 6):** the migration MUST pre-seed all seven component rows (`overview`, `timeseries_rpm`, `timeseries_tpm`, `leaderboard_24h`, `leaderboard_7d`, `leaderboard_30d`, `leaderboard_all`) with `generated_at = epoch` (or operator-configured `bootstrap_generated_at`) and `last_ok_at = epoch`. This guarantees the NOT NULL constraints are satisfied even if the first rollup tick fails before any success, AND it guarantees `/v1/stats/health` derives `status = "down"` for any component whose first tick has not succeeded yet (because `now - epoch > §5.8 budget`). A test MUST verify "first tick fails before any success" produces `status = "down"` without violating NOT NULL. The bootstrap MUST also seed the `rewards_populated` storage for all four windows at `false` (matching the v0.1 empty-ledger default).
 
-**Backfill posture (both modes implemented; operator chooses at cutover):** per §9.7, implement both Path A (rollup-start-date forward + `partial_history_since` field set on `30d`/`all` responses while the window is shorter than its label) and Path B (synchronous backfill from full OLTP history before flipping `stats.streamvc.live` server-block on). Operator-config flag `stats.rollup.backfill_mode = "partial"|"full"` selects at runtime; default `"partial"`.
+**Backfill posture (both modes implemented; operator chooses at cutover):** per §9.7, implement both Path A (rollup-start-date forward + `partial_history_since` field set on `30d`/`all` responses while the window is shorter than its label) and Path B (synchronous backfill from full OLTP history before flipping `stats.malibu.tech` server-block on). Operator-config flag `stats.rollup.backfill_mode = "partial"|"full"` selects at runtime; default `"partial"`.
 
 **`partner_keys.last_used_at` updates: NOT IMPLEMENTED in v0.1.** Per the `partner_keys_writer` resolution in Step 1, the role is skipped for v0.1 and `last_used_at` stays NULL. Step 2 implements NO worker, NO channel, and Step 3's auth dispatcher (§5.4.3 step 2) does NOT emit any `last_used_at` touch. The SPEC §5.4.3 "MAY update `last_used_at` (best effort)" is satisfied by the default-off path. A future SPEC v0.2 candidate that pins an executable grant pattern will unblock the worker; do NOT add it in v0.1 IMPL.
 
@@ -332,7 +332,7 @@ A seed SQL file under `phase4-coordinator/internal/stats/testdata/` MUST contain
 
 **Package location:** `phase4-coordinator/internal/stats/` (flat — handlers, mux wiring, recover middleware all live here per the existing `internal/explorer/` pattern). Subpackage `phase4-coordinator/internal/stats/store/` houses the DAO that the handlers call. Uses `stats_reader` `*sql.DB`.
 
-**Handlers (mount under `/v1/stats/*` per §7.1, exposed on BOTH `coordinator.streamvc.live/v1/stats/*` and `stats.streamvc.live/v1/stats/*` via the same binary):**
+**Handlers (mount under `/v1/stats/*` per §7.1, exposed on BOTH `coordinator.malibu.tech/v1/stats/*` and `stats.malibu.tech/v1/stats/*` via the same binary):**
 
 - `GET /v1/stats/overview` — §5.1 JSON shape, 14 `network.*` fields, 30-point timeseries with `null` (NOT zero) for missing minutes (§5.1 field rules). **v0.1.7 reminder:** the `_total` fields are CUMULATIVE all-time counters (per §9.2).
 - `GET /v1/stats/leaderboard` — §5.2 wire shape. **v0.1.7 binding deltas vs v0.1.6:**
@@ -369,11 +369,11 @@ Implementation rules:
 - Rows 5, 6, and 7 MUST have indistinguishable response latency (±20% variance per AC-18 three-way statistical test of 100+ requests per row).
 - On success, do NOT touch `last_used_at` in v0.1 (per the §7.2.4 default-off resolution above). The auth dispatcher returns success directly; no channel emit, no SQL touch.
 
-**CORS per §5.7 — preflight is key-agnostic** (browsers don't send Authorization on preflight). The handler MUST NOT evaluate per-key allowlist at OPTIONS time. Per-key allowlist enforced ONLY on GET. CORS allowed origins MUST use exact-match strings; sibling-subdomain wildcards (e.g. `*.streamvc.live`) FORBIDDEN — `console.streamvc.live`, `portal.streamvc.live`, `stats.streamvc.live` have distinct trust roles.
+**CORS per §5.7 — preflight is key-agnostic** (browsers don't send Authorization on preflight). The handler MUST NOT evaluate per-key allowlist at OPTIONS time. Per-key allowlist enforced ONLY on GET. CORS allowed origins MUST use exact-match strings; sibling-subdomain wildcards (e.g. `*.malibu.tech`) FORBIDDEN — `console.malibu.tech`, `portal.malibu.tech`, `stats.malibu.tech` have distinct trust roles.
 
 Preflight returns exactly **204** (NOT 200 — AC-13 verifies, do not permit a 200 escape hatch) with empty body, `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`, `Access-Control-Allow-Headers: Authorization, Content-Type`, **`Access-Control-Max-Age: 60`** (v0.1.7: was `3600` in v0.1.6; the SPEC lowered it so partner-key revocation propagates to the browser preflight cache within a minute, not within an hour; operator MAY raise via runtime config to a maximum of 300; >300 requires a SPEC bump). `Access-Control-Allow-Origin` follows §5.7, after applying RFC 6454 normalization to the request Origin:
 
-- **Origin is on the global partner-origin allowlist** (the union of every active `partner_keys.allowed_origins` array + `https://console.streamvc.live` + `https://portal.streamvc.live`) → `Access-Control-Allow-Origin: <normalized Origin>` (echoed) AND `Access-Control-Allow-Credentials: true`.
+- **Origin is on the global partner-origin allowlist** (the union of every active `partner_keys.allowed_origins` array + `https://console.malibu.tech` + `https://portal.malibu.tech`) → `Access-Control-Allow-Origin: <normalized Origin>` (echoed) AND `Access-Control-Allow-Credentials: true`.
 - **Origin is NOT on the global allowlist** → `Access-Control-Allow-Origin: *` AND do NOT emit `Allow-Credentials`.
 
 The subsequent GET is then evaluated by the §5.4.3 7-row decision table EXACTLY. Preflight permissiveness MUST NOT be interpreted by clients or implementations as a guarantee that the GET will succeed:
@@ -492,7 +492,7 @@ Additionally for Step 3 specifically:
 - **Vary header assertions (v0.1.7)** — public-projection `/v1/stats/leaderboard` response MUST have `Vary: Accept-Encoding, Origin` (NOT including `Authorization`); partner-key projection MUST have `Vary: Accept-Encoding, Origin, Authorization`. A 401 keyed-but-invalid response MUST take the public-projection Vary (the response body is not key-derived).
 - **`X-Stats-Generated-At`** present on every NON-304 `/v1/stats/*` response (CODE r8 M2 — 304 path per §5.9 carries only RFC 7232 headers). A separate AC-12 sub-assertion verifies the 304 response does NOT carry `X-Stats-Generated-At`.
 - **§5.4.3 7-row decision-table test** — one fixture per row, including the absent-Origin case (row 3).
-- **CORS sibling-subdomain reject test** — `Origin: https://evil.streamvc.live` rejected; `Origin: https://portal.streamvc.live` accepted only if EXACTLY in allowlist.
+- **CORS sibling-subdomain reject test** — `Origin: https://evil.malibu.tech` rejected; `Origin: https://portal.malibu.tech` accepted only if EXACTLY in allowlist.
 - **CORS partner-key projection NEVER `ACAO: *` test (v0.1.7 H1)** — drive all 7 §5.7 rows; assert that for partner-key projection rows (rows 3, 4, 5 in v0.1.7), the response `Access-Control-Allow-Origin` is either the echoed normalized Origin (when set) OR omitted entirely (server-to-server context), NEVER `*`. Also assert `Allow-Credentials: true` is paired with the echoed-Origin case and omitted in the server-to-server case.
 - **RFC 6454 Origin normalization test (v0.1.7 M4)** — seed `partner_keys.allowed_origins = ARRAY['https://acme.example']` (non-empty allowlist; the key is active, not revoked). Send requests with `Origin: HTTPS://Acme.Example`, `https://acme.example:443`, `https://acme.example/`, `https://acme.example?foo=bar`. Assert:
   - First two (case-insensitive scheme/host + default-port stripped) → 200 partner projection (row 4 of §5.4.3 — exact allowlist match after normalization).
@@ -564,7 +564,7 @@ Issuance flow:
 
 #### 4.B Edge / nginx / rate-limit / cache
 
-**Nginx server-block on Pearl** for `stats.streamvc.live` AND a path-prefix block for `coordinator.streamvc.live/v1/stats/*`. Required directives:
+**Nginx server-block on Pearl** for `stats.malibu.tech` AND a path-prefix block for `coordinator.malibu.tech/v1/stats/*`. Required directives:
 
 - `limit_req_zone` declaration per endpoint at the `http` block (defines the zone). v0.1.8 SPEC §5.6 erratum (2026-06-26): the public-tier zone declaration MUST use `rate=60r/m` and the location block MUST use `limit_req zone=<name> burst=59 nodelay;`. The `burst=59` short-term bucket capacity (1 in-rate token + 59 burst = 60 immediate) is mechanically required for AC-8's "60 succeed; 61st 429s" contract — the earlier "no `burst=` parameter" text was incorrect on nginx semantics (default burst=0 admits at most 1 immediate, failing the AC). Sustained throughput remains 60/min because `rate=60r/m` refill is unchanged. See SPEC §5.6 v0.1.8 erratum for the full reconciliation.
 - `limit_req_status 429;` per endpoint location.
@@ -642,7 +642,7 @@ A test MUST assert that after a successful partner-key request through nginx, th
 - **§5.6 per-endpoint isolation test (v12 CODE r11 002):** from a single client IP with no Authorization, issue 50 `/v1/stats/overview` requests followed by 50 `/v1/stats/leaderboard` requests through nginx in 60s. Assert: ALL 100 succeed at nginx (each endpoint has its own 60-rpm zone per the per-endpoint zone declarations above; the two zones do not share a quota). Then issue a 61st `/v1/stats/overview` request from the same IP within the same 60s; assert 429. Then issue a 51st `/v1/stats/leaderboard` request from the same IP; assert 200 (leaderboard still has 10 tokens left in its own zone). This proves the endpoint dimension is honored in the nginx config.
 - **`proxy_no_cache` write-suppression test (SECURITY r5 C1):** issue a partner-key request through nginx; inspect the nginx `proxy_cache_path` directory after the response. Assert NO cache entry exists for the URL+Authorization combination. Then issue an anonymous follow-up request to the same URL within s-maxage; assert the response carries cache status `MISS` or `BYPASS` (NOT `HIT`) — proving no shared cache served partner-projection bytes to an anonymous client.
 - Burst behavior: at the rate-limit threshold, excess requests are REJECTED with 429 promptly, NOT delayed (verifies `nodelay`).
-- Subdomain trust: request from `Origin: https://evil.streamvc.live` is rejected at the application layer (Step 3 CORS test); nginx forwards the request (does not block at edge).
+- Subdomain trust: request from `Origin: https://evil.malibu.tech` is rejected at the application layer (Step 3 CORS test); nginx forwards the request (does not block at edge).
 - **AC-15 nginx access-log redaction (Step 4.B share):** send a keyed `/v1/stats/leaderboard` request through nginx using a valid `mpk_*` token. Wait for log flush. Scan the nginx access log file (path per the operator config) and assert ZERO occurrences of: the raw token string, the substring of the random 43-char body, the value `mpk_<any>` beyond what `prefix` legitimately carries in operator-permitted log lines, the literal `token_hash`, or any base64-like 43-char sequence. The expected log line shows `Authorization: REDACTED` or omits the header entirely per the §7.4 access-log strip directive.
 
 #### 4.C Observability, runbooks, changelog
@@ -682,7 +682,7 @@ SPEC-017 §6.6.2 requires that providers be disclosed, at onboarding time, that 
 1. **Disclosure copy** added to `OPS.md` under a section "Partner-key exact-dollar exposure — provider disclosure obligation," substantially equivalent to the §6.6.2 SPEC text. The operator-runbook copy is the source of truth until SPEC-014 v0.9 lands the in-portal disclosure.
 2. **Onboarding-flow tracker** entry in the SPEC-014 v0.9 follow-up issue noting: "Add §6.6.2 disclosure copy to the provider-account-creation flow AND a one-time disclosure to every pre-existing provider on next portal login."
 3. **Cutover-runbook gate (v0.1.7 — BLOCKING):** production issuance of partner keys (any `coordinator partner-keys issue` invocation on a production coordinator that produces a key delivered to a real partner) MUST NOT begin until ALL THREE conditions are true on the live Pearl coordinator (per SPEC §6.6.2):
-   - (a) SPEC-014 v0.9 has merged AND is deployed to `portal.streamvc.live`.
+   - (a) SPEC-014 v0.9 has merged AND is deployed to `portal.malibu.tech`.
    - (b) The §6.6.2 disclosure copy is being shown on the provider-account creation page AND on a static portal page that every existing provider is shown on their next portal login.
    - (c) The operator runbook has a recorded sign-off entry naming the SPEC-014 v0.9 commit SHA and the date both disclosure surfaces went live.
 

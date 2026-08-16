@@ -26,7 +26,7 @@ guarded `deploy-pearl-vps.sh` path, not this retired overlay runbook.
 
 - [ ] `main` includes `LoadWithOverlay` + CLI flags (merged #478)
 - [ ] Pearl SSH key: `~/.ssh/pearl_operator_ed25519` (or set `SSH_KEY`)
-- [ ] Pearl host: `159.223.165.194` (`coordinator.streamvc.live`)
+- [ ] Pearl host: `159.223.165.194` (`coordinator.malibu.tech`)
 - [ ] `/etc/macprovider/coordinator.env` present on Pearl (secrets)
 - [ ] **1–2 lab providers** ready to observe (Malibu on your Mac counts)
 - [ ] Prefer **zero connected providers** at restart, or set `FORCE_RESTART=1`
@@ -144,7 +144,7 @@ Base unit (unchanged): `phase4-coordinator/dist/macprovider-coordinator.service`
 ### 5.1 Health + version
 
 ```bash
-curl -sS https://coordinator.streamvc.live/healthz | jq '{version, pool_size}'
+curl -sS https://coordinator.malibu.tech/healthz | jq '{version, pool_size}'
 ```
 
 Version should match the exact checked-out release tag (`vX.Y.Z`).

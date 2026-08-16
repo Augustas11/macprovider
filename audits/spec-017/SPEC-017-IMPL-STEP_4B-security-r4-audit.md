@@ -30,8 +30,8 @@ exercises the dedicated stats vhost plus shared snippets.
   Authorization-aware nginx keying, SECURITY r5 C1 `proxy_no_cache`,
   Cloudflare, subdomain trust, and AC-15 nginx redaction.
 - Required implementation reads completed:
-  `phase4-coordinator/dist/nginx-stats.streamvc.live.conf`,
-  `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`,
+  `phase4-coordinator/dist/nginx-stats.malibu.tech.conf`,
+  `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`,
   `phase4-coordinator/dist/nginx-snippets/stats-shared.conf`,
   `phase4-coordinator/dist/nginx-snippets/stats-security-headers.conf`,
   `phase4-coordinator/dist/deploy-pearl-vps.sh`,
@@ -80,7 +80,7 @@ None.
 2. `phase4-coordinator/dist/test/check_nginx_stats_test.sh:5`
    - Issue: The script header says it validates the amended coordinator vhost,
      but the Docker config only rewrites and includes
-     `nginx-stats.streamvc.live.conf` plus the shared snippets.
+     `nginx-stats.malibu.tech.conf` plus the shared snippets.
    - Risk: Low. Static inspection confirms the coordinator stats locations
      mirror the same cache/no-cache and Authorization forwarding posture, and
      the deploy script installs the shared snippet before both vhosts. The
@@ -104,7 +104,7 @@ leaderboard requests and expects zero edge 429s.
 
 C. Access-log redaction: **PASS.** `stats_redacted` omits
 `$http_authorization`, and the stats vhost writes
-`/var/log/nginx/stats.streamvc.live-access.log stats_redacted`. The harness
+`/var/log/nginx/stats.malibu.tech-access.log stats_redacted`. The harness
 scans after a keyed request for the raw token, its 43-character body, and
 `token_hash`; the static format has no Authorization-bearing field.
 
@@ -124,11 +124,11 @@ directives before the final `nginx -t`.
 G. Cloudflare / external-CDN compatibility: **PASS BY ABSENCE.** No Cloudflare
 cache override is introduced in this PR. Step 3 remains responsible for
 partner `Cache-Control: private`; no repo evidence shows Cloudflare caching in
-front of `stats.streamvc.live`.
+front of `stats.malibu.tech`.
 
 H. Subdomain-trust boundary: **PASS.** The changed nginx files contain no
 Origin-based branch, no `Access-Control-*` directives, and no edge-side
-short-circuit for `https://evil.streamvc.live`. That request is forwarded to
+short-circuit for `https://evil.malibu.tech`. That request is forwarded to
 the coordinator for the Step 3 CORS reject.
 
 I. AC-15 nginx access-log redaction: **PASS STATIC, HARNESS PRESENT BUT NOT RUN
@@ -137,7 +137,7 @@ the mounted stats access log after a keyed request. Local execution skipped
 because Docker is unavailable.
 
 J. error_log posture: **PASS.** Stats vhost sets
-`error_log /var/log/nginx/stats.streamvc.live-error.log warn;`; no committed
+`error_log /var/log/nginx/stats.malibu.tech-error.log warn;`; no committed
 stats nginx config sets `error_log debug`.
 
 ## Closed Since r3

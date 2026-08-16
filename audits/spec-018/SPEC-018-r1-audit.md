@@ -26,7 +26,7 @@ A buyer enables `tools: [{"name": "run_shell"}, …]` (typical Cline configurati
 
 The declared-function check blocks *undeclared* tool names but does NOT distinguish a model-intended call from echoed hostile content. Architect Q-1 deferred the question to security; security returned CRITICAL.
 
-**Operator decision** (recorded 2026-06-27): v0.1 adopts **(a) modelID-match-required + (b) buyer-side validation obligation**. v0.2 adopts **(c) model-hash-bound grammar selection** extending the live SPEC-008 Pillar A + SPEC-011 v0.5 `model_hash` infrastructure (already plumbed end-to-end in `phase4-coordinator/internal/pool/provider.go:158-162`, `phase4-coordinator/internal/buyer/server.go:3743-3764`, and the `/v1/status` `model_hash` block on api.streamvc.live). v0.2 also adds a prompt-echo guard that refuses to synthesize tool_calls whose markup appears verbatim in the request prompt.
+**Operator decision** (recorded 2026-06-27): v0.1 adopts **(a) modelID-match-required + (b) buyer-side validation obligation**. v0.2 adopts **(c) model-hash-bound grammar selection** extending the live SPEC-008 Pillar A + SPEC-011 v0.5 `model_hash` infrastructure (already plumbed end-to-end in `phase4-coordinator/internal/pool/provider.go:158-162`, `phase4-coordinator/internal/buyer/server.go:3743-3764`, and the `/v1/status` `model_hash` block on api.malibu.tech). v0.2 also adds a prompt-echo guard that refuses to synthesize tool_calls whose markup appears verbatim in the request prompt.
 
 ## Cross-lens convergence
 
@@ -81,7 +81,7 @@ Per PD M-3: name in one place — first-turn-only, no `role:"tool"` acceptance, 
 - **AC-15** (Code Q-1): split into AC-15a (code default + validation, CI-verifiable) and AC-15b (live deploy evidence, manual artifact).
 - **AC-16** (PD H-1): rename to "first-turn wire-shape smoke." Add new framework-level AC-16b for at least one agent framework (Cline / Aider / OpenCode / Continue) configured against the buyer URL with first-turn parse passing without adapters.
 - **AC-17** (Architect M-4): scope to non-streaming receipts; cite SPEC-015 v0.3 §5.1-§5.3.
-- **AC-18** (Architect H-1 + Code Q-2): drop hardcoded `api.streamvc.live` URL; rewrite parametric ("any production gateway deployment satisfying SPEC-002/SPEC-006 timeout invariants"); mark as "release smoke / manual evidence" requiring JSON artifact from the integration runner.
+- **AC-18** (Architect H-1 + Code Q-2): drop hardcoded `api.malibu.tech` URL; rewrite parametric ("any production gateway deployment satisfying SPEC-002/SPEC-006 timeout invariants"); mark as "release smoke / manual evidence" requiring JSON artifact from the integration runner.
 - **New AC** (Security C-1 (a)): "Output containing recognized sentinels but no `modelID` family match is emitted as plain assistant content; no `tool_calls[]` are synthesized."
 - **New AC** (Security C-1 (b)): "Response wire shape includes the buyer-side validation obligation in documentation and `tool_calls[]` are emitted without server-side semantic validation."
 - **New AC** (Security H-1): "Coordinator commit-on-delta requires minimal OpenAI tool-call shape validation before committing the response."

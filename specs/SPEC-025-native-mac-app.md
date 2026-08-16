@@ -158,10 +158,10 @@ routine/rollback boundary.
 
 **Change log v0.8 (2026-07-13, R7 audit-loop convergence — code source of truth).** R7
 architect/code caught the watchdog-ownership tail and a bundle-layout invention: the
-companion watchdog `live.streamvc.macprovider-watchdog` **does not restart the CLI for
+companion watchdog `live.malibu.provider-watchdog` **does not restart the CLI for
 routine health failures** — its routine restart request is a no-op
 (`note_provider_restart_request`, `install.sh:3575`); the launchd **provider service**
-`live.streamvc.macprovider` (`KeepAlive`) performs routine restarts (v0.8 further nuanced
+`live.malibu.provider` (`KeepAlive`) performs routine restarts (v0.8 further nuanced
 in v0.9: the watchdog CAN force-restart during auto-update rollback recovery,
 `install.sh:4086,4113`). Swept §0/§2/§5/§8 topology + ASCII diagram + lifecycle +
 grounding table; §5.1 bundle tree lists **only** `Sparkle.framework` as embedded (the
@@ -170,9 +170,9 @@ sits in `MacOS/` beside the executable, not as an embedded framework).
 
 **Change log v0.7 (2026-07-13, R6 audit-loop convergence — code source of truth).** R6
 architect/code caught the last app-side twins: **§8 now documents THREE launchd
-registrations** — the KeepAlive provider service `live.streamvc.macprovider` (the plist
+registrations** — the KeepAlive provider service `live.malibu.provider` (the plist
 the app's evidence gate checks), the SEPARATE companion watchdog
-`live.streamvc.macprovider-watchdog` (`StartInterval=60`, `install.sh:47,4264`), and
+`live.malibu.provider-watchdog` (`StartInterval=60`, `install.sh:47,4264`), and
 `SMAppService` — previously "two" with the provider-service plist mislabeled as the
 watchdog (grounding table + §0 CLI-track def aligned); §12 CLI self-update authority is
 the coordinator-driven `AutoUpdater` (`CoordinatorClient.swift:2756`), NOT
@@ -183,7 +183,7 @@ the coordinator-driven `AutoUpdater` (`CoordinatorClient.swift:2756`), NOT
 architect/code caught remaining app-side twins: §3.3 BSDiff **delta updates marked
 design-intent only** (shipped generator stages one full DMG, `generate-malibu-appcast.sh:67`,
 consistent with §9); §7 receipt/admission Keychain services spelled out in full with
-lifetimes — `com.streamvc.macprovider.receipt-key` (rotatable), `.receipt-key.prev`
+lifetimes — `com.malibu.provider.receipt-key` (rotatable), `.receipt-key.prev`
 (grace), `.bootstrap-identity-key` (current CLI admission identity; legacy service name),
 `.admission-identity-key.pending`, and `.admission-identity-key.prev`, account
 `<provider_id>` (`ReceiptKeyStore.swift:22-25,58-92`); §4 distribution facts corrected —
@@ -199,7 +199,7 @@ optional signed App `.pkg`; §5.1 bundle tree adds the **required** `macprovider
 `mlx.metallib` under `Contents/MacOS/` (`release.yml:556`,
 `verify-tier2-provider-release.sh:405`); §6.2 CI recipe bannered as design-intent
 (`release.yml` authoritative — archive-copy + `hdiutil`, not `-exportArchive`/`create-dmg`);
-§7 receipt-key Keychain coordinates corrected to `com.streamvc.macprovider.receipt-key`
+§7 receipt-key Keychain coordinates corrected to `com.malibu.provider.receipt-key`
 (+`.prev`/`.bootstrap-identity-key`), account `<provider_id>`; §9 Sparkle trust anchor is
 `SUPublicEDKey` in `Info.plist` (no `appcast-key.pub`), with deltas/phased-rollout marked
 design-not-shipped (`generate-malibu-appcast.sh:67`).
@@ -253,11 +253,11 @@ SPEC-026 §6/§7 + the Malibu sources as source of truth pending this v0.2 revis
 
 ## 0. Terminology
 
-- **CLI track** — existing `macprovider-cli` binary + `install.sh` + the launchd **provider service** `live.streamvc.macprovider` and its separate companion watchdog `live.streamvc.macprovider-watchdog` (§8). Developer-facing.
-- **App track** — new `Malibu.app` (this spec). Non-developer-facing; brand is Malibu (see [malibu-branding memory]). User-visible strings never say "MacProvider" or `streamvc.live`.
+- **CLI track** — existing `macprovider-cli` binary + `install.sh` + the launchd **provider service** `live.malibu.provider` and its separate companion watchdog `live.malibu.provider-watchdog` (§8). Developer-facing.
+- **App track** — new `Malibu.app` (this spec). Non-developer-facing; brand is Malibu (see [malibu-branding memory]). User-visible strings never say "MacProvider" or `malibu.tech`.
 - **Wrapper** — the Swift/SwiftUI code added by this spec (`Malibu.app`).
 - **Managed CLI** — the existing `macprovider-cli` binary, installed and run by the
-  **launchd provider service** `live.streamvc.macprovider` (`KeepAlive`) that `install.sh`
+  **launchd provider service** `live.malibu.provider` (`KeepAlive`) that `install.sh`
   sets up (plus a companion health watchdog, §8). The wrapper
   **adopts and monitors** it; it does **not** launch it. (Reconciled v0.2 — v0.1
   called this the "CLI child" spawned by the wrapper; that spawn path is gone,
@@ -305,11 +305,11 @@ From reading `phase3-binary/`:
 | Runtime | `mlx-swift-examples` (MLXLLM, MLXLMCommon) — pure Swift, no Python | Runs inside the **managed CLI** process, not the app; the app is a thin monitor wrapper. |
 | Auth model | `provider_id` + `provider_token` bearer, per SPEC-001 / XSEC-1 | The CLI alone obtains, stores, and consumes the bearer. Malibu may read a legacy App item only long enough to migrate it into CLI custody, then deletes it. |
 | Config | `~/.config/macprovider/config.yaml`, initially containing `provider_token` | A restarted CLI removes the exact matching migration source transactionally only after Keychain-backed coordinator admission. The fixed 0600 backup is the handoff snapshot; deletion is confirmed before journal retirement. |
-| Provider service + watchdog LaunchAgents | `install.sh` installs BOTH the KeepAlive **provider service** `live.streamvc.macprovider` (plist `live.streamvc.macprovider.plist` — **this is the evidence the app checks**) and a SEPARATE **companion watchdog** `live.streamvc.macprovider-watchdog` (`StartInterval=60`, `install.sh:47,4264`) that health-observes the daemon; on routine ticks its restart request is a **no-op** (the provider service's `KeepAlive` performs routine restarts), except during auto-update rollback recovery where it force-restarts the provider service (`install.sh:4086,4113`) (reconciled v0.6/v0.8, §8 — the evidence plist is the provider service, NOT the watchdog). Evidence: `install_manifest.json` or the provider-service plist. | **The App track installs and relies on both** (via `install.sh`). `SMAppService.mainApp.register()` is a **separate** concern — it registers `Malibu.app` itself as a login item (`AppLoginItem.swift`), not the CLI daemon. |
-| Portal | `portal.streamvc.live` (SPEC-014) — installer catalog | **Reconciled v0.2:** the wrapper does **not** open a portal URL for token issuance (removed with `malibu://`). App-track registration happens inside `install.sh` / the CLI track. |
+| Provider service + watchdog LaunchAgents | `install.sh` installs BOTH the KeepAlive **provider service** `live.malibu.provider` (plist `live.malibu.provider.plist` — **this is the evidence the app checks**) and a SEPARATE **companion watchdog** `live.malibu.provider-watchdog` (`StartInterval=60`, `install.sh:47,4264`) that health-observes the daemon; on routine ticks its restart request is a **no-op** (the provider service's `KeepAlive` performs routine restarts), except during auto-update rollback recovery where it force-restarts the provider service (`install.sh:4086,4113`) (reconciled v0.6/v0.8, §8 — the evidence plist is the provider service, NOT the watchdog). Evidence: `install_manifest.json` or the provider-service plist. | **The App track installs and relies on both** (via `install.sh`). `SMAppService.mainApp.register()` is a **separate** concern — it registers `Malibu.app` itself as a login item (`AppLoginItem.swift`), not the CLI daemon. |
+| Portal | `portal.malibu.tech` (SPEC-014) — installer catalog | **Reconciled v0.2:** the wrapper does **not** open a portal URL for token issuance (removed with `malibu://`). App-track registration happens inside `install.sh` / the CLI track. |
 | Release manifest / checksum | `scripts/sign-catalog.go`, `compatibility-set-manifest.py`, `compatibility-artifact-index.py`, tier2 release scripts | Binds the exact signed provider compatibility set and typed rollback plan. |
 | Signing + notarization pipeline | `.github/workflows/release.yml` "Sign + notarize binary" step + `phase3-binary/dist/release-signing-runbook.md` | Reuse the existing keychain-import / codesign / `notarytool submit --wait` / `stapler` pattern verbatim; extend to sign the `.app` and `.dmg` |
-| Signed `.pkg` delivery container | Same workflow, `pkgbuild` + `productsign` with **Developer ID Installer** cert, identifier `live.streamvc.macprovider.cli`, preinstall blocks direct GUI install | Do **not** confuse with the App-track `.pkg`, which the pipeline **already emits** as an OPTIONAL scriptless flat package, identifier `tech.malibu.app.installer` (reconciled v0.5, `release.yml:616,635,641`) — this CLI one is a delivery container for `install.sh`, not a user-facing installer |
+| Signed `.pkg` delivery container | Same workflow, `pkgbuild` + `productsign` with **Developer ID Installer** cert, identifier `live.malibu.provider.cli`, preinstall blocks direct GUI install | Do **not** confuse with the App-track `.pkg`, which the pipeline **already emits** as an OPTIONAL scriptless flat package, identifier `tech.malibu.app.installer` (reconciled v0.5, `release.yml:616,635,641`) — this CLI one is a delivery container for `install.sh`, not a user-facing installer |
 
 **README is stale.** `README.md` says signing is "planned for a future release." The actual state (as of `release.yml`): full pipeline exists, activates conditionally on secret presence — driven by the macOS 26.3.1+ launchd/AMFI change that rejects adhoc-signed binaries (see memory `macprovider-launchd-amfi-blocker-macos-26`). This spec **extends** that pipeline; it does not build it from scratch. README needs a follow-up correction.
 
@@ -455,7 +455,7 @@ time (60–240 s for the first model) in the background.
   unknown/future contracts never trigger automatic mutation.
 - On login: `SMAppService.mainApp.register()` starts `Malibu.app` in the background.
   No Dock icon. (This registers the **app** as a login item; the **CLI daemon** is
-  owned by the launchd **provider service** `live.streamvc.macprovider` (`KeepAlive`)
+  owned by the launchd **provider service** `live.malibu.provider` (`KeepAlive`)
   that `install.sh` set up — a separate mechanism from the app login item, §8.)
 
 ### 3.3 Updates — CLI-owned signed compatibility set
@@ -559,7 +559,7 @@ Ship `.dmg` for v1. **Reconciled v0.4:** the pipeline already emits an **optiona
 
 **Shipped model:** `Malibu.app` is a **thin monitor wrapper**. `install.sh` (bundled
 in `Contents/Resources/`) sets up a **launchd provider-service-managed** `macprovider-cli`
-(`live.streamvc.macprovider`, `KeepAlive`) plus a companion health watchdog (§8);
+(`live.malibu.provider`, `KeepAlive`) plus a companion health watchdog (§8);
 the app then adopts and **observes** it over local HTTP plus a capability-gated,
 owner-only control socket. The app never spawns the CLI; the socket carries typed,
 sanitized CLI-authenticated projections and never transfers provider credentials.
@@ -577,7 +577,7 @@ sanitized CLI-authenticated projections and never transfers provider credentials
 │    · registers SMAppService (APP login item)                         │
 │                               │ GET /v1/health + /v1/status           │
 │                               ▼ (127.0.0.1:<port from config.yaml>)   │
-│   ┌── launchd provider service live.streamvc.macprovider (KeepAlive) ─┐ │
+│   ┌── launchd provider service live.malibu.provider (KeepAlive) ─┐ │
 │   │   macprovider-cli   ← owned/restarted by launchd KeepAlive, NOT the │ │
 │   │   app (+ health watchdog: routine no-op, force-kickstart on         │ │
 │   │   auto-update rollback — §8)                                        │ │
@@ -590,7 +590,7 @@ sanitized CLI-authenticated projections and never transfers provider credentials
 
 `MalibuAgent.start()` **refuses to poll** unless `provider_id` is set, launchd
 install evidence exists (`install_manifest.json` or
-`live.streamvc.macprovider.plist`, `LaunchProviderController.swift:374-380`), and a
+`live.malibu.provider.plist`, `LaunchProviderController.swift:374-380`), and a
 Keychain token is bound. **Reconciled v0.3 — the message is per-gate**
 (`MalibuAgent.swift:64-87`): a missing `provider_id` or a failed `isConfigured` shows
 "Not set up yet. Click Launch Provider to activate."; only missing launchd evidence
@@ -642,7 +642,7 @@ negotiation and reattachment.
 ### 5.3 CLI lifecycle: launchd owns it, the app monitors
 
 **Reconciled v0.2/v0.7 — the wrapper does NOT spawn, restart, or SIGTERM a CLI child.**
-The launchd **provider service** `live.streamvc.macprovider` (`KeepAlive`) that
+The launchd **provider service** `live.malibu.provider` (`KeepAlive`) that
 `install.sh` installs owns the CLI's lifecycle and routine restarts (the companion
 watchdog is a no-op on routine health failures, but DOES force-restart the provider
 service during auto-update rollback recovery — §8).
@@ -677,7 +677,7 @@ What the app actually does around lifecycle:
 - verifies with `codesign --verify --strict --verbose=2`,
 - wraps in a transient `.zip` (Apple's rule for bare Mach-O), submits via `xcrun notarytool submit --wait`,
 - re-tars the signed binary back into `phase3-binary-m4-<tag>.tar.gz`,
-- if the Installer cert is present: `pkgbuild` + `productsign` → `notarytool submit --wait` → `stapler staple` → `stapler validate` → outputs signed `.pkg` (identifier `live.streamvc.macprovider.cli`, preinstall script blocks direct GUI install).
+- if the Installer cert is present: `pkgbuild` + `productsign` → `notarytool submit --wait` → `stapler staple` → `stapler validate` → outputs signed `.pkg` (identifier `live.malibu.provider.cli`, preinstall script blocks direct GUI install).
 
 This spec **adds** an App-track job to the same workflow (or a separate `release-app.yml`) that reuses the exact same keychain-setup pattern and secrets. Do not invent new secret names — piggyback.
 
@@ -772,8 +772,8 @@ The single biggest risk in this spec is stomping a config that a developer previ
 | App-track marker | `~/Library/Application Support/Malibu/.installed-by-app` (**empty file**, reconciled v0.2 — not dated; `ProviderConfig.swift:513-518`) | App track only |
 | CLI custody marker | `~/Library/Application Support/Malibu/.cli-credential-custody-v1` containing the exact provider ID | App-local migration evidence that an installed CLI freshly verified custody; never credential authority |
 | Logs (rolling, 100 MB cap) | `~/Library/Logs/malibu/` | Shared, app tags its own lines |
-| `provider_token` | Authoritative CLI Keychain service `live.streamvc.macprovider.provider-token.v1`, account `<provider_id>`; private YAML is a degraded transition fallback until admission-gated cleanup | CLI owns runtime credential. A legacy App item is migration input only and is deleted after CLI custody is proven. |
-| Session receipt / admission keys | Keychain (CLI store), services `com.streamvc.macprovider.receipt-key` (current, rotatable — signs receipts), `com.streamvc.macprovider.receipt-key.prev` (receipt rotation grace), `com.streamvc.macprovider.bootstrap-identity-key` (current admission identity; legacy name), `com.streamvc.macprovider.admission-identity-key.pending`, and `.prev`, all account `<provider_id>`. Admission identity rotates/recoveries by SPEC-026 §4.3 without Malibu key custody. | Unchanged from CLI track (reuses the existing CLI key store) |
+| `provider_token` | Authoritative CLI Keychain service `live.malibu.provider.provider-token.v1`, account `<provider_id>`; private YAML is a degraded transition fallback until admission-gated cleanup | CLI owns runtime credential. A legacy App item is migration input only and is deleted after CLI custody is proven. |
+| Session receipt / admission keys | Keychain (CLI store), services `com.malibu.provider.receipt-key` (current, rotatable — signs receipts), `com.malibu.provider.receipt-key.prev` (receipt rotation grace), `com.malibu.provider.bootstrap-identity-key` (current admission identity; legacy name), `com.malibu.provider.admission-identity-key.pending`, and `.prev`, all account `<provider_id>`. Admission identity rotates/recoveries by SPEC-026 §4.3 without Malibu key custody. | Unchanged from CLI track (reuses the existing CLI key store) |
 
 Rules (reconciled v0.2 to the shipped `StartupState.route()` + `ProviderConfig`):
 
@@ -819,14 +819,14 @@ Rules (reconciled v0.2 to the shipped `StartupState.route()` + `ProviderConfig`)
 There are **three** launchd-adjacent registrations in the shipped App track (v0.1
 conflated them; v0.6 splits the provider service from its watchdog):
 
-1. **The provider service — `live.streamvc.macprovider`** (plist
-   `~/Library/LaunchAgents/live.streamvc.macprovider.plist`). The KeepAlive launchd job
+1. **The provider service — `live.malibu.provider`** (plist
+   `~/Library/LaunchAgents/live.malibu.provider.plist`). The KeepAlive launchd job
    that runs the CLI daemon itself (`serve --config`, `install.sh:3423`). **This is the
    plist the app's evidence gate checks** (`launchdInstallEvidenceExists` — that plist OR
    `install_manifest.json`, `LaunchProviderController.swift:374-380`); the app refuses to
    monitor without it (§5).
 
-2. **The companion watchdog — `live.streamvc.macprovider-watchdog`** (a SEPARATE
+2. **The companion watchdog — `live.malibu.provider-watchdog`** (a SEPARATE
    `StartInterval=60` launchd job that runs the watchdog binary, `install.sh:47,4264`).
    Distinct from the provider service. **Reconciled v0.7/v0.8 — it does NOT restart the
    CLI for routine health failures:** on a routine unhealthy tick it only records a kick
@@ -887,7 +887,7 @@ try SMAppService.mainApp.register()   // the APP login item, not the CLI daemon
   paranoid; the tag and digest MUST come from the same pinned accepted release the
   button links, so the page can never advertise a digest it does not serve
   (reconciled v0.22 — see §6 step 11).
-- Below the button: disclosure toggle "**Prefer terminal?**" → reveals current `curl -fsSL https://get.streamvc.live/install.sh | bash` block. Devs keep their flow; the surface area for non-devs is a single button.
+- Below the button: disclosure toggle "**Prefer terminal?**" → reveals current `curl -fsSL https://get.malibu.tech/install.sh | bash` block. Devs keep their flow; the surface area for non-devs is a single button.
 - Step section rewritten: "Download → Open → Earn." **There is no GitHub sign-in
   (reconciled v0.2):** onboarding is browserless — one **Launch Provider** click runs
   `install.sh` (SPEC-026 is explicit that no browser/GitHub step exists). v0.1's
@@ -963,7 +963,7 @@ These are the things I'd flag as **must-decide before P0**, in priority order:
 - On-chain flows, payout logic, $MALIBU emissions, staking.
 - CLI-track `install.sh` / `uninstall.sh` / watchdog — unchanged, keep shipping.
 - Existing CLI signing/notarization pipeline in `release.yml`. This spec **adds** steps that consume its output; it does not modify the CLI substeps or their secrets.
-- Existing signed `.pkg` delivery container (`live.streamvc.macprovider.cli`, preinstall blocks GUI install). The App-track `.dmg` is a completely separate artifact.
+- Existing signed `.pkg` delivery container (`live.malibu.provider.cli`, preinstall blocks GUI install). The App-track `.dmg` is a completely separate artifact.
 - Portal (SPEC-014) surface — **unchanged (reconciled v0.2).** v0.1 proposed a
   `client=mac` query param + `malibu://` redirect target; PR #418 removed the
   `malibu://` onboarding entirely, so the App track requires **no** portal-side

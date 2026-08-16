@@ -19,7 +19,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-: "${COLDWARM_BASE:=https://api.streamvc.live}"
+: "${COLDWARM_BASE:=https://api.malibu.tech}"
 : "${COLDWARM_TOKEN_FILE:=$HOME/.config/macprovider/buyer-api-key}"
 : "${COLDWARM_STORE:=$HOME/.local/state/coldwarm-ttft/coldwarm-samples.ndjson}"
 : "${COLDWARM_METRICS_OUT:=$HOME/.local/state/coldwarm-ttft/coldwarm.prom}"

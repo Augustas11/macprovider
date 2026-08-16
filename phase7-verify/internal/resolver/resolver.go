@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	defaultCoordinatorHost      = "coordinator.streamvc.live"
+	defaultCoordinatorHost      = "coordinator.malibu.tech"
 	maxReceiptKeysResponseBytes = 64 * 1024
 	allowPrivateCoordinatorEnv  = "MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR"
 )

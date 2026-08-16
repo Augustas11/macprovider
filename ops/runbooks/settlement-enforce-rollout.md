@@ -107,7 +107,7 @@ Effective mode is `enforce` only if the base shows `enforce` AND the overlay has
 no `verified_model_settlement_mode` overriding it.
 
 **Step 4 — Watch for 30–60 min** (keep-warm + organic traffic across all models):
-- Buyer-facing errors / 5xx rate on `api.streamvc.live` — must not rise.
+- Buyer-facing errors / 5xx rate on `api.malibu.tech` — must not rise.
 - `route_snapshot_failed` / enforce-reject count — expect ~0.
 - New `usage_mismatch` or other quarantine reasons — expect 0 on `normal_done`.
 - Watch query (run every ~10 min):

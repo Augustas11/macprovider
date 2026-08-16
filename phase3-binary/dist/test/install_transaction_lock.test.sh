@@ -246,7 +246,7 @@ python3 - "$INSTALL_SH" <<'PY'
 import sys
 text = open(sys.argv[1], encoding="utf-8").read()
 required = [
-    'INSTALL_RECOVERY_LABEL="live.streamvc.macprovider-install-recovery"',
+    'INSTALL_RECOVERY_LABEL="live.malibu.provider-install-recovery"',
     'arm_install_recovery_agent',
     'fcntl.flock(lock_fd, fcntl.LOCK_EX)',
     'os.path.join(recovery_dir, "recover.sh")',

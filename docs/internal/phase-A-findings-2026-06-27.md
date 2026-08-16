@@ -6,7 +6,7 @@ and the pre-beta engineering punch list.
 
 ## Run conditions
 
-- Target: live `https://api.streamvc.live` + `wss://coordinator.streamvc.live`.
+- Target: live `https://api.malibu.tech` + `wss://coordinator.malibu.tech`.
 - Buyer: `~/.config/macprovider/buyer-api-key` (the operator's own account).
 - Providers attached at time of run:
   - `augustass-macbook-air` — `mlx-community/Qwen3-32B-4bit`, 1 slot,
@@ -153,7 +153,7 @@ polls every 60s, checks `netstat` for an ESTABLISHED TCP to coord IP,
 `launchctl kickstart`s on detection of half-open state. Installed and
 verified. Generalizing requires reading provider id from
 `~/.config/macprovider/config.yaml` and shipping the watchdog as part
-of `get.streamvc.live/install.sh`.
+of `get.malibu.tech/install.sh`.
 
 **Engineering ask.** Proper Swift-side fix in `phase3-binary/`. Most
 likely culprit: `runReconnectLoop`'s `connectAndRunOnce()` hangs

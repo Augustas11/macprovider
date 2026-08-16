@@ -45,7 +45,7 @@ API path.
 
 ```bash
 {
-  printf '%s\n' 'url = "https://coordinator.streamvc.live/admin/hardware-trust/waiting?limit=50"'
+  printf '%s\n' 'url = "https://coordinator.malibu.tech/admin/hardware-trust/waiting?limit=50"'
   printf '%s\n' "header = \"Authorization: Bearer ${OPERATOR_TOKEN}\""
 } | curl --silent --show-error --fail-with-body --config -
 # If the response includes next_after_id, repeat with
@@ -78,7 +78,7 @@ not consumed by bash `printf` escapes.
 # Requester (separate session)
 JOB_ID=12345   # numeric job_id from an approvable waiting_trust row
 {
-  printf '%s\n' 'url = "https://coordinator.streamvc.live/admin/hardware-trust/approve"'
+  printf '%s\n' 'url = "https://coordinator.malibu.tech/admin/hardware-trust/approve"'
   printf '%s\n' 'request = "POST"'
   printf '%s\n' "header = \"Authorization: Bearer ${REQUESTER_TOKEN}\""
   printf '%s\n' 'header = "Content-Type: application/json"'
@@ -87,7 +87,7 @@ JOB_ID=12345   # numeric job_id from an approvable waiting_trust row
 
 # Approver (separate session; PENDING_ID from request response)
 {
-  printf '%s\n' "url = \"https://coordinator.streamvc.live/admin/hardware-trust/approve/${PENDING_ID}/approve\""
+  printf '%s\n' "url = \"https://coordinator.malibu.tech/admin/hardware-trust/approve/${PENDING_ID}/approve\""
   printf '%s\n' 'request = "POST"'
   printf '%s\n' "header = \"Authorization: Bearer ${APPROVER_TOKEN}\""
   printf '%s\n' 'header = "Content-Type: application/json"'

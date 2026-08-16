@@ -86,7 +86,7 @@
       "http_status": 200,
       "server": "Vercel",
       "cache_control": "private, no-store",
-      "content_security_policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src https://coordinator.streamvc.live; img-src 'self'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; manifest-src 'none'; worker-src 'none'",
+      "content_security_policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src https://coordinator.malibu.tech; img-src 'self'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; manifest-src 'none'; worker-src 'none'",
       "referrer_policy": "no-referrer",
       "x_robots_tag": "noindex, nofollow, noarchive",
       "body_sha256": "3271b048637e5d104ee74fa881c0cc959bc78b3fb5e3e8cbbbc9856a7538e4f8",
@@ -116,7 +116,7 @@
       "behaviors_present": [
         "fragment-only MAL1 invite parsing",
         "history.replaceState('/j')",
-        "credentialless fetch to https://coordinator.streamvc.live/v1/referrals/validate",
+        "credentialless fetch to https://coordinator.malibu.tech/v1/referrals/validate",
         "copy invite code",
         "fixed Malibu download link"
       ],
@@ -140,7 +140,7 @@
     }
   },
   "public_validation": {
-    "endpoint": "https://coordinator.streamvc.live/v1/referrals/validate",
+    "endpoint": "https://coordinator.malibu.tech/v1/referrals/validate",
     "allowed_origin_preflight": {
       "origin": "https://malibu.tech",
       "http_status": 204,

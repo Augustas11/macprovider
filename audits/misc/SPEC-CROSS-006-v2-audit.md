@@ -22,7 +22,7 @@ Audit scope: narrow regression check for the cross-spec patch landed at commit `
 - 0 MINOR findings
 - Overall verdict: READY WITH NARROW FIX
 
-The coordinated patch mostly landed cleanly. Dependency lines are synchronized, SPEC-001 is untouched, `/v1/pool/check` remains coordinator-owned, request correlation is now explicit, disconnect settlement is gateway-estimated, gateway config can reach `/poolz`, response header scrubbing is explicit, and SPEC-003 installer text points to `coordinator.streamvc.live`.
+The coordinated patch mostly landed cleanly. Dependency lines are synchronized, SPEC-001 is untouched, `/v1/pool/check` remains coordinator-owned, request correlation is now explicit, disconnect settlement is gateway-estimated, gateway config can reach `/poolz`, response header scrubbing is explicit, and SPEC-003 installer text points to `coordinator.malibu.tech`.
 
 Two narrow regressions remain. First, the per-model `degraded` rule is not where the patched specs say it is: SPEC-006 cites SPEC-002 § 7.5, while SPEC-002 defines the rule under the buyer-side `/v1/models` text, and SPEC-006 repeats the rule instead of only referencing it. Second, the AC-26 through AC-37 cleanup is materially improved but still not complete: several AC success/alternate branches still lack explicit status and body shapes.
 
@@ -53,13 +53,13 @@ Two narrow regressions remain. First, the per-model `degraded` rule is not where
 
 ### SPEC-003 v0.6 (2 items)
 
-- F-603-1: CLOSED. § 5 says the installer calls `https://coordinator.streamvc.live/v1/pool/check?...`, cites SPEC-002 v1.1.4 § 7.4, and forbids using `api.streamvc.live` for that path.
+- F-603-1: CLOSED. § 5 says the installer calls `https://coordinator.malibu.tech/v1/pool/check?...`, cites SPEC-002 v1.1.4 § 7.4, and forbids using `api.malibu.tech` for that path.
 - F-603-2: CLOSED. The dependency line is `SPEC-001 v1.2.2, SPEC-002 v1.1.4`.
 
 ## Cross-spec coherence (Category B)
 
 - D-CROSS-1: CLOSED. SPEC-006 § 7.2 and § 17.7 agree on gateway estimation using `ceil(bytes_emitted_so_far / 4)`, and both mention a future SPEC-001 v1.2.3 candidate for provider-reported partial usage.
-- D-CROSS-2: CLOSED. SPEC-002 § 7.4 owns `/v1/pool/check`, SPEC-002 § 7.6 routes it to coordinator, SPEC-006 does not claim it as a gateway path, and SPEC-003 calls `coordinator.streamvc.live`.
+- D-CROSS-2: CLOSED. SPEC-002 § 7.4 owns `/v1/pool/check`, SPEC-002 § 7.6 routes it to coordinator, SPEC-006 does not claim it as a gateway path, and SPEC-003 calls `coordinator.malibu.tech`.
 - D-CROSS-3: CLOSED. SPEC-006 generates and forwards UUID v4 `X-Request-ID`; SPEC-002 honors it and records it in `request_log`.
 - D-CROSS-4: PARTIAL. The rule is substantively consistent, but the authoritative section reference and no-redefinition discipline did not land cleanly. See Major M1.
 - D-CROSS-5: CLOSED. SPEC-006 § 10.6 states capacity tiers are independent from SPEC-002 admission tiers and forbids cascades.

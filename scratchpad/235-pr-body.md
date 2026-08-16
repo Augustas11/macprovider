@@ -33,7 +33,7 @@ ready the moment hardware exists.
    streaming, `max_tokens=64`, 30B model, 1s inter-request floor (continuous
    busy, ≤ 2 concurrent within Pearl N_eff=2.5). Targets `${LAB_GATEWAY_URL}` /
    `${LAB_COORDINATOR_URL}`, **unset by default so a bare run fails validation
-   rather than hitting `streamvc.live`** (LAB PROVIDER ONLY). Invariants
+   rather than hitting `malibu.tech`** (LAB PROVIDER ONLY). Invariants
    B1-B5,B10. B10 added to the scenario invariant allow-list + a
    `SustainedGateArmed` field on the scenario `Benchmark` struct.
 3. **Provider-side thermal capture** `test/e2e/thermal-soak/` (sibling to
@@ -61,7 +61,7 @@ allowlist `LabHostAllowed`) — every public host is rejected, including
 trailing-dot and Unicode-separator variants; the check runs even when
 `benchmark.enabled=false`; and a `CheckRedirect` guard blocks a lab gateway from
 redirecting the soak to a non-lab host. A soak physically cannot reach
-`streamvc.live`.
+`malibu.tech`.
 
 ### Verification
 

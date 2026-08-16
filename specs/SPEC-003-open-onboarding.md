@@ -73,7 +73,7 @@ Decision log Entry 20.
   200 bytes of the raw `/v1/models` response, or the stderr path and
   last 200 stderr bytes when the endpoint returns nothing.
 - § 4: distribution-channel decoupling is now explicit:
-  `install.sh` is served from `main` via `get.streamvc.live` and is
+  `install.sh` is served from `main` via `get.malibu.tech` and is
   NOT bundled into the release tarball.
 - § 10: new audit category requires integration tests, not code-review
   approval alone, for shell-script paths touching real OS resources.
@@ -128,7 +128,7 @@ SPEC-003 makes Mac Provider a **downloadable product**. After SPEC-003
 ships, the user experience for joining the network is:
 
 ```bash
-curl -fsSL https://get.streamvc.live/install.sh | bash
+curl -fsSL https://get.malibu.tech/install.sh | bash
 ```
 
 One line. Zero operator action. Provider in the pool within 2 minutes
@@ -137,7 +137,7 @@ One line. Zero operator action. Provider in the pool within 2 minutes
 Two parts make this work:
 
 - **Part C — Distribution + lifecycle.** GitHub Releases, curl-pipe-bash
-  install script at `get.streamvc.live`, `macprovider-cli update`
+  install script at `get.malibu.tech`, `macprovider-cli update`
   subcommand, launchd plist for reboot survival, log rotation,
   coordinator-advertised version nudge.
 - **Part D — Onboarding UX.** The README flow, `install.sh` prompts,
@@ -154,7 +154,7 @@ network works, the product doesn't yet exist."
 
 **Part C — Distribution + lifecycle:**
 - GitHub Releases with tagged binaries, checksums, release notes
-- `install.sh` at `get.streamvc.live`
+- `install.sh` at `get.malibu.tech`
 - `macprovider-cli update` subcommand (self-update)
 - `macprovider-cli status` subcommand (local + remote state)
 - `macprovider-cli uninstall` subcommand (remove everything)
@@ -208,7 +208,7 @@ This section describes how SPEC-001 v1.2.1 (Part A), SPEC-002 v1.1.2
 ### End-to-end flow: stranger to serving provider
 
 ```
-Stranger's Mac                    get.streamvc.live    GitHub Releases
+Stranger's Mac                    get.malibu.tech    GitHub Releases
       │                                  │                    │
       │  curl install.sh                 │                    │
       │──────────────────────────────>   │                    │
@@ -221,7 +221,7 @@ Stranger's Mac                    get.streamvc.live    GitHub Releases
       │  verify checksum                                      │
       │  extract to ~/.local/bin/                             │
       │  prompt: model selection (based on RAM)               │
-      │  prompt: coordinator URL (default: streamvc.live)     │
+      │  prompt: coordinator URL (default: malibu.tech)     │
       │  generate provider_id (UUID v4)                       │
       │  write ~/.config/macprovider/config.yaml              │
       │  optionally install launchd plist                     │
@@ -296,7 +296,7 @@ Release shape:
   implements.
 
 **FR-C1a. Distribution channel decoupling.**
-`install.sh` is served from `main` via the `get.streamvc.live` ->
+`install.sh` is served from `main` via the `get.malibu.tech` ->
 `raw.githubusercontent.com/<owner>/<repo>/main/phase3-binary/dist/install.sh`
 redirect. It is NOT bundled into the release tarball. This is an
 intentional architecture property:
@@ -307,7 +307,7 @@ intentional architecture property:
 - Binary releases are tagged, signed, and immutable; an installer patch
   does not require re-running the GitHub Action or re-signing release
   artifacts.
-- Strangers running `curl get.streamvc.live/install.sh | bash` always
+- Strangers running `curl get.malibu.tech/install.sh | bash` always
   get the latest installer, but the installer fetches a specific signed
   binary release tag and verifies it.
 
@@ -315,7 +315,7 @@ The release tarball MUST NOT contain `install.sh`. Re-bundling it would
 reintroduce the slow-iterate path and is explicitly out of scope.
 
 **FR-C2. install.sh contract.**
-The install script at `https://get.streamvc.live/install.sh` is the
+The install script at `https://get.malibu.tech/install.sh` is the
 primary distribution mechanism for new providers. It is a Bash script
 that:
 
@@ -331,7 +331,7 @@ that:
    present) with a comment marker: `# Added by macprovider-cli`.
 8. Prompts the user for model selection (FR-D2).
 9. Prompts for coordinator URL (default:
-   `wss://coordinator.streamvc.live/ws/provider`).
+   `wss://coordinator.malibu.tech/ws/provider`).
 10. Generates a stable `provider_id` (UUID v4, persisted to
     `~/.config/macprovider/provider_id`).
 11. Writes `~/.config/macprovider/config.yaml` with the selected model,
@@ -364,7 +364,7 @@ that:
 | `~/.local/bin/macprovider-cli` | Symlink for PATH discoverability |
 | `~/.config/macprovider/config.yaml` | Configuration |
 | `~/.config/macprovider/provider_id` | Stable identity |
-| `~/Library/LaunchAgents/live.streamvc.macprovider.plist` | launchd plist (if opted in) |
+| `~/Library/LaunchAgents/live.malibu.provider.plist` | launchd plist (if opted in) |
 | `~/Library/Logs/macprovider/` | launchd stdout/stderr logs |
 
 **Environment variables (override defaults):**
@@ -390,8 +390,8 @@ that:
 6. Atomically replaces the old binary with the new one (rename on same
    filesystem; if cross-filesystem, copy + rename + remove old).
 7. If a launchd plist is installed, runs
-   `launchctl bootout gui/$UID/live.streamvc.macprovider` then
-   `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/live.streamvc.macprovider.plist`
+   `launchctl bootout gui/$UID/live.malibu.provider` then
+   `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/live.malibu.provider.plist`
    to restart the service with the new binary.
 8. If no launchd plist, prints "Update complete. Restart macprovider-cli
    to use the new version."
@@ -417,7 +417,7 @@ Local:
   Context cap: 50,000 tokens
 
 Coordinator:
-  URL:         wss://coordinator.streamvc.live/ws/provider
+  URL:         wss://coordinator.malibu.tech/ws/provider
   Connected:   yes (session abc-123)
   Tier:        provisional
   Pool models: Qwen2.5-7B (2 providers), Llama-3.2-3B (1 provider)
@@ -444,7 +444,7 @@ crash:
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>live.streamvc.macprovider</string>
+  <string>live.malibu.provider</string>
   <key>ProgramArguments</key>
   <array>
     <string>$HOME/macprovider/macprovider-cli</string>
@@ -455,7 +455,7 @@ crash:
     <string>--provider-id</string>
     <string>example-provider</string>
     <string>--coordinator</string>
-    <string>wss://coordinator.streamvc.live/ws/provider</string>
+    <string>wss://coordinator.malibu.tech/ws/provider</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -502,8 +502,8 @@ Notes:
 `macprovider-cli uninstall` removes all installed artifacts:
 
 1. If launchd plist exists: `launchctl bootout
-   gui/$UID/live.streamvc.macprovider` (stop the service).
-2. Remove `~/Library/LaunchAgents/live.streamvc.macprovider.plist`.
+   gui/$UID/live.malibu.provider` (stop the service).
+2. Remove `~/Library/LaunchAgents/live.malibu.provider.plist`.
 3. Remove `~/.local/bin/macprovider-cli`.
 4. Prompt: "Remove configuration and logs? [y/N]"
    - If yes: remove `~/.config/macprovider/` and
@@ -566,7 +566,7 @@ Both ack writes happen AFTER `prepareProviderAdmission` and AFTER `releaseUnauth
 On receipt of an ack frame carrying `assigned_provider_token`, the phase3-binary MUST:
 
 1. Write and exact-readback-verify the token in the CLI-owned Keychain service
-   `live.streamvc.macprovider.provider-token.v1`, account `<provider_id>`. The access
+   `live.malibu.provider.provider-token.v1`, account `<provider_id>`. The access
    MUST be non-interactive so launchd never raises a credential prompt.
 2. **AWAIT the Keychain result before adopting the token in memory.** On success,
    adopt it and reconnect with `source=cli_keychain,state=ready,restart_safe=true`.
@@ -681,7 +681,7 @@ The flag flip is safe AFTER:
 Old binaries that cannot parse `assigned_provider_token` will silently drop the field (Swift's JSON decoder ignores unknown keys) and never persist a token; at flag-flip time they are rejected at the WS handshake — same blast radius as the original M1-1 plan, no worse. Entry 60 records this as the explicit compatibility cutoff. The operator action `coordinator-cli list-tokens` may be used during the settling window to verify that all expected provider IDs have at least one unrevoked token row before flipping the flag.
 
 **FR-C9.6. Installer changes preserve the ordinary open-onboarding path.**
-The bootstrap pipe `curl https://get.streamvc.live/install.sh | bash` continues
+The bootstrap pipe `curl https://get.malibu.tech/install.sh | bash` continues
 to work without a referral input and obtains a credential through the CLI-owned
 WS bootstrap. SPEC-034's optional referral integration may modify `install.sh`
 only to capture and unset the path supplied as
@@ -810,7 +810,7 @@ The project README includes a "Join the Network" section:
 Run this on any Apple Silicon Mac (M1 or newer, macOS 14+):
 
 \`\`\`bash
-curl -fsSL https://get.streamvc.live/install.sh | bash
+curl -fsSL https://get.malibu.tech/install.sh | bash
 \`\`\`
 
 The installer will:
@@ -936,7 +936,7 @@ binary:
 2. Runs the SPEC-001 v1.2.3 FR-20 self-test (short inference, verify
    output).
 3. Connects to the coordinator, sends `hello`, waits for `hello_ack`.
-4. Calls `https://coordinator.streamvc.live/v1/pool/check?provider_id=<sanitized>` after WebSocket connect. This is the canonical post-SPEC-006-deployment verification path defined in SPEC-002 v1.1.4 § 7.4: `/v1/pool/check` stays on coordinator's public operator/health surface, not behind the gateway. The installer MUST NOT attempt to reach this endpoint via `api.streamvc.live`; the gateway does not proxy `/v1/pool/check`.
+4. Calls `https://coordinator.malibu.tech/v1/pool/check?provider_id=<sanitized>` after WebSocket connect. This is the canonical post-SPEC-006-deployment verification path defined in SPEC-002 v1.1.4 § 7.4: `/v1/pool/check` stays on coordinator's public operator/health surface, not behind the gateway. The installer MUST NOT attempt to reach this endpoint via `api.malibu.tech`; the gateway does not proxy `/v1/pool/check`.
 5. Prints results:
    ```
    Self-test results:
@@ -952,7 +952,7 @@ binary:
      Inference:        OK (18.3 tok/s)
      Coordinator:      FAILED - connection refused
        -> Check your internet connection
-       -> Verify coordinator URL: wss://coordinator.streamvc.live/ws/provider
+       -> Verify coordinator URL: wss://coordinator.malibu.tech/ws/provider
    ```
 
 **FR-D3a. Installer self-test failure diagnostics.**
@@ -1004,9 +1004,9 @@ timeout), the binary:
 
 Defined in FR-C2. Summary:
 
-- **URL:** `https://get.streamvc.live/install.sh`
+- **URL:** `https://get.malibu.tech/install.sh`
 - **Hosting:** Cloudflare Pages (static site, free tier, global CDN).
-  The `get.streamvc.live` subdomain is a CNAME pointing to Cloudflare
+  The `get.malibu.tech` subdomain is a CNAME pointing to Cloudflare
   Pages.
 - **Arguments:** None (all configuration via interactive prompts or
   env vars).
@@ -1030,7 +1030,7 @@ Defined in FR-C5. Key properties:
 
 | Property | Value | Rationale |
 |---|---|---|
-| Label | `live.streamvc.macprovider` | Reverse-domain per Apple convention |
+| Label | `live.malibu.provider` | Reverse-domain per Apple convention |
 | RunAtLoad | true | Start on login |
 | KeepAlive.SuccessfulExit | false | Restart on crash, not on clean stop |
 | ThrottleInterval | 10 | Prevent crash-loop restart storms |
@@ -1056,7 +1056,7 @@ Defined in FR-C1. Summary:
 | Dependency | Purpose | License | Notes |
 |---|---|---|---|
 | GitHub API | Release discovery, download | N/A (public API) | No API key needed for public repos. Rate limit: 60 req/hr unauthenticated. `install.sh` makes 2 API calls; `update` makes 1-2. |
-| Cloudflare Pages | Hosting `get.streamvc.live` | Free tier | Static site. Only serves `install.sh` and a landing page. |
+| Cloudflare Pages | Hosting `get.malibu.tech` | Free tier | Static site. Only serves `install.sh` and a landing page. |
 | `huggingface-cli` | Model download | Apache-2.0 | NOT a hard dependency. `install.sh` prints manual download instructions if not installed. |
 | `shasum` / `sha256sum` | Checksum verification | OS-provided | macOS ships `shasum` (BSD). Fallback to `openssl dgst -sha256` if neither found. |
 
@@ -1104,7 +1104,7 @@ and SPEC-002 v1.1.4 (AC-11 through AC-15) must also pass.**
 **Setup:** A Mac with no previous macprovider-cli installation. Model
 already downloaded (to isolate install time from download time).
 
-**Action:** `curl -fsSL https://get.streamvc.live/install.sh | bash`
+**Action:** `curl -fsSL https://get.malibu.tech/install.sh | bash`
 (or local `bash install.sh` during testing).
 
 **Expected:**
@@ -1186,7 +1186,7 @@ model string expected by `wait_for_local_model` to a non-existent model
 and reverting the edit after the check.
 
 **Action:** Run
-`curl -fsSL https://get.streamvc.live/install.sh | MACPROVIDER_PORT=18080 MACPROVIDER_NO_PROMPT=1 bash`.
+`curl -fsSL https://get.malibu.tech/install.sh | MACPROVIDER_PORT=18080 MACPROVIDER_NO_PROMPT=1 bash`.
 
 **Expected:**
 1. `install.sh` exits with code 6.
@@ -1288,7 +1288,7 @@ corresponding to the three spec updates that ship together:
 |---|---|---|
 | `BUILD_SPEC_001_V1_2_PROMPT.md` | SPEC-001 v1.2.1 | phase3-binary v1.2: WS inference handlers, hello endpoint_url, new subcommands (update, status, uninstall, self-test), log rotation |
 | `BUILD_SPEC_002_V1_1_PROMPT.md` | SPEC-002 v1.1.2 | coordinator v0.2: WS-tunneled relay, admission tiers, provisional rate limits, new admin endpoints, tier-weighted routing, case-insensitive model match |
-| `BUILD_SPEC_003_V0_2_PROMPT.md` | SPEC-003 v0.2 | install.sh, get.streamvc.live hosting, GitHub Releases automation |
+| `BUILD_SPEC_003_V0_2_PROMPT.md` | SPEC-003 v0.2 | install.sh, get.malibu.tech hosting, GitHub Releases automation |
 
 These build prompts are authored separately by the operator after the
 audit cycle completes.

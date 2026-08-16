@@ -8,7 +8,7 @@
 # Prerequisites done in Stage 1:
 #   - coordinator-linux-amd64 cross-compiled into dist/
 #   - coordinator.yaml + service unit + nginx site config drafted in dist/
-#   - DNS A record coordinator.streamvc.live -> 159.223.165.194 (DNS-only)
+#   - DNS A record coordinator.malibu.tech -> 159.223.165.194 (DNS-only)
 #
 # Usage:
 #   bash deploy-pearl-vps.sh
@@ -17,8 +17,8 @@
 #   SSH_KEY          default: ~/.ssh/pearl_operator_ed25519
 #   VPS_HOST         default: 159.223.165.194
 #   VPS_USER         default: root
-#   DOMAIN           default: coordinator.streamvc.live  (PRIMARY money-path hostname)
-#   STATS_DOMAIN     default: stats.streamvc.live        (SPEC-017 first-class hostname)
+#   DOMAIN           default: coordinator.malibu.tech  (PRIMARY money-path hostname)
+#   STATS_DOMAIN     default: stats.malibu.tech        (SPEC-017 first-class hostname)
 #   EMAIL            default: augstar@gmail.com          (for Let's Encrypt)
 #   STATS_REQUIRED   default: 0   set to 1 to fail-closed on STATS_DOMAIN cert
 #                                 issuance failure (default WARN-only because
@@ -94,7 +94,7 @@
 #
 # Note: DOMAIN and STATS_DOMAIN are validated up-front (step 0) against
 # DNS-name regex AND against the baked-in vhost-template hostnames. The
-# templates `dist/nginx-{coordinator,stats}.streamvc.live.conf` hardcode
+# templates `dist/nginx-{coordinator,stats}.malibu.tech.conf` hardcode
 # `server_name` and `/etc/letsencrypt/live/...` paths, so an env-only
 # override would issue a cert for one hostname while installing a vhost
 # for another. Refused fail-closed.
@@ -146,8 +146,8 @@ _PEARL_TLS_SCRIPT_DIR="$(_pearl_resolve_symlink "${BASH_SOURCE[0]}")"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
 VPS_HOST="${VPS_HOST:-159.223.165.194}"
 VPS_USER="${VPS_USER:-root}"
-DOMAIN="${DOMAIN:-coordinator.streamvc.live}"
-STATS_DOMAIN="${STATS_DOMAIN:-stats.streamvc.live}"
+DOMAIN="${DOMAIN:-coordinator.malibu.tech}"
+STATS_DOMAIN="${STATS_DOMAIN:-stats.malibu.tech}"
 EMAIL="${EMAIL:-augstar@gmail.com}"
 CATALOG_CANARY_PROVIDER_ID="${CATALOG_CANARY_PROVIDER_ID:-}"
 CATALOG_CANARY_AUTH_TOKEN="${CATALOG_CANARY_AUTH_TOKEN:-}"
@@ -195,7 +195,7 @@ _validate_dns_name() {
   fi
 }
 _validate_dns_name "$DOMAIN"        DOMAIN
-_validate_dns_name "${STATS_DOMAIN:-stats.streamvc.live}" STATS_DOMAIN
+_validate_dns_name "${STATS_DOMAIN:-stats.malibu.tech}" STATS_DOMAIN
 
 _validate_catalog_canary_auth_token() {
   local value="$1" length
@@ -627,17 +627,17 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
 fi
 
 # R1 ARCH HIGH-2 — the baked-in vhost templates hardcode
-# server_name=coordinator.streamvc.live and the matching certbot live
+# server_name=coordinator.malibu.tech and the matching certbot live
 # paths. Refuse if $DOMAIN was overridden to something else; otherwise
 # we'd issue a cert for the override domain while installing a vhost
 # with a non-matching server_name.
-if [ "$DOMAIN" != "coordinator.streamvc.live" ]; then
+if [ "$DOMAIN" != "coordinator.malibu.tech" ]; then
   echo "aborting deploy: DOMAIN override ($DOMAIN) does not match the baked-in vhost template" >&2
-  echo "  dist/nginx-coordinator.streamvc.live.conf has server_name=coordinator.streamvc.live hardcoded." >&2
+  echo "  dist/nginx-coordinator.malibu.tech.conf has server_name=coordinator.malibu.tech hardcoded." >&2
   echo "  Edit the conf file in lockstep, or remove the DOMAIN env override." >&2
   exit 1
 fi
-if [ "${STATS_DOMAIN:-stats.streamvc.live}" != "stats.streamvc.live" ]; then
+if [ "${STATS_DOMAIN:-stats.malibu.tech}" != "stats.malibu.tech" ]; then
   echo "aborting deploy: STATS_DOMAIN override (${STATS_DOMAIN}) does not match the baked-in vhost template" >&2
   exit 1
 fi
@@ -660,7 +660,7 @@ STATS_BILLING_MIRROR_SERVICE="$PINNED_DIST_DIR/stats-billing-mirror.service"
 STATS_BILLING_MIRROR_TIMER="$PINNED_DIST_DIR/stats-billing-mirror.timer"
 STATS_HARDWARE_VERIFIER_SERVICE="$PINNED_DIST_DIR/stats-hardware-verifier.service"
 STATS_HARDWARE_VERIFIER_TIMER="$PINNED_DIST_DIR/stats-hardware-verifier.timer"
-NGINX_SITE="$PINNED_DIST_DIR/nginx-coordinator.streamvc.live.conf"
+NGINX_SITE="$PINNED_DIST_DIR/nginx-coordinator.malibu.tech.conf"
 TCP_SYSCTL="$PINNED_DIST_DIR/sysctl.d/99-macprovider-tcp.conf"
 TCP_BBR_MODULES_LOAD="$PINNED_DIST_DIR/modules-load.d/tcp_bbr.conf"
 # SPEC-017 v0.1.8 Step 4.B — additional nginx artifacts the
@@ -671,8 +671,8 @@ TCP_BBR_MODULES_LOAD="$PINNED_DIST_DIR/modules-load.d/tcp_bbr.conf"
 #     Both the coordinator vhost and the stats vhost reference
 #     these names; without the snippet installed first, `nginx -t`
 #     fails (Step 4.B CODE r1 CRITICAL).
-#   - nginx-stats.streamvc.live.conf is the standalone
-#     `stats.streamvc.live` vhost.
+#   - nginx-stats.malibu.tech.conf is the standalone
+#     `stats.malibu.tech` vhost.
 # Both files MUST exist before this deploy proceeds; they are
 # installed below alongside the coordinator vhost.
 NGINX_STATS_SHARED="$PINNED_DIST_DIR/nginx-snippets/stats-shared.conf"
@@ -680,7 +680,7 @@ NGINX_STATS_SECHEADERS="$PINNED_DIST_DIR/nginx-snippets/stats-security-headers.c
 NGINX_STATS_CORS_429="$PINNED_DIST_DIR/nginx-snippets/cors-429.conf"
 NGINX_STATS_PROXY_PUBLIC="$PINNED_DIST_DIR/nginx-snippets/stats-proxy-public.conf"
 NGINX_STATS_PROXY_PARTNER="$PINNED_DIST_DIR/nginx-snippets/stats-proxy-partner.conf"
-NGINX_STATS_SITE="$PINNED_DIST_DIR/nginx-stats.streamvc.live.conf"
+NGINX_STATS_SITE="$PINNED_DIST_DIR/nginx-stats.malibu.tech.conf"
 # SPEC-023 signed recommendation feeds served on the buyer mux at
 # /v1/rate-card, /v1/demand-rank and /v1/autotune-candidates (+ .sig sidecars).
 # Files live in phase3-binary/dist/static/ in the repo. Deploy installs
@@ -818,7 +818,7 @@ _assert_vhost_template() {
   fi
 }
 _assert_vhost_template "$NGINX_SITE"       "$DOMAIN"
-_assert_vhost_template "$NGINX_STATS_SITE" "${STATS_DOMAIN:-stats.streamvc.live}"
+_assert_vhost_template "$NGINX_STATS_SITE" "${STATS_DOMAIN:-stats.malibu.tech}"
 
 SSH="ssh -i $SSH_KEY -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -p 22 $VPS_USER@$VPS_HOST"
 SCP="scp -i $SSH_KEY -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -P 22"
@@ -1544,7 +1544,7 @@ fi
 # under-engineered for the operator-runbook live smoke surface
 # (check_nginx_receipt_header_live_test.sh is the live counterpart);
 # this is the pre-upload acceptance gate that catches a stale local
-# nginx-coordinator.streamvc.live.conf before the deploy ships it.
+# nginx-coordinator.malibu.tech.conf before the deploy ships it.
 bash "$DIST_DIR/test/check_nginx_catalog_routes_test.sh" || {
   echo "aborting deploy: nginx /catalog/ routes missing or misconfigured" >&2; exit 5;
 }
@@ -3174,7 +3174,7 @@ for _deploy_input in \
   "$NGINX_STATS_CORS_429=nginx-stats-cors-429.conf" \
   "$NGINX_STATS_PROXY_PUBLIC=nginx-stats-proxy-public.conf" \
   "$NGINX_STATS_PROXY_PARTNER=nginx-stats-proxy-partner.conf" \
-  "$NGINX_STATS_SITE=nginx-stats.streamvc.live.conf" \
+  "$NGINX_STATS_SITE=nginx-stats.malibu.tech.conf" \
   "$STATIC_DEMAND_JSON=demand-rank.json" \
   "$STATIC_DEMAND_SIG=demand-rank.json.sig" \
   "$STATIC_AUTOTUNE_JSON=autotune-candidates.json" \
@@ -3232,7 +3232,7 @@ $SCP "$NGINX_STATS_SECHEADERS" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats-secu
 $SCP "$NGINX_STATS_CORS_429"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats-cors-429.conf"
 $SCP "$NGINX_STATS_PROXY_PUBLIC"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats-proxy-public.conf"
 $SCP "$NGINX_STATS_PROXY_PARTNER" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats-proxy-partner.conf"
-$SCP "$NGINX_STATS_SITE"       "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats.streamvc.live.conf"
+$SCP "$NGINX_STATS_SITE"       "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats.malibu.tech.conf"
 # SPEC-023 v1.7.3 signed static feeds
 $SCP "$STATIC_DEMAND_JSON"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/demand-rank.json"
 $SCP "$STATIC_DEMAND_SIG"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/demand-rank.json.sig"
@@ -3496,11 +3496,11 @@ $SSH "set -e
 # pre-upload assertion at the top of this script refuses to deploy
 # unless they remain active and bound to the expected hostname.
 
-# SPEC-017 v0.1.8 Step 4.B — stats.streamvc.live is a first-class
+# SPEC-017 v0.1.8 Step 4.B — stats.malibu.tech is a first-class
 # public hostname per SPEC §7.1; deploy applies the SAME ACME
 # stub + certbot + full-vhost pipeline used for the coordinator
 # hostname (round-4 ARCH r2 H1 / CODE r2 C1 fix).
-STATS_DOMAIN="${STATS_DOMAIN:-stats.streamvc.live}"
+STATS_DOMAIN="${STATS_DOMAIN:-stats.malibu.tech}"
 
 # Classify domains by cert state on the remote host (#244 R1+R2+R3).
 # One SSH round-trip; one line per domain: "<STATE> <DOMAIN>".
@@ -3629,7 +3629,7 @@ $SSH "set -e
 for d in ${DOMAINS_FULL_TLS[@]+"${DOMAINS_FULL_TLS[@]}"}; do
   case "$d" in
     "$DOMAIN")        src="$DEPLOY_TMP/nginx-coordinator-full.conf" ;;
-    "$STATS_DOMAIN")  src="$DEPLOY_TMP/nginx-stats.streamvc.live.conf" ;;
+    "$STATS_DOMAIN")  src="$DEPLOY_TMP/nginx-stats.malibu.tech.conf" ;;
     *) echo "  unknown domain in DOMAINS_FULL_TLS: $d (skipping)" >&2; continue ;;
   esac
   $SSH "set -e
@@ -4084,7 +4084,7 @@ try:
     plist_dir_fd = open_dir("Library/LaunchAgents")
     try:
         plist_bytes, _ = read_regular_at(
-            plist_dir_fd, "live.streamvc.macprovider.plist", 1024 * 1024
+            plist_dir_fd, "live.malibu.provider.plist", 1024 * 1024
         )
     finally:
         os.close(plist_dir_fd)
@@ -4105,7 +4105,7 @@ try:
         raise SystemExit("canary LaunchAgent does not use the catalog installation root")
 
     launchd = subprocess.run(
-        ["launchctl", "print", f"gui/{os.getuid()}/live.streamvc.macprovider"],
+        ["launchctl", "print", f"gui/{os.getuid()}/live.malibu.provider"],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

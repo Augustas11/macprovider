@@ -81,7 +81,7 @@ sibling PR (`feat/spec-026-app-onboarding-impl`).
    (`buyer.Server.Handler()` / port 8443 path) or an explicit top-level
    wrapper around it in `cmd/coordinator/main.go`; document the chosen
    shape in code. Update
-   `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf` with
+   `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf` with
    an exact `location = /v1/providers/register` before the generic
    `/v1/` 404 catch-all and add a route/nginx config test.
 7. **Feature gate and runtime Postgres writer seam** — introduce

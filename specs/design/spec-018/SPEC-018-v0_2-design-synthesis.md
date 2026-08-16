@@ -13,7 +13,7 @@ This document synthesizes the codex design pass into a coherent v0.2 design plan
 
 **Question:** is SPEC-018 v0.2 the full agentic product, or the narrowest "Cline drop-in works" surface?
 
-**Answer:** narrow. v0.2 ships the minimum set required for "point Cline at coordinator.streamvc.live → Cline completes a real multi-turn coding session." The strategic governance layer (#2 model-hash registry), defense-in-depth (#3 prompt-echo guard), and buyer-side diagnostics (#5 structured `malformed_tool_call` signal) move to v0.3 — they are real and we will want them, but they are not blocking the Cline drop-in promise.
+**Answer:** narrow. v0.2 ships the minimum set required for "point Cline at coordinator.malibu.tech → Cline completes a real multi-turn coding session." The strategic governance layer (#2 model-hash registry), defense-in-depth (#3 prompt-echo guard), and buyer-side diagnostics (#5 structured `malformed_tool_call` signal) move to v0.3 — they are real and we will want them, but they are not blocking the Cline drop-in promise.
 
 **v0.3 already designed** (codex pass complete, files preserved under `specs/v0_3-design/`): registry options A/B/C with curation models; prompt-echo incremental detector with 256-byte tolerance; structured `usage.macprovider_malformed_tool_call` schema with 6-value `reason` enum.
 

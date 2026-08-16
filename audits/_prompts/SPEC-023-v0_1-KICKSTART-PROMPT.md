@@ -108,7 +108,7 @@ Three input families:
 
 2. **Rate card** — fetched from coordinator (`/v1/rate-card` endpoint) OR baked into binary at release time (offline fallback). Lists the schema: `{version, generated_at, rows: {<model_key>: {prompt_rate_per_mtok, completion_rate_per_mtok, provider_share_bps, global_multiplier_ppm}}}`. Note this matches `phase4-coordinator/internal/billing/formula.go::RateCardEntry`. Wave 0b's `normalizeModelKey` lookup applies to the model_key.
 
-3. **Demand signal** — fetched from static URL `get.streamvc.live/demand-rank.json` with baked fallback in binary. Per RESEARCH_229 conclusion: option (b). JSON schema includes `version, generated_at, source, cold_start_floor, top_k_band, rows: {<model_key>: {demand_weight, rank, recommendable, min_provider_target}}`. SPEC must lock the JSON schema verbatim.
+3. **Demand signal** — fetched from static URL `get.malibu.tech/demand-rank.json` with baked fallback in binary. Per RESEARCH_229 conclusion: option (b). JSON schema includes `version, generated_at, source, cold_start_floor, top_k_band, rows: {<model_key>: {demand_weight, rank, recommendable, min_provider_target}}`. SPEC must lock the JSON schema verbatim.
 
 ### §4 — Formula (locked v0.1)
 

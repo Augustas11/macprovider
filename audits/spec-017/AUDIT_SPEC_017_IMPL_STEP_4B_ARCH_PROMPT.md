@@ -25,10 +25,10 @@ You are auditing the Step 4.B IMPL diff for SPEC-017 at branch
 from the ARCHITECTURE lens.
 
 Step 4.B scope:
-- Nginx server-block on Pearl for `stats.streamvc.live`
-  (new vhost file: `phase4-coordinator/dist/nginx-stats.streamvc.live.conf`).
+- Nginx server-block on Pearl for `stats.malibu.tech`
+  (new vhost file: `phase4-coordinator/dist/nginx-stats.malibu.tech.conf`).
 - Path-prefix allow-through for `/v1/stats/*` on the existing
-  `coordinator.streamvc.live` vhost (existing vhost currently
+  `coordinator.malibu.tech` vhost (existing vhost currently
   returns 404 on `/v1/`).
 - Authorization-aware public-tier rate limiting via shape (a)
   preferred: `map $http_authorization $public_rl_key` + per-
@@ -57,7 +57,7 @@ Severity model:
 - HIGH — would force a v0.2 nginx re-config within the first
   month: `limit_req_status` missing per location; the new
   vhost's TLS posture doesn't match the rest of Pearl's certs;
-  the `coordinator.streamvc.live` path-prefix allow is missing
+  the `coordinator.malibu.tech` path-prefix allow is missing
   (one of the two surfaces stays 404'd); `proxy_cache_path`
   directory wired into a tmpfs / no-disk path that the operator
   rotation playbook doesn't cover; `proxy_read_timeout` too
@@ -77,20 +77,20 @@ Required reading (before writing findings):
 - Step 3 convergence record (`SPEC-017-IMPL-STEP_3-r8-
   convergence.md`) — Step 3's in-process limiter is the
   fallback; understand which limiter does what.
-- Existing `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
+- Existing `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
   (the file Step 4.B may need to amend to add /v1/stats/*
   allow-through).
-- The new `phase4-coordinator/dist/nginx-stats.streamvc.live.conf`
+- The new `phase4-coordinator/dist/nginx-stats.malibu.tech.conf`
   file (if Step 4.B added one).
 - All ARCH r1..r(M-1) audit files for Step 4.B.
 
 Audit categories (sweep ALL — empty findings still record
 evidence):
 
-A. **Vhost surface** — `stats.streamvc.live` server-block
+A. **Vhost surface** — `stats.malibu.tech` server-block
    created with port 80→443 redirect + 443 TLS + certbot-
    compatible cert paths (match the existing `coordinator.
-   streamvc.live` pattern). The `coordinator.streamvc.live`
+   malibu.tech` pattern). The `coordinator.malibu.tech`
    vhost amended to allow-through `/v1/stats/*` BEFORE the
    `location /v1/ { return 404; }` catch-all (longest-match
    ordering).
@@ -145,7 +145,7 @@ G. **CORS — application-layer** — nginx does NOT echo `Access-
 
 H. **Cloudflare / Pearl posture** — the BUILD optional-
    Cloudflare paragraph doesn't apply if the operator runs
-   stats.streamvc.live behind Pearl's nginx directly. The
+   stats.malibu.tech behind Pearl's nginx directly. The
    audit lane MUST verify NO Cloudflare-specific directives
    live in this PR that would silently break Pearl's pipeline
    (e.g. a `Cache-Control` add_header that would shadow the

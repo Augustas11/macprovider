@@ -5,7 +5,7 @@
 **Author context:** Derived from the 2026-05-29 deploy session (see
 `beta/DECISION_CRITERIA.md` Entry 30 + `specs/PHASE3_BINARY_KEEPALIVE_ROOT_CAUSE.md`).
 **Guiding principle:** Harden the live system before adding new spec surface.
-North Star = a stranger hitting `console.streamvc.live` gets a fast, reliable
+North Star = a stranger hitting `console.malibu.tech` gets a fast, reliable
 completion *every time*. Today proved the system works end-to-end but is
 operationally fragile; this plan stabilizes it.
 
@@ -122,7 +122,7 @@ hold.)
 
 ## P3 — Housekeeping (fast, low-risk)
 
-- **DECISION_CRITERIA Entry 31:** record the `console.streamvc.live` go-live
+- **DECISION_CRITERIA Entry 31:** record the `console.malibu.tech` go-live
   (built in Entry 28; deployed 2026-05-29 — DNS + LE cert + nginx + static).
 - **`frontdoor/console/dist/deploy-console.sh`:** idempotent deploy script
   mirroring `phase4-coordinator/dist/deploy-pearl-vps.sh` (stub → certbot →

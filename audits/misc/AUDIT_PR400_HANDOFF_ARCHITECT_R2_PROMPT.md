@@ -48,8 +48,8 @@ The `mp_new_api_key` cookie is now set on every `fullKey != ""`
 path, BEFORE the `returnTo` branch decides between handoff and
 legacy paths. If `StoreOAuthHandoff` fails, the user is redirected
 to Malibu with `?error=handoff_failed` AND the cookie survives on
-`api.streamvc.live`, so the user can retrieve the key by visiting
-`api.streamvc.live/account`.
+`api.malibu.tech`, so the user can retrieve the key by visiting
+`api.malibu.tech/account`.
 
 Rate this fix:
 - SUFFICIENT if the recovery path is a normal user-facing behavior

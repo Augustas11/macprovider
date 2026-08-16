@@ -26,7 +26,7 @@ enum ProviderLogDiagnostics {
     private static let rules: [Rule] = [
         Rule(
             id: "stale_launch_agent",
-            needle: "provider process unhealthy: launchd service live.streamvc.macprovider has no validated pid at",
+            needle: "provider process unhealthy: launchd service live.malibu.provider has no validated pid at",
             userMessage: staleLaunchAgentMessage
         ),
         Rule(
@@ -117,7 +117,7 @@ enum ProviderLogDiagnostics {
         if launchdNeedsRepair,
            let staleFinding = diagnose(
                lines: (providerLines + watchdogLines).filter {
-                   $0.lowercased().contains("provider process unhealthy: launchd service live.streamvc.macprovider has no validated pid at")
+                   $0.lowercased().contains("provider process unhealthy: launchd service live.malibu.provider has no validated pid at")
                }
            ) {
             return staleFinding

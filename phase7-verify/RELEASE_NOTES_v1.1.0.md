@@ -16,9 +16,9 @@
 | Flag | Purpose |
 |---|---|
 | `--catalog <path>` | Local signed catalog file. |
-| `--catalog-url <url>` | Remote signed catalog (e.g. `https://coordinator.streamvc.live/catalog/<id>`). |
+| `--catalog-url <url>` | Remote signed catalog (e.g. `https://coordinator.malibu.tech/catalog/<id>`). |
 | `--catalog-pubkey <43-char base64url-unpadded>` | Catalog Ed25519 pubkey, explicit. |
-| `--catalog-pubkey-url <url>` | Catalog Ed25519 pubkey, fetched (e.g. `https://coordinator.streamvc.live/catalog/pubkey`). |
+| `--catalog-pubkey-url <url>` | Catalog Ed25519 pubkey, fetched (e.g. `https://coordinator.malibu.tech/catalog/pubkey`). |
 | `--require-model-hash` | Buyer fail-closed policy on null hash. With no `--catalog*` flags, asserts "I demand the provider participates in hash attestation, but I'll trust the provider's self-reported hash without catalog cross-check." |
 
 §M.3.1.1 mutual-exclusion enforced: `--catalog` / `--catalog-url` mutually exclusive; `--catalog-pubkey` / `--catalog-pubkey-url` mutually exclusive; `--offline` incompatible with any `--catalog*-url` flag. `--catalog` / `--catalog-url` requires a paired pubkey source (exit 64).

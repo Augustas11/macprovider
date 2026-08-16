@@ -513,7 +513,7 @@ func TestNormalizeCoordinatorAllowsNamesWithoutResolution(t *testing.T) {
 
 func TestResolveExplicitOnlineNoProviderIDSkipsLive(t *testing.T) {
 	root, err := Resolve("", testKey(21), ResolveOpts{
-		CoordinatorHost: "https://coordinator.streamvc.live",
+		CoordinatorHost: "https://coordinator.malibu.tech",
 		Now:             func() time.Time { return fixedNow },
 	})
 	if err != nil {

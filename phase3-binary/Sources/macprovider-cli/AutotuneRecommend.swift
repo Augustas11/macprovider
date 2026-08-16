@@ -238,10 +238,10 @@ struct AutotuneHMACSecretStore {
         // execution on this Mac forging autotune logs on the same Mac) is
         // already outside what keychain protects against.
         //
-        // Existing operators: any legacy `live.streamvc.macprovider.autotune`
+        // Existing operators: any legacy `live.malibu.provider.autotune`
         // keychain item is now orphaned but harmless — it is never read.
         // They can remove it with:
-        //   security delete-generic-password -s "live.streamvc.macprovider.autotune"
+        //   security delete-generic-password -s "live.malibu.provider.autotune"
         // No automatic delete is attempted; SecItemDelete would also trip
         // the ACL prompt for the exact reason this fix exists.
         if FileManager.default.fileExists(atPath: path.path) {
@@ -1377,7 +1377,7 @@ struct AutotuneStaticInputs {
         let bakedGeneratedAt = generatedAt(in: bakedBytes) ?? .distantFuture
         let jsonBytes: Data
         do {
-            let jsonURL = URL(string: "https://coordinator.streamvc.live/v1/\(name)")!
+            let jsonURL = URL(string: "https://coordinator.malibu.tech/v1/\(name)")!
             jsonBytes = try await fetch(jsonURL)
         } catch {
             return AutotuneStaticSelection(
@@ -1391,7 +1391,7 @@ struct AutotuneStaticInputs {
 
         let sigBytes: Data
         do {
-            let sigURL = URL(string: "https://coordinator.streamvc.live/v1/\(name).sig")!
+            let sigURL = URL(string: "https://coordinator.malibu.tech/v1/\(name).sig")!
             sigBytes = try await fetch(sigURL)
         } catch {
             return AutotuneStaticSelection(

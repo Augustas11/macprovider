@@ -112,7 +112,7 @@ func TestV03SchemaConformance(t *testing.T) {
 				ReceiptVersion:  "3",
 				Details: &verify.Details{
 					Field: "catalog_url",
-					URL:   "https://coordinator.streamvc.live/catalog/x",
+					URL:   "https://coordinator.malibu.tech/catalog/x",
 					Cause: "connection refused",
 				},
 			},

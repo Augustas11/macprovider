@@ -163,15 +163,15 @@ E.2  Per-key `allowed_origins` enforced on GET, not OPTIONS.
      Verify the IMPL prompt's CORS-handler directives are
      consistent.
 E.3  No Origin-conditional `$` exposure (§6.4). Verify the IMPL
-     prompt forbids `Origin == portal.streamvc.live` special-case
+     prompt forbids `Origin == portal.malibu.tech` special-case
      branches.
 E.4  CSRF: stats endpoints are GET-only and idempotent, so CSRF
      is N/A for state. BUT the partner-key projection is
      `Cache-Control: private`. Verify the IMPL prompt's
      `Vary: Authorization` directive is consistent with edge-cache
      behavior to prevent cross-key leakage.
-E.5  Subdomain trust: `console.streamvc.live`, `portal.streamvc.live`,
-     and `stats.streamvc.live` are sibling subdomains. The IMPL
+E.5  Subdomain trust: `console.malibu.tech`, `portal.malibu.tech`,
+     and `stats.malibu.tech` are sibling subdomains. The IMPL
      prompt CORS allowlist directives MUST NOT permit any
      subdomain wildcards.
 

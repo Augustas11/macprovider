@@ -304,7 +304,7 @@ release-candidate install** on a test provider:
 
 **Provider-safety on the dev Mac:** it also runs the LIVE production provider.
 Never broad `pkill`. Use a narrow `pgrep`; if you must stop the provider, bootout
-the watchdog first (`live.streamvc.macprovider-watchdog`), then the provider, via
+the watchdog first (`live.malibu.provider-watchdog`), then the provider, via
 graceful `launchctl bootout`, off-peak, and restore + verify serving after. Never
 print the buyer token.
 

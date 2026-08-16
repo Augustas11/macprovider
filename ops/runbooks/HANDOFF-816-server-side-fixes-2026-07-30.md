@@ -50,7 +50,7 @@ Issue **#816** documents why a large/slow single-slot provider (Qwen3-Coder-30B)
 Close **#817** and **#818** when their PRs merge + deploy to Pearl (reference the PR links + deploy date). Comment on the umbrella **#816** that both server-side fixes shipped and **#819 (provider `macprovider-cli`** — move inference off the cooperative pool, `ModelRuntime.swift:779`) is **DEFERRED** to the next CLI release (build → notarize → fleet auto-update). Leave **#816** and **#819** open.
 
 ## Then: re-test 30B on Goose
-Goose is installed (`/opt/homebrew/bin/goose`), config at `~/.config/goose/config.yaml` (provider `openai`, `OPENAI_HOST: https://api.streamvc.live`, `GOOSE_MODEL: mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`). Buyer key: `~/.config/macprovider/buyer-api-key` (never print it).
+Goose is installed (`/opt/homebrew/bin/goose`), config at `~/.config/goose/config.yaml` (provider `openai`, `OPENAI_HOST: https://api.malibu.tech`, `GOOSE_MODEL: mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`). Buyer key: `~/.config/macprovider/buyer-api-key` (never print it).
 
 ```bash
 OPENAI_API_KEY=$(cat ~/.config/macprovider/buyer-api-key) goose run -t "reply with exactly one word: online"
@@ -63,7 +63,7 @@ Before the fixes this returned intermittent `503 no_provider_available` and `Pro
   - (a) **Re-run autotune locally on this Mac** to submit fresh hardware evidence for the current config (keychain is fine locally). This was blocked earlier by an evidence-submission **HTTP 429** rate-limit — retry (it likely cleared). Example:
     `macprovider-cli autotune --recommend --candidate-models mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit --target-context 12000 --max-context-axis 12000 --max-batch-axis 1 --submit-hardware-evidence --apply --recover-hardware-admission --max-duration 1500` (drains the provider ~15–25 min; `--recover-hardware-admission` restores it), **or**
   - (b) revert the provider to a config that already has valid evidence.
-  - Confirm cleared: `curl -s -H "Authorization: Bearer $(cat ~/.config/macprovider/buyer-api-key)" https://api.streamvc.live/v1/models` shows the 30B present with `max_context_tokens`, and Pearl coordinator logs show no `pow_telemetry_drift_detected` for provider `mp-26592d710fc97aa7c07b260665c67cf6`.
+  - Confirm cleared: `curl -s -H "Authorization: Bearer $(cat ~/.config/macprovider/buyer-api-key)" https://api.malibu.tech/v1/models` shows the 30B present with `max_context_tokens`, and Pearl coordinator logs show no `pow_telemetry_drift_detected` for provider `mp-26592d710fc97aa7c07b260665c67cf6`.
 - Keep `idle_prewarm` enabled (low TTFT).
 
 ### Fleet state at handoff (2026-07-30)
@@ -74,4 +74,4 @@ Before the fixes this returned intermittent `503 no_provider_available` and `Pro
 ## Done when
 1. Coordinator + gateway fixes merged (audits clean) **and deployed to Pearl**, verified on the box.
 2. #816 commented and parked for the CLI (fix #1).
-3. 30B answers **reliably** through Goose via `api.streamvc.live` (both gates clear), captured as evidence.
+3. 30B answers **reliably** through Goose via `api.malibu.tech` (both gates clear), captured as evidence.

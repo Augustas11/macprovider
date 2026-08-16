@@ -10,7 +10,7 @@ final class ProviderConflictDetectorTests: XCTestCase {
                 """
                 PID\tStatus\tLabel
                 42\t0\tcom.apple.example
-                1234\t0\tlive.streamvc.macprovider
+                1234\t0\tlive.malibu.provider
                 """
             },
             processList: { [] }
@@ -79,7 +79,7 @@ final class ProviderConflictDetectorTests: XCTestCase {
     /// `(found: true, pid: nil)` for this case; this test pins the
     /// behavior against future refactors.
     func testParseLaunchdManagedInactivePIDReturnsNil() {
-        let output = "-\t-\tlive.streamvc.macprovider\n"
+        let output = "-\t-\tlive.malibu.provider\n"
         let parsed = ProviderConflictDetector.parseLaunchdManagedPID(from: output)
         XCTAssertTrue(parsed.found)
         XCTAssertNil(parsed.pid)
@@ -114,7 +114,7 @@ final class ProviderDrainerTests: XCTestCase {
         XCTAssertEqual(result, .drained)
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(calls[0].0, "/bin/launchctl")
-        XCTAssertEqual(calls[0].1, ["bootout", "gui/501/live.streamvc.macprovider"])
+        XCTAssertEqual(calls[0].1, ["bootout", "gui/501/live.malibu.provider"])
     }
 
     func testForegroundDrainSendsSIGTERMToPID() throws {
@@ -141,7 +141,7 @@ final class ProviderDrainerTests: XCTestCase {
     }
 
     func testLaunchdRestoreInvokesBootstrapWithGuiDomainAndPlist() throws {
-        let plistURL = URL(fileURLWithPath: "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist")
+        let plistURL = URL(fileURLWithPath: "/Users/provider/Library/LaunchAgents/live.malibu.provider.plist")
         var calls: [(String, [String])] = []
         let drainer = ProviderDrainer(
             uid: 502,
@@ -160,7 +160,7 @@ final class ProviderDrainerTests: XCTestCase {
     }
 
     func testLaunchdCrashRestoreGuardStartsOnlyForLaunchdManagedConflict() throws {
-        let plistURL = URL(fileURLWithPath: "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist")
+        let plistURL = URL(fileURLWithPath: "/Users/provider/Library/LaunchAgents/live.malibu.provider.plist")
         var starts: [(String, String)] = []
         var dismissCount = 0
         let drainer = ProviderDrainer(
@@ -204,7 +204,7 @@ final class ProviderDrainerTests: XCTestCase {
             "macprovider-launchd-restore-guard-test",
             fixture.launchctl.path,
             "gui/502",
-            "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist",
+            "/Users/provider/Library/LaunchAgents/live.malibu.provider.plist",
             ProviderLaunchdRestoreGuard.dismissToken,
         ]
         process.standardInput = Pipe().fileHandleForReading
@@ -218,7 +218,7 @@ final class ProviderDrainerTests: XCTestCase {
         let log = try String(contentsOf: fixture.log, encoding: .utf8)
         XCTAssertEqual(
             log,
-            "bootstrap gui/502 /Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist\n"
+            "bootstrap gui/502 /Users/provider/Library/LaunchAgents/live.malibu.provider.plist\n"
         )
     }
 
@@ -233,7 +233,7 @@ final class ProviderDrainerTests: XCTestCase {
             "macprovider-launchd-restore-guard-test",
             fixture.launchctl.path,
             "gui/502",
-            "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist",
+            "/Users/provider/Library/LaunchAgents/live.malibu.provider.plist",
             ProviderLaunchdRestoreGuard.dismissToken,
         ]
         process.standardInput = stdin.fileHandleForReading
@@ -250,7 +250,7 @@ final class ProviderDrainerTests: XCTestCase {
         let log = try String(contentsOf: fixture.log, encoding: .utf8)
         XCTAssertEqual(
             log,
-            "bootstrap gui/502 /Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist\n"
+            "bootstrap gui/502 /Users/provider/Library/LaunchAgents/live.malibu.provider.plist\n"
         )
     }
 
@@ -258,7 +258,7 @@ final class ProviderDrainerTests: XCTestCase {
         let fixture = try makeLaunchdGuardFixture()
         let guardHandle = try ProviderLaunchdRestoreGuard.start(
             launchdDomain: "gui/502",
-            plistPath: "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist",
+            plistPath: "/Users/provider/Library/LaunchAgents/live.malibu.provider.plist",
             launchctlPath: fixture.launchctl.path
         )
 

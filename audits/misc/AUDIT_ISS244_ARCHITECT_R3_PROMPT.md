@@ -30,8 +30,8 @@ Produce findings in the standard severity-graded format.
 ## Files in scope
 
 - `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/deploy-pearl-vps.sh`
-- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
-- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-stats.streamvc.live.conf`
+- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
+- `/Users/augstar/macprovider-iss244/phase4-coordinator/dist/nginx-stats.malibu.tech.conf`
 
 R2→R3 diff: `git -C /Users/augstar/macprovider-iss244 show HEAD`
 R0→R3 cumulative diff: `git -C /Users/augstar/macprovider-iss244 diff HEAD~3 HEAD`

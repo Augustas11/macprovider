@@ -1330,7 +1330,7 @@
         el("div", { class: "panel" },
           el("h2", null, "Waiting for a Mac to come online"),
           el("p", null, "Install MacProvider on a Mac. After install, your Mac will auto-open a browser to link itself."),
-          snippetNode("curl -fsSL https://get.streamvc.live/install.sh | bash", "waiting-install")));
+          snippetNode("curl -fsSL https://get.malibu.tech/install.sh | bash", "waiting-install")));
     }
 
     function renderProviderChooser() {
@@ -1422,7 +1422,7 @@
         el("nav", { class: "nav" }, navNodes),
         el("div", { class: "nav-spacer" }),
         el("div", { class: "nav-footer" },
-          el("a", { href: "https://api.streamvc.live/docs", target: "_blank", rel: "noopener noreferrer" }, "↗ API Docs"),
+          el("a", { href: "https://api.malibu.tech/docs", target: "_blank", rel: "noopener noreferrer" }, "↗ API Docs"),
           el("button", { onclick: signOut }, "⏋ Sign out")));
     }
 
@@ -1524,7 +1524,7 @@
           n: 1,
           title: "Install",
           body: "Run the install script once per Mac. The script writes the binary, the LaunchAgent, and the default config under ~/.config/macprovider/.",
-          snip: "curl -fsSL https://get.streamvc.live/install.sh | bash",
+          snip: "curl -fsSL https://get.malibu.tech/install.sh | bash",
           key: "step1-install",
           cite: "SPEC-003 §4 / FR-C2.",
         },

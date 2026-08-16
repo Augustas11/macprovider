@@ -481,7 +481,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
     ) -> Data {
         try! JSONSerialization.data(withJSONObject: [
             "contract_version": contractVersion,
-            "credential_store": "live.streamvc.macprovider.provider-token.v1",
+            "credential_store": "live.malibu.provider.provider-token.v1",
             "operation": operation,
             "provider_id": providerID,
             "source": "config_fallback",

@@ -4,13 +4,13 @@ import XCTest
 
 final class MalibuAccrualClientTests: XCTestCase {
     func testAccrualURLFromWSSCoordinator() {
-        let url = MalibuAccrualClient.accrualURL(from: "wss://coordinator.streamvc.live/v2/provider")
-        XCTAssertEqual(url?.absoluteString, "https://coordinator.streamvc.live/v1/provider/malibu-accrual")
+        let url = MalibuAccrualClient.accrualURL(from: "wss://coordinator.malibu.tech/v2/provider")
+        XCTAssertEqual(url?.absoluteString, "https://coordinator.malibu.tech/v1/provider/malibu-accrual")
     }
 
     func testAccrualURLFromHTTPSCoordinator() {
-        let url = MalibuAccrualClient.accrualURL(from: "https://coordinator.streamvc.live")
-        XCTAssertEqual(url?.absoluteString, "https://coordinator.streamvc.live/v1/provider/malibu-accrual")
+        let url = MalibuAccrualClient.accrualURL(from: "https://coordinator.malibu.tech")
+        XCTAssertEqual(url?.absoluteString, "https://coordinator.malibu.tech/v1/provider/malibu-accrual")
     }
 
     func testDecodeAccrualSummaryStringDecimals() throws {
@@ -82,7 +82,7 @@ final class MalibuAccrualClientTests: XCTestCase {
         defer { MockURLProtocol.requestHandler = nil }
 
         let client = MalibuAccrualClient(
-            accrualURL: URL(string: "https://coordinator.streamvc.live/v1/provider/malibu-accrual")!,
+            accrualURL: URL(string: "https://coordinator.malibu.tech/v1/provider/malibu-accrual")!,
             session: session
         )
         let summary = try await client.fetch(bearerToken: "test-token")

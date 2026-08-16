@@ -44,7 +44,7 @@ if [ "${MACPROVIDER_FAKE_LAUNCHCTL_FAIL:-}" = "${1:-}" ]; then
 fi
 state_dir="$(dirname "$MACPROVIDER_FAKE_LAUNCHCTL_LOG")/launchctl-state"
 mkdir -p "$state_dir"
-stable_helper="live.streamvc.macprovider-compatibility-reload"
+stable_helper="live.malibu.provider-compatibility-reload"
 legacy_helper="$stable_helper.123e4567-e89b-42d3-a456-426614174001"
 
 case "${1:-}" in
@@ -171,13 +171,13 @@ run_reconcile() {
   [ "$(ls -di "$root/home/.local/share/macprovider/autoupdate/update.lock" | awk '{print $1}')" = "$lock_inode_before" ]
   grep -Fx "list" "$root/launchctl.log" >/dev/null
   grep -F "bootout gui/" "$root/launchctl.log" \
-    | grep -F "live.streamvc.macprovider-compatibility-reload" >/dev/null
+    | grep -F "live.malibu.provider-compatibility-reload" >/dev/null
   grep -F "bootout gui/" "$root/launchctl.log" \
-    | grep -F "live.streamvc.macprovider-compatibility-reload.123e4567-e89b-42d3-a456-426614174001" >/dev/null
+    | grep -F "live.malibu.provider-compatibility-reload.123e4567-e89b-42d3-a456-426614174001" >/dev/null
   grep -F "print gui/" "$root/launchctl.log" \
-    | grep -F "live.streamvc.macprovider-compatibility-reload" >/dev/null
+    | grep -F "live.malibu.provider-compatibility-reload" >/dev/null
   grep -F "print gui/" "$root/launchctl.log" \
-    | grep -F "live.streamvc.macprovider-compatibility-reload.123e4567-e89b-42d3-a456-426614174001" >/dev/null
+    | grep -F "live.malibu.provider-compatibility-reload.123e4567-e89b-42d3-a456-426614174001" >/dev/null
   grep -F "bootstrap gui/" "$root/launchctl.log" >/dev/null
   grep -F "kickstart -k gui/" "$root/launchctl.log" >/dev/null
 }
@@ -351,7 +351,7 @@ assert_loaded_service_accepts_nonzero_bootstrap() {
   MACPROVIDER_FAKE_LAUNCHCTL_FAIL=bootstrap invoke_reconcile "$script" "$root"
   cmp -s "$root/bin/macprovider-cli" <(printf "old-binary")
   [ ! -e "$root/home/.local/share/macprovider/autoupdate/pending.json" ]
-  grep -F "print gui/" "$root/launchctl.log" | grep -F "live.streamvc.macprovider" >/dev/null
+  grep -F "print gui/" "$root/launchctl.log" | grep -F "live.malibu.provider" >/dev/null
   grep -F "kickstart -k gui/" "$root/launchctl.log" >/dev/null
 }
 

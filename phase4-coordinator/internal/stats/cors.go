@@ -43,7 +43,7 @@ import (
 //
 // Round-3 ARCH H1 fix: the global partner-origin allowlist is
 // the UNION of (a) configured static origins (e.g.
-// https://console.streamvc.live, https://portal.streamvc.live)
+// https://console.malibu.tech, https://portal.malibu.tech)
 // AND (b) every active `partner_keys.allowed_origins` entry.
 // The static-only allowlist would have rejected browser partners
 // whose Origin lives only in their key row, forcing operators
@@ -128,7 +128,7 @@ func writeCORSHeaders(w http.ResponseWriter, partner bool, originPresent bool, o
 
 // isOriginOnGlobalAllowlist checks the CORSConfig allowlist
 // (operator-pinned partner origins like
-// https://console.streamvc.live + https://portal.streamvc.live).
+// https://console.malibu.tech + https://portal.malibu.tech).
 // Caller MUST normalize before calling.
 func isOriginOnGlobalAllowlist(normalized string, allowlist []string) bool {
 	for _, o := range allowlist {

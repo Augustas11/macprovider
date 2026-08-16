@@ -6,7 +6,7 @@
 # provider-reported value on 200-status rows, and by how much. See
 # ops/runbooks/spec-drift-remediation.md (item 2) and audit finding H1.
 #
-# Production ledger: /var/lib/macprovider/coordinator.db on coordinator.streamvc.live
+# Production ledger: /var/lib/macprovider/coordinator.db on coordinator.malibu.tech
 # (Pearl VPS). Requires operator SSH + read access. NEVER writes to the live file —
 # snapshot first, then query the copy.
 #

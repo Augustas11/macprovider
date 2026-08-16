@@ -58,7 +58,7 @@ const (
 	warningCatalogSkippedNullHash      = "catalog_skipped_null_hash"
 	warningCatalogSkippedLegacyReceipt = "catalog_skipped_legacy_receipt"
 
-	defaultCoordinatorHost = "coordinator.streamvc.live"
+	defaultCoordinatorHost = "coordinator.malibu.tech"
 	clockSkewThreshold     = 24 * time.Hour
 	graceWindowSlack       = 60 * time.Second
 )

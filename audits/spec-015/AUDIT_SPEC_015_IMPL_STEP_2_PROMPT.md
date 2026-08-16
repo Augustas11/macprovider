@@ -60,7 +60,7 @@ env CLANG_MODULE_CACHE_PATH=/private/tmp/macprovider-swift-module-cache swift te
 
 - Verify Keychain attributes match SPEC-015 §7.1 byte-for-byte:
   `kSecClassGenericPassword`, service
-  `com.streamvc.macprovider.receipt-key`, account `<provider_id>`,
+  `com.malibu.provider.receipt-key`, account `<provider_id>`,
   `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, and
   `kSecAttrSynchronizable=false`.
 - Verify `.prev` uses only the documented `.prev` service and does not expose

@@ -63,7 +63,7 @@ make_fake_common
 : > "$TMP/launchctl.log"
 run_watchdog
 grep -F 'kickstart -k gui/' "$TMP/launchctl.log" >/dev/null
-grep -F 'provider restart requested for live.streamvc.macprovider via launchctl kickstart -k reason=missing_validated_pid' "$TMP/logs/watchdog.log" >/dev/null
+grep -F 'provider restart requested for live.malibu.provider via launchctl kickstart -k reason=missing_validated_pid' "$TMP/logs/watchdog.log" >/dev/null
 
 rm -rf "$TMP/bin" "$TMP/logs" "$TMP/launchctl.log" "$TMP/home/.local/share/macprovider-watchdog/state"
 make_fake_common
@@ -71,7 +71,7 @@ WATCHDOG_TEST_KICKSTART_STATUS=73
 export WATCHDOG_TEST_KICKSTART_STATUS
 : > "$TMP/launchctl.log"
 run_watchdog
-grep -F 'provider restart request failed for live.streamvc.macprovider via launchctl kickstart -k reason=missing_validated_pid exit_status=73' "$TMP/logs/watchdog.log" >/dev/null
+grep -F 'provider restart request failed for live.malibu.provider via launchctl kickstart -k reason=missing_validated_pid exit_status=73' "$TMP/logs/watchdog.log" >/dev/null
 if [ -f "$TMP/home/.local/share/macprovider-watchdog/state/last_kick" ]; then
   echo "failed kickstart must not consume restart cooldown" >&2
   exit 1
@@ -261,7 +261,7 @@ WATCHDOG_TEST_STATUS_BODY='{"status":"unavailable","lifecycle":{"operator_paused
 export WATCHDOG_TEST_STATUS_BODY
 run_watchdog
 grep -F 'provider process 4242 failed local /v1/health after arming; requesting launchd restart' "$TMP/logs/watchdog.log" >/dev/null
-grep -F 'provider restart requested for live.streamvc.macprovider via launchctl kickstart -k reason=local_health_failed_after_arming' "$TMP/logs/watchdog.log" >/dev/null
+grep -F 'provider restart requested for live.malibu.provider via launchctl kickstart -k reason=local_health_failed_after_arming' "$TMP/logs/watchdog.log" >/dev/null
 unset WATCHDOG_TEST_HEALTH_STATUS WATCHDOG_TEST_STATUS_BODY
 
 rm -rf "$TMP/bin" "$TMP/logs" "$TMP/launchctl.log" "$TMP/home/.local/share/macprovider-watchdog/state"
@@ -342,7 +342,7 @@ for lease_mode in maintenance stale forged; do
       exit 1
     fi
     grep -F 'provider process 4242 failed local /v1/health after arming; requesting launchd restart' "$TMP/logs/watchdog.log" >/dev/null
-    grep -F 'provider restart requested for live.streamvc.macprovider via launchctl kickstart -k reason=local_health_failed_after_arming' "$TMP/logs/watchdog.log" >/dev/null
+    grep -F 'provider restart requested for live.malibu.provider via launchctl kickstart -k reason=local_health_failed_after_arming' "$TMP/logs/watchdog.log" >/dev/null
   fi
 done
 

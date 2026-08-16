@@ -160,7 +160,7 @@ close every C/H/M finding.
 - **ARCH-10 (LOW):** CLI-track OAuth retirement observability. **v0.2
   fix:** §4.4 adds `provider_register_source{track="app"|"cli"|"portal"}`
   counter and defines retirement trigger at
-  `portal.streamvc.live/onboard` traffic < 10 req/day for 14 days.
+  `portal.malibu.tech/onboard` traffic < 10 req/day for 14 days.
 
 ## LOW/INFO carried forward (documented in v0.2 PR body, not blocking)
 

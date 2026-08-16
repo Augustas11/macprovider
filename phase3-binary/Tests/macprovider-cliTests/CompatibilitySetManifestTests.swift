@@ -56,6 +56,44 @@ final class CompatibilitySetManifestTests: XCTestCase {
         XCTAssertFalse(CompatibilitySetManifest.localActivationMembers.contains("coordinator_admission"))
     }
 
+    func testLegacyStreamVCServiceIdentifiersRemainReadableForRollbackMigration() throws {
+        let fixture = try CompatibilityManifestFixture()
+        let url = fixture.root.appendingPathComponent(CompatibilitySetManifest.fileName)
+        var envelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        var signed = try XCTUnwrap(envelope["signed"] as? [String: Any])
+        var components = try XCTUnwrap(signed["components"] as? [String: Any])
+        var providerCLI = try XCTUnwrap(components["provider_cli"] as? [String: Any])
+        providerCLI["designated_identifier"] = "live.streamvc.macprovider.cli"
+        components["provider_cli"] = providerCLI
+        var launchd = try XCTUnwrap(components["launchd"] as? [String: Any])
+        launchd["label"] = "live.streamvc.macprovider"
+        components["launchd"] = launchd
+        var watchdog = try XCTUnwrap(components["watchdog"] as? [String: Any])
+        watchdog["monitored_label"] = "live.streamvc.macprovider"
+        watchdog["service_label"] = "live.streamvc.macprovider-watchdog"
+        components["watchdog"] = watchdog
+        signed["components"] = components
+        let signedBytes = try CompatibilityManifestFixture.canonicalData(signed)
+        let signature = try fixture.privateKey.signature(for: SHA256.hash(data: signedBytes))
+        envelope["signed"] = signed
+        envelope["signatures"] = [[
+            "algorithm": "ecdsa-p256-sha256",
+            "key_id": "macprovider-release-p256-v1",
+            "signature": signature.derRepresentation.base64EncodedString(),
+        ]]
+        try CompatibilityManifestFixture.canonicalData(envelope).write(to: url)
+
+        let manifest = try CompatibilitySetManifest.loadValidated(
+            from: fixture.root,
+            expectedProviderVersion: fixture.providerCLIVersion,
+            publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
+        )
+
+        XCTAssertEqual(manifest.compatibilitySetID, fixture.compatibilitySetID)
+    }
+
     func testInstalledManifestResolutionFollowsNormalBinarySymlinkTopology() throws {
         let fixture = try CompatibilityManifestFixture()
         let realBinary = fixture.root.appendingPathComponent("macprovider-cli")
@@ -369,7 +407,7 @@ final class CompatibilityManifestFixture {
                 ],
                 "provider_cli": [
                     "activation": "local",
-                    "designated_identifier": "live.streamvc.macprovider.cli",
+                    "designated_identifier": "live.malibu.provider.cli",
                     "platform": "darwin-arm64",
                     "status_contract": "macprovider.local-status.v1",
                     "version": providerCLIVersion,
@@ -378,16 +416,16 @@ final class CompatibilityManifestFixture {
                     "activation": "local",
                     "contract": "macprovider.launch-agent.v1",
                     "install_contract": try artifact("install.sh"),
-                    "label": "live.streamvc.macprovider",
+                    "label": "live.malibu.provider",
                     "plist_template": try artifact("provider-launch-agent.plist.template"),
                 ],
                 "watchdog": [
                     "activation": "local",
                     "contract": "macprovider.exact-service-pid-watchdog.v1",
-                    "monitored_label": "live.streamvc.macprovider",
+                    "monitored_label": "live.malibu.provider",
                     "plist_template": try artifact("watchdog-launch-agent.plist.template"),
                     "script": try artifact("watchdog.sh"),
-                    "service_label": "live.streamvc.macprovider-watchdog",
+                    "service_label": "live.malibu.provider-watchdog",
                 ],
                 "coordinator_admission": [
                     "activation": "required_remote_gate",

@@ -3255,7 +3255,7 @@ func (s *Server) reserveUnauthenticatedConnForIP(ip string) (bool, func()) {
 // on loopback so every public client appeared as 127.0.0.1 and the per-IP
 // cap collapsed to one shared bucket (codex security audit, 2026-06-11).
 // Fix: when r.RemoteAddr is a loopback address, honor X-Real-IP (which the
-// on-host nginx site sets — see nginx-coordinator.streamvc.live.conf).
+// on-host nginx site sets — see nginx-coordinator.malibu.tech.conf).
 // Direct, non-loopback hits (no proxy in front) use r.RemoteAddr unchanged.
 // Returns "" if parsing fails so the caller skips the per-IP gate (the
 // global semaphore still applies).

@@ -3,7 +3,7 @@
 You are a **security auditor**. Review ONLY the diff of branch
 `research/236-p4-cache-regression` against `origin/main` (commit
 `b8fd549a`). Context: an internal e2e harness that fires buyer requests at
-the live gateway (`api.streamvc.live`) using a bearer token read from
+the live gateway (`api.malibu.tech`) using a bearer token read from
 `${BUYER_TOKEN}` (`~/.config/macprovider/buyer-api-key`). The diff adds a
 sticky KV-cache-reuse regression gate. Files listed in the CODE-lane
 prompt in this directory.

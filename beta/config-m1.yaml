@@ -2,12 +2,12 @@
 # Hostname is pre-provisioned via Cloudflare named tunnel.
 # Model: fill in once the M1 partner reports what their agent picked.
 
-tunnel_url: "https://m1.streamvc.live"
+tunnel_url: "https://m1.malibu.tech"
 
 # M1 partner has 8GB — Llama 3.2 3B 4-bit. After M1 upgraded to phase3-binary
 # v1.1.3 (2026-05-28), the model name comparison became case-sensitive and
 # the binary advertises Title Case at /v1/models. Updated to match exact
-# string from `curl https://m1.streamvc.live/v1/models | jq .data[0].id`.
+# string from `curl https://m1.malibu.tech/v1/models | jq .data[0].id`.
 # (mlx_lm.server was case-insensitive; phase3-binary v1.1.x is not — TODO
 # fix in v1.1.5 or v1.2.)
 model: "mlx-community/Llama-3.2-3B-Instruct-4bit"

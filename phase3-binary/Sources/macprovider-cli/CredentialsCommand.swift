@@ -497,7 +497,7 @@ struct CredentialsRepairCommand: AsyncParsableCommand {
 }
 
 enum CredentialRestartProver {
-    static let launchdLabel = "live.streamvc.macprovider"
+    static let launchdLabel = "live.malibu.provider"
 
     /// Validates the versioned status envelope emitted by the exact
     /// launchd-managed CLI process. Callers must separately prove that the

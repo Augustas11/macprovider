@@ -13,7 +13,7 @@
 #   SSH_KEY          default ~/.ssh/pearl_operator_ed25519
 #   VPS_HOST         default 159.223.165.194
 #   VPS_USER         default root
-#   DOMAIN           default coordinator.streamvc.live (healthz + pool_size check)
+#   DOMAIN           default coordinator.malibu.tech (healthz + pool_size check)
 #   FORCE_RESTART    default 0 — set 1 to restart with connected providers
 #   SKIP_BUILD       default 0 — set 1 if dist/coordinator-linux-amd64 already built
 #   DRY_RUN          default 0 — set 1 to print actions only
@@ -35,7 +35,7 @@ DROPIN="$DIST_DIR/systemd/opoi-v0.conf.example"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
 VPS_HOST="${VPS_HOST:-159.223.165.194}"
 VPS_USER="${VPS_USER:-root}"
-DOMAIN="${DOMAIN:-coordinator.streamvc.live}"
+DOMAIN="${DOMAIN:-coordinator.malibu.tech}"
 FORCE_RESTART="${FORCE_RESTART:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 DRY_RUN="${DRY_RUN:-0}"

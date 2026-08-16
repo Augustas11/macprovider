@@ -27,11 +27,11 @@ Evidence:
 - `specs/SPEC-017-network-stats-api.md:1117` says `public tier is a hard 60 req/min per IP per endpoint with no burst absorption`.
 - `specs/SPEC-017-network-stats-api.md:1120` requires ``limit_req zone=<name> nodelay;` (no `burst=` parameter)`.
 - `specs/BUILD_SPEC_017_IMPL_PROMPT.md:569` says the location block `MUST use limit_req zone=<name> nodelay; with NO burst= parameter`.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:110` uses `limit_req zone=stats_overview burst=59 nodelay;`.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:138` uses `limit_req zone=stats_leaderboard burst=59 nodelay;`.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:161` uses `limit_req zone=stats_health burst=59 nodelay;`.
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf:213`, `:233`, and `:253` repeat the same `burst=59 nodelay` directives.
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:20` through `:28` documents the intentional reinterpretation: `1 in-rate token + 59 burst capacity = 60`.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:110` uses `limit_req zone=stats_overview burst=59 nodelay;`.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:138` uses `limit_req zone=stats_leaderboard burst=59 nodelay;`.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:161` uses `limit_req zone=stats_health burst=59 nodelay;`.
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:213`, `:233`, and `:253` repeat the same `burst=59 nodelay` directives.
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:20` through `:28` documents the intentional reinterpretation: `1 in-rate token + 59 burst capacity = 60`.
 
 Risk:
 

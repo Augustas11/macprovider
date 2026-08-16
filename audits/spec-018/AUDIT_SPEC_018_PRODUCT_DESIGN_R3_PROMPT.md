@@ -10,7 +10,7 @@ You are the **product-design** lane of a round-3 audit of `specs/SPEC-018-agenti
 
 ## The anchor example (unchanged)
 
-A developer opens Cline / Cursor / Aider. Configures `OPENAI_BASE_URL=https://api.streamvc.live/v1` + buyer token. Picks Qwen3-Coder. Asks for a refactor.
+A developer opens Cline / Cursor / Aider. Configures `OPENAI_BASE_URL=https://api.malibu.tech/v1` + buyer token. Picks Qwen3-Coder. Asks for a refactor.
 
 ## Round-3 lane scope
 

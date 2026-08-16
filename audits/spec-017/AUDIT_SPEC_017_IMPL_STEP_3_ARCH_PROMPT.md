@@ -151,7 +151,7 @@ G. **503 + rate-limit semantics** — 503 stale path runs AFTER
 H. **Failure modes + main.go integration** — store reads
    through `stats_reader` `*sql.DB` only (no admin DSN, no
    `stats_rollup` write pool); mux mounts on both
-   `coordinator.streamvc.live` and `stats.streamvc.live` via
+   `coordinator.malibu.tech` and `stats.malibu.tech` via
    the same binary; HEAD added to explicit method allowlist
    (Go's `http.ServeMux` doesn't auto-handle HEAD); 405 path
    with `Allow: GET, HEAD, OPTIONS` + §5.9 envelope;

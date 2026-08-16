@@ -16,7 +16,7 @@ CODE lane. Audit the implementation diff against `origin/main`.
 - `ops/macprovider-watchdog/watchdog.sh`
 - `ops/macprovider-watchdog/install.sh`
 - `ops/macprovider-watchdog/uninstall.sh`
-- `ops/macprovider-watchdog/live.streamvc.macprovider-watchdog.template.plist`
+- `ops/macprovider-watchdog/live.malibu.provider-watchdog.template.plist`
 - New/changed tests under `phase3-binary/Tests`, `phase3-binary/app/Tests`,
   and `phase3-binary/dist/test`.
 

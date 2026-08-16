@@ -1290,7 +1290,7 @@ func TestCredentialBootstrapRejectsBearerPinnedAndBoundDifferentKey(t *testing.T
 		_, h := newCredentialBootstrapHarness(t, func(cfg *config.Config) {
 			cfg.Providers = []config.ProviderConfig{{
 				ProviderID:  providerID,
-				EndpointURL: "https://m4.streamvc.live",
+				EndpointURL: "https://m4.malibu.tech",
 				DisplayName: "M4 test provider",
 			}}
 		})

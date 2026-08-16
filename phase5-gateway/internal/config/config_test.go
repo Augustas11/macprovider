@@ -343,7 +343,7 @@ listen:
   bind_address: 127.0.0.1
   port: 9443
 public:
-  base_url: https://api.streamvc.live
+  base_url: https://api.malibu.tech
   account_path: /account
 coordinator:
   buyer_url: http://127.0.0.1:8443

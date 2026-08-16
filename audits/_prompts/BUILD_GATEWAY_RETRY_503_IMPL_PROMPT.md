@@ -3,7 +3,7 @@
 ## Motivation (measured, 2026-07-04)
 
 A reliability sweep of 90 sequential streaming buyer requests against
-`https://api.streamvc.live/v1/chat/completions` produced the following
+`https://api.malibu.tech/v1/chat/completions` produced the following
 503 rates as a function of inter-request gap (single-provider network,
 `mac` provider on M5 32GB, `max_concurrency_override: 1`, model
 `qwen3-coder-30b-a3b-instruct`):

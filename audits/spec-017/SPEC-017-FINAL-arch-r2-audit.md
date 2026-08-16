@@ -49,8 +49,8 @@ Commands run:
 - `nl -ba phase4-coordinator/cmd/coordinator/visibility.go | sed -n '1,260p'`
 - `nl -ba phase4-coordinator/cmd/coordinator/partnerkeys_integration_test.go | sed -n '240,380p;540,660p;874,950p'`
 - `nl -ba phase4-coordinator/dist/nginx/stats-shared.conf | sed -n '1,120p'`
-- `nl -ba phase4-coordinator/dist/nginx/nginx-stats.streamvc.live.conf | sed -n '100,190p'`
-- `nl -ba phase4-coordinator/dist/nginx/nginx-coordinator.streamvc.live.conf | sed -n '200,280p'`
+- `nl -ba phase4-coordinator/dist/nginx/nginx-stats.malibu.tech.conf | sed -n '100,190p'`
+- `nl -ba phase4-coordinator/dist/nginx/nginx-coordinator.malibu.tech.conf | sed -n '200,280p'`
 - `nl -ba phase4-coordinator/dist/test/check_nginx_stats_test.sh | sed -n '180,330p'`
 - `printf '%s\n' AC-{1..22} | shuf -n 5` failed locally because `shuf` is not installed.
 - `python3 - <<'PY'

@@ -2,7 +2,7 @@
 # Hostname is pre-provisioned via Cloudflare named tunnel.
 # Model: fill in once the M4 user reports what their agent picked.
 
-tunnel_url: "https://m4.streamvc.live"
+tunnel_url: "https://m4.malibu.tech"
 
 # Confirmed by M4 contributor 2026-05-26 — Qwen 7B suggests ~16 GB RAM tier.
 model: "mlx-community/Qwen2.5-7B-Instruct-4bit"

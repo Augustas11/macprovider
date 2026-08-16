@@ -3,12 +3,12 @@
 ## Motivation (measured, 2026-07-04)
 
 Cold-start / inter-token bisection against `mac` (M5 32GB, v1.8.0) via
-`api.streamvc.live` measured this inter-token latency distribution
+`api.malibu.tech` measured this inter-token latency distribution
 for a 500-token buyer stream:
 
 | Bench | median | p95 | p99 | max |
 |---|---:|---:|---:|---:|
-| M5 → api.streamvc.live (WAN + nginx + coord + provider) | 22.6 ms | 90.4 ms | 131.9 ms | **364.0 ms** |
+| M5 → api.malibu.tech (WAN + nginx + coord + provider) | 22.6 ms | 90.4 ms | 131.9 ms | **364.0 ms** |
 | Pearl → localhost:9443 gateway (no nginx, no TLS, no WAN) | 25.7 ms | 75.2 ms | 100.2 ms | **122.5 ms** |
 
 The tail delta (~50-240 ms extra on WAN) is TCP-level jitter on the

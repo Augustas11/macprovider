@@ -11,7 +11,7 @@ You are the **product-design** lane of a four-lane round-2 audit of `specs/SPEC-
 
 ## The anchor example you're auditing against (unchanged from r1)
 
-A developer opens Cline / Cursor / Aider / Claude Code / Continue / OpenCode / Zed. Configures `OPENAI_BASE_URL=https://api.streamvc.live/v1` + buyer token. Picks `qwen3-coder` (or similar). Asks: "refactor this file, run the tests, commit the result."
+A developer opens Cline / Cursor / Aider / Claude Code / Continue / OpenCode / Zed. Configures `OPENAI_BASE_URL=https://api.malibu.tech/v1` + buyer token. Picks `qwen3-coder` (or similar). Asks: "refactor this file, run the tests, commit the result."
 
 Question against v0.1.1: does the SPEC honestly describe what that user gets?
 

@@ -10,13 +10,13 @@ import (
 func TestCORSAllowedOriginHeaders(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(modelsOKClient()))
 	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
-	req.Header.Set("Origin", "https://console.streamvc.live")
+	req.Header.Set("Origin", "https://console.malibu.tech")
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	if got := resp.Header().Get("Access-Control-Allow-Origin"); got != "https://console.streamvc.live" {
+	if got := resp.Header().Get("Access-Control-Allow-Origin"); got != "https://console.malibu.tech" {
 		t.Fatalf("allow-origin=%q", got)
 	}
 	if got := resp.Header().Get("Access-Control-Allow-Credentials"); got != "false" {
@@ -33,10 +33,10 @@ func TestCORSAllowedOriginHeaders(t *testing.T) {
 func TestCORSApexOriginIsIntentionalFirstPartyOrigin(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(modelsOKClient()))
 	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
-	req.Header.Set("Origin", "https://streamvc.live")
+	req.Header.Set("Origin", "https://malibu.tech")
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
-	if got := resp.Header().Get("Access-Control-Allow-Origin"); got != "https://streamvc.live" {
+	if got := resp.Header().Get("Access-Control-Allow-Origin"); got != "https://malibu.tech" {
 		t.Fatalf("apex allow-origin=%q", got)
 	}
 }
@@ -58,14 +58,14 @@ func TestCORSDisallowedOriginNoHeaders(t *testing.T) {
 func TestCORSPreflight(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(modelsOKClient()))
 	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
-	req.Header.Set("Origin", "https://console.streamvc.live")
+	req.Header.Set("Origin", "https://console.malibu.tech")
 	req.Header.Set("Access-Control-Request-Method", "POST")
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
 	if resp.Code != http.StatusNoContent {
 		t.Fatalf("preflight status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	if got := resp.Header().Get("Access-Control-Allow-Origin"); got != "https://console.streamvc.live" {
+	if got := resp.Header().Get("Access-Control-Allow-Origin"); got != "https://console.malibu.tech" {
 		t.Fatalf("allow-origin=%q", got)
 	}
 	if got := resp.Header().Get("Access-Control-Allow-Methods"); got != "POST" {
@@ -85,7 +85,7 @@ func TestCORSPreflight(t *testing.T) {
 func TestCORSOriginCaseSensitive(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(modelsOKClient()))
 	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
-	req.Header.Set("Origin", "https://Console.streamvc.live")
+	req.Header.Set("Origin", "https://Console.malibu.tech")
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
 	if resp.Header().Get("Access-Control-Allow-Origin") != "" {
@@ -97,7 +97,7 @@ func TestCORSNotAppliedToNonDemoEndpoints(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(modelsOKClient()))
 	for _, path := range []string{"/account", "/auth/github/callback", "/admin/feedback-summary"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
-		req.Header.Set("Origin", "https://console.streamvc.live")
+		req.Header.Set("Origin", "https://console.malibu.tech")
 		resp := httptest.NewRecorder()
 		h.ServeHTTP(resp, req)
 		if resp.Header().Get("Access-Control-Allow-Origin") != "" {

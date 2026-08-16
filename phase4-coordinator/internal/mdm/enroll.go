@@ -22,14 +22,14 @@ const (
 )
 
 // mdmPayloadIdentifierNS is the payload identifier namespace for macprovider.
-// Using live.streamvc.macprovider.enroll.* (NOT io.darkbloom.*).
-const mdmPayloadIdentifierNS = "live.streamvc.macprovider.enroll"
+// Using live.malibu.provider.enroll.* (NOT io.darkbloom.*).
+const mdmPayloadIdentifierNS = "live.malibu.provider.enroll"
 
 // Config carries the MDM enrollment parameters for profile generation.
 // Populated at coordinator boot from config.Tier2MDMConfig.
 type Config struct {
 	// EnrollmentBaseURL is the canonical HTTPS base URL (e.g.
-	// "https://coordinator.streamvc.live"). Used to derive SCEP and MDM
+	// "https://coordinator.malibu.tech"). Used to derive SCEP and MDM
 	// connect URLs when MDMServerURL or SCEPUrl are not set explicitly.
 	EnrollmentBaseURL string
 

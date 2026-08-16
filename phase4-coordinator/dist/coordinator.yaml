@@ -1,5 +1,5 @@
 # Production coordinator config — Pearl VPS deployment (159.223.165.194)
-# Binds loopback only; nginx terminates TLS at coordinator.streamvc.live
+# Binds loopback only; nginx terminates TLS at coordinator.malibu.tech
 # and reverse-proxies /v1/* to buyer_port and /ws/provider + /admin/* + /poolz
 # + /healthz to provider_port.
 
@@ -196,7 +196,7 @@ onboarding:
   hardware_trust_approve_dsn: env:ONBOARDING_HARDWARE_TRUST_APPROVE_DSN
   bundle_id: "tech.malibu.app"
   apple_team_id: env:APPLE_TEAM_ID
-  coordinator_domain: "coordinator.streamvc.live"
+  coordinator_domain: "coordinator.malibu.tech"
   asn_prefixes:
     "0.0.0.0/0": "AS0"
     "::/0": "AS0"
@@ -331,7 +331,7 @@ tier2:
   # is effectively active. Empty → falls back to scheme + request Host.
   # Entry 191: physical snapshot-manifest providers are release-bound and
   # hash verification is enforced fail-closed.
-  public_catalog_base_url: "https://coordinator.streamvc.live"
+  public_catalog_base_url: "https://coordinator.malibu.tech"
 
 # Enumerated PINNED providers (SPEC-002 v1.0.4 Finding F-2: every pinned
 # provider_id MUST be listed here). Pearl's owned Mac stays WS-tunneled by

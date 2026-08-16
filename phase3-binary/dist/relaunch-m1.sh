@@ -15,7 +15,7 @@ LOGFILE=/tmp/phase3-binary-m1.log
 PORT=8080
 MODEL="mlx-community/Llama-3.2-3B-Instruct-4bit"
 PROVIDER_ID="m1-anon"
-COORDINATOR_URL="wss://coordinator.streamvc.live/ws/provider"
+COORDINATOR_URL="wss://coordinator.malibu.tech/ws/provider"
 
 log() { printf "[relaunch] %s\n" "$*"; }
 

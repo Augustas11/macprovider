@@ -58,7 +58,7 @@ fi
 
 LAUNCHCTL_BIN="${CANARY_LAUNCHCTL_BIN:-$(command -v launchctl || true)}"
 if [[ -n "$LAUNCHCTL_BIN" && "$platform" == "Darwin" ]]; then
-  launch_target="gui/$target_uid/com.streamvc.canary-buyer"
+  launch_target="gui/$target_uid/com.malibu.canary-buyer"
   "$LAUNCHCTL_BIN" bootout "$launch_target" 2>/dev/null || true
   if "$LAUNCHCTL_BIN" print "$launch_target" >/dev/null 2>&1; then
     echo "canary: class=emergency_disable_failed launchd agent remains loaded" >&2

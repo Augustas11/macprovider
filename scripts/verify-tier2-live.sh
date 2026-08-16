@@ -30,8 +30,8 @@ usage() {
 usage: scripts/verify-tier2-live.sh [--full|--catalog-only|--enforce-ready|--enforced|--b6-ready|--encrypted-leg|--attested]
 
 Environment:
-  GATEWAY_ORIGIN        default: https://api.streamvc.live
-  COORDINATOR_ORIGIN   default: https://coordinator.streamvc.live
+  GATEWAY_ORIGIN        default: https://api.malibu.tech
+  COORDINATOR_ORIGIN   default: https://coordinator.malibu.tech
   DEMO_TOKEN           required unless VERIFY_TIER2_FIXTURES is set
   OPERATOR_KEY         required for --full/--enforce-ready/--enforced/--b6-ready/
                        --encrypted-leg/--attested unless VERIFY_TIER2_FIXTURES is set
@@ -53,8 +53,8 @@ case "${1:---full}" in
   *) usage >&2; exit 2 ;;
 esac
 
-GATEWAY_ORIGIN="${GATEWAY_ORIGIN:-https://api.streamvc.live}"
-COORDINATOR_ORIGIN="${COORDINATOR_ORIGIN:-https://coordinator.streamvc.live}"
+GATEWAY_ORIGIN="${GATEWAY_ORIGIN:-https://api.malibu.tech}"
+COORDINATOR_ORIGIN="${COORDINATOR_ORIGIN:-https://coordinator.malibu.tech}"
 
 if [ -z "${VERIFY_TIER2_FIXTURES:-}" ]; then
   [ -n "${DEMO_TOKEN:-}" ] || { echo "verify-tier2-live: DEMO_TOKEN is required" >&2; exit 2; }

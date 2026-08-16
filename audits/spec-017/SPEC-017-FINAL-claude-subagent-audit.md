@@ -26,7 +26,7 @@ I focused the budget on attack surfaces that the parallel codex audits are LEAST
 5. **AC sampling.** Spot-checked AC-12, AC-14, AC-18, AC-22 against their cited tests. AC-12 has a path-name discrepancy worth flagging.
 6. **Rate-limit refund TOCTOU.** Verified the deferred refund cannot decrement a slot that was never reserved.
 7. **Cache write-suppression on partner-projection 401/429 paths.** Verified `proxy_no_cache $http_authorization` semantics.
-8. **Public security-headers coverage on 200 responses.** Read all four `location` blocks in `nginx-stats.streamvc.live.conf`.
+8. **Public security-headers coverage on 200 responses.** Read all four `location` blocks in `nginx-stats.malibu.tech.conf`.
 
 Roughly 28 tool calls. I did not deeply re-audit the rollup pipeline, migrations, or partner-key CLI internals — codex lanes have spent multiple rounds on those.
 
@@ -52,7 +52,7 @@ if ifNoneMatchEquals(r.Header.Get("If-None-Match"), etag) {
 
 The non-304 branch at `handlers.go:714` calls `writeCORSHeaders(...)`, which emits `Access-Control-Allow-Origin: *` (public) or echoes the Origin (partner). The 304 branch emits NEITHER.
 
-**Why it matters:** Per SPEC §5.7 row 1/2 (public) and row 3/5 (partner-Origin-present), `Access-Control-Allow-Origin` is REQUIRED on every leaderboard response — there is no 304 carve-out in the table. A browser issuing a conditional GET with `If-None-Match` against `/v1/stats/leaderboard` from `https://console.streamvc.live` will receive a 304 without `Access-Control-Allow-Origin`, and the Fetch spec REQUIRES that header on the response (even 304) for the browser to accept it cross-origin. The browser will report a CORS error to the JS caller even though the response is functionally correct. This breaks conditional GET for every browser-side consumer (console.streamvc.live, portal.streamvc.live, third-party partner dashboards).
+**Why it matters:** Per SPEC §5.7 row 1/2 (public) and row 3/5 (partner-Origin-present), `Access-Control-Allow-Origin` is REQUIRED on every leaderboard response — there is no 304 carve-out in the table. A browser issuing a conditional GET with `If-None-Match` against `/v1/stats/leaderboard` from `https://console.malibu.tech` will receive a 304 without `Access-Control-Allow-Origin`, and the Fetch spec REQUIRES that header on the response (even 304) for the browser to accept it cross-origin. The browser will report a CORS error to the JS caller even though the response is functionally correct. This breaks conditional GET for every browser-side consumer (console.malibu.tech, portal.malibu.tech, third-party partner dashboards).
 
 **Test coverage gap:** `TestAC12_304IfNoneMatch` (handlers_integration_test.go:345-367) does not set an `Origin` header and does not assert `Access-Control-Allow-Origin`. The bug is invisible to the AC suite.
 
@@ -66,13 +66,13 @@ The non-304 branch at `handlers.go:714` calls `writeCORSHeaders(...)`, which emi
 
 **Evidence:**
 
-- `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:110, 138, 161`: `limit_req zone=stats_overview burst=59 nodelay;` (and same on /leaderboard and /health).
+- `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:110, 138, 161`: `limit_req zone=stats_overview burst=59 nodelay;` (and same on /leaderboard and /health).
 - `specs/SPEC-017-network-stats-api.md:1118-1119` (SPEC §5.6 v0.1.8 reconciliation):
   > "AC-8 is now mechanically achievable with `limit_req zone=<name> nodelay;` (no `burst=` parameter) on the public-tier location."
 - `specs/SPEC-017-network-stats-api.md:1113`:
   > "The public tier is a hard 60 req/min per IP per endpoint with no burst absorption"
 
-**Why it matters:** The SPEC §5.6 v0.1.8 explicitly drops the `burst=` parameter as a "reconciliation with AC-8." The implementation puts it BACK with `burst=59`, justified in nginx-stats.streamvc.live.conf:20-29 by the argument that with `rate=60r/m` and an initially-empty leaky bucket, `nodelay` alone admits only 1 request before refill, failing AC-8's "60 succeed" assertion. The implementer is mechanically correct about nginx semantics — and the SPEC author appears to have been wrong about what `nodelay` does alone. But the locked SPEC text and the shipped nginx config now disagree.
+**Why it matters:** The SPEC §5.6 v0.1.8 explicitly drops the `burst=` parameter as a "reconciliation with AC-8." The implementation puts it BACK with `burst=59`, justified in nginx-stats.malibu.tech.conf:20-29 by the argument that with `rate=60r/m` and an initially-empty leaky bucket, `nodelay` alone admits only 1 request before refill, failing AC-8's "60 succeed" assertion. The implementer is mechanically correct about nginx semantics — and the SPEC author appears to have been wrong about what `nodelay` does alone. But the locked SPEC text and the shipped nginx config now disagree.
 
 **Defensible interpretation (implementer's):** `1 in-rate token + 59 burst = 60 immediate, then strict 1/sec refill = 60/min sustained`. This delivers AC-8's wire behavior without amplifying long-term throughput.
 
@@ -102,7 +102,7 @@ The non-304 branch at `handlers.go:714` calls `writeCORSHeaders(...)`, which emi
 
 ### [LOW] Successful 200 stats responses lack `X-Content-Type-Options` / `X-Frame-Options` / `Referrer-Policy`
 
-**Evidence:** `phase4-coordinator/dist/nginx-stats.streamvc.live.conf:107-178`. All three `location =` blocks (`/v1/stats/overview`, `/v1/stats/leaderboard`, `/v1/stats/health`) do NOT include `stats-security-headers.conf`. Only the `@stats_rate_limited` named location (line 100) includes it.
+**Evidence:** `phase4-coordinator/dist/nginx-stats.malibu.tech.conf:107-178`. All three `location =` blocks (`/v1/stats/overview`, `/v1/stats/leaderboard`, `/v1/stats/health`) do NOT include `stats-security-headers.conf`. Only the `@stats_rate_limited` named location (line 100) includes it.
 
 Server-level `add_header` directives are absent (lines 57-105). Therefore 200 responses inherit no security headers from this vhost.
 
@@ -168,7 +168,7 @@ These are concrete attack hypotheses I tested AGAINST the implementation and was
 
 1. **`requestObs` happens-before race.** I hypothesized that the dispatcher's `r = r.WithContext(...)` in mux.go:153 would attach a new context that the outer access-log middleware in middleware.go:188-189 wouldn't see. Result: the implementation is correct. `accessLogMiddleware` (middleware.go:176) stores a `*requestObs` POINTER in the request context BEFORE `next.ServeHTTP`; the dispatcher's `WithContext`-chained request carries the SAME pointer in its context tree; both code paths read the same `*requestObs` object. The dispatcher writes to `obs.PartnerKeyID` (mux.go:161); the access-log reads it (middleware.go:189). Single-threaded per request, no race, no missed write. The comments at auth.go:66-78 explain this exactly. PASS.
 
-2. **Partner-projection `$` leak via 429/401 cache hit.** I hypothesized that an auth-failure 429 (which gets `Cache-Control: public, max-age=60` because the partner-projection marker hasn't been set yet) might persist a partner-relevant response in the nginx `stats_public` cache. Result: defeated by `proxy_no_cache $http_authorization` (nginx-stats.streamvc.live.conf:130, 154, 177). Any request carrying ANY Authorization header — including auth-failed 429s — has nginx suppress the cache write. Partner-tier 200s also can't leak because they carry `Cache-Control: private` AND get write-suppressed AND have `Vary: ... Authorization` for any downstream shared cache.
+2. **Partner-projection `$` leak via 429/401 cache hit.** I hypothesized that an auth-failure 429 (which gets `Cache-Control: public, max-age=60` because the partner-projection marker hasn't been set yet) might persist a partner-relevant response in the nginx `stats_public` cache. Result: defeated by `proxy_no_cache $http_authorization` (nginx-stats.malibu.tech.conf:130, 154, 177). Any request carrying ANY Authorization header — including auth-failed 429s — has nginx suppress the cache write. Partner-tier 200s also can't leak because they carry `Cache-Control: private` AND get write-suppressed AND have `Vary: ... Authorization` for any downstream shared cache.
 
 3. **Rate-limit refund decrementing on the 429 path.** I hypothesized that the deferred refund in mux.go:225-241 might fire on the `!allowed` 429 path and decrement a slot that was never reserved. Result: the `if !allowed { writeError(...); return }` at mux.go:220-224 occurs BEFORE the `defer func()` registration at line 225. The defer only registers in the `allowed=true` branch. No spurious refund.
 

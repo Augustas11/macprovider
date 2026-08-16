@@ -237,7 +237,7 @@ insert-or-load pattern from SPEC-015 §7.1.
 
 **Keychain attributes per SPEC-015 §7.1:**
 - `kSecClass = kSecClassGenericPassword`
-- `kSecAttrService = "com.streamvc.macprovider.receipt-key"`
+- `kSecAttrService = "com.malibu.provider.receipt-key"`
 - `kSecAttrAccount = <provider_id>`
 - `kSecAttrAccessible = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
 - `kSecAttrSynchronizable = false`
@@ -614,8 +614,8 @@ shape.
   AC-9 requires both SDKs complete `chat.completions.create()`
   in non-streaming AND streaming modes without raising.
 - nginx config update at
-  `deploy/nginx/coordinator.streamvc.live.conf` and
-  `deploy/nginx/api.streamvc.live.conf` to forward headers up to
+  `deploy/nginx/coordinator.malibu.tech.conf` and
+  `deploy/nginx/api.malibu.tech.conf` to forward headers up to
   4096 bytes (`large_client_header_buffers` / `proxy_buffer_size`
   tuning).
 - Perf bench: a microbenchmark in
@@ -783,7 +783,7 @@ them in implementation-notes.html as you encounter them:
    AC-10 / AC-11 against real Keychain semantics (the in-memory
    tests catch most issues but a real Keychain interaction can
    surface OS-version quirks).
-4. **Buyer documentation** at `api.streamvc.live/docs` should
+4. **Buyer documentation** at `api.malibu.tech/docs` should
    gain a "Receipts" section once a buyer-side verifier exists
    (v0.2 scope, NOT here).
 

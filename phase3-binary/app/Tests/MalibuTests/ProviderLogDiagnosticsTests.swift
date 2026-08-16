@@ -4,7 +4,7 @@ import XCTest
 final class ProviderLogDiagnosticsTests: XCTestCase {
     func testDiagnoseStaleLaunchAgent() {
         let finding = ProviderLogDiagnostics.diagnose(lines: [
-            "provider process unhealthy: launchd service live.streamvc.macprovider has no validated PID at /Users/provider/macprovider-cli",
+            "provider process unhealthy: launchd service live.malibu.provider has no validated PID at /Users/provider/macprovider-cli",
         ])
 
         XCTAssertEqual(finding?.id, "stale_launch_agent")
@@ -39,7 +39,7 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
         let finding = ProviderLogDiagnostics.diagnose(
             providerLines: ["model artifact hash mismatch for /tmp/current"],
             watchdogLines: [
-                "provider process unhealthy: launchd service live.streamvc.macprovider has no validated PID at /Users/provider/macprovider-cli"
+                "provider process unhealthy: launchd service live.malibu.provider has no validated PID at /Users/provider/macprovider-cli"
             ]
         )
 
@@ -49,7 +49,7 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
     func testCurrentLaunchdRepairTakesPrecedenceOverGenericProviderFinding() {
         let finding = ProviderLogDiagnostics.diagnose(
             providerLines: [
-                "provider process unhealthy: launchd service live.streamvc.macprovider has no validated PID at /Users/provider/macprovider-cli",
+                "provider process unhealthy: launchd service live.malibu.provider has no validated PID at /Users/provider/macprovider-cli",
                 "model artifact hash mismatch for /tmp/current"
             ],
             watchdogLines: [],

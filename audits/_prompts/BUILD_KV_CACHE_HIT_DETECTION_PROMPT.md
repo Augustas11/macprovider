@@ -138,7 +138,7 @@ These let the operator watch cache-hit rate over time and validate the buyer-sid
 4. **Unit test** — bounded LRU: insert 9 conversations at 8-cap → oldest evicted; insert conversations totaling > 200k tokens → LRU eviction keeps under cap.
 5. **Integration test** — real 2-turn conversation through `phase3-binary` HTTP server: turn 1 emits `cached_prompt_tokens: 0`; turn 2 with matching key emits positive integer matching (turn-1 prompt_tokens + turn-1 completion_tokens); the numeric equality is exact, not approximate.
 6. **Integration test** — same 2-turn shape without the conversation header: both turns emit `cached_prompt_tokens: 0` (rollout / non-sticky path unchanged).
-7. **End-to-end smoke against `api.streamvc.live`** — 2-turn Python demo using the openai SDK with `X-MacProvider-Conversation` header; observe `usage.cached_prompt_tokens > 0` on turn 2. Add to `examples/` alongside the existing `tool_calling_demo.py`.
+7. **End-to-end smoke against `api.malibu.tech`** — 2-turn Python demo using the openai SDK with `X-MacProvider-Conversation` header; observe `usage.cached_prompt_tokens > 0` on turn 2. Add to `examples/` alongside the existing `tool_calling_demo.py`.
 8. **Regression** — existing test suite stays green. All prior `cached_prompt_tokens == 0` assertions remain valid on non-hit routes.
 
 ## Audit-loop discipline
@@ -159,7 +159,7 @@ Per `~/.claude/projects/-Users-augstar-macprovider-poc/memory/feedback-build-aud
    - Chosen LRU cap defaults + rationale (8 convs / 200K tokens is a starting point; adjust with evidence)
    - The concurrency-safety analysis (which actor, what serialization guarantees)
    - Rollout safety statement: "Providers running old binary continue emitting `cached_prompt_tokens: 0`; new binary + old coordinator emits `0` (no header forwarded); new binary + new coordinator on sticky-hit route emits positive values. All three cases preserve SPEC-024 §3 wire correctness."
-   - Screenshot or captured log of a real 2-turn conversation on `api.streamvc.live` showing positive `cached_prompt_tokens` on turn 2
+   - Screenshot or captured log of a real 2-turn conversation on `api.malibu.tech` showing positive `cached_prompt_tokens` on turn 2
 3. `beta/DECISION_CRITERIA.md` entry recording what shipped + operator cache-cap knobs.
 4. `examples/prefix_cache_reuse_demo.py` — 30-40 line 2-turn demo mirroring `tool_calling_demo.py` conventions.
 
@@ -173,4 +173,4 @@ When this ships, a buyer running a 20-turn coding session with Cline (per the SP
 
 That's the economics landing. Until this ships, SPEC-024 saves buyers exactly zero dollars.
 
-**You're done when:** PR merged, integration test proves positive `cached_prompt_tokens` on turn 2 of a real sticky-conversation flow, and the `examples/prefix_cache_reuse_demo.py` prints a non-zero value against `api.streamvc.live`. If you're past ~1 week of work, surface what's blocking.
+**You're done when:** PR merged, integration test proves positive `cached_prompt_tokens` on turn 2 of a real sticky-conversation flow, and the `examples/prefix_cache_reuse_demo.py` prints a non-zero value against `api.malibu.tech`. If you're past ~1 week of work, surface what's blocking.

@@ -394,7 +394,7 @@ MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT="$ACCEPTANCE_RUN_ATTEMPT" \
 test "$("$HOME/.local/bin/macprovider-cli" --version)" = "${TAG#v}"
 codesign --verify --strict --deep "$HOME/.local/bin/macprovider-cli"
 test "$(codesign -dv --verbose=4 "$HOME/.local/bin/macprovider-cli" 2>&1 | awk -F= '/^Identifier=/{print $2}')" = \
-  live.streamvc.macprovider.cli
+  live.malibu.provider.cli
 spctl -a -t exec "$HOME/.local/bin/macprovider-cli"
 python3 - "$HOME/macprovider/compatibility-set.json" \
   "Augustas11/macprovider:$TAG@$ACCEPTANCE_COMMIT" <<'PY'
@@ -432,7 +432,7 @@ macprovider-cli update \
 test "$(macprovider-cli --version)" = "${TAG#v}"
 codesign --verify --strict --deep "$(command -v macprovider-cli)"
 test "$(codesign -dv --verbose=4 "$(command -v macprovider-cli)" 2>&1 | awk -F= '/^Identifier=/{print $2}')" = \
-  live.streamvc.macprovider.cli
+  live.malibu.provider.cli
 codesign --verify --strict --deep "$MALIBU_APP"
 test "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleIdentifier)" = tech.malibu.app
 MALIBU_VERSION="$(defaults read "$MALIBU_APP/Contents/Info" CFBundleShortVersionString)"
@@ -446,7 +446,7 @@ xcrun stapler validate "$MALIBU_APP"
 spctl -a -t exec "$MALIBU_APP"
 cmp "$HOME/macprovider/compatibility-set.json" \
   "$MALIBU_APP/Contents/Resources/compatibility-set.json"
-launchctl print "gui/$(id -u)/live.streamvc.macprovider" >/dev/null
+launchctl print "gui/$(id -u)/live.malibu.provider" >/dev/null
 ```
 
 Before recording a pass, run the shared transaction rollback proofs. They
@@ -849,9 +849,9 @@ the self-update implementation explicitly learns the package path.
 Verify on a macOS 26.3.1+ Mac:
 
 ```bash
-curl -fsSL https://get.streamvc.live/install.sh | bash
+curl -fsSL https://get.malibu.tech/install.sh | bash
 # expected: "Install as a background service? [Y/n] y" → success (no I/O error)
-launchctl print gui/$(id -u)/live.streamvc.macprovider | head -5
+launchctl print gui/$(id -u)/live.malibu.provider | head -5
 # expected: state = running
 ```
 

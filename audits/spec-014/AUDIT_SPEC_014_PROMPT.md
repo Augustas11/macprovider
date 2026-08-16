@@ -498,7 +498,7 @@ J.2  Walk §6 visual tokens. Confirm "inherits SPEC-009 §6
      Silent deviation = MEDIUM.
 
 J.3  Walk §3 host string + Open Q7. Confirm the implementation is
-     host-agnostic and `provider.streamvc.live` is only a proposal,
+     host-agnostic and `provider.malibu.tech` is only a proposal,
      not hard-coded. If §11 phasing names the host as a binding
      decision = HIGH.
 

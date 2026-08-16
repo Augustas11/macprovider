@@ -15,7 +15,7 @@ if grep -q '^ExecStart=.*qualification' "$SERVICE_FILE"; then
   echo "scheduled service must never invoke qualification mode" >&2
   exit 1
 fi
-if grep -q '<string>qualification</string>' "$(dirname "$SERVICE_FILE")/com.streamvc.canary-buyer.plist"; then
+if grep -q '<string>qualification</string>' "$(dirname "$SERVICE_FILE")/com.malibu.canary-buyer.plist"; then
   echo "scheduled launchd agent must never invoke qualification mode" >&2
   exit 1
 fi
@@ -293,8 +293,8 @@ CANARY_TEST_PLATFORM=Darwin \
   bash -c 'source "$1"' _ "$HERE/emergency-disable.sh" >/dev/null
 test -e "$TMP/darwin-emergency/DISABLED"
 test ! -e "$TMP/darwin-enabled"
-grep -q "^bootout gui/$(id -u)/com.streamvc.canary-buyer$" "$CANARY_TEST_LAUNCHCTL"
-grep -q "^print gui/$(id -u)/com.streamvc.canary-buyer$" "$CANARY_TEST_LAUNCHCTL"
+grep -q "^bootout gui/$(id -u)/com.malibu.canary-buyer$" "$CANARY_TEST_LAUNCHCTL"
+grep -q "^print gui/$(id -u)/com.malibu.canary-buyer$" "$CANARY_TEST_LAUNCHCTL"
 
 # A scheduler that remains loaded makes the command fail, but the fail-closed
 # sentinel must already be present so no subsequent invocation can add load.

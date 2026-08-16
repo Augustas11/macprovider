@@ -2,8 +2,8 @@
 # check_nginx_stats_test.sh — SPEC-017 v0.1.8 Step 4.B nginx
 # config + behavior smoke.
 #
-# Validates the new `nginx-stats.streamvc.live.conf` and the
-# amended `nginx-coordinator.streamvc.live.conf` against a stock
+# Validates the new `nginx-stats.malibu.tech.conf` and the
+# amended `nginx-coordinator.malibu.tech.conf` against a stock
 # nginx via docker. Covers:
 #
 #   1. `nginx -t` PASS on the composed config (stats-shared snippet
@@ -100,7 +100,7 @@ sed \
   -e 's|ssl_protocols .*||' \
   -e 's|ssl_prefer_server_ciphers .*||' \
   -e "s|http://127.0.0.1:8444|http://host.docker.internal:${UPSTREAM_PORT}|g" \
-  "$DIST_DIR/nginx-stats.streamvc.live.conf" > "$TMP/sites-enabled/stats"
+  "$DIST_DIR/nginx-stats.malibu.tech.conf" > "$TMP/sites-enabled/stats"
 
 cat > "$TMP/nginx.conf" <<'EOF'
 worker_processes 1;
@@ -368,7 +368,7 @@ BODY=$(printf 'C%.0s' $(seq 1 43))
 TOKEN2="mpk_${BODY}"
 curl -sf -o /dev/null -H "Authorization: Bearer $TOKEN2" "${BASE}/v1/stats/leaderboard"
 sleep 1
-LOG_FILE="$TMP/log/stats.streamvc.live-access.log"
+LOG_FILE="$TMP/log/stats.malibu.tech-access.log"
 if [ ! -f "$LOG_FILE" ]; then
   fail "AC-15: access log not found at $LOG_FILE"
 else

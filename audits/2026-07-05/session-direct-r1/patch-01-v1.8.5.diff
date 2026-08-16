@@ -324,7 +324,7 @@ index b9f6a4f..74423cd 100644
 --- a/phase3-binary/app/Tests/MalibuTests/LaunchProviderControllerTests.swift
 +++ b/phase3-binary/app/Tests/MalibuTests/LaunchProviderControllerTests.swift
 @@ -331,7 +331,7 @@ final class LaunchProviderControllerTests: XCTestCase {
-                         coordinatorWebSocketURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!
+                         coordinatorWebSocketURL: URL(string: "wss://coordinator.malibu.tech/v2/provider")!
                      )
                  },
 -                saveProviderIdentity: { providerID, token in
@@ -454,7 +454,7 @@ index f500935..aa47920 100644
              try await ProviderConfig.saveProviderIdentity(
                  providerID: "p_failed",
                  token: "provider-token",
-+                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
++                coordinatorWSURL: URL(string: "wss://coordinator.malibu.tech/v2/provider")!,
                  paths: paths,
                  readToken: { _ in nil },
                  saveToken: { _, _ in
@@ -462,7 +462,7 @@ index f500935..aa47920 100644
              try await ProviderConfig.saveProviderIdentity(
                  providerID: "p_marker_failed",
                  token: "provider-token",
-+                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
++                coordinatorWSURL: URL(string: "wss://coordinator.malibu.tech/v2/provider")!,
                  paths: paths,
                  readToken: { _ in nil },
                  saveToken: { _, token in savedToken = token },
@@ -470,7 +470,7 @@ index f500935..aa47920 100644
              try await ProviderConfig.saveProviderIdentity(
                  providerID: "p_verify_failed",
                  token: "provider-token",
-+                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
++                coordinatorWSURL: URL(string: "wss://coordinator.malibu.tech/v2/provider")!,
                  paths: paths,
                  readToken: { _ in nil },
                  saveToken: { _, token in savedToken = token },

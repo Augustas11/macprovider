@@ -410,7 +410,7 @@ version-bump exception.
   as a SOFT dependency (informs which providers participate in
   hash attestation; orthogonal to receipt issuance per §M.2.3).
 - **Live infrastructure citation.** As of 2026-06-24 the
-  coordinator at `coordinator.streamvc.live` runs SPEC-011 v0.5
+  coordinator at `coordinator.malibu.tech` runs SPEC-011 v0.5
   observation mode against catalog
   `macprovider-tier2-model-catalog-2026-05-31`; Pearl journald
   shows 342+ `model_hash_verified` events over the last 7 days
@@ -1570,7 +1570,7 @@ Keychain to obtain its receipt private key:
 
 1. Construct the Keychain query with:
    - `kSecClass = kSecClassGenericPassword`
-   - `kSecAttrService = "com.streamvc.macprovider.receipt-key"`
+   - `kSecAttrService = "com.malibu.provider.receipt-key"`
    - `kSecAttrAccount = <provider_id>`
    - `kSecAttrAccessible = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
    - `kSecAttrSynchronizable = false`
@@ -1710,9 +1710,9 @@ When `macprovider rotate-key` is invoked:
    `auth_response.accepted=true`), the binary atomically swaps
    Keychain:
    - Move the existing Keychain item at
-     `(service=com.streamvc.macprovider.receipt-key,
+     `(service=com.malibu.provider.receipt-key,
        account=<provider_id>)` to
-     `(service=com.streamvc.macprovider.receipt-key.prev,
+     `(service=com.malibu.provider.receipt-key.prev,
        account=<provider_id>)`.
    - Add the new keypair at the original `(service, account)`.
    The `.prev` Keychain item is retained for a 7-day operator
@@ -2039,7 +2039,7 @@ priority order:
 3. **Live:** A fetch of `GET /v1/receipt-keys/<provider_id>`
    (§10.7 — SPEC-002 v1.5 candidate annotation, public /
    unauthenticated / rate-limited) on the coordinator named in
-   the verifier's config (default: `coordinator.streamvc.live`).
+   the verifier's config (default: `coordinator.malibu.tech`).
    MUST be a single `GET` over HTTPS with a 5-second timeout and
    no retries. On success, the verifier MUST update its cache
    (write `fetched_at = now()`) before continuing. The verifier
@@ -2296,7 +2296,7 @@ v0.2-known values for v0.2-mapped cases.
 |---|---|---|
 | `explicit_vs_live_divergence` | `live_pubkey` (string), `coordinator_host` (string) | Explicit `--pubkey` was used AND a live `/v1/receipt-keys` fetch succeeded AND returned a different pubkey for the same `provider_id`. |
 | `live_check_skipped` | `reason` (one of `offline_flag`, `network_unreachable`, `provider_id_unresolvable`) | The live divergence check did not run. `offline_flag`: `--offline` was passed. `network_unreachable`: live fetch failed (network down, 5xx, timeout, 429). `provider_id_unresolvable`: explicit `--pubkey` was supplied AND no `provider_id` was recoverable from CLI, bundle, or cache (the verifier had nothing to address the resolver with). |
-| `non_default_coordinator` | `coordinator_host` (string) | A non-default coordinator (i.e. not `coordinator.streamvc.live`) was used as the trust-root source. |
+| `non_default_coordinator` | `coordinator_host` (string) | A non-default coordinator (i.e. not `coordinator.malibu.tech`) was used as the trust-root source. |
 | `non_default_tls_trust` | `ca_file_path` (string) | The `MACPROVIDER_VERIFY_TLS_CA_FILE` env var was honored and successfully augmented the TLS trust pool used to reach the coordinator. Surfaces silent trust widening so a buyer running under a wrapper script (CI helper, devcontainer setup, ~/.profile modification by malware) where the env var has been set to point at an attacker-controlled CA chain sees a visible indicator. Added in SPEC-015 v0.3.4 (issue #128). |
 | `clock_skew` | `unix_ts` (int), `system_time` (int), `delta_seconds` (int) | Receipt `unix_ts` differs from the verifier's system clock by more than 24 hours. Informational only — does NOT downgrade `result` per §10.6. |
 
@@ -2306,11 +2306,11 @@ A verifier MUST emit `warnings[]` entries regardless of `--quiet`
 **Example outputs:**
 
 ```json
-{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","warnings":[]}
+{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.malibu.tech","warnings":[]}
 ```
 
 ```json
-{"result":"invalid","reason":"output_hash_mismatch","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","details":{"field":"output_hash","computed":"ab12...","receipt":"cd34..."}}
+{"result":"invalid","reason":"output_hash_mismatch","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.malibu.tech","details":{"field":"output_hash","computed":"ab12...","receipt":"cd34..."}}
 ```
 
 ```json
@@ -2320,9 +2320,9 @@ A verifier MUST emit `warnings[]` entries regardless of `--quiet`
 **Default (non-JSON) human-readable output** is a single line:
 
 ```
-valid (m1-anon · qwen2.5-7b-instruct-q4 · signed 2026-06-23T08:00Z · trust=live@coordinator.streamvc.live)
+valid (m1-anon · qwen2.5-7b-instruct-q4 · signed 2026-06-23T08:00Z · trust=live@coordinator.malibu.tech)
 invalid: output_hash mismatch (computed=ab12... receipt=cd34...)
-inconclusive: cache stale and /v1/receipt-keys unreachable on coordinator.streamvc.live
+inconclusive: cache stale and /v1/receipt-keys unreachable on coordinator.malibu.tech
 ```
 
 When the `trust_source` is `live` or `cache`, the human-mode line
@@ -2373,7 +2373,7 @@ individual flag descriptions.
 | `--offline` (no `--pubkey`) | NO | n/a | per `--quiet` | `inconclusive` if cache miss / stale |
 | `--quiet` (alone) | per other flags | per other flags | SUPPRESSED (stderr only) | NO |
 | `--quiet --json` | per other flags | per other flags | SUPPRESSED (stderr); warnings still in JSON `warnings[]` | NO |
-| `--coordinator H` (or env) | YES, against host `H` | per other flags | per `--quiet` | NO; `non_default_coordinator` warning if `H != coordinator.streamvc.live` |
+| `--coordinator H` (or env) | YES, against host `H` | per other flags | per `--quiet` | NO; `non_default_coordinator` warning if `H != coordinator.malibu.tech` |
 | `--explain` | per other flags | per other flags | §10.6 verbatim printed to stderr after valid result | NO |
 | `--bundle B --receipt R` | n/a | n/a | n/a | USAGE ERROR (exit 64) — mutually exclusive |
 | `--bundle -` (stdin mode) | per other flags | per other flags | per `--quiet` | NO |
@@ -2420,7 +2420,7 @@ capture or a network sandbox that denies all egress).
 The live fetch is a single `GET` over HTTPS with a 5-second
 connection-plus-read timeout. No retries. The verifier MUST NOT
 follow HTTP redirects beyond the configured coordinator host
-(default: `coordinator.streamvc.live`; configurable via
+(default: `coordinator.malibu.tech`; configurable via
 `--coordinator` flag or `MACPROVIDER_COORDINATOR` environment
 variable). Redirects whose `Location` resolves to a different host
 MUST be treated as a fetch failure (contributing to `inconclusive`
@@ -2434,7 +2434,7 @@ in fetch semantics across deployments would make `inconclusive`
 mean different things to different buyers.
 
 When the configured coordinator host is NOT the default
-`coordinator.streamvc.live`, the verifier MUST record a
+`coordinator.malibu.tech`, the verifier MUST record a
 `non_default_coordinator` warning per §10.4.2 in every output
 (JSON and human-mode stderr unless `--quiet`). The trust boundary
 is coordinator-specific; making non-default coordinators visible
@@ -3375,8 +3375,8 @@ locked shape, which uses top-level keys `pool` and `summary`).**
   "pool": [...],               // unchanged — SPEC-002 v1.4 §FR-O2
   "summary": {...},            // unchanged — SPEC-002 v1.4 §FR-O2
   "catalog_id": "macprovider-tier2-model-catalog-2026-05-31",
-  "catalog_url": "https://coordinator.streamvc.live/catalog/macprovider-tier2-model-catalog-2026-05-31",
-  "catalog_pubkey_url": "https://coordinator.streamvc.live/catalog/pubkey"
+  "catalog_url": "https://coordinator.malibu.tech/catalog/macprovider-tier2-model-catalog-2026-05-31",
+  "catalog_pubkey_url": "https://coordinator.malibu.tech/catalog/pubkey"
 }
 ```
 
@@ -3462,8 +3462,8 @@ covered by the "effectively active catalog" condition above.
 
 ```
 macprovider-verify --bundle X \
-  --catalog-url https://coordinator.streamvc.live/catalog/macprovider-tier2-model-catalog-2026-05-31 \
-  --catalog-pubkey-url https://coordinator.streamvc.live/catalog/pubkey
+  --catalog-url https://coordinator.malibu.tech/catalog/macprovider-tier2-model-catalog-2026-05-31 \
+  --catalog-pubkey-url https://coordinator.malibu.tech/catalog/pubkey
 ```
 
 with the verifier resolving both URLs in two fetches (plus the
@@ -4390,7 +4390,7 @@ BUILD spec, per the §7.3 deferral.
 
 | Surface | Field | Type | Notes |
 |---|---|---|---|
-| Provider Keychain | `com.streamvc.macprovider.receipt-key/<provider_id>` | 32-byte raw ed25519 private key | `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, `Synchronizable=false` |
+| Provider Keychain | `com.malibu.provider.receipt-key/<provider_id>` | 32-byte raw ed25519 private key | `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, `Synchronizable=false` |
 | Coordinator memory | `Provider.ReceiptPubkey []byte` | 32 bytes | populated on auth, lifetime tied to WS session unless the BUILD spec adds durable storage |
 | Audit log | `receipt_issued` event | JSON | per response, fields per §11 |
 
@@ -4420,7 +4420,7 @@ Each AC is independently verifiable from outside this SPEC.
 
 **AC-1.** A v1.6 `phase3-binary serve` process on first launch
 generates an ed25519 keypair, stores it in macOS Keychain at
-service `com.streamvc.macprovider.receipt-key` account
+service `com.malibu.provider.receipt-key` account
 `<provider_id>`, and on a fresh launch with the same `provider_id`
 reads the same private key bytes from Keychain (verify by computing
 the public key from the stored private key and comparing against the
@@ -4842,7 +4842,7 @@ M8 finding required explicit per-field justification.
 - SPEC-011 v0.5 §3.4 drain semantics (R-3.4.1 in-flight tracking,
   R-3.4.2 drain timeout); v0.3 §M.2.2 enforceability rests on
   these rules.
-- Live infrastructure — `coordinator.streamvc.live/healthz` +
+- Live infrastructure — `coordinator.malibu.tech/healthz` +
   Pearl journald `model_hash_verified` events; v0.3 composes on
   this production observation surface.
 - `specs/BUILD_SPEC_015_RECEIPTS_v0_3_MODELHASH_PROMPT.md` — the

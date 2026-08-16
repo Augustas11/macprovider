@@ -117,8 +117,8 @@ enforceable? Consider:
   reveal infrastructure hostnames. If any of these hostnames were
   previously private (only known to insiders), publishing them
   adds an attack-recon signal.
-- The primary hostnames (coordinator.streamvc.live,
-  gateway.streamvc.live, stats.streamvc.live) are DNS-resolvable
+- The primary hostnames (coordinator.malibu.tech,
+  gateway.malibu.tech, stats.malibu.tech) are DNS-resolvable
   and already public via nginx TLS certs (transparency logs). No
   new disclosure.
 - Confirm no admin/backdoor hostname (e.g.

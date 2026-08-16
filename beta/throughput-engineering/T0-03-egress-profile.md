@@ -116,7 +116,7 @@ that those PRs implemented on their side. The buffer is:
 ### WS send timing estimates (URLSessionWebSocketTask)
 
 `URLSessionWebSocketTask.send(.string(_:))` on localhost (coordinator at
-`coordinator.streamvc.live` or local test) over a stable LAN/WAN connection:
+`coordinator.malibu.tech` or local test) over a stable LAN/WAN connection:
 
 | Scenario | Estimated p95 send µs | Notes |
 |----------|-----------------------|-------|

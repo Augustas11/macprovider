@@ -10,7 +10,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-NGINX_CONF="$REPO_ROOT/phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf"
+NGINX_CONF="$REPO_ROOT/phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf"
 
 FAIL=0
 fail() { echo "FAIL: $1" >&2; FAIL=1; }
@@ -64,7 +64,7 @@ ACTIVE="$(awk '
   in_server {
     block = block $0 ORS
     if ($0 ~ /^[[:space:]]*listen[[:space:]]/ && listen_has_port($0, "443") && $0 ~ /(^|[[:space:]])ssl([[:space:]]|;|$)/) { tls=1 }
-    if ($0 ~ /^[[:space:]]*server_name[[:space:]]/ && server_name_has($0, "coordinator.streamvc.live")) { name=1 }
+    if ($0 ~ /^[[:space:]]*server_name[[:space:]]/ && server_name_has($0, "coordinator.malibu.tech")) { name=1 }
     nopen=gsub(/\{/, "{")
     nclose=gsub(/\}/, "}")
     depth += nopen - nclose
@@ -109,7 +109,7 @@ HTTP_ACTIVE="$(awk '
     block = block $0 ORS
     if ($0 ~ /^[[:space:]]*listen[[:space:]]/ && listen_has_port($0, "80")) { port80=1 }
     if ($0 ~ /^[[:space:]]*listen[[:space:]]/ && $0 ~ /(^|[[:space:]])ssl([[:space:]]|;|$)/) { tls=1 }
-    if ($0 ~ /^[[:space:]]*server_name[[:space:]]/ && server_name_has($0, "coordinator.streamvc.live")) { name=1 }
+    if ($0 ~ /^[[:space:]]*server_name[[:space:]]/ && server_name_has($0, "coordinator.malibu.tech")) { name=1 }
     nopen=gsub(/\{/, "{")
     nclose=gsub(/\}/, "}")
     depth += nopen - nclose
@@ -139,14 +139,14 @@ HTTP_CONTEXT_DIRECTIVES="$(awk '
 ' <<<"$CONF_ACTIVE")"
 
 if [ "$COORDINATOR_TLS_SERVER_COUNT" -eq 0 ]; then
-  fail "TLS server block for coordinator.streamvc.live not found"
+  fail "TLS server block for coordinator.malibu.tech not found"
 elif [ "$COORDINATOR_TLS_SERVER_COUNT" -ne 1 ]; then
-  fail "expected exactly one coordinator.streamvc.live TLS server block, found $COORDINATOR_TLS_SERVER_COUNT"
+  fail "expected exactly one coordinator.malibu.tech TLS server block, found $COORDINATOR_TLS_SERVER_COUNT"
 fi
 if [ "$COORDINATOR_HTTP_SERVER_COUNT" -eq 0 ]; then
-  fail "port-80 server block for coordinator.streamvc.live not found"
+  fail "port-80 server block for coordinator.malibu.tech not found"
 elif [ "$COORDINATOR_HTTP_SERVER_COUNT" -ne 1 ]; then
-  fail "expected exactly one coordinator.streamvc.live port-80 server block, found $COORDINATOR_HTTP_SERVER_COUNT"
+  fail "expected exactly one coordinator.malibu.tech port-80 server block, found $COORDINATOR_HTTP_SERVER_COUNT"
 fi
 
 extract_server_scope_directives() {
@@ -283,7 +283,7 @@ assert_port80_server_directive_allowlist() {
     case "$trimmed" in
       "listen 80;" | \
       "listen [::]:80;" | \
-      "server_name coordinator.streamvc.live;")
+      "server_name coordinator.malibu.tech;")
         ;;
       *)
         fail "port-80 server block contains unexpected server-level directive; keep port-80 behavior in explicit validated locations; got: $(echo "$trimmed" | head -c 200)"

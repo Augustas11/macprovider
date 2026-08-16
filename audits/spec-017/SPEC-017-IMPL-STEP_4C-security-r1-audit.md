@@ -37,7 +37,7 @@ None.
 
 1. `/metrics` exposure relies on the existing loopback bind posture, not an explicit stats-metrics guard.
 
-   Evidence: `phase4-coordinator/cmd/coordinator/main.go:535` through `main.go:558` mounts unauthenticated `/metrics` on the provider mux. Checked-in coordinator examples bind to `127.0.0.1`, and the public nginx stats vhost only proxies the three `/v1/stats/{overview,leaderboard,health}` paths (`phase4-coordinator/dist/nginx-stats.streamvc.live.conf:99`, `:127`, `:150`), so I did not find a public nginx route to `/metrics`.
+   Evidence: `phase4-coordinator/cmd/coordinator/main.go:535` through `main.go:558` mounts unauthenticated `/metrics` on the provider mux. Checked-in coordinator examples bind to `127.0.0.1`, and the public nginx stats vhost only proxies the three `/v1/stats/{overview,leaderboard,health}` paths (`phase4-coordinator/dist/nginx-stats.malibu.tech.conf:99`, `:127`, `:150`), so I did not find a public nginx route to `/metrics`.
 
    Risk: non-blocking defense-in-depth gap. If an operator changes `listen.bind_address` away from loopback, the scrape endpoint becomes unauthenticated on that interface.
 

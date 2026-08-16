@@ -134,7 +134,7 @@ for requirement in (
     "--tag \"$TAG\"",
     "--pearl-release-json \"$accepted/pearl-release.json\"",
     "--trusted-keys \"$accepted/trusted-keys.json\"",
-    "--coordinator-url https://coordinator.streamvc.live",
+    "--coordinator-url https://coordinator.malibu.tech",
     "--openssl \"$OPENSSL_BIN\"",
     "scripts/release-staged-version-policy.sh",
     "prepublication_recommendation_args",

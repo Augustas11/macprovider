@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const testCoordinator = "coordinator.streamvc.live"
+const testCoordinator = "coordinator.malibu.tech"
 
 func TestOpenPutLookupRoundTrip(t *testing.T) {
 	c := openTempCache(t)

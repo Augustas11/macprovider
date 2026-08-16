@@ -60,7 +60,7 @@ without `--enable-warm-swap` is wire-identical to v1.2.4).
 ## 2. What you need to do — SPEC-002 v1.3.5 implementation
 
 The coordinator is **Go**, lives in `phase4-coordinator/`, deploys to
-`coordinator.streamvc.live` (Pearl VPS). It accepts WebSocket
+`coordinator.malibu.tech` (Pearl VPS). It accepts WebSocket
 connections from the provider binaries and routes inference requests
 from buyers.
 
@@ -286,8 +286,8 @@ BUILD prompt MUST explicitly forbid reading
 
 ### 6.5 Coordinator deploy target
 
-Production coordinator: `coordinator.streamvc.live` (Pearl VPS).
-Public installer redirect: `get.streamvc.live/install.sh`.
+Production coordinator: `coordinator.malibu.tech` (Pearl VPS).
+Public installer redirect: `get.malibu.tech/install.sh`.
 
 The v1.3.0 release tag deployment is BLOCKED until SPEC-002 v1.3.5 is
 implemented AND deployed to production coordinator. PR #5 sits on main
@@ -350,7 +350,7 @@ land together.
     dispatch. Iterate fixes until 0/0/0.
 
 11. **Merge to main**, then coordinate with operator on production
-    deploy to `coordinator.streamvc.live`. Once coordinator deploy is
+    deploy to `coordinator.malibu.tech`. Once coordinator deploy is
     confirmed live, the v1.3.0 binary release tag can ship.
 
 ---

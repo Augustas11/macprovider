@@ -102,10 +102,10 @@ explicitly preserved both.
   follow-on SPEC may formalize it.
 - **E.1 fix** (launchd label `com.macprovider.cli` was
   wrong): FR-E.1 now binds to SPEC-003 v0.9.2's actual label
-  `live.streamvc.macprovider` and plist path
-  `~/Library/LaunchAgents/live.streamvc.macprovider.plist`.
+  `live.malibu.provider` and plist path
+  `~/Library/LaunchAgents/live.malibu.provider.plist`.
   The drain sequence is `launchctl bootout
-  gui/$UID/live.streamvc.macprovider` to stop and
+  gui/$UID/live.malibu.provider` to stop and
   `launchctl bootstrap gui/$UID <plist>` to restore. AC-6 is
   extended to cover the launchd-managed install path.
 - **F.1 fix** (`--apply` wrote keys the binary doesn't read):
@@ -739,10 +739,10 @@ cover BOTH install paths:
 
 - **launchd-managed install** (per SPEC-003 v0.9.2 §FR-C5,
   the dominant operator install path):
-  - launchd label: `live.streamvc.macprovider`
+  - launchd label: `live.malibu.provider`
   - plist path:
-    `~/Library/LaunchAgents/live.streamvc.macprovider.plist`
-  - check method: `launchctl list | awk '/live.streamvc.macprovider/'`
+    `~/Library/LaunchAgents/live.malibu.provider.plist`
+  - check method: `launchctl list | awk '/live.malibu.provider/'`
     (matches the existing pattern in
     `phase3-binary/dist/install.sh` line ~923)
 - **foreground / manually-run process**: PID match on
@@ -771,7 +771,7 @@ On conflict, the behavior is:
 **Drain sequence on the launchd-managed install path** (binding
 to SPEC-003 v0.9.2 §FR-C5):
 
-1. `launchctl bootout gui/$UID/live.streamvc.macprovider` to stop
+1. `launchctl bootout gui/$UID/live.malibu.provider` to stop
    the live service. SPEC-003's plist has
    `KeepAlive.SuccessfulExit = false`, so bootout reliably stops
    without auto-restart.
@@ -783,7 +783,7 @@ to SPEC-003 v0.9.2 §FR-C5):
 3. Run the full autotune.
 4. On exit, restore by either:
    - Default (no `--apply`): `launchctl bootstrap gui/$UID
-     ~/Library/LaunchAgents/live.streamvc.macprovider.plist`,
+     ~/Library/LaunchAgents/live.malibu.provider.plist`,
      leaving the operator's pre-tune config in place.
    - `--apply`: write the new config (per FR-F.3), then
      `launchctl bootstrap` to bring the new config live.
@@ -1040,8 +1040,8 @@ this case:
 ```
 applied: ... (backup at ~/.config/macprovider/config.yaml.bak-1718712345-0)
 hint: to apply the new recipe live, restart the serve process:
-  launchctl bootout gui/$UID/live.streamvc.macprovider && \
-    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/live.streamvc.macprovider.plist
+  launchctl bootout gui/$UID/live.malibu.provider && \
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/live.malibu.provider.plist
 ```
 
 SPEC-013 v1 does NOT depend on or trigger SPEC-011 warm-swap for
@@ -1284,7 +1284,7 @@ retained.
 telemetry — no upload, no analytics, no remote logging. The machine
 fingerprint (`ram_gb`, `chip`, `os_version`, `binary_version`)
 appears in `tune_runs.machine_*` columns and in the FR-F.2 JSON
-output for local consumption by `console.streamvc.live` (when the
+output for local consumption by `console.malibu.tech` (when the
 operator chooses to share that JSON). A classic SPEC-013 benchmark/probe run
 performs no network egress except the **HuggingFace pre-warm fetch path selected
 by FR-D.1** — i.e. either:
@@ -1441,10 +1441,10 @@ naming the existing install path (`launchd-managed` or
 `tune_runs.exit_reason` MUST be `'provider_conflict'`. This AC
 MUST cover BOTH install paths:
 
-- **launchd-managed case:** with `live.streamvc.macprovider`
+- **launchd-managed case:** with `live.malibu.provider`
   loaded via `launchctl bootstrap`, autotune detects it via
   `launchctl list` and refuses; with `--drain`, autotune runs
-  `launchctl bootout gui/$UID/live.streamvc.macprovider`,
+  `launchctl bootout gui/$UID/live.malibu.provider`,
   completes the tune, and either restarts the original config
   (no `--apply`) or applies + restarts (with `--apply`).
 - **foreground case:** with `macprovider-cli serve ...`

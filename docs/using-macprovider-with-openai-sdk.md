@@ -10,7 +10,7 @@ There is no `macprovider` SDK. The OpenAI SDK IS the MacProvider SDK. That is de
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="https://api.streamvc.live/v1",
+    base_url="https://api.malibu.tech/v1",
     api_key="<your-macprovider-api-key>",
 )
 ```
@@ -21,12 +21,12 @@ TypeScript / JavaScript:
 import OpenAI from "openai";
 
 const client = new OpenAI({
-  baseURL: "https://api.streamvc.live/v1",
+  baseURL: "https://api.malibu.tech/v1",
   apiKey: process.env.MACPROVIDER_API_KEY,
 });
 ```
 
-Get an API key: [api.streamvc.live/auth/github/start](https://api.streamvc.live/auth/github/start)
+Get an API key: [api.malibu.tech/auth/github/start](https://api.malibu.tech/auth/github/start)
 
 ## Basic completion
 
@@ -38,7 +38,7 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-Any MLX chat model in the pool works. Available models: `client.models.list()` or `curl https://api.streamvc.live/v1/models`.
+Any MLX chat model in the pool works. Available models: `client.models.list()` or `curl https://api.malibu.tech/v1/models`.
 
 Text-only structured content is accepted for `system` and `user` messages too.
 Frameworks that emit `content=[{"type":"text","text":"Hello"}]` for those roles
@@ -135,7 +135,7 @@ Multi-turn conversations get routed to the same provider via a buyer-supplied op
 conversation_id = "thread-42"  # any opaque string stable across turns
 
 client_sticky = OpenAI(
-    base_url="https://api.streamvc.live/v1",
+    base_url="https://api.malibu.tech/v1",
     api_key="<your-macprovider-api-key>",
     default_headers={"X-MacProvider-Conversation": conversation_id},
 )
@@ -176,13 +176,13 @@ Route every request in a session to a specific provider via `X-MacProvider-Pin-P
 
 ```python
 client_pinned = OpenAI(
-    base_url="https://api.streamvc.live/v1",
+    base_url="https://api.malibu.tech/v1",
     api_key="<your-macprovider-api-key>",
     default_headers={"X-MacProvider-Pin-Provider": "provider-air5"},
 )
 ```
 
-Provider IDs are visible on the pool dashboard at [console.streamvc.live](https://console.streamvc.live). If the pinned provider is offline the request returns `503 no_provider_available` rather than routing to a substitute — pinning is strict.
+Provider IDs are visible on the pool dashboard at [console.malibu.tech](https://console.malibu.tech). If the pinned provider is offline the request returns `503 no_provider_available` rather than routing to a substitute — pinning is strict.
 
 `X-MacProvider-Pin-Provider` and `X-MacProvider-Conversation` compose: pinning trumps sticky. If you pin, sticky becomes redundant.
 
@@ -235,7 +235,7 @@ import json
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="https://api.streamvc.live/v1",
+    base_url="https://api.malibu.tech/v1",
     api_key="<your-macprovider-api-key>",
     default_headers={"X-MacProvider-Conversation": "session-2026-07-02-a"},
 )
@@ -298,8 +298,8 @@ Any framework built on `openai-python` or `openai-node` works out of the box. Te
 - **LangChain.** `ChatOpenAI(base_url=..., api_key=...)` — full compatibility including tool calling and structured output.
 - **LlamaIndex.** `OpenAI(base_url=..., api_key=...)` — same story.
 - **Instructor.** Structured output via `response_format` works; Instructor's `patch()` layer sees MacProvider as plain OpenAI.
-- **Aider.** Point `OPENAI_API_BASE` at `https://api.streamvc.live/v1`; existing config keys work.
-- **Cline / Continue.** Per [SPEC-018 v0.2.4](../specs/SPEC-018-*.md) MacProvider is a Cline drop-in target — set the OpenAI-compatible endpoint to `https://api.streamvc.live/v1`.
+- **Aider.** Point `OPENAI_API_BASE` at `https://api.malibu.tech/v1`; existing config keys work.
+- **Cline / Continue.** Per [SPEC-018 v0.2.4](../specs/SPEC-018-*.md) MacProvider is a Cline drop-in target — set the OpenAI-compatible endpoint to `https://api.malibu.tech/v1`.
 
 If you find a framework where the OpenAI SDK works but MacProvider doesn't, that's a wire-shape bug — file an issue with a minimal repro.
 

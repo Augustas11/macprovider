@@ -90,7 +90,7 @@ Read-only probe. No code or spec files modified. Local context used: [CLAUDE.md]
 
 | Field | Assessment |
 |---|---|
-| Scenario | `coordinator.streamvc.live/v1/demand-signal` counts served tokens by model. Models with many providers get more served tokens because they are available. Models with zero providers get zero served tokens even if buyers attempted them and got `503`. |
+| Scenario | `coordinator.malibu.tech/v1/demand-signal` counts served tokens by model. Models with many providers get more served tokens because they are available. Models with zero providers get zero served tokens even if buyers attempted them and got `503`. |
 | What formula does wrong | It measures fulfilled supply, not attempted demand. |
 | Corrupted intent | Demand signal should guide supply into missing demand. Served-token stats guide supply toward already-served rows. |
 | Severity | **Network-degrading**; **network-killing** when it locks out uncovered models. |
@@ -131,7 +131,7 @@ Read-only probe. No code or spec files modified. Local context used: [CLAUDE.md]
 | M17 | FM-8 | **Quality-adjusted score factor.** Multiply by `quality_gate` or `reliability_score` from production errors and TTFT. | Coord stats / formula | Medium-large | Network state and possibly endpoint | Needs enough traffic; can feedback-loop | **Defer v0.2** |
 | M18 | FM-10 | **Label projection as full-utilization capacity.** Installer must say “at 100% utilization” or “capacity, not guaranteed earnings,” and keep token subsidy messaging separate. | install.sh UX | Small | Operator-visible UX | Less exciting onboarding copy | **Yes** |
 | M19 | FM-10 | **Utilization-adjusted expected earnings.** Use local buyer volume / fleet supply to estimate realized earnings. | Coord stats endpoint | Large | New endpoint/state | Bootstrap zero and noisy | **Defer v0.2** |
-| M20 | FM-1, FM-4, FM-5 | **Static demand-rank JSON with version and row metadata.** Serve `get.streamvc.live/demand-rank.json` containing row weights, lifecycle state, min provider coverage, and generated timestamp. Installer fetches it with baked fallback. | Static URL + install/autotune | Small-medium | No coord endpoint; no new provider state | Static file can go stale; needs operator discipline | **Yes** |
+| M20 | FM-1, FM-4, FM-5 | **Static demand-rank JSON with version and row metadata.** Serve `get.malibu.tech/demand-rank.json` containing row weights, lifecycle state, min provider coverage, and generated timestamp. Installer fetches it with baked fallback. | Static URL + install/autotune | Small-medium | No coord endpoint; no new provider state | Static file can go stale; needs operator discipline | **Yes** |
 
 ### Recommended v0.1 Bake-In Set
 
@@ -202,7 +202,7 @@ default =
 Use **option (b)** for v0.1:
 
 ```text
-Primary: get.streamvc.live/demand-rank.json
+Primary: get.malibu.tech/demand-rank.json
 Fallback: baked demand-rank snapshot in the installer/CLI
 Future: switch or blend with coord attempted-demand stats after 60+ days
 ```
@@ -277,7 +277,7 @@ Constant demand is better than bad local stats for cold start, but it turns the 
 
 | Safeguard | Reason |
 |---|---|
-| Baked fallback snapshot | Installer must work offline or if `get.streamvc.live` fails. |
+| Baked fallback snapshot | Installer must work offline or if `get.malibu.tech` fails. |
 | JSON signature or checksum | Prevents accidental or tampered recommendation weights. |
 | `recommendable` flag | Operator can block rows with runtime/billing/deployability failures. |
 | Cold-start floor | Prevents permanent exclusion of new rows. |
@@ -285,7 +285,7 @@ Constant demand is better than bad local stats for cold start, but it turns the 
 | Version/timestamp display | Makes stale recommendation diagnosis possible. |
 | No exact earnings guarantee | Demand rank is a utilization proxy, not a guarantee. |
 
-**Part 3 conclusion:** For SPEC-018 v0.1, use operator-curated OpenRouter-prior demand weights fetched from `get.streamvc.live/demand-rank.json` with a baked fallback, then graduate to blended coord attempted-demand stats only after 60+ days of real buyer history.
+**Part 3 conclusion:** For SPEC-018 v0.1, use operator-curated OpenRouter-prior demand weights fetched from `get.malibu.tech/demand-rank.json` with a baked fallback, then graduate to blended coord attempted-demand stats only after 60+ days of real buyer history.
 
 ## Part 4 — One-Line Conclusions
 
@@ -293,7 +293,7 @@ Constant demand is better than bad local stats for cold start, but it turns the 
 |---|---|
 | Part 1 | The v0.1 risk is not one bad demand multiplier; it is turning a per-provider argmax into a fleet-wide coordination signal without coverage floors, cold-start priors, deployability gates, and stale-input handling. |
 | Part 2 | SPEC-018 v0.1 should bake in cheap static controls: eligibility gates, deployability states, cold-start floors, top-K diversification, metadata versioning, and honest “capacity not guaranteed earnings” wording; defer live market allocation to v0.2. |
-| Part 3 | For SPEC-018 v0.1, use operator-curated OpenRouter-prior demand weights fetched from `get.streamvc.live/demand-rank.json` with a baked fallback, then graduate to blended coord attempted-demand stats only after 60+ days of real buyer history. |
+| Part 3 | For SPEC-018 v0.1, use operator-curated OpenRouter-prior demand weights fetched from `get.malibu.tech/demand-rank.json` with a baked fallback, then graduate to blended coord attempted-demand stats only after 60+ days of real buyer history. |
 | Overall | Ship v0.1 as a conservative installer recommendation system, not an autonomous market maker: recommend only deployable eligible rows, diversify defaults, preserve cold-start, and keep live coord demand optimization for v0.2. |
 
 
@@ -388,7 +388,7 @@ Read-only probe. No code or spec files modified. Local context used: [CLAUDE.md]
 
 | Field | Assessment |
 |---|---|
-| Scenario | `coordinator.streamvc.live/v1/demand-signal` counts served tokens by model. Models with many providers get more served tokens because they are available. Models with zero providers get zero served tokens even if buyers attempted them and got `503`. |
+| Scenario | `coordinator.malibu.tech/v1/demand-signal` counts served tokens by model. Models with many providers get more served tokens because they are available. Models with zero providers get zero served tokens even if buyers attempted them and got `503`. |
 | What formula does wrong | It measures fulfilled supply, not attempted demand. |
 | Corrupted intent | Demand signal should guide supply into missing demand. Served-token stats guide supply toward already-served rows. |
 | Severity | **Network-degrading**; **network-killing** when it locks out uncovered models. |
@@ -429,7 +429,7 @@ Read-only probe. No code or spec files modified. Local context used: [CLAUDE.md]
 | M17 | FM-8 | **Quality-adjusted score factor.** Multiply by `quality_gate` or `reliability_score` from production errors and TTFT. | Coord stats / formula | Medium-large | Network state and possibly endpoint | Needs enough traffic; can feedback-loop | **Defer v0.2** |
 | M18 | FM-10 | **Label projection as full-utilization capacity.** Installer must say “at 100% utilization” or “capacity, not guaranteed earnings,” and keep token subsidy messaging separate. | install.sh UX | Small | Operator-visible UX | Less exciting onboarding copy | **Yes** |
 | M19 | FM-10 | **Utilization-adjusted expected earnings.** Use local buyer volume / fleet supply to estimate realized earnings. | Coord stats endpoint | Large | New endpoint/state | Bootstrap zero and noisy | **Defer v0.2** |
-| M20 | FM-1, FM-4, FM-5 | **Static demand-rank JSON with version and row metadata.** Serve `get.streamvc.live/demand-rank.json` containing row weights, lifecycle state, min provider coverage, and generated timestamp. Installer fetches it with baked fallback. | Static URL + install/autotune | Small-medium | No coord endpoint; no new provider state | Static file can go stale; needs operator discipline | **Yes** |
+| M20 | FM-1, FM-4, FM-5 | **Static demand-rank JSON with version and row metadata.** Serve `get.malibu.tech/demand-rank.json` containing row weights, lifecycle state, min provider coverage, and generated timestamp. Installer fetches it with baked fallback. | Static URL + install/autotune | Small-medium | No coord endpoint; no new provider state | Static file can go stale; needs operator discipline | **Yes** |
 
 ### Recommended v0.1 Bake-In Set
 
@@ -500,7 +500,7 @@ default =
 Use **option (b)** for v0.1:
 
 ```text
-Primary: get.streamvc.live/demand-rank.json
+Primary: get.malibu.tech/demand-rank.json
 Fallback: baked demand-rank snapshot in the installer/CLI
 Future: switch or blend with coord attempted-demand stats after 60+ days
 ```
@@ -575,7 +575,7 @@ Constant demand is better than bad local stats for cold start, but it turns the 
 
 | Safeguard | Reason |
 |---|---|
-| Baked fallback snapshot | Installer must work offline or if `get.streamvc.live` fails. |
+| Baked fallback snapshot | Installer must work offline or if `get.malibu.tech` fails. |
 | JSON signature or checksum | Prevents accidental or tampered recommendation weights. |
 | `recommendable` flag | Operator can block rows with runtime/billing/deployability failures. |
 | Cold-start floor | Prevents permanent exclusion of new rows. |
@@ -583,7 +583,7 @@ Constant demand is better than bad local stats for cold start, but it turns the 
 | Version/timestamp display | Makes stale recommendation diagnosis possible. |
 | No exact earnings guarantee | Demand rank is a utilization proxy, not a guarantee. |
 
-**Part 3 conclusion:** For SPEC-018 v0.1, use operator-curated OpenRouter-prior demand weights fetched from `get.streamvc.live/demand-rank.json` with a baked fallback, then graduate to blended coord attempted-demand stats only after 60+ days of real buyer history.
+**Part 3 conclusion:** For SPEC-018 v0.1, use operator-curated OpenRouter-prior demand weights fetched from `get.malibu.tech/demand-rank.json` with a baked fallback, then graduate to blended coord attempted-demand stats only after 60+ days of real buyer history.
 
 ## Part 4 — One-Line Conclusions
 
@@ -591,7 +591,7 @@ Constant demand is better than bad local stats for cold start, but it turns the 
 |---|---|
 | Part 1 | The v0.1 risk is not one bad demand multiplier; it is turning a per-provider argmax into a fleet-wide coordination signal without coverage floors, cold-start priors, deployability gates, and stale-input handling. |
 | Part 2 | SPEC-018 v0.1 should bake in cheap static controls: eligibility gates, deployability states, cold-start floors, top-K diversification, metadata versioning, and honest “capacity not guaranteed earnings” wording; defer live market allocation to v0.2. |
-| Part 3 | For SPEC-018 v0.1, use operator-curated OpenRouter-prior demand weights fetched from `get.streamvc.live/demand-rank.json` with a baked fallback, then graduate to blended coord attempted-demand stats only after 60+ days of real buyer history. |
+| Part 3 | For SPEC-018 v0.1, use operator-curated OpenRouter-prior demand weights fetched from `get.malibu.tech/demand-rank.json` with a baked fallback, then graduate to blended coord attempted-demand stats only after 60+ days of real buyer history. |
 | Overall | Ship v0.1 as a conservative installer recommendation system, not an autonomous market maker: recommend only deployable eligible rows, diversify defaults, preserve cold-start, and keep live coord demand optimization for v0.2. |
 tokens used
 89 775

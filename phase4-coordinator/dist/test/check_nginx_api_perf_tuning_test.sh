@@ -5,7 +5,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-NGINX_CONF="$REPO_ROOT/phase5-gateway/dist/nginx-api.streamvc.live.conf"
+NGINX_CONF="$REPO_ROOT/phase5-gateway/dist/nginx-api.malibu.tech.conf"
 GATEWAY_DEPLOY="$REPO_ROOT/phase5-gateway/dist/deploy-pearl-vps.sh"
 
 FAIL=0
@@ -42,7 +42,7 @@ API_TLS_BLOCK="$(awk '
     closes = gsub(/\}/, "}")
     depth += opens - closes
     if (depth == 0) {
-      if (block ~ /server_name[[:space:]]+api\.streamvc\.live;/ &&
+      if (block ~ /server_name[[:space:]]+api\.malibu\.tech;/ &&
           block ~ /listen[[:space:]]+443[[:space:]]+ssl/) {
         printf "%s", block
       }
@@ -54,7 +54,7 @@ API_TLS_BLOCK="$(awk '
 require_api_tls_directive() {
   local directive="$1"
   if ! grep -qF "$directive" <<<"$API_TLS_BLOCK"; then
-    fail "$NGINX_CONF api.streamvc.live TLS server missing active directive: $directive"
+    fail "$NGINX_CONF api.malibu.tech TLS server missing active directive: $directive"
   fi
 }
 

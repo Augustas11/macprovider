@@ -1075,7 +1075,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
         self.maxBatch = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
-        self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.streamvc.macprovider.inference")
+        self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.warmSwapEnabled = warmSwapEnabled
@@ -1256,7 +1256,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
         self.maxBatch = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
-        self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.streamvc.macprovider.inference")
+        self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.warmSwapEnabled = warmSwapEnabled

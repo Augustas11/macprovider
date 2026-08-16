@@ -53,7 +53,7 @@ Scenario 15 `--dry-run` validates; fails safely without LAB_* env.
     final window → SKIP (not false PASS). Span <2W → SKIP. + LOW boundary fix
     (exclusive finalCutoff). 2 new tests (provider-stops-before-end, short-run).
   - Prod-host reachable (security H): rejectProdHost() in schema.go hard-fails
-    any B10 scenario whose gateway/coordinator resolves to streamvc.live(+subs).
+    any B10 scenario whose gateway/coordinator resolves to malibu.tech(+subs).
     New regression test. README prod-stack exception removed.
   - Thermal-join channel loss (arch H): join-thermal.py matches pmset +
     powermetrics INDEPENDENTLY, emits per-channel skew, bounds max skew.

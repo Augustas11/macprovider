@@ -13,7 +13,7 @@ proxies to /v1/chat/completions on the configured tunnel_url.
 
 Why a proxy and not direct fetch from the browser:
 mlx_lm.server doesn't ship with permissive CORS, so a browser hitting
-m1.streamvc.live directly would be blocked. The proxy is server-to-server,
+m1.malibu.tech directly would be blocked. The proxy is server-to-server,
 so the browser only ever talks to localhost.
 """
 

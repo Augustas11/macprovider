@@ -59,13 +59,25 @@ enum ProviderCredentialStoreError: Error, Equatable, CustomStringConvertible {
 /// or inaccessible Keychain becomes an explicit recoverable error, never a
 /// password prompt in a launchd session.
 struct KeychainProviderCredentialStore: ProviderCredentialStoring {
-    static let service = "live.streamvc.macprovider.provider-token.v1"
+    static let service = "live.malibu.provider.provider-token.v1"
+    static let legacyService = "live.streamvc.macprovider.provider-token.v1"
     private static let mutationLock = NSLock()
 
     func load(providerID: String) throws -> String? {
         let providerID = try Self.normalizedProviderID(providerID)
+        if let token = try load(providerID: providerID, service: Self.service) {
+            return token
+        }
+        guard let legacyToken = try load(providerID: providerID, service: Self.legacyService) else {
+            return nil
+        }
+        try? migrateLegacyTokenIfAbsent(providerID: providerID, token: legacyToken)
+        return legacyToken
+    }
+
+    private func load(providerID: String, service: String) throws -> String? {
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(Self.readQuery(providerID: providerID) as CFDictionary, &result)
+        let status = SecItemCopyMatching(Self.readQuery(providerID: providerID, service: service) as CFDictionary, &result)
         switch status {
         case errSecSuccess:
             guard let data = result as? Data,
@@ -78,6 +90,19 @@ struct KeychainProviderCredentialStore: ProviderCredentialStoring {
             return nil
         default:
             throw ProviderCredentialStoreError.readFailed(providerID: providerID, status: status)
+        }
+    }
+
+    private func migrateLegacyTokenIfAbsent(providerID: String, token: String) throws {
+        let status = SecItemAdd(
+            Self.addQuery(providerID: providerID, tokenData: Data(token.utf8)) as CFDictionary,
+            nil
+        )
+        switch status {
+        case errSecSuccess, errSecDuplicateItem:
+            return
+        default:
+            throw ProviderCredentialStoreError.writeFailed(providerID: providerID, status: status)
         }
     }
 
@@ -187,17 +212,23 @@ struct KeychainProviderCredentialStore: ProviderCredentialStoring {
 
     func deleteAll() throws {
         try Self.withMutationLock {
-            let status = SecItemDelete(Self.serviceQuery as CFDictionary)
-            switch status {
-            case errSecSuccess, errSecItemNotFound:
-                return
-            default:
-                throw ProviderCredentialStoreError.deleteFailed(status: status)
+            for service in [Self.service, Self.legacyService] {
+                let status = SecItemDelete(Self.serviceQuery(service: service) as CFDictionary)
+                switch status {
+                case errSecSuccess, errSecItemNotFound:
+                    continue
+                default:
+                    throw ProviderCredentialStoreError.deleteFailed(status: status)
+                }
             }
         }
     }
 
     static var serviceQuery: [String: Any] {
+        serviceQuery(service: service)
+    }
+
+    static func serviceQuery(service: String) -> [String: Any] {
         let context = LAContext()
         context.interactionNotAllowed = true
         return [
@@ -208,13 +239,21 @@ struct KeychainProviderCredentialStore: ProviderCredentialStoring {
     }
 
     static func baseQuery(providerID: String) -> [String: Any] {
-        serviceQuery.merging([
+        baseQuery(providerID: providerID, service: service)
+    }
+
+    static func baseQuery(providerID: String, service: String) -> [String: Any] {
+        serviceQuery(service: service).merging([
             kSecAttrAccount as String: providerID,
         ]) { _, new in new }
     }
 
     static func readQuery(providerID: String) -> [String: Any] {
-        baseQuery(providerID: providerID).merging([
+        readQuery(providerID: providerID, service: service)
+    }
+
+    static func readQuery(providerID: String, service: String) -> [String: Any] {
+        baseQuery(providerID: providerID, service: service).merging([
             kSecReturnData as String: kCFBooleanTrue as Any,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]) { _, new in new }

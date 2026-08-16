@@ -245,7 +245,7 @@ header.
     1A only Machine is implemented; Setup/Earn/Monitor/Identity
     render a one-line stub `"Coming in Phase 1B"` /
     `"Coming in Phase 1C"` so the user can click around.
-  - Sidebar footer: external link to `https://api.streamvc.live/docs`
+  - Sidebar footer: external link to `https://api.malibu.tech/docs`
     (`target="_blank" rel="noopener noreferrer"`) and a "Sign out"
     button that clears the in-memory session.
   - Mobile breakpoint at 720 px: sidebar collapses behind a
@@ -319,7 +319,7 @@ Exactly this content (one trailing newline):
 
 ```json
 {
-  "coordinator_base_url": "https://coordinator.streamvc.live",
+  "coordinator_base_url": "https://coordinator.malibu.tech",
   "releases_repo_owner_name": "Augustas11/macprovider",
   "require_provider_tokens": true
 }

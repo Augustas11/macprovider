@@ -140,7 +140,7 @@ CI.**
 
 **Provider safety on the dev Mac:** it runs the LIVE production provider — never
 broad `pkill`; use narrow `pgrep`; bootout the watchdog
-(`live.streamvc.macprovider-watchdog`) then the provider via graceful
+(`live.malibu.provider-watchdog`) then the provider via graceful
 `launchctl bootout`, off-peak, and restore + verify serving after. Never print the
 buyer token.
 

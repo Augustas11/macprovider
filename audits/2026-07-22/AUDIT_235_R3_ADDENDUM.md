@@ -8,7 +8,7 @@ Report CRITICAL / HIGH / MEDIUM / LOW / INFO with file:line. Merge bar: 0 C /
 ## R2 fixes to verify
 
 ### Security / code / architect — prod-reachability (was the R2 HIGH on all lanes)
-The R1 streamvc.live DENYLIST was bypassable (trailing root dot, IDNA/full-width
+The R1 malibu.tech DENYLIST was bypassable (trailing root dot, IDNA/full-width
 separators, uppercase, and it was skipped when `benchmark.enabled=false`). R2
 replaces it with a POSITIVE lab-host ALLOWLIST:
 - `LabHostAllowed(host)` in `internal/scenario/schema.go` accepts ONLY loopback /

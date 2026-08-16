@@ -363,6 +363,10 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
     }
 
     private var providerPlistURL: URL {
+        homeDirectory.appendingPathComponent("Library/LaunchAgents/live.malibu.provider.plist")
+    }
+
+    private var legacyProviderPlistURL: URL {
         homeDirectory.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
     }
 
@@ -371,7 +375,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
     }
 
     private var watchdogPlistURL: URL {
-        homeDirectory.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist")
+        homeDirectory.appendingPathComponent("Library/LaunchAgents/live.malibu.provider-watchdog.plist")
     }
 
     /// Canonical PATH entrypoint (SPEC-003 FR-C2). `install.sh` always
@@ -1123,10 +1127,16 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
     }
 
     private func launchdProgramBinaryURL() -> URL? {
-        guard fileManager.fileExists(atPath: providerPlistURL.path) else { return nil }
-        guard let data = try? readRegularFileNoFollow(providerPlistURL),
+        let candidates = [
+            (providerPlistURL, "live.malibu.provider"),
+            (legacyProviderPlistURL, "live.streamvc.macprovider"),
+        ]
+        guard let candidate = candidates.first(where: { url, _ in
+            fileManager.fileExists(atPath: url.path)
+        }) else { return nil }
+        guard let data = try? readRegularFileNoFollow(candidate.0),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              plist["Label"] as? String == "live.streamvc.macprovider",
+              plist["Label"] as? String == candidate.1,
               let args = plist["ProgramArguments"] as? [String],
               let program = args.first,
               !program.isEmpty,
@@ -2108,7 +2118,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
 
     private func installedWatchdogCoordinatorHost() throws -> String {
         guard fileManager.fileExists(atPath: watchdogPlistURL.path) else {
-            return "coordinator.streamvc.live"
+            return "coordinator.malibu.tech"
         }
         let data = try readRegularFileNoFollow(watchdogPlistURL)
         guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
@@ -2121,7 +2131,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
 
     private func validateProviderPlist(_ data: Data, installDirectory: URL) throws {
         guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              plist["Label"] as? String == "live.streamvc.macprovider",
+              plist["Label"] as? String == "live.malibu.provider",
               plist["ProgramArguments"] as? [String] == [
                   installDirectory.appendingPathComponent("macprovider-cli").path,
                   "serve", "--config", homeDirectory.appendingPathComponent(".config/macprovider/config.yaml").path,
@@ -2132,7 +2142,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
 
     private func validateWatchdogPlist(_ data: Data, installDirectory: URL, coordinatorHost: String) throws {
         guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              plist["Label"] as? String == "live.streamvc.macprovider-watchdog",
+              plist["Label"] as? String == "live.malibu.provider-watchdog",
               plist["ProgramArguments"] as? [String] == [watchdogScriptURL.path],
               let environment = plist["EnvironmentVariables"] as? [String: Any],
               environment["MACPROVIDER_BINARY_PATH"] as? String == installDirectory.appendingPathComponent("macprovider-cli").path,

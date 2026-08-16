@@ -6,13 +6,15 @@ set -euo pipefail
 INSTALL_DIR="$HOME/macprovider"
 BIN_DIR="$HOME/.local/bin"
 BINARY_PATH="$BIN_DIR/macprovider-cli"
-PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
+PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider.plist"
+LEGACY_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
 CACHE_DIR="$HOME/.cache/macprovider"
 MANIFEST_DIR="$HOME/Library/Application Support/macprovider"
 MANIFEST_PATH="$MANIFEST_DIR/install_manifest.json"
 WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
-WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+LEGACY_WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
 DRY_RUN=0
 NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
 
@@ -134,7 +136,9 @@ main() {
 
   labels="$(manifest_json_value launchd_labels 2>/dev/null || true)"
   if [ -z "$labels" ]; then
-    labels="live.streamvc.macprovider
+    labels="live.malibu.provider
+live.malibu.provider-watchdog
+live.streamvc.macprovider
 live.streamvc.macprovider-watchdog"
   fi
   while IFS= read -r label; do
@@ -147,12 +151,14 @@ EOF
   plists="$(manifest_json_value launchd_plists 2>/dev/null || true)"
   if [ -z "$plists" ]; then
     plists="$PLIST_PATH
-$WATCHDOG_PLIST_PATH"
+$WATCHDOG_PLIST_PATH
+$LEGACY_PLIST_PATH
+$LEGACY_WATCHDOG_PLIST_PATH"
   fi
   while IFS= read -r plist; do
     [ -n "$plist" ] || continue
     [ -e "$plist" ] || [ -L "$plist" ] || continue
-    remove_tree_if_allowed "plist" "$plist" "$PLIST_PATH" "$WATCHDOG_PLIST_PATH"
+    remove_tree_if_allowed "plist" "$plist" "$PLIST_PATH" "$WATCHDOG_PLIST_PATH" "$LEGACY_PLIST_PATH" "$LEGACY_WATCHDOG_PLIST_PATH"
   done <<EOF
 $plists
 EOF

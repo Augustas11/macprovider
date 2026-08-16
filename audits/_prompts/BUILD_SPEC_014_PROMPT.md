@@ -108,7 +108,7 @@ section number (e.g. "SPEC-005 §11.4") so future audit rounds can grep.
 ## Mission of SPEC-014
 
 The buyer-facing surface already exists:
-  • `console.streamvc.live` (frontdoor/console/index.html) — chat,
+  • `console.malibu.tech` (frontdoor/console/index.html) — chat,
     dashboard, API key flow. Normative spec: SPEC-009 v0.1.
 
 The seller side has no web surface. A provider today runs
@@ -617,7 +617,7 @@ items for v0.1:
 Right-hand main area renders the active surface. Mobile (< 720 px)
 collapses sidebar to hamburger, identical to SPEC-009.
 
-Host string: the spec MAY propose `provider.streamvc.live` for
+Host string: the spec MAY propose `provider.malibu.tech` for
 discussion but MUST flag it as **Open Q7** — Pearl VPS nginx config
 and DNS provisioning are operator decisions and out of scope for
 SPEC-014. The implementation MUST be host-agnostic (works at any
@@ -625,7 +625,7 @@ host the operator provisions).
 
 Browser-to-coordinator topology: the portal makes
 `Authorization: Bearer` calls into the coordinator from a different
-origin than `coordinator.streamvc.live`. SPEC-002 / SPEC-005 do NOT
+origin than `coordinator.malibu.tech`. SPEC-002 / SPEC-005 do NOT
 document a CORS policy for `/providers/{id}/earnings`. The spec MUST
 file **Open Q9** for the topology decision and recommend ONE of:
   (a) Operator-owned reverse proxy at the portal origin that strips

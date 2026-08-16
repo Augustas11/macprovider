@@ -135,7 +135,7 @@ jobs:
             --tag "$TAG" \
             --pearl-release-json "$assets/pearl-release.json" \
             --trusted-keys "$assets/trusted-keys.json" \
-            --coordinator-url https://coordinator.streamvc.live \
+            --coordinator-url https://coordinator.malibu.tech \
             --openssl "$OPENSSL_BIN" \
             --publication-phase post-publication
           transport_tag="$(python3 - "$assets/macprovider-release-discovery.json" <<'PY'
@@ -189,7 +189,7 @@ jobs:
             --tag "$TAG" \
             --pearl-release-json "$assets/pearl-release.json" \
             --trusted-keys "$assets/trusted-keys.json" \
-            --coordinator-url https://coordinator.streamvc.live \
+            --coordinator-url https://coordinator.malibu.tech \
             --openssl "$OPENSSL_BIN" \
             --publication-phase post-publication
           notes="$RUNNER_TEMP/discovery-notes.md"

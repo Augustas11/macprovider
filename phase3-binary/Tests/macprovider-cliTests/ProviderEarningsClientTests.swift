@@ -5,12 +5,12 @@ import XCTest
 final class ProviderEarningsClientTests: XCTestCase {
     func testEarningsURLReplacesCoordinatorWebSocketPathAndEscapesProviderID() {
         let url = ProviderEarningsClient.earningsURL(
-            from: "wss://coordinator.streamvc.live/v2/provider?ignored=true",
+            from: "wss://coordinator.malibu.tech/v2/provider?ignored=true",
             providerID: "provider/a"
         )
         XCTAssertEqual(
             url?.absoluteString,
-            "https://coordinator.streamvc.live/providers/provider%2Fa/earnings"
+            "https://coordinator.malibu.tech/providers/provider%2Fa/earnings"
         )
     }
 
@@ -56,7 +56,7 @@ final class ProviderEarningsClientTests: XCTestCase {
         defer { ProviderEarningsMockURLProtocol.requestHandler = nil }
 
         let client = ProviderEarningsClient(
-            earningsURL: URL(string: "https://coordinator.streamvc.live/providers/p/earnings")!,
+            earningsURL: URL(string: "https://coordinator.malibu.tech/providers/p/earnings")!,
             session: session
         )
         let summary = try await client.fetch(bearerToken: "cli-token")

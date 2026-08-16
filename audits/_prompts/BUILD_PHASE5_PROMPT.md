@@ -391,7 +391,7 @@ FINAL handback summary. STOP.
 - [ ] User-feedback rating mechanism captures via both API
   endpoint (B) and dashboard-widget contract (C).
 - [ ] OpenAI Python + JavaScript SDKs work drop-in against
-  `https://api.streamvc.live/v1` with `api_key = "mp_..."`.
+  `https://api.malibu.tech/v1` with `api_key = "mp_..."`.
 - [ ] Pre-v1.2.4 provider compatibility verified via mock provider
   that omits `usage` in cancel-response.
 
@@ -492,7 +492,7 @@ part of this prompt's scope. After Phase E handback, decide:
   ~2-3 hours per round.
 
 After whatever level of pre-launch verification you want, set DNS for
-`api.streamvc.live`, flip the `kill_switch.demo_only` to off, and
+`api.malibu.tech`, flip the `kill_switch.demo_only` to off, and
 SPEC-006's user-rating instrumentation begins producing the data the
 falsification framework (§ 6 of `specs/SPEC-006-design.md`) needs to
 either validate or invalidate the product hypothesis over the next 90

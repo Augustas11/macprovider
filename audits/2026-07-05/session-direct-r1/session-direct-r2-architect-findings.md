@@ -33,7 +33,7 @@ The R2 design closes the original orphan-child chain for the intended timeout/er
 
 ### ARCH-R2-I-2 (INFO) Register validator belongs in the HTTP client and same-origin is the right contract
 - File: phase3-binary/app/Sources/Malibu/System/RegisterClient.swift:179
-- Design concern: The validator rejects `coordinator_ws_url` values whose scheme, host, port, userinfo, or empty path do not match the registrar origin. It intentionally validates same-origin with `coordinatorBaseURL`, not hard-pinned `coordinator.streamvc.live`. Since the production App constructs `LaunchProviderController` with `URL(string: "https://coordinator.streamvc.live")!` in `OnboardingWindow.swift:33`, and there is no on-disk config/env path feeding that constructor, this preserves dev/test flexibility without weakening the shipped production path.
+- Design concern: The validator rejects `coordinator_ws_url` values whose scheme, host, port, userinfo, or empty path do not match the registrar origin. It intentionally validates same-origin with `coordinatorBaseURL`, not hard-pinned `coordinator.malibu.tech`. Since the production App constructs `LaunchProviderController` with `URL(string: "https://coordinator.malibu.tech")!` in `OnboardingWindow.swift:33`, and there is no on-disk config/env path feeding that constructor, this preserves dev/test flexibility without weakening the shipped production path.
 - Recommendation: No blocking architecture change. A SPEC-026 note saying `coordinator_ws_url` MUST be same-origin with the registrar base URL would be useful normative cleanup, but not required for this convergence.
 
 ## Validation evidence

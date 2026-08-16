@@ -306,7 +306,7 @@ the necessary tenant-isolation work.
 **Fix:** Add the audit's 8-item Production Gate Recommendations
 section verbatim (or near-verbatim) as a normative launch
 checklist. The operator MUST execute ALL 8 items before SPEC-006
-v0.6 ships publicly via api.streamvc.live:
+v0.6 ships publicly via api.malibu.tech:
 
 > **§ 22 Production launch gate checklist.**
 >
@@ -436,7 +436,7 @@ coordinated set. BUILD_PHASE5 then implements:
   paragraph; `/v1/models` MUST emit `tier1_disclosure` block;
   docs MUST include model identity caveat
 - Phase E: production launch gate § 22 executed as a checklist
-  before api.streamvc.live opens to public buyers
+  before api.malibu.tech opens to public buyers
 
 The audit response transforms from "we agree with the audit" to
 "the audit findings are normatively encoded in the spec corpus,

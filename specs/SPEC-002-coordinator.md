@@ -1967,7 +1967,7 @@ Response:
       "last_heartbeat_at": "2026-05-27T14:30:00Z",
       "connected_at": "2026-05-27T12:00:00Z",
       "binary_version": "0.1.0",
-      "endpoint_url": "https://m4.streamvc.live",
+      "endpoint_url": "https://m4.malibu.tech",
       "auth_state": "bearer_validated",
       "receipt_pubkey": "<base64-32-byte-ed25519>" | null,
       "receipt_pubkey_prev": null | {
@@ -3032,7 +3032,7 @@ endpoints `/poolz` and `/admin/*` are mounted on `listen.provider_port`
 upgrades at `/ws/provider`. `/healthz` MAY be exposed on the coordinator
 health surface. `GET /v1/pool/check` is a public operator/health
 surface for installer verification and is intentionally mounted behind
-`coordinator.streamvc.live`, not behind SPEC-006 gateway. Runbook
+`coordinator.malibu.tech`, not behind SPEC-006 gateway. Runbook
 entries that previously implied "use the buyer URL" should distinguish
 the public coordinator health surface from authenticated provider-port
 admin actions.
@@ -3134,7 +3134,7 @@ first WebSocket connect to confirm that a freshly installed provider has
 registered with the coordinator. It is also a generic provider-registered
 health check.
 
-This endpoint stays publicly accessible at `coordinator.streamvc.live`.
+This endpoint stays publicly accessible at `coordinator.malibu.tech`.
 nginx routes `/v1/pool/check` to the coordinator directly, not to the
 SPEC-006 gateway. SPEC-006 v0.3 gateway MUST NOT intercept this path.
 
@@ -3289,7 +3289,7 @@ disconnects.
 When deployed alongside SPEC-006 v0.3 gateway, coordinator's buyer port
 (8443) MUST be rebound from `0.0.0.0` to `127.0.0.1`. Public TLS
 termination happens at nginx and the gateway. The provider port (8444)
-MAY remain externally reachable if `coordinator.streamvc.live` serves
+MAY remain externally reachable if `coordinator.malibu.tech` serves
 `/admin/*`, `/poolz`, `/healthz`, and `/ws/provider` directly with the
 required auth controls.
 
@@ -3303,14 +3303,14 @@ The public route split is:
 limit_req_zone $binary_remote_addr zone=ws_provider_rate:10m rate=10r/m;
 limit_conn_zone $binary_remote_addr zone=ws_provider_conn:10m;
 
-# api.streamvc.live -> gateway (buyer surface)
+# api.malibu.tech -> gateway (buyer surface)
 location /v1/chat/completions { proxy_pass http://127.0.0.1:9443; }
 location /v1/models { proxy_pass http://127.0.0.1:9443; }
 location /v1/usage { proxy_pass http://127.0.0.1:9443; }
 location /v1/feedback { proxy_pass http://127.0.0.1:9443; }
 location /v1/status { proxy_pass http://127.0.0.1:9443; }
 
-# coordinator.streamvc.live -> coordinator (operator + legacy buyer surface)
+# coordinator.malibu.tech -> coordinator (operator + legacy buyer surface)
 location /v1/pool/check { proxy_pass http://127.0.0.1:8443; }
 location /healthz { proxy_pass http://127.0.0.1:8443; }
 location /poolz { proxy_pass http://127.0.0.1:8444; }
@@ -4340,7 +4340,7 @@ receive WS close 4005 `invalid_token` within 2s of upgrade.
 
 Run by:
 ```
-wscat -c wss://coordinator.streamvc.live/ws/provider \
+wscat -c wss://coordinator.malibu.tech/ws/provider \
   --execute 'hello-with-pinned-provider-id.json'
 ```
 
@@ -4358,7 +4358,7 @@ Run by:
 for i in $(seq 1 16); do
   curl -sk -o /dev/null -w '%{http_code}\n' \
     -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
-    https://coordinator.streamvc.live/ws/provider
+    https://coordinator.malibu.tech/ws/provider
 done
 ```
 
@@ -4882,10 +4882,10 @@ logging:
 # Provider endpoint map (required; coordinator refuses to start if empty)
 providers:
   - provider_id: "m4-anon"
-    endpoint_url: "https://m4.streamvc.live"
+    endpoint_url: "https://m4.malibu.tech"
     display_name: "M4 partner (Qwen 7B)"    # optional; used in /poolz
   - provider_id: "m1-anon"
-    endpoint_url: "https://m1.streamvc.live"
+    endpoint_url: "https://m1.malibu.tech"
     display_name: "M1 partner (Llama 3B)"
 ```
 

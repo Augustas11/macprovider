@@ -129,7 +129,7 @@ This is the **load-bearing verification step**. Compile-time correctness does no
 
   Rows for `qwen3-32b` and `qwen2.5-coder-32b` are **not-applicable** on M5 32GB (blocked by min_ram gate). They are not waived; they move to §3.6b and block default release until validated on eligible larger-RAM hardware.
 
-- [ ] Buyer-path smoke for each M5-validated model: start the branch binary as a provider attached to the live network or an equivalent gateway+coordinator staging stack, then run one non-streaming and one streaming `/v1/chat/completions` request through the buyer-facing path (`api.streamvc.live` → gateway → coordinator → provider, or equivalent staging). Assert route hit for the intended model/provider, HTTP 2xx, non-empty output, terminal `usage`, no stop-token leak, no provider crash, no fallback rate-card row, and gateway/coordinator reconciliation with no token drift. Prefer extending or reusing `test/network-harness` scenarios such as `smoke_gpt_oss_20b.yaml`, `smoke_qwen3_coder_30b_a3b.yaml`, and `smoke_llama_31_8b.yaml`; record harness output, wall time, model ID, route distribution, and reconciliation result in the PR body.
+- [ ] Buyer-path smoke for each M5-validated model: start the branch binary as a provider attached to the live network or an equivalent gateway+coordinator staging stack, then run one non-streaming and one streaming `/v1/chat/completions` request through the buyer-facing path (`api.malibu.tech` → gateway → coordinator → provider, or equivalent staging). Assert route hit for the intended model/provider, HTTP 2xx, non-empty output, terminal `usage`, no stop-token leak, no provider crash, no fallback rate-card row, and gateway/coordinator reconciliation with no token drift. Prefer extending or reusing `test/network-harness` scenarios such as `smoke_gpt_oss_20b.yaml`, `smoke_qwen3_coder_30b_a3b.yaml`, and `smoke_llama_31_8b.yaml`; record harness output, wall time, model ID, route distribution, and reconciliation result in the PR body.
 
 ### 3.6b Runtime regression validation on 48GB+ M-Pro/M-Max/Ultra
 
@@ -156,7 +156,7 @@ Before v1.8.0 can become the default installer release, validate the two current
     tag="$(latest_release_tag)"
   fi
   ```
-  Placement: inside the existing tag resolution block near `use_fresh_recommendation_if_available` or wherever `latest_release_tag` is currently called. Add operator-facing note in the "Environment variables" comment header at the top of the script, including the pipe-side form: `curl -fsSL https://get.streamvc.live/install.sh | MACPROVIDER_VERSION=v1.7.11 bash`.
+  Placement: inside the existing tag resolution block near `use_fresh_recommendation_if_available` or wherever `latest_release_tag` is currently called. Add operator-facing note in the "Environment variables" comment header at the top of the script, including the pipe-side form: `curl -fsSL https://get.malibu.tech/install.sh | MACPROVIDER_VERSION=v1.7.11 bash`.
 - [ ] Add `validate_macprovider_version_tag`:
   - Accept only `vMAJOR.MINOR.PATCH` (`^v[0-9]+\.[0-9]+\.[0-9]+$`).
   - Reject empty values, slashes, path traversal, whitespace, newlines, control characters, `main`, `verify-v*`, and every non-release-channel tag.
@@ -173,7 +173,7 @@ Before v1.8.0 can become the default installer release, validate the two current
   - Case 4: invalid tags (`main`, `verify-v1.0.0`, `../v1.7.11`, newline/control-character input) fail before download.
   - Case 5: below-floor tag `v1.7.10` fails closed with a clear unsupported-version error.
   - Case 6: pinned signature/SHA mismatch aborts without fallback to latest.
-  - Case 7: the documented piped invocation shape passes the variable to the installer shell: `curl -fsSL https://get.streamvc.live/install.sh | MACPROVIDER_VERSION=v1.7.11 bash`.
+  - Case 7: the documented piped invocation shape passes the variable to the installer shell: `curl -fsSL https://get.malibu.tech/install.sh | MACPROVIDER_VERSION=v1.7.11 bash`.
   - Case 8: latest lookup skips prerelease `v1.8.0` and chooses the newest non-prerelease tag unless `MACPROVIDER_VERSION=v1.8.0` is set explicitly.
   Use the existing awk-extract-function pattern from `scripts/test-install-amfi-retry.sh`.
 
@@ -197,7 +197,7 @@ Before v1.8.0 can become the default installer release, validate the two current
 - [ ] Commit + push + PR (title: `feat(mlx): migrate mlx-swift-examples 2.29.1 → mlx-swift-lm 3.31.4 + bump v1.8.0`).
 - [ ] antfleet-ops approve → Augustas11 squash-merge (per project convention).
 - [ ] Post-merge canary: `gh workflow run release.yml -f version=v1.8.0 -f prerelease=true`.
-- [ ] 24h opt-in canary: operators install with `curl -fsSL https://get.streamvc.live/install.sh | MACPROVIDER_VERSION=v1.8.0 bash`; default unpinned install remains on v1.7.11/newest non-prerelease because `latest_release_tag` skips prereleases.
+- [ ] 24h opt-in canary: operators install with `curl -fsSL https://get.malibu.tech/install.sh | MACPROVIDER_VERSION=v1.8.0 bash`; default unpinned install remains on v1.7.11/newest non-prerelease because `latest_release_tag` skips prereleases.
 - [ ] Promote to default/latest only after all local, CI, M5, larger-RAM, served-path, and 24h canary gates are green with no >5% TPS regression, no >10% TTFT regression, and no serve/network errors. Promotion may be via `gh release edit v1.8.0 --prerelease=false --latest`.
 - [ ] Deploy nothing to Pearl. This is a client-only change; the coordinator does not read `mlx-swift-lm`.
 
@@ -228,7 +228,7 @@ Default/latest promotion remains blocked until ALL of the following additional g
 
 1. Runtime regression on M5 32GB per §3.6 shows ≤5% TPS regression and ≤10% TTFT regression on the 3 M5-eligible models.
 2. Runtime regression on eligible 48GB+ M-Pro/M-Max/Ultra hardware per §3.6b shows ≤5% TPS regression and ≤10% TTFT regression on `qwen3-32b` and `qwen2.5-coder-32b`; if not available, v1.8.0 cannot be promoted to default/latest.
-3. Buyer-path smoke passes for every model validated in §3.6 and §3.6b through `api.streamvc.live` or equivalent gateway+coordinator staging, with route hit, HTTP 2xx, non-empty output, terminal usage, no stop-token leak/crash, no fallback row, and gateway/coordinator token reconciliation.
+3. Buyer-path smoke passes for every model validated in §3.6 and §3.6b through `api.malibu.tech` or equivalent gateway+coordinator staging, with route hit, HTTP 2xx, non-empty output, terminal usage, no stop-token leak/crash, no fallback row, and gateway/coordinator token reconciliation.
 4. The opt-in prerelease canary observation window completes without install fallback, runtime regressions, or serve/network errors.
 
 ## 5. Rollback plan
@@ -237,7 +237,7 @@ Default/latest promotion remains blocked until ALL of the following additional g
 An operator who observes a regression after installing v1.8.0 can roll back with a single command once the install.sh `MACPROVIDER_VERSION` override lands:
 
 ```
-curl -fsSL https://get.streamvc.live/install.sh | MACPROVIDER_VERSION=v1.7.11 bash
+curl -fsSL https://get.malibu.tech/install.sh | MACPROVIDER_VERSION=v1.7.11 bash
 ```
 
 Until the override lands (this PR is what lands it), operators can roll back manually:
@@ -245,7 +245,7 @@ Until the override lands (this PR is what lands it), operators can roll back man
 ```
 curl -fL https://github.com/Augustas11/macprovider/releases/download/v1.7.11/macprovider-cli-v1.7.11-darwin-arm64.pkg -o /tmp/mp.pkg
 sudo installer -pkg /tmp/mp.pkg -target /
-launchctl kickstart -k gui/501/live.streamvc.macprovider
+launchctl kickstart -k gui/501/live.malibu.provider
 ```
 
 Document both in the PR body.

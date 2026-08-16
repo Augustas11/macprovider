@@ -11,7 +11,7 @@ For a public provider install on any Apple Silicon Mac (M1 or newer,
 macOS 14+):
 
 ```bash
-curl -fsSL https://get.streamvc.live/install.sh | bash
+curl -fsSL https://get.malibu.tech/install.sh | bash
 ```
 
 The installer:
@@ -26,9 +26,9 @@ The installer:
   for 24 GB or higher.
 - Persists a stable provider handle in `~/.config/macprovider/`.
 - Renders `dist/launchd-plist-template.plist` into
-  `~/Library/LaunchAgents/live.streamvc.macprovider.plist`.
+  `~/Library/LaunchAgents/live.malibu.provider.plist`.
 - Starts the provider with `--coordinator
-  wss://coordinator.streamvc.live/ws/provider`.
+  wss://coordinator.malibu.tech/ws/provider`.
 
 ## Distribution Files
 

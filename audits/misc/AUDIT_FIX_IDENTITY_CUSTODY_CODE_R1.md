@@ -14,7 +14,7 @@ Review for correctness, test adequacy, edge cases, and maintainability in:
 - `phase4-coordinator/internal/onboarding/apptrack_test.go`
 - `phase4-coordinator/cmd/coordinator/main.go`
 - `phase4-coordinator/cmd/coordinator/main_test.go`
-- `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`
+- `phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf`
 - `phase3-binary/Sources/MacProviderCore/ProcessEnvironmentSanitizer.swift`
 - `phase3-binary/Sources/MacProviderCore/BrowserOpener.swift`
 - `phase3-binary/Sources/MacProviderCore/Config.swift`

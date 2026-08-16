@@ -46,7 +46,7 @@ done
 # Guardrail: refuse to run against the production coordinator unless the operator
 # explicitly overrides. Cold-cycling churns the provider; prod is off-limits.
 : "${COLDWARM_BASE:=}"
-if [[ "$COLDWARM_BASE" == *"api.streamvc.live"* || "$COLDWARM_BASE" == *"coordinator.streamvc.live"* ]]; then
+if [[ "$COLDWARM_BASE" == *"api.malibu.tech"* || "$COLDWARM_BASE" == *"coordinator.malibu.tech"* ]]; then
   if [[ "${COLD_CYCLE_ALLOW_PROD:-}" != "1" ]]; then
     echo "cold-cycle: REFUSING to cold-cycle against prod ($COLDWARM_BASE)." >&2
     echo "            Cold-cycling churns the provider and caused an hour-long outage on 2026-07-09." >&2

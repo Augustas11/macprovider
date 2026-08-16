@@ -1851,7 +1851,7 @@ func TestHeartbeatUpdatesPoolz(t *testing.T) {
 	if got.Pool[0].ProviderID != "m4-anon" {
 		t.Fatalf("provider_id = %q", got.Pool[0].ProviderID)
 	}
-	if got.Pool[0].Endpoint != "https://m4.streamvc.live" {
+	if got.Pool[0].Endpoint != "https://m4.malibu.tech" {
 		t.Fatalf("endpoint = %q", got.Pool[0].Endpoint)
 	}
 	if telemetry := got.Pool[0].SafetyTelemetry; telemetry == nil || telemetry.ObservationID != "observation-a" || telemetry.ObservedAt == "2000-01-01T00:00:00Z" {
@@ -2323,7 +2323,7 @@ func TestPoolzReceiptPubkeyPrevShape(t *testing.T) {
 		ModelID:         "mlx-community/Qwen2.5-7B-Instruct-4bit",
 		SlotsFree:       1,
 		SlotsTotal:      1,
-		EndpointURL:     "https://m4.streamvc.live",
+		EndpointURL:     "https://m4.malibu.tech",
 		ConnectedAt:     rotatedAt,
 		LastHeartbeatAt: rotatedAt,
 		LastActivityAt:  rotatedAt,
@@ -3241,7 +3241,7 @@ func TestProviderHealthzAndPoolzExcludeSelfMintedFromPublishedCapacity(t *testin
 		MaxContextTokens: 20000,
 		SlotsFree:        1,
 		SlotsTotal:       1,
-		EndpointURL:      "https://m4.streamvc.live",
+		EndpointURL:      "https://m4.malibu.tech",
 		Tier:             pool.TierPinned,
 		State:            pool.StateReady,
 		LastHeartbeatAt:  now,
@@ -3598,7 +3598,7 @@ func TestProviderHelloPinnedStaticEndpointIgnoresHelloOverride(t *testing.T) {
 	}
 	eventually(t, func() bool {
 		got := fetchPoolz(t, ts.URL)
-		return len(got.Pool) == 1 && got.Pool[0].Endpoint == "https://m4.streamvc.live"
+		return len(got.Pool) == 1 && got.Pool[0].Endpoint == "https://m4.malibu.tech"
 	})
 }
 
@@ -3850,7 +3850,7 @@ func newProviderHarnessWithOptionsAndLogger(t *testing.T, validator providerws.T
 	cfg.Providers = []config.ProviderConfig{
 		{
 			ProviderID:  "m4-anon",
-			EndpointURL: "https://m4.streamvc.live",
+			EndpointURL: "https://m4.malibu.tech",
 			DisplayName: "M4 test provider",
 		},
 	}

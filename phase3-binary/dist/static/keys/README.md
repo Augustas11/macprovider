@@ -40,15 +40,15 @@ The runtime verification model relies on:
 
 1. **Provider clients** ship the baked v4 public key in
    `AutotuneRecommend.swift`. They fetch the signed feed from
-   `https://coordinator.streamvc.live/v1/rate-card`,
-   `https://coordinator.streamvc.live/v1/demand-rank` and
-   `https://coordinator.streamvc.live/v1/autotune-candidates` (URL
+   `https://coordinator.malibu.tech/v1/rate-card`,
+   `https://coordinator.malibu.tech/v1/demand-rank` and
+   `https://coordinator.malibu.tech/v1/autotune-candidates` (URL
    hardcoded in
    [`AutotuneRecommend.swift`](../../../Sources/macprovider-cli/AutotuneRecommend.swift))
    and verify each `.sig` sidecar against the baked pubkey.
 2. **The private key** is held only by the operator running
    `scripts/resign-autotune-static.sh` locally. It never enters
-   git, CI logs, or `coordinator.streamvc.live`.
+   git, CI logs, or `coordinator.malibu.tech`.
 3. **Deployment** copies the freshly-signed `rate-card.json`,
    `autotune-candidates.json`, `demand-rank.json`, their `.sig` sidecars,
    and the release-bound signed `tier2-catalog.json` to Pearl VPS via

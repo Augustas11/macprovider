@@ -314,7 +314,7 @@ legacy coordinator.
    canary:
 
    ```bash
-   curl -fsSL https://get.streamvc.live/install.sh | \
+   curl -fsSL https://get.malibu.tech/install.sh | \
      MACPROVIDER_VERSION=v1.8.31 MACPROVIDER_NO_PROMPT=1 bash
    ```
 
@@ -385,7 +385,7 @@ legacy coordinator.
    response reports that exact value before touching a Mac:
 
    ```bash
-   test "$(curl -fsS https://coordinator.streamvc.live/healthz | \
+   test "$(curl -fsS https://coordinator.malibu.tech/healthz | \
      jq -r .recommended_binary_version)" = "${PRIOR_PROVIDER_TAG#v}"
    ```
 
@@ -393,7 +393,7 @@ legacy coordinator.
    signed operator-pinned installer channel:
 
    ```bash
-   curl -fsSL https://get.streamvc.live/install.sh | \
+   curl -fsSL https://get.malibu.tech/install.sh | \
      MACPROVIDER_VERSION="$PRIOR_PROVIDER_TAG" \
      MACPROVIDER_EMERGENCY_ROLLBACK=1 \
      MACPROVIDER_EMERGENCY_CONFIG_BACKUP="$PRIOR_CONFIG_BACKUP" \
@@ -442,7 +442,7 @@ legacy coordinator.
    while :; do
      curl --fail --silent --show-error --max-time 10 \
        --config "$POOLZ_CURL_CONFIG" \
-       https://coordinator.streamvc.live/poolz >"$SAMPLE"
+       https://coordinator.malibu.tech/poolz >"$SAMPLE"
      python3 - "$SAMPLE" "$EVIDENCE" "$MIN_READY" "$MIN_FREE_SLOTS" <<'PY'
    import datetime, json, pathlib, sys
    payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
@@ -630,7 +630,7 @@ The direct-deploy recovery procedure is:
    `macprovider/catalog-release`) through no-follow directory handles and
    compares every SHA-256 with the locally verified release before commit. The
    remote proof must also match `~/.config/macprovider/provider_id`, the live
-   `live.streamvc.macprovider` launchd PID and executable path/device/inode from
+   `live.malibu.provider` launchd PID and executable path/device/inode from
    `lsof`, that PID's configured listening port, and its local catalog status.
    Its policy version and selected row identity must exactly match the
    coordinator-admitted envelope. This prevents an
@@ -710,7 +710,7 @@ The shell installer acquires that outer lock before provider identity selection.
 persists each transaction under
 `~/.config/macprovider/install-recovery-<installer-pid>` before changing live
 files and deterministically restores any orphan before a later install begins.
-It arms the LaunchAgent `live.streamvc.macprovider-install-recovery`, whose
+It arms the LaunchAgent `live.malibu.provider-install-recovery`, whose
 plist lives in `~/Library/LaunchAgents/` and independently observes the exact
 installer process start. The agent serializes behind the same mutex and performs
 the persisted rollback if the installer is killed or the host restarts. The

@@ -345,7 +345,7 @@ The wallet proof signed object has this exact closed field set:
 {
   "version": "wallet-session-proof-v1",
   "challenge_id": "wch_...",
-  "aud": "https://api.streamvc.live",
+  "aud": "https://api.malibu.tech",
   "account_id": "acct_...",
   "wallet_namespace": "ed25519",
   "wallet_public_key": "<base64url raw public key>",
@@ -381,7 +381,7 @@ Challenge response example:
 ```json
 {
   "challenge_id": "wch_01HZX6Y7K4C2Q9E6J8Q0V7Z2PF",
-  "aud": "https://api.streamvc.live",
+  "aud": "https://api.malibu.tech",
   "account_id": "acct_example",
   "nonce": "AQIDBAUGBwgJCgsMDQ4PEA",
   "expires_at_unix": 1782864000,
@@ -398,7 +398,7 @@ Registration request example:
   "proof": {
     "version": "wallet-session-proof-v1",
     "challenge_id": "wch_01HZX6Y7K4C2Q9E6J8Q0V7Z2PF",
-    "aud": "https://api.streamvc.live",
+    "aud": "https://api.malibu.tech",
     "account_id": "acct_example",
     "wallet_namespace": "ed25519",
     "wallet_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",

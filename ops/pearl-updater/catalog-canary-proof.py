@@ -155,7 +155,7 @@ def main() -> int:
 
         plist_dir_fd = open_dir("Library/LaunchAgents")
         try:
-            plist_bytes = read_regular_at(plist_dir_fd, "live.streamvc.macprovider.plist", 1024 * 1024)
+            plist_bytes = read_regular_at(plist_dir_fd, "live.malibu.provider.plist", 1024 * 1024)
         finally:
             os.close(plist_dir_fd)
         plist = plistlib.loads(plist_bytes)
@@ -173,7 +173,7 @@ def main() -> int:
             fail("canary LaunchAgent does not use the catalog installation root")
 
         launchd = subprocess.run(
-            ["launchctl", "print", f"gui/{os.getuid()}/live.streamvc.macprovider"],
+            ["launchctl", "print", f"gui/{os.getuid()}/live.malibu.provider"],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

@@ -47,7 +47,7 @@ final class StartupRouteTests: XCTestCase {
         let paths = try makeTempPaths()
         let root = paths.appSupport.deletingLastPathComponent()
         let watchdogPlist = root.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+            "Library/LaunchAgents/live.malibu.provider-watchdog.plist"
         )
         let launchctl = root.appendingPathComponent("launchctl")
         try FileManager.default.createDirectory(
@@ -77,7 +77,7 @@ final class StartupRouteTests: XCTestCase {
         let paths = try makeTempPaths()
         let root = paths.appSupport.deletingLastPathComponent()
         let expectedPlist = root.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+            "Library/LaunchAgents/live.malibu.provider.plist"
         )
         let expectedProgram = root.appendingPathComponent("macprovider/macprovider-cli")
         let launchctl = root.appendingPathComponent("launchctl")
@@ -105,7 +105,7 @@ final class StartupRouteTests: XCTestCase {
         let paths = try makeTempPaths()
         let root = paths.appSupport.deletingLastPathComponent()
         let providerPlist = root.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+            "Library/LaunchAgents/live.malibu.provider.plist"
         )
         let providerProgram = root.appendingPathComponent("macprovider/macprovider-cli")
         let providerID = paths.configFile.deletingLastPathComponent().appendingPathComponent("provider_id")
@@ -113,7 +113,7 @@ final class StartupRouteTests: XCTestCase {
             "Library/Application Support/macprovider/install_manifest.json"
         )
         let watchdogPlist = root.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+            "Library/LaunchAgents/live.malibu.provider-watchdog.plist"
         )
         let legacyWatchdog = root.appendingPathComponent(
             ".local/share/macprovider-watchdog/watchdog.sh"
@@ -151,14 +151,14 @@ final class StartupRouteTests: XCTestCase {
         try """
         <?xml version="1.0" encoding="UTF-8"?>
         <plist version="1.0"><dict>
-          <key>Label</key><string>live.streamvc.macprovider</string>
+          <key>Label</key><string>live.malibu.provider</string>
           <key>ProgramArguments</key><array><string>\(providerProgram.path)</string></array>
         </dict></plist>
         """.write(to: providerPlist, atomically: true, encoding: .utf8)
         try JSONSerialization.data(withJSONObject: [
             "install_prefix": providerProgram.deletingLastPathComponent().path,
             "binary_path": providerProgram.path,
-            "launchd_labels": ["live.streamvc.macprovider"],
+            "launchd_labels": ["live.malibu.provider"],
             "launchd_plists": [providerPlist.path]
         ]).write(to: manifest)
         try FileManager.default.createDirectory(
@@ -168,7 +168,7 @@ final class StartupRouteTests: XCTestCase {
         try """
         <?xml version="1.0" encoding="UTF-8"?>
         <plist version="1.0"><dict>
-          <key>Label</key><string>live.streamvc.macprovider-watchdog</string>
+          <key>Label</key><string>live.malibu.provider-watchdog</string>
           <key>ProgramArguments</key><array><string>\(legacyWatchdog.path)</string></array>
         </dict></plist>
         """.write(to: watchdogPlist, atomically: true, encoding: .utf8)
@@ -210,7 +210,7 @@ final class StartupRouteTests: XCTestCase {
         let paths = try makeTempPaths()
         let root = paths.appSupport.deletingLastPathComponent()
         let providerPlist = root.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+            "Library/LaunchAgents/live.malibu.provider.plist"
         )
         let providerProgram = root.appendingPathComponent("macprovider/macprovider-cli")
         let providerID = paths.configFile.deletingLastPathComponent().appendingPathComponent("provider_id")
@@ -228,14 +228,14 @@ final class StartupRouteTests: XCTestCase {
         try """
         <?xml version="1.0" encoding="UTF-8"?>
         <plist version="1.0"><dict>
-          <key>Label</key><string>live.streamvc.macprovider</string>
+          <key>Label</key><string>live.malibu.provider</string>
           <key>ProgramArguments</key><array><string>\(providerProgram.path)</string></array>
         </dict></plist>
         """.write(to: providerPlist, atomically: true, encoding: .utf8)
         try JSONSerialization.data(withJSONObject: [
             "install_prefix": providerProgram.deletingLastPathComponent().path,
             "binary_path": providerProgram.path,
-            "launchd_labels": ["live.streamvc.macprovider"],
+            "launchd_labels": ["live.malibu.provider"],
             "launchd_plists": [providerPlist.path]
         ]).write(to: manifest)
         try "#!/bin/sh\nexit 1\n".write(to: launchctl, atomically: true, encoding: .utf8)
@@ -261,7 +261,7 @@ final class StartupRouteTests: XCTestCase {
         let providerProgram = installDirectory.appendingPathComponent("macprovider-cli")
         let legacyProgram = root.appendingPathComponent(".local/bin/macprovider-cli")
         let providerPlist = root.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+            "Library/LaunchAgents/live.malibu.provider.plist"
         )
         let launchctl = root.appendingPathComponent("launchctl")
         try FileManager.default.createDirectory(at: installDirectory, withIntermediateDirectories: true)
@@ -274,10 +274,10 @@ final class StartupRouteTests: XCTestCase {
             manifest: [
                 "install_prefix": installDirectory.path,
                 "binary_path": providerProgram.path,
-                "launchd_labels": ["live.streamvc.macprovider"],
+                "launchd_labels": ["live.malibu.provider"],
                 "launchd_plists": [providerPlist.path]
             ],
-            plistLabel: "live.streamvc.macprovider",
+            plistLabel: "live.malibu.provider",
             plistProgram: legacyProgram.path
         )
         try "#!/bin/sh\nexit 1\n".write(to: launchctl, atomically: true, encoding: .utf8)
@@ -301,7 +301,7 @@ final class StartupRouteTests: XCTestCase {
         let launchctl = root.appendingPathComponent("launchctl")
         let providerProgram = root.appendingPathComponent("macprovider/macprovider-cli")
         let providerPlist = root.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+            "Library/LaunchAgents/live.malibu.provider.plist"
         )
         try writeRepairEvidence(
             paths: paths,
@@ -309,10 +309,10 @@ final class StartupRouteTests: XCTestCase {
             manifest: [
                 "install_prefix": root.path,
                 "binary_path": providerProgram.path,
-                "launchd_labels": ["live.streamvc.macprovider"],
+                "launchd_labels": ["live.malibu.provider"],
                 "launchd_plists": [providerPlist.path]
             ],
-            plistLabel: "live.streamvc.macprovider",
+            plistLabel: "live.malibu.provider",
             plistProgram: providerProgram.path
         )
         try "#!/bin/sh\nexit 1\n".write(to: launchctl, atomically: true, encoding: .utf8)
@@ -336,7 +336,7 @@ final class StartupRouteTests: XCTestCase {
         let launchctl = root.appendingPathComponent("launchctl")
         let providerProgram = root.appendingPathComponent("macprovider/macprovider-cli")
         let providerPlist = root.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+            "Library/LaunchAgents/live.malibu.provider.plist"
         )
         try writeRepairEvidence(
             paths: paths,
@@ -344,7 +344,7 @@ final class StartupRouteTests: XCTestCase {
             manifest: [
                 "install_prefix": providerProgram.deletingLastPathComponent().path,
                 "binary_path": providerProgram.path,
-                "launchd_labels": ["live.streamvc.macprovider"],
+                "launchd_labels": ["live.malibu.provider"],
                 "launchd_plists": [providerPlist.path]
             ],
             plistLabel: "foreign.label",
@@ -366,7 +366,7 @@ final class StartupRouteTests: XCTestCase {
         let paths = try makeTempPaths()
         let root = paths.appSupport.deletingLastPathComponent()
         let providerPlist = root.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+            "Library/LaunchAgents/live.malibu.provider.plist"
         )
         let providerProgram = root.appendingPathComponent("macprovider/macprovider-cli")
         let providerID = paths.configFile.deletingLastPathComponent().appendingPathComponent("provider_id")
@@ -380,7 +380,7 @@ final class StartupRouteTests: XCTestCase {
         try """
         <?xml version="1.0" encoding="UTF-8"?>
         <plist version="1.0"><dict>
-          <key>Label</key><string>live.streamvc.macprovider</string>
+          <key>Label</key><string>live.malibu.provider</string>
           <key>ProgramArguments</key><array><string>\(providerProgram.path)</string></array>
         </dict></plist>
         """.write(to: providerPlist, atomically: true, encoding: .utf8)
@@ -434,7 +434,7 @@ final class StartupRouteTests: XCTestCase {
         let paths = try makeTempPaths()
         let root = paths.appSupport.deletingLastPathComponent()
         let providerPlist = root.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+            "Library/LaunchAgents/live.malibu.provider.plist"
         )
         let customProgram = root.appendingPathComponent("provider-support/macprovider-cli")
         let manifest = root.appendingPathComponent(
@@ -545,7 +545,7 @@ final class StartupRouteTests: XCTestCase {
         let launchctl = root.appendingPathComponent("launchctl")
         try paths.ensureDirectories()
         try "provider_id: p_old\nprovider_token: old-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
-        try "#!/bin/sh\nprintf 'program = %s\\npath = %s\\n' '\(root.path)/unexpected-provider' '\(root.path)/Library/LaunchAgents/live.streamvc.macprovider.plist'\n"
+        try "#!/bin/sh\nprintf 'program = %s\\npath = %s\\n' '\(root.path)/unexpected-provider' '\(root.path)/Library/LaunchAgents/live.malibu.provider.plist'\n"
             .write(to: launchctl, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launchctl.path)
         defer { try? FileManager.default.removeItem(atPath: root.path) }
@@ -773,7 +773,7 @@ final class StartupRouteTests: XCTestCase {
     ) throws {
         let providerID = paths.configFile.deletingLastPathComponent().appendingPathComponent("provider_id")
         let providerPlist = root.appendingPathComponent(
-            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+            "Library/LaunchAgents/live.malibu.provider.plist"
         )
         try FileManager.default.createDirectory(
             at: providerID.deletingLastPathComponent(),

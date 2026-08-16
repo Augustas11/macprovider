@@ -373,29 +373,29 @@ stack must preserve compat for legacy buyers + legacy providers.
      care about provider version. Any spec text contradicting any
      other on this = CRITICAL.
 
-ε.2  Direct-tunnel buyer paths (m4.streamvc.live, m1.streamvc.live).
+ε.2  Direct-tunnel buyer paths (m4.malibu.tech, m1.malibu.tech).
      SPEC-006 v0.2 explicitly preserves these. Verify SPEC-002 does
      too. Inconsistency = MAJOR.
 
 ε.3  Pre-v1.2.2 buyers (existing harnesses pointing at
-     coordinator.streamvc.live) still work. SPEC-006's gateway
-     stands up at api.streamvc.live; SPEC-002 keeps coordinator
+     coordinator.malibu.tech) still work. SPEC-006's gateway
+     stands up at api.malibu.tech; SPEC-002 keeps coordinator
      direct surface working. Verify no spec text breaks this. MAJOR
      if it does.
 
 ### Category ζ: Distribution-channel coherence
 
-A stranger runs `curl get.streamvc.live/install.sh | bash`. They
+A stranger runs `curl get.malibu.tech/install.sh | bash`. They
 end up as a provider running SPEC-001 v1.2.3 binary connecting to
 SPEC-002 coordinator. Some time later their model gets routed by a
 buyer via SPEC-006 gateway. Verify this end-to-end story.
 
 ζ.1  install.sh hardcoded URLs/versions vs SPEC-006 changes. SPEC-006
-     introduces api.streamvc.live for buyers. Does install.sh
-     hardcode coordinator.streamvc.live as the provider's destination?
+     introduces api.malibu.tech for buyers. Does install.sh
+     hardcode coordinator.malibu.tech as the provider's destination?
      If SPEC-006's gateway forwards to coordinator at
      127.0.0.1:8443 (per F-M19), what does the provider connect to?
-     Verify provider-side URL is still wss://coordinator.streamvc.live/ws/provider
+     Verify provider-side URL is still wss://coordinator.malibu.tech/ws/provider
      (unchanged from SPEC-001 v1.2.x). Any drift = MAJOR.
 
 ζ.2  Self-test flow. SPEC-003 v0.5 install.sh wire-bytes-on-failure.

@@ -54,8 +54,8 @@ F-M5. Gateway trusts buyer-controlled `X-Forwarded-For` when `X-Real-IP` is abse
 
 F-M6. PG-2 proxy rate limits for `/ws/provider` are absent from the nginx artifact
 
-    Location: phase5-gateway/dist/nginx-api.streamvc.live.conf:1
-    Finding: The nginx template has no `limit_req_zone`, no `limit_conn_zone`, and no `/ws/provider` location applying them. It returns 404 for `/ws/provider` on `api.streamvc.live`, but SPEC-002 v1.1.5 PG-2 requires proxy-layer rate and connection caps before the coordinator WebSocket upgrade on the provider/coordinator surface.
+    Location: phase5-gateway/dist/nginx-api.malibu.tech.conf:1
+    Finding: The nginx template has no `limit_req_zone`, no `limit_conn_zone`, and no `/ws/provider` location applying them. It returns 404 for `/ws/provider` on `api.malibu.tech`, but SPEC-002 v1.1.5 PG-2 requires proxy-layer rate and connection caps before the coordinator WebSocket upgrade on the provider/coordinator surface.
     Why it matters: The production launch gate requires the proxy controls wherever `/ws/provider` is exposed. The checked-in deployment artifact does not provide them, so Pearl deployment could pass this gateway template while leaving PG-2 unimplemented on the coordinator-facing site.
     Recommended fix: Add the PG-2 `limit_req_zone` and `limit_conn_zone` declarations and include/apply the `/ws/provider` location in the coordinator-facing nginx config artifact or runbook that will be deployed with Pearl. Verify with `nginx -t` during deployment.
 
@@ -87,7 +87,7 @@ F-m2. No gateway-local health probe exists
     Location: phase5-gateway/internal/router/server.go:95
     Finding: The gateway exposes `/v1/status`, but there is no lightweight `/healthz` or equivalent local process/DB probe for systemd or a load balancer. The public nginx site explicitly returns 404 for `/healthz`.
     Why it matters: Operators can use `/v1/status`, but it depends on coordinator `/poolz` reachability and is not a minimal "gateway process + storage is alive" probe.
-    Recommended fix: Add a loopback-only or nginx-private `/healthz` endpoint that checks process readiness and optionally a cheap DB ping, while keeping coordinator `/healthz` unexposed on `api.streamvc.live`.
+    Recommended fix: Add a loopback-only or nginx-private `/healthz` endpoint that checks process readiness and optionally a cheap DB ping, while keeping coordinator `/healthz` unexposed on `api.malibu.tech`.
 
 ## Operator questions surfaced
 

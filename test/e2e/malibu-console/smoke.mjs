@@ -4,14 +4,14 @@
  *
  * Usage:
  *   MALIBU_API_KEY=mp_... node test/e2e/malibu-console/smoke.mjs
- *   MALIBU_BASE=https://api.streamvc.live  (default)
+ *   MALIBU_BASE=https://api.malibu.tech  (default)
  *
  * Exercises:
  *   GET  /v1/status          (sidebar pool dot)
  *   POST /v1/chat/completions turn 1 + turn 2 with sticky conversation header
  */
 
-const BASE = (process.env.MALIBU_BASE || 'https://api.streamvc.live').replace(/\/$/, '');
+const BASE = (process.env.MALIBU_BASE || 'https://api.malibu.tech').replace(/\/$/, '');
 const API_KEY = process.env.MALIBU_API_KEY || '';
 const DEMO_TOKEN = process.env.MALIBU_DEMO_TOKEN || '';
 const MODEL = process.env.MALIBU_MODEL || 'qwen3-coder-30b-a3b-instruct';

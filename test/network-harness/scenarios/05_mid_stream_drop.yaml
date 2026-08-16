@@ -3,7 +3,7 @@
 #
 # This Mac is provider augustass-macbook-air, serving
 # mlx-community/Qwen3-32B-4bit, managed by launchd label
-# `live.streamvc.macprovider`. Chaos events use local launchctl —
+# `live.malibu.provider`. Chaos events use local launchctl —
 # no SSH required.
 #
 # What we want to learn (phase A, descriptive — recorded only):
@@ -22,7 +22,7 @@
 #
 # IMPORTANT: this scenario stops the local provider. The second chaos
 # event restarts it via launchctl kickstart -k. If launchd KeepAlive is
-# enabled (it is, per live.streamvc.macprovider managed unit), the
+# enabled (it is, per live.malibu.provider managed unit), the
 # restart is automatic and the kickstart is a belt-and-suspenders.
 name: mid_stream_drop
 description: |
@@ -41,8 +41,8 @@ expected_shape: |
    - PHASE B TRIAGE: confirm or refute "no mid-stream reroute" as contract.
 
 target:
-  gateway_url: https://api.streamvc.live
-  coordinator_url: https://coordinator.streamvc.live
+  gateway_url: https://api.malibu.tech
+  coordinator_url: https://coordinator.malibu.tech
   buyer_token: ${BUYER_TOKEN}
   coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
   gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
@@ -67,7 +67,7 @@ prompts:
 chaos_events:
   - at: 5s
     description: "Kill local provider process — buyer is mid-stream"
-    command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
+    command: launchctl kickstart -k gui/$(id -u)/live.malibu.provider
   - at: 25s
     description: "Sanity restart (launchd KeepAlive should already have brought it back)"
-    command: launchctl kickstart gui/$(id -u)/live.streamvc.macprovider
+    command: launchctl kickstart gui/$(id -u)/live.malibu.provider

@@ -67,7 +67,7 @@ func TestStep4C_WiredMux_MetricLabelHygiene(t *testing.T) {
 		_ = doReq("/v1/stats/overview", "", "")
 	}
 	_ = doReq("/v1/stats/leaderboard?window=24h", "garbage", "")
-	_ = doReq("/v1/stats/overview", "", "https://evil.streamvc.live")
+	_ = doReq("/v1/stats/overview", "", "https://evil.malibu.tech")
 
 	// Round-4 ARCH M1 / CODE M1 fix: use a SPEC-shaped 47-char
 	// token (`mpk_` + 43 base64url chars) so any future regression
@@ -165,7 +165,7 @@ func TestStep4C_WiredMux_MetricLabelHygiene(t *testing.T) {
 	// instead of partner_keys.id) is caught.
 	deny := []string{
 		bearer, prefix, "mpk_",
-		"mpk_garbage", "garbage", "evil.streamvc.live",
+		"mpk_garbage", "garbage", "evil.malibu.tech",
 		"Bearer ", "token_hash",
 	}
 	for _, mf := range families {

@@ -631,7 +631,7 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
         guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess,
               let code else { return false }
         var requirement: SecRequirement?
-        let requirementText = "identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"YF7XNRJUG4\""
+        let requirementText = "identifier \"live.malibu.provider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"YF7XNRJUG4\""
         guard SecRequirementCreateWithString(requirementText as CFString, [], &requirement) == errSecSuccess,
               let requirement,
               SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), requirement) == errSecSuccess else { return false }

@@ -1,7 +1,7 @@
 # Network benchmark v0.1 — first baseline run (2026-06-28)
 
 Internal. Source: harness scenarios 07 + 09 against live
-`api.streamvc.live` at gateway `v1.6.1-44-g5f73eee` (includes #196,
+`api.malibu.tech` at gateway `v1.6.1-44-g5f73eee` (includes #196,
 #200, #210, #213 fixes). Provider fleet: 2 (Qwen3-32B-4bit on local
 M4 Air; Qwen2.5-Coder-7B-Instruct-4bit on air5).
 

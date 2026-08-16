@@ -130,7 +130,7 @@ state; codex 3-lane audit converged 0 C/H/M over 8 rounds)
 
 ### 1.1 Goals
 
-`console.streamvc.live` (frontdoor/console, SPEC-009 v0.1) is the
+`console.malibu.tech` (frontdoor/console, SPEC-009 v0.1) is the
 buyer-facing surface. The seller side has no web surface today: a
 provider runs `macprovider-cli serve` in a terminal, watches log
 lines, and may hit `GET /v1/health` for a number. SPEC-014 introduces
@@ -367,7 +367,7 @@ Mechanism:
   root. Shape (reconciled v0.9 — adds `github_oauth_enabled`):
   ```json
   {
-    "coordinator_base_url": "https://coordinator.streamvc.live",
+    "coordinator_base_url": "https://coordinator.malibu.tech",
     "releases_repo_owner_name": "Augustas11/macprovider",
     "require_provider_tokens": true,
     "github_oauth_enabled": false
@@ -392,7 +392,7 @@ Mechanism:
   - **Wiring caveat (reconciled v0.9 — the misconfig banner depends on a real
     404).** The banner fires only if `/v1/auth/me/providers` actually returns a
     404. That requires the operator's reverse proxy to route `/v1/auth/*` to the
-    coordinator (§10.4). **The reference nginx (`dist/nginx-portal.streamvc.live.conf`)
+    coordinator (§10.4). **The reference nginx (`dist/nginx-portal.malibu.tech.conf`)
     does NOT yet proxy `/v1/auth/*`** — those paths fall through to the SPA
     `index.html` fallback and return **200 HTML**, which the portal parses as an
     *empty provider list* and shows the "no Mac bound yet" waiting state, **not**
@@ -565,7 +565,7 @@ table captures the **`401`, `200`, and `429`** outcomes only — a wrong-method
 "every attempt". **This endpoint is reachable via the coordinator's own ingress,
 not the portal `/v1/auth/*` proxy — and it is currently UNWIRED there (carried
 gap):** the CLI POSTs it to the coordinator origin, but the reference **coordinator**
-nginx (`dist/nginx-coordinator.streamvc.live.conf`) returns 404 for unmatched
+nginx (`dist/nginx-coordinator.malibu.tech.conf`) returns 404 for unmatched
 `/v1/*`, so expired-`pair_ot` refresh does not work until an operator adds a
 coordinator-ingress route for it (this is separate from the portal `/v1/auth/*`
 proxy of §10.4).
@@ -619,7 +619,7 @@ SPEC-003 FR-C10's.
   optional `Domain=<MP_SESSION_COOKIE_DOMAIN>`. **Reconciled v0.9 — the `Domain`
   MAY be a parent domain**, not necessarily the exact portal host: the coordinator
   `validateGitHubOAuth` accepts a parent-domain cookie value, so an operator who
-  sets `Domain=streamvc.live` scopes the session cookie to **every** sibling
+  sets `Domain=malibu.tech` scopes the session cookie to **every** sibling
   subdomain (`coordinator.`, `console.`, `get.`, …), widening theft exposure. The
   operator SHOULD scope `Domain` to the exact portal host; the spec cannot force it
   because the shipped validator permits the parent. Carried security residual.
@@ -854,7 +854,7 @@ Sidebar items (v0.1, in this order):
 4. Monitoring
 5. Identity
 6. (spacer)
-7. API Docs (external link to `https://api.streamvc.live/docs`)
+7. API Docs (external link to `https://api.malibu.tech/docs`)
 8. Sign out — **mode-dependent (reconciled v0.9)**: paste-bearer mode clears the
    in-memory session and returns to the AUTH-1 prompt; GitHub-OAuth mode also
    `POST`s `/v1/auth/logout` to delete the server-side session row and clear the
@@ -868,7 +868,7 @@ choice are specified in SPEC-014; SPEC-009's own mobile handling
 is similar but SPEC-014 does NOT inherit it normatively (no
 "verbatim" claim).
 
-**Host string.** The spec MAY propose `provider.streamvc.live` for
+**Host string.** The spec MAY propose `provider.malibu.tech` for
 discussion but flags it as **Open Q7**: Pearl VPS nginx config and
 DNS provisioning are operator decisions outside SPEC-014's scope.
 Implementation MUST be host-agnostic (work at any host the
@@ -876,7 +876,7 @@ operator provisions).
 
 **Browser-to-coordinator topology.** The portal calls
 `/providers/{id}/earnings` and `/v1/pool/check` on the coordinator
-from a different origin than `coordinator.streamvc.live`.
+from a different origin than `coordinator.malibu.tech`.
 SPEC-002 / SPEC-005 do NOT document a CORS policy for these
 routes. See **Open Q9**; recommended solution (a) is an operator-
 owned reverse proxy at the portal origin that strips browser CORS
@@ -1733,7 +1733,7 @@ asserts X actually happens.
 - [ ] Q6 (rotation + removal): no rotation button, no remove-
       machine CTA exists.
 - [ ] Q7 (host string): implementation works at any host the
-      operator provisions (no `provider.streamvc.live` hard-code
+      operator provisions (no `provider.malibu.tech` hard-code
       in the bundle).
 - [ ] Q8 (deployment-mode discovery): portal trusts
       `portal-config.json` and fails CLOSED on missing / non-200.
@@ -1898,7 +1898,7 @@ owning amendment.
 - **Why:** SPEC-014 is host-agnostic; operator decisions live
   outside its scope.
 - **Who decides:** operator.
-- **Spec assumes:** mockup proposes `provider.streamvc.live`;
+- **Spec assumes:** mockup proposes `provider.malibu.tech`;
   binding decision is the operator's.
 - **Portal renders if unanswered:** implementation works at any
   host the operator provisions.
@@ -2032,14 +2032,14 @@ The user shared screenshots from a competitor seller portal
   route returns 404.
 - **GitHub-OAuth deployment prerequisites (reconciled v0.9 — required to
   turn `github_oauth_enabled:true` into a working mode; the reference
-  `dist/nginx-portal.streamvc.live.conf` does NOT yet include these):**
+  `dist/nginx-portal.malibu.tech.conf` does NOT yet include these):**
   - **Proxy `/v1/auth/*` to the coordinator's PROVIDER mux (`:8444`)** at the portal
     origin — **not** the buyer mux. All **five** `/v1/auth/*` routes (§2.5.2) **plus**
     the separately-prefixed `/v1/install/pair/refresh` — **six gated routes total** —
     are registered on `wsServer.Handler()`, which is
     mounted on `providerMux` (`cmd/coordinator/main.go`), whose production port is
     `:8444` (`dist/coordinator.yaml`). The public coordinator nginx
-    (`dist/nginx-coordinator.streamvc.live.conf`) intentionally 404s generic
+    (`dist/nginx-coordinator.malibu.tech.conf`) intentionally 404s generic
     `/v1/*`, so the operator must add explicit ingress routes targeting `:8444` for
     (a) the browser `/v1/auth/*` paths at the portal origin **and** (b) the
     CLI-called `/v1/install/pair/refresh` at the coordinator origin (§2.5.2's

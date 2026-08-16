@@ -56,7 +56,7 @@ func TestStrangerKeyOpenAIChatUsageFlow(t *testing.T) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 	}, WithHTTPClient(client))
 
-	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
+	state, cookie := startOAuth(t, h, "https://api.malibu.tech/auth/github/callback")
 	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp := httptest.NewRecorder()
@@ -96,7 +96,7 @@ func TestStrangerKeyOpenAIChatUsageFlow(t *testing.T) {
 
 func TestAccountPageDisplaysNewKeyOnce(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{ProviderUserID: "account-once", Scopes: []string{"read:user"}}})
-	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
+	state, cookie := startOAuth(t, h, "https://api.malibu.tech/auth/github/callback")
 	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp := httptest.NewRecorder()
@@ -550,7 +550,7 @@ func TestCapacityTierOneClosesSignupButExistingKeyWorks(t *testing.T) {
 	fullKey := createAccountAndKey(t, store, cfg, "acct_existing_capacity")
 
 	postAdminJSON(t, h, "/admin/capacity-signal", `{"signal":"projected_cost","value":80,"threshold":80,"firing":true}`)
-	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
+	state, cookie := startOAuth(t, h, "https://api.malibu.tech/auth/github/callback")
 	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp := httptest.NewRecorder()
@@ -713,17 +713,17 @@ func TestOAuthMintActionIssuesFreshKeyForExistingAccount(t *testing.T) {
 	identity := auth.OAuthIdentity{ProviderUserID: "mint-acct", Scopes: []string{"read:user"}}
 	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: identity})
 
-	signupKey := completeOAuth(t, h, "", "https://api.streamvc.live/auth/github/callback")
+	signupKey := completeOAuth(t, h, "", "https://api.malibu.tech/auth/github/callback")
 	if !strings.HasPrefix(signupKey, "mp_") {
 		t.Fatalf("signup key=%q", signupKey)
 	}
 
-	noActionKey := completeOAuth(t, h, "", "https://api.streamvc.live/auth/github/callback")
+	noActionKey := completeOAuth(t, h, "", "https://api.malibu.tech/auth/github/callback")
 	if noActionKey != "" {
 		t.Fatalf("existing-account login without action must NOT issue a key; got %q", noActionKey)
 	}
 
-	mintedKey := completeOAuth(t, h, "mint", "https://api.streamvc.live/auth/github/callback")
+	mintedKey := completeOAuth(t, h, "mint", "https://api.malibu.tech/auth/github/callback")
 	if !strings.HasPrefix(mintedKey, "mp_") {
 		t.Fatalf("mint-action key=%q", mintedKey)
 	}
@@ -747,7 +747,7 @@ func TestOAuthMintActionIssuesFreshKeyForExistingAccount(t *testing.T) {
 // /auth/github/start, never reach the callback.
 func TestOAuthMintActionRejectsUnknownActions(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{})
-	req := httptest.NewRequest(http.MethodGet, "/auth/github/start?action=delete&redirect_uri="+url.QueryEscape("https://api.streamvc.live/auth/github/callback"), nil)
+	req := httptest.NewRequest(http.MethodGet, "/auth/github/start?action=delete&redirect_uri="+url.QueryEscape("https://api.malibu.tech/auth/github/callback"), nil)
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
 	if resp.Code != http.StatusBadRequest {
@@ -787,7 +787,7 @@ func TestOAuthMintActionDoesNotSetCookie(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{
 		ProviderUserID: "no-action-cookie", Scopes: []string{"read:user"},
 	}})
-	startURL := "/auth/github/start?action=mint&redirect_uri=" + url.QueryEscape("https://api.streamvc.live/auth/github/callback")
+	startURL := "/auth/github/start?action=mint&redirect_uri=" + url.QueryEscape("https://api.malibu.tech/auth/github/callback")
 	req := httptest.NewRequest(http.MethodGet, startURL, nil)
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -813,13 +813,13 @@ func TestOAuthMintActionIsBoundToStateAcrossInterleavedFlows(t *testing.T) {
 		ProviderUserID: "interleave-acct", Scopes: []string{"read:user"},
 	}})
 
-	signupKey := completeOAuth(t, h, "", "https://api.streamvc.live/auth/github/callback")
+	signupKey := completeOAuth(t, h, "", "https://api.malibu.tech/auth/github/callback")
 	if !strings.HasPrefix(signupKey, "mp_") {
 		t.Fatalf("signup key=%q", signupKey)
 	}
 
 	// Tab A: start mint flow but never complete callback.
-	mintStartReq := httptest.NewRequest(http.MethodGet, "/auth/github/start?action=mint&redirect_uri="+url.QueryEscape("https://api.streamvc.live/auth/github/callback"), nil)
+	mintStartReq := httptest.NewRequest(http.MethodGet, "/auth/github/start?action=mint&redirect_uri="+url.QueryEscape("https://api.malibu.tech/auth/github/callback"), nil)
 	mintStartResp := httptest.NewRecorder()
 	h.ServeHTTP(mintStartResp, mintStartReq)
 	if mintStartResp.Code != http.StatusFound {
@@ -828,7 +828,7 @@ func TestOAuthMintActionIsBoundToStateAcrossInterleavedFlows(t *testing.T) {
 
 	// Tab B: start normal flow + complete it. Under cookie design, the
 	// dangling action cookie from tab A would cause tab B to mint.
-	plainKey := completeOAuth(t, h, "", "https://api.streamvc.live/auth/github/callback")
+	plainKey := completeOAuth(t, h, "", "https://api.malibu.tech/auth/github/callback")
 	if plainKey != "" {
 		t.Fatalf("tab B normal flow must not mint when tab A's mint state is pending; got key=%q", plainKey)
 	}

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-config="$root/dist/nginx-coordinator.streamvc.live.conf"
+config="$root/dist/nginx-coordinator.malibu.tech.conf"
 shared_config="$root/dist/nginx-snippets/stats-shared.conf"
 deploy="$root/dist/deploy-pearl-vps.sh"
 

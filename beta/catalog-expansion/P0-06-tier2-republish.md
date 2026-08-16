@@ -77,7 +77,7 @@ Full `deploy-pearl-vps.sh` not run — only catalog file replaced.
 }
 ```
 
-`GET https://coordinator.streamvc.live/catalog/current` — HTTP 200, 7 models, all SHA-256 and `min_ram_gb` match live autotune table.
+`GET https://coordinator.malibu.tech/catalog/current` — HTTP 200, 7 models, all SHA-256 and `min_ram_gb` match live autotune table.
 
 Previous catalog `macprovider-tier2-model-catalog-2026-05-31` (3 models) no longer served.
 

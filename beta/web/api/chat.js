@@ -8,11 +8,11 @@ export const config = {
 
 const PROVIDERS = {
   m1: {
-    tunnel_url: 'https://m1.streamvc.live',
+    tunnel_url: 'https://m1.malibu.tech',
     model: 'mlx-community/llama-3.2-3b-instruct-4bit',
   },
   m4: {
-    tunnel_url: 'https://m4.streamvc.live',
+    tunnel_url: 'https://m4.malibu.tech',
     model: 'mlx-community/Qwen2.5-7B-Instruct-4bit',
   },
 };

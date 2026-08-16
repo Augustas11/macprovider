@@ -35,7 +35,7 @@ from a single scenario-15 run. Until then:
 The whole point of #584 is that a sustained synthetic load **degrades and
 disconnects the single prod mac** (~30 → 8.9 → 5.3 tok/s, then stale
 heartbeats → WS EOF → removed from pool). Running this soak against
-`streamvc.live` with the prod provider in the pool reproduces the outage.
+`malibu.tech` with the prod provider in the pool reproduces the outage.
 
 This is enforced in code by a **positive lab-host allowlist**: any scenario
 declaring `B10` must have both `gateway_url` and `coordinator_url` resolve to a

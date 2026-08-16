@@ -17,9 +17,9 @@ None.
 **M1 - Provider onboarding still depends on a public `/v1/pool/check` surface that SPEC-006 hides.**
 
 Locations across multiple specs:
-- SPEC-006 § 4.2-4.3 says `api.streamvc.live` exposes only the public buyer allowlist and that public `/v1/*` traffic must flow through the gateway; coordinator buyer listener moves to `127.0.0.1:8443`.
+- SPEC-006 § 4.2-4.3 says `api.malibu.tech` exposes only the public buyer allowlist and that public `/v1/*` traffic must flow through the gateway; coordinator buyer listener moves to `127.0.0.1:8443`.
 - SPEC-003 § 5 requires the installer/status path to prove coordinator visibility.
-- Current `phase3-binary/dist/install.sh` defaults to `https://coordinator.streamvc.live` and polls `/v1/pool/check?provider_id=...`.
+- Current `phase3-binary/dist/install.sh` defaults to `https://coordinator.malibu.tech` and polls `/v1/pool/check?provider_id=...`.
 - Current coordinator code exposes `GET /v1/pool/check` on the buyer server and returns `provider_id`, `tier`, and `state`.
 
 Finding:
@@ -139,7 +139,7 @@ Patch SPEC-006 v0.3 to scope that rule to SPEC-006-only implementation/fix passe
 
 **Q1 - Should `/v1/pool/check` be treated as provider-private, buyer-public, or gateway-public?**
 
-This audit found the endpoint in current code and install flow, but not as a normative endpoint in the four locked specs. The operator should decide its long-term ownership before Phase 5: either make it a SPEC-002 provider-onboarding endpoint that remains reachable at `coordinator.streamvc.live`, move it behind the gateway with a redacted response, or remove it from the installer/status path.
+This audit found the endpoint in current code and install flow, but not as a normative endpoint in the four locked specs. The operator should decide its long-term ownership before Phase 5: either make it a SPEC-002 provider-onboarding endpoint that remains reachable at `coordinator.malibu.tech`, move it behind the gateway with a redacted response, or remove it from the installer/status path.
 
 ### Category coverage notes
 
