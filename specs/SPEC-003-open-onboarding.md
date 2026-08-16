@@ -1,6 +1,17 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.11.0 (2026-07-16, referral-gated CLI bootstrap integration)
+**Version:** 0.11.1 (2026-08-16, hosted agent onboarding skill)
+
+**Change log v0.11.1:** Adds FR-C1b and AC-6 for the hosted
+agent-readable onboarding skill requested in issue #926. The canonical public
+URLs are `https://get.malibu.tech/skill.md` and
+`https://get.malibu.tech/.well-known/skills/index.json`; `streamvc.live` is not
+a supported onboarding domain. The repo source lives under
+`docs/agent-onboarding/`, and `make test-dist` now validates URL drift, index
+checksum drift, command coverage, reference coverage, and secret/production
+guardrails. The dedicated get-host publication helper installs the skill and
+index into the root-owned `get.malibu.tech` webroot, and the hosted verifier
+byte-compares both public URLs against the repo artifacts.
 
 **Change log v0.11.0:** Adds FR-C9.7 as the open-onboarding integration point
 for SPEC-034. A referral code is optional WS bootstrap input when enforcement is
@@ -313,6 +324,50 @@ intentional architecture property:
 
 The release tarball MUST NOT contain `install.sh`. Re-bundling it would
 reintroduce the slow-iterate path and is explicitly out of scope.
+
+**FR-C1b. Hosted agent onboarding skill.**
+MacProvider MUST publish a compact, agent-readable onboarding skill at
+`https://get.malibu.tech/skill.md`. The optional discovery index MUST be served
+at `https://get.malibu.tech/.well-known/skills/index.json` when the hosting
+surface supports well-known discovery. The repository source of truth is
+`docs/agent-onboarding/SKILL.md`, with discovery metadata in
+`docs/agent-onboarding/.well-known/skills/index.json`.
+
+The skill is a distribution artifact, not a new runtime protocol. It MUST:
+
+1. Use `malibu.tech` canonical URLs and MUST NOT point agents at legacy
+   `streamvc.live` onboarding URLs.
+2. Cover provider install, status, recovery, update, and uninstall commands
+   using the public installer/uninstaller and the existing `macprovider-cli`
+   surfaces.
+3. Cover buyer SDK compatibility by pointing OpenAI-compatible clients at
+   `https://api.malibu.tech/v1`.
+4. Include guardrails that prevent agents from printing secrets, mutating
+   production, running destructive commands, or crossing the `d-inference`
+   clean-room boundary without explicit authority.
+5. Link to the authoritative repo docs/specs instead of duplicating full
+   operational policy: `README.md`, the OpenAI SDK guide, release verification
+   runbook, first-hop recovery runbook, SPEC-003, SPEC-006, SPEC-020, and
+   SPEC-035.
+
+`scripts/test-agent-onboarding-skill.sh` MUST run in `make test-dist` and fail
+when the skill source and discovery index drift. The validation MUST include at
+least URL/domain checks, SHA-256 index checksum verification, core command
+coverage, reference existence checks, negative tests for unsafe URL/remote
+execution mutations, and secret/production guardrail checks.
+
+The get-host static publication path MUST stage `docs/agent-onboarding/SKILL.md`
+and `docs/agent-onboarding/.well-known/skills/index.json` as root-owned,
+non-writable inputs, install them into the immutable publication directory as
+`skill.md` and `.well-known/skills/index.json`, and expose the public paths via
+current-pointer-backed symlinks. `scripts/publish-agent-onboarding-skill.sh`
+MUST use `MALIBU_GET_WEBROOT` (default `/var/www/malibu-get`), validate the
+exact local artifacts before upload, validate the exact transferred bytes before
+switching the public pointer, and then run `scripts/verify-agent-onboarding-hosted.sh`.
+After publication, `scripts/verify-agent-onboarding-hosted.sh` MUST fetch
+`https://get.malibu.tech/skill.md` and
+`https://get.malibu.tech/.well-known/skills/index.json` and byte-compare them
+to the repo artifacts before the operator can claim the hosted route is live.
 
 **FR-C2. install.sh contract.**
 The install script at `https://get.malibu.tech/install.sh` is the
@@ -1056,7 +1111,7 @@ Defined in FR-C1. Summary:
 | Dependency | Purpose | License | Notes |
 |---|---|---|---|
 | GitHub API | Release discovery, download | N/A (public API) | No API key needed for public repos. Rate limit: 60 req/hr unauthenticated. `install.sh` makes 2 API calls; `update` makes 1-2. |
-| Cloudflare Pages | Hosting `get.malibu.tech` | Free tier | Static site. Only serves `install.sh` and a landing page. |
+| Cloudflare Pages / static nginx | Hosting `get.malibu.tech` | Free tier / Pearl static host | Static site serving `install.sh`, `uninstall.sh`, the landing page, and agent onboarding artifacts. |
 | `huggingface-cli` | Model download | Apache-2.0 | NOT a hard dependency. `install.sh` prints manual download instructions if not installed. |
 | `shasum` / `sha256sum` | Checksum verification | OS-provided | macOS ships `shasum` (BSD). Fallback to `openssl dgst -sha256` if neither found. |
 
@@ -1212,6 +1267,34 @@ green install retest.
 **Expected:** Existing config port is reused; own `macprovider-cli` port holders are stopped while foreign holders still exit 6; launchd invokes the real binary path; warm-cache waits remain 5 minutes; cold-cache waits are 20 minutes with progress; mixed-state directories warn and continue.
 
 **How to verify:** Manual upgrade on existing partner-shaped install plus local mixed-directory simulation.
+
+---
+
+**AC-6. Hosted agent onboarding skill.**
+
+**Setup:** Fresh checkout of `main`, with the hosted static surface configured
+to serve repo artifacts under `get.malibu.tech`.
+
+**Action:** Fetch `https://get.malibu.tech/skill.md` and
+`https://get.malibu.tech/.well-known/skills/index.json`, then compare them to
+`docs/agent-onboarding/SKILL.md` and
+`docs/agent-onboarding/.well-known/skills/index.json`.
+
+**Expected:**
+1. The hosted skill is a compact Markdown artifact that a fresh agent can use
+   to perform a non-production local onboarding smoke.
+2. The discovery index points at `https://get.malibu.tech/skill.md` and its
+   `sha256` matches the repo skill source.
+3. The skill uses only `malibu.tech` onboarding URLs.
+4. Secret handling, production mutation, destructive command, and clean-room
+   guardrails are present.
+5. Core provider install/status/update/uninstall commands and buyer
+   OpenAI-compatible `https://api.malibu.tech/v1` examples are present.
+
+**How to verify:** `bash scripts/test-agent-onboarding-skill.sh` for repo drift,
+`bash scripts/test-agent-onboarding-publication.sh` for static publication wiring,
+and `bash scripts/verify-agent-onboarding-hosted.sh` after publishing or
+changing the static route.
 
 ---
 

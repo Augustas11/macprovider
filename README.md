@@ -103,6 +103,8 @@ bash install.sh
 
 The binary is checksum-verified against a signed release manifest. macOS quarantine (`xattr`) is cleared with your approval during install. Developer ID signing and notarization are planned for a future release.
 
+Agent-readable onboarding source lives in [docs/agent-onboarding/SKILL.md](docs/agent-onboarding/SKILL.md). The canonical publication targets are [get.malibu.tech/skill.md](https://get.malibu.tech/skill.md) and [get.malibu.tech/.well-known/skills/index.json](https://get.malibu.tech/.well-known/skills/index.json).
+
 ## For Buyers
 
 Base URL: `https://api.malibu.tech`
