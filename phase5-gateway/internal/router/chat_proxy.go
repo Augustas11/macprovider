@@ -83,6 +83,22 @@ const (
 
 var errStreamingIdleTimeout = errors.New("streaming upstream idle timeout")
 
+func (s *Server) admitChatStart(w http.ResponseWriter, r *http.Request, accountID string) bool {
+	requestRate := s.chatStartLimits.allow(accountID, s.cfg.Quotas.AccountRequestRatePerSecond, s.now())
+	if requestRate.Admitted {
+		return true
+	}
+	slog.Warn("chat completion request rate limited",
+		"request_id", requestID(r),
+		"account_id", accountID,
+		"limit_rps", requestRate.Limit,
+		"retry_after_s", requestRate.RetryAfterSeconds,
+	)
+	setConcurrencyRateLimitHeaders(w, requestRate.Limit, requestRate.Remaining, requestRate.RetryAfterSeconds, s.now())
+	writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "account_request_rate_exceeded", "Account request rate limit exceeded")
+	return false
+}
+
 type settlementFinalityAction int
 
 const (
@@ -194,18 +210,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		subject = usageSubject{AccountID: authn.Bearer.AccountID}
 	}
 	accountID = subject.AccountID
-	requestRate := s.chatStartLimits.allow(subject.AccountID, s.cfg.Quotas.AccountRequestRatePerSecond, s.now())
-	if !requestRate.Admitted {
-		slog.Warn("chat completion request rate limited",
-			"request_id", requestID(r),
-			"account_id", subject.AccountID,
-			"limit_rps", requestRate.Limit,
-			"retry_after_s", requestRate.RetryAfterSeconds,
-		)
-		setConcurrencyRateLimitHeaders(w, requestRate.Limit, requestRate.Remaining, requestRate.RetryAfterSeconds, s.now())
-		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "account_request_rate_exceeded", "Account request rate limit exceeded")
-		return
-	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, s.cfg.Limits.RequestBodyBytes+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request_body", "Could not read request body")
@@ -229,6 +233,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			"v0.1.0 accepts `Content-Encoding: identity` or no `Content-Encoding` header; compressed request bodies are deferred to v0.2 per §10.",
 			"Content-Encoding",
 		)
+		return
+	}
+	if s.rejectRelayBlindEnvelopeIfRequired(w, r, body, subject.AccountID, authn.WalletSession) {
+		return
+	}
+	if !s.admitChatStart(w, r, subject.AccountID) {
 		return
 	}
 	dedupeEntrypoint := idlessDedupeEntrypointChat

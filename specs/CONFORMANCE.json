@@ -881,6 +881,7 @@
       "depends_on": [
         "SPEC-002",
         "SPEC-003",
+        "SPEC-005",
         "SPEC-006",
         "SPEC-008",
         "SPEC-018"
@@ -1176,6 +1177,41 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/930",
         "rationale": "Local implementation validation is captured for the default-off Ed25519 existing-account wallet-session rail. Structured conformant promotion is intentionally held until a valid signed journey-result artifact is produced for this sensitive authority domain."
+      }
+    },
+    {
+      "spec_id": "SPEC-041",
+      "title": "Relay-Blind Request Encryption",
+      "version": "0.1.0",
+      "path": "specs/SPEC-041-relay-blind-request-encryption.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "relay-blind-request-encryption"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-015",
+        "SPEC-022",
+        "SPEC-040"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Relay-blind buyer privacy is a new authority domain. The first implementation must land default-off with local tests and no conformance promotion until signed journey-result evidence exists."
       }
     }
   ],
@@ -3829,6 +3865,186 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Provider-token custody and compliance payout eligibility (\u00a78, v0.1.20 Wave-2 custody gate): preliminary anchor for the existing obligation area; normative custody gate retained through v0.1.23, but provider eligibility policy and production evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-041-R001",
+      "spec_id": "SPEC-041",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/config/config.go:RelayBlindRequestsConfig",
+        "phase5-gateway/internal/router/disclosure.go:makeTier1Disclosure",
+        "phase5-gateway/internal/router/relay_blind.go:rejectRelayBlindEnvelopeIfRequired"
+      ],
+      "tests": [
+        "phase5-gateway/internal/config/config_test.go:TestRelayBlindRequestsDefaultOffDoesNotRequireBounds",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindModelsDisclosureDefaultOffOmitted",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindModelsDisclosureEnabledUnavailable",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindProbePreservesDefaultOffPlaintextCompatibility"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Gateway default-off config, plaintext compatibility, and buyer-safe /v1/models disclosure have local implementation/tests in this gateway slice; signed journey evidence and provider/coordinator key evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-041-R002",
+      "spec_id": "SPEC-041",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Provider relay-blind key advertisement, revocation, and lifecycle remain future provider/coordinator work; this gateway slice intentionally exposes required_unavailable until signed key evidence exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-041-R003",
+      "spec_id": "SPEC-041",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/relay_blind.go:validateRelayBlindRequestEnvelope",
+        "phase5-gateway/internal/router/relay_blind.go:relayBlindEnvelopeMetadataValid",
+        "phase5-gateway/internal/router/relay_blind.go:recordRelayBlindReplay",
+        "phase5-gateway/internal/storage/sqlite/store.go:RecordRelayBlindReplay"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatFailsClosedBeforeDispatchOrQuota",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatReplayReturnsRelayBlindReplay",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindChatEnvelopeRejectsAPIAndDemoTokenCapViolations",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindMalformedSentinelFieldsFailClosedBeforeDispatchOrQuota"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Gateway envelope shape, clear metadata bounds, freshness, and replay admission have local tests; buyer encryption libraries, provider key evidence, and signed end-to-end vectors remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-041-R004",
+      "spec_id": "SPEC-041",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase5-gateway/internal/router/relay_blind.go:rejectRelayBlindEnvelopeIfRequired",
+        "phase5-gateway/internal/router/relay_blind.go:handleRelayBlindRouteReservations",
+        "phase5-gateway/internal/router/relay_blind.go:handleRelayBlindEndpointDisabled",
+        "phase5-gateway/internal/storage/sqlite/store.go:RecordRelayBlindReplay"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRouteReservationFailsClosedNoStoreNoQuota",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRouteReservationAcceptsWalletSessionSignature",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatDoesNotConsumeAccountRateLimit",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatMetadataLimiterDoesNotConsumePlaintextBucket",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindUnsupportedFamiliesRemainMountedWhenPlaintextFeatureDisabled",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindDisabledFamilyPrechecksModelAndCapsBeforeReplayAudit"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Gateway fail-closed route reservation, inference admission, disabled-family handling, wallet metadata admission, and local replay/rate guards are implemented/tested; coordinator provider-key admission and signed journey evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-041-R005",
+      "spec_id": "SPEC-041",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Provider decryption and decrypted-body validation remain future provider work; this gateway slice only validates clear envelope metadata and fails closed before dispatch."
+      }
+    },
+    {
+      "requirement_id": "SPEC-041-R006",
+      "spec_id": "SPEC-041",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/disclosure.go:makeTier1Disclosure",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase5-gateway/internal/router/relay_blind.go:rejectRelayBlindEnvelopeIfRequired"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindModelsDisclosureEnabledUnavailable",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatFailsClosedBeforeDispatchOrQuota",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatDoesNotConsumeAccountRateLimit"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Admission-only gateway slice preserves no-quota/no-dispatch behavior and exposes settlement disclosure metadata; successful encrypted inference, receipt digest support, and signed settlement journey evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-041-R007",
+      "spec_id": "SPEC-041",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/server.go:gatewayRetryableByCode",
+        "phase5-gateway/internal/router/server.go:gatewayPermanentCodes",
+        "phase5-gateway/internal/router/relay_blind.go:recordRelayBlindAudit",
+        "phase5-gateway/internal/router/relay_blind.go:recordRelayBlindRequiredAudit"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/server_test.go:TestGatewayErrorCodeCompleteness",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindEnvelopeRejectsDowngradeAndUnsupportedFamilies",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindEnabledFamiliesPreferDisabledOverUnsupported",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatWalletAuditIncludesSafeCorrelation",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindDowngradeAuditFailureFailsClosed"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Gateway error classification, downgrade rejection, disabled-vs-unsupported precedence, and redacted audit payloads are implemented/tested locally; provider-side error emissions and signed journey evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-041-R008",
+      "spec_id": "SPEC-041",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/config/config.go:validateRelayBlindRequestsConfig",
+        "phase5-gateway/internal/router/server.go:New",
+        "phase5-gateway/internal/storage/sqlite/migrate.go:relayBlindReplayDDL"
+      ],
+      "tests": [
+        "phase5-gateway/internal/config/config_test.go:TestRelayBlindRequestsValidation",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindUnsupportedFamiliesRemainMountedWhenPlaintextFeatureDisabled",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatMetadataLimiterDoesNotConsumePlaintextBucket",
+        "phase5-gateway/internal/router/relay_blind_test.go:TestRelayBlindRequiredChatReplayCapacityLimitsMetadataWrites"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/928",
+        "rationale": "Gateway config validation, disabled compatibility, relay-blind metadata limiter, and replay storage DDL are implemented/tested locally; production enablement and signed journey-result evidence remain pending."
       }
     }
   ]

@@ -72,7 +72,8 @@
         "SPEC-024",
         "SPEC-038",
         "SPEC-039",
-        "SPEC-040"
+        "SPEC-040",
+        "SPEC-041"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -88,7 +89,8 @@
         "SPEC-018",
         "SPEC-019",
         "SPEC-024",
-        "SPEC-040"
+        "SPEC-040",
+        "SPEC-041"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -228,7 +230,8 @@
         "SPEC-030",
         "SPEC-038",
         "SPEC-039",
-        "SPEC-040"
+        "SPEC-040",
+        "SPEC-041"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -315,7 +318,8 @@
         "SPEC-005",
         "SPEC-015",
         "SPEC-016",
-        "SPEC-040"
+        "SPEC-040",
+        "SPEC-041"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -538,11 +542,22 @@
     {
       "id": "wallet-buyer-session",
       "owner_spec": "SPEC-040",
-      "consumers": [],
+      "consumers": [
+        "SPEC-041"
+      ],
       "status": "declared",
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
       "issue": "https://github.com/Augustas11/macprovider/issues/930"
+    },
+    {
+      "id": "relay-blind-request-encryption",
+      "owner_spec": "SPEC-041",
+      "consumers": [],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/928"
     }
   ]
 }

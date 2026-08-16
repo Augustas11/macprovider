@@ -282,6 +282,22 @@ type WalletSessionReplayMaterial struct {
 	MetadataClientIP    string
 }
 
+type RelayBlindReplayMaterial struct {
+	AccountID                     string
+	WalletSessionID               string
+	RequestID                     string
+	RequestReplayNonceDigest      []byte
+	BuyerEphemeralPublicKeyDigest []byte
+	ProviderBindingDigest         []byte
+	KIDDigest                     []byte
+	EnvelopeDigest                []byte
+	EnvelopeBytes                 int64
+	RetentionExpiresAt            time.Time
+	MaxReplayRows                 int
+	MaxReplayBytes                int64
+	CreatedAt                     time.Time
+}
+
 type WalletSessionAdmissionRequest struct {
 	SessionID       string
 	AccountID       string

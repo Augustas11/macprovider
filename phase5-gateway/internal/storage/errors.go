@@ -38,4 +38,5 @@ var (
 	ErrWalletSessionReplayMismatch  = errors.New("wallet session replay material mismatch")
 	ErrWalletSessionReplayCapacity  = errors.New("wallet session replay capacity exhausted")
 	ErrWalletSessionDispatchFence   = errors.New("wallet session dispatch fence rejected")
+	ErrRelayBlindReplay             = errors.New("relay-blind replay")
 )

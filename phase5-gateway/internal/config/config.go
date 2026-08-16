@@ -269,8 +269,21 @@ type ExplorerConfig struct {
 }
 
 type FeaturesConfig struct {
-	ResponsesAPIEnabled      bool `yaml:"responses_api_enabled"`
-	AnthropicMessagesEnabled bool `yaml:"anthropic_messages_enabled"`
+	ResponsesAPIEnabled      bool                     `yaml:"responses_api_enabled"`
+	AnthropicMessagesEnabled bool                     `yaml:"anthropic_messages_enabled"`
+	RelayBlindRequests       RelayBlindRequestsConfig `yaml:"relay_blind_requests"`
+}
+
+type RelayBlindRequestsConfig struct {
+	Enabled                    bool     `yaml:"enabled"`
+	ReplayRetentionSeconds     int      `yaml:"replay_retention_seconds"`
+	TimestampMaxSkewSeconds    int      `yaml:"timestamp_max_skew_seconds"`
+	RouteReservationTTLSeconds int      `yaml:"route_reservation_ttl_seconds"`
+	MaxEncryptedRequestBytes   int64    `yaml:"max_encrypted_request_bytes"`
+	MetadataRequestsPerMinute  int      `yaml:"metadata_requests_per_minute"`
+	ReplayMaxRowsPerAccount    int      `yaml:"replay_max_rows_per_account"`
+	ReplayMaxBytesPerAccount   int64    `yaml:"replay_max_bytes_per_account"`
+	Algorithms                 []string `yaml:"algorithms"`
 }
 
 func Default() Config {
@@ -397,7 +410,17 @@ func Default() Config {
 		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
 		Retry503: Retry503Config{Enabled: true, MaxAttempts: 3, BackoffBaseMs: 100, BackoffMaxMs: 500},
 		Explorer: ExplorerConfig{Enabled: false},
-		Features: FeaturesConfig{ResponsesAPIEnabled: false, AnthropicMessagesEnabled: false},
+		Features: FeaturesConfig{ResponsesAPIEnabled: false, AnthropicMessagesEnabled: false, RelayBlindRequests: RelayBlindRequestsConfig{
+			Enabled:                    false,
+			ReplayRetentionSeconds:     600,
+			TimestampMaxSkewSeconds:    60,
+			RouteReservationTTLSeconds: 30,
+			MaxEncryptedRequestBytes:   1048576,
+			MetadataRequestsPerMinute:  120,
+			ReplayMaxRowsPerAccount:    10000,
+			ReplayMaxBytesPerAccount:   4 * 1024 * 1024,
+			Algorithms:                 []string{"x25519-hkdf-sha256-a256gcm-v1"},
+		}},
 	}
 }
 
@@ -550,6 +573,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("auth.demo.signing_secret must be set")
 	}
 	if err := validateWalletSessionsConfig(c); err != nil {
+		return err
+	}
+	if err := validateRelayBlindRequestsConfig(c); err != nil {
 		return err
 	}
 	if len(c.Auth.OAuth.CallbackAllowlist) == 0 {
@@ -835,6 +861,37 @@ func validateWalletSessionsConfig(c Config) error {
 		return fmt.Errorf("auth.wallet_sessions wallet_fingerprint_secret rotation is not supported in v0.1")
 	}
 	return rejectWalletSessionSecretReuse(c)
+}
+
+func validateRelayBlindRequestsConfig(c Config) error {
+	rb := c.Features.RelayBlindRequests
+	if !rb.Enabled {
+		return nil
+	}
+	if len(rb.Algorithms) == 0 {
+		return fmt.Errorf("features.relay_blind_requests.algorithms must include x25519-hkdf-sha256-a256gcm-v1 when relay-blind requests are enabled")
+	}
+	for i, alg := range rb.Algorithms {
+		if strings.TrimSpace(alg) != "x25519-hkdf-sha256-a256gcm-v1" {
+			return fmt.Errorf("features.relay_blind_requests.algorithms[%d] must be x25519-hkdf-sha256-a256gcm-v1", i)
+		}
+	}
+	if rb.ReplayRetentionSeconds <= 0 {
+		return fmt.Errorf("features.relay_blind_requests.replay_retention_seconds must be > 0 when relay-blind requests are enabled")
+	}
+	if rb.TimestampMaxSkewSeconds <= 0 || rb.TimestampMaxSkewSeconds >= rb.ReplayRetentionSeconds {
+		return fmt.Errorf("features.relay_blind_requests timestamp skew must be > 0 and less than replay retention")
+	}
+	if rb.RouteReservationTTLSeconds <= 0 || rb.RouteReservationTTLSeconds > rb.ReplayRetentionSeconds {
+		return fmt.Errorf("features.relay_blind_requests.route_reservation_ttl_seconds must be > 0 and <= replay_retention_seconds")
+	}
+	if rb.MaxEncryptedRequestBytes <= 0 || rb.MaxEncryptedRequestBytes > c.Limits.RequestBodyBytes {
+		return fmt.Errorf("features.relay_blind_requests.max_encrypted_request_bytes must be > 0 and <= limits.request_body_bytes")
+	}
+	if rb.MetadataRequestsPerMinute <= 0 || rb.ReplayMaxRowsPerAccount <= 0 || rb.ReplayMaxBytesPerAccount <= 0 {
+		return fmt.Errorf("features.relay_blind_requests metadata replay limits must be > 0 when relay-blind requests are enabled")
+	}
+	return nil
 }
 
 func requireSecretBytes(field, secret string, minBytes int) error {

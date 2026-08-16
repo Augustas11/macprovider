@@ -371,6 +371,7 @@ var semanticHeaderProfiles = map[string][]string{
 	"/v1/chat/completions":                     {"accept", "idempotency-key", "x-macprovider-conversation", "x-macprovider-retry"},
 	"/v1/responses":                            {"accept", "idempotency-key", "x-macprovider-conversation", "x-macprovider-retry"},
 	"/v1/messages":                             {"accept", "anthropic-beta", "anthropic-version", "idempotency-key", "x-macprovider-conversation", "x-macprovider-retry"},
+	"/v1/relay-blind/route-reservations":       {"accept", "idempotency-key"},
 	"/v1/models":                               {},
 	"/auth/wallet-sessions/{session_id}":       {},
 	"/auth/wallet-sessions/{session_id}/usage": {},

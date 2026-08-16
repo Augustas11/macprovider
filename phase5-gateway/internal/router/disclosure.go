@@ -11,24 +11,45 @@ import (
 )
 
 type tier1Disclosure struct {
-	Version                 string                            `json:"version"`
-	PlaintextToProvider     bool                              `json:"plaintext_to_provider"`
-	ModelIdentity           string                            `json:"model_identity"`
-	HardwareAttestation     string                            `json:"hardware_attestation"`
-	Tier2Milestone          string                            `json:"tier2_milestone"`
-	StickyAffinity          *stickyAffinityDisclosure         `json:"sticky_affinity"`
-	ModelVerificationLimit  string                            `json:"model_verification_limit"`
-	VerifiedModelSettlement verifiedModelSettlementDisclosure `json:"verified_model_settlement"`
-	ModelHashVerified       string                            `json:"model_hash_verified,omitempty"`
-	ProviderLegEncryption   string                            `json:"provider_leg_encryption,omitempty"`
-	UntrustedProviderSafety string                            `json:"untrusted_provider_safety,omitempty"`
-	Tier2                   *tier2Disclosure                  `json:"tier2,omitempty"`
+	Version                     string                                 `json:"version"`
+	PlaintextToProvider         bool                                   `json:"plaintext_to_provider"`
+	ModelIdentity               string                                 `json:"model_identity"`
+	HardwareAttestation         string                                 `json:"hardware_attestation"`
+	Tier2Milestone              string                                 `json:"tier2_milestone"`
+	StickyAffinity              *stickyAffinityDisclosure              `json:"sticky_affinity"`
+	RelayBlindRequestEncryption *relayBlindRequestEncryptionDisclosure `json:"relay_blind_request_encryption,omitempty"`
+	ModelVerificationLimit      string                                 `json:"model_verification_limit"`
+	VerifiedModelSettlement     verifiedModelSettlementDisclosure      `json:"verified_model_settlement"`
+	ModelHashVerified           string                                 `json:"model_hash_verified,omitempty"`
+	ProviderLegEncryption       string                                 `json:"provider_leg_encryption,omitempty"`
+	UntrustedProviderSafety     string                                 `json:"untrusted_provider_safety,omitempty"`
+	Tier2                       *tier2Disclosure                       `json:"tier2,omitempty"`
 }
 
 type stickyAffinityDisclosure struct {
 	Enabled     bool   `json:"enabled"`
 	TTLSeconds  int    `json:"ttl_seconds"`
 	Description string `json:"description"`
+}
+
+type relayBlindRequestEncryptionDisclosure struct {
+	Version          string                                  `json:"version"`
+	Scope            string                                  `json:"scope"`
+	EndpointFamilies map[string]relayBlindEndpointDisclosure `json:"endpoint_families"`
+	Settlement       relayBlindSettlementDisclosure          `json:"settlement"`
+	Description      string                                  `json:"description"`
+}
+
+type relayBlindEndpointDisclosure struct {
+	RequiredMode           string `json:"required_mode"`
+	PoolComposition        string `json:"pool_composition"`
+	CapableProviderCount   *int   `json:"capable_provider_count,omitempty"`
+	IncapableProviderCount *int   `json:"incapable_provider_count,omitempty"`
+}
+
+type relayBlindSettlementDisclosure struct {
+	VerifiedModelSettlement string `json:"verified_model_settlement"`
+	UsageSettlement         string `json:"usage_settlement"`
 }
 
 type tier2Disclosure struct {
@@ -322,6 +343,7 @@ func (s *Server) makeTier1Disclosure(ctxs ...context.Context) tier1Disclosure {
 			Description: "Sticky affinity is disabled; related requests are not preferentially routed to the same provider.",
 		},
 	}
+	s.applyRelayBlindDisclosure(&disclosure)
 	if s.cfg.Routing.StickyEnabled {
 		ctx := context.Background()
 		if len(ctxs) > 0 && ctxs[0] != nil {
@@ -337,6 +359,29 @@ func (s *Server) makeTier1Disclosure(ctxs ...context.Context) tier1Disclosure {
 		}
 	}
 	return disclosure
+}
+
+func (s *Server) applyRelayBlindDisclosure(disclosure *tier1Disclosure) {
+	if s.cfg.Features.RelayBlindRequests.Enabled {
+		disclosure.RelayBlindRequestEncryption = relayBlindDisclosureUnavailable()
+	}
+}
+
+func relayBlindDisclosureUnavailable() *relayBlindRequestEncryptionDisclosure {
+	return &relayBlindRequestEncryptionDisclosure{
+		Version: "spec-041-v0.1",
+		Scope:   "request_content_only_provider_can_decrypt_when_available",
+		EndpointFamilies: map[string]relayBlindEndpointDisclosure{
+			"chat_completions": {RequiredMode: "required_unavailable", PoolComposition: "none"},
+			"responses":        {RequiredMode: "unsupported", PoolComposition: "none"},
+			"messages":         {RequiredMode: "unsupported", PoolComposition: "none"},
+		},
+		Settlement: relayBlindSettlementDisclosure{
+			VerifiedModelSettlement: "unavailable_for_relay_blind_request",
+			UsageSettlement:         "standard_usage_settlement_and_clear_cap_enforcement_still_apply",
+		},
+		Description: "Relay-blind request encryption is default-off and unavailable until fresh provider-signed key evidence exists. When available, it prevents the gateway and coordinator from reading request content; it does not hide prompts from the selected provider and is separate from SPEC-008 coordinator-to-provider encryption.",
+	}
 }
 
 func (s *Server) makeTier1DisclosureForModels(body map[string]any, ctxs ...context.Context) tier1Disclosure {

@@ -3495,7 +3495,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "malibu-domain-migration-r1")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
-            "9abc82072e87415614b7256cb05e429e3ab1f45c",
+            "9c78c9880a615725eb1da5b42b1193f1372da7f7",
         )
         subprocess.run(
             ["git", "cat-file", "-e", f"{updater_module.CANARY_AUTHORITY_COMMIT}^{{commit}}"],
