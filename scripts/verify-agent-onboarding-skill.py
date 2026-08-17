@@ -137,6 +137,43 @@ def validate_urls(text: str) -> None:
         require(normalized in ALLOWED_URLS, f"URL is not allowlisted: {raw}")
 
 
+def validate_frontmatter(skill: str) -> None:
+    lines = skill.splitlines()
+    require(lines and lines[0] == "---", "SKILL.md missing YAML front matter")
+    closing_index = None
+    for index, line in enumerate(lines[1:], start=1):
+        if line == "---":
+            closing_index = index
+            break
+    require(closing_index is not None, "SKILL.md front matter is not closed")
+
+    metadata: dict[str, str] = {}
+    for line in lines[1:closing_index]:
+        if not line.strip():
+            continue
+        require(":" in line, f"front matter line is not key/value: {line}")
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        require(key, f"front matter key is empty: {line}")
+        require(value, f"front matter value is empty: {key}")
+        metadata[key] = value
+
+    name = metadata.get("name", "")
+    description = metadata.get("description", "")
+    require(name == "macprovider-agent-onboarding", "front matter name drifted")
+    require(
+        re.fullmatch(r"[a-z0-9-]{1,64}", name) is not None,
+        "front matter name must be lowercase letters, digits, and hyphens",
+    )
+    require(description, "front matter description missing")
+    require("MacProvider" in description, "front matter description must mention MacProvider")
+    require(
+        "install" in description.lower() and "OpenAI-compatible SDKs" in description,
+        "front matter description must cover provider install and buyer SDK use cases",
+    )
+
+
 def validate_files(
     skill_path: Path = SKILL_PATH,
     index_path: Path = INDEX_PATH,
@@ -148,6 +185,7 @@ def validate_files(
     require(len(skill_bytes) <= 20_000, "SKILL.md must stay compact for agent ingestion")
     skill = read_text(skill_path)
     index_text = read_text(index_path)
+    validate_frontmatter(skill)
 
     combined = f"{skill}\n{index_text}"
     for forbidden in FORBIDDEN_LITERAL_SNIPPETS:
@@ -202,6 +240,22 @@ def run_negative_tests() -> None:
         index = temp / "index.json"
         skill.write_text(SKILL_PATH.read_text(encoding="utf-8"), encoding="utf-8")
         index.write_text(INDEX_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        source_skill = SKILL_PATH.read_text(encoding="utf-8")
+        without_manifest = re.sub(r"\A---\n.*?\n---\n\n?", "", source_skill, count=1, flags=re.S)
+        skill.write_text(without_manifest, encoding="utf-8")
+        index_payload = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+        index_payload["skills"][0]["sha256"] = hashlib.sha256(without_manifest.encode()).hexdigest()
+        index.write_text(json.dumps(index_payload, indent=2) + "\n", encoding="utf-8")
+        SUPPRESS_FAILURE_OUTPUT = True
+        try:
+            validate_files(skill, index)
+        except SystemExit as exc:
+            SUPPRESS_FAILURE_OUTPUT = False
+            require(exc.code == 1, f"negative test missing_manifest exited unexpectedly: {exc.code}")
+        else:
+            SUPPRESS_FAILURE_OUTPUT = False
+            fail("negative test did not fail: missing_manifest")
+
         mutations = {
             "legacy_http": "\nhttps://streamvc.live/install.sh\n",
             "legacy_mixed_case": "\nhttps://Get.StreamVC.Live/skill.md\n",
