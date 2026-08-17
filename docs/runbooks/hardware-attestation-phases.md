@@ -1,8 +1,8 @@
 # Hardware Attestation Implementation Runbook (Scenario B)
 
-**Status:** Phase 1 IN PROGRESS  
-**Branch:** `fix/attestation-phase1`  
-**Worktree:** `/Users/augstar/macprovider-attest-phase1`  
+**Status:** Phase 3 IN PROGRESS  
+**Branch:** `feat/attestation-phase3`  
+**Worktree:** `/Users/augstar/macprovider-attest-phase3`  
 **Base:** `origin/main`  
 **Confirmed scope:** macprovider-native attestation only (not Darkbloom integration).
 
@@ -191,7 +191,7 @@ Extend `pool.Provider` (non-breaking JSON fields):
 
 ---
 
-## Phase 2 — MDM MVP
+## Phase 2 — MDM MVP (DONE — 2026-08-17)
 
 **Goal:** macprovider-run MDM so enrolled Macs can receive `DeviceInformation` commands.
 
@@ -229,7 +229,7 @@ Extend `pool.Provider` (non-breaking JSON fields):
 
 ---
 
-## Phase 3 — Live MDA + cache
+## Phase 3 — Live MDA + cache (IN PROGRESS — 2026-08-17)
 
 **Goal:** Apple-rooted hardware proof bound to SE pubkey; survive 7-day rate limit.
 
@@ -247,12 +247,33 @@ Extend `pool.Provider` (non-breaking JSON fields):
 | 3.6 | Remove static-artifact path as default; keep operator override for dev |
 | 3.7 | Rate-limit aware refresh scheduler (≥7 days) |
 
-### 3.2 Exit criteria
+### 3.2 Progress (2026-08-17)
+
+**Landed this PR (`feat/attestation-phase3`):**
+- [x] `verifyMDAFreshness` extended: also accepts `SHA256(sePublicKey)` nonce; `MDAHardware=true` returned when SE key digest matched
+- [x] `AttestationVerifyResult.MDAHardware bool` — WS sets `AttestationTier=hardware` when true
+- [x] `internal/mdm/client.go` — MicroMDM API client (`ListDevices`, `FindDeviceBySerial`, `EnqueueDeviceInformationAttestation`, `ParseDeviceAttestationFromPlist`)
+- [x] `internal/mdm/live_mda.go` — `LiveMDAService` with `RequestAndMaybeUpgrade` + `AttachCachedMDAProof` + `UpgradeFromParsedAttestation`
+- [x] Pool `MDACertChain`, `MDAVerifiedAt`, `MDABoundSEKeyHash` cache fields + `SetMDAProof` / `ClearMDAProof` / `MDAProof` helpers
+- [x] `tier2.VerifyMDACertChainWithSEKey` public helper for LiveMDAService chain re-verify
+- [x] `Tier2MDMConfig.APIURL/APIToken/LiveMDAEnabled/MDARefreshIntervalHours` config fields
+- [x] WS observe wiring: `liveMDAUpgrader` interface, `WithLiveMDA` option, goroutine trigger after SE auth
+- [x] Config documented in `dist/coordinator.yaml.example`
+- [x] Tests: freshness dual-mode, MDM client HTTP tests, integration tier tests
+
+**Still needs (manual Mac E2E):**
+- [ ] Deploy `live_mda_enabled: true` on Pearl with MicroMDM running
+- [ ] Enroll test Mac via `macprovider enroll` and see UDID in MicroMDM
+- [ ] Verify DeviceInformation attestation command arrives at device
+- [ ] Parse DeviceAttestation response and call `UpgradeFromParsedAttestation`
+- [ ] Provider reconnects with `attestation_tier=hardware` visible in `/poolz`
+
+### 3.3 Exit criteria
 
 - [ ] Fresh MDA round-trip on enrolled test Mac
 - [ ] Reconnect reuses cached chain (no new Apple request within 7 days)
 - [ ] SE key rotation invalidates stale chain (forces refresh)
-- [ ] `pillar_c_test.go` covers Freshness=SE pubkey binding
+- [x] `pillar_c_test.go` covers Freshness=SE pubkey binding
 
 ---
 
@@ -293,6 +314,8 @@ Script auto-restores config backup on verification failure. Manual: set `require
 | 2026-07-09 | **Phase 2 started** — worktree `/Users/augstar/macprovider-attest-phase2`, branch `fix/attestation-phase2`. Operator registering Apple MDM push cert in parallel. |
 | 2026-08-07 | Partner ABM + identity.apple.com instructions added: `docs/runbooks/apple-mdm-partner-registration.md`. P2-A/P2-C already on main via PR #509. |
 | 2026-08-17 | APNs push cert issued (topic `com.apple.mgmt.External.b3ba8c97-…`). P2-B: nginx `/v1/enroll`+`/mdm/`+`/scep`, MicroMDM Pearl install — see `docs/runbooks/pearl-micromdm-install.md`. |
+| 2026-08-17 | **Phase 2 enroll E2E done** — coordinator `/v1/enroll` tested, MicroMDM on Pearl, APNs cert live. Phase 2 exit criteria met. |
+| 2026-08-17 | **Phase 3 started** — worktree `/Users/augstar/macprovider-attest-phase3`, branch `feat/attestation-phase3`. Dual-mode MDA freshness, MicroMDM API client, LiveMDAService, pool MDA cache, WS observe wiring. |
 
 ## Phase 2 — IN PROGRESS
 

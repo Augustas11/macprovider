@@ -811,6 +811,17 @@ func main() {
 		pool.WithSwapEmitter(swapEmitter),
 		pool.WithReceiptRotationEmitter(receiptRotationEmitter),
 	))
+	// Phase 3 observe-mode live MDA (disabled unless tier2.mdm.live_mda_enabled
+	// and api_url are set). Failures here are non-fatal — auth continues.
+	if liveMDA, err := mdm.NewLiveMDAService(cfg.Tier2, registry, logger, nil); err != nil {
+		logger.Error().Err(err).Msg("live MDA service init failed; continuing without live MDA")
+	} else if liveMDA != nil {
+		wsOpts = append(wsOpts, providerws.WithLiveMDA(liveMDA))
+		logger.Info().
+			Str("api_url", cfg.Tier2.MDM.APIURL).
+			Int("refresh_hours", cfg.Tier2.MDM.MDARefreshIntervalHours).
+			Msg("Phase 3 live MDA service wired (observe mode)")
+	}
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
 	if rewardsRunner != nil {
 		rewardsRunner.SetConnectivity(rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot))

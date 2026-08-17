@@ -38,6 +38,9 @@ type SEAttestationResult struct {
 	// SEPublicKey is the raw 64-byte uncompressed P-256 point (x || y,
 	// WITHOUT the 0x04 prefix), matching the runbook §1.1.C field format.
 	SEPublicKey []byte
+	// SerialNumber is the optional hardware serial from the signed attestation
+	// blob (used by Phase 3 live MDA to look up the enrolled MicroMDM device).
+	SerialNumber string
 }
 
 // verifySEAttestationToken verifies a macprovider-se-p256-v1 attestation token.
@@ -109,7 +112,11 @@ func verifySEAttestationToken(token AttestationToken, challenge []byte, authAtte
 		return pool.AttestationStatusFailed, nil
 	}
 
-	return pool.AttestationStatusAttested, &SEAttestationResult{SEPublicKey: pubKeyRaw}
+	serial, _ := signed.Attestation["serialNumber"].(string)
+	return pool.AttestationStatusAttested, &SEAttestationResult{
+		SEPublicKey:  pubKeyRaw,
+		SerialNumber: strings.TrimSpace(serial),
+	}
 }
 
 // verifyAttestationBindingSignatureWithECDSA verifies the SPEC-008

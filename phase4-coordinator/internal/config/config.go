@@ -882,6 +882,32 @@ type Tier2MDMConfig struct {
 	// "Unsigned" in the install prompt, which is acceptable for enrollment).
 	ProfileSignerCertPath string `yaml:"profile_signer_cert_path"`
 	ProfileSignerKeyPath  string `yaml:"profile_signer_key_path"`
+
+	// Phase 3 — Live MDA: MicroMDM API client settings.
+	// All fields are optional; when APIURL is empty the MDM client is
+	// disabled and live MDA round-trips are skipped (observe gate only).
+
+	// APIURL is the base URL of the MicroMDM server API, e.g.
+	// "http://127.0.0.1:8080" when MicroMDM runs on the same host.
+	// Startup-only (not hot-reloadable).
+	APIURL string `yaml:"api_url"`
+
+	// APIToken is the MicroMDM API token. Should be loaded from an
+	// environment variable via the env: prefix in production, e.g.
+	// "env:MICROMDM_API_TOKEN". When empty, the MDM client is disabled.
+	APIToken string `yaml:"api_token"`
+
+	// LiveMDAEnabled is the observe-mode gate for Phase 3 live MDA
+	// round-trips. Default false. Set to true only after MicroMDM is
+	// deployed and APNs push cert is installed. Changing to true does
+	// NOT flip require_attestation (Phase 4 gate).
+	LiveMDAEnabled bool `yaml:"live_mda_enabled"`
+
+	// MDARefreshIntervalHours controls how often the coordinator
+	// re-requests a fresh DeviceInformation attestation from MicroMDM.
+	// Apple enforces a ~7-day rate limit on DeviceAttestation commands;
+	// default 168 (7 days). Values below 24 are silently floored to 24.
+	MDARefreshIntervalHours int `yaml:"mda_refresh_interval_hours"`
 }
 
 type CoordinatorAdvertisedVersion struct {

@@ -86,6 +86,11 @@ type attestationBindingSignature struct {
 type AttestationVerifyResult struct {
 	Status   pool.AttestationStatus
 	SEResult *SEAttestationResult
+	// MDAHardware is true when MDA chain verification succeeded AND the
+	// freshness extension matched SHA256(sePublicKey) — i.e. the Apple MDA
+	// is bound to the provider's SE key via MDM DeviceAttestationNonce.
+	// When true the caller should set AttestationTier = "hardware".
+	MDAHardware bool
 }
 
 type attestationModelHashCheck struct {
@@ -96,93 +101,97 @@ type attestationModelHashCheck struct {
 // VerifyAttestationTokenExt is the full-result variant of VerifyAttestationToken.
 // It returns an AttestationVerifyResult so the caller can access SE-specific
 // output (e.g. the verified SE public key) without a second parse pass.
-func VerifyAttestationTokenExt(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger) AttestationVerifyResult {
-	status, seResult := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger, attestationModelHashCheck{})
-	return AttestationVerifyResult{Status: status, SEResult: seResult}
+// sePublicKey is optional (may be nil): when len==64 it is used as an additional
+// MDA freshness nonce (SHA256(sePublicKey)), enabling MDM DeviceAttestationNonce mode.
+func VerifyAttestationTokenExt(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, sePublicKey []byte, now time.Time, logger zerolog.Logger) AttestationVerifyResult {
+	status, seResult, mdaHardware := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, sePublicKey, now, logger, attestationModelHashCheck{})
+	return AttestationVerifyResult{Status: status, SEResult: seResult, MDAHardware: mdaHardware}
 }
 
 // VerifyAttestationTokenExtWithCatalog is the catalog-aware variant used by
 // provider admission. It preserves attestation status semantics while emitting
 // observe-mode diagnostics when the already-signed claimed.model_hash disagrees
 // with the active catalog row for modelID.
-func VerifyAttestationTokenExtWithCatalog(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey, modelID string, catalog *Catalog, now time.Time, logger zerolog.Logger) AttestationVerifyResult {
-	status, seResult := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger, attestationModelHashCheck{
+// sePublicKey is optional (may be nil): when len==64 it is used as an additional
+// MDA freshness nonce (SHA256(sePublicKey)), enabling MDM DeviceAttestationNonce mode.
+func VerifyAttestationTokenExtWithCatalog(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey, modelID string, catalog *Catalog, sePublicKey []byte, now time.Time, logger zerolog.Logger) AttestationVerifyResult {
+	status, seResult, mdaHardware := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, sePublicKey, now, logger, attestationModelHashCheck{
 		Catalog: catalog,
 		ModelID: modelID,
 	})
-	return AttestationVerifyResult{Status: status, SEResult: seResult}
+	return AttestationVerifyResult{Status: status, SEResult: seResult, MDAHardware: mdaHardware}
 }
 
 // VerifyAttestationToken verifies an attestation token and returns the status.
 // Use VerifyAttestationTokenExt when the caller needs format-specific results.
 func VerifyAttestationToken(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger) pool.AttestationStatus {
-	status, _ := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger, attestationModelHashCheck{})
+	status, _, _ := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, nil, now, logger, attestationModelHashCheck{})
 	return status
 }
 
-func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger, modelHashCheck attestationModelHashCheck) (pool.AttestationStatus, *SEAttestationResult) {
+func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, sePublicKey []byte, now time.Time, logger zerolog.Logger, modelHashCheck attestationModelHashCheck) (pool.AttestationStatus, *SEAttestationResult, bool) {
 	if !cfg.RequireAttestation && len(raw) == 0 {
-		return pool.AttestationStatusNotRequired, nil
+		return pool.AttestationStatusNotRequired, nil, false
 	}
 	if len(raw) == 0 || string(raw) == "null" {
 		if cfg.RequireAttestation {
 			logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "missing_token", "tier2.require_attestation")
-			return pool.AttestationStatusFailed, nil
+			return pool.AttestationStatusFailed, nil, false
 		}
 		// A missing token is a capability absence, not an unsupported token
 		// format. When attestation is optional, report the policy decision
 		// explicitly so clients do not treat the accepted session as an
 		// attestation failure during autoupdate eligibility checks.
-		return pool.AttestationStatusNotRequired, nil
+		return pool.AttestationStatusNotRequired, nil, false
 	}
 	if len(raw) > MaxAttestationEnvelopeBytes {
 		logAttestationEvent(logger, "attestation_token_too_large", "WARN", providerID, "reject", "token_too_large", "tier2.attestation_max_age_s")
-		return pool.AttestationStatusFailed, nil
+		return pool.AttestationStatusFailed, nil, false
 	}
 	var token AttestationToken
 	if err := json.Unmarshal(raw, &token); err != nil {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "invalid_json", "tier2.require_attestation")
-		return pool.AttestationStatusFailed, nil
+		return pool.AttestationStatusFailed, nil, false
 	}
 	if !attestationFormatAllowed(token.Format, cfg.AttestationFormats) {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "unsupported_format", "tier2.attestation_formats")
-		return pool.AttestationStatusUnsupported, nil
+		return pool.AttestationStatusUnsupported, nil, false
 	}
 	if len(token.Token) > MaxAttestationTokenBytes {
 		logAttestationEvent(logger, "attestation_token_too_large", "WARN", providerID, "reject", "token_too_large", "tier2.attestation_max_age_s")
-		return pool.AttestationStatusFailed, nil
+		return pool.AttestationStatusFailed, nil, false
 	}
 	if !validAttestationTokenEncoding(token.Token) {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "invalid_token_encoding", "tier2.require_attestation")
-		return pool.AttestationStatusFailed, nil
+		return pool.AttestationStatusFailed, nil, false
 	}
 	if token.ProviderID != providerID {
 		logAttestationEvent(logger, "provider_binding_mismatch", "WARN", providerID, "reject", "provider_binding_mismatch", "tier2.require_attestation")
-		return pool.AttestationStatusFailed, nil
+		return pool.AttestationStatusFailed, nil, false
 	}
 	wantChallenge := base64.RawURLEncoding.EncodeToString(challenge)
 	if token.Challenge != wantChallenge {
 		logAttestationEvent(logger, "attestation_replay", "WARN", providerID, "reject", "challenge_mismatch", "tier2.require_attestation")
-		return pool.AttestationStatusStale, nil
+		return pool.AttestationStatusStale, nil, false
 	}
 	if strings.TrimSpace(providerECDHPublicKey) != "" && token.KeyBinding.ProviderECDHPublicKey != providerECDHPublicKey {
 		logAttestationEvent(logger, "provider_binding_mismatch", "WARN", providerID, "reject", "ecdh_binding_mismatch", "tier2.require_attestation")
-		return pool.AttestationStatusFailed, nil
+		return pool.AttestationStatusFailed, nil, false
 	}
 	if !attestationHardwareFamilyAllowed(token) {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "hardware_family_policy_mismatch", "tier2.attestation_formats")
-		return pool.AttestationStatusFailed, nil
+		return pool.AttestationStatusFailed, nil, false
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	if token.IssuedAt.IsZero() || token.ExpiresAt.IsZero() || now.Before(token.IssuedAt.Add(-1*time.Minute)) || !now.Before(token.ExpiresAt) {
 		logAttestationEvent(logger, "attestation_stale", "WARN", providerID, "reject", "stale_or_expired", "tier2.attestation_max_age_s")
-		return pool.AttestationStatusStale, nil
+		return pool.AttestationStatusStale, nil, false
 	}
 	if cfg.AttestationMaxAgeS > 0 && now.Sub(token.IssuedAt) > time.Duration(cfg.AttestationMaxAgeS)*time.Second {
 		logAttestationEvent(logger, "attestation_stale", "WARN", providerID, "reject", "max_age_exceeded", "tier2.attestation_max_age_s")
-		return pool.AttestationStatusStale, nil
+		return pool.AttestationStatusStale, nil, false
 	}
 	// SE P-256 format: self-signed attestation, no MDA root required.
 	// Common checks above (challenge, providerID, ECDH, hardware family,
@@ -196,28 +205,28 @@ func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config,
 		} else {
 			logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "se_p256_verification_failed", "tier2.attestation_formats")
 		}
-		return status, seResult
+		return status, seResult, false
 	}
 	if len(cfg.AttestationRoots) == 0 {
 		logAttestationEvent(logger, "attestation_root_missing", "WARN", providerID, "reject", "missing_attestation_roots", "tier2.attestation_roots")
 		if cfg.RequireAttestation {
-			return pool.AttestationStatusFailed, nil
+			return pool.AttestationStatusFailed, nil, false
 		}
-		return pool.AttestationStatusUnsupported, nil
+		return pool.AttestationStatusUnsupported, nil, false
 	}
 	if cfg.AllowMockAttestation && hasMockAttestationRoot(cfg.AttestationRoots) {
 		if validMockAttestationToken(token.Token) {
 			logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "mock_attested", "tier2.attestation_roots")
-			return pool.AttestationStatusAttested, nil
+			return pool.AttestationStatusAttested, nil, false
 		}
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "invalid_mock_attestation", "tier2.attestation_roots")
-		return pool.AttestationStatusFailed, nil
+		return pool.AttestationStatusFailed, nil, false
 	}
 	// Production Apple MDA roots must not become a positive hardware signal
 	// until certificate-chain, freshness-code, public-key, device-property,
 	// and ACME CSR key-binding validation all pass.
-	if status, ok := verifyProductionMDAChainShape(token, cfg, now, authAttemptID, providerID, logger, modelHashCheck); ok {
-		return status, nil
+	if status, ok, mdaHardware := verifyProductionMDAChainShape(token, cfg, sePublicKey, now, authAttemptID, providerID, logger, modelHashCheck); ok {
+		return status, nil, mdaHardware
 	}
 	decision := "observe"
 	if cfg.RequireAttestation {
@@ -225,19 +234,23 @@ func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config,
 	}
 	logAttestationEvent(logger, "attestation_unsupported", "WARN", providerID, decision, "mda_certificate_chain_missing", "tier2.attestation_roots")
 	if cfg.RequireAttestation {
-		return pool.AttestationStatusFailed, nil
+		return pool.AttestationStatusFailed, nil, false
 	}
-	return pool.AttestationStatusUnsupported, nil
+	return pool.AttestationStatusUnsupported, nil, false
 }
 
-func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Config, now time.Time, authAttemptID, providerID string, logger zerolog.Logger, modelHashCheck attestationModelHashCheck) (pool.AttestationStatus, bool) {
+// verifyProductionMDAChainShape verifies the full Apple MDA certificate chain
+// for a production token. sePublicKey is optional (may be nil or len!=64); when
+// len==64 it is used as an additional freshness nonce (SHA256(sePublicKey)) and
+// the third return value (mdaHardware) is true when that SE-key digest matched.
+func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Config, sePublicKey []byte, now time.Time, authAttemptID, providerID string, logger zerolog.Logger, modelHashCheck attestationModelHashCheck) (pool.AttestationStatus, bool, bool) {
 	certs, ok, err := extractAttestationCertificateChain(token)
 	if !ok {
-		return "", false
+		return "", false, false
 	}
 	if err != nil {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "invalid_certificate_chain", "tier2.attestation_roots")
-		return pool.AttestationStatusFailed, true
+		return pool.AttestationStatusFailed, true, false
 	}
 	roots, err := parseAttestationRootCertificates(cfg.AttestationRoots)
 	if err != nil {
@@ -247,31 +260,32 @@ func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Confi
 		}
 		logAttestationEvent(logger, "attestation_unsupported", "WARN", providerID, decision, "invalid_attestation_roots", "tier2.attestation_roots")
 		if cfg.RequireAttestation {
-			return pool.AttestationStatusFailed, true
+			return pool.AttestationStatusFailed, true, false
 		}
-		return pool.AttestationStatusUnsupported, true
+		return pool.AttestationStatusUnsupported, true, false
 	}
 	if err := verifyAttestationCertificateChain(certs, roots, now); err != nil {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "certificate_chain_untrusted", "tier2.attestation_roots")
-		return pool.AttestationStatusFailed, true
+		return pool.AttestationStatusFailed, true, false
 	}
 	if err := verifyMDALeafPublicKey(certs[0]); err != nil {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "mda_leaf_public_key_invalid", "tier2.attestation_roots")
-		return pool.AttestationStatusFailed, true
+		return pool.AttestationStatusFailed, true, false
 	}
-	if reason := verifyMDAFreshness(certs[0], token.Token); reason != "" {
+	reason, seKeyUsed := verifyMDAFreshness(certs[0], token.Token, sePublicKey)
+	if reason != "" {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", reason, "tier2.attestation_roots")
-		return pool.AttestationStatusFailed, true
+		return pool.AttestationStatusFailed, true, false
 	}
 	if reason := verifyMDADeviceProperties(certs[0]); reason != "" {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", reason, "tier2.attestation_roots")
-		return pool.AttestationStatusFailed, true
+		return pool.AttestationStatusFailed, true, false
 	}
 	csrStatus, csrReason := verifyMDACSRKeyBinding(certs[0], token)
 	if csrReason != "" {
 		if csrStatus == pool.AttestationStatusFailed {
 			logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", csrReason, "tier2.attestation_roots")
-			return pool.AttestationStatusFailed, true
+			return pool.AttestationStatusFailed, true, false
 		}
 		decision := "observe"
 		if cfg.RequireAttestation {
@@ -279,17 +293,61 @@ func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Confi
 		}
 		logAttestationEvent(logger, "attestation_unsupported", "WARN", providerID, decision, csrReason, "tier2.attestation_roots")
 		if cfg.RequireAttestation {
-			return pool.AttestationStatusFailed, true
+			return pool.AttestationStatusFailed, true, false
 		}
-		return pool.AttestationStatusUnsupported, true
+		return pool.AttestationStatusUnsupported, true, false
 	}
 	if reason := verifyAttestationBindingSignature(certs[0], token, authAttemptID); reason != "" {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", reason, "tier2.require_attestation")
-		return pool.AttestationStatusFailed, true
+		return pool.AttestationStatusFailed, true, false
 	}
 	observeSignedModelHashAgainstCatalog(token, modelHashCheck, providerID, logger)
-	logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "mda_attested", "tier2.attestation_roots")
-	return pool.AttestationStatusAttested, true
+	if seKeyUsed {
+		logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "mda_hardware_attested", "tier2.attestation_roots")
+	} else {
+		logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "mda_attested", "tier2.attestation_roots")
+	}
+	return pool.AttestationStatusAttested, true, seKeyUsed
+}
+
+// VerifyMDACertChainWithSEKey verifies a raw DER certificate chain (leaf first)
+// against the configured attestation roots and the provided SE public key.
+// Used by internal/mdm.LiveMDAService to re-verify cached MDA proofs without
+// synthesising a full AttestationToken.
+//
+// Returns (true, seKeyUsed) when the chain is valid; seKeyUsed=true when
+// freshness was satisfied by SHA256(sePublicKey) (MDA hardware tier).
+// Returns (false, false) on any chain or freshness failure.
+func VerifyMDACertChainWithSEKey(certChain [][]byte, cfg config.Tier2Config, sePublicKey []byte, now time.Time, logger zerolog.Logger) (ok bool, seKeyUsed bool) {
+	if len(certChain) == 0 {
+		return false, false
+	}
+	certs := make([]*x509.Certificate, 0, len(certChain))
+	for _, der := range certChain {
+		c, err := x509.ParseCertificate(der)
+		if err != nil {
+			return false, false
+		}
+		certs = append(certs, c)
+	}
+	roots, err := parseAttestationRootCertificates(cfg.AttestationRoots)
+	if err != nil {
+		return false, false
+	}
+	if err := verifyAttestationCertificateChain(certs, roots, now); err != nil {
+		return false, false
+	}
+	if err := verifyMDALeafPublicKey(certs[0]); err != nil {
+		return false, false
+	}
+	// Use an empty token string for the legacy freshness digest so that it
+	// effectively cannot match — only the SE key path should succeed here.
+	reason, seKeyUsed := verifyMDAFreshness(certs[0], "", sePublicKey)
+	if reason != "" {
+		return false, false
+	}
+	_ = logger
+	return true, seKeyUsed
 }
 
 func verifyMDALeafPublicKey(leaf *x509.Certificate) error {
@@ -354,21 +412,30 @@ func tokenClaimedModelID(token AttestationToken) string {
 	return strings.TrimSpace(modelID)
 }
 
-func verifyMDAFreshness(leaf *x509.Certificate, deviceAttestToken string) string {
+// verifyMDAFreshness checks the MDA leaf freshness extension against expected
+// digest(s). Always accepts SHA256(deviceAttestToken) (legacy SPEC-008 path).
+// When len(sePublicKey)==64, also accepts SHA256(sePublicKey) (MDM
+// DeviceAttestationNonce mode); seKeyUsed=true when that path matched.
+func verifyMDAFreshness(leaf *x509.Certificate, deviceAttestToken string, sePublicKey []byte) (reason string, seKeyUsed bool) {
 	extension, ok := certificateExtension(leaf, mdaOIDFreshness)
-	if !ok {
-		return "mda_freshness_missing"
-	}
-	if len(extension.Value) == 0 {
-		return "mda_freshness_missing"
+	if !ok || len(extension.Value) == 0 {
+		return "mda_freshness_missing", false
 	}
 	expected := expectedMDAFreshnessDigest(deviceAttestToken)
 	for _, candidate := range mdaFreshnessValueCandidates(extension.Value) {
 		if subtle.ConstantTimeCompare(candidate, expected[:]) == 1 {
-			return ""
+			return "", false
 		}
 	}
-	return "mda_freshness_mismatch"
+	if len(sePublicKey) == rawP256PubkeyBytes {
+		seExpected := sha256.Sum256(sePublicKey)
+		for _, candidate := range mdaFreshnessValueCandidates(extension.Value) {
+			if subtle.ConstantTimeCompare(candidate, seExpected[:]) == 1 {
+				return "", true
+			}
+		}
+	}
+	return "mda_freshness_mismatch", false
 }
 
 func expectedMDAFreshnessDigest(deviceAttestToken string) [sha256.Size]byte {
