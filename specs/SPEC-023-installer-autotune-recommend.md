@@ -589,7 +589,7 @@ Constants locked in v0.6:
 | `diversification_band` | `0.85` | Retained in demand-rank JSON schema for forward compatibility; **not used for recommendation pick in v0.5**. Re-enable when supply exceeds demand. |
 | `provider_share` | `0.90` | Represented by rate-card row `provider_share_bps = 9000`; the row value is authoritative, but v0.5 rows are expected to use 0.90. |
 | `tier_weight` | `1.0` | Applies to all rows and tiers in v0.5. Tier-specific calibration is deferred to v0.2 follow-up. |
-| ranked output length | `5` | The JSON `candidates[]` array defaults to the top 5 rows after ranking, including eligible rows first and then selected ineligible diagnostic rows only when no eligible row exists. |
+| ranked output length | `5 (+1 donor fallback)` | The JSON `candidates[]` array defaults to the top 5 rows after ranking, including eligible rows first and then selected ineligible diagnostic rows only when no eligible row exists. When `donor_fallback_explanation` is present for a fallback outside those 5 rows, emit that donor fallback as one additional displayed candidate so the explanation remains bound to a visible model. |
 | `diversification_id` | HMAC-derived stable ID | Used for recommendation-cache identity only in v0.5; does not alter `recommended_model` selection. |
 
 **Real provider earnings** are recorded after tokens are served:
@@ -645,7 +645,7 @@ In v0.4, there is no paid financial gate. All eligible rows proceed to recommend
 
 ## 6. Output JSON contract (`autotune --recommend`)
 
-`autotune --recommend --json` MUST emit deterministic field order exactly as shown below. Unknown optional data uses `null`; fields are not reordered, renamed, or omitted in v0.4.
+`autotune --recommend --json` MUST emit deterministic field order exactly as shown below. Unknown optional data uses `null`; fields are not reordered, renamed, or omitted. The explanation fields are additive `autotune_recommend.v1` extensions. Older v1 documents without them remain schema-decodable by Malibu for compatibility, but they are not valid recommendation display/adoption evidence for a non-null `recommended_model`; Malibu MUST reject recommended documents that lack selected/candidate explanation parity rather than rendering legacy free-text rationale as trusted recommendation evidence. Malibu treats this document family as advisory display evidence unless a later schema adds verifiable adoption authority; explanation parity alone is not one-click adoption authority.
 
 ```json
 {
@@ -681,6 +681,42 @@ In v0.4, there is no paid financial gate. All eligible rows proceed to recommend
       "confidence": "low",
       "why": "<one-line reason>",
       "raw_score": 0.0,
+      "explanation": {
+        "summary": "<safe one-line rationale>",
+        "warning_state": "ready",
+        "measured_tps": 0.0,
+        "throughput_source": "measured",
+        "memory_fit": {
+          "required_gb": 0,
+          "total_gb": 0,
+          "safety_margin_gb": 4,
+          "headroom_gb": 0.0
+        },
+        "demand_signal": {
+          "rank": null,
+          "weight": 0.0,
+          "recommendable": false,
+          "min_provider_target": 0,
+          "ready_provider_count": null,
+          "supply_deficit_multiplier": 0.0
+        },
+        "rate_signal": {
+          "prompt_rate_usd_per_million_tokens": 0.0,
+          "completion_rate_usd_per_million_tokens": 0.0,
+          "provider_share_bps": 0,
+          "provider_completion_payout_usd_per_million_tokens": 0.0
+        },
+        "earning_potential": {
+          "score": 0.0,
+          "kind": "relative_ranking_score",
+          "note": "Estimated earning potential only; actual rewards depend on buyer demand, uptime, accepted work, and settlement."
+        },
+        "local_health": {
+          "warnings": []
+        },
+        "confidence": "low",
+        "lost_reason": "<machine_reason_slug>"
+      },
       "bench_gate_provenance": {
         "source": "policy",
         "notes": "#744 audit: gate set by operator policy to broaden eligibility."
@@ -689,7 +725,19 @@ In v0.4, there is no paid financial gate. All eligible rows proceed to recommend
       "buyer_ttft_ceiling_exceeded": false
     }
   ],
-  "warnings": []
+  "warnings": [],
+  "selected_explanation": null,
+  "alternative_explanations": [
+    {
+      "rank": 2,
+      "model": "<model_key>",
+      "eligible": true,
+      "lost_reason": "lower_expected_earning_potential",
+      "summary": "<safe one-line rationale>",
+      "expected_earning_potential_score": 0.0
+    }
+  ],
+  "donor_fallback_explanation": null
 }
 ```
 
@@ -702,9 +750,24 @@ Schema rules:
 - `recommended_model` is a model key string when at least one eligible row exists; otherwise `null`.
 - `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD/M rates for the selected recommendation, derived from rate-card credits and `usd_per_million_credits`. Both are `null` when `recommended_model` is `null`.
 - `serve_config` is `null` in recommendation-only output when no apply-ready serving configuration has been attached. When present, it is the exact model/knob payload the installer can apply for the selected recommendation; donor outcomes keep `donor_mode = true`.
-- `candidates[]` default length is at most 5. It is sorted by eligibility first, then `raw_score` descending, then `model` lexicographically for deterministic ties.
+- `candidates[]` default length is at most 5. It is sorted by eligibility first, then `raw_score` descending, then `model` lexicographically for deterministic ties. It MAY contain one additional donor fallback candidate when `donor_fallback_explanation` is present and the fallback is outside the default 5 rows.
 - Candidate `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD display rates from the rate-card row used for that candidate.
+- Top-level `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` MUST be finite, non-negative, and equal to the selected candidate's candidate-level rates. When `selected_explanation` is present, they MUST also equal `selected_explanation.rate_signal.prompt_rate_usd_per_million_tokens` and `selected_explanation.rate_signal.completion_rate_usd_per_million_tokens`.
 - `raw_score` is rounded to 6 decimal places in JSON.
+- Candidate `explanation` is optional for legacy v1 decoding but MUST be present in newly emitted output for every displayed candidate. A Malibu consumer that displays a non-null `recommended_model` as recommendation evidence MUST require the selected candidate explanation and top-level `selected_explanation` to be present and semantically equal. Its fields are display-safe, machine-readable evidence for the candidate's rank and eligibility. `summary` is a safe one-line rationale from the CLI-owned template set and MUST NOT contain local paths, provider identity material, hardware identity material, HMAC/key material, or guaranteed/daily/hourly/weekly income claims.
+- Candidate `explanation.measured_tps`, `explanation.memory_fit.headroom_gb`, `explanation.memory_fit.total_gb`, and `explanation.earning_potential.score` MUST match the candidate's `tokens_per_second`, `memory_headroom_gb`, detected `hardware.memory_gb`, and `raw_score` respectively. Consumers MUST reject contradictory explanation/candidate evidence rather than trying to reconcile it.
+- `explanation.warning_state` is one of `ready`, `advisory`, or `blocked`.
+- `explanation.throughput_source` is one of `measured`, `catalog_estimate`, or `unavailable`; `catalog_estimate` MUST be used when installed-only disclosure uses signed catalog estimates instead of a local throughput benchmark.
+- `explanation.memory_fit` reports signed candidate memory requirement, detected total memory, the local safety margin, and computed headroom in GB.
+- `explanation.demand_signal` reports the signed demand rank inputs used for relative ranking. Missing demand uses `rank = null`, `recommendable = false`, and `weight = 0.0`; it must be described as unavailable, not as live demand.
+- `explanation.rate_signal` reports the rate-card row used for relative ranking. Provider payout values are per-million-token rates and MUST NOT be described as accrued rewards.
+- `explanation.earning_potential.kind` is exactly `relative_ranking_score`. `explanation.earning_potential.note` is exactly `Estimated earning potential only; actual rewards depend on buyer demand, uptime, accepted work, and settlement.`
+- `explanation.local_health.warnings` contains only stable local probe warning slugs such as `thermal_throttle_detected`, `thermal_throttled`, `swap_observed_under_load`, and `buyer_ttft_ceiling_exceeded`.
+- `explanation.confidence` uses the same values as candidate `confidence`; installed-only catalog estimate disclosure may use `catalog_estimate`.
+- `explanation.lost_reason` is a lowercase machine slug explaining why the candidate is selected, lower-ranked, or blocked.
+- `selected_explanation` is `null` when there is no selected candidate. When present, it MUST be byte-for-byte semantically equal to the selected candidate's `explanation`.
+- `alternative_explanations[]` is optional for legacy readers but newly emitted output SHOULD include non-selected displayed candidates. Each alternative explanation MUST bind to exactly one non-selected candidate with the same `model`, `lost_reason`, `summary`, and `earning_potential.score`.
+- `donor_fallback_explanation` is `null` unless a donor fallback candidate is selected for display; when present it has the same object shape and safety constraints as candidate `explanation` and MUST bind to exactly one displayed candidate with a semantically equal candidate `explanation`.
 - `bench_gate_provenance` is copied from the signed candidate catalog row for the displayed candidate. Missing signed-catalog provenance is a catalog integrity failure, not a display fallback, except for the exact A4 transition-pinned July 10 live fetch where clients may derive the display-only #744 provenance classification while retaining the original signed bytes as the selected catalog hash.
 - When `bench_gate_provenance.source == "omlx_seeded"`, JSON and human output MUST make the provisional status explicit. The rendered text MUST state that the gate is oMLX-seeded, not macprovider-verified, and not eligible for paid-default recommendation until verified provider autotune promotion replaces the seed per §12.
 - `bench_gate_drift` is a sorted array containing `tps_below_gate` and/or `ttft_above_gate` when local measured benchmark results diverge from the advisory catalog target.

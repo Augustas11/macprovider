@@ -1655,6 +1655,32 @@ struct AutotuneCandidateScore: Equatable {
     var benchGateProvenance: CandidateCatalog.BenchGate.Provenance
     var benchGateDrift: [String]
     var buyerTTFTCeilingExceeded: Bool
+    var explanation: AutotuneCandidateExplanation
+}
+
+struct AutotuneCandidateExplanation: Equatable {
+    var summary: String
+    var warningState: String
+    var measuredTPS: Double
+    var throughputSource: String
+    var memoryRequiredGB: Int
+    var memoryTotalGB: Int
+    var memorySafetyMarginGB: Int
+    var memoryHeadroomGB: Double
+    var demandRank: Int?
+    var demandWeight: Double
+    var demandRecommendable: Bool
+    var minProviderTarget: Int
+    var readyProviderCount: Int?
+    var supplyDeficitMultiplier: Double
+    var promptRateUSDPerMillionTokens: Double
+    var completionRateUSDPerMillionTokens: Double
+    var providerShareBPS: Int64
+    var providerCompletionPayoutUSDPerMillionTokens: Double
+    var expectedEarningPotentialScore: Double
+    var localHealthWarnings: [String]
+    var confidence: String
+    var lostReason: String
 }
 
 struct AutotuneRecommendResult: Equatable {
@@ -1752,11 +1778,19 @@ struct AutotuneRecommendEngine {
         }
 
         let scored = request.candidateCatalog.rows.keys.sorted().compactMap { modelKey -> AutotuneCandidateScore? in
-            guard let candidate = request.candidateCatalog.rows[modelKey],
-                  let demand = request.demandRank.rows[modelKey]
-            else {
+            guard let candidate = request.candidateCatalog.rows[modelKey] else {
                 return nil
             }
+            let demandAvailable = request.demandRank.rows[modelKey] != nil
+            let demand = request.demandRank.rows[modelKey] ?? DemandRank.Row(
+                demandWeight: 0,
+                rank: nil,
+                recommendable: false,
+                minProviderTarget: 0,
+                readyProviderCount: nil,
+                supplyDeficitMultiplier: nil,
+                minDwellHours: nil
+            )
             let rateMatch = request.rateCard.rowForRecommendation(modelKey: modelKey)
             let benchmark = request.benchmarks[modelKey]
             let eligible = isEligible(
@@ -1769,6 +1803,7 @@ struct AutotuneRecommendEngine {
             )
             let measuredTPS = benchmark?.sustainedTPS ?? 0
             let tps = measuredTPS.isFinite ? measuredTPS : 0
+            let throughputSource = Self.throughputSource(benchmark)
             let benchGateDrift = benchmark.map {
                 Self.advisoryBenchmarkWarnings($0, candidate: candidate)
                     .map(\.rawValue)
@@ -1781,10 +1816,11 @@ struct AutotuneRecommendEngine {
             let rateRow = rateMatch?.row
             let promptUSD = rateRow?.usdPerMillionPromptTokens(creditsPerMillion: request.rateCard.usdPerMillionCredits) ?? 0
             let completionUSD = rateRow?.usdPerMillionCompletionTokens(creditsPerMillion: request.rateCard.usdPerMillionCredits) ?? 0
-            let providerShare = Double(rateRow?.providerShareBPS ?? 0) / 10_000.0
+            let providerShareBPS = rateRow?.providerShareBPS ?? 0
+            let providerShare = Double(providerShareBPS) / 10_000.0
             let payoutScore = Double(rateRow?.completionRatePerMtok ?? 0) * providerShare
-            let demandScore = max(demand.demandWeight, request.demandRank.coldStartFloor)
-            let shortageScore = demand.effectiveSupplyDeficitMultiplier
+            let demandScore = demandAvailable ? max(demand.demandWeight, request.demandRank.coldStartFloor) : 0
+            let shortageScore = demandAvailable ? demand.effectiveSupplyDeficitMultiplier : 0
             let expectedEarningsScore = payoutScore * max(tps, 0) * demandScore * shortageScore
             let headroom = Double(request.hardware.memoryGB - Self.safetyMarginGB - candidate.minRAMGB)
             let servedModel = rateMatch.map {
@@ -1795,6 +1831,32 @@ struct AutotuneRecommendEngine {
                 candidateWarnings.insert(.rateCardDefaultTierUsed)
             }
             let confidence = confidence(warnings: candidateWarnings, benchmark: benchmark, benchGateDrift: benchGateDrift)
+            let localHealthWarnings = Self.localHealthWarnings(
+                benchmark: benchmark,
+                buyerTTFTCeilingExceeded: buyerTTFTCeilingExceeded
+            )
+            let lostReason = Self.lostReason(
+                modelKey: modelKey,
+                candidate: candidate,
+                demand: demand,
+                rateCardRow: rateRow,
+                benchmark: benchmark,
+                request: request,
+                buyerTTFTCeilingExceeded: buyerTTFTCeilingExceeded,
+                eligible: eligible,
+                demandAvailable: demandAvailable
+            )
+            let warningState = Self.warningState(
+                eligible: eligible,
+                confidence: confidence,
+                localHealthWarnings: localHealthWarnings,
+                candidateWarnings: candidateWarnings
+            )
+            let summary = Self.explanationSummary(
+                modelKey: modelKey,
+                eligible: eligible,
+                lostReason: lostReason
+            )
             return AutotuneCandidateScore(
                 rank: 0,
                 catalogKey: modelKey,
@@ -1815,7 +1877,31 @@ struct AutotuneRecommendEngine {
                 rawScore: expectedEarningsScore.rounded6,
                 benchGateProvenance: candidate.benchGate.provenance,
                 benchGateDrift: benchGateDrift,
-                buyerTTFTCeilingExceeded: buyerTTFTCeilingExceeded
+                buyerTTFTCeilingExceeded: buyerTTFTCeilingExceeded,
+                explanation: AutotuneCandidateExplanation(
+                    summary: summary,
+                    warningState: warningState,
+                    measuredTPS: tps.rounded6,
+                    throughputSource: throughputSource,
+                    memoryRequiredGB: candidate.minRAMGB,
+                    memoryTotalGB: request.hardware.memoryGB,
+                    memorySafetyMarginGB: Self.safetyMarginGB,
+                    memoryHeadroomGB: headroom.rounded6,
+                    demandRank: demand.rank,
+                    demandWeight: demand.demandWeight.rounded6,
+                    demandRecommendable: demand.recommendable,
+                    minProviderTarget: demand.minProviderTarget,
+                    readyProviderCount: demand.readyProviderCount,
+                    supplyDeficitMultiplier: shortageScore.rounded6,
+                    promptRateUSDPerMillionTokens: promptUSD.rounded6,
+                    completionRateUSDPerMillionTokens: completionUSD.rounded6,
+                    providerShareBPS: providerShareBPS,
+                    providerCompletionPayoutUSDPerMillionTokens: (completionUSD * providerShare).rounded6,
+                    expectedEarningPotentialScore: expectedEarningsScore.rounded6,
+                    localHealthWarnings: localHealthWarnings,
+                    confidence: confidence,
+                    lostReason: lostReason
+                )
             )
         }
         .sorted { a, b in
@@ -1831,6 +1917,14 @@ struct AutotuneRecommendEngine {
         .map { offset, value in
             var next = value
             next.rank = offset + 1
+            if next.eligible {
+                next.explanation.lostReason = offset == 0
+                    ? "selected_best_expected_earning_potential"
+                    : "lower_expected_earning_potential"
+                next.explanation.summary = offset == 0
+                    ? "Selected for the best estimated earning potential on this Mac."
+                    : "Eligible, but another model has stronger estimated earning potential on this Mac."
+            }
             return next
         }
 
@@ -1880,7 +1974,11 @@ struct AutotuneRecommendEngine {
             warnings.insert(.swapObservedUnderLoad)
         }
 
-        let resultCandidates = eligible.isEmpty ? Array(scored.prefix(5)) : Array(eligible.prefix(5))
+        var resultCandidates = eligible.isEmpty ? Array(scored.prefix(5)) : Array(eligible.prefix(5))
+        if let donorFallback,
+           !resultCandidates.contains(where: { $0.catalogKey == donorFallback.catalogKey }) {
+            resultCandidates.append(donorFallback)
+        }
         let benchmarkedCount = scored.reduce(0) { count, score in
             request.benchmarks[score.catalogKey] == nil ? count : count + 1
         }
@@ -2051,6 +2149,114 @@ struct AutotuneRecommendEngine {
         return "high"
     }
 
+    private static func localHealthWarnings(
+        benchmark: CandidateBenchmark?,
+        buyerTTFTCeilingExceeded: Bool
+    ) -> [String] {
+        var warnings: [String] = []
+        if benchmark?.thermalThrottleDetected == true {
+            warnings.append("thermal_throttle_detected")
+        }
+        if benchmark?.swapDetected == true {
+            warnings.append("swap_observed_under_load")
+        }
+        if buyerTTFTCeilingExceeded {
+            warnings.append("buyer_ttft_ceiling_exceeded")
+        }
+        return warnings
+    }
+
+    private static func throughputSource(_ benchmark: CandidateBenchmark?) -> String {
+        guard let benchmark else { return "unavailable" }
+        if benchmark.benchmarkID?.hasPrefix("installed-only-") == true {
+            return "catalog_estimate"
+        }
+        return "measured"
+    }
+
+    private static func warningState(
+        eligible: Bool,
+        confidence: String,
+        localHealthWarnings: [String],
+        candidateWarnings: Set<AutotuneRecommendWarning>
+    ) -> String {
+        if !eligible { return "blocked" }
+        if !localHealthWarnings.isEmpty || confidence != "high" || !candidateWarnings.isEmpty {
+            return "advisory"
+        }
+        return "ready"
+    }
+
+    private static func explanationSummary(
+        modelKey: String,
+        eligible: Bool,
+        lostReason: String
+    ) -> String {
+        if eligible {
+            return "\(modelKey) is eligible and will be ranked by earning potential.".prefixString(160)
+        }
+        switch lostReason {
+        case "paid_trust_blocked":
+            return "Paid recommendation is unavailable until signed inputs are trusted.".prefixString(160)
+        case "demand_not_recommendable":
+            return "\(modelKey) is not currently marked recommendable by demand signal.".prefixString(160)
+        case "demand_signal_unavailable":
+            return "\(modelKey) has no trusted demand signal for earning estimates.".prefixString(160)
+        case "runtime_not_recommendable":
+            return "\(modelKey) is not in recommendable runtime status.".prefixString(160)
+        case "rate_card_unavailable":
+            return "\(modelKey) has no trusted rate-card row for earning estimates.".prefixString(160)
+        case "missing_model_artifact_identity":
+            return "\(modelKey) is missing release-pinned model artifact identity.".prefixString(160)
+        case "insufficient_memory_headroom":
+            return "\(modelKey) does not fit with the local memory safety margin.".prefixString(160)
+        case "bandwidth_tier_below_minimum":
+            return "\(modelKey) needs a higher memory-bandwidth tier than this Mac advertises.".prefixString(160)
+        case "benchmark_unavailable":
+            return "\(modelKey) has no current local throughput benchmark.".prefixString(160)
+        case "thermal_throttle_detected":
+            return "\(modelKey) was blocked by thermal throttling during the probe.".prefixString(160)
+        case "swap_observed_under_load":
+            return "\(modelKey) was blocked because swap was observed under probe load.".prefixString(160)
+        case "buyer_ttft_ceiling_exceeded":
+            return "\(modelKey) was blocked by the buyer latency ceiling.".prefixString(160)
+        case "benchmark_evidence_stale_or_mismatched":
+            return "\(modelKey) needs fresh local benchmark evidence.".prefixString(160)
+        default:
+            return "\(modelKey) did not clear one or more recommendation gates.".prefixString(160)
+        }
+    }
+
+    private static func lostReason(
+        modelKey: String,
+        candidate: CandidateCatalog.Row,
+        demand: DemandRank.Row,
+        rateCardRow: RateCardProjection.Row?,
+        benchmark: CandidateBenchmark?,
+        request: AutotuneRecommendRequest,
+        buyerTTFTCeilingExceeded: Bool,
+        eligible: Bool,
+        demandAvailable: Bool
+    ) -> String {
+        if eligible { return "selected_or_lower_expected_earning_potential" }
+        if !paidTrustBlockingWarnings.isDisjoint(with: request.warnings) { return "paid_trust_blocked" }
+        if !demandAvailable { return "demand_signal_unavailable" }
+        if !demand.recommendable { return "demand_not_recommendable" }
+        if candidate.runtimeStatus != "recommendable" { return "runtime_not_recommendable" }
+        if rateCardRow == nil { return "rate_card_unavailable" }
+        if candidate.modelRevision == nil || candidate.modelSHA256 == nil { return "missing_model_artifact_identity" }
+        if candidate.minRAMGB > request.hardware.memoryGB - safetyMarginGB { return "insufficient_memory_headroom" }
+        if !request.hardware.bandwidthTier.satisfies(minimum: candidate.minBandwidthTier) { return "bandwidth_tier_below_minimum" }
+        guard let benchmark else { return "benchmark_unavailable" }
+        if benchmark.thermalThrottleDetected { return "thermal_throttle_detected" }
+        if benchmark.swapDetected { return "swap_observed_under_load" }
+        if buyerTTFTCeilingExceeded { return "buyer_ttft_ceiling_exceeded" }
+        if !cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey) {
+            return "benchmark_evidence_stale_or_mismatched"
+        }
+        return "unknown_recommendation_gate"
+    }
+
     private func why(
         modelKey: String,
         candidate: CandidateCatalog.Row,
@@ -2085,8 +2291,17 @@ extension AutotuneRecommendResult {
         let warningsJSON = warnings.map { "\"\($0.rawValue)\"" }.joined(separator: ",")
         let candidatesJSON = candidates.map(Self.candidateJSON).joined(separator: ",")
         let serveConfigJSON = serveConfig.map { Self.serveConfigJSON($0, donorMode: donorMode) } ?? "null"
+        let selectedExplanationJSON = selectedCandidate.map { Self.explanationJSON($0.explanation) } ?? "null"
+        let alternativeExplanations = candidates
+            .filter { candidate in
+                guard let recommendedModel else { return true }
+                return candidate.model != recommendedModel
+            }
+            .map(Self.alternativeExplanationJSON)
+            .joined(separator: ",")
+        let donorFallbackExplanationJSON = donorFallbackCandidate.map { Self.explanationJSON($0.explanation) } ?? "null"
         return """
-        {"schema_version":"autotune_recommend.v1","generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"hardware":{"machine":\(hardware.machine?.jsonEscaped ?? "null"),"chip":\(hardware.chip.jsonEscaped),"memory_gb":\(hardware.memoryGB),"bandwidth_tier":\(hardware.bandwidthTier.rawValue.jsonEscaped),"detected":\(hardware.detected),"os_version":\(hardware.osVersion.jsonEscaped),"binary_version":\(hardware.binaryVersion.jsonEscaped)},"inputs":{"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped)},"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"prompt_rate_usd_per_million_tokens":\(promptRatePerMillionTokens?.jsonNumber ?? "null"),"completion_rate_usd_per_million_tokens":\(completionRatePerMillionTokens?.jsonNumber ?? "null"),"serve_config":\(serveConfigJSON),"candidates":[\(candidatesJSON)],"warnings":[\(warningsJSON)]}
+        {"schema_version":"autotune_recommend.v1","generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"hardware":{"machine":\(hardware.machine?.jsonEscaped ?? "null"),"chip":\(hardware.chip.jsonEscaped),"memory_gb":\(hardware.memoryGB),"bandwidth_tier":\(hardware.bandwidthTier.rawValue.jsonEscaped),"detected":\(hardware.detected),"os_version":\(hardware.osVersion.jsonEscaped),"binary_version":\(hardware.binaryVersion.jsonEscaped)},"inputs":{"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped)},"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"prompt_rate_usd_per_million_tokens":\(promptRatePerMillionTokens?.jsonNumber ?? "null"),"completion_rate_usd_per_million_tokens":\(completionRatePerMillionTokens?.jsonNumber ?? "null"),"serve_config":\(serveConfigJSON),"candidates":[\(candidatesJSON)],"warnings":[\(warningsJSON)],"selected_explanation":\(selectedExplanationJSON),"alternative_explanations":[\(alternativeExplanations)],"donor_fallback_explanation":\(donorFallbackExplanationJSON)}
         """
     }
 
@@ -2099,7 +2314,22 @@ extension AutotuneRecommendResult {
     private static func candidateJSON(_ candidate: AutotuneCandidateScore) -> String {
         let driftJSON = candidate.benchGateDrift.map(\.jsonEscaped).joined(separator: ",")
         return """
-        {"rank":\(candidate.rank),"model":\(candidate.model.jsonEscaped),"eligible":\(candidate.eligible),"prompt_rate_usd_per_million_tokens":\(candidate.promptRateUSDPerMillionTokens.jsonNumber),"completion_rate_usd_per_million_tokens":\(candidate.completionRateUSDPerMillionTokens.jsonNumber),"tokens_per_second":\(candidate.tokensPerSecond.jsonNumber),"memory_headroom_gb":\(candidate.memoryHeadroomGB.jsonNumber),"confidence":\(candidate.confidence.jsonEscaped),"why":\(candidate.why.jsonEscaped),"raw_score":\(candidate.rawScore.jsonNumber),"bench_gate_provenance":\(benchGateProvenanceJSON(candidate.benchGateProvenance)),"bench_gate_drift":[\(driftJSON)],"buyer_ttft_ceiling_exceeded":\(candidate.buyerTTFTCeilingExceeded)}
+        {"rank":\(candidate.rank),"model":\(candidate.model.jsonEscaped),"eligible":\(candidate.eligible),"prompt_rate_usd_per_million_tokens":\(candidate.promptRateUSDPerMillionTokens.jsonNumber),"completion_rate_usd_per_million_tokens":\(candidate.completionRateUSDPerMillionTokens.jsonNumber),"tokens_per_second":\(candidate.tokensPerSecond.jsonNumber),"memory_headroom_gb":\(candidate.memoryHeadroomGB.jsonNumber),"confidence":\(candidate.confidence.jsonEscaped),"why":\(candidate.why.jsonEscaped),"raw_score":\(candidate.rawScore.jsonNumber),"explanation":\(explanationJSON(candidate.explanation)),"bench_gate_provenance":\(benchGateProvenanceJSON(candidate.benchGateProvenance)),"bench_gate_drift":[\(driftJSON)],"buyer_ttft_ceiling_exceeded":\(candidate.buyerTTFTCeilingExceeded)}
+        """
+    }
+
+    private static func alternativeExplanationJSON(_ candidate: AutotuneCandidateScore) -> String {
+        """
+        {"rank":\(candidate.rank),"model":\(candidate.model.jsonEscaped),"eligible":\(candidate.eligible),"lost_reason":\(candidate.explanation.lostReason.jsonEscaped),"summary":\(candidate.explanation.summary.jsonEscaped),"expected_earning_potential_score":\(candidate.explanation.expectedEarningPotentialScore.jsonNumber)}
+        """
+    }
+
+    private static func explanationJSON(_ explanation: AutotuneCandidateExplanation) -> String {
+        let rankJSON = explanation.demandRank.map(String.init) ?? "null"
+        let readyJSON = explanation.readyProviderCount.map(String.init) ?? "null"
+        let localWarningsJSON = explanation.localHealthWarnings.map(\.jsonEscaped).joined(separator: ",")
+        return """
+        {"summary":\(explanation.summary.jsonEscaped),"warning_state":\(explanation.warningState.jsonEscaped),"measured_tps":\(explanation.measuredTPS.jsonNumber),"throughput_source":\(explanation.throughputSource.jsonEscaped),"memory_fit":{"required_gb":\(explanation.memoryRequiredGB),"total_gb":\(explanation.memoryTotalGB),"safety_margin_gb":\(explanation.memorySafetyMarginGB),"headroom_gb":\(explanation.memoryHeadroomGB.jsonNumber)},"demand_signal":{"rank":\(rankJSON),"weight":\(explanation.demandWeight.jsonNumber),"recommendable":\(explanation.demandRecommendable),"min_provider_target":\(explanation.minProviderTarget),"ready_provider_count":\(readyJSON),"supply_deficit_multiplier":\(explanation.supplyDeficitMultiplier.jsonNumber)},"rate_signal":{"prompt_rate_usd_per_million_tokens":\(explanation.promptRateUSDPerMillionTokens.jsonNumber),"completion_rate_usd_per_million_tokens":\(explanation.completionRateUSDPerMillionTokens.jsonNumber),"provider_share_bps":\(explanation.providerShareBPS),"provider_completion_payout_usd_per_million_tokens":\(explanation.providerCompletionPayoutUSDPerMillionTokens.jsonNumber)},"earning_potential":{"score":\(explanation.expectedEarningPotentialScore.jsonNumber),"kind":"relative_ranking_score","note":"Estimated earning potential only; actual rewards depend on buyer demand, uptime, accepted work, and settlement."},"local_health":{"warnings":[\(localWarningsJSON)]},"confidence":\(explanation.confidence.jsonEscaped),"lost_reason":\(explanation.lostReason.jsonEscaped)}
         """
     }
 

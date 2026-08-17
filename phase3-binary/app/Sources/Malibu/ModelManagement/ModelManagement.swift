@@ -1305,11 +1305,13 @@ final class ModelManagementStore: ObservableObject {
                 recommendationLine = String(localized: "Recommended installed model: \(target)", comment: "Recommendation available")
                 MalibuAccessibility.announce(String(localized: "A new installed model recommendation is available for \(target).", comment: "Recommendation VoiceOver announcement"))
             } else {
-                recommendation = nil
+                recommendation = document.hasVisibleWhyNotFeedback ? document : nil
                 recommendationJSON = nil
                 if let identity = document.identity(currentModelID: currentModelID),
                    recommendationSchedule.suppresses(identity: identity, at: now) {
                     recommendationLine = String(localized: "The current recommendation is hidden until its inputs change or the 24-hour snooze ends.", comment: "Recommendation identity snoozed")
+                } else if document.hasVisibleWhyNotFeedback {
+                    recommendationLine = String(localized: "Checked installed models; no installed model is recommended right now.", comment: "No recommendation with explanation result")
                 } else {
                     recommendationLine = String(localized: "Checked installed models; no new recommendation is available.", comment: "No recommendation result")
                 }
