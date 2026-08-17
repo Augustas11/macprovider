@@ -113,6 +113,7 @@ func TestHandleMDACommandWebhookHappyPathAndSerialMismatch(t *testing.T) {
 		bindings: NewDeviceBindingStore(),
 		pending:  make(map[string]pendingMDARequest),
 	}
+	_ = svc.bindings.Claim("prov-1", "C02EXPECTED")
 	svc.recordPending("UDID-1", "cmd-1", pendingMDARequest{
 		ProviderID:     "prov-1",
 		AssignedID:     "asg-1",
@@ -232,6 +233,7 @@ func TestHandleMDACommandWebhookAcknowledgeEvent(t *testing.T) {
 		bindings: NewDeviceBindingStore(),
 		pending:  make(map[string]pendingMDARequest),
 	}
+	_ = svc.bindings.Claim("prov-ack", "C02ACKTEST1")
 	svc.recordPending("UDID-ACK-1", "cmd-ack-uuid", pendingMDARequest{
 		ProviderID: "prov-ack", AssignedID: "asg-ack", ExpectedSerial: "C02ACKTEST1",
 		UDID: "UDID-ACK-1", CommandUUID: "cmd-ack-uuid", SEKeyHash: seHash[:], EnqueuedAt: now,

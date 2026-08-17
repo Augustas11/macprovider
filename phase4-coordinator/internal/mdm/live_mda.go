@@ -407,6 +407,8 @@ func (s *LiveMDAService) AttachCachedMDAProof(providerID, assignedID string) boo
 // Prefer HandleMDACommandWebhook for production ingest — it enforces the
 // pending UDID→serial bind (SEC-H1). Direct callers must already know the
 // provider identity; this path does not trust SE-asserted serial alone.
+// R6: also requires the current durable binding serial to match the MDA leaf
+// before publishing hardware (same invariant as the webhook path).
 func (s *LiveMDAService) UpgradeFromParsedAttestation(providerID, assignedID string, result *DeviceAttestationResult) bool {
 	if result == nil {
 		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: upgrade failed — nil DeviceAttestationResult")
@@ -420,6 +422,23 @@ func (s *LiveMDAService) UpgradeFromParsedAttestation(providerID, assignedID str
 	seKeyHash := sha256.Sum256(sePub)
 	if len(result.CertificateChain) == 0 {
 		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: empty certificate chain")
+		return false
+	}
+	leaf, err := x509.ParseCertificate(result.CertificateChain[0])
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("live_mda: upgrade failed — leaf parse")
+		return false
+	}
+	mdaSerial := tier2.ExtractMDASerialNumber(leaf)
+	if mdaSerial == "" {
+		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: upgrade failed — MDA leaf missing serial")
+		return false
+	}
+	if !s.currentBindingMatchesSerial(providerID, mdaSerial) {
+		s.log.Warn().
+			Str("provider_id", providerID).
+			Str("mda_serial", mdaSerial).
+			Msg("live_mda: upgrade refused — current device binding missing or serial mismatch")
 		return false
 	}
 	return s.verifyAndUpgrade(providerID, assignedID, result.CertificateChain, sePub, seKeyHash[:])
@@ -653,6 +672,28 @@ func (s *LiveMDAService) HandleMDACommandWebhook(w http.ResponseWriter, r *http.
 			Str("current_assigned_id", currentAssignedID).
 			Msg("live_mda: webhook using current AssignedID after reconnect (stale pending session)")
 	}
+	// R6-M1: re-check current durable binding before publishing hardware.
+	// Pending ExpectedSerial was snapshotted at enqueue; a rebind A→B while
+	// the A webhook is in flight must not upgrade the rebound session.
+	if !s.currentBindingMatchesSerial(pending.ProviderID, pending.ExpectedSerial) ||
+		!s.currentBindingMatchesSerial(pending.ProviderID, mdaSerial) {
+		bindingSerial := ""
+		if s.bindings != nil {
+			if b, ok := s.bindings.LookupByProvider(pending.ProviderID); ok {
+				bindingSerial = b.Serial
+			}
+		}
+		s.log.Warn().
+			Str("provider_id", pending.ProviderID).
+			Str("udid", udid).
+			Str("pending_expected_serial", pending.ExpectedSerial).
+			Str("mda_serial", mdaSerial).
+			Str("binding_serial", bindingSerial).
+			Msg("live_mda: webhook rejected — current device binding missing or serial mismatch (rebind TOCTOU)")
+		s.markEnqueueFailed(pending)
+		http.Error(w, "binding mismatch", http.StatusForbidden)
+		return
+	}
 	if !s.verifyAndUpgrade(pending.ProviderID, currentAssignedID, result.CertificateChain, sePub, seKeyHash[:]) {
 		s.log.Warn().
 			Str("provider_id", pending.ProviderID).
@@ -853,6 +894,20 @@ func extractWebhookUDID(body []byte) string {
 
 func serialEqualFold(a, b string) bool {
 	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
+// currentBindingMatchesSerial requires a durable device binding for providerID
+// whose serial matches wantSerial (case-insensitive). Used by the fresh webhook
+// path (R6-M1) and UpgradeFromParsedAttestation before publishing hardware.
+func (s *LiveMDAService) currentBindingMatchesSerial(providerID, wantSerial string) bool {
+	if s.bindings == nil {
+		return false
+	}
+	binding, ok := s.bindings.LookupByProvider(providerID)
+	if !ok || strings.TrimSpace(binding.Serial) == "" {
+		return false
+	}
+	return serialEqualFold(binding.Serial, wantSerial)
 }
 
 // tryUpgradeFromCache checks whether the pool already holds a valid, fresh MDA

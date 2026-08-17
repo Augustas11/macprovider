@@ -843,3 +843,63 @@ func TestCachedMDAAllowsMatchingBinding(t *testing.T) {
 	}
 }
 
+// R6-M1: enqueue pending for serial A, rebind provider to B, deliver webhook for A
+// → must not publish hardware (rebind TOCTOU).
+func TestWebhookRefusesAfterRebindSerialChange(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	seKey := make([]byte, 64)
+	for i := range seKey {
+		seKey[i] = byte(i + 51)
+	}
+	seHash := sha256.Sum256(seKey)
+	rootDER, leafDER, cfg := testMDAChainWithSerial(t, now, seHash[:], "C02SERIAL-A")
+
+	reg := pool.NewRegistry(nil)
+	reg.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "p-rebind", AssignedID: "s1", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+		AttestationTier: pool.AttestationTierSelfSigned,
+	}, nil, now)
+
+	svc := &LiveMDAService{
+		cfg: cfg, mdmCfg: config.Tier2MDMConfig{CommandWebhookSecret: "hook-secret", MDARefreshIntervalHours: 168},
+		pool: reg, log: zerolog.Nop(), now: func() time.Time { return now },
+		bindings: NewDeviceBindingStore(), pending: make(map[string]pendingMDARequest),
+		ledger: make(map[string]enqueueLedgerEntry),
+	}
+	_ = svc.bindings.Claim("p-rebind", "C02SERIAL-A")
+	svc.recordPending("UDID-A", "cmd-rebind-a", pendingMDARequest{
+		ProviderID: "p-rebind", AssignedID: "s1", ExpectedSerial: "C02SERIAL-A",
+		UDID: "UDID-A", CommandUUID: "cmd-rebind-a", SEKeyHash: seHash[:], EnqueuedAt: now,
+	})
+	// Ops rebind A→B while webhook for A is still pending.
+	_ = svc.bindings.Claim("p-rebind", "C02SERIAL-B")
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"udid":         "UDID-A",
+		"command_uuid": "cmd-rebind-a",
+		"payload": map[string]interface{}{
+			"DeviceAttestation": []interface{}{
+				base64.StdEncoding.EncodeToString(leafDER),
+				base64.StdEncoding.EncodeToString(rootDER),
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/internal/mdm/command-webhook", bytes.NewReader(body))
+	req.Header.Set("X-MDM-Webhook-Secret", "hook-secret")
+	req.RemoteAddr = "8.8.8.8:1234"
+	rr := httptest.NewRecorder()
+	svc.HandleMDACommandWebhook(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("R6-M1: rebind webhook status=%d want 403, body=%s", rr.Code, rr.Body.String())
+	}
+	p, found := reg.Resolve("p-rebind", "s1")
+	if !found || p.AttestationTier == pool.AttestationTierHardware {
+		t.Fatalf("R6-M1: tier=%q found=%v want non-hardware after A webhook post-rebind-to-B", p.AttestationTier, found)
+	}
+	if _, _, _, _, ok := reg.MDAProof("p-rebind"); ok {
+		t.Fatal("R6-M1: must not SetMDAProof after binding rebind mismatch")
+	}
+}
+
