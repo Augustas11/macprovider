@@ -62,6 +62,9 @@ type RouteSnapshot struct {
 	PendingDeadlineSeconds             int64   `json:"pending_deadline_seconds"`
 	PromptHashBasis                    string  `json:"prompt_hash_basis"`
 	PromptHash                         string  `json:"prompt_hash"`
+	ComputeIntegrityCaptureRequired    bool    `json:"-"`
+	ComputeIntegritySamplingCovered    bool    `json:"-"`
+	ComputeIntegrityHardwareDigest     string  `json:"-"`
 }
 
 func ReceiptKeyID(pubkey []byte) (string, error) {
@@ -176,6 +179,14 @@ func (r RouteSnapshot) Validate() error {
 	if r.PendingDeadlineSeconds <= 0 || r.PendingDeadlineSeconds > MaxPendingReceiptDeadlineSeconds {
 		return fmt.Errorf("route snapshot pending_deadline_seconds must be between 1 and %d", MaxPendingReceiptDeadlineSeconds)
 	}
+	if r.ComputeIntegrityCaptureRequired {
+		if r.RouteSnapshotMode != RouteSnapshotModeEnforce {
+			return fmt.Errorf("compute integrity capture requires enforce route snapshot mode")
+		}
+		if !computeIntegrityDigestPattern.MatchString(r.ComputeIntegrityHardwareDigest) {
+			return fmt.Errorf("compute integrity hardware runtime class digest invalid")
+		}
+	}
 	return nil
 }
 
@@ -201,7 +212,9 @@ INSERT INTO settlement_route_snapshots (
     catalog_signature_pubkey_fingerprint, catalog_expires_at_unix_ms,
     spec008_hash_status, route_snapshot_policy_version, route_snapshot_mode,
     route_decision_ts_unix_ms, request_start_ts_unix_ms, pending_deadline_seconds,
-    prompt_hash_basis, prompt_hash, route_snapshot_digest, route_snapshot_json,
+    prompt_hash_basis, prompt_hash, compute_integrity_capture_required,
+    compute_integrity_sampling_profile_covered, compute_integrity_hardware_runtime_class_digest,
+    route_snapshot_digest, route_snapshot_json,
     route_snapshot_canonical_json, created_at_utc
 ) VALUES (
     ?, ?, ?, ?,
@@ -212,8 +225,8 @@ INSERT INTO settlement_route_snapshots (
     ?, ?,
     ?, ?, ?,
     ?, ?, ?,
-    ?, ?, ?, ?,
-    ?, strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    ?, ?, ?, ?, ?,
+    ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now')
 )`,
 		snapshot.AccountScope, snapshot.RequestID, snapshot.AttemptN, snapshot.ProviderID,
 		nullableString(snapshot.ProviderSessionID), nullableString(snapshot.ProviderGenerationID), snapshot.PaidEntrypoint,
@@ -223,7 +236,9 @@ INSERT INTO settlement_route_snapshots (
 		snapshot.CatalogSignaturePubkeyFingerprint, snapshot.CatalogExpiresAtUnixMS,
 		snapshot.Spec008HashStatus, snapshot.RouteSnapshotPolicyVersion, snapshot.RouteSnapshotMode,
 		snapshot.RouteDecisionTSUnixMS, snapshot.RequestStartTSUnixMS, snapshot.PendingDeadlineSeconds,
-		snapshot.PromptHashBasis, snapshot.PromptHash, digest, string(rendered),
+		snapshot.PromptHashBasis, snapshot.PromptHash,
+		boolInt(snapshot.ComputeIntegrityCaptureRequired), boolInt(snapshot.ComputeIntegritySamplingCovered), nullString(snapshot.ComputeIntegrityHardwareDigest),
+		digest, string(rendered),
 		string(canonical),
 	)
 	if err != nil {

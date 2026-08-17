@@ -11,6 +11,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/catalogbind"
+	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -121,6 +122,13 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		PromptHashBasis:                    promptHashBasisCoordinatorV1,
 		PromptHash:                         promptHash,
 	}
+	computeIntegrityRequired, computeIntegrityCovered, computeIntegrityHardwareDigest, err := computeIntegrityRouteBinding(provider, routeMode)
+	if err != nil {
+		return nil, err
+	}
+	snapshot.ComputeIntegrityCaptureRequired = computeIntegrityRequired
+	snapshot.ComputeIntegritySamplingCovered = computeIntegrityCovered
+	snapshot.ComputeIntegrityHardwareDigest = computeIntegrityHardwareDigest
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()
 	digest, err := store.InsertRouteSnapshot(ctx, snapshot)
@@ -160,6 +168,56 @@ func isLowerHex64(value string) bool {
 		}
 	}
 	return true
+}
+
+func computeIntegrityRouteBinding(provider pool.Provider, routeMode string) (required bool, samplingProfileCovered bool, hardwareDigest string, err error) {
+	if routeMode != billing.RouteSnapshotModeEnforce {
+		return false, false, "", nil
+	}
+	policy := computeintegrity.NewDefaultPolicy()
+	deps := computeintegrity.ActivationDeps{
+		SPEC022Enforce:             true,
+		SPEC022CoverageSubset:      true,
+		AllModelsSignedCatalog:     true,
+		SettlementStorageReady:     true,
+		BillingExcludesNonVerified: true,
+	}
+	// SPEC-036 v0.1 enforce is explicitly maintainer-gated. Until an
+	// authoritative compute_integrity_settlement policy and activation dependency
+	// source are wired here, the safe default policy remains observe-only and
+	// production route snapshots stay dormant.
+	if policy.Mode != computeintegrity.ModeEnforce || !computeintegrity.CanActivateEnforce(policy, deps) {
+		return false, false, "", nil
+	}
+	value := map[string]any{
+		"schema_version":               "compute_integrity_route_hardware_runtime_class_v1",
+		"provider_id":                  provider.ProviderID,
+		"assigned_id":                  provider.AssignedID,
+		"model_id":                     provider.ModelID,
+		"binary_version":               provider.BinaryVersion,
+		"attestation_tier":             provider.AttestationTier,
+		"admitted_chip_normalized":     provider.AdmittedChipNormalized,
+		"admitted_unified_memory_gb":   provider.AdmittedUnifiedMemoryGB,
+		"max_admitted_model_key":       provider.MaxAdmittedModelKey,
+		"max_admitted_model_id":        provider.MaxAdmittedModelID,
+		"max_admitted_min_ram_gb":      provider.MaxAdmittedMinRAMGB,
+		"provider_reported_model_hash": strings.TrimSpace(provider.ModelHash),
+		"provider_reported_capacity":   nil,
+	}
+	if provider.HardwareCapacity != nil {
+		value["provider_reported_capacity"] = map[string]any{
+			"chip":               provider.HardwareCapacity.Chip,
+			"bandwidth_gb_per_s": provider.HardwareCapacity.BandwidthGBPerSec,
+			"network_power_kw":   provider.HardwareCapacity.NetworkPowerKW,
+			"gpu_cores_total":    provider.HardwareCapacity.GPUCoresTotal,
+			"cpu_cores_total":    provider.HardwareCapacity.CPUCoresTotal,
+		}
+	}
+	digest, _, err := billing.CanonicalSHA256Hex(value)
+	if err != nil {
+		return false, false, "", fmt.Errorf("compute integrity route hardware digest: %w", err)
+	}
+	return true, true, "sha256:" + digest, nil
 }
 
 func accountScopeForSettlement(accountID string) string {

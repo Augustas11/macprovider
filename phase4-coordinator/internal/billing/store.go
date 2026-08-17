@@ -226,6 +226,9 @@ CREATE TABLE IF NOT EXISTS settlement_route_snapshots (
     pending_deadline_seconds INTEGER NOT NULL CHECK(pending_deadline_seconds BETWEEN 1 AND 900),
     prompt_hash_basis TEXT NOT NULL,
     prompt_hash TEXT NOT NULL CHECK(length(prompt_hash) = 64 AND prompt_hash NOT GLOB '*[^0-9a-f]*'),
+    compute_integrity_capture_required INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_capture_required IN (0,1)),
+    compute_integrity_sampling_profile_covered INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_sampling_profile_covered IN (0,1)),
+    compute_integrity_hardware_runtime_class_digest TEXT NULL CHECK(compute_integrity_hardware_runtime_class_digest IS NULL OR (length(compute_integrity_hardware_runtime_class_digest) = 71 AND substr(compute_integrity_hardware_runtime_class_digest, 1, 7) = 'sha256:' AND substr(compute_integrity_hardware_runtime_class_digest, 8) NOT GLOB '*[^0-9a-f]*')),
     route_snapshot_digest TEXT NOT NULL CHECK(length(route_snapshot_digest) = 64 AND route_snapshot_digest NOT GLOB '*[^0-9a-f]*'),
     route_snapshot_json TEXT NOT NULL,
     route_snapshot_canonical_json TEXT NOT NULL,
@@ -235,6 +238,46 @@ CREATE TABLE IF NOT EXISTS settlement_route_snapshots (
 CREATE INDEX IF NOT EXISTS idx_srs_request ON settlement_route_snapshots(account_scope, request_id, attempt_n);
 CREATE INDEX IF NOT EXISTS idx_srs_provider ON settlement_route_snapshots(provider_id, created_at_utc);
 CREATE INDEX IF NOT EXISTS idx_srs_digest ON settlement_route_snapshots(route_snapshot_digest);
+CREATE TRIGGER IF NOT EXISTS trg_srs_immutable
+BEFORE UPDATE ON settlement_route_snapshots
+BEGIN
+    SELECT RAISE(ABORT, 'settlement route snapshot is immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS settlement_compute_integrity_captures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_scope TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL CHECK(attempt_n >= 0),
+    provider_id TEXT NOT NULL,
+    capture_required INTEGER NOT NULL DEFAULT 1 CHECK(capture_required IN (0,1)),
+    request_sampling_profile_covered INTEGER NOT NULL CHECK(request_sampling_profile_covered IN (0,1)),
+    route_snapshot_hardware_class_digest TEXT NOT NULL CHECK(length(route_snapshot_hardware_class_digest) = 71 AND substr(route_snapshot_hardware_class_digest, 1, 7) = 'sha256:' AND substr(route_snapshot_hardware_class_digest, 8) NOT GLOB '*[^0-9a-f]*'),
+    capture_json TEXT NULL,
+    request_start_snapshot_digest TEXT NULL CHECK(request_start_snapshot_digest IS NULL OR (length(request_start_snapshot_digest) = 71 AND substr(request_start_snapshot_digest, 1, 7) = 'sha256:' AND substr(request_start_snapshot_digest, 8) NOT GLOB '*[^0-9a-f]*')),
+    captured_at_unix_ms INTEGER NULL CHECK(captured_at_unix_ms IS NULL OR captured_at_unix_ms > 0),
+    created_at_utc TEXT NOT NULL,
+    UNIQUE(account_scope, request_id, attempt_n, provider_id),
+    FOREIGN KEY(account_scope, request_id, attempt_n, provider_id)
+        REFERENCES settlement_route_snapshots(account_scope, request_id, attempt_n, provider_id)
+        ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_scic_request ON settlement_compute_integrity_captures(account_scope, request_id, attempt_n);
+CREATE INDEX IF NOT EXISTS idx_scic_digest ON settlement_compute_integrity_captures(request_start_snapshot_digest);
+CREATE TRIGGER IF NOT EXISTS trg_scic_capture_immutable
+BEFORE UPDATE OF capture_required, request_sampling_profile_covered,
+                 route_snapshot_hardware_class_digest, capture_json,
+                 request_start_snapshot_digest, captured_at_unix_ms
+ON settlement_compute_integrity_captures
+WHEN OLD.capture_required != NEW.capture_required
+  OR OLD.request_sampling_profile_covered != NEW.request_sampling_profile_covered
+  OR OLD.route_snapshot_hardware_class_digest != NEW.route_snapshot_hardware_class_digest
+  OR COALESCE(OLD.capture_json, '') != COALESCE(NEW.capture_json, '')
+  OR COALESCE(OLD.request_start_snapshot_digest, '') != COALESCE(NEW.request_start_snapshot_digest, '')
+  OR COALESCE(OLD.captured_at_unix_ms, -1) != COALESCE(NEW.captured_at_unix_ms, -1)
+BEGIN
+    SELECT RAISE(ABORT, 'settlement compute integrity capture is immutable');
+END;
 
 CREATE TABLE IF NOT EXISTS settlement_attempt_outputs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -344,6 +387,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 	if err := s.ensureLedgerRequestCreditSettlementColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureSettlementRouteSnapshotComputeIntegrityColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.normalizeBillingTimeTextColumns(ctx); err != nil {
 		return err
 	}
@@ -357,6 +403,30 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	return s.validateRequestLog(ctx)
+}
+
+func (s *Store) ensureSettlementRouteSnapshotComputeIntegrityColumns(ctx context.Context) error {
+	add := []struct {
+		name string
+		sql  string
+	}{
+		{"compute_integrity_capture_required", `ALTER TABLE settlement_route_snapshots ADD COLUMN compute_integrity_capture_required INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_capture_required IN (0,1))`},
+		{"compute_integrity_sampling_profile_covered", `ALTER TABLE settlement_route_snapshots ADD COLUMN compute_integrity_sampling_profile_covered INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_sampling_profile_covered IN (0,1))`},
+		{"compute_integrity_hardware_runtime_class_digest", `ALTER TABLE settlement_route_snapshots ADD COLUMN compute_integrity_hardware_runtime_class_digest TEXT NULL CHECK(compute_integrity_hardware_runtime_class_digest IS NULL OR (length(compute_integrity_hardware_runtime_class_digest) = 71 AND substr(compute_integrity_hardware_runtime_class_digest, 1, 7) = 'sha256:' AND substr(compute_integrity_hardware_runtime_class_digest, 8) NOT GLOB '*[^0-9a-f]*'))`},
+	}
+	for _, col := range add {
+		exists, err := s.columnExists(ctx, "settlement_route_snapshots", col.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, col.sql); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ensureLedgerRequestCreditSettlementColumns(ctx context.Context) error {
