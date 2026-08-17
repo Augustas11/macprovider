@@ -315,3 +315,33 @@ func TestRewardEligibilityMissingWalletBlocksWithdrawableBalance(t *testing.T) {
 		t.Fatalf("reasons = %v, want raw balance reason retained", got.Reasons)
 	}
 }
+
+func TestRewardEligibilityEndpointMissingWalletBeatsUnwiredSourcePrimary(t *testing.T) {
+	got := RewardEligibilityFromBalanceAndTrust(
+		AccrualBalance{
+			AccruedMALIBU:      "5.00000000",
+			WithdrawableMALIBU: "5.00000000",
+			HeldMALIBU:         "0",
+			TrustTier:          TierTrusted,
+		},
+		TrustCriteriaStatus{
+			WalletBound:          false,
+			VerifiedReceiptCount: minVerifiedReceipts,
+			AppAttested:          true,
+		},
+	)
+
+	if got.WithdrawalState != WithdrawalStateIneligible {
+		t.Fatalf("withdrawal_state = %q, want %q", got.WithdrawalState, WithdrawalStateIneligible)
+	}
+	if got.PrimaryReason != ReasonMissingWalletBinding {
+		t.Fatalf("primary_reason = %q, want %q", got.PrimaryReason, ReasonMissingWalletBinding)
+	}
+	if !containsReason(got.Reasons, ReasonComputeIntegrityUnavailable) ||
+		!containsReason(got.Reasons, ReasonHardwareEvidenceUnavailable) {
+		t.Fatalf("reasons = %v, want unwired source reasons retained", got.Reasons)
+	}
+	if !containsReason(got.Reasons, ReasonWithdrawableBalanceAvailable) {
+		t.Fatalf("reasons = %v, want raw balance reason retained", got.Reasons)
+	}
+}
