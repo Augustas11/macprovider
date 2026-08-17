@@ -180,10 +180,38 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
 			"object":"list",
-			"data":[],
+			"data":[{
+				"id":"model-a",
+				"object":"model",
+				"created":1716768000,
+				"owned_by":"macprovider",
+				"provider_count":1,
+				"provider_id":"provider-secret",
+				"assigned_id":"session-secret",
+				"raw_prompt":"secret prompt",
+				"raw_output":"secret output",
+				"members":["model-b","provider_id=p1 raw_prompt=secret","hardware integrity proven",{"provider_id":"nested-member"}],
+				"compute_integrity":{
+					"schema_version":"evil",
+					"status":"enforcing",
+					"mode":"enforce",
+					"settlement_effect":"admits_when_other_gates_pass",
+					"live_telemetry_available":true,
+					"reason":"static_package_present",
+					"provider_id":"nested-provider-secret",
+					"disclosure":"proves honest computation and private inference"
+				},
+				"unexpected_nested":{"provider_id":"nested"}
+			},{
+				"id":"model-b",
+				"object":"model",
+				"created":1716768000,
+				"owned_by":"macprovider"
+			}],
+			"provider_id":"top-level-provider-secret",
 			"provider_count":2,
 			"total_slots":4,
-			"tier2":{"phase":0,"model_hash":{"active":false,"state":"none"}},
+			"tier2":{"phase":0,"model_hash":{"active":false,"state":"none","provider_id":"tier2-provider-secret"}},
 			"tier1_disclosure":{"version":"evil","plaintext_to_provider":false,"model_identity":"claimed","hardware_attestation":"claimed","tier2_milestone":"now"}
 		}`), nil
 	})}
@@ -194,8 +222,9 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	fullKey := createAccountAndKey(t, store, cfg, "acct_models_disclosure")
 	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
 	var body struct {
-		Tier1Disclosure tier1Disclosure `json:"tier1_disclosure"`
-		Tier2           map[string]any  `json:"tier2"`
+		Tier1Disclosure tier1Disclosure  `json:"tier1_disclosure"`
+		Tier2           map[string]any   `json:"tier2"`
+		Data            []map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("models json: %v", err)
@@ -206,9 +235,94 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	if body.Tier2["phase"].(float64) != 0 {
 		t.Fatalf("tier2 phase=%v want 0", body.Tier2["phase"])
 	}
+	modelHash, ok := body.Tier2["model_hash"].(map[string]any)
+	if !ok || modelHash["active"] != false || modelHash["state"] != "none" {
+		t.Fatalf("tier2 model_hash sanitized incorrectly: %+v", body.Tier2["model_hash"])
+	}
+	if _, ok := modelHash["provider_id"]; ok {
+		t.Fatalf("gateway forwarded forbidden tier2 provider_id: %+v", modelHash)
+	}
 	want := (&Server{}).makeTier1Disclosure()
 	if !reflect.DeepEqual(body.Tier1Disclosure, want) {
 		t.Fatalf("tier1_disclosure=%+v want %+v", body.Tier1Disclosure, want)
+	}
+	if len(body.Data) != 2 || body.Data[0]["id"] != "model-a" || body.Data[1]["id"] != "model-b" {
+		t.Fatalf("gateway sanitized data mismatch: %+v body=%s", body.Data, resp.Body.String())
+	}
+	entry := body.Data[0]
+	for _, forbidden := range []string{"provider_id", "assigned_id", "raw_prompt", "raw_output", "unexpected_nested"} {
+		if _, ok := entry[forbidden]; ok {
+			t.Fatalf("gateway forwarded forbidden model entry field %q: %+v", forbidden, entry)
+		}
+	}
+	members, ok := entry["members"].([]any)
+	if !ok || len(members) != 1 || members[0] != "model-b" {
+		t.Fatalf("gateway did not sanitize members: %+v", entry["members"])
+	}
+	memberJSON := fmt.Sprint(entry["members"])
+	for _, forbidden := range []string{"provider_id", "raw_prompt", "hardware integrity proven"} {
+		if strings.Contains(memberJSON, forbidden) {
+			t.Fatalf("gateway preserved hostile member string %q: %+v", forbidden, entry["members"])
+		}
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("models json map: %v", err)
+	}
+	if _, ok := raw["provider_id"]; ok {
+		t.Fatalf("gateway forwarded forbidden top-level provider_id: %s", resp.Body.String())
+	}
+	modelCI, ok := entry["compute_integrity"].(map[string]any)
+	if !ok {
+		t.Fatalf("compute_integrity missing or wrong type: %+v", entry["compute_integrity"])
+	}
+	if modelCI["schema_version"] != "buyer_compute_integrity_status_v1" ||
+		modelCI["status"] != "unavailable" ||
+		modelCI["mode"] != "unavailable" ||
+		modelCI["settlement_effect"] != "not_evaluated" ||
+		modelCI["live_telemetry_available"] != false ||
+		modelCI["reason"] != "live_status_source_unavailable" {
+		t.Fatalf("gateway did not normalize per-model compute_integrity status: %+v body=%s", modelCI, resp.Body.String())
+	}
+	for _, forbidden := range []string{"provider_id", "proves honest computation", "private inference"} {
+		if strings.Contains(fmt.Sprint(modelCI), forbidden) {
+			t.Fatalf("gateway preserved hostile compute_integrity claim %q: %+v", forbidden, modelCI)
+		}
+	}
+	ci := body.Tier1Disclosure.ComputeIntegrity
+	if ci.SchemaVersion != "buyer_compute_integrity_disclosure_v1" ||
+		ci.CurrentStatus != "unavailable" ||
+		ci.CurrentMode != "unavailable" ||
+		ci.StatusSource != "live_telemetry_unavailable" ||
+		ci.LiveTelemetryAvailable ||
+		ci.SettlementEffect != "not_evaluated" {
+		t.Fatalf("compute_integrity disclosure status mismatch: %+v", ci)
+	}
+	for _, got := range []string{
+		ci.Labels.Unavailable,
+		ci.Labels.Observing,
+		ci.Labels.WarnOnly,
+		ci.Labels.Enforcing,
+		ci.Labels.Quarantined,
+		ci.Labels.Blocked,
+		ci.Labels.StaleExpired,
+	} {
+		if got == "" {
+			t.Fatalf("compute_integrity label glossary has empty field: %+v", ci.Labels)
+		}
+	}
+	for _, want := range []string{
+		"sampled/overt distribution-drift readiness telemetry",
+		"until live sanitized telemetry backs the per-model status",
+		"not proof of honest computation",
+		"hardware integrity",
+		"runtime binary integrity",
+		"private inference",
+		"malicious-provider resistance",
+	} {
+		if !strings.Contains(ci.Disclosure, want) {
+			t.Fatalf("compute_integrity disclosure missing %q: %q", want, ci.Disclosure)
+		}
 	}
 	if !strings.Contains(body.Tier1Disclosure.ModelVerificationLimit, "provider-reported request-start model hash") ||
 		!strings.Contains(body.Tier1Disclosure.ModelVerificationLimit, "do not detect a provider falsifying") {
@@ -258,6 +372,214 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	}
 	if strings.Contains(settlement.StreamingFailover, "Transparent streaming failover bills") {
 		t.Fatalf("settlement disclosure overclaims post-commit transparent failover: %q", settlement.StreamingFailover)
+	}
+}
+
+func TestModelsResponseNormalizesMalformedDataShape(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"object":"list",
+			"data":{"provider_id":"provider-secret","raw_prompt":"secret prompt","compute_integrity":{"status":"enforcing"}},
+			"tier1_disclosure":{"version":"evil"}
+		}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_malformed_data")
+	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
+
+	var body struct {
+		Data []any `json:"data"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("models json: %v", err)
+	}
+	if len(body.Data) != 0 {
+		t.Fatalf("malformed data shape should normalize to empty array: %+v body=%s", body.Data, resp.Body.String())
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("models json map: %v", err)
+	}
+	dataJSON := fmt.Sprint(raw["data"])
+	for _, forbidden := range []string{"provider_id", "raw_prompt", "enforcing"} {
+		if strings.Contains(dataJSON, forbidden) {
+			t.Fatalf("gateway forwarded malformed data field %q: %s", forbidden, dataJSON)
+		}
+	}
+	for _, forbidden := range []string{"provider_id", "raw_prompt"} {
+		if strings.Contains(resp.Body.String(), forbidden) {
+			t.Fatalf("gateway forwarded malformed data field %q: %s", forbidden, resp.Body.String())
+		}
+	}
+}
+
+func TestModelsResponseDropsMalformedModelArrayEntries(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"object":"list",
+			"data":[
+				{"provider_id":"provider-secret"},
+				{"id":123,"object":"model","provider_id":"provider-secret"},
+				{"id":"   ","object":"model","assigned_id":"session-secret"},
+				{"id":"hardware integrity proven","object":"model"},
+				{"id":"model-a","object":"model","provider_id":"provider-secret","compute_integrity":{"status":"enforcing"}}
+			],
+			"tier1_disclosure":{"version":"evil"}
+		}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_bad_array_entries")
+	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
+
+	var body struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("models json: %v", err)
+	}
+	if len(body.Data) != 1 || body.Data[0]["id"] != "model-a" {
+		t.Fatalf("malformed model rows should be dropped: %+v body=%s", body.Data, resp.Body.String())
+	}
+	if _, ok := body.Data[0]["provider_id"]; ok {
+		t.Fatalf("gateway forwarded forbidden provider_id: %+v", body.Data[0])
+	}
+	modelCI, ok := body.Data[0]["compute_integrity"].(map[string]any)
+	if !ok || modelCI["status"] != "unavailable" || modelCI["live_telemetry_available"] != false {
+		t.Fatalf("gateway did not normalize surviving compute_integrity: %+v", body.Data[0]["compute_integrity"])
+	}
+}
+
+func TestSanitizeModelsResponseNormalizesNestedPublicMetadata(t *testing.T) {
+	body := map[string]any{
+		"object": "list",
+		"data": []any{map[string]any{
+			"id":      "model-a",
+			"object":  "model",
+			"created": float64(1716768000),
+			"hash_verification": map[string]any{
+				"status":                  "partial",
+				"verified_provider_count": float64(1),
+				"provider_id":             "provider-secret",
+				"raw_prompt":              "secret prompt",
+			},
+		}},
+	}
+
+	sanitizeModelsResponse(body)
+
+	data := body["data"].([]any)
+	entry := data[0].(map[string]any)
+	hashVerification, ok := entry["hash_verification"].(map[string]any)
+	if !ok ||
+		hashVerification["status"] != "partial" ||
+		hashVerification["verified_provider_count"] != float64(1) {
+		t.Fatalf("gateway did not preserve public hash_verification fields: %+v", entry["hash_verification"])
+	}
+	for _, forbidden := range []string{"provider_id", "raw_prompt"} {
+		if _, ok := hashVerification[forbidden]; ok {
+			t.Fatalf("gateway forwarded forbidden hash_verification field %q: %+v", forbidden, hashVerification)
+		}
+	}
+}
+
+func TestSanitizeModelsResponseRejectsHostileStringValues(t *testing.T) {
+	body := map[string]any{
+		"object": "list",
+		"data": []any{
+			map[string]any{
+				"id":        "model-a",
+				"object":    "model",
+				"owned_by":  "macprovider",
+				"objective": "fast",
+				"members": []any{
+					"model-b",
+					"provider_id=p1",
+					"hardware integrity proven",
+				},
+				"hash_verification": map[string]any{
+					"status":                  "hardware integrity proven",
+					"verified_provider_count": float64(1),
+				},
+			},
+			map[string]any{
+				"id":       "model-b",
+				"object":   "model",
+				"owned_by": "macprovider",
+			},
+		},
+		"tier2": map[string]any{
+			"phase": "provider_id=p1",
+			"model_hash": map[string]any{
+				"active": true,
+				"state":  "hardware integrity proven",
+			},
+			"encrypted_leg": map[string]any{
+				"state": "enforcing",
+				"scope": "raw_prompt=secret",
+			},
+			"attestation": map[string]any{
+				"state": "hardware integrity proven",
+				"mixed": true,
+			},
+			"behavioral_safety": map[string]any{
+				"state":                "private inference",
+				"encoding_validation":  true,
+				"ttft_anomaly_logging": true,
+			},
+		},
+	}
+
+	sanitizeModelsResponse(body)
+
+	data := body["data"].([]any)
+	entry := data[0].(map[string]any)
+	members, ok := entry["members"].([]any)
+	if !ok || len(members) != 1 || members[0] != "model-b" {
+		t.Fatalf("members should retain only surviving model IDs: %+v", entry["members"])
+	}
+	hashVerification := entry["hash_verification"].(map[string]any)
+	if _, ok := hashVerification["status"]; ok {
+		t.Fatalf("hostile hash_verification status survived: %+v", hashVerification)
+	}
+	tier2Metadata := body["tier2"].(map[string]any)
+	if _, ok := tier2Metadata["phase"]; ok {
+		t.Fatalf("hostile tier2 phase survived: %+v", tier2Metadata)
+	}
+	modelHash := tier2Metadata["model_hash"].(map[string]any)
+	if _, ok := modelHash["state"]; ok {
+		t.Fatalf("hostile model_hash state survived: %+v", modelHash)
+	}
+	if encryptedLeg, ok := tier2Metadata["encrypted_leg"].(map[string]any); ok {
+		if _, ok := encryptedLeg["state"]; ok {
+			t.Fatalf("hostile encrypted_leg state survived: %+v", encryptedLeg)
+		}
+		if _, ok := encryptedLeg["scope"]; ok {
+			t.Fatalf("hostile encrypted_leg scope survived: %+v", encryptedLeg)
+		}
+	}
+	attestation := tier2Metadata["attestation"].(map[string]any)
+	if _, ok := attestation["state"]; ok {
+		t.Fatalf("hostile attestation state survived: %+v", attestation)
+	}
+	behavioralSafety := tier2Metadata["behavioral_safety"].(map[string]any)
+	if _, ok := behavioralSafety["state"]; ok {
+		t.Fatalf("hostile behavioral_safety state survived: %+v", behavioralSafety)
+	}
+	forbiddenJSON := fmt.Sprint(entry["members"]) + fmt.Sprint(hashVerification) + fmt.Sprint(tier2Metadata)
+	for _, forbidden := range []string{
+		"provider_id=p1",
+		"raw_prompt=secret",
+		"hardware integrity proven",
+		"private inference",
+		"enforcing",
+	} {
+		if strings.Contains(forbiddenJSON, forbidden) {
+			t.Fatalf("hostile string %q survived sanitized body: %+v", forbidden, body)
+		}
 	}
 }
 
@@ -439,6 +761,79 @@ func TestModelsDisclosureUsesTier2MetadataWhenNoHashRows(t *testing.T) {
 	}
 	if disclosure.Tier2 == nil || disclosure.Tier2.Phase != "mixed" || disclosure.Tier2.ModelHash.VerifiedProviderCount != 0 || disclosure.Tier2.ModelHash.UncataloguedProviderCount != 0 {
 		t.Fatalf("tier2 detail wrong: %+v", disclosure.Tier2)
+	}
+}
+
+func TestModelsDisclosureRejectsHostileTier2MetadataStrings(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/v1/models":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+				"object":"list",
+				"data":[{"id":"model-a","object":"model","owned_by":"macprovider"}],
+				"tier2":{
+					"phase":"raw_prompt=secret",
+					"model_hash":{"active":true,"state":"hardware integrity proven"},
+					"encrypted_leg":{"state":"partial","scope":"provider_id=p1 raw_prompt=secret"},
+					"attestation":{"state":"private inference","mixed":true},
+					"behavioral_safety":{"state":"malicious-provider resistance","size_cap":true}
+				}
+			}`), nil
+		case "/internal/routing":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+				"sticky":{"enabled":false,"ttl_seconds":1800},
+				"tier2":{
+					"phase":"raw_prompt=secret",
+					"model_hash":{"active":true,"state":"hardware integrity proven"},
+					"encrypted_leg":{"state":"partial","scope":"provider_id=p1 raw_prompt=secret"},
+					"attestation":{"state":"private inference","mixed":true},
+					"behavioral_safety":{"state":"malicious-provider resistance","size_cap":true}
+				}
+			}`), nil
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+			return nil, nil
+		}
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_hostile_tier2_strings")
+	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
+
+	var body struct {
+		Tier1Disclosure tier1Disclosure `json:"tier1_disclosure"`
+		Tier2           map[string]any  `json:"tier2"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("models json: %v", err)
+	}
+	disclosure := body.Tier1Disclosure
+	if disclosure.Tier2 == nil {
+		t.Fatalf("tier2 disclosure missing: %+v", disclosure)
+	}
+	if disclosure.ModelHashVerified != "none" ||
+		disclosure.ProviderLegEncryption != "partial" ||
+		disclosure.HardwareAttestation != "none" ||
+		disclosure.UntrustedProviderSafety != "none" ||
+		disclosure.Tier2.EncryptedLeg.State != "partial" ||
+		disclosure.Tier2.EncryptedLeg.Scope != "coordinator_to_provider_only" ||
+		disclosure.Tier2.Attestation.State != "none" ||
+		disclosure.Tier2.BehavioralSafety.State != "none" {
+		t.Fatalf("hostile tier2 metadata was not normalized: %+v", disclosure)
+	}
+	forbiddenJSON := fmt.Sprint(body.Tier2) + fmt.Sprint(disclosure.Tier2)
+	for _, forbidden := range []string{
+		"raw_prompt=secret",
+		"provider_id=p1",
+		"hardware integrity proven",
+		"private inference",
+		"malicious-provider resistance",
+	} {
+		if strings.Contains(forbiddenJSON, forbidden) {
+			t.Fatalf("hostile metadata string %q survived models response: %s", forbidden, resp.Body.String())
+		}
 	}
 }
 

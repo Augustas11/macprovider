@@ -1,7 +1,11 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.15 (2026-08-17, streaming failover disclosure boundary)
+**Version:** 0.9.16 (2026-08-17, buyer compute-integrity unavailable status)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.16 (2026-08-17, issue #1009 — buyer compute-integrity unavailable status):**
+- §5.3 and §5.3.1 now include buyer-visible compute-integrity status fields for `/v1/models`. Because no live per-model telemetry source is wired into the buyer models surface yet, entries MUST expose `compute_integrity.status: "unavailable"` with `live_telemetry_available: false` rather than deriving observing, warn-only, enforcing, quarantined, blocked, stale, or expired states from static spec/package availability.
+- The disclosure vocabulary distinguishes unavailable, observing, warn-only, enforcing, quarantined, blocked, and stale/expired labels while preserving the SPEC-036 boundary: sampled/overt distribution-drift readiness telemetry is not proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance.
 
 **Change log v0.9.15 (2026-08-17, issue #969 — streaming failover disclosure boundary):**
 - §1.6, `/v1/models`, `/v1/usage`, and docs disclosure examples now state the shipped streaming boundary explicitly: failover is transparent only before response bytes are committed; after the first buyer-visible SSE event, a provider disconnect terminates the stream with `provider_disconnected` and the buyer may retry as a new request that is independently billable with its own reservation and settlement.
@@ -1165,6 +1169,24 @@ Response shape:
       "streaming_failover": "Streaming failover is transparent only before response bytes are committed. After the first buyer-visible SSE event, a provider disconnect terminates the stream with provider_disconnected and the buyer may retry as a new request. That retry is a separate billable request with its own reservation and settlement; cross-request overlapping output is not deduplicated. Settlement remains limited to delivered, receipt-verified output prefixes and must not double-charge overlapping output if a future resume or failover protocol spans multiple provider attempts; verified here means receipt-bound under the provider-reported-hash caveat above.",
       "buyer_receipt_status": "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
     },
+    "compute_integrity": {
+      "schema_version": "buyer_compute_integrity_disclosure_v1",
+      "current_status": "unavailable",
+      "current_mode": "unavailable",
+      "status_source": "live_telemetry_unavailable",
+      "live_telemetry_available": false,
+      "settlement_effect": "not_evaluated",
+      "labels": {
+        "unavailable": "no live sanitized telemetry currently backs buyer-visible per-model compute-integrity status",
+        "observing": "live telemetry is sampled/overt observation only and does not affect settlement",
+        "warn_only": "live telemetry reports warn readiness without blocking paid admission",
+        "enforcing": "policy-backed live telemetry may affect covered SPEC-022 settlement/admission gates",
+        "quarantined": "live telemetry/adjudication marked compute drift or a related adverse state",
+        "blocked": "covered paid admission is blocked for the affected compute-integrity scope",
+        "stale_expired": "previous live telemetry is stale or expired and needs fresh evidence"
+      },
+      "disclosure": "SPEC-036 compute-integrity is sampled/overt distribution-drift readiness telemetry against approved references. It is unavailable here until live sanitized telemetry backs the per-model status. It is not proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance."
+    },
     "sticky_affinity": {
       "enabled": false,
       "ttl_seconds": 0,
@@ -1180,6 +1202,15 @@ Response shape:
       "provider_count": 3,
       "total_slots": 5,
       "max_context_tokens": 8192,
+      "compute_integrity": {
+        "schema_version": "buyer_compute_integrity_status_v1",
+        "status": "unavailable",
+        "mode": "unavailable",
+        "settlement_effect": "not_evaluated",
+        "live_telemetry_available": false,
+        "reason": "live_status_source_unavailable",
+        "disclosure": "SPEC-036 v0.1 is an overt distribution-drift readiness signal against approved references. It is not cryptographic proof of honest computation, not hardware integrity, not runtime binary integrity, and not covert attestation. Per-model buyer status is unavailable until live sanitized telemetry is wired; this field is not derived from static spec/package availability."
+      },
       "degraded": false
     }
   ]
@@ -1191,6 +1222,10 @@ The gateway MUST aggregate providers by case-insensitive model identifier.
 The gateway MUST preserve the canonical model ID spelling returned by the coordinator.
 
 The `id` field returned by `/v1/models` reflects the model identifier as advertised by the serving provider binary. `/v1/models` may also expose catalog-known hash status and settlement-enforced receipt matching for covered enforce-mode traffic. Buyers SHOULD treat `id` as provider-reported and SHOULD NOT treat catalog or settlement fields as hardware attestation, runtime binary attestation, malicious-output prevention, private inference, or detection of a provider falsifying its own loaded-model hash measurement.
+
+Each model entry MUST include `compute_integrity`. Until live sanitized compute-integrity telemetry backs the buyer models surface, implementations MUST return `status: "unavailable"`, `mode: "unavailable"`, `live_telemetry_available: false`, and `settlement_effect: "not_evaluated"`. Implementations MUST NOT derive observing, warn-only, enforcing, quarantined, blocked, stale, or expired buyer-visible status from static SPEC text, package availability, binary presence, or configured intent alone. When a future live source is wired, labels MUST preserve the distinction between sampled/overt observation, warn-only telemetry, enforcement that can affect covered SPEC-022 settlement/admission gates, quarantined/blocked states, and stale/expired evidence.
+
+Gateways MUST allowlist public model-entry fields and MUST replace upstream per-model `compute_integrity` with the gateway-approved unavailable object until a trusted live status source exists. A coordinator or cached snapshot MUST NOT be able to inject provider identifiers, raw prompt/output material, false live-telemetry flags, enforcement labels, or prohibited proof/attestation/private-inference claims into buyer-visible model entries.
 
 The gateway MUST tolerate `/` and `\/` escaped model IDs.
 
@@ -1240,6 +1275,24 @@ The `/v1/models` response MUST include a top-level field:
     "streaming_failover": "Streaming failover is transparent only before response bytes are committed. After the first buyer-visible SSE event, a provider disconnect terminates the stream with provider_disconnected and the buyer may retry as a new request. That retry is a separate billable request with its own reservation and settlement; cross-request overlapping output is not deduplicated. Settlement remains limited to delivered, receipt-verified output prefixes and must not double-charge overlapping output if a future resume or failover protocol spans multiple provider attempts; verified here means receipt-bound under the provider-reported-hash caveat above.",
     "buyer_receipt_status": "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
   },
+  "compute_integrity": {
+    "schema_version": "buyer_compute_integrity_disclosure_v1",
+    "current_status": "unavailable",
+    "current_mode": "unavailable",
+    "status_source": "live_telemetry_unavailable",
+    "live_telemetry_available": false,
+    "settlement_effect": "not_evaluated",
+    "labels": {
+      "unavailable": "no live sanitized telemetry currently backs buyer-visible per-model compute-integrity status",
+      "observing": "live telemetry is sampled/overt observation only and does not affect settlement",
+      "warn_only": "live telemetry reports warn readiness without blocking paid admission",
+      "enforcing": "policy-backed live telemetry may affect covered SPEC-022 settlement/admission gates",
+      "quarantined": "live telemetry/adjudication marked compute drift or a related adverse state",
+      "blocked": "covered paid admission is blocked for the affected compute-integrity scope",
+      "stale_expired": "previous live telemetry is stale or expired and needs fresh evidence"
+    },
+    "disclosure": "SPEC-036 compute-integrity is sampled/overt distribution-drift readiness telemetry against approved references. It is unavailable here until live sanitized telemetry backs the per-model status. It is not proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance."
+  },
   "sticky_affinity": {
     "enabled": false,
     "ttl_seconds": 0,
@@ -1253,6 +1306,10 @@ Buyers consuming this field SHOULD display its content in human-readable form be
 Gateway implementations MUST set this field automatically.
 
 Operator override is forbidden; there MUST be no config opt-out.
+
+The `compute_integrity` sub-object MUST be present in `tier1_disclosure`. Its label glossary MUST distinguish `unavailable`, `observing`, `warn_only`, `enforcing`, `quarantined`, `blocked`, and `stale_expired` states. Until a live sanitized telemetry source backs per-model buyer status, `current_status` and `current_mode` MUST be `unavailable`, `status_source` MUST be `live_telemetry_unavailable`, `live_telemetry_available` MUST be `false`, and `settlement_effect` MUST be `not_evaluated`. The disclosure MUST describe SPEC-036 as sampled/overt distribution-drift readiness telemetry and MUST NOT claim proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance.
+
+Gateway-owned disclosure and per-model status values are authoritative for this unavailable phase. The gateway MUST overwrite hostile, stale, or same-named upstream fields rather than forwarding them verbatim.
 
 The `sticky_affinity` sub-object MUST be present. When `routing.sticky_enabled: false`, implementations MUST return `enabled: false`, `ttl_seconds: 0`, and a description that states no sticky routing is active. When `routing.sticky_enabled: true`, implementations MUST return `enabled: true`, `ttl_seconds` equal to the coordinator's effective SPEC-004 v0.2 `routing.sticky_ttl_s`, and this plain-language privacy tradeoff in substantively equivalent form: "Related requests with the same conversation tag are preferentially routed to one provider for up to this many seconds, so that provider can observe and correlate more of your traffic than under default routing."
 

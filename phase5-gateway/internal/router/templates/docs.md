@@ -142,6 +142,8 @@ Streaming failover is transparent only before response bytes are committed. Afte
 
 `GET /v1/models` returns the current provider-reported model list plus `tier1_disclosure`. The disclosure separates provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching.
 
+Each model includes `compute_integrity`. Until live sanitized telemetry is wired into the buyer models surface, the status is explicitly `unavailable` with `live_telemetry_available: false` and `settlement_effect: not_evaluated`. SPEC-036 compute-integrity is sampled/overt distribution-drift readiness telemetry; it is not proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance.
+
 ### Usage
 
 `GET /v1/usage` returns account quota, key, model, rating summary, and `settlement_disclosure` fields for signed-in API-key users. `daily_tokens_reserved` can include pending verification reservations after a request completes; non-verified terminal outcomes release or refund that reservation.
