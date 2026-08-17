@@ -1452,7 +1452,7 @@
     {
       "requirement_id": "SPEC-010-R004",
       "spec_id": "SPEC-010",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/ws/server.go:expectedAdmissionModelHash",
         "phase4-coordinator/internal/ws/server.go:expectedProviderModelHash",
@@ -1483,7 +1483,12 @@
           "expires_at": "2026-11-10"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1007",
+        "rationale": "This change updates the buyer route snapshot selector that was covered by historical commit evidence; current conformance requires a new post-change signed provider prebeta journey."
+      }
     },
     {
       "requirement_id": "SPEC-010-R005",
@@ -2465,42 +2470,75 @@
       "requirement_id": "SPEC-036-R002",
       "spec_id": "SPEC-036",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/buyer/route_snapshot.go:computeIntegrityRouteBinding",
+        "phase4-coordinator/internal/billing/route_snapshot.go:RouteSnapshot",
+        "phase4-coordinator/internal/billing/settlement_verifier.go:verifySettlementReceiptSPEC022",
+        "phase4-coordinator/internal/billing/settlement_compute_integrity.go:loadComputeIntegrityCaptureConn"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/settlement_compute_integrity_test.go:TestComputeIntegrityObserveRouteDoesNotChangeMoneyOutcome",
+        "phase4-coordinator/internal/billing/settlement_compute_integrity_test.go:signedSettlementReceiptForInputWithKey"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1007",
+        "rationale": "Code and tests preserve SPEC-015 v0.4 receipt/usage shape while adding SPEC-036 as out-of-band settlement context; conformant state is pending signed journey and commit evidence."
       }
     },
     {
       "requirement_id": "SPEC-036-R003",
       "spec_id": "SPEC-036",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/settlement_verifier.go:applyComputeIntegrityGate",
+        "phase4-coordinator/internal/computeintegrity/settlement.go:Evaluate",
+        "phase4-coordinator/internal/computeintegrity/settlement.go:ApplyGate"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/settlement_compute_integrity_test.go:TestComputeIntegrityDriftQuarantinesVerifiedSettlementAndExcludesPayout",
+        "phase4-coordinator/internal/billing/settlement_compute_integrity_test.go:TestComputeIntegrityCleanCaptureDoesNotPromoteZeroSettledSPEC022",
+        "phase4-coordinator/internal/billing/settlement_compute_integrity_test.go:TestComputeIntegrityObserveRouteDoesNotChangeMoneyOutcome",
+        "phase4-coordinator/internal/computeintegrity/settlement_test.go:TestAC05_SettlementOutcomeMapping"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1007",
+        "rationale": "Settlement now composes computeintegrity.Evaluate/ApplyGate over SPEC-022 finality and payout readiness still reads only verified settlement rows; conformant state is pending signed journey and commit evidence."
       }
     },
     {
       "requirement_id": "SPEC-036-R004",
       "spec_id": "SPEC-036",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/buyer/route_snapshot.go:recordRouteSnapshot",
+        "phase4-coordinator/internal/billing/route_snapshot.go:InsertRouteSnapshot",
+        "phase4-coordinator/internal/billing/store.go:ensureSettlementRouteSnapshotComputeIntegrityColumns",
+        "phase4-coordinator/internal/billing/settlement_compute_integrity.go:InsertComputeIntegrityCapture",
+        "phase4-coordinator/internal/billing/settlement_compute_integrity.go:MarkComputeIntegrityCaptureRequired",
+        "phase4-coordinator/internal/billing/settlement_compute_integrity.go:loadComputeIntegrityCaptureConn"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/settlement_compute_integrity_test.go:TestComputeIntegrityMissingOrUnreadableCaptureFailsClosed",
+        "phase4-coordinator/internal/billing/settlement_compute_integrity_test.go:TestComputeIntegrityCaptureRouteMismatchFailsClosed",
+        "phase4-coordinator/internal/billing/settlement_compute_integrity_test.go:TestComputeIntegrityCaptureIsImmutable",
+        "phase4-coordinator/internal/billing/settlement_compute_integrity_test.go:TestComputeIntegrityDriftQuarantinesVerifiedSettlementAndExcludesPayout",
+        "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1007",
+        "rationale": "Billing now persists a keyed immutable request-start capture/required marker and loads only that stored capture during settlement; conformant state is pending signed journey and commit evidence."
       }
     },
     {

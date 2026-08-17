@@ -12,6 +12,8 @@ import (
 	"io"
 	"sort"
 	"strings"
+
+	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 )
 
 const (
@@ -74,6 +76,7 @@ type SettlementVerifyInput struct {
 	CanonicalHashesAvailable   bool
 	AlreadyDeadlineQuarantined bool
 	TerminalOutcomeFinal       bool
+	ComputeIntegrityCapture    *computeintegrity.Capture
 }
 
 type SettlementVerifyResult struct {
@@ -113,18 +116,26 @@ type SettlementReceiptFacts struct {
 }
 
 type SettlementVerificationChecks struct {
-	SignatureVerified    bool `json:"signature_verified"`
-	RouteSnapshotMatched bool `json:"route_snapshot_matched"`
-	PromptHashMatched    bool `json:"prompt_hash_matched"`
-	OutputHashMatched    bool `json:"output_hash_matched"`
-	UsageMatched         bool `json:"usage_matched"`
-	UsageCrossChecked    bool `json:"usage_cross_checked"`
-	NoOverlap            bool `json:"no_overlap"`
-	TerminalStateMatched bool `json:"terminal_state_matched"`
-	TimestampWindowValid bool `json:"timestamp_window_valid"`
+	SignatureVerified              bool   `json:"signature_verified"`
+	RouteSnapshotMatched           bool   `json:"route_snapshot_matched"`
+	PromptHashMatched              bool   `json:"prompt_hash_matched"`
+	OutputHashMatched              bool   `json:"output_hash_matched"`
+	UsageMatched                   bool   `json:"usage_matched"`
+	UsageCrossChecked              bool   `json:"usage_cross_checked"`
+	NoOverlap                      bool   `json:"no_overlap"`
+	TerminalStateMatched           bool   `json:"terminal_state_matched"`
+	TimestampWindowValid           bool   `json:"timestamp_window_valid"`
+	ComputeIntegrityGate           bool   `json:"compute_integrity_gate"`
+	ComputeIntegrityPayable        bool   `json:"compute_integrity_payable"`
+	ComputeIntegrityReason         string `json:"compute_integrity_reason,omitempty"`
+	ComputeIntegritySnapshotDigest string `json:"compute_integrity_request_start_snapshot_digest,omitempty"`
 }
 
 func VerifySettlementReceipt(input SettlementVerifyInput) SettlementVerifyResult {
+	return applyComputeIntegrityGate(input, verifySettlementReceiptSPEC022(input))
+}
+
+func verifySettlementReceiptSPEC022(input SettlementVerifyInput) SettlementVerifyResult {
 	if input.AlreadyDeadlineQuarantined {
 		return settlementQuarantined("deadline_quarantined", "")
 	}
@@ -186,6 +197,34 @@ func VerifySettlementReceipt(input SettlementVerifyInput) SettlementVerifyResult
 		return SettlementVerifyResult{Outcome: SettlementOutcomeZeroSettled, ReceiptResult: SettlementReceiptResultValid, Reason: "verified_zero_settlement", ReceiptVersion: tuple.ReceiptVersion, Facts: facts, Checks: checks}
 	}
 	return SettlementVerifyResult{Outcome: SettlementOutcomeVerified, ReceiptResult: SettlementReceiptResultValid, Reason: "verified_settlement", ReceiptVersion: tuple.ReceiptVersion, Facts: facts, Checks: checks}
+}
+
+func applyComputeIntegrityGate(input SettlementVerifyInput, result SettlementVerifyResult) SettlementVerifyResult {
+	if input.ComputeIntegrityCapture == nil {
+		return result
+	}
+	capture := *input.ComputeIntegrityCapture
+	var snapshotDigest string
+	if !capture.Unreadable {
+		var err error
+		snapshotDigest, err = computeintegrity.RequestStartSnapshotDigest(capture)
+		if err != nil {
+			capture.Unreadable = true
+		}
+	}
+	decision := computeintegrity.Evaluate(capture)
+	outcome, reason := computeintegrity.ApplyGate(result.Outcome, result.Reason, decision)
+	result.Outcome = outcome
+	result.Reason = reason
+	result.Checks.ComputeIntegrityGate = decision.Applies
+	result.Checks.ComputeIntegrityPayable = decision.Payable
+	if decision.Reason != "" {
+		result.Checks.ComputeIntegrityReason = string(decision.Reason)
+	}
+	if snapshotDigest != "" {
+		result.Checks.ComputeIntegritySnapshotDigest = snapshotDigest
+	}
+	return result
 }
 
 func (input SettlementVerifyInput) deadlineUnixMS() int64 {

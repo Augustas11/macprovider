@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
@@ -120,10 +121,11 @@ type SettlementReceiptAuthorization struct {
 }
 
 type settlementEvidence struct {
-	route      RouteSnapshot
-	routeHash  string
-	attempt    settlementAttemptEvidence
-	deadlineMS int64
+	route                   RouteSnapshot
+	routeHash               string
+	attempt                 settlementAttemptEvidence
+	deadlineMS              int64
+	computeIntegrityCapture *computeintegrity.Capture
 }
 
 type settlementAttemptEvidence struct {
@@ -183,6 +185,7 @@ func (s *Store) IngestSettlementReceipt(ctx context.Context, input SettlementRec
 			NowUnixMS:                receivedAt,
 			CanonicalHashesAvailable: evidence.attempt.OutputAvailable && evidence.attempt.OutputHash != "",
 			TerminalOutcomeFinal:     alreadyTerminal,
+			ComputeIntegrityCapture:  evidence.computeIntegrityCapture,
 		})
 	})
 }
@@ -217,6 +220,7 @@ func (s *Store) RecordMissingSettlementReceipt(ctx context.Context, input Settle
 			ReceiptMissing:           true,
 			CanonicalHashesAvailable: evidence.attempt.OutputAvailable && evidence.attempt.OutputHash != "",
 			TerminalOutcomeFinal:     alreadyTerminal,
+			ComputeIntegrityCapture:  evidence.computeIntegrityCapture,
 		})
 	})
 }
@@ -759,19 +763,26 @@ func loadSettlementEvidenceConn(ctx context.Context, conn *sql.Conn, id Settleme
 	if err != nil {
 		return settlementEvidence{}, err
 	}
+	computeIntegrityCapture, err := loadComputeIntegrityCaptureConn(ctx, conn, id, route)
+	if err != nil {
+		return settlementEvidence{}, err
+	}
 	return settlementEvidence{
-		route:      route,
-		routeHash:  routeHash,
-		attempt:    attempt,
-		deadlineMS: attempt.TerminalStateTSUnixMS + route.PendingDeadlineSeconds*1000,
+		route:                   route,
+		routeHash:               routeHash,
+		attempt:                 attempt,
+		deadlineMS:              attempt.TerminalStateTSUnixMS + route.PendingDeadlineSeconds*1000,
+		computeIntegrityCapture: computeIntegrityCapture,
 	}, nil
 }
 
 func loadSettlementRouteSnapshotConn(ctx context.Context, conn *sql.Conn, id SettlementReceiptIdentity) (RouteSnapshot, string, error) {
 	var r RouteSnapshot
 	var providerSession, providerGeneration sql.NullString
+	var computeIntegrityHardwareDigest sql.NullString
 	var digest string
 	var routeSnapshotJSON string
+	var computeIntegrityCaptureRequired, computeIntegritySamplingCovered int
 	err := conn.QueryRowContext(ctx, `
 SELECT provider_session_id, provider_generation_id, paid_entrypoint,
        provider_receipt_key_id, provider_receipt_key_source, model_id,
@@ -781,6 +792,8 @@ SELECT provider_session_id, provider_generation_id, paid_entrypoint,
        spec008_hash_status, route_snapshot_policy_version, route_snapshot_mode,
        route_decision_ts_unix_ms, request_start_ts_unix_ms,
        pending_deadline_seconds, prompt_hash_basis, prompt_hash,
+       compute_integrity_capture_required, compute_integrity_sampling_profile_covered,
+       compute_integrity_hardware_runtime_class_digest,
        route_snapshot_digest, route_snapshot_json
 FROM settlement_route_snapshots
 WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
@@ -794,6 +807,8 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 		&r.Spec008HashStatus, &r.RouteSnapshotPolicyVersion, &r.RouteSnapshotMode,
 		&r.RouteDecisionTSUnixMS, &r.RequestStartTSUnixMS,
 		&r.PendingDeadlineSeconds, &r.PromptHashBasis, &r.PromptHash,
+		&computeIntegrityCaptureRequired, &computeIntegritySamplingCovered,
+		&computeIntegrityHardwareDigest,
 		&digest, &routeSnapshotJSON,
 	)
 	if err != nil {
@@ -821,6 +836,11 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	}
 	r.ProviderReportedModelHashAlgorithm = algorithms.ProviderReported
 	r.ExpectedCatalogModelHashAlgorithm = algorithms.ExpectedCatalog
+	r.ComputeIntegrityCaptureRequired = computeIntegrityCaptureRequired == 1
+	r.ComputeIntegritySamplingCovered = computeIntegritySamplingCovered == 1
+	if computeIntegrityHardwareDigest.Valid {
+		r.ComputeIntegrityHardwareDigest = computeIntegrityHardwareDigest.String
+	}
 	computed, _, err := r.Digest()
 	if err != nil {
 		return RouteSnapshot{}, "", err

@@ -104,6 +104,23 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	}
 }
 
+func TestSettlementRouteSnapshotIsImmutable(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	snapshot := testRouteSnapshot()
+	if _, err := store.InsertRouteSnapshot(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := store.db.Exec(`
+UPDATE settlement_route_snapshots
+   SET compute_integrity_capture_required = 1
+ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		snapshot.AccountScope, snapshot.RequestID, snapshot.AttemptN, snapshot.ProviderID)
+	if err == nil || !strings.Contains(err.Error(), "settlement route snapshot is immutable") {
+		t.Fatalf("err=%v, want immutable route snapshot trigger", err)
+	}
+}
+
 func TestRouteSnapshotRejectsInvalidModeAndDeadline(t *testing.T) {
 	snapshot := testRouteSnapshot()
 	snapshot.RouteSnapshotMode = "shadow"

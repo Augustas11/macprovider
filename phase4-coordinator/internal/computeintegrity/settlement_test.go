@@ -357,6 +357,16 @@ func TestAC16_ClosedReasonPrecedence(t *testing.T) {
 		}
 	})
 
+	t.Run("an explicitly unreadable capture fails closed before false enforce passthrough", func(t *testing.T) {
+		c := payableCapture()
+		c.Spec022EffectiveEnforce = false
+		c.Unreadable = true
+		d := Evaluate(c)
+		if !d.Applies || d.Payable || d.Reason != ReasonUnreadable {
+			t.Fatalf("explicit unreadable capture must fail closed unreadable, got %+v", d)
+		}
+	})
+
 	t.Run("swap_laundering outranks manual_review outranks reference outranks drift", func(t *testing.T) {
 		order := []struct {
 			state  State

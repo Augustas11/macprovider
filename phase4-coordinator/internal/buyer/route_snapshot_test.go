@@ -122,6 +122,9 @@ func TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts(t *testing.T) {
 		if row.Mode != billing.RouteSnapshotModeEnforce {
 			t.Fatalf("route_snapshot_mode=%q want enforce", row.Mode)
 		}
+		if row.ComputeIntegrityCaptureRequired != 0 || row.ComputeIntegritySamplingCovered != 0 || row.ComputeIntegrityHardwareDigest != "" {
+			t.Fatalf("compute integrity activated without explicit SPEC-036 enforce gate: %#v", row)
+		}
 		if len(row.Digest) != 64 || len(row.PromptHash) != 64 {
 			t.Fatalf("digest/prompt hash lengths invalid: %#v", row)
 		}
@@ -165,8 +168,11 @@ func TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts(t *testing.T) {
 	}
 	for _, verdict := range verdicts {
 		if verdict.ReceiptPresent != 0 || verdict.ReceiptResult != billing.SettlementReceiptResultInconclusive || verdict.SettlementOutcome != billing.SettlementOutcomePending {
-			t.Fatalf("verdict=%#v, want missing receipt pending/inconclusive", verdict)
+			t.Fatalf("verdict=%#v, want SPEC-036 dormant missing receipt pending/inconclusive", verdict)
 		}
+	}
+	if got := computeIntegrityCaptureMarkerCount(t, dbPath); got != 0 {
+		t.Fatalf("compute integrity capture markers=%d want 0 without explicit SPEC-036 activation", got)
 	}
 	ledgerPolicies := queryLedgerSettlementPolicies(t, dbPath)
 	if len(ledgerPolicies) != 2 {
@@ -999,12 +1005,15 @@ func TestUnavailableOutputAfterPrefixKeepsEmptyRange(t *testing.T) {
 }
 
 type routeSnapshotRow struct {
-	AttemptN   int
-	ProviderID string
-	Status     string
-	Mode       string
-	Digest     string
-	PromptHash string
+	AttemptN                        int
+	ProviderID                      string
+	Status                          string
+	Mode                            string
+	Digest                          string
+	PromptHash                      string
+	ComputeIntegrityCaptureRequired int
+	ComputeIntegritySamplingCovered int
+	ComputeIntegrityHardwareDigest  string
 }
 
 type settlementAttemptOutputRow struct {
@@ -1099,9 +1108,11 @@ func queryRouteSnapshots(t *testing.T, dbPath string) []routeSnapshotRow {
 	}
 	defer db.Close()
 	rows, err := db.Query(`
-SELECT attempt_n, provider_id, spec008_hash_status, route_snapshot_mode, route_snapshot_digest, prompt_hash
-FROM settlement_route_snapshots
-ORDER BY attempt_n ASC`)
+	SELECT attempt_n, provider_id, spec008_hash_status, route_snapshot_mode, route_snapshot_digest, prompt_hash,
+	       compute_integrity_capture_required, compute_integrity_sampling_profile_covered,
+	       COALESCE(compute_integrity_hardware_runtime_class_digest, '')
+	FROM settlement_route_snapshots
+	ORDER BY attempt_n ASC`)
 	if err != nil {
 		t.Fatalf("query snapshots: %v", err)
 	}
@@ -1109,7 +1120,7 @@ ORDER BY attempt_n ASC`)
 	var got []routeSnapshotRow
 	for rows.Next() {
 		var row routeSnapshotRow
-		if err := rows.Scan(&row.AttemptN, &row.ProviderID, &row.Status, &row.Mode, &row.Digest, &row.PromptHash); err != nil {
+		if err := rows.Scan(&row.AttemptN, &row.ProviderID, &row.Status, &row.Mode, &row.Digest, &row.PromptHash, &row.ComputeIntegrityCaptureRequired, &row.ComputeIntegritySamplingCovered, &row.ComputeIntegrityHardwareDigest); err != nil {
 			t.Fatalf("scan snapshots: %v", err)
 		}
 		got = append(got, row)
@@ -1156,6 +1167,25 @@ func payoutReadyCount(t *testing.T, dbPath string) int {
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_payout_ready`).Scan(&count); err != nil {
 		t.Fatalf("count payout-ready: %v", err)
+	}
+	return count
+}
+
+func computeIntegrityCaptureMarkerCount(t *testing.T, dbPath string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`
+SELECT COUNT(*)
+  FROM settlement_compute_integrity_captures
+ WHERE capture_required = 1
+   AND capture_json IS NULL
+   AND request_start_snapshot_digest IS NULL`).Scan(&count); err != nil {
+		t.Fatalf("count compute integrity capture markers: %v", err)
 	}
 	return count
 }

@@ -115,6 +115,9 @@ type Decision struct {
 // Evaluate resolves the SPEC-036 gate decision for a captured request-start state
 // (FR-3, FR-4). Settlement is a pure function of the immutable capture.
 func Evaluate(c Capture) Decision {
+	if c.Unreadable {
+		return Decision{Applies: true, Payable: false, Reason: ReasonUnreadable}
+	}
 	// A missing/unreadable composite SPEC-022 binding fails closed BEFORE the not-enforce
 	// early return (FR-4): a malformed capture whose binding is absent must not be paid
 	// through as if SPEC-022 were legitimately not enforcing.
