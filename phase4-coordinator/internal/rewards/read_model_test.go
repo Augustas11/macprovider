@@ -99,6 +99,53 @@ func TestRewardEligibilityComputePendingBeatsEarningWork(t *testing.T) {
 	}
 }
 
+func TestRewardEligibilityComputeWarnDoesNotAuthorizeEarningWork(t *testing.T) {
+	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
+		AccruedMALIBU:         "0",
+		WithdrawableMALIBU:    "0",
+		HeldMALIBU:            "0",
+		TrustTier:             TierTrusted,
+		WalletBound:           true,
+		VerifiedReceiptCount:  minVerifiedReceipts,
+		AppAttested:           true,
+		ComputeIntegrityState: ComputeIntegrityStateWarn,
+		HardwareEvidenceState: HardwareEvidenceStateVerified,
+		LocalRuntimeReasons:   []string{ReasonEarningVerifiedWork},
+	})
+
+	if got.EarningState != EarningStateUnavailable {
+		t.Fatalf("earning_state = %q, want %q", got.EarningState, EarningStateUnavailable)
+	}
+	if got.PrimaryReason != ReasonComputeIntegrityPending {
+		t.Fatalf("primary_reason = %q, want %q", got.PrimaryReason, ReasonComputeIntegrityPending)
+	}
+}
+
+func TestRewardEligibilityUnknownProofStatesFailClosed(t *testing.T) {
+	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
+		AccruedMALIBU:         "0",
+		WithdrawableMALIBU:    "0",
+		HeldMALIBU:            "0",
+		TrustTier:             TierTrusted,
+		WalletBound:           true,
+		VerifiedReceiptCount:  minVerifiedReceipts,
+		AppAttested:           true,
+		ComputeIntegrityState: "future_compute_state",
+		HardwareEvidenceState: "future_hardware_state",
+		LocalRuntimeReasons:   []string{ReasonEarningVerifiedWork},
+	})
+
+	if got.EarningState != EarningStateUnavailable {
+		t.Fatalf("earning_state = %q, want %q", got.EarningState, EarningStateUnavailable)
+	}
+	if got.PrimaryReason != ReasonComputeIntegrityUnavailable {
+		t.Fatalf("primary_reason = %q, want %q", got.PrimaryReason, ReasonComputeIntegrityUnavailable)
+	}
+	if !containsReason(got.Reasons, ReasonHardwareEvidenceUnavailable) {
+		t.Fatalf("reasons = %v, want hardware unavailable", got.Reasons)
+	}
+}
+
 func TestRewardEligibilityComputeUnavailableBeatsNoBalance(t *testing.T) {
 	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
 		AccruedMALIBU:          "0",

@@ -149,18 +149,25 @@ func orderedRewardReasons(f MalibuRewardEligibilityFacts) []string {
 		add(ReasonProviderTokenUntrusted)
 	}
 	switch {
+	case f.ComputeIntegrityState == ComputeIntegrityStateVerified:
 	case computeIntegrityBlocked(f.ComputeIntegrityState):
 		add(ReasonComputeIntegrityBlocked)
-	case f.ComputeIntegrityState == ComputeIntegrityStatePending:
+	case f.ComputeIntegrityState == ComputeIntegrityStatePending ||
+		f.ComputeIntegrityState == ComputeIntegrityStateWarn:
 		add(ReasonComputeIntegrityPending)
 	case f.ComputeIntegrityState == ComputeIntegrityStateUnknown ||
 		f.ComputeIntegrityState == ComputeIntegrityStateExpired:
 		add(ReasonComputeIntegrityUnavailable)
+	default:
+		add(ReasonComputeIntegrityUnavailable)
 	}
 	switch f.HardwareEvidenceState {
+	case HardwareEvidenceStateVerified:
 	case HardwareEvidenceStateMissing, HardwareEvidenceStateExpired:
 		add(ReasonHardwareEvidenceMissingOrExpired)
 	case HardwareEvidenceStateUnavailable:
+		add(ReasonHardwareEvidenceUnavailable)
+	default:
 		add(ReasonHardwareEvidenceUnavailable)
 	}
 

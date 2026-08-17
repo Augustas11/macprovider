@@ -278,7 +278,7 @@ Reason vocabulary:
 | `hardware_evidence_unavailable` | SPEC-032/SPEC-033 proof/trust input | Hardware-evidence classification source is not wired or cannot answer. |
 | `hardware_evidence_missing_or_expired` | SPEC-032/SPEC-033 proof/trust input | The hardware-evidence owner reports no verified in-window evidence. This MUST NOT be rendered as a claim that hardware is false or weak. |
 | `compute_integrity_unavailable` | SPEC-036 proof/trust input | Compute-integrity classification source is not wired, unknown, or expired. |
-| `compute_integrity_pending` | SPEC-036 proof/trust input | Compute-integrity state is pending and cannot authorize stronger earning claims. |
+| `compute_integrity_pending` | SPEC-036 proof/trust input | Compute-integrity state is pending or warn-only for this read model and cannot authorize stronger earning claims. |
 | `compute_integrity_blocked` | SPEC-036 proof/trust input | Compute-integrity owner reports `quarantined_compute_drift` or `blocked:<reason>`. |
 | `provider_token_untrusted` | provider-token auth | Provider-token authentication failed or is not trusted for this read model. Successful `/v1/provider/malibu-accrual` responses normally omit this because auth failures return 401. |
 | `local_on_battery` | runtime-health observation reported to reward owner | Runtime health reports battery power blocking earning opportunity. |
@@ -288,7 +288,8 @@ Reason vocabulary:
 
 Precedence:
 
-1. `compute_integrity_blocked` outranks `compute_integrity_pending`.
+1. `compute_integrity_blocked` outranks `compute_integrity_pending`; only a
+   recognized positive compute state may omit both reasons.
 2. `held_wallet_daily_cap` outranks `held_provisional_trust_tier` when both are
    present, so clients can render cap-specific copy.
 3. Ledger-held and ledger-withdrawable facts outrank `telemetry_unavailable` for
