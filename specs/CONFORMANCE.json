@@ -394,7 +394,7 @@
     {
       "spec_id": "SPEC-015",
       "title": "Verifiable inference receipts",
-      "version": "0.4.3",
+      "version": "0.4.4",
       "path": "specs/SPEC-015-receipts.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1053,7 +1053,7 @@
     {
       "spec_id": "SPEC-036",
       "title": "Compute-Integrity Receipt Companion",
-      "version": "v0.1",
+      "version": "v0.1.1",
       "path": "specs/SPEC-036-compute-integrity-receipt.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2714,8 +2714,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1010",
-        "rationale": "Operator/provider status surfaces expose SPEC-036 readiness with approved no-proof/no-attestation copy and sanitized digest-only metadata. Buyer /v1/models now exposes an explicit unavailable per-model status and label glossary until live sanitized telemetry backs the public surface. Conformance remains pending until production live evidence, policy-bound copy version/digest serving, and the receipt-binding decision tracked in #1010 are complete."
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Operator/provider status surfaces expose SPEC-036 readiness with approved no-proof/no-attestation copy and sanitized digest-only metadata. Buyer /v1/models now exposes an explicit unavailable per-model status and label glossary until live sanitized telemetry backs the public surface. Conformance remains pending until production live evidence and policy-bound copy version/digest serving are complete."
       }
     },
     {

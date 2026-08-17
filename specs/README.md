@@ -23,7 +23,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-012 | Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility | 0.3 | draft | pending | pending corpus migration | [SPEC-012-coordinator-demand-pull.md](SPEC-012-coordinator-demand-pull.md) |
 | SPEC-013 | `macprovider-cli autotune` subcommand | 0.3.1 | normative | pending | pending corpus migration | [SPEC-013-cli-autotune.md](SPEC-013-cli-autotune.md) |
 | SPEC-014 | Provider Portal (seller-facing web surface) | 0.9 | draft | pending | pending corpus migration | [SPEC-014-provider-portal.md](SPEC-014-provider-portal.md) |
-| SPEC-015 | Verifiable inference receipts | 0.4.3 | normative | pending | pending: 1 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
+| SPEC-015 | Verifiable inference receipts | 0.4.4 | normative | pending | pending: 1 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
 | SPEC-016 | Provider payout pipeline (USDC on Base) | 0.1.26 | draft | pending | conformant: 1, pending: 10 | [SPEC-016-payout-pipeline.md](SPEC-016-payout-pipeline.md) |
 | SPEC-017 | Network Stats API | 0.1.9 | normative | pending | pending: 1 | [SPEC-017-network-stats-api.md](SPEC-017-network-stats-api.md) |
 | SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.7 | normative | pending | conformant: 1, pending: 1 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
@@ -44,7 +44,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-033 | Hardware-Evidence Verifier (`hardware-verifier.v2`) | v0.6.2 | draft | pending | conformant: 1 | [SPEC-033-hardware-verifier.md](SPEC-033-hardware-verifier.md) |
 | SPEC-034 | Referral admission, provider invites, and advocacy rewards | v0.4.7 | normative | pending | conformant: 1 | [SPEC-034-referral-gated-prebeta.md](SPEC-034-referral-gated-prebeta.md) |
 | SPEC-035 | Provider connection diagnostics and failure history | v0.4.0 | draft | complete | pending: 9 | [SPEC-035-provider-connection-diagnostics.md](SPEC-035-provider-connection-diagnostics.md) |
-| SPEC-036 | Compute-Integrity Receipt Companion | v0.1 | draft | complete | pending: 17 | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |
+| SPEC-036 | Compute-Integrity Receipt Companion | v0.1.1 | draft | complete | pending: 17 | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |
 | SPEC-037 | KV survival across provider restarts (encrypted provider-local disk tier) | v0.1.1 | draft | complete | pending: 13 | [SPEC-037-kv-survival-restart.md](SPEC-037-kv-survival-restart.md) |
 | SPEC-038 | Continuous batching for concurrent provider inference | v0.2 | draft | complete | pending: 17 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
 | SPEC-039 | Paged KV / paged-attention engine | v0.1 | draft | complete | pending: 14 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |

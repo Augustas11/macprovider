@@ -1,9 +1,17 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.1-draft
-**Date:** 2026-07-10
-**Depends on:** SPEC-015 v0.4.2, SPEC-022 v0.1.5, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
+**Status:** v0.1.1-draft
+**Date:** 2026-08-17
+**Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.1.5, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Change log v0.1.1 (2026-08-17, issue #1010 — receipt binding decision):**
+- Records the #1010 decision that request-start compute-integrity state digests
+  MUST NOT be added to SPEC-015 v0.4 receipts or `usage`. If request-level
+  external auditability is needed, SPEC-036 owns a separate audit artifact
+  keyed to the same request attempt and provider-signed receipt tuple digest.
+  A future SPEC-015 successor may reference that artifact only through a new
+  `receipt_version`.
 
 **Numbering + dependency note (2026-07-22).** This spec was drafted as `SPEC-030`
 against `SPEC-029` before the 2026-07-10 corpus-hygiene renumber. It is now
@@ -450,8 +458,21 @@ SPEC-036 MUST NOT add fields to SPEC-015 v0.4 `usage`.
 
 SPEC-036 MUST NOT require a future `receipt_version` to enter warn-only mode.
 
-Future receipt versions MAY bind a digest of the request-start
-compute-integrity state, but that is outside SPEC-036 v0.1.
+Future receipt versions MAY reference a digest of a separate SPEC-036 audit
+artifact only with a new `receipt_version` and explicit verifier behavior. The
+provider signature binds only the artifact reference, not the truth of
+coordinator-owned compute-integrity state.
+
+#1010 resolves the compatible binding path: request-start compute-integrity
+state digests MUST remain outside SPEC-015 v0.4 receipts and `usage`. A
+separate SPEC-036 audit artifact MAY bind the request-start
+compute-integrity state to the same account/request/attempt/provider,
+`route_snapshot_digest`, and digest of the provider-signed SPEC-015 tuple. That
+artifact is coordinator-owned audit evidence, not a provider receipt, and it
+MUST NOT be required for v0.4 receipt validity. If a later receipt contract must
+carry a compute-integrity artifact digest, it MUST define a successor
+`receipt_version` and verifier behavior rather than adding optional fields to
+v0.4.
 
 ### FR-3 Settlement outcome mapping
 
