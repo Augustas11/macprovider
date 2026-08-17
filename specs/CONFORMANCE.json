@@ -2685,14 +2685,27 @@
       "requirement_id": "SPEC-036-R015",
       "spec_id": "SPEC-036",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/computeintegrity/status.go:StatusForKey",
+        "phase4-coordinator/internal/ws/compute_integrity_status.go:handleAdminComputeIntegrity",
+        "phase4-coordinator/internal/ws/compute_integrity_status.go:handleProviderComputeIntegrity"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/computeintegrity/status_test.go:TestStatusForKeyCoversAbsentWarnExpiredAndBlockedStates",
+        "phase4-coordinator/internal/computeintegrity/status_test.go:TestStatusForKeyDoesNotMutateState",
+        "phase4-coordinator/internal/computeintegrity/status_test.go:TestStatusSnapshotOmitsRawPromptAndOutputFields",
+        "phase4-coordinator/internal/ws/compute_integrity_status_test.go:TestComputeIntegrityStatusOperatorAndProviderEndpoints",
+        "phase4-coordinator/internal/ws/compute_integrity_status_test.go:TestComputeIntegrityProviderEndpointRequiresTokenAndSource",
+        "phase4-coordinator/internal/ws/compute_integrity_status_test.go:TestComputeIntegrityProviderEndpointUsesReadOnlyTokenValidation",
+        "phase4-coordinator/internal/ws/compute_integrity_status_test.go:TestComputeIntegrityProviderEndpointRejectsMismatchedProviderStatus"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1008",
+        "rationale": "Operator/provider status surfaces now expose SPEC-036 readiness with approved no-proof/no-attestation copy and sanitized digest-only metadata. Conformance remains pending until live status-source wiring, policy-bound copy version/digest serving, and the remaining buyer/public/auditor disclosure surfaces are complete."
       }
     },
     {

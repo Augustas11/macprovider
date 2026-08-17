@@ -173,6 +173,7 @@ type Server struct {
 	connectionEventStopOnce        sync.Once
 	connectionEventDone            chan struct{}
 	connectionEventsStopped        atomic.Bool
+	computeIntegrityStatus         ComputeIntegrityStatusSource
 	admissionCeilingEventMu        sync.Mutex
 	admissionCeilingEvents         map[string]admissionCeilingEventRateState
 	providerConnWG                 sync.WaitGroup
@@ -566,6 +567,12 @@ func WithCredentialBootstrapMetrics(metrics CredentialBootstrapMetrics) Option {
 func WithCapacityOverClaimMetrics(metrics CapacityOverClaimMetrics) Option {
 	return func(s *Server) {
 		s.capacityOverClaimMetrics = metrics
+	}
+}
+
+func WithComputeIntegrityStatusSource(source ComputeIntegrityStatusSource) Option {
+	return func(s *Server) {
+		s.computeIntegrityStatus = source
 	}
 }
 
@@ -1140,6 +1147,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/blacklist", s.handleBlacklist)
 	mux.HandleFunc("/admin/providers", s.handleAdminProviders)
 	mux.HandleFunc("/admin/providers/", s.handleAdminProviders)
+	mux.HandleFunc("/admin/compute-integrity", s.handleAdminComputeIntegrity)
+	mux.HandleFunc("/admin/compute-integrity/", s.handleAdminComputeIntegrity)
 	mux.HandleFunc("/admin/provisional", s.handleAdminProvisional)
 	mux.HandleFunc("/admin/promote/", s.handleAdminPromote)
 	mux.HandleFunc("/admin/reject/", s.handleAdminReject)
@@ -1152,6 +1161,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/hardware-trust/revoke", s.handleHardwareTrustRevoke)
 	mux.HandleFunc("/admin/provider-admission-identity/recover", s.handleAdmissionIdentityRecoveryRequest)
 	mux.HandleFunc("/admin/provider-admission-identity/recover/", s.handleAdmissionIdentityRecoveryApprove)
+	mux.HandleFunc("/v1/provider/compute-integrity", s.handleProviderComputeIntegrity)
 	if s.cfg.Auth.GitHubOAuth.Enabled {
 		mux.HandleFunc("/v1/auth/github/start", s.handleGitHubStart)
 		mux.HandleFunc("/v1/auth/github/callback", s.handleGitHubCallback)
