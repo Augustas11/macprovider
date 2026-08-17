@@ -152,6 +152,7 @@
         "observations": {"type": "object"},
         "eip712": {"type": "object"},
         "candidate": {"type": "object"},
+        "candidate_identity": {"type": "object"},
         "signer": {"type": "object"}
       },
       "allOf": [

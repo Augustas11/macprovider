@@ -3629,7 +3629,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "Crash recovery and reconcile of in-flight ledger rows (SPEC-005 \u00a710): shipped and unit-tested; physical paid-path evidence is #1022. WAL enforcement lives with NewStore/migrate under R002."
+        "rationale": "Crash recovery and reconcile of in-flight ledger rows (SPEC-005 \u00a710): shipped and unit-tested. JOURNEY-BUYER-PAID-PATH maps this row for observation, but the isolated 11-step harness cannot promote it; crash recovery is not one of the physical steps. Remainder stays with #1022 until a crash-recovery step exists. WAL enforcement lives with NewStore/migrate under R002."
       }
     },
     {

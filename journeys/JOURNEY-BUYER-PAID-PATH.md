@@ -1,6 +1,6 @@
 # JOURNEY-BUYER-PAID-PATH
 
-Status: contract-only; no conformance or production-readiness claim
+Status: contract plus isolated-candidate harness; no signed promotion yet
 Owner: buyer/billing/settlement conformance
 Specs: SPEC-005, SPEC-006, SPEC-015, SPEC-022
 Requirements: SPEC-006-R001, SPEC-006-R002, SPEC-006-R003, SPEC-005-R001, SPEC-005-R002, SPEC-005-R003, SPEC-015-R001, SPEC-022-R001, SPEC-022-R002, SPEC-022-R003, SPEC-022-R004, SPEC-022-R005, SPEC-022-R006, SPEC-022-R007, SPEC-022-R008, SPEC-022-R010
@@ -8,6 +8,7 @@ Authority domains: buyer-api-error-contract, billing-settlement-formula, inferen
 Issue: https://github.com/Augustas11/macprovider/issues/614
 Evidence owner: https://github.com/Augustas11/macprovider/issues/1022
 Execution mode: isolated-candidate-paid-path
+Harness: `test/integration/buyer_paid_path_journey_test.go` (`TestJourneyBuyerPaidPathIsolatedCandidate`); capture with `MACPROVIDER_CAPTURE_BUYER_PAID_PATH=1`. A passing harness is not a signed journey-result.
 
 ## Purpose
 
@@ -32,6 +33,8 @@ conformant.
 - Demo-token traffic as a substitute for a paid API key.
 - SPEC-002-R002 trusted-provider quota (provider admission, not buyer debit).
 - Exhaustive remaining SPEC-005/006/015 clause coverage (issue #1023).
+- Crash recovery / SPEC-005-R003: not one of the eleven physical steps;
+  this harness cannot promote it.
 - Promoting SPEC-022-R007 or SPEC-022-R008 from this observe-mode run.
 
 ## Preconditions
@@ -48,8 +51,9 @@ conformant.
 - Use an isolated test buyer account with a disposable API key and a known
   starting quota. Do not spend a production operator wallet.
 - Capture the effective settlement policy before and after the journey:
-  `settlement.mode` must remain `observe`, plus policy version and pending
-  deadline.
+  `settlement.verified_model_settlement_mode` must remain `observe` and
+  `settlement.job_enabled` must remain false. Ledger
+  `settlement_policy_mode` on payable rows must also stay `observe`.
 - Note: `settlement.mode: observe` does not prevent money movement.
   Observe-mode ledger credits remain payable and can settle into
   `ledger_payout_ready`. Environment isolation, not observe mode, is what
@@ -89,8 +93,8 @@ conformant.
    and uploaded artifacts.
 6. `step-06-streaming-chat` — Repeat steps 2-5 for a streaming
    `POST /v1/chat/completions` request. Require the stream to terminate
-   cleanly and the settled completion tokens to be bound to the delivered
-   prefix, not an unbounded byte estimate.
+   cleanly and the settled completion tokens to equal the delivered
+   fixture prefix, not an unbounded byte estimate.
 7. `step-07-failure-refund` — Exercise a no-provider or pre-dispatch failure
    (or a recorded equivalent fixture against the named candidate). Require the
    buyer-visible error envelope (`error.code`, `error.retryable`) and a quota
@@ -99,12 +103,12 @@ conformant.
    surface) and record `tier1_disclosure.verified_model_settlement` /
    model-verification-limit text. Require observe-mode disclosure not to
    claim enforce.
-9. `step-09-receipt-retrieval` — If a buyer receipt-retrieval endpoint is
-   exposed, fetch the attempt as the owning account and as a second account.
-   Require owner success, non-owner 403, and no raw prompt/output in the body.
-   If the endpoint is not exposed, record
-   `buyer_receipt_retrieval_exposed=false`; do not treat absence as a pass
-   for SPEC-022-R006 promotion.
+9. `step-09-receipt-retrieval` — Probe `GET /v1/receipts/{id}`. This
+   isolated harness treats HTTP 200 as fatal so SPEC-022-R006 cannot
+   silently promote. A 404 records `buyer_receipt_retrieval_exposed=false`.
+   Any other status is inconclusive and fails the run. If a later candidate
+   exposes retrieval, capture that as a separate reviewed step rather than
+   letting this harness adapt in place.
 10. `step-10-redaction` — Inspect logs, ledger rows, receipt state,
     screenshots, callback captures, and exported artifacts for bearer tokens,
     private keys, raw prompts/outputs, or unintended production identifiers.
@@ -117,7 +121,7 @@ conformant.
 
 The run must produce a redacted, signed result envelope containing:
 
-- schema_version, journey_id `JOURNEY-BUYER-PAID-PATH`, spec_id,
+- schema_version, journey_id `JOURNEY-BUYER-PAID-PATH`,
   requirement_ids, run_id, candidate commit/release, operator, environment
   class, and UTC timestamps;
 - execution_mode `isolated-candidate-paid-path`;
@@ -126,7 +130,10 @@ The run must produce a redacted, signed result envelope containing:
   references to retained artifacts;
 - starting and ending quota, ledger credit id fingerprints, receipt outcome,
   and rate-card/catalog identities sufficient to recompute the billed row
-  without secrets;
+  without secrets, recorded in the redacted evidence artifact the signed
+  envelope hashes;
+- `requirement_ids` naming every requirement this run may promote; a single
+  `spec_id` is not used because the journey spans SPEC-005/006/015/022;
 - `observations.settlement_mode` (`observe`),
   `observations.enforce_activated` (false),
   `observations.payout_ready_mutated` (false),
@@ -158,6 +165,8 @@ does not by itself authorize promotion or SPEC-022 enforce activation.
 SPEC-022-R006 cannot promote while buyer receipt retrieval is unexposed.
 SPEC-022-R001 cannot promote from an enforce-mode claim; this journey
 requires captured mode `observe`.
+SPEC-005-R003 cannot promote from this harness; crash recovery is not an
+in-scope physical step.
 SPEC-022-R007 and SPEC-022-R008 cannot promote from this observe-mode run,
 because their money assertions apply to covered enforce traffic. Step 3's
 settled reservation is observe behavior, not evidence for R-8.1.
