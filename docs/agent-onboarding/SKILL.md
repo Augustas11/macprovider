@@ -1,9 +1,14 @@
+---
+name: macprovider-agent-onboarding
+description: Use when helping providers install, repair, inspect, update, or uninstall MacProvider, or when helping buyers use MacProvider through OpenAI-compatible SDKs.
+---
+
 # MacProvider Agent Onboarding Skill
 
 Canonical publication URL: `https://get.malibu.tech/skill.md`
 Discovery index publication URL: `https://get.malibu.tech/.well-known/skills/index.json`
 Source path: `docs/agent-onboarding/SKILL.md`
-Last updated: 2026-08-16
+Last updated: 2026-08-17
 
 Use this skill when an agent needs to help a provider install, repair,
 inspect, update, or uninstall MacProvider, or when a buyer wants to use
