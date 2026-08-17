@@ -291,3 +291,27 @@ func TestRewardEligibilityTrustedBalanceIsWithdrawable(t *testing.T) {
 		t.Fatalf("primary_reason = %q, want %q", got.PrimaryReason, ReasonWithdrawableBalanceAvailable)
 	}
 }
+
+func TestRewardEligibilityMissingWalletBlocksWithdrawableBalance(t *testing.T) {
+	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
+		AccruedMALIBU:         "5.00000000",
+		WithdrawableMALIBU:    "5.00000000",
+		HeldMALIBU:            "0",
+		TrustTier:             TierTrusted,
+		WalletBound:           false,
+		VerifiedReceiptCount:  minVerifiedReceipts,
+		AppAttested:           true,
+		HardwareEvidenceState: HardwareEvidenceStateVerified,
+		ComputeIntegrityState: ComputeIntegrityStateVerified,
+	})
+
+	if got.WithdrawalState != WithdrawalStateIneligible {
+		t.Fatalf("withdrawal_state = %q, want %q", got.WithdrawalState, WithdrawalStateIneligible)
+	}
+	if got.PrimaryReason != ReasonMissingWalletBinding {
+		t.Fatalf("primary_reason = %q, want %q", got.PrimaryReason, ReasonMissingWalletBinding)
+	}
+	if !containsReason(got.Reasons, ReasonWithdrawableBalanceAvailable) {
+		t.Fatalf("reasons = %v, want raw balance reason retained", got.Reasons)
+	}
+}

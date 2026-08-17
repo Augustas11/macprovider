@@ -254,6 +254,9 @@ func withdrawalStateFor(f MalibuRewardEligibilityFacts, reasons []string) string
 		containsReason(reasons, ReasonHeldDemotionCooldown) {
 		return WithdrawalStateHeld
 	}
+	if containsReason(reasons, ReasonMissingWalletBinding) {
+		return WithdrawalStateIneligible
+	}
 	if decimalPositive(f.WithdrawableMALIBU) {
 		return WithdrawalStateWithdrawable
 	}
@@ -274,9 +277,9 @@ func primaryRewardReason(withdrawalState, earningState string, reasons []string)
 		ReasonLocalOnBattery,
 		ReasonLocalThermalPressure,
 		ReasonModelNotReady,
+		ReasonMissingWalletBinding,
 		ReasonEarningVerifiedWork,
 		ReasonWithdrawableBalanceAvailable,
-		ReasonMissingWalletBinding,
 		ReasonInsufficientVerifiedReceipts,
 		ReasonAppAttestationMissing,
 		ReasonTelemetryUnavailable,

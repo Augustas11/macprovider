@@ -292,9 +292,11 @@ Precedence:
    recognized positive compute state may omit both reasons.
 2. `held_wallet_daily_cap` outranks `held_provisional_trust_tier` when both are
    present, so clients can render cap-specific copy.
-3. Ledger-held and ledger-withdrawable facts outrank `telemetry_unavailable` for
+3. `missing_wallet_binding` blocks MALIBU withdrawal readiness and outranks a
+   raw withdrawable ledger balance for `primary_reason`.
+4. Ledger-held and ledger-withdrawable facts outrank `telemetry_unavailable` for
    `withdrawal_state`.
-4. Runtime-health reasons, when reported into v1 by the reward owner, affect
+5. Runtime-health reasons, when reported into v1 by the reward owner, affect
    earning opportunity only. They MUST NOT make already-accrued MALIBU
    withdrawable or non-withdrawable by themselves.
 
