@@ -221,8 +221,11 @@ struct ProviderEarnings: Codable, Equatable {
         idlePrewarm = try c.decodeIfPresent(ProviderIdlePrewarmSummary.self, forKey: .idlePrewarm) ?? .empty
         let decodedMalibuProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .malibuProjectionFresh) ?? false
         malibuProjectionFresh = decodedMalibuProjectionFresh
-        if c.contains(.malibuRewardEligibility) {
-            malibuRewardEligibility = try c.decodeIfPresent(MalibuRewardEligibility.self, forKey: .malibuRewardEligibility)
+        if let decodedRewardEligibility = try c.decodeIfPresent(
+            MalibuRewardEligibility.self,
+            forKey: .malibuRewardEligibility
+        ) {
+            malibuRewardEligibility = decodedRewardEligibility
         } else if decodedMalibuProjectionFresh {
             malibuRewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
         } else {

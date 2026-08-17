@@ -1748,7 +1748,7 @@ enum AgentSnapshotPresenter {
 
     private static func authoritativeRewardEligibility(_ s: AgentSnapshot) -> MalibuRewardEligibility? {
         guard s.malibuProjectionFresh else { return nil }
-        return s.malibuRewardEligibility
+        return s.malibuRewardEligibility ?? MalibuRewardEligibility.unavailableForMissingObject()
     }
 
     private static func rewardEligibilityLine(_ eligibility: MalibuRewardEligibility) -> String {
