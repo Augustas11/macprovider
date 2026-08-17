@@ -247,9 +247,17 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 		!strings.Contains(settlement.Outcomes.Quarantined, "not labeled as buyer fault") ||
 		!strings.Contains(settlement.Outcomes.ZeroSettled, "no billable verified work") ||
 		!strings.Contains(settlement.PartialCharge, "delivered output prefix") ||
-		!strings.Contains(settlement.StreamingFailover, "does not double-charge overlapping output") ||
+		!strings.Contains(settlement.StreamingFailover, "before response bytes are committed") ||
+		!strings.Contains(settlement.StreamingFailover, "provider_disconnected") ||
+		!strings.Contains(settlement.StreamingFailover, "new request") ||
+		!strings.Contains(settlement.StreamingFailover, "separate billable request") ||
+		!strings.Contains(settlement.StreamingFailover, "cross-request overlapping output is not deduplicated") ||
+		!strings.Contains(settlement.StreamingFailover, "must not double-charge overlapping output") ||
 		!strings.Contains(settlement.BuyerReceiptStatus, "without raw prompts or raw outputs") {
 		t.Fatalf("settlement disclosure is incomplete: %+v", settlement)
+	}
+	if strings.Contains(settlement.StreamingFailover, "Transparent streaming failover bills") {
+		t.Fatalf("settlement disclosure overclaims post-commit transparent failover: %q", settlement.StreamingFailover)
 	}
 }
 
@@ -275,9 +283,17 @@ func TestUsageIncludesSPEC022SettlementDisclosure(t *testing.T) {
 		!strings.Contains(disclosure.Outcomes.Quarantined, "not labeled as buyer fault") ||
 		!strings.Contains(disclosure.Outcomes.ZeroSettled, "no billable verified work") ||
 		!strings.Contains(disclosure.PartialCharge, "settlement-capable receipt binds the delivered output prefix") ||
-		!strings.Contains(disclosure.StreamingFailover, "does not double-charge overlapping output") ||
+		!strings.Contains(disclosure.StreamingFailover, "before response bytes are committed") ||
+		!strings.Contains(disclosure.StreamingFailover, "provider_disconnected") ||
+		!strings.Contains(disclosure.StreamingFailover, "new request") ||
+		!strings.Contains(disclosure.StreamingFailover, "separate billable request") ||
+		!strings.Contains(disclosure.StreamingFailover, "cross-request overlapping output is not deduplicated") ||
+		!strings.Contains(disclosure.StreamingFailover, "must not double-charge overlapping output") ||
 		!strings.Contains(disclosure.BuyerReceiptStatus, "without raw prompts or raw outputs") {
 		t.Fatalf("usage settlement disclosure is incomplete: %+v", disclosure)
+	}
+	if strings.Contains(disclosure.StreamingFailover, "Transparent streaming failover bills") {
+		t.Fatalf("usage settlement disclosure overclaims post-commit transparent failover: %q", disclosure.StreamingFailover)
 	}
 }
 

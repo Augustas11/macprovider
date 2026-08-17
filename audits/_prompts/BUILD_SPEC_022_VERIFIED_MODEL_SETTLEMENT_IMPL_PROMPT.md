@@ -284,8 +284,11 @@ Required behavior:
 - streaming receipt delivery does not require non-standard SSE events that
   break OpenAI-compatible clients;
 - internal settlement verification does not depend on buyer retrieval;
-- transparent streaming failover settles per provider attempt;
-- buyer final debit is the sum of verified billable per-attempt prefixes;
+- current streaming failover is transparent only before response bytes are
+  committed; after the first buyer-visible SSE event, provider disconnect
+  terminates the stream with `provider_disconnected`;
+- any future resume or failover protocol spanning multiple provider attempts
+  bills only verified billable per-attempt prefixes;
 - unverified prefixes are not charged or paid;
 - overlapping prefixes are not double charged.
 
@@ -327,9 +330,14 @@ Requirements:
   provider error, or upstream disconnect can still produce a partial charge only
   when a settlement-capable receipt binds the delivered output prefix and
   partial usage.
-- Buyer-facing disclosure must state that transparent streaming failover bills
-  only delivered, verified output across attempts and does not double-charge
-  overlapping output.
+- Buyer-facing disclosure must state that streaming failover is transparent
+  only before response bytes are committed; after the first buyer-visible SSE
+  event, provider disconnect terminates the stream with `provider_disconnected`
+  and the buyer may retry as a new request. That retry must be disclosed as a
+  separate billable request with its own reservation and settlement, and
+  cross-request overlapping output must be disclosed as not deduplicated. Any
+  future resume or failover protocol spanning multiple provider attempts must
+  not double-charge overlapping output.
 - Provider-facing onboarding and operating docs must disclose that receipts
   arriving after `pending_deadline_seconds` are non-settling and
   non-recoverable unless a future exception spec changes that rule.
@@ -407,7 +415,8 @@ Minimum test sets:
 - missing receipt deadline measured from terminal-state timestamp;
 - streaming normal/provider-error/buyer-cancel/gateway-timeout/upstream-
   disconnect terminal states;
-- streaming failover per-attempt debit/settlement and no double charge;
+- future streaming resume/failover protocols that span multiple provider
+  attempts: per-attempt debit/settlement and no double charge;
 - stream-completion, receipt-arrival, settlement-sweep, and payout-sweep race
   harness covering every ordering; only the ordering with verified receipt
   before payout readiness may pay;

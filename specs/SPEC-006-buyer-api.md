@@ -1,7 +1,12 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.14 (2026-08-16, public rate-card and stats overview on the buyer host)
+**Version:** 0.9.15 (2026-08-17, streaming failover disclosure boundary)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.15 (2026-08-17, issue #969 — streaming failover disclosure boundary):**
+- §1.6, `/v1/models`, `/v1/usage`, and docs disclosure examples now state the shipped streaming boundary explicitly: failover is transparent only before response bytes are committed; after the first buyer-visible SSE event, a provider disconnect terminates the stream with `provider_disconnected` and the buyer may retry as a new request that is independently billable with its own reservation and settlement.
+- The settlement language still preserves the SPEC-022 per-attempt invariant for any future resume/failover protocol that spans multiple provider attempts: buyer debit is limited to delivered, receipt-verified output prefixes and overlapping output must not be double-charged.
+- No coordinator or gateway runtime behavior changes.
 
 **Change log v0.9.14 (2026-08-16, issue #1004 — public rate-card and stats overview on `api.malibu.tech`):**
 - §2.2 and §4.2 now include unauthenticated `GET /v1/rate-card`, `GET /v1/rate-card.sig`, and `GET /v1/stats/overview` on the buyer host, plus the compatibility alias `GET /v1/network-stats` (same body as overview). These payloads already existed on coordinator/stats vhosts; buyers using `base_url=https://api.malibu.tech/v1` could not read them because the gateway mux never mounted the paths.
@@ -350,7 +355,7 @@ SPEC-006 v0.8 is a Tier 1 cooperative inference product. The following propertie
 4. **v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot.** They do not detect a provider falsifying its own loaded-model hash measurement.
 5. **Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.** Enforce mode may settle only covered paid entrypoints listed in this disclosure whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.
 6. **Pending means quota or balance can remain reserved while receipt verification is incomplete.** Non-verified terminal outcomes release or refund that reservation. pending: receipt verification is still incomplete and the reservation is not final usage. verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement. quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault. zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault.
-7. **Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.** Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.
+7. **Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.** Streaming failover is transparent only before response bytes are committed. After the first buyer-visible SSE event, a provider disconnect terminates the stream with `provider_disconnected` and the buyer may retry as a new request. That retry is a separate billable request with its own reservation and settlement; cross-request overlapping output is not deduplicated. Settlement remains limited to delivered, receipt-verified output prefixes and must not double-charge overlapping output if a future resume or failover protocol spans multiple provider attempts; verified here means receipt-bound under the provider-reported-hash caveat above.
 8. **Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs.**
 9. **The product makes NO private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with these limitations.
 10. **When sticky affinity is enabled for an account, related requests are preferentially routed to one provider for up to `routing.sticky_ttl_s`.** That provider can observe and correlate more of the buyer's traffic than under default round-robin routing. This disclosure is required only when `routing.sticky_enabled: true`; with the default `routing.sticky_enabled: false`, there is no sticky routing and no new sticky-specific privacy posture beyond properties 1-9.
@@ -1157,7 +1162,7 @@ Response shape:
         "zero_settled": "zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault."
       },
       "partial_charge": "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.",
-      "streaming_failover": "Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.",
+      "streaming_failover": "Streaming failover is transparent only before response bytes are committed. After the first buyer-visible SSE event, a provider disconnect terminates the stream with provider_disconnected and the buyer may retry as a new request. That retry is a separate billable request with its own reservation and settlement; cross-request overlapping output is not deduplicated. Settlement remains limited to delivered, receipt-verified output prefixes and must not double-charge overlapping output if a future resume or failover protocol spans multiple provider attempts; verified here means receipt-bound under the provider-reported-hash caveat above.",
       "buyer_receipt_status": "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
     },
     "sticky_affinity": {
@@ -1232,7 +1237,7 @@ The `/v1/models` response MUST include a top-level field:
       "zero_settled": "zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault."
     },
     "partial_charge": "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.",
-    "streaming_failover": "Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.",
+    "streaming_failover": "Streaming failover is transparent only before response bytes are committed. After the first buyer-visible SSE event, a provider disconnect terminates the stream with provider_disconnected and the buyer may retry as a new request. That retry is a separate billable request with its own reservation and settlement; cross-request overlapping output is not deduplicated. Settlement remains limited to delivered, receipt-verified output prefixes and must not double-charge overlapping output if a future resume or failover protocol spans multiple provider attempts; verified here means receipt-bound under the provider-reported-hash caveat above.",
     "buyer_receipt_status": "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
   },
   "sticky_affinity": {
@@ -1552,7 +1557,7 @@ Response shape:
       "zero_settled": "zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault."
     },
     "partial_charge": "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.",
-    "streaming_failover": "Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.",
+    "streaming_failover": "Streaming failover is transparent only before response bytes are committed. After the first buyer-visible SSE event, a provider disconnect terminates the stream with provider_disconnected and the buyer may retry as a new request. That retry is a separate billable request with its own reservation and settlement; cross-request overlapping output is not deduplicated. Settlement remains limited to delivered, receipt-verified output prefixes and must not double-charge overlapping output if a future resume or failover protocol spans multiple provider attempts; verified here means receipt-bound under the provider-reported-hash caveat above.",
     "buyer_receipt_status": "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
   }
 }
