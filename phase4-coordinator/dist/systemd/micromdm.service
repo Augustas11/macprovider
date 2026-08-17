@@ -1,0 +1,25 @@
+[Unit]
+Description=MicroMDM (macprovider hardware attestation MDM)
+Documentation=https://github.com/micromdm/micromdm
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/micromdm/env
+# MICROMDM_SERVER_URL comes from /etc/systemd/system/micromdm.service.d/override.conf
+# Wrapper keeps the API key out of the unit file text (still visible in process
+# argv — regenerate /etc/micromdm/api-key if it ever leaks via status logs).
+ExecStart=/opt/micromdm/bin/micromdm-serve.sh
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/micromdm /etc/micromdm
+
+[Install]
+WantedBy=multi-user.target

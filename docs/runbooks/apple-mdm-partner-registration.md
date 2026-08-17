@@ -139,7 +139,7 @@ Also note any **Apple Developer Enterprise Program** status (yes/no). Needed onl
 
 ## What eng will do after you hand off (not your job)
 
-- Install push cert + key on Pearl MicroMDM
+- Install push cert + key on Pearl MicroMDM — see [`docs/runbooks/pearl-micromdm-install.md`](./pearl-micromdm-install.md)
 - Set `tier2.mdm.push_topic` (and enroll URLs) on the coordinator
 - Wire nginx `/v1/enroll` + MDM routes
 - Run `macprovider-cli enroll` on a test Mac and confirm check-in + push wake

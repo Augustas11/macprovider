@@ -277,6 +277,21 @@ tier2:
   # When empty, /poolz falls back to scheme + request Host. For Pearl:
   public_catalog_base_url: "https://coordinator.malibu.tech"
 
+  # Phase 2 MDM enrollment (P2-A/P2-B). Startup-only — not hot-reloadable.
+  # When enrollment_base_url is non-empty, POST /v1/enroll is mounted on the
+  # buyer mux. Live Pearl values belong in
+  # /etc/macprovider/coordinator.pearl-overlays.yaml (preserve-live), not in
+  # tracked dist/coordinator.yaml secrets.
+  # mdm:
+  #   enrollment_base_url: "https://coordinator.malibu.tech"
+  #   # Optional overrides (default: {base}/mdm/connect and {base}/scep):
+  #   # mdm_server_url: "https://coordinator.malibu.tech/mdm/connect"
+  #   # scep_url: "https://coordinator.malibu.tech/scep"
+  #   push_topic: "com.apple.mgmt.External.<uuid-from-apns-cert>"
+  #   # Optional CMS profile signing (unsigned profiles are OK for enroll):
+  #   # profile_signer_cert_path: "/etc/macprovider/mdm/profile-signer.crt"
+  #   # profile_signer_key_path: "/etc/macprovider/mdm/profile-signer.key"
+
 # SPEC-017 Network Stats API.
 #
 # Production `dist/coordinator.yaml` enables this block for
