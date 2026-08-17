@@ -241,10 +241,15 @@ USDC `ledger_payout_ready` runner is unchanged.
 
 `reward_eligibility` is the coordinator-owned provider read model for whether
 MALIBU is currently earnable, held, capped, withdrawable, ineligible, or
-unavailable to classify. Clients MUST prefer this object over independently
-inferring eligibility from `trust_tier`, raw hold reasons, trust counters, local
-runtime telemetry, or future compute-integrity fields when the object is present
-and `schema_version == "malibu_reward_eligibility.v1"`.
+unavailable to classify from facts reported to the reward owner. Clients MUST
+prefer this object over independently inferring MALIBU ledger, trust, hardware,
+or compute eligibility from `trust_tier`, raw hold reasons, trust counters, or
+future compute-integrity fields when the object is present and
+`schema_version == "malibu_reward_eligibility.v1"`. Until local runtime-health
+observations are reported into this object by the reward owner, clients MAY
+display them only as separate operational readiness copy; they MUST NOT mutate
+`reward_eligibility`, override its `withdrawal_state`, or add client-inferred
+MALIBU hold reasons.
 
 Fields:
 
@@ -276,9 +281,9 @@ Reason vocabulary:
 | `compute_integrity_pending` | SPEC-036 proof/trust input | Compute-integrity state is pending and cannot authorize stronger earning claims. |
 | `compute_integrity_blocked` | SPEC-036 proof/trust input | Compute-integrity owner reports `quarantined_compute_drift` or `blocked:<reason>`. |
 | `provider_token_untrusted` | provider-token auth | Provider-token authentication failed or is not trusted for this read model. Successful `/v1/provider/malibu-accrual` responses normally omit this because auth failures return 401. |
-| `local_on_battery` | local runtime-health observation | Local runtime reports battery power blocking earning opportunity. |
-| `local_thermal_pressure` | local runtime-health observation | Local runtime reports thermal pressure blocking earning opportunity. |
-| `model_not_ready` | local runtime-health observation | Local runtime reports the model is not loaded/ready for earning work. |
+| `local_on_battery` | runtime-health observation reported to reward owner | Runtime health reports battery power blocking earning opportunity. |
+| `local_thermal_pressure` | runtime-health observation reported to reward owner | Runtime health reports thermal pressure blocking earning opportunity. |
+| `model_not_ready` | runtime-health observation reported to reward owner | Runtime health reports the model is not loaded/ready for earning work. |
 | `telemetry_unavailable` | runtime-health observation | The runtime-health source is missing or stale. This MUST NOT override ledger-held or withdrawable facts for `withdrawal_state`. |
 
 Precedence:
@@ -288,8 +293,9 @@ Precedence:
    present, so clients can render cap-specific copy.
 3. Ledger-held and ledger-withdrawable facts outrank `telemetry_unavailable` for
    `withdrawal_state`.
-4. Local runtime-health reasons affect earning opportunity only. They MUST NOT
-   make already-accrued MALIBU withdrawable or non-withdrawable by themselves.
+4. Runtime-health reasons, when reported into v1 by the reward owner, affect
+   earning opportunity only. They MUST NOT make already-accrued MALIBU
+   withdrawable or non-withdrawable by themselves.
 
 USDC payout readiness remains owned by SPEC-016/SPEC-022 projections. A client MAY
 display USDC and MALIBU readiness in the same UI, but MUST NOT collapse

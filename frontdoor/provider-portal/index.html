@@ -1697,16 +1697,37 @@
       };
     }
 
+    function reportMalibuRewardEligibilitySchemaDrift(schema, field) {
+      if (typeof console === "undefined" || typeof console.warn !== "function") return;
+      console.warn("malibu_reward_eligibility_schema_drift", {
+        schema_version: schema || "missing",
+        field: field
+      });
+    }
+
     function normalizedMalibuRewardEligibility(data) {
       if (!data || !data.reward_eligibility || typeof data.reward_eligibility !== "object") return null;
       var e = data.reward_eligibility;
       var schema = typeof e.schema_version === "string" ? e.schema_version : "";
-      if (schema !== MALIBU_REWARD_ELIGIBILITY_SCHEMA) return unavailableMalibuRewardEligibility(schema);
+      if (schema !== MALIBU_REWARD_ELIGIBILITY_SCHEMA) {
+        reportMalibuRewardEligibilitySchemaDrift(schema, "schema_version");
+        return unavailableMalibuRewardEligibility(schema);
+      }
       var reasons = Array.isArray(e.reasons) ? e.reasons : [];
-      if (!containsValue(MALIBU_EARNING_STATES, e.earning_state) ||
-          !containsValue(MALIBU_WITHDRAWAL_STATES, e.withdrawal_state) ||
-          !containsValue(MALIBU_REWARD_REASONS, e.primary_reason) ||
-          reasons.some(function (reason) { return !containsValue(MALIBU_REWARD_REASONS, reason); })) {
+      if (!containsValue(MALIBU_EARNING_STATES, e.earning_state)) {
+        reportMalibuRewardEligibilitySchemaDrift(schema, "earning_state");
+        return unavailableMalibuRewardEligibility(schema);
+      }
+      if (!containsValue(MALIBU_WITHDRAWAL_STATES, e.withdrawal_state)) {
+        reportMalibuRewardEligibilitySchemaDrift(schema, "withdrawal_state");
+        return unavailableMalibuRewardEligibility(schema);
+      }
+      if (!containsValue(MALIBU_REWARD_REASONS, e.primary_reason)) {
+        reportMalibuRewardEligibilitySchemaDrift(schema, "primary_reason");
+        return unavailableMalibuRewardEligibility(schema);
+      }
+      if (reasons.some(function (reason) { return !containsValue(MALIBU_REWARD_REASONS, reason); })) {
+        reportMalibuRewardEligibilitySchemaDrift(schema, "reasons");
         return unavailableMalibuRewardEligibility(schema);
       }
       return {

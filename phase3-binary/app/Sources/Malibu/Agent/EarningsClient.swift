@@ -63,18 +63,27 @@ struct MalibuRewardEligibility: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let rawSchema = try c.decodeIfPresent(String.self, forKey: .schemaVersion) ?? ""
         guard rawSchema == Self.schemaV1 else {
-            self = .unavailable(schemaVersion: rawSchema)
+            self = .unavailable(schemaVersion: rawSchema, driftField: "schema_version")
             return
         }
         let rawEarningState = try c.decodeIfPresent(String.self, forKey: .earningState) ?? ""
         let rawWithdrawalState = try c.decodeIfPresent(String.self, forKey: .withdrawalState) ?? ""
         let rawPrimaryReason = try c.decodeIfPresent(String.self, forKey: .primaryReason) ?? ""
         let rawReasons = try c.decodeIfPresent([String].self, forKey: .reasons) ?? []
-        guard Self.allowedEarningStates.contains(rawEarningState),
-              Self.allowedWithdrawalStates.contains(rawWithdrawalState),
-              Self.allowedReasons.contains(rawPrimaryReason),
-              rawReasons.allSatisfy({ Self.allowedReasons.contains($0) }) else {
-            self = .unavailable(schemaVersion: rawSchema)
+        if !Self.allowedEarningStates.contains(rawEarningState) {
+            self = .unavailable(schemaVersion: rawSchema, driftField: "earning_state")
+            return
+        }
+        if !Self.allowedWithdrawalStates.contains(rawWithdrawalState) {
+            self = .unavailable(schemaVersion: rawSchema, driftField: "withdrawal_state")
+            return
+        }
+        if !Self.allowedReasons.contains(rawPrimaryReason) {
+            self = .unavailable(schemaVersion: rawSchema, driftField: "primary_reason")
+            return
+        }
+        if rawReasons.contains(where: { !Self.allowedReasons.contains($0) }) {
+            self = .unavailable(schemaVersion: rawSchema, driftField: "reasons")
             return
         }
         self.init(
@@ -86,14 +95,20 @@ struct MalibuRewardEligibility: Codable, Equatable {
         )
     }
 
-    private static func unavailable(schemaVersion: String) -> MalibuRewardEligibility {
-        MalibuRewardEligibility(
+    private static func unavailable(schemaVersion: String, driftField: String) -> MalibuRewardEligibility {
+        logSchemaDrift(schemaVersion: schemaVersion, field: driftField)
+        return MalibuRewardEligibility(
             schemaVersion: schemaVersion.isEmpty ? schemaV1 : schemaVersion,
             earningState: "unavailable",
             withdrawalState: "unavailable",
             primaryReason: "telemetry_unavailable",
             reasons: ["telemetry_unavailable"]
         )
+    }
+
+    private static func logSchemaDrift(schemaVersion: String, field: String) {
+        let schema = schemaVersion.isEmpty ? "missing" : schemaVersion
+        NSLog("[malibu] malibu_reward_eligibility_schema_drift schema_version=%@ field=%@", schema, field)
     }
 
     private static let allowedEarningStates: Set<String> = [

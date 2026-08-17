@@ -72,8 +72,9 @@ type MalibuRewardEligibilityReadModel struct {
 
 // MalibuRewardEligibilityFacts contains policy facts from their owning systems.
 // The accrual endpoint currently fills the ledger/trust subset; the remaining
-// fields are the future extension points for runtime-health, hardware-evidence,
-// and compute-integrity owners without changing the response shape.
+// fields are extension points for facts reported to the reward owner by
+// runtime-health, hardware-evidence, and compute-integrity owners without
+// changing the response shape.
 type MalibuRewardEligibilityFacts struct {
 	AccruedMALIBU          string
 	WithdrawableMALIBU     string
