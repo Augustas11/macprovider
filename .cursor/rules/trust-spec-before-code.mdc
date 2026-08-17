@@ -1,0 +1,37 @@
+---
+description: Trust-tier / attestation work must SPEC the trust contract before coding
+alwaysApply: true
+---
+
+# Trust contracts: SPEC before code
+
+Incident reference: Phase 3 live MDA (#1033) shipped `attestation_tier=hardware`
+as an observe sketch; eight Codex audit rounds reverse-engineered the binding /
+durability / rate-limit / invalidation invariant under fire (2026-08-17).
+
+## Rule
+
+For any change that **mints, upgrades, downgrades, or buyer-exposes a trust
+tier or attestation strength label** (including `attestation_tier`,
+`require_attestation` flips, MDA/`hardware` paths, or gateway trust disclosure):
+
+1. **Write or extend the normative SPEC first** (usually SPEC-008) with the
+   trust predicate: who may bind, one path that may set the label, what must
+   be true at publish time, what invalidates it, durability, rate limits, and
+   observe vs enforce boundary.
+2. **Short SPEC audit** (honesty/completeness) before implementation.
+3. **Then** implement and conformance-check code ↔ SPEC.
+4. Do **not** treat runbook checkboxes or “observe prototype” as a substitute
+   for that contract when the code publishes a public trust label.
+
+## Allowed without a new SPEC pass
+
+- Bugfixes that restore behavior already required by an existing SPEC clause
+- Pure observability that cannot change tier/status/routing/disclosure
+- Docs/runbooks that do not change normative trust semantics
+
+## Not sufficient
+
+- “We’ll SPEC it after the audit loop”
+- Shipping `hardware` (or equivalent) from best-effort MDM/probe code and
+  discovering binding/durability rules only in review

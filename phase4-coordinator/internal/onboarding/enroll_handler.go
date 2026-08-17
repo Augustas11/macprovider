@@ -36,9 +36,11 @@ type ProfileSigner interface {
 // EnrollHandler handles POST /v1/enroll and returns per-device
 // .mobileconfig files for MDM enrollment (Phase 2 Track P2-A, Scenario B).
 //
-// No authentication is required: the serial number is not secret. Trust is
-// established via MDM SecurityInfo verification after enrollment completes,
-// not from possession of the profile.
+// No authentication is required for profile download: the serial number is not
+// secret. R3-H1: this handler does NOT auto-claim device bindings — pending
+// claims from /v1/enroll would enable pre-enrollment serial squat. Binding is
+// ops internal bootstrap of an already-enrolled device (or a future check-in
+// finalize that only SetUDIDs an existing binding).
 type EnrollHandler struct {
 	// MDMConfig carries the profile generation parameters (base URL, SCEP URL,
 	// MDM connect URL, push topic). Populated from config.Tier2MDMConfig.

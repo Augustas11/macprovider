@@ -1,10 +1,26 @@
 # SPEC-008 — Tier-2 Trust Layer
 
-**Version:** 0.5.1 (2026-07-29, signed attestation model-hash mismatch observation)
+**Version:** 0.6.0 (2026-08-17, Phase 3 live MDA observe path + Phase 4 boundary)
 **Depends on:** SPEC-001 v1.8, SPEC-002 v1.3.3, SPEC-004 v0.3.2,
                SPEC-006 v0.9.8
 
-**Change log v0.5.1 (2026-07-29, A7 signed attestation model-hash observation):**
+**Change log v0.6.0 (2026-08-17, Phase 3 live MDA / Phase 4 boundary):**
+- **§7.3:** `attestation_tier=hardware` is no longer “never emitted / reserved”. It is
+  minted only by the live MicroMDM Managed Device Attestation observe path (§7.9), not by
+  the static MDA auth-token path alone and not by SE success alone.
+- **§7.9 (new):** normative Phase 3 live-MDA observe contract — coordinator-owned device
+  binding, raw-plist DeviceInformation + SE-key freshness nonce, acknowledge_event webhook,
+  single `SetMDAProof` publisher, durable SQLite proofs/pending/bindings, ≥168h enqueue
+  floor, and invalidation on rebind / expiry / SE rotate / serial mismatch.
+- **§7.10 (new):** Phase 4 C4b boundary — Phase 3 MUST NOT flip `require_attestation`;
+  Phase 4 MAY flip only after stated prerequisites; `require_attestation` still gates on
+  status `attested` (includes `self_signed`) unless a future hardware-tier predicate lands.
+- **AC-C-11…AC-C-18:** acceptance criteria for the live-MDA path.
+- **Honesty sweep (post SPEC-audit):** §1.1 / §3 / §7.4a / §9.2 no longer claim `hardware`
+  is never emitted by shipped code; §13.3 documents #759 hardware-tier-gated buyer
+  disclosure counting without attributing that gate to Phase 3 live MDA.
+
+**Change log v0.5.1 (2026-07-29, A7 signed attestation model-hash mismatch observation):**
 - **§7.5/§15.3/AC-C-10:** when a cryptographically valid attestation token carries
   `claimed.model_hash`, the coordinator compares that already-signed claim to the active
   catalog row for the provider's admitted model and emits a `T2.C`
@@ -72,8 +88,10 @@ cross-repo interop contract the Swift provider CLI byte-matches):
   is explicit that `self_signed` proves **key custody + session binding only** (not
   Secure-Enclave custody, Apple-Silicon provenance, or device identity: `hardware_family`
   is an unauthenticated self-assertion), that a successful **MDA/mock** attestation is
-  still `attested` but carries an **empty** tier (the shipped WS handler labels only the SE
-  path — so `hardware` is never emitted), and that any future tier consumer MUST treat an
+  still `attested` but carries an **empty** tier (as of v0.4 the shipped WS handler labeled
+  only the SE path — so `hardware` was never emitted then; v0.6 mints `hardware` only via
+  the live MicroMDM observe path §7.9, not via static auth-token MDA), and that any future
+  tier consumer MUST treat an
   empty tier on an `attested` provider as "attested, strength unlabelled" (SPEC-032 does
   not yet consume the tier — forward).
 - **§7.4a (new):** documents `macprovider-se-p256-v1` byte-for-byte — the unpadded-base64url
@@ -102,23 +120,26 @@ cross-repo interop contract the Swift provider CLI byte-matches):
   `tier2.attestation{state,…}` disclosure — `state` enum `none|all|partial|unsupported`
   with a separate `mixed` boolean, counting only `StateReady` providers (matches §13.3);
   the v0.3 per-model block is retained as a **deferred** forward enhancement.
-- **§13.3/§7.6 (trust honesty):** the buyer-visible **`hardware_attestation`** field is
-  derived from the tier-blind `attested` aggregate (coordinator `attestationStateForProviders`
-  → gateway `disclosure.HardwareAttestation`) with no `attestation_tier` check, so an
-  all-`self_signed` (software-key) pool discloses `hardware_attestation: "all"` — documented
-  as a **known overstatement** (the field is a misnomer for the SE path; buyers/consumers
-  MUST NOT read it as hardware proof) with the gating/rename fix carried as a forward
-  coordinator+gateway change. §7.6 makes explicit that `require_attestation` admits
-  `self_signed` and does not require hardware. §13.3's activation and counting basis were
-  reconciled to the shipped **pool-evidence-driven gateway** surface + `StateReady` counting;
-  §7.7 (the coordinator `/v1/models` surface) was distinguished from it (`ConfigActive`-gated).
+- **§13.3/§7.6 (trust honesty, historical pre-#759):** at v0.4 write-time the buyer-visible
+  **`hardware_attestation`** field was still derived from a tier-blind `attested` aggregate
+  (coordinator `attestationStateForProviders` → gateway `disclosure.HardwareAttestation`)
+  with no `attestation_tier` check, so an all-`self_signed` pool disclosed
+  `hardware_attestation: "all"`. **That behavior is historical.** Post-#759 / v0.6, counting
+  is hardware-tier-gated (status `attested` **and** tier `hardware`); an all-`self_signed`
+  pool discloses `"unsupported"` (§13.3, §7.7). Remaining forward polish is field rename /
+  richer tier-aware states — not re-introducing tier-blind `"all"`. §7.6 still makes
+  explicit that `require_attestation` admits `self_signed` and does not require hardware.
+  §13.3's activation and counting basis were reconciled to the shipped
+  **pool-evidence-driven gateway** surface + `StateReady` counting; §7.7 (the coordinator
+  `/v1/models` surface) was distinguished from it (`ConfigActive`-gated).
 - **§4.3 / §13.3 (activation):** corrected — the gateway surfaces attestation for **any**
-  `StateReady` provider (a legacy/tokenless pool discloses `hardware_attestation:
-  "unsupported"`; state is `none` only for an empty ready pool), even at coordinator-default
-  config (the gateway keys off `/internal/routing`, not the `/v1/models` `ConfigActive`
-  gate). The earlier "not buyer-visible at defaults" and "activates on an attested provider"
-  claims were both wrong. `unsupported` denotes every all-non-attested ready pool
-  (failed/stale/`not_required`/empty/unsupported-format), not just unsupported-format.
+  `StateReady` provider (a legacy/tokenless **or** all-`self_signed` ready pool discloses
+  `hardware_attestation: "unsupported"`; state is `none` only for an empty ready pool), even
+  at coordinator-default config (the gateway keys off `/internal/routing`, not the
+  `/v1/models` `ConfigActive` gate). The earlier "not buyer-visible at defaults" and
+  "activates on an attested provider" claims were both wrong. `unsupported` denotes every
+  ready pool with **zero hardware-tier-positive** providers (including
+  failed/stale/`not_required`/`self_signed`/unsupported-format), not just unsupported-format.
 - **§7.4/§10.4/§4.6:** reconciled attestation-token rejection transport — oversize/malformed
   tokens collapse to WS status `attestation_failed` + close `4012`, not an HTTP-400 code (the
   §4.6 `tier2_attestation_token_*` rows are a forward HTTP catalog).
@@ -332,7 +353,8 @@ SPEC-008 covers:
 - Pillar B: provider-leg application-layer encryption.
 - Pillar C: provider attestation data model and coordinator verification flow —
   a self-signed Secure-Enclave key-custody format (shipped default, tier
-  `self_signed`) and an aspirational hardware-rooted Apple-MDA path (§7).
+  `self_signed`) and a hardware-rooted Apple-MDA path (§7) — including the live
+  MicroMDM observe path that MAY mint `attestation_tier=hardware` when enabled (§7.9).
 - Pillar D: untrusted-provider behavioral safety controls in the coordinator
   relay loop.
 - Three implementation phases:
@@ -628,7 +650,8 @@ updates per pillar.
 - Pillar A: model catalog plus hash verification.
 - Pillar B: provider-leg encryption.
 - Pillar C: provider attestation (shipped default: self-signed Secure-Enclave
-  key-custody, tier `self_signed`; aspirational: hardware-rooted Apple-MDA, §7).
+  key-custody, tier `self_signed`; hardware-rooted Apple-MDA via live MicroMDM
+  observe when enabled, §7.9 — not the shipped default, and not a routing flip).
 - Pillar D: untrusted-provider behavioral safety.
 
 **Phase.** A rollout group. Phase 1 ships Pillar A. Phase 2 ships Pillars B
@@ -664,8 +687,9 @@ cryptographically verified an attestation token and bound it to the session.
 **Two formats yield this status, at different trust strengths (§7.3):**
 (a) an Apple **Managed-Device-Attestation** token validated against an
 operator-configured trust root — certificate chain + freshness binding + presence of a
-device-property extension + CSR key binding (the `hardware`-rooted path, §7.4 —
-aspirational/configured, not the shipped default; note the shipped MDA verifier does **not**
+device-property extension + CSR key binding (the `hardware`-rooted path — live MicroMDM
+observe when enabled, §7.9; static auth-token MDA alone does **not** publish `hardware`;
+note the shipped MDA verifier does **not**
 cross-check the certificate's device-property values or `ram_gb` against the provider's
 claims, §7.5); and (b) the shipped **default self-signed
 Secure-Enclave** format (`macprovider-se-p256-v1`, §7.4a), which the coordinator
@@ -674,8 +698,9 @@ verifies against the provider's *own* submitted key — proving P-256 key custod
 Secure-Enclave custody, Apple-Silicon, or device identity (the `hardware_family`
 claim is a self-asserted string). **"Attested" therefore means "presented a
 verified, session-bound attestation token" — it does NOT by itself mean
-"proved trusted hardware"**; only the `hardware` tier does, and that tier is not
-emitted by the shipped code (§7.3, §13.3).
+"proved trusted hardware"**; only the `hardware` tier does, and that tier is
+emitted **only** by the live MicroMDM observe path when enabled (§7.3, §7.9) —
+not by SE success alone and not by static/auth-token MDA alone.
 
 **Unsupported attestation.** A provider state where a positive attestation was
 not established — either because the platform/packaging/OS/entitlement/operator
@@ -834,8 +859,9 @@ are scoped accordingly:
    aggregate is `none` **only** for an empty ready pool (§13.3), the presence of **any
    single `StateReady` provider — including a legacy, tokenless one** — makes attestation
    buyer-visible via the gateway at otherwise-default coordinator config: a tokenless pool
-   discloses `hardware_attestation: "unsupported"`, an SE-attested pool discloses `"all"`
-   (a known misnomer for the self-signed path, §13.3). So a Tier-1-only pool that simply
+   discloses `hardware_attestation: "unsupported"`, and an SE-attested / all-`self_signed`
+   pool also discloses `"unsupported"` (hardware-tier-gated counting per #759 / §13.3 —
+   status `attested` alone is insufficient for `"all"`). So a Tier-1-only pool that simply
    upgrades to a SPEC-008 gateway **does** change buyer-visible disclosure. Operators MUST
    NOT assume default coordinator config keeps attestation off the buyer surface; the
    gateway path bypasses the `/v1/models` `ConfigActive` gate entirely.
@@ -1767,31 +1793,31 @@ continuous traffic and record zero rekey-correlated 503s before rollout.
 
 Pillar C lets a provider submit an attestation token that the coordinator
 verifies and binds to the session. The name "hardware attestation" survives in
-some buyer-visible field names (e.g. `hardware_attestation`, §13.3) and in the
-aspirational MDA design, but the **shipped default is the self-signed
-Secure-Enclave format** (`macprovider-se-p256-v1`, §7.4a), which proves only
-key-custody + session binding, **not** hardware. Two formats reach positive
-`attested` status at different trust strengths (`attestation_tier`, §7.3):
+some buyer-visible field names (e.g. `hardware_attestation`, §13.3). The
+**shipped default positive path** is the self-signed Secure-Enclave format
+(`macprovider-se-p256-v1`, §7.4a), which proves only key-custody + session binding.
+A second, stronger path mints `attestation_tier=hardware` via **live MicroMDM
+Managed Device Attestation** (§7.9) when enabled. Formats / paths:
 
 - **`macprovider-se-p256-v1`** (shipped, default-enabled): self-signed — verified
   against the provider's own submitted P-256 key, **no trust root**. Tier
   `self_signed`.
-- **`apple-managed-device-attestation-acme-v1`** (aspirational/configured):
-  validated against an operator-configured trust root (chain + freshness + the
-  *presence* of a device-property extension + CSR binding; the shipped verifier does
-  **not** match the cert's device-property values or `ram_gb` to the provider's claims,
-  §7.5). Would be the `hardware` tier — **not emitted by the shipped code**.
+- **Live MDA observe path** (§7.9, when `tier2.mdm.live_mda_enabled`): Apple MDA
+  chain via MicroMDM DeviceInformation, SE-key freshness nonce, coordinator-owned
+  device binding → tier `hardware`. This is distinct from presenting a static MDA
+  auth token alone.
+- **`apple-managed-device-attestation-acme-v1` static auth-token path** (§7.4/§7.5):
+  may yield status `attested` when roots are configured, but MUST NOT alone publish
+  `attestation_tier=hardware` (v0.6; AC-C-13).
 
-Sections §7.1–§7.3 describe the model and status; §7.4 the MDA data model; §7.4a
-the shipped SE format; §7.4b the SE liveness re-challenge; §7.5–§7.8 the
-verification flow, routing, disclosure, and acceptance criteria. Read
-"hardware-attestation evidence" in the MDA-oriented prose below as the §7.4
-aspirational path, not a description of the shipped default.
+Sections §7.1–§7.3 describe the model and status; §7.4 the MDA token data model;
+§7.4a–§7.4b the SE format and liveness; §7.5–§7.8 verification/routing/disclosure/ACs;
+§7.9 live MDA Phase 3; §7.10 Phase 4 boundary.
 
 ### 7.1 Threat model
 
-Pillar C's **hardware-rooted MDA path** (§7.4, aspirational/configured) is *intended* to
-target providers lying about platform properties:
+Pillar C's **hardware-rooted MDA paths** (static auth-token §7.4/§7.5 and live MicroMDM
+§7.9) are *intended* to target providers lying about platform properties:
 
 - a non-Apple-Silicon host claims to be Apple Silicon,
 - a provider claims a RAM tier inconsistent with the attested hardware class,
@@ -1889,29 +1915,26 @@ an **attestation tier** capturing *how strong* an `attested` result is, serializ
   `attestationHardwareFamilyAllowed`), and a software P-256 key on any platform satisfies
   every check. It is a self-signed attestation, trusted at the tier the operator
   configures (`attestation_formats` includes it by default).
-- `hardware`: a future/aspirational hardware-rooted tier (e.g. an Apple-Managed Device
-  Attestation chain to a trusted root, §7.4). **The shipped code never emits this value**
-  — the WebSocket handler assigns `attestation_tier` only on the SE path (see below);
-  reserved.
+- `hardware`: Apple-rooted Managed Device Attestation proof bound to the provider’s SE
+  public key and to a **coordinator-owned** enrolled-device binding, minted only by the
+  live MicroMDM observe path (§7.9). This proves device attestation evidence + SE freshness
+  bind under the coordinator’s MDM; it does **not** by itself flip routing enforcement
+  (`require_attestation` remains Phase 4 / §7.10).
 
-**Tier-assignment gap (shipped, v0.4).** `attestation_tier` is set **only** when SE
-verification succeeds (`internal/ws/server.go`, `entry.AttestationTier = "self_signed"`
-guarded by a non-nil SE result). A successful **production MDA chain** or a **mock** root
-also returns status `attested` (`pillar_c.go` `verifyProductionMDAChainShape`,
-`mock_attested`) but carries an **empty** `attestation_tier`. Consumers therefore MUST
-NOT assume every `attested` provider has a non-empty tier; a non-empty
-`attestation_tier` is currently synonymous with the SE `self_signed` path. Promoting
-MDA/mock to a labelled tier is a forward code change, out of scope for this spec-only pass.
+**Tier assignment (shipped, v0.6).**
+- SE verification success → `attestation_tier=self_signed` (`internal/ws/server.go`).
+- Live MDA success via `LiveMDAService` → `attestation_tier=hardware` (`SetMDAProof` only;
+  §7.9). The WebSocket handler MUST NOT set `hardware` from static/auth-token MDA
+  verification alone (`MDAHardware` is observe evidence for the verifier, not a tier
+  publisher).
+- A successful **static** production MDA / mock root on the auth token may still yield
+  status `attested` with an **empty** tier when live MDA did not upgrade the session.
 
-This tier is the "attestation" half of the authority boundary SPEC-032 references when it
-names SPEC-008 authoritative on attestation. Note (v0.4, forward): SPEC-032 currently only
-*declares* SPEC-008 authoritative in its dependency header — it does **not** yet read
-`attestation_tier`/`self_signed`, and its substantive attestation content is a deferred
-future weight-binding proof, not a consumer of this tier. Should a future SPEC-032 (or any
-other consumer) key off attestation, it MUST treat an empty tier on an `attested` provider
-as "positively attested, strength not labelled", never as "not attested", and MUST NOT
-treat `self_signed` as hardware-rooted trust (see §7.6/§13.3 for how the shipped surfaces
-currently misgrade this).
+Consumers MUST NOT assume every `attested` provider has a non-empty tier. Consumers MUST
+NOT treat `self_signed` as hardware-rooted trust. SPEC-032 currently only *declares*
+SPEC-008 authoritative — it does not yet consume `attestation_tier`; if it (or any
+consumer) keys off attestation, empty tier on `attested` means “positively attested,
+strength not labelled.”
 
 ### 7.4 Attestation data model
 
@@ -2140,8 +2163,10 @@ Enclave, that the host is Apple Silicon, or any device identity — `hardware_fa
 apple_silicon` is an **unauthenticated self-asserted claim** any software P-256 key on any
 platform can present. It does not chain to an Apple-attested device root, so it is not
 proof of un-tampered hardware — it is a self-signed key-custody + session-liveness
-attestation, trusted at the operator-configured tier. (The stronger `hardware` tier via
-`apple-managed-device-attestation-acme-v1` remains §7.4's reserved path.)
+attestation, trusted at the operator-configured tier. (The stronger `hardware` tier is
+published only by the live MicroMDM observe path (§7.9); a static
+`apple-managed-device-attestation-acme-v1` auth token may yield status `attested` but
+MUST NOT publish `hardware` by itself.)
 
 ### 7.4b SE liveness re-challenge protocol (`se_liveness_*`) — shipped (v0.4)
 
@@ -2328,16 +2353,21 @@ is:
 }
 ```
 
-The shipped `state` enum (`attestationStateForProviders`, `internal/buyer/server.go`) is:
+The shipped `state` enum (`attestationStateForProviders`, `internal/buyer/server.go`) is
+hardware-tier-gated (#759; same predicate as §13.3). A counted provider is **positive**
+only when `attestation_status=attested` **and** `attestation_tier=hardware`;
+`self_signed` (even when status is `attested`) and all other combinations are **negative**:
 - `"none"` — no eligible providers counted;
-- `"all"` — every counted provider is `attested`;
-- `"partial"` — some but not all counted providers are `attested` (this is the "mixed"
-  case; `mixed` is emitted as a **separate boolean** equal to `state == "partial"`, it is
-  **not** a `state` value);
-- `"unsupported"` — every counted provider is non-attested.
+- `"all"` — every counted provider is hardware-tier positive;
+- `"partial"` — some but not all counted providers are hardware-tier positive (this is the
+  "mixed" case; `mixed` is emitted as a **separate boolean** equal to `state == "partial"`,
+  it is **not** a `state` value);
+- `"unsupported"` — every counted provider is hardware-tier negative (including an
+  all-`self_signed` attested pool).
 
 **Counting eligibility (shipped).** Only providers in `StateReady` are counted; busy or
-other-state providers are excluded from both the numerator and denominator.
+other-state providers are excluded from both the numerator and denominator. Positive vs
+negative within that set follows the hardware-tier gate above (not raw `attested` status).
 
 Field notes vs the v0.3 per-model block below: the shipped key is **`state`** (not
 `status`); it emits `attested_provider_count`/`unsupported_provider_count`/`mixed` and
@@ -2451,6 +2481,160 @@ from the active catalog row for the admitted model, the coordinator logs `T2.C
 attestation_model_hash_mismatch` with `decision: observe`, the claimed and expected hash
 prefixes, and the active catalog ID. The provider remains `attested` and the mismatch does
 not reject admission, exclude routing, or change the provider's Pillar A hash status.
+
+**AC-C-11. Live MDA hardware requires coordinator-owned binding.**
+With `tier2.mdm.live_mda_enabled: true`, the coordinator MUST NOT select a MicroMDM device
+from a provider-asserted SE serial alone. Enqueue MUST use a durable provider↔device binding
+(§7.9). Absent binding → no enqueue (cache path may still run).
+
+**AC-C-12. No pending serial squat.**
+Token-auth and internal claim paths MUST NOT create a binding for a serial that is not yet
+enrolled in MicroMDM (`enrollment_status=true` and non-empty UDID). First binding of an
+already-enrolled device is internal/ops bootstrap only; token path may refresh an existing
+binding.
+
+**AC-C-13. Single hardware publisher.**
+`attestation_tier=hardware` MUST be set only via live-MDA `SetMDAProof` / successful cache
+re-verify under §7.9. Static auth-token MDA (`MDAHardware`) MUST NOT alone publish
+`hardware`.
+
+**AC-C-14. Webhook and cache re-check current binding.**
+Before publishing `hardware` on a fresh webhook or cached reattach, the coordinator MUST
+reload the current durable binding for the provider and require the MDA leaf (or stored
+proof) serial to match that binding. Rebind A→B while a pending A webhook is in flight MUST
+NOT publish `hardware` from A.
+
+**AC-C-15. Rebind clears published hardware.**
+A same-provider serial-changing claim MUST clear live and durable MDA proof and downgrade
+`hardware` → `self_signed` (when SE key remains) before the new binding is trusted for
+enqueue.
+
+**AC-C-16. Durability across restart/reconnect.**
+MDA proofs, device bindings, pending command correlation, and the enqueue ledger MUST
+survive coordinator restart (SQLite on `Storage.DBPath`). After reconnect, webhook upgrade
+MUST use the provider’s **current** `AssignedID`, not a stale pending session id.
+
+**AC-C-17. Apple rate-limit floor.**
+When live MDA is enabled, `mda_refresh_interval_hours` MUST be floored to ≥168. The
+coordinator MUST NOT enqueue a new DeviceInformation for the same
+`{provider_id, serial, se_key_hash}` within that interval while a pending command is open
+or a prior enqueue has not cleared under the ledger rules (§7.9).
+
+**AC-C-18. Observe boundary.**
+With live MDA enabled and `require_attestation: false`, live-MDA failures MUST NOT block
+provider auth or Tier-1 routing. Enabling routing exclusion for non-attested providers is
+Phase 4 (§7.10), not Phase 3.
+
+### 7.9 Live MDA observe path (Phase 3) — shipped (v0.6)
+
+**Goal.** When `tier2.mdm.live_mda_enabled` is true, the coordinator MAY upgrade a
+provider that already has SE `self_signed` status to `attestation_tier=hardware` by
+obtaining a fresh Apple Managed Device Attestation via MicroMDM, bound to
+`SHA-256(SEPublicKey)` freshness and to a coordinator-owned enrolled-device binding.
+
+**Non-goals (Phase 3).** Flipping `tier2.require_attestation`, changing buyer
+`hardware_attestation` disclosure semantics (§13.3), or requiring `hardware` for routing.
+Phase 3 MUST NOT claim that shipping live MDA closes disclosure honesty; any
+tier-gated counting already present in coordinator metadata (#759) is independent of
+this observe path. Routing enforcement remains Phase 4 / §7.10.
+
+#### 7.9.1 Device binding
+
+1. The coordinator MUST maintain a durable exclusive binding
+   `{provider_id → serial, udid}` (and serial→provider exclusivity).
+2. **Enrollment evidence:** a MicroMDM device counts as enrolled only when
+   `enrollment_status == true` and `udid` is non-empty.
+3. **First bind:** only the internal/ops bootstrap claim path MAY create the first binding
+   for an already-enrolled unbound serial. Token-auth MUST reject enrolled-unbound first
+   binds and MUST reject any claim when the serial is not enrolled (no pre-enrollment
+   pending squat).
+4. **Enqueue targeting:** `RequestAndMaybeUpgrade` MUST resolve the MicroMDM UDID only from
+   the provider’s binding. Provider SE `serialNumber` is a mismatch check only — never the
+   lookup key for victim-device selection.
+5. **Check-in webhook** (optional): MAY `SetUDID` on an **existing** binding; MUST NOT
+   create bindings from serial alone.
+
+#### 7.9.2 Enqueue and freshness
+
+1. DeviceInformation MUST be enqueued via MicroMDM **raw plist**
+   `POST /v1/commands/{udid}` with `DeviceAttestation` query and
+   `DeviceAttestationNonce` as plist `<data>` = `SHA-256(SEPublicKey)` (32 bytes).
+   JSON `device_attestation_nonce` on `/v1/commands` is insufficient (MicroMDM drops it).
+2. The coordinator MUST record durable pending correlation
+   `{command_uuid, udid, provider_id, expected_serial, se_key_hash, enqueued_at}` before
+   relying on webhook completion across restart.
+3. Enqueue reservation MUST be atomic per `{provider_id, serial, se_key_hash}` (no TOCTOU
+   double-enqueue under concurrent reconnect).
+4. Refresh / re-enqueue interval when live MDA is enabled: **≥ 168 hours** (Apple ~7-day
+   DeviceAttestation budget).
+
+#### 7.9.3 Webhook ingest
+
+1. MicroMDM command webhooks MUST be parsed as `topic=mdm.Connect` with
+   `acknowledge_event.raw_payload` (base64 device-response plist), not a flat custom JSON
+   DeviceAttestation body alone.
+2. Pending lookup: prefer `command_uuid`, else UDID; hydrate from durable store on memory
+   miss.
+3. Before `SetMDAProof`: verify MDA chain + SE freshness; require MDA leaf serial equals
+   pending expected serial **and** equals the **current** durable binding serial for that
+   provider; resolve **current** pool `AssignedID` for the provider (stale pending session
+   id MUST NOT block upgrade).
+4. Webhook auth: loopback and/or shared secret (`X-MDM-Webhook-Secret` /
+   `command_webhook_secret`).
+
+#### 7.9.4 Single publisher and cache
+
+1. **Only** `pool.Registry.SetMDAProof` (invoked from live-MDA verify/upgrade paths) MAY
+   set `attestation_tier=hardware`.
+2. `MigrateMDAProofFrom` / durable hydrate MAY copy proof bytes + SE-key hash + timestamp
+   **without** publishing `hardware`; tier upgrade requires successful freshness re-verify
+   (`tryUpgradeFromCache`) under current binding serial match.
+3. Cache attach / `tryUpgradeFromCache` MUST refuse `hardware` when no current binding
+   exists or binding serial mismatches the proof/leaf serial (and SHOULD clear mismatched
+   proof).
+
+#### 7.9.5 Invalidation
+
+The coordinator MUST clear live + durable MDA proof and downgrade `hardware` →
+`self_signed` (when an SE key remains) when any of the following occur:
+
+- same-provider binding serial change (rebind);
+- refresh-interval expiry or leaf expiry / failed re-verify on cache path;
+- SE public key rotation that breaks the bound SE-key hash;
+- binding absent or serial mismatch on a path that would otherwise publish `hardware`.
+
+#### 7.9.6 Observe failure mode
+
+Live-MDA failures (MicroMDM down, no binding, rate-limited, webhook verify fail) MUST be
+logged and MUST NOT fail closed on provider WebSocket auth while
+`require_attestation: false`.
+
+### 7.10 Phase 4 boundary (C4b enforcement) — not Phase 3
+
+**Phase 4 goal (runbook):** require attestation for routing and align buyer disclosure,
+via `scripts/activate-tier2-attestation.sh` and `tier2.require_attestation: true`.
+
+**Normative boundary:**
+
+1. Phase 3 (§7.9) MUST NOT set `tier2.require_attestation: true` as part of enabling live
+   MDA.
+2. Phase 4 MAY flip `require_attestation: true` only when operators have verified
+   prerequisites, including at minimum:
+   - routable providers meet the C4b readiness bar in the hardware-attestation runbook
+     (binary version, encrypted leg, `attestation_status=attested`, and — when the operator
+     intends hardware trust — `attestation_tier=hardware` as required by that runbook);
+   - `tier2.attestation_roots` contains the production Apple Enterprise Attestation root(s)
+     needed for the configured MDA path;
+   - activate script `--plan` reviewed; `--apply` with documented rollback
+     (`require_attestation: false` + SIGHUP / script auto-restore).
+3. **Shipped routing predicate (§7.6) is unchanged by Phase 3:** `require_attestation`
+   gates on status `attested`, which **includes** `self_signed`. A future
+   `hardware`-tier-gated routing predicate is out of scope for v0.6 and MUST be a separate
+   SPEC change if required for product trust claims.
+4. Buyer-visible field naming (`hardware_attestation`) and any further disclosure
+   polish remain forward items (§13.3). Coordinator `/internal/routing` metadata already
+   gates positive attestation counts on `attestation_tier=hardware` (#759, pre-v0.6).
+   Phase 3 MUST NOT claim that shipping live MDA closed that counting gap.
 
 ---
 
@@ -2673,11 +2857,12 @@ load, provider-field parsing, aggregation, tests, and disclosure update.
 ### 9.2 Phase 2: Pillars B and C
 
 Phase 2 ships provider-leg encryption and attestation together. "Attestation"
-here is, in the shipped code, the **self-signed Secure-Enclave** format
+here is, in the shipped Phase-2 code, the **self-signed Secure-Enclave** format
 (`macprovider-se-p256-v1`, tier `self_signed`, §7.4a) — key-custody + session
-binding, not hardware-rooted. The `hardware`-tier Apple-MDA path (§7.4) is
-configured/aspirational and not emitted by the shipped code; do not read "Phase 2
-ships hardware attestation" as a hardware-trust guarantee (§7.3, §13.3).
+binding, not hardware-rooted. Phase 2 did **not** emit `attestation_tier=hardware`.
+The live MicroMDM observe path that MAY emit `hardware` is Phase 3 / v0.6 (§7.9) and
+still does not flip `require_attestation`; do not read "Phase 2 ships hardware
+attestation" as a hardware-trust guarantee (§7.3, §13.3).
 
 Prerequisites:
 
@@ -3550,48 +3735,48 @@ For `provider_leg_encryption`, allowed values are:
 - `"partial"`: some routable provider legs are encrypted and some are not.
 - `"all"`: every currently routable provider leg is encrypted.
 
-> **Trust overstatement — the `hardware_attestation` field name is a misnomer for the
-> shipped SE path (v0.4, known gap).** The buyer-visible field is literally named
-> `hardware_attestation`, but it is derived from the coordinator's attestation **status**
-> aggregate (`attestationStateForProviders` → gateway `disclosure.HardwareAttestation`)
-> **without consulting `attestation_tier`**. The shipped default-enabled attestation path
-> is self-signed Secure-Enclave (`self_signed`, §7.3), which proves only software-key
-> custody + session binding — **not** hardware. Consequently an all-`self_signed` pool of
-> ordinary software P-256 keys is disclosed to buyers as **`hardware_attestation: "all"`**,
-> a hardware-trust claim §7.3 explicitly denies. **Buyers and downstream specs MUST NOT
-> read `hardware_attestation` as proof of trusted hardware** until it is gated on a
-> genuinely hardware-rooted tier. Closing this — gating `hardware_attestation` on the
-> `hardware` tier, renaming the field, or exposing tier-aware states/counts — is a
-> forward, coordinated coordinator+gateway (`phase5-gateway`) code change, out of scope
-> for this spec-only reconciliation; it is carried as a tracked follow-up.
+> **Trust note — `hardware_attestation` field name vs strength (updated for #759 / v0.6 honesty).**
+> The buyer-visible field is literally named `hardware_attestation`. Coordinator
+> `/internal/routing` metadata (`attestationStateForProviders` → gateway
+> `disclosure.HardwareAttestation`) counts a ready provider positive **only** when
+> `attestation_status=attested` **and** `attestation_tier=hardware` (#759). An
+> all-`self_signed` (software-key) pool therefore discloses **`hardware_attestation:
+> "unsupported"`**, not `"all"`. That counting gate is **not** a Phase 3 live-MDA change
+> (§7.9 / §7.10.4). Remaining forward polish: the field name still reads as hardware trust
+> even when the pool is empty of hardware-tier providers; renaming or exposing
+> tier-aware states remains a coordinated coordinator+gateway follow-up. **Buyers and
+> downstream specs MUST NOT read a non-`none` / non-`unsupported` value as proof of
+> trusted hardware unless the underlying providers actually carry `attestation_tier=hardware`.**
 
-For `hardware_attestation`, allowed values are (each reflects attestation **status**, not
-strength — see the overstatement note above):
+For `hardware_attestation`, allowed values are (each reflects the **hardware-tier**
+positive count above — status `attested` alone is insufficient):
 
 The value is computed by counting **every `StateReady` provider**
 (`attestationStateForProviders`); a provider counts positive only when its status is
-exactly `attested`, and **every other status — `unsupported`-format, `attestation_failed`,
-`attestation_stale`, `not_required` (a tokenless optional v2 session), or the empty
-legacy zero value — counts as negative**:
+exactly `attested` **and** its tier is `hardware`. **Every other combination —
+`self_signed` (even when status is `attested`), empty tier on `attested`,
+`unsupported`-format, `attestation_failed`, `attestation_stale`, `not_required` (a
+tokenless optional v2 session), or the empty legacy zero value — counts as negative**:
 
 - `"none"`: **there are no `StateReady` providers at all** (empty ready pool). This is the
   *only* case that yields `none`.
-- `"unsupported"`: at least one ready provider exists and **none** is `attested` — i.e.
-  every ready provider is negative for any of the reasons above (not merely
-  "unsupported-format"). A default-config, legacy/tokenless ready pool lands here.
-- `"partial"`: some ready providers are `attested` and some are not.
-- `"all"`: every ready provider is `attested`.
+- `"unsupported"`: at least one ready provider exists and **none** is hardware-tier
+  positive — i.e. every ready provider is negative for any of the reasons above (including
+  an all-`self_signed` attested pool). A default-config, legacy/tokenless ready pool lands
+  here.
+- `"partial"`: some ready providers are hardware-tier positive and some are not.
+- `"all"`: every ready provider is hardware-tier positive.
 
 Derivation (columns count `StateReady` providers):
 
-| StateReady providers | require_attestation | attested / negative split | hardware_attestation |
+| StateReady providers | require_attestation | hardware-tier positive / negative split | hardware_attestation |
 |---|---|---|---|
 | none (empty ready pool) | any | — | `"none"` |
-| ≥1, none attested (incl. tokenless/`not_required`/failed/stale/unsupported-format) | false | all negative | `"unsupported"` |
-| ≥1, mixed | false | some attested, some negative | `"partial"` |
-| ≥1, all attested | false | all attested | `"all"` |
-| ≥1, all attested | true | all attested | `"all"` |
-| ≥1, some negative | true | at least one attested | `"partial"`; else `"unsupported"` |
+| ≥1, none hardware-tier positive (incl. all-`self_signed` attested, tokenless/`not_required`/failed/stale/unsupported-format) | false | all negative | `"unsupported"` |
+| ≥1, mixed | false | some hardware-tier positive, some negative | `"partial"` |
+| ≥1, all hardware-tier positive | false | all positive | `"all"` |
+| ≥1, all hardware-tier positive | true | all positive | `"all"` |
+| ≥1, some negative | true | at least one hardware-tier positive | `"partial"`; else `"unsupported"` |
 
 **Activation differs by surface (v0.4).** The **coordinator's own `/v1/models`** attaches
 the `tier2` block only when `tier2.ConfigActive` is true (config-driven: a `require_*`

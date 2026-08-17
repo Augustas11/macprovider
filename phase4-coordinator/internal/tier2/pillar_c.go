@@ -89,7 +89,9 @@ type AttestationVerifyResult struct {
 	// MDAHardware is true when MDA chain verification succeeded AND the
 	// freshness extension matched SHA256(sePublicKey) — i.e. the Apple MDA
 	// is bound to the provider's SE key via MDM DeviceAttestationNonce.
-	// When true the caller should set AttestationTier = "hardware".
+	// Observe-only: does NOT alone publish pool AttestationTierHardware
+	// (R3-M1). Hardware tier is set only via LiveMDAService SetMDAProof /
+	// tryUpgradeFromCache after binding-serial + SE freshness checks.
 	MDAHardware bool
 }
 
@@ -346,8 +348,56 @@ func VerifyMDACertChainWithSEKey(certChain [][]byte, cfg config.Tier2Config, seP
 	if reason != "" {
 		return false, false
 	}
+	if reason := verifyMDADeviceProperties(certs[0]); reason != "" {
+		return false, false
+	}
 	_ = logger
 	return true, seKeyUsed
+}
+
+// ExtractMDASerialNumber returns the hardware serial number from an Apple MDA
+// leaf certificate (OID 1.2.840.113635.100.8.9.1), or "" when absent/unparseable.
+// Used by LiveMDAService to bind MDM responses to the enrolled MicroMDM device.
+func ExtractMDASerialNumber(leaf *x509.Certificate) string {
+	if leaf == nil {
+		return ""
+	}
+	extension, ok := certificateExtension(leaf, mdaOIDSerialNumber)
+	if !ok {
+		return ""
+	}
+	return decodeMDAExtensionText(extension.Value)
+}
+
+func decodeMDAExtensionText(value []byte) string {
+	if len(value) == 0 {
+		return ""
+	}
+	var text string
+	if rest, err := asn1.Unmarshal(value, &text); err == nil && len(rest) == 0 {
+		return strings.TrimSpace(text)
+	}
+	var octets []byte
+	if rest, err := asn1.Unmarshal(value, &octets); err == nil && len(rest) == 0 {
+		return strings.TrimSpace(string(octets))
+	}
+	// Some test / vendor encodings store the UTF-8 serial as raw OCTET contents.
+	if isMostlyPrintable(value) {
+		return strings.TrimSpace(string(value))
+	}
+	return ""
+}
+
+func isMostlyPrintable(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for _, c := range b {
+		if c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func verifyMDALeafPublicKey(leaf *x509.Certificate) error {

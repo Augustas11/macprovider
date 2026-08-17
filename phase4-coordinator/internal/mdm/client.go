@@ -1,10 +1,9 @@
-// Package mdm implements Phase 2 Track P2-A MDM enrollment profile generation
-// (Scenario B) and Phase 3 MicroMDM API client for live MDA round-trips.
 package mdm
 
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -12,6 +11,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"howett.net/plist"
 )
 
 // ClientConfig holds the configuration for the MicroMDM API client.
@@ -81,60 +83,80 @@ func (c *Client) FindDeviceBySerial(ctx context.Context, serial string) (Device,
 	if err != nil {
 		return Device{}, false, err
 	}
-	serial = strings.ToUpper(strings.TrimSpace(serial))
+	serial = NormalizeSerial(serial)
 	for _, d := range devices {
-		if strings.ToUpper(strings.TrimSpace(d.SerialNumber)) == serial {
+		if NormalizeSerial(d.SerialNumber) == serial {
 			return d, true, nil
 		}
 	}
 	return Device{}, false, nil
 }
 
-// commandPayload is the JSON body for POST /v1/commands.
-type commandPayload struct {
-	UDID    string          `json:"udid"`
-	Payload json.RawMessage `json:"payload"`
-}
-
 // EnqueueDeviceInformationAttestation enqueues a DeviceInformation MDM command
-// for udid with DeviceAttestation and DeviceAttestationNonce queries. The nonce
-// is base64-encoded before sending (Apple MDM plist <data> field format).
+// for udid with DeviceAttestation + DeviceAttestationNonce via MicroMDM's raw
+// plist endpoint POST /v1/commands/{udid}.
+//
+// MicroMDM's JSON DeviceInformation model only has `queries` and drops unknown
+// fields (including device_attestation_nonce), so the nonce must be delivered
+// as a plist <data> field on the raw command path (R2-H2).
 //
 // nonce32 should be 32 bytes — SHA256 of the provider's SE public key so that
 // the resulting MDA freshness extension can be verified with verifyMDAFreshness.
-func (c *Client) EnqueueDeviceInformationAttestation(ctx context.Context, udid string, nonce32 []byte) error {
-	nonceB64 := base64.StdEncoding.EncodeToString(nonce32)
-	// MicroMDM accepts raw plist-like JSON for MDM commands. The Queries list
-	// is an array of string keys; DeviceAttestationNonce is a base64 data blob.
-	cmdBody := map[string]interface{}{
-		"request_type": "DeviceInformation",
-		"queries":      []string{"DeviceAttestation"},
-		"device_attestation_nonce": nonceB64,
+//
+// Returns the CommandUUID embedded in the plist (for pending keying).
+func (c *Client) EnqueueDeviceInformationAttestation(ctx context.Context, udid string, nonce32 []byte) (commandUUID string, err error) {
+	udid = strings.TrimSpace(udid)
+	if udid == "" {
+		return "", fmt.Errorf("mdm enqueue: udid required")
 	}
-	cmdRaw, err := json.Marshal(cmdBody)
+	if len(nonce32) == 0 {
+		return "", fmt.Errorf("mdm enqueue: nonce required")
+	}
+	commandUUID = uuid.New().String()
+	body := buildDeviceInformationAttestationPlist(commandUUID, nonce32)
+	path := "/v1/commands/" + udid
+	req, err := c.newRequest(ctx, http.MethodPost, path, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("mdm enqueue: marshal command: %w", err)
+		return "", err
 	}
-	payload := commandPayload{UDID: udid, Payload: cmdRaw}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("mdm enqueue: marshal payload: %w", err)
-	}
-	req, err := c.newRequest(ctx, http.MethodPost, "/v1/commands", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/xml")
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("mdm enqueue: http: %w", err)
+		return "", fmt.Errorf("mdm enqueue: http: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("mdm enqueue: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("mdm enqueue: status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
-	return nil
+	return commandUUID, nil
+}
+
+// buildDeviceInformationAttestationPlist builds an Apple MDM DeviceInformation
+// command plist with DeviceAttestationNonce as <data> (base64 text).
+func buildDeviceInformationAttestationPlist(commandUUID string, nonce32 []byte) []byte {
+	nonceB64 := base64.StdEncoding.EncodeToString(nonce32)
+	// commandUUID and nonceB64 are hex/base64 — safe for XML text content.
+	return []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CommandUUID</key>
+  <string>%s</string>
+  <key>Command</key>
+  <dict>
+    <key>RequestType</key>
+    <string>DeviceInformation</string>
+    <key>Queries</key>
+    <array>
+      <string>DeviceAttestation</string>
+    </array>
+    <key>DeviceAttestationNonce</key>
+    <data>%s</data>
+  </dict>
+</dict>
+</plist>
+`, commandUUID, nonceB64))
 }
 
 // DeviceAttestationResult holds the parsed DeviceAttestation fields from a
@@ -143,6 +165,111 @@ type DeviceAttestationResult struct {
 	// CertificateChain holds the raw DER bytes of each certificate in the
 	// Apple MDA chain (leaf first), as returned by the device.
 	CertificateChain [][]byte
+}
+
+// AcknowledgeEventParse holds fields extracted from a MicroMDM command webhook.
+type AcknowledgeEventParse struct {
+	Topic       string
+	UDID        string
+	CommandUUID string
+	Status      string
+	Result      *DeviceAttestationResult
+}
+
+// micromdmWebhookEnvelope is the real MicroMDM command-webhook JSON shape.
+type micromdmWebhookEnvelope struct {
+	Topic            string `json:"topic"`
+	AcknowledgeEvent *struct {
+		UDID        string `json:"udid"`
+		Status      string `json:"status"`
+		CommandUUID string `json:"command_uuid"`
+		RawPayload  string `json:"raw_payload"`
+	} `json:"acknowledge_event"`
+}
+
+// ParseAcknowledgeEvent parses a MicroMDM command webhook body.
+// Primary path: topic mdm.Connect + acknowledge_event.raw_payload (base64 plist).
+// Empty topic is accepted when acknowledge_event is present (test fixtures).
+// Falls back to legacy flat/payload JSON DeviceAttestation for secondary compat.
+func ParseAcknowledgeEvent(data []byte) (*AcknowledgeEventParse, error) {
+	var env micromdmWebhookEnvelope
+	if err := json.Unmarshal(data, &env); err == nil && env.AcknowledgeEvent != nil {
+		topic := strings.TrimSpace(env.Topic)
+		if topic != "" && topic != "mdm.Connect" {
+			return nil, fmt.Errorf("mdm: ignore webhook topic %q", topic)
+		}
+		ae := env.AcknowledgeEvent
+		out := &AcknowledgeEventParse{
+			Topic:       topic,
+			UDID:        strings.TrimSpace(ae.UDID),
+			CommandUUID: strings.TrimSpace(ae.CommandUUID),
+			Status:      strings.TrimSpace(ae.Status),
+		}
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(ae.RawPayload))
+		if err != nil {
+			// Some fixtures may already be raw XML; try as-is.
+			raw = []byte(strings.TrimSpace(ae.RawPayload))
+		}
+		if len(raw) == 0 {
+			return out, ErrNoDeviceAttestation
+		}
+		result, err := ParseDeviceAttestationFromPlistBytes(raw)
+		if err != nil {
+			return out, err
+		}
+		out.Result = result
+		return out, nil
+	}
+
+	// Secondary compat: legacy flat JSON used by early Phase 3 tests.
+	udid := extractWebhookUDID(data)
+	result, err := ParseDeviceAttestationFromPlist(data)
+	if err != nil {
+		return nil, err
+	}
+	return &AcknowledgeEventParse{
+		UDID:   udid,
+		Result: result,
+	}, nil
+}
+
+// ParseDeviceAttestationFromPlistBytes extracts DeviceAttestation from raw
+// Apple MDM response plist bytes (XML or binary).
+func ParseDeviceAttestationFromPlistBytes(data []byte) (*DeviceAttestationResult, error) {
+	var top map[string]interface{}
+	if _, err := plist.Unmarshal(data, &top); err != nil {
+		return nil, fmt.Errorf("mdm: plist decode: %w", err)
+	}
+	// Prefer QueryResponses.DeviceAttestation (DeviceInformation response).
+	if qr, ok := top["QueryResponses"].(map[string]interface{}); ok {
+		if v, ok := qr["DeviceAttestation"]; ok {
+			return extractDeviceAttestationCerts(plistValueToJSONCompat(v))
+		}
+	}
+	if v, ok := top["DeviceAttestation"]; ok {
+		return extractDeviceAttestationCerts(plistValueToJSONCompat(v))
+	}
+	return nil, ErrNoDeviceAttestation
+}
+
+// plistValueToJSONCompat converts howett plist values into the shapes
+// extractDeviceAttestationCerts already understands ([]interface{} of strings,
+// or a single base64/string / []byte).
+func plistValueToJSONCompat(v interface{}) interface{} {
+	switch tv := v.(type) {
+	case []interface{}:
+		out := make([]interface{}, 0, len(tv))
+		for _, item := range tv {
+			out = append(out, plistValueToJSONCompat(item))
+		}
+		return out
+	case []byte:
+		return base64.StdEncoding.EncodeToString(tv)
+	case string:
+		return tv
+	default:
+		return v
+	}
 }
 
 // ParseDeviceAttestationFromPlist parses a MicroMDM device information response
@@ -161,18 +288,36 @@ func ParseDeviceAttestationFromPlist(data []byte) (*DeviceAttestationResult, err
 	var outer struct {
 		Payload struct {
 			DeviceAttestation interface{} `json:"DeviceAttestation"`
+			QueryResponses    struct {
+				DeviceAttestation interface{} `json:"DeviceAttestation"`
+			} `json:"QueryResponses"`
 		} `json:"payload"`
 	}
 	// Also try flat parse (direct MDM response JSON).
 	var flat struct {
 		DeviceAttestation interface{} `json:"DeviceAttestation"`
+		QueryResponses    struct {
+			DeviceAttestation interface{} `json:"DeviceAttestation"`
+		} `json:"QueryResponses"`
 	}
 	var parsed interface{}
-	if err := json.Unmarshal(data, &outer); err == nil && outer.Payload.DeviceAttestation != nil {
-		parsed = outer.Payload.DeviceAttestation
-	} else if err2 := json.Unmarshal(data, &flat); err2 == nil && flat.DeviceAttestation != nil {
-		parsed = flat.DeviceAttestation
-	} else {
+	if err := json.Unmarshal(data, &outer); err == nil {
+		if outer.Payload.QueryResponses.DeviceAttestation != nil {
+			parsed = outer.Payload.QueryResponses.DeviceAttestation
+		} else if outer.Payload.DeviceAttestation != nil {
+			parsed = outer.Payload.DeviceAttestation
+		}
+	}
+	if parsed == nil {
+		if err2 := json.Unmarshal(data, &flat); err2 == nil {
+			if flat.QueryResponses.DeviceAttestation != nil {
+				parsed = flat.QueryResponses.DeviceAttestation
+			} else if flat.DeviceAttestation != nil {
+				parsed = flat.DeviceAttestation
+			}
+		}
+	}
+	if parsed == nil {
 		return nil, ErrNoDeviceAttestation
 	}
 	return extractDeviceAttestationCerts(parsed)
@@ -200,10 +345,21 @@ func extractDeviceAttestationCerts(v interface{}) (*DeviceAttestationResult, err
 		}
 		return &DeviceAttestationResult{CertificateChain: chain}, nil
 	case string:
-		// Single base64-encoded DER certificate or PEM block.
+		// Single base64-encoded DER certificate or concatenated DER chain.
 		der, err := decodeBase64Cert(tv)
 		if err != nil {
 			return nil, fmt.Errorf("mdm: DeviceAttestation base64: %w", err)
+		}
+		if certs, err := x509.ParseCertificates(der); err == nil && len(certs) > 0 {
+			chain := make([][]byte, 0, len(certs))
+			for _, c := range certs {
+				chain = append(chain, append([]byte(nil), c.Raw...))
+			}
+			return &DeviceAttestationResult{CertificateChain: chain}, nil
+		}
+		// Fallback: treat as a single opaque DER blob (may fail later verify).
+		if _, err := x509.ParseCertificate(der); err == nil {
+			return &DeviceAttestationResult{CertificateChain: [][]byte{der}}, nil
 		}
 		return &DeviceAttestationResult{CertificateChain: [][]byte{der}}, nil
 	default:

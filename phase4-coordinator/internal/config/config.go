@@ -898,19 +898,28 @@ type Tier2MDMConfig struct {
 	// APIToken is the MicroMDM API token. Should be loaded from an
 	// environment variable via the env: prefix in production, e.g.
 	// "env:MICROMDM_API_TOKEN". When empty, the MDM client is disabled.
+	// Resolved via resolveEnv("tier2.mdm.api_token") at Load time.
 	APIToken string `yaml:"api_token"`
 
 	// LiveMDAEnabled is the observe-mode gate for Phase 3 live MDA
 	// round-trips. Default false. Set to true only after MicroMDM is
 	// deployed and APNs push cert is installed. Changing to true does
 	// NOT flip require_attestation (Phase 4 gate).
+	// When true, Load fail-closes unless api_url and resolved api_token
+	// are both non-empty.
 	LiveMDAEnabled bool `yaml:"live_mda_enabled"`
 
 	// MDARefreshIntervalHours controls how often the coordinator
 	// re-requests a fresh DeviceInformation attestation from MicroMDM.
 	// Apple enforces a ~7-day rate limit on DeviceAttestation commands;
-	// default 168 (7 days). Values below 24 are silently floored to 24.
+	// default 168 (7 days) when unset/0. When live_mda_enabled, values
+	// below 168 are clamped to 168 (R4-M5).
 	MDARefreshIntervalHours int `yaml:"mda_refresh_interval_hours"`
+
+	// CommandWebhookSecret is an optional shared secret for the MicroMDM
+	// command webhook (`X-MDM-Webhook-Secret`). Prefer env:NAME. When empty,
+	// the webhook handler requires a loopback remote address.
+	CommandWebhookSecret string `yaml:"command_webhook_secret"`
 }
 
 type CoordinatorAdvertisedVersion struct {
@@ -1716,6 +1725,27 @@ func (c *Config) resolveEnv() error {
 		return err
 	} else {
 		c.Tier2.ModelHashLegacyUntil = v
+	}
+	// Phase 3 CODE-H1 / SEC-M1: resolve MicroMDM API token (and optional
+	// webhook secret) so env:MICROMDM_API_TOKEN is not sent as Basic Auth.
+	if v, err := resolveEnvValue("tier2.mdm.api_token", c.Tier2.MDM.APIToken); err != nil {
+		return err
+	} else {
+		c.Tier2.MDM.APIToken = v
+	}
+	if v, err := resolveEnvValue("tier2.mdm.command_webhook_secret", c.Tier2.MDM.CommandWebhookSecret); err != nil {
+		return err
+	} else {
+		c.Tier2.MDM.CommandWebhookSecret = v
+	}
+	if c.Tier2.MDM.LiveMDAEnabled {
+		if strings.TrimSpace(c.Tier2.MDM.APIURL) == "" || strings.TrimSpace(c.Tier2.MDM.APIToken) == "" {
+			return fmt.Errorf("tier2.mdm.live_mda_enabled requires non-empty api_url and resolved api_token")
+		}
+		// R4-M5: Apple ~7-day DeviceAttestation budget — floor at 168h.
+		if c.Tier2.MDM.MDARefreshIntervalHours < 168 {
+			c.Tier2.MDM.MDARefreshIntervalHours = 168
+		}
 	}
 	// Round-1 SECURITY r1 MEDIUM 1: stats DSN fields go through
 	// the same env-indirection resolver. Operators inject DSNs
