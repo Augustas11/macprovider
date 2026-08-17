@@ -1,7 +1,15 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.16 (2026-08-17, buyer compute-integrity unavailable status)
+**Version:** 0.9.17 (2026-08-17, preliminary paid-path conformance unit IDs)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.17 (2026-08-17, issue #614 — preliminary paid-path conformance unit IDs):**
+- Registers `SPEC-006-R001`..`SPEC-006-R003` in `specs/CONFORMANCE.json` as
+  pending preliminary conformance anchors for the paid buyer-path #614 slice.
+  These IDs group existing normative obligation areas without changing them:
+  authenticated API-key chat (`R001`), buyer-visible error envelope (`R002`),
+  and quota reservation/refund (`R003`). Remaining SPEC-006 clause migration
+  is issue #1023. No wire-contract or settlement-matrix change.
 
 **Change log v0.9.16 (2026-08-17, issue #1009 — buyer compute-integrity unavailable status):**
 - §5.3 and §5.3.1 now include buyer-visible compute-integrity status fields for `/v1/models`. Because no live per-model telemetry source is wired into the buyer models surface yet, entries MUST expose `compute_integrity.status: "unavailable"` with `live_telemetry_available: false` rather than deriving observing, warn-only, enforcing, quarantined, blocked, stale, or expired states from static spec/package availability.
@@ -173,6 +181,22 @@
 - Defers implementation to a later BUILD_PHASE5 or BUILD_PHASE6 prompt.
 
 ---
+
+## Preliminary conformance unit IDs
+
+SPEC-006 v0.9.17 registers `SPEC-006-R001`..`SPEC-006-R003` in
+`specs/CONFORMANCE.json` as pending preliminary conformance anchors. These IDs
+group existing normative obligation areas without changing them:
+
+- `SPEC-006-R001` — authenticated API-key paid chat entrypoint
+  (`POST /v1/chat/completions`, §5, §6).
+- `SPEC-006-R002` — buyer-visible error envelope and retryability
+  (`error.code` / `error.retryable`, §5.2, §17).
+- `SPEC-006-R003` — quota reservation, settlement, and refund on the chat
+  path (§7, §17.7).
+
+`requirement_id_migration` remains `pending`. Physical paid-path evidence is
+tracked by GitHub issue #1022.
 
 ## 1. Scope
 

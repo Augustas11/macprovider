@@ -103,3 +103,58 @@ The slice can reduce pre-beta release scope, but it cannot promote a sensitive
 requirement to conformant until the evidence rules in `specs/PROCESS.md` are
 satisfied. In particular, signed journey-result work remains the durable
 promotion path for sensitive physical claims.
+
+## Paid buyer path #614 slice
+
+The second bounded #614 release slice is the paid buyer path. Its purpose is
+to make buyer/billing/settlement/receipt conformance executable: name the
+stable requirement IDs a paid API-key request actually exercises, map the
+shipped implementation and tests, and require physical evidence before any
+promotion.
+
+This slice is not more provider onboarding. Provider install, referral,
+autotune, hardware admission, and payout-address registration stay in the
+provider-prebeta slice. Buyer traffic here is the money path itself, not
+smoke that an admitted provider can serve.
+
+Paid-buyer-path active domains:
+
+| Area | Specs | Requirements | Scope |
+| --- | --- | --- | --- |
+| Buyer API paid entry | `SPEC-006` | `SPEC-006-R001` `R002` `R003` | Authenticated API-key `POST /v1/chat/completions`, buyer-visible error envelope, quota reservation and refund/settlement. Domain `buyer-api-error-contract` requires a signed journey-result. |
+| Billing formula and ledger | `SPEC-005` | `SPEC-005-R001` `R002` `R003` | Closed-form credit arithmetic, hot-path ledger write, crash recovery. Domain `billing-settlement-formula`. |
+| Settlement-capable receipts | `SPEC-015` | `SPEC-015-R001` | v0.4 receipt issuance (`ReceiptBuilder.buildSettlement`) and coordinator ingestion/verification. Domain `inference-receipts`. |
+| Verified-model settlement | `SPEC-022` | `SPEC-022-R001`..`R008`, `R010` | Observe-mode settlement gate, route snapshot, receipt verification, quarantine observation, buyer debit observation, buyer disclosure. Domain `verified-model-settlement`. SPEC-022 remains `draft`; R007/R008 cannot promote from this observe-mode journey. |
+
+Deferred for paid buyer path:
+
+- remaining SPEC-005/006/015 clause-to-ID migration beyond the preliminary
+  anchors (`SPEC-005-R001`..`R003`, `SPEC-006-R001`..`R003`,
+  `SPEC-015-R001`); tracked by GitHub issue #1023;
+- provider-prebeta onboarding, autotune, hardware admission, and
+  payout-address registration;
+- SPEC-016 payout runner, hot-wallet funding, and on-chain settlement;
+- SPEC-002-R002 trusted-provider quota (provider admission, not paid-buyer
+  evidence);
+- SPEC-040 wallet sessions;
+- default-off or future features such as `SPEC-024` prefix-cache discount
+  enablement, `SPEC-036` compute-integrity enforce, and SPEC-022 enforce-mode
+  activation.
+
+Stop condition for this slice:
+
+- every paid-buyer-path active requirement has either a current conformance
+  mapping or an explicit non-promoting state with owner, issue, and
+  arbitration rationale;
+- `JOURNEY-BUYER-PAID-PATH` is named and mapped;
+- physical evidence for that journey is captured, redacted, and signed
+  before any mapped requirement is promoted (GitHub issue #1022);
+- observe-mode production posture is recorded honestly; this slice cannot
+  flip SPEC-022 to enforce;
+- specs outside the slice remain deferred, default-off, not-deployed, or
+  owned by the provider-prebeta slice rather than treated as hidden paid-path
+  blockers.
+
+The slice can make the money-path ledger mappable, but it cannot promote a
+sensitive requirement to conformant until the evidence rules in
+`specs/PROCESS.md` are satisfied.

@@ -374,6 +374,54 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "journey_id": {"const": "JOURNEY-BUYER-PAID-PATH"}
+            },
+            "required": ["journey_id"]
+          },
+          "then": {
+            "required": [
+              "run_id",
+              "execution_mode",
+              "observations",
+              "requirement_ids"
+            ],
+            "properties": {
+              "journey_id": {"const": "JOURNEY-BUYER-PAID-PATH"},
+              "execution_mode": {"const": "isolated-candidate-paid-path"},
+              "observations": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "settlement_mode",
+                  "enforce_activated",
+                  "payout_ready_mutated",
+                  "production_side_effects",
+                  "buyer_receipt_retrieval_exposed",
+                  "isolated_environment",
+                  "raw_prompt_output_redacted",
+                  "bearer_tokens_redacted"
+                ],
+                "properties": {
+                  "settlement_mode": {"const": "observe"},
+                  "enforce_activated": {"const": false},
+                  "payout_ready_mutated": {"const": false},
+                  "production_side_effects": {"const": false},
+                  "buyer_receipt_retrieval_exposed": {"type": "boolean"},
+                  "isolated_environment": {"const": true},
+                  "raw_prompt_output_redacted": {"const": true},
+                  "bearer_tokens_redacted": {"const": true}
+                }
+              },
+              "steps": {
+                "minItems": 11,
+                "maxItems": 11
+              }
+            }
+          }
         }
       ]
     }
