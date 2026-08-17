@@ -1988,6 +1988,15 @@
         }
       }
       var action = eligibility ? malibuRewardNextAction(eligibility.primary_reason) : vocab.action;
+      if (eligibility &&
+          eligibility.primary_reason === "held_provisional_trust_tier" &&
+          malibu &&
+          typeof malibu.trust_criteria_met === "number" &&
+          typeof malibu.trust_criteria_required === "number" &&
+          malibu.trust_criteria_required > malibu.trust_criteria_met) {
+        action = "Complete " + (malibu.trust_criteria_required - malibu.trust_criteria_met) +
+          " more trust criteria to unlock withdrawals.";
+      }
       if (!eligibility && malibu && (reasons.length ||
           code === "trust_tier_provisional" ||
           code === "wallet_daily_cap_held")) {
