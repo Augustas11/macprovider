@@ -80,6 +80,14 @@ grep -qF 'runs with --ensure-schema=false' "$ENV_EXAMPLE" ||
   fail "env example must document bootstrap-before-service contract"
 grep -qF 'CREATE TABLE IF NOT EXISTS ledger_request_credits' "$BOOTSTRAP_SQL" ||
   fail "bootstrap SQL must create ledger_request_credits"
+grep -qF 'settlement_policy_mode TEXT' "$BOOTSTRAP_SQL" ||
+  fail "bootstrap SQL must carry settlement policy mode column"
+grep -qF 'spec022_verified BOOLEAN' "$BOOTSTRAP_SQL" ||
+  fail "bootstrap SQL must carry SPEC-022 verified column"
+grep -qF 'lrc_mirror_spec022_verified_enforce_check' "$BOOTSTRAP_SQL" ||
+  fail "bootstrap SQL must constrain SPEC-022 verified rows to enforce mode"
+grep -qF 'CREATE TABLE IF NOT EXISTS ledger_request_credit_spec022_verified_audit' "$BOOTSTRAP_SQL" ||
+  fail "bootstrap SQL must create SPEC-022 verified audit table"
 if grep -qF "PASSWORD 'REPLACE_ME'" "$BOOTSTRAP_SQL"; then
   fail "bootstrap SQL must not create a known default password"
 fi
@@ -89,11 +97,15 @@ grep -qF 'CREATE TABLE IF NOT EXISTS provider_tokens' "$BOOTSTRAP_SQL" ||
   fail "bootstrap SQL must create provider_tokens"
 grep -qF 'GRANT SELECT ON ledger_request_credits TO stats_rollup' "$BOOTSTRAP_SQL" ||
   fail "bootstrap SQL must grant rollup read access"
+grep -qF 'GRANT SELECT ON ledger_request_credits TO rewards_writer' "$BOOTSTRAP_SQL" ||
+  fail "bootstrap SQL must grant rewards writer read access"
 grep -qF 'REVOKE ALL ON ledger_request_credits FROM stats_billing_mirror_writer' "$BOOTSTRAP_SQL" ||
   fail "bootstrap SQL must revoke direct writer table DML"
+grep -qF 'REVOKE ALL ON ledger_request_credit_spec022_verified_audit FROM stats_billing_mirror_writer' "$BOOTSTRAP_SQL" ||
+  fail "bootstrap SQL must revoke direct writer audit table DML"
 grep -qF 'REVOKE ALL ON FUNCTION stats_billing_mirror_upsert_request_credit' "$BOOTSTRAP_SQL" ||
   fail "bootstrap SQL must revoke public function execute"
-grep -qF 'GRANT EXECUTE ON FUNCTION stats_billing_mirror_upsert_request_credit' "$BOOTSTRAP_SQL" ||
+grep -qF 'GRANT EXECUTE ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN) TO stats_billing_mirror_writer' "$BOOTSTRAP_SQL" ||
   fail "bootstrap SQL must grant constrained upsert function"
 grep -qF 'CHECK (usage_source IN' "$BOOTSTRAP_SQL" ||
   fail "bootstrap SQL must carry source billing enum constraints"

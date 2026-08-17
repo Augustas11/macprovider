@@ -442,16 +442,19 @@ func main() {
 			sqlitePath = cfg.Storage.DBPath
 		}
 		rewardsCfg := rewards.Config{
-			Enabled:                true,
-			WriterDSN:              cfg.MalibuEmission.WriterDSN,
-			TickInterval:           time.Duration(cfg.MalibuEmission.TickIntervalSeconds) * time.Second,
-			ProviderDailyCapMALIBU: cfg.MalibuEmission.ProviderDailyCapMALIBU,
-			WalletDailyCapMALIBU:   cfg.MalibuEmission.WalletDailyCapMALIBU,
-			SQLitePayoutDBPath:     sqlitePath,
-			WalletMirrorInterval:   time.Duration(cfg.MalibuEmission.WalletMirrorIntervalSeconds) * time.Second,
-			UnlockEvalInterval:     time.Duration(cfg.MalibuEmission.UnlockEvalIntervalSeconds) * time.Second,
-			MaxSerializableRetries: cfg.MalibuEmission.MaxSerializableRetries,
-			BaseUSDCBalanceRPCURLs: cfg.MalibuEmission.BaseUSDCBalanceRPCURLs,
+			Enabled:                      true,
+			WriterDSN:                    cfg.MalibuEmission.WriterDSN,
+			TickInterval:                 time.Duration(cfg.MalibuEmission.TickIntervalSeconds) * time.Second,
+			UsefulWorkEnabled:            cfg.MalibuEmission.UsefulWorkEnabled,
+			UsefulWorkInterval:           time.Duration(cfg.MalibuEmission.UsefulWorkIntervalSeconds) * time.Second,
+			ProviderDailyCapMALIBU:       cfg.MalibuEmission.ProviderDailyCapMALIBU,
+			WalletDailyCapMALIBU:         cfg.MalibuEmission.WalletDailyCapMALIBU,
+			UsefulWorkMALIBUPer1KCredits: cfg.MalibuEmission.UsefulWorkMALIBUPer1KCredits,
+			SQLitePayoutDBPath:           sqlitePath,
+			WalletMirrorInterval:         time.Duration(cfg.MalibuEmission.WalletMirrorIntervalSeconds) * time.Second,
+			UnlockEvalInterval:           time.Duration(cfg.MalibuEmission.UnlockEvalIntervalSeconds) * time.Second,
+			MaxSerializableRetries:       cfg.MalibuEmission.MaxSerializableRetries,
+			BaseUSDCBalanceRPCURLs:       cfg.MalibuEmission.BaseUSDCBalanceRPCURLs,
 		}
 		var err error
 		rewardsRunner, err = rewards.New(rewardsDB, rewardsCfg, logger.With().Str("subsystem", "malibu_emission").Logger(), rewards.RunnerDeps{})
@@ -2342,9 +2345,10 @@ func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *
 		return nil
 	}
 	rewardsCfg := rewards.Config{
-		ProviderDailyCapMALIBU: cfg.MalibuEmission.ProviderDailyCapMALIBU,
-		WalletDailyCapMALIBU:   cfg.MalibuEmission.WalletDailyCapMALIBU,
-		SQLitePayoutDBPath:     cfg.MalibuEmission.SQLitePayoutDBPath,
+		ProviderDailyCapMALIBU:       cfg.MalibuEmission.ProviderDailyCapMALIBU,
+		WalletDailyCapMALIBU:         cfg.MalibuEmission.WalletDailyCapMALIBU,
+		UsefulWorkMALIBUPer1KCredits: cfg.MalibuEmission.UsefulWorkMALIBUPer1KCredits,
+		SQLitePayoutDBPath:           cfg.MalibuEmission.SQLitePayoutDBPath,
 	}
 	if rewardsCfg.SQLitePayoutDBPath == "" {
 		rewardsCfg.SQLitePayoutDBPath = cfg.Storage.DBPath

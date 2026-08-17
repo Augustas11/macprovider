@@ -5,15 +5,19 @@
 # (e.g. OPoI canaries) before install — deploy script does this automatically.
 #
 # Promotion (after C4 verification): set enabled: true and restart coordinator.
-# Pearl production: enabled:true as of 2026-08-07 (prebeta P2 — accrual ticks on).
+# Useful-work v0.2 rewards remain separately gated by useful_work_enabled.
+# Pearl production: enabled:true as of 2026-08-07 (prebeta P2 — bootstrap accrual ticks on).
 # Rollback: set enabled: false or remove this overlay block.
 
 malibu_emission:
   enabled: false
   writer_dsn: env:MALIBU_EMISSION_WRITER_DSN
   tick_interval_seconds: 900
+  useful_work_enabled: false
+  useful_work_interval_seconds: 900
   provider_daily_cap_malibu: 25
   wallet_daily_cap_malibu: 100
+  useful_work_malibu_per_1000_provider_credits: 1
   wallet_mirror_interval_seconds: 300
   unlock_eval_interval_seconds: 3600
   max_serializable_retries: 5

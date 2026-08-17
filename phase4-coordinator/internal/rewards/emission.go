@@ -12,6 +12,11 @@ import (
 	"github.com/lib/pq"
 )
 
+const (
+	ReasonMalibuBootstrapTick         = "malibu_bootstrap_tick"
+	ReasonMalibuVerifiedUsefulWorkV02 = "malibu_verified_useful_work_v0_2"
+)
+
 // RunEmissionTickOnce runs a single accrual tick (test/export hook).
 func (r *Runner) RunEmissionTickOnce(ctx context.Context) error {
 	return r.runEmissionTick(ctx)
@@ -84,10 +89,23 @@ type providerState struct {
 }
 
 func (r *Runner) accrueProvider(ctx context.Context, providerID string, tickAmount float64) error {
-	if tickAmount <= 0 {
+	return r.accrueProviderReward(ctx, providerID, tickAmount, ReasonMalibuBootstrapTick, "")
+}
+
+func (r *Runner) accrueProviderReward(ctx context.Context, providerID string, amount float64, reason, externalRef string) error {
+	if amount <= 0 {
 		return nil
 	}
 	return r.withSerializableRetry(ctx, func(tx *sql.Tx) error {
+		if externalRef != "" {
+			exists, err := rewardExternalRefExists(ctx, tx, externalRef)
+			if err != nil {
+				return err
+			}
+			if exists {
+				return nil
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `
             INSERT INTO provider_emission_state (provider_id, trust_tier)
             VALUES ($1, $2)
@@ -107,7 +125,7 @@ func (r *Runner) accrueProvider(ctx context.Context, providerID string, tickAmou
 		if remaining <= 0 {
 			return nil
 		}
-		accrue := math.Min(tickAmount, remaining)
+		accrue := math.Min(amount, remaining)
 		if accrue <= 0 {
 			return nil
 		}
@@ -134,13 +152,17 @@ func (r *Runner) accrueProvider(ctx context.Context, providerID string, tickAmou
 		if hold != "" {
 			holdArg = sql.NullString{String: hold, Valid: true}
 		}
+		var refArg sql.NullString
+		if externalRef != "" {
+			refArg = sql.NullString{String: externalRef, Valid: true}
+		}
 
 		now := time.Now().UTC()
 		if _, err := tx.ExecContext(ctx, `
             INSERT INTO provider_rewards_ledger
-                (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason)
-            VALUES ($1, $2, $3, $4, 'malibu_bootstrap_tick')
-        `, providerID, now.Unix(), formatMALIBU(accrue), holdArg); err != nil {
+                (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason, external_ref)
+            VALUES ($1, $2, $3, $4, $5, $6)
+        `, providerID, now.Unix(), formatMALIBU(accrue), holdArg, reason, refArg); err != nil {
 			return err
 		}
 
@@ -168,6 +190,18 @@ func (r *Runner) accrueProvider(ctx context.Context, providerID string, tickAmou
 		}
 		return nil
 	})
+}
+
+func rewardExternalRefExists(ctx context.Context, tx *sql.Tx, externalRef string) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, `
+        SELECT EXISTS (
+            SELECT 1 FROM provider_rewards_ledger
+             WHERE external_ref = $1
+               AND amount_malibu IS NOT NULL
+        )
+    `, externalRef).Scan(&exists)
+	return exists, err
 }
 
 func holdReasonForState(st providerState) string {

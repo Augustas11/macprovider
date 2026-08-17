@@ -68,6 +68,12 @@ func TestFetchRequestCreditsParsesEffectiveStatsColumns(t *testing.T) {
 	if first.Quarantined {
 		t.Fatal("first.Quarantined = true, want false")
 	}
+	if first.SettlementPolicyMode != "enforce" {
+		t.Fatalf("first settlement policy = %q, want enforce", first.SettlementPolicyMode)
+	}
+	if !first.Spec022Verified {
+		t.Fatal("first.Spec022Verified = false, want true")
+	}
 	second := rows[1]
 	if second.UsageSource != "byte_estimated" {
 		t.Fatalf("second usage source = %q, want byte_estimated", second.UsageSource)
@@ -80,6 +86,32 @@ func TestFetchRequestCreditsParsesEffectiveStatsColumns(t *testing.T) {
 	}
 	if !second.Quarantined {
 		t.Fatal("second.Quarantined = false, want true")
+	}
+	if second.Spec022Verified {
+		t.Fatal("second.Spec022Verified = true, want false")
+	}
+}
+
+func TestFetchRequestCreditsSupportsLegacySourceSchema(t *testing.T) {
+	dbPath := seedLegacySQLite(t)
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLite() error = %v", err)
+	}
+	defer db.Close()
+
+	rows, err := FetchRequestCredits(context.Background(), db, 0, 10)
+	if err != nil {
+		t.Fatalf("FetchRequestCredits() error = %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1", len(rows))
+	}
+	if got := rows[0].SettlementPolicyMode; got != "legacy" {
+		t.Fatalf("SettlementPolicyMode = %q, want legacy", got)
+	}
+	if rows[0].Spec022Verified {
+		t.Fatal("Spec022Verified = true, want false for legacy source schema")
 	}
 }
 
@@ -232,8 +264,14 @@ CREATE TABLE ledger_request_credits (
     usage_source TEXT NOT NULL,
     provider_credits INTEGER NOT NULL,
     fault_flag TEXT NOT NULL,
-    quarantined INTEGER NOT NULL
+    quarantined INTEGER NOT NULL,
+    settlement_policy_mode TEXT NOT NULL DEFAULT 'legacy'
 );
+CREATE VIEW spec022_payable_request_credits AS
+SELECT *
+  FROM ledger_request_credits
+ WHERE quarantined = 0
+   AND settlement_policy_mode = 'enforce';
 CREATE TABLE provider_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_hash TEXT NOT NULL UNIQUE,
@@ -247,12 +285,12 @@ CREATE TABLE provider_tokens (
 INSERT INTO ledger_request_credits (
     request_id, attempt_n, provider_id, ts_utc, created_at_utc, updated_at_utc,
     prompt_tokens, completion_tokens, estimated_completion_tokens, usage_source,
-    provider_credits, fault_flag, quarantined
+    provider_credits, fault_flag, quarantined, settlement_policy_mode
 ) VALUES
     ('req-1', 0, 'provider-a', '2026-07-05T08:59:00Z', '2026-07-05T08:59:01Z', NULL,
-     100, 200, NULL, 'provider_reported', 300, 'none', 0),
+     100, 200, NULL, 'provider_reported', 300, 'none', 0, 'enforce'),
     ('req-2', 0, 'provider-a', '2026-07-05T09:01:00Z', '2026-07-05T09:01:01Z', '2026-07-05T09:02:00Z',
-     33, NULL, 44, 'byte_estimated', 0, 'none', 1);
+     33, NULL, 44, 'byte_estimated', 0, 'none', 1, 'enforce');
 INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at, last_used_at)
 VALUES ('hash-a', 'hash-a', 'provider-a', 'Provider A', '2026-07-05T08:00:00Z', '2026-07-05T09:00:00Z');
 `); err != nil {
@@ -263,6 +301,51 @@ VALUES ('hash-a', 'hash-a', 'provider-a', 'Provider A', '2026-07-05T08:00:00Z', 
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("stat seed sqlite: %v", err)
+	}
+	return path
+}
+
+func seedLegacySQLite(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "legacy-request-log.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open legacy sqlite seed db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+CREATE TABLE ledger_request_credits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL,
+    provider_id TEXT NOT NULL,
+    ts_utc TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NULL,
+    prompt_tokens INTEGER NULL,
+    completion_tokens INTEGER NULL,
+    estimated_completion_tokens INTEGER NULL,
+    usage_source TEXT NOT NULL,
+    provider_credits INTEGER NOT NULL,
+    fault_flag TEXT NOT NULL,
+    quarantined INTEGER NOT NULL
+);
+INSERT INTO ledger_request_credits (
+    request_id, attempt_n, provider_id, ts_utc, created_at_utc, updated_at_utc,
+    prompt_tokens, completion_tokens, estimated_completion_tokens, usage_source,
+    provider_credits, fault_flag, quarantined
+) VALUES (
+    'legacy-req', 0, 'provider-legacy', '2026-07-05T08:59:00Z', '2026-07-05T08:59:01Z', NULL,
+    10, 20, NULL, 'provider_reported', 30, 'none', 0
+);
+`); err != nil {
+		t.Fatalf("seed legacy sqlite: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy sqlite seed db: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("stat legacy seed sqlite: %v", err)
 	}
 	return path
 }

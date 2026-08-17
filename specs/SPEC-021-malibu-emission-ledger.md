@@ -1,8 +1,23 @@
-# SPEC-021 — MALIBU bootstrap rewards emission ledger
+# SPEC-021 — MALIBU rewards emission ledger
 
-**Version:** 0.1.1 (2026-08-17, reward eligibility reason read model)
+**Version:** 0.2.0 (2026-08-17, verified useful-work accrual)
 **Status:** DRAFT — implementation target for Session C (`ops/runbooks/malibu-bootstrap-emission.md`)  
 **Depends on:** SPEC-026 v0.13 §5.1–§5.2, §5.5, §10 step 8; SPEC-017 v0.1.8 (`provider_rewards_ledger`); SPEC-016 v0.1.19 (`provider_payout_addresses` projection); SPEC-022 (verified-receipt-only USDC earnings)
+
+**Change log v0.2.0 (2026-08-17, verified useful-work accrual):**
+- Adds `malibu_verified_useful_work_v0_2` ledger rows derived only from
+  mirrored SPEC-022 enforce-mode request credits with verified settlement
+  evidence.
+- Defines the v0.2 accrual formula as normalized provider credits converted to
+  MALIBU by `useful_work_malibu_per_1000_provider_credits`; provider credits
+  are the billing-owned model/rate-card/token weighted unit, so MALIBU does not
+  re-price models independently.
+- Pins idempotency to `external_ref = spec022:<request_id>:<attempt_n>:<provider_id>`
+  with a unique MALIBU external-ref index. Duplicate settlement replay MUST NOT
+  mint another row or advance daily cap aggregates.
+- Keeps v0.1 `malibu_bootstrap_tick` rows readable as historical/bootstrap
+  accrual. No row is silently reclassified; any future backfill MUST use an
+  explicit migration rule.
 
 **Change log v0.1.1 (2026-08-17, reward eligibility reason read model):**
 - Defines `malibu_reward_eligibility.v1`, the provider-token-authenticated read
@@ -26,7 +41,9 @@ Accrue **$MALIBU** for early Malibu providers to bootstrap network growth, with 
 - Per-wallet daily cap applies across all `provider_id`s sharing a bound payout address.
 - Withdrawal runners MUST filter on `withdrawal_hold_reason IS NULL`.
 
-USDC payout semantics remain in SPEC-016; this spec owns MALIBU accrual only.
+USDC payout semantics remain in SPEC-016/SPEC-022; this spec owns MALIBU
+accrual only. v0.2 useful-work rewards consume settlement evidence as an input
+but do not alter buyer debit, USDC payout readiness, or the billing ledger.
 
 ---
 
@@ -43,8 +60,11 @@ Migration extends the existing table:
 | `amount_usd` | `NUMERIC(18,2) NULL` | Legacy operator USD rewards; nullable after migration |
 | `amount_malibu` | `NUMERIC(24,8) NULL` | MALIBU accrual for this row; NULL for USD-only rows |
 | `withdrawal_hold_reason` | `TEXT NULL` | When non-NULL, row is accrual-visible but **not** withdrawable |
+| `reason` | `TEXT NULL` | Reward source, including `malibu_bootstrap_tick` and `malibu_verified_useful_work_v0_2` |
+| `external_ref` | `TEXT NULL` | Idempotency reference for external sources. v0.2 useful-work rows use `spec022:<request_id>:<attempt_n>:<provider_id>` |
 
 Constraint: at least one of `amount_usd`, `amount_malibu` MUST be non-NULL.
+MALIBU rows with non-NULL `external_ref` are unique by `external_ref`.
 
 **Hold reason vocabulary (closed set):**
 
@@ -130,11 +150,14 @@ Dedicated runtime role for emission writes:
 |------|-------------------------|
 | Per-provider daily accrual cap | **25 MALIBU / provider_id / UTC day** |
 | Per-wallet daily aggregate cap | **100 MALIBU / bound wallet / UTC day** |
+| v0.2 useful-work rate | **1 MALIBU / 1000 verified provider credits** |
 | Withdrawable | **No** until `trust_tier = trusted` |
 | Hold reason (provisional accrual) | `trust_tier_provisional` |
 | Hold reason (wallet cap exceeded) | `per_wallet_daily_cap` (accrue but non-withdrawable) |
 
 Trusted providers accrue with `withdrawal_hold_reason IS NULL` unless wallet cap applies (`per_wallet_daily_cap`).
+Provider and wallet daily caps are shared across v0.1 bootstrap tick rows and
+v0.2 useful-work rows.
 
 **Retroactive unlock rule:** Tier transition to Trusted clears holds on **new** accrual rows only. Existing ledger rows retain their original `withdrawal_hold_reason`; operators MAY run a one-shot reconciliation job to clear holds on pre-unlock rows (out of v0.1 scope).
 
@@ -142,9 +165,9 @@ Trusted providers accrue with `withdrawal_hold_reason IS NULL` unless wallet cap
 
 ## 4. Workers
 
-### 4.1 Emission tick (periodic)
+### 4.1 Bootstrap emission tick (periodic)
 
-- Default interval: **15 minutes** (`malibu_emission.tick_interval`)
+- Default interval: **15 minutes** (`malibu_emission.tick_interval_seconds`)
 - Gated by `malibu_emission.enabled` (default `false`)
 - Per tick, per eligible `provider_id`:
   1. Resolve `bound_wallet` from `provider_payout_addresses_proj` (NULL if unbound — per-provider cap still applies; wallet cap skipped)
@@ -157,9 +180,44 @@ Trusted providers accrue with `withdrawal_hold_reason IS NULL` unless wallet cap
 
 Eligibility: provider MUST exist in `provider_emission_state` (seeded at App-track register and lazily on first tick for legacy CLI providers).
 
-Optional gate (hook only, v0.1): when `opoi_liveness_ok = false` for a canary cohort, skip accrual for that provider (Session A integration point).
+Bootstrap tick rows use `reason = malibu_bootstrap_tick`. They remain enabled
+only by `malibu_emission.enabled`; v0.2 does not reclassify them.
 
-### 4.2 Wallet-bind mirror
+### 4.2 Verified useful-work accrual (v0.2)
+
+- Default interval: **15 minutes** (`malibu_emission.useful_work_interval_seconds`)
+- Gated by both `malibu_emission.enabled` and
+  `malibu_emission.useful_work_enabled` (default `false`)
+- Source table: Postgres-mirrored `ledger_request_credits`
+- Eligibility gate:
+  - `spec022_verified = TRUE`
+  - `provider_credits > 0`
+  - no existing MALIBU ledger row for
+    `external_ref = spec022:<request_id>:<attempt_n>:<provider_id>`
+- Formula:
+
+```text
+malibu = provider_credits / 1000 * useful_work_malibu_per_1000_provider_credits
+```
+
+`provider_credits` is billing-owned normalized useful-work weight. It already
+captures verified request count (one eligible row per verified request),
+verified billable tokens, served model/rate-card price, and provider share.
+MALIBU MUST NOT independently re-price models from raw model IDs or client copy.
+Uptime/liveness and proof multipliers are reserved for a later explicit
+multiplier version; v0.2 may use proof state for eligibility/copy but not as a
+hidden amount multiplier.
+
+The worker inserts `provider_rewards_ledger` rows with
+`reason = malibu_verified_useful_work_v0_2` and the external-ref idempotency key
+above. Duplicate settlement replay or mirror overlap MUST be a no-op: no second
+row and no daily cap counter advance.
+
+The same provider cap, wallet cap, provisional hold, demotion hold, and trusted
+withdrawable rules from §3 apply. Non-verified, missing-receipt, quarantined, or
+legacy/observe-only rows are excluded from v0.2 MALIBU useful-work accrual.
+
+### 4.3 Wallet-bind mirror
 
 Periodic poll of SQLite `provider_payout_addresses` (same DB as `ledger_payout_ready` per SPEC-016 §3.1) into `provider_payout_addresses_proj`.
 
@@ -168,7 +226,7 @@ On first bind for a `provider_id`:
 1. Set `provider_emission_state.bound_wallet`
 2. Set `cap_replay_pending = TRUE`
 
-### 4.3 Cap replay at wallet bind
+### 4.4 Cap replay at wallet bind
 
 When `cap_replay_pending = TRUE`, under the same SERIALIZABLE lock as live emissions:
 
@@ -176,7 +234,7 @@ When `cap_replay_pending = TRUE`, under the same SERIALIZABLE lock as live emiss
 2. Re-evaluate against wallet cap; clear `per_wallet_daily_cap` hold where cap now permits withdrawal (Trusted tier only)
 3. Clear `cap_replay_pending`
 
-### 4.4 Trusted unlock evaluator (Phase C2)
+### 4.5 Trusted unlock evaluator (Phase C2)
 
 Coordinator job evaluates SPEC-026 §5.2 criteria on `unlock_eval_interval`:
 
@@ -196,7 +254,7 @@ Coordinator job evaluates SPEC-026 §5.2 criteria on `unlock_eval_interval`:
 - On demotion (§5.5): `trust_tier → provisional`, set `demotion_cooldown_until = now() + 72h`, new rows get `demotion_cooldown` hold until cooldown elapses
 - Post-demotion requalification: pairing must co-hold continuously for 72h before reinstatement
 
-### 4.5 Withdrawal runner filter
+### 4.6 Withdrawal runner filter
 
 Any MALIBU withdrawal query (future SPEC-016 extension or dedicated runner) MUST include:
 
@@ -318,12 +376,15 @@ boolean.
 malibu_emission:
   enabled: false
   writer_dsn: ""                    # rewards_writer role; env override MALIBU_EMISSION_WRITER_DSN
-  tick_interval: 15m
+  tick_interval_seconds: 900
+  useful_work_enabled: false
+  useful_work_interval_seconds: 900
   provider_daily_cap_malibu: 25
   wallet_daily_cap_malibu: 100
+  useful_work_malibu_per_1000_provider_credits: 1
   sqlite_payout_db_path: ""         # defaults to storage.db_path; SPEC-016 payout table source
-  wallet_mirror_interval: 5m
-  unlock_eval_interval: 1h
+  wallet_mirror_interval_seconds: 300
+  unlock_eval_interval_seconds: 3600
   max_serializable_retries: 5
 ```
 
@@ -343,11 +404,15 @@ Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 
 ---
 
-## 8. Acceptance criteria (Phase C1)
+## 8. Acceptance criteria
 
 - [ ] Provisional provider accrues MALIBU with `withdrawal_hold_reason = trust_tier_provisional`
 - [ ] Second `provider_id` on same wallet cannot exceed 100 MALIBU/day wallet aggregate
 - [ ] Withdrawal helper returns zero rows for held accrual
+- [ ] Verified useful-work rows accrue only when `spec022_verified = TRUE`
+- [ ] Non-verified, missing-receipt, quarantined, or legacy/observe-only rows do not accrue v0.2 useful-work MALIBU
+- [ ] Duplicate settlement/mirror replay with the same `spec022:<request_id>:<attempt_n>:<provider_id>` external ref does not mint a second row or advance cap counters
+- [ ] Existing v0.1 `malibu_bootstrap_tick` balances remain readable and are not reclassified
 - [ ] `rewards_writer` cannot SELECT from `partner_keys` or write `stats_*` rollup tables
 - [ ] Migration is idempotent; existing `amount_usd` leaderboard rollup continues to work
 
@@ -356,9 +421,9 @@ Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 ## 9. Open questions
 
 1. Cohort telemetry may adjust 100 MALIBU/day wallet cap (SPEC-026 §13).
-2. Event-driven accrual (per verified receipt) vs periodic tick — v0.1 uses tick; receipt-gated accrual is v0.2 candidate.
+2. Whether bootstrap tick remains permanently as an early-network floor or is disabled after demand reaches a stable threshold remains an operator policy choice.
 3. On-chain MALIBU withdrawal rail — out of scope; this spec is ledger-only.
 
 ---
 
-*End of SPEC-MALIBU-EMISSION-LEDGER v0.1.1.*
+*End of SPEC-MALIBU-EMISSION-LEDGER v0.2.0.*

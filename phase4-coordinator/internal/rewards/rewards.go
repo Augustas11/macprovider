@@ -29,16 +29,19 @@ const (
 
 // Config is the operator-tunable malibu_emission block.
 type Config struct {
-	Enabled                bool
-	WriterDSN              string
-	TickInterval           time.Duration
-	ProviderDailyCapMALIBU float64
-	WalletDailyCapMALIBU   float64
-	SQLitePayoutDBPath     string
-	WalletMirrorInterval   time.Duration
-	UnlockEvalInterval     time.Duration
-	MaxSerializableRetries int
-	BaseUSDCBalanceRPCURLs []string
+	Enabled                      bool
+	WriterDSN                    string
+	TickInterval                 time.Duration
+	UsefulWorkEnabled            bool
+	UsefulWorkInterval           time.Duration
+	ProviderDailyCapMALIBU       float64
+	WalletDailyCapMALIBU         float64
+	UsefulWorkMALIBUPer1KCredits float64
+	SQLitePayoutDBPath           string
+	WalletMirrorInterval         time.Duration
+	UnlockEvalInterval           time.Duration
+	MaxSerializableRetries       int
+	BaseUSDCBalanceRPCURLs       []string
 }
 
 // DefaultsApplied fills zero values with spec defaults.
@@ -47,11 +50,17 @@ func (c Config) DefaultsApplied() Config {
 	if out.TickInterval <= 0 {
 		out.TickInterval = 15 * time.Minute
 	}
+	if out.UsefulWorkInterval <= 0 {
+		out.UsefulWorkInterval = out.TickInterval
+	}
 	if out.ProviderDailyCapMALIBU <= 0 {
 		out.ProviderDailyCapMALIBU = 25
 	}
 	if out.WalletDailyCapMALIBU <= 0 {
 		out.WalletDailyCapMALIBU = 100
+	}
+	if out.UsefulWorkMALIBUPer1KCredits <= 0 {
+		out.UsefulWorkMALIBUPer1KCredits = 1
 	}
 	if out.WalletMirrorInterval <= 0 {
 		out.WalletMirrorInterval = 5 * time.Minute
@@ -134,6 +143,9 @@ func (r *Runner) SetTrustTierObserver(observer TrustTierObserver) {
 // Start launches background goroutines until ctx is cancelled.
 func (r *Runner) Start(ctx context.Context) {
 	go r.loop(ctx, r.cfg.TickInterval, "emission_tick", r.runEmissionTick)
+	if r.cfg.UsefulWorkEnabled {
+		go r.loop(ctx, r.cfg.UsefulWorkInterval, "useful_work_accrual", r.runUsefulWorkAccrual)
+	}
 	go r.loop(ctx, r.cfg.WalletMirrorInterval, "wallet_mirror", r.runWalletMirror)
 	go r.loop(ctx, r.cfg.UnlockEvalInterval, "unlock_eval", r.runUnlockEval)
 }

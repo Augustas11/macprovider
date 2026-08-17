@@ -347,16 +347,19 @@ type OnboardingConfig struct {
 // MalibuEmissionConfig gates SPEC-MALIBU-EMISSION-LEDGER bootstrap accrual.
 // Default-off; money-path changes require PR + audit.
 type MalibuEmissionConfig struct {
-	Enabled                     bool     `yaml:"enabled"`
-	WriterDSN                   string   `yaml:"writer_dsn"`
-	TickIntervalSeconds         int      `yaml:"tick_interval_seconds"`
-	ProviderDailyCapMALIBU      float64  `yaml:"provider_daily_cap_malibu"`
-	WalletDailyCapMALIBU        float64  `yaml:"wallet_daily_cap_malibu"`
-	SQLitePayoutDBPath          string   `yaml:"sqlite_payout_db_path"`
-	WalletMirrorIntervalSeconds int      `yaml:"wallet_mirror_interval_seconds"`
-	UnlockEvalIntervalSeconds   int      `yaml:"unlock_eval_interval_seconds"`
-	MaxSerializableRetries      int      `yaml:"max_serializable_retries"`
-	BaseUSDCBalanceRPCURLs      []string `yaml:"base_usdc_balance_rpc_urls"`
+	Enabled                      bool     `yaml:"enabled"`
+	WriterDSN                    string   `yaml:"writer_dsn"`
+	TickIntervalSeconds          int      `yaml:"tick_interval_seconds"`
+	UsefulWorkEnabled            bool     `yaml:"useful_work_enabled"`
+	UsefulWorkIntervalSeconds    int      `yaml:"useful_work_interval_seconds"`
+	ProviderDailyCapMALIBU       float64  `yaml:"provider_daily_cap_malibu"`
+	WalletDailyCapMALIBU         float64  `yaml:"wallet_daily_cap_malibu"`
+	UsefulWorkMALIBUPer1KCredits float64  `yaml:"useful_work_malibu_per_1000_provider_credits"`
+	SQLitePayoutDBPath           string   `yaml:"sqlite_payout_db_path"`
+	WalletMirrorIntervalSeconds  int      `yaml:"wallet_mirror_interval_seconds"`
+	UnlockEvalIntervalSeconds    int      `yaml:"unlock_eval_interval_seconds"`
+	MaxSerializableRetries       int      `yaml:"max_serializable_retries"`
+	BaseUSDCBalanceRPCURLs       []string `yaml:"base_usdc_balance_rpc_urls"`
 }
 
 // AutotuneFeedsConfig points at the signed SPEC-023 recommendation feeds
@@ -1377,13 +1380,16 @@ func Default() Config {
 			CoordinatorDomain:       "coordinator.malibu.tech",
 		},
 		MalibuEmission: MalibuEmissionConfig{
-			Enabled:                     false,
-			TickIntervalSeconds:         900,
-			ProviderDailyCapMALIBU:      25,
-			WalletDailyCapMALIBU:        100,
-			WalletMirrorIntervalSeconds: 300,
-			UnlockEvalIntervalSeconds:   3600,
-			MaxSerializableRetries:      5,
+			Enabled:                      false,
+			TickIntervalSeconds:          900,
+			UsefulWorkEnabled:            false,
+			UsefulWorkIntervalSeconds:    900,
+			ProviderDailyCapMALIBU:       25,
+			WalletDailyCapMALIBU:         100,
+			UsefulWorkMALIBUPer1KCredits: 1,
+			WalletMirrorIntervalSeconds:  300,
+			UnlockEvalIntervalSeconds:    3600,
+			MaxSerializableRetries:       5,
 		},
 		Explorer: ExplorerConfig{
 			Enabled:                       false,
@@ -2814,11 +2820,17 @@ func (c Config) validateMalibuEmission() error {
 	if m.TickIntervalSeconds <= 0 {
 		return fmt.Errorf("malibu_emission.tick_interval_seconds must be > 0")
 	}
+	if m.UsefulWorkIntervalSeconds <= 0 {
+		return fmt.Errorf("malibu_emission.useful_work_interval_seconds must be > 0")
+	}
 	if m.ProviderDailyCapMALIBU <= 0 {
 		return fmt.Errorf("malibu_emission.provider_daily_cap_malibu must be > 0")
 	}
 	if m.WalletDailyCapMALIBU <= 0 {
 		return fmt.Errorf("malibu_emission.wallet_daily_cap_malibu must be > 0")
+	}
+	if m.UsefulWorkMALIBUPer1KCredits <= 0 {
+		return fmt.Errorf("malibu_emission.useful_work_malibu_per_1000_provider_credits must be > 0")
 	}
 	if m.WalletMirrorIntervalSeconds <= 0 {
 		return fmt.Errorf("malibu_emission.wallet_mirror_interval_seconds must be > 0")
