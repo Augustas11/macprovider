@@ -821,6 +821,7 @@ func main() {
 		logger.Error().Err(err).Msg("live MDA service init failed; continuing without live MDA")
 	} else if liveMDA != nil {
 		liveMDAService = liveMDA
+		liveMDAService.SetTokenValidator(tokenStore)
 		wsOpts = append(wsOpts, providerws.WithLiveMDA(liveMDA))
 		logger.Info().
 			Str("api_url", cfg.Tier2.MDM.APIURL).
@@ -877,7 +878,9 @@ func main() {
 	// unless tier2.mdm.command_webhook_secret is set (X-MDM-Webhook-Secret).
 	if liveMDAService != nil {
 		providerMux.HandleFunc("/internal/mdm/command-webhook", liveMDAService.HandleMDACommandWebhook)
+		providerMux.HandleFunc("/internal/mdm/device-binding", liveMDAService.HandleInternalDeviceBinding)
 		logger.Info().Msg("Phase 3 live MDA command webhook mounted at /internal/mdm/command-webhook")
+		logger.Info().Msg("Phase 3 device binding bootstrap mounted at /internal/mdm/device-binding")
 	}
 	// SPEC-005 v0.4 (issue #169) — `billing.quarantine_resolution_force_void_enabled`
 	// gates the §11.6 force-void endpoint at the route layer. Default
@@ -1075,6 +1078,10 @@ func main() {
 	var enrollHandler http.HandlerFunc
 	if cfg.Tier2.MDM.EnrollmentBaseURL != "" {
 		eh := buildEnrollHandler(cfg, logger)
+		if liveMDAService != nil {
+			eh.Claimer = liveMDAService
+			eh.Tokens = tokenStore
+		}
 		enrollHandler = eh.HandleEnroll
 		logger.Info().
 			Str("base_url", cfg.Tier2.MDM.EnrollmentBaseURL).
@@ -1088,6 +1095,10 @@ func main() {
 		enrollHandler,
 		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
 	)
+	if liveMDAService != nil {
+		buyerHandler = withMDMDeviceBinding(buyerHandler, liveMDAService.HandleDeviceBinding)
+		logger.Info().Msg("Phase 3 device binding claim mounted at /v1/mdm/device-binding")
+	}
 	var trustedReferralProxies []netip.Prefix
 	if cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableJoinLinks || cfg.Referrals.RequireForRegistration {
 		trustedReferralProxies = mustParseTrustedProxies(cfg, logger)
@@ -2285,6 +2296,16 @@ func withReferralValidation(base http.Handler, validate http.HandlerFunc) http.H
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/referrals/validate", validate)
+	mux.Handle("/", base)
+	return mux
+}
+
+func withMDMDeviceBinding(base http.Handler, bind http.HandlerFunc) http.Handler {
+	if bind == nil {
+		return base
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/mdm/device-binding", bind)
 	mux.Handle("/", base)
 	return mux
 }

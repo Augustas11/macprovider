@@ -2844,8 +2844,56 @@ func TestRegisterMigratesMDAProofAcrossReconnect(t *testing.T) {
 	if !found {
 		t.Fatal("session s2 not found")
 	}
-	if p.AttestationTier != AttestationTierHardware {
-		t.Fatalf("AttestationTier=%q want hardware after migrate", p.AttestationTier)
+	if p.AttestationTier != AttestationTierSelfSigned {
+		t.Fatalf("AttestationTier=%q want self_signed after migrate (R2-M1: no early hardware)", p.AttestationTier)
+	}
+}
+
+func TestMigrateMDAProofDoesNotPublishHardwareUntilVerify(t *testing.T) {
+	registry := NewRegistry(nil)
+	now := time.Unix(1716768000, 0).UTC()
+	seKey := bytes.Repeat([]byte{9}, 64)
+	seHash := sha256.Sum256(seKey)
+
+	_, ok, refusal := registry.RegisterAtDetailed(&Provider{
+		ProviderID: "p-exp-mda", AssignedID: "s1", ModelID: "model-a", State: StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+	}, nil, now)
+	if !ok || refusal != RegisterRefusalNone {
+		t.Fatalf("register s1: ok=%v refusal=%q", ok, refusal)
+	}
+	// Cached proof is "expired" relative to a 168h refresh (verified 200h ago).
+	expiredAt := now.Add(-200 * time.Hour)
+	if !registry.SetMDAProof("p-exp-mda", "s1", [][]byte{[]byte("stale-leaf")}, seHash[:], expiredAt) {
+		t.Fatal("SetMDAProof failed")
+	}
+
+	_, ok, refusal = registry.RegisterAtDetailed(&Provider{
+		ProviderID: "p-exp-mda", AssignedID: "s2", ModelID: "model-a", State: StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: append([]byte(nil), seKey...),
+		AuthState: AuthBearerValidated, MaxConcurrency: 1, MaxContextTokens: 8000,
+		AttestationTier: AttestationTierSelfSigned,
+	}, nil, now)
+	if !ok || refusal != RegisterRefusalNone {
+		t.Fatalf("register s2: ok=%v refusal=%q", ok, refusal)
+	}
+	gotChain, verifiedAt, _, present := registry.MDAProof("p-exp-mda")
+	if !present || len(gotChain) == 0 {
+		t.Fatal("proof bytes should migrate")
+	}
+	if !verifiedAt.Equal(expiredAt) {
+		t.Fatalf("verifiedAt=%v want %v", verifiedAt, expiredAt)
+	}
+	p, found := registry.Resolve("p-exp-mda", "s2")
+	if !found {
+		t.Fatal("session s2 not found")
+	}
+	if p.AttestationTier == AttestationTierHardware {
+		t.Fatal("post-register tier must NOT be hardware before re-verify (R2-M1)")
+	}
+	if p.AttestationTier != AttestationTierSelfSigned {
+		t.Fatalf("tier=%q want self_signed", p.AttestationTier)
 	}
 }
 

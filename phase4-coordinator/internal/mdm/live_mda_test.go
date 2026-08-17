@@ -97,22 +97,25 @@ func TestHandleMDACommandWebhookHappyPathAndSerialMismatch(t *testing.T) {
 	}
 
 	svc := &LiveMDAService{
-		cfg:    cfg,
-		mdmCfg: config.Tier2MDMConfig{CommandWebhookSecret: "hook-secret", MDARefreshIntervalHours: 168},
-		pool:   reg,
-		log:    zerolog.Nop(),
-		now:    func() time.Time { return now },
-		pending: map[string]pendingMDARequest{
-			"UDID-1": {
-				ProviderID:     "prov-1",
-				AssignedID:     "asg-1",
-				ExpectedSerial: "C02EXPECTED",
-				SEKeyHash:      seHash[:],
-				EnqueuedAt:     now,
-			},
-		},
+		cfg:      cfg,
+		mdmCfg:   config.Tier2MDMConfig{CommandWebhookSecret: "hook-secret", MDARefreshIntervalHours: 168},
+		pool:     reg,
+		log:      zerolog.Nop(),
+		now:      func() time.Time { return now },
+		bindings: NewDeviceBindingStore(),
+		pending:  make(map[string]pendingMDARequest),
 	}
+	svc.recordPending("UDID-1", "cmd-1", pendingMDARequest{
+		ProviderID:     "prov-1",
+		AssignedID:     "asg-1",
+		ExpectedSerial: "C02EXPECTED",
+		UDID:           "UDID-1",
+		CommandUUID:    "cmd-1",
+		SEKeyHash:      seHash[:],
+		EnqueuedAt:     now,
+	})
 
+	// Legacy flat JSON secondary compat.
 	body, _ := json.Marshal(map[string]interface{}{
 		"udid": "UDID-1",
 		"payload": map[string]interface{}{
@@ -140,15 +143,15 @@ func TestHandleMDACommandWebhookHappyPathAndSerialMismatch(t *testing.T) {
 	}
 
 	// Serial mismatch rejection.
-	svc.pending = map[string]pendingMDARequest{
-		"UDID-2": {
-			ProviderID:     "prov-1",
-			AssignedID:     "asg-1",
-			ExpectedSerial: "OTHER-SERIAL",
-			SEKeyHash:      seHash[:],
-			EnqueuedAt:     now,
-		},
-	}
+	svc.recordPending("UDID-2", "cmd-2", pendingMDARequest{
+		ProviderID:     "prov-1",
+		AssignedID:     "asg-1",
+		ExpectedSerial: "OTHER-SERIAL",
+		UDID:           "UDID-2",
+		CommandUUID:    "cmd-2",
+		SEKeyHash:      seHash[:],
+		EnqueuedAt:     now,
+	})
 	body2, _ := json.Marshal(map[string]interface{}{
 		"udid": "UDID-2",
 		"payload": map[string]interface{}{
@@ -164,6 +167,78 @@ func TestHandleMDACommandWebhookHappyPathAndSerialMismatch(t *testing.T) {
 	svc.HandleMDACommandWebhook(rr2, req2)
 	if rr2.Code != http.StatusForbidden {
 		t.Fatalf("serial mismatch status=%d want 403", rr2.Code)
+	}
+}
+
+func TestHandleMDACommandWebhookAcknowledgeEvent(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	reg := pool.NewRegistry(nil)
+	seKey := bytes.Repeat([]byte{5}, 64)
+	seHash := sha256.Sum256(seKey)
+	rootDER, leafDER, cfg := testMDAChainWithSerial(t, now, seHash[:], "C02ACKTEST1")
+
+	reg.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "prov-ack", AssignedID: "asg-ack", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+	}, nil, now)
+
+	// Build a realistic DeviceInformation response plist with DeviceAttestation.
+	plistXML := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Status</key>
+  <string>Acknowledged</string>
+  <key>UDID</key>
+  <string>UDID-ACK-1</string>
+  <key>CommandUUID</key>
+  <string>cmd-ack-uuid</string>
+  <key>QueryResponses</key>
+  <dict>
+    <key>DeviceAttestation</key>
+    <array>
+      <data>` + base64.StdEncoding.EncodeToString(leafDER) + `</data>
+      <data>` + base64.StdEncoding.EncodeToString(rootDER) + `</data>
+    </array>
+  </dict>
+</dict>
+</plist>`
+
+	envelope, _ := json.Marshal(map[string]interface{}{
+		"topic": "mdm.Connect",
+		"acknowledge_event": map[string]interface{}{
+			"udid":         "UDID-ACK-1",
+			"status":       "Acknowledged",
+			"command_uuid": "cmd-ack-uuid",
+			"raw_payload":  base64.StdEncoding.EncodeToString([]byte(plistXML)),
+		},
+	})
+
+	svc := &LiveMDAService{
+		cfg:      cfg,
+		mdmCfg:   config.Tier2MDMConfig{CommandWebhookSecret: "hook-secret", MDARefreshIntervalHours: 168},
+		pool:     reg,
+		log:      zerolog.Nop(),
+		now:      func() time.Time { return now },
+		bindings: NewDeviceBindingStore(),
+		pending:  make(map[string]pendingMDARequest),
+	}
+	svc.recordPending("UDID-ACK-1", "cmd-ack-uuid", pendingMDARequest{
+		ProviderID: "prov-ack", AssignedID: "asg-ack", ExpectedSerial: "C02ACKTEST1",
+		UDID: "UDID-ACK-1", CommandUUID: "cmd-ack-uuid", SEKeyHash: seHash[:], EnqueuedAt: now,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/mdm/command-webhook", bytes.NewReader(envelope))
+	req.Header.Set("X-MDM-Webhook-Secret", "hook-secret")
+	rr := httptest.NewRecorder()
+	svc.HandleMDACommandWebhook(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("ack status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	p, found := reg.Resolve("prov-ack", "asg-ack")
+	if !found || p.AttestationTier != pool.AttestationTierHardware {
+		t.Fatalf("tier=%q found=%v want hardware", p.AttestationTier, found)
 	}
 }
 

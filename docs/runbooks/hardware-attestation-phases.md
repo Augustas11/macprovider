@@ -252,26 +252,37 @@ Extend `pool.Provider` (non-breaking JSON fields):
 **Landed this PR (`feat/attestation-phase3`):**
 - [x] `verifyMDAFreshness` extended: also accepts `SHA256(sePublicKey)` nonce; `MDAHardware=true` returned when SE key digest matched
 - [x] `AttestationVerifyResult.MDAHardware bool` — WS sets `AttestationTier=hardware` when true
-- [x] `internal/mdm/client.go` — MicroMDM API client (`ListDevices`, `FindDeviceBySerial`, `EnqueueDeviceInformationAttestation`, `ParseDeviceAttestationFromPlist`)
+- [x] `internal/mdm/client.go` — MicroMDM API client (`ListDevices`, `FindDeviceBySerial`, raw-plist `EnqueueDeviceInformationAttestation`, `ParseAcknowledgeEvent`)
 - [x] `internal/mdm/live_mda.go` — `LiveMDAService` with `RequestAndMaybeUpgrade` + `AttachCachedMDAProof` + `UpgradeFromParsedAttestation`
-- [x] Pool `MDACertChain`, `MDAVerifiedAt`, `MDABoundSEKeyHash` cache fields + `SetMDAProof` / `ClearMDAProof` / `MDAProof` helpers
+- [x] `internal/mdm/device_binding.go` — exclusive provider↔serial `DeviceBindingStore` (R2-H1); token `/v1/mdm/device-binding` + internal bootstrap `/internal/mdm/device-binding`
+- [x] Pool `MDACertChain`, `MDAVerifiedAt`, `MDABoundSEKeyHash` cache fields + `SetMDAProof` / `ClearMDAProof` / `MDAProof` / `MigrateMDAProofFrom` (bytes only — no early hardware tier)
 - [x] `tier2.VerifyMDACertChainWithSEKey` public helper for LiveMDAService chain re-verify
 - [x] `Tier2MDMConfig.APIURL/APIToken/LiveMDAEnabled/MDARefreshIntervalHours` config fields
 - [x] WS observe wiring: `liveMDAUpgrader` interface, `WithLiveMDA` option, goroutine trigger after SE auth
 - [x] Config documented in `dist/coordinator.yaml.example`
-- [x] Tests: freshness dual-mode, MDM client HTTP tests, integration tier tests
+- [x] Tests: freshness dual-mode, MDM client HTTP tests, binding borrow-block, acknowledge_event webhook, migrate-without-hardware
 
 **Still needs (manual Mac E2E):**
 - [ ] Deploy `live_mda_enabled: true` on Pearl with MicroMDM running
+- [ ] **Claim device binding before live MDA enqueue**
+  - Already-enrolled fleet (e.g. H2XX74T43X): one-time ops bootstrap via
+    `POST /internal/mdm/device-binding` with webhook secret/loopback +
+    `{"provider_id":"...","serial_number":"..."}` (token-auth claim of
+    enrolled-unbound serial is rejected to block remote borrow)
+  - New devices: `POST /v1/mdm/device-binding` with provider Bearer +
+    `{"serial_number":"..."}` before or after enroll; authenticated
+    `/v1/enroll` also auto-claims when Bearer is present
 - [ ] Enroll test Mac via `macprovider enroll` and see UDID in MicroMDM
 - [ ] Point MicroMDM `-command-webhook-url` at coordinator
       `https://<provider-bind>/internal/mdm/command-webhook` (default Pearl:
       loopback `http://127.0.0.1:8444/internal/mdm/command-webhook`, or set
       `tier2.mdm.command_webhook_secret` / `X-MDM-Webhook-Secret` if exposed)
-- [ ] Verify DeviceInformation attestation command arrives at device and
-      webhook upgrades `attestation_tier=hardware`
-- [ ] Provider reconnects with `attestation_tier=hardware` visible in `/poolz`
-  (MDA proof migrates across reconnect when SE key is unchanged)
+- [ ] Verify DeviceInformation attestation arrives via **raw plist**
+      `POST /v1/commands/{udid}` with `DeviceAttestationNonce` `<data>`, and
+      webhook `mdm.Connect` / `acknowledge_event.raw_payload` upgrades
+      `attestation_tier=hardware`
+- [ ] Provider reconnects: proof bytes migrate but tier stays non-hardware
+      until cache re-verify / fresh webhook; then `/poolz` shows `hardware`
 
 ### 3.3 Exit criteria
 
@@ -279,6 +290,8 @@ Extend `pool.Provider` (non-breaking JSON fields):
 - [ ] Reconnect reuses cached chain (no new Apple request within 7 days)
 - [ ] SE key rotation invalidates stale chain (forces refresh)
 - [x] `pillar_c_test.go` covers Freshness=SE pubkey binding
+- [x] Coordinator-owned device binding required before enqueue (no SE-serial target selection)
+- [x] Raw plist nonce delivery + acknowledge_event webhook ingest
 
 ---
 
@@ -321,6 +334,7 @@ Script auto-restores config backup on verification failure. Manual: set `require
 | 2026-08-17 | APNs push cert issued (topic `com.apple.mgmt.External.b3ba8c97-…`). P2-B: nginx `/v1/enroll`+`/mdm/`+`/scep`, MicroMDM Pearl install — see `docs/runbooks/pearl-micromdm-install.md`. |
 | 2026-08-17 | **Phase 2 enroll E2E done** — coordinator `/v1/enroll` tested, MicroMDM on Pearl, APNs cert live. Phase 2 exit criteria met. |
 | 2026-08-17 | **Phase 3 started** — worktree `/Users/augstar/macprovider-attest-phase3`, branch `feat/attestation-phase3`. Dual-mode MDA freshness, MicroMDM API client, LiveMDAService, pool MDA cache, WS observe wiring. |
+| 2026-08-17 | **Phase 3 R2 remediation** — exclusive device binding (blocks SE-serial borrow), raw plist `DeviceAttestationNonce`, `acknowledge_event` webhook parse, migrate proof without early hardware tier. |
 
 ## Phase 2 — IN PROGRESS
 

@@ -1728,11 +1728,15 @@ func (r *Registry) SetMDAProof(providerID, assignedID string, certChain [][]byte
 	return true
 }
 
-// MigrateMDAProofFrom copies a verified MDA proof from an existing provider
-// record onto a replacement session when the SE key still matches. Called
-// during RegisterAtDetailed reconnect/replace so the 7-day cache survives
-// session replacement. No-op when there is nothing to migrate or the SE key
-// does not match.
+// MigrateMDAProofFrom copies MDA proof bytes/hash/timestamp from an existing
+// provider record onto a replacement session when the SE key still matches.
+// Called during RegisterAtDetailed reconnect/replace so the 7-day cache
+// survives session replacement.
+//
+// R2-M1: does NOT publish AttestationTierHardware here. Tier stays at the
+// replacement's current non-hardware value (typically self_signed) until
+// tryUpgradeFromCache / verifyAndUpgrade succeeds. No-op when there is
+// nothing to migrate or the SE key does not match.
 func MigrateMDAProofFrom(existing, replacement *Provider) {
 	if existing == nil || replacement == nil {
 		return
@@ -1762,9 +1766,8 @@ func MigrateMDAProofFrom(existing, replacement *Provider) {
 	replacement.MDACertChain = chain
 	replacement.MDAVerifiedAt = existing.MDAVerifiedAt
 	replacement.MDABoundSEKeyHash = append([]byte(nil), existing.MDABoundSEKeyHash...)
-	if existing.AttestationTier == AttestationTierHardware {
-		replacement.AttestationTier = AttestationTierHardware
-	}
+	// Intentionally do not set AttestationTierHardware — freshness must be
+	// re-verified before publishing hardware (R2-M1).
 }
 
 // ClearMDAProof removes any cached MDA proof from the provider record. Called

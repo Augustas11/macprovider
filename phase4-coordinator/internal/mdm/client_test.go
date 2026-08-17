@@ -94,15 +94,17 @@ func TestFindDeviceBySerial(t *testing.T) {
 
 func TestEnqueueDeviceInformationAttestation(t *testing.T) {
 	var capturedBody []byte
+	var capturedPath string
+	var capturedCT string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/commands" {
-			t.Errorf("unexpected path %q", r.URL.Path)
-		}
+		capturedPath = r.URL.Path
+		capturedCT = r.Header.Get("Content-Type")
 		if r.Method != http.MethodPost {
 			t.Errorf("unexpected method %q", r.Method)
 		}
-		capturedBody = make([]byte, r.ContentLength)
-		r.Body.Read(capturedBody)
+		buf := new(bytes.Buffer)
+		_, _ = buf.ReadFrom(r.Body)
+		capturedBody = buf.Bytes()
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("{}"))
 	}))
@@ -113,33 +115,36 @@ func TestEnqueueDeviceInformationAttestation(t *testing.T) {
 	for i := range nonce {
 		nonce[i] = byte(i)
 	}
-	if err := c.EnqueueDeviceInformationAttestation(context.Background(), "TEST-UDID-001", nonce); err != nil {
+	cmdUUID, err := c.EnqueueDeviceInformationAttestation(context.Background(), "TEST-UDID-001", nonce)
+	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-
-	var payload commandPayload
-	if err := json.Unmarshal(capturedBody, &payload); err != nil {
-		t.Fatalf("parse captured body: %v", err)
+	if cmdUUID == "" {
+		t.Fatal("expected non-empty commandUUID")
 	}
-	if payload.UDID != "TEST-UDID-001" {
-		t.Errorf("UDID=%q want TEST-UDID-001", payload.UDID)
+	if capturedPath != "/v1/commands/TEST-UDID-001" {
+		t.Errorf("path=%q want /v1/commands/TEST-UDID-001", capturedPath)
 	}
-
-	var cmd map[string]interface{}
-	if err := json.Unmarshal(payload.Payload, &cmd); err != nil {
-		t.Fatalf("parse command payload: %v", err)
+	if !strings.Contains(capturedCT, "xml") && capturedCT != "application/x-apple-aspen-mdm" {
+		t.Errorf("Content-Type=%q want xml", capturedCT)
 	}
-	if cmd["request_type"] != "DeviceInformation" {
-		t.Errorf("request_type=%q want DeviceInformation", cmd["request_type"])
+	body := string(capturedBody)
+	if !strings.Contains(body, "DeviceAttestationNonce") {
+		t.Fatal("body must contain DeviceAttestationNonce")
 	}
-	// Verify nonce is base64-encoded and round-trips.
-	nonceB64, _ := cmd["device_attestation_nonce"].(string)
-	decoded, err := base64.StdEncoding.DecodeString(nonceB64)
-	if err != nil {
-		t.Fatalf("nonce decode: %v", err)
+	if !strings.Contains(body, "RequestType") || !strings.Contains(body, "DeviceInformation") {
+		t.Fatal("body must contain RequestType DeviceInformation")
 	}
-	if len(decoded) != 32 {
-		t.Errorf("nonce len=%d want 32", len(decoded))
+	if !strings.Contains(body, cmdUUID) {
+		t.Fatalf("body must contain CommandUUID %s", cmdUUID)
+	}
+	// Must NOT be the dropped JSON field as sole delivery mechanism.
+	if strings.Contains(body, `"device_attestation_nonce"`) {
+		t.Fatal("must not use JSON device_attestation_nonce field")
+	}
+	nonceB64 := base64.StdEncoding.EncodeToString(nonce)
+	if !strings.Contains(body, nonceB64) {
+		t.Fatal("body must embed nonce as base64 inside <data>")
 	}
 }
 
@@ -150,7 +155,7 @@ func TestEnqueueDeviceInformationAttestationReturnsErrorOnHTTPFailure(t *testing
 	defer srv.Close()
 
 	c, _ := NewClient(ClientConfig{BaseURL: srv.URL, APIToken: "tok"})
-	err := c.EnqueueDeviceInformationAttestation(context.Background(), "UDID", make([]byte, 32))
+	_, err := c.EnqueueDeviceInformationAttestation(context.Background(), "UDID", make([]byte, 32))
 	if err == nil {
 		t.Fatal("expected error on 500 response")
 	}
