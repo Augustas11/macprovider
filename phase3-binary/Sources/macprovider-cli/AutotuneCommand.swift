@@ -1207,16 +1207,29 @@ struct AutotuneCommand: AsyncParsableCommand {
     static func disclosingInstalledOnlyEstimate(_ result: AutotuneRecommendResult) -> AutotuneRecommendResult {
         var disclosed = result
         func disclose(_ candidate: AutotuneCandidateScore) -> AutotuneCandidateScore {
-            guard candidate.eligible else { return candidate }
             var updated = candidate
             updated.confidence = "catalog_estimate"
-            updated.why = "\(candidate.model) is the strongest verified installed candidate from signed catalog estimates and current hardware fit."
+            updated.explanation.throughputSource = "catalog_estimate"
+            updated.explanation.confidence = "catalog_estimate"
+            if candidate.eligible {
+                updated.explanation.warningState = "advisory"
+            }
+            if candidate.catalogKey == result.selectedCandidate?.catalogKey {
+                updated.why = "\(candidate.model) is the strongest verified installed candidate from signed catalog estimates and current hardware fit."
+                updated.explanation.summary = "Selected from signed catalog estimates and current hardware fit; no local throughput benchmark was run."
+            } else if candidate.eligible {
+                updated.why = "\(candidate.model) is a verified installed alternative from signed catalog estimates and current hardware fit."
+                updated.explanation.summary = "Eligible installed alternative from signed catalog estimates; no local throughput benchmark was run."
+            }
             return updated
         }
         disclosed.candidates = disclosed.candidates.map(disclose)
         disclosed.allCandidates = disclosed.allCandidates.map(disclose)
         if let selectedKey = disclosed.selectedCandidate?.catalogKey {
             disclosed.selectedCandidate = disclosed.candidates.first { $0.catalogKey == selectedKey }
+        }
+        if let fallbackKey = disclosed.donorFallbackCandidate?.catalogKey {
+            disclosed.donorFallbackCandidate = disclosed.allCandidates.first { $0.catalogKey == fallbackKey }
         }
         return disclosed
     }

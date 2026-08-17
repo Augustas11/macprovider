@@ -145,18 +145,26 @@ private struct DashboardView: View {
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.08)))
 
-            if let recommendation = modelStore.recommendation,
-               let target = recommendation.recommendedModel {
+            if let recommendation = modelStore.recommendation {
                 VStack(alignment: .leading, spacing: 7) {
-                    Text(String(localized: "Recommended installed model", comment: "Dashboard recommendation title"))
+                    Text(recommendation.isRecommendationResult
+                        ? String(localized: "Recommended installed model", comment: "Dashboard recommendation title")
+                        : String(localized: "No installed model recommendation", comment: "Dashboard no recommendation title"))
                         .font(.caption.weight(.semibold))
-                    Text(target)
-                        .font(.body.monospaced())
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                    if let why = recommendation.recommendedCandidate?.why {
-                        Text(why)
+                    if let target = recommendation.displayModelID {
+                        Text(target)
+                            .font(.body.monospaced())
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                    if let rationale = recommendation.displayRationale {
+                        Text(rationale)
                             .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(recommendation.displayEvidenceLines, id: \.self) { line in
+                        Text(line)
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                     Text(String(localized: "Scope: signed catalog \(recommendation.inputs.candidateCatalogVersion) for \(recommendation.hardware.chip), \(recommendation.hardware.memoryGB) GB.", comment: "Recommendation evidence scope"))
@@ -180,12 +188,14 @@ private struct DashboardView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     HStack {
-                        Button(String(localized: "Adopt", comment: "Dashboard recommendation action")) {
-                            Task { await modelStore.adoptRecommendation() }
-                        }
-                        .disabled(!modelStore.canAdoptRecommendation)
-                        Button(String(localized: "Not now", comment: "Dashboard recommendation snooze")) {
-                            modelStore.snoozeRecommendation()
+                        if recommendation.isRecommendationResult {
+                            Button(String(localized: "Adopt", comment: "Dashboard recommendation action")) {
+                                Task { await modelStore.adoptRecommendation() }
+                            }
+                            .disabled(!modelStore.canAdoptRecommendation)
+                            Button(String(localized: "Not now", comment: "Dashboard recommendation snooze")) {
+                                modelStore.snoozeRecommendation()
+                            }
                         }
                         Button(String(localized: "Stop background recommendations", comment: "Dashboard recommendation opt-out")) {
                             modelStore.stopBackgroundRecommendations()

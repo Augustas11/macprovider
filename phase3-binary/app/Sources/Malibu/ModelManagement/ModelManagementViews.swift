@@ -75,9 +75,8 @@ struct ModelSwitcherSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(.updatesFrequently)
 
-            if let recommendation = store.recommendation,
-               let target = recommendation.recommendedModel {
-                recommendationCallout(recommendation, target: target)
+            if let recommendation = store.recommendation {
+                recommendationCallout(recommendation)
             }
 
             if store.listState == .checking {
@@ -156,21 +155,28 @@ struct ModelSwitcherSheet: View {
         store.canPerformModelAction
     }
 
-    private func recommendationCallout(
-        _ recommendation: MalibuRecommendationDocument,
-        target: String
-    ) -> some View {
+    private func recommendationCallout(_ recommendation: MalibuRecommendationDocument) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(ModelFeatureUI.recommended)
+            Text(recommendation.isRecommendationResult
+                ? ModelFeatureUI.recommended
+                : String(localized: "No installed model recommendation", comment: "No recommendation callout title"))
                 .font(.headline)
-            Text(target)
-                .font(.body.monospaced())
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-            if let why = recommendation.recommendedCandidate?.why {
-                Text(why)
+            if let target = recommendation.displayModelID {
+                Text(target)
+                    .font(.body.monospaced())
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+            if let rationale = recommendation.displayRationale {
+                Text(rationale)
                     .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(recommendation.displayEvidenceLines, id: \.self) { line in
+                Text(line)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -189,13 +195,17 @@ struct ModelSwitcherSheet: View {
                     .foregroundStyle(.orange)
             }
             HStack {
-                Button(ModelFeatureUI.adopt) {
-                    Task { await store.adoptRecommendation() }
+                if recommendation.isRecommendationResult {
+                    Button(ModelFeatureUI.adopt) {
+                        Task { await store.adoptRecommendation() }
+                    }
+                    .disabled(!store.canAdoptRecommendation)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityHint(Text(String(localized: "The provider validates, applies, switches, and verifies this recommendation as one transaction.", comment: "Adopt accessibility hint")))
+                    Button(ModelFeatureUI.notNow) {
+                        store.snoozeRecommendation()
+                    }
                 }
-                .disabled(!store.canAdoptRecommendation)
-                .keyboardShortcut(.defaultAction)
-                .accessibilityHint(Text(String(localized: "The provider validates, applies, switches, and verifies this recommendation as one transaction.", comment: "Adopt accessibility hint")))
-                Button(ModelFeatureUI.notNow) { store.snoozeRecommendation() }
                 Button(ModelFeatureUI.stopBackground) { store.stopBackgroundRecommendations() }
             }
             if let unavailableReason = store.recommendationAdoptionUnavailableReason {

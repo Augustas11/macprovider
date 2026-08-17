@@ -300,6 +300,58 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(root["serve_config"] is NSNull)
     }
 
+    func testRecommendationJSONCarriesStructuredEarningExplanation() throws {
+        var request = try makeMultiCandidateRequest(modelKeys: [
+            "qwen3-coder-30b-a3b-instruct",
+            "meta-llama/llama-3.2-3b-instruct",
+        ])
+        request.demandRank.rows["qwen3-coder-30b-a3b-instruct"]?.supplyDeficitMultiplier = 2
+        request.demandRank.rows["qwen3-coder-30b-a3b-instruct"]?.readyProviderCount = 3
+        request.demandRank.rows["qwen3-coder-30b-a3b-instruct"]?.minProviderTarget = 12
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString().utf8)) as? [String: Any])
+        let selectedExplanation = try XCTUnwrap(root["selected_explanation"] as? [String: Any])
+        let candidate = try XCTUnwrap((root["candidates"] as? [[String: Any]])?.first)
+        let candidateExplanation = try XCTUnwrap(candidate["explanation"] as? [String: Any])
+        let memory = try XCTUnwrap(selectedExplanation["memory_fit"] as? [String: Any])
+        let demand = try XCTUnwrap(selectedExplanation["demand_signal"] as? [String: Any])
+        let rate = try XCTUnwrap(selectedExplanation["rate_signal"] as? [String: Any])
+        let earning = try XCTUnwrap(selectedExplanation["earning_potential"] as? [String: Any])
+        let alternatives = try XCTUnwrap(root["alternative_explanations"] as? [[String: Any]])
+
+        XCTAssertEqual(selectedExplanation["measured_tps"] as? Double, selected.tokensPerSecond)
+        XCTAssertEqual(memory["total_gb"] as? Int, request.hardware.memoryGB)
+        XCTAssertEqual(memory["safety_margin_gb"] as? Int, AutotuneRecommendEngine.safetyMarginGB)
+        XCTAssertEqual(memory["headroom_gb"] as? Double, selected.memoryHeadroomGB)
+        XCTAssertEqual(demand["supply_deficit_multiplier"] as? Double, 2)
+        XCTAssertEqual(demand["ready_provider_count"] as? Int, 3)
+        XCTAssertEqual(demand["min_provider_target"] as? Int, 12)
+        XCTAssertEqual(rate["provider_share_bps"] as? Int, Int(request.rateCard.rows[selected.catalogKey]?.providerShareBPS ?? 0))
+        XCTAssertEqual(earning["kind"] as? String, "relative_ranking_score")
+        XCTAssertTrue((earning["note"] as? String)?.contains("actual rewards depend") == true)
+        XCTAssertEqual(selectedExplanation["throughput_source"] as? String, "measured")
+        XCTAssertEqual(selectedExplanation["lost_reason"] as? String, "selected_best_expected_earning_potential")
+        XCTAssertEqual(candidateExplanation["summary"] as? String, selectedExplanation["summary"] as? String)
+        let explanationData = try JSONSerialization.data(withJSONObject: selectedExplanation)
+        let explanationPayload = try XCTUnwrap(String(data: explanationData, encoding: .utf8))
+        for forbiddenField in [
+            "model_artifact_path",
+            "model_artifact_sha256",
+            "provider_id",
+            "provider_identity",
+            "hardware_identity_hash",
+            "daily_income",
+            "daily_usd",
+            "guaranteed_income",
+        ] {
+            XCTAssertFalse(explanationPayload.contains(forbiddenField), "\(forbiddenField) leaked into explanation payload")
+        }
+        XCTAssertFalse(alternatives.isEmpty)
+        XCTAssertEqual(alternatives.first?["lost_reason"] as? String, "lower_expected_earning_potential")
+    }
+
     func testInstalledOnlyRecommendationUsesOnlyExistingVerifiedArtifacts() throws {
         var request = try makeRequest()
         let modelKey = try XCTUnwrap(request.candidateCatalog.rows.keys.sorted().first)
@@ -347,6 +399,44 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(disclosed.selectedCandidate?.confidence, "catalog_estimate")
         XCTAssertTrue(disclosed.selectedCandidate?.why.contains("signed catalog estimates") == true)
         XCTAssertFalse(disclosed.selectedCandidate?.why.contains("measured throughput") == true)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(disclosed.jsonString().utf8)) as? [String: Any])
+        let explanation = try XCTUnwrap(root["selected_explanation"] as? [String: Any])
+        XCTAssertEqual(explanation["throughput_source"] as? String, "catalog_estimate")
+        XCTAssertEqual(explanation["warning_state"] as? String, "advisory")
+        XCTAssertEqual(explanation["confidence"] as? String, "catalog_estimate")
+    }
+
+    func testInstalledOnlyDisclosureDoesNotCallAlternativesSelected() throws {
+        let request = try makeMultiCandidateRequest(modelKeys: [
+            "qwen3-coder-30b-a3b-instruct",
+            "meta-llama/llama-3.2-3b-instruct",
+        ])
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        let disclosed = AutotuneCommand.disclosingInstalledOnlyEstimate(result)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(disclosed.jsonString().utf8)) as? [String: Any])
+        let alternatives = try XCTUnwrap(root["alternative_explanations"] as? [[String: Any]])
+        let summary = try XCTUnwrap(alternatives.first?["summary"] as? String)
+
+        XCTAssertFalse(summary.contains("Selected from signed catalog estimates"))
+        XCTAssertTrue(summary.contains("Eligible installed alternative"))
+    }
+
+    func testInstalledOnlyDisclosureLabelsBlockedCandidateAsCatalogEstimate() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        request.demandRank.rows = [:]
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let disclosed = AutotuneCommand.disclosingInstalledOnlyEstimate(result)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(disclosed.jsonString().utf8)) as? [String: Any])
+        let candidate = try XCTUnwrap((root["candidates"] as? [[String: Any]])?.first)
+        let explanation = try XCTUnwrap(candidate["explanation"] as? [String: Any])
+
+        XCTAssertEqual(candidate["model"] as? String, modelKey)
+        XCTAssertEqual(explanation["throughput_source"] as? String, "catalog_estimate")
+        XCTAssertEqual(explanation["warning_state"] as? String, "blocked")
+        XCTAssertEqual(explanation["confidence"] as? String, "catalog_estimate")
     }
 
     func testRecommendApplyServeConfigUsesHardwareDerivedMaxBatch() throws {
@@ -487,12 +577,18 @@ final class AutotuneRecommendTests: XCTestCase {
         let result = AutotuneRecommendEngine().recommend(request)
 
         XCTAssertNil(result.recommendedModel)
-        XCTAssertEqual(result.candidates.count, 5)
-        XCTAssertFalse(result.candidates.contains { $0.catalogKey == donorKey })
+        XCTAssertEqual(result.candidates.count, 6)
+        XCTAssertTrue(result.candidates.contains { $0.catalogKey == donorKey })
         XCTAssertEqual(result.donorFallbackModel, donorKey)
         XCTAssertEqual(result.donorFallbackCandidate?.catalogKey, donorKey)
         XCTAssertFalse(result.jsonString().contains("donorFallbackCandidate"))
         XCTAssertFalse(result.jsonString().contains("donor_fallback_candidate"))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString().utf8)) as? [String: Any])
+        let fallback = try XCTUnwrap(root["donor_fallback_explanation"] as? [String: Any])
+        XCTAssertEqual(fallback["warning_state"] as? String, "blocked")
+        XCTAssertEqual(fallback["lost_reason"] as? String, "demand_not_recommendable")
+        let earning = try XCTUnwrap(fallback["earning_potential"] as? [String: Any])
+        XCTAssertEqual(earning["kind"] as? String, "relative_ranking_score")
     }
 
     func testDonorModeRejectsBlockedRows() throws {
@@ -1194,8 +1290,13 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertLessThan(try XCTUnwrap(json.range(of: #""hardware":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""inputs":"#)?.lowerBound))
         XCTAssertLessThan(try XCTUnwrap(json.range(of: #""inputs":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""recommended_model":"#)?.lowerBound))
         XCTAssertLessThan(try XCTUnwrap(json.range(of: #""recommended_model":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""prompt_rate_usd_per_million_tokens":"#)?.lowerBound))
-        XCTAssertLessThan(try XCTUnwrap(json.range(of: #""prompt_rate_usd_per_million_tokens":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""candidates":"#)?.lowerBound))
+        XCTAssertLessThan(try XCTUnwrap(json.range(of: #""prompt_rate_usd_per_million_tokens":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""completion_rate_usd_per_million_tokens":"#)?.lowerBound))
+        XCTAssertLessThan(try XCTUnwrap(json.range(of: #""completion_rate_usd_per_million_tokens":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""serve_config":"#)?.lowerBound))
+        XCTAssertLessThan(try XCTUnwrap(json.range(of: #""serve_config":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""candidates":"#)?.lowerBound))
         XCTAssertLessThan(try XCTUnwrap(json.range(of: #""candidates":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""warnings":"#)?.lowerBound))
+        XCTAssertLessThan(try XCTUnwrap(json.range(of: #""warnings":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""selected_explanation":"#)?.lowerBound))
+        XCTAssertLessThan(try XCTUnwrap(json.range(of: #""selected_explanation":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""alternative_explanations":"#)?.lowerBound))
+        XCTAssertLessThan(try XCTUnwrap(json.range(of: #""alternative_explanations":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""donor_fallback_explanation":"#)?.lowerBound))
     }
 
     func testSignedStaticFallbackAndStaleWarnings() async throws {
@@ -2973,6 +3074,74 @@ final class AutotuneRecommendTests: XCTestCase {
             result.allCandidates.contains { $0.catalogKey == modelKey && !$0.eligible && $0.why.localizedCaseInsensitiveContains("swap") }
         )
         XCTAssertTrue(result.humanTranscript().localizedCaseInsensitiveContains("swap"))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString().utf8)) as? [String: Any])
+        let jsonCandidate = try XCTUnwrap((root["candidates"] as? [[String: Any]])?.first)
+        let explanation = try XCTUnwrap(jsonCandidate["explanation"] as? [String: Any])
+        let health = try XCTUnwrap(explanation["local_health"] as? [String: Any])
+        XCTAssertEqual(explanation["warning_state"] as? String, "blocked")
+        XCTAssertEqual(explanation["lost_reason"] as? String, "swap_observed_under_load")
+        XCTAssertEqual(health["warnings"] as? [String], ["swap_observed_under_load"])
+    }
+
+    func testUnavailableRateCardInputExplainsNonEarningRecommendation() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        request.rateCard.rows = [:]
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString().utf8)) as? [String: Any])
+        let jsonCandidate = try XCTUnwrap((root["candidates"] as? [[String: Any]])?.first)
+        let explanation = try XCTUnwrap(jsonCandidate["explanation"] as? [String: Any])
+        let rate = try XCTUnwrap(explanation["rate_signal"] as? [String: Any])
+
+        XCTAssertNil(result.recommendedModel)
+        XCTAssertTrue(result.warnings.contains(.noEligibleModel))
+        XCTAssertEqual(jsonCandidate["model"] as? String, modelKey)
+        XCTAssertEqual(explanation["warning_state"] as? String, "blocked")
+        XCTAssertEqual(explanation["lost_reason"] as? String, "rate_card_unavailable")
+        XCTAssertEqual(rate["provider_share_bps"] as? Int, 0)
+        XCTAssertEqual(rate["provider_completion_payout_usd_per_million_tokens"] as? Double, 0)
+    }
+
+    func testUnavailableDemandInputExplainsNonEarningRecommendation() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        request.demandRank.rows = [:]
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString().utf8)) as? [String: Any])
+        let jsonCandidate = try XCTUnwrap((root["candidates"] as? [[String: Any]])?.first)
+        let explanation = try XCTUnwrap(jsonCandidate["explanation"] as? [String: Any])
+        let demand = try XCTUnwrap(explanation["demand_signal"] as? [String: Any])
+        let earning = try XCTUnwrap(explanation["earning_potential"] as? [String: Any])
+
+        XCTAssertNil(result.recommendedModel)
+        XCTAssertTrue(result.warnings.contains(.noEligibleModel))
+        XCTAssertEqual(jsonCandidate["model"] as? String, modelKey)
+        XCTAssertEqual(explanation["warning_state"] as? String, "blocked")
+        XCTAssertEqual(explanation["lost_reason"] as? String, "demand_signal_unavailable")
+        XCTAssertEqual(demand["weight"] as? Double, 0)
+        XCTAssertEqual(demand["recommendable"] as? Bool, false)
+        XCTAssertEqual(demand["supply_deficit_multiplier"] as? Double, 0)
+        XCTAssertEqual(earning["score"] as? Double, 0)
+    }
+
+    func testMissingBenchmarkExplainsThroughputUnavailable() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        request.benchmarks = [:]
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString().utf8)) as? [String: Any])
+        let candidate = try XCTUnwrap((root["candidates"] as? [[String: Any]])?.first)
+        let explanation = try XCTUnwrap(candidate["explanation"] as? [String: Any])
+
+        XCTAssertNil(result.recommendedModel)
+        XCTAssertEqual(candidate["model"] as? String, modelKey)
+        XCTAssertEqual(explanation["warning_state"] as? String, "blocked")
+        XCTAssertEqual(explanation["lost_reason"] as? String, "benchmark_unavailable")
+        XCTAssertEqual(explanation["throughput_source"] as? String, "unavailable")
+        XCTAssertEqual(explanation["measured_tps"] as? Double, 0)
     }
 
     /// AC-1/AC-2/AC-5 for #742: replay the recorded 2026-07-23 M5/32 GB
