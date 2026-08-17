@@ -66,6 +66,8 @@ type RequestCredit struct {
 	ProviderCredits           int64
 	FaultFlag                 string
 	Quarantined               bool
+	SettlementPolicyMode      string
+	Spec022Verified           bool
 }
 
 type ProviderIdentity struct {
@@ -267,15 +269,11 @@ func OpenPostgres(dsn string) (*sql.DB, error) {
 }
 
 func FetchRequestCredits(ctx context.Context, db *sql.DB, startID int64, limit int) ([]RequestCredit, error) {
-	const q = `
-SELECT id, request_id, attempt_n, provider_id, ts_utc, created_at_utc, updated_at_utc,
-       prompt_tokens, completion_tokens, estimated_completion_tokens, usage_source,
-       provider_credits, fault_flag, quarantined
-  FROM ledger_request_credits
- WHERE id > ?
- ORDER BY id
- LIMIT ?`
-	return scanRequestCredits(ctx, db, q, startID, limit)
+	caps, err := detectRequestCreditSourceCapabilities(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	return scanRequestCredits(ctx, db, requestCreditsQuery(caps, false), startID, limit)
 }
 
 func FetchMaxRequestCreditID(ctx context.Context, db *sql.DB) (int64, error) {
@@ -290,16 +288,94 @@ func FetchMaxRequestCreditID(ctx context.Context, db *sql.DB) (int64, error) {
 }
 
 func FetchRequestCreditsThrough(ctx context.Context, db *sql.DB, startID, endID int64, limit int) ([]RequestCredit, error) {
-	const q = `
-SELECT id, request_id, attempt_n, provider_id, ts_utc, created_at_utc, updated_at_utc,
-       prompt_tokens, completion_tokens, estimated_completion_tokens, usage_source,
-       provider_credits, fault_flag, quarantined
-  FROM ledger_request_credits
- WHERE id > ?
-   AND id <= ?
- ORDER BY id
- LIMIT ?`
-	return scanRequestCredits(ctx, db, q, startID, endID, limit)
+	caps, err := detectRequestCreditSourceCapabilities(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	return scanRequestCredits(ctx, db, requestCreditsQuery(caps, true), startID, endID, limit)
+}
+
+type requestCreditSourceCapabilities struct {
+	HasSettlementPolicyMode bool
+	HasSpec022PayableView   bool
+}
+
+func detectRequestCreditSourceCapabilities(ctx context.Context, db *sql.DB) (requestCreditSourceCapabilities, error) {
+	hasPolicy, err := sqliteColumnExists(ctx, db, "ledger_request_credits", "settlement_policy_mode")
+	if err != nil {
+		return requestCreditSourceCapabilities{}, err
+	}
+	hasPayable, err := sqliteObjectExists(ctx, db, "spec022_payable_request_credits")
+	if err != nil {
+		return requestCreditSourceCapabilities{}, err
+	}
+	return requestCreditSourceCapabilities{
+		HasSettlementPolicyMode: hasPolicy,
+		HasSpec022PayableView:   hasPayable,
+	}, nil
+}
+
+func requestCreditsQuery(caps requestCreditSourceCapabilities, bounded bool) string {
+	policyExpr := "'legacy'"
+	if caps.HasSettlementPolicyMode {
+		policyExpr = "COALESCE(lrc.settlement_policy_mode, 'legacy')"
+	}
+	verifiedExpr := "0"
+	if caps.HasSpec022PayableView {
+		verifiedExpr = fmt.Sprintf(`CASE
+           WHEN %s = 'enforce'
+            AND EXISTS (SELECT 1 FROM spec022_payable_request_credits payable WHERE payable.id = lrc.id)
+           THEN 1 ELSE 0
+       END`, policyExpr)
+	}
+	where := "WHERE lrc.id > ?"
+	if bounded {
+		where += "\n   AND lrc.id <= ?"
+	}
+	return fmt.Sprintf(`
+SELECT lrc.id, lrc.request_id, lrc.attempt_n, lrc.provider_id, lrc.ts_utc, lrc.created_at_utc, lrc.updated_at_utc,
+       lrc.prompt_tokens, lrc.completion_tokens, lrc.estimated_completion_tokens, lrc.usage_source,
+       lrc.provider_credits, lrc.fault_flag, lrc.quarantined,
+       %s AS settlement_policy_mode,
+       %s AS spec022_verified
+  FROM ledger_request_credits lrc
+ %s
+ ORDER BY lrc.id
+ LIMIT ?`, policyExpr, verifiedExpr, where)
+}
+
+func sqliteColumnExists(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, fmt.Errorf("inspect sqlite table %s: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+func sqliteObjectExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	var exists bool
+	err := db.QueryRowContext(ctx, `
+        SELECT EXISTS (
+            SELECT 1 FROM sqlite_master
+             WHERE name = ?
+               AND type IN ('table', 'view')
+        )
+    `, name).Scan(&exists)
+	return exists, err
 }
 
 func scanRequestCredits(ctx context.Context, db *sql.DB, q string, args ...any) ([]RequestCredit, error) {
@@ -313,12 +389,13 @@ func scanRequestCredits(ctx context.Context, db *sql.DB, q string, args ...any) 
 		var row RequestCredit
 		var ts, created sql.NullString
 		var updated sql.NullString
-		var quarantined int
+		var quarantined, spec022Verified int
 		if err := cur.Scan(
 			&row.SQLiteID, &row.RequestID, &row.AttemptN, &row.ProviderID,
 			&ts, &created, &updated,
 			&row.PromptTokens, &row.CompletionTokens, &row.EstimatedCompletionTokens,
 			&row.UsageSource, &row.ProviderCredits, &row.FaultFlag, &quarantined,
+			&row.SettlementPolicyMode, &spec022Verified,
 		); err != nil {
 			return nil, fmt.Errorf("scan ledger_request_credits: %w", err)
 		}
@@ -335,6 +412,7 @@ func scanRequestCredits(ctx context.Context, db *sql.DB, q string, args ...any) 
 			return nil, fmt.Errorf("updated_at_utc: %w", err)
 		}
 		row.Quarantined = quarantined != 0
+		row.Spec022Verified = spec022Verified != 0
 		out = append(out, row)
 	}
 	if err := cur.Err(); err != nil {
@@ -459,11 +537,11 @@ func upsertRequestCredit(ctx context.Context, tx *sql.Tx, row RequestCredit) err
 	if _, err := tx.ExecContext(ctx, `SELECT stats_billing_mirror_upsert_request_credit(
     $1, $2, $3, $4, $5, $6, $7,
     $8, $9, $10, $11,
-    $12, $13, $14
+    $12, $13, $14, $15, $16
 )`,
 		row.SQLiteID, row.RequestID, row.AttemptN, row.ProviderID, row.TSUTC, row.CreatedAtUTC, nullTimeArg(row.UpdatedAtUTC),
 		nullInt64Arg(row.PromptTokens), nullInt64Arg(row.CompletionTokens), nullInt64Arg(row.EstimatedCompletionTokens),
-		row.UsageSource, row.ProviderCredits, row.FaultFlag, row.Quarantined); err != nil {
+		row.UsageSource, row.ProviderCredits, row.FaultFlag, row.Quarantined, row.SettlementPolicyMode, row.Spec022Verified); err != nil {
 		return fmt.Errorf("upsert request credit %q/%d/%q: %w", row.RequestID, row.AttemptN, row.ProviderID, err)
 	}
 	return nil
@@ -581,7 +659,9 @@ var schemaStatements = []string{
     usage_source TEXT NOT NULL DEFAULT 'provider_reported' CHECK (usage_source IN ('provider_reported','byte_estimated','null_error')),
     provider_credits BIGINT NOT NULL DEFAULT 0 CHECK (provider_credits >= 0),
     fault_flag TEXT NOT NULL DEFAULT 'none' CHECK (fault_flag IN ('none','breaker_qualifying','null_usage_error')),
-    quarantined BOOLEAN NOT NULL DEFAULT FALSE
+    quarantined BOOLEAN NOT NULL DEFAULT FALSE,
+    settlement_policy_mode TEXT NOT NULL DEFAULT 'legacy' CHECK (settlement_policy_mode IN ('legacy','observe','enforce')),
+    spec022_verified BOOLEAN NOT NULL DEFAULT FALSE
 )`,
 	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS sqlite_lrc_id BIGINT`,
 	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS request_id TEXT`,
@@ -597,6 +677,10 @@ var schemaStatements = []string{
 	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS provider_credits BIGINT DEFAULT 0`,
 	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS fault_flag TEXT DEFAULT 'none'`,
 	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS quarantined BOOLEAN DEFAULT FALSE`,
+	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS settlement_policy_mode TEXT DEFAULT 'legacy'`,
+	`ALTER TABLE ledger_request_credits ADD COLUMN IF NOT EXISTS spec022_verified BOOLEAN DEFAULT FALSE`,
+	`UPDATE ledger_request_credits SET settlement_policy_mode = 'legacy' WHERE settlement_policy_mode IS NULL`,
+	`UPDATE ledger_request_credits SET spec022_verified = FALSE WHERE spec022_verified IS NULL`,
 	`DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'lrc_mirror_attempt_nonnegative') THEN
@@ -620,9 +704,29 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'lrc_mirror_fault_flag_enum') THEN
         ALTER TABLE ledger_request_credits ADD CONSTRAINT lrc_mirror_fault_flag_enum CHECK (fault_flag IN ('none','breaker_qualifying','null_usage_error'));
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'lrc_mirror_settlement_policy_mode_enum') THEN
+        ALTER TABLE ledger_request_credits ADD CONSTRAINT lrc_mirror_settlement_policy_mode_enum CHECK (settlement_policy_mode IN ('legacy','observe','enforce'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'lrc_mirror_spec022_verified_not_null') THEN
+        ALTER TABLE ledger_request_credits ADD CONSTRAINT lrc_mirror_spec022_verified_not_null CHECK (spec022_verified IS NOT NULL);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'lrc_mirror_spec022_verified_enforce_check') THEN
+        ALTER TABLE ledger_request_credits ADD CONSTRAINT lrc_mirror_spec022_verified_enforce_check CHECK (spec022_verified = FALSE OR settlement_policy_mode = 'enforce');
+    END IF;
 END $$`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_lrc_mirror_unique_attempt ON ledger_request_credits(request_id, attempt_n, provider_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_lrc_mirror_provider_ts ON ledger_request_credits(provider_id, ts_utc)`,
+	`CREATE TABLE IF NOT EXISTS ledger_request_credit_spec022_verified_audit (
+    request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL,
+    provider_id TEXT NOT NULL,
+    sqlite_lrc_id BIGINT,
+    provider_credits BIGINT NOT NULL,
+    settlement_policy_mode TEXT NOT NULL CHECK (settlement_policy_mode = 'enforce'),
+    source TEXT NOT NULL DEFAULT 'stats_billing_mirror',
+    mirrored_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (request_id, attempt_n, provider_id)
+)`,
 	`CREATE TABLE IF NOT EXISTS provider_tokens (
     id BIGSERIAL PRIMARY KEY,
     token_hash TEXT NOT NULL UNIQUE,
@@ -712,21 +816,46 @@ $$`,
     p_usage_source TEXT,
     p_provider_credits BIGINT,
     p_fault_flag TEXT,
-    p_quarantined BOOLEAN
+    p_quarantined BOOLEAN,
+    p_settlement_policy_mode TEXT,
+    p_spec022_verified BOOLEAN
 )
 RETURNS void
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
 AS $$
+DECLARE
+    v_settlement_policy_mode TEXT := COALESCE(NULLIF(p_settlement_policy_mode, ''), 'legacy');
+    v_spec022_verified BOOLEAN;
+    v_was_spec022_verified BOOLEAN;
+BEGIN
+    IF v_settlement_policy_mode NOT IN ('legacy','observe','enforce') THEN
+        RAISE EXCEPTION 'invalid settlement_policy_mode: %', v_settlement_policy_mode;
+    END IF;
+
+    v_spec022_verified :=
+        v_settlement_policy_mode = 'enforce'
+        AND COALESCE(p_spec022_verified, FALSE)
+        AND COALESCE(p_provider_credits, 0) > 0
+        AND NOT COALESCE(p_quarantined, FALSE);
+
+    SELECT spec022_verified
+      INTO v_was_spec022_verified
+      FROM ledger_request_credits
+     WHERE request_id = p_request_id
+       AND attempt_n = p_attempt_n
+       AND provider_id = p_provider_id
+     FOR UPDATE;
+
     INSERT INTO ledger_request_credits (
         sqlite_lrc_id, request_id, attempt_n, provider_id, ts_utc, created_at_utc, updated_at_utc,
         prompt_tokens, completion_tokens, estimated_completion_tokens, usage_source,
-        provider_credits, fault_flag, quarantined
+        provider_credits, fault_flag, quarantined, settlement_policy_mode, spec022_verified
     ) VALUES (
         p_sqlite_lrc_id, p_request_id, p_attempt_n, p_provider_id, p_ts_utc, p_created_at_utc, p_updated_at_utc,
         p_prompt_tokens, p_completion_tokens, p_estimated_completion_tokens, p_usage_source,
-        p_provider_credits, p_fault_flag, p_quarantined
+        p_provider_credits, p_fault_flag, COALESCE(p_quarantined, FALSE), v_settlement_policy_mode, v_spec022_verified
     )
     ON CONFLICT (request_id, attempt_n, provider_id) DO UPDATE SET
         sqlite_lrc_id = EXCLUDED.sqlite_lrc_id,
@@ -739,7 +868,21 @@ AS $$
         usage_source = EXCLUDED.usage_source,
         provider_credits = EXCLUDED.provider_credits,
         fault_flag = EXCLUDED.fault_flag,
-        quarantined = EXCLUDED.quarantined;
+        quarantined = EXCLUDED.quarantined,
+        settlement_policy_mode = EXCLUDED.settlement_policy_mode,
+        spec022_verified = EXCLUDED.spec022_verified;
+
+    IF v_spec022_verified AND NOT COALESCE(v_was_spec022_verified, FALSE) THEN
+        INSERT INTO ledger_request_credit_spec022_verified_audit (
+            request_id, attempt_n, provider_id, sqlite_lrc_id,
+            provider_credits, settlement_policy_mode
+        ) VALUES (
+            p_request_id, p_attempt_n, p_provider_id, p_sqlite_lrc_id,
+            p_provider_credits, v_settlement_policy_mode
+        )
+        ON CONFLICT (request_id, attempt_n, provider_id) DO NOTHING;
+    END IF;
+END;
 $$`,
 	`DO $$
 BEGIN
@@ -747,18 +890,32 @@ BEGIN
         GRANT SELECT ON ledger_request_credits TO stats_rollup;
         GRANT SELECT ON provider_tokens TO stats_rollup;
     END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rewards_writer') THEN
+        GRANT SELECT ON ledger_request_credits TO rewards_writer;
+    END IF;
+    REVOKE ALL ON FUNCTION stats_billing_mirror_load_state(TEXT) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION stats_billing_mirror_save_state(TEXT, BIGINT, BIGINT) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION stats_billing_mirror_ensure_provider(TEXT, TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ) FROM PUBLIC;
+    IF EXISTS (
+        SELECT 1
+          FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = 'public'
+           AND p.proname = 'stats_billing_mirror_upsert_request_credit'
+           AND p.pronargs = 14
+    ) THEN
+        REVOKE ALL ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN) FROM PUBLIC;
+    END IF;
+    REVOKE ALL ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN) FROM PUBLIC;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'stats_billing_mirror_writer') THEN
         REVOKE ALL ON ledger_request_credits FROM stats_billing_mirror_writer;
         REVOKE ALL ON provider_tokens FROM stats_billing_mirror_writer;
         REVOKE ALL ON stats_billing_mirror_state FROM stats_billing_mirror_writer;
-        REVOKE ALL ON FUNCTION stats_billing_mirror_load_state(TEXT) FROM PUBLIC;
-        REVOKE ALL ON FUNCTION stats_billing_mirror_save_state(TEXT, BIGINT, BIGINT) FROM PUBLIC;
-        REVOKE ALL ON FUNCTION stats_billing_mirror_ensure_provider(TEXT, TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ) FROM PUBLIC;
-        REVOKE ALL ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN) FROM PUBLIC;
+        REVOKE ALL ON ledger_request_credit_spec022_verified_audit FROM stats_billing_mirror_writer;
         GRANT EXECUTE ON FUNCTION stats_billing_mirror_load_state(TEXT) TO stats_billing_mirror_writer;
         GRANT EXECUTE ON FUNCTION stats_billing_mirror_save_state(TEXT, BIGINT, BIGINT) TO stats_billing_mirror_writer;
         GRANT EXECUTE ON FUNCTION stats_billing_mirror_ensure_provider(TEXT, TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ) TO stats_billing_mirror_writer;
-        GRANT EXECUTE ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN) TO stats_billing_mirror_writer;
+        GRANT EXECUTE ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN) TO stats_billing_mirror_writer;
     END IF;
 END $$`,
 }

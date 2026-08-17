@@ -42,6 +42,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{19, "hardware_trust_operator_approval"},
 		{20, "waiting_trust_chip_profile_projection"},
 		{21, "malibu_emission_ledger_update_grant"},
+		{22, "malibu_useful_work_rewards"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))

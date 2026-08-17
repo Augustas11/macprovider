@@ -194,6 +194,224 @@ func TestWalletDailyCapAcrossProviders(t *testing.T) {
 	}
 }
 
+func TestUsefulWorkAccrualVerifiedWorkCapsHoldsAndReplay(t *testing.T) {
+	fx, adminDB := startPostgres(t)
+	ctx := context.Background()
+
+	if _, err := adminDB.ExecContext(ctx, `
+        CREATE TABLE ledger_request_credits (
+            id BIGSERIAL PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            attempt_n INTEGER NOT NULL,
+            provider_id TEXT NOT NULL,
+            ts_utc TIMESTAMPTZ NOT NULL,
+            provider_credits BIGINT NOT NULL,
+            settlement_policy_mode TEXT NOT NULL DEFAULT 'enforce',
+            spec022_verified BOOLEAN NOT NULL DEFAULT FALSE,
+            UNIQUE(request_id, attempt_n, provider_id)
+        );
+        GRANT SELECT ON ledger_request_credits TO rewards_writer;
+    `); err != nil {
+		t.Fatalf("seed useful work mirror table: %v", err)
+	}
+
+	writerDB := openRewardsWriter(t, fx)
+	wallet := "0xusefulwork"
+	for _, seed := range []struct {
+		providerID string
+		tier       string
+		wallet     string
+	}{
+		{"p_verified", rewards.TierTrusted, wallet},
+		{"p_overflow", rewards.TierTrusted, wallet},
+		{"p_provisional", rewards.TierProvisional, ""},
+		{"p_unverified", rewards.TierTrusted, ""},
+	} {
+		if _, err := adminDB.ExecContext(ctx, `
+            INSERT INTO provider_emission_state (provider_id, trust_tier, bound_wallet)
+            VALUES ($1, $2, NULLIF($3, ''))
+        `, seed.providerID, seed.tier, seed.wallet); err != nil {
+			t.Fatalf("seed state %s: %v", seed.providerID, err)
+		}
+	}
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO ledger_request_credits
+            (request_id, attempt_n, provider_id, ts_utc, provider_credits, spec022_verified)
+        VALUES
+            ('req-verified', 0, 'p_verified', now() - interval '4 minutes', 2000, TRUE),
+            ('req-overflow', 0, 'p_overflow', now() - interval '3 minutes', 2000, TRUE),
+            ('req-provisional', 0, 'p_provisional', now() - interval '2 minutes', 1000, TRUE),
+            ('req-unverified', 0, 'p_unverified', now() - interval '1 minute', 9000, FALSE)
+    `); err != nil {
+		t.Fatalf("seed useful work rows: %v", err)
+	}
+
+	cfg := testEmissionConfig(time.Hour, 25, 3)
+	cfg.UsefulWorkEnabled = true
+	cfg.UsefulWorkMALIBUPer1KCredits = 1
+	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	if err := runner.RunUsefulWorkAccrualOnce(ctx); err != nil {
+		t.Fatalf("useful work accrual: %v", err)
+	}
+	if err := runner.RunUsefulWorkAccrualOnce(ctx); err != nil {
+		t.Fatalf("useful work replay accrual: %v", err)
+	}
+
+	var verifiedCount int
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT COUNT(*)
+          FROM provider_rewards_ledger
+         WHERE reason = $1
+    `, rewards.ReasonMalibuVerifiedUsefulWorkV02).Scan(&verifiedCount); err != nil {
+		t.Fatalf("count useful rows: %v", err)
+	}
+	if verifiedCount != 3 {
+		t.Fatalf("useful work ledger rows = %d, want 3 (verified, overflow, provisional only)", verifiedCount)
+	}
+
+	var amount, ref string
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT amount_malibu::TEXT, external_ref
+          FROM provider_rewards_ledger
+         WHERE provider_id = 'p_verified'
+    `).Scan(&amount, &ref); err != nil {
+		t.Fatalf("query verified reward: %v", err)
+	}
+	if amount != "2.00000000" {
+		t.Fatalf("verified amount = %q, want 2.00000000", amount)
+	}
+	if ref != "spec022:req-verified:0:p_verified" {
+		t.Fatalf("external_ref = %q", ref)
+	}
+
+	var overflowHold string
+	var overflowAmount string
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT withdrawal_hold_reason, amount_malibu::TEXT
+          FROM provider_rewards_ledger
+         WHERE provider_id = 'p_overflow'
+    `).Scan(&overflowHold, &overflowAmount); err != nil {
+		t.Fatalf("query overflow reward: %v", err)
+	}
+	if overflowHold != rewards.HoldPerWalletDailyCap {
+		t.Fatalf("overflow hold = %q, want %q", overflowHold, rewards.HoldPerWalletDailyCap)
+	}
+	if overflowAmount != "1.00000000" {
+		t.Fatalf("overflow amount = %q, want 1.00000000", overflowAmount)
+	}
+
+	var provisionalHold string
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT withdrawal_hold_reason
+          FROM provider_rewards_ledger
+         WHERE provider_id = 'p_provisional'
+    `).Scan(&provisionalHold); err != nil {
+		t.Fatalf("query provisional reward: %v", err)
+	}
+	if provisionalHold != rewards.HoldTrustTierProvisional {
+		t.Fatalf("provisional hold = %q, want %q", provisionalHold, rewards.HoldTrustTierProvisional)
+	}
+
+	withdrawable, err := rewards.SelectWithdrawableMALIBU(ctx, writerDB, "p_verified", 10)
+	if err != nil {
+		t.Fatalf("withdrawable verified: %v", err)
+	}
+	if len(withdrawable) != 1 {
+		t.Fatalf("trusted useful work withdrawable rows = %d, want 1", len(withdrawable))
+	}
+	provisionalWithdrawable, err := rewards.SelectWithdrawableMALIBU(ctx, writerDB, "p_provisional", 10)
+	if err != nil {
+		t.Fatalf("withdrawable provisional: %v", err)
+	}
+	if len(provisionalWithdrawable) != 0 {
+		t.Fatalf("provisional useful work withdrawable rows = %d, want 0", len(provisionalWithdrawable))
+	}
+}
+
+func TestUsefulWorkAccrualSkipsProviderAtDailyCap(t *testing.T) {
+	fx, adminDB := startPostgres(t)
+	ctx := context.Background()
+
+	if _, err := adminDB.ExecContext(ctx, `
+        CREATE TABLE ledger_request_credits (
+            id BIGSERIAL PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            attempt_n INTEGER NOT NULL,
+            provider_id TEXT NOT NULL,
+            ts_utc TIMESTAMPTZ NOT NULL,
+            provider_credits BIGINT NOT NULL,
+            settlement_policy_mode TEXT NOT NULL DEFAULT 'enforce',
+            spec022_verified BOOLEAN NOT NULL DEFAULT FALSE,
+            UNIQUE(request_id, attempt_n, provider_id)
+        );
+        GRANT SELECT ON ledger_request_credits TO rewards_writer;
+    `); err != nil {
+		t.Fatalf("seed useful work mirror table: %v", err)
+	}
+
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO provider_emission_state
+            (provider_id, trust_tier, provider_day_malibu, emission_day)
+        VALUES
+            ('p_capped', 'trusted', 1, CURRENT_DATE),
+            ('p_later', 'trusted', 0, CURRENT_DATE);
+
+        INSERT INTO ledger_request_credits
+            (request_id, attempt_n, provider_id, ts_utc, provider_credits, spec022_verified)
+        SELECT 'req-capped-' || gs::TEXT, 0, 'p_capped',
+               now() - interval '2 hours' + (gs || ' seconds')::interval,
+               1000, TRUE
+          FROM generate_series(1, 501) AS gs;
+
+        INSERT INTO ledger_request_credits
+            (request_id, attempt_n, provider_id, ts_utc, provider_credits, spec022_verified)
+        VALUES ('req-later', 0, 'p_later', now(), 1000, TRUE);
+    `); err != nil {
+		t.Fatalf("seed capped useful work rows: %v", err)
+	}
+
+	writerDB := openRewardsWriter(t, fx)
+	cfg := testEmissionConfig(time.Hour, 1, 100)
+	cfg.UsefulWorkEnabled = true
+	cfg.UsefulWorkMALIBUPer1KCredits = 1
+	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	if err := runner.RunUsefulWorkAccrualOnce(ctx); err != nil {
+		t.Fatalf("useful work accrual: %v", err)
+	}
+
+	var laterCount int
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT COUNT(*)
+          FROM provider_rewards_ledger
+         WHERE provider_id = 'p_later'
+           AND reason = $1
+    `, rewards.ReasonMalibuVerifiedUsefulWorkV02).Scan(&laterCount); err != nil {
+		t.Fatalf("count later reward: %v", err)
+	}
+	if laterCount != 1 {
+		t.Fatalf("p_later useful work rewards = %d, want 1", laterCount)
+	}
+
+	var cappedCount int
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT COUNT(*)
+          FROM provider_rewards_ledger
+         WHERE provider_id = 'p_capped'
+           AND reason = $1
+    `, rewards.ReasonMalibuVerifiedUsefulWorkV02).Scan(&cappedCount); err != nil {
+		t.Fatalf("count capped rewards: %v", err)
+	}
+	if cappedCount != 0 {
+		t.Fatalf("p_capped useful work rewards = %d, want 0", cappedCount)
+	}
+}
+
 // TestCapReplayPendingDoesNotDesyncConnection is a regression test for the
 // hardware-track (mp-*) accrual failure: `pq: unexpected Parse response
 // "(C) CommandComplete"`. That error surfaced whenever a Trusted provider's
