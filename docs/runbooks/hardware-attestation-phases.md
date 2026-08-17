@@ -292,6 +292,7 @@ Script auto-restores config backup on verification failure. Manual: set `require
 | 2026-07-09 | **Phase 1 merged** — PR #477 squash-merged to main (`001fb405`). Augustas11 approved (PR author was antfleet-ops). |
 | 2026-07-09 | **Phase 2 started** — worktree `/Users/augstar/macprovider-attest-phase2`, branch `fix/attestation-phase2`. Operator registering Apple MDM push cert in parallel. |
 | 2026-08-07 | Partner ABM + identity.apple.com instructions added: `docs/runbooks/apple-mdm-partner-registration.md`. P2-A/P2-C already on main via PR #509. |
+| 2026-08-17 | APNs push cert issued (topic `com.apple.mgmt.External.b3ba8c97-…`). P2-B: nginx `/v1/enroll`+`/mdm/`+`/scep`, MicroMDM Pearl install — see `docs/runbooks/pearl-micromdm-install.md`. |
 
 ## Phase 2 — IN PROGRESS
 
