@@ -1,7 +1,31 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.1 (2026-07-29, B1 request-log timing consumer note)
+**Version:** 0.6.2 (2026-08-17, preliminary paid-path conformance unit IDs)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2.1 (prefix-cache cache-isolation; its billing sections are superseded by this spec)
+
+**Change log v0.6.2 (2026-08-17, issue #614 — preliminary paid-path conformance unit IDs):**
+- Registers `SPEC-005-R001`..`SPEC-005-R003` in `specs/CONFORMANCE.json` as
+  pending preliminary conformance anchors for the paid buyer-path #614 slice.
+  These IDs group existing normative obligation areas without changing them:
+  closed-form credit arithmetic (`R001`), hot-path ledger write (`R002`), and
+  crash recovery (`R003`). Remaining SPEC-005 clause migration is issue #1023.
+  No formula, ledger, or payout behavior change.
+
+## Preliminary conformance unit IDs
+
+SPEC-005 v0.6.2 registers `SPEC-005-R001`..`SPEC-005-R003` in
+`specs/CONFORMANCE.json` as pending preliminary conformance anchors. These IDs
+group existing normative obligation areas without changing them:
+
+- `SPEC-005-R001` — closed-form credit formula, units, rounding, and rate-card
+  resolution (§5).
+- `SPEC-005-R002` — hot-path ledger persistence of buyer debit / provider
+  credit (§4, §7).
+- `SPEC-005-R003` — crash recovery, WAL, and reconcile of in-flight ledger
+  rows (§10).
+
+`requirement_id_migration` remains `pending`. Physical paid-path evidence is
+tracked by GitHub issue #1022.
 
 **Change log v0.6.1 (2026-07-29, B1 — request-log TTFT/decode consumer boundary):**
 - Dependency bump: SPEC-002 v1.5.2 → v1.5.6 to acknowledge

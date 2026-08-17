@@ -119,7 +119,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.1",
+      "version": "0.6.2",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -144,13 +144,14 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Preliminary paid-path requirement IDs registered; remaining clause migration is issue #1023. Physical evidence is issue #1022. No promotion."
       }
     },
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.16",
+      "version": "0.9.17",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -173,7 +174,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Preliminary paid-path requirement IDs registered; remaining clause migration is issue #1023. Physical evidence is issue #1022. No promotion."
       }
     },
     {
@@ -392,7 +394,7 @@
     {
       "spec_id": "SPEC-015",
       "title": "Verifiable inference receipts",
-      "version": "0.4.2",
+      "version": "0.4.3",
       "path": "specs/SPEC-015-receipts.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -420,7 +422,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Preliminary paid-path requirement IDs registered; remaining clause migration is issue #1023. Physical evidence is issue #1022. No promotion."
       }
     },
     {
@@ -646,7 +649,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Requirement IDs SPEC-022-R001..R011 registered (one per normative requirement group R-1..R-11) in v0.1.6; conformance reconciliation of the settlement pipeline tracked under the verified-model-settlement domain."
+        "rationale": "Requirement IDs SPEC-022-R001..R011 registered in v0.1.6. Paid-path implementation/tests now mapped; JOURNEY-BUYER-PAID-PATH is the contract. Physical evidence is #1022. Observe-mode only; no enforce promotion."
       }
     },
     {
@@ -3557,168 +3560,427 @@
       }
     },
     {
-      "requirement_id": "SPEC-022-R001",
-      "spec_id": "SPEC-022",
+      "requirement_id": "SPEC-005-R001",
+      "spec_id": "SPEC-005",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/formula.go:ComputeCredits",
+        "phase4-coordinator/internal/billing/formula.go:ComputeCreditsWithCache",
+        "phase4-coordinator/internal/billing/formula.go:RateFor"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/formula_test.go:TestComputeCredits_WorkedExamples",
+        "phase4-coordinator/internal/billing/formula_test.go:TestComputeCreditsWithCachePricesOnlyCachedPromptAtCacheRate",
+        "phase4-coordinator/internal/billing/formula_test.go:TestRoundHalfEven",
+        "phase4-coordinator/internal/billing/formula_test.go:TestRateFor_FallsBackToDefault"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-1 policy authority and mode (single authoritative verified_model_settlement surface; default observe MUST NOT change money; enforce activation preconditions; effective policy recorded and read from request-start row): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "Closed-form credit formula, units, rounding, and rate-card resolution (SPEC-005 \u00a75): shipped and unit-tested; physical paid-path evidence is #1022."
+      }
+    },
+    {
+      "requirement_id": "SPEC-005-R002",
+      "spec_id": "SPEC-005",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/hotpath.go:WriteHotPath",
+        "phase4-coordinator/internal/billing/store.go:NewStore"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/store_test.go:TestWriteHotPath_ACID",
+        "phase4-coordinator/internal/billing/store_test.go:TestWriteHotPath_503_NoLedgerRows",
+        "phase4-coordinator/internal/billing/store_test.go:TestWriteHotPath_NullError_ZeroCredits"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "Hot-path ledger persistence of buyer debit / provider credit (SPEC-005 \u00a74/\u00a77): shipped and unit-tested; physical paid-path evidence is #1022."
+      }
+    },
+    {
+      "requirement_id": "SPEC-005-R003",
+      "spec_id": "SPEC-005",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/recovery.go:RecoverLedger"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/store_test.go:TestRecoverLedger_Idempotent",
+        "phase4-coordinator/internal/billing/store_test.go:TestRecoverLedger_QuarantinesOrphanLedgerRows",
+        "phase4-coordinator/internal/billing/store_test.go:TestWriteRequestLogWithIdentity_AllowsRecoveryAfterHotPathFailure"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "Crash recovery and reconcile of in-flight ledger rows (SPEC-005 \u00a710): shipped and unit-tested; physical paid-path evidence is #1022. WAL enforcement lives with NewStore/migrate under R002."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R001",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/auth/keys.go:Validate",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase4-coordinator/internal/buyer/server.go:handleChatCompletions"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/integration_test.go:TestStrangerKeyOpenAIChatUsageFlow",
+        "phase5-gateway/internal/router/server_test.go:TestKeyHashStorage",
+        "phase4-coordinator/internal/buyer/server_test.go:TestChatCompletionsRoutesNonStreamingRequest"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "Authenticated API-key paid chat entrypoint (SPEC-006 \u00a75/\u00a76). The mapped chat handler also admits wallet-session traffic; this ID is evidenced only by an API-key subject. Physical paid-path evidence is #1022."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R002",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/server.go:gatewayRetryable",
+        "phase5-gateway/internal/router/server.go:writeError"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/server_test.go:TestWriteErrorEnvelopeCarriesRetryable",
+        "phase5-gateway/internal/router/server_test.go:TestWriteErrorEnvelopeShape",
+        "phase5-gateway/internal/router/server_test.go:TestGatewayRetryableByCodeClassification",
+        "phase5-gateway/internal/router/error_code_ast_guard_test.go:TestGatewayEmittedLiteralCodesAreClassified"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "Buyer-visible error envelope and retryability (SPEC-006 \u00a75.2/\u00a717): shipped and tested; physical paid-path evidence is #1022."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R003",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/storage/sqlite/store.go:ReserveQuota",
+        "phase5-gateway/internal/storage/sqlite/store.go:SettleReservation",
+        "phase5-gateway/internal/router/chat_proxy.go:settleRequest"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/server_test.go:TestQuotaExhaustedReturns429Not500",
+        "phase5-gateway/internal/router/server_test.go:TestQuotaReservationLeakOnContextCancel",
+        "phase5-gateway/internal/router/server_test.go:TestQuotaSettlement504ZeroCompletion",
+        "phase5-gateway/internal/router/server_test.go:TestCoordinator404ModelNotFoundPassesThroughAndDoesNotChargeQuota"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "Quota reservation, settlement, and refund on the chat path (SPEC-006 \u00a77/\u00a717.7): shipped and tested; physical paid-path evidence is #1022."
+      }
+    },
+    {
+      "requirement_id": "SPEC-015-R001",
+      "spec_id": "SPEC-015",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:buildSettlement",
+        "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
+        "phase4-coordinator/internal/billing/settlement_verifier.go:VerifySettlementReceipt"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ReceiptBuilderTests.swift:testBuildSettlementSignsStrictV04Tuple",
+        "phase4-coordinator/internal/billing/spec015_v04_acceptance_test.go:TestSPEC015V04AcceptanceCriteria",
+        "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit",
+        "phase4-coordinator/internal/billing/settlement_verifier_test.go:TestVerifySettlementReceiptV04Fixtures"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "v0.4 settlement-capable receipt issuance (ReceiptBuilder.buildSettlement) and coordinator ingestion/verification (SPEC-015): shipped and tested; physical paid-path evidence is #1022."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R001",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/config/config.go:SettlementConfig",
+        "phase4-coordinator/internal/buyer/server.go:settlementEnforceMode"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/config/config_test.go:TestSpec005BillingDefaultsAndValidation",
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayableCreditGateLeavesObserveRowsPayable"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "R-1 policy authority and mode (single authoritative verified_model_settlement surface; default observe MUST NOT change money; enforce activation preconditions; effective policy recorded and read from request-start row). Implementation/tests mapped; physical evidence is #1022. This journey requires captured mode observe and cannot promote an enforce claim."
       }
     },
     {
       "requirement_id": "SPEC-022-R002",
       "spec_id": "SPEC-022",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase4-coordinator/internal/buyer/server.go:handleChatCompletions",
+        "phase4-coordinator/internal/buyer/server.go:selectProvider"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/server_test.go:TestChatCompletionsRoutesNonStreamingRequest"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-2 entrypoint and routing preconditions (covered paid entrypoints; active signed catalog at route time; route only to hash_verified provider/model pairs; fail-closed warm-swap): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "R-2 entrypoint and routing preconditions (covered paid entrypoints; active signed catalog at route time; route only to hash_verified provider/model pairs; fail-closed warm-swap). Chat entrypoint and hash-verified selection mapped; catalog-identity resolution remains a pending completeness note. Physical evidence is #1022."
       }
     },
     {
       "requirement_id": "SPEC-022-R003",
       "spec_id": "SPEC-022",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/route_snapshot.go:InsertRouteSnapshot",
+        "phase4-coordinator/internal/billing/route_snapshot.go:Digest"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/route_snapshot_test.go:TestRouteSnapshotStrictKeysAndDigestSensitivity",
+        "phase4-coordinator/internal/billing/route_snapshot_test.go:TestInsertRouteSnapshotPersistsCanonicalDigestAndRejectsRewrite",
+        "phase4-coordinator/internal/billing/route_snapshot_test.go:TestSettlementRouteSnapshotIsImmutable"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-3 route-time verification snapshot (immutable per-attempt snapshot; model-hash triple-equality; usage/prompt_hash/output_hash cross-check against coordinator-observed canonical state; quarantine on unavailable/mismatch): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "R-3 route-time verification snapshot (immutable per-attempt snapshot; model-hash triple-equality; usage/prompt_hash/output_hash cross-check against coordinator-observed canonical state; quarantine on unavailable/mismatch). Implementation/tests mapped; physical evidence is #1022."
       }
     },
     {
       "requirement_id": "SPEC-022-R004",
       "spec_id": "SPEC-022",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
+        "phase4-coordinator/internal/billing/settlement_verifier.go:VerifySettlementReceipt"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit",
+        "phase4-coordinator/internal/billing/settlement_verifier_test.go:TestVerifySettlementReceiptV04Fixtures",
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-4 receipt requirement (settlement-capable provider-signed receipt for any debitable/creditable outcome; null model_hash and legacy receipts non-settling; signature necessary not sufficient; receipt-key identity binding; terminal receipt selection is idempotent): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "R-4 receipt requirement (settlement-capable provider-signed receipt for any debitable/creditable outcome; null model_hash and legacy receipts non-settling; signature necessary not sufficient; receipt-key identity binding; terminal receipt selection is idempotent). Implementation/tests mapped; physical evidence is #1022."
       }
     },
     {
       "requirement_id": "SPEC-022-R005",
       "spec_id": "SPEC-022",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase5-gateway/internal/router/chat_proxy.go:forwardStreamingChat",
+        "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022StreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout",
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022StreamingPartialTerminalReceiptsCreateReceiptBoundSettlement"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-5 streaming receipts (first-class paid traffic; terminal-state binding; partial-prefix binding for partial-output settlement with coordinator-observed cross-check; async verification decoupled; future multi-attempt resume/failover protocols settle delivered verified prefixes per attempt without double-charge, while shipped post-first-event provider disconnect terminates the stream): normative in SPEC-022 v0.1.7; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "R-5 streaming receipts (first-class paid traffic; terminal-state binding; partial-prefix binding for partial-output settlement with coordinator-observed cross-check; async verification decoupled; shipped post-first-event disconnect terminates the stream with provider_disconnected and a later retry is independently billable; future multi-attempt resume/failover must settle only delivered verified prefixes without double-charge). Implementation/tests mapped; physical evidence is #1022."
       }
     },
     {
       "requirement_id": "SPEC-022-R006",
       "spec_id": "SPEC-022",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/settlement_receipts.go:GetSettlementReceiptAuthorization"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestSettlementReceiptAuthorizationRejectsLaterOverlapBackfill",
+        "phase4-coordinator/internal/billing/spec015_v04_acceptance_test.go:TestSPEC015V04AcceptanceCriteria"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-6 buyer receipt retrieval (owner/operator auth; no raw prompts or outputs; proof/metadata only; defined retention, rate limits, idempotency, 404/403, pending/quarantined visibility): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "R-6 buyer receipt retrieval (owner/operator auth; no raw prompts or outputs; proof/metadata only; defined retention, rate limits, idempotency, 404/403, pending/quarantined visibility). Internal authorization lookup mapped. Public retrieval is unexposed; this journey cannot promote R006 while buyer_receipt_retrieval_exposed is false. Physical evidence is #1022."
       }
     },
     {
       "requirement_id": "SPEC-022-R007",
       "spec_id": "SPEC-022",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
+        "phase4-coordinator/internal/billing/settlement.go:RunSettlement"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayableCreditGateRequiresVerifiedReceipt",
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayableCreditGateBlocksQuarantineAndOverlap",
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayoutClaimRevalidatesSourceRows"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-7 settlement, quarantine, and payout exclusion (receipt-verification gate before any credit/earnings/sweep/payout; non-verified excluded; quarantine mandatory for trust failures and terminal; no fallback to provider-reported usage under enforce; operator money-positive bypasses forbidden): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "R-7 settlement, quarantine, and payout exclusion (receipt-verification gate before any credit/earnings/sweep/payout; non-verified excluded; quarantine mandatory for trust failures and terminal; no fallback to provider-reported usage under enforce; operator money-positive bypasses forbidden). Implementation/tests mapped. JOURNEY-BUYER-PAID-PATH may observe this row in observe mode but MUST NOT promote it; enforce money-gate evidence needs a separate journey. Physical evidence owner remains #1022 for observation only."
       }
     },
     {
       "requirement_id": "SPEC-022-R008",
       "spec_id": "SPEC-022",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase5-gateway/internal/storage/sqlite/store.go:ReserveQuota",
+        "phase5-gateway/internal/storage/sqlite/store.go:SettleReservation",
+        "phase4-coordinator/internal/billing/hotpath.go:WriteHotPath"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/server_test.go:TestQuotaReservationLeakOnContextCancel",
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-8 buyer debit semantics (reservation-first; final debit only on verified; quarantine/deadline releases reservation and keeps provider credit zero; zero_settled terminal; buyer surfaces distinguish pending/verified/quarantined/zero_settled): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "R-8 buyer debit semantics (reservation-first; final debit only on verified; quarantine/deadline releases reservation and keeps provider credit zero; zero_settled terminal; buyer surfaces distinguish pending/verified/quarantined/zero_settled). Implementation/tests mapped. Observe-mode quota settlement is not evidence that final debit waited for verified receipts. This journey MUST NOT promote R008. Physical evidence owner remains #1022 for observation only."
       }
     },
     {
       "requirement_id": "SPEC-022-R009",
       "spec_id": "SPEC-022",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/recovery.go:RecoverLedger"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022RecoveryPreservesEnforcePolicyFromRouteSnapshot",
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022RecoveryDoesNotUseOtherAccountRouteSnapshot"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-9 rollout, migration, and rollback (effective policy by request-start timestamp and attempt identity; no retroactive reclassification; enforced rows retain original policy/deadline/payout-exclusion across rollback; pre-existing payout-ready rows excluded from the snapshot): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "rationale": "R-9 rollout, migration, and rollback (effective policy by request-start timestamp and attempt identity; no retroactive reclassification; enforced rows retain original policy/deadline/payout-exclusion across rollback; pre-existing payout-ready rows excluded from the snapshot). Implementation/tests mapped; no paid-path journey. Reconciliation remains under #614."
       }
     },
     {
       "requirement_id": "SPEC-022-R010",
       "spec_id": "SPEC-022",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase5-gateway/internal/router/disclosure.go:makeTier1Disclosure",
+        "phase5-gateway/internal/router/disclosure.go:makeVerifiedModelSettlementDisclosure"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/server_test.go:TestModelsResponseIncludesTier1Disclosure",
+        "phase5-gateway/internal/router/server_test.go:TestUsageIncludesSPEC022SettlementDisclosure"
+      ],
+      "journeys": [
+        "JOURNEY-BUYER-PAID-PATH"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-10 buyer disclosure (distinguish catalog-verified identity from unattested hardware/runtime; mixed-pool claims constrained; observe mode MUST NOT claim enforcement; excluded entrypoints named; partial-charge disclosure; shipped streaming failover is pre-commit only, post-first-event retry is an independently billable request, and future multi-attempt protocols must not double-charge overlapping output): normative in SPEC-022 v0.1.7; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
+        "rationale": "R-10 buyer disclosure (distinguish catalog-verified identity from unattested hardware/runtime; mixed-pool claims constrained; observe mode MUST NOT claim enforcement; excluded entrypoints named; partial-charge disclosure; shipped streaming failover is pre-commit only and a post-first-event retry is an independently billable request). Implementation/tests mapped; physical evidence is #1022."
       }
     },
     {
       "requirement_id": "SPEC-022-R011",
       "spec_id": "SPEC-022",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/billing/settlement_receipts.go:insertSettlementReceiptVerdictAuditConn"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-11 audit and observability (structured per-attempt settlement audit event; no raw prompts/outputs/receipt material; aggregate verified/pending/quarantined/zero_settled counters; recovery/backfill audit completeness): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "rationale": "R-11 audit and observability (structured per-attempt settlement audit event; no raw prompts/outputs/receipt material; aggregate verified/pending/quarantined/zero_settled counters; recovery/backfill audit completeness). Implementation/tests mapped; no paid-path journey. Reconciliation remains under #614."
       }
     },
     {

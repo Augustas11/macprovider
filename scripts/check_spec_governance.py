@@ -55,6 +55,39 @@ PROVIDER_PREBETA_STEP_ID_ORDER = (
     "step-08-redaction-and-correlation",
 )
 PROVIDER_PREBETA_STEP_IDS = set(PROVIDER_PREBETA_STEP_ID_ORDER)
+BUYER_PAID_PATH_JOURNEY_ID = "JOURNEY-BUYER-PAID-PATH"
+BUYER_PAID_PATH_EXECUTION_MODE = "isolated-candidate-paid-path"
+BUYER_PAID_PATH_STEP_ID_ORDER = (
+    "step-01-capture-config",
+    "step-02-nonstream-chat",
+    "step-03-quota-settlement",
+    "step-04-ledger-credit",
+    "step-05-receipt-ingest",
+    "step-06-streaming-chat",
+    "step-07-failure-refund",
+    "step-08-disclosure",
+    "step-09-receipt-retrieval",
+    "step-10-redaction",
+    "step-11-restore-config",
+)
+BUYER_PAID_PATH_STEP_IDS = set(BUYER_PAID_PATH_STEP_ID_ORDER)
+BUYER_PAID_PATH_PROMOTABLE_REQUIREMENT_IDS = {
+    "SPEC-005-R001",
+    "SPEC-005-R002",
+    "SPEC-005-R003",
+    "SPEC-006-R001",
+    "SPEC-006-R002",
+    "SPEC-006-R003",
+    "SPEC-015-R001",
+    "SPEC-022-R001",
+    "SPEC-022-R002",
+    "SPEC-022-R003",
+    "SPEC-022-R004",
+    "SPEC-022-R005",
+    "SPEC-022-R010",
+}
+BUYER_PAID_PATH_CONDITIONAL_REQUIREMENT_IDS = {"SPEC-022-R006"}
+
 TRUSTED_OPENSSL_CANDIDATES = (
     "/usr/bin/openssl",
     "/opt/homebrew/opt/openssl@3/bin/openssl",
@@ -698,6 +731,104 @@ def _validate_provider_prebeta_journey_result(
             _validate_provider_prebeta_artifact(root, artifact, signed, f"{location}.signed.artifacts[{index}]", result)
 
 
+def _validate_buyer_paid_path_journey_result(
+    signed: dict[str, Any],
+    requirement_id: str,
+    journeys: list[str],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    if signed.get("journey_id") != BUYER_PAID_PATH_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {BUYER_PAID_PATH_JOURNEY_ID!r}")
+    if BUYER_PAID_PATH_JOURNEY_ID not in journeys:
+        result.error(location, f"paid-path requirement journeys must include {BUYER_PAID_PATH_JOURNEY_ID!r}")
+    if signed.get("execution_mode") != BUYER_PAID_PATH_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {BUYER_PAID_PATH_EXECUTION_MODE!r}")
+
+    observations = signed.get("observations")
+    if _expect_object(observations, f"{location}.signed.observations", result):
+        required_obs = {
+            "settlement_mode",
+            "enforce_activated",
+            "payout_ready_mutated",
+            "production_side_effects",
+            "buyer_receipt_retrieval_exposed",
+            "isolated_environment",
+            "raw_prompt_output_redacted",
+            "bearer_tokens_redacted",
+        }
+        _expect_keys(observations, required_obs, required_obs, f"{location}.signed.observations", result)
+        if observations.get("settlement_mode") != "observe":
+            result.error(f"{location}.signed.observations.settlement_mode", "must equal 'observe'")
+        for field_name in (
+            "enforce_activated",
+            "payout_ready_mutated",
+            "production_side_effects",
+        ):
+            if observations.get(field_name) is not False:
+                result.error(f"{location}.signed.observations.{field_name}", "must be false")
+        for field_name in (
+            "isolated_environment",
+            "raw_prompt_output_redacted",
+            "bearer_tokens_redacted",
+        ):
+            if observations.get(field_name) is not True:
+                result.error(f"{location}.signed.observations.{field_name}", "must be true")
+        retrieval_exposed = observations.get("buyer_receipt_retrieval_exposed")
+        if not isinstance(retrieval_exposed, bool):
+            result.error(f"{location}.signed.observations.buyer_receipt_retrieval_exposed", "must be a boolean")
+    else:
+        retrieval_exposed = False
+
+    signed_requirement_ids = signed.get("requirement_ids")
+    if not isinstance(signed_requirement_ids, list) or not all(isinstance(item, str) for item in signed_requirement_ids):
+        result.error(f"{location}.signed.requirement_ids", "must be an array of requirement IDs")
+        signed_requirement_ids = []
+    allowed = set(BUYER_PAID_PATH_PROMOTABLE_REQUIREMENT_IDS)
+    if retrieval_exposed is True:
+        allowed |= BUYER_PAID_PATH_CONDITIONAL_REQUIREMENT_IDS
+    unexpected = [item for item in signed_requirement_ids if item not in allowed]
+    if unexpected:
+        result.error(
+            f"{location}.signed.requirement_ids",
+            "paid-path journey-result cannot promote "
+            + ", ".join(sorted(unexpected)),
+        )
+    if requirement_id not in allowed:
+        result.error(
+            f"{location}.signed.requirement_ids",
+            f"paid-path journey-result cannot promote {requirement_id}",
+        )
+    elif requirement_id not in signed_requirement_ids:
+        result.error(
+            f"{location}.signed.requirement_ids",
+            f"must include the requirement being promoted: {requirement_id}",
+        )
+
+    observed_step_ids: set[str] = set()
+    valid_step_count = 0
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict) or not isinstance(step.get("id"), str):
+            continue
+        valid_step_count += 1
+        step_id = step["id"]
+        if step_id in observed_step_ids:
+            result.error(f"{location}.signed.steps[{index}].id", f"duplicate paid-path physical step {step_id!r}")
+        observed_step_ids.add(step_id)
+    missing_steps = BUYER_PAID_PATH_STEP_IDS - observed_step_ids
+    unexpected_steps = observed_step_ids - BUYER_PAID_PATH_STEP_IDS
+    if missing_steps:
+        result.error(f"{location}.signed.steps", f"missing paid-path physical steps: {sorted(missing_steps)}")
+    if unexpected_steps:
+        result.error(f"{location}.signed.steps", f"unexpected paid-path physical steps: {sorted(unexpected_steps)}")
+    if valid_step_count != len(BUYER_PAID_PATH_STEP_IDS):
+        result.error(
+            f"{location}.signed.steps",
+            f"must contain exactly {len(BUYER_PAID_PATH_STEP_IDS)} paid-path physical steps",
+        )
+
+
 def _validate_spec016_payout_journey_result(
     root: Path,
     signed: dict[str, Any],
@@ -1161,6 +1292,15 @@ def _validate_signed_journey_result(
         _validate_spec016_payout_journey_result(root, signed, source, journeys, artifact_records, steps, location, result)
     if journey_id == PROVIDER_PREBETA_JOURNEY_ID:
         _validate_provider_prebeta_journey_result(root, signed, [item for item in journeys if isinstance(item, str)], artifact_records, steps, location, result)
+    if journey_id == BUYER_PAID_PATH_JOURNEY_ID:
+        _validate_buyer_paid_path_journey_result(
+            signed,
+            requirement_id,
+            [item for item in journeys if isinstance(item, str)],
+            steps,
+            location,
+            result,
+        )
 
     return len(result.errors) == before
 

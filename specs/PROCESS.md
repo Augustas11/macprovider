@@ -185,6 +185,14 @@ release. Unknown governance debt inside the named slice must be arbitrated as
 may narrow the gate; it may not mark a requirement conformant without the
 evidence required by this process.
 
+Named #614 slices are recorded in `docs/spec-governance-foundation.md`:
+
+- provider pre-beta: onboarding, runtime, model readiness, payout-address
+  setup, and buyer serving smoke;
+- paid buyer path: authenticated API-key chat, quota reservation/settlement,
+  ledger credit, SPEC-015 v0.4 receipts, and SPEC-022 settlement in the
+  current observe-mode posture.
+
 Every PR body contains exactly one raw, marker-delimited JSON declaration:
 
 ```text

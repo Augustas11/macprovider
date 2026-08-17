@@ -1,7 +1,14 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.2 (2026-06-30, LOCKED settlement-capable receipt profile for SPEC-022; adds v0.4 request-attempt binding, route-snapshot binding, terminal-state binding, usage binding, streaming receipt delivery/storage, settlement-verifier outcome mapping, and redaction/retention rules)
+**Version:** 0.4.3 (2026-08-17, preliminary paid-path conformance unit ID; LOCKED settlement-capable receipt profile for SPEC-022 otherwise unchanged)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 candidate `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.3 (settlement/accounting semantics; v0.4+ chargeability successor expected for terminal-state rows), SPEC-006 v0.9, SPEC-008 v0.3 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.5, SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3, SPEC-022 v0.1.4 (hard — settlement-capable receipt profile consumer)
+
+**Change log v0.4.3 (2026-08-17, issue #614 — preliminary paid-path conformance unit ID):**
+- Registers `SPEC-015-R001` in `specs/CONFORMANCE.json` as a pending
+  preliminary conformance anchor for the paid buyer-path #614 slice. The ID
+  groups the existing v0.4 settlement-capable receipt issuance/ingestion
+  obligations without changing them. Remaining SPEC-015 clause migration is
+  issue #1023. No receipt tuple, wire, or verifier behavior change.
 
 **Change log v0.4.2 (2026-06-30):**
 - Round-2 code audit fix pass: pins v0.4 non-streaming and streaming
@@ -792,6 +799,16 @@ superseded by v0.1.1/v0.1.2):**
   implementer-verifiable.
 
 ---
+
+## Preliminary conformance unit IDs
+
+SPEC-015 v0.4.3 registers `SPEC-015-R001` in `specs/CONFORMANCE.json` as a
+pending preliminary conformance anchor. This ID groups the existing v0.4
+settlement-capable receipt issuance and ingestion obligations without
+changing them.
+
+`requirement_id_migration` remains `pending`. Physical paid-path evidence is
+tracked by GitHub issue #1022.
 
 ## 0. Operator-paste invocation block
 

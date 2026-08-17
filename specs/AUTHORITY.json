@@ -93,7 +93,7 @@
         "SPEC-041"
       ],
       "status": "pending-reconciliation",
-      "requires_signed_journey_result": false,
+      "requires_signed_journey_result": true,
       "owner": "@Augustas11",
       "issue": "https://github.com/Augustas11/macprovider/issues/614"
     },
