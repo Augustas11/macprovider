@@ -100,6 +100,8 @@ func RewardEligibilityFromBalanceAndTrust(bal AccrualBalance, trust TrustCriteri
 		WalletBound:           trust.WalletBound,
 		VerifiedReceiptCount:  trust.VerifiedReceiptCount,
 		AppAttested:           trust.AppAttested,
+		HardwareEvidenceState: HardwareEvidenceStateUnavailable,
+		ComputeIntegrityState: ComputeIntegrityStateUnknown,
 	})
 }
 
@@ -244,6 +246,7 @@ func primaryRewardReason(withdrawalState, earningState string, reasons []string)
 		ReasonProviderTokenUntrusted,
 		ReasonComputeIntegrityBlocked,
 		ReasonComputeIntegrityPending,
+		ReasonComputeIntegrityUnavailable,
 		ReasonHardwareEvidenceMissingOrExpired,
 		ReasonHardwareEvidenceUnavailable,
 		ReasonHeldWalletDailyCap,

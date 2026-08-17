@@ -913,6 +913,59 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
     }
 
+    func testRewardEligibilityV1OverridesLegacyMalibuPresentation() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.trustTier = .trusted
+        snapshot.providerEarningsFresh = true
+        snapshot.malibuProjectionFresh = true
+        snapshot.malibuAccruedToday = 2
+        snapshot.malibuAccruedAllTime = 2
+        snapshot.malibuWithdrawable = 2
+        snapshot.malibuHeld = 0
+        snapshot.malibuHoldReasons = []
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
+
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "MALIBU is locked until Trusted")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuFullLine(snapshot),
+            "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
+        )
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuHoldLine(snapshot),
+            "MALIBU status: Trust verification is incomplete Next: Complete the remaining trust criteria to unlock withdrawals."
+        )
+    }
+
+    func testProviderEarningsUnknownRewardEligibilityNormalizesUnavailable() throws {
+        let data = Data("""
+        {
+          "wallet_bound": true,
+          "trust_tier": "trusted",
+          "unpaid_ledger_backlog_usdc": 0,
+          "unpaid_ledger_backlog_malibu": 0,
+          "malibu_reward_eligibility": {
+            "schema_version": "malibu_reward_eligibility.v1",
+            "earning_state": "earning",
+            "withdrawal_state": "withdrawable",
+            "primary_reason": "future_reason",
+            "reasons": ["future_reason"]
+          }
+        }
+        """.utf8)
+
+        let decoded = try JSONDecoder().decode(ProviderEarnings.self, from: data)
+        XCTAssertEqual(decoded.malibuRewardEligibility?.schemaVersion, "malibu_reward_eligibility.v1")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.earningState, "unavailable")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.withdrawalState, "unavailable")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.primaryReason, "telemetry_unavailable")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.reasons, ["telemetry_unavailable"])
+    }
+
     func testDefaultPresenterStringsDoNotExposeInternalTerms() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .reconnecting

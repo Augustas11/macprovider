@@ -97,6 +97,56 @@ func TestRewardEligibilityComputePendingBeatsEarningWork(t *testing.T) {
 	}
 }
 
+func TestRewardEligibilityComputeUnavailableBeatsNoBalance(t *testing.T) {
+	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
+		AccruedMALIBU:          "0",
+		WithdrawableMALIBU:     "0",
+		HeldMALIBU:             "0",
+		TrustTier:              TierTrusted,
+		WalletBound:            true,
+		VerifiedReceiptCount:   minVerifiedReceipts,
+		AppAttested:            true,
+		ComputeIntegrityState:  ComputeIntegrityStateUnknown,
+		HardwareEvidenceState:  HardwareEvidenceStateVerified,
+		LocalRuntimeReasons:    []string{ReasonEligibleIdleNoWork},
+		TelemetryUnavailable:   false,
+		ProviderTokenUntrusted: false,
+	})
+
+	if got.EarningState != EarningStateUnavailable {
+		t.Fatalf("earning_state = %q, want %q", got.EarningState, EarningStateUnavailable)
+	}
+	if got.PrimaryReason != ReasonComputeIntegrityUnavailable {
+		t.Fatalf("primary_reason = %q, want %q", got.PrimaryReason, ReasonComputeIntegrityUnavailable)
+	}
+}
+
+func TestRewardEligibilityEndpointDefaultsUnwiredSourcesUnavailable(t *testing.T) {
+	got := RewardEligibilityFromBalanceAndTrust(
+		AccrualBalance{
+			AccruedMALIBU:      "0",
+			WithdrawableMALIBU: "0",
+			HeldMALIBU:         "0",
+			TrustTier:          TierTrusted,
+		},
+		TrustCriteriaStatus{
+			WalletBound:          true,
+			VerifiedReceiptCount: minVerifiedReceipts,
+			AppAttested:          true,
+		},
+	)
+
+	if got.EarningState != EarningStateUnavailable {
+		t.Fatalf("earning_state = %q, want %q", got.EarningState, EarningStateUnavailable)
+	}
+	if got.PrimaryReason != ReasonComputeIntegrityUnavailable {
+		t.Fatalf("primary_reason = %q, want %q", got.PrimaryReason, ReasonComputeIntegrityUnavailable)
+	}
+	if !containsReason(got.Reasons, ReasonHardwareEvidenceUnavailable) {
+		t.Fatalf("reasons = %v, want hardware unavailable", got.Reasons)
+	}
+}
+
 func TestRewardEligibilityEarningWorkCanBePrimary(t *testing.T) {
 	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
 		AccruedMALIBU:        "0",
