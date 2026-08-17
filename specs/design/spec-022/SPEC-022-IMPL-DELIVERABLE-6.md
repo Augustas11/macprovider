@@ -21,8 +21,14 @@ Buyer-facing docs, account disclosure text, and static console copy now state:
 - `quarantined` and `zero_settled` are not buyer-fault labels;
 - partial charges after cancel, timeout, provider error, or upstream disconnect
   require receipt-bound delivered-output prefix and partial usage;
-- streaming failover bills only delivered, receipt-verified output and does
-  not double-charge overlapping output;
+- streaming failover is transparent only before response bytes are committed;
+  after the first buyer-visible SSE event, a provider disconnect terminates the
+  stream with `provider_disconnected` and the buyer may retry as a new request;
+  that retry is a separate billable request with its own reservation and
+  settlement, and cross-request overlapping output is not deduplicated;
+  settlement remains limited to delivered, receipt-verified output prefixes and
+  must not double-charge overlapping output if a future resume or failover
+  protocol spans multiple provider attempts;
 - buyer receipt/status surfaces expose labels without raw prompts or raw
   outputs.
 

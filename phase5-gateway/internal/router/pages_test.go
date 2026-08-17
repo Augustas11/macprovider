@@ -124,6 +124,21 @@ func TestTier1DisclosureMatchesSpecSection16(t *testing.T) {
 				t.Fatalf("%s disclosure missing from %s surface", item.Key, surface.name)
 			}
 		}
+		for _, want := range []string{
+			"before response bytes are committed",
+			"provider_disconnected",
+			"new request",
+			"separate billable request",
+			"cross-request overlapping output is not deduplicated",
+			"must not double-charge overlapping output",
+		} {
+			if !strings.Contains(normalized, want) {
+				t.Fatalf("%s surface missing streaming failover disclosure %q", surface.name, want)
+			}
+		}
+		if strings.Contains(normalized, "Transparent streaming failover bills") {
+			t.Fatalf("%s surface contains stale transparent streaming failover claim", surface.name)
+		}
 	}
 }
 

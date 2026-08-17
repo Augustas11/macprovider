@@ -14,7 +14,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.11.1 | normative | pending | pending: 1 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart Router | 0.3.3 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
 | SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.1 | normative | pending | pending corpus migration | [SPEC-005-billing.md](SPEC-005-billing.md) |
-| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.14 | normative | pending | pending corpus migration | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
+| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.15 | normative | pending | pending corpus migration | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.1 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.5.1 | normative | pending | pending: 1 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | normative | pending | pending corpus migration | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
@@ -30,7 +30,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.5 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.11 | normative | pending | pending: 4 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU bootstrap rewards emission ledger | 0.1.0 | draft | pending | pending corpus migration | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
-| SPEC-022 | Verified model settlement | v0.1.6 | draft | complete | pending: 11 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
+| SPEC-022 | Verified model settlement | v0.1.7 | draft | complete | pending: 11 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.9.3 | normative | pending | conformant: 2 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.1 | normative | pending | pending corpus migration | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.22 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
