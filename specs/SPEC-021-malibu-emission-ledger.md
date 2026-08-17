@@ -1,8 +1,22 @@
 # SPEC-021 — MALIBU rewards emission ledger
 
-**Version:** 0.2.0 (2026-08-17, verified useful-work accrual)
+**Version:** 0.3.0 (2026-08-17, reward audit trail)
 **Status:** DRAFT — implementation target for Session C (`ops/runbooks/malibu-bootstrap-emission.md`)  
 **Depends on:** SPEC-026 v0.13 §5.1–§5.2, §5.5, §10 step 8; SPEC-017 v0.1.8 (`provider_rewards_ledger`); SPEC-016 v0.1.19 (`provider_payout_addresses` projection); SPEC-022 (verified-receipt-only USDC earnings)
+
+**Change log v0.3.0 (2026-08-17, reward audit trail):**
+- Adds append-only `malibu_reward_audit_events` rows for MALIBU accrual,
+  hold application/clearance, wallet projection, trust-tier transitions, and
+  reserved withdrawal/eligibility events.
+- Defines provider-token-authenticated `GET /v1/provider/malibu-reward-audit`
+  with stable event IDs, bounded cursor pagination, provider isolation, and a
+  provider-safe field allowlist.
+- Defines operator-authenticated `GET /admin/malibu-reward-audit` for
+  correlation to ledger IDs, source reasons, trust transitions, and external
+  idempotency references without exposing those fields in provider responses.
+- Pins retention and sensitive-field exclusions: raw prompts, raw outputs,
+  bearer tokens, request payloads, operator secrets, and arbitrary metadata
+  MUST NOT be serialized into provider-visible audit events.
 
 **Change log v0.2.0 (2026-08-17, verified useful-work accrual):**
 - Adds `malibu_verified_useful_work_v0_2` ledger rows derived only from
@@ -130,13 +144,59 @@ CREATE TABLE provider_payout_addresses_proj (
 
 Maintained by the wallet-mirror worker (§4.2). Staleness is monitored via mirror heartbeat, not row age alone.
 
-### 2.5 `rewards_writer` Postgres role
+### 2.5 `malibu_reward_audit_events`
+
+Append-only audit trail for MALIBU reward state:
+
+| Column | Type | Semantics |
+|--------|------|-----------|
+| `id` | `BIGSERIAL PRIMARY KEY` | Stable event identity. Provider/operator APIs render this as `mra_<id>`. |
+| `provider_id` | `TEXT NOT NULL` | Provider subject. Provider reads MUST derive this from bearer auth, never from query/body input. |
+| `occurred_at` | `TIMESTAMPTZ NOT NULL` | Event creation/transition time in UTC. |
+| `event_type` | `TEXT NOT NULL` | Closed vocabulary below. |
+| `ledger_id` | `BIGINT NULL` | Optional `provider_rewards_ledger.id` correlation for money-path rows. |
+| `amount_malibu` | `NUMERIC(24,8) NULL` | Reward amount when event concerns a ledger amount. |
+| `withdrawal_hold_reason` | `TEXT NULL` | Closed hold reason when event applies/clears a hold. |
+| `trust_tier` | `TEXT NULL` | Trust tier when event concerns trust state. |
+| `source_reason` | `TEXT NULL` | Ledger source reason such as `malibu_bootstrap_tick` or `malibu_verified_useful_work_v0_2`. |
+| `safe_summary` | `TEXT NOT NULL` | Provider-safe sentence; no secrets or raw prompt/output data. |
+| `operator_correlation` | `JSONB NOT NULL` | Operator-only correlation keys, e.g. ledger ID, source reason, and idempotency external-ref. |
+
+Closed `event_type` vocabulary:
+
+| Value | Meaning |
+|-------|---------|
+| `malibu_accrual_inserted` | A MALIBU ledger row was inserted. |
+| `malibu_hold_applied` | A withdrawal hold was applied to a reward row. |
+| `malibu_hold_cleared` | A withdrawal hold was cleared, e.g. cap replay. |
+| `wallet_daily_cap_applied` | A wallet daily cap hold was applied. |
+| `wallet_bind_projected` | A payout wallet projection changed and cap replay is pending. |
+| `trust_tier_promoted` | Provider trust tier transitioned to `trusted`. |
+| `trust_tier_demoted` | Provider trust tier transitioned to `provisional`. |
+| `withdrawal_candidate_selected` | Reserved for the withdrawal runner selecting a candidate row. |
+| `withdrawal_candidate_skipped` | Reserved for the withdrawal runner skipping a candidate row. |
+| `eligibility_reason_changed` | Reserved for future reward-eligibility reason transitions. |
+
+Provider-visible audit responses MUST NOT include `operator_correlation`,
+`external_ref`, raw request payloads, raw prompts, raw outputs, bearer tokens,
+operator secrets, full arbitrary metadata maps, or internal notes. Operator
+responses MAY include `operator_correlation`, but the column itself remains an
+allowlisted JSON object owned by this spec; it MUST NOT become a dump of
+unreviewed request/provider metadata.
+
+Retention: audit rows are append-only and retained for at least **180 days**.
+Any compaction/archive after that window MUST preserve `id`, `provider_id`,
+`occurred_at`, `event_type`, `ledger_id`, `withdrawal_hold_reason`, and
+`safe_summary` for dispute/support correlation.
+
+### 2.6 `rewards_writer` Postgres role
 
 Dedicated runtime role for emission writes:
 
 - `INSERT` on `provider_rewards_ledger`, `wallet_daily_malibu_emission`, `provider_emission_state`
 - `UPDATE` on `wallet_daily_malibu_emission`, `provider_emission_state`
-- `SELECT` on projection + ledger + state tables
+- `SELECT` on projection + ledger + state + audit tables
+- `INSERT` on `malibu_reward_audit_events`
 - **No** `DELETE`, `TRUNCATE`, or DDL
 - Emission transactions run at **`SERIALIZABLE`** isolation with **retry-on-40001** (max 5 attempts, exponential backoff 10–160ms)
 
@@ -295,7 +355,50 @@ USDC `ledger_payout_ready` runner is unchanged.
 
 `withdrawable_malibu` sums ledger rows where `withdrawal_hold_reason IS NULL`.
 
-### 5.1 `malibu_reward_eligibility.v1`
+### 5.1 Reward audit API
+
+`GET /v1/provider/malibu-reward-audit?limit=25&before_id=mra_123`
+(provider-token auth) returns recent provider-scoped audit events:
+
+```json
+{
+  "events": [
+    {
+      "id": "mra_42",
+      "occurred_at": "2026-08-17T12:00:00Z",
+      "event_type": "malibu_hold_applied",
+      "ledger_id": 917,
+      "amount_malibu": "0.26041667",
+      "withdrawal_hold_reason": "trust_tier_provisional",
+      "trust_tier": "provisional",
+      "source_reason": "malibu_bootstrap_tick",
+      "summary": "Reward hold applied because the provider is provisional."
+    }
+  ],
+  "next_before_id": "mra_41"
+}
+```
+
+Rules:
+
+- Provider identity MUST come from the bearer token. A provider request MUST
+  NOT accept `provider_id` as a query/body override.
+- `limit` defaults to 25 and MUST be bounded to 1..100.
+- Pagination is keyset pagination using `before_id`; cursors are stable
+  `mra_<id>` event IDs.
+- Provider events are ordered newest first.
+- Provider responses MUST use the field allowlist above and exclude
+  `operator_correlation` and `external_ref`.
+- Unknown event types under a known schema version MUST be rendered as
+  "reward status updated" copy and logged for client upgrade.
+
+`GET /admin/malibu-reward-audit?provider_id=<id>&limit=25&before_id=mra_123`
+(operator bearer auth) returns the same events plus `provider_id` and
+`operator_correlation`, allowing support and operators to correlate a provider
+visible event with the authoritative ledger row, trust transition, source
+reason, and useful-work idempotency key.
+
+### 5.2 `malibu_reward_eligibility.v1`
 
 `reward_eligibility` is the coordinator-owned provider read model for whether
 MALIBU is currently earnable, held, capped, withdrawable, ineligible, or
@@ -404,7 +507,18 @@ Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 
 ---
 
-## 8. Acceptance criteria
+## 8. Normative requirements
+
+| Requirement | Status | Text |
+|-------------|--------|------|
+| `SPEC-021-R001` | Draft | MALIBU reward mutations MUST persist append-only audit events for accrual insertion, hold application/clearance, wallet projection, and trust-tier promotion/demotion. |
+| `SPEC-021-R002` | Draft | Provider reward-audit reads MUST authenticate with provider bearer tokens, derive provider identity from the token, enforce provider isolation, and use bounded stable cursor pagination. |
+| `SPEC-021-R003` | Draft | Provider-visible reward-audit events MUST use a fixed safe field allowlist and MUST NOT expose operator correlation, external refs, raw prompts, raw outputs, bearer tokens, operator secrets, arbitrary metadata, or internal notes. |
+| `SPEC-021-R004` | Draft | Operator reward-audit reads MUST require operator auth and return enough correlation to map provider-visible events to ledger IDs, source reasons, trust transitions, and idempotency references. |
+
+---
+
+## 9. Acceptance criteria
 
 - [ ] Provisional provider accrues MALIBU with `withdrawal_hold_reason = trust_tier_provisional`
 - [ ] Second `provider_id` on same wallet cannot exceed 100 MALIBU/day wallet aggregate
@@ -413,12 +527,16 @@ Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 - [ ] Non-verified, missing-receipt, quarantined, or legacy/observe-only rows do not accrue v0.2 useful-work MALIBU
 - [ ] Duplicate settlement/mirror replay with the same `spec022:<request_id>:<attempt_n>:<provider_id>` external ref does not mint a second row or advance cap counters
 - [ ] Existing v0.1 `malibu_bootstrap_tick` balances remain readable and are not reclassified
+- [ ] Provider reward audit API returns recent events with stable IDs, bounded pagination, and no cross-provider leakage
+- [ ] Provider reward audit API excludes operator correlation, external refs, raw prompts/outputs, bearer tokens, and arbitrary metadata
+- [ ] Operator reward audit query returns provider/ledger/trust correlation for support and dispute investigation
+- [ ] Cap replay and trust demotion/promotion produce corresponding audit events
 - [ ] `rewards_writer` cannot SELECT from `partner_keys` or write `stats_*` rollup tables
 - [ ] Migration is idempotent; existing `amount_usd` leaderboard rollup continues to work
 
 ---
 
-## 9. Open questions
+## 10. Open questions
 
 1. Cohort telemetry may adjust 100 MALIBU/day wallet cap (SPEC-026 §13).
 2. Whether bootstrap tick remains permanently as an early-network floor or is disabled after demand reaches a stable threshold remains an operator policy choice.
@@ -426,4 +544,4 @@ Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 
 ---
 
-*End of SPEC-MALIBU-EMISSION-LEDGER v0.2.0.*
+*End of SPEC-MALIBU-EMISSION-LEDGER v0.3.0.*

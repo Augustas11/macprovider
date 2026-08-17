@@ -929,6 +929,7 @@ func main() {
 			DB:           rewardsDB,
 			OperatorKeys: cfg.Auth.OperatorKeys,
 		}))
+		providerMux.Handle("/admin/malibu-reward-audit", malibuRewardAuditAdminHandler(cfg, rewardsDB))
 	}
 
 	// SPEC-016 §4.1 — wire the payout package. Migrations + asserts
@@ -1099,6 +1100,7 @@ func main() {
 		hardwareEvidence,
 		enrollHandler,
 		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
+		malibuRewardAuditHandler(cfg, tokenStore, rewardsDB),
 	)
 	if liveMDAService != nil {
 		buyerHandler = withMDMDeviceBinding(buyerHandler, liveMDAService.HandleDeviceBinding)
@@ -2278,7 +2280,7 @@ func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Ha
 	})
 }
 
-func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence, enroll http.HandlerFunc, malibuAccrual http.Handler) http.Handler {
+func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence, enroll http.HandlerFunc, malibuAccrual, malibuRewardAudit http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	if enabled {
 		mux.HandleFunc("/v1/providers/register", register)
@@ -2290,6 +2292,9 @@ func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, 
 	}
 	if malibuAccrual != nil {
 		mux.Handle("/v1/provider/malibu-accrual", malibuAccrual)
+	}
+	if malibuRewardAudit != nil {
+		mux.Handle("/v1/provider/malibu-reward-audit", malibuRewardAudit)
 	}
 	mux.Handle("/", base)
 	return mux
@@ -2394,6 +2399,27 @@ func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *
 		RequireProviderTokens: cfg.Auth.RequireProviderTokens,
 		Config:                rewardsCfg,
 		Connectivity:          connectivity,
+	})
+}
+
+func malibuRewardAuditHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *sql.DB) http.Handler {
+	if rewardsDB == nil {
+		return nil
+	}
+	return rewards.NewRewardAuditHandler(rewards.AuditHandlerDeps{
+		DB:                    rewardsDB,
+		TokenStore:            tokenStore,
+		RequireProviderTokens: cfg.Auth.RequireProviderTokens,
+	})
+}
+
+func malibuRewardAuditAdminHandler(cfg config.Config, rewardsDB *sql.DB) http.Handler {
+	if rewardsDB == nil {
+		return nil
+	}
+	return rewards.NewRewardAuditAdminHandler(rewards.AuditHandlerDeps{
+		DB:          rewardsDB,
+		OperatorKey: cfg.Auth.OperatorKey,
 	})
 }
 

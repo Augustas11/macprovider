@@ -32,6 +32,14 @@ type pgFixture struct {
 	dbName    string
 }
 
+type testConnectivity struct {
+	ok bool
+}
+
+func (c *testConnectivity) HeartbeatOK(string, time.Time) bool {
+	return c.ok
+}
+
 func (f *pgFixture) adminDSN() string {
 	return fmt.Sprintf("postgres://postgres:%s@%s:%s/%s?sslmode=disable", roleAdminPassword, f.host, f.port, f.dbName)
 }
@@ -108,6 +116,20 @@ func testEmissionConfig(tickInterval time.Duration, providerCap, walletCap float
 	}
 }
 
+func testSQLitePayoutDBPath(t *testing.T) string {
+	t.Helper()
+	path := t.TempDir() + "/payout.db"
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open sqlite payout db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec("PRAGMA user_version = 1"); err != nil {
+		t.Fatalf("initialize sqlite payout db: %v", err)
+	}
+	return path
+}
+
 func TestProvisionalAccrualSetsWithdrawalHold(t *testing.T) {
 	fx, adminDB := startPostgres(t)
 	writerDB := openRewardsWriter(t, fx)
@@ -155,6 +177,176 @@ func TestProvisionalAccrualSetsWithdrawalHold(t *testing.T) {
 	}
 }
 
+func TestRewardAuditEventsAreProviderScopedPaginatedAndRedacted(t *testing.T) {
+	fx, _ := startPostgres(t)
+	writerDB := openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	for _, pid := range []string{"p_audit_a", "p_audit_b"} {
+		if _, err := writerDB.ExecContext(ctx, `
+            INSERT INTO provider_emission_state (provider_id, trust_tier)
+            VALUES ($1, 'provisional')
+        `, pid); err != nil {
+			t.Fatalf("seed state %s: %v", pid, err)
+		}
+	}
+
+	cfg := testEmissionConfig(time.Hour, 25, 100)
+	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	if err := runner.RunEmissionTickOnce(ctx); err != nil {
+		t.Fatalf("emission tick: %v", err)
+	}
+
+	page, err := rewards.QueryRewardAuditEvents(ctx, writerDB, rewards.RewardAuditQuery{
+		ProviderID: "p_audit_a",
+		Limit:      1,
+	})
+	if err != nil {
+		t.Fatalf("query provider audit: %v", err)
+	}
+	if len(page.Events) != 1 {
+		t.Fatalf("events=%d want 1", len(page.Events))
+	}
+	firstID := page.Events[0].EventID
+	if page.Events[0].ProviderID != "" {
+		t.Fatalf("provider response leaked provider_id %q", page.Events[0].ProviderID)
+	}
+	if page.Events[0].OperatorCorrelation != nil {
+		t.Fatalf("provider response leaked operator correlation: %#v", page.Events[0].OperatorCorrelation)
+	}
+	if page.Events[0].EventID == "" || page.NextBeforeID == "" {
+		t.Fatalf("missing event id or next cursor: event=%q next=%q", page.Events[0].EventID, page.NextBeforeID)
+	}
+
+	beforeID, err := rewards.ParseAuditBeforeID(page.NextBeforeID)
+	if err != nil {
+		t.Fatalf("parse next cursor: %v", err)
+	}
+	nextPage, err := rewards.QueryRewardAuditEvents(ctx, writerDB, rewards.RewardAuditQuery{
+		ProviderID: "p_audit_a",
+		Limit:      10,
+		BeforeID:   beforeID,
+	})
+	if err != nil {
+		t.Fatalf("query next provider audit: %v", err)
+	}
+	if len(nextPage.Events) == 0 {
+		t.Fatal("expected older audit event on next page")
+	}
+	if nextPage.Events[0].EventID == firstID {
+		t.Fatalf("pagination repeated first event %q", firstID)
+	}
+
+	operatorPage, err := rewards.QueryRewardAuditEvents(ctx, writerDB, rewards.RewardAuditQuery{
+		ProviderID:      "p_audit_a",
+		Limit:           10,
+		IncludeProvider: true,
+		IncludeOperator: true,
+	})
+	if err != nil {
+		t.Fatalf("query operator audit: %v", err)
+	}
+	for _, evt := range operatorPage.Events {
+		if evt.ProviderID != "p_audit_a" {
+			t.Fatalf("operator event provider_id=%q want p_audit_a", evt.ProviderID)
+		}
+		if evt.OperatorCorrelation == nil || evt.OperatorCorrelation["ledger_id"] == "" {
+			t.Fatalf("operator event missing ledger correlation: %#v", evt.OperatorCorrelation)
+		}
+	}
+}
+
+func TestTrustTierTransitionsWriteRewardAuditEvents(t *testing.T) {
+	fx, _ := startPostgres(t)
+	writerDB := openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	providerID := "p_trust_audit"
+	windowOpen := time.Now().UTC().Add(-73 * time.Hour)
+	if _, err := writerDB.ExecContext(ctx, `
+        INSERT INTO provider_emission_state (provider_id, trust_tier)
+        VALUES ($1, 'provisional');
+
+        INSERT INTO provider_trust_eval_state
+            (provider_id, uptime_ok_since, unlock_pair_ok_since, last_eval_at, updated_at)
+        VALUES ($1, $2, $2, now(), now());
+
+        INSERT INTO provider_trust_operator_promotions
+            (provider_id, promoted_by, reason, pending_id)
+        VALUES ($1, 'integration-test', 'trust audit transition coverage', '00000000-0000-0000-0000-000000001021');
+    `, providerID, windowOpen); err != nil {
+		t.Fatalf("seed trust transition state: %v", err)
+	}
+
+	cfg := testEmissionConfig(time.Hour, 25, 100)
+	cfg.SQLitePayoutDBPath = testSQLitePayoutDBPath(t)
+	connectivity := &testConnectivity{ok: true}
+	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{
+		Connectivity: connectivity,
+	})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+
+	if err := runner.RunUnlockEvalOnce(ctx); err != nil {
+		t.Fatalf("promote provider: %v", err)
+	}
+
+	connectivity.ok = false
+	if err := runner.RunUnlockEvalOnce(ctx); err != nil {
+		t.Fatalf("demote provider: %v", err)
+	}
+
+	if _, err := writerDB.ExecContext(ctx, `
+        UPDATE provider_emission_state
+           SET demotion_cooldown_until = now() - interval '1 hour'
+         WHERE provider_id = $1;
+
+        UPDATE provider_trust_eval_state
+           SET uptime_ok_since = $2,
+               unlock_pair_ok_since = $2,
+               updated_at = now()
+         WHERE provider_id = $1;
+    `, providerID, windowOpen); err != nil {
+		t.Fatalf("seed requalification window: %v", err)
+	}
+	connectivity.ok = true
+	if err := runner.RunUnlockEvalOnce(ctx); err != nil {
+		t.Fatalf("requalify provider: %v", err)
+	}
+
+	page, err := rewards.QueryRewardAuditEvents(ctx, writerDB, rewards.RewardAuditQuery{
+		ProviderID:      providerID,
+		Limit:           10,
+		IncludeProvider: true,
+		IncludeOperator: true,
+	})
+	if err != nil {
+		t.Fatalf("query trust audit events: %v", err)
+	}
+	got := make([]string, 0, len(page.Events))
+	for _, evt := range page.Events {
+		if evt.ProviderID != providerID {
+			t.Fatalf("event provider_id=%q want %q", evt.ProviderID, providerID)
+		}
+		if evt.OperatorCorrelation == nil || evt.OperatorCorrelation["transition"] != evt.EventType {
+			t.Fatalf("missing trust transition correlation for %s: %#v", evt.EventType, evt.OperatorCorrelation)
+		}
+		got = append(got, evt.EventType)
+	}
+	want := []string{
+		rewards.AuditEventTrustTierPromoted,
+		rewards.AuditEventTrustTierDemoted,
+		rewards.AuditEventTrustTierPromoted,
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("trust audit events = %v, want %v", got, want)
+	}
+}
+
 func TestWalletDailyCapAcrossProviders(t *testing.T) {
 	fx, adminDB := startPostgres(t)
 	writerDB := openRewardsWriter(t, fx)
@@ -191,6 +383,23 @@ func TestWalletDailyCapAcrossProviders(t *testing.T) {
 	}
 	if sum > 100.0001 {
 		t.Fatalf("wallet aggregate %v exceeds cap 100", sum)
+	}
+
+	page, err := rewards.QueryRewardAuditEvents(ctx, writerDB, rewards.RewardAuditQuery{
+		ProviderID: "p_b",
+		Limit:      50,
+	})
+	if err != nil {
+		t.Fatalf("query p_b audit: %v", err)
+	}
+	var sawWalletCap bool
+	for _, evt := range page.Events {
+		if evt.EventType == rewards.AuditEventWalletDailyCapApplied {
+			sawWalletCap = true
+		}
+	}
+	if !sawWalletCap {
+		t.Fatal("expected wallet_daily_cap_applied audit event even while provisional hold remains primary")
 	}
 }
 
@@ -489,5 +698,22 @@ func TestCapReplayPendingDoesNotDesyncConnection(t *testing.T) {
 	}
 	if capReplayPending {
 		t.Fatal("cap_replay_pending should be cleared after successful replay")
+	}
+
+	auditPage, err := rewards.QueryRewardAuditEvents(ctx, writerDB, rewards.RewardAuditQuery{
+		ProviderID: providerID,
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("query audit events: %v", err)
+	}
+	var sawHoldCleared bool
+	for _, evt := range auditPage.Events {
+		if evt.EventType == rewards.AuditEventMalibuHoldCleared {
+			sawHoldCleared = true
+		}
+	}
+	if !sawHoldCleared {
+		t.Fatal("expected malibu_hold_cleared audit event after cap replay")
 	}
 }

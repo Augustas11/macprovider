@@ -97,6 +97,19 @@ func (r *Runner) upsertProjection(ctx context.Context, addr PayoutAddress, now t
                 END,
                 updated_at = $5
         `, addr.ProviderID, TierProvisional, addr.Address, replay, now)
+		if err != nil {
+			return err
+		}
+		if !replay {
+			return nil
+		}
+		_, err = insertRewardAuditEvent(ctx, tx, RewardAuditInsert{
+			ProviderID:          addr.ProviderID,
+			OccurredAt:          now,
+			EventType:           AuditEventWalletBindProjected,
+			SafeSummary:         "Payout wallet projection updated; wallet-cap replay is pending.",
+			OperatorCorrelation: map[string]string{"chain": addr.Chain},
+		})
 		return err
 	})
 }
