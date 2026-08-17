@@ -6,12 +6,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 )
 
 type tokenValidator interface {
 	ValidateAndMarkTokenUsed(ctx context.Context, raw string) (subject string, ok bool, err error)
+}
+
+type readOnlyTokenValidator interface {
+	ValidateTokenReadOnly(ctx context.Context, raw string) (subject string, ok bool, err error)
 }
 
 // AccrualHandlerDeps wires the provider MALIBU accrual endpoint.
@@ -99,10 +104,15 @@ type AuditHandlerDeps struct {
 	TokenStore            tokenValidator
 	RequireProviderTokens bool
 	OperatorKey           string
+	Limiter               *RewardAuditLimiter
 }
 
 // NewRewardAuditHandler serves GET /v1/provider/malibu-reward-audit.
 func NewRewardAuditHandler(deps AuditHandlerDeps) http.Handler {
+	limiter := deps.Limiter
+	if limiter == nil {
+		limiter = NewRewardAuditLimiter(60, 4)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -118,11 +128,18 @@ func NewRewardAuditHandler(deps AuditHandlerDeps) http.Handler {
 			writeAuditJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
-		providerID, ok, err := deps.TokenStore.ValidateAndMarkTokenUsed(r.Context(), raw)
+		providerID, ok, err := validateAuditToken(r.Context(), deps.TokenStore, raw)
 		if err != nil || !ok || providerID == "" {
 			writeAuditJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
+		release, ok := limiter.Allow(providerID, time.Now().UTC())
+		if !ok {
+			w.Header().Set("Retry-After", "1")
+			writeAuditJSON(w, http.StatusTooManyRequests, map[string]any{"error": "rate_limited"})
+			return
+		}
+		defer release()
 		limit, beforeID, ok := parseAuditPage(w, r)
 		if !ok {
 			return
@@ -138,6 +155,13 @@ func NewRewardAuditHandler(deps AuditHandlerDeps) http.Handler {
 		}
 		writeAuditJSON(w, http.StatusOK, page)
 	})
+}
+
+func validateAuditToken(ctx context.Context, store tokenValidator, raw string) (string, bool, error) {
+	if ro, ok := store.(readOnlyTokenValidator); ok {
+		return ro.ValidateTokenReadOnly(ctx, raw)
+	}
+	return store.ValidateAndMarkTokenUsed(ctx, raw)
 }
 
 // NewRewardAuditAdminHandler serves GET /admin/malibu-reward-audit?provider_id=...

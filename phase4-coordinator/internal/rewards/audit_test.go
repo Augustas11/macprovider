@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 type fakeAuditTokens map[string]string
@@ -12,6 +13,22 @@ type fakeAuditTokens map[string]string
 func (f fakeAuditTokens) ValidateAndMarkTokenUsed(_ context.Context, raw string) (string, bool, error) {
 	providerID, ok := f[raw]
 	return providerID, ok, nil
+}
+
+type readOnlyAuditTokens struct {
+	providerID string
+	readOnly   int
+	marked     int
+}
+
+func (f *readOnlyAuditTokens) ValidateTokenReadOnly(context.Context, string) (string, bool, error) {
+	f.readOnly++
+	return f.providerID, true, nil
+}
+
+func (f *readOnlyAuditTokens) ValidateAndMarkTokenUsed(context.Context, string) (string, bool, error) {
+	f.marked++
+	return f.providerID, true, nil
 }
 
 func TestParseAuditPageBounds(t *testing.T) {
@@ -54,6 +71,71 @@ func TestRewardAuditHandlerAuthAndCursorValidation(t *testing.T) {
 	h.ServeHTTP(badLimit, req)
 	if badLimit.Code != http.StatusBadRequest {
 		t.Fatalf("bad limit code=%d body=%s", badLimit.Code, badLimit.Body.String())
+	}
+}
+
+func TestRewardAuditHandlerPrefersReadOnlyTokenValidation(t *testing.T) {
+	tokens := &readOnlyAuditTokens{providerID: "provider-a"}
+	h := NewRewardAuditHandler(AuditHandlerDeps{
+		TokenStore:            tokens,
+		RequireProviderTokens: true,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/provider/malibu-reward-audit?limit=101", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if tokens.readOnly != 1 || tokens.marked != 0 {
+		t.Fatalf("validation calls readOnly=%d marked=%d, want readOnly only", tokens.readOnly, tokens.marked)
+	}
+}
+
+func TestRewardAuditLimiterEnforcesProviderWindowAndConcurrency(t *testing.T) {
+	limiter := NewRewardAuditLimiter(2, 1)
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+
+	release, ok := limiter.Allow("provider-a", now)
+	if !ok {
+		t.Fatal("first request should be allowed")
+	}
+	if _, ok := limiter.Allow("provider-a", now); ok {
+		t.Fatal("second concurrent request should be rejected")
+	}
+	release()
+	release, ok = limiter.Allow("provider-a", now)
+	if !ok {
+		t.Fatal("second request after release should be allowed")
+	}
+	release()
+	if _, ok := limiter.Allow("provider-a", now); ok {
+		t.Fatal("third request in the same minute should be rate limited")
+	}
+	if release, ok := limiter.Allow("provider-a", now.Add(time.Minute)); !ok {
+		t.Fatal("next window should be allowed")
+	} else {
+		release()
+	}
+}
+
+func TestRewardAuditLimiterPreservesInflightAcrossMinuteRollover(t *testing.T) {
+	limiter := NewRewardAuditLimiter(10, 1)
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+
+	releaseA, ok := limiter.Allow("provider-a", now)
+	if !ok {
+		t.Fatal("first request should be allowed")
+	}
+	if _, ok := limiter.Allow("provider-a", now.Add(time.Minute)); ok {
+		t.Fatal("second request in next window must be rejected while first remains in flight")
+	}
+	releaseA()
+	if release, ok := limiter.Allow("provider-a", now.Add(time.Minute)); !ok {
+		t.Fatal("request after release should be allowed")
+	} else {
+		release()
 	}
 }
 

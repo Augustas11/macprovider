@@ -261,7 +261,8 @@ only by `malibu_emission.enabled`; v0.2 does not reclassify them.
   Wallet-cap terminal markers use
   `withdrawal_hold_reason = per_wallet_daily_cap` and a paired
   `wallet_daily_cap_applied` audit event so the provider read model remains
-  capped for the UTC day.
+  capped for the UTC day unless a later `malibu_hold_cleared` audit event
+  clears the same ledger row.
 - Formula:
 
 ```text
@@ -468,8 +469,8 @@ Precedence:
 2. `held_wallet_daily_cap` and `held_provider_daily_cap` outrank
    `held_provisional_trust_tier` when both are present, so clients can render
    cap-specific copy. `held_wallet_daily_cap` MAY be derived from same-UTC-day
-   `wallet_daily_cap_applied` audit events when a provisional ledger row can
-   store only `trust_tier_provisional` as its primary hold.
+   un-cleared `wallet_daily_cap_applied` audit events when a provisional ledger
+   row can store only `trust_tier_provisional` as its primary hold.
 3. `missing_wallet_binding` blocks MALIBU withdrawal readiness and outranks raw
    withdrawable ledger balance and generic proof-source unavailable reasons for
    `primary_reason`.

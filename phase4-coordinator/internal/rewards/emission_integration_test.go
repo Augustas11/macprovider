@@ -185,7 +185,10 @@ func TestZeroWalletCapMarkerDoesNotBecomePermanentHold(t *testing.T) {
 	if _, err := adminDB.ExecContext(ctx, `
         INSERT INTO provider_emission_state (provider_id, trust_tier, bound_wallet)
         VALUES ('p_zero_marker', 'trusted', '0xzero');
-
+    `); err != nil {
+		t.Fatalf("seed provider state: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `
         INSERT INTO provider_rewards_ledger
             (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason, external_ref)
         VALUES
@@ -785,12 +788,23 @@ func TestCapReplayPendingDoesNotDesyncConnection(t *testing.T) {
 	}
 
 	heldUnixTS := time.Now().UTC().Add(-time.Hour).Unix()
-	if _, err := adminDB.ExecContext(ctx, `
+	var heldLedgerID int64
+	if err := adminDB.QueryRowContext(ctx, `
         INSERT INTO provider_rewards_ledger
             (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason)
         VALUES ($1, $2, 10, $3, 'malibu_bootstrap_tick')
-    `, providerID, heldUnixTS, rewards.HoldPerWalletDailyCap); err != nil {
+        RETURNING id
+    `, providerID, heldUnixTS, rewards.HoldPerWalletDailyCap).Scan(&heldLedgerID); err != nil {
 		t.Fatalf("seed held ledger row: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO malibu_reward_audit_events
+            (provider_id, event_type, ledger_id, amount_malibu,
+             withdrawal_hold_reason, trust_tier, source_reason, safe_summary)
+        VALUES ($1, $2, $3, 10, $4, 'trusted', 'malibu_bootstrap_tick',
+                'Reward hit the per-wallet daily cap.')
+    `, providerID, rewards.AuditEventWalletDailyCapApplied, heldLedgerID, rewards.HoldPerWalletDailyCap); err != nil {
+		t.Fatalf("seed wallet cap audit event: %v", err)
 	}
 
 	cfg := testEmissionConfig(time.Hour, 25, 100)
@@ -852,5 +866,21 @@ func TestCapReplayPendingDoesNotDesyncConnection(t *testing.T) {
 	}
 	if !sawHoldCleared {
 		t.Fatal("expected malibu_hold_cleared audit event after cap replay")
+	}
+
+	bal, err := rewards.QueryAccrualBalance(ctx, writerDB, providerID, cfg)
+	if err != nil {
+		t.Fatalf("query accrual balance after cap replay: %v", err)
+	}
+	if testContainsString(bal.HoldReasons, rewards.HoldPerWalletDailyCap) {
+		t.Fatalf("hold reasons after cap replay = %v, want wallet cap cleared", bal.HoldReasons)
+	}
+	eligibility := rewards.RewardEligibilityFromBalanceAndTrust(bal, rewards.TrustCriteriaStatus{
+		WalletBound:          true,
+		VerifiedReceiptCount: 999,
+		AppAttested:          true,
+	})
+	if eligibility.PrimaryReason == rewards.ReasonHeldWalletDailyCap {
+		t.Fatalf("primary_reason after cap replay = %q, want wallet cap cleared", eligibility.PrimaryReason)
 	}
 }

@@ -384,6 +384,8 @@ func TestNginxMalibuRewardAuditRouteBeforeV1CatchAll(t *testing.T) {
 		t.Fatal("/v1/provider/malibu-reward-audit route must appear before /v1/ catch-all")
 	}
 	for _, needle := range []string{
+		"limit_req zone=reward_audit_provider_rate burst=20 nodelay;",
+		"limit_req_status 429;",
 		"proxy_pass http://127.0.0.1:8443/v1/provider/malibu-reward-audit;",
 		"proxy_set_header Authorization $http_authorization;",
 		"add_header Cache-Control \"no-store\" always;",

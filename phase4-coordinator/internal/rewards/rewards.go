@@ -287,12 +287,21 @@ func walletDailyCapAppliedToday(ctx context.Context, db *sql.DB, providerID stri
 	err := db.QueryRowContext(ctx, `
         SELECT EXISTS (
             SELECT 1
-              FROM malibu_reward_audit_events
-             WHERE provider_id = $1
-               AND event_type = $2
-               AND occurred_at >= $3
+              FROM malibu_reward_audit_events applied
+             WHERE applied.provider_id = $1
+               AND applied.event_type = $2
+               AND applied.occurred_at >= $3
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM malibu_reward_audit_events cleared
+                    WHERE cleared.provider_id = applied.provider_id
+                      AND cleared.ledger_id = applied.ledger_id
+                      AND cleared.event_type = $4
+                      AND cleared.withdrawal_hold_reason = $5
+                      AND cleared.id > applied.id
+               )
         )
-    `, providerID, AuditEventWalletDailyCapApplied, utcDay(time.Now().UTC())).Scan(&exists)
+    `, providerID, AuditEventWalletDailyCapApplied, utcDay(time.Now().UTC()), AuditEventMalibuHoldCleared, HoldPerWalletDailyCap).Scan(&exists)
 	return exists, err
 }
 
