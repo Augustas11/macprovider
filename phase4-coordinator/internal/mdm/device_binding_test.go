@@ -2,9 +2,11 @@ package mdm
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -63,7 +65,7 @@ func TestClaimDeviceRejectsEnrolledUnboundForTokenPath(t *testing.T) {
 	}
 }
 
-func TestClaimDeviceAllowsPendingWhenNotEnrolled(t *testing.T) {
+func TestClaimDeviceRejectsPendingWhenNotEnrolled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(listDevicesResponse{Devices: nil})
 	}))
@@ -75,12 +77,119 @@ func TestClaimDeviceAllowsPendingWhenNotEnrolled(t *testing.T) {
 		log:      zerolog.Nop(),
 		now:      time.Now,
 	}
-	if err := svc.ClaimDevice(context.Background(), "prov-1", "C02PENDING01", false); err != nil {
-		t.Fatalf("pending claim: %v", err)
+	// Token path must reject (R3-H1).
+	if err := svc.ClaimDevice(context.Background(), "prov-1", "C02PENDING01", false); err != ErrPendingClaimRejected {
+		t.Fatalf("token pending claim err=%v want ErrPendingClaimRejected", err)
 	}
-	b, ok := svc.Bindings().LookupByProvider("prov-1")
-	if !ok || b.Serial != "C02PENDING01" || b.UDID != "" {
-		t.Fatalf("binding=%v ok=%v", b, ok)
+	// Internal bootstrap of not-enrolled serial also rejected.
+	if err := svc.ClaimDevice(context.Background(), "prov-1", "C02PENDING01", true); err != ErrPendingClaimRejected {
+		t.Fatalf("internal pending claim err=%v want ErrPendingClaimRejected", err)
+	}
+	if _, ok := svc.Bindings().LookupByProvider("prov-1"); ok {
+		t.Fatal("no binding should exist after pending reject")
+	}
+}
+
+func TestClaimDeviceTokenRefreshExistingBinding(t *testing.T) {
+	var listCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		listCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(listDevicesResponse{
+			Devices: []Device{{UDID: "UDID-REFRESHED", SerialNumber: "C02EXIST001"}},
+		})
+	}))
+	defer srv.Close()
+	client, _ := NewClient(ClientConfig{BaseURL: srv.URL, APIToken: "tok"})
+	svc := &LiveMDAService{
+		client:   client,
+		bindings: NewDeviceBindingStore(),
+		log:      zerolog.Nop(),
+		now:      time.Now,
+	}
+	if err := svc.ClaimDevice(context.Background(), "owner", "C02EXIST001", true); err != nil {
+		t.Fatalf("internal bootstrap: %v", err)
+	}
+	// Clear UDID to force refresh path.
+	svc.bindings.mu.Lock()
+	b := svc.bindings.byProvider["owner"]
+	b.UDID = ""
+	svc.bindings.byProvider["owner"] = b
+	svc.bindings.mu.Unlock()
+
+	if err := svc.ClaimDevice(context.Background(), "owner", "C02EXIST001", false); err != nil {
+		t.Fatalf("token refresh: %v", err)
+	}
+	got, ok := svc.Bindings().LookupByProvider("owner")
+	if !ok || got.UDID != "UDID-REFRESHED" {
+		t.Fatalf("binding=%v ok=%v want UDID refreshed", got, ok)
+	}
+	if listCalls.Load() < 2 {
+		t.Fatalf("expected FindDeviceBySerial on bootstrap + refresh, calls=%d", listCalls.Load())
+	}
+}
+
+func TestAttackerCannotPreClaimBeforeVictimEnrolls(t *testing.T) {
+	var devices atomic.Value
+	devices.Store([]Device(nil))
+	var enqueuedUDID atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/devices":
+			devs, _ := devices.Load().([]Device)
+			_ = json.NewEncoder(w).Encode(listDevicesResponse{Devices: devs})
+		case len(r.URL.Path) > len("/v1/commands/"):
+			enqueuedUDID.Store(r.URL.Path[len("/v1/commands/"):])
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	client, _ := NewClient(ClientConfig{BaseURL: srv.URL, APIToken: "tok"})
+	reg := pool.NewRegistry(nil)
+	now := time.Unix(1716768000, 0).UTC()
+	seKey := make([]byte, 64)
+	reg.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "attacker", AssignedID: "asg-a", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+	}, nil, now)
+	reg.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "victim", AssignedID: "asg-v", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+	}, nil, now)
+
+	svc := &LiveMDAService{
+		client: client, pool: reg, log: zerolog.Nop(), now: func() time.Time { return now },
+		bindings: NewDeviceBindingStore(), pending: make(map[string]pendingMDARequest),
+		ledger: make(map[string]enqueueLedgerEntry),
+		mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
+	}
+
+	// Attacker tries to pre-claim victim serial before enrollment.
+	if err := svc.ClaimDevice(context.Background(), "attacker", "VICTIMSERIAL1", false); err != ErrPendingClaimRejected {
+		t.Fatalf("pre-claim err=%v want ErrPendingClaimRejected", err)
+	}
+
+	// Victim enrolls in MicroMDM, then rightful internal bootstrap.
+	devices.Store([]Device{{UDID: "VICTIM-UDID", SerialNumber: "VICTIMSERIAL1"}})
+	if err := svc.ClaimDevice(context.Background(), "victim", "VICTIMSERIAL1", true); err != nil {
+		t.Fatalf("victim bootstrap: %v", err)
+	}
+
+	// Attacker still cannot steal or enqueue.
+	if err := svc.ClaimDevice(context.Background(), "attacker", "VICTIMSERIAL1", false); err != ErrSerialAlreadyBound {
+		t.Fatalf("post-enroll steal err=%v want ErrSerialAlreadyBound", err)
+	}
+	svc.RequestAndMaybeUpgrade("attacker", "asg-a", "VICTIMSERIAL1")
+	if v := enqueuedUDID.Load(); v != nil {
+		t.Fatalf("attacker must not enqueue; got udid=%v", v)
+	}
+	svc.RequestAndMaybeUpgrade("victim", "asg-v", "VICTIMSERIAL1")
+	got, _ := enqueuedUDID.Load().(string)
+	if got != "VICTIM-UDID" {
+		t.Fatalf("victim enqueue udid=%q want VICTIM-UDID", got)
 	}
 }
 
@@ -123,8 +232,8 @@ func TestRequestAndMaybeUpgradeNeverEnqueuesVictimFromSESerial(t *testing.T) {
 		now:      func() time.Time { return now },
 		bindings: NewDeviceBindingStore(),
 		pending:  make(map[string]pendingMDARequest),
+		ledger:   make(map[string]enqueueLedgerEntry),
 	}
-	// Attacker binds their own serial, but presents victim SE serial.
 	if err := svc.ClaimDevice(context.Background(), "attacker", "ATTACKERSER1", true); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -133,7 +242,6 @@ func TestRequestAndMaybeUpgradeNeverEnqueuesVictimFromSESerial(t *testing.T) {
 		t.Fatalf("must not enqueue when SE serial mismatches binding; got udid=%v", v)
 	}
 
-	// Matching SE serial enqueues attacker's UDID only.
 	svc.RequestAndMaybeUpgrade("attacker", "asg-1", "ATTACKERSER1")
 	got, _ := enqueuedUDID.Load().(string)
 	if got != "ATTACKER-UDID" {
@@ -166,6 +274,7 @@ func TestRequestAndMaybeUpgradeWorksWithMatchingBinding(t *testing.T) {
 	svc := &LiveMDAService{
 		client: client, pool: reg, log: zerolog.Nop(), now: func() time.Time { return now },
 		bindings: NewDeviceBindingStore(), pending: make(map[string]pendingMDARequest),
+		ledger: make(map[string]enqueueLedgerEntry),
 		mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
 	}
 	_ = svc.ClaimDevice(context.Background(), "owner", "OWNSERIAL001", true)
@@ -178,5 +287,152 @@ func TestRequestAndMaybeUpgradeWorksWithMatchingBinding(t *testing.T) {
 	svc.mu.Unlock()
 	if !okUDID {
 		t.Fatal("pending should be keyed by UDID")
+	}
+}
+
+func TestRequestAndMaybeUpgradeRateLimitsDoubleEnqueue(t *testing.T) {
+	var enqueueCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/devices" {
+			_ = json.NewEncoder(w).Encode(listDevicesResponse{
+				Devices: []Device{{UDID: "RATE-UDID", SerialNumber: "RATESERIAL01"}},
+			})
+			return
+		}
+		enqueueCount.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	client, _ := NewClient(ClientConfig{BaseURL: srv.URL, APIToken: "tok"})
+	reg := pool.NewRegistry(nil)
+	now := time.Unix(1716768000, 0).UTC()
+	clock := now
+	seKey := make([]byte, 64)
+	reg.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "rate", AssignedID: "asg-1", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+	}, nil, now)
+	svc := &LiveMDAService{
+		client: client, pool: reg, log: zerolog.Nop(),
+		now:      func() time.Time { return clock },
+		bindings: NewDeviceBindingStore(), pending: make(map[string]pendingMDARequest),
+		ledger: make(map[string]enqueueLedgerEntry),
+		mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
+	}
+	_ = svc.ClaimDevice(context.Background(), "rate", "RATESERIAL01", true)
+	svc.RequestAndMaybeUpgrade("rate", "asg-1", "RATESERIAL01")
+	svc.RequestAndMaybeUpgrade("rate", "asg-1", "RATESERIAL01")
+	if enqueueCount.Load() != 1 {
+		t.Fatalf("enqueue count=%d want 1 (second call must reuse/rate-limit)", enqueueCount.Load())
+	}
+	clock = now.Add(169 * time.Hour)
+	svc.RequestAndMaybeUpgrade("rate", "asg-1", "RATESERIAL01")
+	if enqueueCount.Load() != 2 {
+		t.Fatalf("after interval enqueue count=%d want 2", enqueueCount.Load())
+	}
+}
+
+func TestDurableMDAProofSurvivesNewService(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "coordinator.db")
+	store, err := OpenMDAStore(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Unix(1716768000, 0).UTC()
+	seKey := make([]byte, 64)
+	for i := range seKey {
+		seKey[i] = byte(i + 1)
+	}
+	seHash := sha256.Sum256(seKey)
+	rootDER, leafDER, cfg := testMDAChainWithSerial(t, now, seHash[:], "C02DURABLE1")
+
+	reg1 := pool.NewRegistry(nil)
+	reg1.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "p-dur", AssignedID: "s1", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+	}, nil, now)
+	svc1 := &LiveMDAService{
+		cfg: cfg, mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
+		pool: reg1, log: zerolog.Nop(), now: func() time.Time { return now },
+		bindings: NewDeviceBindingStore(), store: store,
+		ledger: make(map[string]enqueueLedgerEntry),
+	}
+	_ = svc1.bindings.Claim("p-dur", "C02DURABLE1")
+	if !svc1.verifyAndUpgrade("p-dur", "s1", [][]byte{leafDER, rootDER}, seKey, seHash[:]) {
+		t.Fatal("verifyAndUpgrade failed")
+	}
+
+	reg2 := pool.NewRegistry(nil)
+	reg2.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "p-dur", AssignedID: "s2", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+		AttestationTier: pool.AttestationTierSelfSigned,
+	}, nil, now)
+	svc2 := &LiveMDAService{
+		cfg: cfg, mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
+		pool: reg2, log: zerolog.Nop(), now: func() time.Time { return now },
+		bindings: NewDeviceBindingStore(), store: store,
+		ledger: make(map[string]enqueueLedgerEntry),
+	}
+	if !svc2.AttachCachedMDAProof("p-dur", "s2") {
+		t.Fatal("AttachCachedMDAProof should restore hardware from durable store")
+	}
+	p, found := reg2.Resolve("p-dur", "s2")
+	if !found || p.AttestationTier != pool.AttestationTierHardware {
+		t.Fatalf("tier=%q found=%v want hardware", p.AttestationTier, found)
+	}
+
+	reg3 := pool.NewRegistry(nil)
+	reg3.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "p-dur", AssignedID: "s3", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+	}, nil, now)
+	later := now.Add(200 * time.Hour)
+	svc3 := &LiveMDAService{
+		cfg: cfg, mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
+		pool: reg3, log: zerolog.Nop(), now: func() time.Time { return later },
+		bindings: NewDeviceBindingStore(), store: store,
+		ledger: make(map[string]enqueueLedgerEntry),
+	}
+	if svc3.AttachCachedMDAProof("p-dur", "s3") {
+		t.Fatal("expired durable proof must not upgrade")
+	}
+	if _, _, _, ok := reg3.MDAProof("p-dur"); ok {
+		t.Fatal("expired durable proof must be cleared from pool")
+	}
+	if _, ok, _ := store.LoadProof(context.Background(), "p-dur"); ok {
+		t.Fatal("expired durable proof must be deleted from store")
+	}
+}
+
+func TestLoadMDAProofCacheDoesNotPublishHardware(t *testing.T) {
+	reg := pool.NewRegistry(nil)
+	now := time.Unix(1716768000, 0).UTC()
+	seHash := sha256.Sum256([]byte("se"))
+	reg.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "p-load", AssignedID: "s1", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+		AttestationTier: pool.AttestationTierSelfSigned,
+	}, nil, now)
+	if !reg.LoadMDAProofCache("p-load", "s1", [][]byte{[]byte("leaf")}, seHash[:], now) {
+		t.Fatal("LoadMDAProofCache failed")
+	}
+	p, ok := reg.Resolve("p-load", "s1")
+	if !ok {
+		t.Fatal("resolve failed")
+	}
+	if p.AttestationTier == pool.AttestationTierHardware {
+		t.Fatal("R3-M1/M2: LoadMDAProofCache must not publish hardware tier")
+	}
+	if len(p.MDACertChain) == 0 {
+		t.Fatal("expected proof bytes loaded")
 	}
 }

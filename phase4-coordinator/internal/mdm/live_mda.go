@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,6 +34,14 @@ type pendingMDARequest struct {
 	EnqueuedAt     time.Time
 }
 
+// enqueueLedgerEntry is the in-memory view of per-key DeviceInformation
+// enqueue rate limits (R3-M3). Keyed by provider|serial|hex(se_key_hash).
+type enqueueLedgerEntry struct {
+	LastEnqueueAt      time.Time
+	PendingCommandUUID string
+	TerminalOutcome    string // "" | "success" | "failed"
+}
+
 // TokenValidator validates a provider Bearer token and returns the provider ID.
 // Matches auth.Store.ValidateToken.
 type TokenValidator interface {
@@ -44,11 +53,12 @@ type TokenValidator interface {
 //  1. Resolves the coordinator-owned device binding for the provider (never
 //     selects MicroMDM targets from SE-asserted serial alone — R2-H1).
 //  2. Enqueues a DeviceInformation attestation command (raw plist) with
-//     nonce=SHA256(SEPublicKey).
+//     nonce=SHA256(SEPublicKey), rate-limited per R3-M3.
 //  3. Records a pending request keyed by command_uuid and UDID.
 //  4. On MicroMDM command webhook (acknowledge_event) or AttachCachedMDAProof,
 //     re-verifies the MDA chain bound to the SE key + binding serial and
 //     upgrades the pool entry's attestation tier to "hardware".
+//  5. Persists verified proofs in MDAStore for reconnect/restart (R3-M2).
 //
 // The service operates in observe mode: failures are logged but do not interrupt
 // provider auth or routing. Do not flip require_attestation here (Phase 4 gate).
@@ -61,9 +71,11 @@ type LiveMDAService struct {
 	now      func() time.Time
 	bindings *DeviceBindingStore
 	tokens   TokenValidator
+	store    *MDAStore
 
 	mu      sync.Mutex
 	pending map[string]pendingMDARequest // keyed by UDID and/or command_uuid
+	ledger  map[string]enqueueLedgerEntry
 }
 
 // NewLiveMDAService creates a LiveMDAService. Returns (nil, nil) when
@@ -96,7 +108,16 @@ func NewLiveMDAService(cfg config.Tier2Config, p *pool.Registry, log zerolog.Log
 		now:      now,
 		bindings: NewDeviceBindingStore(),
 		pending:  make(map[string]pendingMDARequest),
+		ledger:   make(map[string]enqueueLedgerEntry),
 	}, nil
+}
+
+// SetMDAStore wires durable MDA proof + enqueue ledger persistence (R3-M2/M3).
+func (s *LiveMDAService) SetMDAStore(store *MDAStore) {
+	if s == nil {
+		return
+	}
+	s.store = store
 }
 
 // SetTokenValidator wires provider Bearer validation for POST /v1/mdm/device-binding.
@@ -117,12 +138,14 @@ func (s *LiveMDAService) Bindings() *DeviceBindingStore {
 
 // ClaimDevice exclusively binds serial to providerID with enrollment policy:
 //
-//   - Token-auth path (allowEnrolledUnbound=false): rejects claiming an already-
-//     enrolled unbound serial (blocks remote MDA borrow).
-//   - Internal/ops path (allowEnrolledUnbound=true): allows first-time bind of
-//     already-enrolled fleet devices (H2XX74T43X bootstrap).
-//   - Device not yet in MicroMDM: pending claim allowed (UDID filled later).
-//   - Same-provider re-claim of own serial is always OK.
+//   - R3-H1: neither path may create a new binding for a serial that is not
+//     already enrolled in MicroMDM (no pending UDID-empty squat).
+//   - Token-auth path (allowEnrolledUnbound=false): rejects enrolled-unbound
+//     new claims (ErrEnrolledUnboundRejected). May refresh UDID on an existing
+//     same-provider binding.
+//   - Internal/ops path (allowEnrolledUnbound=true): creates the first binding
+//     only for already-enrolled devices (fleet bootstrap).
+//   - Same-provider re-claim / UDID refresh of an existing binding is always OK.
 func (s *LiveMDAService) ClaimDevice(ctx context.Context, providerID, serial string, allowEnrolledUnbound bool) error {
 	if s == nil || s.bindings == nil {
 		return fmt.Errorf("mdm: binding store unavailable")
@@ -161,10 +184,12 @@ func (s *LiveMDAService) ClaimDevice(ctx context.Context, providerID, serial str
 			udid = strings.TrimSpace(device.UDID)
 		}
 	}
-	if enrolled {
-		if _, bound := s.bindings.LookupBySerial(serial); !bound && !allowEnrolledUnbound {
-			return ErrEnrolledUnboundRejected
-		}
+	// R3-H1: never create a pending (not-yet-enrolled) binding.
+	if !enrolled {
+		return ErrPendingClaimRejected
+	}
+	if _, bound := s.bindings.LookupBySerial(serial); !bound && !allowEnrolledUnbound {
+		return ErrEnrolledUnboundRejected
 	}
 	if err := s.bindings.Claim(providerID, serial); err != nil {
 		return err
@@ -201,6 +226,9 @@ func (s *LiveMDAService) RequestAndMaybeUpgrade(providerID, assignedID, seSerial
 	}
 
 	seKeyHash := sha256.Sum256(sePub)
+
+	// 0. Hydrate durable cache into pool (bytes only — no hardware tier).
+	s.hydrateDurableProof(ctx, providerID, assignedID)
 
 	// 1. Try to upgrade from cached MDA proof.
 	if s.tryUpgradeFromCache(ctx, providerID, assignedID, sePub, seKeyHash[:]) {
@@ -249,6 +277,16 @@ func (s *LiveMDAService) RequestAndMaybeUpgrade(providerID, assignedID, seSerial
 		}
 	}
 
+	ledgerKey := enqueueLedgerKey(providerID, binding.Serial, seKeyHash[:])
+	if allow, reason := s.enqueueAllowed(ledgerKey); !allow {
+		s.log.Info().
+			Str("provider_id", providerID).
+			Str("serial", binding.Serial).
+			Str("reason", reason).
+			Msg("live_mda: skipping DeviceInformation enqueue (rate limit / pending)")
+		return
+	}
+
 	commandUUID, err := s.client.EnqueueDeviceInformationAttestation(ctx, udid, seKeyHash[:])
 	if err != nil {
 		s.log.Warn().Err(err).
@@ -267,6 +305,7 @@ func (s *LiveMDAService) RequestAndMaybeUpgrade(providerID, assignedID, seSerial
 		SEKeyHash:      append([]byte(nil), seKeyHash[:]...),
 		EnqueuedAt:     s.now(),
 	})
+	s.markEnqueued(ledgerKey, providerID, binding.Serial, seKeyHash[:], commandUUID)
 
 	s.log.Info().
 		Str("provider_id", providerID).
@@ -283,12 +322,14 @@ func (s *LiveMDAService) RequestAndMaybeUpgrade(providerID, assignedID, seSerial
 //
 // Returns true when the proof was attached and the tier upgraded.
 func (s *LiveMDAService) AttachCachedMDAProof(providerID, assignedID string) bool {
+	ctx := context.Background()
+	s.hydrateDurableProof(ctx, providerID, assignedID)
 	sePub := s.pool.ProviderSEPublicKey(providerID)
 	if len(sePub) == 0 {
 		return false
 	}
 	seKeyHash := sha256.Sum256(sePub)
-	return s.tryUpgradeFromCache(context.Background(), providerID, assignedID, sePub, seKeyHash[:])
+	return s.tryUpgradeFromCache(ctx, providerID, assignedID, sePub, seKeyHash[:])
 }
 
 // UpgradeFromParsedAttestation verifies a fresh DeviceAttestationResult (from
@@ -408,7 +449,7 @@ func writeClaimError(w http.ResponseWriter, err error) {
 	switch err {
 	case ErrSerialAlreadyBound:
 		http.Error(w, err.Error(), http.StatusConflict)
-	case ErrEnrolledUnboundRejected:
+	case ErrEnrolledUnboundRejected, ErrPendingClaimRejected:
 		http.Error(w, err.Error(), http.StatusForbidden)
 	case ErrEmptySerial, ErrEmptyProviderID:
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -496,6 +537,7 @@ func (s *LiveMDAService) HandleMDACommandWebhook(w http.ResponseWriter, r *http.
 			Str("udid", udid).
 			Str("provider_id", pending.ProviderID).
 			Msg("live_mda: webhook rejected — MDA leaf missing serial number extension")
+		s.markEnqueueFailed(pending)
 		http.Error(w, "serial missing", http.StatusForbidden)
 		return
 	}
@@ -506,6 +548,7 @@ func (s *LiveMDAService) HandleMDACommandWebhook(w http.ResponseWriter, r *http.
 			Str("expected_serial", pending.ExpectedSerial).
 			Str("mda_serial", mdaSerial).
 			Msg("live_mda: webhook rejected — MDA serial does not match enrolled device (possible serial borrow)")
+		s.markEnqueueFailed(pending)
 		http.Error(w, "serial mismatch", http.StatusForbidden)
 		return
 	}
@@ -521,6 +564,7 @@ func (s *LiveMDAService) HandleMDACommandWebhook(w http.ResponseWriter, r *http.
 		s.log.Warn().
 			Str("provider_id", pending.ProviderID).
 			Msg("live_mda: webhook rejected — SE key rotated since enqueue")
+		s.markEnqueueFailed(pending)
 		http.Error(w, "se key mismatch", http.StatusForbidden)
 		return
 	}
@@ -529,9 +573,11 @@ func (s *LiveMDAService) HandleMDACommandWebhook(w http.ResponseWriter, r *http.
 			Str("provider_id", pending.ProviderID).
 			Str("udid", udid).
 			Msg("live_mda: webhook chain verify/upgrade failed")
+		s.markEnqueueFailed(pending)
 		http.Error(w, "verify failed", http.StatusUnprocessableEntity)
 		return
 	}
+	s.markEnqueueSuccess(pending)
 	s.log.Info().
 		Str("provider_id", pending.ProviderID).
 		Str("udid", udid).
@@ -674,7 +720,7 @@ func (s *LiveMDAService) tryUpgradeFromCache(ctx context.Context, providerID, as
 	// Verify SE key hasn't rotated since the proof was bound.
 	if subtle.ConstantTimeCompare(boundHash, seKeyHash) != 1 {
 		s.log.Info().Str("provider_id", providerID).Msg("live_mda: SE key rotated — clearing stale MDA proof")
-		s.pool.ClearMDAProof(providerID, assignedID)
+		s.clearMDAProof(providerID, assignedID)
 		return false
 	}
 	// Verify proof is within the refresh interval.
@@ -686,13 +732,13 @@ func (s *LiveMDAService) tryUpgradeFromCache(ctx context.Context, providerID, as
 			Dur("age", age).
 			Dur("limit", refreshInterval).
 			Msg("live_mda: cached MDA proof expired — clearing and will re-request")
-		s.pool.ClearMDAProof(providerID, assignedID)
+		s.clearMDAProof(providerID, assignedID)
 		return false
 	}
 	// Re-verify chain freshness in-process without a new MDM round-trip.
 	if !s.verifyAndUpgrade(providerID, assignedID, chain, sePub, seKeyHash) {
 		s.log.Info().Str("provider_id", providerID).Msg("live_mda: cached MDA re-verify failed — clearing proof")
-		s.pool.ClearMDAProof(providerID, assignedID)
+		s.clearMDAProof(providerID, assignedID)
 		return false
 	}
 	return true
@@ -736,6 +782,14 @@ func (s *LiveMDAService) verifyAndUpgrade(providerID, assignedID string, chain [
 		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: SetMDAProof: provider not found (reconnect race?)")
 		return false
 	}
+	serial := ""
+	if binding, ok := s.bindings.LookupByProvider(providerID); ok {
+		serial = binding.Serial
+	}
+	if serial == "" {
+		serial = tier2.ExtractMDASerialNumber(leaf)
+	}
+	s.persistMDAProof(providerID, serial, chain, h[:], now)
 	s.log.Info().
 		Str("provider_id", providerID).
 		Str("attestation_tier", pool.AttestationTierHardware).
@@ -752,4 +806,270 @@ func (s *LiveMDAService) mdmRefreshIntervalHours() int {
 		return 24 // floor per docs
 	}
 	return h
+}
+
+func (s *LiveMDAService) clearMDAProof(providerID, assignedID string) {
+	s.pool.ClearMDAProof(providerID, assignedID)
+	if s.store != nil {
+		if err := s.store.DeleteProof(context.Background(), providerID); err != nil {
+			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("live_mda: durable proof delete failed")
+		}
+	}
+}
+
+func (s *LiveMDAService) persistMDAProof(providerID, serial string, chain [][]byte, seKeyHash []byte, verifiedAt time.Time) {
+	if s.store == nil {
+		return
+	}
+	if err := s.store.SaveProof(context.Background(), MDAProofRecord{
+		ProviderID:     providerID,
+		Serial:         serial,
+		MDACertChain:   chain,
+		BoundSEKeyHash: seKeyHash,
+		VerifiedAt:     verifiedAt,
+	}); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("live_mda: durable proof save failed")
+	}
+}
+
+// hydrateDurableProof loads a persisted MDA proof into the pool without
+// publishing hardware tier (same contract as MigrateMDAProofFrom).
+func (s *LiveMDAService) hydrateDurableProof(ctx context.Context, providerID, assignedID string) {
+	if s.store == nil {
+		return
+	}
+	if _, _, _, ok := s.pool.MDAProof(providerID); ok {
+		return
+	}
+	rec, ok, err := s.store.LoadProof(ctx, providerID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("live_mda: durable proof load failed")
+		return
+	}
+	if !ok || len(rec.MDACertChain) == 0 {
+		return
+	}
+	if !s.pool.LoadMDAProofCache(providerID, assignedID, rec.MDACertChain, rec.BoundSEKeyHash, rec.VerifiedAt) {
+		return
+	}
+	s.log.Debug().
+		Str("provider_id", providerID).
+		Time("verified_at", rec.VerifiedAt).
+		Msg("live_mda: hydrated durable MDA proof (tier pending re-verify)")
+}
+
+func enqueueLedgerKey(providerID, serial string, seKeyHash []byte) string {
+	return strings.TrimSpace(providerID) + "|" + NormalizeSerial(serial) + "|" + hex.EncodeToString(seKeyHash)
+}
+
+// enqueueAllowed returns whether a new DeviceInformation enqueue is allowed
+// under R3-M3 rate limits. reason is "reuse" or "rate_limited" when blocked.
+func (s *LiveMDAService) enqueueAllowed(ledgerKey string) (allow bool, reason string) {
+	interval := time.Duration(s.mdmRefreshIntervalHours()) * time.Hour
+	now := s.now()
+	entry, ok := s.loadLedger(ledgerKey)
+	if !ok || entry.LastEnqueueAt.IsZero() {
+		return true, ""
+	}
+	if now.Sub(entry.LastEnqueueAt) >= interval {
+		return true, ""
+	}
+	if strings.TrimSpace(entry.PendingCommandUUID) != "" {
+		return false, "reuse"
+	}
+	return false, "rate_limited"
+}
+
+func (s *LiveMDAService) loadLedger(ledgerKey string) (enqueueLedgerEntry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ledger == nil {
+		s.ledger = make(map[string]enqueueLedgerEntry)
+	}
+	if e, ok := s.ledger[ledgerKey]; ok {
+		return e, true
+	}
+	if s.store != nil {
+		rec, ok, err := s.store.LoadEnqueueLedger(context.Background(), ledgerKey)
+		if err == nil && ok {
+			e := enqueueLedgerEntry{
+				LastEnqueueAt:      rec.LastEnqueueAt,
+				PendingCommandUUID: rec.PendingCommandUUID,
+				TerminalOutcome:    rec.TerminalOutcome,
+			}
+			s.ledger[ledgerKey] = e
+			return e, true
+		}
+	}
+	return enqueueLedgerEntry{}, false
+}
+
+func (s *LiveMDAService) markEnqueued(ledgerKey, providerID, serial string, seKeyHash []byte, commandUUID string) {
+	now := s.now()
+	entry := enqueueLedgerEntry{
+		LastEnqueueAt:      now,
+		PendingCommandUUID: commandUUID,
+		TerminalOutcome:    "",
+	}
+	s.mu.Lock()
+	if s.ledger == nil {
+		s.ledger = make(map[string]enqueueLedgerEntry)
+	}
+	s.ledger[ledgerKey] = entry
+	s.mu.Unlock()
+	if s.store != nil {
+		_ = s.store.SaveEnqueueLedger(context.Background(), EnqueueLedgerRecord{
+			LedgerKey:          ledgerKey,
+			ProviderID:         providerID,
+			Serial:             serial,
+			SEKeyHash:          seKeyHash,
+			LastEnqueueAt:      now,
+			PendingCommandUUID: commandUUID,
+			TerminalOutcome:    "",
+		})
+	}
+}
+
+func (s *LiveMDAService) markEnqueueSuccess(pending pendingMDARequest) {
+	key := enqueueLedgerKey(pending.ProviderID, pending.ExpectedSerial, pending.SEKeyHash)
+	s.mu.Lock()
+	if s.ledger == nil {
+		s.ledger = make(map[string]enqueueLedgerEntry)
+	}
+	e := s.ledger[key]
+	if e.LastEnqueueAt.IsZero() {
+		e.LastEnqueueAt = pending.EnqueuedAt
+	}
+	e.PendingCommandUUID = ""
+	e.TerminalOutcome = "success"
+	s.ledger[key] = e
+	s.mu.Unlock()
+	if s.store != nil {
+		_ = s.store.SaveEnqueueLedger(context.Background(), EnqueueLedgerRecord{
+			LedgerKey:          key,
+			ProviderID:         pending.ProviderID,
+			Serial:             pending.ExpectedSerial,
+			SEKeyHash:          pending.SEKeyHash,
+			LastEnqueueAt:      e.LastEnqueueAt,
+			PendingCommandUUID: "",
+			TerminalOutcome:    "success",
+		})
+	}
+}
+
+func (s *LiveMDAService) markEnqueueFailed(pending pendingMDARequest) {
+	key := enqueueLedgerKey(pending.ProviderID, pending.ExpectedSerial, pending.SEKeyHash)
+	s.mu.Lock()
+	if s.ledger == nil {
+		s.ledger = make(map[string]enqueueLedgerEntry)
+	}
+	e := s.ledger[key]
+	if e.LastEnqueueAt.IsZero() {
+		e.LastEnqueueAt = pending.EnqueuedAt
+	}
+	e.PendingCommandUUID = ""
+	e.TerminalOutcome = "failed"
+	s.ledger[key] = e
+	s.mu.Unlock()
+	if s.store != nil {
+		_ = s.store.SaveEnqueueLedger(context.Background(), EnqueueLedgerRecord{
+			LedgerKey:          key,
+			ProviderID:         pending.ProviderID,
+			Serial:             pending.ExpectedSerial,
+			SEKeyHash:          pending.SEKeyHash,
+			LastEnqueueAt:      e.LastEnqueueAt,
+			PendingCommandUUID: "",
+			TerminalOutcome:    "failed",
+		})
+	}
+}
+
+// HandleCheckInWebhook is an optional MicroMDM check-in / Authenticate receiver.
+// It only SetUDIDs an existing binding when serial matches — never creates a
+// binding from serial alone (R3-H1).
+func (s *LiveMDAService) HandleCheckInWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizeWebhook(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	var envelope struct {
+		Topic           string `json:"topic"`
+		CheckinEvent    *struct {
+			UDID         string `json:"udid"`
+			URLParams    map[string]string `json:"url_params"`
+			RawPayload   string `json:"raw_payload"`
+			MessageType  string `json:"message_type"`
+		} `json:"checkin_event"`
+		UDID         string `json:"udid"`
+		SerialNumber string `json:"serial_number"`
+		Serial       string `json:"SerialNumber"`
+	}
+	_ = json.Unmarshal(body, &envelope)
+	udid := strings.TrimSpace(envelope.UDID)
+	serial := strings.TrimSpace(envelope.SerialNumber)
+	if serial == "" {
+		serial = strings.TrimSpace(envelope.Serial)
+	}
+	if envelope.CheckinEvent != nil {
+		if udid == "" {
+			udid = strings.TrimSpace(envelope.CheckinEvent.UDID)
+		}
+		if serial == "" && envelope.CheckinEvent.URLParams != nil {
+			serial = strings.TrimSpace(envelope.CheckinEvent.URLParams["serial"])
+		}
+	}
+	// Best-effort extract from flat/plist-ish JSON keys.
+	if serial == "" || udid == "" {
+		var flat map[string]json.RawMessage
+		if json.Unmarshal(body, &flat) == nil {
+			for _, key := range []string{"SerialNumber", "serial_number", "serial"} {
+				if raw, ok := flat[key]; ok {
+					var s string
+					if json.Unmarshal(raw, &s) == nil && strings.TrimSpace(s) != "" {
+						serial = strings.TrimSpace(s)
+						break
+					}
+				}
+			}
+			if udid == "" {
+				for _, key := range []string{"UDID", "udid"} {
+					if raw, ok := flat[key]; ok {
+						var s string
+						if json.Unmarshal(raw, &s) == nil && strings.TrimSpace(s) != "" {
+							udid = strings.TrimSpace(s)
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	serial = NormalizeSerial(serial)
+	if serial == "" || udid == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if _, ok := s.bindings.LookupBySerial(serial); !ok {
+		s.log.Info().
+			Str("serial", serial).
+			Str("udid", udid).
+			Msg("live_mda: check-in ignored — no existing binding for serial")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	s.bindings.SetUDID(serial, udid)
+	s.log.Info().
+		Str("serial", serial).
+		Str("udid", udid).
+		Msg("live_mda: check-in SetUDID on existing binding")
+	w.WriteHeader(http.StatusNoContent)
 }

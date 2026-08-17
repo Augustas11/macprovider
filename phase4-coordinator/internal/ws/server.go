@@ -2084,9 +2084,10 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		entry.SEPublicKey = append([]byte(nil), attestResult.SEResult.SEPublicKey...)
 		entry.AttestationTier = pool.AttestationTierSelfSigned
 	}
-	if attestResult.MDAHardware {
-		entry.AttestationTier = pool.AttestationTierHardware
-	}
+	// R3-M1: static/legacy MDA may still yield AttestationStatusAttested via
+	// the verifier, but public AttestationTierHardware is only published by
+	// LiveMDAService SetMDAProof / tryUpgradeFromCache — never from
+	// attestResult.MDAHardware alone.
 	if len(initial.ProviderReceiptPubkey) > 0 {
 		entry.ReceiptPubkey = append([]byte(nil), initial.ProviderReceiptPubkey...)
 	} else {

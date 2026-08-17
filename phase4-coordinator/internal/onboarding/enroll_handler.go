@@ -1,7 +1,6 @@
 package onboarding
 
 import (
-	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
@@ -13,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/mdm"
 	"github.com/rs/zerolog"
@@ -35,24 +33,14 @@ type ProfileSigner interface {
 	Sign(profile []byte) ([]byte, error)
 }
 
-// DeviceClaimer optionally auto-claims a serial for an authenticated provider
-// after a successful /v1/enroll (R2-H1 binding bootstrap).
-type DeviceClaimer interface {
-	ClaimDevice(ctx context.Context, providerID, serial string, allowEnrolledUnbound bool) error
-}
-
-// EnrollTokenValidator validates an optional provider Bearer on /v1/enroll.
-type EnrollTokenValidator interface {
-	ValidateToken(ctx context.Context, token string) (providerID string, ok bool, err error)
-}
-
 // EnrollHandler handles POST /v1/enroll and returns per-device
 // .mobileconfig files for MDM enrollment (Phase 2 Track P2-A, Scenario B).
 //
 // No authentication is required for profile download: the serial number is not
-// secret. When an Authorization Bearer is present and Tokens/Claimer are set,
-// a successful enroll also auto-Claims the serial for that provider (token
-// path — enrolled-unbound still rejected until internal bootstrap).
+// secret. R3-H1: this handler does NOT auto-claim device bindings — pending
+// claims from /v1/enroll would enable pre-enrollment serial squat. Binding is
+// ops internal bootstrap of an already-enrolled device (or a future check-in
+// finalize that only SetUDIDs an existing binding).
 type EnrollHandler struct {
 	// MDMConfig carries the profile generation parameters (base URL, SCEP URL,
 	// MDM connect URL, push topic). Populated from config.Tier2MDMConfig.
@@ -61,13 +49,6 @@ type EnrollHandler struct {
 	// Signer optionally CMS-signs the profile. When nil the profile is served
 	// unsigned. Build via NewFileProfileSigner from config signer paths.
 	Signer ProfileSigner
-
-	// Claimer optionally binds serial→provider after enroll when Tokens
-	// validates a Bearer. Best-effort — claim failure does not fail enroll.
-	Claimer DeviceClaimer
-
-	// Tokens optionally validates Authorization Bearer for auto-claim.
-	Tokens EnrollTokenValidator
 
 	// Logger is required; use zerolog.Nop() for tests.
 	Logger zerolog.Logger
@@ -130,40 +111,11 @@ func (h *EnrollHandler) HandleEnroll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Best-effort auto-claim when the request carries a validated provider token.
-	if h.Claimer != nil && h.Tokens != nil {
-		if raw := enrollBearer(r.Header.Get("Authorization")); raw != "" {
-			if providerID, ok, verr := h.Tokens.ValidateToken(r.Context(), raw); verr == nil && ok && strings.TrimSpace(providerID) != "" {
-				if cerr := h.Claimer.ClaimDevice(r.Context(), providerID, req.SerialNumber, false); cerr != nil {
-					h.Logger.Info().
-						Err(cerr).
-						Str("provider_id", providerID).
-						Str("serial_number", req.SerialNumber).
-						Msg("MDM enroll auto-claim skipped")
-				} else {
-					h.Logger.Info().
-						Str("provider_id", providerID).
-						Str("serial_number", req.SerialNumber).
-						Msg("MDM enroll auto-claimed device binding")
-				}
-			}
-		}
-	}
-
 	w.Header().Set("Content-Type", "application/x-apple-aspen-config")
 	w.Header().Set("Content-Disposition",
 		fmt.Sprintf(`attachment; filename="macprovider-enroll-%s.mobileconfig"`, req.SerialNumber))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(profileBody)
-}
-
-func enrollBearer(h string) string {
-	const prefix = "Bearer "
-	trimmed := strings.TrimSpace(h)
-	if !strings.HasPrefix(trimmed, prefix) {
-		return ""
-	}
-	return strings.TrimSpace(trimmed[len(prefix):])
 }
 
 // NewFileProfileSigner loads a PEM cert + key from disk and returns a

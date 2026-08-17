@@ -28,6 +28,11 @@ var (
 	// already-enrolled unbound serial (R2-H1 borrow prevention). Ops may
 	// bootstrap via the internal claim endpoint with AllowEnrolledUnbound.
 	ErrEnrolledUnboundRejected = errors.New("mdm: enrolled device requires internal bootstrap claim")
+	// ErrPendingClaimRejected blocks creating a binding for a serial that is
+	// not yet enrolled in MicroMDM (R3-H1). Pending UDID-empty bindings are
+	// never creatable by token-auth or internal bootstrap — that closed the
+	// pre-enrollment serial squat race.
+	ErrPendingClaimRejected = errors.New("mdm: device must be enrolled in MicroMDM before binding")
 )
 
 // DeviceBindingStore is an in-memory exclusive provider↔serial binding index.

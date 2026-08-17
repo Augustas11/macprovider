@@ -1709,7 +1709,7 @@ func (r *Registry) ProviderSEPublicKey(providerID string) []byte {
 // SetMDAProof stores a verified MDA certificate chain and the SE key hash that
 // was used as the MDM DeviceAttestationNonce for the freshness binding.
 // The caller must have already verified the chain. Clears stale proof if the
-// SE key changed.
+// SE key changed. Publishes AttestationTierHardware (live MDA lifecycle only).
 func (r *Registry) SetMDAProof(providerID, assignedID string, certChain [][]byte, seKeyHash []byte, verifiedAt time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1725,6 +1725,29 @@ func (r *Registry) SetMDAProof(providerID, assignedID string, certChain [][]byte
 	p.MDAVerifiedAt = verifiedAt
 	p.MDABoundSEKeyHash = append([]byte(nil), seKeyHash...)
 	p.AttestationTier = AttestationTierHardware
+	return true
+}
+
+// LoadMDAProofCache copies durable/migrated MDA proof bytes onto the live
+// provider without publishing AttestationTierHardware (R2-M1 / R3-M2).
+// Callers must re-verify via tryUpgradeFromCache before hardware is public.
+func (r *Registry) LoadMDAProofCache(providerID, assignedID string, certChain [][]byte, seKeyHash []byte, verifiedAt time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	if len(certChain) == 0 || len(seKeyHash) == 0 {
+		return false
+	}
+	chain := make([][]byte, len(certChain))
+	for i, c := range certChain {
+		chain[i] = append([]byte(nil), c...)
+	}
+	p.MDACertChain = chain
+	p.MDAVerifiedAt = verifiedAt
+	p.MDABoundSEKeyHash = append([]byte(nil), seKeyHash...)
 	return true
 }
 

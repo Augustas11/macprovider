@@ -822,6 +822,12 @@ func main() {
 	} else if liveMDA != nil {
 		liveMDAService = liveMDA
 		liveMDAService.SetTokenValidator(tokenStore)
+		if mdaStore, err := mdm.OpenMDAStore(cfg.Storage.DBPath); err != nil {
+			logger.Error().Err(err).Msg("live MDA durable store open failed; continuing with in-memory only")
+		} else {
+			liveMDAService.SetMDAStore(mdaStore)
+			logger.Info().Str("db_path", cfg.Storage.DBPath).Msg("Phase 3 live MDA durable proof store wired")
+		}
 		wsOpts = append(wsOpts, providerws.WithLiveMDA(liveMDA))
 		logger.Info().
 			Str("api_url", cfg.Tier2.MDM.APIURL).
@@ -879,8 +885,10 @@ func main() {
 	if liveMDAService != nil {
 		providerMux.HandleFunc("/internal/mdm/command-webhook", liveMDAService.HandleMDACommandWebhook)
 		providerMux.HandleFunc("/internal/mdm/device-binding", liveMDAService.HandleInternalDeviceBinding)
+		providerMux.HandleFunc("/internal/mdm/checkin-webhook", liveMDAService.HandleCheckInWebhook)
 		logger.Info().Msg("Phase 3 live MDA command webhook mounted at /internal/mdm/command-webhook")
 		logger.Info().Msg("Phase 3 device binding bootstrap mounted at /internal/mdm/device-binding")
+		logger.Info().Msg("Phase 3 check-in SetUDID webhook mounted at /internal/mdm/checkin-webhook")
 	}
 	// SPEC-005 v0.4 (issue #169) — `billing.quarantine_resolution_force_void_enabled`
 	// gates the §11.6 force-void endpoint at the route layer. Default
@@ -1078,10 +1086,7 @@ func main() {
 	var enrollHandler http.HandlerFunc
 	if cfg.Tier2.MDM.EnrollmentBaseURL != "" {
 		eh := buildEnrollHandler(cfg, logger)
-		if liveMDAService != nil {
-			eh.Claimer = liveMDAService
-			eh.Tokens = tokenStore
-		}
+		// R3-H1: /v1/enroll generates profiles only — no auto-claim (pending squat).
 		enrollHandler = eh.HandleEnroll
 		logger.Info().
 			Str("base_url", cfg.Tier2.MDM.EnrollmentBaseURL).
