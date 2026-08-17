@@ -35,7 +35,8 @@ var (
 	ErrPendingClaimRejected = errors.New("mdm: device must be enrolled in MicroMDM before binding")
 )
 
-// DeviceBindingStore is an in-memory exclusive provider↔serial binding index.
+// DeviceBindingStore is an exclusive provider↔serial binding index.
+// In-memory for hot-path lookups; LiveMDAService persists via MDAStore (R4-M2).
 // Safe for concurrent use.
 type DeviceBindingStore struct {
 	mu         sync.Mutex
@@ -54,6 +55,36 @@ func NewDeviceBindingStore() *DeviceBindingStore {
 // NormalizeSerial trims and uppercases a hardware serial.
 func NormalizeSerial(serial string) string {
 	return strings.ToUpper(strings.TrimSpace(serial))
+}
+
+// Restore loads a durable binding into memory (startup hydrate). Same-serial
+// conflicts prefer the first restored binding; later duplicates are skipped.
+func (s *DeviceBindingStore) Restore(b Binding) error {
+	providerID := strings.TrimSpace(b.ProviderID)
+	serial := NormalizeSerial(b.Serial)
+	if providerID == "" {
+		return ErrEmptyProviderID
+	}
+	if serial == "" {
+		return ErrEmptySerial
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if owner, ok := s.bySerial[serial]; ok && owner != providerID {
+		return ErrSerialAlreadyBound
+	}
+	if prev, ok := s.byProvider[providerID]; ok && prev.Serial != "" && prev.Serial != serial {
+		delete(s.bySerial, prev.Serial)
+	}
+	b.ProviderID = providerID
+	b.Serial = serial
+	b.UDID = strings.TrimSpace(b.UDID)
+	if b.ClaimedAt.IsZero() {
+		b.ClaimedAt = time.Now().UTC()
+	}
+	s.byProvider[providerID] = b
+	s.bySerial[serial] = providerID
+	return nil
 }
 
 // Claim exclusively binds serial to providerID (possession-order).

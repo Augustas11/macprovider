@@ -245,7 +245,7 @@ Extend `pool.Provider` (non-breaking JSON fields):
 | 3.4 | `attachCachedMDAProof` on reconnect — re-verify chain + Freshness bind to SE key |
 | 3.5 | Upgrade `attestation_tier` to `hardware` when MDA valid |
 | 3.6 | Remove static-artifact path as default; keep operator override for dev |
-| 3.7 | Rate-limit aware refresh scheduler (≥7 days) |
+| 3.7 | Rate-limit aware refresh scheduler (≥7 days; config floors below 168h when live MDA enabled) |
 
 ### 3.2 Progress (2026-08-17)
 
@@ -254,26 +254,28 @@ Extend `pool.Provider` (non-breaking JSON fields):
 - [x] `AttestationVerifyResult.MDAHardware bool` — **R3-M1:** WS does **not** set `AttestationTier=hardware` from this flag; hardware tier only via LiveMDAService `SetMDAProof` / `tryUpgradeFromCache`
 - [x] `internal/mdm/client.go` — MicroMDM API client (`ListDevices`, `FindDeviceBySerial`, raw-plist `EnqueueDeviceInformationAttestation`, `ParseAcknowledgeEvent`)
 - [x] `internal/mdm/live_mda.go` — `LiveMDAService` with `RequestAndMaybeUpgrade` + `AttachCachedMDAProof` + `UpgradeFromParsedAttestation` + durable store + enqueue ledger
-- [x] `internal/mdm/device_binding.go` — exclusive provider↔serial `DeviceBindingStore`; **R3-H1:** no token/internal pending claims — device must be enrolled; token path rejects enrolled-unbound; only internal bootstrap creates first binding
+- [x] `internal/mdm/device_binding.go` — exclusive provider↔serial `DeviceBindingStore`; **R3-H1:** no token/internal pending claims — device must be enrolled; **R4-M3:** `enrollment_status==true` + non-empty UDID; token path rejects enrolled-unbound; only internal bootstrap creates first binding; **R4-M2:** durable `mda_device_bindings`
 - [x] Pool `MDACertChain`, `MDAVerifiedAt`, `MDABoundSEKeyHash` + `SetMDAProof` / `ClearMDAProof` / `LoadMDAProofCache` / `MDAProof` / `MigrateMDAProofFrom` (bytes only — no early hardware tier)
-- [x] `internal/mdm/mda_store.go` — SQLite `mda_proofs` + `mda_enqueue_ledger` on `Storage.DBPath` (R3-M2/M3)
+- [x] `internal/mdm/mda_store.go` — SQLite `mda_proofs` + `mda_enqueue_ledger` + `mda_pending` + `mda_device_bindings` on `Storage.DBPath` (R3-M2/M3, R4-M1/M2)
 - [x] `tier2.VerifyMDACertChainWithSEKey` public helper for LiveMDAService chain re-verify
-- [x] `Tier2MDMConfig.APIURL/APIToken/LiveMDAEnabled/MDARefreshIntervalHours` config fields
+- [x] `Tier2MDMConfig.APIURL/APIToken/LiveMDAEnabled/MDARefreshIntervalHours` config fields (**R4-M5:** refresh interval floored to ≥168h when live MDA enabled)
 - [x] WS observe wiring: `liveMDAUpgrader` interface, `WithLiveMDA` option, goroutine trigger after SE auth
 - [x] Config documented in `dist/coordinator.yaml.example`
-- [x] Tests: freshness dual-mode, MDM client HTTP tests, binding borrow-block, acknowledge_event webhook, migrate-without-hardware, pending-reject, durable cache, enqueue rate-limit
+- [x] Tests: freshness dual-mode, MDM client HTTP tests, binding borrow-block, acknowledge_event webhook, migrate-without-hardware, pending-reject, durable cache/bindings/pending, enqueue rate-limit + concurrent reservation
 
 **Still needs (manual Mac E2E):**
 - [ ] Deploy `live_mda_enabled: true` on Pearl with MicroMDM running
 - [ ] **Claim device binding before live MDA enqueue**
   - Already-enrolled fleet (e.g. H2XX74T43X): one-time ops bootstrap via
     `POST /internal/mdm/device-binding` with webhook secret/loopback +
-    `{"provider_id":"...","serial_number":"..."}` (requires MicroMDM enrollment;
-    token-auth cannot create first binding or pending squat)
+    `{"provider_id":"...","serial_number":"..."}` (requires MicroMDM
+    `enrollment_status:true` + non-empty UDID; token-auth cannot create
+    first binding or pending squat). Bindings survive coordinator restart.
   - Token path `POST /v1/mdm/device-binding`: refresh/re-claim **existing**
     binding only — never creates pending or enrolled-unbound first bind
   - `/v1/enroll` generates profile only (no auto-claim). Optional check-in
     webhook `/internal/mdm/checkin-webhook` SetUDIDs existing bindings only
+  - Keep `mda_refresh_interval_hours` ≥168 (sub-168 values are clamped)
 - [ ] Enroll test Mac via `macprovider enroll` and see UDID in MicroMDM
 - [ ] Point MicroMDM `-command-webhook-url` at coordinator
       `https://<provider-bind>/internal/mdm/command-webhook` (default Pearl:

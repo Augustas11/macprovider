@@ -60,12 +60,20 @@ func TestMDMRefreshIntervalFloor(t *testing.T) {
 		t.Fatalf("unset default=%d want 168", got)
 	}
 	svc.mdmCfg.MDARefreshIntervalHours = 12
-	if got := svc.mdmRefreshIntervalHours(); got != 24 {
-		t.Fatalf("floor=%d want 24", got)
+	if got := svc.mdmRefreshIntervalHours(); got != 168 {
+		t.Fatalf("floor=%d want 168", got)
 	}
 	svc.mdmCfg.MDARefreshIntervalHours = 48
-	if got := svc.mdmRefreshIntervalHours(); got != 48 {
-		t.Fatalf("passthrough=%d want 48", got)
+	if got := svc.mdmRefreshIntervalHours(); got != 168 {
+		t.Fatalf("sub-168 clamp=%d want 168", got)
+	}
+	svc.mdmCfg.MDARefreshIntervalHours = 168
+	if got := svc.mdmRefreshIntervalHours(); got != 168 {
+		t.Fatalf("passthrough=%d want 168", got)
+	}
+	svc.mdmCfg.MDARefreshIntervalHours = 200
+	if got := svc.mdmRefreshIntervalHours(); got != 200 {
+		t.Fatalf("above floor=%d want 200", got)
 	}
 }
 

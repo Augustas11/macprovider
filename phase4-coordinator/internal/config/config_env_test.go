@@ -385,3 +385,27 @@ tier2:
 		t.Fatalf("expected live_mda_enabled fail-closed error, got %v", err)
 	}
 }
+
+func TestLoadClampsMDARefreshIntervalWhenLiveMDAEnabled(t *testing.T) {
+	t.Setenv("PHASE3_TEST_OP_KEY4", "0123456789abcdefABCDEFghijklmnop")
+	t.Setenv("PHASE3_TEST_GW_TOKEN4", "fedcba9876543210PONMLKJIHGFEDCBA")
+	t.Setenv("PHASE3_TEST_MDM_TOKEN4", "micromdm-secret-token")
+
+	cfg, err := loadConfigFromYAML(t, `
+auth:
+  operator_key: env:PHASE3_TEST_OP_KEY4
+  gateway_service_token: env:PHASE3_TEST_GW_TOKEN4
+tier2:
+  mdm:
+    api_url: "http://127.0.0.1:8080"
+    api_token: env:PHASE3_TEST_MDM_TOKEN4
+    live_mda_enabled: true
+    mda_refresh_interval_hours: 48
+`)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Tier2.MDM.MDARefreshIntervalHours != 168 {
+		t.Fatalf("MDARefreshIntervalHours=%d want 168 (R4-M5 clamp)", cfg.Tier2.MDM.MDARefreshIntervalHours)
+	}
+}

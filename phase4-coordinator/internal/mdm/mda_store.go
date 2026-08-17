@@ -36,7 +36,28 @@ type EnqueueLedgerRecord struct {
 	TerminalOutcome    string // "" | "success" | "failed"
 }
 
-// MDAStore persists MDA proofs and enqueue ledger rows in coordinator SQLite.
+// PendingMDARecord is a durable webhook correlation for an in-flight
+// DeviceInformation attestation (R4-M1).
+type PendingMDARecord struct {
+	ProviderID  string
+	AssignedID  string
+	Serial      string
+	UDID        string
+	SEKeyHash   []byte
+	CommandUUID string
+	EnqueuedAt  time.Time
+}
+
+// DeviceBindingRecord is a durable provider↔serial↔UDID binding (R4-M2).
+type DeviceBindingRecord struct {
+	ProviderID string
+	Serial     string
+	UDID       string
+	ClaimedAt  time.Time
+}
+
+// MDAStore persists MDA proofs, enqueue ledger, pending webhook correlation,
+// and device bindings in coordinator SQLite.
 type MDAStore struct {
 	db *sql.DB
 }
@@ -90,6 +111,22 @@ CREATE TABLE IF NOT EXISTS mda_enqueue_ledger (
 	last_enqueue_at TEXT NOT NULL,
 	pending_command_uuid TEXT NOT NULL DEFAULT '',
 	terminal_outcome TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS mda_pending (
+	command_uuid TEXT PRIMARY KEY,
+	provider_id TEXT NOT NULL,
+	assigned_id TEXT NOT NULL,
+	serial TEXT NOT NULL,
+	udid TEXT NOT NULL,
+	se_key_hash BLOB NOT NULL,
+	enqueued_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mda_pending_udid ON mda_pending(udid);
+CREATE TABLE IF NOT EXISTS mda_device_bindings (
+	provider_id TEXT PRIMARY KEY,
+	serial TEXT NOT NULL UNIQUE,
+	udid TEXT NOT NULL DEFAULT '',
+	claimed_at TEXT NOT NULL
 );
 `)
 	return err
@@ -249,4 +286,185 @@ FROM mda_enqueue_ledger WHERE ledger_key = ?`, ledgerKey).Scan(
 	}
 	rec.LastEnqueueAt = ts.UTC()
 	return rec, true, nil
+}
+
+// DeleteEnqueueLedger removes a ledger row (used to release a failed reservation).
+func (s *MDAStore) DeleteEnqueueLedger(ctx context.Context, ledgerKey string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM mda_enqueue_ledger WHERE ledger_key = ?`, ledgerKey)
+	return err
+}
+
+// SavePending upserts a durable pending MDA webhook correlation.
+func (s *MDAStore) SavePending(ctx context.Context, rec PendingMDARecord) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	commandUUID := strings.TrimSpace(rec.CommandUUID)
+	if commandUUID == "" {
+		return fmt.Errorf("mda store: pending command_uuid required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO mda_pending(command_uuid, provider_id, assigned_id, serial, udid, se_key_hash, enqueued_at)
+VALUES(?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(command_uuid) DO UPDATE SET
+	provider_id = excluded.provider_id,
+	assigned_id = excluded.assigned_id,
+	serial = excluded.serial,
+	udid = excluded.udid,
+	se_key_hash = excluded.se_key_hash,
+	enqueued_at = excluded.enqueued_at`,
+		commandUUID,
+		strings.TrimSpace(rec.ProviderID),
+		strings.TrimSpace(rec.AssignedID),
+		NormalizeSerial(rec.Serial),
+		strings.TrimSpace(rec.UDID),
+		append([]byte(nil), rec.SEKeyHash...),
+		rec.EnqueuedAt.UTC().Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+// LoadPendingByCommandUUID returns a durable pending row by command UUID.
+func (s *MDAStore) LoadPendingByCommandUUID(ctx context.Context, commandUUID string) (PendingMDARecord, bool, error) {
+	if s == nil || s.db == nil {
+		return PendingMDARecord{}, false, nil
+	}
+	return s.scanPending(ctx, `
+SELECT command_uuid, provider_id, assigned_id, serial, udid, se_key_hash, enqueued_at
+FROM mda_pending WHERE command_uuid = ?`, strings.TrimSpace(commandUUID))
+}
+
+// LoadPendingByUDID returns a durable pending row by UDID (first match).
+func (s *MDAStore) LoadPendingByUDID(ctx context.Context, udid string) (PendingMDARecord, bool, error) {
+	if s == nil || s.db == nil {
+		return PendingMDARecord{}, false, nil
+	}
+	return s.scanPending(ctx, `
+SELECT command_uuid, provider_id, assigned_id, serial, udid, se_key_hash, enqueued_at
+FROM mda_pending WHERE udid = ? LIMIT 1`, strings.TrimSpace(udid))
+}
+
+func (s *MDAStore) scanPending(ctx context.Context, query string, arg string) (PendingMDARecord, bool, error) {
+	var rec PendingMDARecord
+	var enqueuedAt string
+	err := s.db.QueryRowContext(ctx, query, arg).Scan(
+		&rec.CommandUUID, &rec.ProviderID, &rec.AssignedID, &rec.Serial,
+		&rec.UDID, &rec.SEKeyHash, &enqueuedAt,
+	)
+	if err == sql.ErrNoRows {
+		return PendingMDARecord{}, false, nil
+	}
+	if err != nil {
+		return PendingMDARecord{}, false, err
+	}
+	ts, err := time.Parse(time.RFC3339Nano, enqueuedAt)
+	if err != nil {
+		ts, err = time.Parse(time.RFC3339, enqueuedAt)
+		if err != nil {
+			return PendingMDARecord{}, false, err
+		}
+	}
+	rec.EnqueuedAt = ts.UTC()
+	rec.SEKeyHash = append([]byte(nil), rec.SEKeyHash...)
+	return rec, true, nil
+}
+
+// DeletePending removes durable pending rows by command UUID and/or UDID.
+func (s *MDAStore) DeletePending(ctx context.Context, commandUUID, udid string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	commandUUID = strings.TrimSpace(commandUUID)
+	udid = strings.TrimSpace(udid)
+	if commandUUID == "" && udid == "" {
+		return nil
+	}
+	if commandUUID != "" && udid != "" {
+		_, err := s.db.ExecContext(ctx,
+			`DELETE FROM mda_pending WHERE command_uuid = ? OR udid = ?`, commandUUID, udid)
+		return err
+	}
+	if commandUUID != "" {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM mda_pending WHERE command_uuid = ?`, commandUUID)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM mda_pending WHERE udid = ?`, udid)
+	return err
+}
+
+// SaveBinding upserts a durable device binding.
+func (s *MDAStore) SaveBinding(ctx context.Context, rec DeviceBindingRecord) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	providerID := strings.TrimSpace(rec.ProviderID)
+	serial := NormalizeSerial(rec.Serial)
+	if providerID == "" || serial == "" {
+		return fmt.Errorf("mda store: binding provider_id and serial required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO mda_device_bindings(provider_id, serial, udid, claimed_at)
+VALUES(?, ?, ?, ?)
+ON CONFLICT(provider_id) DO UPDATE SET
+	serial = excluded.serial,
+	udid = excluded.udid,
+	claimed_at = excluded.claimed_at`,
+		providerID,
+		serial,
+		strings.TrimSpace(rec.UDID),
+		rec.ClaimedAt.UTC().Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+// LoadAllBindings returns every durable device binding.
+func (s *MDAStore) LoadAllBindings(ctx context.Context) ([]DeviceBindingRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT provider_id, serial, udid, claimed_at FROM mda_device_bindings`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DeviceBindingRecord
+	for rows.Next() {
+		var rec DeviceBindingRecord
+		var claimedAt string
+		if err := rows.Scan(&rec.ProviderID, &rec.Serial, &rec.UDID, &claimedAt); err != nil {
+			return nil, err
+		}
+		ts, err := time.Parse(time.RFC3339Nano, claimedAt)
+		if err != nil {
+			ts, err = time.Parse(time.RFC3339, claimedAt)
+			if err != nil {
+				return nil, err
+			}
+		}
+		rec.ClaimedAt = ts.UTC()
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// DeleteBinding removes a durable binding by provider ID.
+func (s *MDAStore) DeleteBinding(ctx context.Context, providerID string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM mda_device_bindings WHERE provider_id = ?`, strings.TrimSpace(providerID))
+	return err
+}
+
+// DeleteBindingBySerial removes a durable binding by serial.
+func (s *MDAStore) DeleteBindingBySerial(ctx context.Context, serial string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM mda_device_bindings WHERE serial = ?`, NormalizeSerial(serial))
+	return err
 }

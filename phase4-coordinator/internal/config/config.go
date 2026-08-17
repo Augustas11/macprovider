@@ -912,7 +912,8 @@ type Tier2MDMConfig struct {
 	// MDARefreshIntervalHours controls how often the coordinator
 	// re-requests a fresh DeviceInformation attestation from MicroMDM.
 	// Apple enforces a ~7-day rate limit on DeviceAttestation commands;
-	// default 168 (7 days) when unset/0. Values in 1..23 are floored to 24.
+	// default 168 (7 days) when unset/0. When live_mda_enabled, values
+	// below 168 are clamped to 168 (R4-M5).
 	MDARefreshIntervalHours int `yaml:"mda_refresh_interval_hours"`
 
 	// CommandWebhookSecret is an optional shared secret for the MicroMDM
@@ -1740,6 +1741,10 @@ func (c *Config) resolveEnv() error {
 	if c.Tier2.MDM.LiveMDAEnabled {
 		if strings.TrimSpace(c.Tier2.MDM.APIURL) == "" || strings.TrimSpace(c.Tier2.MDM.APIToken) == "" {
 			return fmt.Errorf("tier2.mdm.live_mda_enabled requires non-empty api_url and resolved api_token")
+		}
+		// R4-M5: Apple ~7-day DeviceAttestation budget — floor at 168h.
+		if c.Tier2.MDM.MDARefreshIntervalHours < 168 {
+			c.Tier2.MDM.MDARefreshIntervalHours = 168
 		}
 	}
 	// Round-1 SECURITY r1 MEDIUM 1: stats DSN fields go through

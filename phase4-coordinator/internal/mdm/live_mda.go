@@ -18,6 +18,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
 
@@ -73,9 +74,11 @@ type LiveMDAService struct {
 	tokens   TokenValidator
 	store    *MDAStore
 
-	mu      sync.Mutex
-	pending map[string]pendingMDARequest // keyed by UDID and/or command_uuid
-	ledger  map[string]enqueueLedgerEntry
+	mu           sync.Mutex
+	pending      map[string]pendingMDARequest // keyed by UDID and/or command_uuid
+	ledger       map[string]enqueueLedgerEntry
+	enqueueMu    sync.Mutex
+	enqueueLocks map[string]*sync.Mutex // per ledger-key reservation locks (R4-M4)
 }
 
 // NewLiveMDAService creates a LiveMDAService. Returns (nil, nil) when
@@ -112,12 +115,59 @@ func NewLiveMDAService(cfg config.Tier2Config, p *pool.Registry, log zerolog.Log
 	}, nil
 }
 
-// SetMDAStore wires durable MDA proof + enqueue ledger persistence (R3-M2/M3).
+// SetMDAStore wires durable MDA proof, enqueue ledger, pending correlation,
+// and device binding persistence (R3-M2/M3, R4-M1/M2). Hydrates bindings.
 func (s *LiveMDAService) SetMDAStore(store *MDAStore) {
 	if s == nil {
 		return
 	}
 	s.store = store
+	s.hydrateBindings(context.Background())
+}
+
+func (s *LiveMDAService) hydrateBindings(ctx context.Context) {
+	if s.store == nil || s.bindings == nil {
+		return
+	}
+	recs, err := s.store.LoadAllBindings(ctx)
+	if err != nil {
+		s.log.Warn().Err(err).Msg("live_mda: durable binding hydrate failed")
+		return
+	}
+	for _, rec := range recs {
+		if err := s.bindings.Restore(Binding{
+			ProviderID: rec.ProviderID,
+			Serial:     rec.Serial,
+			UDID:       rec.UDID,
+			ClaimedAt:  rec.ClaimedAt,
+		}); err != nil {
+			s.log.Warn().Err(err).
+				Str("provider_id", rec.ProviderID).
+				Str("serial", rec.Serial).
+				Msg("live_mda: durable binding restore skipped")
+		}
+	}
+	if len(recs) > 0 {
+		s.log.Info().Int("count", len(recs)).Msg("live_mda: hydrated durable device bindings")
+	}
+}
+
+func (s *LiveMDAService) persistBinding(providerID string) {
+	if s == nil || s.store == nil || s.bindings == nil {
+		return
+	}
+	b, ok := s.bindings.LookupByProvider(providerID)
+	if !ok {
+		return
+	}
+	if err := s.store.SaveBinding(context.Background(), DeviceBindingRecord{
+		ProviderID: b.ProviderID,
+		Serial:     b.Serial,
+		UDID:       b.UDID,
+		ClaimedAt:  b.ClaimedAt,
+	}); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("live_mda: durable binding save failed")
+	}
 }
 
 // SetTokenValidator wires provider Bearer validation for POST /v1/mdm/device-binding.
@@ -140,6 +190,7 @@ func (s *LiveMDAService) Bindings() *DeviceBindingStore {
 //
 //   - R3-H1: neither path may create a new binding for a serial that is not
 //     already enrolled in MicroMDM (no pending UDID-empty squat).
+//   - R4-M3: enrolled means EnrollmentStatus==true AND non-empty UDID.
 //   - Token-auth path (allowEnrolledUnbound=false): rejects enrolled-unbound
 //     new claims (ErrEnrolledUnboundRejected). May refresh UDID on an existing
 //     same-provider binding.
@@ -165,8 +216,9 @@ func (s *LiveMDAService) ClaimDevice(ctx context.Context, providerID, serial str
 	// Same provider already owns this serial — refresh UDID if possible.
 	if existing, ok := s.bindings.LookupByProvider(providerID); ok && existing.Serial == serial {
 		if existing.UDID == "" && s.client != nil {
-			if device, found, err := s.client.FindDeviceBySerial(ctx, serial); err == nil && found && device.UDID != "" {
+			if device, found, err := s.client.FindDeviceBySerial(ctx, serial); err == nil && found && isEnrolledDevice(device) {
 				s.bindings.SetUDID(serial, device.UDID)
+				s.persistBinding(providerID)
 			}
 		}
 		return nil
@@ -179,12 +231,12 @@ func (s *LiveMDAService) ClaimDevice(ctx context.Context, providerID, serial str
 		if err != nil {
 			return fmt.Errorf("mdm claim: find device: %w", err)
 		}
-		if found {
+		if found && isEnrolledDevice(device) {
 			enrolled = true
 			udid = strings.TrimSpace(device.UDID)
 		}
 	}
-	// R3-H1: never create a pending (not-yet-enrolled) binding.
+	// R3-H1 / R4-M3: never create a pending or unenrolled binding.
 	if !enrolled {
 		return ErrPendingClaimRejected
 	}
@@ -197,7 +249,13 @@ func (s *LiveMDAService) ClaimDevice(ctx context.Context, providerID, serial str
 	if udid != "" {
 		s.bindings.SetUDID(serial, udid)
 	}
+	s.persistBinding(providerID)
 	return nil
+}
+
+// isEnrolledDevice is true only when MicroMDM reports enrollment_status and a UDID (R4-M3).
+func isEnrolledDevice(d Device) bool {
+	return d.EnrollmentStatus && strings.TrimSpace(d.UDID) != ""
 }
 
 // RequestAndMaybeUpgrade is the main Phase 3 observe-mode entry point.
@@ -263,21 +321,25 @@ func (s *LiveMDAService) RequestAndMaybeUpgrade(providerID, assignedID, seSerial
 				Msg("live_mda: FindDeviceBySerial for binding failed")
 			return
 		}
-		if !found || strings.TrimSpace(device.UDID) == "" {
+		if !found || !isEnrolledDevice(device) {
 			s.log.Info().
 				Str("provider_id", providerID).
 				Str("serial", binding.Serial).
-				Msg("live_mda: bound serial has no MicroMDM UDID yet — skip enqueue")
+				Msg("live_mda: bound serial has no enrolled MicroMDM UDID yet — skip enqueue")
 			return
 		}
 		udid = strings.TrimSpace(device.UDID)
 		s.bindings.SetUDID(binding.Serial, udid)
+		s.persistBinding(providerID)
 		if sn := strings.TrimSpace(device.SerialNumber); sn != "" {
 			binding.Serial = NormalizeSerial(sn)
 		}
 	}
 
 	ledgerKey := enqueueLedgerKey(providerID, binding.Serial, seKeyHash[:])
+	keyMu := s.lockEnqueueKey(ledgerKey)
+	defer keyMu.Unlock()
+
 	if allow, reason := s.enqueueAllowed(ledgerKey); !allow {
 		s.log.Info().
 			Str("provider_id", providerID).
@@ -287,8 +349,23 @@ func (s *LiveMDAService) RequestAndMaybeUpgrade(providerID, assignedID, seSerial
 		return
 	}
 
+	// R4-M4: reserve durable pending/ledger before outbound HTTP.
+	provisionalUUID := uuid.New().String()
+	pendingReq := pendingMDARequest{
+		ProviderID:     providerID,
+		AssignedID:     assignedID,
+		ExpectedSerial: binding.Serial,
+		UDID:           udid,
+		CommandUUID:    provisionalUUID,
+		SEKeyHash:      append([]byte(nil), seKeyHash[:]...),
+		EnqueuedAt:     s.now(),
+	}
+	s.recordPending(udid, provisionalUUID, pendingReq)
+	s.markEnqueued(ledgerKey, providerID, binding.Serial, seKeyHash[:], provisionalUUID)
+
 	commandUUID, err := s.client.EnqueueDeviceInformationAttestation(ctx, udid, seKeyHash[:])
 	if err != nil {
+		s.releaseEnqueueReservation(ledgerKey, provisionalUUID, udid)
 		s.log.Warn().Err(err).
 			Str("provider_id", providerID).
 			Str("udid", udid).
@@ -296,16 +373,7 @@ func (s *LiveMDAService) RequestAndMaybeUpgrade(providerID, assignedID, seSerial
 		return
 	}
 
-	s.recordPending(udid, commandUUID, pendingMDARequest{
-		ProviderID:     providerID,
-		AssignedID:     assignedID,
-		ExpectedSerial: binding.Serial,
-		UDID:           udid,
-		CommandUUID:    commandUUID,
-		SEKeyHash:      append([]byte(nil), seKeyHash[:]...),
-		EnqueuedAt:     s.now(),
-	})
-	s.markEnqueued(ledgerKey, providerID, binding.Serial, seKeyHash[:], commandUUID)
+	s.confirmEnqueue(ledgerKey, providerID, binding.Serial, seKeyHash[:], provisionalUUID, commandUUID, pendingReq)
 
 	s.log.Info().
 		Str("provider_id", providerID).
@@ -617,7 +685,6 @@ func (s *LiveMDAService) recordPending(udid, commandUUID string, req pendingMDAR
 		req.CommandUUID = commandUUID
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.pending == nil {
 		s.pending = make(map[string]pendingMDARequest)
 	}
@@ -626,6 +693,38 @@ func (s *LiveMDAService) recordPending(udid, commandUUID string, req pendingMDAR
 	}
 	if commandUUID != "" {
 		s.pending[commandUUID] = req
+	}
+	s.mu.Unlock()
+	s.persistPending(req)
+}
+
+func (s *LiveMDAService) persistPending(req pendingMDARequest) {
+	if s.store == nil || strings.TrimSpace(req.CommandUUID) == "" {
+		return
+	}
+	if err := s.store.SavePending(context.Background(), PendingMDARecord{
+		ProviderID:  req.ProviderID,
+		AssignedID:  req.AssignedID,
+		Serial:      req.ExpectedSerial,
+		UDID:        req.UDID,
+		SEKeyHash:   req.SEKeyHash,
+		CommandUUID: req.CommandUUID,
+		EnqueuedAt:  req.EnqueuedAt,
+	}); err != nil {
+		s.log.Warn().Err(err).
+			Str("command_uuid", req.CommandUUID).
+			Msg("live_mda: durable pending save failed")
+	}
+}
+
+func (s *LiveMDAService) clearDurablePending(req pendingMDARequest) {
+	if s.store == nil {
+		return
+	}
+	if err := s.store.DeletePending(context.Background(), req.CommandUUID, req.UDID); err != nil {
+		s.log.Warn().Err(err).
+			Str("command_uuid", req.CommandUUID).
+			Msg("live_mda: durable pending delete failed")
 	}
 }
 
@@ -642,21 +741,51 @@ func (s *LiveMDAService) takePending(commandUUID, udid string) (pendingMDAReques
 	if !ok && udid != "" {
 		req, ok = s.pending[udid]
 	}
+	// R4-M1: hydrate from durable store on memory miss (restart).
+	if !ok && s.store != nil {
+		ctx := context.Background()
+		var rec PendingMDARecord
+		var found bool
+		var err error
+		if commandUUID != "" {
+			rec, found, err = s.store.LoadPendingByCommandUUID(ctx, commandUUID)
+		}
+		if (err != nil || !found) && udid != "" {
+			rec, found, err = s.store.LoadPendingByUDID(ctx, udid)
+		}
+		if err == nil && found {
+			req = pendingMDARequest{
+				ProviderID:     rec.ProviderID,
+				AssignedID:     rec.AssignedID,
+				ExpectedSerial: rec.Serial,
+				UDID:           rec.UDID,
+				CommandUUID:    rec.CommandUUID,
+				SEKeyHash:      append([]byte(nil), rec.SEKeyHash...),
+				EnqueuedAt:     rec.EnqueuedAt,
+			}
+			ok = true
+		}
+	}
 	if !ok {
 		return pendingMDARequest{}, false
 	}
-	// Remove all aliases for this pending request.
-	if req.CommandUUID != "" {
-		delete(s.pending, req.CommandUUID)
+	// Remove all aliases for this pending request (memory + durable).
+	if s.pending != nil {
+		if req.CommandUUID != "" {
+			delete(s.pending, req.CommandUUID)
+		}
+		if req.UDID != "" {
+			delete(s.pending, req.UDID)
+		}
+		if commandUUID != "" {
+			delete(s.pending, commandUUID)
+		}
+		if udid != "" {
+			delete(s.pending, udid)
+		}
 	}
-	if req.UDID != "" {
-		delete(s.pending, req.UDID)
-	}
-	if commandUUID != "" {
-		delete(s.pending, commandUUID)
-	}
-	if udid != "" {
-		delete(s.pending, udid)
+	if s.store != nil {
+		_ = s.store.DeletePending(context.Background(), req.CommandUUID, req.UDID)
 	}
 	return req, true
 }
@@ -799,11 +928,8 @@ func (s *LiveMDAService) verifyAndUpgrade(providerID, assignedID string, chain [
 
 func (s *LiveMDAService) mdmRefreshIntervalHours() int {
 	h := s.mdmCfg.MDARefreshIntervalHours
-	if h <= 0 {
-		return 168 // default 7 days when unset
-	}
-	if h < 24 {
-		return 24 // floor per docs
+	if h < 168 {
+		return 168 // R4-M5: Apple ~7-day DeviceAttestation budget floor
 	}
 	return h
 }
@@ -930,6 +1056,66 @@ func (s *LiveMDAService) markEnqueued(ledgerKey, providerID, serial string, seKe
 	}
 }
 
+// lockEnqueueKey returns a per-ledger-key mutex held by the caller (R4-M4).
+func (s *LiveMDAService) lockEnqueueKey(ledgerKey string) *sync.Mutex {
+	s.enqueueMu.Lock()
+	if s.enqueueLocks == nil {
+		s.enqueueLocks = make(map[string]*sync.Mutex)
+	}
+	m, ok := s.enqueueLocks[ledgerKey]
+	if !ok {
+		m = &sync.Mutex{}
+		s.enqueueLocks[ledgerKey] = m
+	}
+	s.enqueueMu.Unlock()
+	m.Lock()
+	return m
+}
+
+// confirmEnqueue replaces a provisional reservation with the real MicroMDM command UUID.
+func (s *LiveMDAService) confirmEnqueue(ledgerKey, providerID, serial string, seKeyHash []byte, provisionalUUID, commandUUID string, req pendingMDARequest) {
+	provisionalUUID = strings.TrimSpace(provisionalUUID)
+	commandUUID = strings.TrimSpace(commandUUID)
+	if commandUUID == "" {
+		commandUUID = provisionalUUID
+	}
+	req.CommandUUID = commandUUID
+	// Drop provisional memory alias before recording the real UUID.
+	s.mu.Lock()
+	if s.pending != nil && provisionalUUID != "" && provisionalUUID != commandUUID {
+		delete(s.pending, provisionalUUID)
+	}
+	s.mu.Unlock()
+	if s.store != nil && provisionalUUID != "" && provisionalUUID != commandUUID {
+		_ = s.store.DeletePending(context.Background(), provisionalUUID, "")
+	}
+	s.recordPending(req.UDID, commandUUID, req)
+	s.markEnqueued(ledgerKey, providerID, serial, seKeyHash, commandUUID)
+}
+
+// releaseEnqueueReservation undoes a pre-HTTP reservation after enqueue failure.
+func (s *LiveMDAService) releaseEnqueueReservation(ledgerKey, provisionalUUID, udid string) {
+	provisionalUUID = strings.TrimSpace(provisionalUUID)
+	udid = strings.TrimSpace(udid)
+	s.mu.Lock()
+	if s.pending != nil {
+		if provisionalUUID != "" {
+			delete(s.pending, provisionalUUID)
+		}
+		if udid != "" {
+			delete(s.pending, udid)
+		}
+	}
+	if s.ledger != nil {
+		delete(s.ledger, ledgerKey)
+	}
+	s.mu.Unlock()
+	if s.store != nil {
+		_ = s.store.DeletePending(context.Background(), provisionalUUID, udid)
+		_ = s.store.DeleteEnqueueLedger(context.Background(), ledgerKey)
+	}
+}
+
 func (s *LiveMDAService) markEnqueueSuccess(pending pendingMDARequest) {
 	key := enqueueLedgerKey(pending.ProviderID, pending.ExpectedSerial, pending.SEKeyHash)
 	s.mu.Lock()
@@ -944,6 +1130,7 @@ func (s *LiveMDAService) markEnqueueSuccess(pending pendingMDARequest) {
 	e.TerminalOutcome = "success"
 	s.ledger[key] = e
 	s.mu.Unlock()
+	s.clearDurablePending(pending)
 	if s.store != nil {
 		_ = s.store.SaveEnqueueLedger(context.Background(), EnqueueLedgerRecord{
 			LedgerKey:          key,
@@ -971,6 +1158,7 @@ func (s *LiveMDAService) markEnqueueFailed(pending pendingMDARequest) {
 	e.TerminalOutcome = "failed"
 	s.ledger[key] = e
 	s.mu.Unlock()
+	s.clearDurablePending(pending)
 	if s.store != nil {
 		_ = s.store.SaveEnqueueLedger(context.Background(), EnqueueLedgerRecord{
 			LedgerKey:          key,
@@ -1067,6 +1255,9 @@ func (s *LiveMDAService) HandleCheckInWebhook(w http.ResponseWriter, r *http.Req
 		return
 	}
 	s.bindings.SetUDID(serial, udid)
+	if b, ok := s.bindings.LookupBySerial(serial); ok {
+		s.persistBinding(b.ProviderID)
+	}
 	s.log.Info().
 		Str("serial", serial).
 		Str("udid", udid).

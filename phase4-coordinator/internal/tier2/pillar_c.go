@@ -89,7 +89,9 @@ type AttestationVerifyResult struct {
 	// MDAHardware is true when MDA chain verification succeeded AND the
 	// freshness extension matched SHA256(sePublicKey) — i.e. the Apple MDA
 	// is bound to the provider's SE key via MDM DeviceAttestationNonce.
-	// When true the caller should set AttestationTier = "hardware".
+	// Observe-only: does NOT alone publish pool AttestationTierHardware
+	// (R3-M1). Hardware tier is set only via LiveMDAService SetMDAProof /
+	// tryUpgradeFromCache after binding-serial + SE freshness checks.
 	MDAHardware bool
 }
 
