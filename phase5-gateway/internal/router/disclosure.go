@@ -91,17 +91,25 @@ type behavioralSafetyDisclosure struct {
 }
 
 type verifiedModelSettlementDisclosure struct {
-	IncludedPaidEntrypoints []string                    `json:"included_paid_entrypoints"`
-	ExcludedPaidEntrypoints []string                    `json:"excluded_paid_entrypoints"`
-	ModelIdentity           string                      `json:"model_identity"`
-	ModelIdentityCaveat     string                      `json:"model_identity_caveat"`
-	ObserveMode             string                      `json:"observe_mode"`
-	EnforceMode             string                      `json:"enforce_mode"`
-	PendingReservation      string                      `json:"pending_reservation"`
-	Outcomes                settlementOutcomeDisclosure `json:"outcomes"`
-	PartialCharge           string                      `json:"partial_charge"`
-	StreamingFailover       string                      `json:"streaming_failover"`
-	BuyerReceiptStatus      string                      `json:"buyer_receipt_status"`
+	IncludedPaidEntrypoints []string                      `json:"included_paid_entrypoints"`
+	ExcludedPaidEntrypoints []string                      `json:"excluded_paid_entrypoints"`
+	ModelIdentity           string                        `json:"model_identity"`
+	ModelIdentityCaveat     string                        `json:"model_identity_caveat"`
+	SettlementIntegrity     settlementIntegrityDisclosure `json:"settlement_integrity"`
+	ObserveMode             string                        `json:"observe_mode"`
+	EnforceMode             string                        `json:"enforce_mode"`
+	PendingReservation      string                        `json:"pending_reservation"`
+	Outcomes                settlementOutcomeDisclosure   `json:"outcomes"`
+	PartialCharge           string                        `json:"partial_charge"`
+	StreamingFailover       string                        `json:"streaming_failover"`
+	BuyerReceiptStatus      string                        `json:"buyer_receipt_status"`
+}
+
+type settlementIntegrityDisclosure struct {
+	SchemaVersion    string `json:"schema_version"`
+	ReceiptBinding   string `json:"receipt_binding"`
+	ComputeIntegrity string `json:"compute_integrity"`
+	ClaimLimit       string `json:"claim_limit"`
 }
 
 type settlementOutcomeDisclosure struct {
@@ -273,6 +281,9 @@ const routingMetaTTL = 5 * time.Second
 const modelVerificationLimitDisclosure = "v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement."
 const settlementModelIdentityDisclosure = "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately."
 const settlementModelIdentityCaveatDisclosure = "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement."
+const settlementIntegrityReceiptBindingDisclosure = "Settlement-integrity labels are receipt-bound for covered paid entrypoints under SPEC-022 enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize. In observe mode, this label is disclosure-only and does not change buyer debit or provider payout."
+const settlementIntegrityComputeDisclosure = "SPEC-036 compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available."
+const settlementIntegrityClaimLimitDisclosure = "Do not describe settlement-integrity labels as proof of honest computation, hardware integrity, binary integrity, private inference, or malicious-provider resistance."
 const settlementObserveModeDisclosure = "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout."
 const settlementEnforceModeDisclosure = "Enforce mode may settle only covered paid entrypoints listed in this disclosure whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified."
 const settlementPendingReservationDisclosure = "Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation."
@@ -338,9 +349,15 @@ func makeVerifiedModelSettlementDisclosure(includeResponses, includeAnthropicMes
 		},
 		ModelIdentity:       settlementModelIdentityDisclosure,
 		ModelIdentityCaveat: settlementModelIdentityCaveatDisclosure,
-		ObserveMode:         settlementObserveModeDisclosure,
-		EnforceMode:         enforceMode,
-		PendingReservation:  settlementPendingReservationDisclosure,
+		SettlementIntegrity: settlementIntegrityDisclosure{
+			SchemaVersion:    "buyer_settlement_integrity_disclosure_v1",
+			ReceiptBinding:   settlementIntegrityReceiptBindingDisclosure,
+			ComputeIntegrity: settlementIntegrityComputeDisclosure,
+			ClaimLimit:       settlementIntegrityClaimLimitDisclosure,
+		},
+		ObserveMode:        settlementObserveModeDisclosure,
+		EnforceMode:        enforceMode,
+		PendingReservation: settlementPendingReservationDisclosure,
 		Outcomes: settlementOutcomeDisclosure{
 			Pending:     settlementPendingOutcomeDisclosure,
 			Verified:    settlementVerifiedOutcomeDisclosure,

@@ -14,7 +14,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.11.1 | normative | pending | pending: 1 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart Router | 0.3.3 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
 | SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.2 | normative | pending | pending: 3 | [SPEC-005-billing.md](SPEC-005-billing.md) |
-| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.17 | normative | pending | pending: 3 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
+| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.18 | normative | pending | pending: 3 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.1 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.5.1 | normative | pending | pending: 1 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | normative | pending | pending corpus migration | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
