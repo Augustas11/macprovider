@@ -213,15 +213,21 @@ func (s *LiveMDAService) ClaimDevice(ctx context.Context, providerID, serial str
 	if existing, ok := s.bindings.LookupBySerial(serial); ok && existing.ProviderID != providerID {
 		return ErrSerialAlreadyBound
 	}
-	// Same provider already owns this serial — refresh UDID if possible.
-	if existing, ok := s.bindings.LookupByProvider(providerID); ok && existing.Serial == serial {
-		if existing.UDID == "" && s.client != nil {
-			if device, found, err := s.client.FindDeviceBySerial(ctx, serial); err == nil && found && isEnrolledDevice(device) {
-				s.bindings.SetUDID(serial, device.UDID)
-				s.persistBinding(providerID)
+	priorBindingSerial := ""
+	priorBindingUDID := ""
+	if existing, ok := s.bindings.LookupByProvider(providerID); ok {
+		priorBindingSerial = existing.Serial
+		priorBindingUDID = existing.UDID
+		// Same provider already owns this serial — refresh UDID if possible.
+		if existing.Serial == serial {
+			if existing.UDID == "" && s.client != nil {
+				if device, found, err := s.client.FindDeviceBySerial(ctx, serial); err == nil && found && isEnrolledDevice(device) {
+					s.bindings.SetUDID(serial, device.UDID)
+					s.persistBinding(providerID)
+				}
 			}
+			return nil
 		}
-		return nil
 	}
 
 	var enrolled bool
@@ -250,6 +256,9 @@ func (s *LiveMDAService) ClaimDevice(ctx context.Context, providerID, serial str
 		s.bindings.SetUDID(serial, udid)
 	}
 	s.persistBinding(providerID)
+	// R7-M1: binding↔hardware — clear live+durable MDA proof when the claim
+	// serial differs from prior binding / live MDASerial / durable proof serial.
+	s.clearHardwareAfterSerialClaim(providerID, serial, priorBindingSerial, priorBindingUDID)
 	return nil
 }
 
@@ -1057,11 +1066,140 @@ func (s *LiveMDAService) mdmRefreshIntervalHours() int {
 }
 
 func (s *LiveMDAService) clearMDAProof(providerID, assignedID string) {
-	s.pool.ClearMDAProof(providerID, assignedID)
+	if s.pool != nil {
+		s.pool.ClearMDAProof(providerID, assignedID)
+	}
 	if s.store != nil {
 		if err := s.store.DeleteProof(context.Background(), providerID); err != nil {
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("live_mda: durable proof delete failed")
 		}
+	}
+}
+
+// clearHardwareAfterSerialClaim implements R7-M1: after a successful ClaimDevice
+// that binds providerID to newSerial, drop any live/durable MDA proof whose
+// serial does not match the new binding (and clear stale pending for the old
+// serial/UDID). Downgrades AttestationTierHardware → self_signed via ClearMDAProof.
+func (s *LiveMDAService) clearHardwareAfterSerialClaim(providerID, newSerial, priorBindingSerial, priorBindingUDID string) {
+	providerID = strings.TrimSpace(providerID)
+	newSerial = NormalizeSerial(newSerial)
+	if providerID == "" || newSerial == "" {
+		return
+	}
+	prior := NormalizeSerial(priorBindingSerial)
+
+	liveSerial := ""
+	assignedID := ""
+	hardwareTier := false
+	if s.pool != nil {
+		if p, ok := s.pool.Resolve(providerID, ""); ok {
+			assignedID = strings.TrimSpace(p.AssignedID)
+			liveSerial = NormalizeSerial(p.MDASerial)
+			hardwareTier = p.AttestationTier == pool.AttestationTierHardware
+		}
+		if _, _, _, ser, ok := s.pool.MDAProof(providerID); ok {
+			liveSerial = NormalizeSerial(ser)
+		}
+	}
+
+	durableSerial := ""
+	if s.store != nil {
+		if rec, ok, err := s.store.LoadProof(context.Background(), providerID); err != nil {
+			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("live_mda: durable proof load failed on rebind clear")
+		} else if ok {
+			durableSerial = NormalizeSerial(rec.Serial)
+		}
+	}
+
+	needClear := false
+	if prior != "" && prior != newSerial {
+		needClear = true
+	}
+	if liveSerial != "" && liveSerial != newSerial {
+		needClear = true
+	}
+	if durableSerial != "" && durableSerial != newSerial {
+		needClear = true
+	}
+	if hardwareTier && prior != "" && prior != newSerial {
+		needClear = true
+	}
+	if !needClear {
+		return
+	}
+
+	if assignedID != "" {
+		s.clearMDAProof(providerID, assignedID)
+	} else if s.store != nil {
+		if err := s.store.DeleteProof(context.Background(), providerID); err != nil {
+			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("live_mda: durable proof delete failed on rebind")
+		}
+	}
+
+	s.clearPendingForProviderOldSerial(providerID, priorBindingUDID, prior, liveSerial, durableSerial)
+	s.log.Info().
+		Str("provider_id", providerID).
+		Str("new_serial", newSerial).
+		Str("prior_binding_serial", prior).
+		Str("live_mda_serial", liveSerial).
+		Str("durable_proof_serial", durableSerial).
+		Msg("live_mda: cleared MDA proof after serial rebind (R7-M1)")
+}
+
+// clearPendingForProviderOldSerial drops in-memory and durable pending rows for
+// this provider whose ExpectedSerial matches any of the pre-rebind serials, or
+// whose UDID matches the released binding UDID.
+func (s *LiveMDAService) clearPendingForProviderOldSerial(providerID, priorUDID string, oldSerials ...string) {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return
+	}
+	oldSet := make(map[string]struct{})
+	for _, ser := range oldSerials {
+		if n := NormalizeSerial(ser); n != "" {
+			oldSet[n] = struct{}{}
+		}
+	}
+	priorUDID = strings.TrimSpace(priorUDID)
+
+	s.mu.Lock()
+	var toClear []pendingMDARequest
+	seen := make(map[string]struct{})
+	if s.pending != nil {
+		for _, req := range s.pending {
+			if strings.TrimSpace(req.ProviderID) != providerID {
+				continue
+			}
+			match := false
+			if _, ok := oldSet[NormalizeSerial(req.ExpectedSerial)]; ok {
+				match = true
+			}
+			if !match && priorUDID != "" && strings.TrimSpace(req.UDID) == priorUDID {
+				match = true
+			}
+			if !match {
+				continue
+			}
+			key := req.CommandUUID + "|" + req.UDID
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			toClear = append(toClear, req)
+		}
+		for _, req := range toClear {
+			if req.CommandUUID != "" {
+				delete(s.pending, req.CommandUUID)
+			}
+			if req.UDID != "" {
+				delete(s.pending, req.UDID)
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	for _, req := range toClear {
+		s.clearDurablePending(req)
 	}
 }
 

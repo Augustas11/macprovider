@@ -903,3 +903,117 @@ func TestWebhookRefusesAfterRebindSerialChange(t *testing.T) {
 	}
 }
 
+// R7-M1: after SetMDAProof/hardware for serial A, ClaimDevice to B must clear
+// live+durable MDA proof, downgrade tier, and refuse a stale A webhook.
+func TestClaimDeviceClearsHardwareOnSerialRebind(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenMDAStore(filepath.Join(dir, "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Unix(1716768000, 0).UTC()
+	seKey := make([]byte, 64)
+	for i := range seKey {
+		seKey[i] = byte(i + 61)
+	}
+	seHash := sha256.Sum256(seKey)
+	rootDER, leafDER, cfg := testMDAChainWithSerial(t, now, seHash[:], "C02SERIAL-A")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(listDevicesResponse{
+			Devices: []Device{
+				{UDID: "UDID-A", SerialNumber: "C02SERIAL-A", EnrollmentStatus: true},
+				{UDID: "UDID-B", SerialNumber: "C02SERIAL-B", EnrollmentStatus: true},
+			},
+		})
+	}))
+	defer srv.Close()
+	client, _ := NewClient(ClientConfig{BaseURL: srv.URL, APIToken: "tok"})
+
+	reg := pool.NewRegistry(nil)
+	reg.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "p-r7", AssignedID: "s1", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+		AttestationTier: pool.AttestationTierSelfSigned,
+	}, nil, now)
+
+	svc := &LiveMDAService{
+		client: client,
+		cfg:    cfg, mdmCfg: config.Tier2MDMConfig{CommandWebhookSecret: "hook-secret", MDARefreshIntervalHours: 168},
+		pool: reg, log: zerolog.Nop(), now: func() time.Time { return now },
+		bindings: NewDeviceBindingStore(), pending: make(map[string]pendingMDARequest),
+		ledger: make(map[string]enqueueLedgerEntry),
+	}
+	svc.SetMDAStore(store)
+
+	if err := svc.ClaimDevice(context.Background(), "p-r7", "C02SERIAL-A", true); err != nil {
+		t.Fatalf("claim A: %v", err)
+	}
+	if !svc.verifyAndUpgrade("p-r7", "s1", [][]byte{leafDER, rootDER}, seKey, seHash[:]) {
+		t.Fatal("verifyAndUpgrade A failed")
+	}
+	p, found := reg.Resolve("p-r7", "s1")
+	if !found || p.AttestationTier != pool.AttestationTierHardware {
+		t.Fatalf("pre-rebind tier=%q found=%v want hardware", p.AttestationTier, found)
+	}
+	if _, ok, err := store.LoadProof(context.Background(), "p-r7"); err != nil || !ok {
+		t.Fatalf("pre-rebind durable proof ok=%v err=%v", ok, err)
+	}
+
+	svc.recordPending("UDID-A", "cmd-r7-a", pendingMDARequest{
+		ProviderID: "p-r7", AssignedID: "s1", ExpectedSerial: "C02SERIAL-A",
+		UDID: "UDID-A", CommandUUID: "cmd-r7-a", SEKeyHash: seHash[:], EnqueuedAt: now,
+	})
+
+	if err := svc.ClaimDevice(context.Background(), "p-r7", "C02SERIAL-B", true); err != nil {
+		t.Fatalf("rebind claim B: %v", err)
+	}
+
+	p, found = reg.Resolve("p-r7", "s1")
+	if !found || p.AttestationTier == pool.AttestationTierHardware {
+		t.Fatalf("R7-M1: tier=%q found=%v want non-hardware after rebind A→B", p.AttestationTier, found)
+	}
+	if _, _, _, _, ok := reg.MDAProof("p-r7"); ok {
+		t.Fatal("R7-M1: in-memory MDAProof must be cleared after rebind")
+	}
+	if _, ok, err := store.LoadProof(context.Background(), "p-r7"); err != nil {
+		t.Fatalf("durable load: %v", err)
+	} else if ok {
+		t.Fatal("R7-M1: durable MDA proof must be deleted after rebind")
+	}
+	b, ok := svc.Bindings().LookupByProvider("p-r7")
+	if !ok || b.Serial != "C02SERIAL-B" {
+		t.Fatalf("binding after rebind=%v ok=%v want C02SERIAL-B", b, ok)
+	}
+
+	// Stale A webhook must not restore hardware (pending cleared and/or binding mismatch).
+	body, _ := json.Marshal(map[string]interface{}{
+		"udid":         "UDID-A",
+		"command_uuid": "cmd-r7-a",
+		"payload": map[string]interface{}{
+			"DeviceAttestation": []interface{}{
+				base64.StdEncoding.EncodeToString(leafDER),
+				base64.StdEncoding.EncodeToString(rootDER),
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/internal/mdm/command-webhook", bytes.NewReader(body))
+	req.Header.Set("X-MDM-Webhook-Secret", "hook-secret")
+	req.RemoteAddr = "8.8.8.8:1234"
+	rr := httptest.NewRecorder()
+	svc.HandleMDACommandWebhook(rr, req)
+	if rr.Code == http.StatusOK {
+		t.Fatalf("R7-M1: stale A webhook status=%d must not succeed", rr.Code)
+	}
+	p, found = reg.Resolve("p-r7", "s1")
+	if !found || p.AttestationTier == pool.AttestationTierHardware {
+		t.Fatalf("R7-M1: tier=%q after stale A webhook want non-hardware", p.AttestationTier)
+	}
+	if _, _, _, _, ok := reg.MDAProof("p-r7"); ok {
+		t.Fatal("R7-M1: stale A webhook must not SetMDAProof")
+	}
+}
+
