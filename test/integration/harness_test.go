@@ -216,12 +216,19 @@ type scenario struct {
 		ID  string
 		URL string
 	}
-	fakeProvs   []*fakeProvider
-	coordLogBuf *logBuffer // populated when captureCoordLogs=true
-	cancelAll   context.CancelFunc
-	fakeProv    *fakeProvider
-	procWG      sync.WaitGroup
-	modelHash   string
+	fakeProvs              []*fakeProvider
+	coordLogBuf            *logBuffer // populated when captureCoordLogs=true
+	cancelAll              context.CancelFunc
+	fakeProv               *fakeProvider
+	procWG                 sync.WaitGroup
+	modelHash              string
+	rateCardPath           string
+	rateCardSHA256         string
+	rateCardVersion        string
+	autotuneCatalogVersion string
+	autotuneCatalogSHA256  string
+	settlementCatalogID    string
+	settlementCatalogKeyID string
 }
 
 type scenarioOpts struct {
@@ -283,6 +290,8 @@ type settlementCatalogFixture struct {
 	publicKey              string
 	modelHash              string
 	rateCardPath           string
+	rateCardSHA256         string
+	rateCardVersion        string
 	rateCardSigPath        string
 	demandRankPath         string
 	demandRankSigPath      string
@@ -291,6 +300,8 @@ type settlementCatalogFixture struct {
 	autotuneCatalogSHA256  string
 	autotuneCatalogVersion string
 	autotunePolicyVersion  string
+	catalogID              string
+	catalogKeyID           string
 }
 
 func newScenario(t *testing.T, opts scenarioOpts) *scenario {
@@ -377,6 +388,12 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	if opts.settlementReceiptProvider {
 		settlementCatalog = s.writeSettlementCatalogFixture()
 		s.modelHash = settlementCatalog.modelHash
+		s.rateCardSHA256 = settlementCatalog.rateCardSHA256
+		s.rateCardVersion = settlementCatalog.rateCardVersion
+		s.autotuneCatalogVersion = settlementCatalog.autotuneCatalogVersion
+		s.autotuneCatalogSHA256 = settlementCatalog.autotuneCatalogSHA256
+		s.settlementCatalogID = settlementCatalog.catalogID
+		s.settlementCatalogKeyID = settlementCatalog.catalogKeyID
 	}
 	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode)
 
@@ -635,6 +652,20 @@ func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 	autotuneCatalogSigPath := autotuneCatalogPath + ".sig"
 	rateCardPath := filepath.Join(repoRoot, "phase3-binary", "dist", "static", "rate-card.json")
 	rateCardSigPath := rateCardPath + ".sig"
+	rateCardJSON, err := os.ReadFile(rateCardPath)
+	if err != nil {
+		s.t.Fatalf("read rate-card fixture: %v", err)
+	}
+	var rateCardMeta struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(rateCardJSON, &rateCardMeta); err != nil {
+		s.t.Fatalf("parse rate-card fixture: %v", err)
+	}
+	if rateCardMeta.Version == "" {
+		s.t.Fatal("rate-card fixture missing version")
+	}
+	rateCardDigest := sha256.Sum256(rateCardJSON)
 	demandRankPath := filepath.Join(repoRoot, "phase3-binary", "dist", "static", "demand-rank.json")
 	demandRankSigPath := demandRankPath + ".sig"
 	autotuneCatalogJSON, err := os.ReadFile(autotuneCatalogPath)
@@ -721,6 +752,8 @@ func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 		publicKey:              base64.RawURLEncoding.EncodeToString(pub),
 		modelHash:              modelHash,
 		rateCardPath:           rateCardPath,
+		rateCardSHA256:         hex.EncodeToString(rateCardDigest[:]),
+		rateCardVersion:        rateCardMeta.Version,
 		rateCardSigPath:        rateCardSigPath,
 		demandRankPath:         demandRankPath,
 		demandRankSigPath:      demandRankSigPath,
@@ -729,6 +762,8 @@ func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 		autotuneCatalogSHA256:  hex.EncodeToString(autotuneCatalogDigest[:]),
 		autotuneCatalogVersion: autotuneCatalog.Version,
 		autotunePolicyVersion:  autotuneCatalog.PolicyVersion,
+		catalogID:              body.CatalogID,
+		catalogKeyID:           file.Signature.KeyID,
 	}
 }
 
@@ -2287,4 +2322,127 @@ SELECT request_id, attempt_n, provider_id, receipt_present, receipt_version,
 		s.t.Fatalf("settlement_receipt_verdict rows: %v", err)
 	}
 	return verdicts
+}
+
+type ledgerCreditRow struct {
+	ID                    int64
+	RequestID             string
+	AttemptN              int
+	ProviderID            string
+	Status                int
+	Stream                int
+	PromptTokens          sql.NullInt64
+	ChargedPromptTokens   sql.NullInt64
+	CachedPromptTokens    sql.NullInt64
+	CompletionTokens      sql.NullInt64
+	PromptRatePerMtok     int64
+	CompletionRatePerMtok int64
+	GlobalMultiplierPPM   int64
+	ProviderShareBps      int64
+	GrossCredits          int64
+	ProviderCredits       int64
+	Settled               int
+	SettlementPolicyMode  string
+}
+
+func (s *scenario) readLedgerCredits() []ledgerCreditRow {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", s.coordinatorDB)
+	if err != nil {
+		s.t.Fatalf("open coord db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`
+SELECT id, request_id, attempt_n, provider_id, status, stream,
+       prompt_tokens, charged_prompt_tokens, cached_prompt_tokens, completion_tokens,
+       prompt_rate_per_mtok, completion_rate_per_mtok,
+       global_multiplier_ppm, provider_share_bps, gross_credits, provider_credits,
+       settled, settlement_policy_mode
+  FROM ledger_request_credits
+ ORDER BY id ASC`)
+	if err != nil {
+		s.t.Fatalf("query ledger_request_credits: %v", err)
+	}
+	defer rows.Close()
+	var credits []ledgerCreditRow
+	for rows.Next() {
+		var row ledgerCreditRow
+		if err := rows.Scan(
+			&row.ID,
+			&row.RequestID,
+			&row.AttemptN,
+			&row.ProviderID,
+			&row.Status,
+			&row.Stream,
+			&row.PromptTokens,
+			&row.ChargedPromptTokens,
+			&row.CachedPromptTokens,
+			&row.CompletionTokens,
+			&row.PromptRatePerMtok,
+			&row.CompletionRatePerMtok,
+			&row.GlobalMultiplierPPM,
+			&row.ProviderShareBps,
+			&row.GrossCredits,
+			&row.ProviderCredits,
+			&row.Settled,
+			&row.SettlementPolicyMode,
+		); err != nil {
+			s.t.Fatalf("scan ledger_request_credits: %v", err)
+		}
+		credits = append(credits, row)
+	}
+	if err := rows.Err(); err != nil {
+		s.t.Fatalf("ledger_request_credits rows: %v", err)
+	}
+	return credits
+}
+
+func (s *scenario) payoutReadyCount() int {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", s.coordinatorDB)
+	if err != nil {
+		s.t.Fatalf("open coord db: %v", err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_payout_ready`).Scan(&count); err != nil {
+		s.t.Fatalf("query ledger_payout_ready: %v", err)
+	}
+	return count
+}
+
+func (s *scenario) settledQuotaTokens() int64 {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", s.gatewayDB)
+	if err != nil {
+		s.t.Fatalf("open gateway db: %v", err)
+	}
+	defer db.Close()
+	var total int64
+	if err := db.QueryRow(
+		`SELECT COALESCE(SUM(settled_tokens), 0) FROM quota_reservations WHERE account_id = ? AND status = 'settled'`,
+		s.accountID,
+	).Scan(&total); err != nil {
+		s.t.Fatalf("query settled quota: %v", err)
+	}
+	return total
+}
+
+func (s *scenario) gatewayRequest(method, path string, extraHeaders map[string]string) (int, http.Header, []byte) {
+	s.t.Helper()
+	req, err := http.NewRequest(method, s.gatewayBaseURL+path, nil)
+	if err != nil {
+		s.t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Header, body
 }

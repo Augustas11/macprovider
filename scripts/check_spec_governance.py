@@ -74,7 +74,6 @@ BUYER_PAID_PATH_STEP_IDS = set(BUYER_PAID_PATH_STEP_ID_ORDER)
 BUYER_PAID_PATH_PROMOTABLE_REQUIREMENT_IDS = {
     "SPEC-005-R001",
     "SPEC-005-R002",
-    "SPEC-005-R003",
     "SPEC-006-R001",
     "SPEC-006-R002",
     "SPEC-006-R003",
@@ -87,6 +86,34 @@ BUYER_PAID_PATH_PROMOTABLE_REQUIREMENT_IDS = {
     "SPEC-022-R010",
 }
 BUYER_PAID_PATH_CONDITIONAL_REQUIREMENT_IDS = {"SPEC-022-R006"}
+SIGNED_JOURNEY_RESULT_REQUIRED_KEYS = {
+    "schema_version",
+    "journey_id",
+    "requirement_ids",
+    "repository",
+    "captured_at",
+    "expires_at",
+    "operator",
+    "environment",
+    "artifacts",
+    "result",
+    "steps",
+    "redaction",
+}
+SIGNED_JOURNEY_RESULT_ALLOWED_KEYS = SIGNED_JOURNEY_RESULT_REQUIRED_KEYS | {
+    "spec_id",
+    "run_id",
+    "execution_mode",
+    "harness",
+    "config_before",
+    "config_after",
+    "restoration",
+    "observations",
+    "eip712",
+    "candidate",
+    "candidate_identity",
+    "signer",
+}
 
 TRUSTED_OPENSSL_CANDIDATES = (
     "/usr/bin/openssl",
@@ -781,6 +808,41 @@ def _validate_buyer_paid_path_journey_result(
     else:
         retrieval_exposed = False
 
+    identity = signed.get("candidate_identity")
+    if _expect_object(identity, f"{location}.signed.candidate_identity", result):
+        required_identity = {
+            "gateway_base_url_sha256",
+            "coordinator_config_sha256",
+            "rate_card_sha256",
+            "rate_card_version",
+            "rate_card_matched_key",
+            "signed_catalog_id",
+            "signed_catalog_key_id",
+            "autotune_catalog_version",
+            "autotune_catalog_sha256",
+            "verified_model_sha256",
+        }
+        _expect_keys(identity, required_identity, required_identity, f"{location}.signed.candidate_identity", result)
+        for field_name in (
+            "gateway_base_url_sha256",
+            "coordinator_config_sha256",
+            "rate_card_sha256",
+            "autotune_catalog_sha256",
+            "verified_model_sha256",
+        ):
+            value = identity.get(field_name)
+            if not isinstance(value, str) or not SHA256_HEX_RE.fullmatch(value):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a 64-char hex fingerprint")
+        for field_name in (
+            "rate_card_version",
+            "rate_card_matched_key",
+            "signed_catalog_id",
+            "signed_catalog_key_id",
+            "autotune_catalog_version",
+        ):
+            if not isinstance(identity.get(field_name), str) or not identity.get(field_name):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a non-empty string")
+
     signed_requirement_ids = signed.get("requirement_ids")
     if not isinstance(signed_requirement_ids, list) or not all(isinstance(item, str) for item in signed_requirement_ids):
         result.error(f"{location}.signed.requirement_ids", "must be an array of requirement IDs")
@@ -1077,45 +1139,8 @@ def _validate_signed_journey_result(
 
     _expect_keys(
         signed,
-        {
-            "schema_version",
-            "journey_id",
-            "requirement_ids",
-            "repository",
-            "captured_at",
-            "expires_at",
-            "operator",
-            "environment",
-            "artifacts",
-            "result",
-            "steps",
-            "redaction",
-        },
-        {
-            "schema_version",
-            "journey_id",
-            "requirement_ids",
-            "repository",
-            "captured_at",
-            "expires_at",
-            "operator",
-            "environment",
-            "artifacts",
-            "result",
-            "steps",
-            "redaction",
-            "spec_id",
-            "run_id",
-            "execution_mode",
-            "harness",
-            "config_before",
-            "config_after",
-            "restoration",
-            "observations",
-            "eip712",
-            "candidate",
-            "signer",
-        },
+        SIGNED_JOURNEY_RESULT_REQUIRED_KEYS,
+        SIGNED_JOURNEY_RESULT_ALLOWED_KEYS,
         f"{location}.signed",
         result,
     )

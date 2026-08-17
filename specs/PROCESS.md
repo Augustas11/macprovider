@@ -191,7 +191,11 @@ Named #614 slices are recorded in `docs/spec-governance-foundation.md`:
   setup, and buyer serving smoke;
 - paid buyer path: authenticated API-key chat, quota reservation/settlement,
   ledger credit, SPEC-015 v0.4 receipts, and SPEC-022 settlement in the
-  current observe-mode posture.
+  current observe-mode posture. Physical evidence is GitHub issue #1022;
+  the isolated-candidate harness is
+  `test/integration/buyer_paid_path_journey_test.go`
+  (`TestJourneyBuyerPaidPathIsolatedCandidate`). Signing stays on the
+  protected `promote-signed-buyer-paid-path-journey.yml` workflow.
 
 Every PR body contains exactly one raw, marker-delimited JSON declaration:
 

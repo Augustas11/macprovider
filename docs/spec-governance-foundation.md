@@ -148,7 +148,10 @@ Stop condition for this slice:
   arbitration rationale;
 - `JOURNEY-BUYER-PAID-PATH` is named and mapped;
 - physical evidence for that journey is captured, redacted, and signed
-  before any mapped requirement is promoted (GitHub issue #1022);
+  before any mapped requirement is promoted (GitHub issue #1022). The
+  isolated-candidate harness is
+  `TestJourneyBuyerPaidPathIsolatedCandidate`; promotion still requires the
+  protected signing workflow, not the local test passing by itself;
 - observe-mode production posture is recorded honestly; this slice cannot
   flip SPEC-022 to enforce;
 - specs outside the slice remain deferred, default-off, not-deployed, or
