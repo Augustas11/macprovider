@@ -39,6 +39,8 @@ func TestRewardEligibilityWalletCapWinsOverProvisionalHold(t *testing.T) {
 		WalletBound:           true,
 		VerifiedReceiptCount:  minVerifiedReceipts,
 		AppAttested:           true,
+		HardwareEvidenceState: HardwareEvidenceStateVerified,
+		ComputeIntegrityState: ComputeIntegrityStateVerified,
 	})
 
 	if got.EarningState != EarningStateCapped {
@@ -147,6 +149,29 @@ func TestRewardEligibilityEndpointDefaultsUnwiredSourcesUnavailable(t *testing.T
 	}
 }
 
+func TestRewardEligibilityBuilderDefaultsUnwiredSourcesUnavailable(t *testing.T) {
+	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
+		AccruedMALIBU:        "0",
+		WithdrawableMALIBU:   "0",
+		HeldMALIBU:           "0",
+		TrustTier:            TierTrusted,
+		WalletBound:          true,
+		VerifiedReceiptCount: minVerifiedReceipts,
+		AppAttested:          true,
+		LocalRuntimeReasons:  []string{ReasonEarningVerifiedWork},
+	})
+
+	if got.EarningState != EarningStateUnavailable {
+		t.Fatalf("earning_state = %q, want %q", got.EarningState, EarningStateUnavailable)
+	}
+	if got.PrimaryReason != ReasonComputeIntegrityUnavailable {
+		t.Fatalf("primary_reason = %q, want %q", got.PrimaryReason, ReasonComputeIntegrityUnavailable)
+	}
+	if !containsReason(got.Reasons, ReasonHardwareEvidenceUnavailable) {
+		t.Fatalf("reasons = %v, want hardware unavailable", got.Reasons)
+	}
+}
+
 func TestRewardEligibilityLedgerHoldBeatsUnwiredSourcePrimary(t *testing.T) {
 	got := RewardEligibilityFromBalanceAndTrust(
 		AccrualBalance{
@@ -176,14 +201,16 @@ func TestRewardEligibilityLedgerHoldBeatsUnwiredSourcePrimary(t *testing.T) {
 
 func TestRewardEligibilityEarningWorkCanBePrimary(t *testing.T) {
 	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
-		AccruedMALIBU:        "0",
-		WithdrawableMALIBU:   "0",
-		HeldMALIBU:           "0",
-		TrustTier:            TierTrusted,
-		WalletBound:          true,
-		VerifiedReceiptCount: minVerifiedReceipts,
-		AppAttested:          true,
-		LocalRuntimeReasons:  []string{ReasonEarningVerifiedWork},
+		AccruedMALIBU:         "0",
+		WithdrawableMALIBU:    "0",
+		HeldMALIBU:            "0",
+		TrustTier:             TierTrusted,
+		WalletBound:           true,
+		VerifiedReceiptCount:  minVerifiedReceipts,
+		AppAttested:           true,
+		HardwareEvidenceState: HardwareEvidenceStateVerified,
+		ComputeIntegrityState: ComputeIntegrityStateVerified,
+		LocalRuntimeReasons:   []string{ReasonEarningVerifiedWork},
 	})
 
 	if got.EarningState != EarningStateEarning {
@@ -196,13 +223,15 @@ func TestRewardEligibilityEarningWorkCanBePrimary(t *testing.T) {
 
 func TestRewardEligibilityTrustedBalanceIsWithdrawable(t *testing.T) {
 	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
-		AccruedMALIBU:        "5.00000000",
-		WithdrawableMALIBU:   "5.00000000",
-		HeldMALIBU:           "0",
-		TrustTier:            TierTrusted,
-		WalletBound:          true,
-		VerifiedReceiptCount: minVerifiedReceipts,
-		AppAttested:          true,
+		AccruedMALIBU:         "5.00000000",
+		WithdrawableMALIBU:    "5.00000000",
+		HeldMALIBU:            "0",
+		TrustTier:             TierTrusted,
+		WalletBound:           true,
+		VerifiedReceiptCount:  minVerifiedReceipts,
+		AppAttested:           true,
+		HardwareEvidenceState: HardwareEvidenceStateVerified,
+		ComputeIntegrityState: ComputeIntegrityStateVerified,
 	})
 
 	if got.EarningState != EarningStateEligibleIdle {

@@ -1657,6 +1657,126 @@
       return "Review the hold reason above before withdrawing.";
     }
 
+    var MALIBU_REWARD_ELIGIBILITY_SCHEMA = "malibu_reward_eligibility.v1";
+    var MALIBU_EARNING_STATES = ["earning", "eligible_idle", "held", "capped", "ineligible", "unavailable"];
+    var MALIBU_WITHDRAWAL_STATES = ["withdrawable", "held", "capped", "ineligible", "unavailable"];
+    var MALIBU_REWARD_REASONS = [
+      "earning_verified_work",
+      "eligible_idle_no_work",
+      "held_provisional_trust_tier",
+      "held_wallet_daily_cap",
+      "held_demotion_cooldown",
+      "withdrawable_balance_available",
+      "withdrawable_no_balance",
+      "missing_wallet_binding",
+      "insufficient_verified_receipts",
+      "app_attestation_missing",
+      "hardware_evidence_unavailable",
+      "hardware_evidence_missing_or_expired",
+      "compute_integrity_unavailable",
+      "compute_integrity_pending",
+      "compute_integrity_blocked",
+      "provider_token_untrusted",
+      "local_on_battery",
+      "local_thermal_pressure",
+      "model_not_ready",
+      "telemetry_unavailable"
+    ];
+
+    function containsValue(list, value) {
+      return list.indexOf(value) !== -1;
+    }
+
+    function unavailableMalibuRewardEligibility(schema) {
+      return {
+        schema_version: schema || MALIBU_REWARD_ELIGIBILITY_SCHEMA,
+        earning_state: "unavailable",
+        withdrawal_state: "unavailable",
+        primary_reason: "telemetry_unavailable",
+        reasons: ["telemetry_unavailable"]
+      };
+    }
+
+    function normalizedMalibuRewardEligibility(data) {
+      if (!data || !data.reward_eligibility || typeof data.reward_eligibility !== "object") return null;
+      var e = data.reward_eligibility;
+      var schema = typeof e.schema_version === "string" ? e.schema_version : "";
+      if (schema !== MALIBU_REWARD_ELIGIBILITY_SCHEMA) return unavailableMalibuRewardEligibility(schema);
+      var reasons = Array.isArray(e.reasons) ? e.reasons : [];
+      if (!containsValue(MALIBU_EARNING_STATES, e.earning_state) ||
+          !containsValue(MALIBU_WITHDRAWAL_STATES, e.withdrawal_state) ||
+          !containsValue(MALIBU_REWARD_REASONS, e.primary_reason) ||
+          reasons.some(function (reason) { return !containsValue(MALIBU_REWARD_REASONS, reason); })) {
+        return unavailableMalibuRewardEligibility(schema);
+      }
+      return {
+        schema_version: schema,
+        earning_state: e.earning_state,
+        withdrawal_state: e.withdrawal_state,
+        primary_reason: e.primary_reason,
+        reasons: reasons
+      };
+    }
+
+    function malibuRewardReasonCopy(reason) {
+      switch (reason) {
+        case "earning_verified_work": return "Earning from verified work";
+        case "eligible_idle_no_work": return "Eligible; waiting for work";
+        case "held_provisional_trust_tier": return "Trust verification is incomplete";
+        case "held_wallet_daily_cap": return "wallet daily limit reached";
+        case "held_demotion_cooldown": return "Trust requalification is in progress";
+        case "withdrawable_balance_available": return "MALIBU is available to withdraw";
+        case "withdrawable_no_balance": return "No MALIBU is available yet";
+        case "missing_wallet_binding": return "wallet binding is missing";
+        case "insufficient_verified_receipts": return "more verified work is required";
+        case "app_attestation_missing": return "app verification is incomplete";
+        case "compute_integrity_pending": return "reward verification is pending";
+        case "compute_integrity_blocked":
+        case "provider_token_untrusted":
+          return "reward eligibility needs review";
+        case "hardware_evidence_unavailable":
+        case "hardware_evidence_missing_or_expired":
+        case "compute_integrity_unavailable":
+        case "telemetry_unavailable":
+          return "reward status is unavailable";
+        case "local_on_battery": return "provider is on battery";
+        case "local_thermal_pressure": return "provider is cooling down";
+        case "model_not_ready": return "model is preparing";
+        default: return "reward eligibility is still being verified";
+      }
+    }
+
+    function malibuRewardNextAction(reason) {
+      switch (reason) {
+        case "held_wallet_daily_cap": return "The wallet cap resets at the next UTC day.";
+        case "held_provisional_trust_tier": return "Complete the remaining trust criteria to unlock withdrawals.";
+        case "held_demotion_cooldown": return "Re-qualify for Trusted to clear the cooldown.";
+        case "missing_wallet_binding": return "Add a payout wallet.";
+        case "insufficient_verified_receipts": return "Keep serving verified work.";
+        case "app_attestation_missing":
+        case "compute_integrity_pending":
+          return "Wait for verification to complete.";
+        case "compute_integrity_blocked":
+        case "provider_token_untrusted":
+          return "Review diagnostics before withdrawing.";
+        case "withdrawable_balance_available":
+        case "withdrawable_no_balance":
+          return "No withdrawal hold action is required.";
+        default: return "Try again when reward status refreshes.";
+      }
+    }
+
+    function malibuRewardStatusCopy(e) {
+      switch (e.withdrawal_state) {
+        case "withdrawable": return "MALIBU is available to withdraw";
+        case "held": return "MALIBU is locked until eligible";
+        case "capped": return "MALIBU is limited by a daily cap";
+        case "ineligible": return "MALIBU is not eligible for withdrawal";
+        case "unavailable": return "MALIBU reward status unavailable";
+        default: return malibuRewardReasonCopy(e.primary_reason);
+      }
+    }
+
     function miningReasonVocabulary(code) {
       switch (code) {
         case "earning":
@@ -1758,6 +1878,27 @@
       }
     }
 
+    function miningHealthCodeFromRewardEligibility(eligibility, pool) {
+      if (!eligibility) return null;
+      switch (eligibility.primary_reason) {
+        case "earning_verified_work": return "earning";
+        case "eligible_idle_no_work": return "idle_no_work";
+        case "held_provisional_trust_tier": return "trust_tier_provisional";
+        case "held_wallet_daily_cap": return "wallet_daily_cap_held";
+        case "held_demotion_cooldown": return "rewards_held";
+        case "withdrawable_balance_available": return "trusted_withdrawable";
+        case "missing_wallet_binding": return "wallet_missing";
+        case "local_on_battery": return "local_on_battery";
+        case "local_thermal_pressure": return "local_thermal_pressure";
+        case "model_not_ready": return "local_model_preparing";
+        case "withdrawable_no_balance":
+          return pool && (pool.state === "ready" || pool.state === "draining")
+            ? "idle_no_work" : "customer_availability_pending";
+        default:
+          return "reward_projection_unavailable";
+      }
+    }
+
     function computePortalMiningHealth() {
       var earn = state.earn.data;
       var malibu = state.malibu.data;
@@ -1766,6 +1907,7 @@
       var skips = idle && idle.skips_by_reason_last_1h ? idle.skips_by_reason_last_1h : {};
       var reasons = malibu && Array.isArray(malibu.withdrawal_hold_reasons)
         ? malibu.withdrawal_hold_reasons : [];
+      var eligibility = normalizedMalibuRewardEligibility(malibu);
       var code;
       if (pool && pool.state && pool.state !== "ready" && pool.state !== "draining") {
         code = "not_running";
@@ -1778,6 +1920,8 @@
         code = "local_thermal_pressure";
       } else if ((skips.model_not_loaded || 0) > 0) {
         code = "local_model_preparing";
+      } else if (eligibility) {
+        code = miningHealthCodeFromRewardEligibility(eligibility, pool);
       } else if (malibu.wallet_bound === false) {
         code = "wallet_missing";
       } else if (reasons.indexOf("per_wallet_daily_cap") !== -1) {
@@ -1818,16 +1962,17 @@
             malibu.trust_criteria_required + " criteria met";
         }
       }
-      var action = vocab.action;
-      if (malibu && (reasons.length ||
+      var action = eligibility ? malibuRewardNextAction(eligibility.primary_reason) : vocab.action;
+      if (!eligibility && malibu && (reasons.length ||
           code === "trust_tier_provisional" ||
           code === "wallet_daily_cap_held")) {
         action = malibuNextAction(malibu, reasons);
       }
       return {
         code: code,
+        displayReasonCode: eligibility ? eligibility.primary_reason : code,
         status: vocab.status,
-        reason: vocab.reason,
+        reason: eligibility ? malibuRewardReasonCopy(eligibility.primary_reason) : vocab.reason,
         action: action,
         rewardSummary: rewardSummary,
         trustSummary: trustSummary,
@@ -1852,7 +1997,7 @@
           el("div", null,
             el("div", { class: "mh-label" }, "Next safe action"),
             el("div", { class: "mh-value" }, health.action))),
-        el("div", { class: "fiat-cite mono" }, "reason_code: " + health.code));
+        el("div", { class: "fiat-cite mono" }, "reason_code: " + (health.displayReasonCode || health.code)));
     }
 
     function renderMalibuRewardsCard() {
@@ -1867,12 +2012,17 @@
             ? "Reward availability is temporarily unavailable while the MALIBU projection route is being deployed."
             : "Read-only projection returned HTTP " + state.malibu.err.status + ".") : null);
       }
-      var reasons = Array.isArray(d.withdrawal_hold_reasons) ? d.withdrawal_hold_reasons : [];
+      var eligibility = normalizedMalibuRewardEligibility(d);
+      var reasons = eligibility ? eligibility.reasons : (Array.isArray(d.withdrawal_hold_reasons) ? d.withdrawal_hold_reasons : []);
       var held = Number(d.held_malibu);
       var hasHeld = typeof d.held_malibu === "number" && isFinite(d.held_malibu);
-      var holdText = reasons.length
+      var holdText = eligibility
+        ? malibuRewardReasonCopy(eligibility.primary_reason)
+        : reasons.length
         ? reasons.map(malibuReasonCopy).join("; ")
         : (hasHeld ? (held > 0 ? "A payout eligibility hold is active." : "No active hold.") : "Hold status unavailable.");
+      var nextAction = eligibility ? malibuRewardNextAction(eligibility.primary_reason) : malibuNextAction(d, reasons);
+      var statusCopy = eligibility ? malibuRewardStatusCopy(eligibility) : "Read-only reward availability";
       var capParts = [];
       if (d.daily_cap_malibu !== null && d.daily_cap_malibu !== undefined) {
         capParts.push("provider cap " + formatMalibuAmount(d.daily_cap_malibu) + "/day");
@@ -1882,15 +2032,15 @@
       }
       return el("div", { class: "fiat-card rewards-card" },
         el("h3", null, "MALIBU rewards"),
-        el("div", { class: "fiat-body" }, "Read-only reward availability"),
+        el("div", { class: "fiat-body" }, statusCopy),
         el("div", { class: "reward-grid" },
           el("div", null, el("div", { class: "reward-label" }, "Accrued"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.accrued_malibu))),
           el("div", null, el("div", { class: "reward-label" }, "Withdrawable"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.withdrawable_malibu))),
           el("div", null, el("div", { class: "reward-label" }, "Held"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.held_malibu)))),
         el("div", { class: "reward-next" }, "Trust tier: ",
           typeof d.trust_tier === "string" && d.trust_tier.trim() ? d.trust_tier : "n/a"),
-        el("div", { class: "reward-hold" }, "Held because: ", holdText),
-        el("div", { class: "reward-next" }, "Next: ", malibuNextAction(d, reasons)),
+        el("div", { class: "reward-hold" }, eligibility ? "Reward status: " : "Held because: ", holdText),
+        el("div", { class: "reward-next" }, "Next: ", nextAction),
         capParts.length ? el("div", { class: "fiat-cite" }, capParts.join(" · ")) : null);
     }
 

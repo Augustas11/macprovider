@@ -941,6 +941,27 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
     }
 
+    func testRewardEligibilityUsesFreshMalibuProjectionWithoutFreshUSDCProjection() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.trustTier = .trusted
+        snapshot.providerEarningsFresh = false
+        snapshot.malibuProjectionFresh = true
+        snapshot.malibuAccruedToday = 2
+        snapshot.malibuAccruedAllTime = 2
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
+
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "MALIBU is locked until Trusted")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuFullLine(snapshot),
+            "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
+        )
+    }
+
     func testProviderEarningsUnknownRewardEligibilityNormalizesUnavailable() throws {
         let data = Data("""
         {

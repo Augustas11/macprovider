@@ -999,10 +999,10 @@ enum AgentSnapshotPresenter {
     /// counts. Gated by `providerEarningsFresh` since idle-prewarm data
     /// arrives on the same projection as the other earnings fields.
     static func eligibilityLine(_ s: AgentSnapshot) -> String? {
-        guard s.providerEarningsFresh else { return nil }
         if let eligibility = authoritativeRewardEligibility(s) {
             return rewardEligibilityLine(eligibility)
         }
+        guard s.providerEarningsFresh else { return nil }
         let skips = s.idlePrewarmSummary.skipsByReasonLast1h
         if (skips["on_battery"] ?? 0) > 0 {
             return "On battery — plug in to earn"
@@ -1725,7 +1725,7 @@ enum AgentSnapshotPresenter {
     }
 
     private static func authoritativeRewardEligibility(_ s: AgentSnapshot) -> MalibuRewardEligibility? {
-        guard s.providerEarningsFresh, s.malibuProjectionFresh else { return nil }
+        guard s.malibuProjectionFresh else { return nil }
         return s.malibuRewardEligibility
     }
 

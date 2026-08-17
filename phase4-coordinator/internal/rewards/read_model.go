@@ -106,6 +106,7 @@ func RewardEligibilityFromBalanceAndTrust(bal AccrualBalance, trust TrustCriteri
 }
 
 func BuildMalibuRewardEligibility(f MalibuRewardEligibilityFacts) MalibuRewardEligibilityReadModel {
+	f = normalizeRewardEligibilityFacts(f)
 	reasons := orderedRewardReasons(f)
 	earningState := earningStateFor(f, reasons)
 	withdrawalState := withdrawalStateFor(f, reasons)
@@ -117,6 +118,16 @@ func BuildMalibuRewardEligibility(f MalibuRewardEligibilityFacts) MalibuRewardEl
 		PrimaryReason:   primary,
 		Reasons:         reasons,
 	}
+}
+
+func normalizeRewardEligibilityFacts(f MalibuRewardEligibilityFacts) MalibuRewardEligibilityFacts {
+	if f.ComputeIntegrityState == "" {
+		f.ComputeIntegrityState = ComputeIntegrityStateUnknown
+	}
+	if f.HardwareEvidenceState == "" {
+		f.HardwareEvidenceState = HardwareEvidenceStateUnavailable
+	}
+	return f
 }
 
 func orderedRewardReasons(f MalibuRewardEligibilityFacts) []string {
