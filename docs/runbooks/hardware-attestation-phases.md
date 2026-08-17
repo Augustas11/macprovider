@@ -264,9 +264,14 @@ Extend `pool.Provider` (non-breaking JSON fields):
 **Still needs (manual Mac E2E):**
 - [ ] Deploy `live_mda_enabled: true` on Pearl with MicroMDM running
 - [ ] Enroll test Mac via `macprovider enroll` and see UDID in MicroMDM
-- [ ] Verify DeviceInformation attestation command arrives at device
-- [ ] Parse DeviceAttestation response and call `UpgradeFromParsedAttestation`
+- [ ] Point MicroMDM `-command-webhook-url` at coordinator
+      `https://<provider-bind>/internal/mdm/command-webhook` (default Pearl:
+      loopback `http://127.0.0.1:8444/internal/mdm/command-webhook`, or set
+      `tier2.mdm.command_webhook_secret` / `X-MDM-Webhook-Secret` if exposed)
+- [ ] Verify DeviceInformation attestation command arrives at device and
+      webhook upgrades `attestation_tier=hardware`
 - [ ] Provider reconnects with `attestation_tier=hardware` visible in `/poolz`
+  (MDA proof migrates across reconnect when SE key is unchanged)
 
 ### 3.3 Exit criteria
 

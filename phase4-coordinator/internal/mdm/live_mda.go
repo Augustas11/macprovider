@@ -5,8 +5,13 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -15,13 +20,25 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// pendingMDARequest binds an enqueued DeviceInformation attestation to the
+// MicroMDM device that was looked up at enqueue time. SEC-H1: responses must
+// match this expected serial (from the MDA leaf) before SetMDAProof.
+type pendingMDARequest struct {
+	ProviderID     string
+	AssignedID     string
+	ExpectedSerial string
+	SEKeyHash      []byte
+	EnqueuedAt     time.Time
+}
+
 // LiveMDAService orchestrates Phase 3 live MDA round-trips. It:
 //
 //  1. Looks up the enrolled device in MicroMDM by serial number.
 //  2. Enqueues a DeviceInformation attestation command with nonce=SHA256(SEPublicKey).
-//  3. On a subsequent call (or after polling), re-verifies a cached MDA chain
-//     bound to the SE key and upgrades the pool entry's attestation tier to
-//     "hardware".
+//  3. Records a pending request keyed by UDID (serial-bound).
+//  4. On MicroMDM command webhook (or AttachCachedMDAProof), re-verifies the
+//     MDA chain bound to the SE key + enrolled serial and upgrades the pool
+//     entry's attestation tier to "hardware".
 //
 // The service operates in observe mode: failures are logged but do not interrupt
 // provider auth or routing. Do not flip require_attestation here (Phase 4 gate).
@@ -32,15 +49,21 @@ type LiveMDAService struct {
 	pool    *pool.Registry
 	log     zerolog.Logger
 	now     func() time.Time
+
+	mu       sync.Mutex
+	pending  map[string]pendingMDARequest // keyed by UDID
 }
 
-// NewLiveMDAService creates a LiveMDAService. Returns (nil, nil) when the MDM
-// client is disabled (APIURL empty or LiveMDAEnabled false); caller should skip
-// wiring the service.
+// NewLiveMDAService creates a LiveMDAService. Returns (nil, nil) when
+// LiveMDAEnabled is false. When LiveMDAEnabled is true, APIURL and APIToken
+// must both be non-empty (fail-closed); otherwise returns an error.
 func NewLiveMDAService(cfg config.Tier2Config, p *pool.Registry, log zerolog.Logger, now func() time.Time) (*LiveMDAService, error) {
 	mdmCfg := cfg.MDM
-	if !mdmCfg.LiveMDAEnabled || strings.TrimSpace(mdmCfg.APIURL) == "" {
+	if !mdmCfg.LiveMDAEnabled {
 		return nil, nil
+	}
+	if strings.TrimSpace(mdmCfg.APIURL) == "" || strings.TrimSpace(mdmCfg.APIToken) == "" {
+		return nil, fmt.Errorf("live_mda: api_url and api_token are required when live_mda_enabled")
 	}
 	client, err := NewClient(ClientConfig{
 		BaseURL:  mdmCfg.APIURL,
@@ -53,12 +76,13 @@ func NewLiveMDAService(cfg config.Tier2Config, p *pool.Registry, log zerolog.Log
 		now = func() time.Time { return time.Now().UTC() }
 	}
 	return &LiveMDAService{
-		client: client,
-		cfg:    cfg,
-		mdmCfg: mdmCfg,
-		pool:   p,
-		log:    log,
-		now:    now,
+		client:  client,
+		cfg:     cfg,
+		mdmCfg:  mdmCfg,
+		pool:    p,
+		log:     log,
+		now:     now,
+		pending: make(map[string]pendingMDARequest),
 	}, nil
 }
 
@@ -69,8 +93,7 @@ func NewLiveMDAService(cfg config.Tier2Config, p *pool.Registry, log zerolog.Log
 // If the provider already has a valid, fresh MDA proof bound to the current SE
 // key, the tier is upgraded immediately without a new MDM round-trip. Otherwise
 // a DeviceInformation attestation command is enqueued for the enrolled device
-// (best-effort). The full round-trip completes asynchronously via polling or
-// webhook — this method only initiates the enqueue.
+// (best-effort) and a pending bind is recorded for webhook ingest.
 //
 // serial is the device serial number from attestation claims (may be empty, in
 // which case MDM lookup is skipped and only the cached proof path runs).
@@ -126,11 +149,23 @@ func (s *LiveMDAService) RequestAndMaybeUpgrade(providerID, assignedID, serial s
 		return
 	}
 
+	expectedSerial := strings.TrimSpace(device.SerialNumber)
+	if expectedSerial == "" {
+		expectedSerial = serial
+	}
+	s.recordPending(device.UDID, pendingMDARequest{
+		ProviderID:     providerID,
+		AssignedID:     assignedID,
+		ExpectedSerial: expectedSerial,
+		SEKeyHash:      append([]byte(nil), seKeyHash[:]...),
+		EnqueuedAt:     s.now(),
+	})
+
 	s.log.Info().
 		Str("provider_id", providerID).
 		Str("udid", device.UDID).
-		Str("serial", serial).
-		Msg("live_mda: DeviceInformation attestation command enqueued")
+		Str("serial", expectedSerial).
+		Msg("live_mda: DeviceInformation attestation command enqueued (awaiting webhook)")
 }
 
 // AttachCachedMDAProof attempts to re-verify and attach a cached MDA proof for
@@ -152,9 +187,14 @@ func (s *LiveMDAService) AttachCachedMDAProof(providerID, assignedID string) boo
 // ParseDeviceAttestationFromPlist) against the provider's SE key and upgrades
 // the pool entry on success. Returns true when the tier was upgraded.
 //
-// Call this when a DeviceInformation command response arrives (e.g. via MDM
-// webhook or polling the MicroMDM command queue).
+// Prefer HandleMDACommandWebhook for production ingest — it enforces the
+// pending UDID→serial bind (SEC-H1). Direct callers must already know the
+// provider identity; this path does not trust SE-asserted serial alone.
 func (s *LiveMDAService) UpgradeFromParsedAttestation(providerID, assignedID string, result *DeviceAttestationResult) bool {
+	if result == nil {
+		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: upgrade failed — nil DeviceAttestationResult")
+		return false
+	}
 	sePub := s.pool.ProviderSEPublicKey(providerID)
 	if len(sePub) == 0 {
 		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: upgrade failed — no SE key")
@@ -168,9 +208,192 @@ func (s *LiveMDAService) UpgradeFromParsedAttestation(providerID, assignedID str
 	return s.verifyAndUpgrade(providerID, assignedID, result.CertificateChain, sePub, seKeyHash[:])
 }
 
+// HandleMDACommandWebhook is the MicroMDM command-webhook receiver. Point
+// MicroMDM `-command-webhook-url` at this path (default
+// `/internal/mdm/command-webhook` on the provider listener).
+//
+// Auth: if tier2.mdm.command_webhook_secret is set, require matching
+// X-MDM-Webhook-Secret header; otherwise require a loopback remote address.
+func (s *LiveMDAService) HandleMDACommandWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizeWebhook(r) {
+		s.log.Warn().Str("remote", r.RemoteAddr).Msg("live_mda: webhook rejected — auth failed")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	udid := extractWebhookUDID(body)
+	if udid == "" {
+		s.log.Warn().Msg("live_mda: webhook missing UDID")
+		http.Error(w, "udid required", http.StatusBadRequest)
+		return
+	}
+	pending, ok := s.takePending(udid)
+	if !ok {
+		s.log.Info().Str("udid", udid).Msg("live_mda: webhook ignored — no pending request for UDID")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	result, err := ParseDeviceAttestationFromPlist(body)
+	if err != nil {
+		s.log.Warn().Err(err).
+			Str("udid", udid).
+			Str("provider_id", pending.ProviderID).
+			Msg("live_mda: webhook DeviceAttestation parse failed")
+		// Re-queue pending so a later delivery can succeed.
+		s.recordPending(udid, pending)
+		http.Error(w, "no device attestation", http.StatusBadRequest)
+		return
+	}
+	if len(result.CertificateChain) == 0 {
+		s.recordPending(udid, pending)
+		http.Error(w, "empty chain", http.StatusBadRequest)
+		return
+	}
+	leaf, err := x509.ParseCertificate(result.CertificateChain[0])
+	if err != nil {
+		s.log.Warn().Err(err).Str("udid", udid).Msg("live_mda: webhook leaf parse failed")
+		s.recordPending(udid, pending)
+		http.Error(w, "bad leaf", http.StatusBadRequest)
+		return
+	}
+	mdaSerial := tier2.ExtractMDASerialNumber(leaf)
+	if mdaSerial == "" {
+		s.log.Warn().
+			Str("udid", udid).
+			Str("provider_id", pending.ProviderID).
+			Msg("live_mda: webhook rejected — MDA leaf missing serial number extension")
+		http.Error(w, "serial missing", http.StatusForbidden)
+		return
+	}
+	if !serialEqualFold(mdaSerial, pending.ExpectedSerial) {
+		s.log.Warn().
+			Str("udid", udid).
+			Str("provider_id", pending.ProviderID).
+			Str("expected_serial", pending.ExpectedSerial).
+			Str("mda_serial", mdaSerial).
+			Msg("live_mda: webhook rejected — MDA serial does not match enrolled device (possible serial borrow)")
+		http.Error(w, "serial mismatch", http.StatusForbidden)
+		return
+	}
+	sePub := s.pool.ProviderSEPublicKey(pending.ProviderID)
+	if len(sePub) == 0 {
+		s.log.Warn().Str("provider_id", pending.ProviderID).Msg("live_mda: webhook upgrade skipped — provider offline / no SE key")
+		s.recordPending(udid, pending)
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	seKeyHash := sha256.Sum256(sePub)
+	if len(pending.SEKeyHash) > 0 && subtle.ConstantTimeCompare(pending.SEKeyHash, seKeyHash[:]) != 1 {
+		s.log.Warn().
+			Str("provider_id", pending.ProviderID).
+			Msg("live_mda: webhook rejected — SE key rotated since enqueue")
+		http.Error(w, "se key mismatch", http.StatusForbidden)
+		return
+	}
+	if !s.verifyAndUpgrade(pending.ProviderID, pending.AssignedID, result.CertificateChain, sePub, seKeyHash[:]) {
+		s.log.Warn().
+			Str("provider_id", pending.ProviderID).
+			Str("udid", udid).
+			Msg("live_mda: webhook chain verify/upgrade failed")
+		http.Error(w, "verify failed", http.StatusUnprocessableEntity)
+		return
+	}
+	s.log.Info().
+		Str("provider_id", pending.ProviderID).
+		Str("udid", udid).
+		Str("serial", mdaSerial).
+		Msg("live_mda: webhook upgrade succeeded")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *LiveMDAService) authorizeWebhook(r *http.Request) bool {
+	secret := strings.TrimSpace(s.mdmCfg.CommandWebhookSecret)
+	if secret != "" {
+		got := strings.TrimSpace(r.Header.Get("X-MDM-Webhook-Secret"))
+		if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(secret)) != 1 {
+			return false
+		}
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func (s *LiveMDAService) recordPending(udid string, req pendingMDARequest) {
+	udid = strings.TrimSpace(udid)
+	if udid == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending == nil {
+		s.pending = make(map[string]pendingMDARequest)
+	}
+	s.pending[udid] = req
+}
+
+func (s *LiveMDAService) takePending(udid string) (pendingMDARequest, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	req, ok := s.pending[strings.TrimSpace(udid)]
+	if !ok {
+		return pendingMDARequest{}, false
+	}
+	delete(s.pending, strings.TrimSpace(udid))
+	return req, true
+}
+
+func extractWebhookUDID(body []byte) string {
+	var flat map[string]json.RawMessage
+	if err := json.Unmarshal(body, &flat); err != nil {
+		return ""
+	}
+	for _, key := range []string{"udid", "UDID"} {
+		if raw, ok := flat[key]; ok {
+			var s string
+			if json.Unmarshal(raw, &s) == nil && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	if raw, ok := flat["payload"]; ok {
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(raw, &nested) == nil {
+			for _, key := range []string{"udid", "UDID"} {
+				if v, ok := nested[key]; ok {
+					var s string
+					if json.Unmarshal(v, &s) == nil && strings.TrimSpace(s) != "" {
+						return strings.TrimSpace(s)
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func serialEqualFold(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+}
+
 // tryUpgradeFromCache checks whether the pool already holds a valid, fresh MDA
 // proof bound to the current SE key. Returns true and upgrades if so.
+// On expiry or failed re-verification, clears the proof and downgrades
+// hardware → self_signed (ARCH-M2).
 func (s *LiveMDAService) tryUpgradeFromCache(ctx context.Context, providerID, assignedID string, sePub, seKeyHash []byte) bool {
+	_ = ctx
 	chain, verifiedAt, boundHash, ok := s.pool.MDAProof(providerID)
 	if !ok || len(chain) == 0 {
 		return false
@@ -189,11 +412,17 @@ func (s *LiveMDAService) tryUpgradeFromCache(ctx context.Context, providerID, as
 			Str("provider_id", providerID).
 			Dur("age", age).
 			Dur("limit", refreshInterval).
-			Msg("live_mda: cached MDA proof expired — will re-request")
+			Msg("live_mda: cached MDA proof expired — clearing and will re-request")
+		s.pool.ClearMDAProof(providerID, assignedID)
 		return false
 	}
 	// Re-verify chain freshness in-process without a new MDM round-trip.
-	return s.verifyAndUpgrade(providerID, assignedID, chain, sePub, seKeyHash)
+	if !s.verifyAndUpgrade(providerID, assignedID, chain, sePub, seKeyHash) {
+		s.log.Info().Str("provider_id", providerID).Msg("live_mda: cached MDA re-verify failed — clearing proof")
+		s.pool.ClearMDAProof(providerID, assignedID)
+		return false
+	}
+	return true
 }
 
 // verifyAndUpgrade verifies the certificate chain against configured roots and
@@ -225,6 +454,11 @@ func (s *LiveMDAService) verifyAndUpgrade(providerID, assignedID string, chain [
 	}
 
 	h := sha256.Sum256(sePub)
+	if len(seKeyHash) > 0 && subtle.ConstantTimeCompare(h[:], seKeyHash) != 1 {
+		// Defensive: caller-supplied hash must match current SE key.
+		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: seKeyHash mismatch")
+		return false
+	}
 	if !s.pool.SetMDAProof(providerID, assignedID, chain, h[:], now) {
 		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: SetMDAProof: provider not found (reconnect race?)")
 		return false
@@ -238,8 +472,11 @@ func (s *LiveMDAService) verifyAndUpgrade(providerID, assignedID string, chain [
 
 func (s *LiveMDAService) mdmRefreshIntervalHours() int {
 	h := s.mdmCfg.MDARefreshIntervalHours
+	if h <= 0 {
+		return 168 // default 7 days when unset
+	}
 	if h < 24 {
-		h = 168 // 7 days default
+		return 24 // floor per docs
 	}
 	return h
 }

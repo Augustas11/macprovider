@@ -816,9 +816,11 @@ func main() {
 	))
 	// Phase 3 observe-mode live MDA (disabled unless tier2.mdm.live_mda_enabled
 	// and api_url are set). Failures here are non-fatal — auth continues.
+	var liveMDAService *mdm.LiveMDAService
 	if liveMDA, err := mdm.NewLiveMDAService(cfg.Tier2, registry, logger, nil); err != nil {
 		logger.Error().Err(err).Msg("live MDA service init failed; continuing without live MDA")
 	} else if liveMDA != nil {
+		liveMDAService = liveMDA
 		wsOpts = append(wsOpts, providerws.WithLiveMDA(liveMDA))
 		logger.Info().
 			Str("api_url", cfg.Tier2.MDM.APIURL).
@@ -870,6 +872,13 @@ func main() {
 	providerMux := http.NewServeMux()
 	providerMux.Handle("/", wsServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
+	// Phase 3: MicroMDM command webhook for DeviceAttestation ingest.
+	// Point MicroMDM `-command-webhook-url` here. Auth is loopback-only
+	// unless tier2.mdm.command_webhook_secret is set (X-MDM-Webhook-Secret).
+	if liveMDAService != nil {
+		providerMux.HandleFunc("/internal/mdm/command-webhook", liveMDAService.HandleMDACommandWebhook)
+		logger.Info().Msg("Phase 3 live MDA command webhook mounted at /internal/mdm/command-webhook")
+	}
 	// SPEC-005 v0.4 (issue #169) — `billing.quarantine_resolution_force_void_enabled`
 	// gates the §11.6 force-void endpoint at the route layer. Default
 	// false: endpoint returns HTTP 404 until the operator explicitly

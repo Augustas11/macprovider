@@ -322,3 +322,66 @@ payout:
 		t.Fatal("enabled must stay false")
 	}
 }
+
+func TestLoadResolvesMDMAPITokenEnv(t *testing.T) {
+	t.Setenv("PHASE3_TEST_OP_KEY", "0123456789abcdefABCDEFghijklmnop")
+	t.Setenv("PHASE3_TEST_GW_TOKEN", "fedcba9876543210PONMLKJIHGFEDCBA")
+	t.Setenv("PHASE3_TEST_MDM_TOKEN", "micromdm-secret-token")
+
+	cfg := writeMinimalConfig(t, `
+auth:
+  operator_key: env:PHASE3_TEST_OP_KEY
+  gateway_service_token: env:PHASE3_TEST_GW_TOKEN
+tier2:
+  mdm:
+    api_url: "http://127.0.0.1:8080"
+    api_token: env:PHASE3_TEST_MDM_TOKEN
+    live_mda_enabled: true
+`)
+	if cfg.Tier2.MDM.APIToken != "micromdm-secret-token" {
+		t.Fatalf("APIToken=%q want resolved micromdm-secret-token", cfg.Tier2.MDM.APIToken)
+	}
+}
+
+func TestLoadFailsClosedWhenLiveMDAEnabledAndMDMTokenEnvUnset(t *testing.T) {
+	t.Setenv("PHASE3_TEST_OP_KEY2", "0123456789abcdefABCDEFghijklmnop")
+	t.Setenv("PHASE3_TEST_GW_TOKEN2", "fedcba9876543210PONMLKJIHGFEDCBA")
+	os.Unsetenv("PHASE3_TEST_MDM_TOKEN_MISSING")
+
+	_, err := loadConfigFromYAML(t, `
+auth:
+  operator_key: env:PHASE3_TEST_OP_KEY2
+  gateway_service_token: env:PHASE3_TEST_GW_TOKEN2
+tier2:
+  mdm:
+    api_url: "http://127.0.0.1:8080"
+    api_token: env:PHASE3_TEST_MDM_TOKEN_MISSING
+    live_mda_enabled: true
+`)
+	if err == nil {
+		t.Fatal("expected config load error when live MDA token env unset")
+	}
+	if !strings.Contains(err.Error(), "PHASE3_TEST_MDM_TOKEN_MISSING") &&
+		!strings.Contains(err.Error(), "live_mda_enabled") {
+		t.Fatalf("error should mention missing env or live_mda fail-closed, got %v", err)
+	}
+}
+
+func TestLoadFailsClosedWhenLiveMDAEnabledWithoutToken(t *testing.T) {
+	t.Setenv("PHASE3_TEST_OP_KEY3", "0123456789abcdefABCDEFghijklmnop")
+	t.Setenv("PHASE3_TEST_GW_TOKEN3", "fedcba9876543210PONMLKJIHGFEDCBA")
+
+	_, err := loadConfigFromYAML(t, `
+auth:
+  operator_key: env:PHASE3_TEST_OP_KEY3
+  gateway_service_token: env:PHASE3_TEST_GW_TOKEN3
+tier2:
+  mdm:
+    api_url: "http://127.0.0.1:8080"
+    api_token: ""
+    live_mda_enabled: true
+`)
+	if err == nil || !strings.Contains(err.Error(), "live_mda_enabled") {
+		t.Fatalf("expected live_mda_enabled fail-closed error, got %v", err)
+	}
+}

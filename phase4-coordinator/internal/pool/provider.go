@@ -2,6 +2,8 @@ package pool
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -926,6 +928,9 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 		// The invariant this delete still preserves is per-provider
 		// attribution only.
 		delete(r.seenModelsByProvider, p.ProviderID)
+		// Phase 3 CODE-M1 / ARCH-M1: preserve verified MDA proof across
+		// reconnect when the SE key still matches the bound hash.
+		MigrateMDAProofFrom(existing, p)
 	} else {
 		if r.stageReceiptPublicationLocked(nil, p, now) == RegisterRefusalReceiptRotationGraceActive {
 			return nil, false, RegisterRefusalReceiptRotationGraceActive
@@ -1723,9 +1728,49 @@ func (r *Registry) SetMDAProof(providerID, assignedID string, certChain [][]byte
 	return true
 }
 
+// MigrateMDAProofFrom copies a verified MDA proof from an existing provider
+// record onto a replacement session when the SE key still matches. Called
+// during RegisterAtDetailed reconnect/replace so the 7-day cache survives
+// session replacement. No-op when there is nothing to migrate or the SE key
+// does not match.
+func MigrateMDAProofFrom(existing, replacement *Provider) {
+	if existing == nil || replacement == nil {
+		return
+	}
+	if len(existing.MDACertChain) == 0 || len(existing.MDABoundSEKeyHash) == 0 {
+		return
+	}
+	seMatch := false
+	if len(replacement.SEPublicKey) > 0 {
+		h := sha256.Sum256(replacement.SEPublicKey)
+		if subtle.ConstantTimeCompare(h[:], existing.MDABoundSEKeyHash) == 1 {
+			seMatch = true
+		}
+	}
+	if !seMatch && len(replacement.SEPublicKey) > 0 && len(existing.SEPublicKey) > 0 {
+		if subtle.ConstantTimeCompare(replacement.SEPublicKey, existing.SEPublicKey) == 1 {
+			seMatch = true
+		}
+	}
+	if !seMatch {
+		return
+	}
+	chain := make([][]byte, len(existing.MDACertChain))
+	for i, c := range existing.MDACertChain {
+		chain[i] = append([]byte(nil), c...)
+	}
+	replacement.MDACertChain = chain
+	replacement.MDAVerifiedAt = existing.MDAVerifiedAt
+	replacement.MDABoundSEKeyHash = append([]byte(nil), existing.MDABoundSEKeyHash...)
+	if existing.AttestationTier == AttestationTierHardware {
+		replacement.AttestationTier = AttestationTierHardware
+	}
+}
+
 // ClearMDAProof removes any cached MDA proof from the provider record. Called
-// when the SE key rotates so the stale MDA chain (bound to the old key) is not
-// reused. Does not downgrade AttestationTier if the provider still has SE auth.
+// when the SE key rotates or a cached proof expires/fails re-verify so the
+// hardware tier is not retained without a valid proof. Downgrades
+// AttestationTierHardware → AttestationTierSelfSigned.
 func (r *Registry) ClearMDAProof(providerID, assignedID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

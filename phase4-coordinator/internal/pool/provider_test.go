@@ -2,6 +2,8 @@ package pool
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -2776,5 +2778,98 @@ func TestRegistryRefusesNonBearerReplacementOfRoutableBearerValidated(t *testing
 	_, ok = registry.Register(bearerReplacement, nil)
 	if !ok {
 		t.Fatal("legitimate AuthBearerValidated reconnect MUST be allowed to replace an existing AuthBearerValidated session")
+	}
+}
+
+func TestRegisterMigratesMDAProofAcrossReconnect(t *testing.T) {
+	registry := NewRegistry(nil)
+	now := time.Unix(1716768000, 0).UTC()
+	seKey := make([]byte, 64)
+	for i := range seKey {
+		seKey[i] = byte(i + 1)
+	}
+	seHash := sha256.Sum256(seKey)
+	chain := [][]byte{[]byte("leaf-der"), []byte("root-der")}
+
+	_, ok, refusal := registry.RegisterAtDetailed(&Provider{
+		ProviderID:   "p-mda",
+		AssignedID:   "s1",
+		ModelID:      "model-a",
+		State:        StateReady,
+		SlotsFree:    1,
+		SlotsTotal:   1,
+		SEPublicKey:  seKey,
+		AuthState:    AuthBearerValidated,
+		MaxConcurrency: 1,
+		MaxContextTokens: 8000,
+	}, nil, now)
+	if !ok || refusal != RegisterRefusalNone {
+		t.Fatalf("register s1: ok=%v refusal=%q", ok, refusal)
+	}
+	if !registry.SetMDAProof("p-mda", "s1", chain, seHash[:], now) {
+		t.Fatal("SetMDAProof failed")
+	}
+
+	_, ok, refusal = registry.RegisterAtDetailed(&Provider{
+		ProviderID:   "p-mda",
+		AssignedID:   "s2",
+		ModelID:      "model-a",
+		State:        StateReady,
+		SlotsFree:    1,
+		SlotsTotal:   1,
+		SEPublicKey:  append([]byte(nil), seKey...),
+		AuthState:    AuthBearerValidated,
+		MaxConcurrency: 1,
+		MaxContextTokens: 8000,
+		AttestationTier: AttestationTierSelfSigned,
+	}, nil, now.Add(time.Minute))
+	if !ok || refusal != RegisterRefusalNone {
+		t.Fatalf("register s2: ok=%v refusal=%q", ok, refusal)
+	}
+
+	gotChain, verifiedAt, bound, present := registry.MDAProof("p-mda")
+	if !present {
+		t.Fatal("MDA proof missing after reconnect with same SE key")
+	}
+	if verifiedAt != now {
+		t.Fatalf("verifiedAt=%v want %v", verifiedAt, now)
+	}
+	if string(gotChain[0]) != "leaf-der" || string(gotChain[1]) != "root-der" {
+		t.Fatalf("chain mismatch: %#v", gotChain)
+	}
+	if subtle.ConstantTimeCompare(bound, seHash[:]) != 1 {
+		t.Fatal("bound SE key hash mismatch")
+	}
+	p, found := registry.Resolve("p-mda", "s2")
+	if !found {
+		t.Fatal("session s2 not found")
+	}
+	if p.AttestationTier != AttestationTierHardware {
+		t.Fatalf("AttestationTier=%q want hardware after migrate", p.AttestationTier)
+	}
+}
+
+func TestRegisterDoesNotMigrateMDAProofOnSEKeyChange(t *testing.T) {
+	registry := NewRegistry(nil)
+	now := time.Unix(1716768000, 0).UTC()
+	oldKey := bytes.Repeat([]byte{1}, 64)
+	newKey := bytes.Repeat([]byte{2}, 64)
+	seHash := sha256.Sum256(oldKey)
+
+	registry.RegisterAtDetailed(&Provider{
+		ProviderID: "p-rot", AssignedID: "s1", ModelID: "m", State: StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: oldKey, AuthState: AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+	}, nil, now)
+	registry.SetMDAProof("p-rot", "s1", [][]byte{[]byte("c")}, seHash[:], now)
+
+	registry.RegisterAtDetailed(&Provider{
+		ProviderID: "p-rot", AssignedID: "s2", ModelID: "m", State: StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: newKey, AuthState: AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+	}, nil, now.Add(time.Minute))
+
+	if _, _, _, ok := registry.MDAProof("p-rot"); ok {
+		t.Fatal("MDA proof must not migrate when SE key changes")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"math/big"
@@ -481,6 +482,7 @@ type testAttestationCertificateOptions struct {
 	IncludeFreshness         bool
 	IncludeDeviceProperty    bool
 	DevicePropertyValue      []byte
+	SerialNumber             string
 	IncludeCSR               bool
 	MalformedCSR             bool
 	MismatchCSR              bool
@@ -625,6 +627,16 @@ func testAttestationCertificateChain(t *testing.T, now time.Time, opts testAttes
 		leaf.ExtraExtensions = append(leaf.ExtraExtensions, pkix.Extension{
 			Id:    mdaOIDOSVersion,
 			Value: value,
+		})
+	}
+	if opts.SerialNumber != "" {
+		enc, err := asn1.Marshal(opts.SerialNumber)
+		if err != nil {
+			t.Fatalf("marshal serial: %v", err)
+		}
+		leaf.ExtraExtensions = append(leaf.ExtraExtensions, pkix.Extension{
+			Id:    mdaOIDSerialNumber,
+			Value: enc,
 		})
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, leaf, root, leafSigner.Public(), rootPriv)
@@ -804,5 +816,67 @@ func TestVerifyAttestationTokenExtMDAHardwareFalseWithoutSEKey(t *testing.T) {
 	}
 	if result.MDAHardware {
 		t.Fatal("expected MDAHardware=false when SE key was nil (legacy token path)")
+	}
+}
+
+func TestVerifyMDACertChainWithSEKeyRequiresDeviceProperties(t *testing.T) {
+	seKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate SE key: %v", err)
+	}
+	xBytes := make([]byte, 32)
+	yBytes := make([]byte, 32)
+	copy(xBytes[32-len(seKey.PublicKey.X.Bytes()):], seKey.PublicKey.X.Bytes())
+	copy(yBytes[32-len(seKey.PublicKey.Y.Bytes()):], seKey.PublicKey.Y.Bytes())
+	sePub := append(xBytes, yBytes...)
+	now := time.Unix(1716768000, 0).UTC()
+	seDigest := sha256.Sum256(sePub)
+
+	rootDER, leafDER, _ := testAttestationCertificateChain(t, now, testAttestationCertificateOptions{
+		RawFreshnessDigest:    seDigest[:],
+		IncludeFreshness:      true,
+		IncludeDeviceProperty: false,
+		LeafKeyType:           "p256",
+	})
+	cfg := config.Default().Tier2
+	cfg.AttestationRoots = []string{base64.StdEncoding.EncodeToString(rootDER)}
+
+	ok, seKeyUsed := VerifyMDACertChainWithSEKey([][]byte{leafDER}, cfg, sePub, now, zerolog.Nop())
+	if ok || seKeyUsed {
+		t.Fatalf("expected device-property failure, got ok=%v seKeyUsed=%v", ok, seKeyUsed)
+	}
+
+	rootDER2, leafDER2, _ := testAttestationCertificateChain(t, now, testAttestationCertificateOptions{
+		RawFreshnessDigest:    seDigest[:],
+		IncludeFreshness:      true,
+		IncludeDeviceProperty: true,
+		LeafKeyType:           "p256",
+	})
+	cfg.AttestationRoots = []string{base64.StdEncoding.EncodeToString(rootDER2)}
+	ok, seKeyUsed = VerifyMDACertChainWithSEKey([][]byte{leafDER2}, cfg, sePub, now, zerolog.Nop())
+	if !ok || !seKeyUsed {
+		t.Fatalf("expected success with device property, got ok=%v seKeyUsed=%v", ok, seKeyUsed)
+	}
+}
+
+func TestExtractMDASerialNumber(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	_, leafDER, _ := testAttestationCertificateChain(t, now, testAttestationCertificateOptions{
+		IncludeFreshness:      true,
+		FreshnessToken:        "tok",
+		IncludeDeviceProperty: true,
+		SerialNumber:          "C02TESTSERIAL",
+		LeafKeyType:           "p256",
+	})
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatalf("parse leaf: %v", err)
+	}
+	got := ExtractMDASerialNumber(leaf)
+	if got != "C02TESTSERIAL" {
+		t.Fatalf("ExtractMDASerialNumber=%q want C02TESTSERIAL", got)
+	}
+	if ExtractMDASerialNumber(nil) != "" {
+		t.Fatal("nil leaf should return empty")
 	}
 }

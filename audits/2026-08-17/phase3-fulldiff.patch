@@ -1,0 +1,1687 @@
+diff --git a/docs/runbooks/hardware-attestation-phases.md b/docs/runbooks/hardware-attestation-phases.md
+index 3cada97b..9797b8ec 100644
+--- a/docs/runbooks/hardware-attestation-phases.md
++++ b/docs/runbooks/hardware-attestation-phases.md
+@@ -1,8 +1,8 @@
+ # Hardware Attestation Implementation Runbook (Scenario B)
+ 
+-**Status:** Phase 1 IN PROGRESS  
+-**Branch:** `fix/attestation-phase1`  
+-**Worktree:** `/Users/augstar/macprovider-attest-phase1`  
++**Status:** Phase 3 IN PROGRESS  
++**Branch:** `feat/attestation-phase3`  
++**Worktree:** `/Users/augstar/macprovider-attest-phase3`  
+ **Base:** `origin/main`  
+ **Confirmed scope:** macprovider-native attestation only (not Darkbloom integration).
+ 
+@@ -191,7 +191,7 @@ Extend `pool.Provider` (non-breaking JSON fields):
+ 
+ ---
+ 
+-## Phase 2 — MDM MVP
++## Phase 2 — MDM MVP (DONE — 2026-08-17)
+ 
+ **Goal:** macprovider-run MDM so enrolled Macs can receive `DeviceInformation` commands.
+ 
+@@ -229,7 +229,7 @@ Extend `pool.Provider` (non-breaking JSON fields):
+ 
+ ---
+ 
+-## Phase 3 — Live MDA + cache
++## Phase 3 — Live MDA + cache (IN PROGRESS — 2026-08-17)
+ 
+ **Goal:** Apple-rooted hardware proof bound to SE pubkey; survive 7-day rate limit.
+ 
+@@ -247,12 +247,33 @@ Extend `pool.Provider` (non-breaking JSON fields):
+ | 3.6 | Remove static-artifact path as default; keep operator override for dev |
+ | 3.7 | Rate-limit aware refresh scheduler (≥7 days) |
+ 
+-### 3.2 Exit criteria
++### 3.2 Progress (2026-08-17)
++
++**Landed this PR (`feat/attestation-phase3`):**
++- [x] `verifyMDAFreshness` extended: also accepts `SHA256(sePublicKey)` nonce; `MDAHardware=true` returned when SE key digest matched
++- [x] `AttestationVerifyResult.MDAHardware bool` — WS sets `AttestationTier=hardware` when true
++- [x] `internal/mdm/client.go` — MicroMDM API client (`ListDevices`, `FindDeviceBySerial`, `EnqueueDeviceInformationAttestation`, `ParseDeviceAttestationFromPlist`)
++- [x] `internal/mdm/live_mda.go` — `LiveMDAService` with `RequestAndMaybeUpgrade` + `AttachCachedMDAProof` + `UpgradeFromParsedAttestation`
++- [x] Pool `MDACertChain`, `MDAVerifiedAt`, `MDABoundSEKeyHash` cache fields + `SetMDAProof` / `ClearMDAProof` / `MDAProof` helpers
++- [x] `tier2.VerifyMDACertChainWithSEKey` public helper for LiveMDAService chain re-verify
++- [x] `Tier2MDMConfig.APIURL/APIToken/LiveMDAEnabled/MDARefreshIntervalHours` config fields
++- [x] WS observe wiring: `liveMDAUpgrader` interface, `WithLiveMDA` option, goroutine trigger after SE auth
++- [x] Config documented in `dist/coordinator.yaml.example`
++- [x] Tests: freshness dual-mode, MDM client HTTP tests, integration tier tests
++
++**Still needs (manual Mac E2E):**
++- [ ] Deploy `live_mda_enabled: true` on Pearl with MicroMDM running
++- [ ] Enroll test Mac via `macprovider enroll` and see UDID in MicroMDM
++- [ ] Verify DeviceInformation attestation command arrives at device
++- [ ] Parse DeviceAttestation response and call `UpgradeFromParsedAttestation`
++- [ ] Provider reconnects with `attestation_tier=hardware` visible in `/poolz`
++
++### 3.3 Exit criteria
+ 
+ - [ ] Fresh MDA round-trip on enrolled test Mac
+ - [ ] Reconnect reuses cached chain (no new Apple request within 7 days)
+ - [ ] SE key rotation invalidates stale chain (forces refresh)
+-- [ ] `pillar_c_test.go` covers Freshness=SE pubkey binding
++- [x] `pillar_c_test.go` covers Freshness=SE pubkey binding
+ 
+ ---
+ 
+@@ -293,6 +314,8 @@ Script auto-restores config backup on verification failure. Manual: set `require
+ | 2026-07-09 | **Phase 2 started** — worktree `/Users/augstar/macprovider-attest-phase2`, branch `fix/attestation-phase2`. Operator registering Apple MDM push cert in parallel. |
+ | 2026-08-07 | Partner ABM + identity.apple.com instructions added: `docs/runbooks/apple-mdm-partner-registration.md`. P2-A/P2-C already on main via PR #509. |
+ | 2026-08-17 | APNs push cert issued (topic `com.apple.mgmt.External.b3ba8c97-…`). P2-B: nginx `/v1/enroll`+`/mdm/`+`/scep`, MicroMDM Pearl install — see `docs/runbooks/pearl-micromdm-install.md`. |
++| 2026-08-17 | **Phase 2 enroll E2E done** — coordinator `/v1/enroll` tested, MicroMDM on Pearl, APNs cert live. Phase 2 exit criteria met. |
++| 2026-08-17 | **Phase 3 started** — worktree `/Users/augstar/macprovider-attest-phase3`, branch `feat/attestation-phase3`. Dual-mode MDA freshness, MicroMDM API client, LiveMDAService, pool MDA cache, WS observe wiring. |
+ 
+ ## Phase 2 — IN PROGRESS
+ 
+diff --git a/phase4-coordinator/cmd/coordinator/main.go b/phase4-coordinator/cmd/coordinator/main.go
+index f6f7cc64..7b4e22c0 100644
+--- a/phase4-coordinator/cmd/coordinator/main.go
++++ b/phase4-coordinator/cmd/coordinator/main.go
+@@ -811,6 +811,17 @@ func main() {
+ 		pool.WithSwapEmitter(swapEmitter),
+ 		pool.WithReceiptRotationEmitter(receiptRotationEmitter),
+ 	))
++	// Phase 3 observe-mode live MDA (disabled unless tier2.mdm.live_mda_enabled
++	// and api_url are set). Failures here are non-fatal — auth continues.
++	if liveMDA, err := mdm.NewLiveMDAService(cfg.Tier2, registry, logger, nil); err != nil {
++		logger.Error().Err(err).Msg("live MDA service init failed; continuing without live MDA")
++	} else if liveMDA != nil {
++		wsOpts = append(wsOpts, providerws.WithLiveMDA(liveMDA))
++		logger.Info().
++			Str("api_url", cfg.Tier2.MDM.APIURL).
++			Int("refresh_hours", cfg.Tier2.MDM.MDARefreshIntervalHours).
++			Msg("Phase 3 live MDA service wired (observe mode)")
++	}
+ 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
+ 	if rewardsRunner != nil {
+ 		rewardsRunner.SetConnectivity(rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot))
+diff --git a/phase4-coordinator/dist/coordinator.yaml.example b/phase4-coordinator/dist/coordinator.yaml.example
+index 093a5a78..d71cb6d0 100644
+--- a/phase4-coordinator/dist/coordinator.yaml.example
++++ b/phase4-coordinator/dist/coordinator.yaml.example
+@@ -291,6 +291,15 @@ tier2:
+   #   # Optional CMS profile signing (unsigned profiles are OK for enroll):
+   #   # profile_signer_cert_path: "/etc/macprovider/mdm/profile-signer.crt"
+   #   # profile_signer_key_path: "/etc/macprovider/mdm/profile-signer.key"
++  #
++  #   # Phase 3 — Live MDA (observe mode, NO require_attestation flip).
++  #   # MicroMDM API client — loopback when MicroMDM runs on the same host.
++  #   # Do NOT put api_token secrets in this tracked file; use
++  #   # /etc/macprovider/coordinator.pearl-overlays.yaml or an env: reference.
++  #   # api_url: "http://127.0.0.1:8080"
++  #   # api_token: "env:MICROMDM_API_TOKEN"
++  #   # live_mda_enabled: false          # flip to true after APNs cert + MicroMDM deploy
++  #   # mda_refresh_interval_hours: 168  # 7 days (Apple rate limit floor)
+ 
+ # SPEC-017 Network Stats API.
+ #
+diff --git a/phase4-coordinator/internal/config/config.go b/phase4-coordinator/internal/config/config.go
+index c952bc98..1ba55145 100644
+--- a/phase4-coordinator/internal/config/config.go
++++ b/phase4-coordinator/internal/config/config.go
+@@ -882,6 +882,32 @@ type Tier2MDMConfig struct {
+ 	// "Unsigned" in the install prompt, which is acceptable for enrollment).
+ 	ProfileSignerCertPath string `yaml:"profile_signer_cert_path"`
+ 	ProfileSignerKeyPath  string `yaml:"profile_signer_key_path"`
++
++	// Phase 3 — Live MDA: MicroMDM API client settings.
++	// All fields are optional; when APIURL is empty the MDM client is
++	// disabled and live MDA round-trips are skipped (observe gate only).
++
++	// APIURL is the base URL of the MicroMDM server API, e.g.
++	// "http://127.0.0.1:8080" when MicroMDM runs on the same host.
++	// Startup-only (not hot-reloadable).
++	APIURL string `yaml:"api_url"`
++
++	// APIToken is the MicroMDM API token. Should be loaded from an
++	// environment variable via the env: prefix in production, e.g.
++	// "env:MICROMDM_API_TOKEN". When empty, the MDM client is disabled.
++	APIToken string `yaml:"api_token"`
++
++	// LiveMDAEnabled is the observe-mode gate for Phase 3 live MDA
++	// round-trips. Default false. Set to true only after MicroMDM is
++	// deployed and APNs push cert is installed. Changing to true does
++	// NOT flip require_attestation (Phase 4 gate).
++	LiveMDAEnabled bool `yaml:"live_mda_enabled"`
++
++	// MDARefreshIntervalHours controls how often the coordinator
++	// re-requests a fresh DeviceInformation attestation from MicroMDM.
++	// Apple enforces a ~7-day rate limit on DeviceAttestation commands;
++	// default 168 (7 days). Values below 24 are silently floored to 24.
++	MDARefreshIntervalHours int `yaml:"mda_refresh_interval_hours"`
+ }
+ 
+ type CoordinatorAdvertisedVersion struct {
+diff --git a/phase4-coordinator/internal/mdm/client.go b/phase4-coordinator/internal/mdm/client.go
+new file mode 100644
+index 00000000..813a5578
+--- /dev/null
++++ b/phase4-coordinator/internal/mdm/client.go
+@@ -0,0 +1,249 @@
++// Package mdm implements Phase 2 Track P2-A MDM enrollment profile generation
++// (Scenario B) and Phase 3 MicroMDM API client for live MDA round-trips.
++package mdm
++
++import (
++	"bytes"
++	"context"
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"strings"
++	"time"
++)
++
++// ClientConfig holds the configuration for the MicroMDM API client.
++// All fields are required when the client is enabled (APIURL non-empty).
++type ClientConfig struct {
++	// BaseURL is the MicroMDM server API base URL, e.g. "http://127.0.0.1:8080".
++	BaseURL string
++	// APIToken is the MicroMDM API token (basic-auth password with "micromdm" username).
++	APIToken string
++	// HTTPClient is optional; when nil the default http.Client with a 15s timeout
++	// is used.
++	HTTPClient *http.Client
++}
++
++// Client is a minimal MicroMDM API client for Phase 3 live MDA.
++// It supports listing devices and enqueuing DeviceInformation attestation commands.
++type Client struct {
++	cfg ClientConfig
++	hc  *http.Client
++}
++
++// NewClient creates a new MicroMDM API client from cfg.
++// Returns an error when BaseURL is empty.
++func NewClient(cfg ClientConfig) (*Client, error) {
++	if strings.TrimSpace(cfg.BaseURL) == "" {
++		return nil, fmt.Errorf("mdm client: BaseURL is required")
++	}
++	hc := cfg.HTTPClient
++	if hc == nil {
++		hc = &http.Client{Timeout: 15 * time.Second}
++	}
++	return &Client{cfg: cfg, hc: hc}, nil
++}
++
++// Device is a minimal MicroMDM device record returned by /v1/devices.
++type Device struct {
++	// UDID is the device's Unique Device Identifier.
++	UDID string `json:"udid"`
++	// SerialNumber is the hardware serial number.
++	SerialNumber string `json:"serial_number"`
++	// EnrollmentStatus indicates whether the device is enrolled.
++	EnrollmentStatus bool `json:"enrollment_status"`
++}
++
++// listDevicesResponse is the /v1/devices API response envelope.
++type listDevicesResponse struct {
++	Devices []Device `json:"devices"`
++}
++
++// ListDevices returns all devices enrolled in MicroMDM.
++func (c *Client) ListDevices(ctx context.Context) ([]Device, error) {
++	req, err := c.newRequest(ctx, http.MethodGet, "/v1/devices", nil)
++	if err != nil {
++		return nil, err
++	}
++	var resp listDevicesResponse
++	if err := c.doJSON(req, &resp); err != nil {
++		return nil, fmt.Errorf("mdm list devices: %w", err)
++	}
++	return resp.Devices, nil
++}
++
++// FindDeviceBySerial returns the first device whose serial number matches
++// serial (case-insensitive). Returns (Device{}, false, nil) when not found.
++func (c *Client) FindDeviceBySerial(ctx context.Context, serial string) (Device, bool, error) {
++	devices, err := c.ListDevices(ctx)
++	if err != nil {
++		return Device{}, false, err
++	}
++	serial = strings.ToUpper(strings.TrimSpace(serial))
++	for _, d := range devices {
++		if strings.ToUpper(strings.TrimSpace(d.SerialNumber)) == serial {
++			return d, true, nil
++		}
++	}
++	return Device{}, false, nil
++}
++
++// commandPayload is the JSON body for POST /v1/commands.
++type commandPayload struct {
++	UDID    string          `json:"udid"`
++	Payload json.RawMessage `json:"payload"`
++}
++
++// EnqueueDeviceInformationAttestation enqueues a DeviceInformation MDM command
++// for udid with DeviceAttestation and DeviceAttestationNonce queries. The nonce
++// is base64-encoded before sending (Apple MDM plist <data> field format).
++//
++// nonce32 should be 32 bytes — SHA256 of the provider's SE public key so that
++// the resulting MDA freshness extension can be verified with verifyMDAFreshness.
++func (c *Client) EnqueueDeviceInformationAttestation(ctx context.Context, udid string, nonce32 []byte) error {
++	nonceB64 := base64.StdEncoding.EncodeToString(nonce32)
++	// MicroMDM accepts raw plist-like JSON for MDM commands. The Queries list
++	// is an array of string keys; DeviceAttestationNonce is a base64 data blob.
++	cmdBody := map[string]interface{}{
++		"request_type": "DeviceInformation",
++		"queries":      []string{"DeviceAttestation"},
++		"device_attestation_nonce": nonceB64,
++	}
++	cmdRaw, err := json.Marshal(cmdBody)
++	if err != nil {
++		return fmt.Errorf("mdm enqueue: marshal command: %w", err)
++	}
++	payload := commandPayload{UDID: udid, Payload: cmdRaw}
++	body, err := json.Marshal(payload)
++	if err != nil {
++		return fmt.Errorf("mdm enqueue: marshal payload: %w", err)
++	}
++	req, err := c.newRequest(ctx, http.MethodPost, "/v1/commands", bytes.NewReader(body))
++	if err != nil {
++		return err
++	}
++	req.Header.Set("Content-Type", "application/json")
++	resp, err := c.hc.Do(req)
++	if err != nil {
++		return fmt.Errorf("mdm enqueue: http: %w", err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
++		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
++		return fmt.Errorf("mdm enqueue: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
++	}
++	return nil
++}
++
++// DeviceAttestationResult holds the parsed DeviceAttestation fields from a
++// DeviceInformation command response (polled or received via webhook).
++type DeviceAttestationResult struct {
++	// CertificateChain holds the raw DER bytes of each certificate in the
++	// Apple MDA chain (leaf first), as returned by the device.
++	CertificateChain [][]byte
++}
++
++// ParseDeviceAttestationFromPlist parses a MicroMDM device information response
++// body (JSON wrapping plist fields) and extracts the DeviceAttestation chain.
++//
++// MicroMDM v1.13 returns device responses via GET /v1/commands when the command
++// is polled. The response format is a JSON object with a "payload" key containing
++// the MDM CheckIn/Acknowledge plist decoded into JSON. The DeviceAttestation key
++// holds a base64-encoded sequence of DER certificates (Apple-specific format:
++// either a JSON array of base64 strings or a concatenated DER blob).
++//
++// This function handles both variants. When the format is unknown it returns
++// (nil, ErrNoDeviceAttestation).
++func ParseDeviceAttestationFromPlist(data []byte) (*DeviceAttestationResult, error) {
++	// Unwrap MicroMDM command response envelope.
++	var outer struct {
++		Payload struct {
++			DeviceAttestation interface{} `json:"DeviceAttestation"`
++		} `json:"payload"`
++	}
++	// Also try flat parse (direct MDM response JSON).
++	var flat struct {
++		DeviceAttestation interface{} `json:"DeviceAttestation"`
++	}
++	var parsed interface{}
++	if err := json.Unmarshal(data, &outer); err == nil && outer.Payload.DeviceAttestation != nil {
++		parsed = outer.Payload.DeviceAttestation
++	} else if err2 := json.Unmarshal(data, &flat); err2 == nil && flat.DeviceAttestation != nil {
++		parsed = flat.DeviceAttestation
++	} else {
++		return nil, ErrNoDeviceAttestation
++	}
++	return extractDeviceAttestationCerts(parsed)
++}
++
++// ErrNoDeviceAttestation is returned by ParseDeviceAttestationFromPlist when
++// no DeviceAttestation field is present in the response.
++var ErrNoDeviceAttestation = fmt.Errorf("mdm: no DeviceAttestation field in response")
++
++func extractDeviceAttestationCerts(v interface{}) (*DeviceAttestationResult, error) {
++	switch tv := v.(type) {
++	case []interface{}:
++		// Array of base64-encoded DER certificates.
++		chain := make([][]byte, 0, len(tv))
++		for i, item := range tv {
++			s, ok := item.(string)
++			if !ok {
++				return nil, fmt.Errorf("mdm: DeviceAttestation[%d] is not a string", i)
++			}
++			der, err := decodeBase64Cert(s)
++			if err != nil {
++				return nil, fmt.Errorf("mdm: DeviceAttestation[%d]: %w", i, err)
++			}
++			chain = append(chain, der)
++		}
++		return &DeviceAttestationResult{CertificateChain: chain}, nil
++	case string:
++		// Single base64-encoded DER certificate or PEM block.
++		der, err := decodeBase64Cert(tv)
++		if err != nil {
++			return nil, fmt.Errorf("mdm: DeviceAttestation base64: %w", err)
++		}
++		return &DeviceAttestationResult{CertificateChain: [][]byte{der}}, nil
++	default:
++		return nil, fmt.Errorf("mdm: unexpected DeviceAttestation type %T", v)
++	}
++}
++
++func decodeBase64Cert(s string) ([]byte, error) {
++	for _, enc := range []*base64.Encoding{
++		base64.StdEncoding,
++		base64.RawStdEncoding,
++		base64.URLEncoding,
++		base64.RawURLEncoding,
++	} {
++		if b, err := enc.DecodeString(strings.TrimSpace(s)); err == nil {
++			return b, nil
++		}
++	}
++	return nil, fmt.Errorf("not valid base64")
++}
++
++func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
++	url := strings.TrimRight(c.cfg.BaseURL, "/") + path
++	req, err := http.NewRequestWithContext(ctx, method, url, body)
++	if err != nil {
++		return nil, fmt.Errorf("mdm: build request: %w", err)
++	}
++	req.SetBasicAuth("micromdm", c.cfg.APIToken)
++	return req, nil
++}
++
++func (c *Client) doJSON(req *http.Request, out interface{}) error {
++	resp, err := c.hc.Do(req)
++	if err != nil {
++		return fmt.Errorf("http: %w", err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
++		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
++		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
++	}
++	return json.NewDecoder(resp.Body).Decode(out)
++}
+diff --git a/phase4-coordinator/internal/mdm/client_test.go b/phase4-coordinator/internal/mdm/client_test.go
+new file mode 100644
+index 00000000..b82d30fd
+--- /dev/null
++++ b/phase4-coordinator/internal/mdm/client_test.go
+@@ -0,0 +1,193 @@
++package mdm
++
++import (
++	"context"
++	"encoding/base64"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++)
++
++func TestNewClientRequiresBaseURL(t *testing.T) {
++	_, err := NewClient(ClientConfig{BaseURL: "", APIToken: "tok"})
++	if err == nil {
++		t.Fatal("expected error for empty BaseURL")
++	}
++}
++
++func TestListDevices(t *testing.T) {
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/v1/devices" {
++			t.Errorf("unexpected path %q", r.URL.Path)
++		}
++		user, pass, ok := r.BasicAuth()
++		if !ok || user != "micromdm" || pass != "test-token" {
++			t.Errorf("bad basic auth: user=%q pass=%q ok=%v", user, pass, ok)
++		}
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(listDevicesResponse{
++			Devices: []Device{
++				{UDID: "AAAA-BBBB", SerialNumber: "C02T1234ABC", EnrollmentStatus: true},
++				{UDID: "CCCC-DDDD", SerialNumber: "C02X5678DEF", EnrollmentStatus: false},
++			},
++		})
++	}))
++	defer srv.Close()
++
++	c, err := NewClient(ClientConfig{BaseURL: srv.URL, APIToken: "test-token"})
++	if err != nil {
++		t.Fatalf("new client: %v", err)
++	}
++	devices, err := c.ListDevices(context.Background())
++	if err != nil {
++		t.Fatalf("list devices: %v", err)
++	}
++	if len(devices) != 2 {
++		t.Fatalf("expected 2 devices, got %d", len(devices))
++	}
++	if devices[0].UDID != "AAAA-BBBB" {
++		t.Errorf("device[0].UDID=%q want AAAA-BBBB", devices[0].UDID)
++	}
++}
++
++func TestFindDeviceBySerial(t *testing.T) {
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		json.NewEncoder(w).Encode(listDevicesResponse{
++			Devices: []Device{
++				{UDID: "AAAA-BBBB", SerialNumber: "C02T1234ABC"},
++				{UDID: "CCCC-DDDD", SerialNumber: "C02X5678DEF"},
++			},
++		})
++	}))
++	defer srv.Close()
++
++	c, _ := NewClient(ClientConfig{BaseURL: srv.URL, APIToken: "tok"})
++
++	d, found, err := c.FindDeviceBySerial(context.Background(), "c02t1234abc") // lowercase
++	if err != nil {
++		t.Fatalf("find device: %v", err)
++	}
++	if !found {
++		t.Fatal("expected device to be found")
++	}
++	if d.UDID != "AAAA-BBBB" {
++		t.Errorf("found wrong device: UDID=%q", d.UDID)
++	}
++
++	_, found2, _ := c.FindDeviceBySerial(context.Background(), "NOTEXIST")
++	if found2 {
++		t.Fatal("expected not found for unknown serial")
++	}
++}
++
++func TestEnqueueDeviceInformationAttestation(t *testing.T) {
++	var capturedBody []byte
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/v1/commands" {
++			t.Errorf("unexpected path %q", r.URL.Path)
++		}
++		if r.Method != http.MethodPost {
++			t.Errorf("unexpected method %q", r.Method)
++		}
++		capturedBody = make([]byte, r.ContentLength)
++		r.Body.Read(capturedBody)
++		w.WriteHeader(http.StatusOK)
++		w.Write([]byte("{}"))
++	}))
++	defer srv.Close()
++
++	c, _ := NewClient(ClientConfig{BaseURL: srv.URL, APIToken: "tok"})
++	nonce := make([]byte, 32)
++	for i := range nonce {
++		nonce[i] = byte(i)
++	}
++	if err := c.EnqueueDeviceInformationAttestation(context.Background(), "TEST-UDID-001", nonce); err != nil {
++		t.Fatalf("enqueue: %v", err)
++	}
++
++	var payload commandPayload
++	if err := json.Unmarshal(capturedBody, &payload); err != nil {
++		t.Fatalf("parse captured body: %v", err)
++	}
++	if payload.UDID != "TEST-UDID-001" {
++		t.Errorf("UDID=%q want TEST-UDID-001", payload.UDID)
++	}
++
++	var cmd map[string]interface{}
++	if err := json.Unmarshal(payload.Payload, &cmd); err != nil {
++		t.Fatalf("parse command payload: %v", err)
++	}
++	if cmd["request_type"] != "DeviceInformation" {
++		t.Errorf("request_type=%q want DeviceInformation", cmd["request_type"])
++	}
++	// Verify nonce is base64-encoded and round-trips.
++	nonceB64, _ := cmd["device_attestation_nonce"].(string)
++	decoded, err := base64.StdEncoding.DecodeString(nonceB64)
++	if err != nil {
++		t.Fatalf("nonce decode: %v", err)
++	}
++	if len(decoded) != 32 {
++		t.Errorf("nonce len=%d want 32", len(decoded))
++	}
++}
++
++func TestEnqueueDeviceInformationAttestationReturnsErrorOnHTTPFailure(t *testing.T) {
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		http.Error(w, "internal error", http.StatusInternalServerError)
++	}))
++	defer srv.Close()
++
++	c, _ := NewClient(ClientConfig{BaseURL: srv.URL, APIToken: "tok"})
++	err := c.EnqueueDeviceInformationAttestation(context.Background(), "UDID", make([]byte, 32))
++	if err == nil {
++		t.Fatal("expected error on 500 response")
++	}
++	if !strings.Contains(err.Error(), "500") {
++		t.Errorf("error should mention status 500, got: %v", err)
++	}
++}
++
++func TestParseDeviceAttestationFromPlistArrayFormat(t *testing.T) {
++	cert1B64 := base64.StdEncoding.EncodeToString([]byte("fake-der-cert-1"))
++	cert2B64 := base64.StdEncoding.EncodeToString([]byte("fake-der-cert-2"))
++	data, _ := json.Marshal(map[string]interface{}{
++		"payload": map[string]interface{}{
++			"DeviceAttestation": []interface{}{cert1B64, cert2B64},
++		},
++	})
++	result, err := ParseDeviceAttestationFromPlist(data)
++	if err != nil {
++		t.Fatalf("parse: %v", err)
++	}
++	if len(result.CertificateChain) != 2 {
++		t.Fatalf("expected 2 certs, got %d", len(result.CertificateChain))
++	}
++	if string(result.CertificateChain[0]) != "fake-der-cert-1" {
++		t.Errorf("cert[0] mismatch")
++	}
++}
++
++func TestParseDeviceAttestationFromPlistFlatFormat(t *testing.T) {
++	cert1B64 := base64.StdEncoding.EncodeToString([]byte("flat-cert"))
++	data, _ := json.Marshal(map[string]interface{}{
++		"DeviceAttestation": cert1B64,
++	})
++	result, err := ParseDeviceAttestationFromPlist(data)
++	if err != nil {
++		t.Fatalf("parse: %v", err)
++	}
++	if len(result.CertificateChain) != 1 {
++		t.Fatalf("expected 1 cert, got %d", len(result.CertificateChain))
++	}
++}
++
++func TestParseDeviceAttestationFromPlistMissingReturnsError(t *testing.T) {
++	data := []byte(`{"payload": {"OtherKey": "value"}}`)
++	_, err := ParseDeviceAttestationFromPlist(data)
++	if err != ErrNoDeviceAttestation {
++		t.Fatalf("expected ErrNoDeviceAttestation, got %v", err)
++	}
++}
+diff --git a/phase4-coordinator/internal/mdm/live_mda.go b/phase4-coordinator/internal/mdm/live_mda.go
+new file mode 100644
+index 00000000..6f12a113
+--- /dev/null
++++ b/phase4-coordinator/internal/mdm/live_mda.go
+@@ -0,0 +1,245 @@
++package mdm
++
++import (
++	"context"
++	"crypto/sha256"
++	"crypto/subtle"
++	"crypto/x509"
++	"fmt"
++	"strings"
++	"time"
++
++	"github.com/augstar/macprovider-coordinator/internal/config"
++	"github.com/augstar/macprovider-coordinator/internal/pool"
++	"github.com/augstar/macprovider-coordinator/internal/tier2"
++	"github.com/rs/zerolog"
++)
++
++// LiveMDAService orchestrates Phase 3 live MDA round-trips. It:
++//
++//  1. Looks up the enrolled device in MicroMDM by serial number.
++//  2. Enqueues a DeviceInformation attestation command with nonce=SHA256(SEPublicKey).
++//  3. On a subsequent call (or after polling), re-verifies a cached MDA chain
++//     bound to the SE key and upgrades the pool entry's attestation tier to
++//     "hardware".
++//
++// The service operates in observe mode: failures are logged but do not interrupt
++// provider auth or routing. Do not flip require_attestation here (Phase 4 gate).
++type LiveMDAService struct {
++	client  *Client
++	cfg     config.Tier2Config
++	mdmCfg  config.Tier2MDMConfig
++	pool    *pool.Registry
++	log     zerolog.Logger
++	now     func() time.Time
++}
++
++// NewLiveMDAService creates a LiveMDAService. Returns (nil, nil) when the MDM
++// client is disabled (APIURL empty or LiveMDAEnabled false); caller should skip
++// wiring the service.
++func NewLiveMDAService(cfg config.Tier2Config, p *pool.Registry, log zerolog.Logger, now func() time.Time) (*LiveMDAService, error) {
++	mdmCfg := cfg.MDM
++	if !mdmCfg.LiveMDAEnabled || strings.TrimSpace(mdmCfg.APIURL) == "" {
++		return nil, nil
++	}
++	client, err := NewClient(ClientConfig{
++		BaseURL:  mdmCfg.APIURL,
++		APIToken: mdmCfg.APIToken,
++	})
++	if err != nil {
++		return nil, fmt.Errorf("live_mda: create client: %w", err)
++	}
++	if now == nil {
++		now = func() time.Time { return time.Now().UTC() }
++	}
++	return &LiveMDAService{
++		client: client,
++		cfg:    cfg,
++		mdmCfg: mdmCfg,
++		pool:   p,
++		log:    log,
++		now:    now,
++	}, nil
++}
++
++// RequestAndMaybeUpgrade is the main Phase 3 observe-mode entry point.
++// It should be called in a goroutine (go svc.RequestAndMaybeUpgrade(...))
++// after successful SE attestation auth so it never blocks the auth path.
++//
++// If the provider already has a valid, fresh MDA proof bound to the current SE
++// key, the tier is upgraded immediately without a new MDM round-trip. Otherwise
++// a DeviceInformation attestation command is enqueued for the enrolled device
++// (best-effort). The full round-trip completes asynchronously via polling or
++// webhook — this method only initiates the enqueue.
++//
++// serial is the device serial number from attestation claims (may be empty, in
++// which case MDM lookup is skipped and only the cached proof path runs).
++func (s *LiveMDAService) RequestAndMaybeUpgrade(providerID, assignedID, serial string) {
++	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++	defer cancel()
++
++	sePub := s.pool.ProviderSEPublicKey(providerID)
++	if len(sePub) == 0 {
++		s.log.Debug().
++			Str("provider_id", providerID).
++			Str("reason", "no_se_key").
++			Msg("live_mda: skipping — no SE public key recorded")
++		return
++	}
++
++	seKeyHash := sha256.Sum256(sePub)
++
++	// 1. Try to upgrade from cached MDA proof.
++	if s.tryUpgradeFromCache(ctx, providerID, assignedID, sePub, seKeyHash[:]) {
++		return
++	}
++
++	// 2. Cache miss or stale — enqueue new DeviceInformation attestation.
++	if serial = strings.TrimSpace(serial); serial == "" {
++		s.log.Debug().
++			Str("provider_id", providerID).
++			Str("reason", "no_serial").
++			Msg("live_mda: cannot enqueue — no device serial")
++		return
++	}
++	device, found, err := s.client.FindDeviceBySerial(ctx, serial)
++	if err != nil {
++		s.log.Warn().Err(err).
++			Str("provider_id", providerID).
++			Str("serial", serial).
++			Msg("live_mda: FindDeviceBySerial failed")
++		return
++	}
++	if !found {
++		s.log.Info().
++			Str("provider_id", providerID).
++			Str("serial", serial).
++			Msg("live_mda: device not found in MicroMDM — not enrolled yet")
++		return
++	}
++
++	if err := s.client.EnqueueDeviceInformationAttestation(ctx, device.UDID, seKeyHash[:]); err != nil {
++		s.log.Warn().Err(err).
++			Str("provider_id", providerID).
++			Str("udid", device.UDID).
++			Msg("live_mda: EnqueueDeviceInformationAttestation failed (best-effort, ignoring)")
++		return
++	}
++
++	s.log.Info().
++		Str("provider_id", providerID).
++		Str("udid", device.UDID).
++		Str("serial", serial).
++		Msg("live_mda: DeviceInformation attestation command enqueued")
++}
++
++// AttachCachedMDAProof attempts to re-verify and attach a cached MDA proof for
++// providerID on reconnect. Call this after SE attestation succeeds so that a
++// provider whose MDA chain was verified in a prior session immediately gets
++// hardware tier without waiting for a new MDM round-trip.
++//
++// Returns true when the proof was attached and the tier upgraded.
++func (s *LiveMDAService) AttachCachedMDAProof(providerID, assignedID string) bool {
++	sePub := s.pool.ProviderSEPublicKey(providerID)
++	if len(sePub) == 0 {
++		return false
++	}
++	seKeyHash := sha256.Sum256(sePub)
++	return s.tryUpgradeFromCache(context.Background(), providerID, assignedID, sePub, seKeyHash[:])
++}
++
++// UpgradeFromParsedAttestation verifies a fresh DeviceAttestationResult (from
++// ParseDeviceAttestationFromPlist) against the provider's SE key and upgrades
++// the pool entry on success. Returns true when the tier was upgraded.
++//
++// Call this when a DeviceInformation command response arrives (e.g. via MDM
++// webhook or polling the MicroMDM command queue).
++func (s *LiveMDAService) UpgradeFromParsedAttestation(providerID, assignedID string, result *DeviceAttestationResult) bool {
++	sePub := s.pool.ProviderSEPublicKey(providerID)
++	if len(sePub) == 0 {
++		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: upgrade failed — no SE key")
++		return false
++	}
++	seKeyHash := sha256.Sum256(sePub)
++	if len(result.CertificateChain) == 0 {
++		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: empty certificate chain")
++		return false
++	}
++	return s.verifyAndUpgrade(providerID, assignedID, result.CertificateChain, sePub, seKeyHash[:])
++}
++
++// tryUpgradeFromCache checks whether the pool already holds a valid, fresh MDA
++// proof bound to the current SE key. Returns true and upgrades if so.
++func (s *LiveMDAService) tryUpgradeFromCache(ctx context.Context, providerID, assignedID string, sePub, seKeyHash []byte) bool {
++	chain, verifiedAt, boundHash, ok := s.pool.MDAProof(providerID)
++	if !ok || len(chain) == 0 {
++		return false
++	}
++	// Verify SE key hasn't rotated since the proof was bound.
++	if subtle.ConstantTimeCompare(boundHash, seKeyHash) != 1 {
++		s.log.Info().Str("provider_id", providerID).Msg("live_mda: SE key rotated — clearing stale MDA proof")
++		s.pool.ClearMDAProof(providerID, assignedID)
++		return false
++	}
++	// Verify proof is within the refresh interval.
++	refreshInterval := time.Duration(s.mdmRefreshIntervalHours()) * time.Hour
++	age := s.now().Sub(verifiedAt)
++	if age > refreshInterval {
++		s.log.Info().
++			Str("provider_id", providerID).
++			Dur("age", age).
++			Dur("limit", refreshInterval).
++			Msg("live_mda: cached MDA proof expired — will re-request")
++		return false
++	}
++	// Re-verify chain freshness in-process without a new MDM round-trip.
++	return s.verifyAndUpgrade(providerID, assignedID, chain, sePub, seKeyHash)
++}
++
++// verifyAndUpgrade verifies the certificate chain against configured roots and
++// the SE public key freshness, then upgrades the pool entry's attestation tier.
++func (s *LiveMDAService) verifyAndUpgrade(providerID, assignedID string, chain [][]byte, sePub, seKeyHash []byte) bool {
++	if len(chain) == 0 {
++		return false
++	}
++	// Check leaf certificate expiry before doing expensive chain verify.
++	leaf, err := x509.ParseCertificate(chain[0])
++	if err != nil {
++		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("live_mda: parse leaf certificate failed")
++		return false
++	}
++	now := s.now()
++	if now.After(leaf.NotAfter) {
++		s.log.Info().Str("provider_id", providerID).Msg("live_mda: cached MDA leaf certificate expired")
++		return false
++	}
++
++	ok, seKeyUsed := tier2.VerifyMDACertChainWithSEKey(chain, s.cfg, sePub, now, s.log)
++	if !ok || !seKeyUsed {
++		s.log.Info().
++			Str("provider_id", providerID).
++			Bool("chain_ok", ok).
++			Bool("se_key_used", seKeyUsed).
++			Msg("live_mda: chain re-verify failed")
++		return false
++	}
++
++	h := sha256.Sum256(sePub)
++	if !s.pool.SetMDAProof(providerID, assignedID, chain, h[:], now) {
++		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: SetMDAProof: provider not found (reconnect race?)")
++		return false
++	}
++	s.log.Info().
++		Str("provider_id", providerID).
++		Str("attestation_tier", pool.AttestationTierHardware).
++		Msg("live_mda: attestation_tier upgraded to hardware")
++	return true
++}
++
++func (s *LiveMDAService) mdmRefreshIntervalHours() int {
++	h := s.mdmCfg.MDARefreshIntervalHours
++	if h < 24 {
++		h = 168 // 7 days default
++	}
++	return h
++}
+diff --git a/phase4-coordinator/internal/pool/provider.go b/phase4-coordinator/internal/pool/provider.go
+index 22c777cb..9e71cd14 100644
+--- a/phase4-coordinator/internal/pool/provider.go
++++ b/phase4-coordinator/internal/pool/provider.go
+@@ -272,6 +272,20 @@ type Provider struct {
+ 	// Internal only — not serialised to JSON.
+ 	SELivenessFailCount int `json:"-"`
+ 
++	// Phase 3 — Live MDA proof cache.
++	// MDACertChain holds the raw DER bytes of the Apple MDA certificate chain
++	// (leaf first) obtained via MDM DeviceInformation attestation. Nil until
++	// a live MDA round-trip completes.
++	MDACertChain [][]byte `json:"-"`
++	// MDAVerifiedAt is the coordinator clock at the last successful MDA
++	// chain verification. Zero if no MDA proof is cached.
++	MDAVerifiedAt time.Time `json:"-"`
++	// MDABoundSEKeyHash is SHA256 of the SE public key used as the MDM
++	// DeviceAttestationNonce when the cached MDA proof was obtained.
++	// When the provider's SE key changes, this mismatch triggers a
++	// proof refresh.
++	MDABoundSEKeyHash []byte `json:"-"`
++
+ 	// SPEC-002 v1.3.5 §3.X.1 — populated from v2 auth_request initial-stage
+ 	// supported_models[] per SPEC-010 v1.5 R-3.3.1; nil for the L-1 baseline.
+ 	SupportedModels []string `json:"supported_models,omitempty"`
+@@ -1674,6 +1688,76 @@ func (r *Registry) SetSEPublicKey(providerID, assignedID string, pubkey []byte,
+ 	return true
+ }
+ 
++// ProviderSEPublicKey returns the currently stored SE public key for the given
++// providerID, or nil if the provider is not live or has no SE key recorded.
++// Safe to call concurrently.
++func (r *Registry) ProviderSEPublicKey(providerID string) []byte {
++	r.mu.RLock()
++	defer r.mu.RUnlock()
++	p := r.providers[providerID]
++	if p == nil || len(p.SEPublicKey) == 0 {
++		return nil
++	}
++	return append([]byte(nil), p.SEPublicKey...)
++}
++
++// SetMDAProof stores a verified MDA certificate chain and the SE key hash that
++// was used as the MDM DeviceAttestationNonce for the freshness binding.
++// The caller must have already verified the chain. Clears stale proof if the
++// SE key changed.
++func (r *Registry) SetMDAProof(providerID, assignedID string, certChain [][]byte, seKeyHash []byte, verifiedAt time.Time) bool {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	p := r.providers[providerID]
++	if p == nil || p.AssignedID != assignedID {
++		return false
++	}
++	chain := make([][]byte, len(certChain))
++	for i, c := range certChain {
++		chain[i] = append([]byte(nil), c...)
++	}
++	p.MDACertChain = chain
++	p.MDAVerifiedAt = verifiedAt
++	p.MDABoundSEKeyHash = append([]byte(nil), seKeyHash...)
++	p.AttestationTier = AttestationTierHardware
++	return true
++}
++
++// ClearMDAProof removes any cached MDA proof from the provider record. Called
++// when the SE key rotates so the stale MDA chain (bound to the old key) is not
++// reused. Does not downgrade AttestationTier if the provider still has SE auth.
++func (r *Registry) ClearMDAProof(providerID, assignedID string) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	p := r.providers[providerID]
++	if p == nil || p.AssignedID != assignedID {
++		return
++	}
++	p.MDACertChain = nil
++	p.MDAVerifiedAt = time.Time{}
++	p.MDABoundSEKeyHash = nil
++	if p.AttestationTier == AttestationTierHardware {
++		p.AttestationTier = AttestationTierSelfSigned
++	}
++}
++
++// MDAProof returns the cached MDA proof fields for the given provider.
++// Returns (nil, zero, nil, false) if no proof is cached.
++// Safe to call concurrently.
++func (r *Registry) MDAProof(providerID string) (certChain [][]byte, verifiedAt time.Time, seKeyHash []byte, ok bool) {
++	r.mu.RLock()
++	defer r.mu.RUnlock()
++	p := r.providers[providerID]
++	if p == nil || len(p.MDACertChain) == 0 {
++		return nil, time.Time{}, nil, false
++	}
++	chain := make([][]byte, len(p.MDACertChain))
++	for i, c := range p.MDACertChain {
++		chain[i] = append([]byte(nil), c...)
++	}
++	return chain, p.MDAVerifiedAt, append([]byte(nil), p.MDABoundSEKeyHash...), true
++}
++
+ func (r *Registry) SetModelClassOPoIPass(providerID, assignedID string, pass *bool) {
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
+diff --git a/phase4-coordinator/internal/tier2/pillar_c.go b/phase4-coordinator/internal/tier2/pillar_c.go
+index 76240d3f..7495c4dd 100644
+--- a/phase4-coordinator/internal/tier2/pillar_c.go
++++ b/phase4-coordinator/internal/tier2/pillar_c.go
+@@ -86,6 +86,11 @@ type attestationBindingSignature struct {
+ type AttestationVerifyResult struct {
+ 	Status   pool.AttestationStatus
+ 	SEResult *SEAttestationResult
++	// MDAHardware is true when MDA chain verification succeeded AND the
++	// freshness extension matched SHA256(sePublicKey) — i.e. the Apple MDA
++	// is bound to the provider's SE key via MDM DeviceAttestationNonce.
++	// When true the caller should set AttestationTier = "hardware".
++	MDAHardware bool
+ }
+ 
+ type attestationModelHashCheck struct {
+@@ -96,93 +101,97 @@ type attestationModelHashCheck struct {
+ // VerifyAttestationTokenExt is the full-result variant of VerifyAttestationToken.
+ // It returns an AttestationVerifyResult so the caller can access SE-specific
+ // output (e.g. the verified SE public key) without a second parse pass.
+-func VerifyAttestationTokenExt(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger) AttestationVerifyResult {
+-	status, seResult := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger, attestationModelHashCheck{})
+-	return AttestationVerifyResult{Status: status, SEResult: seResult}
++// sePublicKey is optional (may be nil): when len==64 it is used as an additional
++// MDA freshness nonce (SHA256(sePublicKey)), enabling MDM DeviceAttestationNonce mode.
++func VerifyAttestationTokenExt(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, sePublicKey []byte, now time.Time, logger zerolog.Logger) AttestationVerifyResult {
++	status, seResult, mdaHardware := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, sePublicKey, now, logger, attestationModelHashCheck{})
++	return AttestationVerifyResult{Status: status, SEResult: seResult, MDAHardware: mdaHardware}
+ }
+ 
+ // VerifyAttestationTokenExtWithCatalog is the catalog-aware variant used by
+ // provider admission. It preserves attestation status semantics while emitting
+ // observe-mode diagnostics when the already-signed claimed.model_hash disagrees
+ // with the active catalog row for modelID.
+-func VerifyAttestationTokenExtWithCatalog(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey, modelID string, catalog *Catalog, now time.Time, logger zerolog.Logger) AttestationVerifyResult {
+-	status, seResult := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger, attestationModelHashCheck{
++// sePublicKey is optional (may be nil): when len==64 it is used as an additional
++// MDA freshness nonce (SHA256(sePublicKey)), enabling MDM DeviceAttestationNonce mode.
++func VerifyAttestationTokenExtWithCatalog(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey, modelID string, catalog *Catalog, sePublicKey []byte, now time.Time, logger zerolog.Logger) AttestationVerifyResult {
++	status, seResult, mdaHardware := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, sePublicKey, now, logger, attestationModelHashCheck{
+ 		Catalog: catalog,
+ 		ModelID: modelID,
+ 	})
+-	return AttestationVerifyResult{Status: status, SEResult: seResult}
++	return AttestationVerifyResult{Status: status, SEResult: seResult, MDAHardware: mdaHardware}
+ }
+ 
+ // VerifyAttestationToken verifies an attestation token and returns the status.
+ // Use VerifyAttestationTokenExt when the caller needs format-specific results.
+ func VerifyAttestationToken(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger) pool.AttestationStatus {
+-	status, _ := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger, attestationModelHashCheck{})
++	status, _, _ := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, nil, now, logger, attestationModelHashCheck{})
+ 	return status
+ }
+ 
+-func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger, modelHashCheck attestationModelHashCheck) (pool.AttestationStatus, *SEAttestationResult) {
++func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, sePublicKey []byte, now time.Time, logger zerolog.Logger, modelHashCheck attestationModelHashCheck) (pool.AttestationStatus, *SEAttestationResult, bool) {
+ 	if !cfg.RequireAttestation && len(raw) == 0 {
+-		return pool.AttestationStatusNotRequired, nil
++		return pool.AttestationStatusNotRequired, nil, false
+ 	}
+ 	if len(raw) == 0 || string(raw) == "null" {
+ 		if cfg.RequireAttestation {
+ 			logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "missing_token", "tier2.require_attestation")
+-			return pool.AttestationStatusFailed, nil
++			return pool.AttestationStatusFailed, nil, false
+ 		}
+ 		// A missing token is a capability absence, not an unsupported token
+ 		// format. When attestation is optional, report the policy decision
+ 		// explicitly so clients do not treat the accepted session as an
+ 		// attestation failure during autoupdate eligibility checks.
+-		return pool.AttestationStatusNotRequired, nil
++		return pool.AttestationStatusNotRequired, nil, false
+ 	}
+ 	if len(raw) > MaxAttestationEnvelopeBytes {
+ 		logAttestationEvent(logger, "attestation_token_too_large", "WARN", providerID, "reject", "token_too_large", "tier2.attestation_max_age_s")
+-		return pool.AttestationStatusFailed, nil
++		return pool.AttestationStatusFailed, nil, false
+ 	}
+ 	var token AttestationToken
+ 	if err := json.Unmarshal(raw, &token); err != nil {
+ 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "invalid_json", "tier2.require_attestation")
+-		return pool.AttestationStatusFailed, nil
++		return pool.AttestationStatusFailed, nil, false
+ 	}
+ 	if !attestationFormatAllowed(token.Format, cfg.AttestationFormats) {
+ 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "unsupported_format", "tier2.attestation_formats")
+-		return pool.AttestationStatusUnsupported, nil
++		return pool.AttestationStatusUnsupported, nil, false
+ 	}
+ 	if len(token.Token) > MaxAttestationTokenBytes {
+ 		logAttestationEvent(logger, "attestation_token_too_large", "WARN", providerID, "reject", "token_too_large", "tier2.attestation_max_age_s")
+-		return pool.AttestationStatusFailed, nil
++		return pool.AttestationStatusFailed, nil, false
+ 	}
+ 	if !validAttestationTokenEncoding(token.Token) {
+ 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "invalid_token_encoding", "tier2.require_attestation")
+-		return pool.AttestationStatusFailed, nil
++		return pool.AttestationStatusFailed, nil, false
+ 	}
+ 	if token.ProviderID != providerID {
+ 		logAttestationEvent(logger, "provider_binding_mismatch", "WARN", providerID, "reject", "provider_binding_mismatch", "tier2.require_attestation")
+-		return pool.AttestationStatusFailed, nil
++		return pool.AttestationStatusFailed, nil, false
+ 	}
+ 	wantChallenge := base64.RawURLEncoding.EncodeToString(challenge)
+ 	if token.Challenge != wantChallenge {
+ 		logAttestationEvent(logger, "attestation_replay", "WARN", providerID, "reject", "challenge_mismatch", "tier2.require_attestation")
+-		return pool.AttestationStatusStale, nil
++		return pool.AttestationStatusStale, nil, false
+ 	}
+ 	if strings.TrimSpace(providerECDHPublicKey) != "" && token.KeyBinding.ProviderECDHPublicKey != providerECDHPublicKey {
+ 		logAttestationEvent(logger, "provider_binding_mismatch", "WARN", providerID, "reject", "ecdh_binding_mismatch", "tier2.require_attestation")
+-		return pool.AttestationStatusFailed, nil
++		return pool.AttestationStatusFailed, nil, false
+ 	}
+ 	if !attestationHardwareFamilyAllowed(token) {
+ 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "hardware_family_policy_mismatch", "tier2.attestation_formats")
+-		return pool.AttestationStatusFailed, nil
++		return pool.AttestationStatusFailed, nil, false
+ 	}
+ 	if now.IsZero() {
+ 		now = time.Now().UTC()
+ 	}
+ 	if token.IssuedAt.IsZero() || token.ExpiresAt.IsZero() || now.Before(token.IssuedAt.Add(-1*time.Minute)) || !now.Before(token.ExpiresAt) {
+ 		logAttestationEvent(logger, "attestation_stale", "WARN", providerID, "reject", "stale_or_expired", "tier2.attestation_max_age_s")
+-		return pool.AttestationStatusStale, nil
++		return pool.AttestationStatusStale, nil, false
+ 	}
+ 	if cfg.AttestationMaxAgeS > 0 && now.Sub(token.IssuedAt) > time.Duration(cfg.AttestationMaxAgeS)*time.Second {
+ 		logAttestationEvent(logger, "attestation_stale", "WARN", providerID, "reject", "max_age_exceeded", "tier2.attestation_max_age_s")
+-		return pool.AttestationStatusStale, nil
++		return pool.AttestationStatusStale, nil, false
+ 	}
+ 	// SE P-256 format: self-signed attestation, no MDA root required.
+ 	// Common checks above (challenge, providerID, ECDH, hardware family,
+@@ -196,28 +205,28 @@ func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config,
+ 		} else {
+ 			logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "se_p256_verification_failed", "tier2.attestation_formats")
+ 		}
+-		return status, seResult
++		return status, seResult, false
+ 	}
+ 	if len(cfg.AttestationRoots) == 0 {
+ 		logAttestationEvent(logger, "attestation_root_missing", "WARN", providerID, "reject", "missing_attestation_roots", "tier2.attestation_roots")
+ 		if cfg.RequireAttestation {
+-			return pool.AttestationStatusFailed, nil
++			return pool.AttestationStatusFailed, nil, false
+ 		}
+-		return pool.AttestationStatusUnsupported, nil
++		return pool.AttestationStatusUnsupported, nil, false
+ 	}
+ 	if cfg.AllowMockAttestation && hasMockAttestationRoot(cfg.AttestationRoots) {
+ 		if validMockAttestationToken(token.Token) {
+ 			logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "mock_attested", "tier2.attestation_roots")
+-			return pool.AttestationStatusAttested, nil
++			return pool.AttestationStatusAttested, nil, false
+ 		}
+ 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "invalid_mock_attestation", "tier2.attestation_roots")
+-		return pool.AttestationStatusFailed, nil
++		return pool.AttestationStatusFailed, nil, false
+ 	}
+ 	// Production Apple MDA roots must not become a positive hardware signal
+ 	// until certificate-chain, freshness-code, public-key, device-property,
+ 	// and ACME CSR key-binding validation all pass.
+-	if status, ok := verifyProductionMDAChainShape(token, cfg, now, authAttemptID, providerID, logger, modelHashCheck); ok {
+-		return status, nil
++	if status, ok, mdaHardware := verifyProductionMDAChainShape(token, cfg, sePublicKey, now, authAttemptID, providerID, logger, modelHashCheck); ok {
++		return status, nil, mdaHardware
+ 	}
+ 	decision := "observe"
+ 	if cfg.RequireAttestation {
+@@ -225,19 +234,23 @@ func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config,
+ 	}
+ 	logAttestationEvent(logger, "attestation_unsupported", "WARN", providerID, decision, "mda_certificate_chain_missing", "tier2.attestation_roots")
+ 	if cfg.RequireAttestation {
+-		return pool.AttestationStatusFailed, nil
++		return pool.AttestationStatusFailed, nil, false
+ 	}
+-	return pool.AttestationStatusUnsupported, nil
++	return pool.AttestationStatusUnsupported, nil, false
+ }
+ 
+-func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Config, now time.Time, authAttemptID, providerID string, logger zerolog.Logger, modelHashCheck attestationModelHashCheck) (pool.AttestationStatus, bool) {
++// verifyProductionMDAChainShape verifies the full Apple MDA certificate chain
++// for a production token. sePublicKey is optional (may be nil or len!=64); when
++// len==64 it is used as an additional freshness nonce (SHA256(sePublicKey)) and
++// the third return value (mdaHardware) is true when that SE-key digest matched.
++func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Config, sePublicKey []byte, now time.Time, authAttemptID, providerID string, logger zerolog.Logger, modelHashCheck attestationModelHashCheck) (pool.AttestationStatus, bool, bool) {
+ 	certs, ok, err := extractAttestationCertificateChain(token)
+ 	if !ok {
+-		return "", false
++		return "", false, false
+ 	}
+ 	if err != nil {
+ 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "invalid_certificate_chain", "tier2.attestation_roots")
+-		return pool.AttestationStatusFailed, true
++		return pool.AttestationStatusFailed, true, false
+ 	}
+ 	roots, err := parseAttestationRootCertificates(cfg.AttestationRoots)
+ 	if err != nil {
+@@ -247,31 +260,32 @@ func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Confi
+ 		}
+ 		logAttestationEvent(logger, "attestation_unsupported", "WARN", providerID, decision, "invalid_attestation_roots", "tier2.attestation_roots")
+ 		if cfg.RequireAttestation {
+-			return pool.AttestationStatusFailed, true
++			return pool.AttestationStatusFailed, true, false
+ 		}
+-		return pool.AttestationStatusUnsupported, true
++		return pool.AttestationStatusUnsupported, true, false
+ 	}
+ 	if err := verifyAttestationCertificateChain(certs, roots, now); err != nil {
+ 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "certificate_chain_untrusted", "tier2.attestation_roots")
+-		return pool.AttestationStatusFailed, true
++		return pool.AttestationStatusFailed, true, false
+ 	}
+ 	if err := verifyMDALeafPublicKey(certs[0]); err != nil {
+ 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "mda_leaf_public_key_invalid", "tier2.attestation_roots")
+-		return pool.AttestationStatusFailed, true
++		return pool.AttestationStatusFailed, true, false
+ 	}
+-	if reason := verifyMDAFreshness(certs[0], token.Token); reason != "" {
++	reason, seKeyUsed := verifyMDAFreshness(certs[0], token.Token, sePublicKey)
++	if reason != "" {
+ 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", reason, "tier2.attestation_roots")
+-		return pool.AttestationStatusFailed, true
++		return pool.AttestationStatusFailed, true, false
+ 	}
+ 	if reason := verifyMDADeviceProperties(certs[0]); reason != "" {
+ 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", reason, "tier2.attestation_roots")
+-		return pool.AttestationStatusFailed, true
++		return pool.AttestationStatusFailed, true, false
+ 	}
+ 	csrStatus, csrReason := verifyMDACSRKeyBinding(certs[0], token)
+ 	if csrReason != "" {
+ 		if csrStatus == pool.AttestationStatusFailed {
+ 			logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", csrReason, "tier2.attestation_roots")
+-			return pool.AttestationStatusFailed, true
++			return pool.AttestationStatusFailed, true, false
+ 		}
+ 		decision := "observe"
+ 		if cfg.RequireAttestation {
+@@ -279,17 +293,61 @@ func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Confi
+ 		}
+ 		logAttestationEvent(logger, "attestation_unsupported", "WARN", providerID, decision, csrReason, "tier2.attestation_roots")
+ 		if cfg.RequireAttestation {
+-			return pool.AttestationStatusFailed, true
++			return pool.AttestationStatusFailed, true, false
+ 		}
+-		return pool.AttestationStatusUnsupported, true
++		return pool.AttestationStatusUnsupported, true, false
+ 	}
+ 	if reason := verifyAttestationBindingSignature(certs[0], token, authAttemptID); reason != "" {
+ 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", reason, "tier2.require_attestation")
+-		return pool.AttestationStatusFailed, true
++		return pool.AttestationStatusFailed, true, false
+ 	}
+ 	observeSignedModelHashAgainstCatalog(token, modelHashCheck, providerID, logger)
+-	logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "mda_attested", "tier2.attestation_roots")
+-	return pool.AttestationStatusAttested, true
++	if seKeyUsed {
++		logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "mda_hardware_attested", "tier2.attestation_roots")
++	} else {
++		logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "mda_attested", "tier2.attestation_roots")
++	}
++	return pool.AttestationStatusAttested, true, seKeyUsed
++}
++
++// VerifyMDACertChainWithSEKey verifies a raw DER certificate chain (leaf first)
++// against the configured attestation roots and the provided SE public key.
++// Used by internal/mdm.LiveMDAService to re-verify cached MDA proofs without
++// synthesising a full AttestationToken.
++//
++// Returns (true, seKeyUsed) when the chain is valid; seKeyUsed=true when
++// freshness was satisfied by SHA256(sePublicKey) (MDA hardware tier).
++// Returns (false, false) on any chain or freshness failure.
++func VerifyMDACertChainWithSEKey(certChain [][]byte, cfg config.Tier2Config, sePublicKey []byte, now time.Time, logger zerolog.Logger) (ok bool, seKeyUsed bool) {
++	if len(certChain) == 0 {
++		return false, false
++	}
++	certs := make([]*x509.Certificate, 0, len(certChain))
++	for _, der := range certChain {
++		c, err := x509.ParseCertificate(der)
++		if err != nil {
++			return false, false
++		}
++		certs = append(certs, c)
++	}
++	roots, err := parseAttestationRootCertificates(cfg.AttestationRoots)
++	if err != nil {
++		return false, false
++	}
++	if err := verifyAttestationCertificateChain(certs, roots, now); err != nil {
++		return false, false
++	}
++	if err := verifyMDALeafPublicKey(certs[0]); err != nil {
++		return false, false
++	}
++	// Use an empty token string for the legacy freshness digest so that it
++	// effectively cannot match — only the SE key path should succeed here.
++	reason, seKeyUsed := verifyMDAFreshness(certs[0], "", sePublicKey)
++	if reason != "" {
++		return false, false
++	}
++	_ = logger
++	return true, seKeyUsed
+ }
+ 
+ func verifyMDALeafPublicKey(leaf *x509.Certificate) error {
+@@ -354,21 +412,30 @@ func tokenClaimedModelID(token AttestationToken) string {
+ 	return strings.TrimSpace(modelID)
+ }
+ 
+-func verifyMDAFreshness(leaf *x509.Certificate, deviceAttestToken string) string {
++// verifyMDAFreshness checks the MDA leaf freshness extension against expected
++// digest(s). Always accepts SHA256(deviceAttestToken) (legacy SPEC-008 path).
++// When len(sePublicKey)==64, also accepts SHA256(sePublicKey) (MDM
++// DeviceAttestationNonce mode); seKeyUsed=true when that path matched.
++func verifyMDAFreshness(leaf *x509.Certificate, deviceAttestToken string, sePublicKey []byte) (reason string, seKeyUsed bool) {
+ 	extension, ok := certificateExtension(leaf, mdaOIDFreshness)
+-	if !ok {
+-		return "mda_freshness_missing"
+-	}
+-	if len(extension.Value) == 0 {
+-		return "mda_freshness_missing"
++	if !ok || len(extension.Value) == 0 {
++		return "mda_freshness_missing", false
+ 	}
+ 	expected := expectedMDAFreshnessDigest(deviceAttestToken)
+ 	for _, candidate := range mdaFreshnessValueCandidates(extension.Value) {
+ 		if subtle.ConstantTimeCompare(candidate, expected[:]) == 1 {
+-			return ""
++			return "", false
++		}
++	}
++	if len(sePublicKey) == rawP256PubkeyBytes {
++		seExpected := sha256.Sum256(sePublicKey)
++		for _, candidate := range mdaFreshnessValueCandidates(extension.Value) {
++			if subtle.ConstantTimeCompare(candidate, seExpected[:]) == 1 {
++				return "", true
++			}
+ 		}
+ 	}
+-	return "mda_freshness_mismatch"
++	return "mda_freshness_mismatch", false
+ }
+ 
+ func expectedMDAFreshnessDigest(deviceAttestToken string) [sha256.Size]byte {
+diff --git a/phase4-coordinator/internal/tier2/pillar_c_se.go b/phase4-coordinator/internal/tier2/pillar_c_se.go
+index 74012e22..b9e0687d 100644
+--- a/phase4-coordinator/internal/tier2/pillar_c_se.go
++++ b/phase4-coordinator/internal/tier2/pillar_c_se.go
+@@ -38,6 +38,9 @@ type SEAttestationResult struct {
+ 	// SEPublicKey is the raw 64-byte uncompressed P-256 point (x || y,
+ 	// WITHOUT the 0x04 prefix), matching the runbook §1.1.C field format.
+ 	SEPublicKey []byte
++	// SerialNumber is the optional hardware serial from the signed attestation
++	// blob (used by Phase 3 live MDA to look up the enrolled MicroMDM device).
++	SerialNumber string
+ }
+ 
+ // verifySEAttestationToken verifies a macprovider-se-p256-v1 attestation token.
+@@ -109,7 +112,11 @@ func verifySEAttestationToken(token AttestationToken, challenge []byte, authAtte
+ 		return pool.AttestationStatusFailed, nil
+ 	}
+ 
+-	return pool.AttestationStatusAttested, &SEAttestationResult{SEPublicKey: pubKeyRaw}
++	serial, _ := signed.Attestation["serialNumber"].(string)
++	return pool.AttestationStatusAttested, &SEAttestationResult{
++		SEPublicKey:  pubKeyRaw,
++		SerialNumber: strings.TrimSpace(serial),
++	}
+ }
+ 
+ // verifyAttestationBindingSignatureWithECDSA verifies the SPEC-008
+diff --git a/phase4-coordinator/internal/tier2/pillar_c_se_test.go b/phase4-coordinator/internal/tier2/pillar_c_se_test.go
+index 2b30e5d6..6e105751 100644
+--- a/phase4-coordinator/internal/tier2/pillar_c_se_test.go
++++ b/phase4-coordinator/internal/tier2/pillar_c_se_test.go
+@@ -151,7 +151,7 @@ func TestSEAttestationRoundtrip(t *testing.T) {
+ 	cfg := config.Default().Tier2
+ 	raw := buildSEAttestationToken(t, seKey, nil, challenge, "provider-se-1", ecdhKey, now.Add(-time.Minute), now.Add(time.Minute))
+ 
+-	result := VerifyAttestationTokenExt(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, now, zerolog.Nop())
++	result := VerifyAttestationTokenExt(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, nil, now, zerolog.Nop())
+ 
+ 	if result.Status != pool.AttestationStatusAttested {
+ 		t.Fatalf("status=%q want attested", result.Status)
+@@ -195,7 +195,7 @@ func TestSEAttestationSignedModelHashMismatchWarnsButAttests(t *testing.T) {
+ 	}
+ 	var logs bytes.Buffer
+ 
+-	result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, now, zerolog.New(&logs))
++	result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, nil, now, zerolog.New(&logs))
+ 
+ 	if result.Status != pool.AttestationStatusAttested {
+ 		t.Fatalf("status=%q want attested", result.Status)
+@@ -243,7 +243,7 @@ func TestSEAttestationSignedModelHashMatchDoesNotWarn(t *testing.T) {
+ 	}
+ 	var logs bytes.Buffer
+ 
+-	result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, now, zerolog.New(&logs))
++	result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, nil, now, zerolog.New(&logs))
+ 
+ 	if result.Status != pool.AttestationStatusAttested {
+ 		t.Fatalf("status=%q want attested", result.Status)
+@@ -285,7 +285,7 @@ func TestSEAttestationInvalidSignedModelHashWarnsButAttests(t *testing.T) {
+ 			}
+ 			var logs bytes.Buffer
+ 
+-			result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, now, zerolog.New(&logs))
++			result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, nil, now, zerolog.New(&logs))
+ 
+ 			if result.Status != pool.AttestationStatusAttested {
+ 				t.Fatalf("status=%q want attested", result.Status)
+@@ -316,7 +316,7 @@ func TestSEAttestationChallengeMismatch(t *testing.T) {
+ 	cfg := config.Default().Tier2
+ 	raw := buildSEAttestationToken(t, seKey, nil, challenge, "provider-se-2", ecdhKey, now.Add(-time.Minute), now.Add(time.Minute))
+ 
+-	result := VerifyAttestationTokenExt(raw, cfg, []byte("different-challenge"), "auth-test", "provider-se-2", ecdhKey, now, zerolog.Nop())
++	result := VerifyAttestationTokenExt(raw, cfg, []byte("different-challenge"), "auth-test", "provider-se-2", ecdhKey, nil, now, zerolog.Nop())
+ 
+ 	if result.Status != pool.AttestationStatusStale {
+ 		t.Fatalf("status=%q want stale on challenge mismatch", result.Status)
+@@ -341,7 +341,7 @@ func TestSEAttestationECDHBindMismatch(t *testing.T) {
+ 	// the auth initial stage — triggering the outer ecdh_binding_mismatch.
+ 	raw := buildSEAttestationToken(t, seKey, nil, challenge, "provider-se-3", ecdhKeyInToken, now.Add(-time.Minute), now.Add(time.Minute))
+ 
+-	result := VerifyAttestationTokenExt(raw, cfg, challenge, "auth-test", "provider-se-3", ecdhKeyInBinding, now, zerolog.Nop())
++	result := VerifyAttestationTokenExt(raw, cfg, challenge, "auth-test", "provider-se-3", ecdhKeyInBinding, nil, now, zerolog.Nop())
+ 
+ 	if result.Status != pool.AttestationStatusFailed {
+ 		t.Fatalf("status=%q want failed on ECDH mismatch", result.Status)
+@@ -404,7 +404,7 @@ func TestSEAttestationWrongSignature(t *testing.T) {
+ 	outer.Signature = bindingSig
+ 	raw, _ := json.Marshal(outer)
+ 
+-	result := VerifyAttestationTokenExt(raw, cfg, challenge, "auth-test", "provider-se-4", ecdhKey, now, zerolog.Nop())
++	result := VerifyAttestationTokenExt(raw, cfg, challenge, "auth-test", "provider-se-4", ecdhKey, nil, now, zerolog.Nop())
+ 
+ 	if result.Status != pool.AttestationStatusFailed {
+ 		t.Fatalf("status=%q want failed on wrong SE signature", result.Status)
+diff --git a/phase4-coordinator/internal/tier2/pillar_c_test.go b/phase4-coordinator/internal/tier2/pillar_c_test.go
+index d183795f..a0d2121f 100644
+--- a/phase4-coordinator/internal/tier2/pillar_c_test.go
++++ b/phase4-coordinator/internal/tier2/pillar_c_test.go
+@@ -473,6 +473,10 @@ func TestVerifyAttestationTokenWithoutRootsNeverMarksAttested(t *testing.T) {
+ 
+ type testAttestationCertificateOptions struct {
+ 	FreshnessToken           string
++	// RawFreshnessDigest, when set, overrides the freshness digest in the leaf
++	// certificate extension (instead of SHA256(FreshnessToken)). Used to embed
++	// SHA256(sePublicKey) without mangling the token field.
++	RawFreshnessDigest       []byte
+ 	TokenValue               string
+ 	IncludeFreshness         bool
+ 	IncludeDeviceProperty    bool
+@@ -601,10 +605,16 @@ func testAttestationCertificateChain(t *testing.T, now time.Time, opts testAttes
+ 		BasicConstraintsValid: true,
+ 	}
+ 	if opts.IncludeFreshness {
+-		digest := expectedMDAFreshnessDigest(opts.FreshnessToken)
++		var digestBytes []byte
++		if len(opts.RawFreshnessDigest) > 0 {
++			digestBytes = opts.RawFreshnessDigest
++		} else {
++			d := expectedMDAFreshnessDigest(opts.FreshnessToken)
++			digestBytes = d[:]
++		}
+ 		leaf.ExtraExtensions = append(leaf.ExtraExtensions, pkix.Extension{
+ 			Id:    mdaOIDFreshness,
+-			Value: digest[:],
++			Value: digestBytes,
+ 		})
+ 	}
+ 	if opts.IncludeDeviceProperty {
+@@ -634,3 +644,165 @@ func testCertificateSigningRequest(t *testing.T, signer crypto.Signer) []byte {
+ 	}
+ 	return csrDER
+ }
++
++// TestVerifyMDAFreshnessWithSEPublicKey verifies that verifyMDAFreshness accepts
++// SHA256(sePublicKey) as a valid freshness digest and returns seKeyUsed=true.
++func TestVerifyMDAFreshnessWithSEPublicKey(t *testing.T) {
++	seKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatalf("generate SE key: %v", err)
++	}
++	xBytes := make([]byte, 32)
++	yBytes := make([]byte, 32)
++	copy(xBytes[32-len(seKey.PublicKey.X.Bytes()):], seKey.PublicKey.X.Bytes())
++	copy(yBytes[32-len(seKey.PublicKey.Y.Bytes()):], seKey.PublicKey.Y.Bytes())
++	sePub := append(xBytes, yBytes...)
++
++	// Build a leaf cert whose freshness extension = SHA256(sePub).
++	now := time.Unix(1716768000, 0).UTC()
++	seDigest := sha256.Sum256(sePub)
++	_, leafDER, _ := testAttestationCertificateChain(t, now, testAttestationCertificateOptions{
++		RawFreshnessDigest:    seDigest[:],
++		IncludeFreshness:      true,
++		IncludeDeviceProperty: true,
++		LeafKeyType:           "p256",
++	})
++	leaf, err := x509.ParseCertificate(leafDER)
++	if err != nil {
++		t.Fatalf("parse leaf: %v", err)
++	}
++
++	reason, seKeyUsed := verifyMDAFreshness(leaf, "unrelated-token", sePub)
++	if reason != "" {
++		t.Fatalf("freshness check failed: %s", reason)
++	}
++	if !seKeyUsed {
++		t.Fatal("expected seKeyUsed=true when SE key digest matched")
++	}
++}
++
++// TestVerifyMDAFreshnessWithSEPublicKeyMismatch verifies that verifyMDAFreshness
++// fails (mda_freshness_mismatch) when neither the token hash nor the SE key hash
++// matches the certificate freshness extension.
++func TestVerifyMDAFreshnessWithSEPublicKeyMismatch(t *testing.T) {
++	seKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatalf("generate SE key: %v", err)
++	}
++	xBytes := make([]byte, 32)
++	yBytes := make([]byte, 32)
++	copy(xBytes[32-len(seKey.PublicKey.X.Bytes()):], seKey.PublicKey.X.Bytes())
++	copy(yBytes[32-len(seKey.PublicKey.Y.Bytes()):], seKey.PublicKey.Y.Bytes())
++	sePub := append(xBytes, yBytes...)
++
++	// Build a leaf cert whose freshness extension = SHA256("different-token").
++	now := time.Unix(1716768000, 0).UTC()
++	_, leafDER, _ := testAttestationCertificateChain(t, now, testAttestationCertificateOptions{
++		FreshnessToken:        "different-token",
++		IncludeFreshness:      true,
++		IncludeDeviceProperty: true,
++		LeafKeyType:           "p256",
++	})
++	leaf, err := x509.ParseCertificate(leafDER)
++	if err != nil {
++		t.Fatalf("parse leaf: %v", err)
++	}
++
++	reason, seKeyUsed := verifyMDAFreshness(leaf, "wrong-token-too", sePub)
++	if reason != "mda_freshness_mismatch" {
++		t.Fatalf("expected mda_freshness_mismatch, got reason=%q seKeyUsed=%v", reason, seKeyUsed)
++	}
++	if seKeyUsed {
++		t.Fatal("expected seKeyUsed=false on mismatch")
++	}
++}
++
++// TestVerifyMDAFreshnessTokenPathStillWorks ensures the legacy SHA256(token) path
++// still succeeds and returns seKeyUsed=false, regardless of a sePublicKey being passed.
++func TestVerifyMDAFreshnessTokenPathStillWorks(t *testing.T) {
++	now := time.Unix(1716768000, 0).UTC()
++	tokenStr := base64.RawURLEncoding.EncodeToString([]byte("legacy-device-token"))
++	_, leafDER, _ := testAttestationCertificateChain(t, now, testAttestationCertificateOptions{
++		FreshnessToken:        tokenStr,
++		IncludeFreshness:      true,
++		IncludeDeviceProperty: true,
++		LeafKeyType:           "p256",
++	})
++	leaf, err := x509.ParseCertificate(leafDER)
++	if err != nil {
++		t.Fatalf("parse leaf: %v", err)
++	}
++
++	// Even with a non-nil SE key, the token path matches first.
++	dummySEKey := make([]byte, rawP256PubkeyBytes)
++	reason, seKeyUsed := verifyMDAFreshness(leaf, tokenStr, dummySEKey)
++	if reason != "" {
++		t.Fatalf("token-path freshness check failed: %s", reason)
++	}
++	if seKeyUsed {
++		t.Fatal("expected seKeyUsed=false when token digest matched")
++	}
++}
++
++// TestVerifyAttestationTokenExtMDAHardwareTierWithSEKey is an integration test
++// verifying that VerifyAttestationTokenExt returns MDAHardware=true when the
++// production MDA chain's freshness is bound to the SE public key.
++func TestVerifyAttestationTokenExtMDAHardwareTierWithSEKey(t *testing.T) {
++	now := time.Unix(1716768000, 0).UTC()
++	challenge := []byte("challenge-1")
++
++	seKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatalf("generate SE key: %v", err)
++	}
++	xBytes := make([]byte, 32)
++	yBytes := make([]byte, 32)
++	copy(xBytes[32-len(seKey.PublicKey.X.Bytes()):], seKey.PublicKey.X.Bytes())
++	copy(yBytes[32-len(seKey.PublicKey.Y.Bytes()):], seKey.PublicKey.Y.Bytes())
++	sePub := append(xBytes, yBytes...)
++	seDigest := sha256.Sum256(sePub)
++
++	cfg, _, withChain := productionChainToken(t, now, testAttestationCertificateOptions{
++		RawFreshnessDigest:    seDigest[:],
++		IncludeFreshness:      true,
++		IncludeDeviceProperty: true,
++		IncludeCSR:            true,
++		LeafKeyType:           "p256",
++		// Token value doesn't matter for freshness; use the challenge as token.
++		TokenValue: base64.RawURLEncoding.EncodeToString(challenge),
++	})
++
++	result := VerifyAttestationTokenExt(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", sePub, now, zerolog.Nop())
++	if result.Status != pool.AttestationStatusAttested {
++		t.Fatalf("expected attested, got %q", result.Status)
++	}
++	if !result.MDAHardware {
++		t.Fatal("expected MDAHardware=true when SE key digest matched freshness")
++	}
++}
++
++// TestVerifyAttestationTokenExtMDAHardwareFalseWithoutSEKey verifies that when
++// no SE key is provided, MDAHardware=false even when the MDA chain validates via
++// the legacy token-hash freshness path.
++func TestVerifyAttestationTokenExtMDAHardwareFalseWithoutSEKey(t *testing.T) {
++	now := time.Unix(1716768000, 0).UTC()
++	challenge := []byte("challenge-1")
++	tokenStr := base64.RawURLEncoding.EncodeToString(challenge)
++
++	cfg, _, withChain := productionChainToken(t, now, testAttestationCertificateOptions{
++		FreshnessToken:        tokenStr,
++		TokenValue:            tokenStr,
++		IncludeFreshness:      true,
++		IncludeDeviceProperty: true,
++		IncludeCSR:            true,
++		LeafKeyType:           "p256",
++	})
++
++	result := VerifyAttestationTokenExt(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", nil, now, zerolog.Nop())
++	if result.Status != pool.AttestationStatusAttested {
++		t.Fatalf("expected attested, got %q", result.Status)
++	}
++	if result.MDAHardware {
++		t.Fatal("expected MDAHardware=false when SE key was nil (legacy token path)")
++	}
++}
+diff --git a/phase4-coordinator/internal/ws/server.go b/phase4-coordinator/internal/ws/server.go
+index 00170029..e5e8354a 100644
+--- a/phase4-coordinator/internal/ws/server.go
++++ b/phase4-coordinator/internal/ws/server.go
+@@ -209,6 +209,18 @@ type Server struct {
+ 	rewardsTrustSweepFailures sync.Map
+ 	// rewardsTrustStoreFailures preserves the all-lookups-failed outage guard.
+ 	rewardsTrustStoreFailures int
++
++	// liveMDA is the Phase 3 observe-mode MDA upgrade service (may be nil when
++	// MDM client is disabled or live_mda_enabled=false).
++	liveMDA liveMDAUpgrader
++}
++
++// liveMDAUpgrader is the minimal interface satisfied by mdm.LiveMDAService.
++// Using an interface allows the WS package to avoid a hard import of mdm
++// and keeps the wiring optional/nil-safe.
++type liveMDAUpgrader interface {
++	RequestAndMaybeUpgrade(providerID, assignedID, serial string)
++	AttachCachedMDAProof(providerID, assignedID string) bool
+ }
+ 
+ // TokenValidator handles inspection of a Bearer header on the WS connect.
+@@ -647,6 +659,15 @@ func WithRegistryOptions(opts ...pool.RegistryOption) Option {
+ 	}
+ }
+ 
++// WithLiveMDA injects a Phase 3 live MDA upgrade service. When set,
++// the server will call svc.RequestAndMaybeUpgrade in a goroutine after
++// successful SE attestation auth (observe mode; never blocks auth).
++func WithLiveMDA(svc liveMDAUpgrader) Option {
++	return func(s *Server) {
++		s.liveMDA = svc
++	}
++}
++
+ // AuthAttemptCount returns the number of in-flight auth-attempt
+ // retention entries. Test-only — production code MUST NOT
+ // condition behavior on this value (the retention bound is the
+@@ -1984,7 +2005,12 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
+ 			}
+ 		}
+ 	}
+-	attestResult := tier2.VerifyAttestationTokenExtWithCatalog(proof.AttestationToken, tier2Cfg, challengeBytes, authAttemptID, initial.ProviderID, initial.ProviderECDHPublicKey, entry.ModelID, s.catalogRef(), s.now(), s.log)
++	// For MDA attestation tokens: look up the provider's stored SE public key
++	// (from a prior SE auth) so verifyMDAFreshness can accept SHA256(sePublicKey)
++	// as the freshness nonce (Phase 3 MDM DeviceAttestationNonce mode).
++	// Nil when provider has no prior SE auth — falls back to legacy token-hash path.
++	storedSEKey := s.pool.ProviderSEPublicKey(initial.ProviderID)
++	attestResult := tier2.VerifyAttestationTokenExtWithCatalog(proof.AttestationToken, tier2Cfg, challengeBytes, authAttemptID, initial.ProviderID, initial.ProviderECDHPublicKey, entry.ModelID, s.catalogRef(), storedSEKey, s.now(), s.log)
+ 	attestationStatus := attestResult.Status
+ 	if tier2Cfg.RequireAttestation && attestationStatus != pool.AttestationStatusAttested {
+ 		s.sendAuthRejection(conn, string(attestationStatus), string(attestationStatus))
+@@ -2058,6 +2084,9 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
+ 		entry.SEPublicKey = append([]byte(nil), attestResult.SEResult.SEPublicKey...)
+ 		entry.AttestationTier = pool.AttestationTierSelfSigned
+ 	}
++	if attestResult.MDAHardware {
++		entry.AttestationTier = pool.AttestationTierHardware
++	}
+ 	if len(initial.ProviderReceiptPubkey) > 0 {
+ 		entry.ReceiptPubkey = append([]byte(nil), initial.ProviderReceiptPubkey...)
+ 	} else {
+@@ -2268,6 +2297,16 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
+ 		return "", ""
+ 	}
+ 	registered = true
++	// Phase 3 observe-mode: trigger live MDA upgrade asynchronously after
++	// SE attestation auth. Never blocks auth. Serial comes from the SE
++	// attestation blob when present (MicroMDM device lookup).
++	if s.liveMDA != nil && attestResult.SEResult != nil {
++		svc := s.liveMDA
++		provID := entry.ProviderID
++		assignID := entry.AssignedID
++		serial := attestResult.SEResult.SerialNumber
++		go svc.RequestAndMaybeUpgrade(provID, assignID, serial)
++	}
+ 	if reservedAdmission && entry.Tier == pool.TierProvisional {
+ 		s.admission.ReleasePendingProvisional()
+ 	}

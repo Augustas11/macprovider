@@ -1,13 +1,22 @@
 package mdm
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewClientRequiresBaseURL(t *testing.T) {
@@ -189,5 +198,59 @@ func TestParseDeviceAttestationFromPlistMissingReturnsError(t *testing.T) {
 	_, err := ParseDeviceAttestationFromPlist(data)
 	if err != ErrNoDeviceAttestation {
 		t.Fatalf("expected ErrNoDeviceAttestation, got %v", err)
+	}
+}
+
+func TestParseDeviceAttestationConcatenatedDER(t *testing.T) {
+	now := time.Now().UTC()
+	rootPub, rootPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("root key: %v", err)
+	}
+	rootTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-root"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, rootPub, rootPriv)
+	if err != nil {
+		t.Fatalf("root cert: %v", err)
+	}
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("leaf key: %v", err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "test-leaf"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, rootTmpl, &leafKey.PublicKey, rootPriv)
+	if err != nil {
+		t.Fatalf("leaf cert: %v", err)
+	}
+	concat := append(append([]byte{}, leafDER...), rootDER...)
+	b64 := base64.StdEncoding.EncodeToString(concat)
+	data, _ := json.Marshal(map[string]interface{}{
+		"DeviceAttestation": b64,
+	})
+	result, err := ParseDeviceAttestationFromPlist(data)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(result.CertificateChain) != 2 {
+		t.Fatalf("expected 2 certs from concatenated DER, got %d", len(result.CertificateChain))
+	}
+	if !bytes.Equal(result.CertificateChain[0], leafDER) {
+		t.Fatal("cert[0] should be leaf DER")
+	}
+	if !bytes.Equal(result.CertificateChain[1], rootDER) {
+		t.Fatal("cert[1] should be root DER")
 	}
 }

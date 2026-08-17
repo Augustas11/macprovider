@@ -5,6 +5,7 @@ package mdm
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -200,10 +201,21 @@ func extractDeviceAttestationCerts(v interface{}) (*DeviceAttestationResult, err
 		}
 		return &DeviceAttestationResult{CertificateChain: chain}, nil
 	case string:
-		// Single base64-encoded DER certificate or PEM block.
+		// Single base64-encoded DER certificate or concatenated DER chain.
 		der, err := decodeBase64Cert(tv)
 		if err != nil {
 			return nil, fmt.Errorf("mdm: DeviceAttestation base64: %w", err)
+		}
+		if certs, err := x509.ParseCertificates(der); err == nil && len(certs) > 0 {
+			chain := make([][]byte, 0, len(certs))
+			for _, c := range certs {
+				chain = append(chain, append([]byte(nil), c.Raw...))
+			}
+			return &DeviceAttestationResult{CertificateChain: chain}, nil
+		}
+		// Fallback: treat as a single opaque DER blob (may fail later verify).
+		if _, err := x509.ParseCertificate(der); err == nil {
+			return &DeviceAttestationResult{CertificateChain: [][]byte{der}}, nil
 		}
 		return &DeviceAttestationResult{CertificateChain: [][]byte{der}}, nil
 	default:

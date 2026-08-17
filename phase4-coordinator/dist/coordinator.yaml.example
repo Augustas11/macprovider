@@ -299,7 +299,10 @@ tier2:
   #   # api_url: "http://127.0.0.1:8080"
   #   # api_token: "env:MICROMDM_API_TOKEN"
   #   # live_mda_enabled: false          # flip to true after APNs cert + MicroMDM deploy
-  #   # mda_refresh_interval_hours: 168  # 7 days (Apple rate limit floor)
+  #   # mda_refresh_interval_hours: 168  # 7 days default; values 1..23 floored to 24
+  #   # command_webhook_secret: "env:MICROMDM_COMMAND_WEBHOOK_SECRET"
+  #   # MicroMDM: -command-webhook-url http://127.0.0.1:8444/internal/mdm/command-webhook
+  #   # (loopback OK without secret; set secret + X-MDM-Webhook-Secret if not loopback)
 
 # SPEC-017 Network Stats API.
 #

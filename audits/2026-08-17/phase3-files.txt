@@ -1,0 +1,13 @@
+docs/runbooks/hardware-attestation-phases.md
+phase4-coordinator/cmd/coordinator/main.go
+phase4-coordinator/dist/coordinator.yaml.example
+phase4-coordinator/internal/config/config.go
+phase4-coordinator/internal/mdm/client.go
+phase4-coordinator/internal/mdm/client_test.go
+phase4-coordinator/internal/mdm/live_mda.go
+phase4-coordinator/internal/pool/provider.go
+phase4-coordinator/internal/tier2/pillar_c.go
+phase4-coordinator/internal/tier2/pillar_c_se.go
+phase4-coordinator/internal/tier2/pillar_c_se_test.go
+phase4-coordinator/internal/tier2/pillar_c_test.go
+phase4-coordinator/internal/ws/server.go
