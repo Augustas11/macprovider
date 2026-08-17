@@ -2021,6 +2021,16 @@
         el("div", { class: "fiat-cite mono" }, "reason_code: " + (health.displayReasonCode || health.code)));
     }
 
+    function malibuWithdrawableGridLabel(eligibility) {
+      return eligibility && eligibility.withdrawal_state !== "withdrawable" ? "Ledger amount" : "Withdrawable";
+    }
+
+    function malibuWithdrawableGridValue(data, eligibility) {
+      if (!eligibility || eligibility.withdrawal_state === "withdrawable") return formatMalibuAmount(data.withdrawable_malibu);
+      if (eligibility.withdrawal_state === "unavailable") return "n/a";
+      return formatMalibuAmount(data.withdrawable_malibu);
+    }
+
     function renderMalibuRewardsCard() {
       var d = state.malibu.data;
       var loading = state.malibu.inflight && !d;
@@ -2056,7 +2066,7 @@
         el("div", { class: "fiat-body" }, statusCopy),
         el("div", { class: "reward-grid" },
           el("div", null, el("div", { class: "reward-label" }, "Accrued"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.accrued_malibu))),
-          el("div", null, el("div", { class: "reward-label" }, "Withdrawable"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.withdrawable_malibu))),
+          el("div", null, el("div", { class: "reward-label" }, malibuWithdrawableGridLabel(eligibility)), el("div", { class: "reward-value mono" }, malibuWithdrawableGridValue(d, eligibility))),
           el("div", null, el("div", { class: "reward-label" }, "Held"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.held_malibu)))),
         el("div", { class: "reward-next" }, "Trust tier: ",
           typeof d.trust_tier === "string" && d.trust_tier.trim() ? d.trust_tier : "n/a"),

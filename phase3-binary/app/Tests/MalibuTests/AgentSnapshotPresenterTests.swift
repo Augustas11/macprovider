@@ -932,6 +932,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "MALIBU is locked until Trusted")
         XCTAssertEqual(
+            AgentSnapshotPresenter.malibuAvailabilityLine(snapshot),
+            "MALIBU: not withdrawable · 0.00 held"
+        )
+        XCTAssertEqual(
             AgentSnapshotPresenter.malibuFullLine(snapshot),
             "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
         )

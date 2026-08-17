@@ -1415,9 +1415,31 @@ enum AgentSnapshotPresenter {
     static func malibuAvailabilityLine(_ s: AgentSnapshot) -> String? {
         guard s.malibuProjectionFresh,
               s.malibuWithdrawable != nil || s.malibuHeld != nil else { return nil }
-        let withdrawable = s.malibuWithdrawable.map { String(format: "%.2f available", $0) } ?? "n/a available"
+        let withdrawable: String
+        if let eligibility = authoritativeRewardEligibility(s) {
+            withdrawable = malibuWithdrawableDisplay(s.malibuWithdrawable, eligibility: eligibility)
+        } else {
+            withdrawable = s.malibuWithdrawable.map { String(format: "%.2f available", $0) } ?? "n/a available"
+        }
         let held = s.malibuHeld.map { String(format: "%.2f held", $0) } ?? "n/a held"
         return "MALIBU: \(withdrawable) · \(held)"
+    }
+
+    private static func malibuWithdrawableDisplay(_ amount: Double?, eligibility: MalibuRewardEligibility) -> String {
+        switch eligibility.withdrawalState {
+        case "withdrawable":
+            return amount.map { String(format: "%.2f available", $0) } ?? "n/a available"
+        case "held":
+            return "not withdrawable"
+        case "capped":
+            return "withdrawal capped"
+        case "ineligible":
+            return "not eligible"
+        case "unavailable":
+            return "status unavailable"
+        default:
+            return "status unavailable"
+        }
     }
 
     static func malibuHoldLine(_ s: AgentSnapshot) -> String? {
