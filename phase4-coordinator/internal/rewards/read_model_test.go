@@ -147,6 +147,33 @@ func TestRewardEligibilityEndpointDefaultsUnwiredSourcesUnavailable(t *testing.T
 	}
 }
 
+func TestRewardEligibilityLedgerHoldBeatsUnwiredSourcePrimary(t *testing.T) {
+	got := RewardEligibilityFromBalanceAndTrust(
+		AccrualBalance{
+			AccruedMALIBU:      "12.50000000",
+			WithdrawableMALIBU: "0",
+			HeldMALIBU:         "12.50000000",
+			TrustTier:          TierProvisional,
+			HoldReasons:        []string{HoldTrustTierProvisional},
+		},
+		TrustCriteriaStatus{
+			WalletBound:          true,
+			VerifiedReceiptCount: minVerifiedReceipts,
+			AppAttested:          true,
+		},
+	)
+
+	if got.WithdrawalState != WithdrawalStateHeld {
+		t.Fatalf("withdrawal_state = %q, want %q", got.WithdrawalState, WithdrawalStateHeld)
+	}
+	if got.PrimaryReason != ReasonHeldProvisionalTrustTier {
+		t.Fatalf("primary_reason = %q, want %q", got.PrimaryReason, ReasonHeldProvisionalTrustTier)
+	}
+	if !containsReason(got.Reasons, ReasonComputeIntegrityUnavailable) {
+		t.Fatalf("reasons = %v, want compute unavailable retained", got.Reasons)
+	}
+}
+
 func TestRewardEligibilityEarningWorkCanBePrimary(t *testing.T) {
 	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
 		AccruedMALIBU:        "0",
