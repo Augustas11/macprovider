@@ -27,6 +27,10 @@ enum DashboardCopy {
     static let currentStateTitle = "Current state"
     static let meaningTitle = "What this means"
     static let nextActionTitle = "Next safe action"
+    static let miningHealthTitle = "Mining Health"
+    static let miningReasonTitle = "Reason"
+    static let miningRewardsTitle = "Rewards"
+    static let miningEligibilityTitle = "Eligibility"
     static let resetProviderTitle = "Reset provider service"
     static let exportDiagnosticsTitle = "Export diagnostics…"
     static let recoveryHelpTitle = "If something is stuck"
@@ -44,6 +48,7 @@ enum DashboardCopy {
 
     static func defaultPublicStrings(_ snapshot: AgentSnapshot) -> [String] {
         let publicStatus = AgentSnapshotPresenter.publicStatus(snapshot)
+        let mining = AgentSnapshotPresenter.miningHealth(snapshot)
         return [
             currentStateTitle,
             publicStatus.title,
@@ -51,6 +56,15 @@ enum DashboardCopy {
             publicStatus.detail,
             nextActionTitle,
             publicStatus.safeNextAction,
+            miningHealthTitle,
+            mining.status,
+            miningReasonTitle,
+            mining.reason,
+            miningRewardsTitle,
+            mining.rewardSummary,
+            miningEligibilityTitle,
+            mining.trustSummary,
+            mining.nextAction,
         ].compactMap { $0 }
     }
 
@@ -182,6 +196,8 @@ private struct DashboardView: View {
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.09)))
                 .accessibilityElement(children: .contain)
             }
+
+            miningHealthPanel
 
             HStack(alignment: .top, spacing: 16) {
                 panel {
@@ -378,6 +394,43 @@ private struct DashboardView: View {
                 peer: MalibuModelPeerEvidence(snapshot: agent.snapshot)
             )
             await modelStore.startBackgroundCheckIfEligible(thermalState: agent.snapshot.thermalState)
+        }
+    }
+
+    private var miningHealthPanel: some View {
+        let mining = AgentSnapshotPresenter.miningHealth(agent.snapshot)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(DashboardCopy.miningHealthTitle)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(mining.status)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(miningTone(mining.reasonCode))
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                MetricRow(title: DashboardCopy.miningReasonTitle, value: mining.reason)
+                MetricRow(title: DashboardCopy.miningRewardsTitle, value: mining.rewardSummary)
+                MetricRow(title: DashboardCopy.miningEligibilityTitle, value: mining.trustSummary)
+                MetricRow(title: DashboardCopy.nextActionTitle, value: mining.nextAction)
+            }
+        }
+        .padding(12)
+        .background(panelBackground)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func miningTone(_ reasonCode: String) -> Color {
+        switch reasonCode {
+        case "earning", "trusted_withdrawable":
+            return .green
+        case "idle_no_work", "eligible_waiting_settlement", "customer_availability_pending":
+            return .secondary
+        case "not_running", "provider_paused", "reward_projection_unavailable":
+            return MalibuBrand.sunnyYellow
+        default:
+            return MalibuBrand.coral
         }
     }
 

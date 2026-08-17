@@ -15,6 +15,9 @@ per [SPEC-014](../../specs/SPEC-014-provider-portal.md).
   isolation) + AC 8(f) (single-machine copy hygiene). Exits 0 on
   clean bundle, 1 on prohibited match, 2 if `index.html` is missing.
   CI MUST run this before serving the file (see "CI" below).
+- `mining-health.test.mjs` — Node smoke tests for the portal's local
+  Mining Health reason-code adapter and unavailable-vs-zero reward
+  rendering.
 - `README.md` — this file.
 
 ## Operator deploy
@@ -54,6 +57,37 @@ CI MUST run `frontdoor/provider-portal/check-bundle.sh` on any PR
 that touches files under `frontdoor/provider-portal/`. The repo's
 CI hook lives outside this directory and is added in a follow-up
 operator step (see SPEC-014 §10.4 operator runbook).
+Run `node --test frontdoor/provider-portal/mining-health.test.mjs`
+when changing the Earn / Mining Health mapping.
+
+## Mining Health vocabulary
+
+The Earn surface maps current portal projections to the same local
+Mining Health reason codes Malibu.app renders from `AgentSnapshot`.
+Portal inference is best-effort because the portal does not have
+Malibu.app's local lifecycle snapshot. These codes are intentionally
+small and backend-ready:
+
+- `earning`
+- `idle_no_work`
+- `not_running`
+- `provider_paused`
+- `provider_error`
+- `local_on_battery`
+- `local_thermal_pressure`
+- `local_model_preparing`
+- `reward_projection_unavailable`
+- `wallet_missing`
+- `trust_tier_provisional`
+- `wallet_daily_cap_held`
+- `rewards_held`
+- `trusted_withdrawable`
+- `eligible_waiting_settlement`
+- `customer_availability_pending`
+
+When a future backend eligibility reason model becomes authoritative,
+keep this UI map as the adapter boundary and prefer stable backend
+codes over local inference.
 
 ## Auth model summary
 

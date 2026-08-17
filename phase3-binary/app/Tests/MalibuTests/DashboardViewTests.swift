@@ -227,6 +227,125 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(snapshot))
     }
 
+    func testMiningHealthCoversIssue1017OperationalStates() {
+        var earning = miningBase()
+        earning.earningsUsdcToday = 0.04
+        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(earning).reasonCode, "earning")
+
+        var idle = miningBase()
+        idle.earningsUsdcToday = 0
+        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(idle).reasonCode, "idle_no_work")
+
+        var pendingAvailability = miningBase()
+        pendingAvailability.earningsUsdcToday = 0
+        pendingAvailability.networkState = "buyer_serving_unknown"
+        XCTAssertEqual(
+            AgentSnapshotPresenter.miningHealth(pendingAvailability).reasonCode,
+            "customer_availability_pending"
+        )
+
+        var notRunning = AgentSnapshot.empty
+        notRunning.state = .idle
+        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(notRunning).reasonCode, "not_running")
+
+        var battery = miningBase()
+        battery.idlePrewarmSummary = ProviderIdlePrewarmSummary(skipsByReasonLast1h: ["on_battery": 1])
+        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(battery).reasonCode, "local_on_battery")
+
+        var thermal = miningBase()
+        thermal.idlePrewarmSummary = ProviderIdlePrewarmSummary(skipsByReasonLast1h: ["thermal_pressure": 1])
+        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(thermal).reasonCode, "local_thermal_pressure")
+
+        var preparing = AgentSnapshot.empty
+        preparing.state = .starting
+        preparing.lifecycleState = "loading_model"
+        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(preparing).reasonCode, "local_model_preparing")
+
+        var unavailable = AgentSnapshot.empty
+        unavailable.state = .serving
+        unavailable.networkState = "buyer_serving"
+        unavailable.earningsUsdcToday = 0
+        unavailable.malibuWithdrawable = 0
+        let unavailableHealth = AgentSnapshotPresenter.miningHealth(unavailable)
+        XCTAssertEqual(unavailableHealth.reasonCode, "reward_projection_unavailable")
+        XCTAssertEqual(unavailableHealth.rewardSummary, "USDC unavailable · MALIBU unavailable")
+
+        var missingWallet = miningBase()
+        missingWallet.walletBound = false
+        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(missingWallet).reasonCode, "wallet_missing")
+
+        var provisional = miningBase()
+        provisional.trustTier = .provisional
+        provisional.malibuHoldReasons = ["trust_tier_provisional"]
+        provisional.trustCriteriaMet = 1
+        provisional.trustCriteriaRequired = 3
+        let provisionalHealth = AgentSnapshotPresenter.miningHealth(provisional)
+        XCTAssertEqual(provisionalHealth.reasonCode, "trust_tier_provisional")
+        XCTAssertEqual(provisionalHealth.nextAction, "Complete 2 more trust criteria to unlock withdrawals.")
+
+        provisional.malibuHoldReasons = []
+        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(provisional).reasonCode, "trust_tier_provisional")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.miningHealth(provisional).nextAction,
+            "Complete 2 more trust criteria to unlock withdrawals."
+        )
+
+        var walletCap = miningBase()
+        walletCap.malibuHeld = 2
+        walletCap.malibuHoldReasons = ["per_wallet_daily_cap"]
+        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(walletCap).reasonCode, "wallet_daily_cap_held")
+
+        var genericHold = miningBase()
+        genericHold.malibuHeld = 2
+        genericHold.malibuHoldReasons = ["manual_review"]
+        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(genericHold).reasonCode, "rewards_held")
+
+        var withdrawable = miningBase()
+        withdrawable.malibuWithdrawable = 2
+        XCTAssertEqual(AgentSnapshotPresenter.miningHealth(withdrawable).reasonCode, "trusted_withdrawable")
+    }
+
+    func testMiningHealthDistinguishesFreshPartialAndUnavailableRewards() {
+        var fresh = miningBase()
+        fresh.earningsUsdcToday = nil
+        fresh.malibuWithdrawable = 0
+        fresh.malibuHeld = 0
+        let freshHealth = AgentSnapshotPresenter.miningHealth(fresh)
+        XCTAssertEqual(freshHealth.reasonCode, "idle_no_work")
+        XCTAssertEqual(freshHealth.rewardSummary, "n/a USDC today · MALIBU 0.00 withdrawable / 0.00 held")
+
+        var partial = miningBase()
+        partial.malibuProjectionFresh = false
+        partial.earningsUsdcToday = 0.04
+        let partialHealth = AgentSnapshotPresenter.miningHealth(partial)
+        XCTAssertEqual(partialHealth.reasonCode, "reward_projection_unavailable")
+        XCTAssertEqual(partialHealth.rewardSummary, "$0.04 USDC today · MALIBU unavailable")
+
+        var stale = miningBase()
+        stale.providerEarningsFresh = false
+        stale.malibuProjectionFresh = false
+        stale.earningsUsdcToday = 0
+        stale.malibuWithdrawable = 0
+        let staleHealth = AgentSnapshotPresenter.miningHealth(stale)
+        XCTAssertEqual(staleHealth.reasonCode, "reward_projection_unavailable")
+        XCTAssertFalse(staleHealth.rewardSummary.contains("$0.00"))
+        XCTAssertFalse(staleHealth.rewardSummary.contains("0.00 MALIBU"))
+    }
+
+    private func miningBase() -> AgentSnapshot {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.coordinatorConnected = true
+        snapshot.networkState = "buyer_serving"
+        snapshot.providerEarningsFresh = true
+        snapshot.malibuProjectionFresh = true
+        snapshot.walletBound = true
+        snapshot.trustTier = .trusted
+        snapshot.malibuWithdrawable = 0
+        snapshot.malibuHeld = 0
+        return snapshot
+    }
+
     func testRecoveryCopyIsOnTheDashboardSurface() {
         XCTAssertEqual(DashboardCopy.resetProviderTitle, "Reset provider service")
         XCTAssertEqual(DashboardCopy.exportDiagnosticsTitle, "Export diagnostics…")
