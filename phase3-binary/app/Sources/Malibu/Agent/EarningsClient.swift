@@ -27,6 +27,124 @@ struct ProviderIdlePrewarmSummary: Codable, Equatable {
     }
 }
 
+/// Coordinator-owned MALIBU reward eligibility reason model.
+struct MalibuRewardEligibility: Codable, Equatable {
+    static let schemaV1 = "malibu_reward_eligibility.v1"
+
+    let schemaVersion: String
+    let earningState: String
+    let withdrawalState: String
+    let primaryReason: String
+    let reasons: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case earningState = "earning_state"
+        case withdrawalState = "withdrawal_state"
+        case primaryReason = "primary_reason"
+        case reasons
+    }
+
+    init(
+        schemaVersion: String = schemaV1,
+        earningState: String,
+        withdrawalState: String,
+        primaryReason: String,
+        reasons: [String]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.earningState = earningState
+        self.withdrawalState = withdrawalState
+        self.primaryReason = primaryReason
+        self.reasons = reasons
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let rawSchema = try c.decodeIfPresent(String.self, forKey: .schemaVersion) ?? ""
+        guard rawSchema == Self.schemaV1 else {
+            self = .unavailable(schemaVersion: rawSchema, driftField: "schema_version")
+            return
+        }
+        let rawEarningState = try c.decodeIfPresent(String.self, forKey: .earningState) ?? ""
+        let rawWithdrawalState = try c.decodeIfPresent(String.self, forKey: .withdrawalState) ?? ""
+        let rawPrimaryReason = try c.decodeIfPresent(String.self, forKey: .primaryReason) ?? ""
+        let rawReasons = try c.decodeIfPresent([String].self, forKey: .reasons) ?? []
+        if !Self.allowedEarningStates.contains(rawEarningState) {
+            self = .unavailable(schemaVersion: rawSchema, driftField: "earning_state")
+            return
+        }
+        if !Self.allowedWithdrawalStates.contains(rawWithdrawalState) {
+            self = .unavailable(schemaVersion: rawSchema, driftField: "withdrawal_state")
+            return
+        }
+        if !Self.allowedReasons.contains(rawPrimaryReason) {
+            self = .unavailable(schemaVersion: rawSchema, driftField: "primary_reason")
+            return
+        }
+        if rawReasons.contains(where: { !Self.allowedReasons.contains($0) }) {
+            self = .unavailable(schemaVersion: rawSchema, driftField: "reasons")
+            return
+        }
+        self.init(
+            schemaVersion: rawSchema,
+            earningState: rawEarningState,
+            withdrawalState: rawWithdrawalState,
+            primaryReason: rawPrimaryReason,
+            reasons: rawReasons
+        )
+    }
+
+    private static func unavailable(schemaVersion: String, driftField: String) -> MalibuRewardEligibility {
+        logSchemaDrift(schemaVersion: schemaVersion, field: driftField)
+        return MalibuRewardEligibility(
+            schemaVersion: schemaVersion.isEmpty ? schemaV1 : schemaVersion,
+            earningState: "unavailable",
+            withdrawalState: "unavailable",
+            primaryReason: "telemetry_unavailable",
+            reasons: ["telemetry_unavailable"]
+        )
+    }
+
+    static func unavailableForMissingObject() -> MalibuRewardEligibility {
+        unavailable(schemaVersion: "", driftField: "malibu_reward_eligibility")
+    }
+
+    private static func logSchemaDrift(schemaVersion: String, field: String) {
+        let schema = schemaVersion.isEmpty ? "missing" : schemaVersion
+        NSLog("[malibu] malibu_reward_eligibility_schema_drift schema_version=%@ field=%@", schema, field)
+    }
+
+    private static let allowedEarningStates: Set<String> = [
+        "earning", "eligible_idle", "held", "capped", "ineligible", "unavailable"
+    ]
+    private static let allowedWithdrawalStates: Set<String> = [
+        "withdrawable", "held", "capped", "ineligible", "unavailable"
+    ]
+    private static let allowedReasons: Set<String> = [
+        "earning_verified_work",
+        "eligible_idle_no_work",
+        "held_provisional_trust_tier",
+        "held_wallet_daily_cap",
+        "held_demotion_cooldown",
+        "withdrawable_balance_available",
+        "withdrawable_no_balance",
+        "missing_wallet_binding",
+        "insufficient_verified_receipts",
+        "app_attestation_missing",
+        "hardware_evidence_unavailable",
+        "hardware_evidence_missing_or_expired",
+        "compute_integrity_unavailable",
+        "compute_integrity_pending",
+        "compute_integrity_blocked",
+        "provider_token_untrusted",
+        "local_on_battery",
+        "local_thermal_pressure",
+        "model_not_ready",
+        "telemetry_unavailable",
+    ]
+}
+
 /// Non-secret earnings projection received from the CLI over the same-user
 /// control socket. Malibu never receives or stores the provider bearer.
 struct ProviderEarnings: Codable, Equatable {
@@ -47,6 +165,7 @@ struct ProviderEarnings: Codable, Equatable {
     let malibuHoldReasons: [String]
     let malibuDailyCap: Double?
     let malibuWalletDailyCap: Double?
+    let malibuRewardEligibility: MalibuRewardEligibility?
     /// Last-hour idle-prewarm event/skip counts, used to explain why a
     /// serving provider is not currently earning. Display-only.
     let idlePrewarm: ProviderIdlePrewarmSummary
@@ -74,6 +193,7 @@ struct ProviderEarnings: Codable, Equatable {
         case malibuHoldReasons = "malibu_hold_reasons"
         case malibuDailyCap = "malibu_daily_cap"
         case malibuWalletDailyCap = "malibu_wallet_daily_cap"
+        case malibuRewardEligibility = "malibu_reward_eligibility"
         case idlePrewarm = "idle_prewarm"
         case malibuProjectionFresh = "malibu_projection_fresh"
         case earningsProjectionFresh = "earnings_projection_fresh"
@@ -99,7 +219,18 @@ struct ProviderEarnings: Codable, Equatable {
         malibuDailyCap = try c.decodeIfPresent(Double.self, forKey: .malibuDailyCap)
         malibuWalletDailyCap = try c.decodeIfPresent(Double.self, forKey: .malibuWalletDailyCap)
         idlePrewarm = try c.decodeIfPresent(ProviderIdlePrewarmSummary.self, forKey: .idlePrewarm) ?? .empty
-        malibuProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .malibuProjectionFresh) ?? false
+        let decodedMalibuProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .malibuProjectionFresh) ?? false
+        malibuProjectionFresh = decodedMalibuProjectionFresh
+        if let decodedRewardEligibility = try c.decodeIfPresent(
+            MalibuRewardEligibility.self,
+            forKey: .malibuRewardEligibility
+        ) {
+            malibuRewardEligibility = decodedRewardEligibility
+        } else if decodedMalibuProjectionFresh {
+            malibuRewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
+        } else {
+            malibuRewardEligibility = nil
+        }
         earningsProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
     }
 
@@ -121,6 +252,7 @@ struct ProviderEarnings: Codable, Equatable {
         malibuHoldReasons: [String] = [],
         malibuDailyCap: Double? = nil,
         malibuWalletDailyCap: Double? = nil,
+        malibuRewardEligibility: MalibuRewardEligibility? = nil,
         idlePrewarm: ProviderIdlePrewarmSummary = .empty,
         malibuProjectionFresh: Bool = false,
         earningsProjectionFresh: Bool = false
@@ -142,6 +274,7 @@ struct ProviderEarnings: Codable, Equatable {
         self.malibuHoldReasons = malibuHoldReasons
         self.malibuDailyCap = malibuDailyCap
         self.malibuWalletDailyCap = malibuWalletDailyCap
+        self.malibuRewardEligibility = malibuRewardEligibility
         self.idlePrewarm = idlePrewarm
         self.malibuProjectionFresh = malibuProjectionFresh
         self.earningsProjectionFresh = earningsProjectionFresh

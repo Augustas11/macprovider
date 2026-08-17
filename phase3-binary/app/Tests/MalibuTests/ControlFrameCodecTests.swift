@@ -61,6 +61,12 @@ final class ControlFrameCodecTests: XCTestCase {
                 malibuHoldReasons: ["per_wallet_daily_cap"],
                 malibuDailyCap: 25,
                 malibuWalletDailyCap: 100,
+                malibuRewardEligibility: MalibuRewardEligibility(
+                    earningState: "capped",
+                    withdrawalState: "capped",
+                    primaryReason: "held_wallet_daily_cap",
+                    reasons: ["held_wallet_daily_cap"]
+                ),
                 idlePrewarm: ProviderIdlePrewarmSummary(
                     eventsLast1h: ["idle_prewarm_started": 4],
                     skipsByReasonLast1h: ["on_battery": 2]
@@ -282,7 +288,7 @@ final class ControlFrameCodecTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot), "n/a")
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot),
-            "MALIBU: 1.00 available · 8.00 held"
+            "MALIBU: status unavailable · 8.00 held"
         )
         XCTAssertTrue(AgentSnapshotPresenter.malibuFullLine(agent.snapshot).contains("MALIBU daily not reported yet"))
         XCTAssertEqual(AgentSnapshotPresenter.earningsLine(agent.snapshot), "Today: reward status unavailable")

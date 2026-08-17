@@ -1,8 +1,18 @@
 # SPEC-021 — MALIBU bootstrap rewards emission ledger
 
-**Version:** 0.1.0 (2026-07-08)  
+**Version:** 0.1.1 (2026-08-17, reward eligibility reason read model)
 **Status:** DRAFT — implementation target for Session C (`ops/runbooks/malibu-bootstrap-emission.md`)  
 **Depends on:** SPEC-026 v0.13 §5.1–§5.2, §5.5, §10 step 8; SPEC-017 v0.1.8 (`provider_rewards_ledger`); SPEC-016 v0.1.19 (`provider_payout_addresses` projection); SPEC-022 (verified-receipt-only USDC earnings)
+
+**Change log v0.1.1 (2026-08-17, reward eligibility reason read model):**
+- Defines `malibu_reward_eligibility.v1`, the provider-token-authenticated read
+  model for MALIBU earning opportunity, held/withdrawable state, and stable
+  client reason codes.
+- Separates reward-ledger facts, runtime-health observations, proof/trust
+  observations, and unavailable-source reasons so clients do not re-derive policy
+  from raw fields.
+- Keeps USDC payout readiness separate from MALIBU reward eligibility while
+  allowing clients to render both projections together.
 
 **Note on numbering:** This is canonical **SPEC-021** (assigned 2026-07-10 in a corpus-hygiene pass; promoted from `docs/notes/SPEC-MALIBU-EMISSION-LEDGER.md` into `specs/`). Earlier SPEC-026 prose called the emission ledger "SPEC-028"; that was a mislabel — `SPEC-028-mlx-speculative-decoding.md` is unrelated MLX work — and those references now point to SPEC-021. The human-readable name `SPEC-MALIBU-EMISSION-LEDGER` remains a valid alias used by code comments, migrations (`012_malibu_emission_ledger.up.sql`), and runbooks.
 
@@ -210,11 +220,95 @@ USDC `ledger_payout_ready` runner is unchanged.
   "trust_tier": "provisional",
   "daily_cap_malibu": "25",
   "wallet_daily_cap_malibu": "100",
-  "withdrawal_hold_reasons": ["trust_tier_provisional"]
+  "withdrawal_hold_reasons": ["trust_tier_provisional"],
+  "reward_eligibility": {
+    "schema_version": "malibu_reward_eligibility.v1",
+    "earning_state": "held",
+    "withdrawal_state": "held",
+    "primary_reason": "held_provisional_trust_tier",
+    "reasons": [
+      "held_provisional_trust_tier",
+      "missing_wallet_binding",
+      "insufficient_verified_receipts"
+    ]
+  }
 }
 ```
 
 `withdrawable_malibu` sums ledger rows where `withdrawal_hold_reason IS NULL`.
+
+### 5.1 `malibu_reward_eligibility.v1`
+
+`reward_eligibility` is the coordinator-owned provider read model for whether
+MALIBU is currently earnable, held, capped, withdrawable, ineligible, or
+unavailable to classify from facts reported to the reward owner. Clients MUST
+prefer this object over independently inferring MALIBU ledger, trust, hardware,
+or compute eligibility from `trust_tier`, raw hold reasons, trust counters, or
+future compute-integrity fields when the object is present and
+`schema_version == "malibu_reward_eligibility.v1"`. Until local runtime-health
+observations are reported into this object by the reward owner, clients MAY
+display them only as separate operational readiness copy; they MUST NOT mutate
+`reward_eligibility`, override its `withdrawal_state`, or add client-inferred
+MALIBU hold reasons. A successful `/v1/provider/malibu-accrual` response that
+omits `reward_eligibility` is schema drift for v0.1.1 readers: clients MUST
+render the MALIBU reward state as unavailable and MUST NOT fall back to raw
+`withdrawable_malibu`, `wallet_bound`, `trust_tier`, or hold-reason fields to
+authorize withdrawable copy.
+
+Fields:
+
+| Field | Type | Semantics |
+|-------|------|-----------|
+| `schema_version` | string | Exactly `malibu_reward_eligibility.v1` for this contract. Unknown versions MUST be treated as unavailable rather than guessed. |
+| `earning_state` | enum | One of `earning`, `eligible_idle`, `held`, `capped`, `ineligible`, `unavailable`. This is an earning-opportunity/readiness state; it does not assert live paid work unless `earning_verified_work` is present. |
+| `withdrawal_state` | enum | One of `withdrawable`, `held`, `capped`, `ineligible`, `unavailable`. This describes MALIBU withdrawal eligibility only, not USDC payout readiness. |
+| `primary_reason` | enum | The single highest-priority reason clients should render first. |
+| `reasons` | array | Closed ordered set of reason codes. Unknown codes under a known schema version MUST be rendered as generic unavailable/review-needed copy and logged for client upgrade. |
+
+Reason vocabulary:
+
+| Reason | Owner | Meaning |
+|--------|-------|---------|
+| `earning_verified_work` | coordinator reward/read model | Recent verified work was observed by the reward owner and can be presented as active earning. |
+| `eligible_idle_no_work` | coordinator reward/read model | No blocking reward reason is known, but no current earning work is observed. |
+| `held_provisional_trust_tier` | MALIBU ledger/trust | Accrual is visible but held because the provider is not Trusted. Maps from `withdrawal_hold_reason = trust_tier_provisional`. |
+| `held_wallet_daily_cap` | MALIBU ledger | Accrual is held or capped by the bound-wallet daily MALIBU cap. Maps from `withdrawal_hold_reason = per_wallet_daily_cap`. |
+| `held_demotion_cooldown` | MALIBU ledger/trust | Accrual is held during post-demotion requalification. Maps from `withdrawal_hold_reason = demotion_cooldown`. |
+| `withdrawable_balance_available` | MALIBU ledger | At least one MALIBU ledger row is withdrawable. |
+| `withdrawable_no_balance` | MALIBU ledger | No MALIBU is currently withdrawable and no held MALIBU exists. |
+| `missing_wallet_binding` | payout-address projection | The provider does not have a payout wallet binding in the MALIBU projection. This may affect trust/unlock or cap replay; it is not a USDC payout-ready assertion. |
+| `insufficient_verified_receipts` | SPEC-022/SPEC-026 trust input | Verified receipt count is below the trust criterion threshold used by the unlock evaluator. |
+| `app_attestation_missing` | SPEC-026 trust input | App attestation is not currently satisfied for the trust-read snapshot. |
+| `hardware_evidence_unavailable` | SPEC-032/SPEC-033 proof/trust input | Hardware-evidence classification source is not wired or cannot answer. |
+| `hardware_evidence_missing_or_expired` | SPEC-032/SPEC-033 proof/trust input | The hardware-evidence owner reports no verified in-window evidence. This MUST NOT be rendered as a claim that hardware is false or weak. |
+| `compute_integrity_unavailable` | SPEC-036 proof/trust input | Compute-integrity classification source is not wired, unknown, or expired. |
+| `compute_integrity_pending` | SPEC-036 proof/trust input | Compute-integrity state is pending or warn-only for this read model and cannot authorize stronger earning claims. |
+| `compute_integrity_blocked` | SPEC-036 proof/trust input | Compute-integrity owner reports `quarantined_compute_drift` or `blocked:<reason>`. |
+| `provider_token_untrusted` | provider-token auth | Provider-token authentication failed or is not trusted for this read model. Successful `/v1/provider/malibu-accrual` responses normally omit this because auth failures return 401. |
+| `local_on_battery` | runtime-health observation reported to reward owner | Runtime health reports battery power blocking earning opportunity. |
+| `local_thermal_pressure` | runtime-health observation reported to reward owner | Runtime health reports thermal pressure blocking earning opportunity. |
+| `model_not_ready` | runtime-health observation reported to reward owner | Runtime health reports the model is not loaded/ready for earning work. |
+| `telemetry_unavailable` | runtime-health observation | The runtime-health source is missing or stale. This MUST NOT override ledger-held or withdrawable facts for `withdrawal_state`. |
+
+Precedence:
+
+1. `compute_integrity_blocked` outranks `compute_integrity_pending`; only a
+   recognized positive compute state may omit both reasons.
+2. `held_wallet_daily_cap` outranks `held_provisional_trust_tier` when both are
+   present, so clients can render cap-specific copy.
+3. `missing_wallet_binding` blocks MALIBU withdrawal readiness and outranks raw
+   withdrawable ledger balance and generic proof-source unavailable reasons for
+   `primary_reason`.
+4. Ledger-held and ledger-withdrawable facts outrank `telemetry_unavailable` for
+   `withdrawal_state`.
+5. Runtime-health reasons, when reported into v1 by the reward owner, affect
+   earning opportunity only. They MUST NOT make already-accrued MALIBU
+   withdrawable or non-withdrawable by themselves.
+
+USDC payout readiness remains owned by SPEC-016/SPEC-022 projections. A client MAY
+display USDC and MALIBU readiness in the same UI, but MUST NOT collapse
+`wallet_bound`, USDC payout readiness, and MALIBU `withdrawal_state` into one
+boolean.
 
 ---
 
@@ -267,4 +361,4 @@ Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 
 ---
 
-*End of SPEC-MALIBU-EMISSION-LEDGER v0.1.0.*
+*End of SPEC-MALIBU-EMISSION-LEDGER v0.1.1.*

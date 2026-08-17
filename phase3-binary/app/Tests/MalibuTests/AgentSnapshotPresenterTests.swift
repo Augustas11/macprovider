@@ -39,6 +39,12 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         s.malibuAccruedAllTime = 12.5
         s.malibuHeld = 12.5
         s.trustTier = .provisional
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
 
         XCTAssertEqual(
             AgentSnapshotPresenter.earningsLine(s),
@@ -46,7 +52,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuFullLine(s),
-            "MALIBU daily not reported yet · 12.50 all-time · [locked] unlocks at Trusted"
+            "MALIBU daily not reported yet · 12.50 all-time · locked until eligible"
         )
     }
 
@@ -325,8 +331,14 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         s.trustTier = .provisional
         s.providerEarningsFresh = true
         s.malibuProjectionFresh = true
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
         XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("[locked] 2.00 MALIBU"))
-        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("unlocks at Trusted"))
+        XCTAssertFalse(AgentSnapshotPresenter.earningsLine(s).contains("unlocks at Trusted"))
     }
 
     func testBacklogLineOnlyWhenWalletUnbound() {
@@ -864,7 +876,14 @@ final class AgentSnapshotPresenterTests: XCTestCase {
           "malibu_held": 0.5,
           "malibu_hold_reasons": ["per_wallet_daily_cap"],
           "malibu_daily_cap": 25,
-          "malibu_wallet_daily_cap": 100
+          "malibu_wallet_daily_cap": 100,
+          "malibu_reward_eligibility": {
+            "schema_version": "malibu_reward_eligibility.v1",
+            "earning_state": "capped",
+            "withdrawal_state": "capped",
+            "primary_reason": "held_wallet_daily_cap",
+            "reasons": ["held_wallet_daily_cap"]
+          }
         }
         """.utf8)
         let decoded = try JSONDecoder().decode(ProviderEarnings.self, from: data)
@@ -877,6 +896,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(decoded.malibuHoldReasons, ["per_wallet_daily_cap"])
         XCTAssertEqual(decoded.malibuDailyCap, 25)
         XCTAssertEqual(decoded.malibuWalletDailyCap, 100)
+        XCTAssertEqual(decoded.malibuRewardEligibility?.primaryReason, "held_wallet_daily_cap")
         XCTAssertFalse(decoded.malibuProjectionFresh)
         XCTAssertFalse(decoded.earningsProjectionFresh)
     }
@@ -891,18 +911,157 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.malibuHoldReasons = ["trust_tier_provisional"]
         snapshot.trustCriteriaMet = 2
         snapshot.trustCriteriaRequired = 4
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
 
-        XCTAssertEqual(AgentSnapshotPresenter.malibuAvailabilityLine(snapshot), "MALIBU: 0.00 available · 12.50 held")
+        XCTAssertEqual(AgentSnapshotPresenter.malibuAvailabilityLine(snapshot), "MALIBU: not withdrawable · 12.50 held")
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "Held because: Trust verification is incomplete Next: Complete 2 more trust criteria to unlock withdrawals."
+            "MALIBU status: Trust verification is incomplete Next: Complete the remaining trust criteria to unlock withdrawals."
         )
 
         snapshot.malibuHoldReasons = ["per_wallet_daily_cap"]
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "capped",
+            withdrawalState: "capped",
+            primaryReason: "held_wallet_daily_cap",
+            reasons: ["held_wallet_daily_cap"]
+        )
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "Held because: the wallet's daily limit has been reached Next: The wallet cap resets at the next UTC day."
+            "MALIBU status: wallet daily limit reached Next: The wallet cap resets at the next UTC day."
         )
+    }
+
+    func testRewardEligibilityV1OverridesLegacyMalibuPresentation() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.trustTier = .trusted
+        snapshot.providerEarningsFresh = true
+        snapshot.malibuProjectionFresh = true
+        snapshot.malibuAccruedToday = 2
+        snapshot.malibuAccruedAllTime = 2
+        snapshot.malibuWithdrawable = 2
+        snapshot.malibuHeld = 0
+        snapshot.malibuHoldReasons = []
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
+
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "MALIBU is locked until Trusted")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuAvailabilityLine(snapshot),
+            "MALIBU: not withdrawable · 0.00 held"
+        )
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuFullLine(snapshot),
+            "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
+        )
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuHoldLine(snapshot),
+            "MALIBU status: Trust verification is incomplete Next: Complete the remaining trust criteria to unlock withdrawals."
+        )
+    }
+
+    func testRewardEligibilityUsesFreshMalibuProjectionWithoutFreshUSDCProjection() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.trustTier = .trusted
+        snapshot.providerEarningsFresh = false
+        snapshot.malibuProjectionFresh = true
+        snapshot.malibuAccruedToday = 2
+        snapshot.malibuAccruedAllTime = 2
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
+
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "MALIBU is locked until Trusted")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuFullLine(snapshot),
+            "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
+        )
+    }
+
+    func testProviderEarningsUnknownRewardEligibilityNormalizesUnavailable() throws {
+        let data = Data("""
+        {
+          "wallet_bound": true,
+          "trust_tier": "trusted",
+          "unpaid_ledger_backlog_usdc": 0,
+          "unpaid_ledger_backlog_malibu": 0,
+          "malibu_reward_eligibility": {
+            "schema_version": "malibu_reward_eligibility.v1",
+            "earning_state": "earning",
+            "withdrawal_state": "withdrawable",
+            "primary_reason": "future_reason",
+            "reasons": ["future_reason"]
+          }
+        }
+        """.utf8)
+
+        let decoded = try JSONDecoder().decode(ProviderEarnings.self, from: data)
+        XCTAssertEqual(decoded.malibuRewardEligibility?.schemaVersion, "malibu_reward_eligibility.v1")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.earningState, "unavailable")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.withdrawalState, "unavailable")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.primaryReason, "telemetry_unavailable")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.reasons, ["telemetry_unavailable"])
+    }
+
+    func testFreshProviderEarningsWithoutRewardEligibilityFailsClosed() throws {
+        let data = Data("""
+        {
+          "wallet_bound": false,
+          "trust_tier": "trusted",
+          "unpaid_ledger_backlog_usdc": 0,
+          "unpaid_ledger_backlog_malibu": 8,
+          "malibu_withdrawable": 8,
+          "malibu_held": 0,
+          "malibu_projection_fresh": true
+        }
+        """.utf8)
+
+        let decoded = try JSONDecoder().decode(ProviderEarnings.self, from: data)
+        XCTAssertTrue(decoded.malibuProjectionFresh)
+        XCTAssertEqual(decoded.malibuRewardEligibility?.schemaVersion, "malibu_reward_eligibility.v1")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.withdrawalState, "unavailable")
+
+        var snapshot = AgentSnapshot.empty
+        snapshot.walletBound = decoded.walletBound
+        snapshot.trustTier = decoded.trustTier
+        snapshot.providerEarningsFresh = decoded.earningsProjectionFresh
+        snapshot.malibuProjectionFresh = decoded.malibuProjectionFresh
+        snapshot.malibuWithdrawable = decoded.malibuWithdrawable
+        snapshot.malibuHeld = decoded.malibuHeld
+        snapshot.malibuRewardEligibility = decoded.malibuRewardEligibility
+
+        XCTAssertEqual(AgentSnapshotPresenter.malibuAvailabilityLine(snapshot), "MALIBU: status unavailable · 0.00 held")
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Reward status unavailable")
+    }
+
+    func testUnavailableRewardEligibilityDoesNotRenderLockedAmount() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.providerEarningsFresh = true
+        snapshot.malibuProjectionFresh = true
+        snapshot.earningsUsdcToday = 0.04
+        snapshot.malibuAccruedToday = 8
+        snapshot.malibuAccruedAllTime = 8
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
+
+        let earningsLine = AgentSnapshotPresenter.earningsLine(snapshot)
+        let fullLine = AgentSnapshotPresenter.malibuFullLine(snapshot)
+        XCTAssertEqual(earningsLine, "Today: $0.04 USDC · MALIBU reward status unavailable")
+        XCTAssertEqual(fullLine, "MALIBU today unavailable · 8.00 all-time · reward status unavailable")
+        XCTAssertFalse(earningsLine.contains("[locked]"))
+        XCTAssertFalse(fullLine.contains("locked"))
     }
 
     func testDefaultPresenterStringsDoNotExposeInternalTerms() {

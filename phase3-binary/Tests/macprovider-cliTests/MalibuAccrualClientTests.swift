@@ -25,7 +25,14 @@ final class MalibuAccrualClientTests: XCTestCase {
           "wallet_bound": true,
           "daily_cap_malibu": "25",
           "wallet_daily_cap_malibu": 100,
-          "withdrawal_hold_reasons": ["trust_tier_provisional"]
+          "withdrawal_hold_reasons": ["trust_tier_provisional"],
+          "reward_eligibility": {
+            "schema_version": "malibu_reward_eligibility.v1",
+            "earning_state": "held",
+            "withdrawal_state": "held",
+            "primary_reason": "held_provisional_trust_tier",
+            "reasons": ["held_provisional_trust_tier"]
+          }
         }
         """.data(using: .utf8)!
         let summary = try JSONDecoder().decode(MalibuAccrualSummary.self, from: json)
@@ -39,6 +46,77 @@ final class MalibuAccrualClientTests: XCTestCase {
         XCTAssertEqual(summary.dailyCapMALIBU, 25)
         XCTAssertEqual(summary.walletDailyCapMALIBU, 100)
         XCTAssertEqual(summary.withdrawalHoldReasons, ["trust_tier_provisional"])
+        XCTAssertEqual(summary.rewardEligibility?.schemaVersion, "malibu_reward_eligibility.v1")
+        XCTAssertEqual(summary.rewardEligibility?.primaryReason, "held_provisional_trust_tier")
+    }
+
+    func testRewardEligibilityUnknownSchemaNormalizesUnavailable() throws {
+        let json = """
+        {
+          "accrued_malibu": "0",
+          "withdrawable_malibu": "0",
+          "held_malibu": "0",
+          "trust_tier": "trusted",
+          "reward_eligibility": {
+            "schema_version": "malibu_reward_eligibility.v2",
+            "earning_state": "earning",
+            "withdrawal_state": "withdrawable",
+            "primary_reason": "future_reason",
+            "reasons": ["future_reason"]
+          }
+        }
+        """.data(using: .utf8)!
+
+        let summary = try JSONDecoder().decode(MalibuAccrualSummary.self, from: json)
+        XCTAssertEqual(summary.rewardEligibility?.schemaVersion, "malibu_reward_eligibility.v2")
+        XCTAssertEqual(summary.rewardEligibility?.earningState, "unavailable")
+        XCTAssertEqual(summary.rewardEligibility?.withdrawalState, "unavailable")
+        XCTAssertEqual(summary.rewardEligibility?.primaryReason, "telemetry_unavailable")
+        XCTAssertEqual(summary.rewardEligibility?.reasons, ["telemetry_unavailable"])
+    }
+
+    func testRewardEligibilityUnknownV1ReasonNormalizesUnavailable() throws {
+        let json = """
+        {
+          "accrued_malibu": "0",
+          "withdrawable_malibu": "0",
+          "held_malibu": "0",
+          "trust_tier": "trusted",
+          "reward_eligibility": {
+            "schema_version": "malibu_reward_eligibility.v1",
+            "earning_state": "earning",
+            "withdrawal_state": "withdrawable",
+            "primary_reason": "future_reason",
+            "reasons": ["future_reason"]
+          }
+        }
+        """.data(using: .utf8)!
+
+        let summary = try JSONDecoder().decode(MalibuAccrualSummary.self, from: json)
+        XCTAssertEqual(summary.rewardEligibility?.schemaVersion, "malibu_reward_eligibility.v1")
+        XCTAssertEqual(summary.rewardEligibility?.earningState, "unavailable")
+        XCTAssertEqual(summary.rewardEligibility?.withdrawalState, "unavailable")
+        XCTAssertEqual(summary.rewardEligibility?.primaryReason, "telemetry_unavailable")
+        XCTAssertEqual(summary.rewardEligibility?.reasons, ["telemetry_unavailable"])
+    }
+
+    func testMissingRewardEligibilityNormalizesUnavailable() throws {
+        let json = """
+        {
+          "accrued_malibu": "8",
+          "withdrawable_malibu": "8",
+          "held_malibu": "0",
+          "trust_tier": "trusted",
+          "wallet_bound": false
+        }
+        """.data(using: .utf8)!
+
+        let summary = try JSONDecoder().decode(MalibuAccrualSummary.self, from: json)
+        XCTAssertEqual(summary.rewardEligibility?.schemaVersion, "malibu_reward_eligibility.v1")
+        XCTAssertEqual(summary.rewardEligibility?.earningState, "unavailable")
+        XCTAssertEqual(summary.rewardEligibility?.withdrawalState, "unavailable")
+        XCTAssertEqual(summary.rewardEligibility?.primaryReason, "telemetry_unavailable")
+        XCTAssertEqual(summary.rewardEligibility?.reasons, ["telemetry_unavailable"])
     }
 
     func testMissingRequiredAmountFailsClosed() {
@@ -75,7 +153,19 @@ final class MalibuAccrualClientTests: XCTestCase {
                 headerFields: ["Content-Type": "application/json"]
             )!
             let body = """
-            {"accrued_malibu":1.25,"withdrawable_malibu":0,"held_malibu":1.25,"trust_tier":"provisional"}
+            {
+              "accrued_malibu":1.25,
+              "withdrawable_malibu":0,
+              "held_malibu":1.25,
+              "trust_tier":"provisional",
+              "reward_eligibility": {
+                "schema_version": "malibu_reward_eligibility.v1",
+                "earning_state": "held",
+                "withdrawal_state": "held",
+                "primary_reason": "held_provisional_trust_tier",
+                "reasons": ["held_provisional_trust_tier"]
+              }
+            }
             """.data(using: .utf8)!
             return (response, body)
         }

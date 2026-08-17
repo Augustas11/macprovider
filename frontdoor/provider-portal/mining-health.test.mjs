@@ -58,10 +58,21 @@ function baseState(context) {
       withdrawable_malibu: 0,
       held_malibu: 0,
       withdrawal_hold_reasons: [],
+      reward_eligibility: rewardEligibility("eligible_idle", "withdrawable", "eligible_idle_no_work"),
     },
     ts: Date.now(),
     err: null,
     inflight: false,
+  };
+}
+
+function rewardEligibility(earningState, withdrawalState, primaryReason) {
+  return {
+    schema_version: "malibu_reward_eligibility.v1",
+    earning_state: earningState,
+    withdrawal_state: withdrawalState,
+    primary_reason: primaryReason,
+    reasons: [primaryReason],
   };
 }
 
@@ -117,11 +128,21 @@ test("portal mining health prioritizes local blockers and reward holds", () => {
 
   context.state.earn.data.idle_prewarm.skips_by_reason_last_1h = {};
   context.state.malibu.data.wallet_bound = false;
+  context.state.malibu.data.reward_eligibility = rewardEligibility(
+    "ineligible",
+    "ineligible",
+    "missing_wallet_binding"
+  );
   assert.equal(vm.runInContext("computePortalMiningHealth().code", context), "wallet_missing");
 
   context.state.malibu.data.wallet_bound = true;
   context.state.malibu.data.trust_tier = "provisional";
   context.state.malibu.data.withdrawal_hold_reasons = [];
+  context.state.malibu.data.reward_eligibility = rewardEligibility(
+    "held",
+    "held",
+    "held_provisional_trust_tier"
+  );
   context.state.malibu.data.trust_criteria_met = 1;
   context.state.malibu.data.trust_criteria_required = 3;
   const provisional = vm.runInContext("computePortalMiningHealth()", context);
@@ -130,10 +151,12 @@ test("portal mining health prioritizes local blockers and reward holds", () => {
 
   context.state.malibu.data.trust_tier = "trusted";
   context.state.malibu.data.withdrawal_hold_reasons = ["per_wallet_daily_cap"];
+  context.state.malibu.data.reward_eligibility = rewardEligibility("capped", "capped", "held_wallet_daily_cap");
   assert.equal(vm.runInContext("computePortalMiningHealth().code", context), "wallet_daily_cap_held");
 
   context.state.malibu.data.withdrawal_hold_reasons = ["manual_review"];
   context.state.malibu.data.held_malibu = 2;
+  context.state.malibu.data.reward_eligibility = rewardEligibility("held", "held", "held_demotion_cooldown");
   assert.equal(vm.runInContext("computePortalMiningHealth().code", context), "rewards_held");
 }
 );

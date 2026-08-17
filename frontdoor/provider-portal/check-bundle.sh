@@ -160,6 +160,14 @@ for p in "${multi_machine[@]}"; do
   fi
 done
 
+# SPEC-021 v0.1.1 — a loaded MALIBU projection that omits the
+# coordinator-owned reward eligibility object must fail closed instead of
+# rendering raw withdrawable fields as authoritative.
+if ! perl -0ne 'exit(/function normalizedMalibuRewardEligibility\(data\).*?if \(!data\) return null;.*?if \(!data\.reward_eligibility \|\| typeof data\.reward_eligibility !== "object"\) \{\s*reportMalibuRewardEligibilitySchemaDrift\("", "reward_eligibility"\);\s*return unavailableMalibuRewardEligibility\(""\);\s*\}/s ? 0 : 1)' "$BUNDLE"; then
+  echo "FAIL [SPEC-021]: missing reward_eligibility must normalize to unavailable" >&2
+  fail=1
+fi
+
 for idx in "${!storage_patterns[@]}"; do
   n=$((idx + 1))
   pattern="${storage_patterns[$idx]}"

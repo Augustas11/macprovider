@@ -140,6 +140,12 @@ final class DashboardViewTests: XCTestCase {
         snapshot.malibuAccruedToday = 12
         snapshot.malibuAccruedAllTime = 50
         snapshot.trustTier = .provisional
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
         snapshot.providerEarningsFresh = true
         snapshot.malibuProjectionFresh = true
         snapshot.gpuUtilizationPct = 62
@@ -153,7 +159,7 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertTrue(AgentSnapshotPresenter.tokenLine(snapshot).contains("1.2M in / 3.8M out today"))
         XCTAssertEqual(AgentSnapshotPresenter.usdcFullLine(snapshot), "$4.12 today · $18.40 wk · $6.90 accrued · $211.00 life")
         XCTAssertEqual(AgentSnapshotPresenter.usdcAccrualCaption(snapshot), "Accrued — payouts open in beta")
-        XCTAssertTrue(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("[locked] unlocks at Trusted"))
+        XCTAssertTrue(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("locked until eligible"))
         XCTAssertEqual(AgentSnapshotPresenter.gpuChip(snapshot), "GPU 62%")
         XCTAssertEqual(AgentSnapshotPresenter.latencyChip(snapshot), "p50 42ms · p99 180ms")
         XCTAssertEqual(AgentSnapshotPresenter.queueChip(snapshot), "3 queued")

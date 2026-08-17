@@ -1232,6 +1232,7 @@ final class MalibuAgent: ObservableObject {
                 snapshot.malibuHoldReasons = providerEarnings.malibuHoldReasons
                 snapshot.malibuDailyCap = providerEarnings.malibuDailyCap
                 snapshot.malibuWalletDailyCap = providerEarnings.malibuWalletDailyCap
+                snapshot.malibuRewardEligibility = providerEarnings.malibuRewardEligibility
                 snapshot.trustCriteriaMet = providerEarnings.trustCriteriaMet
                 snapshot.trustCriteriaRequired = providerEarnings.trustCriteriaRequired
                 snapshot.idlePrewarmSummary = providerEarnings.idlePrewarm
