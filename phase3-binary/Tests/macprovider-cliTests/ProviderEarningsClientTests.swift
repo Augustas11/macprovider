@@ -98,6 +98,30 @@ final class ProviderEarningsClientTests: XCTestCase {
         XCTAssertFalse(summary.malibuProjectionFresh)
     }
 
+    func testFreshMalibuProjectionWithoutRewardEligibilityNormalizesUnavailable() throws {
+        let summary = try JSONDecoder().decode(
+            ProviderEarningsSummary.self,
+            from: Data("""
+            {
+              "wallet_bound": false,
+              "trust_tier": "trusted",
+              "unpaid_ledger_backlog_usdc": 0,
+              "unpaid_ledger_backlog_malibu": 8,
+              "malibu_withdrawable": 8,
+              "malibu_held": 0,
+              "malibu_projection_fresh": true
+            }
+            """.utf8)
+        )
+
+        XCTAssertTrue(summary.malibuProjectionFresh)
+        XCTAssertEqual(summary.malibuRewardEligibility?.schemaVersion, "malibu_reward_eligibility.v1")
+        XCTAssertEqual(summary.malibuRewardEligibility?.earningState, "unavailable")
+        XCTAssertEqual(summary.malibuRewardEligibility?.withdrawalState, "unavailable")
+        XCTAssertEqual(summary.malibuRewardEligibility?.primaryReason, "telemetry_unavailable")
+        XCTAssertEqual(summary.malibuRewardEligibility?.reasons, ["telemetry_unavailable"])
+    }
+
     func testAccrualProjectionFillsTrustAndMalibuWithoutInventingUSDC() throws {
         let earnings = try JSONDecoder().decode(
             ProviderEarningsSummary.self,

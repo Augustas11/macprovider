@@ -111,15 +111,25 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         malibuHoldReasons = try container.decodeIfPresent([String].self, forKey: .malibuHoldReasons) ?? []
         malibuDailyCap = try container.decodeIfPresent(Double.self, forKey: .malibuDailyCap)
         malibuWalletDailyCap = try container.decodeIfPresent(Double.self, forKey: .malibuWalletDailyCap)
-        malibuRewardEligibility = try container.decodeIfPresent(
-            MalibuRewardEligibility.self,
-            forKey: .malibuRewardEligibility
-        )
         idlePrewarm = try container.decodeIfPresent(
             ProviderIdlePrewarmSummary.self,
             forKey: .idlePrewarm
         ) ?? .empty
-        malibuProjectionFresh = try container.decodeIfPresent(Bool.self, forKey: .malibuProjectionFresh) ?? false
+        let decodedMalibuProjectionFresh = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .malibuProjectionFresh
+        ) ?? false
+        malibuProjectionFresh = decodedMalibuProjectionFresh
+        if let decodedRewardEligibility = try container.decodeIfPresent(
+            MalibuRewardEligibility.self,
+            forKey: .malibuRewardEligibility
+        ) {
+            malibuRewardEligibility = decodedRewardEligibility
+        } else if decodedMalibuProjectionFresh {
+            malibuRewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
+        } else {
+            malibuRewardEligibility = nil
+        }
         earningsProjectionFresh = try container.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
     }
 
