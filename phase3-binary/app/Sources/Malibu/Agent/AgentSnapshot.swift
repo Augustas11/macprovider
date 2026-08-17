@@ -426,6 +426,204 @@ enum AgentSnapshotPresenter {
         }
     }
 
+    struct MiningHealth: Equatable {
+        let status: String
+        let reasonCode: String
+        let reason: String
+        let nextAction: String
+        let rewardSummary: String
+        let trustSummary: String
+    }
+
+    static func miningHealth(_ s: AgentSnapshot) -> MiningHealth {
+        func result(
+            status: String,
+            code: String,
+            reason: String,
+            action: String
+        ) -> MiningHealth {
+            MiningHealth(
+                status: status,
+                reasonCode: code,
+                reason: reason,
+                nextAction: action,
+                rewardSummary: miningRewardSummary(s),
+                trustSummary: miningTrustSummary(s)
+            )
+        }
+
+        if s.state == .idle {
+            return result(
+                status: "Not running",
+                code: "not_running",
+                reason: "The provider service is stopped.",
+                action: "Start provider setup."
+            )
+        }
+        if s.state == .paused {
+            return result(
+                status: "Paused",
+                code: "provider_paused",
+                reason: "This Mac will not receive customer work while paused.",
+                action: "Choose Resume when ready."
+            )
+        }
+        if s.state == .error {
+            return result(
+                status: "Needs attention",
+                code: "provider_error",
+                reason: publicErrorDetail(s.lastError) ?? "The provider reported an error.",
+                action: publicStatus(s).safeNextAction ?? "Export diagnostics for support."
+            )
+        }
+        if miningSkipCount(s, "on_battery") > 0 {
+            return result(
+                status: "Blocked locally",
+                code: "local_on_battery",
+                reason: "This Mac is on battery.",
+                action: "Plug in power to earn."
+            )
+        }
+        if miningSkipCount(s, "thermal_pressure") > 0 {
+            return result(
+                status: "Blocked locally",
+                code: "local_thermal_pressure",
+                reason: "Thermal pressure is limiting local work.",
+                action: "Let this Mac cool before earning resumes."
+            )
+        }
+        if miningSkipCount(s, "model_not_loaded") > 0 || isModelPreparing(s) {
+            return result(
+                status: "Preparing",
+                code: "local_model_preparing",
+                reason: "The model is still loading or checking local setup.",
+                action: "Keep Malibu open while setup continues."
+            )
+        }
+        if !s.providerEarningsFresh || !s.malibuProjectionFresh {
+            return result(
+                status: "Reward status unavailable",
+                code: "reward_projection_unavailable",
+                reason: "Fresh earnings or MALIBU reward telemetry is not available yet.",
+                action: isActive(s) ? "Keep Malibu open while reward status refreshes." : "Start the provider to refresh reward status."
+            )
+        }
+        if s.walletBound == false {
+            return result(
+                status: "Missing wallet",
+                code: "wallet_missing",
+                reason: "Rewards are visible, but no payout wallet is bound.",
+                action: "Add a payout wallet."
+            )
+        }
+        if s.malibuHoldReasons.contains("per_wallet_daily_cap") {
+            return result(
+                status: "Wallet cap held",
+                code: "wallet_daily_cap_held",
+                reason: "MALIBU above the wallet daily cap is held.",
+                action: "Wait for the next UTC day or use a wallet below the cap."
+            )
+        }
+        if s.trustTier == .provisional || s.malibuHoldReasons.contains("trust_tier_provisional") {
+            return result(
+                status: "Locked until Trusted",
+                code: "trust_tier_provisional",
+                reason: "MALIBU is accruing, but withdrawals are locked until Trusted.",
+                action: trustCriteriaAction(s) ?? "Complete trust criteria to unlock withdrawals."
+            )
+        }
+        if !s.malibuHoldReasons.isEmpty || (s.malibuHeld ?? 0) > 0 {
+            return result(
+                status: "Rewards held",
+                code: "rewards_held",
+                reason: "Some MALIBU is held while payout eligibility is being verified.",
+                action: "Review the hold reason before withdrawing."
+            )
+        }
+        if s.trustTier == .trusted, let withdrawable = s.malibuWithdrawable, withdrawable > 0 {
+            return result(
+                status: "Withdrawable",
+                code: "trusted_withdrawable",
+                reason: "Trusted reward projection reports withdrawable MALIBU.",
+                action: "No local action needed."
+            )
+        }
+        if hasMiningEarningsActivity(s) {
+            return result(
+                status: "Earning",
+                code: "earning",
+                reason: "Paid work or rewards have settled in the current window.",
+                action: "No local action needed."
+            )
+        }
+        if (s.requestsServedToday ?? 0) > 0 {
+            return result(
+                status: "Waiting for settlement",
+                code: "eligible_waiting_settlement",
+                reason: "Work ran today; paid credits appear when jobs settle.",
+                action: "No local action needed."
+            )
+        }
+        if isNetworkReady(s) {
+            return result(
+                status: "Eligible, idle",
+                code: "idle_no_work",
+                reason: "This Mac is eligible, but the network is quiet right now.",
+                action: "Keep Malibu online."
+            )
+        }
+        return result(
+            status: publicStatus(s).title,
+            code: "customer_availability_pending",
+            reason: publicStatus(s).detail ?? "Customer availability is still being checked.",
+            action: publicStatus(s).safeNextAction ?? "Keep Malibu open while status updates."
+        )
+    }
+
+    private static func miningSkipCount(_ s: AgentSnapshot, _ reason: String) -> Int64 {
+        guard s.providerEarningsFresh else { return 0 }
+        return s.idlePrewarmSummary.skipsByReasonLast1h[reason] ?? 0
+    }
+
+    private static func hasMiningEarningsActivity(_ s: AgentSnapshot) -> Bool {
+        (s.requestsPerMinute ?? 0) > 0
+            || (s.earningsUsdcToday ?? 0) > 0
+            || (s.malibuAccruedToday ?? 0) > 0
+    }
+
+    private static func miningRewardSummary(_ s: AgentSnapshot) -> String {
+        let usdc = s.providerEarningsFresh
+            ? s.earningsUsdcToday.map { "\(formatUSDC($0)) USDC today" } ?? "n/a USDC today"
+            : "USDC unavailable"
+        let malibu: String
+        if s.malibuProjectionFresh {
+            let withdrawable = s.malibuWithdrawable.map { String(format: "%.2f withdrawable", $0) }
+                ?? "n/a withdrawable"
+            let held = s.malibuHeld.map { String(format: "%.2f held", $0) }
+                ?? "n/a held"
+            malibu = "MALIBU \(withdrawable) / \(held)"
+        } else {
+            malibu = "MALIBU unavailable"
+        }
+        return "\(usdc) · \(malibu)"
+    }
+
+    private static func miningTrustSummary(_ s: AgentSnapshot) -> String {
+        guard s.malibuProjectionFresh else { return "Trust status unavailable" }
+        let tier = s.trustTier.rawValue.capitalized
+        if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
+            return "Trust: \(tier) · \(met) of \(required) criteria met"
+        }
+        return "Trust: \(tier)"
+    }
+
+    private static func trustCriteriaAction(_ s: AgentSnapshot) -> String? {
+        guard let met = s.trustCriteriaMet,
+              let required = s.trustCriteriaRequired,
+              required > met else { return nil }
+        return "Complete \(required - met) more trust criteria to unlock withdrawals."
+    }
+
     private static func isActive(_ s: AgentSnapshot) -> Bool {
         s.state == .serving || s.state == .paused || isLocalOnly(s)
     }
