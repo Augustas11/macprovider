@@ -1046,6 +1046,24 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Reward status unavailable")
     }
 
+    func testUnavailableRewardEligibilityDoesNotRenderLockedAmount() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.providerEarningsFresh = true
+        snapshot.malibuProjectionFresh = true
+        snapshot.earningsUsdcToday = 0.04
+        snapshot.malibuAccruedToday = 8
+        snapshot.malibuAccruedAllTime = 8
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
+
+        let earningsLine = AgentSnapshotPresenter.earningsLine(snapshot)
+        let fullLine = AgentSnapshotPresenter.malibuFullLine(snapshot)
+        XCTAssertEqual(earningsLine, "Today: $0.04 USDC · MALIBU reward status unavailable")
+        XCTAssertEqual(fullLine, "MALIBU today unavailable · 8.00 all-time · reward status unavailable")
+        XCTAssertFalse(earningsLine.contains("[locked]"))
+        XCTAssertFalse(fullLine.contains("locked"))
+    }
+
     func testDefaultPresenterStringsDoNotExposeInternalTerms() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .reconnecting

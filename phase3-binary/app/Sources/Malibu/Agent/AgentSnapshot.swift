@@ -1711,6 +1711,11 @@ enum AgentSnapshotPresenter {
                     return String(format: "%.2f MALIBU today (capped)", amount)
                 }
                 return String(format: "[capped] %.2f MALIBU", amount)
+            case "unavailable":
+                if compact {
+                    return "MALIBU today unavailable"
+                }
+                return "MALIBU reward status unavailable"
             default:
                 if compact {
                     return String(format: "%.2f MALIBU today (locked)", amount)
