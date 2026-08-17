@@ -249,7 +249,11 @@ future compute-integrity fields when the object is present and
 observations are reported into this object by the reward owner, clients MAY
 display them only as separate operational readiness copy; they MUST NOT mutate
 `reward_eligibility`, override its `withdrawal_state`, or add client-inferred
-MALIBU hold reasons.
+MALIBU hold reasons. A successful `/v1/provider/malibu-accrual` response that
+omits `reward_eligibility` is schema drift for v0.1.1 readers: clients MUST
+render the MALIBU reward state as unavailable and MUST NOT fall back to raw
+`withdrawable_malibu`, `wallet_bound`, `trust_tier`, or hold-reason fields to
+authorize withdrawable copy.
 
 Fields:
 

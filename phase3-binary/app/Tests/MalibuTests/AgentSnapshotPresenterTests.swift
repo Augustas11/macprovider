@@ -991,6 +991,37 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(decoded.malibuRewardEligibility?.reasons, ["telemetry_unavailable"])
     }
 
+    func testFreshProviderEarningsWithoutRewardEligibilityFailsClosed() throws {
+        let data = Data("""
+        {
+          "wallet_bound": false,
+          "trust_tier": "trusted",
+          "unpaid_ledger_backlog_usdc": 0,
+          "unpaid_ledger_backlog_malibu": 8,
+          "malibu_withdrawable": 8,
+          "malibu_held": 0,
+          "malibu_projection_fresh": true
+        }
+        """.utf8)
+
+        let decoded = try JSONDecoder().decode(ProviderEarnings.self, from: data)
+        XCTAssertTrue(decoded.malibuProjectionFresh)
+        XCTAssertEqual(decoded.malibuRewardEligibility?.schemaVersion, "malibu_reward_eligibility.v1")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.withdrawalState, "unavailable")
+
+        var snapshot = AgentSnapshot.empty
+        snapshot.walletBound = decoded.walletBound
+        snapshot.trustTier = decoded.trustTier
+        snapshot.providerEarningsFresh = decoded.earningsProjectionFresh
+        snapshot.malibuProjectionFresh = decoded.malibuProjectionFresh
+        snapshot.malibuWithdrawable = decoded.malibuWithdrawable
+        snapshot.malibuHeld = decoded.malibuHeld
+        snapshot.malibuRewardEligibility = decoded.malibuRewardEligibility
+
+        XCTAssertEqual(AgentSnapshotPresenter.malibuAvailabilityLine(snapshot), "MALIBU: status unavailable · 0.00 held")
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Reward status unavailable")
+    }
+
     func testDefaultPresenterStringsDoNotExposeInternalTerms() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .reconnecting

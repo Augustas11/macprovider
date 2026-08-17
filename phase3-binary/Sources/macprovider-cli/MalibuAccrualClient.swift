@@ -79,6 +79,10 @@ public struct MalibuRewardEligibility: Codable, Equatable, Sendable {
         )
     }
 
+    static func unavailableForMissingObject() -> MalibuRewardEligibility {
+        unavailable(schemaVersion: "", driftField: "reward_eligibility")
+    }
+
     private static func logSchemaDrift(schemaVersion: String, field: String) {
         let schema = schemaVersion.isEmpty ? "missing" : schemaVersion
         let line = "event=malibu_reward_eligibility_schema_drift schema_version=\(schema) field=\(field)\n"
@@ -163,7 +167,11 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
         dailyCapMALIBU = try Self.decodeOptionalDecimal(c, key: .dailyCapMALIBU)
         walletDailyCapMALIBU = try Self.decodeOptionalDecimal(c, key: .walletDailyCapMALIBU)
         withdrawalHoldReasons = try c.decodeIfPresent([String].self, forKey: .withdrawalHoldReasons) ?? []
-        rewardEligibility = try c.decodeIfPresent(MalibuRewardEligibility.self, forKey: .rewardEligibility)
+        if let decodedRewardEligibility = try c.decodeIfPresent(MalibuRewardEligibility.self, forKey: .rewardEligibility) {
+            rewardEligibility = decodedRewardEligibility
+        } else {
+            rewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
+        }
     }
 
     private static func decodeRequiredDecimal(

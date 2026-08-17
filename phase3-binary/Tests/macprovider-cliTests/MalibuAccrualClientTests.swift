@@ -100,6 +100,25 @@ final class MalibuAccrualClientTests: XCTestCase {
         XCTAssertEqual(summary.rewardEligibility?.reasons, ["telemetry_unavailable"])
     }
 
+    func testMissingRewardEligibilityNormalizesUnavailable() throws {
+        let json = """
+        {
+          "accrued_malibu": "8",
+          "withdrawable_malibu": "8",
+          "held_malibu": "0",
+          "trust_tier": "trusted",
+          "wallet_bound": false
+        }
+        """.data(using: .utf8)!
+
+        let summary = try JSONDecoder().decode(MalibuAccrualSummary.self, from: json)
+        XCTAssertEqual(summary.rewardEligibility?.schemaVersion, "malibu_reward_eligibility.v1")
+        XCTAssertEqual(summary.rewardEligibility?.earningState, "unavailable")
+        XCTAssertEqual(summary.rewardEligibility?.withdrawalState, "unavailable")
+        XCTAssertEqual(summary.rewardEligibility?.primaryReason, "telemetry_unavailable")
+        XCTAssertEqual(summary.rewardEligibility?.reasons, ["telemetry_unavailable"])
+    }
+
     func testMissingRequiredAmountFailsClosed() {
         let json = Data(#"{"accrued_malibu":1.25,"withdrawable_malibu":0,"trust_tier":"provisional"}"#.utf8)
         XCTAssertThrowsError(try JSONDecoder().decode(MalibuAccrualSummary.self, from: json))
@@ -134,7 +153,19 @@ final class MalibuAccrualClientTests: XCTestCase {
                 headerFields: ["Content-Type": "application/json"]
             )!
             let body = """
-            {"accrued_malibu":1.25,"withdrawable_malibu":0,"held_malibu":1.25,"trust_tier":"provisional"}
+            {
+              "accrued_malibu":1.25,
+              "withdrawable_malibu":0,
+              "held_malibu":1.25,
+              "trust_tier":"provisional",
+              "reward_eligibility": {
+                "schema_version": "malibu_reward_eligibility.v1",
+                "earning_state": "held",
+                "withdrawal_state": "held",
+                "primary_reason": "held_provisional_trust_tier",
+                "reasons": ["held_provisional_trust_tier"]
+              }
+            }
             """.data(using: .utf8)!
             return (response, body)
         }

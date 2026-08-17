@@ -106,6 +106,10 @@ struct MalibuRewardEligibility: Codable, Equatable {
         )
     }
 
+    static func unavailableForMissingObject() -> MalibuRewardEligibility {
+        unavailable(schemaVersion: "", driftField: "malibu_reward_eligibility")
+    }
+
     private static func logSchemaDrift(schemaVersion: String, field: String) {
         let schema = schemaVersion.isEmpty ? "missing" : schemaVersion
         NSLog("[malibu] malibu_reward_eligibility_schema_drift schema_version=%@ field=%@", schema, field)
@@ -214,9 +218,16 @@ struct ProviderEarnings: Codable, Equatable {
         malibuHoldReasons = try c.decodeIfPresent([String].self, forKey: .malibuHoldReasons) ?? []
         malibuDailyCap = try c.decodeIfPresent(Double.self, forKey: .malibuDailyCap)
         malibuWalletDailyCap = try c.decodeIfPresent(Double.self, forKey: .malibuWalletDailyCap)
-        malibuRewardEligibility = try c.decodeIfPresent(MalibuRewardEligibility.self, forKey: .malibuRewardEligibility)
         idlePrewarm = try c.decodeIfPresent(ProviderIdlePrewarmSummary.self, forKey: .idlePrewarm) ?? .empty
-        malibuProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .malibuProjectionFresh) ?? false
+        let decodedMalibuProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .malibuProjectionFresh) ?? false
+        malibuProjectionFresh = decodedMalibuProjectionFresh
+        if c.contains(.malibuRewardEligibility) {
+            malibuRewardEligibility = try c.decodeIfPresent(MalibuRewardEligibility.self, forKey: .malibuRewardEligibility)
+        } else if decodedMalibuProjectionFresh {
+            malibuRewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
+        } else {
+            malibuRewardEligibility = nil
+        }
         earningsProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
     }
 

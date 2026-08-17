@@ -1706,7 +1706,11 @@
     }
 
     function normalizedMalibuRewardEligibility(data) {
-      if (!data || !data.reward_eligibility || typeof data.reward_eligibility !== "object") return null;
+      if (!data) return null;
+      if (!data.reward_eligibility || typeof data.reward_eligibility !== "object") {
+        reportMalibuRewardEligibilitySchemaDrift("", "reward_eligibility");
+        return unavailableMalibuRewardEligibility("");
+      }
       var e = data.reward_eligibility;
       var schema = typeof e.schema_version === "string" ? e.schema_version : "";
       if (schema !== MALIBU_REWARD_ELIGIBILITY_SCHEMA) {
