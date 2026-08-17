@@ -272,6 +272,20 @@ type Provider struct {
 	// Internal only — not serialised to JSON.
 	SELivenessFailCount int `json:"-"`
 
+	// Phase 3 — Live MDA proof cache.
+	// MDACertChain holds the raw DER bytes of the Apple MDA certificate chain
+	// (leaf first) obtained via MDM DeviceInformation attestation. Nil until
+	// a live MDA round-trip completes.
+	MDACertChain [][]byte `json:"-"`
+	// MDAVerifiedAt is the coordinator clock at the last successful MDA
+	// chain verification. Zero if no MDA proof is cached.
+	MDAVerifiedAt time.Time `json:"-"`
+	// MDABoundSEKeyHash is SHA256 of the SE public key used as the MDM
+	// DeviceAttestationNonce when the cached MDA proof was obtained.
+	// When the provider's SE key changes, this mismatch triggers a
+	// proof refresh.
+	MDABoundSEKeyHash []byte `json:"-"`
+
 	// SPEC-002 v1.3.5 §3.X.1 — populated from v2 auth_request initial-stage
 	// supported_models[] per SPEC-010 v1.5 R-3.3.1; nil for the L-1 baseline.
 	SupportedModels []string `json:"supported_models,omitempty"`
@@ -1672,6 +1686,76 @@ func (r *Registry) SetSEPublicKey(providerID, assignedID string, pubkey []byte, 
 	p.SEPublicKey = append([]byte(nil), pubkey...)
 	p.AttestationTier = tier
 	return true
+}
+
+// ProviderSEPublicKey returns the currently stored SE public key for the given
+// providerID, or nil if the provider is not live or has no SE key recorded.
+// Safe to call concurrently.
+func (r *Registry) ProviderSEPublicKey(providerID string) []byte {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p := r.providers[providerID]
+	if p == nil || len(p.SEPublicKey) == 0 {
+		return nil
+	}
+	return append([]byte(nil), p.SEPublicKey...)
+}
+
+// SetMDAProof stores a verified MDA certificate chain and the SE key hash that
+// was used as the MDM DeviceAttestationNonce for the freshness binding.
+// The caller must have already verified the chain. Clears stale proof if the
+// SE key changed.
+func (r *Registry) SetMDAProof(providerID, assignedID string, certChain [][]byte, seKeyHash []byte, verifiedAt time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	chain := make([][]byte, len(certChain))
+	for i, c := range certChain {
+		chain[i] = append([]byte(nil), c...)
+	}
+	p.MDACertChain = chain
+	p.MDAVerifiedAt = verifiedAt
+	p.MDABoundSEKeyHash = append([]byte(nil), seKeyHash...)
+	p.AttestationTier = AttestationTierHardware
+	return true
+}
+
+// ClearMDAProof removes any cached MDA proof from the provider record. Called
+// when the SE key rotates so the stale MDA chain (bound to the old key) is not
+// reused. Does not downgrade AttestationTier if the provider still has SE auth.
+func (r *Registry) ClearMDAProof(providerID, assignedID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return
+	}
+	p.MDACertChain = nil
+	p.MDAVerifiedAt = time.Time{}
+	p.MDABoundSEKeyHash = nil
+	if p.AttestationTier == AttestationTierHardware {
+		p.AttestationTier = AttestationTierSelfSigned
+	}
+}
+
+// MDAProof returns the cached MDA proof fields for the given provider.
+// Returns (nil, zero, nil, false) if no proof is cached.
+// Safe to call concurrently.
+func (r *Registry) MDAProof(providerID string) (certChain [][]byte, verifiedAt time.Time, seKeyHash []byte, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p := r.providers[providerID]
+	if p == nil || len(p.MDACertChain) == 0 {
+		return nil, time.Time{}, nil, false
+	}
+	chain := make([][]byte, len(p.MDACertChain))
+	for i, c := range p.MDACertChain {
+		chain[i] = append([]byte(nil), c...)
+	}
+	return chain, p.MDAVerifiedAt, append([]byte(nil), p.MDABoundSEKeyHash...), true
 }
 
 func (r *Registry) SetModelClassOPoIPass(providerID, assignedID string, pass *bool) {

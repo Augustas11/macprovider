@@ -473,6 +473,10 @@ func TestVerifyAttestationTokenWithoutRootsNeverMarksAttested(t *testing.T) {
 
 type testAttestationCertificateOptions struct {
 	FreshnessToken           string
+	// RawFreshnessDigest, when set, overrides the freshness digest in the leaf
+	// certificate extension (instead of SHA256(FreshnessToken)). Used to embed
+	// SHA256(sePublicKey) without mangling the token field.
+	RawFreshnessDigest       []byte
 	TokenValue               string
 	IncludeFreshness         bool
 	IncludeDeviceProperty    bool
@@ -601,10 +605,16 @@ func testAttestationCertificateChain(t *testing.T, now time.Time, opts testAttes
 		BasicConstraintsValid: true,
 	}
 	if opts.IncludeFreshness {
-		digest := expectedMDAFreshnessDigest(opts.FreshnessToken)
+		var digestBytes []byte
+		if len(opts.RawFreshnessDigest) > 0 {
+			digestBytes = opts.RawFreshnessDigest
+		} else {
+			d := expectedMDAFreshnessDigest(opts.FreshnessToken)
+			digestBytes = d[:]
+		}
 		leaf.ExtraExtensions = append(leaf.ExtraExtensions, pkix.Extension{
 			Id:    mdaOIDFreshness,
-			Value: digest[:],
+			Value: digestBytes,
 		})
 	}
 	if opts.IncludeDeviceProperty {
@@ -633,4 +643,166 @@ func testCertificateSigningRequest(t *testing.T, signer crypto.Signer) []byte {
 		t.Fatalf("create certificate signing request: %v", err)
 	}
 	return csrDER
+}
+
+// TestVerifyMDAFreshnessWithSEPublicKey verifies that verifyMDAFreshness accepts
+// SHA256(sePublicKey) as a valid freshness digest and returns seKeyUsed=true.
+func TestVerifyMDAFreshnessWithSEPublicKey(t *testing.T) {
+	seKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate SE key: %v", err)
+	}
+	xBytes := make([]byte, 32)
+	yBytes := make([]byte, 32)
+	copy(xBytes[32-len(seKey.PublicKey.X.Bytes()):], seKey.PublicKey.X.Bytes())
+	copy(yBytes[32-len(seKey.PublicKey.Y.Bytes()):], seKey.PublicKey.Y.Bytes())
+	sePub := append(xBytes, yBytes...)
+
+	// Build a leaf cert whose freshness extension = SHA256(sePub).
+	now := time.Unix(1716768000, 0).UTC()
+	seDigest := sha256.Sum256(sePub)
+	_, leafDER, _ := testAttestationCertificateChain(t, now, testAttestationCertificateOptions{
+		RawFreshnessDigest:    seDigest[:],
+		IncludeFreshness:      true,
+		IncludeDeviceProperty: true,
+		LeafKeyType:           "p256",
+	})
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatalf("parse leaf: %v", err)
+	}
+
+	reason, seKeyUsed := verifyMDAFreshness(leaf, "unrelated-token", sePub)
+	if reason != "" {
+		t.Fatalf("freshness check failed: %s", reason)
+	}
+	if !seKeyUsed {
+		t.Fatal("expected seKeyUsed=true when SE key digest matched")
+	}
+}
+
+// TestVerifyMDAFreshnessWithSEPublicKeyMismatch verifies that verifyMDAFreshness
+// fails (mda_freshness_mismatch) when neither the token hash nor the SE key hash
+// matches the certificate freshness extension.
+func TestVerifyMDAFreshnessWithSEPublicKeyMismatch(t *testing.T) {
+	seKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate SE key: %v", err)
+	}
+	xBytes := make([]byte, 32)
+	yBytes := make([]byte, 32)
+	copy(xBytes[32-len(seKey.PublicKey.X.Bytes()):], seKey.PublicKey.X.Bytes())
+	copy(yBytes[32-len(seKey.PublicKey.Y.Bytes()):], seKey.PublicKey.Y.Bytes())
+	sePub := append(xBytes, yBytes...)
+
+	// Build a leaf cert whose freshness extension = SHA256("different-token").
+	now := time.Unix(1716768000, 0).UTC()
+	_, leafDER, _ := testAttestationCertificateChain(t, now, testAttestationCertificateOptions{
+		FreshnessToken:        "different-token",
+		IncludeFreshness:      true,
+		IncludeDeviceProperty: true,
+		LeafKeyType:           "p256",
+	})
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatalf("parse leaf: %v", err)
+	}
+
+	reason, seKeyUsed := verifyMDAFreshness(leaf, "wrong-token-too", sePub)
+	if reason != "mda_freshness_mismatch" {
+		t.Fatalf("expected mda_freshness_mismatch, got reason=%q seKeyUsed=%v", reason, seKeyUsed)
+	}
+	if seKeyUsed {
+		t.Fatal("expected seKeyUsed=false on mismatch")
+	}
+}
+
+// TestVerifyMDAFreshnessTokenPathStillWorks ensures the legacy SHA256(token) path
+// still succeeds and returns seKeyUsed=false, regardless of a sePublicKey being passed.
+func TestVerifyMDAFreshnessTokenPathStillWorks(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	tokenStr := base64.RawURLEncoding.EncodeToString([]byte("legacy-device-token"))
+	_, leafDER, _ := testAttestationCertificateChain(t, now, testAttestationCertificateOptions{
+		FreshnessToken:        tokenStr,
+		IncludeFreshness:      true,
+		IncludeDeviceProperty: true,
+		LeafKeyType:           "p256",
+	})
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatalf("parse leaf: %v", err)
+	}
+
+	// Even with a non-nil SE key, the token path matches first.
+	dummySEKey := make([]byte, rawP256PubkeyBytes)
+	reason, seKeyUsed := verifyMDAFreshness(leaf, tokenStr, dummySEKey)
+	if reason != "" {
+		t.Fatalf("token-path freshness check failed: %s", reason)
+	}
+	if seKeyUsed {
+		t.Fatal("expected seKeyUsed=false when token digest matched")
+	}
+}
+
+// TestVerifyAttestationTokenExtMDAHardwareTierWithSEKey is an integration test
+// verifying that VerifyAttestationTokenExt returns MDAHardware=true when the
+// production MDA chain's freshness is bound to the SE public key.
+func TestVerifyAttestationTokenExtMDAHardwareTierWithSEKey(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	challenge := []byte("challenge-1")
+
+	seKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate SE key: %v", err)
+	}
+	xBytes := make([]byte, 32)
+	yBytes := make([]byte, 32)
+	copy(xBytes[32-len(seKey.PublicKey.X.Bytes()):], seKey.PublicKey.X.Bytes())
+	copy(yBytes[32-len(seKey.PublicKey.Y.Bytes()):], seKey.PublicKey.Y.Bytes())
+	sePub := append(xBytes, yBytes...)
+	seDigest := sha256.Sum256(sePub)
+
+	cfg, _, withChain := productionChainToken(t, now, testAttestationCertificateOptions{
+		RawFreshnessDigest:    seDigest[:],
+		IncludeFreshness:      true,
+		IncludeDeviceProperty: true,
+		IncludeCSR:            true,
+		LeafKeyType:           "p256",
+		// Token value doesn't matter for freshness; use the challenge as token.
+		TokenValue: base64.RawURLEncoding.EncodeToString(challenge),
+	})
+
+	result := VerifyAttestationTokenExt(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", sePub, now, zerolog.Nop())
+	if result.Status != pool.AttestationStatusAttested {
+		t.Fatalf("expected attested, got %q", result.Status)
+	}
+	if !result.MDAHardware {
+		t.Fatal("expected MDAHardware=true when SE key digest matched freshness")
+	}
+}
+
+// TestVerifyAttestationTokenExtMDAHardwareFalseWithoutSEKey verifies that when
+// no SE key is provided, MDAHardware=false even when the MDA chain validates via
+// the legacy token-hash freshness path.
+func TestVerifyAttestationTokenExtMDAHardwareFalseWithoutSEKey(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	challenge := []byte("challenge-1")
+	tokenStr := base64.RawURLEncoding.EncodeToString(challenge)
+
+	cfg, _, withChain := productionChainToken(t, now, testAttestationCertificateOptions{
+		FreshnessToken:        tokenStr,
+		TokenValue:            tokenStr,
+		IncludeFreshness:      true,
+		IncludeDeviceProperty: true,
+		IncludeCSR:            true,
+		LeafKeyType:           "p256",
+	})
+
+	result := VerifyAttestationTokenExt(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", nil, now, zerolog.Nop())
+	if result.Status != pool.AttestationStatusAttested {
+		t.Fatalf("expected attested, got %q", result.Status)
+	}
+	if result.MDAHardware {
+		t.Fatal("expected MDAHardware=false when SE key was nil (legacy token path)")
+	}
 }

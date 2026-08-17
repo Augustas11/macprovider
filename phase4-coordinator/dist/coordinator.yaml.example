@@ -291,6 +291,15 @@ tier2:
   #   # Optional CMS profile signing (unsigned profiles are OK for enroll):
   #   # profile_signer_cert_path: "/etc/macprovider/mdm/profile-signer.crt"
   #   # profile_signer_key_path: "/etc/macprovider/mdm/profile-signer.key"
+  #
+  #   # Phase 3 — Live MDA (observe mode, NO require_attestation flip).
+  #   # MicroMDM API client — loopback when MicroMDM runs on the same host.
+  #   # Do NOT put api_token secrets in this tracked file; use
+  #   # /etc/macprovider/coordinator.pearl-overlays.yaml or an env: reference.
+  #   # api_url: "http://127.0.0.1:8080"
+  #   # api_token: "env:MICROMDM_API_TOKEN"
+  #   # live_mda_enabled: false          # flip to true after APNs cert + MicroMDM deploy
+  #   # mda_refresh_interval_hours: 168  # 7 days (Apple rate limit floor)
 
 # SPEC-017 Network Stats API.
 #

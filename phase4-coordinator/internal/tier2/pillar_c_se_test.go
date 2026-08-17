@@ -151,7 +151,7 @@ func TestSEAttestationRoundtrip(t *testing.T) {
 	cfg := config.Default().Tier2
 	raw := buildSEAttestationToken(t, seKey, nil, challenge, "provider-se-1", ecdhKey, now.Add(-time.Minute), now.Add(time.Minute))
 
-	result := VerifyAttestationTokenExt(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, now, zerolog.Nop())
+	result := VerifyAttestationTokenExt(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, nil, now, zerolog.Nop())
 
 	if result.Status != pool.AttestationStatusAttested {
 		t.Fatalf("status=%q want attested", result.Status)
@@ -195,7 +195,7 @@ func TestSEAttestationSignedModelHashMismatchWarnsButAttests(t *testing.T) {
 	}
 	var logs bytes.Buffer
 
-	result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, now, zerolog.New(&logs))
+	result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, nil, now, zerolog.New(&logs))
 
 	if result.Status != pool.AttestationStatusAttested {
 		t.Fatalf("status=%q want attested", result.Status)
@@ -243,7 +243,7 @@ func TestSEAttestationSignedModelHashMatchDoesNotWarn(t *testing.T) {
 	}
 	var logs bytes.Buffer
 
-	result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, now, zerolog.New(&logs))
+	result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, nil, now, zerolog.New(&logs))
 
 	if result.Status != pool.AttestationStatusAttested {
 		t.Fatalf("status=%q want attested", result.Status)
@@ -285,7 +285,7 @@ func TestSEAttestationInvalidSignedModelHashWarnsButAttests(t *testing.T) {
 			}
 			var logs bytes.Buffer
 
-			result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, now, zerolog.New(&logs))
+			result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, nil, now, zerolog.New(&logs))
 
 			if result.Status != pool.AttestationStatusAttested {
 				t.Fatalf("status=%q want attested", result.Status)
@@ -316,7 +316,7 @@ func TestSEAttestationChallengeMismatch(t *testing.T) {
 	cfg := config.Default().Tier2
 	raw := buildSEAttestationToken(t, seKey, nil, challenge, "provider-se-2", ecdhKey, now.Add(-time.Minute), now.Add(time.Minute))
 
-	result := VerifyAttestationTokenExt(raw, cfg, []byte("different-challenge"), "auth-test", "provider-se-2", ecdhKey, now, zerolog.Nop())
+	result := VerifyAttestationTokenExt(raw, cfg, []byte("different-challenge"), "auth-test", "provider-se-2", ecdhKey, nil, now, zerolog.Nop())
 
 	if result.Status != pool.AttestationStatusStale {
 		t.Fatalf("status=%q want stale on challenge mismatch", result.Status)
@@ -341,7 +341,7 @@ func TestSEAttestationECDHBindMismatch(t *testing.T) {
 	// the auth initial stage — triggering the outer ecdh_binding_mismatch.
 	raw := buildSEAttestationToken(t, seKey, nil, challenge, "provider-se-3", ecdhKeyInToken, now.Add(-time.Minute), now.Add(time.Minute))
 
-	result := VerifyAttestationTokenExt(raw, cfg, challenge, "auth-test", "provider-se-3", ecdhKeyInBinding, now, zerolog.Nop())
+	result := VerifyAttestationTokenExt(raw, cfg, challenge, "auth-test", "provider-se-3", ecdhKeyInBinding, nil, now, zerolog.Nop())
 
 	if result.Status != pool.AttestationStatusFailed {
 		t.Fatalf("status=%q want failed on ECDH mismatch", result.Status)
@@ -404,7 +404,7 @@ func TestSEAttestationWrongSignature(t *testing.T) {
 	outer.Signature = bindingSig
 	raw, _ := json.Marshal(outer)
 
-	result := VerifyAttestationTokenExt(raw, cfg, challenge, "auth-test", "provider-se-4", ecdhKey, now, zerolog.Nop())
+	result := VerifyAttestationTokenExt(raw, cfg, challenge, "auth-test", "provider-se-4", ecdhKey, nil, now, zerolog.Nop())
 
 	if result.Status != pool.AttestationStatusFailed {
 		t.Fatalf("status=%q want failed on wrong SE signature", result.Status)

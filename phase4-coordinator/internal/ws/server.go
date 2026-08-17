@@ -209,6 +209,18 @@ type Server struct {
 	rewardsTrustSweepFailures sync.Map
 	// rewardsTrustStoreFailures preserves the all-lookups-failed outage guard.
 	rewardsTrustStoreFailures int
+
+	// liveMDA is the Phase 3 observe-mode MDA upgrade service (may be nil when
+	// MDM client is disabled or live_mda_enabled=false).
+	liveMDA liveMDAUpgrader
+}
+
+// liveMDAUpgrader is the minimal interface satisfied by mdm.LiveMDAService.
+// Using an interface allows the WS package to avoid a hard import of mdm
+// and keeps the wiring optional/nil-safe.
+type liveMDAUpgrader interface {
+	RequestAndMaybeUpgrade(providerID, assignedID, serial string)
+	AttachCachedMDAProof(providerID, assignedID string) bool
 }
 
 // TokenValidator handles inspection of a Bearer header on the WS connect.
@@ -644,6 +656,15 @@ func WithRegistryOptions(opts ...pool.RegistryOption) Option {
 		for _, opt := range opts {
 			opt(s.pool)
 		}
+	}
+}
+
+// WithLiveMDA injects a Phase 3 live MDA upgrade service. When set,
+// the server will call svc.RequestAndMaybeUpgrade in a goroutine after
+// successful SE attestation auth (observe mode; never blocks auth).
+func WithLiveMDA(svc liveMDAUpgrader) Option {
+	return func(s *Server) {
+		s.liveMDA = svc
 	}
 }
 
@@ -1984,7 +2005,12 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			}
 		}
 	}
-	attestResult := tier2.VerifyAttestationTokenExtWithCatalog(proof.AttestationToken, tier2Cfg, challengeBytes, authAttemptID, initial.ProviderID, initial.ProviderECDHPublicKey, entry.ModelID, s.catalogRef(), s.now(), s.log)
+	// For MDA attestation tokens: look up the provider's stored SE public key
+	// (from a prior SE auth) so verifyMDAFreshness can accept SHA256(sePublicKey)
+	// as the freshness nonce (Phase 3 MDM DeviceAttestationNonce mode).
+	// Nil when provider has no prior SE auth — falls back to legacy token-hash path.
+	storedSEKey := s.pool.ProviderSEPublicKey(initial.ProviderID)
+	attestResult := tier2.VerifyAttestationTokenExtWithCatalog(proof.AttestationToken, tier2Cfg, challengeBytes, authAttemptID, initial.ProviderID, initial.ProviderECDHPublicKey, entry.ModelID, s.catalogRef(), storedSEKey, s.now(), s.log)
 	attestationStatus := attestResult.Status
 	if tier2Cfg.RequireAttestation && attestationStatus != pool.AttestationStatusAttested {
 		s.sendAuthRejection(conn, string(attestationStatus), string(attestationStatus))
@@ -2057,6 +2083,9 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if attestResult.SEResult != nil {
 		entry.SEPublicKey = append([]byte(nil), attestResult.SEResult.SEPublicKey...)
 		entry.AttestationTier = pool.AttestationTierSelfSigned
+	}
+	if attestResult.MDAHardware {
+		entry.AttestationTier = pool.AttestationTierHardware
 	}
 	if len(initial.ProviderReceiptPubkey) > 0 {
 		entry.ReceiptPubkey = append([]byte(nil), initial.ProviderReceiptPubkey...)
@@ -2268,6 +2297,16 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		return "", ""
 	}
 	registered = true
+	// Phase 3 observe-mode: trigger live MDA upgrade asynchronously after
+	// SE attestation auth. Never blocks auth. Serial comes from the SE
+	// attestation blob when present (MicroMDM device lookup).
+	if s.liveMDA != nil && attestResult.SEResult != nil {
+		svc := s.liveMDA
+		provID := entry.ProviderID
+		assignID := entry.AssignedID
+		serial := attestResult.SEResult.SerialNumber
+		go svc.RequestAndMaybeUpgrade(provID, assignID, serial)
+	}
 	if reservedAdmission && entry.Tier == pool.TierProvisional {
 		s.admission.ReleasePendingProvisional()
 	}
