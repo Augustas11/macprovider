@@ -124,7 +124,14 @@ final class ProviderEarningsClientTests: XCTestCase {
               "wallet_bound": true,
               "daily_cap_malibu": "25",
               "wallet_daily_cap_malibu": "100",
-              "withdrawal_hold_reasons": ["trust_tier_provisional"]
+              "withdrawal_hold_reasons": ["trust_tier_provisional"],
+              "reward_eligibility": {
+                "schema_version": "malibu_reward_eligibility.v1",
+                "earning_state": "held",
+                "withdrawal_state": "held",
+                "primary_reason": "held_provisional_trust_tier",
+                "reasons": ["held_provisional_trust_tier"]
+              }
             }
             """.utf8)
         )
@@ -139,6 +146,7 @@ final class ProviderEarningsClientTests: XCTestCase {
         XCTAssertEqual(merged.malibuHoldReasons, ["trust_tier_provisional"])
         XCTAssertEqual(merged.malibuDailyCap, 25)
         XCTAssertEqual(merged.malibuWalletDailyCap, 100)
+        XCTAssertEqual(merged.malibuRewardEligibility?.primaryReason, "held_provisional_trust_tier")
         XCTAssertEqual(merged.idlePrewarm.skipsByReasonLast1h["model_not_loaded"], 3)
         XCTAssertTrue(merged.malibuProjectionFresh)
         XCTAssertFalse(merged.earningsProjectionFresh)

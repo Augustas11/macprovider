@@ -864,7 +864,14 @@ final class AgentSnapshotPresenterTests: XCTestCase {
           "malibu_held": 0.5,
           "malibu_hold_reasons": ["per_wallet_daily_cap"],
           "malibu_daily_cap": 25,
-          "malibu_wallet_daily_cap": 100
+          "malibu_wallet_daily_cap": 100,
+          "malibu_reward_eligibility": {
+            "schema_version": "malibu_reward_eligibility.v1",
+            "earning_state": "capped",
+            "withdrawal_state": "capped",
+            "primary_reason": "held_wallet_daily_cap",
+            "reasons": ["held_wallet_daily_cap"]
+          }
         }
         """.utf8)
         let decoded = try JSONDecoder().decode(ProviderEarnings.self, from: data)
@@ -877,6 +884,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(decoded.malibuHoldReasons, ["per_wallet_daily_cap"])
         XCTAssertEqual(decoded.malibuDailyCap, 25)
         XCTAssertEqual(decoded.malibuWalletDailyCap, 100)
+        XCTAssertEqual(decoded.malibuRewardEligibility?.primaryReason, "held_wallet_daily_cap")
         XCTAssertFalse(decoded.malibuProjectionFresh)
         XCTAssertFalse(decoded.earningsProjectionFresh)
     }

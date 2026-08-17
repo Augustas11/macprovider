@@ -1,0 +1,302 @@
+package rewards
+
+import "strconv"
+
+const MalibuRewardEligibilitySchemaV1 = "malibu_reward_eligibility.v1"
+
+const (
+	EarningStateEarning      = "earning"
+	EarningStateEligibleIdle = "eligible_idle"
+	EarningStateHeld         = "held"
+	EarningStateCapped       = "capped"
+	EarningStateIneligible   = "ineligible"
+	EarningStateUnavailable  = "unavailable"
+)
+
+const (
+	WithdrawalStateWithdrawable = "withdrawable"
+	WithdrawalStateHeld         = "held"
+	WithdrawalStateCapped       = "capped"
+	WithdrawalStateIneligible   = "ineligible"
+	WithdrawalStateUnavailable  = "unavailable"
+)
+
+const (
+	ReasonEarningVerifiedWork              = "earning_verified_work"
+	ReasonEligibleIdleNoWork               = "eligible_idle_no_work"
+	ReasonHeldProvisionalTrustTier         = "held_provisional_trust_tier"
+	ReasonHeldWalletDailyCap               = "held_wallet_daily_cap"
+	ReasonHeldDemotionCooldown             = "held_demotion_cooldown"
+	ReasonWithdrawableBalanceAvailable     = "withdrawable_balance_available"
+	ReasonWithdrawableNoBalance            = "withdrawable_no_balance"
+	ReasonMissingWalletBinding             = "missing_wallet_binding"
+	ReasonInsufficientVerifiedReceipts     = "insufficient_verified_receipts"
+	ReasonAppAttestationMissing            = "app_attestation_missing"
+	ReasonHardwareEvidenceUnavailable      = "hardware_evidence_unavailable"
+	ReasonHardwareEvidenceMissingOrExpired = "hardware_evidence_missing_or_expired"
+	ReasonComputeIntegrityUnavailable      = "compute_integrity_unavailable"
+	ReasonComputeIntegrityPending          = "compute_integrity_pending"
+	ReasonComputeIntegrityBlocked          = "compute_integrity_blocked"
+	ReasonProviderTokenUntrusted           = "provider_token_untrusted"
+	ReasonLocalOnBattery                   = "local_on_battery"
+	ReasonLocalThermalPressure             = "local_thermal_pressure"
+	ReasonModelNotReady                    = "model_not_ready"
+	ReasonTelemetryUnavailable             = "telemetry_unavailable"
+)
+
+const (
+	ComputeIntegrityStateUnknown                 = "unknown"
+	ComputeIntegrityStatePending                 = "pending"
+	ComputeIntegrityStateVerified                = "verified"
+	ComputeIntegrityStateWarn                    = "warn"
+	ComputeIntegrityStateExpired                 = "expired"
+	ComputeIntegrityStateQuarantinedComputeDrift = "quarantined_compute_drift"
+)
+
+const (
+	HardwareEvidenceStateUnavailable = "unavailable"
+	HardwareEvidenceStateVerified    = "verified"
+	HardwareEvidenceStateMissing     = "missing"
+	HardwareEvidenceStateExpired     = "expired"
+)
+
+// MalibuRewardEligibilityReadModel is the provider-facing, coordinator-owned
+// reason model returned by GET /v1/provider/malibu-accrual.
+type MalibuRewardEligibilityReadModel struct {
+	SchemaVersion   string   `json:"schema_version"`
+	EarningState    string   `json:"earning_state"`
+	WithdrawalState string   `json:"withdrawal_state"`
+	PrimaryReason   string   `json:"primary_reason"`
+	Reasons         []string `json:"reasons"`
+}
+
+// MalibuRewardEligibilityFacts contains policy facts from their owning systems.
+// The accrual endpoint currently fills the ledger/trust subset; the remaining
+// fields are the future extension points for runtime-health, hardware-evidence,
+// and compute-integrity owners without changing the response shape.
+type MalibuRewardEligibilityFacts struct {
+	AccruedMALIBU          string
+	WithdrawableMALIBU     string
+	HeldMALIBU             string
+	TrustTier              string
+	WithdrawalHoldReasons  []string
+	WalletBound            bool
+	VerifiedReceiptCount   int
+	AppAttested            bool
+	LocalRuntimeReasons    []string
+	TelemetryUnavailable   bool
+	HardwareEvidenceState  string
+	ComputeIntegrityState  string
+	ProviderTokenUntrusted bool
+}
+
+func RewardEligibilityFromBalanceAndTrust(bal AccrualBalance, trust TrustCriteriaStatus) MalibuRewardEligibilityReadModel {
+	return BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
+		AccruedMALIBU:         bal.AccruedMALIBU,
+		WithdrawableMALIBU:    bal.WithdrawableMALIBU,
+		HeldMALIBU:            bal.HeldMALIBU,
+		TrustTier:             bal.TrustTier,
+		WithdrawalHoldReasons: bal.HoldReasons,
+		WalletBound:           trust.WalletBound,
+		VerifiedReceiptCount:  trust.VerifiedReceiptCount,
+		AppAttested:           trust.AppAttested,
+	})
+}
+
+func BuildMalibuRewardEligibility(f MalibuRewardEligibilityFacts) MalibuRewardEligibilityReadModel {
+	reasons := orderedRewardReasons(f)
+	earningState := earningStateFor(f, reasons)
+	withdrawalState := withdrawalStateFor(f, reasons)
+	primary := primaryRewardReason(withdrawalState, earningState, reasons)
+	return MalibuRewardEligibilityReadModel{
+		SchemaVersion:   MalibuRewardEligibilitySchemaV1,
+		EarningState:    earningState,
+		WithdrawalState: withdrawalState,
+		PrimaryReason:   primary,
+		Reasons:         reasons,
+	}
+}
+
+func orderedRewardReasons(f MalibuRewardEligibilityFacts) []string {
+	out := make([]string, 0, 8)
+	add := func(reason string) {
+		if reason == "" {
+			return
+		}
+		for _, existing := range out {
+			if existing == reason {
+				return
+			}
+		}
+		out = append(out, reason)
+	}
+
+	if f.ProviderTokenUntrusted {
+		add(ReasonProviderTokenUntrusted)
+	}
+	switch {
+	case computeIntegrityBlocked(f.ComputeIntegrityState):
+		add(ReasonComputeIntegrityBlocked)
+	case f.ComputeIntegrityState == ComputeIntegrityStatePending:
+		add(ReasonComputeIntegrityPending)
+	case f.ComputeIntegrityState == ComputeIntegrityStateUnknown ||
+		f.ComputeIntegrityState == ComputeIntegrityStateExpired:
+		add(ReasonComputeIntegrityUnavailable)
+	}
+	switch f.HardwareEvidenceState {
+	case HardwareEvidenceStateMissing, HardwareEvidenceStateExpired:
+		add(ReasonHardwareEvidenceMissingOrExpired)
+	case HardwareEvidenceStateUnavailable:
+		add(ReasonHardwareEvidenceUnavailable)
+	}
+
+	for _, hold := range f.WithdrawalHoldReasons {
+		switch hold {
+		case HoldPerWalletDailyCap:
+			add(ReasonHeldWalletDailyCap)
+		case HoldDemotionCooldown:
+			add(ReasonHeldDemotionCooldown)
+		case HoldTrustTierProvisional:
+			add(ReasonHeldProvisionalTrustTier)
+		}
+	}
+
+	if !f.WalletBound {
+		add(ReasonMissingWalletBinding)
+	}
+	if f.VerifiedReceiptCount < minVerifiedReceipts {
+		add(ReasonInsufficientVerifiedReceipts)
+	}
+	if !f.AppAttested {
+		add(ReasonAppAttestationMissing)
+	}
+
+	for _, reason := range f.LocalRuntimeReasons {
+		switch reason {
+		case ReasonLocalOnBattery, ReasonLocalThermalPressure, ReasonModelNotReady,
+			ReasonEarningVerifiedWork, ReasonEligibleIdleNoWork:
+			add(reason)
+		}
+	}
+	if f.TelemetryUnavailable {
+		add(ReasonTelemetryUnavailable)
+	}
+
+	if decimalPositive(f.WithdrawableMALIBU) {
+		add(ReasonWithdrawableBalanceAvailable)
+	} else if !decimalPositive(f.HeldMALIBU) {
+		add(ReasonWithdrawableNoBalance)
+	}
+	return out
+}
+
+func earningStateFor(f MalibuRewardEligibilityFacts, reasons []string) string {
+	if containsReason(reasons, ReasonProviderTokenUntrusted) ||
+		containsReason(reasons, ReasonComputeIntegrityBlocked) ||
+		containsReason(reasons, ReasonHardwareEvidenceMissingOrExpired) {
+		return EarningStateIneligible
+	}
+	if containsReason(reasons, ReasonComputeIntegrityPending) ||
+		containsReason(reasons, ReasonComputeIntegrityUnavailable) ||
+		containsReason(reasons, ReasonHardwareEvidenceUnavailable) {
+		return EarningStateUnavailable
+	}
+	if containsReason(reasons, ReasonLocalOnBattery) ||
+		containsReason(reasons, ReasonLocalThermalPressure) ||
+		containsReason(reasons, ReasonModelNotReady) {
+		return EarningStateIneligible
+	}
+	if containsReason(reasons, ReasonHeldWalletDailyCap) {
+		return EarningStateCapped
+	}
+	if containsReason(reasons, ReasonHeldProvisionalTrustTier) ||
+		containsReason(reasons, ReasonHeldDemotionCooldown) {
+		return EarningStateHeld
+	}
+	if containsReason(reasons, ReasonEarningVerifiedWork) {
+		return EarningStateEarning
+	}
+	if f.TelemetryUnavailable {
+		return EarningStateUnavailable
+	}
+	return EarningStateEligibleIdle
+}
+
+func withdrawalStateFor(f MalibuRewardEligibilityFacts, reasons []string) string {
+	if containsReason(reasons, ReasonProviderTokenUntrusted) {
+		return WithdrawalStateIneligible
+	}
+	if containsReason(reasons, ReasonHeldWalletDailyCap) {
+		return WithdrawalStateCapped
+	}
+	if containsReason(reasons, ReasonHeldProvisionalTrustTier) ||
+		containsReason(reasons, ReasonHeldDemotionCooldown) {
+		return WithdrawalStateHeld
+	}
+	if decimalPositive(f.WithdrawableMALIBU) {
+		return WithdrawalStateWithdrawable
+	}
+	return WithdrawalStateIneligible
+}
+
+func primaryRewardReason(withdrawalState, earningState string, reasons []string) string {
+	priority := []string{
+		ReasonProviderTokenUntrusted,
+		ReasonComputeIntegrityBlocked,
+		ReasonComputeIntegrityPending,
+		ReasonHardwareEvidenceMissingOrExpired,
+		ReasonHardwareEvidenceUnavailable,
+		ReasonHeldWalletDailyCap,
+		ReasonHeldDemotionCooldown,
+		ReasonHeldProvisionalTrustTier,
+		ReasonLocalOnBattery,
+		ReasonLocalThermalPressure,
+		ReasonModelNotReady,
+		ReasonEarningVerifiedWork,
+		ReasonWithdrawableBalanceAvailable,
+		ReasonMissingWalletBinding,
+		ReasonInsufficientVerifiedReceipts,
+		ReasonAppAttestationMissing,
+		ReasonTelemetryUnavailable,
+		ReasonEligibleIdleNoWork,
+		ReasonWithdrawableNoBalance,
+	}
+	for _, candidate := range priority {
+		if containsReason(reasons, candidate) {
+			return candidate
+		}
+	}
+	if withdrawalState == WithdrawalStateWithdrawable {
+		return ReasonWithdrawableBalanceAvailable
+	}
+	if earningState == EarningStateEligibleIdle {
+		return ReasonEligibleIdleNoWork
+	}
+	return ReasonTelemetryUnavailable
+}
+
+func computeIntegrityBlocked(state string) bool {
+	return state == ComputeIntegrityStateQuarantinedComputeDrift || hasBlockedPrefix(state)
+}
+
+func hasBlockedPrefix(state string) bool {
+	const prefix = "blocked:"
+	return len(state) > len(prefix) && state[:len(prefix)] == prefix
+}
+
+func containsReason(reasons []string, reason string) bool {
+	for _, r := range reasons {
+		if r == reason {
+			return true
+		}
+	}
+	return false
+}
+
+func decimalPositive(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	return err == nil && v > 0
+}

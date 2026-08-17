@@ -66,6 +66,7 @@ func NewAccrualHandler(deps AccrualHandlerDeps) http.Handler {
 			_, _ = w.Write([]byte(`{"error":"internal_error"}` + "\n"))
 			return
 		}
+		eligibility := RewardEligibilityFromBalanceAndTrust(bal, trust)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -84,6 +85,7 @@ func NewAccrualHandler(deps AccrualHandlerDeps) http.Handler {
 			"verified_receipt_count":  trust.VerifiedReceiptCount,
 			"wallet_bound":            trust.WalletBound,
 			"app_attested":            trust.AppAttested,
+			"reward_eligibility":      eligibility,
 		})
 	})
 }

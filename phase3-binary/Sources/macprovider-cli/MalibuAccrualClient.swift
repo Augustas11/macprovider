@@ -1,5 +1,22 @@
 import Foundation
 
+/// Coordinator-owned MALIBU reward eligibility reason model.
+public struct MalibuRewardEligibility: Codable, Equatable, Sendable {
+    public let schemaVersion: String
+    public let earningState: String
+    public let withdrawalState: String
+    public let primaryReason: String
+    public let reasons: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case earningState = "earning_state"
+        case withdrawalState = "withdrawal_state"
+        case primaryReason = "primary_reason"
+        case reasons
+    }
+}
+
 /// Provider-facing MALIBU accrual read model from GET /v1/provider/malibu-accrual.
 struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
     let accruedMALIBU: Double
@@ -12,6 +29,7 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
     let dailyCapMALIBU: Double?
     let walletDailyCapMALIBU: Double?
     let withdrawalHoldReasons: [String]
+    let rewardEligibility: MalibuRewardEligibility?
 
     enum CodingKeys: String, CodingKey {
         case accruedMALIBU = "accrued_malibu"
@@ -24,6 +42,7 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
         case dailyCapMALIBU = "daily_cap_malibu"
         case walletDailyCapMALIBU = "wallet_daily_cap_malibu"
         case withdrawalHoldReasons = "withdrawal_hold_reasons"
+        case rewardEligibility = "reward_eligibility"
     }
 
     init(from decoder: Decoder) throws {
@@ -46,6 +65,7 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
         dailyCapMALIBU = try Self.decodeOptionalDecimal(c, key: .dailyCapMALIBU)
         walletDailyCapMALIBU = try Self.decodeOptionalDecimal(c, key: .walletDailyCapMALIBU)
         withdrawalHoldReasons = try c.decodeIfPresent([String].self, forKey: .withdrawalHoldReasons) ?? []
+        rewardEligibility = try c.decodeIfPresent(MalibuRewardEligibility.self, forKey: .rewardEligibility)
     }
 
     private static func decodeRequiredDecimal(

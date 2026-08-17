@@ -50,6 +50,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
     public let malibuHoldReasons: [String]
     public let malibuDailyCap: Double?
     public let malibuWalletDailyCap: Double?
+    public let malibuRewardEligibility: MalibuRewardEligibility?
     /// Last-hour idle-prewarm event/skip counts, used to explain why a
     /// serving provider is not currently earning (on battery, thermal
     /// throttle, model not loaded). Display-only.
@@ -79,6 +80,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         case malibuHoldReasons = "malibu_hold_reasons"
         case malibuDailyCap = "malibu_daily_cap"
         case malibuWalletDailyCap = "malibu_wallet_daily_cap"
+        case malibuRewardEligibility = "malibu_reward_eligibility"
         case idlePrewarm = "idle_prewarm"
         case malibuProjectionFresh = "malibu_projection_fresh"
         case earningsProjectionFresh = "earnings_projection_fresh"
@@ -109,6 +111,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         malibuHoldReasons = try container.decodeIfPresent([String].self, forKey: .malibuHoldReasons) ?? []
         malibuDailyCap = try container.decodeIfPresent(Double.self, forKey: .malibuDailyCap)
         malibuWalletDailyCap = try container.decodeIfPresent(Double.self, forKey: .malibuWalletDailyCap)
+        malibuRewardEligibility = try container.decodeIfPresent(
+            MalibuRewardEligibility.self,
+            forKey: .malibuRewardEligibility
+        )
         idlePrewarm = try container.decodeIfPresent(
             ProviderIdlePrewarmSummary.self,
             forKey: .idlePrewarm
@@ -135,6 +141,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         malibuHoldReasons: [String] = [],
         malibuDailyCap: Double? = nil,
         malibuWalletDailyCap: Double? = nil,
+        malibuRewardEligibility: MalibuRewardEligibility? = nil,
         idlePrewarm: ProviderIdlePrewarmSummary = .empty,
         malibuProjectionFresh: Bool = false,
         earningsProjectionFresh: Bool = false
@@ -156,6 +163,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         self.malibuHoldReasons = malibuHoldReasons
         self.malibuDailyCap = malibuDailyCap
         self.malibuWalletDailyCap = malibuWalletDailyCap
+        self.malibuRewardEligibility = malibuRewardEligibility
         self.idlePrewarm = idlePrewarm
         self.malibuProjectionFresh = malibuProjectionFresh
         self.earningsProjectionFresh = earningsProjectionFresh
@@ -180,6 +188,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuHoldReasons: malibuHoldReasons,
             malibuDailyCap: malibuDailyCap,
             malibuWalletDailyCap: malibuWalletDailyCap,
+            malibuRewardEligibility: nil,
             idlePrewarm: idlePrewarm,
             malibuProjectionFresh: false,
             earningsProjectionFresh: true
@@ -205,6 +214,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuHoldReasons: accrual.withdrawalHoldReasons,
             malibuDailyCap: accrual.dailyCapMALIBU,
             malibuWalletDailyCap: accrual.walletDailyCapMALIBU,
+            malibuRewardEligibility: accrual.rewardEligibility,
             idlePrewarm: idlePrewarm,
             malibuProjectionFresh: true,
             earningsProjectionFresh: earningsProjectionFresh
@@ -230,6 +240,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuHoldReasons: accrual.withdrawalHoldReasons,
             malibuDailyCap: accrual.dailyCapMALIBU,
             malibuWalletDailyCap: accrual.walletDailyCapMALIBU,
+            malibuRewardEligibility: accrual.rewardEligibility,
             idlePrewarm: .empty,
             malibuProjectionFresh: true,
             earningsProjectionFresh: false

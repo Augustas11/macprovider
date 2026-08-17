@@ -25,7 +25,14 @@ final class MalibuAccrualClientTests: XCTestCase {
           "wallet_bound": true,
           "daily_cap_malibu": "25",
           "wallet_daily_cap_malibu": 100,
-          "withdrawal_hold_reasons": ["trust_tier_provisional"]
+          "withdrawal_hold_reasons": ["trust_tier_provisional"],
+          "reward_eligibility": {
+            "schema_version": "malibu_reward_eligibility.v1",
+            "earning_state": "held",
+            "withdrawal_state": "held",
+            "primary_reason": "held_provisional_trust_tier",
+            "reasons": ["held_provisional_trust_tier"]
+          }
         }
         """.data(using: .utf8)!
         let summary = try JSONDecoder().decode(MalibuAccrualSummary.self, from: json)
@@ -39,6 +46,8 @@ final class MalibuAccrualClientTests: XCTestCase {
         XCTAssertEqual(summary.dailyCapMALIBU, 25)
         XCTAssertEqual(summary.walletDailyCapMALIBU, 100)
         XCTAssertEqual(summary.withdrawalHoldReasons, ["trust_tier_provisional"])
+        XCTAssertEqual(summary.rewardEligibility?.schemaVersion, "malibu_reward_eligibility.v1")
+        XCTAssertEqual(summary.rewardEligibility?.primaryReason, "held_provisional_trust_tier")
     }
 
     func testMissingRequiredAmountFailsClosed() {

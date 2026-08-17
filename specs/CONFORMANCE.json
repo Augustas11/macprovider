@@ -591,7 +591,7 @@
     {
       "spec_id": "SPEC-021",
       "title": "MALIBU bootstrap rewards emission ledger",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "path": "specs/SPEC-021-malibu-emission-ledger.md",
       "status": "draft",
       "owner": "@Augustas11",

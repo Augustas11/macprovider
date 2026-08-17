@@ -50,6 +50,7 @@ struct AgentSnapshot: Equatable {
     var malibuHoldReasons: [String]
     var malibuDailyCap: Double?
     var malibuWalletDailyCap: Double?
+    var malibuRewardEligibility: MalibuRewardEligibility?
     /// Last-hour idle-prewarm event/skip counts from the provider earnings
     /// endpoint. Gated by `providerEarningsFresh`, same as the other fields
     /// sourced from that projection.
@@ -315,6 +316,7 @@ struct AgentSnapshot: Equatable {
         malibuHoldReasons: [],
         malibuDailyCap: nil,
         malibuWalletDailyCap: nil,
+        malibuRewardEligibility: nil,
         providerEarningsFresh: false,
         malibuProjectionFresh: false,
         gpuUtilizationPct: nil,

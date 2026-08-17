@@ -29,7 +29,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.7 | normative | pending | conformant: 1, pending: 1 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.5 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.11 | normative | pending | pending: 4 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
-| SPEC-021 | MALIBU bootstrap rewards emission ledger | 0.1.0 | draft | pending | pending corpus migration | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
+| SPEC-021 | MALIBU bootstrap rewards emission ledger | 0.1.1 | draft | pending | pending corpus migration | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
 | SPEC-022 | Verified model settlement | v0.1.7 | draft | complete | pending: 11 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.9.3 | normative | pending | conformant: 2 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.1 | normative | pending | pending corpus migration | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
