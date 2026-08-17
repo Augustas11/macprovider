@@ -1,7 +1,15 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.3 (2026-08-17, preliminary paid-path conformance unit ID; LOCKED settlement-capable receipt profile for SPEC-022 otherwise unchanged)
+**Version:** 0.4.4 (2026-08-17, issue #1010 — compute-integrity digest binding decision; LOCKED settlement-capable receipt profile for SPEC-022 otherwise unchanged)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 candidate `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.3 (settlement/accounting semantics; v0.4+ chargeability successor expected for terminal-state rows), SPEC-006 v0.9, SPEC-008 v0.3 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.5, SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3, SPEC-022 v0.1.4 (hard — settlement-capable receipt profile consumer)
+
+**Change log v0.4.4 (2026-08-17, issue #1010 — compute-integrity digest binding decision):**
+- Closes the SPEC-015 side of #1010. Request-start compute-integrity state
+  digests remain outside the v0.4 signed tuple and strict `usage` object. If
+  externally reviewable compute-integrity binding is needed, it belongs in a
+  separate SPEC-036 audit artifact keyed to the same request attempt and
+  receipt tuple. A future SPEC-015 successor may reference that artifact only by
+  defining a new `receipt_version`; v0.4 MUST NOT gain optional digest fields.
 
 **Change log v0.4.3 (2026-08-17, issue #614 — preliminary paid-path conformance unit ID):**
 - Registers `SPEC-015-R001` in `specs/CONFORMANCE.json` as a pending
@@ -802,7 +810,7 @@ superseded by v0.1.1/v0.1.2):**
 
 ## Preliminary conformance unit IDs
 
-SPEC-015 v0.4.3 registers `SPEC-015-R001` in `specs/CONFORMANCE.json` as a
+SPEC-015 v0.4.4 registers `SPEC-015-R001` in `specs/CONFORMANCE.json` as a
 pending preliminary conformance anchor. This ID groups the existing v0.4
 settlement-capable receipt issuance and ingestion obligations without
 changing them.
@@ -4202,6 +4210,29 @@ local model-hash measurement before reporting it. That boundary remains
 outside SPEC-015 without hardware/runtime attestation. Product and
 buyer-facing language MUST NOT claim more than this.
 
+### §N.10.1 Compute-integrity digest binding decision
+
+SPEC-015 v0.4 receipts MUST NOT include request-start compute-integrity state
+digests, sampler state, SPEC-036 policy digests, probe/reference digests, or
+SPEC-036 audit-artifact digests in the signed tuple or strict `usage` object.
+Any such field in a `receipt_version: "4"` tuple is an extra field under §N.1
+and AC-43.
+
+This is deliberate. SPEC-015 v0.4 proves settlement tuple integrity and
+provider receipt-key accountability. SPEC-036 compute integrity is
+coordinator-owned sampled/overt drift evidence and may narrow settlement only
+through the SPEC-022/SPEC-036 policy gate. A v0.4 verifier MUST NOT infer
+compute-integrity state, adverse-state absence, or proof of honest computation
+from the receipt alone.
+
+If externally reviewable request-start compute-integrity binding is required,
+the compatible path is a separate SPEC-036 audit artifact keyed to the same
+account/request/attempt/provider, route-snapshot digest, and digest of the
+provider-signed SPEC-015 tuple. That artifact is not itself a SPEC-015 receipt
+and is not required for v0.4 receipt validity. A future SPEC-015 successor MAY
+reference a SPEC-036 artifact digest only by defining a new `receipt_version`
+and verifier behavior; it MUST NOT be added as an optional v0.4 field.
+
 ### §N.11 Acceptance criteria
 
 The v0.4 implementation MUST satisfy these acceptance criteria before
@@ -4757,6 +4788,15 @@ to (`first_hash`, `last_hash`) or to (`hash_per_chunk_range`)?
 How does the verifier compose multiple catalog lookups under
 a single tuple? Is the wire-shape extension a new
 `receipt_version: "5"` or a separate multi-segment profile?
+
+**Q8: Compute-integrity request-start state digest binding. RESOLVED for
+v0.4 by #1010.** §N.10.1 keeps SPEC-036 request-start state digests outside
+the v0.4 signed tuple and strict `usage` object. The accepted compatible path is
+a separate SPEC-036 audit artifact keyed to the same request attempt and digest
+of the provider-signed SPEC-015 tuple. A future SPEC-015 successor MAY reference
+that artifact digest only through a new `receipt_version`; v0.4 MUST NOT grow
+optional compute-integrity fields. External v0.4 verifiers continue to reject
+extra fields and to classify unknown future versions as inconclusive.
 
 ---
 
