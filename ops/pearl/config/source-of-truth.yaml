@@ -485,6 +485,37 @@ pearl_overlay_classifications:
     category: Evidence
     classification: overlay-owned Pearl production setting
     expected_type: number
+  - path: tier2.mdm.enrollment_base_url
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path: tier2.mdm.push_topic
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path: tier2.mdm.api_url
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path: tier2.mdm.api_token
+    owner: pearl_operator_secrets
+    category: Evidence
+    classification: secrets/env-owned setting
+    require_env_reference: true
+    message: live MicroMDM API token reference is classified; value=<MASKED>
+  - path: tier2.mdm.live_mda_enabled
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: boolean
+  - path: tier2.mdm.mda_refresh_interval_hours
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
 
 provider_rows:
   tracked_static_provider_ids:
@@ -530,6 +561,7 @@ env_key_names:
     - OPERATOR_KEY
     - COORDINATOR_PARTNER_KEYS_ADMIN_DSN
     - MAL_REFERRAL_HMAC_K1
+    - MICROMDM_API_TOKEN
     - STATS_PARTNER_KEYS_WRITER_DSN
     - STATS_READER_DSN
     - STATS_ROLLUP_DSN

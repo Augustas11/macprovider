@@ -301,6 +301,7 @@ tier2:
   #   # live_mda_enabled: false          # flip to true after APNs cert + MicroMDM deploy
   #   # mda_refresh_interval_hours: 168  # 7 days default; when live_mda_enabled, values below 168 are clamped to 168
   #   # command_webhook_secret: "env:MICROMDM_COMMAND_WEBHOOK_SECRET"
+  #   # MicroMDM list-devices is POST /v1/devices (GET 404s).
   #   # MicroMDM: -command-webhook-url http://127.0.0.1:8444/internal/mdm/command-webhook
   #   # (loopback OK without secret; set secret + X-MDM-Webhook-Secret if not loopback)
 

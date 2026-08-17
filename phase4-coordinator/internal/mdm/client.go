@@ -64,11 +64,13 @@ type listDevicesResponse struct {
 }
 
 // ListDevices returns all devices enrolled in MicroMDM.
+// MicroMDM's HTTP API only accepts POST /v1/devices (GET is 404).
 func (c *Client) ListDevices(ctx context.Context) ([]Device, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, "/v1/devices", nil)
+	req, err := c.newRequest(ctx, http.MethodPost, "/v1/devices", bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	var resp listDevicesResponse
 	if err := c.doJSON(req, &resp); err != nil {
 		return nil, fmt.Errorf("mdm list devices: %w", err)

@@ -31,6 +31,12 @@ func TestListDevices(t *testing.T) {
 		if r.URL.Path != "/v1/devices" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method %q want POST", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); !strings.Contains(ct, "json") {
+			t.Errorf("Content-Type=%q want json", ct)
+		}
 		user, pass, ok := r.BasicAuth()
 		if !ok || user != "micromdm" || pass != "test-token" {
 			t.Errorf("bad basic auth: user=%q pass=%q ok=%v", user, pass, ok)
