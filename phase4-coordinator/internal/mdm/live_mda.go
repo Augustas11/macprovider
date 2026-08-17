@@ -636,10 +636,28 @@ func (s *LiveMDAService) HandleMDACommandWebhook(w http.ResponseWriter, r *http.
 		http.Error(w, "se key mismatch", http.StatusForbidden)
 		return
 	}
-	if !s.verifyAndUpgrade(pending.ProviderID, pending.AssignedID, result.CertificateChain, sePub, seKeyHash[:]) {
+	// R5-M1: durable pending may store a stale AssignedID from before reconnect.
+	// Authority is provider_id + current SE key; upgrade the live session ID.
+	current, found := s.pool.Resolve(pending.ProviderID, "")
+	if !found || strings.TrimSpace(current.AssignedID) == "" {
+		s.log.Warn().Str("provider_id", pending.ProviderID).Msg("live_mda: webhook upgrade skipped — no current session")
+		s.recordPending(pending.UDID, pending.CommandUUID, pending)
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	currentAssignedID := current.AssignedID
+	if pending.AssignedID != "" && pending.AssignedID != currentAssignedID {
+		s.log.Info().
+			Str("provider_id", pending.ProviderID).
+			Str("pending_assigned_id", pending.AssignedID).
+			Str("current_assigned_id", currentAssignedID).
+			Msg("live_mda: webhook using current AssignedID after reconnect (stale pending session)")
+	}
+	if !s.verifyAndUpgrade(pending.ProviderID, currentAssignedID, result.CertificateChain, sePub, seKeyHash[:]) {
 		s.log.Warn().
 			Str("provider_id", pending.ProviderID).
 			Str("udid", udid).
+			Str("assigned_id", currentAssignedID).
 			Msg("live_mda: webhook chain verify/upgrade failed")
 		s.markEnqueueFailed(pending)
 		http.Error(w, "verify failed", http.StatusUnprocessableEntity)
@@ -651,6 +669,7 @@ func (s *LiveMDAService) HandleMDACommandWebhook(w http.ResponseWriter, r *http.
 		Str("udid", udid).
 		Str("serial", mdaSerial).
 		Str("command_uuid", commandUUID).
+		Str("assigned_id", currentAssignedID).
 		Msg("live_mda: webhook upgrade succeeded")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -837,12 +856,13 @@ func serialEqualFold(a, b string) bool {
 }
 
 // tryUpgradeFromCache checks whether the pool already holds a valid, fresh MDA
-// proof bound to the current SE key. Returns true and upgrades if so.
-// On expiry or failed re-verification, clears the proof and downgrades
-// hardware → self_signed (ARCH-M2).
+// proof bound to the current SE key and current device-binding serial.
+// Returns true and upgrades if so. On expiry, binding mismatch, or failed
+// re-verification, clears the proof (when appropriate) and downgrades
+// hardware → self_signed (ARCH-M2 / R5-M2).
 func (s *LiveMDAService) tryUpgradeFromCache(ctx context.Context, providerID, assignedID string, sePub, seKeyHash []byte) bool {
 	_ = ctx
-	chain, verifiedAt, boundHash, ok := s.pool.MDAProof(providerID)
+	chain, verifiedAt, boundHash, storedSerial, ok := s.pool.MDAProof(providerID)
 	if !ok || len(chain) == 0 {
 		return false
 	}
@@ -864,9 +884,48 @@ func (s *LiveMDAService) tryUpgradeFromCache(ctx context.Context, providerID, as
 		s.clearMDAProof(providerID, assignedID)
 		return false
 	}
+	// R5-M2: require current durable binding serial to match proof serial.
+	if !s.cachedProofMatchesBinding(providerID, assignedID, chain, storedSerial) {
+		return false
+	}
 	// Re-verify chain freshness in-process without a new MDM round-trip.
 	if !s.verifyAndUpgrade(providerID, assignedID, chain, sePub, seKeyHash) {
 		s.log.Info().Str("provider_id", providerID).Msg("live_mda: cached MDA re-verify failed — clearing proof")
+		s.clearMDAProof(providerID, assignedID)
+		return false
+	}
+	return true
+}
+
+// cachedProofMatchesBinding requires a current device binding whose serial
+// matches the MDA leaf serial (preferred) or stored proof serial (R5-M2).
+// Binding absent → refuse upgrade, leave cache. Serial mismatch → clear proof.
+func (s *LiveMDAService) cachedProofMatchesBinding(providerID, assignedID string, chain [][]byte, storedSerial string) bool {
+	if s.bindings == nil {
+		s.log.Info().Str("provider_id", providerID).Msg("live_mda: no binding store — refusing cached hardware upgrade")
+		return false
+	}
+	binding, ok := s.bindings.LookupByProvider(providerID)
+	if !ok || strings.TrimSpace(binding.Serial) == "" {
+		s.log.Info().
+			Str("provider_id", providerID).
+			Msg("live_mda: no device binding — refusing cached hardware upgrade")
+		return false
+	}
+	proofSerial := strings.TrimSpace(storedSerial)
+	if len(chain) > 0 {
+		if leaf, err := x509.ParseCertificate(chain[0]); err == nil {
+			if sn := tier2.ExtractMDASerialNumber(leaf); sn != "" {
+				proofSerial = sn
+			}
+		}
+	}
+	if proofSerial == "" || !serialEqualFold(proofSerial, binding.Serial) {
+		s.log.Warn().
+			Str("provider_id", providerID).
+			Str("binding_serial", binding.Serial).
+			Str("proof_serial", proofSerial).
+			Msg("live_mda: cached MDA serial does not match device binding — clearing proof")
 		s.clearMDAProof(providerID, assignedID)
 		return false
 	}
@@ -907,21 +966,29 @@ func (s *LiveMDAService) verifyAndUpgrade(providerID, assignedID string, chain [
 		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: seKeyHash mismatch")
 		return false
 	}
-	if !s.pool.SetMDAProof(providerID, assignedID, chain, h[:], now) {
+	proofSerial := tier2.ExtractMDASerialNumber(leaf)
+	persistSerial := proofSerial
+	if s.bindings != nil {
+		if binding, ok := s.bindings.LookupByProvider(providerID); ok && strings.TrimSpace(binding.Serial) != "" {
+			persistSerial = binding.Serial
+		}
+	}
+	if persistSerial == "" {
+		persistSerial = proofSerial
+	}
+	poolSerial := proofSerial
+	if poolSerial == "" {
+		poolSerial = persistSerial
+	}
+	if !s.pool.SetMDAProof(providerID, assignedID, chain, h[:], now, poolSerial) {
 		s.log.Warn().Str("provider_id", providerID).Msg("live_mda: SetMDAProof: provider not found (reconnect race?)")
 		return false
 	}
-	serial := ""
-	if binding, ok := s.bindings.LookupByProvider(providerID); ok {
-		serial = binding.Serial
-	}
-	if serial == "" {
-		serial = tier2.ExtractMDASerialNumber(leaf)
-	}
-	s.persistMDAProof(providerID, serial, chain, h[:], now)
+	s.persistMDAProof(providerID, persistSerial, chain, h[:], now)
 	s.log.Info().
 		Str("provider_id", providerID).
 		Str("attestation_tier", pool.AttestationTierHardware).
+		Str("serial", poolSerial).
 		Msg("live_mda: attestation_tier upgraded to hardware")
 	return true
 }
@@ -964,7 +1031,7 @@ func (s *LiveMDAService) hydrateDurableProof(ctx context.Context, providerID, as
 	if s.store == nil {
 		return
 	}
-	if _, _, _, ok := s.pool.MDAProof(providerID); ok {
+	if _, _, _, _, ok := s.pool.MDAProof(providerID); ok {
 		return
 	}
 	rec, ok, err := s.store.LoadProof(ctx, providerID)
@@ -975,7 +1042,7 @@ func (s *LiveMDAService) hydrateDurableProof(ctx context.Context, providerID, as
 	if !ok || len(rec.MDACertChain) == 0 {
 		return
 	}
-	if !s.pool.LoadMDAProofCache(providerID, assignedID, rec.MDACertChain, rec.BoundSEKeyHash, rec.VerifiedAt) {
+	if !s.pool.LoadMDAProofCache(providerID, assignedID, rec.MDACertChain, rec.BoundSEKeyHash, rec.VerifiedAt, rec.Serial) {
 		return
 	}
 	s.log.Debug().

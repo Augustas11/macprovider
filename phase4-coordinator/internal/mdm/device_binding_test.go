@@ -363,10 +363,12 @@ func TestDurableMDAProofSurvivesNewService(t *testing.T) {
 	svc1 := &LiveMDAService{
 		cfg: cfg, mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
 		pool: reg1, log: zerolog.Nop(), now: func() time.Time { return now },
-		bindings: NewDeviceBindingStore(), store: store,
+		bindings: NewDeviceBindingStore(),
 		ledger: make(map[string]enqueueLedgerEntry),
 	}
+	svc1.SetMDAStore(store)
 	_ = svc1.bindings.Claim("p-dur", "C02DURABLE1")
+	svc1.persistBinding("p-dur")
 	if !svc1.verifyAndUpgrade("p-dur", "s1", [][]byte{leafDER, rootDER}, seKey, seHash[:]) {
 		t.Fatal("verifyAndUpgrade failed")
 	}
@@ -381,9 +383,10 @@ func TestDurableMDAProofSurvivesNewService(t *testing.T) {
 	svc2 := &LiveMDAService{
 		cfg: cfg, mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
 		pool: reg2, log: zerolog.Nop(), now: func() time.Time { return now },
-		bindings: NewDeviceBindingStore(), store: store,
+		bindings: NewDeviceBindingStore(),
 		ledger: make(map[string]enqueueLedgerEntry),
 	}
+	svc2.SetMDAStore(store)
 	if !svc2.AttachCachedMDAProof("p-dur", "s2") {
 		t.Fatal("AttachCachedMDAProof should restore hardware from durable store")
 	}
@@ -402,13 +405,14 @@ func TestDurableMDAProofSurvivesNewService(t *testing.T) {
 	svc3 := &LiveMDAService{
 		cfg: cfg, mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
 		pool: reg3, log: zerolog.Nop(), now: func() time.Time { return later },
-		bindings: NewDeviceBindingStore(), store: store,
+		bindings: NewDeviceBindingStore(),
 		ledger: make(map[string]enqueueLedgerEntry),
 	}
+	svc3.SetMDAStore(store)
 	if svc3.AttachCachedMDAProof("p-dur", "s3") {
 		t.Fatal("expired durable proof must not upgrade")
 	}
-	if _, _, _, ok := reg3.MDAProof("p-dur"); ok {
+	if _, _, _, _, ok := reg3.MDAProof("p-dur"); ok {
 		t.Fatal("expired durable proof must be cleared from pool")
 	}
 	if _, ok, _ := store.LoadProof(context.Background(), "p-dur"); ok {
@@ -426,7 +430,7 @@ func TestLoadMDAProofCacheDoesNotPublishHardware(t *testing.T) {
 		MaxConcurrency: 1, MaxContextTokens: 8000,
 		AttestationTier: pool.AttestationTierSelfSigned,
 	}, nil, now)
-	if !reg.LoadMDAProofCache("p-load", "s1", [][]byte{[]byte("leaf")}, seHash[:], now) {
+	if !reg.LoadMDAProofCache("p-load", "s1", [][]byte{[]byte("leaf")}, seHash[:], now, "SERIAL") {
 		t.Fatal("LoadMDAProofCache failed")
 	}
 	p, ok := reg.Resolve("p-load", "s1")
@@ -667,3 +671,175 @@ func TestConcurrentEnqueueOnlyOnce(t *testing.T) {
 		t.Fatalf("concurrent enqueue count=%d want 1", enqueueCount.Load())
 	}
 }
+
+// R5-M1: pending AssignedID=s1 survives reconnect as s2; webhook upgrades s2.
+func TestWebhookUpgradeUsesCurrentAssignedIDAfterReconnect(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	seKey := make([]byte, 64)
+	for i := range seKey {
+		seKey[i] = byte(i + 11)
+	}
+	seHash := sha256.Sum256(seKey)
+	rootDER, leafDER, cfg := testMDAChainWithSerial(t, now, seHash[:], "C02RECONN01")
+
+	reg := pool.NewRegistry(nil)
+	reg.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "p-reconn", AssignedID: "s2", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+		AttestationTier: pool.AttestationTierSelfSigned,
+	}, nil, now)
+
+	svc := &LiveMDAService{
+		cfg: cfg, mdmCfg: config.Tier2MDMConfig{CommandWebhookSecret: "hook-secret", MDARefreshIntervalHours: 168},
+		pool: reg, log: zerolog.Nop(), now: func() time.Time { return now },
+		bindings: NewDeviceBindingStore(), pending: make(map[string]pendingMDARequest),
+		ledger: make(map[string]enqueueLedgerEntry),
+	}
+	_ = svc.bindings.Claim("p-reconn", "C02RECONN01")
+	// Stale pending session from pre-reconnect enqueue.
+	svc.recordPending("UDID-RECONN", "cmd-reconn-1", pendingMDARequest{
+		ProviderID: "p-reconn", AssignedID: "s1", ExpectedSerial: "C02RECONN01",
+		UDID: "UDID-RECONN", CommandUUID: "cmd-reconn-1", SEKeyHash: seHash[:], EnqueuedAt: now,
+	})
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"udid":         "UDID-RECONN",
+		"command_uuid": "cmd-reconn-1",
+		"payload": map[string]interface{}{
+			"DeviceAttestation": []interface{}{
+				base64.StdEncoding.EncodeToString(leafDER),
+				base64.StdEncoding.EncodeToString(rootDER),
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/internal/mdm/command-webhook", bytes.NewReader(body))
+	req.Header.Set("X-MDM-Webhook-Secret", "hook-secret")
+	req.RemoteAddr = "8.8.8.8:1234"
+	rr := httptest.NewRecorder()
+	svc.HandleMDACommandWebhook(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("webhook status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	p, found := reg.Resolve("p-reconn", "s2")
+	if !found || p.AttestationTier != pool.AttestationTierHardware {
+		t.Fatalf("tier=%q found=%v want hardware on current session s2", p.AttestationTier, found)
+	}
+	if _, foundOld := reg.Resolve("p-reconn", "s1"); foundOld {
+		t.Fatal("stale session s1 must not be live")
+	}
+}
+
+// R5-M2: cached reattach without a device binding must not publish hardware.
+func TestCachedMDARefusesWithoutBinding(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	seKey := make([]byte, 64)
+	for i := range seKey {
+		seKey[i] = byte(i + 21)
+	}
+	seHash := sha256.Sum256(seKey)
+	rootDER, leafDER, cfg := testMDAChainWithSerial(t, now, seHash[:], "C02NOBIND01")
+
+	reg := pool.NewRegistry(nil)
+	reg.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "p-nobind", AssignedID: "s1", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+		AttestationTier: pool.AttestationTierSelfSigned,
+	}, nil, now)
+	if !reg.LoadMDAProofCache("p-nobind", "s1", [][]byte{leafDER, rootDER}, seHash[:], now, "C02NOBIND01") {
+		t.Fatal("LoadMDAProofCache failed")
+	}
+
+	svc := &LiveMDAService{
+		cfg: cfg, mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
+		pool: reg, log: zerolog.Nop(), now: func() time.Time { return now },
+		bindings: NewDeviceBindingStore(),
+	}
+	if svc.AttachCachedMDAProof("p-nobind", "s1") {
+		t.Fatal("R5-M2: cached upgrade without binding must fail")
+	}
+	p, found := reg.Resolve("p-nobind", "s1")
+	if !found || p.AttestationTier == pool.AttestationTierHardware {
+		t.Fatalf("tier=%q found=%v want non-hardware when binding absent", p.AttestationTier, found)
+	}
+	if _, _, _, _, ok := reg.MDAProof("p-nobind"); !ok {
+		t.Fatal("binding-absent refuse should leave cache bytes (not clear)")
+	}
+}
+
+// R5-M2: binding serial change refuses cached hardware and clears proof.
+func TestCachedMDARefusesBindingSerialMismatch(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	seKey := make([]byte, 64)
+	for i := range seKey {
+		seKey[i] = byte(i + 31)
+	}
+	seHash := sha256.Sum256(seKey)
+	rootDER, leafDER, cfg := testMDAChainWithSerial(t, now, seHash[:], "C02OLDDEV01")
+
+	reg := pool.NewRegistry(nil)
+	reg.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "p-mismatch", AssignedID: "s1", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+		AttestationTier: pool.AttestationTierSelfSigned,
+	}, nil, now)
+	if !reg.LoadMDAProofCache("p-mismatch", "s1", [][]byte{leafDER, rootDER}, seHash[:], now, "C02OLDDEV01") {
+		t.Fatal("LoadMDAProofCache failed")
+	}
+
+	svc := &LiveMDAService{
+		cfg: cfg, mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
+		pool: reg, log: zerolog.Nop(), now: func() time.Time { return now },
+		bindings: NewDeviceBindingStore(),
+	}
+	_ = svc.bindings.Claim("p-mismatch", "C02NEWDEV99")
+	if svc.AttachCachedMDAProof("p-mismatch", "s1") {
+		t.Fatal("R5-M2: binding serial mismatch must refuse cached upgrade")
+	}
+	p, found := reg.Resolve("p-mismatch", "s1")
+	if !found || p.AttestationTier == pool.AttestationTierHardware {
+		t.Fatalf("tier=%q found=%v want non-hardware after mismatch", p.AttestationTier, found)
+	}
+	if _, _, _, _, ok := reg.MDAProof("p-mismatch"); ok {
+		t.Fatal("serial mismatch should ClearMDAProof")
+	}
+}
+
+// R5-M2: matching binding allows cached hardware upgrade.
+func TestCachedMDAAllowsMatchingBinding(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	seKey := make([]byte, 64)
+	for i := range seKey {
+		seKey[i] = byte(i + 41)
+	}
+	seHash := sha256.Sum256(seKey)
+	rootDER, leafDER, cfg := testMDAChainWithSerial(t, now, seHash[:], "C02MATCH001")
+
+	reg := pool.NewRegistry(nil)
+	reg.RegisterAtDetailed(&pool.Provider{
+		ProviderID: "p-match", AssignedID: "s1", ModelID: "m", State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
+		MaxConcurrency: 1, MaxContextTokens: 8000,
+		AttestationTier: pool.AttestationTierSelfSigned,
+	}, nil, now)
+	if !reg.LoadMDAProofCache("p-match", "s1", [][]byte{leafDER, rootDER}, seHash[:], now, "C02MATCH001") {
+		t.Fatal("LoadMDAProofCache failed")
+	}
+
+	svc := &LiveMDAService{
+		cfg: cfg, mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
+		pool: reg, log: zerolog.Nop(), now: func() time.Time { return now },
+		bindings: NewDeviceBindingStore(),
+	}
+	_ = svc.bindings.Claim("p-match", "c02match001") // case-insensitive
+	if !svc.AttachCachedMDAProof("p-match", "s1") {
+		t.Fatal("matching binding should allow cached hardware upgrade")
+	}
+	p, found := reg.Resolve("p-match", "s1")
+	if !found || p.AttestationTier != pool.AttestationTierHardware {
+		t.Fatalf("tier=%q found=%v want hardware", p.AttestationTier, found)
+	}
+}
+

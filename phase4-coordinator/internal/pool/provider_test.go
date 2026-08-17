@@ -2806,7 +2806,7 @@ func TestRegisterMigratesMDAProofAcrossReconnect(t *testing.T) {
 	if !ok || refusal != RegisterRefusalNone {
 		t.Fatalf("register s1: ok=%v refusal=%q", ok, refusal)
 	}
-	if !registry.SetMDAProof("p-mda", "s1", chain, seHash[:], now) {
+	if !registry.SetMDAProof("p-mda", "s1", chain, seHash[:], now, "") {
 		t.Fatal("SetMDAProof failed")
 	}
 
@@ -2827,7 +2827,7 @@ func TestRegisterMigratesMDAProofAcrossReconnect(t *testing.T) {
 		t.Fatalf("register s2: ok=%v refusal=%q", ok, refusal)
 	}
 
-	gotChain, verifiedAt, bound, present := registry.MDAProof("p-mda")
+	gotChain, verifiedAt, bound, _, present := registry.MDAProof("p-mda")
 	if !present {
 		t.Fatal("MDA proof missing after reconnect with same SE key")
 	}
@@ -2865,7 +2865,7 @@ func TestMigrateMDAProofDoesNotPublishHardwareUntilVerify(t *testing.T) {
 	}
 	// Cached proof is "expired" relative to a 168h refresh (verified 200h ago).
 	expiredAt := now.Add(-200 * time.Hour)
-	if !registry.SetMDAProof("p-exp-mda", "s1", [][]byte{[]byte("stale-leaf")}, seHash[:], expiredAt) {
+	if !registry.SetMDAProof("p-exp-mda", "s1", [][]byte{[]byte("stale-leaf")}, seHash[:], expiredAt, "") {
 		t.Fatal("SetMDAProof failed")
 	}
 
@@ -2878,7 +2878,7 @@ func TestMigrateMDAProofDoesNotPublishHardwareUntilVerify(t *testing.T) {
 	if !ok || refusal != RegisterRefusalNone {
 		t.Fatalf("register s2: ok=%v refusal=%q", ok, refusal)
 	}
-	gotChain, verifiedAt, _, present := registry.MDAProof("p-exp-mda")
+	gotChain, verifiedAt, _, _, present := registry.MDAProof("p-exp-mda")
 	if !present || len(gotChain) == 0 {
 		t.Fatal("proof bytes should migrate")
 	}
@@ -2909,7 +2909,7 @@ func TestRegisterDoesNotMigrateMDAProofOnSEKeyChange(t *testing.T) {
 		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: oldKey, AuthState: AuthBearerValidated,
 		MaxConcurrency: 1, MaxContextTokens: 8000,
 	}, nil, now)
-	registry.SetMDAProof("p-rot", "s1", [][]byte{[]byte("c")}, seHash[:], now)
+	registry.SetMDAProof("p-rot", "s1", [][]byte{[]byte("c")}, seHash[:], now, "")
 
 	registry.RegisterAtDetailed(&Provider{
 		ProviderID: "p-rot", AssignedID: "s2", ModelID: "m", State: StateReady,
@@ -2917,7 +2917,7 @@ func TestRegisterDoesNotMigrateMDAProofOnSEKeyChange(t *testing.T) {
 		MaxConcurrency: 1, MaxContextTokens: 8000,
 	}, nil, now.Add(time.Minute))
 
-	if _, _, _, ok := registry.MDAProof("p-rot"); ok {
+	if _, _, _, _, ok := registry.MDAProof("p-rot"); ok {
 		t.Fatal("MDA proof must not migrate when SE key changes")
 	}
 }

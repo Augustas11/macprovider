@@ -141,7 +141,7 @@ func TestHandleMDACommandWebhookHappyPathAndSerialMismatch(t *testing.T) {
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("happy path status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	chain, _, _, present := reg.MDAProof("prov-1")
+	chain, _, _, _, present := reg.MDAProof("prov-1")
 	if !present || len(chain) == 0 {
 		t.Fatal("expected MDA proof after webhook happy path")
 	}
@@ -260,7 +260,7 @@ func TestTryUpgradeFromCacheClearsOnExpiry(t *testing.T) {
 		SlotsFree: 1, SlotsTotal: 1, SEPublicKey: seKey, AuthState: pool.AuthBearerValidated,
 		MaxConcurrency: 1, MaxContextTokens: 8000,
 	}, nil, now)
-	reg.SetMDAProof("p-exp", "s1", [][]byte{[]byte("stale")}, seHash[:], now.Add(-200*time.Hour))
+	reg.SetMDAProof("p-exp", "s1", [][]byte{[]byte("stale")}, seHash[:], now.Add(-200*time.Hour), "")
 
 	svc := &LiveMDAService{
 		mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
@@ -271,7 +271,7 @@ func TestTryUpgradeFromCacheClearsOnExpiry(t *testing.T) {
 	if svc.tryUpgradeFromCache(nil, "p-exp", "s1", seKey, seHash[:]) {
 		t.Fatal("expired cache should not upgrade")
 	}
-	if _, _, _, ok := reg.MDAProof("p-exp"); ok {
+	if _, _, _, _, ok := reg.MDAProof("p-exp"); ok {
 		t.Fatal("expired cache must ClearMDAProof")
 	}
 	p, _ := reg.Resolve("p-exp", "s1")
