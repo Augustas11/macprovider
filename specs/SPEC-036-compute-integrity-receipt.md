@@ -2326,6 +2326,6 @@ default holds unless maintainers record a stricter value in the LOCK PR or
 - Proving runtime binary integrity.
 - Proving malicious-provider honesty under overt probes.
 - Adding buyer-facing canary issuance.
-- Changing buyer API request or response schema.
+- Changing buyer inference, usage, receipt, or settlement request/response schema; additive buyer catalog disclosure fields remain owned by SPEC-006.
 - Changing SPEC-015 v0.4 receipt shape.
 - Changing SPEC-022 outcome enum in v0.1.

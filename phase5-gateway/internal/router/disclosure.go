@@ -20,6 +20,7 @@ type tier1Disclosure struct {
 	RelayBlindRequestEncryption *relayBlindRequestEncryptionDisclosure `json:"relay_blind_request_encryption,omitempty"`
 	ModelVerificationLimit      string                                 `json:"model_verification_limit"`
 	VerifiedModelSettlement     verifiedModelSettlementDisclosure      `json:"verified_model_settlement"`
+	ComputeIntegrity            computeIntegrityDisclosure             `json:"compute_integrity"`
 	ModelHashVerified           string                                 `json:"model_hash_verified,omitempty"`
 	ProviderLegEncryption       string                                 `json:"provider_leg_encryption,omitempty"`
 	UntrustedProviderSafety     string                                 `json:"untrusted_provider_safety,omitempty"`
@@ -110,6 +111,37 @@ type settlementOutcomeDisclosure struct {
 	ZeroSettled string `json:"zero_settled"`
 }
 
+type computeIntegrityDisclosure struct {
+	SchemaVersion          string                        `json:"schema_version"`
+	CurrentStatus          string                        `json:"current_status"`
+	CurrentMode            string                        `json:"current_mode"`
+	StatusSource           string                        `json:"status_source"`
+	LiveTelemetryAvailable bool                          `json:"live_telemetry_available"`
+	SettlementEffect       string                        `json:"settlement_effect"`
+	Labels                 computeIntegrityLabelGlossary `json:"labels"`
+	Disclosure             string                        `json:"disclosure"`
+}
+
+type computeIntegrityLabelGlossary struct {
+	Unavailable  string `json:"unavailable"`
+	Observing    string `json:"observing"`
+	WarnOnly     string `json:"warn_only"`
+	Enforcing    string `json:"enforcing"`
+	Quarantined  string `json:"quarantined"`
+	Blocked      string `json:"blocked"`
+	StaleExpired string `json:"stale_expired"`
+}
+
+type modelComputeIntegrityStatus struct {
+	SchemaVersion          string `json:"schema_version"`
+	Status                 string `json:"status"`
+	Mode                   string `json:"mode"`
+	SettlementEffect       string `json:"settlement_effect"`
+	LiveTelemetryAvailable bool   `json:"live_telemetry_available"`
+	Reason                 string `json:"reason"`
+	Disclosure             string `json:"disclosure"`
+}
+
 type coordinatorRoutingMetadata struct {
 	Sticky struct {
 		Enabled    bool `json:"enabled"`
@@ -140,28 +172,30 @@ func (m coordinatorEncryptedLegMetadata) active() bool {
 }
 
 func (m coordinatorEncryptedLegMetadata) disclosureState() string {
-	if !m.active() {
+	switch m.State {
+	case "all":
+		return "all"
+	case "partial":
+		return "partial"
+	default:
 		return "none"
 	}
-	if m.State == "all" {
-		return "all"
-	}
-	return "partial"
 }
 
 func (m coordinatorEncryptedLegMetadata) toDisclosure() encryptedLegDisclosure {
-	if !m.active() {
+	state := m.disclosureState()
+	if state == "none" {
 		return encryptedLegDisclosure{State: "none", Scope: "coordinator_to_provider_only"}
 	}
 	scope := m.Scope
-	if scope == "" {
+	if scope != "coordinator_to_provider_only" {
 		scope = "coordinator_to_provider_only"
 	}
 	return encryptedLegDisclosure{
-		State:                    m.State,
+		State:                    state,
 		EncryptedProviderCount:   m.EncryptedProviderCount,
 		UnencryptedProviderCount: m.UnencryptedProviderCount,
-		Mixed:                    m.Mixed || m.State == "partial",
+		Mixed:                    m.Mixed || state == "partial",
 		Scope:                    scope,
 	}
 }
@@ -187,14 +221,15 @@ func (m coordinatorAttestationMetadata) disclosureState() string {
 }
 
 func (m coordinatorAttestationMetadata) toDisclosure() attestationDisclosure {
-	if !m.active() {
+	state := m.disclosureState()
+	if state == "none" {
 		return attestationDisclosure{State: "none"}
 	}
 	return attestationDisclosure{
-		State:                    m.State,
+		State:                    state,
 		AttestedProviderCount:    m.AttestedProviderCount,
 		UnsupportedProviderCount: m.UnsupportedProviderCount,
-		Mixed:                    m.Mixed || m.State == "partial",
+		Mixed:                    m.Mixed || state == "partial",
 	}
 }
 
@@ -210,21 +245,23 @@ func (m coordinatorBehavioralSafetyMetadata) active() bool {
 }
 
 func (m coordinatorBehavioralSafetyMetadata) disclosureState() string {
-	if !m.active() {
+	switch m.State {
+	case "enforced":
+		return "enforced"
+	case "partial":
+		return "partial"
+	default:
 		return "none"
 	}
-	if m.State == "enforced" {
-		return "enforced"
-	}
-	return "partial"
 }
 
 func (m coordinatorBehavioralSafetyMetadata) toDisclosure() behavioralSafetyDisclosure {
-	if !m.active() {
+	state := m.disclosureState()
+	if state == "none" {
 		return behavioralSafetyDisclosure{State: "none"}
 	}
 	return behavioralSafetyDisclosure{
-		State:              m.State,
+		State:              state,
 		SizeCap:            m.SizeCap,
 		EncodingValidation: m.EncodingValidation,
 		TTFTAnomalyLogging: m.TTFTAnomalyLogging,
@@ -246,6 +283,41 @@ const settlementZeroSettledOutcomeDisclosure = "zero_settled: not charged becaus
 const settlementPartialChargeDisclosure = "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage."
 const settlementStreamingFailoverDisclosure = "Streaming failover is transparent only before response bytes are committed. After the first buyer-visible SSE event, a provider disconnect terminates the stream with provider_disconnected and the buyer may retry as a new request. That retry is a separate billable request with its own reservation and settlement; cross-request overlapping output is not deduplicated. Settlement remains limited to delivered, receipt-verified output prefixes and must not double-charge overlapping output if a future resume or failover protocol spans multiple provider attempts; verified here means receipt-bound under the provider-reported-hash caveat above."
 const settlementBuyerReceiptStatusDisclosure = "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
+const computeIntegrityDisclosureCopy = "SPEC-036 compute-integrity is sampled/overt distribution-drift readiness telemetry against approved references. It is unavailable here until live sanitized telemetry backs the per-model status. It is not proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance."
+const modelComputeIntegrityUnavailableDisclosure = "SPEC-036 v0.1 is an overt distribution-drift readiness signal against approved references. It is not cryptographic proof of honest computation, not hardware integrity, not runtime binary integrity, and not covert attestation. Per-model buyer status is unavailable until live sanitized telemetry is wired; this field is not derived from static spec/package availability."
+
+func makeModelComputeIntegrityUnavailableStatus() modelComputeIntegrityStatus {
+	return modelComputeIntegrityStatus{
+		SchemaVersion:          "buyer_compute_integrity_status_v1",
+		Status:                 "unavailable",
+		Mode:                   "unavailable",
+		SettlementEffect:       "not_evaluated",
+		LiveTelemetryAvailable: false,
+		Reason:                 "live_status_source_unavailable",
+		Disclosure:             modelComputeIntegrityUnavailableDisclosure,
+	}
+}
+
+func makeComputeIntegrityDisclosure() computeIntegrityDisclosure {
+	return computeIntegrityDisclosure{
+		SchemaVersion:          "buyer_compute_integrity_disclosure_v1",
+		CurrentStatus:          "unavailable",
+		CurrentMode:            "unavailable",
+		StatusSource:           "live_telemetry_unavailable",
+		LiveTelemetryAvailable: false,
+		SettlementEffect:       "not_evaluated",
+		Labels: computeIntegrityLabelGlossary{
+			Unavailable:  "no live sanitized telemetry currently backs buyer-visible per-model compute-integrity status",
+			Observing:    "live telemetry is sampled/overt observation only and does not affect settlement",
+			WarnOnly:     "live telemetry reports warn readiness without blocking paid admission",
+			Enforcing:    "policy-backed live telemetry may affect covered SPEC-022 settlement/admission gates",
+			Quarantined:  "live telemetry/adjudication marked compute drift or a related adverse state",
+			Blocked:      "covered paid admission is blocked for the affected compute-integrity scope",
+			StaleExpired: "previous live telemetry is stale or expired and needs fresh evidence",
+		},
+		Disclosure: computeIntegrityDisclosureCopy,
+	}
+}
 
 func makeVerifiedModelSettlementDisclosure(includeResponses, includeAnthropicMessages bool) verifiedModelSettlementDisclosure {
 	included := []string{"POST /v1/chat/completions"}
@@ -338,6 +410,7 @@ func (s *Server) makeTier1Disclosure(ctxs ...context.Context) tier1Disclosure {
 		Tier2Milestone:          "future",
 		ModelVerificationLimit:  modelVerificationLimitDisclosure,
 		VerifiedModelSettlement: makeVerifiedModelSettlementDisclosure(s.cfg.Features.ResponsesAPIEnabled, s.cfg.Features.AnthropicMessagesEnabled),
+		ComputeIntegrity:        makeComputeIntegrityDisclosure(),
 		StickyAffinity: &stickyAffinityDisclosure{
 			Enabled: false, TTLSeconds: 0,
 			Description: "Sticky affinity is disabled; related requests are not preferentially routed to the same provider.",

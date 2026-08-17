@@ -369,6 +369,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "api_error", "coordinator_models_error", "Coordinator models error")
 		return
 	}
+	sanitizeModelsResponse(body)
 	disclosure, ok := s.tier1DisclosureForModels(body, r.Context())
 	if !ok {
 		writeError(w, http.StatusBadGateway, "api_error", "tier2_metadata_unavailable", "Coordinator Tier-2 metadata unavailable")
@@ -380,6 +381,301 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	copyCleanHeaders(w.Header(), resp.Header)
 	writeJSON(w, http.StatusOK, body)
+}
+
+func sanitizeModelsResponse(body map[string]any) {
+	for key, value := range body {
+		if sanitized, ok := sanitizeModelsTopLevelValue(key, value); ok {
+			body[key] = sanitized
+		} else {
+			delete(body, key)
+		}
+	}
+	data, ok := body["data"].([]any)
+	if !ok {
+		body["data"] = []any{}
+		return
+	}
+	candidates := make([]sanitizedModelCandidate, 0, len(data))
+	modelIDs := make(map[string]struct{}, len(data))
+	for _, item := range data {
+		model, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		clean := make(map[string]any, len(model)+1)
+		var rawMembers any
+		for key, value := range model {
+			if key == "members" {
+				rawMembers = value
+				continue
+			}
+			if sanitizedValue, ok := sanitizeModelEntryValue(key, value); ok {
+				clean[key] = sanitizedValue
+			}
+		}
+		id, ok := sanitizedModelEntryID(clean)
+		if !ok {
+			continue
+		}
+		clean["compute_integrity"] = makeModelComputeIntegrityUnavailableStatus()
+		modelIDs[id] = struct{}{}
+		candidates = append(candidates, sanitizedModelCandidate{entry: clean, rawMembers: rawMembers})
+	}
+	sanitized := make([]any, 0, len(candidates))
+	for _, candidate := range candidates {
+		if members, ok := sanitizeMemberReferences(candidate.rawMembers, modelIDs); ok {
+			candidate.entry["members"] = members
+		}
+		sanitized = append(sanitized, candidate.entry)
+	}
+	body["data"] = sanitized
+}
+
+type sanitizedModelCandidate struct {
+	entry      map[string]any
+	rawMembers any
+}
+
+func sanitizedModelEntryID(entry map[string]any) (string, bool) {
+	id, ok := entry["id"].(string)
+	if !ok || !isPublicModelID(id) {
+		return "", false
+	}
+	return id, true
+}
+
+func sanitizeModelsTopLevelValue(key string, value any) (any, bool) {
+	switch key {
+	case "object":
+		return value, valueIsStringEnum(value, "list")
+	case "data":
+		return value, true
+	case "tier2":
+		return sanitizeTier2Metadata(value)
+	case "provider_count", "total_slots":
+		return value, valueIsJSONNumber(value)
+	default:
+		return nil, false
+	}
+}
+
+func sanitizeModelEntryValue(key string, value any) (any, bool) {
+	switch key {
+	case "id":
+		return value, valueIsPublicModelID(value)
+	case "object":
+		return value, valueIsStringEnum(value, "model")
+	case "owned_by":
+		return value, valueIsStringEnum(value, "macprovider")
+	case "objective":
+		return value, valueIsStringEnum(value, "fast", "balanced", "accurate")
+	case "created", "provider_count", "max_context_tokens", "total_slots":
+		return value, valueIsJSONNumber(value)
+	case "hash_verified":
+		return sanitizeHashVerified(value)
+	case "hash_verification":
+		return sanitizeHashVerification(value)
+	case "degraded":
+		return value, valueIsBool(value)
+	default:
+		return nil, false
+	}
+}
+
+func sanitizeHashVerified(value any) (any, bool) {
+	if valueIsBool(value) {
+		return value, true
+	}
+	if s, ok := value.(string); ok && s == "uncatalogued" {
+		return value, true
+	}
+	return nil, false
+}
+
+func sanitizeHashVerification(value any) (any, bool) {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	clean := map[string]any{}
+	for key, child := range raw {
+		switch key {
+		case "status":
+			if valueIsStringEnum(child, "all_uncatalogued", "catalog_unavailable", "mismatch", "all_verified", "partial") {
+				clean[key] = child
+			}
+		case "verified_provider_count", "uncatalogued_provider_count", "mismatch_provider_count", "invalid_provider_count":
+			if valueIsJSONNumber(child) {
+				clean[key] = child
+			}
+		case "catalogued":
+			if valueIsBool(child) {
+				clean[key] = child
+			}
+		}
+	}
+	return clean, len(clean) > 0
+}
+
+func sanitizeTier2Metadata(value any) (any, bool) {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	clean := map[string]any{}
+	for key, child := range raw {
+		switch key {
+		case "phase":
+			if valueIsTier2Phase(child) {
+				clean[key] = child
+			}
+		case "model_hash":
+			if modelHash, ok := sanitizeMapFields(child, map[string]func(any) bool{
+				"active":                      valueIsBool,
+				"state":                       func(v any) bool { return valueIsStringEnum(v, "none", "required", "all", "partial") },
+				"verified_count":              valueIsJSONNumber,
+				"uncatalogued_count":          valueIsJSONNumber,
+				"require_verified":            valueIsBool,
+				"catalog_available":           valueIsBool,
+				"catalog_load_failed":         valueIsBool,
+				"verified_provider_count":     valueIsJSONNumber,
+				"uncatalogued_provider_count": valueIsJSONNumber,
+			}); ok {
+				clean[key] = modelHash
+			}
+		case "encrypted_leg":
+			if encryptedLeg, ok := sanitizeMapFields(child, map[string]func(any) bool{
+				"state":                      func(v any) bool { return valueIsStringEnum(v, "none", "all", "partial") },
+				"encrypted_provider_count":   valueIsJSONNumber,
+				"unencrypted_provider_count": valueIsJSONNumber,
+				"mixed":                      valueIsBool,
+				"scope":                      func(v any) bool { return valueIsStringEnum(v, "coordinator_to_provider_only") },
+			}); ok {
+				clean[key] = encryptedLeg
+			}
+		case "attestation":
+			if attestation, ok := sanitizeMapFields(child, map[string]func(any) bool{
+				"state":                      func(v any) bool { return valueIsStringEnum(v, "none", "all", "partial", "unsupported") },
+				"attested_provider_count":    valueIsJSONNumber,
+				"unsupported_provider_count": valueIsJSONNumber,
+				"mixed":                      valueIsBool,
+			}); ok {
+				clean[key] = attestation
+			}
+		case "behavioral_safety":
+			if behavioralSafety, ok := sanitizeMapFields(child, map[string]func(any) bool{
+				"state":                func(v any) bool { return valueIsStringEnum(v, "none", "partial", "enforced") },
+				"size_cap":             valueIsBool,
+				"encoding_validation":  valueIsBool,
+				"ttft_anomaly_logging": valueIsBool,
+			}); ok {
+				clean[key] = behavioralSafety
+			}
+		}
+	}
+	return clean, len(clean) > 0
+}
+
+func sanitizeMapFields(value any, validators map[string]func(any) bool) (map[string]any, bool) {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	clean := map[string]any{}
+	for key, child := range raw {
+		if valid, ok := validators[key]; ok && valid(child) {
+			clean[key] = child
+		}
+	}
+	return clean, len(clean) > 0
+}
+
+func sanitizeMemberReferences(value any, modelIDs map[string]struct{}) (any, bool) {
+	raw, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	clean := make([]any, 0, len(raw))
+	for _, item := range raw {
+		member, ok := item.(string)
+		if !ok || !isPublicModelID(member) {
+			continue
+		}
+		if _, ok := modelIDs[member]; ok {
+			clean = append(clean, member)
+		}
+	}
+	return clean, len(clean) > 0
+}
+
+func valueIsStringEnum(value any, allowed ...string) bool {
+	s, ok := value.(string)
+	if !ok {
+		return false
+	}
+	for _, candidate := range allowed {
+		if s == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func valueIsPublicModelID(value any) bool {
+	s, ok := value.(string)
+	return ok && isPublicModelID(s)
+}
+
+func isPublicModelID(s string) bool {
+	if s == "" || len(s) > 512 || strings.TrimSpace(s) != s {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.' || r == '/' || r == ':' || r == '@' || r == '+':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func valueIsTier2Phase(value any) bool {
+	switch v := value.(type) {
+	case string:
+		return v == "mixed"
+	case float64:
+		return v == 0 || v == 1 || v == 2 || v == 3
+	case json.Number:
+		i, err := v.Int64()
+		return err == nil && i >= 0 && i <= 3
+	case int:
+		return v >= 0 && v <= 3
+	case int64:
+		return v >= 0 && v <= 3
+	case uint64:
+		return v <= 3
+	default:
+		return false
+	}
+}
+
+func valueIsBool(value any) bool {
+	_, ok := value.(bool)
+	return ok
+}
+
+func valueIsJSONNumber(value any) bool {
+	switch value.(type) {
+	case float64, json.Number, int, int64, uint64:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

@@ -27,6 +27,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/computeintegrity"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
@@ -1633,17 +1634,28 @@ type modelsResponse struct {
 }
 
 type modelEntry struct {
-	ID               string            `json:"id"`
-	Object           string            `json:"object"`
-	Created          int64             `json:"created"`
-	OwnedBy          string            `json:"owned_by"`
-	ProviderCount    int               `json:"provider_count"`
-	MaxContextTokens int               `json:"max_context_tokens"`
-	TotalSlots       int               `json:"total_slots"`
-	Objective        string            `json:"objective,omitempty"`
-	Members          []string          `json:"members,omitempty"`
-	HashVerified     interface{}       `json:"hash_verified,omitempty"`
-	HashVerification *hashVerification `json:"hash_verification,omitempty"`
+	ID               string                      `json:"id"`
+	Object           string                      `json:"object"`
+	Created          int64                       `json:"created"`
+	OwnedBy          string                      `json:"owned_by"`
+	ProviderCount    int                         `json:"provider_count"`
+	MaxContextTokens int                         `json:"max_context_tokens"`
+	TotalSlots       int                         `json:"total_slots"`
+	Objective        string                      `json:"objective,omitempty"`
+	Members          []string                    `json:"members,omitempty"`
+	ComputeIntegrity modelComputeIntegrityStatus `json:"compute_integrity"`
+	HashVerified     interface{}                 `json:"hash_verified,omitempty"`
+	HashVerification *hashVerification           `json:"hash_verification,omitempty"`
+}
+
+type modelComputeIntegrityStatus struct {
+	SchemaVersion          string `json:"schema_version"`
+	Status                 string `json:"status"`
+	Mode                   string `json:"mode"`
+	SettlementEffect       string `json:"settlement_effect"`
+	LiveTelemetryAvailable bool   `json:"live_telemetry_available"`
+	Reason                 string `json:"reason"`
+	Disclosure             string `json:"disclosure"`
 }
 
 type hashVerification struct {
@@ -1653,6 +1665,20 @@ type hashVerification struct {
 	MismatchProviderCount     int    `json:"mismatch_provider_count"`
 	InvalidProviderCount      int    `json:"invalid_provider_count"`
 	Catalogued                bool   `json:"catalogued"`
+}
+
+const buyerComputeIntegrityUnavailableDisclosure = computeintegrity.StatusCopyV1 + " Per-model buyer status is unavailable until live sanitized telemetry is wired; this field is not derived from static spec/package availability."
+
+func unavailableModelComputeIntegrityStatus() modelComputeIntegrityStatus {
+	return modelComputeIntegrityStatus{
+		SchemaVersion:          "buyer_compute_integrity_status_v1",
+		Status:                 "unavailable",
+		Mode:                   "unavailable",
+		SettlementEffect:       "not_evaluated",
+		LiveTelemetryAvailable: false,
+		Reason:                 "live_status_source_unavailable",
+		Disclosure:             buyerComputeIntegrityUnavailableDisclosure,
+	}
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -1672,10 +1698,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		entry := models[p.ModelID]
 		if entry.ID == "" {
 			entry = modelEntry{
-				ID:      p.ModelID,
-				Object:  "model",
-				Created: s.createdAt,
-				OwnedBy: "macprovider",
+				ID:               p.ModelID,
+				Object:           "model",
+				Created:          s.createdAt,
+				OwnedBy:          "macprovider",
+				ComputeIntegrity: unavailableModelComputeIntegrityStatus(),
 			}
 		}
 		if !excluded {
@@ -1696,6 +1723,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		data = append(data, modelEntry{
 			ID: name, Object: "model", Created: s.createdAt, OwnedBy: "macprovider",
 			Objective: class.Objective, Members: append([]string(nil), modelClassMembers(&class)...),
+			ComputeIntegrity: unavailableModelComputeIntegrityStatus(),
 		})
 	}
 	if pillarAActive {

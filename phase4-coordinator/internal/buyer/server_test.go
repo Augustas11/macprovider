@@ -509,6 +509,67 @@ func TestModelsDefaultHasNoTier2HashFields(t *testing.T) {
 	}
 }
 
+func TestModelsIncludesComputeIntegrityUnavailableStatus(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "https://p1.example"}})
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rr := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var got struct {
+		Data []struct {
+			ID               string `json:"id"`
+			ComputeIntegrity struct {
+				SchemaVersion          string `json:"schema_version"`
+				Status                 string `json:"status"`
+				Mode                   string `json:"mode"`
+				SettlementEffect       string `json:"settlement_effect"`
+				LiveTelemetryAvailable bool   `json:"live_telemetry_available"`
+				Reason                 string `json:"reason"`
+				Disclosure             string `json:"disclosure"`
+			} `json:"compute_integrity"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(got.Data) != 1 {
+		t.Fatalf("data len = %d, want 1; body=%s", len(got.Data), rr.Body.String())
+	}
+	status := got.Data[0].ComputeIntegrity
+	if got.Data[0].ID != "model-a" ||
+		status.SchemaVersion != "buyer_compute_integrity_status_v1" ||
+		status.Status != "unavailable" ||
+		status.Mode != "unavailable" ||
+		status.SettlementEffect != "not_evaluated" ||
+		status.LiveTelemetryAvailable ||
+		status.Reason != "live_status_source_unavailable" {
+		t.Fatalf("compute_integrity unavailable status mismatch: %+v body=%s", status, rr.Body.String())
+	}
+	for _, want := range []string{
+		"overt distribution-drift readiness signal",
+		"not cryptographic proof of honest computation",
+		"not hardware integrity",
+		"not runtime binary integrity",
+		"not derived from static spec/package availability",
+	} {
+		if !strings.Contains(status.Disclosure, want) {
+			t.Fatalf("compute_integrity disclosure missing %q: %q", want, status.Disclosure)
+		}
+	}
+	raw := rr.Body.String()
+	for _, forbidden := range []string{"provider_id", "assigned_id", "prompt", "output"} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("compute_integrity response leaked %s: %s", forbidden, raw)
+		}
+	}
+}
+
 func TestModelsDefaultIncludesReadyProvidersWithoutFreeSlots(t *testing.T) {
 	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "https://p1.example"}})
 	registerWithHashStatusSlots(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 0, 1, "https://p1.example", "")
