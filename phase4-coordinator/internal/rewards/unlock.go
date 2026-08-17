@@ -314,7 +314,18 @@ func (r *Runner) persistTrustEvalState(ctx context.Context, providerID string, p
 }
 
 func (r *Runner) promoteProvider(ctx context.Context, providerID string, now time.Time) error {
-	if err := SetTrustTier(ctx, r.db, providerID, TierTrusted); err != nil {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := setTrustTier(ctx, tx, providerID, TierTrusted); err != nil {
+		return err
+	}
+	if err := auditTrustTierChangedTx(ctx, tx, providerID, TierTrusted, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	r.notifyTrustTierChanged(providerID, TierTrusted)
@@ -323,15 +334,26 @@ func (r *Runner) promoteProvider(ctx context.Context, providerID string, now tim
 }
 
 func (r *Runner) demoteProvider(ctx context.Context, providerID string, now time.Time) error {
-	if err := SetTrustTier(ctx, r.db, providerID, TierProvisional); err != nil {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	_, err := r.db.ExecContext(ctx, `
+	defer func() { _ = tx.Rollback() }()
+	if err := setTrustTier(ctx, tx, providerID, TierProvisional); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
         UPDATE provider_trust_eval_state
            SET unlock_pair_ok_since = NULL, updated_at = $2
          WHERE provider_id = $1
     `, providerID, now)
 	if err != nil {
+		return err
+	}
+	if err := auditTrustTierChangedTx(ctx, tx, providerID, TierProvisional, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	r.notifyTrustTierChanged(providerID, TierProvisional)

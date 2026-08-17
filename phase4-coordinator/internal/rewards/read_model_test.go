@@ -54,6 +54,31 @@ func TestRewardEligibilityWalletCapWinsOverProvisionalHold(t *testing.T) {
 	}
 }
 
+func TestRewardEligibilityProviderDailyCapIsCapped(t *testing.T) {
+	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
+		AccruedMALIBU:         "25.00000000",
+		WithdrawableMALIBU:    "25.00000000",
+		HeldMALIBU:            "0",
+		TrustTier:             TierTrusted,
+		ProviderDailyCapped:   true,
+		WalletBound:           true,
+		VerifiedReceiptCount:  minVerifiedReceipts,
+		AppAttested:           true,
+		HardwareEvidenceState: HardwareEvidenceStateVerified,
+		ComputeIntegrityState: ComputeIntegrityStateVerified,
+	})
+
+	if got.EarningState != EarningStateCapped {
+		t.Fatalf("earning_state = %q, want %q", got.EarningState, EarningStateCapped)
+	}
+	if got.WithdrawalState != WithdrawalStateCapped {
+		t.Fatalf("withdrawal_state = %q, want %q", got.WithdrawalState, WithdrawalStateCapped)
+	}
+	if got.PrimaryReason != ReasonHeldProviderDailyCap {
+		t.Fatalf("primary_reason = %q, want %q", got.PrimaryReason, ReasonHeldProviderDailyCap)
+	}
+}
+
 func TestRewardEligibilityComputeBlockedWinsOverPending(t *testing.T) {
 	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
 		AccruedMALIBU:         "0",

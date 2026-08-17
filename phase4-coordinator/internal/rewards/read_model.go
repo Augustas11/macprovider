@@ -25,6 +25,7 @@ const (
 	ReasonEarningVerifiedWork              = "earning_verified_work"
 	ReasonEligibleIdleNoWork               = "eligible_idle_no_work"
 	ReasonHeldProvisionalTrustTier         = "held_provisional_trust_tier"
+	ReasonHeldProviderDailyCap             = "held_provider_daily_cap"
 	ReasonHeldWalletDailyCap               = "held_wallet_daily_cap"
 	ReasonHeldDemotionCooldown             = "held_demotion_cooldown"
 	ReasonWithdrawableBalanceAvailable     = "withdrawable_balance_available"
@@ -81,6 +82,7 @@ type MalibuRewardEligibilityFacts struct {
 	HeldMALIBU             string
 	TrustTier              string
 	WithdrawalHoldReasons  []string
+	ProviderDailyCapped    bool
 	WalletBound            bool
 	VerifiedReceiptCount   int
 	AppAttested            bool
@@ -98,6 +100,7 @@ func RewardEligibilityFromBalanceAndTrust(bal AccrualBalance, trust TrustCriteri
 		HeldMALIBU:            bal.HeldMALIBU,
 		TrustTier:             bal.TrustTier,
 		WithdrawalHoldReasons: bal.HoldReasons,
+		ProviderDailyCapped:   bal.ProviderDailyCapped,
 		WalletBound:           trust.WalletBound,
 		VerifiedReceiptCount:  trust.VerifiedReceiptCount,
 		AppAttested:           trust.AppAttested,
@@ -181,6 +184,9 @@ func orderedRewardReasons(f MalibuRewardEligibilityFacts) []string {
 			add(ReasonHeldProvisionalTrustTier)
 		}
 	}
+	if f.ProviderDailyCapped {
+		add(ReasonHeldProviderDailyCap)
+	}
 
 	if !f.WalletBound {
 		add(ReasonMissingWalletBinding)
@@ -227,7 +233,8 @@ func earningStateFor(f MalibuRewardEligibilityFacts, reasons []string) string {
 		containsReason(reasons, ReasonModelNotReady) {
 		return EarningStateIneligible
 	}
-	if containsReason(reasons, ReasonHeldWalletDailyCap) {
+	if containsReason(reasons, ReasonHeldWalletDailyCap) ||
+		containsReason(reasons, ReasonHeldProviderDailyCap) {
 		return EarningStateCapped
 	}
 	if containsReason(reasons, ReasonHeldProvisionalTrustTier) ||
@@ -247,7 +254,8 @@ func withdrawalStateFor(f MalibuRewardEligibilityFacts, reasons []string) string
 	if containsReason(reasons, ReasonProviderTokenUntrusted) {
 		return WithdrawalStateIneligible
 	}
-	if containsReason(reasons, ReasonHeldWalletDailyCap) {
+	if containsReason(reasons, ReasonHeldWalletDailyCap) ||
+		containsReason(reasons, ReasonHeldProviderDailyCap) {
 		return WithdrawalStateCapped
 	}
 	if containsReason(reasons, ReasonHeldProvisionalTrustTier) ||
@@ -269,6 +277,7 @@ func primaryRewardReason(withdrawalState, earningState string, reasons []string)
 		ReasonComputeIntegrityBlocked,
 		ReasonComputeIntegrityPending,
 		ReasonHeldWalletDailyCap,
+		ReasonHeldProviderDailyCap,
 		ReasonHeldDemotionCooldown,
 		ReasonHeldProvisionalTrustTier,
 		ReasonMissingWalletBinding,

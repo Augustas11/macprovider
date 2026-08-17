@@ -47,12 +47,20 @@ func SelectWithdrawableMALIBU(ctx context.Context, db *sql.DB, providerID string
 
 // SetTrustTier updates provider trust tier (unlock/demotion path).
 func SetTrustTier(ctx context.Context, db *sql.DB, providerID, tier string) error {
+	return setTrustTier(ctx, db, providerID, tier)
+}
+
+type trustTierWriter interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}
+
+func setTrustTier(ctx context.Context, q trustTierWriter, providerID, tier string) error {
 	now := time.Now().UTC()
 	var cooldown interface{}
 	if tier == TierProvisional {
 		cooldown = now.Add(trustRequalifyWindow)
 	}
-	_, err := db.ExecContext(ctx, `
+	_, err := q.ExecContext(ctx, `
         INSERT INTO provider_emission_state (provider_id, trust_tier, demotion_cooldown_until, updated_at)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (provider_id) DO UPDATE SET

@@ -123,7 +123,7 @@ func (r *Runner) accrueProviderReward(ctx context.Context, providerID string, am
 		}
 		remaining := r.cfg.ProviderDailyCapMALIBU - st.ProviderDayMALIBU
 		if remaining <= 0 {
-			return nil
+			return r.recordFullyCappedAccrual(ctx, tx, providerID, "", st.TrustTier, reason, externalRef)
 		}
 		accrue := math.Min(amount, remaining)
 		if accrue <= 0 {
@@ -131,6 +131,7 @@ func (r *Runner) accrueProviderReward(ctx context.Context, providerID string, am
 		}
 
 		hold := holdReasonForState(st)
+		walletCapApplied := false
 		wallet := strings.ToLower(st.BoundWallet.String)
 		if wallet != "" && strings.HasPrefix(wallet, "0x") {
 			walletHeld, walletAccrue, err := applyWalletCap(ctx, tx, wallet, today, accrue, r.cfg.WalletDailyCapMALIBU, st.TrustTier)
@@ -138,10 +139,11 @@ func (r *Runner) accrueProviderReward(ctx context.Context, providerID string, am
 				return err
 			}
 			if walletAccrue <= 0 {
-				return nil
+				return r.recordFullyCappedAccrual(ctx, tx, providerID, HoldPerWalletDailyCap, st.TrustTier, reason, externalRef)
 			}
 			accrue = walletAccrue
 			if walletHeld {
+				walletCapApplied = true
 				if hold == "" {
 					hold = HoldPerWalletDailyCap
 				}
@@ -158,12 +160,27 @@ func (r *Runner) accrueProviderReward(ctx context.Context, providerID string, am
 		}
 
 		now := time.Now().UTC()
-		if _, err := tx.ExecContext(ctx, `
+		var ledgerID int64
+		if err := tx.QueryRowContext(ctx, `
             INSERT INTO provider_rewards_ledger
                 (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason, external_ref)
             VALUES ($1, $2, $3, $4, $5, $6)
-        `, providerID, now.Unix(), formatMALIBU(accrue), holdArg, reason, refArg); err != nil {
+            RETURNING id
+        `, providerID, now.Unix(), formatMALIBU(accrue), holdArg, reason, refArg).Scan(&ledgerID); err != nil {
 			return err
+		}
+		if err := auditAccrualInserted(ctx, tx, providerID, ledgerID, formatMALIBU(accrue), hold, st.TrustTier, reason, externalRef, now); err != nil {
+			return err
+		}
+		if hold != "" {
+			if err := auditHoldApplied(ctx, tx, providerID, ledgerID, formatMALIBU(accrue), hold, st.TrustTier, reason, externalRef, now); err != nil {
+				return err
+			}
+		}
+		if walletCapApplied {
+			if err := auditWalletDailyCapApplied(ctx, tx, providerID, ledgerID, formatMALIBU(accrue), HoldPerWalletDailyCap, st.TrustTier, reason, externalRef, now); err != nil {
+				return err
+			}
 		}
 
 		newDayTotal := st.ProviderDayMALIBU + accrue
@@ -190,6 +207,26 @@ func (r *Runner) accrueProviderReward(ctx context.Context, providerID string, am
 		}
 		return nil
 	})
+}
+
+func (r *Runner) recordFullyCappedAccrual(ctx context.Context, tx *sql.Tx, providerID, hold, tier, reason, externalRef string) error {
+	if externalRef == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	var ledgerID int64
+	if err := tx.QueryRowContext(ctx, `
+        INSERT INTO provider_rewards_ledger
+            (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason, external_ref)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id
+    `, providerID, now.Unix(), formatMALIBU(0), sql.NullString{String: hold, Valid: hold != ""}, reason, externalRef).Scan(&ledgerID); err != nil {
+		return err
+	}
+	if hold == "" {
+		return auditAccrualInserted(ctx, tx, providerID, ledgerID, formatMALIBU(0), "", tier, reason, externalRef, now)
+	}
+	return auditWalletDailyCapApplied(ctx, tx, providerID, ledgerID, formatMALIBU(0), hold, tier, reason, externalRef, now)
 }
 
 func rewardExternalRefExists(ctx context.Context, tx *sql.Tx, externalRef string) (bool, error) {
@@ -239,9 +276,7 @@ func applyWalletCap(ctx context.Context, tx *sql.Tx, wallet string, day time.Tim
 	}
 	remaining := cap - sum
 	if remaining <= 0 {
-		// Still accrue at zero? Spec says accrue with hold when cap hit.
-		// Accrue the requested amount but mark held — caller sets hold.
-		return true, want, nil
+		return true, 0, nil
 	}
 	if want > remaining {
 		return true, remaining, nil
@@ -283,9 +318,12 @@ func bumpWalletDaily(ctx context.Context, tx *sql.Tx, wallet string, day time.Ti
 }
 
 type pendingReplayRow struct {
-	id   int64
-	amt  float64
-	tier string
+	id         int64
+	providerID string
+	amt        float64
+	amountText string
+	tier       string
+	reason     sql.NullString
 }
 
 func replayCapPending(ctx context.Context, tx *sql.Tx, wallet string, walletCap float64) error {
@@ -299,7 +337,8 @@ func replayCapPending(ctx context.Context, tx *sql.Tx, wallet string, walletCap 
 	// open desyncs the wire protocol (surfaces as
 	// `pq: unexpected Parse response "(C) CommandComplete"`).
 	rows, err := tx.QueryContext(ctx, `
-        SELECT prl.id, prl.amount_malibu::FLOAT8, pes.trust_tier
+        SELECT prl.id, prl.provider_id, prl.amount_malibu::FLOAT8, prl.amount_malibu::TEXT,
+               pes.trust_tier, prl.reason
           FROM provider_rewards_ledger prl
           JOIN provider_emission_state pes ON pes.provider_id = prl.provider_id
          WHERE pes.bound_wallet = $1
@@ -314,7 +353,7 @@ func replayCapPending(ctx context.Context, tx *sql.Tx, wallet string, walletCap 
 	var pending []pendingReplayRow
 	for rows.Next() {
 		var row pendingReplayRow
-		if err := rows.Scan(&row.id, &row.amt, &row.tier); err != nil {
+		if err := rows.Scan(&row.id, &row.providerID, &row.amt, &row.amountText, &row.tier, &row.reason); err != nil {
 			_ = rows.Close()
 			return err
 		}
@@ -344,6 +383,9 @@ func replayCapPending(ctx context.Context, tx *sql.Tx, wallet string, walletCap 
                    SET withdrawal_hold_reason = NULL
                  WHERE id = $1
             `, row.id); err != nil {
+				return err
+			}
+			if err := auditHoldCleared(ctx, tx, row.providerID, row.id, row.amountText, HoldPerWalletDailyCap, row.tier, row.reason.String, time.Now().UTC()); err != nil {
 				return err
 			}
 		}

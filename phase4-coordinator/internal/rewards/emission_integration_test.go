@@ -32,6 +32,14 @@ type pgFixture struct {
 	dbName    string
 }
 
+type testConnectivity struct {
+	ok bool
+}
+
+func (c *testConnectivity) HeartbeatOK(string, time.Time) bool {
+	return c.ok
+}
+
 func (f *pgFixture) adminDSN() string {
 	return fmt.Sprintf("postgres://postgres:%s@%s:%s/%s?sslmode=disable", roleAdminPassword, f.host, f.port, f.dbName)
 }
@@ -108,6 +116,20 @@ func testEmissionConfig(tickInterval time.Duration, providerCap, walletCap float
 	}
 }
 
+func testSQLitePayoutDBPath(t *testing.T) string {
+	t.Helper()
+	path := t.TempDir() + "/payout.db"
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open sqlite payout db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec("PRAGMA user_version = 1"); err != nil {
+		t.Fatalf("initialize sqlite payout db: %v", err)
+	}
+	return path
+}
+
 func TestProvisionalAccrualSetsWithdrawalHold(t *testing.T) {
 	fx, adminDB := startPostgres(t)
 	writerDB := openRewardsWriter(t, fx)
@@ -155,6 +177,223 @@ func TestProvisionalAccrualSetsWithdrawalHold(t *testing.T) {
 	}
 }
 
+func TestZeroWalletCapMarkerDoesNotBecomePermanentHold(t *testing.T) {
+	fx, adminDB := startPostgres(t)
+	writerDB := openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO provider_emission_state (provider_id, trust_tier, bound_wallet)
+        VALUES ('p_zero_marker', 'trusted', '0xzero');
+    `); err != nil {
+		t.Fatalf("seed provider state: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO provider_rewards_ledger
+            (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason, external_ref)
+        VALUES
+            ('p_zero_marker', extract(epoch from now() - interval '1 day')::BIGINT,
+             0, $1, $2, 'spec022:req-zero:0:p_zero_marker');
+    `, rewards.HoldPerWalletDailyCap, rewards.ReasonMalibuVerifiedUsefulWorkV02); err != nil {
+		t.Fatalf("seed zero marker: %v", err)
+	}
+
+	bal, err := rewards.QueryAccrualBalance(ctx, writerDB, "p_zero_marker", testEmissionConfig(time.Hour, 25, 100))
+	if err != nil {
+		t.Fatalf("query accrual balance: %v", err)
+	}
+	if testContainsString(bal.HoldReasons, rewards.HoldPerWalletDailyCap) {
+		t.Fatalf("hold reasons = %v, zero historical marker must not act as current cap", bal.HoldReasons)
+	}
+	eligibility := rewards.RewardEligibilityFromBalanceAndTrust(bal, rewards.TrustCriteriaStatus{
+		WalletBound:          true,
+		VerifiedReceiptCount: 999,
+		AppAttested:          true,
+	})
+	if eligibility.PrimaryReason == rewards.ReasonHeldWalletDailyCap {
+		t.Fatalf("primary_reason = %q, zero historical marker must not act as current cap", eligibility.PrimaryReason)
+	}
+}
+
+func TestRewardAuditEventsAreProviderScopedPaginatedAndRedacted(t *testing.T) {
+	fx, _ := startPostgres(t)
+	writerDB := openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	for _, pid := range []string{"p_audit_a", "p_audit_b"} {
+		if _, err := writerDB.ExecContext(ctx, `
+            INSERT INTO provider_emission_state (provider_id, trust_tier)
+            VALUES ($1, 'provisional')
+        `, pid); err != nil {
+			t.Fatalf("seed state %s: %v", pid, err)
+		}
+	}
+
+	cfg := testEmissionConfig(time.Hour, 25, 100)
+	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	if err := runner.RunEmissionTickOnce(ctx); err != nil {
+		t.Fatalf("emission tick: %v", err)
+	}
+
+	page, err := rewards.QueryRewardAuditEvents(ctx, writerDB, rewards.RewardAuditQuery{
+		ProviderID: "p_audit_a",
+		Limit:      1,
+	})
+	if err != nil {
+		t.Fatalf("query provider audit: %v", err)
+	}
+	if len(page.Events) != 1 {
+		t.Fatalf("events=%d want 1", len(page.Events))
+	}
+	firstID := page.Events[0].EventID
+	if page.Events[0].ProviderID != "" {
+		t.Fatalf("provider response leaked provider_id %q", page.Events[0].ProviderID)
+	}
+	if page.Events[0].OperatorCorrelation != nil {
+		t.Fatalf("provider response leaked operator correlation: %#v", page.Events[0].OperatorCorrelation)
+	}
+	if page.Events[0].EventID == "" || page.NextBeforeID == "" {
+		t.Fatalf("missing event id or next cursor: event=%q next=%q", page.Events[0].EventID, page.NextBeforeID)
+	}
+
+	beforeID, err := rewards.ParseAuditBeforeID(page.NextBeforeID)
+	if err != nil {
+		t.Fatalf("parse next cursor: %v", err)
+	}
+	nextPage, err := rewards.QueryRewardAuditEvents(ctx, writerDB, rewards.RewardAuditQuery{
+		ProviderID: "p_audit_a",
+		Limit:      10,
+		BeforeID:   beforeID,
+	})
+	if err != nil {
+		t.Fatalf("query next provider audit: %v", err)
+	}
+	if len(nextPage.Events) == 0 {
+		t.Fatal("expected older audit event on next page")
+	}
+	if nextPage.Events[0].EventID == firstID {
+		t.Fatalf("pagination repeated first event %q", firstID)
+	}
+
+	operatorPage, err := rewards.QueryRewardAuditEvents(ctx, writerDB, rewards.RewardAuditQuery{
+		ProviderID:      "p_audit_a",
+		Limit:           10,
+		IncludeProvider: true,
+		IncludeOperator: true,
+	})
+	if err != nil {
+		t.Fatalf("query operator audit: %v", err)
+	}
+	for _, evt := range operatorPage.Events {
+		if evt.ProviderID != "p_audit_a" {
+			t.Fatalf("operator event provider_id=%q want p_audit_a", evt.ProviderID)
+		}
+		if evt.OperatorCorrelation == nil || evt.OperatorCorrelation["ledger_id"] == "" {
+			t.Fatalf("operator event missing ledger correlation: %#v", evt.OperatorCorrelation)
+		}
+	}
+}
+
+func TestTrustTierTransitionsWriteRewardAuditEvents(t *testing.T) {
+	fx, _ := startPostgres(t)
+	writerDB := openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	providerID := "p_trust_audit"
+	windowOpen := time.Now().UTC().Add(-73 * time.Hour)
+	if _, err := writerDB.ExecContext(ctx, `
+        INSERT INTO provider_emission_state (provider_id, trust_tier)
+        VALUES ($1, 'provisional')
+    `, providerID); err != nil {
+		t.Fatalf("seed trust state: %v", err)
+	}
+	if _, err := writerDB.ExecContext(ctx, `
+        INSERT INTO provider_trust_eval_state
+            (provider_id, uptime_ok_since, unlock_pair_ok_since, last_eval_at, updated_at)
+        VALUES ($1, $2, $2, now(), now())
+    `, providerID, windowOpen); err != nil {
+		t.Fatalf("seed trust eval state: %v", err)
+	}
+	if _, err := writerDB.ExecContext(ctx, `
+        INSERT INTO provider_trust_operator_promotions
+            (provider_id, promoted_by, reason, pending_id)
+        VALUES ($1, 'integration-test', 'trust audit transition coverage', '00000000-0000-0000-0000-000000001021')
+    `, providerID); err != nil {
+		t.Fatalf("seed operator promotion: %v", err)
+	}
+
+	cfg := testEmissionConfig(time.Hour, 25, 100)
+	cfg.SQLitePayoutDBPath = testSQLitePayoutDBPath(t)
+	connectivity := &testConnectivity{ok: true}
+	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{
+		Connectivity: connectivity,
+	})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+
+	if err := runner.RunUnlockEvalOnce(ctx); err != nil {
+		t.Fatalf("promote provider: %v", err)
+	}
+
+	connectivity.ok = false
+	if err := runner.RunUnlockEvalOnce(ctx); err != nil {
+		t.Fatalf("demote provider: %v", err)
+	}
+
+	if _, err := writerDB.ExecContext(ctx, `
+        UPDATE provider_emission_state
+           SET demotion_cooldown_until = now() - interval '1 hour'
+         WHERE provider_id = $1
+    `, providerID); err != nil {
+		t.Fatalf("seed requalification cooldown: %v", err)
+	}
+	if _, err := writerDB.ExecContext(ctx, `
+        UPDATE provider_trust_eval_state
+           SET uptime_ok_since = $2,
+               unlock_pair_ok_since = $2,
+               updated_at = now()
+         WHERE provider_id = $1
+    `, providerID, windowOpen); err != nil {
+		t.Fatalf("seed requalification window: %v", err)
+	}
+	connectivity.ok = true
+	if err := runner.RunUnlockEvalOnce(ctx); err != nil {
+		t.Fatalf("requalify provider: %v", err)
+	}
+
+	page, err := rewards.QueryRewardAuditEvents(ctx, writerDB, rewards.RewardAuditQuery{
+		ProviderID:      providerID,
+		Limit:           10,
+		IncludeProvider: true,
+		IncludeOperator: true,
+	})
+	if err != nil {
+		t.Fatalf("query trust audit events: %v", err)
+	}
+	got := make([]string, 0, len(page.Events))
+	for _, evt := range page.Events {
+		if evt.ProviderID != providerID {
+			t.Fatalf("event provider_id=%q want %q", evt.ProviderID, providerID)
+		}
+		if evt.OperatorCorrelation == nil || evt.OperatorCorrelation["transition"] != evt.EventType {
+			t.Fatalf("missing trust transition correlation for %s: %#v", evt.EventType, evt.OperatorCorrelation)
+		}
+		got = append(got, evt.EventType)
+	}
+	want := []string{
+		rewards.AuditEventTrustTierPromoted,
+		rewards.AuditEventTrustTierDemoted,
+		rewards.AuditEventTrustTierPromoted,
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("trust audit events = %v, want %v", got, want)
+	}
+}
+
 func TestWalletDailyCapAcrossProviders(t *testing.T) {
 	fx, adminDB := startPostgres(t)
 	writerDB := openRewardsWriter(t, fx)
@@ -170,15 +409,21 @@ func TestWalletDailyCapAcrossProviders(t *testing.T) {
 		}
 	}
 
-	cfg := testEmissionConfig(time.Minute, 1000, 100)
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	if _, err := writerDB.ExecContext(ctx, `
+        INSERT INTO wallet_daily_malibu_emission (bound_wallet, emission_day, sum_malibu, updated_at)
+        VALUES ($1, $2, 99, now())
+    `, wallet, today); err != nil {
+		t.Fatalf("seed wallet daily total: %v", err)
+	}
+
+	cfg := testEmissionConfig(time.Hour, 1000, 100)
 	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
 	if err != nil {
 		t.Fatalf("new runner: %v", err)
 	}
-	for i := 0; i < 12; i++ {
-		if err := runner.RunEmissionTickOnce(ctx); err != nil {
-			t.Fatalf("tick %d: %v", i, err)
-		}
+	if err := runner.RunEmissionTickOnce(ctx); err != nil {
+		t.Fatalf("emission tick: %v", err)
 	}
 
 	var sum float64
@@ -192,6 +437,61 @@ func TestWalletDailyCapAcrossProviders(t *testing.T) {
 	if sum > 100.0001 {
 		t.Fatalf("wallet aggregate %v exceeds cap 100", sum)
 	}
+
+	var walletCapProvider string
+	for _, pid := range []string{"p_a", "p_b"} {
+		page, err := rewards.QueryRewardAuditEvents(ctx, writerDB, rewards.RewardAuditQuery{
+			ProviderID: pid,
+			Limit:      100,
+		})
+		if err != nil {
+			t.Fatalf("query %s audit: %v", pid, err)
+		}
+		for _, evt := range page.Events {
+			if evt.EventType == rewards.AuditEventWalletDailyCapApplied {
+				walletCapProvider = pid
+			}
+		}
+	}
+	if walletCapProvider == "" {
+		t.Fatal("expected wallet_daily_cap_applied audit event even while provisional hold remains primary")
+	}
+	for _, pid := range []string{"p_a", "p_b"} {
+		bal, err := rewards.QueryAccrualBalance(ctx, writerDB, pid, cfg)
+		if err != nil {
+			t.Fatalf("query %s accrual balance: %v", pid, err)
+		}
+		hasWalletCap := testContainsString(bal.HoldReasons, rewards.HoldPerWalletDailyCap)
+		if pid == walletCapProvider && !hasWalletCap {
+			t.Fatalf("%s hold reasons = %v, want wallet cap hold", pid, bal.HoldReasons)
+		}
+		if pid != walletCapProvider && hasWalletCap {
+			t.Fatalf("%s hold reasons = %v, must not expose shared-wallet cap state", pid, bal.HoldReasons)
+		}
+		eligibility := rewards.RewardEligibilityFromBalanceAndTrust(bal, rewards.TrustCriteriaStatus{
+			WalletBound:          true,
+			VerifiedReceiptCount: 999,
+			AppAttested:          true,
+		})
+		if pid == walletCapProvider && eligibility.WithdrawalState != rewards.WithdrawalStateCapped {
+			t.Fatalf("%s withdrawal_state = %q, want %q", pid, eligibility.WithdrawalState, rewards.WithdrawalStateCapped)
+		}
+		if pid == walletCapProvider && eligibility.PrimaryReason != rewards.ReasonHeldWalletDailyCap {
+			t.Fatalf("%s primary_reason = %q, want %q", pid, eligibility.PrimaryReason, rewards.ReasonHeldWalletDailyCap)
+		}
+		if pid != walletCapProvider && eligibility.PrimaryReason == rewards.ReasonHeldWalletDailyCap {
+			t.Fatalf("%s primary_reason must not expose shared-wallet cap state", pid)
+		}
+	}
+}
+
+func testContainsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestUsefulWorkAccrualVerifiedWorkCapsHoldsAndReplay(t *testing.T) {
@@ -331,7 +631,7 @@ func TestUsefulWorkAccrualVerifiedWorkCapsHoldsAndReplay(t *testing.T) {
 	}
 }
 
-func TestUsefulWorkAccrualSkipsProviderAtDailyCap(t *testing.T) {
+func TestUsefulWorkAccrualMarksProviderAtDailyCap(t *testing.T) {
 	fx, adminDB := startPostgres(t)
 	ctx := context.Background()
 
@@ -364,7 +664,7 @@ func TestUsefulWorkAccrualSkipsProviderAtDailyCap(t *testing.T) {
         SELECT 'req-capped-' || gs::TEXT, 0, 'p_capped',
                now() - interval '2 hours' + (gs || ' seconds')::interval,
                1000, TRUE
-          FROM generate_series(1, 501) AS gs;
+          FROM generate_series(1, 500) AS gs;
 
         INSERT INTO ledger_request_credits
             (request_id, attempt_n, provider_id, ts_utc, provider_credits, spec022_verified)
@@ -385,6 +685,44 @@ func TestUsefulWorkAccrualSkipsProviderAtDailyCap(t *testing.T) {
 		t.Fatalf("useful work accrual: %v", err)
 	}
 
+	var cappedCount int
+	var cappedSum string
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT COUNT(*), COALESCE(SUM(amount_malibu), 0)::TEXT
+          FROM provider_rewards_ledger
+         WHERE provider_id = 'p_capped'
+           AND reason = $1
+    `, rewards.ReasonMalibuVerifiedUsefulWorkV02).Scan(&cappedCount, &cappedSum); err != nil {
+		t.Fatalf("count capped rewards: %v", err)
+	}
+	if cappedCount != 500 {
+		t.Fatalf("p_capped terminal cap markers = %d, want 500", cappedCount)
+	}
+	if cappedSum != "0.00000000" {
+		t.Fatalf("p_capped capped sum = %q, want 0.00000000", cappedSum)
+	}
+	bal, err := rewards.QueryAccrualBalance(ctx, writerDB, "p_capped", cfg)
+	if err != nil {
+		t.Fatalf("query capped balance: %v", err)
+	}
+	if !bal.ProviderDailyCapped {
+		t.Fatal("p_capped should report provider daily cap active")
+	}
+	eligibility := rewards.RewardEligibilityFromBalanceAndTrust(bal, rewards.TrustCriteriaStatus{
+		WalletBound:          true,
+		VerifiedReceiptCount: 999,
+		AppAttested:          true,
+	})
+	if eligibility.WithdrawalState != rewards.WithdrawalStateCapped {
+		t.Fatalf("p_capped withdrawal_state = %q, want %q", eligibility.WithdrawalState, rewards.WithdrawalStateCapped)
+	}
+	if eligibility.PrimaryReason != rewards.ReasonHeldProviderDailyCap {
+		t.Fatalf("p_capped primary_reason = %q, want %q", eligibility.PrimaryReason, rewards.ReasonHeldProviderDailyCap)
+	}
+
+	if err := runner.RunUsefulWorkAccrualOnce(ctx); err != nil {
+		t.Fatalf("useful work accrual next batch: %v", err)
+	}
 	var laterCount int
 	if err := adminDB.QueryRowContext(ctx, `
         SELECT COUNT(*)
@@ -398,17 +736,28 @@ func TestUsefulWorkAccrualSkipsProviderAtDailyCap(t *testing.T) {
 		t.Fatalf("p_later useful work rewards = %d, want 1", laterCount)
 	}
 
-	var cappedCount int
+	if _, err := adminDB.ExecContext(ctx, `
+        UPDATE provider_emission_state
+           SET provider_day_malibu = 0,
+               emission_day = CURRENT_DATE - interval '1 day'
+         WHERE provider_id = 'p_capped'
+    `); err != nil {
+		t.Fatalf("simulate next day: %v", err)
+	}
+	if err := runner.RunUsefulWorkAccrualOnce(ctx); err != nil {
+		t.Fatalf("useful work accrual replay: %v", err)
+	}
+	var replayCount int
 	if err := adminDB.QueryRowContext(ctx, `
         SELECT COUNT(*)
           FROM provider_rewards_ledger
          WHERE provider_id = 'p_capped'
            AND reason = $1
-    `, rewards.ReasonMalibuVerifiedUsefulWorkV02).Scan(&cappedCount); err != nil {
-		t.Fatalf("count capped rewards: %v", err)
+    `, rewards.ReasonMalibuVerifiedUsefulWorkV02).Scan(&replayCount); err != nil {
+		t.Fatalf("count replay capped rewards: %v", err)
 	}
-	if cappedCount != 0 {
-		t.Fatalf("p_capped useful work rewards = %d, want 0", cappedCount)
+	if replayCount != cappedCount {
+		t.Fatalf("p_capped replay markers = %d, want unchanged %d", replayCount, cappedCount)
 	}
 }
 
@@ -439,12 +788,23 @@ func TestCapReplayPendingDoesNotDesyncConnection(t *testing.T) {
 	}
 
 	heldUnixTS := time.Now().UTC().Add(-time.Hour).Unix()
-	if _, err := adminDB.ExecContext(ctx, `
+	var heldLedgerID int64
+	if err := adminDB.QueryRowContext(ctx, `
         INSERT INTO provider_rewards_ledger
             (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason)
         VALUES ($1, $2, 10, $3, 'malibu_bootstrap_tick')
-    `, providerID, heldUnixTS, rewards.HoldPerWalletDailyCap); err != nil {
+        RETURNING id
+    `, providerID, heldUnixTS, rewards.HoldPerWalletDailyCap).Scan(&heldLedgerID); err != nil {
 		t.Fatalf("seed held ledger row: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO malibu_reward_audit_events
+            (provider_id, event_type, ledger_id, amount_malibu,
+             withdrawal_hold_reason, trust_tier, source_reason, safe_summary)
+        VALUES ($1, $2, $3, 10, $4, 'trusted', 'malibu_bootstrap_tick',
+                'Reward hit the per-wallet daily cap.')
+    `, providerID, rewards.AuditEventWalletDailyCapApplied, heldLedgerID, rewards.HoldPerWalletDailyCap); err != nil {
+		t.Fatalf("seed wallet cap audit event: %v", err)
 	}
 
 	cfg := testEmissionConfig(time.Hour, 25, 100)
@@ -489,5 +849,38 @@ func TestCapReplayPendingDoesNotDesyncConnection(t *testing.T) {
 	}
 	if capReplayPending {
 		t.Fatal("cap_replay_pending should be cleared after successful replay")
+	}
+
+	auditPage, err := rewards.QueryRewardAuditEvents(ctx, writerDB, rewards.RewardAuditQuery{
+		ProviderID: providerID,
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("query audit events: %v", err)
+	}
+	var sawHoldCleared bool
+	for _, evt := range auditPage.Events {
+		if evt.EventType == rewards.AuditEventMalibuHoldCleared {
+			sawHoldCleared = true
+		}
+	}
+	if !sawHoldCleared {
+		t.Fatal("expected malibu_hold_cleared audit event after cap replay")
+	}
+
+	bal, err := rewards.QueryAccrualBalance(ctx, writerDB, providerID, cfg)
+	if err != nil {
+		t.Fatalf("query accrual balance after cap replay: %v", err)
+	}
+	if testContainsString(bal.HoldReasons, rewards.HoldPerWalletDailyCap) {
+		t.Fatalf("hold reasons after cap replay = %v, want wallet cap cleared", bal.HoldReasons)
+	}
+	eligibility := rewards.RewardEligibilityFromBalanceAndTrust(bal, rewards.TrustCriteriaStatus{
+		WalletBound:          true,
+		VerifiedReceiptCount: 999,
+		AppAttested:          true,
+	})
+	if eligibility.PrimaryReason == rewards.ReasonHeldWalletDailyCap {
+		t.Fatalf("primary_reason after cap replay = %q, want wallet cap cleared", eligibility.PrimaryReason)
 	}
 }
