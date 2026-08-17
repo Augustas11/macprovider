@@ -149,7 +149,9 @@ body, `AUTHORITY.json`, or `CONFORMANCE.json` additionally states
 inside the governance-only path allowlist. Changes to normative specs,
 authority, conformance, validator logic, or release gates require review and
 must pass the spec index, governance validator, targeted tests, and the three
-repository audit lanes at 0 CRITICAL, 0 HIGH, and 0 MEDIUM.
+repository audit lanes (`omc ask codex --agent-prompt code-reviewer|security-reviewer|architect`;
+Codex subscription CLI through OMC, not Cursor Task subagents or raw `codex`)
+at 0 CRITICAL, 0 HIGH, and 0 MEDIUM.
 
 A release may advance only when every affected requirement is conformant and
 all required journey evidence is current. The physical release gate tracked by

@@ -1,0 +1,21 @@
+---
+description: Three-lane audits run via omc ask codex (Codex subscription CLI), never Cursor Task subagents
+alwaysApply: true
+---
+
+# Codex audit lanes — `omc ask codex` only
+
+The house audit loop is three Codex lanes: **code**, **security**, **architect**.
+Invoke them with the Codex subscription CLI through OMC. Do not treat Cursor
+`Task` subagents (`code-reviewer`, `security-reviewer`, `architect`) as those
+lanes. Do not call `codex` / `codex exec` directly.
+
+```bash
+omc ask codex --agent-prompt code-reviewer --prompt "<lane prompt>"
+omc ask codex --agent-prompt security-reviewer --prompt "<lane prompt>"
+omc ask codex --agent-prompt architect --prompt "<lane prompt>"
+```
+
+Run from the session/worktree root. Artifacts: `.omc/artifacts/ask/`.
+Gate: **0 CRITICAL, 0 HIGH, 0 MEDIUM** (LOW/INFO may carry explicitly).
+Review the **full fix diff** as it will land, not an incremental slice.

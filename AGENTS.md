@@ -76,8 +76,20 @@ source under any circumstance.
 
 ## 7. Audit the full fix diff — never a slice
 
-When running auditors (3-lane codex `code`/`security`/`architect`,
-`code-reviewer`, etc.) on a fix, always review the **full diff of the
+The three required audit lanes are Codex subscription CLI via OMC, not
+Cursor `Task` subagents and not raw `codex` / `codex exec`:
+
+```bash
+omc ask codex --agent-prompt code-reviewer --prompt "<lane prompt>"
+omc ask codex --agent-prompt security-reviewer --prompt "<lane prompt>"
+omc ask codex --agent-prompt architect --prompt "<lane prompt>"
+```
+
+Run from the session/worktree root. Artifacts land under
+`.omc/artifacts/ask/`. Gate: 0 CRITICAL, 0 HIGH, 0 MEDIUM (LOW/INFO may
+be carried explicitly).
+
+When running those lanes on a fix, always review the **full diff of the
 complete fix as it will land** — every commit of that fix combined,
 scoped to the fix's files — never an incremental follow-up slice
 layered on an already-merged earlier part of the same fix.

@@ -248,8 +248,20 @@ Runbook: `docs/runbooks/provider-cli-release-verification.md`.
 - Every implementation slice must pass the audit loop before being treated as
   done. This applies to full implementations and step/deliverable/checkpoint
   implementations alike: run the three Codex audit lanes (code, security,
-  architect) and keep fixing/re-auditing until all three report 0 CRITICAL,
-  0 HIGH, and 0 MEDIUM findings. LOW/INFO findings may be carried explicitly.
+  architect) via `omc ask codex` (Codex subscription CLI through OMC — never
+  raw `codex`/`codex exec`, and never Cursor `Task` subagents such as
+  `code-reviewer` / `security-reviewer` / `architect` as a substitute). Invoke
+  from the session/worktree root:
+
+  ```bash
+  omc ask codex --agent-prompt code-reviewer --prompt "<lane prompt>"
+  omc ask codex --agent-prompt security-reviewer --prompt "<lane prompt>"
+  omc ask codex --agent-prompt architect --prompt "<lane prompt>"
+  ```
+
+  Artifacts land under `.omc/artifacts/ask/`. Keep fixing/re-auditing until
+  all three report 0 CRITICAL, 0 HIGH, and 0 MEDIUM findings. LOW/INFO
+  findings may be carried explicitly.
 - Spec corpus lives in `specs/`. House style: `BUILD_SPEC_*`, `AUDIT_SPEC_*`,
   `FIX_SPEC_*_VX_Y` naming for prompts; `SPEC-NNN-*.md` for normative
   documents.
