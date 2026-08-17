@@ -85,7 +85,7 @@ MALIBU rows with non-NULL `external_ref` are unique by `external_ref`.
 | Value | Meaning |
 |-------|---------|
 | `trust_tier_provisional` | Provider is Provisional; accrues but cannot withdraw MALIBU |
-| `per_wallet_daily_cap` | Wallet aggregate cap reached; accrual continues for visibility but is held |
+| `per_wallet_daily_cap` | Wallet aggregate cap reached on a partial boundary accrual; the accepted remainder is visible but not withdrawable |
 | `demotion_cooldown` | Provider demoted from Trusted; 72h requalification window (SPEC-026 §5.5) |
 
 Withdrawal selection: `WHERE withdrawal_hold_reason IS NULL AND amount_malibu IS NOT NULL AND amount_malibu > 0`.
@@ -213,7 +213,7 @@ Dedicated runtime role for emission writes:
 | v0.2 useful-work rate | **1 MALIBU / 1000 verified provider credits** |
 | Withdrawable | **No** until `trust_tier = trusted` |
 | Hold reason (provisional accrual) | `trust_tier_provisional` |
-| Hold reason (wallet cap exceeded) | `per_wallet_daily_cap` (accrue but non-withdrawable) |
+| Hold reason (wallet cap boundary reached) | `per_wallet_daily_cap` (accepted remainder is accrual-visible but non-withdrawable) |
 
 Trusted providers accrue with `withdrawal_hold_reason IS NULL` unless wallet cap applies (`per_wallet_daily_cap`).
 Provider and wallet daily caps are shared across v0.1 bootstrap tick rows and
@@ -234,7 +234,7 @@ v0.2 useful-work rows.
   2. Compute tick accrual: `provider_daily_cap / ticks_per_day`
   3. Under SERIALIZABLE txn + wallet/provider day counters:
      - If `provider_day_malibu + tick > provider_daily_cap`, accrue remainder only
-     - If bound wallet set and `wallet sum + accrual > wallet_daily_cap`, accrue remainder with `per_wallet_daily_cap` hold on overflow portion
+     - If bound wallet set and `wallet sum + accrual > wallet_daily_cap`, accrue only the remainder that fits under `wallet_daily_cap`, mark that accepted boundary amount with `per_wallet_daily_cap`, and skip any fully over-cap amount so the wallet aggregate never advances beyond the cap
      - Insert `provider_rewards_ledger` row
      - Upsert aggregates
 
@@ -254,6 +254,14 @@ only by `malibu_emission.enabled`; v0.2 does not reclassify them.
   - `provider_credits > 0`
   - no existing MALIBU ledger row for
     `external_ref = spec022:<request_id>:<attempt_n>:<provider_id>`
+- If the provider or wallet daily cap is already exhausted before a useful-work
+  row can accept any MALIBU, the coordinator writes a terminal ledger marker
+  with `amount_malibu = 0` and the useful-work `external_ref`. This marks the
+  source row processed without advancing provider or wallet daily aggregates.
+  Wallet-cap terminal markers use
+  `withdrawal_hold_reason = per_wallet_daily_cap` and a paired
+  `wallet_daily_cap_applied` audit event so the provider read model remains
+  capped for the UTC day.
 - Formula:
 
 ```text
@@ -337,6 +345,7 @@ USDC `ledger_payout_ready` runner is unchanged.
   "held_malibu": "12.50000000",
   "trust_tier": "provisional",
   "daily_cap_malibu": "25",
+  "provider_daily_capped": false,
   "wallet_daily_cap_malibu": "100",
   "withdrawal_hold_reasons": ["trust_tier_provisional"],
   "reward_eligibility": {
@@ -433,6 +442,7 @@ Reason vocabulary:
 | `earning_verified_work` | coordinator reward/read model | Recent verified work was observed by the reward owner and can be presented as active earning. |
 | `eligible_idle_no_work` | coordinator reward/read model | No blocking reward reason is known, but no current earning work is observed. |
 | `held_provisional_trust_tier` | MALIBU ledger/trust | Accrual is visible but held because the provider is not Trusted. Maps from `withdrawal_hold_reason = trust_tier_provisional`. |
+| `held_provider_daily_cap` | provider emission state | The provider has reached its UTC-day MALIBU cap. Maps from `provider_emission_state.provider_day_malibu >= daily_cap_malibu` for the current UTC day. |
 | `held_wallet_daily_cap` | MALIBU ledger | Accrual is held or capped by the bound-wallet daily MALIBU cap. Maps from `withdrawal_hold_reason = per_wallet_daily_cap`. |
 | `held_demotion_cooldown` | MALIBU ledger/trust | Accrual is held during post-demotion requalification. Maps from `withdrawal_hold_reason = demotion_cooldown`. |
 | `withdrawable_balance_available` | MALIBU ledger | At least one MALIBU ledger row is withdrawable. |
@@ -455,8 +465,11 @@ Precedence:
 
 1. `compute_integrity_blocked` outranks `compute_integrity_pending`; only a
    recognized positive compute state may omit both reasons.
-2. `held_wallet_daily_cap` outranks `held_provisional_trust_tier` when both are
-   present, so clients can render cap-specific copy.
+2. `held_wallet_daily_cap` and `held_provider_daily_cap` outrank
+   `held_provisional_trust_tier` when both are present, so clients can render
+   cap-specific copy. `held_wallet_daily_cap` MAY be derived from same-UTC-day
+   `wallet_daily_cap_applied` audit events when a provisional ledger row can
+   store only `trust_tier_provisional` as its primary hold.
 3. `missing_wallet_binding` blocks MALIBU withdrawal readiness and outranks raw
    withdrawable ledger balance and generic proof-source unavailable reasons for
    `primary_reason`.

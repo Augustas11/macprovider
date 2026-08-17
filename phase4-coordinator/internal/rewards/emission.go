@@ -123,7 +123,7 @@ func (r *Runner) accrueProviderReward(ctx context.Context, providerID string, am
 		}
 		remaining := r.cfg.ProviderDailyCapMALIBU - st.ProviderDayMALIBU
 		if remaining <= 0 {
-			return nil
+			return r.recordFullyCappedAccrual(ctx, tx, providerID, "", st.TrustTier, reason, externalRef)
 		}
 		accrue := math.Min(amount, remaining)
 		if accrue <= 0 {
@@ -139,7 +139,7 @@ func (r *Runner) accrueProviderReward(ctx context.Context, providerID string, am
 				return err
 			}
 			if walletAccrue <= 0 {
-				return nil
+				return r.recordFullyCappedAccrual(ctx, tx, providerID, HoldPerWalletDailyCap, st.TrustTier, reason, externalRef)
 			}
 			accrue = walletAccrue
 			if walletHeld {
@@ -209,6 +209,26 @@ func (r *Runner) accrueProviderReward(ctx context.Context, providerID string, am
 	})
 }
 
+func (r *Runner) recordFullyCappedAccrual(ctx context.Context, tx *sql.Tx, providerID, hold, tier, reason, externalRef string) error {
+	if externalRef == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	var ledgerID int64
+	if err := tx.QueryRowContext(ctx, `
+        INSERT INTO provider_rewards_ledger
+            (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason, external_ref)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id
+    `, providerID, now.Unix(), formatMALIBU(0), sql.NullString{String: hold, Valid: hold != ""}, reason, externalRef).Scan(&ledgerID); err != nil {
+		return err
+	}
+	if hold == "" {
+		return auditAccrualInserted(ctx, tx, providerID, ledgerID, formatMALIBU(0), "", tier, reason, externalRef, now)
+	}
+	return auditWalletDailyCapApplied(ctx, tx, providerID, ledgerID, formatMALIBU(0), hold, tier, reason, externalRef, now)
+}
+
 func rewardExternalRefExists(ctx context.Context, tx *sql.Tx, externalRef string) (bool, error) {
 	var exists bool
 	err := tx.QueryRowContext(ctx, `
@@ -256,9 +276,7 @@ func applyWalletCap(ctx context.Context, tx *sql.Tx, wallet string, day time.Tim
 	}
 	remaining := cap - sum
 	if remaining <= 0 {
-		// Still accrue at zero? Spec says accrue with hold when cap hit.
-		// Accrue the requested amount but mark held — caller sets hold.
-		return true, want, nil
+		return true, 0, nil
 	}
 	if want > remaining {
 		return true, remaining, nil

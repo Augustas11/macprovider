@@ -78,6 +78,7 @@ func NewAccrualHandler(deps AccrualHandlerDeps) http.Handler {
 			"held_malibu":             bal.HeldMALIBU,
 			"trust_tier":              bal.TrustTier,
 			"daily_cap_malibu":        bal.ProviderDailyCap,
+			"provider_daily_capped":   bal.ProviderDailyCapped,
 			"wallet_daily_cap_malibu": bal.WalletDailyCap,
 			"withdrawal_hold_reasons": bal.HoldReasons,
 			"trust_criteria_met":      trust.CriteriaMet,

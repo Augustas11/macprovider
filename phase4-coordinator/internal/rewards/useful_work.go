@@ -51,15 +51,8 @@ func (r *Runner) listUnrewardedUsefulWork(ctx context.Context, limit int) ([]use
 	rows, err := r.db.QueryContext(ctx, `
         SELECT lrc.request_id, lrc.attempt_n, lrc.provider_id, lrc.provider_credits
           FROM ledger_request_credits lrc
-          LEFT JOIN provider_emission_state pes ON pes.provider_id = lrc.provider_id
          WHERE COALESCE(lrc.spec022_verified, FALSE) = TRUE
            AND lrc.provider_credits > 0
-           AND (
-                pes.provider_id IS NULL
-                OR pes.emission_day IS NULL
-                OR pes.emission_day <> CURRENT_DATE
-                OR pes.provider_day_malibu < $2
-           )
            AND NOT EXISTS (
                 SELECT 1
                   FROM provider_rewards_ledger prl
@@ -68,7 +61,7 @@ func (r *Runner) listUnrewardedUsefulWork(ctx context.Context, limit int) ([]use
            )
          ORDER BY lrc.ts_utc ASC, lrc.id ASC
          LIMIT $1
-    `, limit, r.cfg.ProviderDailyCapMALIBU)
+    `, limit)
 	if err != nil {
 		return nil, err
 	}
