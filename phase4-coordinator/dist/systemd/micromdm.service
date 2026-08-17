@@ -9,20 +9,12 @@ Type=simple
 User=root
 EnvironmentFile=-/etc/micromdm/env
 # MICROMDM_SERVER_URL comes from /etc/systemd/system/micromdm.service.d/override.conf
-ExecStart=/opt/micromdm/bin/micromdm serve \
-  -server-url ${MICROMDM_SERVER_URL} \
-  -api-key ${MICROMDM_API_KEY} \
-  -config-path /var/lib/micromdm \
-  -filerepo /var/lib/micromdm/repo \
-  -http-addr 127.0.0.1:8080 \
-  -tls=false \
-  -http-proxy-headers=true \
-  -homepage=false \
-  -log-time=true
+# Wrapper keeps the API key out of the unit file text (still visible in process
+# argv — regenerate /etc/micromdm/api-key if it ever leaks via status logs).
+ExecStart=/opt/micromdm/bin/micromdm-serve.sh
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65536
-# Secrets stay mode 600 under /etc/micromdm
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true

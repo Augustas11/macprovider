@@ -77,6 +77,7 @@ log "ensuring API key + directories on Pearl"
 set -euo pipefail
 install -d -m 0755 /opt/micromdm/bin
 install -d -m 0700 /var/lib/micromdm
+install -d -m 0700 /var/lib/micromdm/repo
 install -d -m 0700 /etc/micromdm
 install -d -m 0700 /etc/micromdm/apns
 if [[ ! -f /etc/micromdm/api-key ]]; then
@@ -105,8 +106,12 @@ install -m 0755 "$WORKDIR/extract/build/linux/micromdm" "$WORKDIR/micromdm"
 install -m 0755 "$WORKDIR/extract/build/linux/mdmctl" "$WORKDIR/mdmctl"
 
 log "installing binaries + unit"
-"${SCP[@]}" "$WORKDIR/micromdm" "$WORKDIR/mdmctl" "$VPS_USER@$VPS_HOST:/opt/micromdm/bin/"
+install -m 0755 "$SCRIPT_DIR/systemd/micromdm-serve.sh" "$WORKDIR/micromdm-serve.sh"
+"${SCP[@]}" "$WORKDIR/micromdm" "$WORKDIR/mdmctl" "$WORKDIR/micromdm-serve.sh" \
+  "$VPS_USER@$VPS_HOST:/opt/micromdm/bin/"
+"${SSH[@]}" 'chmod 0755 /opt/micromdm/bin/micromdm /opt/micromdm/bin/mdmctl /opt/micromdm/bin/micromdm-serve.sh'
 "${SCP[@]}" "$UNIT_SRC" "$VPS_USER@$VPS_HOST:/etc/systemd/system/micromdm.service"
+
 
 # Write server-url into a drop-in so DOMAIN is configurable without editing the unit in git.
 "${SSH[@]}" bash -s -- "$SERVER_URL" <<'REMOTE'
@@ -143,23 +148,23 @@ API_KEY="$(cat /etc/micromdm/api-key)"
 export HOME=/root
 install -d -m 0700 /root/.micromdm
 
-# Prefer an unencrypted key for upload (avoids mdmctl password flag variance).
-KEY_UPLOAD=/etc/micromdm/apns/PushPrivateKey.unencrypted.key
+# Prefer traditional RSA PEM for mdmctl (rejects PKCS#8).
+KEY_UPLOAD=/etc/micromdm/apns/PushPrivateKey.rsa.pem
 if [[ -f /etc/micromdm/apns/PushPrivateKey.password ]]; then
   openssl rsa \
     -in /etc/micromdm/apns/PushPrivateKey.key \
     -passin file:/etc/micromdm/apns/PushPrivateKey.password \
+    -traditional \
     -out "$KEY_UPLOAD"
 else
-  cp /etc/micromdm/apns/PushPrivateKey.key "$KEY_UPLOAD"
+  openssl rsa -in /etc/micromdm/apns/PushPrivateKey.key -traditional -out "$KEY_UPLOAD"
 fi
 chmod 600 "$KEY_UPLOAD"
 
 /opt/micromdm/bin/mdmctl config set \
   -name pearl \
-  -api-url "http://127.0.0.1:8080" \
-  -api-key "$API_KEY" \
-  -server-url "$SERVER_URL"
+  -server-url "http://127.0.0.1:8080" \
+  -api-token "$API_KEY"
 /opt/micromdm/bin/mdmctl config switch -name pearl
 /opt/micromdm/bin/mdmctl mdmcert upload \
   -cert /etc/micromdm/apns/PushCertificate.pem \
