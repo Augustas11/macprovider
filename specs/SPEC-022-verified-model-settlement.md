@@ -1,11 +1,20 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.1.6
+Version: v0.1.7
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016
 
 ## Change log
+
+### v0.1.7
+
+Disclosure-only clarification for issue #969: R-10.5 and AC-022-62 now state
+that the shipped transparent streaming failover boundary is pre-commit only.
+After the first buyer-visible SSE event, provider disconnects terminate the
+stream with `provider_disconnected`; any future post-commit resume/failover
+protocol must preserve per-attempt receipt binding and no double-charge of
+overlapping output. No settlement runtime behavior changes.
 
 ### v0.1.6
 
@@ -537,12 +546,16 @@ which states can be billable with a verified receipt, which states are
 SPEC-022 enforce mode MUST NOT activate until that classification exists for
 every covered streaming terminal state.
 
-R-5.9. Covered streaming failover settles per request attempt. If one buyer
-request delivers output from multiple provider attempts, each attempt MUST have
-its own route-time snapshot and settlement-capable receipt for the prefix and
-usage attributed to that attempt. Buyer final debit for the request MUST equal
-the sum of verified billable per-attempt prefixes. Unverified prefixes MUST NOT
-be final-debited to the buyer or positively settled to any provider. Overlapping
+R-5.9. Covered streaming resume or failover protocols that span multiple
+provider attempts settle per request attempt. The shipped post-first-event
+provider-disconnect behavior is not such a protocol: after the first
+buyer-visible SSE event, provider disconnect terminates the stream with
+`provider_disconnected`. If a future protocol allows one buyer request to
+deliver output from multiple provider attempts, each attempt MUST have its own
+route-time snapshot and settlement-capable receipt for the prefix and usage
+attributed to that attempt. Buyer final debit for the request MUST equal the
+sum of verified billable per-attempt prefixes. Unverified prefixes MUST NOT be
+final-debited to the buyer or positively settled to any provider. Overlapping
 or duplicate output across attempts MUST NOT be charged or credited twice.
 
 ### R-6. Buyer receipt retrieval (SPEC-022-R006)
@@ -686,10 +699,17 @@ entrypoint MUST be disabled for paid traffic.
 R-10.5. Buyer-facing disclosure MUST state that buyer cancel, gateway timeout,
 provider error, or upstream disconnect can still produce a partial charge only
 when a settlement-capable receipt binds the delivered output prefix and partial
-usage. If transparent streaming failover spans multiple provider attempts,
-buyer-facing disclosure MUST state that the request is billed only for delivered,
-verified output across attempts and is not double-charged for overlapping
-output.
+usage. Buyer-facing disclosure MUST NOT describe post-commit streaming resume as
+shipped unless a resume protocol exists. The shipped transparent streaming
+failover boundary is pre-commit only: after the first buyer-visible SSE event,
+a provider disconnect terminates the stream with `provider_disconnected`, and
+the buyer may retry as a new request. Buyer-facing disclosure MUST state that
+such a retry is a separate billable request with its own reservation and
+settlement, and that cross-request overlapping output is not deduplicated. If a
+future resume or failover protocol spans multiple provider attempts,
+buyer-facing disclosure MUST state that the request is billed only for
+delivered, verified output across attempts and is not double-charged for
+overlapping output.
 
 R-10.6. Buyer-facing usage and quota surfaces MUST explain that a completed
 request can briefly keep quota reserved while receipt verification is pending,
@@ -889,12 +909,14 @@ NOT synthesize missing route snapshots after the fact.
   its row was quarantined by `pending_deadline_seconds` does not resurrect the
   row; provider credit remains zero, payout readiness remains absent, and the
   buyer refund or reservation release stands.
-- **AC-022-49:** A covered streaming request that fails over mid-stream and
-  delivers output spanning two provider attempts settles only the per-attempt
-  prefixes that each have a verified receipt binding that attempt's route-time
-  snapshot; buyer final debit equals the sum of verified billable per-attempt
-  prefixes, no unverified prefix is charged, and no overlapping prefix is
-  credited twice.
+- **AC-022-49:** If a future covered streaming resume or failover protocol
+  allows one buyer request to deliver output spanning two provider attempts,
+  settlement covers only the per-attempt prefixes that each have a verified
+  receipt binding that attempt's route-time snapshot; buyer final debit equals
+  the sum of verified billable per-attempt prefixes, no unverified prefix is
+  charged, and no overlapping prefix is credited twice. Until such a protocol
+  exists, post-first-event provider disconnect terminates with
+  `provider_disconnected`.
 - **AC-022-50a:** A normal completed streaming request binds terminal state
   `normal_completion` or the receipt-spec equivalent and settles according to
   the terminal-state chargeability classification.
@@ -943,10 +965,14 @@ NOT synthesize missing route snapshots after the fact.
 - **AC-022-61:** Pending deadline calculation starts from the recorded
   terminal-state timestamp, not request start, and is verified for normal
   completion plus each partial terminal state.
-- **AC-022-62:** A covered streaming failover whose final attempt ends in buyer
-  cancel, gateway timeout, or upstream disconnect settles the fully verified
-  prefix attempts and the final partial attempt according to per-attempt receipt
-  binding, without charging or crediting overlapping output twice.
+- **AC-022-62:** A covered streaming resume or failover protocol that spans
+  multiple provider attempts and whose final attempt ends in buyer cancel,
+  gateway timeout, or upstream disconnect settles the fully verified prefix
+  attempts and the final partial attempt according to per-attempt receipt
+  binding, without charging or crediting overlapping output twice. Until such a
+  post-commit resume protocol exists, shipped buyer-facing disclosure states
+  that post-first-event provider disconnect terminates the stream with
+  `provider_disconnected` and does not claim seamless continuation.
 - **AC-022-63:** Normal-completion usage used for buyer debit and provider
   settlement is derived from or cross-checked against coordinator/gateway
   canonical request and output state under the settlement usage rules and cannot

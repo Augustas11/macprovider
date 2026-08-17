@@ -150,7 +150,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.14",
+      "version": "0.9.15",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -617,7 +617,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.1.6",
+      "version": "v0.1.7",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -3608,7 +3608,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-5 streaming receipts (first-class paid traffic; terminal-state binding; partial-prefix binding for partial-output settlement with coordinator-observed cross-check; async verification decoupled; per-attempt failover settles delivered verified prefixes without double-charge): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "rationale": "R-5 streaming receipts (first-class paid traffic; terminal-state binding; partial-prefix binding for partial-output settlement with coordinator-observed cross-check; async verification decoupled; future multi-attempt resume/failover protocols settle delivered verified prefixes per attempt without double-charge, while shipped post-first-event provider disconnect terminates the stream): normative in SPEC-022 v0.1.7; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
       }
     },
     {
@@ -3683,7 +3683,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-10 buyer disclosure (distinguish catalog-verified identity from unattested hardware/runtime; mixed-pool claims constrained; observe mode MUST NOT claim enforcement; excluded entrypoints named; partial-charge and failover disclosure): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+        "rationale": "R-10 buyer disclosure (distinguish catalog-verified identity from unattested hardware/runtime; mixed-pool claims constrained; observe mode MUST NOT claim enforcement; excluded entrypoints named; partial-charge disclosure; shipped streaming failover is pre-commit only, post-first-event retry is an independently billable request, and future multi-attempt protocols must not double-charge overlapping output): normative in SPEC-022 v0.1.7; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
       }
     },
     {

@@ -260,7 +260,8 @@ Create v0.4 acceptance criteria covering:
 - streaming buyer cancel;
 - streaming gateway timeout;
 - streaming upstream transport disconnect;
-- streaming failover per-attempt receipt handling;
+- future streaming resume/failover protocols that span multiple provider
+  attempts: per-attempt receipt handling;
 - receipt replay/idempotency;
 - late receipt after deadline classification;
 - partial-output binding unavailable goes pending until deadline, then
