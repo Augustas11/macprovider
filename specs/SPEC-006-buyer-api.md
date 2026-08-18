@@ -1,7 +1,11 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.18 (2026-08-17, settlement-integrity disclosure framing)
+**Version:** 0.9.19 (2026-08-18, buyer receipt metadata retrieval)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.19 (2026-08-18, issue #1042 — buyer receipt metadata retrieval):**
+- §2.2 and new §5.5.1 expose authenticated `GET /v1/receipts/{request_id}` on the buyer host. The response is a metadata view (`schema_version: macprovider.buyer-receipt-view.v1`, `surface: metadata`): hashes, terminal/settlement outcome, and pending/quarantined visibility. It is not signed proof and MUST NOT include raw prompts, raw outputs, or the v0.4 wire envelope.
+- Owner API-key or operator may retrieve; demo tokens MUST 403; authenticated non-owners MUST 403; unknown ids MUST 404; unauthenticated MUST 401. Retention equals the coordinator `request_log` / settlement-verdict lifetime. GET is idempotent. Rate limits match authenticated `GET /v1/usage` plus `kill_switch.all_public_api`. Responses MUST be `Cache-Control: no-store`. SPEC-022-R006 stays pending until a signed paid-path capture records `buyer_receipt_retrieval_exposed=true`.
 
 **Change log v0.9.18 (2026-08-17, issue #931 — settlement-integrity disclosure framing):**
 - Adds a `settlement_integrity` disclosure object to the existing `/v1/models tier1_disclosure.verified_model_settlement` and `/v1/usage settlement_disclosure` surfaces. The object consolidates the near-term buyer-facing framing: settlement-integrity labels are receipt-bound for covered paid entrypoints under SPEC-022 enforce mode, SPEC-036 compute integrity is sampled/overt distribution-drift gate logic, and buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available.
@@ -505,6 +509,7 @@ This section is read-only design input and MUST NOT be treated as a place to pro
   - `POST /v1/chat/completions` (including SSE streaming via `stream: true`)
   - `POST /v1/messages` only when `features.anthropic_messages_enabled` is true
   - `GET /v1/usage`
+  - `GET /v1/receipts/{request_id}` (authenticated metadata-only retrieval; owner API-key or operator)
   - `GET /v1/status`
   - `GET /v1/rate-card` and `GET /v1/rate-card.sig` (unauthenticated public recommendation feed; same bytes as coordinator)
   - `GET /v1/stats/overview` (unauthenticated public SPEC-017 snapshot; same body as stats host)
@@ -1682,6 +1687,79 @@ labels or reservations are exposed. That disclosure MUST explain pending
 verification reservations, non-verified reservation release/refund behavior,
 and the provider-reported-hash caveat without exposing raw prompts or raw
 outputs.
+
+### 5.5.1 `GET /v1/receipts/{request_id}`
+
+`GET /v1/receipts/{request_id}` returns a metadata-only view of settlement
+receipts for one buyer request (SPEC-022-R006 / SPEC-015 Q5 option (b)).
+
+This surface is honest about persistence: the coordinator does not retain
+raw signed v0.4 wire envelopes after ingest. The response is not a
+re-download of the provider receipt and MUST NOT be described as signed
+proof.
+
+Authentication:
+
+- Bearer API key for the owning `account_id`, or the operator key.
+- Wallet-session bearers MAY retrieve for the session account.
+- Demo tokens MUST return HTTP 403 `demo_receipt_forbidden`.
+- Unauthenticated requests MUST return HTTP 401.
+
+Authorization and lookup:
+
+- The `{request_id}` path parameter is the buyer-visible request id
+  (`X-Request-ID` / coordinator `external_request_id` or `request_id`).
+- An authenticated caller whose account does not own the request MUST
+  receive HTTP 403 `receipt_forbidden`.
+- An unknown id MUST receive HTTP 404. Do not leak existence to
+  unauthenticated callers (401 first).
+- Pending and quarantined attempts MUST be visible to the owning buyer
+  (`pending_quarantined_visible: true`). Empty `attempts` is a valid 200
+  when the request is owned but no settlement-verdict row exists yet.
+
+Retention:
+
+- The metadata view is available for as long as a coordinator
+  `request_log` ownership row exists for the request. Verdict fields are
+  present only while the matching `settlement_receipt_verdicts` row
+  exists. There is no separate receipt-blob TTL.
+
+Rate limits and idempotency:
+
+- The endpoint is subject to `kill_switch.all_public_api` like other
+  public `/v1/*` routes.
+- Responses MUST send `Cache-Control: no-store` (and `Vary` on
+  `Authorization`, `X-Api-Key`, and `X-Demo-Token`) so intermediaries
+  cannot reuse another account's metadata view.
+- There is no extra receipt-specific quota in v0.9.19; authenticated
+  retrieval follows the same abuse posture as `GET /v1/usage`.
+- GET is read-only and idempotent: repeating the same authorized request
+  returns the same metadata view or 404 if the ownership row is gone.
+
+Response shape:
+
+```json
+{
+  "schema_version": "macprovider.buyer-receipt-view.v1",
+  "request_id": "11111111-1111-4111-8111-111111111111",
+  "surface": "metadata",
+  "pending_quarantined_visible": true,
+  "attempts": [
+    {
+      "attempt_n": 0,
+      "settlement_outcome": "pending",
+      "receipt_result": "inconclusive",
+      "closed": false,
+      "prompt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "output_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}
+```
+
+The response MUST NOT include raw prompts, raw outputs, bearer tokens,
+private keys, or `X-MacProvider-Receipt` wire envelopes. Hash fields MAY
+be present. `surface` MUST be `metadata`.
 
 ### 5.6 `GET /v1/status`
 

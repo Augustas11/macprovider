@@ -126,21 +126,23 @@ var spec018RetryableByCode = map[string]bool{
 	// do, so false is confirmed correct and now explicit rather than
 	// implicit. TestCoordinatorErrorCodeCompleteness enforces every
 	// emitted code has an explicit entry going forward.
-	"catalog_not_found":              false, // resource lookup, permanent
-	"provider_not_found":             false, // config/admin lookup, permanent
-	"provider_response_too_large":    false, // cap-violation family (response_byte_cap_exceeded sibling)
-	"not_found":                      false, // internal settlement-finality lookup, coordinator-authorization gated
-	"unauthorized":                   false, // internal/coordinator-authorization errors, not a buyer retry signal
-	"request_log_failed":             false, // internal durable-logging fault, ambiguous — not an availability signal
-	"settlement_finality_failed":     false, // internal settlement-finality fault, coordinator-authorization gated
-	"idempotency_key_body_mismatch":  false, // client reused Idempotency-Key with a different body
-	"idempotency_key_replayed":       false, // request already recorded, not an error to retry
-	"idempotency_reservation_failed": false, // internal store-contention fault, ambiguous
-	"malformed_settlement_stream":    false, // internal settlement-protocol fault
-	"tool_call_final_close_failed":   false, // validation-shape error, permanent
-	"malformed_tool_call":            false, // validation-shape error, permanent
-	"stream_output_exceeded":         false, // cap-violation family, same bucket as response_byte_cap_exceeded
-	"session_ended":                  false, // pinned session no longer exists, permanent
+	"catalog_not_found":                false, // resource lookup, permanent
+	"provider_not_found":               false, // config/admin lookup, permanent
+	"provider_response_too_large":      false, // cap-violation family (response_byte_cap_exceeded sibling)
+	"not_found":                        false, // internal settlement-finality lookup, coordinator-authorization gated
+	"unauthorized":                     false, // internal/coordinator-authorization errors, not a buyer retry signal
+	"request_log_failed":               false, // internal durable-logging fault, ambiguous — not an availability signal
+	"settlement_finality_failed":       false, // internal settlement-finality fault, coordinator-authorization gated
+	"settlement_receipt_lookup_failed": false, // internal buyer-receipt lookup fault, coordinator-authorization gated
+	"forbidden":                        false, // internal settlement-receipt ownership denial, coordinator-authorization gated
+	"idempotency_key_body_mismatch":    false, // client reused Idempotency-Key with a different body
+	"idempotency_key_replayed":         false, // request already recorded, not an error to retry
+	"idempotency_reservation_failed":   false, // internal store-contention fault, ambiguous
+	"malformed_settlement_stream":      false, // internal settlement-protocol fault
+	"tool_call_final_close_failed":     false, // validation-shape error, permanent
+	"malformed_tool_call":              false, // validation-shape error, permanent
+	"stream_output_exceeded":           false, // cap-violation family, same bucket as response_byte_cap_exceeded
+	"session_ended":                    false, // pinned session no longer exists, permanent
 	// Tier-2 attestation/security-policy codes: conservatively false.
 	// tier2_hash_verified_required / tier2_encrypted_leg_required /
 	// tier2_attestation_required ("no attested/encrypted/hash-verified
@@ -805,6 +807,7 @@ func (s *Server) InternalHandler() http.Handler {
 	r.Delete("/internal/sticky", s.handleInternalStickyDelete)
 	r.Get("/internal/routing", s.handleInternalRouting)
 	r.Get("/internal/settlement/finality", s.handleInternalSettlementFinality)
+	r.Get("/internal/settlement/receipts", s.handleInternalSettlementReceipts)
 	return r
 }
 
@@ -865,6 +868,45 @@ func (s *Server) handleInternalSettlementFinality(w http.ResponseWriter, r *http
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(finality)
+}
+
+func (s *Server) handleInternalSettlementReceipts(w http.ResponseWriter, r *http.Request) {
+	if !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Internal settlement receipts require coordinator authorization")
+		return
+	}
+	accountID := sanitizeAccountID(r.URL.Query().Get("account_id"))
+	requestID := sanitizeExternalRequestID(r.URL.Query().Get("request_id"))
+	operator := strings.TrimSpace(r.URL.Query().Get("operator")) == "1"
+	if requestID == "" || (!operator && accountID == "") {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request_id is required")
+		return
+	}
+	billingStore, _, _ := s.billingState()
+	if billingStore == nil {
+		writeError(w, http.StatusNotFound, "not_found", "Settlement receipts are unavailable")
+		return
+	}
+	view, status, err := billingStore.LookupBuyerReceipt(r.Context(), accountID, requestID, operator)
+	if err != nil {
+		s.log.Warn().Err(err).Str("request_id", requestID).Str("account_id", accountID).Msg("internal settlement receipt lookup failed")
+		writeError(w, http.StatusInternalServerError, "settlement_receipt_lookup_failed", "Could not load settlement receipt")
+		return
+	}
+	switch status {
+	case http.StatusForbidden:
+		writeError(w, http.StatusForbidden, "forbidden", "Receipt does not belong to this account")
+		return
+	case http.StatusNotFound:
+		writeError(w, http.StatusNotFound, "not_found", "Receipt not found")
+		return
+	case http.StatusOK:
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(view)
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, "settlement_receipt_lookup_failed", "Could not load settlement receipt")
+	}
 }
 
 func (s *Server) internalTier2Metadata() map[string]any {
