@@ -13,7 +13,7 @@ enum DashboardWindow {
             onExportDiagnostics: onExportDiagnostics,
             onResetProvider: onResetProvider
         ))
-        hosting.sizingOptions = [.minSize]
+        hosting.sizingOptions = []
         let window = NSWindow(contentViewController: hosting)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.title = "Malibu"
@@ -106,6 +106,8 @@ private struct DashboardView: View {
     @State private var showModelSheet = false
     @ObservedObject private var modelStore = ModelManagementStore.shared
 
+    @State private var advancedDiagnosticsExpanded = true
+
     var body: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 16) {
@@ -150,10 +152,12 @@ private struct DashboardView: View {
                         .lineLimit(2)
                 }
                 Spacer()
-                Button(String(localized: "Change Model…", comment: "Dashboard model action")) {
-                    showModelSheet = true
-                }
-                .accessibilityIdentifier("malibu.dashboard.change-model")
+                AppKitActionButton(
+                    title: String(localized: "Change Model…", comment: "Dashboard model action"),
+                    accessibilityIdentifier: "malibu.dashboard.change-model",
+                    action: { showModelSheet = true }
+                )
+                .fixedSize()
                 .accessibilityHint(Text(String(localized: "Opens the model switcher and shows provider guards before any action.", comment: "Dashboard model action hint")))
                 Button {
                     SettingsWindowPresenter.shared.present()
@@ -317,7 +321,7 @@ private struct DashboardView: View {
                     }
                     primaryActionButton
                     recoveryActions
-                    DisclosureGroup("Advanced diagnostics") {
+                    DisclosureGroup("Advanced diagnostics", isExpanded: $advancedDiagnosticsExpanded) {
                         VStack(alignment: .leading, spacing: 12) {
                             MetricRow(title: "Running model", value: AgentSnapshotPresenter.modelLine(agent.snapshot))
                             if let path = agent.snapshot.weightsPath {
@@ -417,18 +421,20 @@ private struct DashboardView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                    .accessibilityIdentifier("malibu.dashboard.advanced-diagnostics")
                 }
             }
-            .frame(minHeight: 280)
 
             if agent.snapshot.localProviderID != nil {
                 ReferralPanel(agent: agent)
             }
         }
         .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(minWidth: 640, minHeight: 480)
+        .scrollIndicators(.visible)
         .accessibilityIdentifier("malibu.dashboard.scroll")
+        .frame(minWidth: 640, maxWidth: .infinity, minHeight: 480, maxHeight: .infinity)
         .sheet(isPresented: $showAddWalletSheet) {
             AddWalletSheet(agent: agent, isPresented: $showAddWalletSheet)
         }
@@ -534,12 +540,22 @@ private struct DashboardView: View {
             Text(DashboardCopy.recoveryHelpTitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                Button(DashboardCopy.resetProviderTitle) {
-                    onResetProvider()
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    Button(DashboardCopy.resetProviderTitle) {
+                        onResetProvider()
+                    }
+                    Button(DashboardCopy.exportDiagnosticsTitle) {
+                        onExportDiagnostics()
+                    }
                 }
-                Button(DashboardCopy.exportDiagnosticsTitle) {
-                    onExportDiagnostics()
+                VStack(alignment: .leading, spacing: 8) {
+                    Button(DashboardCopy.resetProviderTitle) {
+                        onResetProvider()
+                    }
+                    Button(DashboardCopy.exportDiagnosticsTitle) {
+                        onExportDiagnostics()
+                    }
                 }
             }
         }
@@ -549,7 +565,6 @@ private struct DashboardView: View {
     private func panel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             content()
-            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, minHeight: 250, alignment: .topLeading)
         .padding(16)
@@ -560,7 +575,6 @@ private struct DashboardView: View {
     private func statsPanel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             content()
-            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, minHeight: 250, alignment: .topLeading)
         .padding(16)
@@ -857,6 +871,42 @@ private struct ReferralPanel: View {
         .task(id: agent.snapshot.localProviderID) {
             guard agent.snapshot.hasTrustedReferralBoundary() else { return }
             await agent.refreshReferralStatus()
+        }
+    }
+}
+
+private struct AppKitActionButton: NSViewRepresentable {
+    let title: String
+    let accessibilityIdentifier: String
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.run))
+        button.bezelStyle = .rounded
+        button.setButtonType(.momentaryPushIn)
+        button.setAccessibilityIdentifier(accessibilityIdentifier)
+        button.setAccessibilityLabel(title)
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        button.title = title
+        button.setAccessibilityIdentifier(accessibilityIdentifier)
+        context.coordinator.action = action
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        @objc func run() {
+            action()
         }
     }
 }
