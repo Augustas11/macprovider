@@ -921,6 +921,33 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertFalse(decoded.earningsProjectionFresh)
     }
 
+    func testProviderEarningsAcceptsProviderDailyCapRewardReason() throws {
+        let data = Data("""
+        {
+          "wallet_bound": true,
+          "trust_tier": "trusted",
+          "unpaid_ledger_backlog_usdc": 0,
+          "unpaid_ledger_backlog_malibu": 4,
+          "malibu_withdrawable": 0,
+          "malibu_held": 4,
+          "malibu_projection_fresh": true,
+          "malibu_reward_eligibility": {
+            "schema_version": "malibu_reward_eligibility.v1",
+            "earning_state": "capped",
+            "withdrawal_state": "capped",
+            "primary_reason": "held_provider_daily_cap",
+            "reasons": ["held_provider_daily_cap"]
+          }
+        }
+        """.utf8)
+
+        let decoded = try JSONDecoder().decode(ProviderEarnings.self, from: data)
+        XCTAssertEqual(decoded.malibuRewardEligibility?.earningState, "capped")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.withdrawalState, "capped")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.primaryReason, "held_provider_daily_cap")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.reasons, ["held_provider_daily_cap"])
+    }
+
     func testMalibuAvailabilityAndHoldCopyExplainWithdrawalState() {
         var snapshot = AgentSnapshot.empty
         snapshot.trustTier = .provisional
@@ -954,6 +981,18 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuHoldLine(snapshot),
             "MALIBU status: wallet daily limit reached Next: The wallet cap resets at the next UTC day."
+        )
+
+        snapshot.malibuHoldReasons = []
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "capped",
+            withdrawalState: "capped",
+            primaryReason: "held_provider_daily_cap",
+            reasons: ["held_provider_daily_cap"]
+        )
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuHoldLine(snapshot),
+            "MALIBU status: provider daily limit reached Next: The provider cap resets at the next UTC day."
         )
     }
 

@@ -125,6 +125,7 @@ struct MalibuRewardEligibility: Codable, Equatable {
         "earning_verified_work",
         "eligible_idle_no_work",
         "held_provisional_trust_tier",
+        "held_provider_daily_cap",
         "held_wallet_daily_cap",
         "held_demotion_cooldown",
         "withdrawable_balance_available",

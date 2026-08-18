@@ -231,6 +231,61 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         )
     }
 
+    func merging(walletStatus: ProviderWalletStatusSummary) -> ProviderEarningsSummary {
+        if walletStatus.unavailable {
+            return markingWalletStatusUnavailable()
+        }
+        return ProviderEarningsSummary(
+            walletBound: walletStatus.walletBound,
+            trustTier: walletStatus.eligibilityInputs?.trustTier ?? trustTier,
+            unpaidLedgerBacklogUSDC: unpaidLedgerBacklogUSDC,
+            unpaidLedgerBacklogMALIBU: unpaidLedgerBacklogMALIBU,
+            usdcToday: usdcToday,
+            usdcWeek: usdcWeek,
+            usdcPending: usdcPending,
+            usdcLifetime: usdcLifetime,
+            malibuToday: malibuToday,
+            malibuAllTime: walletStatus.rewardAmounts?.accruedMALIBU ?? malibuAllTime,
+            trustCriteriaMet: walletStatus.eligibilityInputs?.criteriaMet ?? trustCriteriaMet,
+            trustCriteriaRequired: walletStatus.eligibilityInputs?.criteriaRequired ?? trustCriteriaRequired,
+            malibuWithdrawable: walletStatus.rewardAmounts?.withdrawableMALIBU ?? malibuWithdrawable,
+            malibuHeld: walletStatus.rewardAmounts?.heldMALIBU ?? malibuHeld,
+            malibuHoldReasons: malibuHoldReasons,
+            malibuDailyCap: walletStatus.rewardAmounts?.providerDailyCapMALIBU ?? malibuDailyCap,
+            malibuWalletDailyCap: walletStatus.rewardAmounts?.walletDailyCapMALIBU ?? malibuWalletDailyCap,
+            malibuRewardEligibility: walletStatus.rewardEligibility,
+            idlePrewarm: idlePrewarm,
+            malibuProjectionFresh: true,
+            earningsProjectionFresh: earningsProjectionFresh
+        )
+    }
+
+    func markingWalletStatusUnavailable() -> ProviderEarningsSummary {
+        ProviderEarningsSummary(
+            walletBound: false,
+            trustTier: trustTier,
+            unpaidLedgerBacklogUSDC: unpaidLedgerBacklogUSDC,
+            unpaidLedgerBacklogMALIBU: unpaidLedgerBacklogMALIBU,
+            usdcToday: usdcToday,
+            usdcWeek: usdcWeek,
+            usdcPending: usdcPending,
+            usdcLifetime: usdcLifetime,
+            malibuToday: malibuToday,
+            malibuAllTime: nil,
+            trustCriteriaMet: trustCriteriaMet,
+            trustCriteriaRequired: trustCriteriaRequired,
+            malibuWithdrawable: nil,
+            malibuHeld: nil,
+            malibuHoldReasons: [],
+            malibuDailyCap: nil,
+            malibuWalletDailyCap: nil,
+            malibuRewardEligibility: MalibuRewardEligibility.unavailableForMissingObject(),
+            idlePrewarm: idlePrewarm,
+            malibuProjectionFresh: true,
+            earningsProjectionFresh: earningsProjectionFresh
+        )
+    }
+
     static func from(accrual: MalibuAccrualSummary) -> ProviderEarningsSummary {
         ProviderEarningsSummary(
             walletBound: accrual.walletBound ?? false,
@@ -251,6 +306,32 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuDailyCap: accrual.dailyCapMALIBU,
             malibuWalletDailyCap: accrual.walletDailyCapMALIBU,
             malibuRewardEligibility: accrual.rewardEligibility,
+            idlePrewarm: .empty,
+            malibuProjectionFresh: true,
+            earningsProjectionFresh: false
+        )
+    }
+
+    static func unavailableWalletStatus() -> ProviderEarningsSummary {
+        ProviderEarningsSummary(
+            walletBound: false,
+            trustTier: "provisional",
+            unpaidLedgerBacklogUSDC: 0,
+            unpaidLedgerBacklogMALIBU: 0,
+            usdcToday: nil,
+            usdcWeek: nil,
+            usdcPending: nil,
+            usdcLifetime: nil,
+            malibuToday: nil,
+            malibuAllTime: nil,
+            trustCriteriaMet: nil,
+            trustCriteriaRequired: nil,
+            malibuWithdrawable: nil,
+            malibuHeld: nil,
+            malibuHoldReasons: [],
+            malibuDailyCap: nil,
+            malibuWalletDailyCap: nil,
+            malibuRewardEligibility: MalibuRewardEligibility.unavailableForMissingObject(),
             idlePrewarm: .empty,
             malibuProjectionFresh: true,
             earningsProjectionFresh: false

@@ -323,13 +323,21 @@
     .rewards-card .reward-value { font-size:18px; margin-top:3px; }
     .rewards-card .reward-hold { color:var(--bad); margin-top:12px; font-size:13px; line-height:1.45; }
     .rewards-card .reward-next { margin-top:6px; font-size:13px; line-height:1.45; }
+    .wallet-card { margin-top:18px; }
+    .wallet-card .wallet-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; margin-top:12px; }
+    .wallet-card .wallet-label { color:var(--muted); font-size:12px; }
+    .wallet-card .wallet-value { margin-top:3px; overflow-wrap:anywhere; }
+    .wallet-card .audit-list { margin-top:12px; border-top:1px solid var(--line); }
+    .wallet-card .audit-row { padding:10px 0; border-bottom:1px solid var(--line); }
+    .wallet-card .audit-row .audit-type { font-size:13px; }
+    .wallet-card .audit-row .audit-summary { color:var(--muted); font-size:12px; line-height:1.4; margin-top:3px; }
     .mining-health-card { margin-bottom:18px; border-left:2px solid var(--accent); }
     .mining-health-card .mh-status { font-size:20px; font-weight:600; margin-top:2px; }
     .mining-health-card .mh-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; margin-top:12px; }
     .mining-health-card .mh-label { color:var(--muted); font-size:12px; }
     .mining-health-card .mh-value { font-size:13px; margin-top:3px; line-height:1.45; }
     @media (max-width: 720px) { .mining-health-card .mh-grid { grid-template-columns:1fr; } }
-    @media (max-width: 620px) { .rewards-card .reward-grid { grid-template-columns:1fr; } }
+    @media (max-width: 620px) { .rewards-card .reward-grid, .wallet-card .wallet-grid { grid-template-columns:1fr; } }
     .monitor-card { background:var(--surface); border:1px dashed var(--border2); border-radius:10px; padding:16px 18px; }
     .monitor-card h3 { margin:0 0 10px 0; font-size:14px; }
     .monitor-card ul { margin:0; padding-left:18px; color:var(--muted); font-size:13px; line-height:1.6; }
@@ -384,6 +392,7 @@
       return "/providers/" + encodeURIComponent(providerId) + "/earnings";
     }
     var MALIBU_ACCRUAL_PATH = "/v1/provider/malibu-accrual";
+    var PROVIDER_WALLET_PATH = "/v1/provider/wallet";
 
     var RELEASES_HOST = "https://api.github.com";
     var RELEASES_TTL_MS = 5 * 60 * 1000;
@@ -400,6 +409,7 @@
       pool: { data: null, ts: 0, err: null, inflight: false },
       earn: { data: null, ts: 0, err: null, inflight: false },
       malibu: { data: null, ts: 0, err: null, inflight: false },
+      wallet: { data: null, ts: 0, err: null, inflight: false },
       authFailBySurface: {},
       proxyMissing: false,
       sidebarOpen: false,
@@ -760,6 +770,54 @@
         });
     }
 
+    function walletFetch(surface, opts) {
+      opts = opts || {};
+      if (!state.session || (state.cfg && state.cfg.github_oauth_enabled)) return Promise.resolve();
+      var sessionGeneration = state.sessionGeneration;
+      var now = Date.now();
+      if (!opts.force && state.wallet.data && (now - state.wallet.ts) < EARN_CACHE_TTL_MS) {
+        return Promise.resolve();
+      }
+      if (state.wallet.inflight) return Promise.resolve();
+      state.wallet.inflight = true;
+      render();
+      return coordFetch(PROVIDER_WALLET_PATH, {
+        auth: true,
+        surface: surface || "machine",
+        ignoreAuthFailureStatus: 404,
+        sessionGeneration: sessionGeneration
+      })
+        .then(function (r) {
+          if (sessionGeneration !== state.sessionGeneration) return;
+          state.wallet.inflight = false;
+          if (r.ok) {
+            state.wallet.data = r.body;
+            state.wallet.ts = Date.now();
+            state.wallet.err = null;
+            render();
+            return;
+          }
+          state.wallet.data = null;
+          state.wallet.ts = 0;
+          if (r.status === 401 || r.status === 403) {
+            handleAuthRejection(r.status, surface || "machine");
+            return;
+          }
+          state.wallet.err = {
+            status: r.status,
+            unavailable: r.status === 404
+          };
+          render();
+        })
+        .catch(function () {
+          if (sessionGeneration !== state.sessionGeneration) return;
+          state.wallet.inflight = false;
+          state.wallet.data = null;
+          state.wallet.ts = 0;
+          render();
+        });
+    }
+
     /* =====================================================================
      * GitHub Releases feed (§4.2 B.3, §5.1 table (a), §5.4 thresholds)
      *
@@ -824,6 +882,7 @@
       state.session = null;
       state.earn = { data: null, ts: 0, err: null, inflight: false };
       state.malibu = { data: null, ts: 0, err: null, inflight: false };
+      state.wallet = { data: null, ts: 0, err: null, inflight: false };
       state.pool = { data: null, ts: 0, err: null, inflight: false };
       if (status === 401) {
         state.signinErr = signInRejectedCopy();
@@ -849,11 +908,13 @@
       timers.earn = setInterval(function () {
         earnFetch("machine");
         malibuFetch("machine");
+        walletFetch("machine");
       }, EARN_POLL_MS);
       timers.stamp = setInterval(function () { renderStampOnly(); }, STAMP_TICK_MS);
       poolCheck();
       earnFetch("machine", { force: true });
       malibuFetch("machine", { force: true });
+      walletFetch("machine", { force: true });
     }
     function stopPollers() {
       if (timers.pool) { clearInterval(timers.pool); timers.pool = null; }
@@ -873,6 +934,7 @@
         state.pool = { data: null, ts: 0, err: null, inflight: false };
         state.earn = { data: null, ts: 0, err: null, inflight: false };
         state.malibu = { data: null, ts: 0, err: null, inflight: false };
+        state.wallet = { data: null, ts: 0, err: null, inflight: false };
         state.releases = { list: null, ts: 0, err: null, inflight: false, rateLimited: false };
         state.authFailBySurface = {};
         state.proxyMissing = false;
@@ -891,6 +953,7 @@
       state.pool = { data: null, ts: 0, err: null, inflight: false };
       state.earn = { data: null, ts: 0, err: null, inflight: false };
       state.malibu = { data: null, ts: 0, err: null, inflight: false };
+      state.wallet = { data: null, ts: 0, err: null, inflight: false };
       state.releases = { list: null, ts: 0, err: null, inflight: false, rateLimited: false };
       state.authFailBySurface = {};
       state.proxyMissing = false;
@@ -917,6 +980,10 @@
       state.signinErr = null;
       state.signinMisconfigNotice = null;
       state.route = "machine";
+      state.pool = { data: null, ts: 0, err: null, inflight: false };
+      state.earn = { data: null, ts: 0, err: null, inflight: false };
+      state.malibu = { data: null, ts: 0, err: null, inflight: false };
+      state.wallet = { data: null, ts: 0, err: null, inflight: false };
       render();
       startPollers();
     }
@@ -999,6 +1066,7 @@
       state.pool = { data: null, ts: 0, err: null, inflight: false };
       state.earn = { data: null, ts: 0, err: null, inflight: false };
       state.malibu = { data: null, ts: 0, err: null, inflight: false };
+      state.wallet = { data: null, ts: 0, err: null, inflight: false };
       if (pushRoute) {
         history.pushState({}, "", "/?p=" + encodeURIComponent(providerId));
       }
@@ -1417,6 +1485,8 @@
               releasesFetch();
             } else if (it.id === "earn") {
               earnFetch("earn");
+              malibuFetch("earn");
+              walletFetch("earn");
             }
           },
         }, it.label);
@@ -1441,6 +1511,8 @@
         el("code", null, "/providers/{id}/earnings"),
         ", plus ",
         el("code", null, "/v1/provider/malibu-accrual"),
+        ", ",
+        el("code", null, "/v1/provider/wallet"),
         ", ",
         el("code", null, "/v1/auth/github/*"),
         ", ",
@@ -1658,12 +1730,14 @@
     }
 
     var MALIBU_REWARD_ELIGIBILITY_SCHEMA = "malibu_reward_eligibility.v1";
+    var PROVIDER_WALLET_STATUS_SCHEMA = "provider_wallet_status.v1";
     var MALIBU_EARNING_STATES = ["earning", "eligible_idle", "held", "capped", "ineligible", "unavailable"];
     var MALIBU_WITHDRAWAL_STATES = ["withdrawable", "held", "capped", "ineligible", "unavailable"];
     var MALIBU_REWARD_REASONS = [
       "earning_verified_work",
       "eligible_idle_no_work",
       "held_provisional_trust_tier",
+      "held_provider_daily_cap",
       "held_wallet_daily_cap",
       "held_demotion_cooldown",
       "withdrawable_balance_available",
@@ -1748,6 +1822,7 @@
         case "earning_verified_work": return "Earning from verified work";
         case "eligible_idle_no_work": return "Eligible; waiting for work";
         case "held_provisional_trust_tier": return "Trust verification is incomplete";
+        case "held_provider_daily_cap": return "provider daily limit reached";
         case "held_wallet_daily_cap": return "wallet daily limit reached";
         case "held_demotion_cooldown": return "Trust requalification is in progress";
         case "withdrawable_balance_available": return "MALIBU is available to withdraw";
@@ -1773,6 +1848,7 @@
 
     function malibuRewardNextAction(reason) {
       switch (reason) {
+        case "held_provider_daily_cap": return "The provider cap resets at the next UTC day.";
         case "held_wallet_daily_cap": return "The wallet cap resets at the next UTC day.";
         case "held_provisional_trust_tier": return "Complete the remaining trust criteria to unlock withdrawals.";
         case "held_demotion_cooldown": return "Re-qualify for Trusted to clear the cooldown.";
@@ -1876,6 +1952,12 @@
             reason: "MALIBU above the wallet daily cap is held.",
             action: "Wait for the next UTC day or use a wallet below the cap.",
           };
+        case "provider_daily_cap_held":
+          return {
+            status: "Provider cap held",
+            reason: "MALIBU above the provider daily cap is held.",
+            action: "Wait for the next UTC day.",
+          };
         case "rewards_held":
           return {
             status: "Rewards held",
@@ -1909,6 +1991,7 @@
         case "earning_verified_work": return "earning";
         case "eligible_idle_no_work": return "idle_no_work";
         case "held_provisional_trust_tier": return "trust_tier_provisional";
+        case "held_provider_daily_cap": return "provider_daily_cap_held";
         case "held_wallet_daily_cap": return "wallet_daily_cap_held";
         case "held_demotion_cooldown": return "rewards_held";
         case "withdrawable_balance_available": return "trusted_withdrawable";
@@ -1999,6 +2082,7 @@
       }
       if (!eligibility && malibu && (reasons.length ||
           code === "trust_tier_provisional" ||
+          code === "provider_daily_cap_held" ||
           code === "wallet_daily_cap_held")) {
         action = malibuNextAction(malibu, reasons);
       }
@@ -2088,6 +2172,271 @@
         capParts.length ? el("div", { class: "fiat-cite" }, capParts.join(" · ")) : null);
     }
 
+    function normalizedProviderWalletStatus(data) {
+      if (!data) return null;
+      if (data.schema_version !== PROVIDER_WALLET_STATUS_SCHEMA) {
+        return providerWalletStatusUnavailable(data, "schema_version");
+      }
+      var driftField = providerWalletStatusV1DriftField(data);
+      if (driftField) return providerWalletStatusUnavailable(data, driftField);
+      return data;
+    }
+
+    function providerWalletStatusUnavailable(data, field) {
+      if (typeof console !== "undefined" && typeof console.warn === "function") {
+        console.warn("provider_wallet_status_schema_drift", {
+          schema_version: data && data.schema_version ? data.schema_version : "missing",
+          field: field
+        });
+      }
+      return {
+        unavailable: true,
+        schema_version: data && data.schema_version ? data.schema_version : PROVIDER_WALLET_STATUS_SCHEMA
+      };
+    }
+
+    function providerWalletStatusV1DriftField(data) {
+      if (!isPlainObject(data)) return "body";
+      if (!nonEmptyString(data.provider_id)) return "provider_id";
+      if (typeof data.wallet_bound !== "boolean") return "wallet_bound";
+      if (typeof data.wallet_mismatch !== "boolean") return "wallet_mismatch";
+      if (Object.prototype.hasOwnProperty.call(data, "hold_or_mismatch_reason") && !nonEmptyString(data.hold_or_mismatch_reason)) {
+        return "hold_or_mismatch_reason";
+      }
+      if (data.payout_wallet != null) {
+        var payoutWalletDrift = providerPayoutWalletDriftField(data.payout_wallet);
+        if (payoutWalletDrift) return "payout_wallet." + payoutWalletDrift;
+      }
+      var rewardWalletDrift = providerRewardWalletDriftField(data.reward_wallet);
+      if (rewardWalletDrift) return "reward_wallet." + rewardWalletDrift;
+      var rewardAmountsDrift = providerRewardAmountsDriftField(data.reward_amounts);
+      if (rewardAmountsDrift) return "reward_amounts." + rewardAmountsDrift;
+      var inputsDrift = providerEligibilityInputsDriftField(data.eligibility_inputs);
+      if (inputsDrift) return "eligibility_inputs." + inputsDrift;
+      var rewardEligibilityDrift = providerRewardEligibilityDriftField(data.reward_eligibility);
+      if (rewardEligibilityDrift) return "reward_eligibility." + rewardEligibilityDrift;
+      var auditDrift = providerRewardAuditDriftField(data.audit);
+      if (auditDrift) return "audit." + auditDrift;
+      return "";
+    }
+
+    function providerPayoutWalletDriftField(wallet) {
+      if (!isPlainObject(wallet)) return "body";
+      var requiredStringFields = ["chain", "address", "verification_source"];
+      for (var i = 0; i < requiredStringFields.length; i++) {
+        if (!nonEmptyString(wallet[requiredStringFields[i]])) return requiredStringFields[i];
+      }
+      if (typeof wallet.payout_allowed !== "boolean") return "payout_allowed";
+      var optionalStringFields = [
+        "pending_until_utc",
+        "rotated_from",
+        "registered_at_utc",
+        "registered_against_hot_wallet",
+        "last_update_utc",
+      ];
+      for (var j = 0; j < optionalStringFields.length; j++) {
+        var field = optionalStringFields[j];
+        if (Object.prototype.hasOwnProperty.call(wallet, field) && !nonEmptyString(wallet[field])) return field;
+      }
+      return "";
+    }
+
+    function providerRewardWalletDriftField(wallet) {
+      if (!isPlainObject(wallet)) return "body";
+      if (Object.prototype.hasOwnProperty.call(wallet, "address") && !nonEmptyString(wallet.address)) return "address";
+      if (!nonEmptyString(wallet.verification_source)) return "verification_source";
+      if (Object.prototype.hasOwnProperty.call(wallet, "last_update_utc") && !nonEmptyString(wallet.last_update_utc)) {
+        return "last_update_utc";
+      }
+      if (typeof wallet.cap_replay_pending !== "boolean") return "cap_replay_pending";
+      return "";
+    }
+
+    function providerRewardAmountsDriftField(amounts) {
+      if (!isPlainObject(amounts)) return "body";
+      var decimalFields = [
+        "accrued_malibu",
+        "withdrawable_malibu",
+        "held_malibu",
+        "provider_daily_cap_malibu",
+        "provider_day_malibu",
+        "wallet_daily_cap_malibu",
+        "wallet_day_malibu",
+      ];
+      for (var i = 0; i < decimalFields.length; i++) {
+        if (!finiteDecimalField(amounts, decimalFields[i])) return decimalFields[i];
+      }
+      if (typeof amounts.provider_daily_capped !== "boolean") return "provider_daily_capped";
+      if (typeof amounts.wallet_daily_capped !== "boolean") return "wallet_daily_capped";
+      return "";
+    }
+
+    function providerEligibilityInputsDriftField(inputs) {
+      if (!isPlainObject(inputs)) return "body";
+      var stringFields = ["trust_tier", "receipt_quality", "compute_integrity_state", "attestation_tier"];
+      for (var i = 0; i < stringFields.length; i++) {
+        if (!nonEmptyString(inputs[stringFields[i]])) return stringFields[i];
+      }
+      var intFields = ["verified_receipt_count", "required_receipt_count", "criteria_met", "criteria_required"];
+      for (var j = 0; j < intFields.length; j++) {
+        if (!Number.isInteger(inputs[intFields[j]])) return intFields[j];
+      }
+      if (typeof inputs.quarantined !== "boolean") return "quarantined";
+      if (typeof inputs.app_attested !== "boolean") return "app_attested";
+      if (typeof inputs.wallet_balance_ok !== "boolean") return "wallet_balance_ok";
+      if (typeof inputs.uptime_ok !== "boolean") return "uptime_ok";
+      if (!Array.isArray(inputs.economic_criteria)) return "economic_criteria";
+      if (!Array.isArray(inputs.additional_criteria)) return "additional_criteria";
+      return "";
+    }
+
+    function providerRewardEligibilityDriftField(eligibility) {
+      if (!isPlainObject(eligibility)) return "body";
+      if (eligibility.schema_version !== MALIBU_REWARD_ELIGIBILITY_SCHEMA) return "schema_version";
+      if (!containsValue(MALIBU_EARNING_STATES, eligibility.earning_state)) return "earning_state";
+      if (!containsValue(MALIBU_WITHDRAWAL_STATES, eligibility.withdrawal_state)) return "withdrawal_state";
+      if (!containsValue(MALIBU_REWARD_REASONS, eligibility.primary_reason)) return "primary_reason";
+      if (!Array.isArray(eligibility.reasons)) return "reasons";
+      if (eligibility.reasons.some(function (reason) { return !containsValue(MALIBU_REWARD_REASONS, reason); })) return "reasons";
+      return "";
+    }
+
+	    function providerRewardAuditDriftField(audit) {
+	      if (!isPlainObject(audit)) return "body";
+	      if (!Array.isArray(audit.events)) return "events";
+	      if (Object.prototype.hasOwnProperty.call(audit, "next_before_id") && !nonEmptyString(audit.next_before_id)) {
+	        return "next_before_id";
+	      }
+	      for (var i = 0; i < audit.events.length; i++) {
+	        var eventDrift = providerRewardAuditEventDriftField(audit.events[i]);
+	        if (eventDrift) return "events[" + i + "]." + eventDrift;
+	      }
+	      return "";
+	    }
+
+	    function providerRewardAuditEventDriftField(evt) {
+	      if (!isPlainObject(evt)) return "body";
+	      var stringFields = ["id", "occurred_at", "event_type", "summary"];
+	      for (var i = 0; i < stringFields.length; i++) {
+	        if (!nonEmptyString(evt[stringFields[i]])) return stringFields[i];
+	      }
+	      if (Object.prototype.hasOwnProperty.call(evt, "ledger_id") && !Number.isInteger(evt.ledger_id)) {
+	        return "ledger_id";
+	      }
+	      if (Object.prototype.hasOwnProperty.call(evt, "amount_malibu") && !finiteDecimalField(evt, "amount_malibu")) {
+	        return "amount_malibu";
+	      }
+	      var optionalStringFields = ["withdrawal_hold_reason", "trust_tier", "source_reason"];
+	      for (var j = 0; j < optionalStringFields.length; j++) {
+	        var field = optionalStringFields[j];
+	        if (Object.prototype.hasOwnProperty.call(evt, field) && !nonEmptyString(evt[field])) return field;
+	      }
+	      return "";
+	    }
+
+    function isPlainObject(value) {
+      return !!value && typeof value === "object" && !Array.isArray(value);
+    }
+
+    function nonEmptyString(value) {
+      return typeof value === "string" && value.trim() !== "";
+    }
+
+    function finiteDecimalField(obj, field) {
+      if (!Object.prototype.hasOwnProperty.call(obj, field)) return false;
+      var value = obj[field];
+      if (value === null) return false;
+      if (typeof value !== "number" && typeof value !== "string") return false;
+      if (typeof value === "string" && value.trim() === "") return false;
+      return Number.isFinite(Number(value));
+    }
+
+    function walletAddressLine(wallet) {
+      if (!wallet || !wallet.address) return "No wallet bound";
+      return wallet.address;
+    }
+
+    function walletCapLine(amounts) {
+      if (!amounts) return "Cap usage unavailable";
+      return formatMalibuAmount(amounts.wallet_day_malibu) + " of " +
+        formatMalibuAmount(amounts.wallet_daily_cap_malibu) + "/day";
+    }
+
+    function eligibilityInputLine(inputs) {
+      if (!inputs) return "Eligibility inputs unavailable";
+      var parts = [];
+      parts.push("trust " + (inputs.trust_tier || "n/a"));
+      parts.push("receipts " + fmtInt(inputs.verified_receipt_count || 0) + "/" + fmtInt(inputs.required_receipt_count || 0));
+      parts.push("compute " + (inputs.compute_integrity_state || "unknown"));
+      parts.push("attestation " + (inputs.attestation_tier || "n/a"));
+      return parts.join(" · ");
+    }
+
+    function renderRewardAuditList(page) {
+      var events = page && Array.isArray(page.events) ? page.events.slice(0, 5) : [];
+      if (!events.length) {
+        return el("div", { class: "fiat-cite" }, "No recent reward audit events.");
+      }
+      return el("div", { class: "audit-list" }, events.map(function (evt) {
+        return el("div", { class: "audit-row" },
+          el("div", { class: "audit-type mono" }, evt.event_type || "reward_event"),
+          el("div", { class: "audit-summary" }, evt.summary || "Reward event recorded."),
+          evt.occurred_at ? el("div", { class: "fiat-cite mono" }, evt.occurred_at) : null);
+      }));
+    }
+
+    function renderProviderWalletCard() {
+      var raw = state.wallet.data;
+      var loading = state.wallet.inflight && !raw;
+      if (!raw && !loading && !state.wallet.err) return null;
+      if (!raw) {
+        return el("div", { class: "fiat-card wallet-card" },
+          el("h3", null, "Wallet & eligibility"),
+          el("div", { class: "fiat-body" }, loading ? "Loading wallet status…" : "Wallet status unavailable."),
+          state.wallet.err ? el("div", { class: "fiat-cite" }, state.wallet.err.unavailable
+            ? "Wallet status is temporarily unavailable while the read-only route is being deployed."
+            : "Wallet status returned HTTP " + state.wallet.err.status + ".") : null);
+      }
+      var d = normalizedProviderWalletStatus(raw);
+      if (d && d.unavailable) {
+        return el("div", { class: "fiat-card wallet-card" },
+          el("h3", null, "Wallet & eligibility"),
+          el("div", { class: "fiat-body" }, "Wallet status schema is unavailable."),
+          el("div", { class: "fiat-cite mono" }, "schema_version: " + d.schema_version));
+      }
+      var payout = d.payout_wallet;
+      var reward = d.reward_wallet || {};
+      var amounts = d.reward_amounts || {};
+      var inputs = d.eligibility_inputs || {};
+      var reason = d.hold_or_mismatch_reason || (d.wallet_bound ? "none" : "missing_wallet_binding");
+      return el("div", { class: "fiat-card wallet-card" },
+        el("h3", null, "Wallet & eligibility"),
+        el("div", { class: "fiat-body" }, d.wallet_mismatch
+          ? "Wallet projection mismatch; rewards fail closed until the mirror catches up."
+          : (d.wallet_bound ? "Wallet binding is visible to rewards." : "No payout wallet is bound.")),
+        el("div", { class: "wallet-grid" },
+          el("div", null,
+            el("div", { class: "wallet-label" }, "Payout wallet"),
+            el("div", { class: "wallet-value mono" }, walletAddressLine(payout))),
+          el("div", null,
+            el("div", { class: "wallet-label" }, "Reward wallet"),
+            el("div", { class: "wallet-value mono" }, walletAddressLine(reward))),
+          el("div", null,
+            el("div", { class: "wallet-label" }, "Eligible / held"),
+            el("div", { class: "wallet-value mono" }, formatMalibuAmount(amounts.withdrawable_malibu) + " eligible · " +
+              formatMalibuAmount(amounts.held_malibu) + " held")),
+          el("div", null,
+            el("div", { class: "wallet-label" }, "Wallet cap usage"),
+            el("div", { class: "wallet-value mono" }, walletCapLine(amounts)))),
+        el("div", { class: d.wallet_mismatch || reason !== "none" ? "reward-hold" : "reward-next" },
+          "Reason: ", reason),
+        el("div", { class: "reward-next" }, eligibilityInputLine(inputs)),
+        el("div", { class: "fiat-cite" }, "payout source: ",
+          payout && payout.verification_source ? payout.verification_source : "not_bound",
+          " · reward source: ", reward.verification_source || "not_bound"),
+        renderRewardAuditList(d.audit));
+    }
+
     /* ---- Surface C — Earn ---- */
     function renderEarn() {
       var d = state.earn.data;
@@ -2127,6 +2476,7 @@
         el("h2", { class: "section-h" }, "Credit totals"),
         creditsRow,
         renderMalibuRewardsCard(),
+        renderProviderWalletCard(),
         el("div", { style: "margin-top:18px;" },
           el("h2", { class: "section-h" }, "Payout status"),
           fiatCard));

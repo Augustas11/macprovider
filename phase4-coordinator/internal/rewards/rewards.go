@@ -38,6 +38,7 @@ type Config struct {
 	WalletDailyCapMALIBU         float64
 	UsefulWorkMALIBUPer1KCredits float64
 	SQLitePayoutDBPath           string
+	PayoutHotWalletAddress       string
 	WalletMirrorInterval         time.Duration
 	UnlockEvalInterval           time.Duration
 	MaxSerializableRetries       int

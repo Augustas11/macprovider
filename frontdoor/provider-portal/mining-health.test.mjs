@@ -160,3 +160,269 @@ test("portal mining health prioritizes local blockers and reward holds", () => {
   assert.equal(vm.runInContext("computePortalMiningHealth().code", context), "rewards_held");
 }
 );
+
+test("provider wallet status normalizes unknown schema unavailable", () => {
+  const warnings = [];
+  const context = loadPortalContext();
+  context.console = { ...console, warn(...args) { warnings.push(args); } };
+  context.state.wallet.data = {
+    schema_version: "provider_wallet_status.v2",
+    provider_id: "mp-test",
+    wallet_bound: true,
+  };
+
+  const normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+
+  assert.equal(normalized.unavailable, true);
+  assert.equal(normalized.schema_version, "provider_wallet_status.v2");
+  assert.equal(warnings[0][0], "provider_wallet_status_schema_drift");
+}
+);
+
+test("provider wallet status normalizes incomplete v1 unavailable", () => {
+  const warnings = [];
+  const context = loadPortalContext();
+  context.console = { ...console, warn(...args) { warnings.push(args); } };
+  context.state.wallet.data = {
+    schema_version: "provider_wallet_status.v1",
+    provider_id: "mp-test",
+    wallet_bound: true,
+    wallet_mismatch: false,
+    reward_wallet: {
+      verification_source: "provider_emission_state",
+      cap_replay_pending: false,
+    },
+    eligibility_inputs: {
+      trust_tier: "trusted",
+      quarantined: false,
+      receipt_quality: "sufficient_verified_receipts",
+      verified_receipt_count: 3,
+      required_receipt_count: 3,
+      compute_integrity_state: "unknown",
+      attestation_tier: "app_attested",
+      app_attested: true,
+      criteria_met: 3,
+      criteria_required: 3,
+      economic_criteria: [],
+      additional_criteria: [],
+      wallet_balance_ok: true,
+      uptime_ok: true,
+    },
+  };
+
+  const normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+
+  assert.equal(normalized.unavailable, true);
+  assert.equal(normalized.schema_version, "provider_wallet_status.v1");
+  assert.equal(warnings[0][0], "provider_wallet_status_schema_drift");
+  assert.equal(warnings[0][1].field, "reward_amounts.body");
+}
+);
+
+test("provider wallet status requires reward eligibility and audit events", () => {
+  const warnings = [];
+  const context = loadPortalContext();
+  context.console = { ...console, warn(...args) { warnings.push(args); } };
+  const complete = {
+    schema_version: "provider_wallet_status.v1",
+    provider_id: "mp-test",
+    wallet_bound: true,
+    wallet_mismatch: false,
+    reward_wallet: {
+      verification_source: "provider_emission_state",
+      cap_replay_pending: false,
+    },
+    reward_amounts: {
+      accrued_malibu: "0",
+      withdrawable_malibu: "0",
+      held_malibu: "0",
+      provider_daily_cap_malibu: 25,
+      provider_day_malibu: "0",
+      provider_daily_capped: false,
+      wallet_daily_cap_malibu: 100,
+      wallet_day_malibu: "0",
+      wallet_daily_capped: false,
+    },
+    eligibility_inputs: {
+      trust_tier: "trusted",
+      quarantined: false,
+      receipt_quality: "sufficient_verified_receipts",
+      verified_receipt_count: 3,
+      required_receipt_count: 3,
+      compute_integrity_state: "unknown",
+      attestation_tier: "app_attested",
+      app_attested: true,
+      criteria_met: 3,
+      criteria_required: 3,
+      economic_criteria: [],
+      additional_criteria: [],
+      wallet_balance_ok: true,
+      uptime_ok: true,
+    },
+    reward_eligibility: rewardEligibility("eligible_idle", "withdrawable", "eligible_idle_no_work"),
+    audit: { events: [{ id: "evt-1", occurred_at: "2026-08-18T00:00:00Z", event_type: "wallet_bind_projected", summary: "Wallet projected." }] },
+  };
+
+  context.state.wallet.data = { ...complete };
+  delete context.state.wallet.data.reward_eligibility;
+  let normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+  assert.equal(normalized.unavailable, true);
+  assert.equal(warnings.at(-1)[1].field, "reward_eligibility.body");
+
+  context.state.wallet.data = {
+    ...complete,
+    payout_wallet: {
+      chain: "base-mainnet",
+      address: "0xPayout",
+      payout_allowed: "yes",
+      verification_source: "provider_payout_addresses",
+    },
+  };
+  normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+  assert.equal(normalized.unavailable, true);
+  assert.equal(warnings.at(-1)[1].field, "payout_wallet.payout_allowed");
+
+  context.state.wallet.data = {
+    ...complete,
+    payout_wallet: {
+      chain: "base-mainnet",
+      address: "0xPayout",
+      payout_allowed: true,
+      verification_source: "provider_payout_addresses",
+      last_update_utc: "",
+    },
+  };
+  normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+  assert.equal(normalized.unavailable, true);
+  assert.equal(warnings.at(-1)[1].field, "payout_wallet.last_update_utc");
+
+  context.state.wallet.data = {
+    ...complete,
+    reward_wallet: { ...complete.reward_wallet, address: true },
+  };
+  normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+  assert.equal(normalized.unavailable, true);
+  assert.equal(warnings.at(-1)[1].field, "reward_wallet.address");
+
+  context.state.wallet.data = { ...complete, audit: {} };
+  normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+  assert.equal(normalized.unavailable, true);
+  assert.equal(warnings.at(-1)[1].field, "audit.events");
+
+  context.state.wallet.data = { ...complete, audit: { events: [{ event_type: "wallet_bind_projected" }] } };
+  normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+  assert.equal(normalized.unavailable, true);
+  assert.equal(warnings.at(-1)[1].field, "audit.events[0].id");
+
+  context.state.wallet.data = { ...complete, audit: { next_before_id: 42, events: complete.audit.events } };
+  normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+  assert.equal(normalized.unavailable, true);
+  assert.equal(warnings.at(-1)[1].field, "audit.next_before_id");
+
+  context.state.wallet.data = {
+    ...complete,
+    reward_amounts: { ...complete.reward_amounts, accrued_malibu: true },
+  };
+  normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+  assert.equal(normalized.unavailable, true);
+  assert.equal(warnings.at(-1)[1].field, "reward_amounts.accrued_malibu");
+
+  context.state.wallet.data = {
+    ...complete,
+    audit: { events: [{ ...complete.audit.events[0], amount_malibu: "not-a-number" }] },
+  };
+  normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+  assert.equal(normalized.unavailable, true);
+  assert.equal(warnings.at(-1)[1].field, "audit.events[0].amount_malibu");
+
+  context.state.wallet.data = {
+    ...complete,
+    audit: { events: [{ ...complete.audit.events[0], amount_malibu: true }] },
+  };
+  normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+  assert.equal(normalized.unavailable, true);
+  assert.equal(warnings.at(-1)[1].field, "audit.events[0].amount_malibu");
+
+  context.state.wallet.data = complete;
+  normalized = vm.runInContext("normalizedProviderWalletStatus(state.wallet.data)", context);
+  assert.equal(normalized.unavailable, undefined);
+  assert.equal(normalized.reward_eligibility.primary_reason, "eligible_idle_no_work");
+});
+
+test("provider wallet card helpers expose held, capped, mismatch inputs", () => {
+  const context = loadPortalContext();
+  const wallet = {
+    schema_version: "provider_wallet_status.v1",
+    provider_id: "mp-test",
+    wallet_bound: true,
+    wallet_mismatch: true,
+    hold_or_mismatch_reason: "wallet_projection_mismatch",
+    payout_wallet: {
+      chain: "base-mainnet",
+      address: "0xPayout",
+      payout_allowed: true,
+      verification_source: "provider_payout_addresses",
+    },
+    reward_wallet: {
+      address: "0xReward",
+      verification_source: "provider_emission_state",
+      cap_replay_pending: true,
+    },
+    reward_amounts: {
+      accrued_malibu: "10",
+      withdrawable_malibu: "7.5",
+      held_malibu: "2.5",
+      provider_daily_cap_malibu: 25,
+      provider_day_malibu: "25",
+      provider_daily_capped: true,
+      wallet_day_malibu: "100",
+      wallet_daily_cap_malibu: 100,
+      wallet_daily_capped: true,
+    },
+    eligibility_inputs: {
+      trust_tier: "trusted",
+      quarantined: false,
+      receipt_quality: "sufficient_verified_receipts",
+      verified_receipt_count: 3,
+      required_receipt_count: 3,
+      compute_integrity_state: "unknown",
+      attestation_tier: "app_attested",
+      app_attested: true,
+      criteria_met: 3,
+      criteria_required: 3,
+      economic_criteria: [],
+      additional_criteria: [],
+      wallet_balance_ok: true,
+      uptime_ok: true,
+    },
+    reward_eligibility: rewardEligibility("capped", "capped", "held_provider_daily_cap"),
+	    audit: { events: [{ id: "evt-1", occurred_at: "2026-08-18T00:00:00Z", event_type: "wallet_bind_projected", summary: "Wallet projected." }] },
+	  };
+  context.state.wallet.data = wallet;
+
+  assert.equal(vm.runInContext("walletAddressLine(state.wallet.data.payout_wallet)", context), "0xPayout");
+  assert.equal(vm.runInContext("walletCapLine(state.wallet.data.reward_amounts)", context), "100.00 MALIBU of 100.00 MALIBU/day");
+  assert.equal(
+    vm.runInContext("eligibilityInputLine(state.wallet.data.eligibility_inputs)", context),
+    "trust trusted · receipts 3/3 · compute unknown · attestation app_attested"
+  );
+  assert.equal(vm.runInContext("normalizedProviderWalletStatus(state.wallet.data).hold_or_mismatch_reason", context), "wallet_projection_mismatch");
+}
+);
+
+test("portal accepts provider daily cap reward reason", () => {
+  const context = loadPortalContext();
+  baseState(context);
+  context.state.malibu.data.reward_eligibility = rewardEligibility(
+    "capped",
+    "capped",
+    "held_provider_daily_cap"
+  );
+
+  const eligibility = vm.runInContext("normalizedMalibuRewardEligibility(state.malibu.data)", context);
+
+  assert.equal(eligibility.primary_reason, "held_provider_daily_cap");
+  assert.equal(vm.runInContext("malibuRewardReasonCopy('held_provider_daily_cap')", context), "provider daily limit reached");
+  assert.equal(vm.runInContext("computePortalMiningHealth().code", context), "provider_daily_cap_held");
+}
+);

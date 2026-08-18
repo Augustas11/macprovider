@@ -22,6 +22,7 @@ type readOnlyTokenValidator interface {
 // AccrualHandlerDeps wires the provider MALIBU accrual endpoint.
 type AccrualHandlerDeps struct {
 	DB                    *sql.DB
+	PayoutDB              *sql.DB
 	TokenStore            tokenValidator
 	RequireProviderTokens bool
 	Config                Config
@@ -73,6 +74,22 @@ func NewAccrualHandler(deps AccrualHandlerDeps) http.Handler {
 			_, _ = w.Write([]byte(`{"error":"internal_error"}` + "\n"))
 			return
 		}
+		rewardProjection, err := queryRewardWalletProjection(r.Context(), deps.DB, providerID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"internal_error"}` + "\n"))
+			return
+		}
+		payoutWallet, err := queryPayoutWalletStatus(r.Context(), deps.PayoutDB, providerID, deps.Config.PayoutHotWalletAddress)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"internal_error"}` + "\n"))
+			return
+		}
+		currentWalletAllowed, walletMismatch := currentWalletBinding(payoutWallet, rewardProjection)
+		trust = trustCriteriaWithWalletBinding(trust, currentWalletAllowed && !walletMismatch)
 		eligibility := RewardEligibilityFromBalanceAndTrust(bal, trust)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
@@ -92,6 +109,7 @@ func NewAccrualHandler(deps AccrualHandlerDeps) http.Handler {
 			"additional_criteria":     trust.AdditionalSatisfied,
 			"verified_receipt_count":  trust.VerifiedReceiptCount,
 			"wallet_bound":            trust.WalletBound,
+			"wallet_mismatch":         walletMismatch,
 			"app_attested":            trust.AppAttested,
 			"reward_eligibility":      eligibility,
 		})

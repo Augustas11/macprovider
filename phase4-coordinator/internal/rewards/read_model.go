@@ -94,6 +94,10 @@ type MalibuRewardEligibilityFacts struct {
 }
 
 func RewardEligibilityFromBalanceAndTrust(bal AccrualBalance, trust TrustCriteriaStatus) MalibuRewardEligibilityReadModel {
+	return rewardEligibilityFromBalanceTrustAndWallet(bal, trust, trust.WalletBound)
+}
+
+func rewardEligibilityFromBalanceTrustAndWallet(bal AccrualBalance, trust TrustCriteriaStatus, walletBound bool) MalibuRewardEligibilityReadModel {
 	return BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
 		AccruedMALIBU:         bal.AccruedMALIBU,
 		WithdrawableMALIBU:    bal.WithdrawableMALIBU,
@@ -101,7 +105,7 @@ func RewardEligibilityFromBalanceAndTrust(bal AccrualBalance, trust TrustCriteri
 		TrustTier:             bal.TrustTier,
 		WithdrawalHoldReasons: bal.HoldReasons,
 		ProviderDailyCapped:   bal.ProviderDailyCapped,
-		WalletBound:           trust.WalletBound,
+		WalletBound:           walletBound,
 		VerifiedReceiptCount:  trust.VerifiedReceiptCount,
 		AppAttested:           trust.AppAttested,
 		HardwareEvidenceState: HardwareEvidenceStateUnavailable,
