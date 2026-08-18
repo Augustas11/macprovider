@@ -145,7 +145,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Preliminary paid-path requirement IDs registered; remaining clause migration is issue #1023. Physical evidence is issue #1022. No promotion."
+        "rationale": "SPEC-005-R001/R002 promoted from signed JOURNEY-BUYER-PAID-PATH (observe-mode isolated candidate). SPEC-005-R003 (crash recovery) remains pending. Remaining clause migration is #1023. No enforce claim."
       }
     },
     {
@@ -175,7 +175,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Preliminary paid-path requirement IDs registered; remaining clause migration is issue #1023. Physical evidence is issue #1022. No promotion."
+        "rationale": "SPEC-006-R001/R002/R003 promoted from signed JOURNEY-BUYER-PAID-PATH (API-key paid path). Remaining clause migration is #1023."
       }
     },
     {
@@ -423,7 +423,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Preliminary paid-path requirement IDs registered; remaining clause migration is issue #1023. Physical evidence is issue #1022. No promotion."
+        "rationale": "SPEC-015-R001 promoted from signed JOURNEY-BUYER-PAID-PATH (v0.4 settlement-capable receipt issuance/ingestion). Remaining clause migration is #1023. Buyer receipt retrieval (SPEC-022-R006) is still unexposed."
       }
     },
     {
@@ -649,7 +649,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Requirement IDs SPEC-022-R001..R011 registered in v0.1.6. Paid-path implementation/tests now mapped; JOURNEY-BUYER-PAID-PATH is the contract. Physical evidence is #1022. Observe-mode only; no enforce promotion."
+        "rationale": "SPEC-022-R001..R005 and R010 promoted from signed observe-mode JOURNEY-BUYER-PAID-PATH. R006 pending (buyer receipt retrieval unexposed). R007/R008 cannot promote from observe. R009/R011 still pending. No enforce activation."
       }
     },
     {
@@ -3562,7 +3562,7 @@
     {
       "requirement_id": "SPEC-005-R001",
       "spec_id": "SPEC-005",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/formula.go:ComputeCredits",
         "phase4-coordinator/internal/billing/formula.go:ComputeCreditsWithCache",
@@ -3577,18 +3577,26 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "Closed-form credit formula, units, rounding, and rate-card resolution (SPEC-005 \u00a75): shipped and unit-tested; physical paid-path evidence is #1022."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
+          "source": null,
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        },
+        {
+          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
+          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-005-R002",
       "spec_id": "SPEC-005",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/hotpath.go:WriteHotPath",
         "phase4-coordinator/internal/billing/store.go:NewStore"
@@ -3601,13 +3609,21 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "Hot-path ledger persistence of buyer debit / provider credit (SPEC-005 \u00a74/\u00a77): shipped and unit-tested; physical paid-path evidence is #1022."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
+          "source": null,
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        },
+        {
+          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
+          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-005-R003",
@@ -3635,7 +3651,7 @@
     {
       "requirement_id": "SPEC-006-R001",
       "spec_id": "SPEC-006",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/auth/keys.go:Validate",
         "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
@@ -3649,18 +3665,26 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "Authenticated API-key paid chat entrypoint (SPEC-006 \u00a75/\u00a76). The mapped chat handler also admits wallet-session traffic; this ID is evidenced only by an API-key subject. Physical paid-path evidence is #1022."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
+          "source": null,
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        },
+        {
+          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
+          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-006-R002",
       "spec_id": "SPEC-006",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/router/server.go:gatewayRetryable",
         "phase5-gateway/internal/router/server.go:writeError"
@@ -3674,18 +3698,26 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "Buyer-visible error envelope and retryability (SPEC-006 \u00a75.2/\u00a717): shipped and tested; physical paid-path evidence is #1022."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
+          "source": null,
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        },
+        {
+          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
+          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-006-R003",
       "spec_id": "SPEC-006",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/storage/sqlite/store.go:ReserveQuota",
         "phase5-gateway/internal/storage/sqlite/store.go:SettleReservation",
@@ -3700,18 +3732,26 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "Quota reservation, settlement, and refund on the chat path (SPEC-006 \u00a77/\u00a717.7): shipped and tested; physical paid-path evidence is #1022."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
+          "source": null,
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        },
+        {
+          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
+          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-015-R001",
       "spec_id": "SPEC-015",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:buildSettlement",
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
@@ -3726,18 +3766,26 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "v0.4 settlement-capable receipt issuance (ReceiptBuilder.buildSettlement) and coordinator ingestion/verification (SPEC-015): shipped and tested; physical paid-path evidence is #1022."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
+          "source": null,
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        },
+        {
+          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
+          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R001",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/config/config.go:SettlementConfig",
         "phase4-coordinator/internal/buyer/server.go:settlementEnforceMode"
@@ -3749,18 +3797,26 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "R-1 policy authority and mode (single authoritative verified_model_settlement surface; default observe MUST NOT change money; enforce activation preconditions; effective policy recorded and read from request-start row). Implementation/tests mapped; physical evidence is #1022. This journey requires captured mode observe and cannot promote an enforce claim."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
+          "source": null,
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        },
+        {
+          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
+          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R002",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
         "phase4-coordinator/internal/buyer/server.go:handleChatCompletions",
@@ -3772,18 +3828,26 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "R-2 entrypoint and routing preconditions (covered paid entrypoints; active signed catalog at route time; route only to hash_verified provider/model pairs; fail-closed warm-swap). Chat entrypoint and hash-verified selection mapped; catalog-identity resolution remains a pending completeness note. Physical evidence is #1022."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
+          "source": null,
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        },
+        {
+          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
+          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R003",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/route_snapshot.go:InsertRouteSnapshot",
         "phase4-coordinator/internal/billing/route_snapshot.go:Digest"
@@ -3796,18 +3860,26 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "R-3 route-time verification snapshot (immutable per-attempt snapshot; model-hash triple-equality; usage/prompt_hash/output_hash cross-check against coordinator-observed canonical state; quarantine on unavailable/mismatch). Implementation/tests mapped; physical evidence is #1022."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
+          "source": null,
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        },
+        {
+          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
+          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R004",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
         "phase4-coordinator/internal/billing/settlement_verifier.go:VerifySettlementReceipt"
@@ -3820,18 +3892,26 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "R-4 receipt requirement (settlement-capable provider-signed receipt for any debitable/creditable outcome; null model_hash and legacy receipts non-settling; signature necessary not sufficient; receipt-key identity binding; terminal receipt selection is idempotent). Implementation/tests mapped; physical evidence is #1022."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
+          "source": null,
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        },
+        {
+          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
+          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R005",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/router/chat_proxy.go:forwardStreamingChat",
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt"
@@ -3843,13 +3923,21 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "R-5 streaming receipts (first-class paid traffic; terminal-state binding; partial-prefix binding for partial-output settlement with coordinator-observed cross-check; async verification decoupled; shipped post-first-event disconnect terminates the stream with provider_disconnected and a later retry is independently billable; future multi-attempt resume/failover must settle only delivered verified prefixes without double-charge). Implementation/tests mapped; physical evidence is #1022."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
+          "source": null,
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        },
+        {
+          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
+          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R006",
@@ -3944,7 +4032,7 @@
     {
       "requirement_id": "SPEC-022-R010",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/router/disclosure.go:makeTier1Disclosure",
         "phase5-gateway/internal/router/disclosure.go:makeVerifiedModelSettlementDisclosure"
@@ -3956,13 +4044,21 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "R-10 buyer disclosure (distinguish catalog-verified identity from unattested hardware/runtime; mixed-pool claims constrained; observe mode MUST NOT claim enforcement; excluded entrypoints named; partial-charge disclosure; shipped streaming failover is pre-commit only and a post-first-event retry is an independently billable request). Implementation/tests mapped; physical evidence is #1022."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
+          "source": null,
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        },
+        {
+          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
+          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
+          "captured_at": "2026-08-17",
+          "expires_at": "2026-09-16"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R011",

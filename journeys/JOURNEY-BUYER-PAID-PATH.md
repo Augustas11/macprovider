@@ -1,12 +1,13 @@
 # JOURNEY-BUYER-PAID-PATH
 
-Status: contract plus isolated-candidate harness; no signed promotion yet
+Status: signed observe-mode promotion for SPEC-005-R001/R002, SPEC-006-R001..R003, SPEC-015-R001, SPEC-022-R001..R005, and SPEC-022-R010; no enforce promotion
 Owner: buyer/billing/settlement conformance
 Specs: SPEC-005, SPEC-006, SPEC-015, SPEC-022
 Requirements: SPEC-006-R001, SPEC-006-R002, SPEC-006-R003, SPEC-005-R001, SPEC-005-R002, SPEC-005-R003, SPEC-015-R001, SPEC-022-R001, SPEC-022-R002, SPEC-022-R003, SPEC-022-R004, SPEC-022-R005, SPEC-022-R006, SPEC-022-R007, SPEC-022-R008, SPEC-022-R010
 Authority domains: buyer-api-error-contract, billing-settlement-formula, inference-receipts, verified-model-settlement
 Issue: https://github.com/Augustas11/macprovider/issues/614
 Evidence owner: https://github.com/Augustas11/macprovider/issues/1022
+Signed envelope: `journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json` (workflow [31996627496](https://github.com/Augustas11/macprovider/actions/runs/31996627496))
 Execution mode: isolated-candidate-paid-path
 Harness: `test/integration/buyer_paid_path_journey_test.go` (`TestJourneyBuyerPaidPathIsolatedCandidate`); capture with `MACPROVIDER_CAPTURE_BUYER_PAID_PATH=1`. A passing harness is not a signed journey-result.
 
