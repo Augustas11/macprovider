@@ -31,89 +31,60 @@ final class SEAttestationBuilderTests: XCTestCase {
 
     func testCanonicalJSONProducesSortedKeys() throws {
         let signer = MockSEBlobSigner()
-        let fixedDate = Date(timeIntervalSince1970: 1_716_768_000)
-        let builder = SEAttestationBuilder(
-            now: { fixedDate },
-            sysctlStringOverride: { name in
-                switch name {
-                case "machdep.cpu.brand_string": return "Apple M4"
-                case "hw.model": return "Mac15,3"
-                default: return nil
-                }
-            }
-        )
+        let builder = SEAttestationBuilder(serialNumberOverride: { "H2XX74T43X" })
 
         let attestation = try builder.build(
             signer: signer,
             providerECDHPublicKey: "test-ecdh-key"
         )
         let blob = attestation.blob
-        XCTAssertEqual(blob.chipName, "Apple M4")
-        XCTAssertEqual(blob.hardwareModel, "Mac15,3")
         XCTAssertEqual(blob.encryptionPublicKey, "test-ecdh-key")
-        XCTAssertEqual(blob.timestamp, "2024-05-27T00:00:00Z")
+        XCTAssertEqual(blob.serialNumber, "H2XX74T43X")
 
-        // Canonical JSON must have sorted keys
         let canonical = try blob.canonicalJSON()
         let parsed = try JSONSerialization.jsonObject(with: canonical) as? [String: Any]
         XCTAssertNotNil(parsed)
 
-        // Verify the JSON string has keys in ascending order
         let jsonString = String(data: canonical, encoding: .utf8) ?? ""
-        let keyOrder = ["binaryHash", "chipName", "encryptionPublicKey", "hardwareModel",
-                        "osVersion", "publicKey", "secureBootEnabled", "secureEnclaveAvailable",
-                        "serialNumber", "sipEnabled", "timestamp"]
+        let keyOrder = ["encryptionPublicKey", "publicKey", "serialNumber"]
         var prevIdx = jsonString.startIndex
         for key in keyOrder {
-            if let range = jsonString.range(of: "\"\(key)\"") {
-                XCTAssertGreaterThanOrEqual(range.lowerBound, prevIdx,
-                    "Key '\(key)' appeared before expected position")
-                prevIdx = range.upperBound
-            }
+            let range = try XCTUnwrap(jsonString.range(of: "\"\(key)\""))
+            XCTAssertGreaterThanOrEqual(range.lowerBound, prevIdx,
+                "Key '\(key)' appeared before expected position")
+            prevIdx = range.upperBound
         }
     }
 
-    func testCanonicalJSONOmitsNilOptionals() throws {
+    func testCanonicalJSONOmitsNilSerial() throws {
         let signer = MockSEBlobSigner()
-        let builder = SEAttestationBuilder(
-            now: { Date(timeIntervalSince1970: 0) },
-            sysctlStringOverride: { _ in nil },
-            serialNumberOverride: { nil }
-        )
+        let builder = SEAttestationBuilder(serialNumberOverride: { nil })
         let attestation = try builder.build(
             signer: signer,
-            providerECDHPublicKey: "ecdh",
-            binaryHash: nil
+            providerECDHPublicKey: "ecdh"
         )
         let json = String(data: try attestation.blob.canonicalJSON(), encoding: .utf8) ?? ""
-        XCTAssertFalse(json.contains("binaryHash"))
         XCTAssertFalse(json.contains("serialNumber"))
+        XCTAssertFalse(json.contains("chipName"))
+        XCTAssertFalse(json.contains("binaryHash"))
     }
 
-    func testCanonicalJSONIncludesBinaryHashWhenProvided() throws {
-        let signer = MockSEBlobSigner()
-        let builder = SEAttestationBuilder(
-            now: { Date(timeIntervalSince1970: 0) },
-            sysctlStringOverride: { _ in nil }
+    func testCanonicalJSONLeavesBase64SlashesLiteral() throws {
+        let blob = AttestationBlob(
+            publicKey: "abc/def+ghi=",
+            encryptionPublicKey: "ecdh",
+            serialNumber: nil
         )
-        let attestation = try builder.build(
-            signer: signer,
-            providerECDHPublicKey: "ecdh",
-            binaryHash: "abc123"
-        )
-        let json = String(data: try attestation.blob.canonicalJSON(), encoding: .utf8) ?? ""
-        XCTAssertTrue(json.contains("\"binaryHash\""))
-        XCTAssertTrue(json.contains("abc123"))
+        let json = String(data: try blob.canonicalJSON(), encoding: .utf8) ?? ""
+        XCTAssertTrue(json.contains("abc/def+ghi="))
+        XCTAssertFalse(json.contains("\\/"))
     }
 
     // MARK: SignedSEAttestation tokenJSON
 
     func testTokenJSONHasExpectedShape() throws {
         let signer = MockSEBlobSigner()
-        let builder = SEAttestationBuilder(
-            now: { Date(timeIntervalSince1970: 1_716_768_000) },
-            sysctlStringOverride: { _ in nil }
-        )
+        let builder = SEAttestationBuilder(serialNumberOverride: { nil })
         let attestation = try builder.build(signer: signer, providerECDHPublicKey: "ecdh")
         let tokenData = try attestation.tokenJSON()
         let tokenObj = try JSONSerialization.jsonObject(with: tokenData) as? [String: Any]
@@ -122,25 +93,21 @@ final class SEAttestationBuilderTests: XCTestCase {
         XCTAssertNotNil(tokenObj?["signature"] as? String)
 
         let inner = try XCTUnwrap(tokenObj?["attestation"] as? [String: Any])
-        XCTAssertEqual(inner["chipName"] as? String, "Apple Silicon")
         XCTAssertEqual(inner["encryptionPublicKey"] as? String, "ecdh")
+        XCTAssertNotNil(inner["publicKey"] as? String)
+        XCTAssertNil(inner["chipName"])
     }
 
     func testTokenBase64URLRoundTrips() throws {
         let signer = MockSEBlobSigner()
-        let builder = SEAttestationBuilder(
-            now: { Date(timeIntervalSince1970: 1_716_768_000) },
-            sysctlStringOverride: { _ in nil }
-        )
+        let builder = SEAttestationBuilder(serialNumberOverride: { nil })
         let attestation = try builder.build(signer: signer, providerECDHPublicKey: "ecdh")
         let b64url = try attestation.tokenBase64URL()
 
-        // Must be valid base64url (no +, /, =)
         XCTAssertFalse(b64url.contains("+"))
         XCTAssertFalse(b64url.contains("/"))
         XCTAssertFalse(b64url.contains("="))
 
-        // Must decode back to the same JSON
         let decoded = try Data(base64URLUnpadded: b64url)
         let obj = try JSONSerialization.jsonObject(with: decoded) as? [String: Any]
         XCTAssertNotNil(obj?["attestation"])
@@ -152,13 +119,9 @@ final class SEAttestationBuilderTests: XCTestCase {
     func testBlobSignatureVerifiesAgainstPublicKey() throws {
         let signer = MockSEBlobSigner()
         let p256Key = signer.p256Key
-        let builder = SEAttestationBuilder(
-            now: { Date(timeIntervalSince1970: 1_716_768_000) },
-            sysctlStringOverride: { _ in nil }
-        )
+        let builder = SEAttestationBuilder(serialNumberOverride: { nil })
         let attestation = try builder.build(signer: signer, providerECDHPublicKey: "ecdh")
 
-        // Re-derive canonical JSON and verify the outer signature
         let canonical = try attestation.blob.canonicalJSON()
         let sigData = Data(base64Encoded: attestation.signatureBase64) ?? Data()
         let sig = try P256.Signing.ECDSASignature(derRepresentation: sigData)
@@ -182,10 +145,7 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
     func testEnvelopeShapeMatchesSpecFormat() async throws {
         let signer = MockSEBlobSigner()
         let fixedDate = Date(timeIntervalSince1970: 1_716_768_000)
-        let builder = SEAttestationBuilder(
-            now: { fixedDate },
-            sysctlStringOverride: { _ in nil }
-        )
+        let builder = SEAttestationBuilder(serialNumberOverride: { "H2XX74T43X" })
         let generator = SecureEnclaveAttestationGenerator(
             signer: signer,
             builder: builder,
@@ -229,10 +189,7 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
     func testEnvelopeContainsBindingSignature() async throws {
         let signer = MockSEBlobSigner()
         let fixedDate = Date(timeIntervalSince1970: 1_716_768_000)
-        let builder = SEAttestationBuilder(
-            now: { fixedDate },
-            sysctlStringOverride: { _ in nil }
-        )
+        let builder = SEAttestationBuilder(serialNumberOverride: { "H2XX74T43X" })
         let generator = SecureEnclaveAttestationGenerator(
             signer: signer,
             builder: builder,
@@ -265,10 +222,7 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
     func testBindingSignatureMatchesBINDINGPayloadFormat() async throws {
         let signer = MockSEBlobSigner()
         let fixedDate = Date(timeIntervalSince1970: 1_716_768_000)
-        let builder = SEAttestationBuilder(
-            now: { fixedDate },
-            sysctlStringOverride: { _ in nil }
-        )
+        let builder = SEAttestationBuilder(serialNumberOverride: { "H2XX74T43X" })
         let generator = SecureEnclaveAttestationGenerator(
             signer: signer,
             builder: builder,
@@ -352,10 +306,7 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
     func testPublicKeyInBlobMatchesMockSignerKey() async throws {
         let signer = MockSEBlobSigner()
         let fixedDate = Date(timeIntervalSince1970: 0)
-        let builder = SEAttestationBuilder(
-            now: { fixedDate },
-            sysctlStringOverride: { _ in nil }
-        )
+        let builder = SEAttestationBuilder(serialNumberOverride: { "H2XX74T43X" })
         let generator = SecureEnclaveAttestationGenerator(
             signer: signer,
             builder: builder,
@@ -386,6 +337,105 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
         let pubKeyData = try XCTUnwrap(Data(base64Encoded: pubKeyB64))
 
         XCTAssertEqual(pubKeyData, signer.publicKeyRaw)
+    }
+
+    func testRealisticEnvelopeFitsHandshakeCap() async throws {
+        let signer = MockSEBlobSigner()
+        let builder = SEAttestationBuilder(serialNumberOverride: { "H2XX74T43X" })
+        let generator = SecureEnclaveAttestationGenerator(
+            signer: signer,
+            builder: builder,
+            now: { Date(timeIntervalSince1970: 1_716_768_000) }
+        )
+        let status = ProviderStatus(
+            modelID: "mlx-community/Qwen3-8B-4bit",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let snapshot = await status.snapshot()
+        let challenge = Data(repeating: 0x11, count: 32).base64URLUnpadded()
+        let ecdh = Data(repeating: 0x22, count: 32).base64URLUnpadded()
+        let envelope = await generator.makeAttestationToken(
+            challengeBase64URL: challenge,
+            authAttemptID: "attempt-001",
+            providerID: "mp-26592d710fc97aa7c07b260665c67cf6",
+            binaryVersion: CoordinatorClient.binaryVersion,
+            snapshot: snapshot,
+            providerECDHPublicKey: ecdh
+        )
+        let env = try XCTUnwrap(envelope)
+        let encoded = try JSONSerialization.data(withJSONObject: env, options: [.withoutEscapingSlashes])
+        XCTAssertLessThanOrEqual(
+            encoded.count,
+            SecureEnclaveAttestationGenerator.maxHandshakeTokenBytes,
+            "SE attestation_token must fit coordinator maxHandshakeMetadataBytes"
+        )
+        let claimed = try XCTUnwrap(env["claimed"] as? [String: Any])
+        XCTAssertNil(claimed["model_hash"])
+        XCTAssertNil(claimed["weights_manifest_sha256"])
+        let tokenB64 = try XCTUnwrap(env["token"] as? String)
+        let tokenObj = try JSONSerialization.jsonObject(with: try Data(base64URLUnpadded: tokenB64)) as? [String: Any]
+        let inner = try XCTUnwrap(tokenObj?["attestation"] as? [String: Any])
+        XCTAssertEqual(inner["serialNumber"] as? String, "H2XX74T43X")
+        XCTAssertNil(inner["chipName"])
+    }
+
+    func testBindingClaimedHashLeavesModelIDSlashLiteral() async throws {
+        let signer = MockSEBlobSigner()
+        let builder = SEAttestationBuilder(serialNumberOverride: { "H2XX74T43X" })
+        let generator = SecureEnclaveAttestationGenerator(
+            signer: signer,
+            builder: builder,
+            now: { Date(timeIntervalSince1970: 1_716_768_000) }
+        )
+        let status = ProviderStatus(
+            modelID: "mlx-community/Qwen3-8B-4bit",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let snapshot = await status.snapshot()
+        let envelope = await generator.makeAttestationToken(
+            challengeBase64URL: Data(repeating: 0x11, count: 32).base64URLUnpadded(),
+            authAttemptID: "attempt-slash",
+            providerID: "mp-26592d710fc97aa7c07b260665c67cf6",
+            binaryVersion: CoordinatorClient.binaryVersion,
+            snapshot: snapshot,
+            providerECDHPublicKey: Data(repeating: 0x22, count: 32).base64URLUnpadded()
+        )
+        let env = try XCTUnwrap(envelope)
+        let claimed = try XCTUnwrap(env["claimed"] as? [String: Any])
+        let claimedJSON = String(data: try Spec008CanonicalJSON.marshal(claimed), encoding: .utf8) ?? ""
+        XCTAssertTrue(claimedJSON.contains("mlx-community/Qwen3-8B-4bit"))
+        XCTAssertFalse(claimedJSON.contains("\\/"))
+
+        let payload = try ManagedDeviceAttestationGenerator.buildBindingPayload(
+            envelope: env,
+            authAttemptID: "attempt-slash"
+        )
+        let claimedHash = Data(SHA256.hash(data: try Spec008CanonicalJSON.marshal(claimed))).base64URLUnpadded()
+        let payloadStr = try XCTUnwrap(String(data: payload, encoding: .utf8))
+        XCTAssertTrue(payloadStr.contains(claimedHash))
+    }
+
+    func testOversizedClaimedOmitsTokenRatherThanExceedCap() async throws {
+        let signer = MockSEBlobSigner()
+        let builder = SEAttestationBuilder(serialNumberOverride: { "H2XX74T43X" })
+        let generator = SecureEnclaveAttestationGenerator(signer: signer, builder: builder)
+        let status = ProviderStatus(
+            modelID: String(repeating: "m", count: 2000),
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 1_000, maxConcurrencyOverride: 1)
+        )
+        let snapshot = await status.snapshot()
+        let result = await generator.makeAttestationToken(
+            challengeBase64URL: Data(repeating: 0x11, count: 32).base64URLUnpadded(),
+            authAttemptID: "a",
+            providerID: "mp-26592d710fc97aa7c07b260665c67cf6",
+            binaryVersion: "1.8.99",
+            snapshot: snapshot,
+            providerECDHPublicKey: Data(repeating: 0x22, count: 32).base64URLUnpadded()
+        )
+        XCTAssertNil(result)
     }
 }
 
