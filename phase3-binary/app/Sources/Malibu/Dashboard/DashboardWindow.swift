@@ -153,6 +153,7 @@ private struct DashboardView: View {
                 Button(String(localized: "Change Model…", comment: "Dashboard model action")) {
                     showModelSheet = true
                 }
+                .accessibilityIdentifier("malibu.dashboard.change-model")
                 .accessibilityHint(Text(String(localized: "Opens the model switcher and shows provider guards before any action.", comment: "Dashboard model action hint")))
                 Button {
                     SettingsWindowPresenter.shared.present()
@@ -161,6 +162,7 @@ private struct DashboardView: View {
                 }
                 .buttonStyle(.borderless)
                 .help(String(localized: "Settings", comment: "Dashboard settings help"))
+                .accessibilityIdentifier("malibu.dashboard.settings")
                 .accessibilityLabel(Text(String(localized: "Settings", comment: "Dashboard settings action")))
             }
             .padding(12)
@@ -426,6 +428,7 @@ private struct DashboardView: View {
         .padding(20)
         }
         .frame(minWidth: 640, minHeight: 480)
+        .accessibilityIdentifier("malibu.dashboard.scroll")
         .sheet(isPresented: $showAddWalletSheet) {
             AddWalletSheet(agent: agent, isPresented: $showAddWalletSheet)
         }
@@ -455,6 +458,7 @@ private struct DashboardView: View {
                 Text(mining.status)
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(miningTone(mining.reasonCode))
+                    .accessibilityIdentifier("malibu.dashboard.mining-status")
             }
             VStack(alignment: .leading, spacing: 8) {
                 MetricRow(title: DashboardCopy.miningReasonTitle, value: mining.reason)
@@ -871,6 +875,8 @@ private struct MetricRow: View {
                 .lineLimit(nil)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(value)")
     }
 }
 
