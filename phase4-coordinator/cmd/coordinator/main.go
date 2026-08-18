@@ -204,6 +204,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
+	payoutReadDB, closePayoutReadDB, err := configuredPayoutReadDB(cfg, reqLogStore)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "payout read db: %v\n", err)
+		os.Exit(1)
+	}
+	defer closePayoutReadDB()
 	// SPEC-002 v1.4.2 R-2 / ISS-188: request_log.external_request_id
 	// is added by OpenStore as an additive column. The matching partial-
 	// NULL reconciliation index is NOT auto-built here — the request-log
@@ -1093,14 +1099,16 @@ func main() {
 			Str("base_url", cfg.Tier2.MDM.EnrollmentBaseURL).
 			Msg("MDM enrollment profile route mounted on buyer port (/v1/enroll)")
 	}
+	rewardAuditLimiter := rewards.NewRewardAuditLimiter(60, 4)
 	var buyerHandler http.Handler = buyerHandlerWithOptionalProviderEndpoints(
 		buyerServer.Handler(),
 		cfg.Onboarding.AppTrackRegisterEnabled,
 		register,
 		hardwareEvidence,
 		enrollHandler,
-		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
-		malibuRewardAuditHandler(cfg, tokenStore, rewardsDB),
+		providerWalletHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot), rewardAuditLimiter),
+		malibuAccrualHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
+		malibuRewardAuditHandler(cfg, tokenStore, rewardsDB, rewardAuditLimiter),
 	)
 	if liveMDAService != nil {
 		buyerHandler = withMDMDeviceBinding(buyerHandler, liveMDAService.HandleDeviceBinding)
@@ -2280,13 +2288,17 @@ func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Ha
 	})
 }
 
-func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence, enroll http.HandlerFunc, malibuAccrual, malibuRewardAudit http.Handler) http.Handler {
+func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence, enroll http.HandlerFunc, providerWallet, malibuAccrual, malibuRewardAudit http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	if enabled {
 		mux.HandleFunc("/v1/providers/register", register)
 		mux.HandleFunc("/v1/providers/hardware-evidence", hardwareEvidence)
 	}
-	mux.HandleFunc("/v1/provider/wallet", appTrackWalletNotImplementedHandler)
+	if providerWallet != nil {
+		mux.Handle("/v1/provider/wallet", providerWallet)
+	} else {
+		mux.Handle("/v1/provider/wallet", walletMutationGuardHandler())
+	}
 	if enroll != nil {
 		mux.HandleFunc("/v1/enroll", enroll)
 	}
@@ -2380,29 +2392,21 @@ func buildEnrollHandler(cfg config.Config, logger zerolog.Logger) *onboarding.En
 	return eh
 }
 
-func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *sql.DB, connectivity rewards.ProviderConnectivity) http.Handler {
+func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity) http.Handler {
 	if rewardsDB == nil {
 		return nil
 	}
-	rewardsCfg := rewards.Config{
-		ProviderDailyCapMALIBU:       cfg.MalibuEmission.ProviderDailyCapMALIBU,
-		WalletDailyCapMALIBU:         cfg.MalibuEmission.WalletDailyCapMALIBU,
-		UsefulWorkMALIBUPer1KCredits: cfg.MalibuEmission.UsefulWorkMALIBUPer1KCredits,
-		SQLitePayoutDBPath:           cfg.MalibuEmission.SQLitePayoutDBPath,
-	}
-	if rewardsCfg.SQLitePayoutDBPath == "" {
-		rewardsCfg.SQLitePayoutDBPath = cfg.Storage.DBPath
-	}
 	return rewards.NewAccrualHandler(rewards.AccrualHandlerDeps{
 		DB:                    rewardsDB,
+		PayoutDB:              payoutDB,
 		TokenStore:            tokenStore,
 		RequireProviderTokens: cfg.Auth.RequireProviderTokens,
-		Config:                rewardsCfg,
+		Config:                coordinatorRewardsConfig(cfg),
 		Connectivity:          connectivity,
 	})
 }
 
-func malibuRewardAuditHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *sql.DB) http.Handler {
+func malibuRewardAuditHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *sql.DB, limiter *rewards.RewardAuditLimiter) http.Handler {
 	if rewardsDB == nil {
 		return nil
 	}
@@ -2410,6 +2414,7 @@ func malibuRewardAuditHandler(cfg config.Config, tokenStore *auth.Store, rewards
 		DB:                    rewardsDB,
 		TokenStore:            tokenStore,
 		RequireProviderTokens: cfg.Auth.RequireProviderTokens,
+		Limiter:               limiter,
 	})
 }
 
@@ -2423,18 +2428,80 @@ func malibuRewardAuditAdminHandler(cfg config.Config, rewardsDB *sql.DB) http.Ha
 	})
 }
 
-func appTrackWalletNotImplementedHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
+func providerWalletHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB, payoutDB *sql.DB, connectivity rewards.ProviderConnectivity, limiter *rewards.RewardAuditLimiter) http.Handler {
+	return rewards.NewWalletStatusHandler(rewards.WalletHandlerDeps{
+		RewardsDB:             rewardsDB,
+		PayoutDB:              payoutDB,
+		TokenStore:            tokenStore,
+		RequireProviderTokens: cfg.Auth.RequireProviderTokens,
+		Config:                coordinatorRewardsConfig(cfg),
+		Connectivity:          connectivity,
+		Limiter:               limiter,
+	})
+}
+
+func coordinatorRewardsConfig(cfg config.Config) rewards.Config {
+	hotWalletAddress := strings.TrimSpace(cfg.Payout.Security.HotWalletAddress)
+	if canonical, err := payout.CanonicalizeEIP55(hotWalletAddress); err == nil {
+		hotWalletAddress = canonical
+	}
+	rewardsCfg := rewards.Config{
+		ProviderDailyCapMALIBU:       cfg.MalibuEmission.ProviderDailyCapMALIBU,
+		WalletDailyCapMALIBU:         cfg.MalibuEmission.WalletDailyCapMALIBU,
+		UsefulWorkMALIBUPer1KCredits: cfg.MalibuEmission.UsefulWorkMALIBUPer1KCredits,
+		SQLitePayoutDBPath:           cfg.MalibuEmission.SQLitePayoutDBPath,
+		PayoutHotWalletAddress:       hotWalletAddress,
+	}
+	if rewardsCfg.SQLitePayoutDBPath == "" {
+		rewardsCfg.SQLitePayoutDBPath = cfg.Storage.DBPath
+	}
+	return rewardsCfg
+}
+
+func configuredPayoutReadDB(cfg config.Config, defaultStore *requestlog.Store) (*sql.DB, func(), error) {
+	if defaultStore == nil {
+		return nil, nil, errors.New("default request log store is required")
+	}
+	rewardsCfg := coordinatorRewardsConfig(cfg)
+	payoutPath := strings.TrimSpace(rewardsCfg.SQLitePayoutDBPath)
+	if payoutPath == "" || sameFilePath(payoutPath, cfg.Storage.DBPath) {
+		return defaultStore.DB(), func() {}, nil
+	}
+	payoutStore, err := requestlog.OpenStoreReadOnly(payoutPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	return payoutStore.DB(), func() { _ = payoutStore.Close() }, nil
+}
+
+func sameFilePath(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return a == b
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA == nil && errB == nil {
+		return filepath.Clean(absA) == filepath.Clean(absB)
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func walletMutationGuardHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusNotImplemented)
+			_, _ = w.Write([]byte(`{"error":"wallet_change_requires_spec_027"}` + "\n"))
+			return
+		}
+		w.Header().Set("Allow", "POST")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		_, _ = w.Write([]byte(`{"error":"method_not_allowed"}` + "\n"))
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusNotImplemented)
-	_, _ = w.Write([]byte(`{"error":"wallet_change_requires_spec_027"}` + "\n"))
+	})
 }
 
 func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, billingStores ...*billing.Store) {

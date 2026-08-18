@@ -315,6 +315,18 @@ final class DashboardViewTests: XCTestCase {
         walletCap.malibuHoldReasons = ["per_wallet_daily_cap"]
         XCTAssertEqual(AgentSnapshotPresenter.miningHealth(walletCap).reasonCode, "wallet_daily_cap_held")
 
+        var providerCap = miningBase()
+        providerCap.malibuHeld = 2
+        providerCap.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "capped",
+            withdrawalState: "capped",
+            primaryReason: "held_provider_daily_cap",
+            reasons: ["held_provider_daily_cap"]
+        )
+        let providerCapHealth = AgentSnapshotPresenter.miningHealth(providerCap)
+        XCTAssertEqual(providerCapHealth.reasonCode, "provider_daily_cap_held")
+        XCTAssertEqual(providerCapHealth.nextAction, "Wait for the next UTC day.")
+
         var genericHold = miningBase()
         genericHold.malibuHeld = 2
         genericHold.malibuHoldReasons = ["manual_review"]

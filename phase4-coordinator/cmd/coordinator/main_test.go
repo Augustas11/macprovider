@@ -213,6 +213,62 @@ func TestOperatorMetricsHandlerRequiresOperatorBearer(t *testing.T) {
 	}
 }
 
+func TestCoordinatorRewardsConfigIncludesWalletHotWallet(t *testing.T) {
+	cfg := config.Default()
+	cfg.Storage.DBPath = "/tmp/provider.sqlite"
+	cfg.MalibuEmission.SQLitePayoutDBPath = ""
+	cfg.MalibuEmission.ProviderDailyCapMALIBU = 33
+	cfg.MalibuEmission.WalletDailyCapMALIBU = 44
+	cfg.MalibuEmission.UsefulWorkMALIBUPer1KCredits = 2.5
+	cfg.Payout.Security.HotWalletAddress = "0x52908400098527886e0f7030069857d2e4169ee7"
+
+	got := coordinatorRewardsConfig(cfg)
+	if got.SQLitePayoutDBPath != "/tmp/provider.sqlite" {
+		t.Fatalf("SQLitePayoutDBPath=%q, want storage fallback", got.SQLitePayoutDBPath)
+	}
+	if got.PayoutHotWalletAddress != "0x52908400098527886E0F7030069857D2E4169EE7" {
+		t.Fatalf("PayoutHotWalletAddress=%q, want canonical coordinator payout hot wallet", got.PayoutHotWalletAddress)
+	}
+	if got.ProviderDailyCapMALIBU != 33 || got.WalletDailyCapMALIBU != 44 || got.UsefulWorkMALIBUPer1KCredits != 2.5 {
+		t.Fatalf("cap mapping lost: %+v", got)
+	}
+}
+
+func TestConfiguredPayoutReadDBUsesAlternateSQLitePath(t *testing.T) {
+	tmp := t.TempDir()
+	defaultPath := filepath.Join(tmp, "default.sqlite")
+	alternatePath := filepath.Join(tmp, "payout.sqlite")
+	defaultStore, err := requestlog.OpenStore(defaultPath)
+	if err != nil {
+		t.Fatalf("open default store: %v", err)
+	}
+	t.Cleanup(func() { _ = defaultStore.Close() })
+
+	cfg := config.Default()
+	cfg.Storage.DBPath = defaultPath
+	db, closeDB, err := configuredPayoutReadDB(cfg, defaultStore)
+	if err != nil {
+		t.Fatalf("default payout read db: %v", err)
+	}
+	t.Cleanup(closeDB)
+	if db != defaultStore.DB() {
+		t.Fatal("default payout read DB should reuse the request-log DB handle")
+	}
+
+	cfg.MalibuEmission.SQLitePayoutDBPath = alternatePath
+	db, closeDB, err = configuredPayoutReadDB(cfg, defaultStore)
+	if err != nil {
+		t.Fatalf("alternate payout read db: %v", err)
+	}
+	t.Cleanup(closeDB)
+	if db == nil {
+		t.Fatal("alternate payout read DB is nil")
+	}
+	if db == defaultStore.DB() {
+		t.Fatal("alternate payout read DB reused the request-log DB handle")
+	}
+}
+
 func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 	base := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "base", http.StatusTeapot)
@@ -224,7 +280,7 @@ func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	})
 
-	disabled := buyerHandlerWithOptionalProviderEndpoints(base, false, register, hardwareEvidence, nil, nil, nil)
+	disabled := buyerHandlerWithOptionalProviderEndpoints(base, false, register, hardwareEvidence, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", nil)
 	rr := httptest.NewRecorder()
 	disabled.ServeHTTP(rr, req)
@@ -245,7 +301,7 @@ func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 		t.Fatalf("disabled wallet route status=%d body=%s, want 501 wallet_change_requires_spec_027", rr.Code, rr.Body.String())
 	}
 
-	enabled := buyerHandlerWithOptionalProviderEndpoints(base, true, register, hardwareEvidence, nil, nil, nil)
+	enabled := buyerHandlerWithOptionalProviderEndpoints(base, true, register, hardwareEvidence, nil, nil, nil, nil)
 	rr = httptest.NewRecorder()
 	enabled.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNoContent {

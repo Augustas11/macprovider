@@ -519,6 +519,22 @@ enum AgentSnapshotPresenter {
             )
         }
         if s.malibuProjectionFresh {
+            if let eligibility = authoritativeRewardEligibility(s), eligibility.primaryReason == "held_provider_daily_cap" {
+                return result(
+                    status: "Provider cap held",
+                    code: "provider_daily_cap_held",
+                    reason: "MALIBU above the provider daily cap is held.",
+                    action: "Wait for the next UTC day."
+                )
+            }
+            if let eligibility = authoritativeRewardEligibility(s), eligibility.primaryReason == "held_wallet_daily_cap" {
+                return result(
+                    status: "Wallet cap held",
+                    code: "wallet_daily_cap_held",
+                    reason: "MALIBU above the wallet daily cap is held.",
+                    action: "Wait for the next UTC day or use a wallet below the cap."
+                )
+            }
             if s.malibuHoldReasons.contains("per_wallet_daily_cap") {
                 return result(
                     status: "Wallet cap held",
@@ -1777,6 +1793,8 @@ enum AgentSnapshotPresenter {
             return "Earning MALIBU from verified work"
         case "eligible_idle_no_work":
             return "Eligible · network is quiet"
+        case "held_provider_daily_cap":
+            return "MALIBU provider daily cap reached"
         case "held_wallet_daily_cap":
             return "MALIBU wallet daily cap reached"
         case "held_provisional_trust_tier":
@@ -1826,6 +1844,8 @@ enum AgentSnapshotPresenter {
 
     private static func rewardReasonCopy(_ reason: String) -> String {
         switch reason {
+        case "held_provider_daily_cap":
+            return "provider daily limit reached"
         case "held_wallet_daily_cap":
             return "wallet daily limit reached"
         case "held_provisional_trust_tier":
@@ -1854,6 +1874,8 @@ enum AgentSnapshotPresenter {
 
     private static func rewardReasonNextAction(_ reason: String) -> String {
         switch reason {
+        case "held_provider_daily_cap":
+            return "The provider cap resets at the next UTC day."
         case "held_wallet_daily_cap":
             return "The wallet cap resets at the next UTC day."
         case "held_provisional_trust_tier":

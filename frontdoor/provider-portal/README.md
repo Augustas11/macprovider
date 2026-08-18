@@ -39,10 +39,13 @@ per [SPEC-014](../../specs/SPEC-014-provider-portal.md).
    The loader rejects any unknown top-level key.
 2. Host `index.html` alongside an operator-owned reverse proxy on the
    SAME origin that forwards `/v1/pool/check`,
-   `/v1/provider/malibu-accrual`, and `/providers/{id}/earnings` to the
+   `/v1/provider/malibu-accrual`, `/v1/provider/wallet`,
+   `/v1/provider/malibu-reward-audit`, and `/providers/{id}/earnings` to the
    coordinator (SPEC-014 §3 + Open Q9). The MALIBU accrual route must
    preserve the provider `Authorization` header and use the buyer-mux
-   coordinator port, as shown in `dist/nginx-portal.malibu.tech.conf`.
+   coordinator port; the wallet and reward-audit routes have the same
+   provider-authenticated no-store requirement, as shown in
+   `dist/nginx-portal.malibu.tech.conf`.
    For GitHub auth mode, also forward `/v1/auth/github/*`,
    `/v1/auth/me/*`, `/v1/auth/logout`, and
    `/v1/install/pair/refresh`. If the proxy is missing, the portal
@@ -79,6 +82,7 @@ small and backend-ready:
 - `reward_projection_unavailable`
 - `wallet_missing`
 - `trust_tier_provisional`
+- `provider_daily_cap_held`
 - `wallet_daily_cap_held`
 - `rewards_held`
 - `trusted_withdrawable`

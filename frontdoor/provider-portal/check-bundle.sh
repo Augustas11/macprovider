@@ -168,6 +168,11 @@ if ! perl -0ne 'exit(/function normalizedMalibuRewardEligibility\(data\).*?if \(
   fail=1
 fi
 
+if ! perl -0ne 'exit(/var PROVIDER_WALLET_PATH = "\/v1\/provider\/wallet";.*?function normalizedProviderWalletStatus\(data\).*?if \(data\.schema_version !== PROVIDER_WALLET_STATUS_SCHEMA\) \{.*?provider_wallet_status_schema_drift.*?unavailable: true/s ? 0 : 1)' "$BUNDLE"; then
+  echo "FAIL [#1064]: provider wallet status must use the same-origin route and fail closed on schema drift" >&2
+  fail=1
+fi
+
 for idx in "${!storage_patterns[@]}"; do
   n=$((idx + 1))
   pattern="${storage_patterns[$idx]}"

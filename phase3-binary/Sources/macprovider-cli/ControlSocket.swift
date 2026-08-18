@@ -1112,9 +1112,10 @@ actor ControlSocketServer {
     private let idleTimeoutSeconds: TimeInterval
     private let providerStatus: ProviderStatus?
     private let providerEarningsClient: ProviderEarningsClient?
-    private let referralCoordinatorService: ReferralCoordinatorService?
-    private let malibuAccrualClient: MalibuAccrualClient?
-    private let providerToken: String?
+	private let referralCoordinatorService: ReferralCoordinatorService?
+	private let malibuAccrualClient: MalibuAccrualClient?
+	private let providerWalletStatusClient: ProviderWalletStatusClient?
+	private let providerToken: String?
     private let pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?
     private let resumeProvider: (@Sendable () async -> ProviderControlCommandResult)?
     private let watchdogCleanup: ControlSocketWatchdogCleanup?
@@ -1137,10 +1138,11 @@ actor ControlSocketServer {
         receiptRotationProviderID: String? = nil,
         idleTimeoutSeconds: TimeInterval = 30.0,
         providerStatus: ProviderStatus? = nil,
-        providerEarningsClient: ProviderEarningsClient? = nil,
-        referralCoordinatorService: ReferralCoordinatorService? = nil,
-        malibuAccrualClient: MalibuAccrualClient? = nil,
-        providerToken: String? = nil,
+		providerEarningsClient: ProviderEarningsClient? = nil,
+		referralCoordinatorService: ReferralCoordinatorService? = nil,
+		malibuAccrualClient: MalibuAccrualClient? = nil,
+		providerWalletStatusClient: ProviderWalletStatusClient? = nil,
+		providerToken: String? = nil,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         watchdogCleanup: ControlSocketWatchdogCleanup? = nil,
@@ -1154,9 +1156,10 @@ actor ControlSocketServer {
         self.idleTimeoutSeconds = idleTimeoutSeconds
         self.providerStatus = providerStatus
         self.providerEarningsClient = providerEarningsClient
-        self.referralCoordinatorService = referralCoordinatorService
-        self.malibuAccrualClient = malibuAccrualClient
-        self.providerToken = providerToken
+		self.referralCoordinatorService = referralCoordinatorService
+		self.malibuAccrualClient = malibuAccrualClient
+		self.providerWalletStatusClient = providerWalletStatusClient
+		self.providerToken = providerToken
         self.pauseProvider = pauseProvider
         self.resumeProvider = resumeProvider
         self.watchdogCleanup = watchdogCleanup
@@ -1223,6 +1226,7 @@ actor ControlSocketServer {
         let providerEarningsClient = providerEarningsClient
         let referralCoordinatorService = referralCoordinatorService
         let malibuAccrualClient = malibuAccrualClient
+        let providerWalletStatusClient = providerWalletStatusClient
         let providerToken = providerToken
         let pauseProvider = pauseProvider
         let resumeProvider = resumeProvider
@@ -1239,6 +1243,7 @@ actor ControlSocketServer {
                 providerEarningsClient: providerEarningsClient,
                 referralCoordinatorService: referralCoordinatorService,
                 malibuAccrualClient: malibuAccrualClient,
+                providerWalletStatusClient: providerWalletStatusClient,
                 providerToken: providerToken,
                 pauseProvider: pauseProvider,
                 resumeProvider: resumeProvider,
@@ -1297,10 +1302,11 @@ actor ControlSocketServer {
         receiptRotationProviderID: String?,
         idleTimeoutSeconds: TimeInterval,
         providerStatus: ProviderStatus?,
-        providerEarningsClient: ProviderEarningsClient?,
-        referralCoordinatorService: ReferralCoordinatorService?,
-        malibuAccrualClient: MalibuAccrualClient?,
-        providerToken: String?,
+		providerEarningsClient: ProviderEarningsClient?,
+		referralCoordinatorService: ReferralCoordinatorService?,
+		malibuAccrualClient: MalibuAccrualClient?,
+		providerWalletStatusClient: ProviderWalletStatusClient?,
+		providerToken: String?,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)?,
         kvDiskTier: KVDiskTier?,
@@ -1336,6 +1342,7 @@ actor ControlSocketServer {
                     providerEarningsClient: providerEarningsClient,
                     referralCoordinatorService: referralCoordinatorService,
                     malibuAccrualClient: malibuAccrualClient,
+                    providerWalletStatusClient: providerWalletStatusClient,
                     providerToken: providerToken,
                     pauseProvider: pauseProvider,
                     resumeProvider: resumeProvider,
@@ -1356,10 +1363,11 @@ actor ControlSocketServer {
         receiptRotationProviderID: String?,
         idleTimeoutSeconds: TimeInterval,
         providerStatus: ProviderStatus? = nil,
-        providerEarningsClient: ProviderEarningsClient? = nil,
-        referralCoordinatorService: ReferralCoordinatorService? = nil,
-        malibuAccrualClient: MalibuAccrualClient? = nil,
-        providerToken: String? = nil,
+		providerEarningsClient: ProviderEarningsClient? = nil,
+		referralCoordinatorService: ReferralCoordinatorService? = nil,
+		malibuAccrualClient: MalibuAccrualClient? = nil,
+		providerWalletStatusClient: ProviderWalletStatusClient? = nil,
+		providerToken: String? = nil,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         kvDiskTier: KVDiskTier? = nil
@@ -1452,11 +1460,12 @@ actor ControlSocketServer {
                     return
                 case .metricsRequest:
                     let snapshot = await ControlMetricsBuilder.build(
-                        providerStatus: providerStatus,
-                        providerEarningsClient: providerEarningsClient,
-                        malibuAccrualClient: malibuAccrualClient,
-                        providerToken: providerToken
-                    )
+						providerStatus: providerStatus,
+						providerEarningsClient: providerEarningsClient,
+						malibuAccrualClient: malibuAccrualClient,
+						providerWalletStatusClient: providerWalletStatusClient,
+						providerToken: providerToken
+					)
                     try? await connection.send(.metricsResponse(snapshot))
                 case .pauseRequest:
                     let result = await pauseProvider?()
