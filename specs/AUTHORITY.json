@@ -68,6 +68,7 @@
         "SPEC-006",
         "SPEC-015",
         "SPEC-016",
+        "SPEC-021",
         "SPEC-022",
         "SPEC-024",
         "SPEC-038",
@@ -254,7 +255,8 @@
       "id": "network-stats",
       "owner_spec": "SPEC-017",
       "consumers": [
-        "SPEC-009"
+        "SPEC-009",
+        "SPEC-021"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -318,6 +320,7 @@
         "SPEC-005",
         "SPEC-015",
         "SPEC-016",
+        "SPEC-021",
         "SPEC-040",
         "SPEC-041"
       ],
@@ -479,6 +482,7 @@
       "consumers": [
         "SPEC-001",
         "SPEC-003",
+        "SPEC-021",
         "SPEC-025",
         "SPEC-026"
       ],
@@ -513,11 +517,25 @@
     {
       "id": "compute-integrity-settlement",
       "owner_spec": "SPEC-036",
-      "consumers": [],
+      "consumers": [
+        "SPEC-021"
+      ],
       "status": "declared",
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
       "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "malibu-epoch-disposition-state",
+      "owner_spec": "SPEC-021",
+      "consumers": [
+        "SPEC-016",
+        "SPEC-017"
+      ],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/929"
     },
     {
       "id": "continuous-batching-serving",
