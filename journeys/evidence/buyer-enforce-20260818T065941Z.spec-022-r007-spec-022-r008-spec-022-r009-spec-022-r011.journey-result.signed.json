@@ -1,0 +1,126 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEUCIB8SiSi/7UcSqo8ubBPIMI8QEWZ2MaWDV0RE/fWOPFMFAiEA8rJheN8cW0Dn8+YJAMPPPjCJpQikleIrB04ZA+BzOv0=",
+      "signed_sha256": "9ca4c9192e1ecaf0b3fb21955c4321a674b8fa05d52949d9e457aa9ae561fc67",
+      "verified_at": "2026-08-18T07:54:45Z",
+      "verifier": ".github/workflows/promote-signed-buyer-enforce-journey.yml:32110816602:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-BUYER-ENFORCE",
+    "requirement_ids": [
+      "SPEC-022-R007",
+      "SPEC-022-R008",
+      "SPEC-022-R009",
+      "SPEC-022-R011"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "caa6ae4aec712c5d6353a3d307aab551911bea65"
+    },
+    "captured_at": "2026-08-18T06:59:41Z",
+    "expires_at": "2026-09-17",
+    "operator": {
+      "identity_fingerprint": "36f99b7bd0ed27f09c26023e50341e9044b5786b9bdba2bc55a02986716ff7a6",
+      "role": "acceptance-operator"
+    },
+    "environment": {
+      "candidate": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
+      "class": "isolated-candidate-enforce",
+      "hardware_profile": "local-macos-redacted"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-buyer-enforce",
+        "sha256": "051a36b0a680e1a67abf0c54b747b8b498307d70780add3d1e54e3dabe845fff",
+        "source": "journeys/evidence/buyer-enforce-20260818T065941Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "isolated candidate enforce journey passed without payout-ready mutation or Pearl flip"
+    },
+    "steps": [
+      {
+        "id": "step-01-capture-config",
+        "status": "pass",
+        "assertion": "isolated candidate captured in enforce mode with an API-key subject and no settlement runner",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      },
+      {
+        "id": "step-02-verified-debit",
+        "status": "pass",
+        "assertion": "reservation-first debit settled only after a verified settlement-capable receipt",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      },
+      {
+        "id": "step-03-payout-exclusion",
+        "status": "pass",
+        "assertion": "job_enabled stayed false and verified enforce traffic created no payout-ready rows",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      },
+      {
+        "id": "step-04-missing-receipt-quarantine",
+        "status": "pass",
+        "assertion": "deadline quarantine released the buyer reservation and kept payout exclusion",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      },
+      {
+        "id": "step-05-policy-pinning",
+        "status": "pass",
+        "assertion": "observe rollback did not rewrite already-enforced ledger or verdict rows",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      },
+      {
+        "id": "step-06-audit",
+        "status": "pass",
+        "assertion": "per-attempt settlement audit is structured and omits raw prompts, outputs, and secrets",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      },
+      {
+        "id": "step-07-restore-config",
+        "status": "pass",
+        "assertion": "settlement job stayed disabled and production Pearl was not touched",
+        "artifacts": [
+          "redacted-buyer-enforce"
+        ]
+      }
+    ],
+    "redaction": {
+      "local_account_names_redacted": true,
+      "operator_identity_redacted": true,
+      "secrets_redacted": true
+    },
+    "run_id": "buyer-enforce-20260818T065941Z",
+    "execution_mode": "isolated-candidate-enforce",
+    "observations": {
+      "enforce_activated": true,
+      "isolated_environment": true,
+      "job_enabled": false,
+      "payout_ready_mutated": false,
+      "production_pearl": false,
+      "production_side_effects": false,
+      "raw_prompt_output_redacted": true,
+      "settlement_mode_end": "observe",
+      "settlement_mode_start": "enforce",
+      "start_job_enabled": false
+    }
+  }
+}
