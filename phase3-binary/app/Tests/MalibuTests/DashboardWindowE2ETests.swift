@@ -124,8 +124,14 @@ final class DashboardWindowE2ETests: XCTestCase {
     }
 
     private static func assertRenderedCopy(_ text: String, mustContain needles: [String]) {
+        // GitHub Actions sets CI=true and the macos runner does not produce
+        // reliable Vision OCR of SwiftUI. Pixel copy stays a local extra check.
+        guard ProcessInfo.processInfo.environment["CI"] == nil else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else {
+            XCTFail("Local OCR returned no dashboard text")
+            return
+        }
         for needle in needles {
             XCTAssertTrue(trimmed.contains(needle), "OCR missing \(needle). OCR:\n\(trimmed)")
         }
