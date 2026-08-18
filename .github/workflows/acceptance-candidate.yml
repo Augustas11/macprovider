@@ -109,10 +109,25 @@ jobs:
           CANDIDATE_COMMIT: ${{ steps.source.outputs.candidate_commit }}
         run: bash candidate/scripts/verify-app-build-inputs.sh "$CANDIDATE_COMMIT"
 
+      - name: Verify candidate Pearl Go module parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          coordinator_go="$(awk '$1 == "go" { print $2; exit }' candidate/phase4-coordinator/go.mod)"
+          gateway_go="$(awk '$1 == "go" { print $2; exit }' candidate/phase5-gateway/go.mod)"
+          if [ -z "$coordinator_go" ] || [ -z "$gateway_go" ]; then
+            echo "::error::candidate Pearl module is missing a Go directive" >&2
+            exit 1
+          fi
+          if [ "$coordinator_go" != "$gateway_go" ]; then
+            echo "::error::candidate Pearl Go module mismatch: coordinator=$coordinator_go gateway=$gateway_go" >&2
+            exit 1
+          fi
+
       - name: Setup Go for candidate Pearl binaries
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: "1.26.5"
+          go-version-file: candidate/phase4-coordinator/go.mod
           cache-dependency-path: |
             candidate/phase4-coordinator/go.sum
             candidate/phase5-gateway/go.sum
