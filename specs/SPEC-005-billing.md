@@ -1,7 +1,14 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.2 (2026-08-17, preliminary paid-path conformance unit IDs)
+**Version:** 0.6.3 (2026-08-18, remaining SPEC-005 conformance unit IDs)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2.1 (prefix-cache cache-isolation; its billing sections are superseded by this spec)
+
+**Change log v0.6.3 (2026-08-18, issue #1023 — remaining conformance unit IDs):**
+- Registers `SPEC-005-R004`..`SPEC-005-R009` in `specs/CONFORMANCE.json` as
+  pending anchors for D8 failed-request accounting, settlement/payout-ready,
+  multi-attempt attribution, operator endpoints, account-scope identity, and
+  quarantine resolutions. No formula, ledger, or payout behavior change.
+  `requirement_id_migration` remains `pending`. Do not promote.
 
 **Change log v0.6.2 (2026-08-17, issue #614 — preliminary paid-path conformance unit IDs):**
 - Registers `SPEC-005-R001`..`SPEC-005-R003` in `specs/CONFORMANCE.json` as
@@ -13,9 +20,10 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-005 v0.6.2 registers `SPEC-005-R001`..`SPEC-005-R003` in
-`specs/CONFORMANCE.json` as pending preliminary conformance anchors. These IDs
-group existing normative obligation areas without changing them:
+SPEC-005 v0.6.3 registers `SPEC-005-R001`..`SPEC-005-R009` in
+`specs/CONFORMANCE.json`. R001–R003 remain the paid-path formula, hot-path,
+and crash-recovery units. R004–R009 group additional existing obligation
+areas without changing them:
 
 - `SPEC-005-R001` — closed-form credit formula, units, rounding, and rate-card
   resolution (§5).
@@ -23,9 +31,17 @@ group existing normative obligation areas without changing them:
   credit (§4, §7).
 - `SPEC-005-R003` — crash recovery, WAL, and reconcile of in-flight ledger
   rows (§10).
+- `SPEC-005-R004` — D8 failed-request accounting (§6).
+- `SPEC-005-R005` — settlement cadence, threshold, and payout-ready
+  idempotency (§7, §4.5).
+- `SPEC-005-R006` — multi-attempt attribution (§8).
+- `SPEC-005-R007` — operator and provider ledger endpoints (§11).
+- `SPEC-005-R008` — settlement account-scope hashing / identity snapshots
+  (§4.8).
+- `SPEC-005-R009` — operator quarantine resolutions (§4.10, §10.5).
 
-`requirement_id_migration` remains `pending`. Physical paid-path evidence is
-tracked by GitHub issue #1022.
+`requirement_id_migration` remains `pending` until issue #1023 closes.
+These IDs are not promoted from this registration.
 
 **Change log v0.6.1 (2026-07-29, B1 — request-log TTFT/decode consumer boundary):**
 - Dependency bump: SPEC-002 v1.5.2 → v1.5.6 to acknowledge

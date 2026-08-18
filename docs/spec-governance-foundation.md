@@ -128,9 +128,12 @@ Paid-buyer-path active domains:
 
 Deferred for paid buyer path:
 
-- remaining SPEC-005/006/015 clause-to-ID migration beyond the preliminary
-  anchors (`SPEC-005-R001`..`R003`, `SPEC-006-R001`..`R003`,
-  `SPEC-015-R001`); tracked by GitHub issue #1023;
+- exhaustive close of `requirement_id_migration` on SPEC-005/006/015
+  after the #1023 remainder IDs (`SPEC-005-R004`..`R009`,
+  `SPEC-006-R004`..`R009`, `SPEC-015-R002`..`R005`) are accepted as
+  covering the remaining evidencable obligation areas; the flag stays
+  `pending` until that issue closes, and those IDs are not promoted
+  from registration;
 - provider-prebeta onboarding, autotune, hardware admission, and
   payout-address registration;
 - SPEC-016 payout runner, hot-wallet funding, and on-chain settlement;
