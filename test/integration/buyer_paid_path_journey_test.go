@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -280,14 +281,50 @@ func TestJourneyBuyerPaidPathIsolatedCandidate(t *testing.T) {
 		"enforce_claimed": false,
 	})
 
-	receiptStatus, _, _ := s.gatewayRequest(http.MethodGet, "/v1/receipts/"+nonstreamID, nil)
-	if receiptStatus != http.StatusNotFound {
-		t.Fatalf("buyer receipt retrieval status=%d want 404; this journey must not silently promote SPEC-022-R006", receiptStatus)
+	receiptStatus, _, receiptBody := s.gatewayRequest(http.MethodGet, "/v1/receipts/"+nonstreamID, nil)
+	if receiptStatus != http.StatusOK {
+		t.Fatalf("buyer receipt retrieval status=%d want 200 body=%s", receiptStatus, string(receiptBody))
 	}
-	retrievalExposed := false
-	pass("step-09-receipt-retrieval", "buyer receipt-retrieval endpoint is not exposed on the candidate", map[string]any{
+	var receiptView map[string]any
+	if err := json.Unmarshal(receiptBody, &receiptView); err != nil {
+		t.Fatalf("decode receipt body: %v", err)
+	}
+	if receiptView["schema_version"] != "macprovider.buyer-receipt-view.v1" || receiptView["surface"] != "metadata" {
+		t.Fatalf("receipt view=%v", receiptView)
+	}
+	if receiptView["pending_quarantined_visible"] != true {
+		t.Fatalf("pending_quarantined_visible=%v want true", receiptView["pending_quarantined_visible"])
+	}
+	rawReceipt := strings.ToLower(string(receiptBody))
+	for _, needle := range []string{"raw_prompt", "raw_output", "x-macprovider-receipt"} {
+		if strings.Contains(rawReceipt, needle) {
+			t.Fatalf("receipt retrieval leaked %q: %s", needle, string(receiptBody))
+		}
+	}
+	missingStatus, _, _ := s.gatewayRequest(http.MethodGet, "/v1/receipts/99999999-9999-4999-8999-999999999999", nil)
+	if missingStatus != http.StatusNotFound {
+		t.Fatalf("missing receipt status=%d want 404", missingStatus)
+	}
+	unauthReq, err := http.NewRequest(http.MethodGet, s.gatewayBaseURL+"/v1/receipts/"+nonstreamID, nil)
+	if err != nil {
+		t.Fatalf("unauth request: %v", err)
+	}
+	unauthResp, err := http.DefaultClient.Do(unauthReq)
+	if err != nil {
+		t.Fatalf("unauth GET: %v", err)
+	}
+	unauthBody, _ := io.ReadAll(unauthResp.Body)
+	_ = unauthResp.Body.Close()
+	if unauthResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated receipt status=%d want 401 body=%s", unauthResp.StatusCode, string(unauthBody))
+	}
+	retrievalExposed := true
+	pass("step-09-receipt-retrieval", "owner GET /v1/receipts/{id} returns metadata-only 200; missing is 404; unauthenticated is 401", map[string]any{
 		"http_status":                     receiptStatus,
+		"missing_http_status":             missingStatus,
+		"unauthenticated_http_status":     unauthResp.StatusCode,
 		"buyer_receipt_retrieval_exposed": retrievalExposed,
+		"surface":                         receiptView["surface"],
 	})
 
 	if s.payoutReadyCount() != 0 {
@@ -524,6 +561,7 @@ func writeBuyerPaidPathEvidence(t *testing.T, s *scenario, steps []buyerPaidPath
 			"SPEC-022-R003",
 			"SPEC-022-R004",
 			"SPEC-022-R005",
+			"SPEC-022-R006",
 			"SPEC-022-R010",
 		},
 		"repository": map[string]string{"name": "Augustas11/macprovider", "commit": commit},

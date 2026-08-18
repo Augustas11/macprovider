@@ -230,6 +230,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/models", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleModels)))
 	mux.HandleFunc("/v1/usage", s.handleUsage)
 	mux.Handle("/v1/chat/completions", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleChatCompletions)))
+	mux.Handle("/v1/receipts/", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleBuyerReceipt)))
 	mux.Handle("/v1/relay-blind/route-reservations", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleRelayBlindRouteReservations)))
 	if s.cfg.Features.ResponsesAPIEnabled {
 		mux.Handle("/v1/responses", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleResponses)))
@@ -1401,7 +1402,9 @@ var gatewayPermanentCodes = map[string]bool{
 	"demo_session_record_failed": true, "api_key_rotation_failed": true,
 	"api_key_revoke_failed": true, "internal_error": true,
 	"coordinator_models_error": true, "coordinator_rate_card_error": true,
-	"coordinator_stats_error": true, "tier2_metadata_unavailable": true,
+	"coordinator_receipt_error": true, "coordinator_stats_error": true,
+	"tier2_metadata_unavailable": true, "demo_receipt_forbidden": true,
+	"receipt_forbidden": true,
 	"usage_load_failed": true, "keys_load_failed": true,
 	"coordinator_sticky_error": true, "feedback_limit_check_failed": true,
 	"feedback_store_failed": true, "settlement_reconcile_load_failed": true,
