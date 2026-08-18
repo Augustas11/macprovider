@@ -194,7 +194,6 @@ codesign --force \
   --options runtime \
   --timestamp \
   --identifier live.malibu.provider.cli \
-  --entitlements phase3-binary/dist/macprovider-cli.entitlements \
   --keychain "$keychain" \
   --sign "$signing_identity" \
   "$cli_work/macprovider-cli"
