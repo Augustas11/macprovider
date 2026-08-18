@@ -95,8 +95,8 @@ func (c *Client) FindDeviceBySerial(ctx context.Context, serial string) (Device,
 }
 
 // EnqueueDeviceInformationAttestation enqueues a DeviceInformation MDM command
-// for udid with DeviceAttestation + DeviceAttestationNonce via MicroMDM's raw
-// plist endpoint POST /v1/commands/{udid}.
+// for udid with DevicePropertiesAttestation + DeviceAttestationNonce via
+// MicroMDM's raw plist endpoint POST /v1/commands/{udid}.
 //
 // MicroMDM's JSON DeviceInformation model only has `queries` and drops unknown
 // fields (including device_attestation_nonce), so the nonce must be delivered
@@ -151,7 +151,7 @@ func buildDeviceInformationAttestationPlist(commandUUID string, nonce32 []byte) 
     <string>DeviceInformation</string>
     <key>Queries</key>
     <array>
-      <string>DeviceAttestation</string>
+      <string>DevicePropertiesAttestation</string>
     </array>
     <key>DeviceAttestationNonce</key>
     <data>%s</data>
@@ -235,23 +235,46 @@ func ParseAcknowledgeEvent(data []byte) (*AcknowledgeEventParse, error) {
 	}, nil
 }
 
-// ParseDeviceAttestationFromPlistBytes extracts DeviceAttestation from raw
-// Apple MDM response plist bytes (XML or binary).
+// ParseDeviceAttestationFromPlistBytes extracts the MDA chain from raw Apple
+// MDM response plist bytes (XML or binary).
 func ParseDeviceAttestationFromPlistBytes(data []byte) (*DeviceAttestationResult, error) {
 	var top map[string]interface{}
 	if _, err := plist.Unmarshal(data, &top); err != nil {
 		return nil, fmt.Errorf("mdm: plist decode: %w", err)
 	}
-	// Prefer QueryResponses.DeviceAttestation (DeviceInformation response).
 	if qr, ok := top["QueryResponses"].(map[string]interface{}); ok {
-		if v, ok := qr["DeviceAttestation"]; ok {
+		if v, ok := mapAttestationValue(qr); ok {
 			return extractDeviceAttestationCerts(plistValueToJSONCompat(v))
 		}
 	}
-	if v, ok := top["DeviceAttestation"]; ok {
+	if v, ok := mapAttestationValue(top); ok {
 		return extractDeviceAttestationCerts(plistValueToJSONCompat(v))
 	}
 	return nil, ErrNoDeviceAttestation
+}
+
+// mapAttestationValue returns Apple's DevicePropertiesAttestation value, or the
+// legacy DeviceAttestation fallback used by early Phase 3 fixtures.
+func mapAttestationValue(m map[string]interface{}) (interface{}, bool) {
+	if m == nil {
+		return nil, false
+	}
+	if v, ok := m["DevicePropertiesAttestation"]; ok && v != nil {
+		return v, true
+	}
+	if v, ok := m["DeviceAttestation"]; ok && v != nil {
+		return v, true
+	}
+	return nil, false
+}
+
+func firstAttestationValue(values ...interface{}) interface{} {
+	for _, v := range values {
+		if v != nil {
+			return v
+		}
+	}
+	return nil
 }
 
 // plistValueToJSONCompat converts howett plist values into the shapes
@@ -275,13 +298,14 @@ func plistValueToJSONCompat(v interface{}) interface{} {
 }
 
 // ParseDeviceAttestationFromPlist parses a MicroMDM device information response
-// body (JSON wrapping plist fields) and extracts the DeviceAttestation chain.
+// body (JSON wrapping plist fields) and extracts the MDA certificate chain.
 //
 // MicroMDM v1.13 returns device responses via GET /v1/commands when the command
 // is polled. The response format is a JSON object with a "payload" key containing
-// the MDM CheckIn/Acknowledge plist decoded into JSON. The DeviceAttestation key
-// holds a base64-encoded sequence of DER certificates (Apple-specific format:
-// either a JSON array of base64 strings or a concatenated DER blob).
+// the MDM CheckIn/Acknowledge plist decoded into JSON. Prefer
+// QueryResponses.DevicePropertiesAttestation (Apple); DeviceAttestation is
+// legacy fallback. The value is a base64-encoded sequence of DER certificates
+// (JSON array of base64 strings or a concatenated DER blob).
 //
 // This function handles both variants. When the format is unknown it returns
 // (nil, ErrNoDeviceAttestation).
@@ -289,34 +313,40 @@ func ParseDeviceAttestationFromPlist(data []byte) (*DeviceAttestationResult, err
 	// Unwrap MicroMDM command response envelope.
 	var outer struct {
 		Payload struct {
-			DeviceAttestation interface{} `json:"DeviceAttestation"`
-			QueryResponses    struct {
-				DeviceAttestation interface{} `json:"DeviceAttestation"`
+			DevicePropertiesAttestation interface{} `json:"DevicePropertiesAttestation"`
+			DeviceAttestation           interface{} `json:"DeviceAttestation"`
+			QueryResponses              struct {
+				DevicePropertiesAttestation interface{} `json:"DevicePropertiesAttestation"`
+				DeviceAttestation           interface{} `json:"DeviceAttestation"`
 			} `json:"QueryResponses"`
 		} `json:"payload"`
 	}
 	// Also try flat parse (direct MDM response JSON).
 	var flat struct {
-		DeviceAttestation interface{} `json:"DeviceAttestation"`
-		QueryResponses    struct {
-			DeviceAttestation interface{} `json:"DeviceAttestation"`
+		DevicePropertiesAttestation interface{} `json:"DevicePropertiesAttestation"`
+		DeviceAttestation           interface{} `json:"DeviceAttestation"`
+		QueryResponses              struct {
+			DevicePropertiesAttestation interface{} `json:"DevicePropertiesAttestation"`
+			DeviceAttestation           interface{} `json:"DeviceAttestation"`
 		} `json:"QueryResponses"`
 	}
 	var parsed interface{}
 	if err := json.Unmarshal(data, &outer); err == nil {
-		if outer.Payload.QueryResponses.DeviceAttestation != nil {
-			parsed = outer.Payload.QueryResponses.DeviceAttestation
-		} else if outer.Payload.DeviceAttestation != nil {
-			parsed = outer.Payload.DeviceAttestation
-		}
+		parsed = firstAttestationValue(
+			outer.Payload.QueryResponses.DevicePropertiesAttestation,
+			outer.Payload.QueryResponses.DeviceAttestation,
+			outer.Payload.DevicePropertiesAttestation,
+			outer.Payload.DeviceAttestation,
+		)
 	}
 	if parsed == nil {
 		if err2 := json.Unmarshal(data, &flat); err2 == nil {
-			if flat.QueryResponses.DeviceAttestation != nil {
-				parsed = flat.QueryResponses.DeviceAttestation
-			} else if flat.DeviceAttestation != nil {
-				parsed = flat.DeviceAttestation
-			}
+			parsed = firstAttestationValue(
+				flat.QueryResponses.DevicePropertiesAttestation,
+				flat.QueryResponses.DeviceAttestation,
+				flat.DevicePropertiesAttestation,
+				flat.DeviceAttestation,
+			)
 		}
 	}
 	if parsed == nil {

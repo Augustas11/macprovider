@@ -192,7 +192,7 @@ func TestHandleMDACommandWebhookAcknowledgeEvent(t *testing.T) {
 		MaxConcurrency: 1, MaxContextTokens: 8000,
 	}, nil, now)
 
-	// Build a realistic DeviceInformation response plist with DeviceAttestation.
+	// Build a realistic DeviceInformation response plist with DevicePropertiesAttestation.
 	plistXML := `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -205,7 +205,7 @@ func TestHandleMDACommandWebhookAcknowledgeEvent(t *testing.T) {
   <string>cmd-ack-uuid</string>
   <key>QueryResponses</key>
   <dict>
-    <key>DeviceAttestation</key>
+    <key>DevicePropertiesAttestation</key>
     <array>
       <data>` + base64.StdEncoding.EncodeToString(leafDER) + `</data>
       <data>` + base64.StdEncoding.EncodeToString(rootDER) + `</data>
