@@ -384,7 +384,7 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
         else {
             throw ManagedDeviceAttestationArtifactError.bindingPayloadInvalid
         }
-        let claimedData = try JSONSerialization.data(withJSONObject: claimed, options: [.sortedKeys])
+        let claimedData = try Spec008CanonicalJSON.marshal(claimed)
         let claimedHash = Data(SHA256.hash(data: claimedData)).base64URLUnpadded()
         let tokenHash = Data(SHA256.hash(data: Data(token.utf8))).base64URLUnpadded()
         let fields: [(String, String)] = [

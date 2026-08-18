@@ -49,9 +49,10 @@ struct AttestationBlob {
         return d
     }
 
-    /// Canonical JSON bytes for signature: sorted keys, UTF-8.
+    /// Canonical JSON bytes for signature: Go `encoding/json` Marshal of a
+    /// map (sorted keys, `/` left literal). SPEC-008 §7.4a.
     func canonicalJSON() throws -> Data {
-        try JSONSerialization.data(withJSONObject: asDictionary(), options: [.sortedKeys])
+        try Spec008CanonicalJSON.marshal(asDictionary())
     }
 }
 
@@ -66,7 +67,7 @@ struct SignedSEAttestation {
             "attestation": blob.asDictionary(),
             "signature": signatureBase64,
         ]
-        return try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
+        return try Spec008CanonicalJSON.marshal(obj)
     }
 
     func tokenBase64URL() throws -> String {
@@ -115,5 +116,17 @@ struct SEAttestationBuilder: Sendable {
         guard let serial = raw.takeRetainedValue() as? String else { return nil }
         let trimmed = serial.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+/// Go `encoding/json` Marshal of a JSON object: sorted keys, `/` unescaped.
+/// HTML-escaping of `<`, `>`, `&` is unused for current SE fields (base64,
+/// serial, model ids). The coordinator verifies signatures over this form.
+enum Spec008CanonicalJSON {
+    static func marshal(_ object: Any) throws -> Data {
+        try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
     }
 }

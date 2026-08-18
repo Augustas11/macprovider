@@ -69,6 +69,17 @@ final class SEAttestationBuilderTests: XCTestCase {
         XCTAssertFalse(json.contains("binaryHash"))
     }
 
+    func testCanonicalJSONLeavesBase64SlashesLiteral() throws {
+        let blob = AttestationBlob(
+            publicKey: "abc/def+ghi=",
+            encryptionPublicKey: "ecdh",
+            serialNumber: nil
+        )
+        let json = String(data: try blob.canonicalJSON(), encoding: .utf8) ?? ""
+        XCTAssertTrue(json.contains("abc/def+ghi="))
+        XCTAssertFalse(json.contains("\\/"))
+    }
+
     // MARK: SignedSEAttestation tokenJSON
 
     func testTokenJSONHasExpectedShape() throws {
@@ -367,6 +378,43 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
         let inner = try XCTUnwrap(tokenObj?["attestation"] as? [String: Any])
         XCTAssertEqual(inner["serialNumber"] as? String, "H2XX74T43X")
         XCTAssertNil(inner["chipName"])
+    }
+
+    func testBindingClaimedHashLeavesModelIDSlashLiteral() async throws {
+        let signer = MockSEBlobSigner()
+        let builder = SEAttestationBuilder(serialNumberOverride: { "H2XX74T43X" })
+        let generator = SecureEnclaveAttestationGenerator(
+            signer: signer,
+            builder: builder,
+            now: { Date(timeIntervalSince1970: 1_716_768_000) }
+        )
+        let status = ProviderStatus(
+            modelID: "mlx-community/Qwen3-8B-4bit",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let snapshot = await status.snapshot()
+        let envelope = await generator.makeAttestationToken(
+            challengeBase64URL: Data(repeating: 0x11, count: 32).base64URLUnpadded(),
+            authAttemptID: "attempt-slash",
+            providerID: "mp-26592d710fc97aa7c07b260665c67cf6",
+            binaryVersion: CoordinatorClient.binaryVersion,
+            snapshot: snapshot,
+            providerECDHPublicKey: Data(repeating: 0x22, count: 32).base64URLUnpadded()
+        )
+        let env = try XCTUnwrap(envelope)
+        let claimed = try XCTUnwrap(env["claimed"] as? [String: Any])
+        let claimedJSON = String(data: try Spec008CanonicalJSON.marshal(claimed), encoding: .utf8) ?? ""
+        XCTAssertTrue(claimedJSON.contains("mlx-community/Qwen3-8B-4bit"))
+        XCTAssertFalse(claimedJSON.contains("\\/"))
+
+        let payload = try ManagedDeviceAttestationGenerator.buildBindingPayload(
+            envelope: env,
+            authAttemptID: "attempt-slash"
+        )
+        let claimedHash = Data(SHA256.hash(data: try Spec008CanonicalJSON.marshal(claimed))).base64URLUnpadded()
+        let payloadStr = try XCTUnwrap(String(data: payload, encoding: .utf8))
+        XCTAssertTrue(payloadStr.contains(claimedHash))
     }
 
     func testOversizedClaimedOmitsTokenRatherThanExceedCap() async throws {
