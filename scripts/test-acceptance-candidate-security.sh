@@ -38,6 +38,18 @@ build = workflow.split("\n  build_candidate:\n", 1)[1].split("\n  sign_acceptanc
 protected = workflow.split("\n  sign_acceptance:\n", 1)[1]
 if "secrets." in build or "contents: write" in build or "environment:" in build:
     raise SystemExit("unprivileged candidate build gained a secret, write permission, or environment")
+if "go-version-file: candidate/phase4-coordinator/go.mod" not in build:
+    raise SystemExit("candidate Pearl build must derive Go from the candidate coordinator go.mod")
+if re.search(r'(?m)^\s*go-version\s*:', build):
+    raise SystemExit("candidate Pearl build must not hardcode a Go version")
+for value in (
+    "Verify candidate Pearl Go module parity",
+    "candidate/phase4-coordinator/go.mod",
+    "candidate/phase5-gateway/go.mod",
+    "candidate Pearl Go module mismatch",
+):
+    if value not in build:
+        raise SystemExit(f"candidate Pearl Go parity guard is incomplete: {value}")
 if "environment: production-release" not in protected:
     raise SystemExit("protected signer lacks the production-release environment gate")
 permissions = protected.split("    steps:\n", 1)[0]
