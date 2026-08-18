@@ -7,6 +7,7 @@ Requirements: SPEC-006-R001, SPEC-006-R002, SPEC-006-R003, SPEC-005-R001, SPEC-0
 Authority domains: buyer-api-error-contract, billing-settlement-formula, inference-receipts, verified-model-settlement
 Issue: https://github.com/Augustas11/macprovider/issues/614
 Evidence owner: https://github.com/Augustas11/macprovider/issues/1022
+Retrieval evidence owner: https://github.com/Augustas11/macprovider/issues/1042
 Signed envelope: `journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json` (workflow [31996627496](https://github.com/Augustas11/macprovider/actions/runs/31996627496))
 Execution mode: isolated-candidate-paid-path
 Harness: `test/integration/buyer_paid_path_journey_test.go` (`TestJourneyBuyerPaidPathIsolatedCandidate`); capture with `MACPROVIDER_CAPTURE_BUYER_PAID_PATH=1`. A passing harness is not a signed journey-result.
@@ -104,12 +105,14 @@ conformant.
    surface) and record `tier1_disclosure.verified_model_settlement` /
    model-verification-limit text. Require observe-mode disclosure not to
    claim enforce.
-9. `step-09-receipt-retrieval` — Probe `GET /v1/receipts/{id}`. This
-   isolated harness treats HTTP 200 as fatal so SPEC-022-R006 cannot
-   silently promote. A 404 records `buyer_receipt_retrieval_exposed=false`.
-   Any other status is inconclusive and fails the run. If a later candidate
-   exposes retrieval, capture that as a separate reviewed step rather than
-   letting this harness adapt in place.
+9. `step-09-receipt-retrieval` — `GET /v1/receipts/{id}` for the owning
+   API key after step 05 ingest. Require HTTP 200 with
+   `schema_version=macprovider.buyer-receipt-view.v1`, `surface=metadata`,
+   `pending_quarantined_visible=true`, and no raw prompt/output material.
+   Unauthenticated GET MUST return 401. Unknown `request_id` MUST return
+   404. Record `buyer_receipt_retrieval_exposed=true`. This metadata
+   surface is not signed proof and does not promote SPEC-022-R006 until a
+   later signed capture against this reviewed contract.
 10. `step-10-redaction` — Inspect logs, ledger rows, receipt state,
     screenshots, callback captures, and exported artifacts for bearer tokens,
     private keys, raw prompts/outputs, or unintended production identifiers.
@@ -153,7 +156,8 @@ material before adding a journey evidence SHA to `specs/CONFORMANCE.json`.
 
 This journey-result may not promote SPEC-022-R007 or SPEC-022-R008.
 It may not promote SPEC-022-R006 while
-`observations.buyer_receipt_retrieval_exposed` is false.
+`observations.buyer_receipt_retrieval_exposed` is false. A local 200 on
+this reviewed step is not signed promotion evidence.
 
 ## Pass criteria
 
@@ -163,7 +167,8 @@ all required artifacts are retained and redacted, and the release gate accepts
 the evidence as fresh. A passing local test or observe-mode production sample
 does not by itself authorize promotion or SPEC-022 enforce activation.
 
-SPEC-022-R006 cannot promote while buyer receipt retrieval is unexposed.
+SPEC-022-R006 cannot promote until a signed journey-result records
+`buyer_receipt_retrieval_exposed=true` against this reviewed contract.
 SPEC-022-R001 cannot promote from an enforce-mode claim; this journey
 requires captured mode `observe`.
 SPEC-005-R003 cannot promote from this harness; crash recovery is not an

@@ -151,7 +151,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.18",
+      "version": "0.9.19",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -175,7 +175,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-006-R001/R002/R003 promoted from signed JOURNEY-BUYER-PAID-PATH (API-key paid path). Remaining clause migration is #1023."
+        "rationale": "SPEC-006-R001/R002/R003 promoted from signed JOURNEY-BUYER-PAID-PATH (API-key paid path). Remaining clause migration is #1023. Buyer receipt GET is specified in SPEC-006 v0.9.19; SPEC-022-R006 stays pending until signed capture (#1042)."
       }
     },
     {
@@ -423,7 +423,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-015-R001 promoted from signed JOURNEY-BUYER-PAID-PATH (v0.4 settlement-capable receipt issuance/ingestion). Remaining clause migration is #1023. Buyer receipt retrieval (SPEC-022-R006) is still unexposed."
+        "rationale": "SPEC-015-R001 promoted from signed JOURNEY-BUYER-PAID-PATH (v0.4 settlement-capable receipt issuance/ingestion). Remaining clause migration is #1023. Buyer receipt retrieval is implemented as metadata-only GET /v1/receipts/{request_id} (SPEC-006 v0.9.19); SPEC-022-R006 stays pending until signed capture (#1042)."
       }
     },
     {
@@ -649,7 +649,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-022-R001..R005 and R010 promoted from signed observe-mode JOURNEY-BUYER-PAID-PATH. R006 pending (buyer receipt retrieval unexposed). R007/R008 cannot promote from observe. R009/R011 still pending. No enforce activation."
+        "rationale": "SPEC-022-R001..R005 and R010 promoted from signed observe-mode JOURNEY-BUYER-PAID-PATH. R006 implemented as metadata-only GET /v1/receipts/{request_id} and remains pending until signed capture (#1042). R007/R008 cannot promote from observe. R009/R011 still pending. No enforce activation."
       }
     },
     {
@@ -3944,11 +3944,14 @@
       "spec_id": "SPEC-022",
       "state": "pending",
       "implementation": [
-        "phase4-coordinator/internal/billing/settlement_receipts.go:GetSettlementReceiptAuthorization"
+        "phase4-coordinator/internal/billing/settlement_receipt_retrieval.go:LookupBuyerReceipt",
+        "phase4-coordinator/internal/buyer/server.go:handleInternalSettlementReceipts",
+        "phase5-gateway/internal/router/receipts.go:handleBuyerReceipt"
       ],
       "tests": [
-        "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestSettlementReceiptAuthorizationRejectsLaterOverlapBackfill",
-        "phase4-coordinator/internal/billing/spec015_v04_acceptance_test.go:TestSPEC015V04AcceptanceCriteria"
+        "phase4-coordinator/internal/billing/settlement_receipt_retrieval_test.go:TestLookupBuyerReceiptOwnershipAndMissing",
+        "phase5-gateway/internal/router/receipts_test.go:TestBuyerReceiptRetrievalAuthAndRedaction",
+        "test/integration/buyer_paid_path_journey_test.go:TestJourneyBuyerPaidPathIsolatedCandidate"
       ],
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
@@ -3957,8 +3960,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "R-6 buyer receipt retrieval (owner/operator auth; no raw prompts or outputs; proof/metadata only; defined retention, rate limits, idempotency, 404/403, pending/quarantined visibility). Internal authorization lookup mapped. Public retrieval is unexposed; this journey cannot promote R006 while buyer_receipt_retrieval_exposed is false. Physical evidence is #1022."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1042",
+        "rationale": "R-6 buyer receipt retrieval is implemented as metadata-only GET /v1/receipts/{request_id} (owner/operator auth; demo 403; no raw prompts or outputs; pending/quarantined visible; retention = request_log/verdict lifetime; GET idempotent). Public retrieval is now exposed in code and the isolated harness records buyer_receipt_retrieval_exposed=true, but this row stays pending until a signed capture + promotion PR. Physical evidence is #1042."
       }
     },
     {
