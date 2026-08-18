@@ -1,6 +1,6 @@
 # JOURNEY-BUYER-PAID-PATH
 
-Status: signed observe-mode promotion for SPEC-005-R001/R002, SPEC-006-R001..R003, SPEC-015-R001, SPEC-022-R001..R005, and SPEC-022-R010; no enforce promotion
+Status: signed observe-mode promotion for SPEC-005-R001/R002, SPEC-006-R001..R003, SPEC-015-R001, SPEC-022-R001..R006, and SPEC-022-R010; no enforce promotion
 Owner: buyer/billing/settlement conformance
 Specs: SPEC-005, SPEC-006, SPEC-015, SPEC-022
 Requirements: SPEC-006-R001, SPEC-006-R002, SPEC-006-R003, SPEC-005-R001, SPEC-005-R002, SPEC-005-R003, SPEC-015-R001, SPEC-022-R001, SPEC-022-R002, SPEC-022-R003, SPEC-022-R004, SPEC-022-R005, SPEC-022-R006, SPEC-022-R007, SPEC-022-R008, SPEC-022-R010
@@ -9,6 +9,7 @@ Issue: https://github.com/Augustas11/macprovider/issues/614
 Evidence owner: https://github.com/Augustas11/macprovider/issues/1022
 Retrieval evidence owner: https://github.com/Augustas11/macprovider/issues/1042
 Signed envelope: `journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json` (workflow [31996627496](https://github.com/Augustas11/macprovider/actions/runs/31996627496))
+R006 signed envelope: `journeys/evidence/buyer-paid-path-20260818T051813Z.spec-022-r006.journey-result.signed.json` (workflow [32104641658](https://github.com/Augustas11/macprovider/actions/runs/32104641658))
 Execution mode: isolated-candidate-paid-path
 Harness: `test/integration/buyer_paid_path_journey_test.go` (`TestJourneyBuyerPaidPathIsolatedCandidate`); capture with `MACPROVIDER_CAPTURE_BUYER_PAID_PATH=1`. A passing harness is not a signed journey-result.
 
@@ -111,9 +112,9 @@ conformant.
    `schema_version=macprovider.buyer-receipt-view.v1`, `surface=metadata`,
    `pending_quarantined_visible=true`, and no raw prompt/output material.
    Unauthenticated GET MUST return 401. Unknown `request_id` MUST return
-   404. Record `buyer_receipt_retrieval_exposed=true`. This metadata
-   surface is not signed proof and does not promote SPEC-022-R006 until a
-   later signed capture against this reviewed contract.
+   404. Record `buyer_receipt_retrieval_exposed=true`. SPEC-022-R006
+   promotion requires a signed journey-result against this step, not a
+   local 200.
 10. `step-10-redaction` — Inspect logs, ledger rows, receipt state,
     screenshots, callback captures, and exported artifacts for bearer tokens,
     private keys, raw prompts/outputs, or unintended production identifiers.
@@ -157,8 +158,7 @@ material before adding a journey evidence SHA to `specs/CONFORMANCE.json`.
 
 This journey-result may not promote SPEC-022-R007 or SPEC-022-R008.
 It may not promote SPEC-022-R006 while
-`observations.buyer_receipt_retrieval_exposed` is false. A local 200 on
-this reviewed step is not signed promotion evidence.
+`observations.buyer_receipt_retrieval_exposed` is false.
 
 ## Pass criteria
 
@@ -168,7 +168,7 @@ all required artifacts are retained and redacted, and the release gate accepts
 the evidence as fresh. A passing local test or observe-mode production sample
 does not by itself authorize promotion or SPEC-022 enforce activation.
 
-SPEC-022-R006 cannot promote until a signed journey-result records
+SPEC-022-R006 is promoted from the signed journey-result that records
 `buyer_receipt_retrieval_exposed=true` against this reviewed contract.
 SPEC-022-R001 cannot promote from an enforce-mode claim; this journey
 requires captured mode `observe`.
