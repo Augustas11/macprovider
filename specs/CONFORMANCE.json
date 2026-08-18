@@ -649,7 +649,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-022-R001..R005 and R010 promoted from signed observe-mode JOURNEY-BUYER-PAID-PATH. R006 implemented as metadata-only GET /v1/receipts/{request_id} and remains pending until signed capture (#1042). Isolated JOURNEY-BUYER-ENFORCE (#1044) is the candidate harness for R007/R008/R009/R011; observe-mode paid-path must not promote R007/R008. No production Pearl / enforce activation."
+        "rationale": "SPEC-022-R001..R006 and R010 promoted from signed observe-mode JOURNEY-BUYER-PAID-PATH. Isolated JOURNEY-BUYER-ENFORCE (#1044) is the candidate harness for R007/R008/R009/R011; observe-mode paid-path must not promote R007/R008. No production Pearl / enforce activation."
       }
     },
     {
@@ -4269,7 +4269,7 @@
     {
       "requirement_id": "SPEC-022-R006",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipt_retrieval.go:LookupBuyerReceipt",
         "phase4-coordinator/internal/buyer/server.go:handleInternalSettlementReceipts",
@@ -4283,13 +4283,21 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1042",
-        "rationale": "R-6 buyer receipt retrieval is implemented as metadata-only GET /v1/receipts/{request_id} (owner/operator auth; demo 403; no raw prompts or outputs; pending/quarantined visible; retention = request_log/verdict lifetime; GET idempotent). Public retrieval is now exposed in code and the isolated harness records buyer_receipt_retrieval_exposed=true, but this row stays pending until a signed capture + promotion PR. Physical evidence is #1042."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:f6c61a785347c4dcd61a42f3925cd1cd161d0480",
+          "source": null,
+          "captured_at": "2026-08-18",
+          "expires_at": "2026-09-17"
+        },
+        {
+          "artifact": "sha256:8a1d088f8decc1f57c5799d18474cbf54936dda9f044d1919b958be55e23feeb",
+          "source": "journeys/evidence/buyer-paid-path-20260818T051813Z.spec-022-r006.journey-result.signed.json",
+          "captured_at": "2026-08-18",
+          "expires_at": "2026-09-17"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R007",
