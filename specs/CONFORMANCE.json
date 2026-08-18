@@ -4310,7 +4310,7 @@
     {
       "requirement_id": "SPEC-022-R007",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
         "phase4-coordinator/internal/billing/settlement.go:RunSettlement"
@@ -4324,18 +4324,26 @@
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1044",
-        "rationale": "R-7 settlement, quarantine, and payout exclusion. Isolated JOURNEY-BUYER-ENFORCE exercises enforce-mode verified debit plus missing-receipt deadline quarantine with reservation refund and no payout-ready rows. JOURNEY-BUYER-PAID-PATH must not promote this row from observe mode. A passing local harness is not signed promotion evidence. Physical evidence is #1044. Production Pearl is not flipped."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
+          "source": null,
+          "captured_at": "2026-08-18",
+          "expires_at": "2026-09-17"
+        },
+        {
+          "artifact": "sha256:5ede794fefc03470f1e3e5c0c401e95c8b9842c2c4aa0ac0fb7fcefd0ee39e14",
+          "source": "journeys/evidence/buyer-enforce-20260818T065941Z.spec-022-r007-spec-022-r008-spec-022-r009-spec-022-r011.journey-result.signed.json",
+          "captured_at": "2026-08-18",
+          "expires_at": "2026-09-17"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R008",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/storage/sqlite/store.go:ReserveQuota",
         "phase5-gateway/internal/storage/sqlite/store.go:SettleReservation",
@@ -4349,18 +4357,26 @@
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1044",
-        "rationale": "R-8 buyer debit semantics. Isolated JOURNEY-BUYER-ENFORCE proves reservation-first gateway debit after verified receipts and reservation refund after deadline quarantine. Observe-mode JOURNEY-BUYER-PAID-PATH must not promote this row. A passing local harness is not signed promotion evidence. Physical evidence is #1044."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
+          "source": null,
+          "captured_at": "2026-08-18",
+          "expires_at": "2026-09-17"
+        },
+        {
+          "artifact": "sha256:5ede794fefc03470f1e3e5c0c401e95c8b9842c2c4aa0ac0fb7fcefd0ee39e14",
+          "source": "journeys/evidence/buyer-enforce-20260818T065941Z.spec-022-r007-spec-022-r008-spec-022-r009-spec-022-r011.journey-result.signed.json",
+          "captured_at": "2026-08-18",
+          "expires_at": "2026-09-17"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R009",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/recovery.go:RecoverLedger"
       ],
@@ -4372,13 +4388,21 @@
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1044",
-        "rationale": "R-9 rollout, migration, and rollback. Isolated JOURNEY-BUYER-ENFORCE pins enforce-mode ledger rows, then rewrites YAML to observe and restarts the coordinator; already-enforced rows retain settlement_policy_mode=enforce. A passing local harness is not signed promotion evidence. Physical evidence is #1044. Production Pearl is not flipped."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
+          "source": null,
+          "captured_at": "2026-08-18",
+          "expires_at": "2026-09-17"
+        },
+        {
+          "artifact": "sha256:5ede794fefc03470f1e3e5c0c401e95c8b9842c2c4aa0ac0fb7fcefd0ee39e14",
+          "source": "journeys/evidence/buyer-enforce-20260818T065941Z.spec-022-r007-spec-022-r008-spec-022-r009-spec-022-r011.journey-result.signed.json",
+          "captured_at": "2026-08-18",
+          "expires_at": "2026-09-17"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R010",
@@ -4414,7 +4438,7 @@
     {
       "requirement_id": "SPEC-022-R011",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipts.go:insertSettlementReceiptVerdictAuditConn"
       ],
@@ -4425,13 +4449,21 @@
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1044",
-        "rationale": "R-11 audit and observability. Isolated JOURNEY-BUYER-ENFORCE reads settlement_receipt_verdict audit_log rows and asserts structured outcome fields without raw prompts, outputs, or API keys. A passing local harness is not signed promotion evidence. Physical evidence is #1044."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
+          "source": null,
+          "captured_at": "2026-08-18",
+          "expires_at": "2026-09-17"
+        },
+        {
+          "artifact": "sha256:5ede794fefc03470f1e3e5c0c401e95c8b9842c2c4aa0ac0fb7fcefd0ee39e14",
+          "source": "journeys/evidence/buyer-enforce-20260818T065941Z.spec-022-r007-spec-022-r008-spec-022-r009-spec-022-r011.journey-result.signed.json",
+          "captured_at": "2026-08-18",
+          "expires_at": "2026-09-17"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-016-R001",
