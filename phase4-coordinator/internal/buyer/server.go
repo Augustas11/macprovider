@@ -2088,6 +2088,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	state.routingDone = s.now()
 	state.phaseTiming.markCoordRoutingDone(state.routingDone)
 	state.provider = provider
+	// SPEC-042 R005 generation fence: if pool membership changed between
+	// selection and here, re-select against fresh membership instead of
+	// dispatching a possibly-stale candidate. Retryable and fail-closed.
+	if s.poolGenerationStale(state) {
+		s.releaseQueuedSlotReservation(state)
+		rec.logRow("", http.StatusServiceUnavailable, nil, nil, "pool membership changed during routing", "", 0)
+		writeError(w, http.StatusServiceUnavailable, "pool_state_stale", "Pool membership changed during routing; please retry")
+		return
+	}
 	defer s.releaseQueuedSlotReservation(state)
 	// M2-1c: the three transport loops (streaming, WS-non-streaming, HTTP)
 	// previously duplicated the retry/failover/busy-marking decision tree.
@@ -6803,6 +6812,22 @@ func (c *eligibilityCtx) ProviderInPool(p pool.Provider) bool {
 		return true
 	}
 	return c.poolMembers[p.ProviderID]
+}
+
+// poolGenerationStale implements the SPEC-042 R005 generation fence for the
+// select->dispatch window: it reports whether the selected pool's membership
+// generation advanced since the consistent snapshot was captured at
+// selection. A change (e.g. the selected provider was revoked in that window,
+// or membership otherwise mutated) means the candidate may no longer be a
+// valid member, so the caller MUST fail closed with a retryable
+// pool_state_stale and re-select against fresh membership rather than
+// dispatch. Inert for global requests (poolGenSet false) and when the pool
+// feature is off.
+func (s *Server) poolGenerationStale(state *forwardState) bool {
+	if state == nil || !state.poolGenSet || s.trustPools == nil {
+		return false
+	}
+	return s.trustPools.Generation(state.poolID) != state.poolGeneration
 }
 
 // ProviderHasSettlementReceiptKey drops providers that can never have a

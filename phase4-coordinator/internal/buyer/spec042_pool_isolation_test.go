@@ -155,6 +155,28 @@ func TestPoolIsolation_SlotQueuePollExcludesNonMember(t *testing.T) {
 	}
 }
 
+// T7 (generation fence, R005): a request whose fenced generation no longer
+// matches the live pool generation (membership changed between selection and
+// dispatch) is stale and must be re-selected, not dispatched.
+func TestPoolIsolation_GenerationFenceDetectsStale(t *testing.T) {
+	s, _, tp := poolIsolationServer(t)
+	tp.AddMember("P", "member-x")
+	// Selection captured generation g.
+	state := &forwardState{poolID: "P", poolGeneration: tp.Generation("P"), poolGenSet: true}
+	if s.poolGenerationStale(state) {
+		t.Fatal("fresh snapshot must not be stale")
+	}
+	// A membership change bumps the generation -> the fenced snapshot is stale.
+	tp.Revoke("P", "member-x")
+	if !s.poolGenerationStale(state) {
+		t.Fatal("generation advanced after revocation; fence must report stale")
+	}
+	// Global requests (no pool) are never fenced.
+	if s.poolGenerationStale(&forwardState{}) {
+		t.Fatal("global request must never be stale")
+	}
+}
+
 // T3 (byte-identical global): with no pool selected, a pinned provider is
 // served exactly as before — the pool gate is inert.
 func TestPoolIsolation_NoPoolSelected_PinnedServed(t *testing.T) {
