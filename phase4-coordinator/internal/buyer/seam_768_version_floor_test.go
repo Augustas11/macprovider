@@ -197,7 +197,7 @@ func TestModelVersionFloorRecheckedAtSlotQueuePoll(t *testing.T) {
 	}
 	defer s.slotQueue.leave(waiter)
 
-	_, status := s.pollQueuedProvider(waiter, floorModelID, nil, 100)
+	_, status := s.pollQueuedProvider(waiter, floorModelID, nil, 100, nil)
 	if status != queuedProviderTerminal {
 		t.Fatalf("pollQueuedProvider status = %v, want terminal — a below-floor same-ID "+
 			"replacement must not be served off the slot queue", status)
@@ -211,7 +211,7 @@ func TestModelVersionFloorRecheckedAtSlotQueuePoll(t *testing.T) {
 	registry2.Register(&above, nil)
 	w2, _ := s2.slotQueue.enter("p-queued")
 	defer s2.slotQueue.leave(w2)
-	got, status2 := s2.pollQueuedProvider(w2, floorModelID, nil, 100)
+	got, status2 := s2.pollQueuedProvider(w2, floorModelID, nil, 100, nil)
 	if status2 != queuedProviderAvailable || got.ProviderID != "p-queued" {
 		t.Fatalf("control poll = (%q, %v), want the above-floor provider available", got.ProviderID, status2)
 	}

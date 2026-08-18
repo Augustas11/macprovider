@@ -35,6 +35,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/routing"
 	"github.com/augstar/macprovider-coordinator/internal/routing/sticky"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/go-chi/chi/v5"
@@ -175,7 +176,12 @@ func spec018Retryable(code string) bool {
 }
 
 type Server struct {
-	pool               *pool.Registry
+	pool *pool.Registry
+	// trustPools holds SPEC-042 Trusted Pool membership/revocation state.
+	// Nil unless WithPoolMembership is supplied — when nil the pool feature
+	// is OFF and any inbound pool_id is ignored (global routing), so default
+	// deployments stay byte-identical (SPEC-042 R010 default-off).
+	trustPools         *trustpool.Registry
 	log                zerolog.Logger
 	createdAt          int64
 	preflight          PreflightFunc
@@ -456,6 +462,16 @@ func WithStreamingMetricsMaxSamples(maxSamples int) Option {
 }
 
 // WithModelVersionFloors installs the #768 per-model minimum-binary-version
+// WithPoolMembership wires the SPEC-042 Trusted Pool registry that the R005
+// tenant-isolation gate consults. When not supplied the pool feature is OFF
+// (any inbound pool_id is ignored, global routing), so default deployments
+// stay byte-identical.
+func WithPoolMembership(r *trustpool.Registry) Option {
+	return func(s *Server) {
+		s.trustPools = r
+	}
+}
+
 // map. Unset (or empty) keeps routing byte-identical to pre-#768 behavior.
 func WithModelVersionFloors(floors map[string]string) Option {
 	return func(s *Server) {
@@ -1848,6 +1864,10 @@ type chatRequest struct {
 	Messages []chatMessage `json:"messages"`
 	Stream   bool          `json:"stream"`
 	raw      json.RawMessage
+	// poolID is the SPEC-042 Trusted Pool selected for this request (from
+	// the authorized X-MacProvider-Pool header). "" means global (poolless)
+	// routing — the default — which keeps selection byte-identical.
+	poolID string
 }
 
 type chatMessage struct {
@@ -1955,6 +1975,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	rec.setModel(req.Model)
 	rec.setStream(req.Stream)
+	// SPEC-042 R002: honor the authorized pool selection header only when the
+	// pool feature is configured. The gateway emits X-MacProvider-Pool only
+	// for a credential-authorized pool (narrow-only, R002); the coordinator
+	// trusts that authority stamp like X-MacProvider-Account. With no registry
+	// the header is ignored (global routing), so default deployments are
+	// byte-identical.
+	if s.trustPools != nil {
+		req.poolID = sanitizeAccountID(r.Header.Get("X-MacProvider-Pool"))
+	}
 	if idempotencyKey := normalizeIdempotencyKey(r.Header.Get("Idempotency-Key")); idempotencyKey != "" {
 		if s.reqLogStore == nil {
 			rec.logBuyerFailure(http.StatusServiceUnavailable, "Idempotency-Key requires durable request logging")
@@ -5518,12 +5547,35 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	estimatedTokens := estimateTokens(req.raw)
 	class := s.classForRequest(req.Model, providers)
 	tier2Cfg := s.tier2Config()
+	// SPEC-042 R005: capture a single consistent membership+generation
+	// snapshot for the selected pool (nil for global). poolActive gates
+	// every pool-specific branch below; when the pool feature is off
+	// (s.trustPools == nil) or the request is poolless (req.poolID == "")
+	// nothing here changes and selection stays byte-identical.
+	var poolMembers map[string]bool
+	poolActive := s.trustPools != nil && req.poolID != ""
+	if poolActive {
+		snap := s.trustPools.Snapshot(req.poolID)
+		poolMembers = snap.Members
+		if state != nil {
+			state.poolID = req.poolID
+			state.poolMembers = snap.Members
+			state.poolGeneration = snap.Generation
+			state.poolGenSet = true
+		}
+	}
 	if hasInternalRoutingHeader(headers) && !s.internalBearerAuthorized(headers) {
 		return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "invalid_request", message: "Internal routing header is not accepted on the buyer port"}
 	}
 	if session := headers.Get("X-MacProvider-Session"); session != "" {
 		for _, p := range providers {
 			if p.AssignedID == session {
+				if poolActive && !poolMembers[p.ProviderID] {
+					// SPEC-042 R005: the pinned/self-route path bypasses the
+					// eligibility filter, so re-apply pool membership here or
+					// a pin would route a pool request to a non-member.
+					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "Pinned session provider is not a member of the selected pool"}
+				}
 				provider, routeErr := s.validatePinnedProviderForRequest(p, req.Model, estimatedTokens, "Pinned session not available", class)
 				if routeErr != nil {
 					return provider, routeErr
@@ -5539,6 +5591,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	if providerID := headers.Get("X-MacProvider-Provider"); providerID != "" {
 		for _, p := range providers {
 			if p.ProviderID == providerID {
+				if poolActive && !poolMembers[p.ProviderID] {
+					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "Pinned provider is not a member of the selected pool"}
+				}
 				provider, routeErr := s.validatePinnedProviderForRequest(p, req.Model, estimatedTokens, "Pinned provider not available", class)
 				if routeErr != nil {
 					return provider, routeErr
@@ -5563,6 +5618,14 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		estimatedTokens:   estimatedTokens,
 		tier2Cfg:          tier2Cfg,
 		settlementEnforce: s.settlementEnforceMode(),
+	}
+	// Only arm the pool gate when the pool is active. Leaving poolID == ""
+	// otherwise keeps ProviderInPool a no-op (byte-identical global routing)
+	// even if a stray pool header arrives with the feature off.
+	if poolActive {
+		checker.poolID = req.poolID
+		checker.poolMembers = poolMembers
+		checker.poolGeneration = state.poolGeneration
 	}
 	result := routing.EligibleCandidates(providers, exSet, pool.Provider.SortKey, checker)
 	candidates := result.Eligible
@@ -6409,7 +6472,7 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 		}
 		queueSegmentStart := time.Now()
 		for {
-			provider, status := s.pollQueuedProvider(waiter, model, class, estimatedTokens)
+			provider, status := s.pollQueuedProvider(waiter, model, class, estimatedTokens, state)
 			switch status {
 			case queuedProviderAvailable:
 				s.slotQueue.leave(waiter)
@@ -6461,13 +6524,20 @@ const (
 	queuedProviderTerminal
 )
 
-func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *config.ModelClassConfig, estimatedTokens int) (pool.Provider, queuedProviderStatus) {
+func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *config.ModelClassConfig, estimatedTokens int, state *forwardState) (pool.Provider, queuedProviderStatus) {
 	if !s.slotQueue.head(waiter) {
 		return pool.Provider{}, queuedProviderWait
 	}
 	for _, provider := range s.pool.Snapshot() {
 		if provider.ProviderID != waiter.providerID {
 			continue
+		}
+		// SPEC-042 R005: the queue stores only providerID, so a same-ID
+		// reconnect polled here may no longer be a pool member (e.g. revoked
+		// while queued). Re-apply the pool-membership gate off the snapshot
+		// captured at selection so a non-member is never served off the queue.
+		if state != nil && state.poolID != "" && !state.poolMembers[provider.ProviderID] {
+			return pool.Provider{}, queuedProviderTerminal
 		}
 		if !s.providerMatchesRequest(provider, model, class) || provider.MaxContextTokens < estimatedTokens {
 			return pool.Provider{}, queuedProviderTerminal
@@ -6512,6 +6582,12 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
 			continue
 		}
 		if !s.providerMatchesRequest(provider, checker.model, checker.class) || !checker.ProviderContextSufficient(provider) {
+			continue
+		}
+		// SPEC-042 R005: the slot queue re-derives the routing gate by hand,
+		// so the pool-membership gate must be re-applied here too or a
+		// non-member could be queued for and eventually served a pool request.
+		if !checker.ProviderInPool(provider) {
 			continue
 		}
 		// The slot queue re-derives the public routing gate list by hand; the

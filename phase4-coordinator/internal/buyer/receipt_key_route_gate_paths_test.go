@@ -118,7 +118,7 @@ func TestReceiptKeyGate_RecheckedAtSlotQueuePoll(t *testing.T) {
 		t.Fatal("enter returned no waiter")
 	}
 	defer sEnforce.slotQueue.leave(w)
-	if _, status := sEnforce.pollQueuedProvider(w, "model-a", nil, 100); status != queuedProviderTerminal {
+	if _, status := sEnforce.pollQueuedProvider(w, "model-a", nil, 100, nil); status != queuedProviderTerminal {
 		t.Fatalf("enforce poll status = %v, want terminal (empty active receipt key)", status)
 	}
 
@@ -133,7 +133,7 @@ func TestReceiptKeyGate_RecheckedAtSlotQueuePoll(t *testing.T) {
 		t.Fatal("control: enter returned no waiter")
 	}
 	defer sObserve.slotQueue.leave(w2)
-	got, status2 := sObserve.pollQueuedProvider(w2, "model-a", nil, 100)
+	got, status2 := sObserve.pollQueuedProvider(w2, "model-a", nil, 100, nil)
 	if status2 != queuedProviderAvailable || got.ProviderID != "p-queued" {
 		t.Fatalf("observe control poll = (%q, %v), want the provider served", got.ProviderID, status2)
 	}
