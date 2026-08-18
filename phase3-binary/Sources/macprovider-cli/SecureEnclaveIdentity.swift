@@ -1,6 +1,6 @@
-/// SecureEnclaveIdentity — persistent SE P-256 signing key backed by the
-/// macOS data-protection keychain. arm64-only; callers must guard with
-/// `#if arch(arm64)` or check `SecureEnclaveIdentity.isAvailable` at runtime.
+/// SecureEnclaveIdentity — persistent SE P-256 signing key. arm64-only;
+/// callers must guard with `#if arch(arm64)` or check
+/// `SecureEnclaveIdentity.isAvailable` at runtime.
 ///
 /// Access-group note: production Developer ID `macprovider-cli` omits
 /// `kSecAttrAccessGroup` and ships with no keychain entitlements. A named
@@ -11,6 +11,12 @@
 /// only when the binary is profiled. A named group without the entitlement
 /// returns errSecMissingEntitlement (-34018) as
 /// `SecureEnclaveIdentityError.missingEntitlement`.
+///
+/// Data-protection keychain SE items also return -34018 for this naked CLI
+/// even with no named group (no `application-identifier`). When no named
+/// group is requested, load-or-create falls back to a CryptoKit SE key whose
+/// wrapped `dataRepresentation` lives in an owner-only file. That blob is
+/// not raw private key material; the Secure Enclave still owns the key.
 
 import CryptoKit
 import Darwin
@@ -29,6 +35,8 @@ enum SecureEnclaveIdentityError: Error, CustomStringConvertible {
     case publicKeyExtractionFailed
     case publicKeySerializationFailed(status: OSStatus)
     case missingEntitlement
+    case fileStoreAlreadyExists
+    case fileStoreFailed(String)
 
     var description: String {
         switch self {
@@ -53,6 +61,10 @@ enum SecureEnclaveIdentityError: Error, CustomStringConvertible {
             return "Failed to serialize SE public key: OSStatus \(status)"
         case .missingEntitlement:
             return "Binary is missing the keychain-access-groups entitlement for the requested access group"
+        case .fileStoreAlreadyExists:
+            return "SE file-backed identity store already exists"
+        case .fileStoreFailed(let message):
+            return "SE file-backed identity store failed: \(message)"
         }
     }
 }
@@ -84,14 +96,125 @@ enum MacProviderKeychainAccessGroup {
     }
 }
 
+enum SEAttestationFileStore {
+    /// Test-only override. Production uses `defaultURL`.
+    nonisolated(unsafe) static var urlOverride: URL?
+
+    static var defaultURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Application Support/macprovider/se-attestation-p256.v1",
+                isDirectory: false
+            )
+    }
+
+    static var resolvedURL: URL {
+        urlOverride ?? defaultURL
+    }
+
+    static func read(_ url: URL) throws -> Data {
+        var st = stat()
+        guard lstat(url.path, &st) == 0 else {
+            throw SecureEnclaveIdentityError.fileStoreFailed("missing \(url.path)")
+        }
+        guard (st.st_mode & S_IFMT) == S_IFREG,
+              st.st_uid == getuid(),
+              (st.st_mode & 0o077) == 0
+        else {
+            throw SecureEnclaveIdentityError.fileStoreFailed(
+                "\(url.path) is not an owner-only regular file"
+            )
+        }
+        do {
+            return try Data(contentsOf: url)
+        } catch {
+            throw SecureEnclaveIdentityError.fileStoreFailed(
+                "read \(url.path): \(error.localizedDescription)"
+            )
+        }
+    }
+
+    static func writeExclusive(_ url: URL, data: Data) throws {
+        try ensurePrivateParentDirectory(for: url)
+        let path = url.path
+        let fd = open(path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o600)
+        let openErrno = errno
+        guard fd >= 0 else {
+            if openErrno == EEXIST {
+                throw SecureEnclaveIdentityError.fileStoreAlreadyExists
+            }
+            throw SecureEnclaveIdentityError.fileStoreFailed(
+                "open \(path): errno=\(openErrno)"
+            )
+        }
+        defer { close(fd) }
+        _ = fchmod(fd, 0o600)
+        var written = 0
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            written = write(fd, base, raw.count)
+        }
+        guard written == data.count else {
+            unlink(path)
+            throw SecureEnclaveIdentityError.fileStoreFailed("write \(path): short write")
+        }
+        var st = stat()
+        guard fstat(fd, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG,
+              (st.st_mode & 0o777) == 0o600,
+              st.st_uid == getuid()
+        else {
+            unlink(path)
+            throw SecureEnclaveIdentityError.fileStoreFailed(
+                "post-write permission check failed for \(path)"
+            )
+        }
+    }
+
+    static func ensurePrivateParentDirectory(for url: URL) throws {
+        let parent = url.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(
+                at: parent,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            throw SecureEnclaveIdentityError.fileStoreFailed(
+                "mkdir \(parent.path): \(error.localizedDescription)"
+            )
+        }
+        var st = stat()
+        // stat(2) follows symlinks so /var → /private/var is a directory.
+        guard stat(parent.path, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFDIR,
+              st.st_uid == getuid()
+        else {
+            throw SecureEnclaveIdentityError.fileStoreFailed(
+                "parent \(parent.path) is not an owner directory"
+            )
+        }
+        if (st.st_mode & 0o077) != 0 {
+            guard chmod(parent.path, 0o700) == 0 else {
+                throw SecureEnclaveIdentityError.fileStoreFailed(
+                    "chmod \(parent.path): errno=\(errno)"
+                )
+            }
+        }
+    }
+}
+
 // MARK: - SecureEnclaveIdentity
 
 #if arch(arm64)
 
 final class SecureEnclaveIdentity: @unchecked Sendable {
-    /// Handle to the SE-backed private key; the SE owns all private material.
-    internal let privateKey: SecKey
+    private enum KeyBackend {
+        case secKey(SecKey)
+        case cryptoKit(SecureEnclave.P256.Signing.PrivateKey)
+    }
 
+    private let backend: KeyBackend
     private let _publicKeyRaw: Data
 
     /// Current label. Keys here use `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
@@ -108,12 +231,24 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
     /// without T2, macOS VMs without virtualized SE, and the Simulator.
     static var isAvailable: Bool { SecureEnclave.isAvailable }
 
+    var backendName: String {
+        switch backend {
+        case .secKey:
+            return "keychain"
+        case .cryptoKit:
+            return "file"
+        }
+    }
+
     // MARK: - Private init
 
-    private init(privateKey: SecKey) throws {
-        self.privateKey = privateKey
+    private init(backend: KeyBackend, publicKeyRaw: Data) {
+        self.backend = backend
+        self._publicKeyRaw = publicKeyRaw
+    }
 
-        guard let pubKey = SecKeyCopyPublicKey(privateKey) else {
+    private static func rawPublicKey(from secKey: SecKey) throws -> Data {
+        guard let pubKey = SecKeyCopyPublicKey(secKey) else {
             throw SecureEnclaveIdentityError.publicKeyExtractionFailed
         }
         var serError: Unmanaged<CFError>?
@@ -126,7 +261,17 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
         guard pubData.count == 65, pubData[0] == 0x04 else {
             throw SecureEnclaveIdentityError.publicKeyExtractionFailed
         }
-        self._publicKeyRaw = Data(pubData.dropFirst())
+        return Data(pubData.dropFirst())
+    }
+
+    private static func rawPublicKey(
+        from cryptoKit: SecureEnclave.P256.Signing.PrivateKey
+    ) throws -> Data {
+        let x963 = cryptoKit.publicKey.x963Representation
+        guard x963.count == 65, x963[0] == 0x04 else {
+            throw SecureEnclaveIdentityError.publicKeyExtractionFailed
+        }
+        return Data(x963.dropFirst())
     }
 
     // MARK: - Load or Create
@@ -135,6 +280,9 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
     /// not found. Throws `missingEntitlement` when a named access group is
     /// requested and the binary lacks `keychain-access-groups` — callers
     /// should fall back to a non-SE attestation path rather than aborting.
+    ///
+    /// When no named group is requested and the data-protection keychain
+    /// returns -34018, falls back to the file-backed CryptoKit SE store.
     static func loadOrCreate(
         accessGroup: String? = nil,
         label: String? = nil
@@ -146,13 +294,61 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
         let keyLabel = label ?? defaultLabel
 
         do {
-            let existing = try findExisting(accessGroup: group, label: keyLabel)
-            return existing
-        } catch SecureEnclaveIdentityError.keyLookupFailed(status: errSecItemNotFound) {
-            // Fall through to creation.
+            do {
+                let existing = try findExisting(accessGroup: group, label: keyLabel)
+                print("INFO se_attestation identity_ready backend=\(existing.backendName)")
+                return existing
+            } catch SecureEnclaveIdentityError.keyLookupFailed(status: errSecItemNotFound) {
+                let created = try createNew(accessGroup: group, label: keyLabel)
+                print("INFO se_attestation identity_ready backend=\(created.backendName)")
+                return created
+            }
+        } catch SecureEnclaveIdentityError.missingEntitlement where group == nil {
+            let fileBacked = try loadOrCreateFileBacked()
+            print("INFO se_attestation identity_ready backend=\(fileBacked.backendName)")
+            return fileBacked
         }
+    }
 
-        return try createNew(accessGroup: group, label: keyLabel)
+    internal static func loadOrCreateFileBacked() throws -> SecureEnclaveIdentity {
+        guard isAvailable else {
+            throw SecureEnclaveIdentityError.secureEnclaveUnavailable
+        }
+        let url = SEAttestationFileStore.resolvedURL
+        if FileManager.default.fileExists(atPath: url.path) {
+            return try loadFileBacked(url: url)
+        }
+        let privateKey: SecureEnclave.P256.Signing.PrivateKey
+        do {
+            privateKey = try SecureEnclave.P256.Signing.PrivateKey()
+        } catch {
+            throw SecureEnclaveIdentityError.keyCreationFailed(status: errSecInternalError)
+        }
+        do {
+            try SEAttestationFileStore.writeExclusive(url, data: privateKey.dataRepresentation)
+        } catch SecureEnclaveIdentityError.fileStoreAlreadyExists {
+            return try loadFileBacked(url: url)
+        }
+        return try SecureEnclaveIdentity(
+            backend: .cryptoKit(privateKey),
+            publicKeyRaw: rawPublicKey(from: privateKey)
+        )
+    }
+
+    private static func loadFileBacked(url: URL) throws -> SecureEnclaveIdentity {
+        let data = try SEAttestationFileStore.read(url)
+        let privateKey: SecureEnclave.P256.Signing.PrivateKey
+        do {
+            privateKey = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: data)
+        } catch {
+            throw SecureEnclaveIdentityError.fileStoreFailed(
+                "restore SE handle: \(error.localizedDescription)"
+            )
+        }
+        return try SecureEnclaveIdentity(
+            backend: .cryptoKit(privateKey),
+            publicKeyRaw: rawPublicKey(from: privateKey)
+        )
     }
 
     // MARK: - Sign
@@ -161,26 +357,38 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
     /// Returns a DER-encoded ECDSA signature (ASN.1 SEQUENCE of two INTEGERs),
     /// compatible with Go's crypto/ecdsa and the coordinator verifier.
     func sign(_ data: Data) throws -> Data {
-        var signError: Unmanaged<CFError>?
-        guard let sig = SecKeyCreateSignature(
-            privateKey,
-            .ecdsaSignatureMessageX962SHA256,
-            data as CFData,
-            &signError
-        ) as Data? else {
-            if let cfErr = signError {
-                let nsErr = cfErr.takeRetainedValue() as Error as NSError
+        switch backend {
+        case .secKey(let privateKey):
+            var signError: Unmanaged<CFError>?
+            guard let sig = SecKeyCreateSignature(
+                privateKey,
+                .ecdsaSignatureMessageX962SHA256,
+                data as CFData,
+                &signError
+            ) as Data? else {
+                if let cfErr = signError {
+                    let nsErr = cfErr.takeRetainedValue() as Error as NSError
+                    throw SecureEnclaveIdentityError.signingFailed(
+                        status: OSStatus(nsErr.code),
+                        message: nsErr.localizedDescription
+                    )
+                }
                 throw SecureEnclaveIdentityError.signingFailed(
-                    status: OSStatus(nsErr.code),
-                    message: nsErr.localizedDescription
+                    status: errSecInternalError,
+                    message: "unknown error"
                 )
             }
-            throw SecureEnclaveIdentityError.signingFailed(
-                status: errSecInternalError,
-                message: "unknown error"
-            )
+            return sig as Data
+        case .cryptoKit(let privateKey):
+            do {
+                return try privateKey.signature(for: data).derRepresentation
+            } catch {
+                throw SecureEnclaveIdentityError.signingFailed(
+                    status: errSecInternalError,
+                    message: error.localizedDescription
+                )
+            }
         }
-        return sig as Data
     }
 
     // MARK: - Delete
@@ -203,11 +411,16 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
         let status = SecItemDelete(query as CFDictionary)
         switch status {
         case errSecSuccess, errSecItemNotFound:
-            return
+            break
+        case -34018 where group == nil:
+            break
         case -34018:
             throw SecureEnclaveIdentityError.missingEntitlement
         default:
             throw SecureEnclaveIdentityError.deletionFailed(status: status)
+        }
+        if group == nil {
+            try? FileManager.default.removeItem(at: SEAttestationFileStore.resolvedURL)
         }
     }
 
@@ -251,7 +464,10 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
                 throw SecureEnclaveIdentityError.keyLookupFailed(status: status)
             }
             let key = result as! SecKey
-            return try SecureEnclaveIdentity(privateKey: key)
+            return try SecureEnclaveIdentity(
+                backend: .secKey(key),
+                publicKeyRaw: rawPublicKey(from: key)
+            )
         case errSecItemNotFound:
             throw SecureEnclaveIdentityError.keyLookupFailed(status: errSecItemNotFound)
         case -34018:
@@ -301,7 +517,10 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
             }
             throw SecureEnclaveIdentityError.keyCreationFailed(status: status)
         }
-        return try SecureEnclaveIdentity(privateKey: privateKey)
+        return try SecureEnclaveIdentity(
+            backend: .secKey(privateKey),
+            publicKeyRaw: rawPublicKey(from: privateKey)
+        )
     }
 }
 
