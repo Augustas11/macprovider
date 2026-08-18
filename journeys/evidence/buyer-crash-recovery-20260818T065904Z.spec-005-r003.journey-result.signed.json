@@ -1,0 +1,136 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEUCIQC5GUWXGn3maWbF9RLt7QdH5PNckhSmNftSKo5Ze8QamQIgRz0pqlc9NG8t4A4Ic156F9Z6+4sSSgOU1RViVsx1+Fw=",
+      "signed_sha256": "090f4fdc92f171f4f1664dcb4b73f5a6ccd3541609b89994d3f5e89b1fb7171f",
+      "verified_at": "2026-08-18T07:54:41Z",
+      "verifier": ".github/workflows/promote-signed-buyer-crash-recovery-journey.yml:32110813730:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-BUYER-CRASH-RECOVERY",
+    "requirement_ids": [
+      "SPEC-005-R003"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "caa6ae4aec712c5d6353a3d307aab551911bea65"
+    },
+    "captured_at": "2026-08-18T06:59:04Z",
+    "expires_at": "2026-09-17",
+    "operator": {
+      "identity_fingerprint": "be58592d53b5b222fca8a50f59960f5c4be6a594ecbfbc9b7d52fab5fc109cab",
+      "role": "acceptance-operator"
+    },
+    "environment": {
+      "candidate": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
+      "class": "isolated-candidate-crash-recovery",
+      "hardware_profile": "local-macos-redacted"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-buyer-crash-recovery",
+        "sha256": "852cdbc28cc6dd515d0ee3d4da11a0d6c2436313996bb18b004c2d2f03fa29f4",
+        "source": "journeys/evidence/buyer-crash-recovery-20260818T065904Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "isolated candidate crash-recovery journey recovered identity-fallback credits without double credit or payout-ready mutation"
+    },
+    "steps": [
+      {
+        "id": "step-01-capture-config",
+        "status": "pass",
+        "assertion": "isolated candidate captured in observe mode with settlement job disabled",
+        "artifacts": [
+          "redacted-buyer-crash-recovery"
+        ]
+      },
+      {
+        "id": "step-02-stop-coordinator",
+        "status": "pass",
+        "assertion": "coordinator process stopped against the same isolated SQLite file",
+        "artifacts": [
+          "redacted-buyer-crash-recovery"
+        ]
+      },
+      {
+        "id": "step-03-plant-identity-fallback",
+        "status": "pass",
+        "assertion": "identity-fallback request_log and provider snapshot planted with no credit row",
+        "artifacts": [
+          "redacted-buyer-crash-recovery"
+        ]
+      },
+      {
+        "id": "step-04-plant-orphan-credit",
+        "status": "pass",
+        "assertion": "orphan ledger_request_credits row planted without matching request_log",
+        "artifacts": [
+          "redacted-buyer-crash-recovery"
+        ]
+      },
+      {
+        "id": "step-05-startup-scan-recover",
+        "status": "pass",
+        "assertion": "startup_scan recovered exactly one non-quarantined credit for the planted request",
+        "artifacts": [
+          "redacted-buyer-crash-recovery"
+        ]
+      },
+      {
+        "id": "step-06-orphan-quarantine",
+        "status": "pass",
+        "assertion": "planted orphan credit was quarantined missing_request_log",
+        "artifacts": [
+          "redacted-buyer-crash-recovery"
+        ]
+      },
+      {
+        "id": "step-07-idempotent-rescan",
+        "status": "pass",
+        "assertion": "second startup scan did not double-credit the recovered request",
+        "artifacts": [
+          "redacted-buyer-crash-recovery"
+        ]
+      },
+      {
+        "id": "step-08-no-payout",
+        "status": "pass",
+        "assertion": "settlement job stayed disabled and no payout-ready rows were created",
+        "artifacts": [
+          "redacted-buyer-crash-recovery"
+        ]
+      }
+    ],
+    "redaction": {
+      "local_account_names_redacted": true,
+      "operator_identity_redacted": true,
+      "secrets_redacted": true
+    },
+    "run_id": "buyer-crash-recovery-20260818T065904Z",
+    "execution_mode": "isolated-candidate-crash-recovery",
+    "observations": {
+      "idempotent_rescan": true,
+      "identity_fallback_recovered": true,
+      "isolated_environment": true,
+      "job_enabled": false,
+      "missing_credit_rows_created": 1,
+      "orphan_credit_rows_quarantined": 1,
+      "orphan_quarantined": true,
+      "payout_ready_mutated": false,
+      "planted_at": "2026-08-18T06:57:03.731795Z",
+      "production_pearl": false,
+      "production_side_effects": false,
+      "recovery_source": "startup_scan",
+      "settlement_mode": "observe",
+      "start_job_enabled": false,
+      "start_mode": "observe"
+    }
+  }
+}
