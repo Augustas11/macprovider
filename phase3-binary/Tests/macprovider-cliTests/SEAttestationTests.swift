@@ -389,4 +389,18 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
     }
 }
 
+final class MacProviderKeychainAccessGroupTests: XCTestCase {
+    func testProductionAccessGroupMatchesReleaseEntitlement() {
+        XCTAssertEqual(
+            MacProviderKeychainAccessGroup.production,
+            "YF7XNRJUG4.live.malibu.provider"
+        )
+        XCTAssertEqual(MacProviderKeychainAccessGroup.productionTeamID, "YF7XNRJUG4")
+        XCTAssertEqual(
+            MacProviderKeychainAccessGroup.resolve("override.group"),
+            "override.group"
+        )
+    }
+}
+
 

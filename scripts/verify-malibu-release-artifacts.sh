@@ -93,12 +93,16 @@ verify_embedded_cli_identity() {
     return 0
   fi
 
+  bash "$repo_root/scripts/require-cli-se-entitlements.sh" \
+    "$app_path/Contents/MacOS/macprovider-cli"
+
   if [ -n "$provider_tarball" ]; then
     extract_dir="$(mktemp -d "${TMPDIR:-/tmp}/malibu-provider-cli.XXXXXX")"
     tar -xzf "$provider_tarball" -C "$extract_dir" macprovider-cli ||
       die "provider tarball does not contain macprovider-cli"
     [ -x "$extract_dir/macprovider-cli" ] ||
       die "provider tarball macprovider-cli is not executable"
+    bash "$repo_root/scripts/require-cli-se-entitlements.sh" "$extract_dir/macprovider-cli"
     expected_sha="$(sha256_file "$extract_dir/macprovider-cli")"
     rm -rf "$extract_dir"
   fi
