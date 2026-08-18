@@ -28,15 +28,17 @@ final class DashboardWindowE2ETests: XCTestCase {
         NSApp.activate(ignoringOtherApps: true)
         Self.spin(0.8)
 
+        let mining = AgentSnapshotPresenter.miningHealth(agent.snapshot)
+        XCTAssertEqual(mining.status, "Eligible, idle")
+        XCTAssertEqual(mining.reasonCode, "idle_no_work")
+        XCTAssertEqual(mining.trustSummary, "MALIBU trust telemetry not published yet")
+        XCTAssertFalse(mining.status.contains("Reward status unavailable"))
+
         let initialPNG = try Self.writePNG(Self.capture(window), to: artifacts.appendingPathComponent("01-initial.png"))
         let initialText = Self.ocr(initialPNG)
         Self.write(initialText, to: artifacts.appendingPathComponent("01-initial-text.txt"))
         Self.write(Self.viewTree(window), to: artifacts.appendingPathComponent("01-initial-tree.txt"))
-
-        XCTAssertTrue(initialText.contains("Eligible, idle") || initialText.contains("Earning"))
-        XCTAssertFalse(Self.miningStatusIsUnavailable(initialText))
-        XCTAssertTrue(initialText.contains("MALIBU trust telemetry not published yet"))
-        XCTAssertTrue(initialText.contains("Change Model"))
+        Self.assertRenderedCopy(initialText, mustContain: ["Eligible, idle", "Change Model", "MALIBU trust telemetry not published yet"])
 
         let gear = Self.firstView(in: window) {
             String(describing: type(of: $0)).contains("SwiftUIAppKitButton") && $0.frame.width <= 24
@@ -62,10 +64,13 @@ final class DashboardWindowE2ETests: XCTestCase {
         }
         Self.write(sheetText, to: artifacts.appendingPathComponent("04-change-model-text.txt"))
         Self.write(NSApp.windows.map { "title=\($0.title) sheet=\($0.isSheet) frame=\($0.frame)" }.joined(separator: "\n"), to: artifacts.appendingPathComponent("04-windows.txt"))
+        let openedSwitcher = NSApp.windows.contains(where: \.isSheet)
+            || sheetText.contains("Model switcher")
         XCTAssertTrue(
-            sheetText.contains("Model switcher") && sheetText.contains("Close"),
-            "Change Model must open the switcher. windows=\(NSApp.windows.map(\.title)) OCR:\n\(sheetText)"
+            openedSwitcher,
+            "Change Model must open the switcher. windows=\(NSApp.windows.map { "\($0.title) sheet=\($0.isSheet)" }) OCR:\n\(sheetText)"
         )
+        Self.assertRenderedCopy(sheetText, mustContain: ["Model switcher", "Close"])
         Self.clickCloseIfNeeded(in: window)
         Self.spin(0.25)
 
@@ -89,7 +94,7 @@ final class DashboardWindowE2ETests: XCTestCase {
         let shrunkPNG = try Self.writePNG(Self.capture(window), to: artifacts.appendingPathComponent("02-shrunk.png"))
         let shrunkText = Self.ocr(shrunkPNG)
         Self.write(shrunkText, to: artifacts.appendingPathComponent("02-shrunk-text.txt"))
-        XCTAssertTrue(shrunkText.contains("Eligible, idle") || shrunkText.contains("Mining Health"))
+        Self.assertRenderedCopy(shrunkText, mustContain: ["Eligible, idle"])
 
         if let scroll = Self.firstView(in: window, { $0 is NSScrollView }) as? NSScrollView {
             let documentHeight = scroll.documentView?.frame.height ?? 0
@@ -105,13 +110,9 @@ final class DashboardWindowE2ETests: XCTestCase {
             let bottomPNG = try Self.writePNG(Self.capture(window), to: artifacts.appendingPathComponent("03-scrolled-bottom.png"))
             let bottomText = Self.ocr(bottomPNG)
             Self.write(bottomText, to: artifacts.appendingPathComponent("03-scrolled-bottom-text.txt"))
-            XCTAssertTrue(
-                bottomText.contains("Last setup failure") && bottomText.contains("None recorded"),
-                "Scrolling the shrunk window must reveal Last setup failure. OCR:\n\(bottomText)"
-            )
-            XCTAssertTrue(
-                bottomText.contains("Provider service started"),
-                "Scrolling must reveal operator-readable last restart. OCR:\n\(bottomText)"
+            Self.assertRenderedCopy(
+                bottomText,
+                mustContain: ["Last setup failure", "None recorded", "Provider service started"]
             )
             Self.scroll(scroll, to: .zero)
             Self.spin(0.15)
@@ -122,12 +123,12 @@ final class DashboardWindowE2ETests: XCTestCase {
         FileHandle.standardError.write(Data("E2E artifacts: \(artifacts.path)\n".utf8))
     }
 
-    private static func miningStatusIsUnavailable(_ text: String) -> Bool {
-        guard let mining = text.components(separatedBy: "Mining Health").last else { return false }
-        let head = mining.components(separatedBy: "Reason").first ?? mining
-        return head.contains("Reward status unavailable")
-            && !head.contains("Eligible")
-            && !head.contains("Earning")
+    private static func assertRenderedCopy(_ text: String, mustContain needles: [String]) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        for needle in needles {
+            XCTAssertTrue(trimmed.contains(needle), "OCR missing \(needle). OCR:\n\(trimmed)")
+        }
     }
 
     private static func firstView(in window: NSWindow, _ predicate: (NSView) -> Bool) -> NSView? {
