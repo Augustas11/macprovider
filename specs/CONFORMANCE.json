@@ -591,7 +591,7 @@
     {
       "spec_id": "SPEC-021",
       "title": "MALIBU rewards emission ledger",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "path": "specs/SPEC-021-malibu-emission-ledger.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -610,7 +610,7 @@
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
       "evidence": [],
-      "requirement_id_migration": "pending",
+      "requirement_id_migration": "complete",
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
@@ -4365,6 +4365,102 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
         "rationale": "Gateway config validation, disabled compatibility, relay-blind metadata limiter, and replay storage DDL are implemented/tested locally; production enablement and signed journey-result evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-021-R001",
+      "spec_id": "SPEC-021",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/stats/migrations/023_malibu_reward_audit_events.up.sql:malibu_reward_audit_events",
+        "phase4-coordinator/internal/rewards/audit.go:InsertRewardAuditEvent",
+        "phase4-coordinator/internal/rewards/emission.go:func (r *Runner) accrueProviderReward",
+        "phase4-coordinator/internal/rewards/emission.go:func replayCapPending",
+        "phase4-coordinator/internal/rewards/wallet_mirror.go:func (r *Runner) upsertProjection",
+        "phase4-coordinator/internal/rewards/unlock.go:func (r *Runner) promoteProvider",
+        "phase4-coordinator/internal/rewards/unlock.go:func (r *Runner) demoteProvider"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/emission_integration_test.go::TestRewardAuditEventsAreProviderScopedPaginatedAndRedacted",
+        "phase4-coordinator/internal/rewards/emission_integration_test.go::TestTrustTierTransitionsWriteRewardAuditEvents",
+        "phase4-coordinator/internal/rewards/emission_integration_test.go::TestCapReplayPendingDoesNotDesyncConnection"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1021",
+        "rationale": "Append-only audit persistence is implemented for accrual, holds, wallet projection, cap replay, and trust transitions; production migration/app evidence remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-021-R002",
+      "spec_id": "SPEC-021",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/rewards/endpoints.go:NewRewardAuditHandler",
+        "phase4-coordinator/internal/rewards/audit.go:QueryRewardAuditEvents",
+        "phase4-coordinator/cmd/coordinator/main.go:malibuRewardAuditHandler",
+        "phase4-coordinator/dist/nginx-coordinator.malibu.tech.conf:/v1/provider/malibu-reward-audit",
+        "frontdoor/provider-portal/dist/nginx-portal.malibu.tech.conf:/v1/provider/malibu-reward-audit"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/audit_test.go::TestParseAuditPageBounds",
+        "phase4-coordinator/internal/rewards/audit_test.go::TestRewardAuditHandlerAuthAndCursorValidation",
+        "phase4-coordinator/internal/rewards/emission_integration_test.go::TestRewardAuditEventsAreProviderScopedPaginatedAndRedacted",
+        "phase4-coordinator/cmd/coordinator/main_test.go::TestNginxMalibuRewardAuditRouteBeforeV1CatchAll"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1021",
+        "rationale": "Provider-token scoped audit API, bounded limits, stable cursors, and nginx allow-through are implemented/tested locally; live route evidence remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-021-R003",
+      "spec_id": "SPEC-021",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/rewards/audit.go:RewardAuditEvent",
+        "phase4-coordinator/internal/rewards/audit.go:QueryRewardAuditEvents",
+        "phase4-coordinator/internal/rewards/endpoints.go:NewRewardAuditHandler"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/emission_integration_test.go::TestRewardAuditEventsAreProviderScopedPaginatedAndRedacted"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1021",
+        "rationale": "Provider DTO redacts operator correlation and external refs while preserving safe summaries; live payload evidence remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-021-R004",
+      "spec_id": "SPEC-021",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/rewards/endpoints.go:NewRewardAuditAdminHandler",
+        "phase4-coordinator/internal/rewards/audit.go:QueryRewardAuditEvents",
+        "phase4-coordinator/cmd/coordinator/main.go:malibuRewardAuditAdminHandler"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/rewards/audit_test.go::TestRewardAuditAdminHandlerAuthAndProviderRequired",
+        "phase4-coordinator/internal/rewards/emission_integration_test.go::TestRewardAuditEventsAreProviderScopedPaginatedAndRedacted"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1021",
+        "rationale": "Operator-authenticated audit query exposes provider and correlation fields for support; live operator route evidence remains pending."
       }
     },
     {

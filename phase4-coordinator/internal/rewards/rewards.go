@@ -181,13 +181,14 @@ func EnsureProviderState(ctx context.Context, db *sql.DB, providerID string) err
 
 // AccrualBalance returns total and withdrawable MALIBU for a provider.
 type AccrualBalance struct {
-	AccruedMALIBU      string
-	WithdrawableMALIBU string
-	HeldMALIBU         string
-	TrustTier          string
-	HoldReasons        []string
-	ProviderDailyCap   float64
-	WalletDailyCap     float64
+	AccruedMALIBU       string
+	WithdrawableMALIBU  string
+	HeldMALIBU          string
+	TrustTier           string
+	HoldReasons         []string
+	ProviderDailyCapped bool
+	ProviderDailyCap    float64
+	WalletDailyCap      float64
 }
 
 // QueryAccrualBalance reads ledger aggregates for the provider read API.
@@ -220,6 +221,7 @@ func QueryAccrualBalance(ctx context.Context, db *sql.DB, providerID string, cfg
           FROM provider_rewards_ledger
          WHERE provider_id = $1
            AND amount_malibu IS NOT NULL
+           AND amount_malibu > 0
            AND withdrawal_hold_reason IS NOT NULL
     `, providerID)
 	if err != nil {
@@ -238,16 +240,69 @@ func QueryAccrualBalance(ctx context.Context, db *sql.DB, providerID string, cfg
 		return AccrualBalance{}, err
 	}
 
+	walletCapAppliedToday, err := walletDailyCapAppliedToday(ctx, db, providerID)
+	if err != nil {
+		return AccrualBalance{}, fmt.Errorf("wallet cap audit state: %w", err)
+	}
+	if walletCapAppliedToday && !containsReason(holds, HoldPerWalletDailyCap) {
+		holds = append(holds, HoldPerWalletDailyCap)
+	}
+	providerDailyCapped, err := providerDailyCapActiveToday(ctx, db, providerID, cfg.ProviderDailyCapMALIBU)
+	if err != nil {
+		return AccrualBalance{}, fmt.Errorf("provider cap state: %w", err)
+	}
+
 	held := subtractDecimalStrings(accrued, withdrawable)
 	return AccrualBalance{
-		AccruedMALIBU:      accrued,
-		WithdrawableMALIBU: withdrawable,
-		HeldMALIBU:         held,
-		TrustTier:          tier,
-		HoldReasons:        holds,
-		ProviderDailyCap:   cfg.ProviderDailyCapMALIBU,
-		WalletDailyCap:     cfg.WalletDailyCapMALIBU,
+		AccruedMALIBU:       accrued,
+		WithdrawableMALIBU:  withdrawable,
+		HeldMALIBU:          held,
+		TrustTier:           tier,
+		HoldReasons:         holds,
+		ProviderDailyCapped: providerDailyCapped,
+		ProviderDailyCap:    cfg.ProviderDailyCapMALIBU,
+		WalletDailyCap:      cfg.WalletDailyCapMALIBU,
 	}, nil
+}
+
+func providerDailyCapActiveToday(ctx context.Context, db *sql.DB, providerID string, cap float64) (bool, error) {
+	if cap <= 0 {
+		return false, nil
+	}
+	var exists bool
+	err := db.QueryRowContext(ctx, `
+        SELECT EXISTS (
+            SELECT 1
+              FROM provider_emission_state
+             WHERE provider_id = $1
+               AND emission_day = $2
+               AND provider_day_malibu >= $3::NUMERIC(24,8)
+        )
+    `, providerID, utcDay(time.Now().UTC()), formatMALIBU(cap)).Scan(&exists)
+	return exists, err
+}
+
+func walletDailyCapAppliedToday(ctx context.Context, db *sql.DB, providerID string) (bool, error) {
+	var exists bool
+	err := db.QueryRowContext(ctx, `
+        SELECT EXISTS (
+            SELECT 1
+              FROM malibu_reward_audit_events applied
+             WHERE applied.provider_id = $1
+               AND applied.event_type = $2
+               AND applied.occurred_at >= $3
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM malibu_reward_audit_events cleared
+                    WHERE cleared.provider_id = applied.provider_id
+                      AND cleared.ledger_id = applied.ledger_id
+                      AND cleared.event_type = $4
+                      AND cleared.withdrawal_hold_reason = $5
+                      AND cleared.id > applied.id
+               )
+        )
+    `, providerID, AuditEventWalletDailyCapApplied, utcDay(time.Now().UTC()), AuditEventMalibuHoldCleared, HoldPerWalletDailyCap).Scan(&exists)
+	return exists, err
 }
 
 func subtractDecimalStrings(a, b string) string {

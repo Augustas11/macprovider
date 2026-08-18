@@ -19,6 +19,10 @@ spec-owned doc.
   `include`d in EVERY `location` block because nginx `add_header` is
   all-or-nothing per level — any location-level `add_header` shadows ALL
   inherited add_headers (silent security-header regression if you forget).
+- `nginx-snippets/portal-shared.conf` — http-context `limit_req_zone`
+  declarations used by the portal vhost. Stage under `/etc/nginx/conf.d/`
+  before running `nginx -t`; nginx rejects `limit_req_zone` inside a
+  `server` block.
 
 ## Two deploy gotchas worth remembering
 
@@ -54,7 +58,9 @@ scp frontdoor/provider-portal/index.html root@$PEARL:/var/www/portal/
 scp portal-config.json root@$PEARL:/var/www/portal/
 ssh root@$PEARL 'chown www-data:www-data /var/www/portal/*; chmod 0644 /var/www/portal/*'
 
-# 2. Stage nginx config + security-headers snippet
+# 2. Stage nginx config + snippets
+scp frontdoor/provider-portal/dist/nginx-snippets/portal-shared.conf \
+  root@$PEARL:/etc/nginx/conf.d/portal-shared.conf
 scp frontdoor/provider-portal/dist/nginx-snippets/portal-security-headers.conf \
   root@$PEARL:/etc/nginx/snippets/portal-security-headers.conf
 scp frontdoor/provider-portal/dist/nginx-portal.malibu.tech.conf \
