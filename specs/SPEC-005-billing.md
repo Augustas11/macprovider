@@ -1,7 +1,13 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.3 (2026-08-18, remaining SPEC-005 conformance unit IDs)
+**Version:** 0.6.4 (2026-08-18, close SPEC-005 requirement-ID migration)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2.1 (prefix-cache cache-isolation; its billing sections are superseded by this spec)
+
+**Change log v0.6.4 (2026-08-18, issue #1023 — close requirement-ID migration):**
+- Accepts `SPEC-005-R001`..`SPEC-005-R009` as the exhaustive evidencable
+  conformance units for this spec. `requirement_id_migration` is `complete`.
+  R004–R009 stay pending until a signed journey-result promotes them. No
+  formula, ledger, or payout behavior change. Do not promote from this close.
 
 **Change log v0.6.3 (2026-08-18, issue #1023 — remaining conformance unit IDs):**
 - Registers `SPEC-005-R004`..`SPEC-005-R009` in `specs/CONFORMANCE.json` as
@@ -20,7 +26,7 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-005 v0.6.3 registers `SPEC-005-R001`..`SPEC-005-R009` in
+SPEC-005 v0.6.4 registers `SPEC-005-R001`..`SPEC-005-R009` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path formula, hot-path,
 and crash-recovery units. R004–R009 group additional existing obligation
 areas without changing them:
@@ -40,8 +46,9 @@ areas without changing them:
   (§4.8).
 - `SPEC-005-R009` — operator quarantine resolutions (§4.10, §10.5).
 
-`requirement_id_migration` remains `pending` until issue #1023 closes.
-These IDs are not promoted from this registration.
+`requirement_id_migration` is `complete`. R004–R009 are not promoted from
+this close. Signed journey-result evidence is still required before any of
+those rows can become conformant.
 
 **Change log v0.6.1 (2026-07-29, B1 — request-log TTFT/decode consumer boundary):**
 - Dependency bump: SPEC-002 v1.5.2 → v1.5.6 to acknowledge
