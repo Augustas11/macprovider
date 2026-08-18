@@ -22,6 +22,10 @@ import Security
 /// caller fall back to ManagedDeviceAttestationGenerator or return nil.
 struct SecureEnclaveAttestationGenerator: Tier2AttestationTokenGenerating {
     static let format = "macprovider-se-p256-v1"
+    /// SPEC-008 §7.4: the whole `attestation_token` JSON object must fit
+    /// in coordinator `maxHandshakeMetadataBytes` or the handshake is
+    /// closed 4001. Omit the token rather than brick the session.
+    static let maxHandshakeTokenBytes = 1024
 
     private let signer: SEBlobSigner
     private let builder: SEAttestationBuilder
@@ -89,21 +93,13 @@ struct SecureEnclaveAttestationGenerator: Tier2AttestationTokenGenerating {
         }
 
         let issuedAt = now()
-        var claimed: [String: Any] = [
+        // Keep claimed compact: model/weights hashes already ride on hello.
+        // Extra 64-hex fields here push a realistic envelope over 1024 bytes.
+        let claimed: [String: Any] = [
             "hardware_family": "apple_silicon",
             "ram_gb": snapshot.capacity.ramGB,
             "model_id": snapshot.modelID ?? "",
         ]
-        if let modelHash = snapshot.modelHash {
-            claimed["model_hash"] = modelHash
-            if let algorithm = snapshot.modelHashAlgorithm {
-                claimed["model_hash_algorithm"] = algorithm
-            }
-        }
-        if let weights = snapshot.weightsManifestSHA256 {
-            claimed["weights_manifest_sha256"] = weights
-            claimed["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
-        }
 
         var envelope: [String: Any] = [
             "format": Self.format,
@@ -127,6 +123,20 @@ struct SecureEnclaveAttestationGenerator: Tier2AttestationTokenGenerating {
             )
         } catch {
             print("WARN se_attestation unsupported reason=binding_signature_failed error=\(error)")
+            return nil
+        }
+
+        do {
+            let encoded = try JSONSerialization.data(
+                withJSONObject: envelope,
+                options: [.withoutEscapingSlashes]
+            )
+            if encoded.count > Self.maxHandshakeTokenBytes {
+                print("WARN se_attestation unsupported reason=token_exceeds_handshake_cap bytes=\(encoded.count) cap=\(Self.maxHandshakeTokenBytes)")
+                return nil
+            }
+        } catch {
+            print("WARN se_attestation unsupported reason=token_size_check_failed error=\(error)")
             return nil
         }
 
