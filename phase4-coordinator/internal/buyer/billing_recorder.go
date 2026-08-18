@@ -313,6 +313,7 @@ func (b *billingRecorder) recordRow(
 		RequestID:             b.requestID,
 		ExternalRequestID:     b.externalRequestID,
 		AccountID:             b.accountID,
+		PoolID:                b.state.poolID, // SPEC-042 R002 per-pool attribution ("" = global)
 		Model:                 sanitizeRequestLogText(b.model),
 		ProviderAssignedID:    providerAssignedID,
 		PromptTokens:          promptTok,

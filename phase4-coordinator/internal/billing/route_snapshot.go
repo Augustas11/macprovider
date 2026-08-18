@@ -62,9 +62,16 @@ type RouteSnapshot struct {
 	PendingDeadlineSeconds             int64   `json:"pending_deadline_seconds"`
 	PromptHashBasis                    string  `json:"prompt_hash_basis"`
 	PromptHash                         string  `json:"prompt_hash"`
-	ComputeIntegrityCaptureRequired    bool    `json:"-"`
-	ComputeIntegritySamplingCovered    bool    `json:"-"`
-	ComputeIntegrityHardwareDigest     string  `json:"-"`
+	// PoolID is the SPEC-042 Trusted Pool that served this request ("" for
+	// global). It binds into the canonical route-snapshot digest / settlement
+	// context (SPEC-042 R006) but ONLY when non-empty, so poolless snapshots
+	// keep byte-identical digests. Like the *_model_hash_algorithm fields it
+	// is carried in route_snapshot_json (not a dedicated column) and recovered
+	// on the settlement recompute path so insert-digest == recompute-digest.
+	PoolID                          string `json:"pool_id"`
+	ComputeIntegrityCaptureRequired bool   `json:"-"`
+	ComputeIntegritySamplingCovered bool   `json:"-"`
+	ComputeIntegrityHardwareDigest  string `json:"-"`
 }
 
 func ReceiptKeyID(pubkey []byte) (string, error) {
@@ -106,6 +113,12 @@ func (r RouteSnapshot) Value() map[string]any {
 	if r.ProviderReportedModelHashAlgorithm != "" || r.ExpectedCatalogModelHashAlgorithm != "" {
 		value["provider_reported_model_hash_algorithm"] = r.ProviderReportedModelHashAlgorithm
 		value["expected_catalog_model_hash_algorithm"] = r.ExpectedCatalogModelHashAlgorithm
+	}
+	// SPEC-042 R006: bind pool_id into the canonical route-snapshot digest,
+	// but only when a pool served the request — a poolless snapshot omits it
+	// and keeps a byte-identical digest to pre-SPEC-042.
+	if r.PoolID != "" {
+		value["pool_id"] = r.PoolID
 	}
 	return value
 }

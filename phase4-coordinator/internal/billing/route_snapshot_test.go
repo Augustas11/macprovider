@@ -69,6 +69,70 @@ func TestRouteSnapshotStrictKeysAndDigestSensitivity(t *testing.T) {
 	}
 }
 
+func TestRouteSnapshotPoolID_DigestBinding(t *testing.T) {
+	// SPEC-042 R006: pool_id binds into the canonical digest only when a pool
+	// served the request; a poolless snapshot omits it and keeps a
+	// byte-identical value/digest.
+	global := testRouteSnapshot() // PoolID == ""
+	gv := global.Value()
+	if _, present := gv["pool_id"]; present {
+		t.Fatalf("poolless snapshot must NOT carry pool_id in Value(): %#v", gv)
+	}
+	gd, _, err := global.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pooled := testRouteSnapshot()
+	pooled.PoolID = "pool-abc"
+	pv := pooled.Value()
+	if pv["pool_id"] != "pool-abc" {
+		t.Fatalf("pool snapshot must carry pool_id in Value(), got %v", pv["pool_id"])
+	}
+	pd, _, err := pooled.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pd == gd {
+		t.Fatal("pool_id must change the canonical digest")
+	}
+}
+
+func TestRouteSnapshotPoolID_RoundTripsThroughSettlementLoader(t *testing.T) {
+	// The money-path hazard test (map: settlement_receipts.go:844): the digest
+	// is RECOMPUTED from the stored row at settlement time. Inserting a
+	// snapshot with pool_id and loading it back MUST recover pool_id (from
+	// route_snapshot_json) so recompute-digest == insert-digest — otherwise the
+	// loader returns "settlement route snapshot digest mismatch".
+	_, store := newRequestAndBillingStores(t)
+	snap := testRouteSnapshot()
+	snap.PoolID = "pool-abc"
+	insertDigest, err := store.InsertRouteSnapshot(context.Background(), snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := store.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	loaded, loadedDigest, err := loadSettlementRouteSnapshotConn(context.Background(), conn, SettlementReceiptIdentity{
+		AccountScope: snap.AccountScope,
+		RequestID:    snap.RequestID,
+		AttemptN:     snap.AttemptN,
+		ProviderID:   snap.ProviderID,
+	})
+	if err != nil {
+		t.Fatalf("loader returned error (missing pool_id read-back would cause a digest mismatch): %v", err)
+	}
+	if loaded.PoolID != "pool-abc" {
+		t.Fatalf("loader did not recover pool_id, got %q", loaded.PoolID)
+	}
+	if loadedDigest != insertDigest {
+		t.Fatalf("recompute digest %q != insert digest %q", loadedDigest, insertDigest)
+	}
+}
+
 func TestInsertRouteSnapshotPersistsCanonicalDigestAndRejectsRewrite(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	snapshot := testRouteSnapshot()
