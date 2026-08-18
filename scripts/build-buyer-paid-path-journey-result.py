@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from check_spec_governance import (
+    BUYER_PAID_PATH_CONDITIONAL_REQUIREMENT_IDS,
     BUYER_PAID_PATH_EXECUTION_MODE,
     BUYER_PAID_PATH_JOURNEY_ID,
     BUYER_PAID_PATH_PROMOTABLE_REQUIREMENT_IDS,
@@ -170,7 +171,11 @@ def parse_requirement_ids(raw: str | None, evidence: dict[str, Any]) -> list[str
     overclaimed = [item for item in input_ids if item not in covered]
     if overclaimed:
         die(f"--requirement-ids must be covered by evidence.requirement_ids: {', '.join(overclaimed)}")
-    forbidden = [item for item in input_ids if item not in BUYER_PAID_PATH_PROMOTABLE_REQUIREMENT_IDS]
+    allowed = set(BUYER_PAID_PATH_PROMOTABLE_REQUIREMENT_IDS)
+    observations = evidence.get("observations")
+    if isinstance(observations, dict) and observations.get("buyer_receipt_retrieval_exposed") is True:
+        allowed |= BUYER_PAID_PATH_CONDITIONAL_REQUIREMENT_IDS
+    forbidden = [item for item in input_ids if item not in allowed]
     if forbidden:
         die(f"paid-path journey-result cannot promote {', '.join(forbidden)}")
     return input_ids

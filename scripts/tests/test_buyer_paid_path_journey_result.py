@@ -228,6 +228,21 @@ class BuyerPaidPathJourneyResultTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             builder.parse_requirement_ids("SPEC-005-R003", {"requirement_ids": ["SPEC-005-R003"]})
         with self.assertRaises(SystemExit):
+            builder.parse_requirement_ids(
+                "SPEC-022-R006",
+                {"requirement_ids": ["SPEC-022-R006"]},
+            )
+        self.assertEqual(
+            builder.parse_requirement_ids(
+                "SPEC-022-R006",
+                {
+                    "requirement_ids": ["SPEC-022-R006"],
+                    "observations": {"buyer_receipt_retrieval_exposed": True},
+                },
+            ),
+            ["SPEC-022-R006"],
+        )
+        with self.assertRaises(SystemExit):
             builder.require_observations({"settlement_mode": "enforce"})
         with self.assertRaises(SystemExit):
             builder.require_candidate_identity({"rate_card_matched_key": "default"})
