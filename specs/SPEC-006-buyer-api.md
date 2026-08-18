@@ -1,7 +1,14 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.19 (2026-08-18, buyer receipt metadata retrieval)
+**Version:** 0.9.20 (2026-08-18, remaining SPEC-006 conformance unit IDs)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.20 (2026-08-18, issue #1023 — remaining conformance unit IDs):**
+- Registers `SPEC-006-R004`..`SPEC-006-R009` in `specs/CONFORMANCE.json` as
+  pending anchors for models disclosure, usage, status, kill switches,
+  public rate-card/stats, and demo isolation. No wire-contract or
+  settlement-matrix change. `requirement_id_migration` remains `pending`.
+  Do not promote.
 
 **Change log v0.9.19 (2026-08-18, issue #1042 — buyer receipt metadata retrieval):**
 - §2.2 and new §5.5.1 expose authenticated `GET /v1/receipts/{request_id}` on the buyer host. The response is a metadata view (`schema_version: macprovider.buyer-receipt-view.v1`, `surface: metadata`): hashes, terminal/settlement outcome, and pending/quarantined visibility. It is not signed proof and MUST NOT include raw prompts, raw outputs, or the v0.4 wire envelope.
@@ -192,9 +199,10 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-006 v0.9.17 registers `SPEC-006-R001`..`SPEC-006-R003` in
-`specs/CONFORMANCE.json` as pending preliminary conformance anchors. These IDs
-group existing normative obligation areas without changing them:
+SPEC-006 v0.9.20 registers `SPEC-006-R001`..`SPEC-006-R009` in
+`specs/CONFORMANCE.json`. R001–R003 remain the paid-path chat, error, and
+quota units. R004–R009 group additional existing obligation areas without
+changing them:
 
 - `SPEC-006-R001` — authenticated API-key paid chat entrypoint
   (`POST /v1/chat/completions`, §5, §6).
@@ -202,9 +210,16 @@ group existing normative obligation areas without changing them:
   (`error.code` / `error.retryable`, §5.2, §17).
 - `SPEC-006-R003` — quota reservation, settlement, and refund on the chat
   path (§7, §17.7).
+- `SPEC-006-R004` — `GET /v1/models` and tier-1 disclosure (§5.3).
+- `SPEC-006-R005` — authenticated `GET /v1/usage` (§5.5).
+- `SPEC-006-R006` — public `GET /v1/status` (§5.6).
+- `SPEC-006-R007` — gateway kill switches (§2.7).
+- `SPEC-006-R008` — unauthenticated public rate-card and stats overview
+  (§2.2, §4.2).
+- `SPEC-006-R009` — demo-token traffic isolation from paid quota (§3.6).
 
-`requirement_id_migration` remains `pending`. Physical paid-path evidence is
-tracked by GitHub issue #1022.
+`requirement_id_migration` remains `pending` until issue #1023 closes.
+These IDs are not promoted from this registration.
 
 ## 1. Scope
 

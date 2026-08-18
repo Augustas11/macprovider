@@ -1,7 +1,15 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.4 (2026-08-17, issue #1010 — compute-integrity digest binding decision; LOCKED settlement-capable receipt profile for SPEC-022 otherwise unchanged)
+**Version:** 0.4.5 (2026-08-18, remaining SPEC-015 conformance unit IDs; LOCKED settlement-capable receipt profile for SPEC-022 otherwise unchanged)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 candidate `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.3 (settlement/accounting semantics; v0.4+ chargeability successor expected for terminal-state rows), SPEC-006 v0.9, SPEC-008 v0.3 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.5, SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3, SPEC-022 v0.1.4 (hard — settlement-capable receipt profile consumer)
+
+**Change log v0.4.5 (2026-08-18, issue #1023 — remaining conformance unit IDs):**
+- Registers `SPEC-015-R002`..`SPEC-015-R005` in `specs/CONFORMANCE.json` as
+  pending anchors for historical v0.1–v0.3 verification, receipt-key
+  lifecycle, pubkey trust root, and ingest/storage redaction. Buyer
+  retrieval remains SPEC-022-R006. No receipt tuple, wire, or verifier
+  behavior change. `requirement_id_migration` remains `pending`. Do not
+  promote.
 
 **Change log v0.4.4 (2026-08-17, issue #1010 — compute-integrity digest binding decision):**
 - Closes the SPEC-015 side of #1010. Request-start compute-integrity state
@@ -810,13 +818,23 @@ superseded by v0.1.1/v0.1.2):**
 
 ## Preliminary conformance unit IDs
 
-SPEC-015 v0.4.4 registers `SPEC-015-R001` in `specs/CONFORMANCE.json` as a
-pending preliminary conformance anchor. This ID groups the existing v0.4
-settlement-capable receipt issuance and ingestion obligations without
-changing them.
+SPEC-015 v0.4.5 registers `SPEC-015-R001`..`SPEC-015-R005` in
+`specs/CONFORMANCE.json`. R001 remains the v0.4 settlement-capable
+issuance/ingestion unit. R002–R005 group additional existing obligation
+areas without changing them:
 
-`requirement_id_migration` remains `pending`. Physical paid-path evidence is
-tracked by GitHub issue #1022.
+- `SPEC-015-R001` — v0.4 settlement-capable receipt issuance and ingestion
+  (§N).
+- `SPEC-015-R002` — historical v0.1–v0.3 verification and forward-incompat
+  with v0.4 (§10, §M).
+- `SPEC-015-R003` — provider receipt-key lifecycle and buyer-safe pubkey
+  resolver (§7).
+- `SPEC-015-R004` — pubkey trust root (§8).
+- `SPEC-015-R005` — coordinator receipt storage, ingest idempotency, and
+  audit redaction (§13, §N). Buyer retrieval remains SPEC-022-R006.
+
+`requirement_id_migration` remains `pending` until issue #1023 closes.
+These IDs are not promoted from this registration.
 
 ## 0. Operator-paste invocation block
 
