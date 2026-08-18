@@ -1,6 +1,6 @@
 module github.com/augstar/macprovider-integration
 
-go 1.26
+go 1.26.6
 
 require (
 	github.com/gobwas/ws v1.4.0
