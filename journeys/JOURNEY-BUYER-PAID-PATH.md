@@ -1,6 +1,6 @@
 # JOURNEY-BUYER-PAID-PATH
 
-Status: contract plus isolated-candidate harness; no signed promotion yet
+Status: signed observe-mode promotion for SPEC-005-R001/R002, SPEC-006-R001..R003, SPEC-015-R001, SPEC-022-R001..R005, and SPEC-022-R010; no enforce promotion
 Owner: buyer/billing/settlement conformance
 Specs: SPEC-005, SPEC-006, SPEC-015, SPEC-022
 Requirements: SPEC-006-R001, SPEC-006-R002, SPEC-006-R003, SPEC-005-R001, SPEC-005-R002, SPEC-005-R003, SPEC-015-R001, SPEC-022-R001, SPEC-022-R002, SPEC-022-R003, SPEC-022-R004, SPEC-022-R005, SPEC-022-R006, SPEC-022-R007, SPEC-022-R008, SPEC-022-R010
