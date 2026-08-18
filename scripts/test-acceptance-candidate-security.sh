@@ -153,6 +153,10 @@ if re.search(r'\$cli_work/macprovider-cli["}]?\s+--', signer):
     raise SystemExit("protected signer executes the candidate CLI")
 if "codesign --force --deep" in signer:
     raise SystemExit("acceptance signer must preserve the already-signed embedded CLI bytes")
+if "--entitlements phase3-binary/dist/macprovider-cli.entitlements" not in signer:
+    raise SystemExit("acceptance signer must attach CLI keychain-access-groups entitlements")
+if "require-cli-se-entitlements.sh" not in signer:
+    raise SystemExit("acceptance signer must prove the signed CLI carries the SE access group")
 if signer.count('shasum -a 256 "$app/Contents/MacOS/macprovider-cli"') != 2:
     raise SystemExit("acceptance signer must prove embedded CLI bytes before and after outer app signing")
 for value in (

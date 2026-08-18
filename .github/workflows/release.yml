@@ -710,6 +710,7 @@ jobs:
             --options runtime \
             --timestamp \
             --identifier live.malibu.provider.cli \
+            --entitlements phase3-binary/dist/macprovider-cli.entitlements \
             --sign "$SIGNING_ID" \
             "$WORK/macprovider-cli"
 
@@ -717,6 +718,7 @@ jobs:
           # early (e.g. cert expired) without burning notary submission
           # quota.
           codesign --verify --strict --verbose=2 "$WORK/macprovider-cli"
+          bash scripts/require-cli-se-entitlements.sh "$WORK/macprovider-cli"
           CLI_REQUIREMENT=$(codesign -d -r- "$WORK/macprovider-cli" 2>&1)
           printf '%s\n' "$CLI_REQUIREMENT" | grep -F 'identifier "live.malibu.provider.cli"' >/dev/null || {
             echo "::error::CLI designated requirement lacks the stable release identifier" >&2
@@ -966,6 +968,7 @@ jobs:
             echo "::error::standalone=$source_cli_sha256 embedded=$bundled_cli_sha256" >&2
             exit 1
           fi
+          bash scripts/require-cli-se-entitlements.sh "$APP/Contents/MacOS/macprovider-cli"
           BUNDLED_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
           printf '%s\n' "$BUNDLED_CLI_REQUIREMENT" | grep -F 'identifier "live.malibu.provider.cli"' >/dev/null || {
             echo "::error::Bundling changed the CLI designated requirement identifier" >&2

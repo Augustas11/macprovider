@@ -157,7 +157,7 @@ Extend `pool.Provider` (non-breaking JSON fields):
 ### 1.3 Entitlements / signing notes
 
 - SE persistent key requires **keychain-access-groups** entitlement on distributed `macprovider-cli` binary.
-- Team ID prefix in access group must match codesign team (document in `phase3-binary` release notes).
+- Production group: `YF7XNRJUG4.live.malibu.provider` (`phase3-binary/dist/macprovider-cli.entitlements`). Team ID prefix must match Developer ID signing (`YF7XNRJUG4`).
 - Simulator / x86: SE path returns `unsupported` (no fake attestation).
 
 ### 1.4 Tests (mandatory)

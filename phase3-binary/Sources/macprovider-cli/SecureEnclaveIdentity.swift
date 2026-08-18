@@ -3,8 +3,10 @@
 /// `#if arch(arm64)` or check `SecureEnclaveIdentity.isAvailable` at runtime.
 ///
 /// Access-group note: The production access group is
-/// `<TEAM_ID>.live.malibu.provider`. Set it via env var
-/// `MACPROVIDER_KEYCHAIN_ACCESS_GROUP` or use the `accessGroup:` parameter.
+/// `YF7XNRJUG4.live.malibu.provider` (Developer ID Team ID Superposition
+/// Technologies). Release signing attaches it via
+/// `phase3-binary/dist/macprovider-cli.entitlements`. Override with env var
+/// `MACPROVIDER_KEYCHAIN_ACCESS_GROUP` or the `accessGroup:` parameter.
 /// A binary missing the `keychain-access-groups` entitlement receives
 /// errSecMissingEntitlement (-34018), which surfaces as
 /// `SecureEnclaveIdentityError.missingEntitlement`.
@@ -63,16 +65,18 @@ private func osStatus(from cfError: Unmanaged<CFError>?) -> OSStatus {
 }
 
 enum MacProviderKeychainAccessGroup {
+    /// Superposition Technologies Developer ID Team ID (`YF7XNRJUG4`).
+    static let productionTeamID = "YF7XNRJUG4"
+    /// Must match `phase3-binary/dist/macprovider-cli.entitlements`.
+    static let production = "YF7XNRJUG4.live.malibu.provider"
+
     static func resolve(_ override: String?) -> String {
         if let override { return override }
         if let env = ProcessInfo.processInfo.environment["MACPROVIDER_KEYCHAIN_ACCESS_GROUP"],
            !env.isEmpty { return env }
-        // Production value: replace TEAMID with the 10-char Apple Developer Team ID.
-        // The keychain-access-groups entitlement must list this group.
-        // During local dev/CI, set MACPROVIDER_KEYCHAIN_ACCESS_GROUP to a signed
-        // test group or leave unset — loadOrCreate will throw missingEntitlement,
-        // which the generator treats as graceful SE-unavailable.
-        return "REPLACEME.live.malibu.provider"
+        // Unsigned local/CI binaries lack keychain-access-groups; loadOrCreate
+        // throws missingEntitlement and the generator treats SE as unavailable.
+        return production
     }
 }
 

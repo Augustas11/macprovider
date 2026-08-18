@@ -194,10 +194,12 @@ codesign --force \
   --options runtime \
   --timestamp \
   --identifier live.malibu.provider.cli \
+  --entitlements phase3-binary/dist/macprovider-cli.entitlements \
   --keychain "$keychain" \
   --sign "$signing_identity" \
   "$cli_work/macprovider-cli"
 codesign --verify --strict --verbose=2 "$cli_work/macprovider-cli"
+"$root/scripts/require-cli-se-entitlements.sh" "$cli_work/macprovider-cli"
 cli_requirement="$(codesign -d -r- "$cli_work/macprovider-cli" 2>&1)"
 grep -F 'identifier "live.malibu.provider.cli"' <<<"$cli_requirement" >/dev/null ||
   die "signed CLI lacks the stable designated requirement"
@@ -224,6 +226,7 @@ codesign --force \
   "$app"
 [[ "$(shasum -a 256 "$app/Contents/MacOS/macprovider-cli" | awk '{print $1}')" == "$embedded_cli_sha256" ]] ||
   die "outer Malibu signing changed the already-signed embedded CLI"
+"$root/scripts/require-cli-se-entitlements.sh" "$app/Contents/MacOS/macprovider-cli"
 codesign --verify --strict --verbose=2 --deep "$app"
 app_notary="$signing_tmp/Malibu-notary.zip"
 /usr/bin/ditto -c -k --keepParent "$app" "$app_notary"

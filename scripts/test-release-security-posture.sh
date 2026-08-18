@@ -837,6 +837,13 @@ team_requirement = (
 )
 if publish.count(team_requirement) != 2:
     raise SystemExit("CLI and bundled CLI must evaluate the exact Team ID requirement semantically")
+cli_sign = publish.split("- name: Sign + notarize binary", 1)[1].split(
+    "\n      - name:", 1
+)[0]
+if "--entitlements phase3-binary/dist/macprovider-cli.entitlements" not in cli_sign:
+    raise SystemExit("CLI signing must attach keychain-access-groups entitlements")
+if "bash scripts/require-cli-se-entitlements.sh" not in cli_sign:
+    raise SystemExit("CLI signing must prove the SE keychain access group")
 if 'grep -F "certificate leaf[subject.OU]' in publish:
     raise SystemExit("release workflow must not parse codesign requirement display formatting")
 if '"repos/$GITHUB_REPOSITORY/releases/$release_id"' not in publish:
