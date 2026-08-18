@@ -1,0 +1,156 @@
+{
+  "captured_at": "2026-08-18T06:59:04Z",
+  "environment": {
+    "candidate": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
+    "class": "isolated-candidate-crash-recovery",
+    "hardware_profile": "local-macos-redacted"
+  },
+  "expires_at": "2026-09-17",
+  "harness": {
+    "execution_mode": "isolated-candidate-crash-recovery",
+    "id": "test/integration:TestJourneyBuyerCrashRecoveryIsolatedCandidate",
+    "isolated_sqlite": true,
+    "production_side_effects": false,
+    "real_binaries": true,
+    "settlement_runner": false
+  },
+  "journey_id": "JOURNEY-BUYER-CRASH-RECOVERY",
+  "observations": {
+    "idempotent_rescan": true,
+    "identity_fallback_recovered": true,
+    "isolated_environment": true,
+    "job_enabled": false,
+    "missing_credit_rows_created": 1,
+    "orphan_credit_rows_quarantined": 1,
+    "orphan_quarantined": true,
+    "payout_ready_mutated": false,
+    "planted_at": "2026-08-18T06:57:03.731795Z",
+    "production_pearl": false,
+    "production_side_effects": false,
+    "recovery_source": "startup_scan",
+    "settlement_mode": "observe",
+    "start_job_enabled": false,
+    "start_mode": "observe"
+  },
+  "operator": {
+    "identity_fingerprint": "be58592d53b5b222fca8a50f59960f5c4be6a594ecbfbc9b7d52fab5fc109cab",
+    "role": "acceptance-operator"
+  },
+  "redaction": {
+    "local_account_names_redacted": true,
+    "operator_identity_redacted": true,
+    "secrets_redacted": true
+  },
+  "repository": {
+    "commit": "caa6ae4aec712c5d6353a3d307aab551911bea65",
+    "name": "Augustas11/macprovider"
+  },
+  "requirement_ids": [
+    "SPEC-005-R003"
+  ],
+  "result": {
+    "status": "pass",
+    "summary": "isolated candidate crash-recovery journey recovered identity-fallback credits without double credit or payout-ready mutation"
+  },
+  "run_id": "buyer-crash-recovery-20260818T065904Z",
+  "schema_version": "macprovider.buyer-crash-recovery-evidence.v1",
+  "steps": [
+    {
+      "id": "step-01-capture-config",
+      "status": "pass",
+      "assertion": "isolated candidate captured in observe mode with settlement job disabled",
+      "artifacts": [
+        "redacted-buyer-crash-recovery"
+      ],
+      "details": {
+        "isolated_sqlite": true,
+        "job_enabled": false,
+        "settlement_mode": "observe"
+      }
+    },
+    {
+      "id": "step-02-stop-coordinator",
+      "status": "pass",
+      "assertion": "coordinator process stopped against the same isolated SQLite file",
+      "artifacts": [
+        "redacted-buyer-crash-recovery"
+      ],
+      "details": {
+        "coordinator_stopped": true
+      }
+    },
+    {
+      "id": "step-03-plant-identity-fallback",
+      "status": "pass",
+      "assertion": "identity-fallback request_log and provider snapshot planted with no credit row",
+      "artifacts": [
+        "redacted-buyer-crash-recovery"
+      ],
+      "details": {
+        "credit_count": 0,
+        "request_id": "crash-recovery-identity-fallback"
+      }
+    },
+    {
+      "id": "step-04-plant-orphan-credit",
+      "status": "pass",
+      "assertion": "orphan ledger_request_credits row planted without matching request_log",
+      "artifacts": [
+        "redacted-buyer-crash-recovery"
+      ],
+      "details": {
+        "orphan_request_id": "crash-recovery-orphan-credit"
+      }
+    },
+    {
+      "id": "step-05-startup-scan-recover",
+      "status": "pass",
+      "assertion": "startup_scan recovered exactly one non-quarantined credit for the planted request",
+      "artifacts": [
+        "redacted-buyer-crash-recovery"
+      ],
+      "details": {
+        "missing_credit_rows_created": 1,
+        "recovered_credits": 1,
+        "recovery_source": "startup_scan",
+        "startup_scan_status": "complete"
+      }
+    },
+    {
+      "id": "step-06-orphan-quarantine",
+      "status": "pass",
+      "assertion": "planted orphan credit was quarantined missing_request_log",
+      "artifacts": [
+        "redacted-buyer-crash-recovery"
+      ],
+      "details": {
+        "orphan_quarantined": 1,
+        "quarantine_reason": "missing_request_log"
+      }
+    },
+    {
+      "id": "step-07-idempotent-rescan",
+      "status": "pass",
+      "assertion": "second startup scan did not double-credit the recovered request",
+      "artifacts": [
+        "redacted-buyer-crash-recovery"
+      ],
+      "details": {
+        "credits_after_rescan": 1
+      }
+    },
+    {
+      "id": "step-08-no-payout",
+      "status": "pass",
+      "assertion": "settlement job stayed disabled and no payout-ready rows were created",
+      "artifacts": [
+        "redacted-buyer-crash-recovery"
+      ],
+      "details": {
+        "job_enabled": false,
+        "payout_ready_count": 0,
+        "settlement_mode": "observe"
+      }
+    }
+  ]
+}
