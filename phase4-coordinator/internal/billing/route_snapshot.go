@@ -218,7 +218,7 @@ func (s *Store) InsertRouteSnapshot(ctx context.Context, snapshot RouteSnapshot)
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO settlement_route_snapshots (
     account_scope, request_id, attempt_n, provider_id,
-    provider_session_id, provider_generation_id, paid_entrypoint,
+    provider_session_id, provider_generation_id, pool_id, paid_entrypoint,
     provider_receipt_key_id, provider_receipt_key_source,
     model_id, provider_reported_model_hash, expected_catalog_model_hash,
     catalog_id, catalog_body_digest, catalog_signature_key_id,
@@ -231,7 +231,7 @@ INSERT INTO settlement_route_snapshots (
     route_snapshot_canonical_json, created_at_utc
 ) VALUES (
     ?, ?, ?, ?,
-    ?, ?, ?,
+    ?, ?, ?, ?,
     ?, ?,
     ?, ?, ?,
     ?, ?, ?,
@@ -242,7 +242,7 @@ INSERT INTO settlement_route_snapshots (
     ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now')
 )`,
 		snapshot.AccountScope, snapshot.RequestID, snapshot.AttemptN, snapshot.ProviderID,
-		nullableString(snapshot.ProviderSessionID), nullableString(snapshot.ProviderGenerationID), snapshot.PaidEntrypoint,
+		nullableString(snapshot.ProviderSessionID), nullableString(snapshot.ProviderGenerationID), nullString(snapshot.PoolID), snapshot.PaidEntrypoint,
 		snapshot.ProviderReceiptKeyID, snapshot.ProviderReceiptKeySource,
 		snapshot.ModelID, snapshot.ProviderReportedModelHash, snapshot.ExpectedCatalogModelHash,
 		snapshot.CatalogID, snapshot.CatalogBodyDigest, snapshot.CatalogSignatureKeyID,

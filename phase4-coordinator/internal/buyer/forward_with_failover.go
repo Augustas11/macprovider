@@ -68,6 +68,21 @@ func (s *Server) forwardWithFailover(
 ) (shouldFallThroughToHTTP bool) {
 	failoverAttempted := false
 	for {
+		// SPEC-042 R005 generation fence — checked before EVERY dispatch, not
+		// just the initial one. advanceToNextProvider (retry) and
+		// failoverCandidate (failover) re-select and refresh state.poolGeneration
+		// then loop back here; a membership/revocation change between that
+		// selection and this dispatch means state.provider may no longer be a
+		// pool member. Fail closed with retryable pool_state_stale and force
+		// fresh selection rather than dispatch a stale candidate. Fires before
+		// tx.dispatch, while the response is still uncommitted (failover only
+		// occurs pre-commit). Inert for global requests / feature-off.
+		if s.poolGenerationStale(state) {
+			s.releaseQueuedSlotReservation(state)
+			rec.logRow("", http.StatusServiceUnavailable, nil, nil, "pool membership changed during routing", "", 0)
+			writeError(w, http.StatusServiceUnavailable, "pool_state_stale", "Pool membership changed during routing; please retry")
+			return false
+		}
 		// Reset the per-attempt dispatched flag before every attempt so the
 		// item-18 no-charge marker reflects only THIS attempt's dispatch
 		// (providerCredited separately carries billed credit from prior

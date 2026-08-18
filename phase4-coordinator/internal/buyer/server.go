@@ -1979,12 +1979,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	rec.setModel(req.Model)
 	rec.setStream(req.Stream)
 	// SPEC-042 R002: honor the authorized pool selection header only when the
-	// pool feature is configured. The gateway emits X-MacProvider-Pool only
-	// for a credential-authorized pool (narrow-only, R002); the coordinator
-	// trusts that authority stamp like X-MacProvider-Account. With no registry
-	// the header is ignored (global routing), so default deployments are
-	// byte-identical.
-	if s.trustPools != nil {
+	// pool feature is configured AND the request carries an authenticated
+	// (gateway-context) account. The gateway emits X-MacProvider-Pool only for
+	// a credential-authorized pool (narrow-only, R002); the coordinator trusts
+	// that gateway authority stamp like X-MacProvider-Account. Defense in depth:
+	// X-MacProvider-Pool is also in hasInternalRoutingHeader, so an unauthorized
+	// buyer-port request carrying it is rejected before routing. With no
+	// registry the header is ignored (global routing), so default deployments
+	// are byte-identical.
+	if s.trustPools != nil && hasAuthenticatedAccount {
 		req.poolID = sanitizeAccountID(r.Header.Get("X-MacProvider-Pool"))
 	}
 	if idempotencyKey := normalizeIdempotencyKey(r.Header.Get("Idempotency-Key")); idempotencyKey != "" {
@@ -2091,15 +2094,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	state.routingDone = s.now()
 	state.phaseTiming.markCoordRoutingDone(state.routingDone)
 	state.provider = provider
-	// SPEC-042 R005 generation fence: if pool membership changed between
-	// selection and here, re-select against fresh membership instead of
-	// dispatching a possibly-stale candidate. Retryable and fail-closed.
-	if s.poolGenerationStale(state) {
-		s.releaseQueuedSlotReservation(state)
-		rec.logRow("", http.StatusServiceUnavailable, nil, nil, "pool membership changed during routing", "", 0)
-		writeError(w, http.StatusServiceUnavailable, "pool_state_stale", "Pool membership changed during routing; please retry")
-		return
-	}
+	// SPEC-042 R005 generation fence is enforced centrally at the top of the
+	// forwardWithFailover dispatch loop (covering initial, retry, and failover
+	// dispatches) — see forward_with_failover.go.
 	defer s.releaseQueuedSlotReservation(state)
 	// M2-1c: the three transport loops (streaming, WS-non-streaming, HTTP)
 	// previously duplicated the retry/failover/busy-marking decision tree.
@@ -5689,6 +5686,17 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		if result.Counts[routing.ReasonModelVersionFloor] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "model_version_floor_unmet", message: "No provider running a new enough binary is available for model `" + req.Model + "`.", typ: "server_error"}
 		}
+		// SPEC-042 R005/R010: a pool request whose candidates were all dropped
+		// for non-membership surfaces the non-retryable pool_no_eligible_member,
+		// not the retryable generic no_provider_available (which would let
+		// clients/gateways retry a condition the SPEC marks terminal). Placed
+		// AFTER the member-specific gate errors above (quota/context/tier2/
+		// version) so an actual pool MEMBER that failed a specific gate — the
+		// pool gate is first in the filter, so those counts are members only —
+		// still yields its specific, actionable error.
+		if poolActive && result.Counts[routing.ReasonPoolNotMember] > 0 {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "No eligible member is available for the selected pool"}
+		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
 	}
 	objective := s.objectiveForRequest(headers, class)
@@ -6159,6 +6167,8 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
 			key = "quota_blocked"
 		case routing.ReasonReceiptKeyMissing:
 			key = "receipt_key_missing"
+		case routing.ReasonPoolNotMember:
+			key = "pool_not_member" // SPEC-042 R005: distinct so pool-isolation drops are observable, not "other"
 		default:
 			key = "other"
 		}
@@ -6326,7 +6336,11 @@ func modelClassMembers(class *config.ModelClassConfig) []string {
 func hasInternalRoutingHeader(headers http.Header) bool {
 	for key, values := range headers {
 		lowerKey := strings.ToLower(key)
-		if lowerKey != "x-macprovider-account" && !strings.HasPrefix(lowerKey, "x-macprovider-internal-") {
+		// SPEC-042 R002: X-MacProvider-Pool is gateway-owned authority metadata
+		// (like X-MacProvider-Account) — it selects Trusted Pool routing and
+		// MUST NOT be honored on direct buyer traffic that lacks the internal
+		// gateway bearer, or a client could self-select pool capacity.
+		if lowerKey != "x-macprovider-account" && lowerKey != "x-macprovider-pool" && !strings.HasPrefix(lowerKey, "x-macprovider-internal-") {
 			continue
 		}
 		for _, value := range values {
