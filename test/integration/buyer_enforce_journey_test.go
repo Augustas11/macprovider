@@ -224,7 +224,7 @@ func TestJourneyBuyerEnforceIsolatedCandidate(t *testing.T) {
 	if os.Getenv("MACPROVIDER_CAPTURE_BUYER_ENFORCE") != "1" {
 		return
 	}
-	writeBuyerEnforceEvidence(t, s, steps, isolated, startMode, endMode)
+	writeBuyerEnforceEvidence(t, s, steps, isolated, startMode, endMode, startJob, endJob)
 }
 
 func waitForMissingReceiptDeadlineQuarantine(t *testing.T, s *scenario, wantCount int) settlementReceiptVerdictRow {
@@ -292,7 +292,7 @@ func (s *scenario) payableCreditCount(requestID string) int {
 	return count
 }
 
-func writeBuyerEnforceEvidence(t *testing.T, s *scenario, steps []buyerEnforceStep, isolated bool, startMode, endMode string) {
+func writeBuyerEnforceEvidence(t *testing.T, s *scenario, steps []buyerEnforceStep, isolated bool, startMode, endMode string, startJob, endJob bool) {
 	t.Helper()
 	root, err := findRepoRoot()
 	if err != nil {
@@ -320,8 +320,9 @@ func writeBuyerEnforceEvidence(t *testing.T, s *scenario, steps []buyerEnforceSt
 			"identity_fingerprint": sha256Hex("isolated-candidate-enforce"),
 		},
 		"environment": map[string]string{
-			"class":     "isolated-candidate-enforce",
-			"candidate": "commit:" + commit,
+			"class":            "isolated-candidate-enforce",
+			"hardware_profile": "local-macos-redacted",
+			"candidate":        "commit:" + commit,
 		},
 		"harness": map[string]any{
 			"id":                      "test/integration:TestJourneyBuyerEnforceIsolatedCandidate",
@@ -336,6 +337,8 @@ func writeBuyerEnforceEvidence(t *testing.T, s *scenario, steps []buyerEnforceSt
 			"settlement_mode_start":      startMode,
 			"settlement_mode_end":        endMode,
 			"enforce_activated":          startMode == "enforce",
+			"job_enabled":                endJob,
+			"start_job_enabled":          startJob,
 			"payout_ready_mutated":       false,
 			"production_side_effects":    false,
 			"production_pearl":           false,

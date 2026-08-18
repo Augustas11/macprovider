@@ -198,6 +198,14 @@ Named #614 slices are recorded in `docs/spec-governance-foundation.md`:
   `test/integration/buyer_paid_path_journey_test.go`
   (`TestJourneyBuyerPaidPathIsolatedCandidate`). Signing stays on the
   protected `promote-signed-buyer-paid-path-journey.yml` workflow.
+- crash recovery: SPEC-005-R003 identity-fallback recovery and orphan
+  quarantine on isolated SQLite. Physical evidence is GitHub issue #1043;
+  signing stays on `promote-signed-buyer-crash-recovery-journey.yml`.
+- isolated enforce: SPEC-022-R007/R008/R009/R011 against isolated YAML
+  `verified_model_settlement_mode: enforce` with `job_enabled: false`.
+  Physical evidence is GitHub issue #1044; signing stays on
+  `promote-signed-buyer-enforce-journey.yml`. Isolated enforce is not a
+  production Pearl flip.
 
 Every PR body contains exactly one raw, marker-delimited JSON declaration:
 
