@@ -1,7 +1,14 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.5 (2026-08-18, remaining SPEC-015 conformance unit IDs; LOCKED settlement-capable receipt profile for SPEC-022 otherwise unchanged)
+**Version:** 0.4.6 (2026-08-18, close SPEC-015 requirement-ID migration; LOCKED settlement-capable receipt profile for SPEC-022 otherwise unchanged)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 candidate `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.3 (settlement/accounting semantics; v0.4+ chargeability successor expected for terminal-state rows), SPEC-006 v0.9, SPEC-008 v0.3 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.5, SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3, SPEC-022 v0.1.4 (hard — settlement-capable receipt profile consumer)
+
+**Change log v0.4.6 (2026-08-18, issue #1023 — close requirement-ID migration):**
+- Accepts `SPEC-015-R001`..`SPEC-015-R005` as the exhaustive evidencable
+  conformance units for this spec. `requirement_id_migration` is `complete`.
+  R002–R005 stay pending until a signed journey-result promotes them. Buyer
+  retrieval remains SPEC-022-R006. No receipt tuple, wire, or verifier
+  behavior change. Do not promote from this close.
 
 **Change log v0.4.5 (2026-08-18, issue #1023 — remaining conformance unit IDs):**
 - Registers `SPEC-015-R002`..`SPEC-015-R005` in `specs/CONFORMANCE.json` as
@@ -818,7 +825,7 @@ superseded by v0.1.1/v0.1.2):**
 
 ## Preliminary conformance unit IDs
 
-SPEC-015 v0.4.5 registers `SPEC-015-R001`..`SPEC-015-R005` in
+SPEC-015 v0.4.6 registers `SPEC-015-R001`..`SPEC-015-R005` in
 `specs/CONFORMANCE.json`. R001 remains the v0.4 settlement-capable
 issuance/ingestion unit. R002–R005 group additional existing obligation
 areas without changing them:
@@ -833,8 +840,9 @@ areas without changing them:
 - `SPEC-015-R005` — coordinator receipt storage, ingest idempotency, and
   audit redaction (§13, §N). Buyer retrieval remains SPEC-022-R006.
 
-`requirement_id_migration` remains `pending` until issue #1023 closes.
-These IDs are not promoted from this registration.
+`requirement_id_migration` is `complete`. R002–R005 are not promoted from
+this close. Signed journey-result evidence is still required before any of
+those rows can become conformant. Buyer retrieval remains SPEC-022-R006.
 
 ## 0. Operator-paste invocation block
 

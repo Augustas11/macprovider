@@ -1,7 +1,13 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.20 (2026-08-18, remaining SPEC-006 conformance unit IDs)
+**Version:** 0.9.21 (2026-08-18, close SPEC-006 requirement-ID migration)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.21 (2026-08-18, issue #1023 — close requirement-ID migration):**
+- Accepts `SPEC-006-R001`..`SPEC-006-R009` as the exhaustive evidencable
+  conformance units for this spec. `requirement_id_migration` is `complete`.
+  R004–R009 stay pending until a signed journey-result promotes them. No
+  wire-contract or settlement-matrix change. Do not promote from this close.
 
 **Change log v0.9.20 (2026-08-18, issue #1023 — remaining conformance unit IDs):**
 - Registers `SPEC-006-R004`..`SPEC-006-R009` in `specs/CONFORMANCE.json` as
@@ -199,7 +205,7 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-006 v0.9.20 registers `SPEC-006-R001`..`SPEC-006-R009` in
+SPEC-006 v0.9.21 registers `SPEC-006-R001`..`SPEC-006-R009` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path chat, error, and
 quota units. R004–R009 group additional existing obligation areas without
 changing them:
@@ -218,8 +224,9 @@ changing them:
   (§2.2, §4.2).
 - `SPEC-006-R009` — demo-token traffic isolation from paid quota (§3.6).
 
-`requirement_id_migration` remains `pending` until issue #1023 closes.
-These IDs are not promoted from this registration.
+`requirement_id_migration` is `complete`. R004–R009 are not promoted from
+this close. Signed journey-result evidence is still required before any of
+those rows can become conformant.
 
 ## 1. Scope
 

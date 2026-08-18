@@ -13,8 +13,8 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.5.8 | normative | pending | pending: 2 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.11.1 | normative | pending | pending: 1 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart Router | 0.3.3 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
-| SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.3 | normative | pending | conformant: 3, pending: 6 | [SPEC-005-billing.md](SPEC-005-billing.md) |
-| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.20 | normative | pending | conformant: 3, pending: 6 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
+| SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.4 | normative | complete | conformant: 3, pending: 6 | [SPEC-005-billing.md](SPEC-005-billing.md) |
+| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.21 | normative | complete | conformant: 3, pending: 6 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.1 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.6.0 | normative | pending | pending: 1 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | normative | pending | pending corpus migration | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
@@ -23,7 +23,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-012 | Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility | 0.3 | draft | pending | pending corpus migration | [SPEC-012-coordinator-demand-pull.md](SPEC-012-coordinator-demand-pull.md) |
 | SPEC-013 | `macprovider-cli autotune` subcommand | 0.3.1 | normative | pending | pending corpus migration | [SPEC-013-cli-autotune.md](SPEC-013-cli-autotune.md) |
 | SPEC-014 | Provider Portal (seller-facing web surface) | 0.9 | draft | pending | pending corpus migration | [SPEC-014-provider-portal.md](SPEC-014-provider-portal.md) |
-| SPEC-015 | Verifiable inference receipts | 0.4.5 | normative | pending | conformant: 1, pending: 4 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
+| SPEC-015 | Verifiable inference receipts | 0.4.6 | normative | complete | conformant: 1, pending: 4 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
 | SPEC-016 | Provider payout pipeline (USDC on Base) | 0.1.26 | draft | pending | conformant: 1, pending: 10 | [SPEC-016-payout-pipeline.md](SPEC-016-payout-pipeline.md) |
 | SPEC-017 | Network Stats API | 0.1.9 | normative | pending | pending: 1 | [SPEC-017-network-stats-api.md](SPEC-017-network-stats-api.md) |
 | SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.7 | normative | pending | conformant: 1, pending: 1 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
