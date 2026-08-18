@@ -141,8 +141,10 @@ Deferred for paid buyer path:
   evidence);
 - SPEC-040 wallet sessions;
 - default-off or future features such as `SPEC-024` prefix-cache discount
-  enablement, `SPEC-036` compute-integrity enforce, and SPEC-022 enforce-mode
-  activation.
+  enablement, `SPEC-036` compute-integrity enforce, and production Pearl /
+  SPEC-022 enforce-mode activation. Isolated `JOURNEY-BUYER-ENFORCE`
+  (`TestJourneyBuyerEnforceIsolatedCandidate`, issue #1044) is the
+  candidate harness for R007/R008/R009/R011; it does not flip Pearl.
 
 Stop condition for this slice:
 
