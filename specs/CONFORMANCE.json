@@ -649,7 +649,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-022-R001..R005 and R010 promoted from signed observe-mode JOURNEY-BUYER-PAID-PATH. R006 implemented as metadata-only GET /v1/receipts/{request_id} and remains pending until signed capture (#1042). R007/R008 cannot promote from observe. R009/R011 still pending. No enforce activation."
+        "rationale": "SPEC-022-R001..R005 and R010 promoted from signed observe-mode JOURNEY-BUYER-PAID-PATH. R006 implemented as metadata-only GET /v1/receipts/{request_id} and remains pending until signed capture (#1042). Isolated JOURNEY-BUYER-ENFORCE (#1044) is the candidate harness for R007/R008/R009/R011; observe-mode paid-path must not promote R007/R008. No production Pearl / enforce activation."
       }
     },
     {
@@ -4302,17 +4302,18 @@
       "tests": [
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayableCreditGateRequiresVerifiedReceipt",
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayableCreditGateBlocksQuarantineAndOverlap",
-        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayoutClaimRevalidatesSourceRows"
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022PayoutClaimRevalidatesSourceRows",
+        "test/integration/buyer_enforce_journey_test.go:TestJourneyBuyerEnforceIsolatedCandidate"
       ],
       "journeys": [
-        "JOURNEY-BUYER-PAID-PATH"
+        "JOURNEY-BUYER-ENFORCE"
       ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "R-7 settlement, quarantine, and payout exclusion (receipt-verification gate before any credit/earnings/sweep/payout; non-verified excluded; quarantine mandatory for trust failures and terminal; no fallback to provider-reported usage under enforce; operator money-positive bypasses forbidden). Implementation/tests mapped. JOURNEY-BUYER-PAID-PATH may observe this row in observe mode but MUST NOT promote it; enforce money-gate evidence needs a separate journey. Physical evidence owner remains #1022 for observation only."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1044",
+        "rationale": "R-7 settlement, quarantine, and payout exclusion. Isolated JOURNEY-BUYER-ENFORCE exercises enforce-mode verified debit plus missing-receipt deadline quarantine with reservation refund and no payout-ready rows. JOURNEY-BUYER-PAID-PATH must not promote this row from observe mode. A passing local harness is not signed promotion evidence. Physical evidence is #1044. Production Pearl is not flipped."
       }
     },
     {
@@ -4326,17 +4327,18 @@
       ],
       "tests": [
         "phase5-gateway/internal/router/server_test.go:TestQuotaReservationLeakOnContextCancel",
-        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout"
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout",
+        "test/integration/buyer_enforce_journey_test.go:TestJourneyBuyerEnforceIsolatedCandidate"
       ],
       "journeys": [
-        "JOURNEY-BUYER-PAID-PATH"
+        "JOURNEY-BUYER-ENFORCE"
       ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "R-8 buyer debit semantics (reservation-first; final debit only on verified; quarantine/deadline releases reservation and keeps provider credit zero; zero_settled terminal; buyer surfaces distinguish pending/verified/quarantined/zero_settled). Implementation/tests mapped. Observe-mode quota settlement is not evidence that final debit waited for verified receipts. This journey MUST NOT promote R008. Physical evidence owner remains #1022 for observation only."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1044",
+        "rationale": "R-8 buyer debit semantics. Isolated JOURNEY-BUYER-ENFORCE proves reservation-first gateway debit after verified receipts and reservation refund after deadline quarantine. Observe-mode JOURNEY-BUYER-PAID-PATH must not promote this row. A passing local harness is not signed promotion evidence. Physical evidence is #1044."
       }
     },
     {
@@ -4348,15 +4350,18 @@
       ],
       "tests": [
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022RecoveryPreservesEnforcePolicyFromRouteSnapshot",
-        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022RecoveryDoesNotUseOtherAccountRouteSnapshot"
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022RecoveryDoesNotUseOtherAccountRouteSnapshot",
+        "test/integration/buyer_enforce_journey_test.go:TestJourneyBuyerEnforceIsolatedCandidate"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-BUYER-ENFORCE"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-9 rollout, migration, and rollback (effective policy by request-start timestamp and attempt identity; no retroactive reclassification; enforced rows retain original policy/deadline/payout-exclusion across rollback; pre-existing payout-ready rows excluded from the snapshot). Implementation/tests mapped; no paid-path journey. Reconciliation remains under #614."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1044",
+        "rationale": "R-9 rollout, migration, and rollback. Isolated JOURNEY-BUYER-ENFORCE pins enforce-mode ledger rows, then rewrites YAML to observe and restarts the coordinator; already-enforced rows retain settlement_policy_mode=enforce. A passing local harness is not signed promotion evidence. Physical evidence is #1044. Production Pearl is not flipped."
       }
     },
     {
@@ -4398,15 +4403,18 @@
         "phase4-coordinator/internal/billing/settlement_receipts.go:insertSettlementReceiptVerdictAuditConn"
       ],
       "tests": [
-        "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit"
+        "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit",
+        "test/integration/buyer_enforce_journey_test.go:TestJourneyBuyerEnforceIsolatedCandidate"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-BUYER-ENFORCE"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "R-11 audit and observability (structured per-attempt settlement audit event; no raw prompts/outputs/receipt material; aggregate verified/pending/quarantined/zero_settled counters; recovery/backfill audit completeness). Implementation/tests mapped; no paid-path journey. Reconciliation remains under #614."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1044",
+        "rationale": "R-11 audit and observability. Isolated JOURNEY-BUYER-ENFORCE reads settlement_receipt_verdict audit_log rows and asserts structured outcome fields without raw prompts, outputs, or API keys. A passing local harness is not signed promotion evidence. Physical evidence is #1044."
       }
     },
     {

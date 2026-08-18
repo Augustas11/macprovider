@@ -286,6 +286,9 @@ type scenarioOpts struct {
 	// settlementReconcileIntervalSeconds overrides the gateway SPEC-022
 	// background reconciler cadence. Zero keeps the gateway default.
 	settlementReconcileIntervalSeconds int
+	// pendingDeadlineSeconds overrides settlement.pending_deadline_seconds.
+	// Zero keeps the coordinator default (300).
+	pendingDeadlineSeconds int
 }
 
 type settlementCatalogFixture struct {
@@ -399,7 +402,7 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		s.settlementCatalogID = settlementCatalog.catalogID
 		s.settlementCatalogKeyID = settlementCatalog.catalogKeyID
 	}
-	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode)
+	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode, opts.pendingDeadlineSeconds)
 
 	gwServiceTok := s.serviceToken
 	if opts.gatewayServiceToken != nil {
@@ -485,7 +488,7 @@ func randHex(t *testing.T, n int) string {
 // the audit fixture: we want a clean room for testing the GATEWAY ↔
 // COORDINATOR boundary, not the provider auth gate which has its own
 // dedicated tests in phase4-coordinator/internal/ws).
-func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool) {
+func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool, pendingDeadlineSeconds int) {
 	s.t.Helper()
 	tier2Cfg := map[string]any{
 		"observe_enabled":                    false,
@@ -596,6 +599,7 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			"startup_reconcile_window_hours": 24,
 			"nightly_reconcile_window_days":  7,
 			"recovery_grace_seconds":         30,
+			"pending_deadline_seconds":       pendingDeadlineOrDefault(pendingDeadlineSeconds),
 			"verified_model_settlement_mode": verifiedModelSettlementMode(settlementEnforceMode),
 			"job_enabled":                    false,
 		},
@@ -644,6 +648,13 @@ func verifiedModelSettlementMode(enforce bool) string {
 		return "enforce"
 	}
 	return "observe"
+}
+
+func pendingDeadlineOrDefault(seconds int) int {
+	if seconds > 0 {
+		return seconds
+	}
+	return 300
 }
 
 func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
@@ -1063,6 +1074,31 @@ func (s *scenario) restartCoordinator() {
 	s.waitForHealth(s.coordProvURL + "/healthz")
 }
 
+func (s *scenario) rewriteSettlementMode(mode string) {
+	s.t.Helper()
+	raw, err := os.ReadFile(s.coordYAML)
+	if err != nil {
+		s.t.Fatalf("read coordinator yaml: %v", err)
+	}
+	var cfg map[string]any
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		s.t.Fatalf("parse coordinator yaml: %v", err)
+	}
+	settlement, _ := cfg["settlement"].(map[string]any)
+	if settlement == nil {
+		s.t.Fatal("coordinator yaml missing settlement")
+	}
+	settlement["verified_model_settlement_mode"] = mode
+	cfg["settlement"] = settlement
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		s.t.Fatalf("marshal coordinator yaml: %v", err)
+	}
+	if err := os.WriteFile(s.coordYAML, out, 0o600); err != nil {
+		s.t.Fatalf("write coordinator yaml: %v", err)
+	}
+}
+
 func (s *scenario) startGateway(ctx context.Context) {
 	s.t.Helper()
 	cmd := exec.CommandContext(ctx, gatewayBin, "-config", s.gatewayYAML)
@@ -1238,28 +1274,29 @@ func (s *scenario) chatRequest(headers map[string]string, body string) (int, htt
 // serves OpenAI-shaped chat completions on the endpoint port.
 // Cancellation tears both halves down.
 type fakeProvider struct {
-	t                 *testing.T
-	providerID        string
-	providerToken     string
-	httpPort          int
-	wsURL             string
-	hServer           *http.Server
-	receiptEnabled    bool
-	settlementEnabled bool
-	modelID           string
-	modelHash         string
-	catalogReleaseID  string
-	catalogPolicy     string
-	catalogSHA256     string
-	receiptPubkey     ed25519.PublicKey
-	receiptPrivkey    ed25519.PrivateKey
-	lastRequestBody   []byte
-	lastResponseBody  []byte
-	hReady            chan struct{}
-	stopOnce          sync.Once
-	stopped           chan struct{}
-	hitMu             sync.Mutex
-	hits              int // /v1/chat/completions hit count, for sticky verification
+	t                     *testing.T
+	providerID            string
+	providerToken         string
+	httpPort              int
+	wsURL                 string
+	hServer               *http.Server
+	receiptEnabled        bool
+	settlementEnabled     bool
+	omitSettlementReceipt bool
+	modelID               string
+	modelHash             string
+	catalogReleaseID      string
+	catalogPolicy         string
+	catalogSHA256         string
+	receiptPubkey         ed25519.PublicKey
+	receiptPrivkey        ed25519.PrivateKey
+	lastRequestBody       []byte
+	lastResponseBody      []byte
+	hReady                chan struct{}
+	stopOnce              sync.Once
+	stopped               chan struct{}
+	hitMu                 sync.Mutex
+	hits                  int // /v1/chat/completions hit count, for sticky verification
 }
 
 // Hits returns the number of /v1/chat/completions requests this fake
@@ -1324,6 +1361,12 @@ func (p *fakeProvider) enableSettlementReceipts(catalog settlementCatalogFixture
 	p.catalogSHA256 = catalog.autotuneCatalogSHA256
 	p.receiptPubkey = pub
 	p.receiptPrivkey = priv
+}
+
+func (p *fakeProvider) setOmitSettlementReceipts(omit bool) {
+	p.hitMu.Lock()
+	p.omitSettlementReceipt = omit
+	p.hitMu.Unlock()
 }
 
 const fakeCompletionBody = `{
@@ -1874,12 +1917,13 @@ func (p *fakeProvider) start(ctx context.Context) {
 		p.hits++
 		p.lastRequestBody = append([]byte(nil), requestBody...)
 		p.lastResponseBody = []byte(fakeCompletionBody)
+		omitReceipt := p.omitSettlementReceipt
 		p.hitMu.Unlock()
 		if chatBodyRequestsStream(requestBody) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			terminalTS := time.Now().UTC().UnixMilli()
 			var receipt string
-			if p.settlementEnabled && hasSettlementMetadata {
+			if p.settlementEnabled && hasSettlementMetadata && !omitReceipt {
 				var err error
 				receipt, err = p.buildSettlementReceiptHeader(settlementMetadata, "hello from fake provider", "stop", 8, 12, terminalTS)
 				if err != nil {
@@ -1911,7 +1955,7 @@ func (p *fakeProvider) start(ctx context.Context) {
 			}
 			w.Header().Set("X-MacProvider-Receipt", receipt)
 		}
-		if p.settlementEnabled && hasSettlementMetadata {
+		if p.settlementEnabled && hasSettlementMetadata && !omitReceipt {
 			terminalTS := time.Now().UTC().UnixMilli()
 			receipt, err := p.buildSettlementReceiptHeader(settlementMetadata, "hello from fake provider", "stop", 8, 12, terminalTS)
 			if err != nil {
@@ -2209,6 +2253,7 @@ type settlementReceiptVerdictRow struct {
 	BuyerDebitOutcome         string
 	ProviderSettlementOutcome string
 	PayoutExclusionOutcome    string
+	RouteSnapshotMode         string
 }
 
 type quotaReservationRow struct {
@@ -2329,7 +2374,8 @@ func (s *scenario) readSettlementReceiptVerdicts() []settlementReceiptVerdictRow
 	rows, err := db.Query(`
 SELECT request_id, attempt_n, provider_id, receipt_present, receipt_version,
        receipt_result, settlement_outcome, reason, closed, model_hash,
-       buyer_debit_outcome, provider_settlement_outcome, payout_exclusion_outcome
+       buyer_debit_outcome, provider_settlement_outcome, payout_exclusion_outcome,
+       route_snapshot_mode
   FROM settlement_receipt_verdicts
  ORDER BY id ASC`)
 	if err != nil {
@@ -2353,6 +2399,7 @@ SELECT request_id, attempt_n, provider_id, receipt_present, receipt_version,
 			&row.BuyerDebitOutcome,
 			&row.ProviderSettlementOutcome,
 			&row.PayoutExclusionOutcome,
+			&row.RouteSnapshotMode,
 		); err != nil {
 			s.t.Fatalf("scan settlement_receipt_verdicts: %v", err)
 		}

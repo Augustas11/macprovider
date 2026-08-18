@@ -38,6 +38,7 @@ conformant.
 - Crash recovery / SPEC-005-R003: not one of the eleven physical steps;
   this harness cannot promote it.
 - Promoting SPEC-022-R007 or SPEC-022-R008 from this observe-mode run.
+  Enforce money-gate evidence is `JOURNEY-BUYER-ENFORCE` (issue #1044).
 
 ## Preconditions
 
