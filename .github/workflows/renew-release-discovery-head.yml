@@ -314,7 +314,7 @@ jobs:
         id: publish
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
           OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
           TAG: ${{ steps.target.outputs.tag }}
           COMMIT: ${{ steps.target.outputs.commit }}
