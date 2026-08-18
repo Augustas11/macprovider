@@ -81,6 +81,9 @@ var spec018RetryableByCode = map[string]bool{
 	// succeed once a provider upgrades and reconnects.
 	"model_version_floor_unmet": true,
 	"rate_limited":              true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
+	// SPEC-042 R005/R010 tenant isolation.
+	"pool_state_stale":        true,  // 503, pool membership changed during routing; re-select
+	"pool_no_eligible_member": false, // 503, no member satisfies the pool; same reservation must not be retried
 	// Permanent/client errors — retrying will not help (SPEC-006 §5.2).
 	"model_not_found":                                         false,
 	"context_exceeds_capacity":                                false,
