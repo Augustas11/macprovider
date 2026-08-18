@@ -12,4 +12,5 @@ exec /opt/micromdm/bin/micromdm serve \
   -tls=false \
   -http-proxy-headers=true \
   -homepage=false \
-  -log-time=true
+  -log-time=true \
+  -command-webhook-url http://127.0.0.1:8444/internal/mdm/command-webhook
