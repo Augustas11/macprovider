@@ -124,12 +124,12 @@ final class DashboardWindowE2ETests: XCTestCase {
     }
 
     private static func assertRenderedCopy(_ text: String, mustContain needles: [String]) {
-        // GitHub Actions sets CI=true and the macos runner does not produce
-        // reliable Vision OCR of SwiftUI. Pixel copy stays a local extra check.
-        guard ProcessInfo.processInfo.environment["CI"] == nil else { return }
+        // Pixel OCR is opt-in. GitHub Actions does not reliably pass CI=true into
+        // the Malibu test host, and the runner's Vision output is junk.
+        guard ProcessInfo.processInfo.environment["MALIBU_DASHBOARD_E2E_OCR"] == "1" else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            XCTFail("Local OCR returned no dashboard text")
+            XCTFail("MALIBU_DASHBOARD_E2E_OCR=1 but OCR returned no dashboard text")
             return
         }
         for needle in needles {
