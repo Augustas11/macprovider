@@ -405,4 +405,68 @@ final class MacProviderKeychainAccessGroupTests: XCTestCase {
     }
 }
 
+final class SEAttestationFileStoreTests: XCTestCase {
+    override func tearDown() {
+        SEAttestationFileStore.urlOverride = nil
+        super.tearDown()
+    }
+
+    func testDefaultURLIsUnderApplicationSupport() {
+        let path = SEAttestationFileStore.defaultURL.path
+        XCTAssertTrue(path.hasSuffix("Library/Application Support/macprovider/se-attestation-p256.v1"))
+    }
+
+    func testWriteExclusiveCreatesOwnerOnlyFile() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("se-file-store-\(UUID().uuidString)", isDirectory: true)
+        let url = dir.appendingPathComponent("se-attestation-p256.v1")
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let payload = Data("not-an-se-key".utf8)
+        try SEAttestationFileStore.writeExclusive(url, data: payload)
+
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        XCTAssertEqual(try SEAttestationFileStore.read(url), payload)
+
+        XCTAssertThrowsError(try SEAttestationFileStore.writeExclusive(url, data: payload)) { error in
+            guard case SecureEnclaveIdentityError.fileStoreAlreadyExists = error else {
+                XCTFail("expected fileStoreAlreadyExists, got \(error)")
+                return
+            }
+        }
+    }
+
+    #if arch(arm64)
+    func testFileBackedSERoundTripWhenAvailable() throws {
+        try XCTSkipUnless(SecureEnclaveIdentity.isAvailable, "Secure Enclave required")
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("se-file-store-\(UUID().uuidString)", isDirectory: true)
+        let url = dir.appendingPathComponent("se-attestation-p256.v1")
+        SEAttestationFileStore.urlOverride = url
+        addTeardownBlock {
+            SEAttestationFileStore.urlOverride = nil
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let first = try SecureEnclaveIdentity.loadOrCreateFileBacked()
+        XCTAssertEqual(first.backendName, "file")
+        XCTAssertEqual(first.publicKeyRaw.count, 64)
+
+        let second = try SecureEnclaveIdentity.loadOrCreateFileBacked()
+        XCTAssertEqual(first.publicKeyRaw, second.publicKeyRaw)
+
+        let message = Data("hello-se-file".utf8)
+        let signature = try first.sign(message)
+        var x963 = Data([0x04])
+        x963.append(first.publicKeyRaw)
+        let publicKey = try P256.Signing.PublicKey(x963Representation: x963)
+        let ecdsa = try P256.Signing.ECDSASignature(derRepresentation: signature)
+        XCTAssertTrue(publicKey.isValidSignature(ecdsa, for: message))
+    }
+    #endif
+}
+
 

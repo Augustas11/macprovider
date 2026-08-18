@@ -126,14 +126,14 @@ Paid-buyer-path active domains:
 | Settlement-capable receipts | `SPEC-015` | `SPEC-015-R001` | v0.4 receipt issuance (`ReceiptBuilder.buildSettlement`) and coordinator ingestion/verification. Domain `inference-receipts`. |
 | Verified-model settlement | `SPEC-022` | `SPEC-022-R001`..`R008`, `R010` | Observe-mode settlement gate, route snapshot, receipt verification, quarantine observation, buyer debit observation, buyer disclosure. Domain `verified-model-settlement`. SPEC-022 remains `draft`; R007/R008 cannot promote from this observe-mode journey. |
 
+Paid-path ID migration: `requirement_id_migration` on SPEC-005/006/015 is
+`complete` after #1023 accepted the remainder IDs (`SPEC-005-R004`..`R009`,
+`SPEC-006-R004`..`R009`, `SPEC-015-R002`..`R005`) as covering the remaining
+evidencable obligation areas. Those IDs stay unpromoted until a signed
+journey-result exists; closing #1023 does not promote them.
+
 Deferred for paid buyer path:
 
-- exhaustive close of `requirement_id_migration` on SPEC-005/006/015
-  after the #1023 remainder IDs (`SPEC-005-R004`..`R009`,
-  `SPEC-006-R004`..`R009`, `SPEC-015-R002`..`R005`) are accepted as
-  covering the remaining evidencable obligation areas; the flag stays
-  `pending` until that issue closes, and those IDs are not promoted
-  from registration;
 - provider-prebeta onboarding, autotune, hardware admission, and
   payout-address registration;
 - SPEC-016 payout runner, hot-wallet funding, and on-chain settlement;

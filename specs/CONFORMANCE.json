@@ -119,7 +119,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.3",
+      "version": "0.6.4",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -140,18 +140,18 @@
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
       "evidence": [],
-      "requirement_id_migration": "pending",
+      "requirement_id_migration": "complete",
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "SPEC-005-R001/R002 promoted from signed JOURNEY-BUYER-PAID-PATH (observe-mode isolated candidate). SPEC-005-R003 (crash recovery) remains pending under isolated JOURNEY-BUYER-CRASH-RECOVERY (#1043). R004\u2013R009 register remaining D8/settlement/attempt/endpoint/account-scope/quarantine obligation areas without promotion. requirement_id_migration stays pending until this #1023 remainder is accepted as exhaustive. No enforce claim."
+        "rationale": "SPEC-005-R001/R002 promoted from signed JOURNEY-BUYER-PAID-PATH. SPEC-005-R003 promoted from signed JOURNEY-BUYER-CRASH-RECOVERY (#1057). R004\u2013R009 remain pending evidencable units (D8/settlement/attempt/endpoint/account-scope/quarantine). requirement_id_migration is complete after #1023. Do not promote R004\u2013R009 from this close. No enforce claim."
       }
     },
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.20",
+      "version": "0.9.21",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -170,12 +170,12 @@
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
       "evidence": [],
-      "requirement_id_migration": "pending",
+      "requirement_id_migration": "complete",
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "SPEC-006-R001/R002/R003 remain the paid-path chat/error/quota units. R004\u2013R009 register models/usage/status/kill-switch/public-feeds/demo isolation without promotion. requirement_id_migration stays pending until this #1023 remainder is accepted as exhaustive."
+        "rationale": "SPEC-006-R001/R002/R003 remain the paid-path chat/error/quota units. R004\u2013R009 remain pending evidencable units (models/usage/status/kill-switch/public-feeds/demo isolation). requirement_id_migration is complete after #1023. Do not promote R004\u2013R009 from this close."
       }
     },
     {
@@ -394,7 +394,7 @@
     {
       "spec_id": "SPEC-015",
       "title": "Verifiable inference receipts",
-      "version": "0.4.5",
+      "version": "0.4.6",
       "path": "specs/SPEC-015-receipts.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -418,12 +418,12 @@
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
       "evidence": [],
-      "requirement_id_migration": "pending",
+      "requirement_id_migration": "complete",
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "SPEC-015-R001 remains the v0.4 settlement-capable issuance/ingestion unit. R002\u2013R005 register historical v0.1\u2013v0.3, receipt-key lifecycle, trust root, and storage/redaction without promotion. Buyer retrieval stays SPEC-022-R006. requirement_id_migration stays pending until this #1023 remainder is accepted as exhaustive."
+        "rationale": "SPEC-015-R001 remains the v0.4 settlement-capable issuance/ingestion unit. R002\u2013R005 remain pending evidencable units (historical v0.1\u2013v0.3, receipt-key lifecycle, trust root, storage/redaction). Buyer retrieval stays SPEC-022-R006. requirement_id_migration is complete after #1023. Do not promote R002\u2013R005 from this close."
       }
     },
     {
@@ -3676,7 +3676,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "D8 failed-request accounting (\u00a76): 503 writes no payable ledger row; null-usage errors persist zero-credit rows. Mapped to existing hot-path tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "D8 failed-request accounting (\u00a76): 503 writes no payable ledger row; null-usage errors persist zero-credit rows. Mapped to existing hot-path tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -3696,7 +3696,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Settlement cadence, threshold, split, and payout-ready idempotency (\u00a77, \u00a74.5). Mapped to existing RunSettlement tests. job_enabled remains operator-gated. Not promoted. Remainder tracking is #1023."
+        "rationale": "Settlement cadence, threshold, split, and payout-ready idempotency (\u00a77, \u00a74.5). Mapped to existing RunSettlement tests. job_enabled remains operator-gated. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -3716,7 +3716,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Multi-attempt attribution (\u00a78): monotonic attempt_n, duplicate-without-retry quarantine, derived retry credit. Mapped to existing hot-path tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Multi-attempt attribution (\u00a78): monotonic attempt_n, duplicate-without-retry quarantine, derived retry credit. Mapped to existing hot-path tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -3736,7 +3736,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Operator and provider ledger endpoints (\u00a711): summary, settlement-verdict counters. Mapped to existing endpoint tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Operator and provider ledger endpoints (\u00a711): summary, settlement-verdict counters. Mapped to existing endpoint tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -3756,7 +3756,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Settlement account-scope hashing and identity snapshots (\u00a74.8). Mapped to existing account-scope tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Settlement account-scope hashing and identity snapshots (\u00a74.8). Mapped to existing account-scope tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -3776,7 +3776,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Operator quarantine resolutions (\u00a74.10, \u00a710.5): force-void and open-quarantine list. Mapped to existing quarantine tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Operator quarantine resolutions (\u00a74.10, \u00a710.5): force-void and open-quarantine list. Mapped to existing quarantine tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -3896,7 +3896,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Public GET /v1/models and tier-1 disclosure (\u00a75.3). Mapped to existing models tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Public GET /v1/models and tier-1 disclosure (\u00a75.3). Mapped to existing models tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -3915,7 +3915,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Authenticated GET /v1/usage (\u00a75.5). Mapped to existing usage disclosure tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Authenticated GET /v1/usage (\u00a75.5). Mapped to existing usage disclosure tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -3935,7 +3935,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Public GET /v1/status aggregation and redaction (\u00a75.6). Mapped to existing status tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Public GET /v1/status aggregation and redaction (\u00a75.6). Mapped to existing status tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -3956,7 +3956,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Gateway kill switches (\u00a72.7). Mapped to existing persist/demo-pause tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Gateway kill switches (\u00a72.7). Mapped to existing persist/demo-pause tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -3977,7 +3977,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Unauthenticated public rate-card and stats overview on the buyer host (\u00a72.2, \u00a74.2). Mapped to existing public-feeds tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Unauthenticated public rate-card and stats overview on the buyer host (\u00a72.2, \u00a74.2). Mapped to existing public-feeds tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -3997,7 +3997,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Demo-token traffic isolation from paid API-key quota (\u00a73.6). Mapped to existing demo tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Demo-token traffic isolation from paid API-key quota (\u00a73.6). Mapped to existing demo tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -4053,7 +4053,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Historical v0.1\u2013v0.3 verification and forward-incompat with v0.4 (\u00a710, \u00a7M). Mapped to existing verifier tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Historical v0.1\u2013v0.3 verification and forward-incompat with v0.4 (\u00a710, \u00a7M). Mapped to existing verifier tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -4074,7 +4074,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Provider receipt-key lifecycle and buyer-safe pubkey resolver (\u00a77). Mapped to existing receipt-keys tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Provider receipt-key lifecycle and buyer-safe pubkey resolver (\u00a77). Mapped to existing receipt-keys tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -4095,7 +4095,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Pubkey trust root and TLS-trust warnings (\u00a78). Mapped to existing verify/resolver tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Pubkey trust root and TLS-trust warnings (\u00a78). Mapped to existing verify/resolver tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {
@@ -4114,7 +4114,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Coordinator receipt storage, ingest idempotency, and audit redaction (\u00a713, \u00a7N). Retrieval remains SPEC-022-R006. Mapped to existing ingest tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Coordinator receipt storage, ingest idempotency, and audit redaction (\u00a713, \u00a7N). Retrieval remains SPEC-022-R006. Mapped to existing ingest tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
       }
     },
     {

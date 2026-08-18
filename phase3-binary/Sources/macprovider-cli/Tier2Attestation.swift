@@ -12,7 +12,11 @@ import Security
 /// Returns nil (with a WARN log) when:
 /// - SE hardware is unavailable
 /// - A named keychain access group is requested without the entitlement
+/// - File-backed SE store initialization fails
 /// - Any other SE initialization error
+///
+/// When no named group is set, a data-protection keychain -34018 falls
+/// back to the file-backed CryptoKit SE store instead of returning nil.
 ///
 /// This generator does NOT fake attestation on non-SE hardware; it lets the
 /// caller fall back to ManagedDeviceAttestationGenerator or return nil.
