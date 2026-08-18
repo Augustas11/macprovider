@@ -1,0 +1,25 @@
+{
+  "captured_at": "2026-08-18T05:18:26Z",
+  "journey_id": "JOURNEY-BUYER-CRASH-RECOVERY",
+  "observations": {
+    "idempotent_rescan": true,
+    "identity_fallback_recovered": true,
+    "job_enabled": false,
+    "missing_credit_rows_created": 1,
+    "orphan_credit_rows_quarantined": 1,
+    "orphan_quarantined": true,
+    "payout_ready_mutated": false,
+    "planted_at": "2026-08-18T05:16:26.024891Z",
+    "recovery_source": "startup_scan",
+    "settlement_mode": "observe"
+  },
+  "repository": {
+    "commit": "f6c61a785347c4dcd61a42f3925cd1cd161d0480",
+    "name": "Augustas11/macprovider"
+  },
+  "requirement_ids": [
+    "SPEC-005-R003"
+  ],
+  "run_id": "buyer-crash-recovery-20260818T051826Z",
+  "schema_version": "macprovider.buyer-crash-recovery-evidence.v1"
+}
