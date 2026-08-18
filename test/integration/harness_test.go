@@ -219,6 +219,9 @@ type scenario struct {
 	fakeProvs              []*fakeProvider
 	coordLogBuf            *logBuffer // populated when captureCoordLogs=true
 	cancelAll              context.CancelFunc
+	rootCtx                context.Context
+	coordCancel            context.CancelFunc
+	coordCmd               *exec.Cmd
 	fakeProv               *fakeProvider
 	procWG                 sync.WaitGroup
 	modelHash              string
@@ -323,6 +326,7 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		demoSecret:    randHex(t, 32),
 		accountID:     "acct_" + randHex(t, 8),
 		providerID:    "prov-" + randHex(t, 4),
+		rootCtx:       ctx,
 		cancelAll:     cancel,
 	}
 	t.Cleanup(s.shutdown)
@@ -1010,17 +1014,53 @@ func (s *scenario) issueProviderToken(providerID, providerName string) string {
 
 func (s *scenario) startCoordinator(ctx context.Context) {
 	s.t.Helper()
-	cmd := exec.CommandContext(ctx, coordinatorBin, "-config", s.coordYAML)
+	if s.coordCancel != nil {
+		s.coordCancel()
+	}
+	coordCtx, cancel := context.WithCancel(ctx)
+	s.coordCancel = cancel
+	cmd := exec.CommandContext(coordCtx, coordinatorBin, "-config", s.coordYAML)
 	cmd.Env = os.Environ()
 	s.streamLogs(cmd, "coord")
 	if err := cmd.Start(); err != nil {
 		s.t.Fatalf("start coordinator: %v", err)
 	}
+	s.coordCmd = cmd
 	s.procWG.Add(1)
 	go func() {
 		defer s.procWG.Done()
 		_ = cmd.Wait()
 	}()
+}
+
+func (s *scenario) stopCoordinator() {
+	s.t.Helper()
+	if s.coordCancel != nil {
+		s.coordCancel()
+	}
+	if s.coordCmd != nil && s.coordCmd.Process != nil {
+		_ = s.coordCmd.Process.Kill()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(s.coordBuyerURL + "/healthz")
+		if err != nil {
+			s.coordCmd = nil
+			return
+		}
+		resp.Body.Close()
+		time.Sleep(50 * time.Millisecond)
+	}
+	s.t.Fatal("coordinator healthz still reachable after stop")
+}
+
+func (s *scenario) restartCoordinator() {
+	s.t.Helper()
+	s.stopCoordinator()
+	time.Sleep(200 * time.Millisecond)
+	s.startCoordinator(s.rootCtx)
+	s.waitForHealth(s.coordBuyerURL + "/healthz")
+	s.waitForHealth(s.coordProvURL + "/healthz")
 }
 
 func (s *scenario) startGateway(ctx context.Context) {

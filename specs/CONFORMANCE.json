@@ -145,7 +145,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "SPEC-005-R001/R002 remain the paid-path formula/hot-path units. R003 stays pending for crash recovery. R004–R009 register remaining D8/settlement/attempt/endpoint/account-scope/quarantine obligation areas without promotion. requirement_id_migration stays pending until this #1023 remainder is accepted as exhaustive."
+        "rationale": "SPEC-005-R001/R002 promoted from signed JOURNEY-BUYER-PAID-PATH (observe-mode isolated candidate). SPEC-005-R003 (crash recovery) remains pending under isolated JOURNEY-BUYER-CRASH-RECOVERY (#1043). R004–R009 register remaining D8/settlement/attempt/endpoint/account-scope/quarantine obligation areas without promotion. requirement_id_migration stays pending until this #1023 remainder is accepted as exhaustive. No enforce claim."
       }
     },
     {
@@ -3630,22 +3630,24 @@
       "spec_id": "SPEC-005",
       "state": "pending",
       "implementation": [
-        "phase4-coordinator/internal/billing/recovery.go:RecoverLedger"
+        "phase4-coordinator/internal/billing/recovery.go:RecoverLedger",
+        "phase4-coordinator/internal/billing/recovery.go:StartStartupScan"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/store_test.go:TestRecoverLedger_Idempotent",
         "phase4-coordinator/internal/billing/store_test.go:TestRecoverLedger_QuarantinesOrphanLedgerRows",
-        "phase4-coordinator/internal/billing/store_test.go:TestWriteRequestLogWithIdentity_AllowsRecoveryAfterHotPathFailure"
+        "phase4-coordinator/internal/billing/store_test.go:TestWriteRequestLogWithIdentity_AllowsRecoveryAfterHotPathFailure",
+        "test/integration/buyer_crash_recovery_journey_test.go:TestJourneyBuyerCrashRecoveryIsolatedCandidate"
       ],
       "journeys": [
-        "JOURNEY-BUYER-PAID-PATH"
+        "JOURNEY-BUYER-CRASH-RECOVERY"
       ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1022",
-        "rationale": "Crash recovery and reconcile of in-flight ledger rows (SPEC-005 §10): shipped and unit-tested. JOURNEY-BUYER-PAID-PATH maps this row for observation, but the isolated 11-step harness cannot promote it; crash recovery is not one of the physical steps. Remainder stays with #1022 until a crash-recovery step exists. WAL enforcement lives with NewStore/migrate under R002."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1043",
+        "rationale": "Crash recovery and reconcile of in-flight ledger rows (SPEC-005 §10): shipped and unit-tested. Isolated JOURNEY-BUYER-CRASH-RECOVERY reconstructs identity-fallback durable state and proves coordinator restart startup_scan recovery, idempotent rescan, orphan quarantine, and no double credit. A passing local harness is not signed promotion evidence. Physical evidence is #1043."
       }
     },
     {
