@@ -6652,6 +6652,18 @@ type eligibilityCtx struct {
 	// the receipt-key gate is a no-op, so any eligibilityCtx built
 	// without setting it keeps pre-fix selection.
 	settlementEnforce bool
+
+	// SPEC-042 R005 tenant isolation. poolID is "" for global (poolless)
+	// requests -- the zero value -- so ProviderInPool returns true for
+	// every provider and selection stays byte-identical to pre-SPEC-042.
+	// When a request selects a pool, poolID is set and poolMembers is the
+	// consistent membership snapshot (member provider IDs) captured
+	// together with poolGeneration (SPEC-042 R003 single-read rule). The
+	// request-path wiring that populates these lands in the R002 threading
+	// stage; until then no code sets poolID, so this gate is inert.
+	poolID         string
+	poolMembers    map[string]bool
+	poolGeneration uint64
 }
 
 // ProviderMatchesRequest combines the model/class match and the
@@ -6702,6 +6714,19 @@ func (c *eligibilityCtx) Tier2Decision(p pool.Provider) (routing.RejectionReason
 
 func (c *eligibilityCtx) QuotaPermits(p pool.Provider) bool {
 	return c.s.checkQuota(p)
+}
+
+// ProviderInPool implements the SPEC-042 R005 tenant-isolation gate. For a
+// global (poolless) request poolID is "" and every provider is a member, so
+// this returns true and selection is byte-identical to pre-SPEC-042. For a
+// pool request it returns true iff the provider is in the consistent
+// membership snapshot captured for that pool (poolMembers), which already
+// excludes revoked members (SPEC-042 R003).
+func (c *eligibilityCtx) ProviderInPool(p pool.Provider) bool {
+	if c.poolID == "" {
+		return true
+	}
+	return c.poolMembers[p.ProviderID]
 }
 
 // ProviderHasSettlementReceiptKey drops providers that can never have a

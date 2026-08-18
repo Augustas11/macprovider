@@ -50,6 +50,15 @@ const (
 	// true for every provider and this reason never fires, so default /
 	// observe selection stays byte-identical to pre-fix behaviour.
 	ReasonReceiptKeyMissing
+	// ReasonPoolNotMember — the request carries a pool_id (SPEC-042) and
+	// the provider is not a current, non-revoked member of that pool. A
+	// false ProviderInPool return is reported here. With no pool selected
+	// (global traffic) the checker returns true for every provider and
+	// this reason never fires, so poolless selection stays byte-identical
+	// to pre-SPEC-042 behaviour. Fail-closed: when every candidate is
+	// dropped for this reason the eligible list is empty and the request
+	// surfaces the no-eligible-member 503 with no spill to global.
+	ReasonPoolNotMember
 )
 
 // EligibilityChecker is the cross-package boundary between the
@@ -119,6 +128,17 @@ type EligibilityChecker interface {
 	// eligible provider is quota-blocked. server.go applies the
 	// 429-vs-503 decision against FilterResult counts.
 	QuotaPermits(p pool.Provider) bool
+
+	// ProviderInPool reports whether the provider is a current,
+	// non-revoked member of the request's selected pool (SPEC-042
+	// R005 tenant isolation). A false return is reported as
+	// ReasonPoolNotMember. Implementations MUST return true for every
+	// provider when the request carries no pool selection, so global
+	// (poolless) selection stays byte-identical to pre-SPEC-042. The
+	// member set and pool generation MUST be read as a single
+	// consistent snapshot (SPEC-042 R003) so a revocation cannot leave
+	// a stale member passing this gate.
+	ProviderInPool(p pool.Provider) bool
 }
 
 // RejectedProvider records a single provider drop with enough
@@ -195,6 +215,16 @@ func EligibleCandidates(
 	for _, p := range providers {
 		if excluded.Has(keyer(p)) {
 			res.Counts[ReasonExcluded]++
+			continue
+		}
+		// SPEC-042 R005 tenant isolation: a non-member of the request's
+		// selected pool is dropped before any model/version/tier2 gate —
+		// pool membership is the trust boundary and dominates. For global
+		// (poolless) requests ProviderInPool returns true for every
+		// provider, so this gate is a no-op and selection stays
+		// byte-identical to pre-SPEC-042.
+		if !checker.ProviderInPool(p) {
+			res.Counts[ReasonPoolNotMember]++
 			continue
 		}
 		if !checker.ProviderMatchesRequest(p) {
