@@ -1,8 +1,17 @@
 # SPEC-008 — Tier-2 Trust Layer
 
-**Version:** 0.6.0 (2026-08-17, Phase 3 live MDA observe path + Phase 4 boundary)
+**Version:** 0.6.1 (2026-08-18, Apple DevicePropertiesAttestation query key)
 **Depends on:** SPEC-001 v1.8, SPEC-002 v1.3.3, SPEC-004 v0.3.2,
                SPEC-006 v0.9.8
+
+**Change log v0.6.1 (2026-08-18, Apple DeviceInformation attestation query key):**
+- **§7.9.2 / §7.9.3:** live MDA DeviceInformation MUST query
+  `DevicePropertiesAttestation` (Apple device-management schema; WWDC22).
+  `DeviceAttestationNonce` stays the freshness `<data>` field. Webhook ingest
+  MUST read `QueryResponses.DevicePropertiesAttestation` and MAY accept legacy
+  `DeviceAttestation` as a parser fallback only. The previous `DeviceAttestation`
+  Queries string is not an Apple DeviceInformation key; macOS omits it and ACKs
+  an empty QueryResponses, so `attestation_tier=hardware` cannot mint.
 
 **Change log v0.6.0 (2026-08-17, Phase 3 live MDA / Phase 4 boundary):**
 - **§7.3:** `attestation_tier=hardware` is no longer “never emitted / reserved”. It is
@@ -2557,9 +2566,12 @@ this observe path. Routing enforcement remains Phase 4 / §7.10.
 #### 7.9.2 Enqueue and freshness
 
 1. DeviceInformation MUST be enqueued via MicroMDM **raw plist**
-   `POST /v1/commands/{udid}` with `DeviceAttestation` query and
-   `DeviceAttestationNonce` as plist `<data>` = `SHA-256(SEPublicKey)` (32 bytes).
-   JSON `device_attestation_nonce` on `/v1/commands` is insufficient (MicroMDM drops it).
+   `POST /v1/commands/{udid}` with Queries containing
+   `DevicePropertiesAttestation` and `DeviceAttestationNonce` as plist `<data>` =
+   `SHA-256(SEPublicKey)` (32 bytes). Apple requires that nonce only when Queries
+   includes `DevicePropertiesAttestation`. JSON `device_attestation_nonce` on
+   `/v1/commands` is insufficient (MicroMDM drops it). Do not enqueue the
+   non-Apple Queries string `DeviceAttestation`.
 2. The coordinator MUST record durable pending correlation
    `{command_uuid, udid, provider_id, expected_serial, se_key_hash, enqueued_at}` before
    relying on webhook completion across restart.
@@ -2572,7 +2584,9 @@ this observe path. Routing enforcement remains Phase 4 / §7.10.
 
 1. MicroMDM command webhooks MUST be parsed as `topic=mdm.Connect` with
    `acknowledge_event.raw_payload` (base64 device-response plist), not a flat custom JSON
-   DeviceAttestation body alone.
+   DeviceAttestation body alone. The device-response plist MUST be read from
+   `QueryResponses.DevicePropertiesAttestation` (Apple). A legacy
+   `QueryResponses.DeviceAttestation` value MAY be accepted as parser fallback.
 2. Pending lookup: prefer `command_uuid`, else UDID; hydrate from durable store on memory
    miss.
 3. Before `SetMDAProof`: verify MDA chain + SE freshness; require MDA leaf serial equals

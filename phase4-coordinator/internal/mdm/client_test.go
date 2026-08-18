@@ -138,6 +138,12 @@ func TestEnqueueDeviceInformationAttestation(t *testing.T) {
 	if !strings.Contains(body, "DeviceAttestationNonce") {
 		t.Fatal("body must contain DeviceAttestationNonce")
 	}
+	if !strings.Contains(body, "DevicePropertiesAttestation") {
+		t.Fatal("body must query Apple DevicePropertiesAttestation")
+	}
+	if strings.Contains(body, "<string>DeviceAttestation</string>") {
+		t.Fatal("must not enqueue the non-Apple Queries string DeviceAttestation")
+	}
 	if !strings.Contains(body, "RequestType") || !strings.Contains(body, "DeviceInformation") {
 		t.Fatal("body must contain RequestType DeviceInformation")
 	}
@@ -209,6 +215,49 @@ func TestParseDeviceAttestationFromPlistMissingReturnsError(t *testing.T) {
 	_, err := ParseDeviceAttestationFromPlist(data)
 	if err != ErrNoDeviceAttestation {
 		t.Fatalf("expected ErrNoDeviceAttestation, got %v", err)
+	}
+}
+
+func TestParseDeviceAttestationFromPlistAppleDevicePropertiesKey(t *testing.T) {
+	cert1B64 := base64.StdEncoding.EncodeToString([]byte("apple-der-cert"))
+	data, _ := json.Marshal(map[string]interface{}{
+		"payload": map[string]interface{}{
+			"QueryResponses": map[string]interface{}{
+				"DevicePropertiesAttestation": []interface{}{cert1B64},
+			},
+		},
+	})
+	result, err := ParseDeviceAttestationFromPlist(data)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(result.CertificateChain) != 1 || string(result.CertificateChain[0]) != "apple-der-cert" {
+		t.Fatalf("chain mismatch: %+v", result)
+	}
+}
+
+func TestParseDeviceAttestationFromPlistBytesAppleQueryResponses(t *testing.T) {
+	plistXML := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Status</key>
+  <string>Acknowledged</string>
+  <key>QueryResponses</key>
+  <dict>
+    <key>DevicePropertiesAttestation</key>
+    <array>
+      <data>` + base64.StdEncoding.EncodeToString([]byte("plist-der")) + `</data>
+    </array>
+  </dict>
+</dict>
+</plist>`
+	result, err := ParseDeviceAttestationFromPlistBytes([]byte(plistXML))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(result.CertificateChain) != 1 || string(result.CertificateChain[0]) != "plist-der" {
+		t.Fatalf("chain mismatch: %+v", result)
 	}
 }
 
