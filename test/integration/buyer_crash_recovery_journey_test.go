@@ -17,6 +17,14 @@ const (
 	crashRecoveryOrphanRequestID     = "crash-recovery-orphan-credit"
 )
 
+type buyerCrashRecoveryStep struct {
+	ID        string         `json:"id"`
+	Status    string         `json:"status"`
+	Assertion string         `json:"assertion"`
+	Artifacts []string       `json:"artifacts"`
+	Details   map[string]any `json:"details,omitempty"`
+}
+
 func TestJourneyBuyerCrashRecoveryIsolatedCandidate(t *testing.T) {
 	s := newScenario(t, scenarioOpts{seedAccount: true})
 	startMode, startJob := readCoordinatorSettlement(t, s.coordYAML)
@@ -28,13 +36,39 @@ func TestJourneyBuyerCrashRecoveryIsolatedCandidate(t *testing.T) {
 	}
 	scansBefore := s.startupScanCount()
 
+	steps := make([]buyerCrashRecoveryStep, 0, 8)
+	pass := func(id, assertion string, details map[string]any) {
+		steps = append(steps, buyerCrashRecoveryStep{
+			ID:        id,
+			Status:    "pass",
+			Assertion: assertion,
+			Artifacts: []string{"redacted-buyer-crash-recovery"},
+			Details:   details,
+		})
+	}
+	pass("step-01-capture-config", "isolated candidate captured in observe mode with settlement job disabled", map[string]any{
+		"settlement_mode": startMode,
+		"job_enabled":     startJob,
+		"isolated_sqlite": true,
+	})
+
 	plantedAt := time.Now().UTC().Add(-2 * time.Minute)
 	s.stopCoordinator()
+	pass("step-02-stop-coordinator", "coordinator process stopped against the same isolated SQLite file", map[string]any{
+		"coordinator_stopped": true,
+	})
 	s.plantIdentityFallback(plantedAt)
-	s.plantOrphanCredit(plantedAt)
 	if got := s.creditCount(crashRecoveryRequestID, false); got != 0 {
 		t.Fatalf("credits before recovery=%d want 0", got)
 	}
+	pass("step-03-plant-identity-fallback", "identity-fallback request_log and provider snapshot planted with no credit row", map[string]any{
+		"request_id":   crashRecoveryRequestID,
+		"credit_count": 0,
+	})
+	s.plantOrphanCredit(plantedAt)
+	pass("step-04-plant-orphan-credit", "orphan ledger_request_credits row planted without matching request_log", map[string]any{
+		"orphan_request_id": crashRecoveryOrphanRequestID,
+	})
 
 	s.restartCoordinator()
 	if got := s.creditCount(crashRecoveryRequestID, false); got != 1 {
@@ -53,14 +87,27 @@ func TestJourneyBuyerCrashRecoveryIsolatedCandidate(t *testing.T) {
 	if latest.MissingCreditRowsCreated < 1 {
 		t.Fatalf("missing_credit_rows_created=%d want >=1", latest.MissingCreditRowsCreated)
 	}
+	pass("step-05-startup-scan-recover", "startup_scan recovered exactly one non-quarantined credit for the planted request", map[string]any{
+		"recovery_source":             "startup_scan",
+		"recovered_credits":           1,
+		"missing_credit_rows_created": latest.MissingCreditRowsCreated,
+		"startup_scan_status":         latest.Status,
+	})
 	if got := s.quarantinedCount(crashRecoveryOrphanRequestID, "missing_request_log"); got != 1 {
 		t.Fatalf("orphan quarantined=%d want 1", got)
 	}
+	pass("step-06-orphan-quarantine", "planted orphan credit was quarantined missing_request_log", map[string]any{
+		"orphan_quarantined": 1,
+		"quarantine_reason":  "missing_request_log",
+	})
 
 	s.restartCoordinator()
 	if got := s.creditCount(crashRecoveryRequestID, false); got != 1 {
 		t.Fatalf("credits after rescan=%d want 1 (no double credit)", got)
 	}
+	pass("step-07-idempotent-rescan", "second startup scan did not double-credit the recovered request", map[string]any{
+		"credits_after_rescan": 1,
+	})
 	if got := s.payoutReadyCount(); got != 0 {
 		t.Fatalf("payout-ready rows after journey=%d want 0", got)
 	}
@@ -68,11 +115,16 @@ func TestJourneyBuyerCrashRecoveryIsolatedCandidate(t *testing.T) {
 	if endMode != startMode || endJob != startJob || endMode != "observe" || endJob {
 		t.Fatalf("settlement config drifted: start=%s/%v end=%s/%v", startMode, startJob, endMode, endJob)
 	}
+	pass("step-08-no-payout", "settlement job stayed disabled and no payout-ready rows were created", map[string]any{
+		"payout_ready_count": 0,
+		"job_enabled":        endJob,
+		"settlement_mode":    endMode,
+	})
 
 	if os.Getenv("MACPROVIDER_CAPTURE_BUYER_CRASH_RECOVERY") != "1" {
 		return
 	}
-	writeBuyerCrashRecoveryEvidence(t, s, plantedAt, latest)
+	writeBuyerCrashRecoveryEvidence(t, s, steps, plantedAt, latest, startMode, endMode, startJob, endJob)
 }
 
 type startupScanRow struct {
@@ -208,7 +260,7 @@ SELECT status, missing_credit_rows_created, orphan_credit_rows_quarantined
 	return row
 }
 
-func writeBuyerCrashRecoveryEvidence(t *testing.T, s *scenario, plantedAt time.Time, scan startupScanRow) {
+func writeBuyerCrashRecoveryEvidence(t *testing.T, s *scenario, steps []buyerCrashRecoveryStep, plantedAt time.Time, scan startupScanRow, startMode, endMode string, startJob, endJob bool) {
 	t.Helper()
 	root, err := findRepoRoot()
 	if err != nil {
@@ -223,19 +275,52 @@ func writeBuyerCrashRecoveryEvidence(t *testing.T, s *scenario, plantedAt time.T
 		"journey_id":      buyerCrashRecoveryJourneyID,
 		"run_id":          runID,
 		"captured_at":     captured.Format("2006-01-02T15:04:05Z"),
+		"expires_at":      captured.AddDate(0, 0, 30).Format("2006-01-02"),
 		"requirement_ids": []string{"SPEC-005-R003"},
 		"repository":      map[string]string{"name": "Augustas11/macprovider", "commit": commit},
+		"operator": map[string]string{
+			"role":                 "acceptance-operator",
+			"identity_fingerprint": sha256Hex("isolated-candidate-crash-recovery"),
+		},
+		"environment": map[string]string{
+			"class":            "isolated-candidate-crash-recovery",
+			"hardware_profile": "local-macos-redacted",
+			"candidate":        "commit:" + commit,
+		},
+		"harness": map[string]any{
+			"id":                      "test/integration:TestJourneyBuyerCrashRecoveryIsolatedCandidate",
+			"execution_mode":          "isolated-candidate-crash-recovery",
+			"isolated_sqlite":         true,
+			"real_binaries":           true,
+			"production_side_effects": false,
+			"settlement_runner":       false,
+		},
 		"observations": map[string]any{
-			"settlement_mode":                "observe",
-			"job_enabled":                    false,
+			"settlement_mode":                endMode,
+			"job_enabled":                    endJob,
 			"payout_ready_mutated":           false,
+			"production_side_effects":        false,
+			"isolated_environment":           true,
 			"identity_fallback_recovered":    true,
 			"orphan_quarantined":             true,
 			"idempotent_rescan":              true,
 			"recovery_source":                "startup_scan",
+			"production_pearl":               false,
 			"planted_at":                     plantedAt.UTC().Format(time.RFC3339Nano),
 			"missing_credit_rows_created":    scan.MissingCreditRowsCreated,
 			"orphan_credit_rows_quarantined": scan.OrphanCreditRowsQuarantined,
+			"start_mode":                     startMode,
+			"start_job_enabled":              startJob,
+		},
+		"result": map[string]any{
+			"status":  "pass",
+			"summary": "isolated candidate crash-recovery journey recovered identity-fallback credits without double credit or payout-ready mutation",
+		},
+		"steps": steps,
+		"redaction": map[string]any{
+			"secrets_redacted":             true,
+			"operator_identity_redacted":   true,
+			"local_account_names_redacted": true,
 		},
 	}
 	raw, err := json.MarshalIndent(evidence, "", "  ")

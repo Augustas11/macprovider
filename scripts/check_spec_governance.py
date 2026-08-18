@@ -86,6 +86,38 @@ BUYER_PAID_PATH_PROMOTABLE_REQUIREMENT_IDS = {
     "SPEC-022-R010",
 }
 BUYER_PAID_PATH_CONDITIONAL_REQUIREMENT_IDS = {"SPEC-022-R006"}
+BUYER_CRASH_RECOVERY_JOURNEY_ID = "JOURNEY-BUYER-CRASH-RECOVERY"
+BUYER_CRASH_RECOVERY_EXECUTION_MODE = "isolated-candidate-crash-recovery"
+BUYER_CRASH_RECOVERY_STEP_ID_ORDER = (
+    "step-01-capture-config",
+    "step-02-stop-coordinator",
+    "step-03-plant-identity-fallback",
+    "step-04-plant-orphan-credit",
+    "step-05-startup-scan-recover",
+    "step-06-orphan-quarantine",
+    "step-07-idempotent-rescan",
+    "step-08-no-payout",
+)
+BUYER_CRASH_RECOVERY_STEP_IDS = set(BUYER_CRASH_RECOVERY_STEP_ID_ORDER)
+BUYER_CRASH_RECOVERY_PROMOTABLE_REQUIREMENT_IDS = {"SPEC-005-R003"}
+BUYER_ENFORCE_JOURNEY_ID = "JOURNEY-BUYER-ENFORCE"
+BUYER_ENFORCE_EXECUTION_MODE = "isolated-candidate-enforce"
+BUYER_ENFORCE_STEP_ID_ORDER = (
+    "step-01-capture-config",
+    "step-02-verified-debit",
+    "step-03-payout-exclusion",
+    "step-04-missing-receipt-quarantine",
+    "step-05-policy-pinning",
+    "step-06-audit",
+    "step-07-restore-config",
+)
+BUYER_ENFORCE_STEP_IDS = set(BUYER_ENFORCE_STEP_ID_ORDER)
+BUYER_ENFORCE_PROMOTABLE_REQUIREMENT_IDS = {
+    "SPEC-022-R007",
+    "SPEC-022-R008",
+    "SPEC-022-R009",
+    "SPEC-022-R011",
+}
 SIGNED_JOURNEY_RESULT_REQUIRED_KEYS = {
     "schema_version",
     "journey_id",
@@ -891,6 +923,164 @@ def _validate_buyer_paid_path_journey_result(
         )
 
 
+def _validate_named_journey_steps(
+    steps: list[Any],
+    expected_ids: set[str],
+    location: str,
+    result: ValidationResult,
+    label: str,
+) -> None:
+    observed_step_ids: set[str] = set()
+    valid_step_count = 0
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict) or not isinstance(step.get("id"), str):
+            continue
+        valid_step_count += 1
+        step_id = step["id"]
+        if step_id in observed_step_ids:
+            result.error(f"{location}.signed.steps[{index}].id", f"duplicate {label} physical step {step_id!r}")
+        observed_step_ids.add(step_id)
+    missing_steps = expected_ids - observed_step_ids
+    unexpected_steps = observed_step_ids - expected_ids
+    if missing_steps:
+        result.error(f"{location}.signed.steps", f"missing {label} physical steps: {sorted(missing_steps)}")
+    if unexpected_steps:
+        result.error(f"{location}.signed.steps", f"unexpected {label} physical steps: {sorted(unexpected_steps)}")
+    if valid_step_count != len(expected_ids):
+        result.error(
+            f"{location}.signed.steps",
+            f"must contain exactly {len(expected_ids)} {label} physical steps",
+        )
+
+
+def _validate_buyer_crash_recovery_journey_result(
+    signed: dict[str, Any],
+    requirement_id: str,
+    journeys: list[str],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    if signed.get("journey_id") != BUYER_CRASH_RECOVERY_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {BUYER_CRASH_RECOVERY_JOURNEY_ID!r}")
+    if BUYER_CRASH_RECOVERY_JOURNEY_ID not in journeys:
+        result.error(location, f"crash-recovery requirement journeys must include {BUYER_CRASH_RECOVERY_JOURNEY_ID!r}")
+    if signed.get("execution_mode") != BUYER_CRASH_RECOVERY_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {BUYER_CRASH_RECOVERY_EXECUTION_MODE!r}")
+    observations = signed.get("observations")
+    if _expect_object(observations, f"{location}.signed.observations", result):
+        required_obs = {
+            "settlement_mode",
+            "job_enabled",
+            "payout_ready_mutated",
+            "production_side_effects",
+            "isolated_environment",
+            "identity_fallback_recovered",
+            "orphan_quarantined",
+            "idempotent_rescan",
+            "recovery_source",
+            "production_pearl",
+        }
+        for field_name in required_obs:
+            if field_name not in observations:
+                result.error(f"{location}.signed.observations.{field_name}", "is required")
+        if observations.get("settlement_mode") != "observe":
+            result.error(f"{location}.signed.observations.settlement_mode", "must equal 'observe'")
+        if observations.get("job_enabled") is not False:
+            result.error(f"{location}.signed.observations.job_enabled", "must be false")
+        if observations.get("payout_ready_mutated") is not False:
+            result.error(f"{location}.signed.observations.payout_ready_mutated", "must be false")
+        if observations.get("production_side_effects") is not False:
+            result.error(f"{location}.signed.observations.production_side_effects", "must be false")
+        if observations.get("production_pearl") is not False:
+            result.error(f"{location}.signed.observations.production_pearl", "must be false")
+        if observations.get("isolated_environment") is not True:
+            result.error(f"{location}.signed.observations.isolated_environment", "must be true")
+        if observations.get("identity_fallback_recovered") is not True:
+            result.error(f"{location}.signed.observations.identity_fallback_recovered", "must be true")
+        if observations.get("orphan_quarantined") is not True:
+            result.error(f"{location}.signed.observations.orphan_quarantined", "must be true")
+        if observations.get("idempotent_rescan") is not True:
+            result.error(f"{location}.signed.observations.idempotent_rescan", "must be true")
+        if observations.get("recovery_source") != "startup_scan":
+            result.error(f"{location}.signed.observations.recovery_source", "must equal 'startup_scan'")
+    signed_requirement_ids = signed.get("requirement_ids")
+    if not isinstance(signed_requirement_ids, list) or requirement_id not in signed_requirement_ids:
+        result.error(f"{location}.signed.requirement_ids", f"must include the requirement being promoted: {requirement_id}")
+    unexpected = [
+        item
+        for item in (signed_requirement_ids or [])
+        if isinstance(item, str) and item not in BUYER_CRASH_RECOVERY_PROMOTABLE_REQUIREMENT_IDS
+    ]
+    if unexpected:
+        result.error(
+            f"{location}.signed.requirement_ids",
+            "crash-recovery journey-result cannot promote " + ", ".join(sorted(unexpected)),
+        )
+    if requirement_id not in BUYER_CRASH_RECOVERY_PROMOTABLE_REQUIREMENT_IDS:
+        result.error(f"{location}.signed.requirement_ids", f"crash-recovery journey-result cannot promote {requirement_id}")
+    _validate_named_journey_steps(steps, BUYER_CRASH_RECOVERY_STEP_IDS, location, result, "crash-recovery")
+
+
+def _validate_buyer_enforce_journey_result(
+    signed: dict[str, Any],
+    requirement_id: str,
+    journeys: list[str],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    if signed.get("journey_id") != BUYER_ENFORCE_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {BUYER_ENFORCE_JOURNEY_ID!r}")
+    if BUYER_ENFORCE_JOURNEY_ID not in journeys:
+        result.error(location, f"enforce requirement journeys must include {BUYER_ENFORCE_JOURNEY_ID!r}")
+    if signed.get("execution_mode") != BUYER_ENFORCE_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {BUYER_ENFORCE_EXECUTION_MODE!r}")
+    observations = signed.get("observations")
+    if _expect_object(observations, f"{location}.signed.observations", result):
+        required_obs = {
+            "settlement_mode_start",
+            "enforce_activated",
+            "job_enabled",
+            "payout_ready_mutated",
+            "production_side_effects",
+            "production_pearl",
+            "isolated_environment",
+            "raw_prompt_output_redacted",
+        }
+        for field_name in required_obs:
+            if field_name not in observations:
+                result.error(f"{location}.signed.observations.{field_name}", "is required")
+        if observations.get("settlement_mode_start") != "enforce":
+            result.error(f"{location}.signed.observations.settlement_mode_start", "must equal 'enforce'")
+        if observations.get("enforce_activated") is not True:
+            result.error(f"{location}.signed.observations.enforce_activated", "must be true")
+        if observations.get("job_enabled") is not False:
+            result.error(f"{location}.signed.observations.job_enabled", "must be false")
+        for field_name in ("payout_ready_mutated", "production_side_effects", "production_pearl"):
+            if observations.get(field_name) is not False:
+                result.error(f"{location}.signed.observations.{field_name}", "must be false")
+        for field_name in ("isolated_environment", "raw_prompt_output_redacted"):
+            if observations.get(field_name) is not True:
+                result.error(f"{location}.signed.observations.{field_name}", "must be true")
+    signed_requirement_ids = signed.get("requirement_ids")
+    if not isinstance(signed_requirement_ids, list) or requirement_id not in signed_requirement_ids:
+        result.error(f"{location}.signed.requirement_ids", f"must include the requirement being promoted: {requirement_id}")
+    unexpected = [
+        item
+        for item in (signed_requirement_ids or [])
+        if isinstance(item, str) and item not in BUYER_ENFORCE_PROMOTABLE_REQUIREMENT_IDS
+    ]
+    if unexpected:
+        result.error(
+            f"{location}.signed.requirement_ids",
+            "enforce journey-result cannot promote " + ", ".join(sorted(unexpected)),
+        )
+    if requirement_id not in BUYER_ENFORCE_PROMOTABLE_REQUIREMENT_IDS:
+        result.error(f"{location}.signed.requirement_ids", f"enforce journey-result cannot promote {requirement_id}")
+    _validate_named_journey_steps(steps, BUYER_ENFORCE_STEP_IDS, location, result, "enforce")
+
+
 def _validate_spec016_payout_journey_result(
     root: Path,
     signed: dict[str, Any],
@@ -1319,6 +1509,24 @@ def _validate_signed_journey_result(
         _validate_provider_prebeta_journey_result(root, signed, [item for item in journeys if isinstance(item, str)], artifact_records, steps, location, result)
     if journey_id == BUYER_PAID_PATH_JOURNEY_ID:
         _validate_buyer_paid_path_journey_result(
+            signed,
+            requirement_id,
+            [item for item in journeys if isinstance(item, str)],
+            steps,
+            location,
+            result,
+        )
+    if journey_id == BUYER_CRASH_RECOVERY_JOURNEY_ID:
+        _validate_buyer_crash_recovery_journey_result(
+            signed,
+            requirement_id,
+            [item for item in journeys if isinstance(item, str)],
+            steps,
+            location,
+            result,
+        )
+    if journey_id == BUYER_ENFORCE_JOURNEY_ID:
+        _validate_buyer_enforce_journey_result(
             signed,
             requirement_id,
             [item for item in journeys if isinstance(item, str)],
