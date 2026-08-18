@@ -190,7 +190,7 @@ final class ControlFrameCodecTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.malibuFullLine(agent.snapshot), "n/a MALIBU today · n/a all-time")
         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("[locked]"))
         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("Trusted"))
-        XCTAssertEqual(AgentSnapshotPresenter.trustLine(agent.snapshot), "Trust status unavailable")
+        XCTAssertEqual(AgentSnapshotPresenter.trustLine(agent.snapshot), "MALIBU trust telemetry not published yet")
         XCTAssertNil(AgentSnapshotPresenter.backlogLine(agent.snapshot))
     }
 

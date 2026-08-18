@@ -13,9 +13,11 @@ enum DashboardWindow {
             onExportDiagnostics: onExportDiagnostics,
             onResetProvider: onResetProvider
         ))
+        hosting.sizingOptions = []
         let window = NSWindow(contentViewController: hosting)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.title = "Malibu"
+        window.contentMinSize = NSSize(width: 640, height: 520)
         window.setContentSize(NSSize(width: 780, height: 740))
         window.center()
         window.isReleasedWhenClosed = false
@@ -39,11 +41,30 @@ enum DashboardCopy {
     static let resetProviderConfirmButton = "Reset provider service"
     static let resetProviderCancelButton = "Cancel"
 
-    static func modelRowStatusLine(currentModelID: String?, switcherStatusLine: String) -> String {
-        if currentModelID != nil {
-            return String(localized: "Current model shown. Change Model shows switching availability.", comment: "Dashboard stable current-model status")
+    static func modelRowStatusLine(
+        currentModelID: String?,
+        listState: ModelManagementStore.ListState
+    ) -> String {
+        guard currentModelID != nil else {
+            switch listState {
+            case .checking:
+                return String(localized: "Checking current model…", comment: "Dashboard model loading status")
+            case .unavailable:
+                return String(localized: "Current model is not available from provider status.", comment: "Dashboard model missing status")
+            case .ready, .viewOnly:
+                return String(localized: "No current model reported.", comment: "Dashboard no current model")
+            }
         }
-        return switcherStatusLine
+        switch listState {
+        case .checking:
+            return String(localized: "Serving this model. Checking whether switching is available.", comment: "Dashboard model checking switch")
+        case .ready:
+            return String(localized: "Serving this model. Change Model lists other options.", comment: "Dashboard model ready to switch")
+        case .viewOnly:
+            return String(localized: "Serving this model. Live switching is off until warm swap is running.", comment: "Dashboard model view-only")
+        case .unavailable:
+            return String(localized: "Serving this model. Open Change Model to see why switching is unavailable.", comment: "Dashboard model switch unavailable")
+        }
     }
 
     static func defaultPublicStrings(_ snapshot: AgentSnapshot) -> [String] {
@@ -85,7 +106,10 @@ private struct DashboardView: View {
     @State private var showModelSheet = false
     @ObservedObject private var modelStore = ModelManagementStore.shared
 
+    @State private var advancedDiagnosticsExpanded = true
+
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
                 MalibuBrandTile()
@@ -121,26 +145,29 @@ private struct DashboardView: View {
                         .accessibilityLabel(Text(String(localized: "Current provider model", comment: "Dashboard model accessibility label")))
                     Text(DashboardCopy.modelRowStatusLine(
                         currentModelID: modelStore.currentModelID ?? agent.snapshot.currentModelID,
-                        switcherStatusLine: modelStore.statusLine
+                        listState: modelStore.listState
                     ))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
                 Spacer()
-                Button(String(localized: "Change Model…", comment: "Dashboard model action")) {
-                    showModelSheet = true
-                }
-                .disabled(modelStore.listState == .unavailable)
+                AppKitActionButton(
+                    title: String(localized: "Change Model…", comment: "Dashboard model action"),
+                    accessibilityIdentifier: "malibu.dashboard.change-model",
+                    action: { showModelSheet = true }
+                )
+                .fixedSize()
                 .accessibilityHint(Text(String(localized: "Opens the model switcher and shows provider guards before any action.", comment: "Dashboard model action hint")))
-                Menu {
-                    Button(String(localized: "Settings…", comment: "Dashboard settings action")) {
-                        SettingsWindowPresenter.shared.present()
-                    }
+                Button {
+                    SettingsWindowPresenter.shared.present()
                 } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .accessibilityLabel(Text(String(localized: "More model options", comment: "Dashboard model menu label")))
+                    Image(systemName: "gearshape")
                 }
+                .buttonStyle(.borderless)
+                .help(String(localized: "Settings", comment: "Dashboard settings help"))
+                .accessibilityIdentifier("malibu.dashboard.settings")
+                .accessibilityLabel(Text(String(localized: "Settings", comment: "Dashboard settings action")))
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.08)))
@@ -213,7 +240,7 @@ private struct DashboardView: View {
                 panel {
                     Text("Today").font(.caption).foregroundStyle(.secondary)
                     Text(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot))
-                        .font(.system(size: 36, weight: .semibold, design: .rounded))
+                        .font(.system(size: 28, weight: .semibold, design: .rounded))
                     Text(AgentSnapshotPresenter.usdcFullLine(agent.snapshot))
                         .foregroundStyle(.secondary)
                         .font(.callout)
@@ -294,7 +321,7 @@ private struct DashboardView: View {
                     }
                     primaryActionButton
                     recoveryActions
-                    DisclosureGroup("Advanced diagnostics") {
+                    DisclosureGroup("Advanced diagnostics", isExpanded: $advancedDiagnosticsExpanded) {
                         VStack(alignment: .leading, spacing: 12) {
                             MetricRow(title: "Running model", value: AgentSnapshotPresenter.modelLine(agent.snapshot))
                             if let path = agent.snapshot.weightsPath {
@@ -317,16 +344,32 @@ private struct DashboardView: View {
                                 MetricRow(title: "Provider status", value: lifecycle)
                             }
                             if let event = agent.snapshot.lifecycleLastRestart {
-                                MetricRow(title: "Last restart", value: AgentSnapshotPresenter.lifecycleEventLine(event))
+                                MetricRow(
+                                    title: "Last restart",
+                                    value: AgentSnapshotPresenter.lifecycleEventDisplay(event)
+                                )
+                            } else {
+                                MetricRow(title: "Last restart", value: "Not recorded this session")
                             }
                             if let event = agent.snapshot.lifecycleLastRejection {
-                                MetricRow(title: "Last rejection", value: AgentSnapshotPresenter.lifecycleEventLine(event))
+                                MetricRow(
+                                    title: "Last setup failure",
+                                    value: AgentSnapshotPresenter.lifecycleEventDisplay(event)
+                                )
+                            } else {
+                                MetricRow(title: "Last setup failure", value: "None recorded")
                             }
                             if let event = agent.snapshot.lifecycleLastUpdate {
-                                MetricRow(title: "Last update", value: AgentSnapshotPresenter.lifecycleEventLine(event))
+                                MetricRow(
+                                    title: "Last update",
+                                    value: AgentSnapshotPresenter.lifecycleEventDisplay(event)
+                                )
                             }
                             if let event = agent.snapshot.lifecycleLastWatchdog {
-                                MetricRow(title: "Last provider recovery", value: AgentSnapshotPresenter.lifecycleEventLine(event))
+                                MetricRow(
+                                    title: "Last provider recovery",
+                                    value: AgentSnapshotPresenter.lifecycleEventDisplay(event)
+                                )
                             }
                             MetricRow(title: "Provider access", value: AgentSnapshotPresenter.credentialLine(agent.snapshot))
                             MetricRow(title: "Network verification", value: AgentSnapshotPresenter.admissionIdentityLine(agent.snapshot))
@@ -378,17 +421,20 @@ private struct DashboardView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                    .accessibilityIdentifier("malibu.dashboard.advanced-diagnostics")
                 }
             }
-            .frame(minHeight: 280)
 
             if agent.snapshot.localProviderID != nil {
                 ReferralPanel(agent: agent)
             }
-
-            Spacer(minLength: 0)
         }
         .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .scrollIndicators(.visible)
+        .accessibilityIdentifier("malibu.dashboard.scroll")
+        .frame(minWidth: 640, maxWidth: .infinity, minHeight: 480, maxHeight: .infinity)
         .sheet(isPresented: $showAddWalletSheet) {
             AddWalletSheet(agent: agent, isPresented: $showAddWalletSheet)
         }
@@ -418,6 +464,7 @@ private struct DashboardView: View {
                 Text(mining.status)
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(miningTone(mining.reasonCode))
+                    .accessibilityIdentifier("malibu.dashboard.mining-status")
             }
             VStack(alignment: .leading, spacing: 8) {
                 MetricRow(title: DashboardCopy.miningReasonTitle, value: mining.reason)
@@ -493,12 +540,22 @@ private struct DashboardView: View {
             Text(DashboardCopy.recoveryHelpTitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                Button(DashboardCopy.resetProviderTitle) {
-                    onResetProvider()
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    Button(DashboardCopy.resetProviderTitle) {
+                        onResetProvider()
+                    }
+                    Button(DashboardCopy.exportDiagnosticsTitle) {
+                        onExportDiagnostics()
+                    }
                 }
-                Button(DashboardCopy.exportDiagnosticsTitle) {
-                    onExportDiagnostics()
+                VStack(alignment: .leading, spacing: 8) {
+                    Button(DashboardCopy.resetProviderTitle) {
+                        onResetProvider()
+                    }
+                    Button(DashboardCopy.exportDiagnosticsTitle) {
+                        onExportDiagnostics()
+                    }
                 }
             }
         }
@@ -508,7 +565,6 @@ private struct DashboardView: View {
     private func panel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             content()
-            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, minHeight: 250, alignment: .topLeading)
         .padding(16)
@@ -517,13 +573,10 @@ private struct DashboardView: View {
 
     @ViewBuilder
     private func statsPanel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                content()
-            }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+        VStack(alignment: .leading, spacing: 12) {
+            content()
         }
-        .frame(maxWidth: .infinity, minHeight: 280, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 250, alignment: .topLeading)
         .padding(16)
         .background(panelBackground)
     }
@@ -822,6 +875,42 @@ private struct ReferralPanel: View {
     }
 }
 
+private struct AppKitActionButton: NSViewRepresentable {
+    let title: String
+    let accessibilityIdentifier: String
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.run))
+        button.bezelStyle = .rounded
+        button.setButtonType(.momentaryPushIn)
+        button.setAccessibilityIdentifier(accessibilityIdentifier)
+        button.setAccessibilityLabel(title)
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        button.title = title
+        button.setAccessibilityIdentifier(accessibilityIdentifier)
+        context.coordinator.action = action
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        @objc func run() {
+            action()
+        }
+    }
+}
+
 private struct MetricRow: View {
     let title: String
     let value: String
@@ -836,6 +925,8 @@ private struct MetricRow: View {
                 .lineLimit(nil)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title): \(value)")
     }
 }
 

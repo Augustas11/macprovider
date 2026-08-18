@@ -625,6 +625,26 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
     }
 
+    func testLaunchdRestartCopyIsOperatorReadable() {
+        let event = ProviderLifecycleEventSnapshot(
+            sequence: 1,
+            transitionID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            transitionAt: Date(timeIntervalSince1970: 1_700_000_000),
+            state: "starting_provider",
+            reason: "launchd_service_started",
+            writer: "serve",
+            compatibilitySetID: nil,
+            operationID: nil
+        )
+        XCTAssertEqual(
+            AgentSnapshotPresenter.lifecycleEventLine(event),
+            "Provider service started · Starting provider"
+        )
+        XCTAssertTrue(AgentSnapshotPresenter.lifecycleEventDisplay(event).hasPrefix(
+            "Provider service started · Starting provider · "
+        ))
+    }
+
     func testObservationLeaseShorterThanPollCadenceKeepsBuyerServingStable() {
         // CLI valid_for_ms is 5s; Malibu polls ~15s. Public status must remain
         // Serving across that gap while the same healthy observation is retained.

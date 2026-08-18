@@ -2,20 +2,34 @@ import XCTest
 @testable import Malibu
 
 final class DashboardViewTests: XCTestCase {
-    func testDashboardModelSubtitleDoesNotEchoSwitcherFreshnessFlapping() {
+    func testDashboardModelSubtitleIsStableAndActionable() {
         XCTAssertEqual(
             DashboardCopy.modelRowStatusLine(
                 currentModelID: "meta-llama/llama-3.2-3b-instruct",
-                switcherStatusLine: "Model controls ready."
+                listState: .ready
             ),
-            "Current model shown. Change Model shows switching availability."
+            "Serving this model. Change Model lists other options."
         )
         XCTAssertEqual(
             DashboardCopy.modelRowStatusLine(
                 currentModelID: "meta-llama/llama-3.2-3b-instruct",
-                switcherStatusLine: "Provider status is stale. Refresh the provider before switching models."
+                listState: .viewOnly
             ),
-            "Current model shown. Change Model shows switching availability."
+            "Serving this model. Live switching is off until warm swap is running."
+        )
+        XCTAssertEqual(
+            DashboardCopy.modelRowStatusLine(
+                currentModelID: "meta-llama/llama-3.2-3b-instruct",
+                listState: .unavailable
+            ),
+            "Serving this model. Open Change Model to see why switching is unavailable."
+        )
+        XCTAssertEqual(
+            DashboardCopy.modelRowStatusLine(
+                currentModelID: "meta-llama/llama-3.2-3b-instruct",
+                listState: .checking
+            ),
+            "Serving this model. Checking whether switching is available."
         )
     }
 
@@ -324,8 +338,17 @@ final class DashboardViewTests: XCTestCase {
         partial.malibuProjectionFresh = false
         partial.earningsUsdcToday = 0.04
         let partialHealth = AgentSnapshotPresenter.miningHealth(partial)
-        XCTAssertEqual(partialHealth.reasonCode, "reward_projection_unavailable")
+        XCTAssertEqual(partialHealth.reasonCode, "earning")
         XCTAssertEqual(partialHealth.rewardSummary, "$0.04 USDC today · MALIBU unavailable")
+        XCTAssertEqual(partialHealth.trustSummary, "MALIBU trust telemetry not published yet")
+
+        var partialIdle = miningBase()
+        partialIdle.malibuProjectionFresh = false
+        partialIdle.earningsUsdcToday = 0
+        let partialIdleHealth = AgentSnapshotPresenter.miningHealth(partialIdle)
+        XCTAssertEqual(partialIdleHealth.reasonCode, "idle_no_work")
+        XCTAssertEqual(partialIdleHealth.status, "Eligible, idle")
+        XCTAssertEqual(partialIdleHealth.trustSummary, "MALIBU trust telemetry not published yet")
 
         var stale = miningBase()
         stale.providerEarningsFresh = false

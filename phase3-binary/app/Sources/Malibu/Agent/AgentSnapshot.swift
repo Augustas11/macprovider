@@ -502,7 +502,7 @@ enum AgentSnapshotPresenter {
                 action: "Keep Malibu open while setup continues."
             )
         }
-        if !s.providerEarningsFresh || !s.malibuProjectionFresh {
+        if !s.providerEarningsFresh {
             return result(
                 status: "Reward status unavailable",
                 code: "reward_projection_unavailable",
@@ -518,37 +518,39 @@ enum AgentSnapshotPresenter {
                 action: "Add a payout wallet."
             )
         }
-        if s.malibuHoldReasons.contains("per_wallet_daily_cap") {
-            return result(
-                status: "Wallet cap held",
-                code: "wallet_daily_cap_held",
-                reason: "MALIBU above the wallet daily cap is held.",
-                action: "Wait for the next UTC day or use a wallet below the cap."
-            )
-        }
-        if s.trustTier == .provisional || s.malibuHoldReasons.contains("trust_tier_provisional") {
-            return result(
-                status: "Locked until Trusted",
-                code: "trust_tier_provisional",
-                reason: "MALIBU is accruing, but withdrawals are locked until Trusted.",
-                action: trustCriteriaAction(s) ?? "Complete trust criteria to unlock withdrawals."
-            )
-        }
-        if !s.malibuHoldReasons.isEmpty || (s.malibuHeld ?? 0) > 0 {
-            return result(
-                status: "Rewards held",
-                code: "rewards_held",
-                reason: "Some MALIBU is held while payout eligibility is being verified.",
-                action: "Review the hold reason before withdrawing."
-            )
-        }
-        if s.trustTier == .trusted, let withdrawable = s.malibuWithdrawable, withdrawable > 0 {
-            return result(
-                status: "Withdrawable",
-                code: "trusted_withdrawable",
-                reason: "Trusted reward projection reports withdrawable MALIBU.",
-                action: "No local action needed."
-            )
+        if s.malibuProjectionFresh {
+            if s.malibuHoldReasons.contains("per_wallet_daily_cap") {
+                return result(
+                    status: "Wallet cap held",
+                    code: "wallet_daily_cap_held",
+                    reason: "MALIBU above the wallet daily cap is held.",
+                    action: "Wait for the next UTC day or use a wallet below the cap."
+                )
+            }
+            if s.trustTier == .provisional || s.malibuHoldReasons.contains("trust_tier_provisional") {
+                return result(
+                    status: "Locked until Trusted",
+                    code: "trust_tier_provisional",
+                    reason: "MALIBU is accruing, but withdrawals are locked until Trusted.",
+                    action: trustCriteriaAction(s) ?? "Complete trust criteria to unlock withdrawals."
+                )
+            }
+            if !s.malibuHoldReasons.isEmpty || (s.malibuHeld ?? 0) > 0 {
+                return result(
+                    status: "Rewards held",
+                    code: "rewards_held",
+                    reason: "Some MALIBU is held while payout eligibility is being verified.",
+                    action: "Review the hold reason before withdrawing."
+                )
+            }
+            if s.trustTier == .trusted, let withdrawable = s.malibuWithdrawable, withdrawable > 0 {
+                return result(
+                    status: "Withdrawable",
+                    code: "trusted_withdrawable",
+                    reason: "Trusted reward projection reports withdrawable MALIBU.",
+                    action: "No local action needed."
+                )
+            }
         }
         if hasMiningEarningsActivity(s) {
             return result(
@@ -611,7 +613,9 @@ enum AgentSnapshotPresenter {
     }
 
     private static func miningTrustSummary(_ s: AgentSnapshot) -> String {
-        guard s.malibuProjectionFresh else { return "Trust status unavailable" }
+        guard s.malibuProjectionFresh else {
+            return "MALIBU trust telemetry not published yet"
+        }
         let tier = s.trustTier.rawValue.capitalized
         if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
             return "Trust: \(tier) · \(met) of \(required) criteria met"
@@ -1255,6 +1259,10 @@ enum AgentSnapshotPresenter {
         return parts.joined(separator: " · ")
     }
 
+    static func lifecycleEventDisplay(_ event: ProviderLifecycleEventSnapshot) -> String {
+        "\(lifecycleEventLine(event)) · \(event.transitionAt.formatted(date: .abbreviated, time: .shortened))"
+    }
+
     static func advertisedCapacityLine(_ s: AgentSnapshot) -> String {
         let capacity = s.advertisedMaxConcurrency.map { value in
             "\(value) buyer slot\(value == 1 ? "" : "s")"
@@ -1466,7 +1474,7 @@ enum AgentSnapshotPresenter {
     }
 
     static func trustLine(_ s: AgentSnapshot) -> String {
-        guard s.malibuProjectionFresh else { return "Trust status unavailable" }
+        guard s.malibuProjectionFresh else { return "MALIBU trust telemetry not published yet" }
         let tier = s.trustTier.rawValue.capitalized
         if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
             return "\(tier) — \(met) of \(required) criteria met · Unlock Trusted →"
@@ -1617,13 +1625,20 @@ enum AgentSnapshotPresenter {
     }
 
     private static func publicReason(_ reason: String) -> String {
-        reason
-            .replacingOccurrences(of: "_", with: " ")
-            .replacingOccurrences(of: "watchdog", with: "provider recovery")
-            .replacingOccurrences(of: "buyer serving", with: "customer availability")
-            .replacingOccurrences(of: "coordinator", with: "network")
-            .replacingOccurrences(of: "compatibility set", with: "provider software")
-            .replacingOccurrences(of: "admission identity", with: "network verification")
+        switch reason {
+        case "launchd_service_started":
+            return "Provider service started"
+        case "serve_invoked":
+            return "Provider start requested"
+        default:
+            return reason
+                .replacingOccurrences(of: "_", with: " ")
+                .replacingOccurrences(of: "watchdog", with: "provider recovery")
+                .replacingOccurrences(of: "buyer serving", with: "customer availability")
+                .replacingOccurrences(of: "coordinator", with: "network")
+                .replacingOccurrences(of: "compatibility set", with: "provider software")
+                .replacingOccurrences(of: "admission identity", with: "network verification")
+        }
     }
 
     static func publicErrorDetail(_ error: String?) -> String? {
