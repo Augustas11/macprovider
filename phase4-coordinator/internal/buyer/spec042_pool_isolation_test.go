@@ -202,8 +202,8 @@ func TestPoolIsolation_LoopFenceRejectsStaleBeforeDispatch(t *testing.T) {
 	if dispatched {
 		t.Fatal("dispatch ran under a stale pool generation; the loop fence did not fire")
 	}
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d, want 503", w.Code)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want 409 (SPEC-042 R010 pool_state_stale)", w.Code)
 	}
 	if !strings.Contains(w.Body.String(), "pool_state_stale") {
 		t.Fatalf("body=%s, want pool_state_stale", w.Body.String())

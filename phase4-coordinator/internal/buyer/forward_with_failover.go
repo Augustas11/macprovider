@@ -79,8 +79,10 @@ func (s *Server) forwardWithFailover(
 		// occurs pre-commit). Inert for global requests / feature-off.
 		if s.poolGenerationStale(state) {
 			s.releaseQueuedSlotReservation(state)
-			rec.logRow("", http.StatusServiceUnavailable, nil, nil, "pool membership changed during routing", "", 0)
-			writeError(w, http.StatusServiceUnavailable, "pool_state_stale", "Pool membership changed during routing; please retry")
+			// HTTP 409 per the SPEC-042 R010 error table (retryable): the
+			// reservation's fenced pool generation conflicts with current state.
+			rec.logRow("", http.StatusConflict, nil, nil, "pool membership changed during routing", "", 0)
+			writeError(w, http.StatusConflict, "pool_state_stale", "Pool membership changed during routing; please retry")
 			return false
 		}
 		// Reset the per-attempt dispatched flag before every attempt so the

@@ -5562,10 +5562,12 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// (s.trustPools == nil) or the request is poolless (req.poolID == "")
 	// nothing here changes and selection stays byte-identical.
 	var poolMembers map[string]bool
+	var poolGen uint64
 	poolActive := s.trustPools != nil && req.poolID != ""
 	if poolActive {
 		snap := s.trustPools.Snapshot(req.poolID)
 		poolMembers = snap.Members
+		poolGen = snap.Generation
 		if state != nil {
 			state.poolID = req.poolID
 			state.poolMembers = snap.Members
@@ -5634,7 +5636,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	if poolActive {
 		checker.poolID = req.poolID
 		checker.poolMembers = poolMembers
-		checker.poolGeneration = state.poolGeneration
+		checker.poolGeneration = poolGen // local snapshot value; avoids a nil-state deref
 	}
 	result := routing.EligibleCandidates(providers, exSet, pool.Provider.SortKey, checker)
 	candidates := result.Eligible
