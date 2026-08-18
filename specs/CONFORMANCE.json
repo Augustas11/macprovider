@@ -145,7 +145,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "SPEC-005-R001/R002 promoted from signed JOURNEY-BUYER-PAID-PATH (observe-mode isolated candidate). SPEC-005-R003 (crash recovery) remains pending under isolated JOURNEY-BUYER-CRASH-RECOVERY (#1043). R004–R009 register remaining D8/settlement/attempt/endpoint/account-scope/quarantine obligation areas without promotion. requirement_id_migration stays pending until this #1023 remainder is accepted as exhaustive. No enforce claim."
+        "rationale": "SPEC-005-R001/R002 promoted from signed JOURNEY-BUYER-PAID-PATH (observe-mode isolated candidate). SPEC-005-R003 (crash recovery) remains pending under isolated JOURNEY-BUYER-CRASH-RECOVERY (#1043). R004\u2013R009 register remaining D8/settlement/attempt/endpoint/account-scope/quarantine obligation areas without promotion. requirement_id_migration stays pending until this #1023 remainder is accepted as exhaustive. No enforce claim."
       }
     },
     {
@@ -175,7 +175,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "SPEC-006-R001/R002/R003 remain the paid-path chat/error/quota units. R004–R009 register models/usage/status/kill-switch/public-feeds/demo isolation without promotion. requirement_id_migration stays pending until this #1023 remainder is accepted as exhaustive."
+        "rationale": "SPEC-006-R001/R002/R003 remain the paid-path chat/error/quota units. R004\u2013R009 register models/usage/status/kill-switch/public-feeds/demo isolation without promotion. requirement_id_migration stays pending until this #1023 remainder is accepted as exhaustive."
       }
     },
     {
@@ -423,7 +423,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "SPEC-015-R001 remains the v0.4 settlement-capable issuance/ingestion unit. R002–R005 register historical v0.1–v0.3, receipt-key lifecycle, trust root, and storage/redaction without promotion. Buyer retrieval stays SPEC-022-R006. requirement_id_migration stays pending until this #1023 remainder is accepted as exhaustive."
+        "rationale": "SPEC-015-R001 remains the v0.4 settlement-capable issuance/ingestion unit. R002\u2013R005 register historical v0.1\u2013v0.3, receipt-key lifecycle, trust root, and storage/redaction without promotion. Buyer retrieval stays SPEC-022-R006. requirement_id_migration stays pending until this #1023 remainder is accepted as exhaustive."
       }
     },
     {
@@ -465,7 +465,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "PR #164 merged the SPEC-016 USDC-on-Base payout implementation, PR #827 repaired the spec-index drift, and PR #882 added the provider-facing Add Wallet registration flow. SPEC-016 v0.1.26 (#954) mounts §3.3 registration while payout.enabled=false when hot_wallet_address is set; the runner remains default-off and no production activation claim is made. Exhaustive clause-level requirement ID migration, signed journey evidence, §9 operator prerequisites, production deployment, and the remaining per-requirement reconciliations remain pending under the payout-lifecycle domain."
+        "rationale": "PR #164 merged the SPEC-016 USDC-on-Base payout implementation, PR #827 repaired the spec-index drift, and PR #882 added the provider-facing Add Wallet registration flow. SPEC-016 v0.1.26 (#954) mounts \u00a73.3 registration while payout.enabled=false when hot_wallet_address is set; the runner remains default-off and no production activation claim is made. Exhaustive clause-level requirement ID migration, signed journey evidence, \u00a79 operator prerequisites, production deployment, and the remaining per-requirement reconciliations remain pending under the payout-lifecycle domain."
       }
     },
     {
@@ -1239,7 +1239,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/854",
-        "rationale": "Provider serving continuity across coordinator disconnect, reconnect backoff, and coordinator drain (§6.5 / FR-13 / FR-15 / AC-16): PR #853 binds the macOS sleep assertion to serving intent under regression tests, but production physical uptime evidence remains pending."
+        "rationale": "Provider serving continuity across coordinator disconnect, reconnect backoff, and coordinator drain (\u00a76.5 / FR-13 / FR-15 / AC-16): PR #853 binds the macOS sleep assertion to serving intent under regression tests, but production physical uptime evidence remains pending."
       }
     },
     {
@@ -2302,7 +2302,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP3 (snapshot-at-commit, write ordering, durability events) plus the §5a Format v1 normative encoding it publishes; normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP3 (snapshot-at-commit, write ordering, durability events) plus the \u00a75a Format v1 normative encoding it publishes; normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
       }
     },
     {
@@ -2317,7 +2317,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per §5a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per \u00a75a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
       }
     },
     {
@@ -3628,7 +3628,7 @@
     {
       "requirement_id": "SPEC-005-R003",
       "spec_id": "SPEC-005",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/recovery.go:RecoverLedger",
         "phase4-coordinator/internal/billing/recovery.go:StartStartupScan"
@@ -3642,13 +3642,21 @@
       "journeys": [
         "JOURNEY-BUYER-CRASH-RECOVERY"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1043",
-        "rationale": "Crash recovery and reconcile of in-flight ledger rows (SPEC-005 §10): shipped and unit-tested. Isolated JOURNEY-BUYER-CRASH-RECOVERY reconstructs identity-fallback durable state and proves coordinator restart startup_scan recovery, idempotent rescan, orphan quarantine, and no double credit. A passing local harness is not signed promotion evidence. Physical evidence is #1043."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
+          "source": null,
+          "captured_at": "2026-08-18",
+          "expires_at": "2026-09-17"
+        },
+        {
+          "artifact": "sha256:553f8eb085674daa557277cf4aaf476ad8269e50e5c7f9b89dcf77bf5587706b",
+          "source": "journeys/evidence/buyer-crash-recovery-20260818T065904Z.spec-005-r003.journey-result.signed.json",
+          "captured_at": "2026-08-18",
+          "expires_at": "2026-09-17"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-005-R004",
@@ -3668,7 +3676,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "D8 failed-request accounting (§6): 503 writes no payable ledger row; null-usage errors persist zero-credit rows. Mapped to existing hot-path tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "D8 failed-request accounting (\u00a76): 503 writes no payable ledger row; null-usage errors persist zero-credit rows. Mapped to existing hot-path tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -3688,7 +3696,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Settlement cadence, threshold, split, and payout-ready idempotency (§7, §4.5). Mapped to existing RunSettlement tests. job_enabled remains operator-gated. Not promoted. Remainder tracking is #1023."
+        "rationale": "Settlement cadence, threshold, split, and payout-ready idempotency (\u00a77, \u00a74.5). Mapped to existing RunSettlement tests. job_enabled remains operator-gated. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -3708,7 +3716,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Multi-attempt attribution (§8): monotonic attempt_n, duplicate-without-retry quarantine, derived retry credit. Mapped to existing hot-path tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Multi-attempt attribution (\u00a78): monotonic attempt_n, duplicate-without-retry quarantine, derived retry credit. Mapped to existing hot-path tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -3728,7 +3736,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Operator and provider ledger endpoints (§11): summary, settlement-verdict counters. Mapped to existing endpoint tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Operator and provider ledger endpoints (\u00a711): summary, settlement-verdict counters. Mapped to existing endpoint tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -3748,7 +3756,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Settlement account-scope hashing and identity snapshots (§4.8). Mapped to existing account-scope tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Settlement account-scope hashing and identity snapshots (\u00a74.8). Mapped to existing account-scope tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -3768,7 +3776,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Operator quarantine resolutions (§4.10, §10.5): force-void and open-quarantine list. Mapped to existing quarantine tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Operator quarantine resolutions (\u00a74.10, \u00a710.5): force-void and open-quarantine list. Mapped to existing quarantine tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -3888,7 +3896,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Public GET /v1/models and tier-1 disclosure (§5.3). Mapped to existing models tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Public GET /v1/models and tier-1 disclosure (\u00a75.3). Mapped to existing models tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -3907,7 +3915,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Authenticated GET /v1/usage (§5.5). Mapped to existing usage disclosure tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Authenticated GET /v1/usage (\u00a75.5). Mapped to existing usage disclosure tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -3927,7 +3935,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Public GET /v1/status aggregation and redaction (§5.6). Mapped to existing status tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Public GET /v1/status aggregation and redaction (\u00a75.6). Mapped to existing status tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -3948,7 +3956,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Gateway kill switches (§2.7). Mapped to existing persist/demo-pause tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Gateway kill switches (\u00a72.7). Mapped to existing persist/demo-pause tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -3969,7 +3977,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Unauthenticated public rate-card and stats overview on the buyer host (§2.2, §4.2). Mapped to existing public-feeds tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Unauthenticated public rate-card and stats overview on the buyer host (\u00a72.2, \u00a74.2). Mapped to existing public-feeds tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -3989,7 +3997,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Demo-token traffic isolation from paid API-key quota (§3.6). Mapped to existing demo tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Demo-token traffic isolation from paid API-key quota (\u00a73.6). Mapped to existing demo tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -4045,7 +4053,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Historical v0.1–v0.3 verification and forward-incompat with v0.4 (§10, §M). Mapped to existing verifier tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Historical v0.1\u2013v0.3 verification and forward-incompat with v0.4 (\u00a710, \u00a7M). Mapped to existing verifier tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -4066,7 +4074,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Provider receipt-key lifecycle and buyer-safe pubkey resolver (§7). Mapped to existing receipt-keys tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Provider receipt-key lifecycle and buyer-safe pubkey resolver (\u00a77). Mapped to existing receipt-keys tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -4087,7 +4095,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Pubkey trust root and TLS-trust warnings (§8). Mapped to existing verify/resolver tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Pubkey trust root and TLS-trust warnings (\u00a78). Mapped to existing verify/resolver tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -4106,7 +4114,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Coordinator receipt storage, ingest idempotency, and audit redaction (§13, §N). Retrieval remains SPEC-022-R006. Mapped to existing ingest tests. Not promoted. Remainder tracking is #1023."
+        "rationale": "Coordinator receipt storage, ingest idempotency, and audit redaction (\u00a713, \u00a7N). Retrieval remains SPEC-022-R006. Mapped to existing ingest tests. Not promoted. Remainder tracking is #1023."
       }
     },
     {
@@ -4437,7 +4445,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Default-off rail scope, USDC-on-Base operator prerequisites, and activation boundary (§1, §2, §9): preliminary anchor for the existing obligation area; implementation merged default-off by PR #164, but production enablement and §9 operator prerequisite evidence remain pending."
+        "rationale": "Default-off rail scope, USDC-on-Base operator prerequisites, and activation boundary (\u00a71, \u00a72, \u00a79): preliminary anchor for the existing obligation area; implementation merged default-off by PR #164, but production enablement and \u00a79 operator prerequisite evidence remain pending."
       }
     },
     {
@@ -4506,7 +4514,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Payout package boundary, read surfaces, handler inventory, and import-graph ownership (§3.4, §4.1, §7.3): preliminary anchor for the existing obligation area; implementation exists in the coordinator payout package and wiring, but mappings/tests are not yet reconciled to conformant."
+        "rationale": "Payout package boundary, read surfaces, handler inventory, and import-graph ownership (\u00a73.4, \u00a74.1, \u00a77.3): preliminary anchor for the existing obligation area; implementation exists in the coordinator payout package and wiring, but mappings/tests are not yet reconciled to conformant."
       }
     },
     {
@@ -4521,7 +4529,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Runner selection, signing, broadcast, two-RPC confirmation, and ClaimPayoutReady finalization (§4.3): preliminary anchor for the existing obligation area; runner implementation merged default-off, but production activation, mapped tests, and journey evidence remain pending."
+        "rationale": "Runner selection, signing, broadcast, two-RPC confirmation, and ClaimPayoutReady finalization (\u00a74.3): preliminary anchor for the existing obligation area; runner implementation merged default-off, but production activation, mapped tests, and journey evidence remain pending."
       }
     },
     {
@@ -4536,7 +4544,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Payout attempt schema, idempotent retry, nonce-gap fill, cancel self-transfer, and abandon-attempt recovery (§4.5, §4.6): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and evidence remain pending."
+        "rationale": "Payout attempt schema, idempotent retry, nonce-gap fill, cancel self-transfer, and abandon-attempt recovery (\u00a74.5, \u00a74.6): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and evidence remain pending."
       }
     },
     {
@@ -4551,7 +4559,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Reorg polling, orphan recording, compensation, and funding-recording admin flows (§4.7, §4.9): preliminary anchor for the existing obligation area; implementation merged default-off, but operator runbook evidence and signed journey-result support remain pending."
+        "rationale": "Reorg polling, orphan recording, compensation, and funding-recording admin flows (\u00a74.7, \u00a74.9): preliminary anchor for the existing obligation area; implementation merged default-off, but operator runbook evidence and signed journey-result support remain pending."
       }
     },
     {
@@ -4566,7 +4574,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Runtime flags, pause/resume, runner lease, self-fencing, and crash-safe audit outboxes (§4.8, §4.8a, §4.8b, §4.8c, §6.4.1): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and production evidence remain pending."
+        "rationale": "Runtime flags, pause/resume, runner lease, self-fencing, and crash-safe audit outboxes (\u00a74.8, \u00a74.8a, \u00a74.8b, \u00a74.8c, \u00a76.4.1): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and production evidence remain pending."
       }
     },
     {
@@ -4581,7 +4589,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Payout caps, hot-wallet balances, gas accounting, and conservation reconciliation (§5, §6.2, §7.4): preliminary anchor for the existing obligation area; implementation merged default-off, but funded-wallet operation and reconciliation evidence remain pending."
+        "rationale": "Payout caps, hot-wallet balances, gas accounting, and conservation reconciliation (\u00a75, \u00a76.2, \u00a77.4): preliminary anchor for the existing obligation area; implementation merged default-off, but funded-wallet operation and reconciliation evidence remain pending."
       }
     },
     {
@@ -4596,7 +4604,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Signer custody, Linux-only process hardening, two-RPC discipline, SPKI pinning, and reload boundaries (§6.3, §6.4, §6.5): preliminary anchor for the existing obligation area; implementation merged default-off, but production host evidence and signed journey-result support remain pending."
+        "rationale": "Signer custody, Linux-only process hardening, two-RPC discipline, SPKI pinning, and reload boundaries (\u00a76.3, \u00a76.4, \u00a76.5): preliminary anchor for the existing obligation area; implementation merged default-off, but production host evidence and signed journey-result support remain pending."
       }
     },
     {
@@ -4611,7 +4619,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Structured audit events, retention, operator queries, BetterStack alert filters, and runbook obligations (§7, §9): preliminary anchor for the existing obligation area; implementation and runbook artifacts merged, but alert verification and production evidence remain pending."
+        "rationale": "Structured audit events, retention, operator queries, BetterStack alert filters, and runbook obligations (\u00a77, \u00a79): preliminary anchor for the existing obligation area; implementation and runbook artifacts merged, but alert verification and production evidence remain pending."
       }
     },
     {
@@ -4626,7 +4634,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Provider-token custody and compliance payout eligibility (§8, v0.1.20 Wave-2 custody gate): preliminary anchor for the existing obligation area; normative custody gate retained through v0.1.23, but provider eligibility policy and production evidence remain pending."
+        "rationale": "Provider-token custody and compliance payout eligibility (\u00a78, v0.1.20 Wave-2 custody gate): preliminary anchor for the existing obligation area; normative custody gate retained through v0.1.23, but provider eligibility policy and production evidence remain pending."
       }
     },
     {
