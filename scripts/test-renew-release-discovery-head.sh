@@ -80,6 +80,8 @@ if 'gh release create "release-discovery"' in publish or "gh release upload" in 
     raise SystemExit("renewal must not publish to the fixed release-discovery tag")
 if "gh release create \"$TRANSPORT_TAG\"" not in publish:
     raise SystemExit("renewal must create an append-only transport tag")
+if "GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}" not in publish:
+    raise SystemExit("renewal publish must use the protected release token")
 top_level, _, rest = workflow.partition("\njobs:\n")
 if "contents: write" in top_level:
     raise SystemExit("top-level renewal permissions must remain read-only")
