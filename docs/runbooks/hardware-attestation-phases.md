@@ -156,8 +156,8 @@ Extend `pool.Provider` (non-breaking JSON fields):
 
 ### 1.3 Entitlements / signing notes
 
-- SE persistent key requires **keychain-access-groups** entitlement on distributed `macprovider-cli` binary.
-- Production group: `YF7XNRJUG4.live.malibu.provider` (`phase3-binary/dist/macprovider-cli.entitlements`). Team ID prefix must match Developer ID signing (`YF7XNRJUG4`).
+- Production Developer ID `macprovider-cli` uses the **process default keychain** (no `kSecAttrAccessGroup`). Do **not** attach `keychain-access-groups` on the naked CLI: AMFI treats that as restricted and SIGKILLs a Developer ID tool with no provisioning profile (v1.8.96).
+- A named group (`YF7XNRJUG4.live.malibu.provider`) is only for a future **profiled app bundle** that must share the SE key across binaries. That requires an Apple-issued Developer ID provisioning profile, not a git entitlements plist.
 - Simulator / x86: SE path returns `unsupported` (no fake attestation).
 
 ### 1.4 Tests (mandatory)
@@ -373,7 +373,7 @@ Script auto-restores config backup on verification failure. Manual: set `require
 - [x] Periodic `se_liveness_challenge` / response on coordinator
 - [x] Provider `handleSELivenessChallenge` wired
 - [ ] End-to-end auth + liveness integration test (Swift + Go)
-- [ ] `keychain-access-groups` entitlement on release binary
+- [x] Developer ID CLI uses default keychain (no restricted `keychain-access-groups`; v1.8.96 AMFI kill)
 - [ ] Phase 1 commit + PR
 
 ---

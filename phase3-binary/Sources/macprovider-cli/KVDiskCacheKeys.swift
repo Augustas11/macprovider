@@ -320,26 +320,30 @@ enum KVChunkCrypto {
 // MARK: - SecItem adapter (thin; only this touches the Keychain)
 
 /// Data-Protection-Keychain adapter. All items are generic passwords with
-/// `kSecUseDataProtectionKeychain = true`, an access group per the shipped
-/// `SecureEnclaveIdentity` pattern, `AfterFirstUnlockThisDeviceOnly`, non-
-/// synchronizable, and non-interactive lookups. If the entitlement/access group is
-/// unavailable, operations surface `.unavailable` and the tier stays dormant.
+/// `kSecUseDataProtectionKeychain = true`, the process default keychain
+/// (no named access group unless `MACPROVIDER_KEYCHAIN_ACCESS_GROUP` is set),
+/// `AfterFirstUnlockThisDeviceOnly`, non-synchronizable, and non-interactive
+/// lookups. If a named group is requested without the entitlement, operations
+/// surface `.unavailable` and the tier stays dormant.
 struct KVSecItemKeychain: KVKeychain {
-    let accessGroup: String
+    let accessGroup: String?
 
     init(accessGroup: String? = nil) {
         self.accessGroup = MacProviderKeychainAccessGroup.resolve(accessGroup)
     }
 
     private func nonInteractiveBase(service: String) -> [String: Any] {
-        [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccessGroup as String: accessGroup,
             kSecUseDataProtectionKeychain as String: true,
             kSecAttrSynchronizable as String: false,
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
+        if let accessGroup {
+            query[kSecAttrAccessGroup as String] = accessGroup
+        }
+        return query
     }
 
     func add(service: String, account: String, secret: Data, incarnation: String) throws {
@@ -401,14 +405,16 @@ struct KVSecItemKeychain: KVKeychain {
     func enumerate(servicePrefix: String) throws -> [KVKeychainItem] {
         // Data-Protection generic passwords cannot be prefix-queried by service, so
         // enumerate all items in the access group and filter in-process.
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccessGroup as String: accessGroup,
             kSecUseDataProtectionKeychain as String: true,
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
             kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitAll,
         ]
+        if let accessGroup {
+            query[kSecAttrAccessGroup as String] = accessGroup
+        }
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         switch status {

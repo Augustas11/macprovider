@@ -390,16 +390,18 @@ final class SEAttestationGeneratorEnvelopeTests: XCTestCase {
 }
 
 final class MacProviderKeychainAccessGroupTests: XCTestCase {
-    func testProductionAccessGroupMatchesReleaseEntitlement() {
+    func testDefaultAccessGroupIsOmittedForDeveloperIDCLI() {
         XCTAssertEqual(
-            MacProviderKeychainAccessGroup.production,
+            MacProviderKeychainAccessGroup.namedProduction,
             "YF7XNRJUG4.live.malibu.provider"
         )
         XCTAssertEqual(MacProviderKeychainAccessGroup.productionTeamID, "YF7XNRJUG4")
+        XCTAssertNil(MacProviderKeychainAccessGroup.resolve(nil))
         XCTAssertEqual(
             MacProviderKeychainAccessGroup.resolve("override.group"),
             "override.group"
         )
+        XCTAssertNil(MacProviderKeychainAccessGroup.resolve("   "))
     }
 }
 

@@ -2,13 +2,14 @@
 /// macOS data-protection keychain. arm64-only; callers must guard with
 /// `#if arch(arm64)` or check `SecureEnclaveIdentity.isAvailable` at runtime.
 ///
-/// Access-group note: The production access group is
-/// `YF7XNRJUG4.live.malibu.provider` (Developer ID Team ID Superposition
-/// Technologies). Release signing attaches it via
-/// `phase3-binary/dist/macprovider-cli.entitlements`. Override with env var
-/// `MACPROVIDER_KEYCHAIN_ACCESS_GROUP` or the `accessGroup:` parameter.
-/// A binary missing the `keychain-access-groups` entitlement receives
-/// errSecMissingEntitlement (-34018), which surfaces as
+/// Access-group note: production Developer ID `macprovider-cli` omits
+/// `kSecAttrAccessGroup` and ships with no keychain entitlements. A named
+/// group requires the restricted `keychain-access-groups` entitlement, and
+/// AMFI SIGKILLs a naked Developer ID CLI that carries that entitlement
+/// without an embedded provisioning profile (v1.8.96). Override with env
+/// var `MACPROVIDER_KEYCHAIN_ACCESS_GROUP` or the `accessGroup:` parameter
+/// only when the binary is profiled. A named group without the entitlement
+/// returns errSecMissingEntitlement (-34018) as
 /// `SecureEnclaveIdentityError.missingEntitlement`.
 
 import CryptoKit
@@ -51,7 +52,7 @@ enum SecureEnclaveIdentityError: Error, CustomStringConvertible {
         case .publicKeySerializationFailed(let status):
             return "Failed to serialize SE public key: OSStatus \(status)"
         case .missingEntitlement:
-            return "Binary is missing the keychain-access-groups entitlement for the configured access group"
+            return "Binary is missing the keychain-access-groups entitlement for the requested access group"
         }
     }
 }
@@ -67,16 +68,19 @@ private func osStatus(from cfError: Unmanaged<CFError>?) -> OSStatus {
 enum MacProviderKeychainAccessGroup {
     /// Superposition Technologies Developer ID Team ID (`YF7XNRJUG4`).
     static let productionTeamID = "YF7XNRJUG4"
-    /// Must match `phase3-binary/dist/macprovider-cli.entitlements`.
-    static let production = "YF7XNRJUG4.live.malibu.provider"
+    /// Named group for a future profiled app bundle. Not the Developer ID CLI default.
+    static let namedProduction = "YF7XNRJUG4.live.malibu.provider"
 
-    static func resolve(_ override: String?) -> String {
-        if let override { return override }
-        if let env = ProcessInfo.processInfo.environment["MACPROVIDER_KEYCHAIN_ACCESS_GROUP"],
-           !env.isEmpty { return env }
-        // Unsigned local/CI binaries lack keychain-access-groups; loadOrCreate
-        // throws missingEntitlement and the generator treats SE as unavailable.
-        return production
+    static func resolve(_ override: String?) -> String? {
+        if let override {
+            let trimmed = override.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let env = ProcessInfo.processInfo.environment["MACPROVIDER_KEYCHAIN_ACCESS_GROUP"] {
+            let trimmed = env.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return nil
     }
 }
 
@@ -128,9 +132,9 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
     // MARK: - Load or Create
 
     /// Load an existing persistent SE key from the keychain, or create one if
-    /// not found. Throws `missingEntitlement` when the binary lacks the
-    /// `keychain-access-groups` entitlement — callers should fall back to a
-    /// non-SE attestation path rather than aborting.
+    /// not found. Throws `missingEntitlement` when a named access group is
+    /// requested and the binary lacks `keychain-access-groups` — callers
+    /// should fall back to a non-SE attestation path rather than aborting.
     static func loadOrCreate(
         accessGroup: String? = nil,
         label: String? = nil
@@ -187,16 +191,15 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
     ) throws {
         let group = resolveAccessGroup(accessGroup)
         let keyLabel = label ?? defaultLabel
-        let query: [String: Any] = [
+        let query = applyingAccessGroup([
             kSecClass as String: kSecClassKey,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
             kSecAttrLabel as String: keyLabel,
-            kSecAttrAccessGroup as String: group,
             kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
             kSecUseDataProtectionKeychain as String: true,
-        ]
+        ], group)
         let status = SecItemDelete(query as CFDictionary)
         switch status {
         case errSecSuccess, errSecItemNotFound:
@@ -210,27 +213,36 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
 
     // MARK: - Access Group Resolution
 
-    static func resolveAccessGroup(_ override: String?) -> String {
+    static func resolveAccessGroup(_ override: String?) -> String? {
         MacProviderKeychainAccessGroup.resolve(override)
+    }
+
+    private static func applyingAccessGroup(
+        _ query: [String: Any],
+        _ accessGroup: String?
+    ) -> [String: Any] {
+        guard let accessGroup else { return query }
+        var query = query
+        query[kSecAttrAccessGroup as String] = accessGroup
+        return query
     }
 
     // MARK: - Private Helpers
 
     private static func findExisting(
-        accessGroup: String,
+        accessGroup: String?,
         label: String
     ) throws -> SecureEnclaveIdentity {
-        let query: [String: Any] = [
+        let query = applyingAccessGroup([
             kSecClass as String: kSecClassKey,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
             kSecAttrLabel as String: label,
-            kSecAttrAccessGroup as String: accessGroup,
             kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
             kSecUseDataProtectionKeychain as String: true,
             kSecReturnRef as String: true,
-        ]
+        ], accessGroup)
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         switch status {
@@ -250,7 +262,7 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
     }
 
     private static func createNew(
-        accessGroup: String,
+        accessGroup: String?,
         label: String
     ) throws -> SecureEnclaveIdentity {
         var acError: Unmanaged<CFError>?
@@ -265,12 +277,11 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
             )
         }
 
-        let privateKeyAttrs: [String: Any] = [
+        let privateKeyAttrs = applyingAccessGroup([
             kSecAttrIsPermanent as String: true,
             kSecAttrAccessControl as String: accessControl,
             kSecAttrLabel as String: label,
-            kSecAttrAccessGroup as String: accessGroup,
-        ]
+        ], accessGroup)
         let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,

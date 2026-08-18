@@ -11,7 +11,7 @@ import Security
 ///
 /// Returns nil (with a WARN log) when:
 /// - SE hardware is unavailable
-/// - The binary lacks the `keychain-access-groups` entitlement
+/// - A named keychain access group is requested without the entitlement
 /// - Any other SE initialization error
 ///
 /// This generator does NOT fake attestation on non-SE hardware; it lets the
