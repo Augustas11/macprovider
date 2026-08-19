@@ -49,8 +49,8 @@ pool_id = base64url_nopad( SHA256(identity_core_bytes)[0:16] )
 
 `pool_id` is a 128-bit truncation, a **non-capability** naming key (R001). It is
 carried alongside the manifest and MUST be rejected on mismatch against the
-recomputed identity-core digest (mismatch check is a later verification slice;
-this slice provides the derivation + an equality helper).
+recomputed identity-core digest; this slice provides the derivation, and the
+recompute-and-compare mismatch check is a later verification slice.
 
 ## 4. Versioned policy core (→ `manifest_core_digest`)
 
@@ -117,7 +117,7 @@ which is the point — the wire format is frozen once these land. Vectors cover:
 
 ```go
 type IdentityCore struct { RootIssuerKeyID string; GenesisNonce []byte }
-type PolicyCore struct { PoolID string; ManifestVersion uint64; PrevManifestCoreHash []byte; SignerSetVersion uint64; ModelAllowlist []string; MinBinaryVersion string; MinAttestationTier string; RequireEncryptedLeg bool; SettlementMode string; RevenueSplitBps uint64; SplitExecutionStatus string; RetentionPolicyID string; MinEligibleMembers uint64; PrivacyMode string; NotBeforeUnix uint64; ExpiresAtUnix uint64 }
+type PolicyCore struct { PoolID string; ManifestVersion uint64; PrevManifestCoreHash []byte; SignerSetVersion uint64; ModelAllowlist []string; MinBinaryVersion string; MinAttestationTier string; RequireEncryptedLeg bool; SettlementMode string; RevenueSplitBps uint64; SplitExecutionStatus string; RetentionPolicyID string; MinEligibleMembers uint64; PrivacyMode string; RelayBlindCapable bool; ReceiptContract string; MetadataVisible string; DowngradePolicy string; StickyRoutingAllowed bool; NotBeforeUnix uint64; ExpiresAtUnix uint64 }
 
 func (IdentityCore) CanonicalBytes() ([]byte, error)
 func (IdentityCore) PoolID() (string, error)            // base64url(SHA256(canonical)[0:16])
