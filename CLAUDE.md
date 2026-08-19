@@ -107,6 +107,8 @@ git checkout -b fix/<topic> origin/main
 
 # Commit, push, open PR
 git push -u origin fix/<topic>
+# First draft the PR body with exactly one SPEC-GOVERNANCE-DECLARATION
+# block and validate it locally; see "PR governance declaration gate".
 gh pr create
 
 # After PR squash-merges on GitHub
@@ -159,7 +161,7 @@ intent and bringing in the idempotency-key feature added during
 review. Backup branch `backup-main-pre-merge-20260604` preserves the
 pre-merge tip in case of regression.
 
-## PR governance declaration gate (don't panic when it's red)
+## PR governance declaration gate (preflight before opening PRs)
 
 Every PR runs the `spec-index` workflow's `check` job
 (`scripts/check_spec_pr_declaration.py`), which requires the **PR body** to
@@ -168,10 +170,23 @@ contain exactly one `SPEC-GOVERNANCE-DECLARATION-BEGIN` /
 `schema_version: "spec-pr-governance-v1"` JSON payload. Omit it and that
 job goes red with `PR body must contain exactly one ...DECLARATION-BEGIN/END`.
 
-**This `check` is advisory, not a merge blocker.** The `main` ruleset
-requires only the **`ci-required`** status context (the aggregation job at
-the bottom of `.github/workflows/ci.yml`; it does *not* `needs:` spec-index)
-plus **1 approving review**. A red `spec-index / check` does not block merge.
+Prepare and validate this block **before** running `gh pr create`. Do not
+open a PR first, wait for `spec-index / check` to fail, and then patch the
+body afterward. For local validation, save a minimal event payload containing
+the planned body and run the same validator that CI runs:
+
+```bash
+python3 - <<'PY' > /tmp/pr-event.json
+import json
+from pathlib import Path
+body = Path('/tmp/pr-body.md').read_text()
+print(json.dumps({'pull_request': {'body': body}}))
+PY
+python3 scripts/check_spec_pr_declaration.py \
+  --event /tmp/pr-event.json \
+  --base origin/main \
+  --head HEAD
+```
 
 Fill the block honestly when a spec fits (real example, PR #713):
 
@@ -202,7 +217,11 @@ rejects `"none"` — it must be `"yes"` with ≥1 each of specs / requirements /
 authority_domains / arbitration / tests / journeys, all validated against
 `specs/AUTHORITY.json` and `specs/CONFORMANCE.json`.
 
-**Infra/CI-only PRs (e.g. a `ci.yml` tweak) have no honest declaration:**
+Allowed arbitration verdict values are currently `CODE_BUG`, `SPEC_BUG`,
+`DUPLICATE_AUTHORITY`, `DECISION_REQUIRED`, and `UNKNOWN`; values such as
+`defer` are invalid.
+
+**Infra/CI-only PRs (e.g. a `ci.yml` tweak) may have no honest declaration:**
 `ci.yml` is a non-governance path but no authority domain governs CI, so
 `"none"` is rejected and `"yes"` has no real spec to cite. Do **not**
 fabricate a spec link. Either merge past the advisory red (state in the PR

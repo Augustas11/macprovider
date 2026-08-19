@@ -39,6 +39,15 @@ Always work on a feature branch. After your PR squash-merges, run
 PR-branch commits. See `CLAUDE.md` § *PR workflow* for the full
 sequence and recovery steps for inheriting a divergent local main.
 
+Before opening any PR, prepare the PR body with exactly one
+`SPEC-GOVERNANCE-DECLARATION-BEGIN` /
+`SPEC-GOVERNANCE-DECLARATION-END` block and validate it locally with
+`scripts/check_spec_pr_declaration.py` when the branch changes specs,
+manifests, product behavior, or any non-governance path. Do this before
+`gh pr create`; do not wait for the `spec-index` workflow to fail and
+patch the body afterward. See `CLAUDE.md` § *PR governance declaration
+gate* for the required JSON fields and allowed verdict values.
+
 ## 3. Git identity — pushes route to `Augustas11` automatically
 
 A per-repo credential helper in `.git/config` calls `gh auth token
