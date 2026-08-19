@@ -1224,7 +1224,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.7",
+      "version": "0.0.8",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5103,15 +5103,21 @@
       "requirement_id": "SPEC-042-R001",
       "spec_id": "SPEC-042",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/poolmanifest/manifest.go:func (ic IdentityCore) PoolID",
+        "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) ManifestCoreDigest"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestGoldenVectors",
+        "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestDigestSensitivity"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool object + signed manifest + identity/rollback (pool_id as digest of a stable identity core; versioned policy core): NOT yet implemented. The signed manifest write/verify path is a future slice; pool state is seeded in-memory today (internal/trustpool). Gated in the SPEC-042 R010 v0.1 promotion checklist."
+        "rationale": "Pool object + signed manifest + identity/rollback: slice 1 implements the canonical identity-core and versioned-policy-core byte grammar with pool_id (base64url(SHA256(identity core)[0:16])) and manifest_core_digest derivations, frozen by golden vectors (v0.0.8). Still deferred to later R001/R012 slices: signature verification, the root-issuer/signer-set authority log, mutable operational fields, active-policy selection, durable persistence, and routing wiring."
       }
     },
     {
