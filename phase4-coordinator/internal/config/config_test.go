@@ -1106,6 +1106,8 @@ func TestLoadWithOverlayMalibuEmissionBlock(t *testing.T) {
 	overlay := strings.TrimSpace(`
 malibu_emission:
   enabled: false
+  bootstrap_tick_enabled: false
+  epoch_enabled: false
   writer_dsn: env:MALIBU_EMISSION_WRITER_DSN
   provider_daily_cap_malibu: 25
 `)
@@ -1119,11 +1121,38 @@ malibu_emission:
 	if cfg.MalibuEmission.Enabled {
 		t.Fatal("malibu overlay should keep enabled false for C4 staging")
 	}
+	if cfg.MalibuEmission.BootstrapTickEnabled {
+		t.Fatal("bootstrap tick should remain disabled in staging overlay")
+	}
+	if cfg.MalibuEmission.EpochEnabled {
+		t.Fatal("epoch mode should remain disabled until the policy engine is active")
+	}
 	if cfg.MalibuEmission.WriterDSN != "postgres://rewards_writer:pw@127.0.0.1:5432/stats?sslmode=disable" {
 		t.Fatalf("writer_dsn=%q", cfg.MalibuEmission.WriterDSN)
 	}
 	if cfg.MalibuEmission.ProviderDailyCapMALIBU != 25 {
 		t.Fatalf("provider cap=%v", cfg.MalibuEmission.ProviderDailyCapMALIBU)
+	}
+}
+
+func TestValidateMalibuEmissionRejectsEpochBootstrapCoexistence(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.MalibuEmission.Enabled = true
+	cfg.MalibuEmission.BootstrapTickEnabled = true
+	cfg.MalibuEmission.EpochEnabled = true
+	cfg.MalibuEmission.WriterDSN = "postgres://rewards_writer:pw@127.0.0.1:5432/stats?sslmode=disable"
+	cfg.MalibuEmission.TickIntervalSeconds = 900
+	cfg.MalibuEmission.UsefulWorkIntervalSeconds = 900
+	cfg.MalibuEmission.ProviderDailyCapMALIBU = 25
+	cfg.MalibuEmission.WalletDailyCapMALIBU = 100
+	cfg.MalibuEmission.UsefulWorkMALIBUPer1KCredits = 1
+	cfg.MalibuEmission.WalletMirrorIntervalSeconds = 300
+	cfg.MalibuEmission.UnlockEvalIntervalSeconds = 3600
+	cfg.MalibuEmission.MaxSerializableRetries = 5
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "bootstrap_tick_enabled") {
+		t.Fatalf("Validate error=%v, want bootstrap/epoch coexistence rejection", err)
 	}
 }
 

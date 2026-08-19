@@ -19,6 +19,12 @@ func TestConfigDefaultsAndValidate(t *testing.T) {
 	if applied.WalletDailyCapMALIBU != 100 {
 		t.Fatalf("wallet cap = %v", applied.WalletDailyCapMALIBU)
 	}
+	if applied.BootstrapTickEnabled {
+		t.Fatal("bootstrap tick should default disabled")
+	}
+	if applied.EpochEnabled {
+		t.Fatal("epoch mode should default disabled")
+	}
 	if err := applied.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -31,6 +37,17 @@ func TestConfigDefaultsAndValidate(t *testing.T) {
 	missing := rewards.Config{Enabled: true}
 	if err := missing.Validate(); err == nil {
 		t.Fatal("expected error for missing writer dsn")
+	}
+
+	conflict := rewards.Config{
+		Enabled:              true,
+		BootstrapTickEnabled: true,
+		EpochEnabled:         true,
+		WriterDSN:            "postgres://x",
+		SQLitePayoutDBPath:   "/tmp/x.db",
+	}
+	if err := conflict.Validate(); err == nil {
+		t.Fatal("expected error for epoch/bootstrap coexistence without policy engine")
 	}
 }
 

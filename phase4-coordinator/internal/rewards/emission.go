@@ -28,6 +28,12 @@ func (r *Runner) RunWalletMirrorOnce(ctx context.Context) error {
 }
 
 func (r *Runner) runEmissionTick(ctx context.Context) error {
+	if !r.cfg.BootstrapTickEnabled {
+		return nil
+	}
+	if r.cfg.EpochEnabled {
+		return ErrEpochPolicyEngineUnavailable
+	}
 	providers, err := r.listEligibleProviders(ctx)
 	if err != nil {
 		return err

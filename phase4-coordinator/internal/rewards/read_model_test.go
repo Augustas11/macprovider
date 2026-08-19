@@ -79,6 +79,46 @@ func TestRewardEligibilityProviderDailyCapIsCapped(t *testing.T) {
 	}
 }
 
+func TestRewardEligibilityEpochDispositionReasons(t *testing.T) {
+	held := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
+		AccruedMALIBU:         "10.00000000",
+		WithdrawableMALIBU:    "0",
+		HeldMALIBU:            "10.00000000",
+		TrustTier:             TierTrusted,
+		WithdrawalHoldReasons: []string{ReasonHeldEpochDisposition},
+		WalletBound:           true,
+		VerifiedReceiptCount:  minVerifiedReceipts,
+		AppAttested:           true,
+		HardwareEvidenceState: HardwareEvidenceStateVerified,
+		ComputeIntegrityState: ComputeIntegrityStateVerified,
+	})
+	if held.WithdrawalState != WithdrawalStateHeld {
+		t.Fatalf("held withdrawal_state = %q, want %q", held.WithdrawalState, WithdrawalStateHeld)
+	}
+	if held.PrimaryReason != ReasonHeldEpochDisposition {
+		t.Fatalf("held primary_reason = %q, want %q", held.PrimaryReason, ReasonHeldEpochDisposition)
+	}
+
+	excluded := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
+		AccruedMALIBU:         "10.00000000",
+		WithdrawableMALIBU:    "0",
+		HeldMALIBU:            "10.00000000",
+		TrustTier:             TierTrusted,
+		WithdrawalHoldReasons: []string{ReasonExcludedEpochDisposition},
+		WalletBound:           true,
+		VerifiedReceiptCount:  minVerifiedReceipts,
+		AppAttested:           true,
+		HardwareEvidenceState: HardwareEvidenceStateVerified,
+		ComputeIntegrityState: ComputeIntegrityStateVerified,
+	})
+	if excluded.WithdrawalState != WithdrawalStateIneligible {
+		t.Fatalf("excluded withdrawal_state = %q, want %q", excluded.WithdrawalState, WithdrawalStateIneligible)
+	}
+	if excluded.PrimaryReason != ReasonExcludedEpochDisposition {
+		t.Fatalf("excluded primary_reason = %q, want %q", excluded.PrimaryReason, ReasonExcludedEpochDisposition)
+	}
+}
+
 func TestRewardEligibilityComputeBlockedWinsOverPending(t *testing.T) {
 	got := BuildMalibuRewardEligibility(MalibuRewardEligibilityFacts{
 		AccruedMALIBU:         "0",

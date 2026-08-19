@@ -216,10 +216,21 @@ func TestOperatorMetricsHandlerRequiresOperatorBearer(t *testing.T) {
 func TestCoordinatorRewardsConfigIncludesWalletHotWallet(t *testing.T) {
 	cfg := config.Default()
 	cfg.Storage.DBPath = "/tmp/provider.sqlite"
+	cfg.MalibuEmission.Enabled = true
+	cfg.MalibuEmission.BootstrapTickEnabled = true
+	cfg.MalibuEmission.EpochEnabled = true
+	cfg.MalibuEmission.WriterDSN = "postgres://rewards_writer:pw@127.0.0.1:5432/stats?sslmode=disable"
+	cfg.MalibuEmission.TickIntervalSeconds = 123
+	cfg.MalibuEmission.UsefulWorkEnabled = true
+	cfg.MalibuEmission.UsefulWorkIntervalSeconds = 456
 	cfg.MalibuEmission.SQLitePayoutDBPath = ""
 	cfg.MalibuEmission.ProviderDailyCapMALIBU = 33
 	cfg.MalibuEmission.WalletDailyCapMALIBU = 44
 	cfg.MalibuEmission.UsefulWorkMALIBUPer1KCredits = 2.5
+	cfg.MalibuEmission.WalletMirrorIntervalSeconds = 12
+	cfg.MalibuEmission.UnlockEvalIntervalSeconds = 34
+	cfg.MalibuEmission.MaxSerializableRetries = 7
+	cfg.MalibuEmission.BaseUSDCBalanceRPCURLs = []string{"https://base-rpc-a.example", "https://base-rpc-b.example"}
 	cfg.Payout.Security.HotWalletAddress = "0x52908400098527886e0f7030069857d2e4169ee7"
 
 	got := coordinatorRewardsConfig(cfg)
@@ -231,6 +242,21 @@ func TestCoordinatorRewardsConfigIncludesWalletHotWallet(t *testing.T) {
 	}
 	if got.ProviderDailyCapMALIBU != 33 || got.WalletDailyCapMALIBU != 44 || got.UsefulWorkMALIBUPer1KCredits != 2.5 {
 		t.Fatalf("cap mapping lost: %+v", got)
+	}
+	if !got.Enabled || !got.BootstrapTickEnabled || !got.EpochEnabled || !got.UsefulWorkEnabled {
+		t.Fatalf("activation mapping lost: %+v", got)
+	}
+	if got.WriterDSN != cfg.MalibuEmission.WriterDSN {
+		t.Fatalf("WriterDSN=%q, want %q", got.WriterDSN, cfg.MalibuEmission.WriterDSN)
+	}
+	if got.TickInterval.String() != "2m3s" || got.UsefulWorkInterval.String() != "7m36s" {
+		t.Fatalf("interval mapping lost: %+v", got)
+	}
+	if got.WalletMirrorInterval.String() != "12s" || got.UnlockEvalInterval.String() != "34s" {
+		t.Fatalf("maintenance interval mapping lost: %+v", got)
+	}
+	if got.MaxSerializableRetries != 7 || len(got.BaseUSDCBalanceRPCURLs) != 2 {
+		t.Fatalf("retry/RPC mapping lost: %+v", got)
 	}
 }
 

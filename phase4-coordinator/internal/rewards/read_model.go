@@ -28,6 +28,9 @@ const (
 	ReasonHeldProviderDailyCap             = "held_provider_daily_cap"
 	ReasonHeldWalletDailyCap               = "held_wallet_daily_cap"
 	ReasonHeldDemotionCooldown             = "held_demotion_cooldown"
+	ReasonHeldEpochDisposition             = "held_epoch_disposition"
+	ReasonExcludedEpochDisposition         = "excluded_epoch_disposition"
+	ReasonBurnedOrRetiredEpochDisposition  = "burned_or_retired_epoch_disposition"
 	ReasonWithdrawableBalanceAvailable     = "withdrawable_balance_available"
 	ReasonWithdrawableNoBalance            = "withdrawable_no_balance"
 	ReasonMissingWalletBinding             = "missing_wallet_binding"
@@ -186,6 +189,12 @@ func orderedRewardReasons(f MalibuRewardEligibilityFacts) []string {
 			add(ReasonHeldDemotionCooldown)
 		case HoldTrustTierProvisional:
 			add(ReasonHeldProvisionalTrustTier)
+		case ReasonHeldEpochDisposition:
+			add(ReasonHeldEpochDisposition)
+		case ReasonExcludedEpochDisposition:
+			add(ReasonExcludedEpochDisposition)
+		case ReasonBurnedOrRetiredEpochDisposition:
+			add(ReasonBurnedOrRetiredEpochDisposition)
 		}
 	}
 	if f.ProviderDailyCapped {
@@ -223,6 +232,8 @@ func orderedRewardReasons(f MalibuRewardEligibilityFacts) []string {
 
 func earningStateFor(f MalibuRewardEligibilityFacts, reasons []string) string {
 	if containsReason(reasons, ReasonProviderTokenUntrusted) ||
+		containsReason(reasons, ReasonExcludedEpochDisposition) ||
+		containsReason(reasons, ReasonBurnedOrRetiredEpochDisposition) ||
 		containsReason(reasons, ReasonComputeIntegrityBlocked) ||
 		containsReason(reasons, ReasonHardwareEvidenceMissingOrExpired) {
 		return EarningStateIneligible
@@ -242,7 +253,8 @@ func earningStateFor(f MalibuRewardEligibilityFacts, reasons []string) string {
 		return EarningStateCapped
 	}
 	if containsReason(reasons, ReasonHeldProvisionalTrustTier) ||
-		containsReason(reasons, ReasonHeldDemotionCooldown) {
+		containsReason(reasons, ReasonHeldDemotionCooldown) ||
+		containsReason(reasons, ReasonHeldEpochDisposition) {
 		return EarningStateHeld
 	}
 	if containsReason(reasons, ReasonEarningVerifiedWork) {
@@ -258,12 +270,17 @@ func withdrawalStateFor(f MalibuRewardEligibilityFacts, reasons []string) string
 	if containsReason(reasons, ReasonProviderTokenUntrusted) {
 		return WithdrawalStateIneligible
 	}
+	if containsReason(reasons, ReasonExcludedEpochDisposition) ||
+		containsReason(reasons, ReasonBurnedOrRetiredEpochDisposition) {
+		return WithdrawalStateIneligible
+	}
 	if containsReason(reasons, ReasonHeldWalletDailyCap) ||
 		containsReason(reasons, ReasonHeldProviderDailyCap) {
 		return WithdrawalStateCapped
 	}
 	if containsReason(reasons, ReasonHeldProvisionalTrustTier) ||
-		containsReason(reasons, ReasonHeldDemotionCooldown) {
+		containsReason(reasons, ReasonHeldDemotionCooldown) ||
+		containsReason(reasons, ReasonHeldEpochDisposition) {
 		return WithdrawalStateHeld
 	}
 	if containsReason(reasons, ReasonMissingWalletBinding) {
@@ -282,6 +299,9 @@ func primaryRewardReason(withdrawalState, earningState string, reasons []string)
 		ReasonComputeIntegrityPending,
 		ReasonHeldWalletDailyCap,
 		ReasonHeldProviderDailyCap,
+		ReasonBurnedOrRetiredEpochDisposition,
+		ReasonExcludedEpochDisposition,
+		ReasonHeldEpochDisposition,
 		ReasonHeldDemotionCooldown,
 		ReasonHeldProvisionalTrustTier,
 		ReasonMissingWalletBinding,

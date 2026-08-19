@@ -76,8 +76,14 @@ source under any circumstance.
 
 ## 7. Audit the full fix diff — never a slice
 
-The three required audit lanes are Codex subscription CLI via OMC, not
-Cursor `Task` subagents and not raw `codex` / `codex exec`:
+The three required audit lanes are code review, security review, and
+architecture review. In Codex sessions, run those lanes with native Codex
+subagents/auditor lanes, not OMC. Use bounded prompts that point each auditor
+at the exact full fix diff, and keep their findings in the session transcript
+or repo-local artifacts if the session needs durable evidence.
+
+OMC remains only a legacy fallback for non-Codex contexts that do not have
+native Codex subagents available:
 
 ```bash
 omc ask codex --agent-prompt code-reviewer --prompt "<lane prompt>"
@@ -85,9 +91,8 @@ omc ask codex --agent-prompt security-reviewer --prompt "<lane prompt>"
 omc ask codex --agent-prompt architect --prompt "<lane prompt>"
 ```
 
-Run from the session/worktree root. Artifacts land under
-`.omc/artifacts/ask/`. Gate: 0 CRITICAL, 0 HIGH, 0 MEDIUM (LOW/INFO may
-be carried explicitly).
+Gate: 0 CRITICAL, 0 HIGH, 0 MEDIUM across all three lanes (LOW/INFO may be
+carried explicitly).
 
 When running those lanes on a fix, always review the **full diff of the
 complete fix as it will land** — every commit of that fix combined,

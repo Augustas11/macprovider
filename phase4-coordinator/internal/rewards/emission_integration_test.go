@@ -6,6 +6,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,13 +55,23 @@ func startPostgres(t *testing.T) (*pgFixture, *sql.DB) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	c, err := tcpg.Run(ctx, pgImage,
-		tcpg.WithDatabase("rewards_test"),
-		tcpg.WithUsername("postgres"),
-		tcpg.WithPassword(roleAdminPassword),
-		tc.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").WithOccurrence(2)),
-	)
+	var c *tcpg.PostgresContainer
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("start postgres panic: %v", r)
+			}
+		}()
+		c, err = tcpg.Run(ctx, pgImage,
+			tcpg.WithDatabase("rewards_test"),
+			tcpg.WithUsername("postgres"),
+			tcpg.WithPassword(roleAdminPassword),
+			tc.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").WithOccurrence(2)),
+		)
+	}()
 	if err != nil {
+		skipOnMissingDocker(t, err)
 		t.Fatalf("start postgres: %v", err)
 	}
 	host, err := c.Host(ctx)
@@ -90,6 +102,20 @@ func startPostgres(t *testing.T) (*pgFixture, *sql.DB) {
 	return fx, adminDB
 }
 
+func skipOnMissingDocker(t *testing.T, err error) {
+	t.Helper()
+	msg := err.Error()
+	if strings.Contains(msg, "Docker not found") ||
+		strings.Contains(msg, "rootless Docker not found") ||
+		strings.Contains(msg, "Cannot connect to the Docker daemon") ||
+		strings.Contains(msg, "failed to create Docker provider") {
+		if os.Getenv("CI") == "true" || os.Getenv("GITHUB_ACTIONS") == "true" {
+			return
+		}
+		t.Skipf("skip local Postgres integration without Docker: %v", err)
+	}
+}
+
 func openRewardsWriter(t *testing.T, fx *pgFixture) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("postgres", fx.roleDSN("rewards_writer"))
@@ -107,6 +133,7 @@ func openRewardsWriter(t *testing.T, fx *pgFixture) *sql.DB {
 func testEmissionConfig(tickInterval time.Duration, providerCap, walletCap float64) rewards.Config {
 	return rewards.Config{
 		Enabled:                true,
+		BootstrapTickEnabled:   true,
 		WriterDSN:              "unused-in-test",
 		SQLitePayoutDBPath:     "/dev/null",
 		TickInterval:           tickInterval,
@@ -174,6 +201,320 @@ func TestProvisionalAccrualSetsWithdrawalHold(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Fatalf("provisional rows must not be withdrawable, got %d", len(rows))
+	}
+}
+
+func TestDispositionFactsBlockWithdrawableMALIBUByScope(t *testing.T) {
+	fx, _ := startPostgres(t)
+	writerDB := openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	scopes := []struct {
+		name        string
+		subjectType string
+		disposition string
+		membership  bool
+	}{
+		{name: "ledger-row", subjectType: "ledger_row", disposition: "hold"},
+		{name: "useful-work-source", subjectType: "useful_work_source", disposition: "exclude"},
+		{name: "provider", subjectType: "provider", disposition: "burn"},
+		{name: "wallet", subjectType: "wallet", disposition: "retire", membership: true},
+		{name: "cohort", subjectType: "cohort", disposition: "hold", membership: true},
+		{name: "duplicate-class", subjectType: "duplicate_class", disposition: "exclude", membership: true},
+		{name: "epoch", subjectType: "epoch", disposition: "burn", membership: true},
+	}
+
+	for i, tc := range scopes {
+		t.Run(tc.name, func(t *testing.T) {
+			providerID := fmt.Sprintf("p_scope_%d", i)
+			externalRef := fmt.Sprintf("spec022:req-scope-%d:1:%s", i, providerID)
+			wallet := fmt.Sprintf("0xscope%02d", i)
+			if _, err := writerDB.ExecContext(ctx, `
+                INSERT INTO provider_emission_state (provider_id, trust_tier, bound_wallet)
+                VALUES ($1, 'trusted', $2)
+            `, providerID, wallet); err != nil {
+				t.Fatalf("seed provider state: %v", err)
+			}
+			var ledgerID int64
+			if err := writerDB.QueryRowContext(ctx, `
+                INSERT INTO provider_rewards_ledger
+                    (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason, external_ref)
+                VALUES ($1, $2, '5.00000000', NULL, $3, $4)
+                RETURNING id
+            `, providerID, time.Now().UTC().Unix(), rewards.ReasonMalibuVerifiedUsefulWorkV02, externalRef).Scan(&ledgerID); err != nil {
+				t.Fatalf("seed ledger row: %v", err)
+			}
+			before, err := rewards.SelectWithdrawableMALIBU(ctx, writerDB, providerID, 10)
+			if err != nil {
+				t.Fatalf("select withdrawable before disposition: %v", err)
+			}
+			if len(before) != 1 {
+				t.Fatalf("withdrawable before disposition = %d, want 1", len(before))
+			}
+
+			subjectID := providerID
+			switch tc.subjectType {
+			case "ledger_row":
+				subjectID = fmt.Sprintf("%d", ledgerID)
+			case "useful_work_source":
+				subjectID = externalRef
+			case "wallet":
+				subjectID = wallet
+			case "cohort":
+				subjectID = "cohort-a"
+			case "duplicate_class":
+				subjectID = "duplicate-class-a"
+			case "epoch":
+				subjectID = "epoch-a"
+			}
+
+			var dispositionID int64
+			if err := writerDB.QueryRowContext(ctx, `
+                INSERT INTO malibu_epoch_disposition_facts
+                    (epoch_id, policy_revision, subject_type, subject_id, ledger_id, external_ref, aggregate_ref,
+                     disposition, reason_code, decision_actor, decided_at)
+                VALUES ('epoch-scope', 'policy-r1', $1, $2,
+                        CASE WHEN $1 = 'ledger_row' THEN $3::BIGINT ELSE NULL END,
+                        CASE WHEN $1 = 'useful_work_source' THEN $4 ELSE NULL END,
+                        CASE WHEN $1 IN ('wallet', 'cohort', 'duplicate_class', 'epoch') THEN $2 ELSE NULL END,
+                        $5, 'manual_review', 'operator-a', now())
+                RETURNING id
+            `, tc.subjectType, subjectID, ledgerID, externalRef, tc.disposition).Scan(&dispositionID); err != nil {
+				t.Fatalf("insert disposition fact: %v", err)
+			}
+			if tc.membership {
+				if _, err := writerDB.ExecContext(ctx, `
+                    INSERT INTO malibu_epoch_disposition_subject_memberships
+                        (disposition_id, epoch_id, policy_revision, subject_type, subject_id, provider_id, ledger_id, external_ref)
+                    VALUES ($1, 'epoch-scope', 'policy-r1', $2, $3, $4, $5, $6)
+                `, dispositionID, tc.subjectType, subjectID, providerID, ledgerID, externalRef); err != nil {
+					t.Fatalf("insert disposition membership: %v", err)
+				}
+			}
+
+			blocked, err := rewards.SelectWithdrawableMALIBU(ctx, writerDB, providerID, 10)
+			if err != nil {
+				t.Fatalf("select withdrawable with disposition: %v", err)
+			}
+			if len(blocked) != 0 {
+				t.Fatalf("withdrawable with disposition = %d, want 0", len(blocked))
+			}
+			bal, err := rewards.QueryAccrualBalance(ctx, writerDB, providerID, rewards.Config{})
+			if err != nil {
+				t.Fatalf("query balance with disposition: %v", err)
+			}
+			if bal.WithdrawableMALIBU != "0" {
+				t.Fatalf("withdrawable balance with disposition = %q, want 0", bal.WithdrawableMALIBU)
+			}
+			if len(bal.HoldReasons) == 0 {
+				t.Fatal("hold reasons empty, want disposition-derived reason")
+			}
+		})
+	}
+}
+
+func TestRewardsWriterCannotNakedReleaseDispositionFact(t *testing.T) {
+	fx, _ := startPostgres(t)
+	writerDB := openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	if _, err := writerDB.ExecContext(ctx, `
+        INSERT INTO provider_emission_state (provider_id, trust_tier)
+        VALUES ('p_release', 'trusted')
+    `); err != nil {
+		t.Fatalf("seed provider state: %v", err)
+	}
+	var ledgerID int64
+	if err := writerDB.QueryRowContext(ctx, `
+        INSERT INTO provider_rewards_ledger
+            (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason)
+        VALUES ('p_release', $1, '5.00000000', NULL, $2)
+        RETURNING id
+    `, time.Now().UTC().Unix(), rewards.ReasonMalibuBootstrapTick).Scan(&ledgerID); err != nil {
+		t.Fatalf("seed ledger row: %v", err)
+	}
+	var dispositionID int64
+	if err := writerDB.QueryRowContext(ctx, `
+        INSERT INTO malibu_epoch_disposition_facts
+            (epoch_id, policy_revision, subject_type, subject_id, ledger_id,
+             disposition, reason_code, decision_actor, decided_at)
+        VALUES ('epoch-release', 'policy-r1', 'ledger_row', $1, $2,
+                'hold', 'manual_review', 'operator-a', now())
+        RETURNING id
+    `, fmt.Sprintf("%d", ledgerID), ledgerID).Scan(&dispositionID); err != nil {
+		t.Fatalf("insert disposition fact: %v", err)
+	}
+	blocked, err := rewards.SelectWithdrawableMALIBU(ctx, writerDB, "p_release", 10)
+	if err != nil {
+		t.Fatalf("select blocked withdrawable: %v", err)
+	}
+	if len(blocked) != 0 {
+		t.Fatalf("blocked withdrawable rows = %d, want 0", len(blocked))
+	}
+	if _, err := writerDB.ExecContext(ctx, `
+        UPDATE malibu_epoch_disposition_facts
+           SET active = FALSE
+         WHERE id = $1
+    `, dispositionID); err == nil {
+		t.Fatalf("rewards_writer naked release unexpectedly succeeded")
+	}
+	stillBlocked, err := rewards.SelectWithdrawableMALIBU(ctx, writerDB, "p_release", 10)
+	if err != nil {
+		t.Fatalf("select still-blocked withdrawable: %v", err)
+	}
+	if len(stillBlocked) != 0 {
+		t.Fatalf("still-blocked withdrawable rows = %d, want 0", len(stillBlocked))
+	}
+}
+
+func TestRewardsWriterCannotInsertReleaseDispositionFact(t *testing.T) {
+	fx, _ := startPostgres(t)
+	writerDB := openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	if _, err := writerDB.ExecContext(ctx, `
+        INSERT INTO provider_emission_state (provider_id, trust_tier)
+        VALUES ('p_release_insert', 'trusted')
+    `); err != nil {
+		t.Fatalf("seed provider state: %v", err)
+	}
+	var ledgerID int64
+	if err := writerDB.QueryRowContext(ctx, `
+        INSERT INTO provider_rewards_ledger
+            (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason)
+        VALUES ('p_release_insert', $1, '5.00000000', NULL, $2)
+        RETURNING id
+    `, time.Now().UTC().Unix(), rewards.ReasonMalibuBootstrapTick).Scan(&ledgerID); err != nil {
+		t.Fatalf("seed ledger row: %v", err)
+	}
+	var dispositionID int64
+	if err := writerDB.QueryRowContext(ctx, `
+        INSERT INTO malibu_epoch_disposition_facts
+            (epoch_id, policy_revision, subject_type, subject_id, ledger_id,
+             disposition, reason_code, decision_actor, decided_at)
+        VALUES ('epoch-release-insert', 'policy-r1', 'ledger_row', $1, $2,
+                'hold', 'manual_review', 'operator-a', now())
+        RETURNING id
+    `, fmt.Sprintf("%d", ledgerID), ledgerID).Scan(&dispositionID); err != nil {
+		t.Fatalf("insert disposition fact: %v", err)
+	}
+
+	_, err := writerDB.ExecContext(ctx, `
+        INSERT INTO malibu_epoch_disposition_facts
+            (epoch_id, policy_revision, subject_type, subject_id, ledger_id,
+             disposition, reason_code, decision_actor, decided_at, clears_disposition_id)
+        VALUES ('epoch-release-insert', 'policy-r1', 'ledger_row', $1, $2,
+                'release', 'false_positive', 'operator-b', now(), $3)
+    `, fmt.Sprintf("%d", ledgerID), ledgerID, dispositionID)
+	if err == nil {
+		t.Fatal("insert release disposition unexpectedly succeeded")
+	}
+}
+
+func TestDispositionProviderIDMetadataDoesNotOvermatchAggregateScopes(t *testing.T) {
+	fx, _ := startPostgres(t)
+	writerDB := openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	scopes := []string{"wallet", "cohort", "duplicate_class", "epoch"}
+	for i, subjectType := range scopes {
+		t.Run(subjectType, func(t *testing.T) {
+			providerID := fmt.Sprintf("p_no_overmatch_%d", i)
+			externalRef := fmt.Sprintf("spec022:req-no-overmatch-%d:1:%s", i, providerID)
+			if _, err := writerDB.ExecContext(ctx, `
+                INSERT INTO provider_emission_state (provider_id, trust_tier, bound_wallet)
+                VALUES ($1, 'trusted', '0xactualwallet')
+            `, providerID); err != nil {
+				t.Fatalf("seed provider state: %v", err)
+			}
+			if _, err := writerDB.ExecContext(ctx, `
+                INSERT INTO provider_rewards_ledger
+                    (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason, external_ref)
+                VALUES ($1, $2, '5.00000000', NULL, $3, $4)
+            `, providerID, time.Now().UTC().Unix(), rewards.ReasonMalibuVerifiedUsefulWorkV02, externalRef); err != nil {
+				t.Fatalf("seed ledger row: %v", err)
+			}
+			subjectID := fmt.Sprintf("%s-unrelated", subjectType)
+			if _, err := writerDB.ExecContext(ctx, `
+                INSERT INTO malibu_epoch_disposition_facts
+                    (epoch_id, policy_revision, subject_type, subject_id, provider_id, aggregate_ref,
+                     disposition, reason_code, decision_actor, decided_at)
+                VALUES ('epoch-no-overmatch', 'policy-r1', $1, $2, $3, $2,
+                        'hold', 'manual_review', 'operator-a', now())
+            `, subjectType, subjectID, providerID); err != nil {
+				t.Fatalf("insert disposition fact: %v", err)
+			}
+
+			rows, err := rewards.SelectWithdrawableMALIBU(ctx, writerDB, providerID, 10)
+			if err != nil {
+				t.Fatalf("select withdrawable: %v", err)
+			}
+			if len(rows) != 1 {
+				t.Fatalf("withdrawable rows = %d, want 1; provider_id metadata must not prove %s membership", len(rows), subjectType)
+			}
+			bal, err := rewards.QueryAccrualBalance(ctx, writerDB, providerID, rewards.Config{})
+			if err != nil {
+				t.Fatalf("query balance: %v", err)
+			}
+			if bal.WithdrawableMALIBU == "0" {
+				t.Fatalf("withdrawable balance = %q; provider_id metadata must not block %s scope", bal.WithdrawableMALIBU, subjectType)
+			}
+		})
+	}
+}
+
+func TestProviderDispositionRejectsMismatchedProviderMetadata(t *testing.T) {
+	fx, _ := startPostgres(t)
+	writerDB := openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	_, err := writerDB.ExecContext(ctx, `
+        INSERT INTO malibu_epoch_disposition_facts
+            (epoch_id, policy_revision, subject_type, subject_id, provider_id,
+             disposition, reason_code, decision_actor, decided_at)
+        VALUES ('epoch-provider-check', 'policy-r1', 'provider', 'p_subject', 'p_other',
+                'hold', 'manual_review', 'operator-a', now())
+    `)
+	if err == nil {
+		t.Fatal("insert mismatched provider disposition unexpectedly succeeded")
+	}
+}
+
+func TestWalletDispositionCanTargetLedgerAfterWalletRotation(t *testing.T) {
+	fx, _ := startPostgres(t)
+	writerDB := openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	if _, err := writerDB.ExecContext(ctx, `
+        INSERT INTO provider_emission_state (provider_id, trust_tier, bound_wallet)
+        VALUES ('p_wallet_rotation', 'trusted', '0xnewwallet')
+    `); err != nil {
+		t.Fatalf("seed provider state: %v", err)
+	}
+	var ledgerID int64
+	if err := writerDB.QueryRowContext(ctx, `
+        INSERT INTO provider_rewards_ledger
+            (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason, external_ref)
+        VALUES ('p_wallet_rotation', $1, '5.00000000', NULL, $2, 'spec022:req-wallet-rotation:1:p_wallet_rotation')
+        RETURNING id
+    `, time.Now().UTC().Unix(), rewards.ReasonMalibuVerifiedUsefulWorkV02).Scan(&ledgerID); err != nil {
+		t.Fatalf("seed ledger row: %v", err)
+	}
+	if _, err := writerDB.ExecContext(ctx, `
+        INSERT INTO malibu_epoch_disposition_facts
+            (epoch_id, policy_revision, subject_type, subject_id, ledger_id,
+             disposition, reason_code, decision_actor, decided_at)
+        VALUES ('epoch-wallet-rotation', 'policy-r1', 'wallet', '0xoldwallet', $1,
+                'hold', 'wallet_rotation_cap', 'operator-a', now())
+    `, ledgerID); err != nil {
+		t.Fatalf("insert wallet disposition fact: %v", err)
+	}
+	rows, err := rewards.SelectWithdrawableMALIBU(ctx, writerDB, "p_wallet_rotation", 10)
+	if err != nil {
+		t.Fatalf("select withdrawable: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("wallet ledger-targeted disposition rows = %d, want 0", len(rows))
 	}
 }
 
