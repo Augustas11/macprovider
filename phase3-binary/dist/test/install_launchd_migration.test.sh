@@ -250,3 +250,85 @@ if grep -F 'launchctl bootout "gui/$REC_UID" "$REC_PLIST_PATH"' "$INSTALL_SH" >/
   exit 1
 fi
 echo "launchd migration reclaim ok"
+
+python3 - "$INSTALL_SH" > "$TMP/port-functions.sh" <<'PY'
+import sys
+
+names = [
+    "validate_port_value",
+    "ensure_port_free",
+    "reclaim_launchd_service",
+    "reclaim_legacy_launchd_service",
+]
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+for name in names:
+    for index, line in enumerate(lines):
+        if line != f"{name}() {{":
+            continue
+        depth = 0
+        while index < len(lines):
+            current = lines[index]
+            print(current)
+            depth += current.count("{") - current.count("}")
+            index += 1
+            if depth == 0:
+                break
+        break
+    else:
+        raise SystemExit(f"could not extract {name}")
+PY
+printf '%s\n' 'PROVIDER_LABEL="${PROVIDER_LABEL:-live.malibu.provider}"' >> "$TMP/port-functions.sh"
+printf '%s\n' 'LEGACY_PROVIDER_LABEL="${LEGACY_PROVIDER_LABEL:-live.streamvc.macprovider}"' >> "$TMP/port-functions.sh"
+printf '%s\n' 'LEGACY_PLIST_PATH="${LEGACY_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist}"' >> "$TMP/port-functions.sh"
+
+mkdir -p "$TMP/port-bin"
+cat > "$TMP/port-bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"-d txt"*) printf 'p4242\nn%s/macprovider/macprovider-cli\n' "$HOME" ;;
+  *-t*)
+    if [ -f "$LSOF_T_SEEN" ]; then
+      exit 0
+    fi
+    : > "$LSOF_T_SEEN"
+    printf '4242\n'
+    ;;
+  *) printf "COMMAND PID\nmacprovider-cli 4242\n" ;;
+esac
+EOF
+chmod 0755 "$TMP/port-bin/lsof"
+: > "$TMP/legacy-upgrade.log"
+rm -f "$TMP/lsof-t-seen"
+HOME="$TMP/home" \
+  FUNCTION_PATH="$TMP/port-functions.sh" \
+  PATH="$TMP/port-bin:/usr/bin:/bin" \
+  LEGACY_UPGRADE_LOG="$TMP/legacy-upgrade.log" \
+  LSOF_T_SEEN="$TMP/lsof-t-seen" \
+  bash -c '
+    set -euo pipefail
+    die() { printf "ERR:%s\n" "$*" >&2; exit "$1"; }
+    log() { printf "LOG:%s\n" "$*" >&2; }
+    assert_install_lock_ownership() { :; }
+    capture_manual_provider_for_recovery() {
+      printf "captured\n" >> "$LEGACY_UPGRADE_LOG"
+      die 70 "manual capture should not run for a loaded legacy LaunchAgent"
+    }
+    DRY_RUN=0
+    PORT=18080
+    INSTALL_DIR="$HOME/macprovider"
+    BINARY_PATH="$HOME/.local/bin/macprovider-cli"
+    INSTALL_TX_SERVICE_WAS_ACTIVE=0
+    INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE=1
+    INSTALL_TX_ACTIVE=1
+    source "$FUNCTION_PATH"
+    reclaim_launchd_service() { printf "reclaim-current\n" >> "$LEGACY_UPGRADE_LOG"; }
+    reclaim_legacy_launchd_service() { printf "reclaim-legacy\n" >> "$LEGACY_UPGRADE_LOG"; }
+    ensure_port_free 1
+  '
+grep -Fx "reclaim-legacy" "$TMP/legacy-upgrade.log" >/dev/null
+if grep -Fx "captured" "$TMP/legacy-upgrade.log" >/dev/null; then
+  echo "legacy launchd upgrade captured a manual provider" >&2
+  exit 1
+fi
+echo "legacy launchd upgrade skips manual capture ok"

@@ -28,46 +28,32 @@ curl_args=(
   --connect-timeout 20 --max-time 240 --retry 5 --retry-delay 2
 )
 api="https://api.github.com/repos/$repository"
-curl "${curl_args[@]}" "$api/releases?per_page=20" -o "$work/releases.json"
-
-python3 - "$work/releases.json" "$transport_tag" "$target_commit" "$repository" "$work/release.json" "$work/assets.tsv" <<'PY'
-import json
-import pathlib
-import re
-import sys
-
-releases_path, expected_transport, commit, repository, release_output, assets_output = sys.argv[1:]
-releases = json.loads(pathlib.Path(releases_path).read_text(encoding="utf-8"))
-candidates = []
-for release in releases:
-    match = re.fullmatch(r"release-discovery-v1-([1-9][0-9]*)", str(release.get("tag_name", "")))
-    if match:
-        candidates.append((int(match.group(1)), release))
-if not candidates:
-    raise SystemExit("public discovery listing has no append-only transport")
-_, release = max(candidates, key=lambda item: item[0])
-if release.get("tag_name") != expected_transport or release.get("target_commitish") != commit:
-    raise SystemExit("highest public discovery transport is not the promoted target")
-if release.get("draft") is not False or release.get("prerelease") is not True or release.get("immutable") is not True:
-    raise SystemExit("public discovery transport is not an immutable prerelease")
-required = {
-    "compatibility-artifact-index.json",
-    "macprovider-release-discovery.json",
-    "macprovider-release-discovery.json.sig",
-}
-rows = []
-for name in sorted(required):
-    matches = [asset for asset in release.get("assets", []) if asset.get("name") == name]
-    if len(matches) != 1:
-        raise SystemExit(f"public release does not contain exactly one {name}")
-    url = matches[0].get("browser_download_url")
-    expected = f"https://github.com/{repository}/releases/download/{expected_transport}/{name}"
-    if url != expected:
-        raise SystemExit(f"noncanonical public asset URL for {name}")
-    rows.append(f"{name}\t{url}\n")
-pathlib.Path(release_output).write_text(json.dumps(release), encoding="utf-8")
-pathlib.Path(assets_output).write_text("".join(rows), encoding="ascii")
-PY
+listing_attempts="${MACPROVIDER_DISCOVERY_LISTING_ATTEMPTS:-15}"
+listing_retry_seconds="${MACPROVIDER_DISCOVERY_LISTING_RETRY_SECONDS:-2}"
+[[ "$listing_attempts" =~ ^[1-9][0-9]*$ ]] || die "invalid discovery listing attempt budget"
+[[ "$listing_retry_seconds" =~ ^[1-9][0-9]*$ ]] || die "invalid discovery listing retry interval"
+listing_attempt=1
+while true; do
+  curl "${curl_args[@]}" "$api/releases?per_page=100" -o "$work/releases.json"
+  set +e
+  python3 "$root/scripts/select_public_discovery_transport.py" \
+    "$work/releases.json" \
+    "$transport_tag" \
+    "$target_commit" \
+    "$repository" \
+    "$work/release.json" \
+    "$work/assets.tsv"
+  listing_status=$?
+  set -e
+  if [ "$listing_status" -eq 0 ]; then
+    break
+  fi
+  if [ "$listing_status" -ne 2 ] || [ "$listing_attempt" -ge "$listing_attempts" ]; then
+    die "highest public discovery transport is not the promoted target"
+  fi
+  listing_attempt=$((listing_attempt + 1))
+  sleep "$listing_retry_seconds"
+done
 
 while IFS=$'\t' read -r name url; do
   curl "${curl_args[@]}" "$url" -o "$work/$name"

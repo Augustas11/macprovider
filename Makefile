@@ -86,6 +86,7 @@ test-dist:
 	bash scripts/test-agent-onboarding-publication.sh
 	bash scripts/test-release-discovery-head.sh
 	bash scripts/test-release-discovery-transport.sh
+	bash scripts/test-select-public-discovery-transport.sh
 	bash scripts/test-renew-release-discovery-head.sh
 	bash scripts/test-tier2-provider-artifact.sh
 	bash scripts/test-tier2-provider-release.sh
