@@ -23,6 +23,9 @@ func (r *Runner) runUsefulWorkAccrual(ctx context.Context) error {
 	if !r.cfg.UsefulWorkEnabled {
 		return nil
 	}
+	if r.cfg.EpochEnabled {
+		return ErrEpochPolicyEngineUnavailable
+	}
 	rows, err := r.listUnrewardedUsefulWork(ctx, usefulWorkBatchLimit)
 	if err != nil {
 		return err

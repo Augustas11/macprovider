@@ -39,6 +39,15 @@ Always work on a feature branch. After your PR squash-merges, run
 PR-branch commits. See `CLAUDE.md` § *PR workflow* for the full
 sequence and recovery steps for inheriting a divergent local main.
 
+Before opening any PR, prepare the PR body with exactly one
+`SPEC-GOVERNANCE-DECLARATION-BEGIN` /
+`SPEC-GOVERNANCE-DECLARATION-END` block and validate it locally with
+`scripts/check_spec_pr_declaration.py` when the branch changes specs,
+manifests, product behavior, or any non-governance path. Do this before
+`gh pr create`; do not wait for the `spec-index` workflow to fail and
+patch the body afterward. See `CLAUDE.md` § *PR governance declaration
+gate* for the required JSON fields and allowed verdict values.
+
 ## 3. Git identity — pushes route to `Augustas11` automatically
 
 A per-repo credential helper in `.git/config` calls `gh auth token
@@ -76,8 +85,14 @@ source under any circumstance.
 
 ## 7. Audit the full fix diff — never a slice
 
-The three required audit lanes are Codex subscription CLI via OMC, not
-Cursor `Task` subagents and not raw `codex` / `codex exec`:
+The three required audit lanes are code review, security review, and
+architecture review. In Codex sessions, run those lanes with native Codex
+subagents/auditor lanes, not OMC. Use bounded prompts that point each auditor
+at the exact full fix diff, and keep their findings in the session transcript
+or repo-local artifacts if the session needs durable evidence.
+
+OMC remains only a legacy fallback for non-Codex contexts that do not have
+native Codex subagents available:
 
 ```bash
 omc ask codex --agent-prompt code-reviewer --prompt "<lane prompt>"
@@ -85,9 +100,8 @@ omc ask codex --agent-prompt security-reviewer --prompt "<lane prompt>"
 omc ask codex --agent-prompt architect --prompt "<lane prompt>"
 ```
 
-Run from the session/worktree root. Artifacts land under
-`.omc/artifacts/ask/`. Gate: 0 CRITICAL, 0 HIGH, 0 MEDIUM (LOW/INFO may
-be carried explicitly).
+Gate: 0 CRITICAL, 0 HIGH, 0 MEDIUM across all three lanes (LOW/INFO may be
+carried explicitly).
 
 When running those lanes on a fix, always review the **full diff of the
 complete fix as it will land** — every commit of that fix combined,

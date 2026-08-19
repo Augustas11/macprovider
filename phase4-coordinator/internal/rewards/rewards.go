@@ -27,9 +27,13 @@ const (
 	TierTrusted     = "trusted"
 )
 
+var ErrEpochPolicyEngineUnavailable = errors.New("malibu_emission.epoch_enabled requires active SPEC-021 v0.4 epoch policy engine")
+
 // Config is the operator-tunable malibu_emission block.
 type Config struct {
 	Enabled                      bool
+	BootstrapTickEnabled         bool
+	EpochEnabled                 bool
 	WriterDSN                    string
 	TickInterval                 time.Duration
 	UsefulWorkEnabled            bool
@@ -84,6 +88,9 @@ func (c Config) Validate() error {
 	}
 	if c.SQLitePayoutDBPath == "" {
 		return errors.New("malibu_emission.sqlite_payout_db_path is required when enabled")
+	}
+	if c.EpochEnabled && c.BootstrapTickEnabled {
+		return errors.New("malibu_emission.bootstrap_tick_enabled cannot be true when epoch_enabled is true without a coexistence policy engine")
 	}
 	return nil
 }
@@ -143,7 +150,9 @@ func (r *Runner) SetTrustTierObserver(observer TrustTierObserver) {
 
 // Start launches background goroutines until ctx is cancelled.
 func (r *Runner) Start(ctx context.Context) {
-	go r.loop(ctx, r.cfg.TickInterval, "emission_tick", r.runEmissionTick)
+	if r.cfg.BootstrapTickEnabled {
+		go r.loop(ctx, r.cfg.TickInterval, "emission_tick", r.runEmissionTick)
+	}
 	if r.cfg.UsefulWorkEnabled {
 		go r.loop(ctx, r.cfg.UsefulWorkInterval, "useful_work_accrual", r.runUsefulWorkAccrual)
 	}
@@ -209,21 +218,48 @@ func QueryAccrualBalance(ctx context.Context, db *sql.DB, providerID string, cfg
 
 	var accrued, withdrawable string
 	if err := db.QueryRowContext(ctx, `
-        SELECT COALESCE(SUM(amount_malibu), 0)::TEXT,
-               COALESCE(SUM(amount_malibu) FILTER (WHERE withdrawal_hold_reason IS NULL), 0)::TEXT
-          FROM provider_rewards_ledger
-         WHERE provider_id = $1 AND amount_malibu IS NOT NULL
+        SELECT COALESCE(SUM(prl.amount_malibu), 0)::TEXT,
+               COALESCE(SUM(prl.amount_malibu) FILTER (
+                   WHERE prl.withdrawal_hold_reason IS NULL
+                     AND prl.amount_malibu > 0
+                     AND NOT prl.epoch_disposition_blocked
+               ), 0)::TEXT
+          FROM malibu_rewards_ledger_with_disposition prl
+         WHERE prl.provider_id = $1
+           AND prl.amount_malibu IS NOT NULL
     `, providerID).Scan(&accrued, &withdrawable); err != nil {
 		return AccrualBalance{}, fmt.Errorf("ledger sum: %w", err)
 	}
 
 	rows, err := db.QueryContext(ctx, `
-        SELECT DISTINCT withdrawal_hold_reason
-          FROM provider_rewards_ledger
-         WHERE provider_id = $1
-           AND amount_malibu IS NOT NULL
-           AND amount_malibu > 0
-           AND withdrawal_hold_reason IS NOT NULL
+        SELECT hold_reason
+          FROM (
+                SELECT withdrawal_hold_reason AS hold_reason
+                  FROM provider_rewards_ledger
+                 WHERE provider_id = $1
+                   AND amount_malibu IS NOT NULL
+                   AND amount_malibu > 0
+                   AND withdrawal_hold_reason IS NOT NULL
+                UNION
+                SELECT epoch_disposition_hold_reason AS hold_reason
+                  FROM malibu_rewards_ledger_with_disposition
+                 WHERE provider_id = $1
+                   AND amount_malibu IS NOT NULL
+                   AND amount_malibu > 0
+                   AND epoch_disposition_hold_reason IS NOT NULL
+          ) holds
+         GROUP BY hold_reason
+         ORDER BY CASE hold_reason
+              WHEN 'per_wallet_daily_cap' THEN 10
+              WHEN 'held_provider_daily_cap' THEN 20
+              WHEN 'burned_or_retired_epoch_disposition' THEN 30
+              WHEN 'excluded_epoch_disposition' THEN 40
+              WHEN 'held_epoch_disposition' THEN 50
+              WHEN 'demotion_cooldown' THEN 60
+              WHEN 'trust_tier_provisional' THEN 70
+              ELSE 100
+          END,
+          hold_reason
     `, providerID)
 	if err != nil {
 		return AccrualBalance{}, fmt.Errorf("hold reasons: %w", err)

@@ -449,6 +449,8 @@ func main() {
 		}
 		rewardsCfg := rewards.Config{
 			Enabled:                      true,
+			BootstrapTickEnabled:         cfg.MalibuEmission.BootstrapTickEnabled,
+			EpochEnabled:                 cfg.MalibuEmission.EpochEnabled,
 			WriterDSN:                    cfg.MalibuEmission.WriterDSN,
 			TickInterval:                 time.Duration(cfg.MalibuEmission.TickIntervalSeconds) * time.Second,
 			UsefulWorkEnabled:            cfg.MalibuEmission.UsefulWorkEnabled,
@@ -2446,11 +2448,22 @@ func coordinatorRewardsConfig(cfg config.Config) rewards.Config {
 		hotWalletAddress = canonical
 	}
 	rewardsCfg := rewards.Config{
+		Enabled:                      cfg.MalibuEmission.Enabled,
+		BootstrapTickEnabled:         cfg.MalibuEmission.BootstrapTickEnabled,
+		EpochEnabled:                 cfg.MalibuEmission.EpochEnabled,
+		WriterDSN:                    cfg.MalibuEmission.WriterDSN,
+		TickInterval:                 time.Duration(cfg.MalibuEmission.TickIntervalSeconds) * time.Second,
+		UsefulWorkEnabled:            cfg.MalibuEmission.UsefulWorkEnabled,
+		UsefulWorkInterval:           time.Duration(cfg.MalibuEmission.UsefulWorkIntervalSeconds) * time.Second,
 		ProviderDailyCapMALIBU:       cfg.MalibuEmission.ProviderDailyCapMALIBU,
 		WalletDailyCapMALIBU:         cfg.MalibuEmission.WalletDailyCapMALIBU,
 		UsefulWorkMALIBUPer1KCredits: cfg.MalibuEmission.UsefulWorkMALIBUPer1KCredits,
 		SQLitePayoutDBPath:           cfg.MalibuEmission.SQLitePayoutDBPath,
 		PayoutHotWalletAddress:       hotWalletAddress,
+		WalletMirrorInterval:         time.Duration(cfg.MalibuEmission.WalletMirrorIntervalSeconds) * time.Second,
+		UnlockEvalInterval:           time.Duration(cfg.MalibuEmission.UnlockEvalIntervalSeconds) * time.Second,
+		MaxSerializableRetries:       cfg.MalibuEmission.MaxSerializableRetries,
+		BaseUSDCBalanceRPCURLs:       cfg.MalibuEmission.BaseUSDCBalanceRPCURLs,
 	}
 	if rewardsCfg.SQLitePayoutDBPath == "" {
 		rewardsCfg.SQLitePayoutDBPath = cfg.Storage.DBPath

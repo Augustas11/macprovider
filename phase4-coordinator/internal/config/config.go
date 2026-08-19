@@ -348,6 +348,8 @@ type OnboardingConfig struct {
 // Default-off; money-path changes require PR + audit.
 type MalibuEmissionConfig struct {
 	Enabled                      bool     `yaml:"enabled"`
+	BootstrapTickEnabled         bool     `yaml:"bootstrap_tick_enabled"`
+	EpochEnabled                 bool     `yaml:"epoch_enabled"`
 	WriterDSN                    string   `yaml:"writer_dsn"`
 	TickIntervalSeconds          int      `yaml:"tick_interval_seconds"`
 	UsefulWorkEnabled            bool     `yaml:"useful_work_enabled"`
@@ -1390,6 +1392,8 @@ func Default() Config {
 		},
 		MalibuEmission: MalibuEmissionConfig{
 			Enabled:                      false,
+			BootstrapTickEnabled:         false,
+			EpochEnabled:                 false,
 			TickIntervalSeconds:          900,
 			UsefulWorkEnabled:            false,
 			UsefulWorkIntervalSeconds:    900,
@@ -2846,6 +2850,9 @@ func (c Config) validateMalibuEmission() error {
 	}
 	if strings.TrimSpace(m.WriterDSN) == "" {
 		return fmt.Errorf("malibu_emission.writer_dsn must be set when malibu_emission.enabled is true")
+	}
+	if m.EpochEnabled && m.BootstrapTickEnabled {
+		return fmt.Errorf("malibu_emission.bootstrap_tick_enabled cannot be true when malibu_emission.epoch_enabled is true without a coexistence policy engine")
 	}
 	if m.TickIntervalSeconds <= 0 {
 		return fmt.Errorf("malibu_emission.tick_interval_seconds must be > 0")

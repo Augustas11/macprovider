@@ -341,13 +341,20 @@ stats:
     - "::1/128"
 
 # SPEC-MALIBU-EMISSION-LEDGER — bootstrap $MALIBU accrual (default-off).
-# Requires migration 012 on the stats/rewards Postgres DB before enable.
+# Requires current rewards migrations through 024 on the stats/rewards Postgres DB before enable.
 malibu_emission:
   enabled: false
+  # bootstrap_tick_enabled controls legacy periodic bootstrap accrual ticks.
+  bootstrap_tick_enabled: false
+  # epoch_enabled is fail-closed until the SPEC-021 v0.4 epoch policy engine ships.
+  epoch_enabled: false
   # writer_dsn: env:MALIBU_EMISSION_WRITER_DSN
   tick_interval_seconds: 900
+  useful_work_enabled: false
+  useful_work_interval_seconds: 900
   provider_daily_cap_malibu: 25
   wallet_daily_cap_malibu: 100
+  useful_work_malibu_per_1000_provider_credits: 1
   # Defaults to storage.db_path when unset (SPEC-016 payout address mirror source).
   # sqlite_payout_db_path: "/var/lib/macprovider/coordinator.db"
   wallet_mirror_interval_seconds: 300

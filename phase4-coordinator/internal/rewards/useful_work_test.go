@@ -1,6 +1,10 @@
 package rewards
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+)
 
 func TestUsefulWorkRewardFormulaAndExternalRef(t *testing.T) {
 	runner := &Runner{cfg: Config{UsefulWorkMALIBUPer1KCredits: 2.5}.DefaultsApplied()}
@@ -18,5 +22,17 @@ func TestUsefulWorkRewardFormulaAndExternalRef(t *testing.T) {
 	})
 	if ref != "spec022:req-1:2:provider-a" {
 		t.Fatalf("external ref = %q", ref)
+	}
+}
+
+func TestUsefulWorkEpochModeFailsClosedWithoutPolicyEngine(t *testing.T) {
+	runner := &Runner{cfg: Config{
+		Enabled:           true,
+		UsefulWorkEnabled: true,
+		EpochEnabled:      true,
+	}.DefaultsApplied()}
+	err := runner.runUsefulWorkAccrual(context.Background())
+	if !errors.Is(err, ErrEpochPolicyEngineUnavailable) {
+		t.Fatalf("runUsefulWorkAccrual error = %v, want %v", err, ErrEpochPolicyEngineUnavailable)
 	}
 }

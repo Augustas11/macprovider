@@ -1,8 +1,25 @@
 # SPEC-021 — MALIBU rewards emission ledger
 
-**Version:** 0.3.0 (2026-08-17, reward audit trail)
+**Version:** 0.4.0 (2026-08-19, sybil-resistant reward economics)
 **Status:** DRAFT — implementation target for Session C (`ops/runbooks/malibu-bootstrap-emission.md`)  
-**Depends on:** SPEC-026 v0.13 §5.1–§5.2, §5.5, §10 step 8; SPEC-017 v0.1.8 (`provider_rewards_ledger`); SPEC-016 v0.1.19 (`provider_payout_addresses` projection); SPEC-022 (verified-receipt-only USDC earnings)
+**Depends on:** SPEC-026 v0.13 §5.1–§5.2, §5.5, §10 step 8; SPEC-017 v0.1.8 (`provider_rewards_ledger`); SPEC-005 (buyer billing and settlement ledger separation); SPEC-016 v0.1.19 (`provider_payout_addresses` projection); SPEC-022 (verified-receipt-only USDC earnings); SPEC-034 (referral/admission anti-wash boundary); SPEC-036 (compute-integrity reward gating input)
+
+**Change log v0.4.0 (2026-08-19, sybil-resistant reward economics):**
+- Defines usage-gated reward epochs as the only v0.4 issuance path. Epoch
+  accrual is derived from verified useful-work rows and an immutable epoch
+  policy snapshot, not wall-clock presence alone.
+- Pins epoch-wide, provider, wallet, admission-cohort, and duplicate-identity
+  cap semantics. Caps are transactionally enforced and observable through the
+  reward read/audit surfaces.
+- Makes compute-integrity and quarantine state an explicit MALIBU withdrawal
+  and accrual gate: blocked/quarantined work cannot create withdrawable MALIBU,
+  and unresolved suspicious work must remain held or excluded until an operator
+  decision is recorded.
+- Defines the operator/public reward projection boundary for emitted, held,
+  withdrawable, capped, excluded, burned, and retired MALIBU totals without
+  exposing buyer identifiers, prompts, outputs, secrets, or raw provider internals.
+- Reaffirms USDC payout and buyer debit separation: MALIBU reward economics
+  cannot mutate SPEC-005/SPEC-016/SPEC-022 settlement state.
 
 **Change log v0.3.0 (2026-08-17, reward audit trail):**
 - Adds append-only `malibu_reward_audit_events` rows for MALIBU accrual,
@@ -53,7 +70,9 @@ Accrue **$MALIBU** for early Malibu providers to bootstrap network growth, with 
 
 - Provisional tier accrual is **non-withdrawable** until Trusted.
 - Per-wallet daily cap applies across all `provider_id`s sharing a bound payout address.
-- Withdrawal runners MUST filter on `withdrawal_hold_reason IS NULL`.
+- Withdrawal runners MUST use the canonical withdrawability predicate in §2.6;
+  the legacy `withdrawal_hold_reason IS NULL` check is one required component
+  for legacy row-level holds.
 
 USDC payout semantics remain in SPEC-016/SPEC-022; this spec owns MALIBU
 accrual only. v0.2 useful-work rewards consume settlement evidence as an input
@@ -88,7 +107,10 @@ MALIBU rows with non-NULL `external_ref` are unique by `external_ref`.
 | `per_wallet_daily_cap` | Wallet aggregate cap reached on a partial boundary accrual; the accepted remainder is visible but not withdrawable |
 | `demotion_cooldown` | Provider demoted from Trusted; 72h requalification window (SPEC-026 §5.5) |
 
-Withdrawal selection: `WHERE withdrawal_hold_reason IS NULL AND amount_malibu IS NOT NULL AND amount_malibu > 0`.
+Withdrawal selection MUST use the canonical withdrawability predicate in §2.6.
+Legacy-only rows satisfy that predicate when `withdrawal_hold_reason IS NULL`
+and `amount_malibu > 0`; v0.4 rows or source aggregates must also have no
+active or terminal non-withdrawable epoch-disposition fact.
 
 ### 2.2 `wallet_daily_malibu_emission`
 
@@ -184,18 +206,84 @@ responses MAY include `operator_correlation`, but the column itself remains an
 allowlisted JSON object owned by this spec; it MUST NOT become a dump of
 unreviewed request/provider metadata.
 
+v0.4 epoch-disposition events MAY set `withdrawal_hold_reason` only when the
+event applies or clears one of the closed §3 row-level hold reasons. Other
+dispositions MUST be captured in the first-class epoch-disposition state owned
+by §2.6. `operator_correlation` MAY mirror only non-authoritative support
+identifiers such as `epoch_id` and `affected_source_refs`; withdrawal
+selection, provider reads, and reward projections MUST enforce the first-class
+disposition state, not audit JSON alone. Provider-visible responses expose only
+the safe summary and aggregate reason vocabulary authorized by §3.4; they MUST
+NOT leak raw operator correlation. Provider read reason codes are separately
+owned by §5.2.
+
 Retention: audit rows are append-only and retained for at least **180 days**.
 Any compaction/archive after that window MUST preserve `id`, `provider_id`,
 `occurred_at`, `event_type`, `ledger_id`, `withdrawal_hold_reason`, and
 `safe_summary` for dispute/support correlation.
 
-### 2.6 `rewards_writer` Postgres role
+### 2.6 `malibu_epoch_disposition_facts` (v0.4)
+
+v0.4 implementations MUST persist a queryable first-class epoch-disposition
+state relation, table, or equivalent transactional projection before enabling
+reward epochs. The exact storage name is implementation-owned, but the state
+model MUST expose:
+
+- stable `disposition_id`;
+- `epoch_id` and policy revision;
+- `subject_type` with closed values `ledger_row`, `useful_work_source`,
+  `provider`, `wallet`, `cohort`, `duplicate_class`, or `epoch`;
+- `subject_id`, scoped by `subject_type`;
+- nullable or denormalized `provider_id` when available for provider-scoped
+  lookup, but not as the universal subject;
+- one or more source references when applicable: `ledger_id`, useful-work
+  `external_ref`, or a typed aggregate reference for provider, wallet, cohort,
+  duplicate-class, or epoch-level caps;
+- `disposition` with closed values `hold`, `exclude`, `burn`, `retire`, or
+  `release`;
+- `reason_code`;
+- `decision_actor`;
+- `decided_at` in UTC;
+- active/cleared status;
+- `clears_disposition_id` when a release clears a previous disposition.
+
+An active non-withdrawable epoch disposition is any active fact with
+`disposition IN ('hold', 'exclude', 'burn', 'retire')`. A `release` disposition
+MAY clear only `hold` or false-positive `exclude` dispositions and MUST
+reference the active disposition it clears; it does not make work withdrawable
+unless every referenced legacy row also has `withdrawal_hold_reason IS NULL` and
+no other active non-withdrawable disposition applies to the row or source
+aggregate. `burn` and `retire` are terminal economic dispositions: they MUST NOT
+be cleared by `release`, MUST remain excluded from withdrawable totals
+permanently, and MAY be corrected only by a separately audited compensating
+ledger row or migration rule that preserves the original burn/retirement fact.
+
+Provider reads, public/operator reward projections, and future withdrawal
+selection MUST use the same canonical v0.4 withdrawability predicate:
+
+```sql
+withdrawal_hold_reason IS NULL
+AND amount_malibu > 0
+AND no active non-withdrawable epoch-disposition fact applies to the
+    ledger row, useful-work source row, provider, wallet, cohort,
+    duplicate class, or epoch aggregate
+AND no terminal burn or retire epoch-disposition fact applies to the
+    ledger row, useful-work source row, provider, wallet, cohort,
+    duplicate class, or epoch aggregate
+```
+
+The implementation PR that promotes any v0.4 requirement MUST define the
+concrete query/view contract and test matrix for each disposition scope:
+ledger row, useful-work source, provider, wallet, cohort, duplicate class, and
+epoch.
+
+### 2.7 `rewards_writer` Postgres role
 
 Dedicated runtime role for emission writes:
 
-- `INSERT` on `provider_rewards_ledger`, `wallet_daily_malibu_emission`, `provider_emission_state`
-- `UPDATE` on `wallet_daily_malibu_emission`, `provider_emission_state`
-- `SELECT` on projection + ledger + state + audit tables
+- `INSERT` on `provider_rewards_ledger`, `wallet_daily_malibu_emission`, `provider_emission_state`, and v0.4 epoch-disposition facts
+- `UPDATE` on `wallet_daily_malibu_emission`, `provider_emission_state`, and v0.4 epoch-disposition facts only when the implementation stores active/cleared state in mutable rows
+- `SELECT` on projection, ledger, state, v0.4 epoch-disposition fact, and audit tables
 - `INSERT` on `malibu_reward_audit_events`
 - **No** `DELETE`, `TRUNCATE`, or DDL
 - Emission transactions run at **`SERIALIZABLE`** isolation with **retry-on-40001** (max 5 attempts, exponential backoff 10–160ms)
@@ -219,7 +307,131 @@ Trusted providers accrue with `withdrawal_hold_reason IS NULL` unless wallet cap
 Provider and wallet daily caps are shared across v0.1 bootstrap tick rows and
 v0.2 useful-work rows.
 
+`withdrawal_hold_reason` is the legacy row-level hold field. Its closed
+v0.1-v0.3 vocabulary is:
+
+- `trust_tier_provisional`;
+- `per_wallet_daily_cap`;
+- `demotion_cooldown`.
+
+v0.4 epoch dispositions (`hold`, `exclude`, `burn`, `retire`, `release`) are
+not `withdrawal_hold_reason` values. A v0.4 implementation MAY map a disposition
+to `withdrawal_hold_reason` only when it exactly matches the closed row-level
+vocabulary above. All other suspicious, over-cap, duplicate, sanctioned,
+quarantined, burn, retirement, or release decisions MUST be represented as a
+separate epoch-disposition fact with its own reason, actor, timestamp, source
+row or aggregate reference, and audit/projection visibility. The legacy hold
+field MUST NOT be overloaded with new arbitrary strings.
+
 **Retroactive unlock rule:** Tier transition to Trusted clears holds on **new** accrual rows only. Existing ledger rows retain their original `withdrawal_hold_reason`; operators MAY run a one-shot reconciliation job to clear holds on pre-unlock rows (out of v0.1 scope).
+
+### 3.1 Usage-gated reward epochs (v0.4)
+
+v0.4 introduces a logical reward epoch: an operator-named UTC window with an
+immutable policy snapshot. The snapshot includes:
+
+- `epoch_id`;
+- `window_start_utc` and `window_end_utc`;
+- `epoch_budget_malibu`;
+- provider, wallet, admission-cohort, and duplicate-identity caps;
+- `formula_version`;
+- `wash_policy_version`;
+- the configured disposition for over-cap or suspicious work:
+  `hold`, `exclude`, `burn`, or `retire`.
+
+An active v0.4 epoch MUST NOT emit MALIBU from wall-clock presence alone. Epoch
+issuance is derived only from v0.2 verified useful-work source rows after all
+epoch gates pass. `malibu_bootstrap_tick` rows remain historical/bootstrap rows
+and MAY continue only through the explicit default-off legacy/coexistence gates
+in §4.1; they are reported separately and count against shared provider, wallet,
+cohort, duplicate-identity, compute-integrity, and disposition caps when both
+paths are enabled.
+
+The epoch policy snapshot is append-only for audit purposes. A correction after
+activation creates a new epoch policy revision or voids the epoch; it MUST NOT
+silently rewrite the policy used to compute prior reward rows. Epoch closure
+records final totals for emitted, held, capped, excluded, burned, retired, and
+withdrawable MALIBU.
+
+### 3.2 Anti-sybil and wash-traffic gates (v0.4)
+
+v0.4 reward eligibility is aggregated at every identity boundary the reward
+owner can observe:
+
+- `provider_id`;
+- bound payout wallet;
+- referral or admission cohort from SPEC-034 when present;
+- any operator-reviewed duplicate-provider or duplicate-wallet classification;
+- any compute-integrity quarantine, provider sanction, or abuse hold reported
+  to the reward owner.
+
+The MALIBU reward owner MUST treat duplicate or suspicious work as an economic
+risk, not as a normal rewardable event. When a source row, provider, wallet, or
+cohort is under unresolved wash/self-dealing/duplicate/quarantine review, the
+implementation must either exclude the row from epoch issuance or attach a
+non-withdrawable row hold or v0.4 epoch-disposition fact. Such rows cannot
+become withdrawable until a dual-control operator clearance records the reason,
+request actor, approval actor, timestamps, affected rows or aggregates, and
+release disposition. Clearance MUST bind each actor identity to the matched
+operator key, MUST require distinct request and approval actors, MUST fail
+closed unless at least two distinct operator credentials are configured, and
+MUST append both decision records before any release can affect withdrawability.
+
+Provider and wallet caps remain required, but they are not sufficient by
+themselves. The v0.4 epoch policy must also define a cohort-level or
+duplicate-class-level cap when multiple `provider_id`s can share an admission
+source, wallet custodian, or abuse classification. A provider identity reset,
+referral churn, wallet rotation, or re-registration MUST NOT reset the effective
+epoch cap unless dual-control operators record a new admission authority
+decision with distinct request and approval actors.
+
+### 3.3 Compute-integrity and quarantine disposition (v0.4)
+
+SPEC-036 remains the owner of compute-integrity observations. SPEC-021 consumes
+only the reward-facing classification exposed by that owner:
+
+- positive/eligible;
+- unavailable or pending;
+- warn-only;
+- blocked/quarantined with a reason.
+
+Blocked or quarantined compute-integrity state MUST prevent new withdrawable
+MALIBU for the covered work. Pending, unavailable, or warn-only state cannot be
+silently treated as positive authority for a stronger reward claim; the v0.4
+epoch policy must choose whether those rows are excluded, held, or allowed only
+under a clearly named default-off policy. A later positive compute-integrity
+decision may make covered work eligible for the dual-control release path in
+§3.2, but it MUST NOT by itself clear a row hold, clear an epoch-disposition
+fact, make MALIBU withdrawable, or recompute old rows under a different formula
+without a migration rule.
+
+### 3.4 Reward projection and public legibility (v0.4)
+
+The reward projection is the canonical summary for dashboards and operator
+reviews. It reports, at minimum:
+
+- `generated_at` and `stale_after`;
+- `epoch_id` and epoch window;
+- `total_malibu_emitted`;
+- `total_malibu_held`;
+- `total_malibu_withdrawable`;
+- `total_malibu_capped`;
+- `total_malibu_excluded`;
+- `total_malibu_burned`;
+- `total_malibu_retired`;
+- provider, wallet, and cohort counts by reward state;
+- aggregate hold/exclusion reasons.
+
+The projection MUST be derived from ledger/audit/epoch facts, not from UI-side
+recalculation. Public projections MUST aggregate or redact provider, wallet,
+buyer, and request identities unless a separate owner spec authorizes a more
+specific public field. Public payloads MUST NOT include raw prompts, raw
+outputs, buyer identifiers, API keys, bearer tokens, payout secrets, arbitrary
+operator notes, or unreviewed provider internals.
+
+SPEC-017 owns public Network Stats API transport. SPEC-021 owns the MALIBU
+reward totals, state vocabulary, and redaction boundary that any public stats or
+dashboard surface must consume.
 
 ---
 
@@ -228,7 +440,8 @@ v0.2 useful-work rows.
 ### 4.1 Bootstrap emission tick (periodic)
 
 - Default interval: **15 minutes** (`malibu_emission.tick_interval_seconds`)
-- Gated by `malibu_emission.enabled` (default `false`)
+- Legacy path gated by both `malibu_emission.enabled` and
+  `malibu_emission.bootstrap_tick_enabled` (both default `false`)
 - Per tick, per eligible `provider_id`:
   1. Resolve `bound_wallet` from `provider_payout_addresses_proj` (NULL if unbound — per-provider cap still applies; wallet cap skipped)
   2. Compute tick accrual: `provider_daily_cap / ticks_per_day`
@@ -241,13 +454,28 @@ v0.2 useful-work rows.
 Eligibility: provider MUST exist in `provider_emission_state` (seeded at App-track register and lazily on first tick for legacy CLI providers).
 
 Bootstrap tick rows use `reason = malibu_bootstrap_tick`. They remain enabled
-only by `malibu_emission.enabled`; v0.2 does not reclassify them.
+only by the explicit legacy `bootstrap_tick_enabled` flag; v0.2 does not
+reclassify them. `malibu_emission.enabled` alone is a global reward kill switch
+and MUST NOT emit wall-clock bootstrap rows under v0.4.
+
+When `malibu_emission.epoch_enabled = true`, bootstrap tick emission MUST remain
+disabled unless an operator records a default-off coexistence policy snapshot
+that treats bootstrap rows as outside v0.4 epoch issuance, reports them
+separately, and applies shared provider, wallet, cohort, duplicate-identity,
+compute-integrity, and disposition caps before any bootstrap MALIBU can become
+withdrawable. Historical bootstrap rows remain readable but are not proof that a
+v0.4 epoch may emit from wall-clock presence.
 
 ### 4.2 Verified useful-work accrual (v0.2)
 
 - Default interval: **15 minutes** (`malibu_emission.useful_work_interval_seconds`)
 - Gated by both `malibu_emission.enabled` and
   `malibu_emission.useful_work_enabled` (default `false`)
+- v0.4 epoch issuance is additionally gated by
+  `malibu_emission.epoch_enabled = true` and an active immutable epoch policy
+  snapshot. `useful_work_enabled` alone may mirror/process verified useful-work
+  rows under the v0.2 path, but it MUST NOT emit v0.4 epoch MALIBU without
+  `epoch_enabled` and the epoch policy snapshot.
 - Source table: Postgres-mirrored `ledger_request_credits`
 - Eligibility gate:
   - `spec022_verified = TRUE`
@@ -331,6 +559,16 @@ Any MALIBU withdrawal query (future SPEC-016 extension or dedicated runner) MUST
 WHERE withdrawal_hold_reason IS NULL
 ```
 
+For v0.4 epoch rewards, the withdrawal query MUST also exclude any source row,
+ledger row, or source aggregate with an active non-withdrawable
+epoch-disposition fact (`hold`, `exclude`, `burn`, or `retire`) even when the
+legacy `withdrawal_hold_reason` column is NULL. A `release` disposition makes
+work withdrawable only when the legacy hold field is also NULL and the release
+references the active epoch-disposition fact it clears.
+
+This is the same canonical withdrawability predicate defined in §2.6 and used
+by provider reads and projections.
+
 USDC `ledger_payout_ready` runner is unchanged.
 
 ---
@@ -363,7 +601,13 @@ USDC `ledger_payout_ready` runner is unchanged.
 }
 ```
 
-`withdrawable_malibu` sums ledger rows where `withdrawal_hold_reason IS NULL`.
+`withdrawable_malibu` MUST use the canonical v0.4 withdrawability predicate in
+§2.6. Legacy rows with no v0.4 epoch-disposition fact are withdrawable only when
+`withdrawal_hold_reason IS NULL`; v0.4 rows or source aggregates are
+withdrawable only when both the legacy hold field is NULL and no active
+non-withdrawable epoch-disposition fact applies. `held_malibu`,
+`withdrawal_state`, reward eligibility reasons, and projection totals MUST use
+the same predicate so provider copy cannot diverge from withdrawal selection.
 
 ### 5.1 Reward audit API
 
@@ -446,8 +690,11 @@ Reason vocabulary:
 | `held_provider_daily_cap` | provider emission state | The provider has reached its UTC-day MALIBU cap. Maps from `provider_emission_state.provider_day_malibu >= daily_cap_malibu` for the current UTC day. |
 | `held_wallet_daily_cap` | MALIBU ledger | Accrual is held or capped by the bound-wallet daily MALIBU cap. Maps from `withdrawal_hold_reason = per_wallet_daily_cap`. |
 | `held_demotion_cooldown` | MALIBU ledger/trust | Accrual is held during post-demotion requalification. Maps from `withdrawal_hold_reason = demotion_cooldown`. |
-| `withdrawable_balance_available` | MALIBU ledger | At least one MALIBU ledger row is withdrawable. |
+| `withdrawable_balance_available` | MALIBU ledger + v0.4 epoch-disposition facts | At least one MALIBU ledger row satisfies the canonical withdrawability predicate in §2.6. |
 | `withdrawable_no_balance` | MALIBU ledger | No MALIBU is currently withdrawable and no held MALIBU exists. |
+| `held_epoch_disposition` | v0.4 epoch-disposition facts | An active `hold` disposition prevents MALIBU from being withdrawable. |
+| `excluded_epoch_disposition` | v0.4 epoch-disposition facts | An active `exclude` disposition excludes source work or an aggregate from withdrawable MALIBU. |
+| `burned_or_retired_epoch_disposition` | v0.4 epoch-disposition facts | An active or historical `burn`/`retire` disposition removes MALIBU from withdrawable totals while preserving projection/audit visibility. |
 | `missing_wallet_binding` | payout-address projection | The provider does not have a payout wallet binding in the MALIBU projection. This may affect trust/unlock or cap replay; it is not a USDC payout-ready assertion. |
 | `insufficient_verified_receipts` | SPEC-022/SPEC-026 trust input | Verified receipt count is below the trust criterion threshold used by the unlock evaluator. |
 | `app_attestation_missing` | SPEC-026 trust input | App attestation is not currently satisfied for the trust-read snapshot. |
@@ -476,7 +723,11 @@ Precedence:
    `primary_reason`.
 4. Ledger-held and ledger-withdrawable facts outrank `telemetry_unavailable` for
    `withdrawal_state`.
-5. Runtime-health reasons, when reported into v1 by the reward owner, affect
+5. Active non-withdrawable v0.4 epoch-disposition facts outrank raw ledger
+   withdrawability. A ledger row with `withdrawal_hold_reason IS NULL` is not
+   provider-withdrawable while an active `hold`, `exclude`, `burn`, or `retire`
+   disposition applies to the row or source aggregate.
+6. Runtime-health reasons, when reported into v1 by the reward owner, affect
    earning opportunity only. They MUST NOT make already-accrued MALIBU
    withdrawable or non-withdrawable by themselves.
 
@@ -492,6 +743,8 @@ boolean.
 ```yaml
 malibu_emission:
   enabled: false
+  bootstrap_tick_enabled: false      # legacy wall-clock path; enabled alone MUST NOT emit bootstrap rows under v0.4
+  epoch_enabled: false               # v0.4 verified-useful-work epoch path
   writer_dsn: ""                    # rewards_writer role; env override MALIBU_EMISSION_WRITER_DSN
   tick_interval_seconds: 900
   useful_work_enabled: false
@@ -529,6 +782,12 @@ Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 | `SPEC-021-R002` | Draft | Provider reward-audit reads MUST authenticate with provider bearer tokens, derive provider identity from the token, enforce provider isolation, and use bounded stable cursor pagination. |
 | `SPEC-021-R003` | Draft | Provider-visible reward-audit events MUST use a fixed safe field allowlist and MUST NOT expose operator correlation, external refs, raw prompts, raw outputs, bearer tokens, operator secrets, arbitrary metadata, or internal notes. |
 | `SPEC-021-R004` | Draft | Operator reward-audit reads MUST require operator auth and return enough correlation to map provider-visible events to ledger IDs, source reasons, trust transitions, and idempotency references. |
+| `SPEC-021-R005` | Draft | v0.4 reward epochs MUST derive issuance only from verified useful-work source rows and an immutable epoch policy snapshot; wall-clock presence alone MUST NOT emit epoch MALIBU. |
+| `SPEC-021-R006` | Draft | v0.4 reward caps MUST be transactionally enforced and observable across epoch, provider, wallet, admission-cohort, and duplicate-identity boundaries. |
+| `SPEC-021-R007` | Draft | Provisional, untrusted, duplicate, sanctioned, compute-integrity-blocked, or quarantined work MUST NOT become withdrawable MALIBU unless a dual-control operator clearance explicitly clears the row hold or releasable v0.4 epoch-disposition fact. |
+| `SPEC-021-R008` | Draft | Reward issuance MUST preserve a wash-traffic disposition trail that records v0.4 hold, exclusion, burn, retirement, or release decisions with actor, timestamp, reason, and affected source rows or aggregates, without overloading the closed `withdrawal_hold_reason` vocabulary. |
+| `SPEC-021-R009` | Draft | Reward projections MUST report emitted, held, withdrawable, capped, excluded, burned, and retired MALIBU totals with generated-at/stale-after metadata and redaction of private buyer/provider/request material. |
+| `SPEC-021-R010` | Draft | MALIBU reward accrual, caps, holds, burns, retirements, and projections MUST NOT mutate buyer debit, USDC payout readiness, or SPEC-005/SPEC-016/SPEC-022 settlement ledger state. |
 
 ---
 
@@ -547,6 +806,17 @@ Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 - [ ] Cap replay and trust demotion/promotion produce corresponding audit events
 - [ ] `rewards_writer` cannot SELECT from `partner_keys` or write `stats_*` rollup tables
 - [ ] Migration is idempotent; existing `amount_usd` leaderboard rollup continues to work
+- [ ] v0.4 epoch rows cannot accrue from wall-clock presence alone
+- [ ] `useful_work_enabled` alone cannot emit v0.4 epoch MALIBU without `epoch_enabled` and an active immutable epoch policy snapshot
+- [ ] `malibu_emission.enabled` alone cannot emit legacy `malibu_bootstrap_tick` rows under v0.4; bootstrap requires the explicit default-off legacy flag and any coexistence policy gates
+- [ ] Epoch budget exhaustion prevents additional withdrawable MALIBU and records an observable capped/excluded/burned/retired disposition
+- [ ] Provider, wallet, cohort, and duplicate-identity caps are enforced in one transactional reward decision
+- [ ] Compute-integrity blocked/quarantined source rows cannot become withdrawable without a dual-control operator clearance audit trail
+- [ ] Withdrawal selection excludes active v0.4 non-withdrawable epoch-disposition facts even when `withdrawal_hold_reason IS NULL`
+- [ ] Burned or retired epoch-disposition facts remain permanently excluded from withdrawable totals and cannot be cleared by `release`
+- [ ] Provider identity reset, wallet rotation, or referral churn cannot reset effective epoch caps without an explicit dual-control admission-authority decision
+- [ ] Reward projection totals reconcile to ledger/audit facts and redact buyer IDs, prompts, outputs, API keys, bearer tokens, payout secrets, and raw provider internals
+- [ ] MALIBU reward processing leaves buyer debit, USDC payout readiness, and settlement ledgers unchanged
 
 ---
 
@@ -554,8 +824,10 @@ Coordinator → CLI metrics wiring is C3; this spec defines the read API in §5.
 
 1. Cohort telemetry may adjust 100 MALIBU/day wallet cap (SPEC-026 §13).
 2. Whether bootstrap tick remains permanently as an early-network floor or is disabled after demand reaches a stable threshold remains an operator policy choice.
-3. On-chain MALIBU withdrawal rail — out of scope; this spec is ledger-only.
+3. The exact wash-loss formula and operator-review SLA for held suspicious work remain an implementation/design decision under #929.
+4. Whether SPEC-017 exposes the reward projection through a public endpoint or only an operator dashboard is a separate public-stats transport decision.
+5. On-chain MALIBU withdrawal rail — out of scope; this spec is ledger-only.
 
 ---
 
-*End of SPEC-MALIBU-EMISSION-LEDGER v0.3.0.*
+*End of SPEC-MALIBU-EMISSION-LEDGER v0.4.0.*

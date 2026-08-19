@@ -591,19 +591,23 @@
     {
       "spec_id": "SPEC-021",
       "title": "MALIBU rewards emission ledger",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "path": "specs/SPEC-021-malibu-emission-ledger.md",
       "status": "draft",
       "owner": "@Augustas11",
       "authority_domains": [
-        "malibu-emission-ledger"
+        "malibu-emission-ledger",
+        "malibu-epoch-disposition-state"
       ],
       "supersedes": [],
       "depends_on": [
+        "SPEC-005",
         "SPEC-016",
         "SPEC-017",
         "SPEC-022",
-        "SPEC-026"
+        "SPEC-026",
+        "SPEC-034",
+        "SPEC-036"
       ],
       "implementation_status": "pending-reconciliation",
       "production_status": "pending-verification",
@@ -4943,6 +4947,96 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1021",
         "rationale": "Operator-authenticated audit query exposes provider and correlation fields for support; live operator route evidence remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-021-R005",
+      "spec_id": "SPEC-021",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/929",
+        "rationale": "SPEC-021 v0.4 defines verified-useful-work-only reward epochs; implementation and tests are intentionally deferred until this contract lands."
+      }
+    },
+    {
+      "requirement_id": "SPEC-021-R006",
+      "spec_id": "SPEC-021",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/929",
+        "rationale": "SPEC-021 v0.4 defines transactionally observable epoch/provider/wallet/cohort/duplicate-identity cap enforcement; implementation and tests are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-021-R007",
+      "spec_id": "SPEC-021",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/929",
+        "rationale": "SPEC-021 v0.4 defines non-withdrawable handling for provisional, untrusted, duplicate, sanctioned, compute-integrity-blocked, and quarantined work; implementation and tests are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-021-R008",
+      "spec_id": "SPEC-021",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/929",
+        "rationale": "SPEC-021 v0.4 defines the wash-traffic disposition trail; implementation and tests are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-021-R009",
+      "spec_id": "SPEC-021",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/929",
+        "rationale": "SPEC-021 v0.4 defines reward projection totals and redaction boundaries; implementation, SPEC-017 transport, and tests are not yet mapped."
+      }
+    },
+    {
+      "requirement_id": "SPEC-021-R010",
+      "spec_id": "SPEC-021",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/929",
+        "rationale": "SPEC-021 v0.4 reasserts separation from buyer debit, USDC payout readiness, and settlement ledgers; implementation and regression tests are not yet mapped."
       }
     },
     {

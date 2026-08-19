@@ -44,6 +44,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{21, "malibu_emission_ledger_update_grant"},
 		{22, "malibu_useful_work_rewards"},
 		{23, "malibu_reward_audit_events"},
+		{24, "malibu_epoch_disposition_facts"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -80,7 +81,7 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm, powW2HelloGateGrants, onboardingDecisionReason, hardwareMemoryReverification, autotuneCurrentHardwareGateGrants, hardwareTrustApproval, waitingTrustChipProfileProjection string
+	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm, powW2HelloGateGrants, onboardingDecisionReason, hardwareMemoryReverification, autotuneCurrentHardwareGateGrants, hardwareTrustApproval, waitingTrustChipProfileProjection, malibuEpochDispositionFacts string
 	for _, m := range all {
 		switch m.Name {
 		case "stats_tables":
@@ -109,6 +110,8 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 			hardwareTrustApproval = m.SQL
 		case "waiting_trust_chip_profile_projection":
 			waitingTrustChipProfileProjection = m.SQL
+		case "malibu_epoch_disposition_facts":
+			malibuEpochDispositionFacts = m.SQL
 		}
 	}
 	if schema == "" {
@@ -116,6 +119,9 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	}
 	if waitingTrustChipProfileProjection == "" {
 		t.Fatal("waiting_trust_chip_profile_projection migration body is empty")
+	}
+	if malibuEpochDispositionFacts == "" {
+		t.Fatal("malibu_epoch_disposition_facts migration body is empty")
 	}
 	// The forbidden-substring checks must scan code, not
 	// comments. The migration's prose comments document v0.1.7
@@ -217,6 +223,44 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	}
 	if autotuneCurrentHardwareGateGrants == "" {
 		t.Fatal("autotune current hardware gate grants forward migration body is empty")
+	}
+	for _, needle := range []string{
+		"CREATE TABLE IF NOT EXISTS malibu_epoch_disposition_facts",
+		"CREATE TABLE IF NOT EXISTS malibu_epoch_disposition_subject_memberships",
+		"CREATE OR REPLACE VIEW malibu_rewards_ledger_with_disposition",
+		"disposition IN ('hold', 'exclude', 'burn', 'retire')",
+		"CHECK (clears_disposition_id IS NULL)",
+		"CHECK (\n        subject_type <> 'provider'",
+		"disposition_id BIGINT NOT NULL REFERENCES malibu_epoch_disposition_facts(id)",
+		"policy_revision TEXT NOT NULL",
+		"subject_type IN ('wallet', 'cohort', 'duplicate_class', 'epoch')",
+		"CHECK (ledger_id IS NOT NULL OR external_ref IS NOT NULL)",
+		"medf.ledger_id = prl.id",
+		"medf.external_ref = prl.external_ref",
+		"medf.subject_type = 'provider'",
+		"AND medf.subject_id = prl.provider_id",
+		"FROM malibu_epoch_disposition_subject_memberships mesm",
+		"mesm.disposition_id = medf.id",
+		"mesm.policy_revision = medf.policy_revision",
+		"mesm.subject_type = medf.subject_type",
+		"mesm.subject_id = medf.subject_id",
+		"mesm.provider_id = prl.provider_id",
+		"mesm.ledger_id = prl.id OR mesm.external_ref = prl.external_ref",
+		"GRANT SELECT, INSERT ON malibu_epoch_disposition_subject_memberships TO rewards_writer",
+		"GRANT SELECT ON malibu_rewards_ledger_with_disposition TO rewards_writer",
+	} {
+		mustContain(t, malibuEpochDispositionFacts, needle, "SPEC-021 v0.4 disposition facts migration")
+	}
+	for _, needle := range []string{
+		"LOWER(medf.subject_id) = LOWER(pes.bound_wallet)",
+		"AND (medf.subject_id = prl.provider_id OR medf.provider_id = prl.provider_id)",
+		"disposition IN ('hold', 'exclude', 'burn', 'retire', 'release')",
+		"(disposition = 'release'",
+		"GRANT UPDATE",
+		"mesm.ledger_id IS NULL OR mesm.ledger_id = prl.id",
+		"mesm.external_ref IS NULL OR mesm.external_ref = prl.external_ref",
+	} {
+		mustNotContain(t, malibuEpochDispositionFacts, needle, "SPEC-021 v0.4 disposition facts migration")
 	}
 	for _, needle := range []string{
 		"GRANT SELECT (",

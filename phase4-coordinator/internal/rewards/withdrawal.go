@@ -21,13 +21,14 @@ func SelectWithdrawableMALIBU(ctx context.Context, db *sql.DB, providerID string
 		limit = 100
 	}
 	rows, err := db.QueryContext(ctx, `
-        SELECT id, provider_id, unix_ts, amount_malibu::TEXT
-          FROM provider_rewards_ledger
-         WHERE provider_id = $1
-           AND amount_malibu IS NOT NULL
-           AND amount_malibu > 0
-           AND withdrawal_hold_reason IS NULL
-         ORDER BY id ASC
+        SELECT prl.id, prl.provider_id, prl.unix_ts, prl.amount_malibu::TEXT
+          FROM malibu_rewards_ledger_with_disposition prl
+         WHERE prl.provider_id = $1
+           AND prl.amount_malibu IS NOT NULL
+           AND prl.amount_malibu > 0
+           AND prl.withdrawal_hold_reason IS NULL
+           AND NOT prl.epoch_disposition_blocked
+         ORDER BY prl.id ASC
          LIMIT $2
     `, providerID, limit)
 	if err != nil {
