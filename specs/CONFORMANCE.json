@@ -1224,7 +1224,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.8",
+      "version": "0.0.9",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5105,11 +5105,13 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/poolmanifest/manifest.go:func (ic IdentityCore) PoolID",
-        "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) ManifestCoreDigest"
+        "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) ManifestCoreDigest",
+        "phase4-coordinator/internal/poolmanifest/signature.go:func VerifyPoolIDBinding"
       ],
       "tests": [
         "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestGoldenVectors",
-        "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestDigestSensitivity"
+        "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestDigestSensitivity",
+        "phase4-coordinator/internal/poolmanifest/signature_test.go:TestVerifyPoolIDBinding"
       ],
       "journeys": [],
       "evidence": [],
@@ -5117,7 +5119,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool object + signed manifest + identity/rollback: slice 1 implements the canonical identity-core and versioned-policy-core byte grammar with pool_id (base64url(SHA256(identity core)[0:16])) and manifest_core_digest derivations, frozen by golden vectors (v0.0.8). Still deferred to later R001/R012 slices: signature verification, the root-issuer/signer-set authority log, mutable operational fields, active-policy selection, durable persistence, and routing wiring."
+        "rationale": "Pool object + signed manifest + identity/rollback: slice 1 implements the canonical identity-core and versioned-policy-core byte grammar with pool_id (base64url(SHA256(identity core)[0:16])) and manifest_core_digest derivations, frozen by golden vectors (v0.0.8); slice 2 adds the pool_id-binding recompute-and-compare check (VerifyPoolIDBinding) and the policy-core signature layer (see SPEC-042-R012), v0.0.9. Still deferred to later R001/R012 slices: the root-issuer/signer-set authority log, mutable operational fields, active-policy selection + durable version history, durable persistence, and routing wiring."
       }
     },
     {
@@ -5307,15 +5309,22 @@
       "requirement_id": "SPEC-042-R012",
       "spec_id": "SPEC-042",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/poolmanifest/signature.go:func VerifyPolicyCore",
+        "phase4-coordinator/internal/poolmanifest/signature.go:func (ss SignerSet) Validate"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/poolmanifest/signature_test.go:TestVerifyPolicyCoreAccept",
+        "phase4-coordinator/internal/poolmanifest/signature_test.go:TestVerifyPolicyCoreRejects",
+        "phase4-coordinator/internal/poolmanifest/signature_test.go:TestSignatureGoldenVectors"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Manifest authority + signer-set key lifecycle: NOT yet implemented; depends on the signed-manifest machinery (R001) which is a future slice."
+        "rationale": "Manifest authority + signer-set key lifecycle: slice 2 (v0.0.9) implements policy-core signature verification against a signer set \u2014 the domain-separated signing preimage, M-of-N over distinct authorized keys (VerifyPolicyCore), and signer-set structural validation (SignerSet.Validate) with signer_set_version match and not_before-anchored validity \u2014 frozen by golden signature vectors. Still deferred: the append-only hash-chained authority log that establishes and versions signer sets (entry byte grammar + vectors, root-issuer/prior-set signatures, rollback/threshold/hash-chain checks, and setting SignerSet.Revoked), signed emergency control messages, and durable persistence/restart reconstruction of the log and recorded acceptance verdicts."
       }
     }
   ]

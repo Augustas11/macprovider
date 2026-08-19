@@ -1,0 +1,847 @@
+diff --git a/docs/design/spec-042-r001-slice2-manifest-signatures.md b/docs/design/spec-042-r001-slice2-manifest-signatures.md
+new file mode 100644
+index 00000000..84b42902
+--- /dev/null
++++ b/docs/design/spec-042-r001-slice2-manifest-signatures.md
+@@ -0,0 +1,184 @@
++# SPEC-042 R001/R012 slice 2 — manifest signature verification (M-of-N over a signer set)
++
++Status: design → implementation. Coordinator-only (phase4), extends the existing
++`internal/poolmanifest` package. Second of the R001 manifest epic. Builds directly
++on slice 1 (canonical encoding + `pool_id`/`manifest_core_digest` derivations,
++frozen by golden vectors) and makes that encoding **trust-bearing**: given a signer
++set, decide whether a signed policy core is authentic, authorized, and threshold-met.
++
++## 1. Scope
++
++Deliver the signature layer that turns a canonical policy core into an accepted or
++rejected signed record:
++
++1. The **detached-signature wire shape** (`Signature{KeyID, Sig}`, Ed25519, base64url
++   on the wire — matching the SPEC-014/tier2 catalog-signature precedent) and the
++   **domain-separated signing preimage** for a policy core.
++2. A **`SignerSet`** value type — the authorized keys, the `M`-of-`N` threshold, and a
++   validity window — as the **input** to verification, with its own structural
++   validation (`1 ≤ M ≤ N`, distinct key ids, well-formed keys).
++3. **M-of-N threshold verification** with distinct-signer counting, and the
++   policy-core accept/reject predicate that binds `signer_set_version`, the signer-set
++   validity window, and the recomputed `manifest_core_digest`.
++4. The **`pool_id` binding check** (recompute the identity-core digest and reject on
++   mismatch against the carried `pool_id`, SPEC-042-R001).
++5. **Golden vectors** (fixed seed-derived keypairs) that freeze the signing preimage
++   and pin accept + every reject path.
++
++Out of scope (later slices, called out so the boundary is explicit):
++
++- The **authority log** (SPEC-042-R012) that *establishes and versions* signer sets —
++  the append-only hash-chained log signed by the root issuer / prior signer set, its
++  own byte grammar, and the lookup "given `signer_set_version`, return the `SignerSet`."
++  Slice 2 verifies a policy core against a `SignerSet` it is **handed**; slice 3
++  produces that value and its `Revoked` verdict. (`SignerSet.Revoked` is honored here
++  but only ever *set* by slice 3.)
++- **Stateful** manifest rejects that need durable history: `manifest_version`
++  monotonicity, `prev_manifest_core_hash` chaining, rollback, and active-policy
++  selection / validity-window overlap (slice 4), and the durable acceptance-verdict
++  record for restart replay (slice 5).
++- **Mutable operational field** signing (R001) — a separate signed structure with no
++  defined encoding yet; the threshold primitive here is written to be reusable for it
++  and for authority-log entries, but no mutable-field API ships in slice 2.
++
++This slice is pure verification: no I/O, no persistence, no wall-clock — `crypto/ed25519`
+++ `crypto/sha256` + stdlib only. Every check is a total function of its inputs.
++
++## 2. What gets signed (policy-core signing preimage)
++
++A signature is a detached Ed25519 signature over a domain-separated message:
++
++```
++policy_core_sig_message = tag("macprovider/spec042/policy-core-sig/v1") ‖ manifest_core_digest
++```
++
++where `manifest_core_digest = SHA256(canonical policy core)` from slice 1 (32 bytes).
++The digest already commits to `pool_id`, `manifest_version`, `signer_set_version`, the
++allowlist, every predicate, the R009 group, and the validity window — so signing the
++digest binds the entire policy core. The **distinct signing tag** (note: `-sig/v1`, not
++the `policy-core/v1` preimage tag of slice 1) domain-separates a policy-core signature
++from the identity-core, authority-log-entry, and mutable-field signatures that later
++slices will add, so a signature harvested from one structure can never be replayed as
++another. Signing the 32-byte digest (rather than the full preimage) keeps the signed
++message short; it is equivalent in strength under SHA-256 collision resistance, and the
++signing tag lives outside the digest so it cannot be confused with a digest-preimage field.
++
++## 3. Signer set (verification input)
++
++```go
++type SignerKey struct { KeyID string; PublicKey ed25519.PublicKey }
++type SignerSet struct {
++    Version       uint64        // signer_set_version this set embodies (SPEC-042-R012)
++    Keys          []SignerKey   // N authorized signer keys, distinct key ids
++    Threshold     uint32        // M; requires 1 ≤ M ≤ N
++    NotBeforeUnix uint64        // validity window [NotBefore, Expires)
++    ExpiresAtUnix uint64
++    Revoked       bool          // set only by the slice-3 authority log
++}
++```
++
++`Validate()` enforces `N = len(Keys) ≥ 1`, `1 ≤ Threshold ≤ N`, distinct non-empty key
++ids, each `PublicKey` exactly `ed25519.PublicKeySize`, **distinct public-key bytes**,
++and `NotBeforeUnix < ExpiresAtUnix`. `Validate()` is a structural check on the set
++itself and does **not** consult the clock or any policy — window *applicability* is
++evaluated per policy (§4).
++
++Distinct public-key bytes are load-bearing, not cosmetic: because threshold counting
++dedupes signatures by key id (§4.1), a set carrying the same public key under two key
++ids would let the holder of a *single* private key present the same valid signature
++under both ids and satisfy a 2-of-N threshold with one key — collapsing M-of-N. This
++slice rejects duplicate public keys at the trust-primitive boundary so the M-of-N
++independence invariant holds regardless of how the slice-3 authority log builds the
++set (defense in depth: slice 3 SHOULD also refuse to construct such a set).
++
++**Deferred (carried LOW).** `Validate()` and threshold verification accept
++unbounded-size `Keys`/`sigs` slices. Nothing untrusted reaches this package yet — it
++is called only with in-process values — so there is no allocation-DoS surface today.
++A SPEC-backed maximum (`MaxSignerSetKeys` / `MaxPolicyCoreSignatures`) belongs to the
++slice-3 wire/parse layer that first admits attacker-sized manifests, and is recorded
++there rather than hard-coded here without a spec anchor.
++
++## 4. Policy-core accept/reject predicate
++
++`VerifyPolicyCore(core PolicyCore, sigs []Signature, ss SignerSet) error` accepts iff
++**all** hold (any failure returns a distinct typed sentinel; no partial acceptance):
++
++1. `ss.Validate()` passes (a malformed signer set can authorize nothing).
++2. **Signer-set version match** — `ss.Version == core.SignerSetVersion`. A policy core is
++   verified against *exactly* the signer set it names (SPEC-042-R012); a set of a
++   different version is rejected even if its keys would verify.
++3. **Signer-set applicability** — `ss` is not `Revoked`, and its window *contains the
++   policy's* `not_before`: `ss.NotBeforeUnix ≤ core.NotBeforeUnix < ss.ExpiresAtUnix`.
++   Per SPEC-042-R012 acceptance validity is anchored to `not_before_unix`, never to
++   `manifest_version` (a policy ordinal, not a time anchor). Slice 2 takes no wall-clock;
++   the durable "verdict + epoch" record that replay uses is slice 5.
++4. **`manifest_core_digest`** recomputes from `core` (this also runs slice-1 structural
++   validation — 32-byte prev hash, no duplicate allowlist entry).
++5. **M-of-N threshold met** by *distinct authorized valid* signatures (§4.1).
++
++### 4.1 Threshold counting (the security-load-bearing part)
++
++`sigs` must be a **clean** list: every entry authorized, cryptographically valid, and
++distinct by key id. Concretely, iterating `sigs`:
++
++- a **duplicate key id** → reject (`errDuplicateSigner`): one key must never count toward
++  the threshold twice, and a repeated key id is malformed, not silently deduped;
++- a key id **not in `ss.Keys`** → reject (`errUnknownSigner`): a signature from a
++  non-member key is "signature-invalid against the signer set" (R001), not ignorable
++  padding;
++- wrong signature length or **Ed25519 verify failure** over the §2 message → reject
++  (`errBadSignature`);
++- then require `len(sigs) ≥ ss.Threshold` (`errThresholdNotMet`); an empty list is
++  "unsigned" and fails here.
++
++Because every listed signature must be valid/authorized/distinct, the accepted count is
++exactly `len(sigs)`, and `M`-of-`N` means *M distinct authorized keys signed the same
++digest* — never M signatures from one key, never M-good-plus-garbage. Ed25519 signature
++malleability is irrelevant: a malleated second signature for the same `(key, digest)`
++carries the same key id and is rejected as a duplicate, so it cannot inflate the count.
++
++## 5. `pool_id` binding
++
++`VerifyPoolIDBinding(ic IdentityCore, claimedPoolID string) error` recomputes
++`ic.PoolID()` and compares against `claimedPoolID`, rejecting on mismatch
++(`errPoolIDMismatch`, SPEC-042-R001: "rejected on mismatch against the recomputed
++identity-core digest"). The comparison uses `subtle.ConstantTimeCompare` for hygiene
++though `pool_id` is a public identifier. The identity core itself carries no signature
++in this slice — `pool_id = hash(identity core)` is a self-certifying *name*;
++authorization flows only from signatures over policy cores by a root-issuer-authorized
++signer set (the authority log, slice 3).
++
++## 6. Golden vectors
++
++Keypairs are derived from **fixed 32-byte seeds** (`ed25519.NewKeyFromSeed`) so the
++vectors are deterministic and reproducible with no `crypto/rand`. The table pins:
++
++- the exact hex of the §2 signing message for the slice-1 sample policy core;
++- a valid **2-of-3** signature set (accept) and a valid **1-of-1** (accept);
++- reject paths, each asserted to return its specific sentinel: wrong
++  `signer_set_version`; signer set `Revoked`; `not_before` outside the signer-set
++  window (both below `NotBefore` and at/after `Expires`); one fewer signature than the
++  threshold; a duplicate key id; a signature from a key outside the set; a signature
++  over a tampered digest; a malformed signer set (`M > N`, `M = 0`, duplicate key id,
++  bad key length).
++
++Any change to the signing tag or preimage construction breaks the message vector —
++which is the point; the signing format is frozen alongside the slice-1 encoding.
++
++## 7. API synopsis
++
++```go
++type Signature struct { KeyID string; Sig []byte }   // Alg is fixed Ed25519
++type SignerKey struct { KeyID string; PublicKey ed25519.PublicKey }
++type SignerSet  struct { Version uint64; Keys []SignerKey; Threshold uint32; NotBeforeUnix, ExpiresAtUnix uint64; Revoked bool }
++
++func (SignerSet) Validate() error
++func PolicyCoreSigningMessage(manifestCoreDigest []byte) ([]byte, error) // tag ‖ digest
++func VerifyPolicyCore(core PolicyCore, sigs []Signature, ss SignerSet) error
++func VerifyPoolIDBinding(ic IdentityCore, claimedPoolID string) error
++```
++
++Verification is total and deterministic; it returns a typed sentinel on every reject and
++`nil` only when the policy core is authentic, authorized under the named signer set, and
++threshold-met. No durable state, no clock, no lookup — those are the boundaries of
++slices 3–5.
+diff --git a/phase4-coordinator/internal/poolmanifest/signature.go b/phase4-coordinator/internal/poolmanifest/signature.go
+new file mode 100644
+index 00000000..7a51ea5e
+--- /dev/null
++++ b/phase4-coordinator/internal/poolmanifest/signature.go
+@@ -0,0 +1,222 @@
++package poolmanifest
++
++// SPEC-042-R001/R012 slice 2: signature verification over the canonical policy
++// core. Slice 1 froze the encoding and the manifest_core_digest; this file makes
++// that encoding trust-bearing by deciding whether a signed policy core is
++// authentic (valid Ed25519 signatures), authorized (keys in the named signer
++// set), and threshold-met (M distinct authorized signers).
++//
++// Scope boundary: verification takes a SignerSet as an INPUT. The append-only,
++// hash-chained authority log that establishes and versions signer sets — and
++// sets SignerSet.Revoked — is SPEC-042-R012 (slice 3). Stateful manifest rejects
++// (manifest_version monotonicity, prev-hash chaining, rollback, active-policy
++// selection, durable verdict records) need durable history and are slices 4-5.
++// This file has no I/O, no persistence, and no wall-clock: every function is a
++// total function of its inputs.
++
++import (
++	"crypto/ed25519"
++	"crypto/subtle"
++	"errors"
++)
++
++// policyCoreSigTag domain-separates a policy-core signature from the identity-core,
++// authority-log-entry, and mutable-field signatures added by later slices, so a
++// signature harvested from one structure can never be replayed as another. It is
++// DISTINCT from the policyCoreTag (slice 1) that prefixes the digest preimage.
++const policyCoreSigTag = "macprovider/spec042/policy-core-sig/v1"
++
++var (
++	errSignerSetEmpty    = errors.New("poolmanifest: signer set has no keys")
++	errThresholdRange    = errors.New("poolmanifest: signer set threshold must satisfy 1 <= M <= N")
++	errSignerKeyID       = errors.New("poolmanifest: signer set key id must be non-empty and distinct")
++	errSignerKeyLen      = errors.New("poolmanifest: signer set public key must be ed25519.PublicKeySize bytes")
++	errSignerKeyDup      = errors.New("poolmanifest: signer set public keys must be distinct")
++	errSignerSetWindow   = errors.New("poolmanifest: signer set validity window must satisfy not_before < expires")
++	errSignerSetVersion  = errors.New("poolmanifest: policy core signer_set_version does not match signer set")
++	errSignerSetRevoked  = errors.New("poolmanifest: signer set is revoked")
++	errSignerSetInactive = errors.New("poolmanifest: signer set window does not contain policy not_before")
++	errDuplicateSigner   = errors.New("poolmanifest: duplicate signer key id in signature list")
++	errUnknownSigner     = errors.New("poolmanifest: signature key id not in signer set")
++	errBadSignature      = errors.New("poolmanifest: invalid signature")
++	errThresholdNotMet   = errors.New("poolmanifest: fewer authorized signatures than threshold")
++	errPoolIDMismatch    = errors.New("poolmanifest: pool_id does not match recomputed identity-core digest")
++	errDigestLen         = errors.New("poolmanifest: manifest_core_digest must be 32 bytes")
++)
++
++// Signature is a detached Ed25519 signature by one signer key over a
++// domain-separated policy-core signing message (SPEC-042-R012). Alg is fixed
++// Ed25519 (the network signature algorithm; see internal/tier2 catalog
++// signatures). On the wire KeyID and Sig are base64url per the catalog precedent;
++// this in-memory form carries the decoded signature bytes.
++type Signature struct {
++	KeyID string
++	Sig   []byte
++}
++
++// SignerKey is one authorized operational signer: an opaque key id and its
++// Ed25519 public key.
++type SignerKey struct {
++	KeyID     string
++	PublicKey ed25519.PublicKey
++}
++
++// SignerSet is the M-of-N operational signer set a policy core is verified
++// against (SPEC-042-R012), the INPUT to verification. Slice 3's authority log
++// constructs it (and is the only writer of Revoked); slice 2 only consumes it.
++type SignerSet struct {
++	Version       uint64
++	Keys          []SignerKey
++	Threshold     uint32 // M
++	NotBeforeUnix uint64 // validity window [NotBeforeUnix, ExpiresAtUnix)
++	ExpiresAtUnix uint64
++	Revoked       bool
++}
++
++// Validate checks the signer set is structurally well-formed: N = len(Keys) >= 1,
++// 1 <= Threshold <= N, distinct non-empty key ids, each public key exactly
++// ed25519.PublicKeySize bytes, DISTINCT public-key bytes, and a non-empty
++// half-open validity window. It does NOT consult the clock or any policy; window
++// applicability is evaluated per policy in VerifyPolicyCore.
++//
++// Distinct public-key bytes are load-bearing for true M-of-N independence: because
++// verifyThreshold dedupes signatures by key id, a signer set carrying the same
++// public key under two key ids would let the holder of a single private key submit
++// the same valid signature under both ids and satisfy a 2-of-N threshold with one
++// key. Rejecting duplicate public keys here (the trust-primitive boundary) closes
++// that collapse regardless of how the slice-3 authority log constructs the set.
++func (ss SignerSet) Validate() error {
++	n := len(ss.Keys)
++	if n == 0 {
++		return errSignerSetEmpty
++	}
++	if ss.Threshold < 1 || int(ss.Threshold) > n {
++		return errThresholdRange
++	}
++	seenIDs := make(map[string]struct{}, n)
++	seenKeys := make(map[string]struct{}, n)
++	for _, k := range ss.Keys {
++		if k.KeyID == "" {
++			return errSignerKeyID
++		}
++		if _, dup := seenIDs[k.KeyID]; dup {
++			return errSignerKeyID
++		}
++		seenIDs[k.KeyID] = struct{}{}
++		if len(k.PublicKey) != ed25519.PublicKeySize {
++			return errSignerKeyLen
++		}
++		if _, dup := seenKeys[string(k.PublicKey)]; dup {
++			return errSignerKeyDup
++		}
++		seenKeys[string(k.PublicKey)] = struct{}{}
++	}
++	if ss.NotBeforeUnix >= ss.ExpiresAtUnix {
++		return errSignerSetWindow
++	}
++	return nil
++}
++
++// keyByID returns the public key for id, or ok=false if id is not in the set.
++func (ss SignerSet) keyByID(id string) (ed25519.PublicKey, bool) {
++	for _, k := range ss.Keys {
++		if k.KeyID == id {
++			return k.PublicKey, true
++		}
++	}
++	return nil, false
++}
++
++// PolicyCoreSigningMessage returns the domain-separated message a signer signs
++// for a policy core: policyCoreSigTag ‖ manifest_core_digest. manifestCoreDigest
++// must be the 32-byte SHA-256 policy-core digest from ManifestCoreDigest.
++func PolicyCoreSigningMessage(manifestCoreDigest []byte) ([]byte, error) {
++	if len(manifestCoreDigest) != manifestCoreHashLen {
++		return nil, errDigestLen
++	}
++	msg := make([]byte, 0, len(policyCoreSigTag)+manifestCoreHashLen)
++	msg = append(msg, policyCoreSigTag...)
++	msg = append(msg, manifestCoreDigest...)
++	return msg, nil
++}
++
++// VerifyPolicyCore accepts iff the policy core is authentic, authorized under the
++// named signer set, and threshold-met (SPEC-042-R001/R012). It returns a distinct
++// typed sentinel on every reject and nil only on full acceptance. There is no
++// partial acceptance: every listed signature MUST be authorized, valid, and
++// distinct, and the count MUST reach the threshold.
++func VerifyPolicyCore(core PolicyCore, sigs []Signature, ss SignerSet) error {
++	if err := ss.Validate(); err != nil {
++		return err
++	}
++	// The policy core is verified against EXACTLY the signer set it names.
++	if ss.Version != core.SignerSetVersion {
++		return errSignerSetVersion
++	}
++	// Acceptance validity is anchored to the policy's not_before, never to
++	// manifest_version (SPEC-042-R012): the signer set must be unrevoked and its
++	// half-open window must contain core.NotBeforeUnix.
++	if ss.Revoked {
++		return errSignerSetRevoked
++	}
++	if !(ss.NotBeforeUnix <= core.NotBeforeUnix && core.NotBeforeUnix < ss.ExpiresAtUnix) {
++		return errSignerSetInactive
++	}
++	// Recompute the digest (also runs slice-1 structural validation of the core).
++	digest, err := core.ManifestCoreDigest()
++	if err != nil {
++		return err
++	}
++	return verifyThreshold(digest, sigs, ss)
++}
++
++// verifyThreshold enforces M-of-N over distinct authorized valid signatures. The
++// signature list must be clean: each entry authorized (key id in the set),
++// cryptographically valid over the policy-core signing message, and distinct by
++// key id; then len(sigs) >= Threshold. This makes M-of-N mean "M distinct
++// authorized keys signed the same digest", never M signatures from one key nor M
++// good signatures padded with garbage. ss is assumed already Validate()d.
++func verifyThreshold(manifestCoreDigest []byte, sigs []Signature, ss SignerSet) error {
++	msg, err := PolicyCoreSigningMessage(manifestCoreDigest)
++	if err != nil {
++		return err
++	}
++	seen := make(map[string]struct{}, len(sigs))
++	for _, s := range sigs {
++		if _, dup := seen[s.KeyID]; dup {
++			return errDuplicateSigner
++		}
++		seen[s.KeyID] = struct{}{}
++		pub, ok := ss.keyByID(s.KeyID)
++		if !ok {
++			return errUnknownSigner
++		}
++		if len(s.Sig) != ed25519.SignatureSize {
++			return errBadSignature
++		}
++		if !ed25519.Verify(pub, msg, s.Sig) {
++			return errBadSignature
++		}
++	}
++	if len(sigs) < int(ss.Threshold) {
++		return errThresholdNotMet
++	}
++	return nil
++}
++
++// VerifyPoolIDBinding recomputes the identity-core-derived pool_id and rejects on
++// mismatch against the pool_id carried alongside the manifest (SPEC-042-R001).
++// pool_id is a self-certifying name (a hash of the identity core), not an
++// authorization; authorization flows only from policy-core signatures verified
++// against a signer set. The compare is constant-time for hygiene though pool_id
++// is public.
++func VerifyPoolIDBinding(ic IdentityCore, claimedPoolID string) error {
++	got, err := ic.PoolID()
++	if err != nil {
++		return err
++	}
++	if subtle.ConstantTimeCompare([]byte(got), []byte(claimedPoolID)) != 1 {
++		return errPoolIDMismatch
++	}
++	return nil
++}
+diff --git a/phase4-coordinator/internal/poolmanifest/signature_test.go b/phase4-coordinator/internal/poolmanifest/signature_test.go
+new file mode 100644
+index 00000000..d467b45f
+--- /dev/null
++++ b/phase4-coordinator/internal/poolmanifest/signature_test.go
+@@ -0,0 +1,299 @@
++package poolmanifest
++
++import (
++	"crypto/ed25519"
++	"encoding/hex"
++	"errors"
++	"testing"
++)
++
++// Fixed seeds derive deterministic keypairs (no crypto/rand) so the golden
++// signature vectors below are reproducible. Seed i is 32 bytes all = i+1.
++func seedKey(n byte) (SignerKey, ed25519.PrivateKey) {
++	seed := make([]byte, ed25519.SeedSize)
++	for i := range seed {
++		seed[i] = n
++	}
++	priv := ed25519.NewKeyFromSeed(seed)
++	return SignerKey{KeyID: string([]byte{'k', '0' + n}), PublicKey: priv.Public().(ed25519.PublicKey)}, priv
++}
++
++// GOLDEN VECTORS — freeze the SPEC-042-R012 policy-core signing preimage and the
++// resulting deterministic Ed25519 signatures over the slice-1 sample policy core.
++// SIGMSG is policyCoreSigTag ‖ goldenManifestDigest; any change to the signing tag
++// or preimage breaks it on purpose.
++const (
++	goldenPolicyCoreSigMsgHex = "6d616370726f76696465722f737065633034322f706f6c6963792d636f72652d7369672f7631237806f14c4bef1a2a0ec853c0309b24fc3db7c6cd14d5d71b9e186245ead2b6"
++	goldenSigKey1Hex          = "dec36e7c2a004833f8f034678e063d6d882fe9b71af583811028b8cb57eb97856ceeb10390ccdbb567a064a179a4572d1f14b2e4c460589509bf8587bd7ef70c"
++	goldenSigKey2Hex          = "a95228ca0e8a1007494ed46f887ae79d9b75fa88bd5dc14d8c427998b07c2efb97a942a89b6ee44534e872d586d9f4d2a9858626cbdc683905d30995b5d92700"
++	goldenSigKey3Hex          = "2dce54997d2f8b8273900784a8429d846a0a8429f2ea0f352562870d42f554464f5b925e2a1a2a56ff6a7fa07c77f021b2511c5e381aba69dce7fc80c9727d08"
++)
++
++func mustHex(s string) []byte {
++	b, err := hex.DecodeString(s)
++	if err != nil {
++		panic(err)
++	}
++	return b
++}
++
++// signerSet3 returns a fixed 3-key set (keys k1,k2,k3) with the given threshold
++// and a window that contains the sample policy's not_before (1000), plus the
++// three private keys for signing.
++func signerSet3(threshold uint32) (SignerSet, [3]ed25519.PrivateKey) {
++	k1, p1 := seedKey(1)
++	k2, p2 := seedKey(2)
++	k3, p3 := seedKey(3)
++	return SignerSet{
++		Version:       1,
++		Keys:          []SignerKey{k1, k2, k3},
++		Threshold:     threshold,
++		NotBeforeUnix: 500,
++		ExpiresAtUnix: 5000,
++	}, [3]ed25519.PrivateKey{p1, p2, p3}
++}
++
++// signPolicy signs the sample policy core with the given private key.
++func signPolicy(t *testing.T, keyID string, priv ed25519.PrivateKey) Signature {
++	t.Helper()
++	pid, _ := sampleIdentity().PoolID()
++	dig := must(samplePolicy(pid).ManifestCoreDigest())
++	msg := must(PolicyCoreSigningMessage(dig))
++	return Signature{KeyID: keyID, Sig: ed25519.Sign(priv, msg)}
++}
++
++func samplePolicyForSig(t *testing.T) PolicyCore {
++	t.Helper()
++	pid, _ := sampleIdentity().PoolID()
++	return samplePolicy(pid)
++}
++
++func TestPolicyCoreSigningMessageGolden(t *testing.T) {
++	dig := must(samplePolicyForSig(t).ManifestCoreDigest())
++	msg := must(PolicyCoreSigningMessage(dig))
++	if got := hex.EncodeToString(msg); got != goldenPolicyCoreSigMsgHex {
++		t.Fatalf("signing message drifted:\n got=%s\nwant=%s", got, goldenPolicyCoreSigMsgHex)
++	}
++	// The tag prefixes the digest; the digest suffix is the slice-1 golden digest.
++	if got := hex.EncodeToString(dig); got != goldenManifestDigest {
++		t.Fatalf("digest changed out from under the signing vector: %s", got)
++	}
++	// Non-32-byte digest is rejected with its own distinct sentinel.
++	if _, err := PolicyCoreSigningMessage([]byte{0x00}); !errors.Is(err, errDigestLen) {
++		t.Fatalf("want errDigestLen for short digest, got %v", err)
++	}
++}
++
++func TestSignatureGoldenVectors(t *testing.T) {
++	// The fixed-seed keys reproduce the pinned signatures exactly (Ed25519 is
++	// deterministic), and each verifies under VerifyPolicyCore in a 1-of-1 set.
++	golden := []string{goldenSigKey1Hex, goldenSigKey2Hex, goldenSigKey3Hex}
++	for i := byte(1); i <= 3; i++ {
++		key, priv := seedKey(i)
++		sig := signPolicy(t, key.KeyID, priv)
++		if got := hex.EncodeToString(sig.Sig); got != golden[i-1] {
++			t.Fatalf("key %d signature drifted:\n got=%s\nwant=%s", i, got, golden[i-1])
++		}
++		ss := SignerSet{Version: 1, Keys: []SignerKey{key}, Threshold: 1, NotBeforeUnix: 500, ExpiresAtUnix: 5000}
++		if err := VerifyPolicyCore(samplePolicyForSig(t), []Signature{sig}, ss); err != nil {
++			t.Fatalf("golden 1-of-1 verify failed for key %d: %v", i, err)
++		}
++		// The pinned signature bytes verify too (guards the vector, not just re-signing).
++		ss2 := ss
++		if err := VerifyPolicyCore(samplePolicyForSig(t), []Signature{{KeyID: key.KeyID, Sig: mustHex(golden[i-1])}}, ss2); err != nil {
++			t.Fatalf("pinned signature bytes failed to verify for key %d: %v", i, err)
++		}
++	}
++}
++
++func TestVerifyPolicyCoreAccept(t *testing.T) {
++	// 2-of-3: two distinct authorized signatures satisfy threshold 2.
++	ss, priv := signerSet3(2)
++	sigs := []Signature{signPolicy(t, "k1", priv[0]), signPolicy(t, "k3", priv[2])}
++	if err := VerifyPolicyCore(samplePolicyForSig(t), sigs, ss); err != nil {
++		t.Fatalf("2-of-3 accept failed: %v", err)
++	}
++	// All three also accept (count exceeds threshold is fine).
++	all := []Signature{signPolicy(t, "k1", priv[0]), signPolicy(t, "k2", priv[1]), signPolicy(t, "k3", priv[2])}
++	if err := VerifyPolicyCore(samplePolicyForSig(t), all, ss); err != nil {
++		t.Fatalf("3-of-3 accept failed: %v", err)
++	}
++}
++
++func TestVerifyPolicyCoreRejects(t *testing.T) {
++	base := samplePolicyForSig(t)
++
++	t.Run("wrong signer_set_version", func(t *testing.T) {
++		ss, priv := signerSet3(1)
++		ss.Version = 2 // policy core carries SignerSetVersion=1
++		err := VerifyPolicyCore(base, []Signature{signPolicy(t, "k1", priv[0])}, ss)
++		if !errors.Is(err, errSignerSetVersion) {
++			t.Fatalf("want errSignerSetVersion, got %v", err)
++		}
++	})
++
++	t.Run("revoked signer set", func(t *testing.T) {
++		ss, priv := signerSet3(1)
++		ss.Revoked = true
++		err := VerifyPolicyCore(base, []Signature{signPolicy(t, "k1", priv[0])}, ss)
++		if !errors.Is(err, errSignerSetRevoked) {
++			t.Fatalf("want errSignerSetRevoked, got %v", err)
++		}
++	})
++
++	t.Run("not_before below signer-set window", func(t *testing.T) {
++		ss, priv := signerSet3(1)
++		ss.NotBeforeUnix = 1500 // policy not_before is 1000 < 1500
++		err := VerifyPolicyCore(base, []Signature{signPolicy(t, "k1", priv[0])}, ss)
++		if !errors.Is(err, errSignerSetInactive) {
++			t.Fatalf("want errSignerSetInactive, got %v", err)
++		}
++	})
++
++	t.Run("not_before at/after signer-set expiry", func(t *testing.T) {
++		ss, priv := signerSet3(1)
++		ss.NotBeforeUnix = 100
++		ss.ExpiresAtUnix = 1000 // half-open: policy not_before 1000 == expires -> inactive
++		err := VerifyPolicyCore(base, []Signature{signPolicy(t, "k1", priv[0])}, ss)
++		if !errors.Is(err, errSignerSetInactive) {
++			t.Fatalf("want errSignerSetInactive, got %v", err)
++		}
++	})
++
++	t.Run("below threshold", func(t *testing.T) {
++		ss, priv := signerSet3(2)
++		err := VerifyPolicyCore(base, []Signature{signPolicy(t, "k1", priv[0])}, ss)
++		if !errors.Is(err, errThresholdNotMet) {
++			t.Fatalf("want errThresholdNotMet, got %v", err)
++		}
++	})
++
++	t.Run("empty signature list is unsigned", func(t *testing.T) {
++		ss, _ := signerSet3(1)
++		err := VerifyPolicyCore(base, nil, ss)
++		if !errors.Is(err, errThresholdNotMet) {
++			t.Fatalf("want errThresholdNotMet, got %v", err)
++		}
++	})
++
++	t.Run("duplicate key id does not count twice", func(t *testing.T) {
++		ss, priv := signerSet3(2)
++		s := signPolicy(t, "k1", priv[0])
++		err := VerifyPolicyCore(base, []Signature{s, s}, ss) // same key twice
++		if !errors.Is(err, errDuplicateSigner) {
++			t.Fatalf("want errDuplicateSigner, got %v", err)
++		}
++	})
++
++	t.Run("signature from key outside the set", func(t *testing.T) {
++		ss, _ := signerSet3(1)
++		outsideKey, outsidePriv := seedKey(9)
++		err := VerifyPolicyCore(base, []Signature{signPolicy(t, outsideKey.KeyID, outsidePriv)}, ss)
++		if !errors.Is(err, errUnknownSigner) {
++			t.Fatalf("want errUnknownSigner, got %v", err)
++		}
++	})
++
++	t.Run("signature over a tampered digest", func(t *testing.T) {
++		ss, priv := signerSet3(1)
++		// Sign the sample message, then verify against a DIFFERENT policy core.
++		good := signPolicy(t, "k1", priv[0])
++		tampered := base
++		tampered.RevenueSplitBps = 999 // changes manifest_core_digest
++		err := VerifyPolicyCore(tampered, []Signature{good}, ss)
++		if !errors.Is(err, errBadSignature) {
++			t.Fatalf("want errBadSignature, got %v", err)
++		}
++	})
++
++	t.Run("truncated signature bytes", func(t *testing.T) {
++		ss, priv := signerSet3(1)
++		s := signPolicy(t, "k1", priv[0])
++		s.Sig = s.Sig[:10]
++		err := VerifyPolicyCore(base, []Signature{s}, ss)
++		if !errors.Is(err, errBadSignature) {
++			t.Fatalf("want errBadSignature, got %v", err)
++		}
++	})
++}
++
++func TestSignerSetValidate(t *testing.T) {
++	k1, _ := seedKey(1)
++	k2, _ := seedKey(2)
++	valid := SignerSet{Version: 1, Keys: []SignerKey{k1, k2}, Threshold: 2, NotBeforeUnix: 1, ExpiresAtUnix: 2}
++	if err := valid.Validate(); err != nil {
++		t.Fatalf("valid set rejected: %v", err)
++	}
++	cases := []struct {
++		name string
++		mut  func(*SignerSet)
++		want error
++	}{
++		{"no keys", func(s *SignerSet) { s.Keys = nil }, errSignerSetEmpty},
++		{"threshold zero", func(s *SignerSet) { s.Threshold = 0 }, errThresholdRange},
++		{"threshold exceeds N", func(s *SignerSet) { s.Threshold = 3 }, errThresholdRange},
++		{"empty key id", func(s *SignerSet) { s.Keys[0].KeyID = "" }, errSignerKeyID},
++		{"duplicate key id", func(s *SignerSet) { s.Keys[1].KeyID = s.Keys[0].KeyID }, errSignerKeyID},
++		{"bad key length", func(s *SignerSet) { s.Keys[0].PublicKey = []byte{0x00} }, errSignerKeyLen},
++		{"duplicate public key under distinct ids", func(s *SignerSet) { s.Keys[1].PublicKey = s.Keys[0].PublicKey }, errSignerKeyDup},
++		{"empty window", func(s *SignerSet) { s.NotBeforeUnix = 5; s.ExpiresAtUnix = 5 }, errSignerSetWindow},
++		{"inverted window", func(s *SignerSet) { s.NotBeforeUnix = 9; s.ExpiresAtUnix = 1 }, errSignerSetWindow},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			s := SignerSet{Version: 1, Keys: []SignerKey{k1, k2}, Threshold: 2, NotBeforeUnix: 1, ExpiresAtUnix: 2}
++			tc.mut(&s)
++			if err := s.Validate(); !errors.Is(err, tc.want) {
++				t.Fatalf("want %v, got %v", tc.want, err)
++			}
++		})
++	}
++	// VerifyPolicyCore rejects when the signer set itself is malformed.
++	bad := SignerSet{Version: 1, Keys: []SignerKey{k1}, Threshold: 5, NotBeforeUnix: 1, ExpiresAtUnix: 2}
++	if err := VerifyPolicyCore(samplePolicyForSig(t), nil, bad); !errors.Is(err, errThresholdRange) {
++		t.Fatalf("malformed signer set not rejected first: %v", err)
++	}
++}
++
++// TestDuplicatePublicKeyCannotCollapseThreshold proves that one private key cannot
++// satisfy a 2-of-N threshold by appearing under two key ids sharing its public key:
++// such a signer set is rejected outright, so the single-key holder's signature
++// (valid under both ids) never reaches the threshold count.
++func TestDuplicatePublicKeyCannotCollapseThreshold(t *testing.T) {
++	k1, p1 := seedKey(1)
++	// A second "identity" that reuses k1's public key.
++	twin := SignerKey{KeyID: "k1-twin", PublicKey: k1.PublicKey}
++	ss := SignerSet{
++		Version:       1,
++		Keys:          []SignerKey{k1, twin},
++		Threshold:     2,
++		NotBeforeUnix: 500,
++		ExpiresAtUnix: 5000,
++	}
++	if err := ss.Validate(); !errors.Is(err, errSignerKeyDup) {
++		t.Fatalf("duplicate-pubkey signer set not rejected by Validate: %v", err)
++	}
++	// The same valid signature presented under both ids must NOT verify: the
++	// malformed set is rejected before any threshold counting.
++	sig := signPolicy(t, "k1", p1)
++	twinSig := Signature{KeyID: "k1-twin", Sig: sig.Sig}
++	if err := VerifyPolicyCore(samplePolicyForSig(t), []Signature{sig, twinSig}, ss); !errors.Is(err, errSignerKeyDup) {
++		t.Fatalf("one key satisfied 2-of-N via duplicate public key: %v", err)
++	}
++}
++
++func TestVerifyPoolIDBinding(t *testing.T) {
++	ic := sampleIdentity()
++	pid, _ := ic.PoolID()
++	if err := VerifyPoolIDBinding(ic, pid); err != nil {
++		t.Fatalf("correct pool_id rejected: %v", err)
++	}
++	if err := VerifyPoolIDBinding(ic, "not-the-right-pool-idxx"); !errors.Is(err, errPoolIDMismatch) {
++		t.Fatalf("want errPoolIDMismatch, got %v", err)
++	}
++	// A different identity core yields a different pool_id, so the old binding fails.
++	other := IdentityCore{RootIssuerKeyID: "root-key-2", GenesisNonce: []byte("x")}
++	if err := VerifyPoolIDBinding(other, pid); !errors.Is(err, errPoolIDMismatch) {
++		t.Fatalf("want errPoolIDMismatch for mismatched identity, got %v", err)
++	}
++}
+diff --git a/specs/CONFORMANCE.json b/specs/CONFORMANCE.json
+index 261628bb..7af8dd6f 100644
+--- a/specs/CONFORMANCE.json
++++ b/specs/CONFORMANCE.json
+@@ -1224,7 +1224,7 @@
+     {
+       "spec_id": "SPEC-042",
+       "title": "Pool Control Plane and Trusted-Pool Manifest",
+-      "version": "0.0.8",
++      "version": "0.0.9",
+       "path": "specs/SPEC-042-pool-control-plane.md",
+       "status": "draft",
+       "owner": "@Augustas11",
+@@ -5105,11 +5105,13 @@
+       "state": "pending",
+       "implementation": [
+         "phase4-coordinator/internal/poolmanifest/manifest.go:func (ic IdentityCore) PoolID",
+-        "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) ManifestCoreDigest"
++        "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) ManifestCoreDigest",
++        "phase4-coordinator/internal/poolmanifest/signature.go:func VerifyPoolIDBinding"
+       ],
+       "tests": [
+         "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestGoldenVectors",
+-        "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestDigestSensitivity"
++        "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestDigestSensitivity",
++        "phase4-coordinator/internal/poolmanifest/signature_test.go:TestVerifyPoolIDBinding"
+       ],
+       "journeys": [],
+       "evidence": [],
+@@ -5117,7 +5119,7 @@
+         "verdict": "DECISION_REQUIRED",
+         "owner": "@Augustas11",
+         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+-        "rationale": "Pool object + signed manifest + identity/rollback: slice 1 implements the canonical identity-core and versioned-policy-core byte grammar with pool_id (base64url(SHA256(identity core)[0:16])) and manifest_core_digest derivations, frozen by golden vectors (v0.0.8). Still deferred to later R001/R012 slices: signature verification, the root-issuer/signer-set authority log, mutable operational fields, active-policy selection, durable persistence, and routing wiring."
++        "rationale": "Pool object + signed manifest + identity/rollback: slice 1 implements the canonical identity-core and versioned-policy-core byte grammar with pool_id (base64url(SHA256(identity core)[0:16])) and manifest_core_digest derivations, frozen by golden vectors (v0.0.8); slice 2 adds the pool_id-binding recompute-and-compare check (VerifyPoolIDBinding) and the policy-core signature layer (see SPEC-042-R012), v0.0.9. Still deferred to later R001/R012 slices: the root-issuer/signer-set authority log, mutable operational fields, active-policy selection + durable version history, durable persistence, and routing wiring."
+       }
+     },
+     {
+@@ -5307,15 +5309,22 @@
+       "requirement_id": "SPEC-042-R012",
+       "spec_id": "SPEC-042",
+       "state": "pending",
+-      "implementation": [],
+-      "tests": [],
++      "implementation": [
++        "phase4-coordinator/internal/poolmanifest/signature.go:func VerifyPolicyCore",
++        "phase4-coordinator/internal/poolmanifest/signature.go:func (ss SignerSet) Validate"
++      ],
++      "tests": [
++        "phase4-coordinator/internal/poolmanifest/signature_test.go:TestVerifyPolicyCoreAccept",
++        "phase4-coordinator/internal/poolmanifest/signature_test.go:TestVerifyPolicyCoreRejects",
++        "phase4-coordinator/internal/poolmanifest/signature_test.go:TestSignatureGoldenVectors"
++      ],
+       "journeys": [],
+       "evidence": [],
+       "gap": {
+         "verdict": "DECISION_REQUIRED",
+         "owner": "@Augustas11",
+         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+-        "rationale": "Manifest authority + signer-set key lifecycle: NOT yet implemented; depends on the signed-manifest machinery (R001) which is a future slice."
++        "rationale": "Manifest authority + signer-set key lifecycle: slice 2 (v0.0.9) implements policy-core signature verification against a signer set \u2014 the domain-separated signing preimage, M-of-N over distinct authorized keys (VerifyPolicyCore), and signer-set structural validation (SignerSet.Validate) with signer_set_version match and not_before-anchored validity \u2014 frozen by golden signature vectors. Still deferred: the append-only hash-chained authority log that establishes and versions signer sets (entry byte grammar + vectors, root-issuer/prior-set signatures, rollback/threshold/hash-chain checks, and setting SignerSet.Revoked), signed emergency control messages, and durable persistence/restart reconstruction of the log and recorded acceptance verdicts."
+       }
+     }
+   ]
+diff --git a/specs/README.md b/specs/README.md
+index 4caca2a5..6764111a 100644
+--- a/specs/README.md
++++ b/specs/README.md
+@@ -50,7 +50,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
+ | SPEC-039 | Paged KV / paged-attention engine | v0.1 | draft | complete | pending: 14 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |
+ | SPEC-040 | Wallet-Native Buyer Sessions | 0.1.8 | draft | complete | pending: 10 | [SPEC-040-wallet-native-buyer-sessions.md](SPEC-040-wallet-native-buyer-sessions.md) |
+ | SPEC-041 | Relay-Blind Request Encryption | 0.1.0 | draft | complete | pending: 8 | [SPEC-041-relay-blind-request-encryption.md](SPEC-041-relay-blind-request-encryption.md) |
+-| SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.8 | draft | complete | pending: 12 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
++| SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.9 | draft | complete | pending: 12 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
+ <!-- AUTOGEN:spec-index END -->
+ 
+ **Version of record is each spec's own `**Version:**` header, not this table.**
+diff --git a/specs/SPEC-042-pool-control-plane.md b/specs/SPEC-042-pool-control-plane.md
+index 6231c162..8dc9bda8 100644
+--- a/specs/SPEC-042-pool-control-plane.md
++++ b/specs/SPEC-042-pool-control-plane.md
+@@ -1,6 +1,6 @@
+ # SPEC-042 - Pool Control Plane and Trusted-Pool Manifest
+ 
+-**Version:** 0.0.8
++**Version:** 0.0.9
+ Status: draft
+ Maturity: skeleton (pre-v0.1; not build-ready)
+ Owner: @Augustas11
+@@ -11,7 +11,7 @@ Audit history: Skeleton draft. NOT build-ready. Round 1 five-lane-style codex au
+ {
+   "spec_id": "SPEC-042",
+   "title": "Pool Control Plane and Trusted-Pool Manifest",
+-  "version": "0.0.7",
++  "version": "0.0.9",
+   "path": "specs/SPEC-042-pool-control-plane.md",
+   "status": "draft",
+   "owner": "@Augustas11",
+@@ -129,6 +129,8 @@ Loosening any confidentiality/attestation/settlement predicate is a trust-contra
+ 
+ **Canonical encoding (identity core and versioned policy core).** Both cores use one deterministic, domain-separated, length-prefixed byte grammar (the SPEC-041-R002 framing precedent): unsigned 32-bit big-endian length prefixes on every string and byte field; unsigned 64-bit big-endian integers; a one-byte boolean (`0x01`/`0x00`); and set-like lists (the model allowlist) encoded as a 32-bit count followed by each element length-prefixed in byte-lexicographic ascending order with no duplicates. Each core's preimage begins with a fixed ASCII domain tag — `macprovider/spec042/identity-core/v1` and `macprovider/spec042/policy-core/v1` — so an identity-core digest can never collide with a policy-core digest or any other signed structure. The identity core encodes exactly `root_issuer_key_id` then `genesis_nonce`; `pool_id` = unpadded `base64url(SHA256(identity-core preimage)[0:16])`. The policy core encodes the SPEC-042-R001 field list above in the order listed, with `pool_id` carried as a reference bound into the preimage (so a signed policy core is non-transferable to another pool) and the genesis `prev_manifest_core_hash` fixed at 32 zero bytes; `manifest_core_digest` = `SHA256(policy-core preimage)`. The normative encoding is implemented in `phase4-coordinator/internal/poolmanifest` and frozen by the golden vectors in `phase4-coordinator/internal/poolmanifest/manifest_test.go`; the authority-log entry encoding (SPEC-042-R012) is specified with its implementation slice, not here.
+ 
++**Signature verification (policy core).** A policy-core signature is a detached Ed25519 signature over a domain-separated signing message `macprovider/spec042/policy-core-sig/v1 ‖ manifest_core_digest`. The signing-domain tag is DISTINCT from the `policy-core/v1` digest-preimage tag so a policy-core signature can never be replayed as an identity-core, authority-log-entry, or mutable-field signature (each later structure gets its own signing tag). Because `manifest_core_digest` already commits to `pool_id`, `manifest_version`, `signer_set_version`, and every predicate, signing the digest binds the whole policy core. Verification (SPEC-042-R012) is M-of-N over the signer set the policy core names: the signer set MUST be structurally valid (`1 ≤ M ≤ N`, distinct key ids, distinct well-formed public keys — distinct public keys are required so one private key cannot satisfy the threshold under two key ids); its `Version` MUST equal the policy core's `signer_set_version`; it MUST be unrevoked with its half-open validity window containing the policy's `not_before_unix` (acceptance validity is anchored to `not_before_unix`, never to `manifest_version`); and the signature list MUST consist only of distinct, authorized, cryptographically valid signatures numbering at least `M` — so `M`-of-`N` means M *distinct authorized keys* signed the same digest, never M signatures from one key nor M valid signatures padded with an unauthorized one. This verification and the `pool_id`-binding recompute-and-compare are implemented in `phase4-coordinator/internal/poolmanifest/signature.go` and frozen by golden signature vectors in `signature_test.go`. The signer set consumed here is produced by the SPEC-042-R012 authority log (a later slice); this slice verifies a policy core against a signer set it is handed and does not itself establish or version signer sets.
++
+ ### SPEC-042-R002 - `pool_id` authority threading and selection authorization
+ 
+ `pool_id` MUST be threaded as a first-class authority field through gateway admission, coordinator routing, provider admission/eligibility, route snapshots, request logs, routing logs (candidate set + chosen provider), route-snapshot and settlement context (not the v0.4 provider-signed receipt tuple unless SPEC-015 is revised), settlement journal, payout accounting, and public disclosure. Live Layer 2 traffic MUST NOT be enabled until `pool_id` is present and authoritative across all of those paths. Every settled **pool** request MUST record `pool_id`, `manifest_version`, and `manifest_core_digest`; global (poolless) requests carry no pool identity (represented per the Open-A nullable/sentinel decision) and this recording requirement does not apply to them. Absence of a pool selection MUST resolve to today's global behavior unchanged. A request MUST NOT be silently reassigned from one `pool_id` to another, nor from a pool to global, after admission.
+@@ -224,7 +226,7 @@ Promotion out of draft-skeleton requires, at minimum:
+ 
+ - (done in 0.0.2–0.0.4) AUTHORITY.json + CONFORMANCE.json registration of SPEC-042 / `pool-control-plane` with a regenerated `specs/README.md`, `scripts/check_spec_governance.py` and `scripts/gen_spec_index.py --check` green; the remaining registry work is adding per-requirement CONFORMANCE records for R001–R012;
+ - tracking issue https://github.com/Augustas11/macprovider/issues/1053 assigned and wired through the SPEC and registries (done in 0.0.2/0.0.3);
+-- closure of the open decisions: **Open-A** (nullable `pool_id` vs. reserved sentinel — representation only), **Open-B** (SPEC-015 signed-receipt field vs. route-snapshot context); the exact canonical **identity-core and versioned-policy-core** field encodings with golden test vectors are **CLOSED** (v0.0.8, `phase4-coordinator/internal/poolmanifest` + golden vectors), and per-requirement CONFORMANCE records for R001–R012 are **CLOSED** (registered in CONFORMANCE.json); still open: the **authority-log** field encoding with vectors (SPEC-042-R012 implementation slice), the `pool_policy.json`/`pool_status.json` JSON schemas, and the retention-matrix field list;
++- closure of the open decisions: **Open-A** (nullable `pool_id` vs. reserved sentinel — representation only), **Open-B** (SPEC-015 signed-receipt field vs. route-snapshot context); the exact canonical **identity-core and versioned-policy-core** field encodings with golden test vectors are **CLOSED** (v0.0.8, `phase4-coordinator/internal/poolmanifest` + golden vectors), **policy-core signature verification** (M-of-N over a signer set, the signing preimage, and the `pool_id`-binding check) is **CLOSED** (v0.0.9, `phase4-coordinator/internal/poolmanifest/signature.go` + golden signature vectors), and per-requirement CONFORMANCE records for R001–R012 are **CLOSED** (registered in CONFORMANCE.json); still open: the **authority-log** field encoding with vectors that establishes/versions the signer sets (SPEC-042-R012 implementation slice), active-policy selection + durable version history (R001), the `pool_policy.json`/`pool_status.json` JSON schemas, and the retention-matrix field list;
+ - a SPEC-040-compatible amendment (request-signature/semantic-header profile version bump) before pool-scoped wallet selection can be enabled, since SPEC-040's current signed envelope has a closed field set with no pool fields — this gate is independent of relay-blind/Layer 3 work;
+ - a coordinated SPEC-008 amendment promoting the live-MDA hardware verdict from observe to gating-grade before the `hardware_mda` predicate (SPEC-042-R004) can be enabled as a fail-closed gate;
+ - the positive pool-capability negotiation handshake (SPEC-042-R010) specified in wire terms (coordinator/provider pool-support version advertisement + gateway refusal on absence);
+@@ -282,6 +284,7 @@ No implementation evidence. AUTHORITY/CONFORMANCE registration and tracking issu
+ 
+ ## 7. Changelog and history
+ 
++- 0.0.9 - R001/R012 implementation slice 2 (manifest signatures): made the frozen slice-1 encoding **trust-bearing**. Defined the domain-separated policy-core signing preimage (`macprovider/spec042/policy-core-sig/v1 ‖ manifest_core_digest`, tag distinct from the digest preimage so signatures cannot be cross-replayed) and implemented **M-of-N signature verification** over a signer set (SPEC-042-R012): structural signer-set validation (`1 ≤ M ≤ N`, distinct keys), `signer_set_version` match, unrevoked signer set whose half-open validity window contains the policy's `not_before_unix` (acceptance anchored to `not_before`, not `manifest_version`), and distinct-authorized-valid-signature counting (M distinct authorized keys, never M-from-one nor good-plus-garbage). Added the `pool_id`-binding recompute-and-compare check. Lives in `phase4-coordinator/internal/poolmanifest/signature.go`, frozen by golden signature vectors. Closes the signature-verification half of R012; the authority log that establishes/versions signer sets, active-policy selection, durable persistence, and routing wiring remain later slices. Verification is pure (no I/O, persistence, or wall-clock). No behavior wired to live routing yet; default-inert.
+ - 0.0.8 - R001 implementation slice 1 (manifest keystone): defined and implemented the canonical, domain-separated, length-prefixed byte grammar for the **identity core** and **versioned policy core** (SPEC-041-R002 framing precedent), with `pool_id = base64url(SHA256(identity-core preimage)[0:16])` and `manifest_core_digest = SHA256(policy-core preimage)`. Normative encoding lives in `phase4-coordinator/internal/poolmanifest`, frozen by golden vectors. Closes the identity/policy-core half of the deferred "canonical encodings + golden vectors" R010 promotion item (authority-log encoding still deferred to the R012 slice). No signing, authority log, active-policy selection, persistence, or routing wiring yet — those are later R001/R012 slices. Governance-tracked deferred deliverables updated accordingly.
+ - 0.0.7 - Round 5 re-audit: BOTH subagent lanes PASS at 0 Critical / 0 High / 0 Medium (product-design critic PASS C:0/H:0/M:0/L:1/I:2; adversarial verifier PASS C:0/H:0/M:0/L:3/I:2, mechanisms verified composable, no regressions). The five-lane promotion gate (code/security/architecture via codex + product-design/adversarial via subagents) is complete at 0 C/H/M. Closed the carried LOW/INFO for polish: relabeled `pool_status.json` coordinator-attested in Terms/§1 (was "buyer-verifiable"); scoped the co-tenancy claim to per-request routing + SPEC-008 `conv:` cache bounding, directing side-channel-sensitive pools to dedicated supply (R003); required a single consistent (membership, generation) capture to preclude TOCTOU (R003); made claim-control machine-enforced — coordinator rejects a signed `confidentiality_scope` overclaim at acceptance (R009); defined the saturated-but-eligible outcome with a distinct `pool_at_capacity` code and clarified `ready` is not a free-capacity promise (R011/R010); retired the last "subnet" synonym in §1. Remaining items are INFO only.
+ - 0.0.6 - Round 5 audit applied (two Claude subagent lanes completing the five-lane gate: product-design critic C:0/H:1/M:4/L:2/I:2; adversarial verifier C:0/H:1/M:4/L:6/I:4). The verifier ground-truthed against coordinator/gateway code and both lanes confirmed the core guarantees (manifest identity/rollback, selection-auth, se_custody mapping, cross-spec gates) hold. Fixes: (verifier H) revocation now gen-keys cached eligibility so a committed revocation blocks new dispatch at T+ε — the 5000 ms bound is a liveness backstop, not a licensed staleness window (R003); added `revoke_graceful`/`revoke_immediate` modes. (verifier M) gated `hardware_mda` behind a SPEC-008 amendment (observe→gating-grade), matching the discipline used for split/privacy/receipts (R004); required the generation fence on every dispatch-authorizing path incl. pinned/self-route, not just reservations (R005); added a positive pool-capability negotiation handshake to prevent new-gateway→old-coordinator pool→global spill (R010); scoped tenant-isolation Terms to "new dispatch" and reconciled in-flight completion (Terms/R011). (critic H) named the MVP wedge — vertically-integrated operator = creator+supply+demand, no third-party supply/split needed at MVP (§1). (critic M) mandated a `confidentiality_scope` true-negative disclosure and transport-leg-only labeling of `require_encrypted_leg` (R008/R009); required a `split_execution_status: declared_not_executed` marker for the inert v0.1 split (R001/R006/R008); added operator-provenance requirement / self-asserted-name disclosure (R012); fixed three-way naming to canonical "Trusted Pool" (§1/Terms/R009). Plus LOW/INFO: label-mismatch disposition (R006), draining→retired delivery-vs-settlement split (R011), pool_status.json relabeled coordinator-attested (R008), durable acceptance verdict (R012), error-taxonomy timing-oracle guard (R010), pool_id non-capability note (R001), dead-logic + relay-blind-pool-ineligibility + ledger-naming + global-scoping cleanups. Bar not yet re-confirmed; re-running both lanes.
