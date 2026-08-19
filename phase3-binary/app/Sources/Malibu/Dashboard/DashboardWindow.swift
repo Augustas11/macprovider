@@ -403,7 +403,12 @@ private struct DashboardView: View {
                             if let status = AgentSnapshotPresenter.cliUpdateStatusLine(agent.snapshot) {
                                 Text(status)
                                     .font(.caption)
-                                    .foregroundStyle(agent.snapshot.cliUpdateLastError == nil ? Color.secondary : Color.red)
+                                    .foregroundStyle(
+                                        agent.snapshot.cliUpdateLastError == nil
+                                            && agent.snapshot.providerSoftwareRepairLastError == nil
+                                            ? Color.secondary
+                                            : Color.red
+                                    )
                             }
                             if !agent.logLines.isEmpty {
                                 LogTailView(lines: agent.logLines)
@@ -512,11 +517,16 @@ private struct DashboardView: View {
             }
         case .updateProviderSoftware:
             if AgentSnapshotPresenter.updateAvailable(agent.snapshot) {
-                Button(agent.snapshot.cliUpdateInProgress ? "Updating provider software..." : "Update provider software") {
+                Button(agent.snapshot.cliUpdateInProgress ? "Installing latest provider software…" : "Install latest provider software") {
                     Task { await agent.updateCLINow() }
                 }
-                .disabled(agent.snapshot.cliUpdateInProgress)
+                .disabled(agent.snapshot.cliUpdateInProgress || agent.snapshot.providerSoftwareRepairInProgress)
             }
+        case .repairProviderSoftware:
+            Button(agent.snapshot.providerSoftwareRepairInProgress ? "Repairing provider software…" : "Repair provider software") {
+                Task { await agent.repairProviderSoftware() }
+            }
+            .disabled(agent.snapshot.providerSoftwareRepairInProgress || agent.snapshot.cliUpdateInProgress)
         case .repairCredential:
             Button("Repair saved access") {
                 Task { await agent.repairProviderCredential() }

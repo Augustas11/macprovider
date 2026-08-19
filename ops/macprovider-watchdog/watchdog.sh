@@ -441,7 +441,7 @@ def record_watchdog_recovery(marker, failure_class):
     except Exception as exc:
         log(f"lifecycle_transition_failed=watchdog_recovery error={type(exc).__name__}")
 
-def reject_path(path, must_exist=True):
+def reject_path(path, must_exist=True, allow_home_acl_write=False):
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -463,6 +463,8 @@ def reject_path(path, must_exist=True):
             if not re.match(r"^[0-9]+:", stripped):
                 continue
             if ("write" in stripped or "append" in stripped or "add_file" in stripped) and f"user:{provider_user.lower()}" not in stripped:
+                if allow_home_acl_write and os.path.normpath(path) == os.path.normpath(os.path.expanduser("~")):
+                    continue
                 raise RuntimeError(f"acl_write_rejected:{path}")
     except FileNotFoundError:
         pass
@@ -479,7 +481,10 @@ def verify_root():
         current = parent
     for path in reversed(parts):
         if os.path.exists(path):
-            st = reject_path(path)
+            st = reject_path(
+                path,
+                allow_home_acl_write=os.path.normpath(path) == os.path.normpath(os.path.expanduser("~")),
+            )
             if not stat.S_ISDIR(st.st_mode):
                 raise RuntimeError(f"not_directory:{path}")
 

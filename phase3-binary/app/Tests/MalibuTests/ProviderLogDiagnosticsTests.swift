@@ -26,6 +26,77 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
         XCTAssertFalse(finding?.userMessage.contains("autotune --recommend --apply") == true)
     }
 
+    func testDetectsHomeAutoupdateACLRejection() {
+        let finding = ProviderLogDiagnostics.homeAutoupdateACLRejection(
+            lines: [
+                "[2026-08-19T01:05:42Z] autoupdate recovery_error=acl_write_rejected:/Users/provider"
+            ],
+            homeDirectory: URL(fileURLWithPath: "/Users/provider")
+        )
+
+        XCTAssertEqual(finding?.id, "autoupdate_home_acl_rejected")
+        XCTAssertTrue(finding?.userMessage.contains("macOS folder permission") == true)
+        XCTAssertFalse(finding?.userMessage.contains("/Users/provider") == true)
+    }
+
+    func testDetectsHomeAutoupdateACLRejectionWithSpaceInHomePath() {
+        let finding = ProviderLogDiagnostics.homeAutoupdateACLRejection(
+            lines: [
+                "[2026-08-19T01:05:42Z] autoupdate recovery_error=acl_write_rejected:/Users/provider name"
+            ],
+            homeDirectory: URL(fileURLWithPath: "/Users/provider name")
+        )
+
+        XCTAssertEqual(finding?.id, "autoupdate_home_acl_rejected")
+    }
+
+    func testIgnoresNonHomeAutoupdateACLRejection() {
+        let finding = ProviderLogDiagnostics.homeAutoupdateACLRejection(
+            lines: [
+                "[2026-08-19T01:05:42Z] autoupdate recovery_error=acl_write_rejected:/Users/provider/.local/share/macprovider/autoupdate"
+            ],
+            homeDirectory: URL(fileURLWithPath: "/Users/provider")
+        )
+
+        XCTAssertNil(finding)
+    }
+
+    func testIgnoresHomeAutoupdateACLRejectionBeforeSuccessfulBundledRepairMarker() {
+        let finding = ProviderLogDiagnostics.homeAutoupdateACLRejection(
+            lines: [
+                "[2026-08-19T01:05:42Z] autoupdate recovery_error=acl_write_rejected:/Users/provider",
+                "[2026-08-19T01:08:20Z] \(ProviderLogDiagnostics.providerSoftwareInstallHandledAutoupdateACLMarker)",
+            ],
+            homeDirectory: URL(fileURLWithPath: "/Users/provider")
+        )
+
+        XCTAssertNil(finding)
+    }
+
+    func testDetectsHomeAutoupdateACLRejectionAfterSuccessfulBundledRepairMarker() {
+        let finding = ProviderLogDiagnostics.homeAutoupdateACLRejection(
+            lines: [
+                "[2026-08-19T01:08:20Z] \(ProviderLogDiagnostics.providerSoftwareInstallHandledAutoupdateACLMarker)",
+                "[2026-08-19T01:09:42Z] autoupdate recovery_error=acl_write_rejected:/Users/provider",
+            ],
+            homeDirectory: URL(fileURLWithPath: "/Users/provider")
+        )
+
+        XCTAssertEqual(finding?.id, "autoupdate_home_acl_rejected")
+    }
+
+    func testIgnoresHomeAutoupdateACLRejectionBeforeWatchdogRecoverySuccess() {
+        let finding = ProviderLogDiagnostics.homeAutoupdateACLRejection(
+            lines: [
+                "[2026-08-19T01:05:42Z] autoupdate recovery_error=acl_write_rejected:/Users/provider",
+                "[2026-08-19T01:06:00Z] autoupdate lifecycle_transition=watchdog_recovery reason_code=watchdog_rollback_readiness",
+            ],
+            homeDirectory: URL(fileURLWithPath: "/Users/provider")
+        )
+
+        XCTAssertNil(finding)
+    }
+
     func testDiagnosePrefersMostRecentMatchingLine() {
         let finding = ProviderLogDiagnostics.diagnose(lines: [
             "model artifact hash mismatch for /tmp/old",

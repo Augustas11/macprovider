@@ -355,6 +355,21 @@ assert_loaded_service_accepts_nonzero_bootstrap() {
   grep -F "kickstart -k gui/" "$root/launchctl.log" >/dev/null
 }
 
+assert_home_acl_write_is_tolerated() {
+  script="$1"
+  root="$2"
+  if ! chmod +a "group:everyone allow add_file" "$root/home" 2>/dev/null; then
+    return 0
+  fi
+  invoke_reconcile "$script" "$root"
+  cmp -s "$root/bin/macprovider-cli" <(printf "old-binary")
+  [ ! -e "$root/home/.local/share/macprovider/autoupdate/pending.json" ]
+  if grep -F "recovery_error=acl_write_rejected:$root/home" "$root/logs/watchdog.log" >/dev/null; then
+    echo "watchdog must tolerate write ACLs on HOME while checking autoupdate descendants" >&2
+    return 1
+  fi
+}
+
 make_fixture "$TMP/standalone"
 run_reconcile "$STANDALONE" "$TMP/standalone"
 
@@ -397,6 +412,8 @@ for script_name in standalone inline; do
   make_fixture "$TMP/bootstrap-loaded-$script_name"
   assert_loaded_service_accepts_nonzero_bootstrap \
     "$script" "$TMP/bootstrap-loaded-$script_name"
+  make_fixture "$TMP/home-acl-$script_name"
+  assert_home_acl_write_is_tolerated "$script" "$TMP/home-acl-$script_name"
   for kind in hardlink fifo inner-readable outer-readable; do
     make_fixture "$TMP/unsafe-$script_name-$kind"
     assert_unsafe_lock_rejected "$script" "$TMP/unsafe-$script_name-$kind" "$kind"

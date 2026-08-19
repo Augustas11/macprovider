@@ -589,7 +589,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         XCTAssertEqual(
             AgentSnapshotPresenter.lifecycleLine(snapshot),
-            "Provider software update required · startup catalog incompatible · Update provider software, then retry"
+            "Provider software update required · startup catalog incompatible · Install latest provider software, then retry"
         )
 
         snapshot.lifecycleState = "watchdog_recovery"
@@ -1156,6 +1156,120 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         for term in prohibitedPublicTerms {
             XCTAssertFalse(publicStrings.contains(term), "\(term) leaked in:\n\(publicStrings)")
         }
+    }
+
+    func testProviderSoftwareRepairRecommendedTakesSoftwareUpdateAction() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "catalog_update_required"
+        snapshot.cliVersion = "1.8.93"
+        snapshot.coordinatorRecommendedVersion = "1.8.101"
+        snapshot.providerSoftwareRepairRecommended = true
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+
+        XCTAssertEqual(status.title, "Provider software repair available")
+        XCTAssertEqual(status.detail, "A permission on your home folder blocked automatic update recovery.")
+        XCTAssertEqual(
+            status.safeNextAction,
+            "Repair provider software. Malibu will reinstall the bundled provider software and watchdog. Your provider identity and downloaded models will be kept."
+        )
+        XCTAssertEqual(status.executableAction, .repairProviderSoftware)
+        XCTAssertTrue(AgentSnapshotPresenter.canRepairProviderSoftware(snapshot))
+    }
+
+    func testProviderSoftwareRepairRecommendedTakesReadyStateAction() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "buyer_serving"
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationFresh = true
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.providerSoftwareRepairRecommended = true
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+
+        XCTAssertEqual(status.title, "Provider software repair available")
+        XCTAssertEqual(status.executableAction, .repairProviderSoftware)
+    }
+
+    func testProviderSoftwareRepairRecommendedTakesPausedStateAction() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .paused
+        snapshot.providerSoftwareRepairRecommended = true
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+
+        XCTAssertEqual(status.title, "Provider software repair available")
+        XCTAssertEqual(status.executableAction, .repairProviderSoftware)
+    }
+
+    func testProviderSoftwareRepairRecommendationSurvivesStatusInvalidation() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "buyer_serving"
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationFresh = true
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.providerSoftwareRepairRecommended = true
+
+        snapshot.invalidateLocalStatusObservation()
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+
+        XCTAssertEqual(status.title, "Provider software repair available")
+        XCTAssertEqual(status.executableAction, .repairProviderSoftware)
+        XCTAssertTrue(AgentSnapshotPresenter.canRepairProviderSoftware(snapshot))
+    }
+
+    func testProviderSoftwareUpdateInProgressSurvivesStatusInvalidation() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "buyer_serving"
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationFresh = true
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.cliUpdateInProgress = true
+
+        snapshot.invalidateLocalStatusObservation()
+
+        XCTAssertTrue(snapshot.cliUpdateInProgress)
+        XCTAssertEqual(
+            AgentSnapshotPresenter.cliUpdateStatusLine(snapshot),
+            "Installing latest provider software…"
+        )
+    }
+
+    func testProviderSoftwareRepairInProgressKeepsRepairStatus() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "catalog_update_required"
+        snapshot.cliVersion = "1.8.93"
+        snapshot.coordinatorRecommendedVersion = "1.8.101"
+        snapshot.providerSoftwareRepairRecommended = true
+        snapshot.providerSoftwareRepairInProgress = true
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+
+        XCTAssertEqual(status.title, "Repairing provider software")
+        XCTAssertEqual(
+            status.detail,
+            "Malibu is reinstalling the bundled provider software and watchdog. Keep Malibu open."
+        )
+        XCTAssertEqual(status.safeNextAction, "Repair is in progress.")
+        XCTAssertNil(status.executableAction)
+    }
+
+    func testProviderSoftwareRepairStatusLine() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.providerSoftwareRepairInProgress = true
+
+        XCTAssertEqual(
+            AgentSnapshotPresenter.cliUpdateStatusLine(snapshot),
+            "Repairing provider software…"
+        )
     }
 
     func testDefaultDashboardAndOnboardingStringsDoNotExposeInternalTerms() {
