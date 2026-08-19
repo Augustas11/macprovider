@@ -111,6 +111,7 @@ REVOKE ALL ON
     stats_leaderboard_7d,
     stats_leaderboard_30d,
     stats_leaderboard_all,
+    stats_routability_current,
     stats_components_health,
     stats_late_events,
     stats_rewards_populated,

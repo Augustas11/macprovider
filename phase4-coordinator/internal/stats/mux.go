@@ -12,7 +12,7 @@ import (
 )
 
 // Mux is the SPEC-017 §7.1 mux. Exposes
-// /v1/stats/{overview,leaderboard,health}.
+// /v1/stats/{overview,leaderboard,health,routability,models,providers}.
 //
 // SPEC §4.3 auth scoping (round-3 ARCH C1 fix):
 //
@@ -20,6 +20,9 @@ import (
 //	/leaderboard   — Auth: optional Bearer <partner_key>;
 //	                 §5.4.3 7-row decision table applies.
 //	/health        — Auth: None.
+//	/routability   — Auth: None.
+//	/models        — Auth: None.
+//	/providers     — Auth: None.
 //
 // Only `/v1/stats/leaderboard` runs the auth-failure tier and
 // the §5.4.3 dispatcher. `/overview` and `/health` get a
@@ -134,9 +137,9 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 
 	ip := clientIP(r, m.trustedCIDRs)
 
-	// Round-3 ARCH C1 fix: only /leaderboard runs the
-	// auth-failure tier + §5.4.3 dispatcher. /overview and
-	// /health are §4.3 `Auth: None`; Authorization is ignored.
+	// Round-3 ARCH C1 fix: only /leaderboard and /provider run the
+	// auth-failure tier + §5.4.3 dispatcher. Public endpoints are
+	// §4.3 `Auth: None`; Authorization is ignored.
 	var ar authResult
 	if endpoint == "leaderboard" || endpoint == "provider" {
 		authStarted := time.Now()
@@ -205,7 +208,7 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		// /overview + /health: synthesize a public authResult
+		// Public endpoints: synthesize a public authResult
 		// with normalized Origin for CORS reflection. The
 		// Authorization header (if any) is IGNORED.
 		norm, valid := NormalizeOrigin(r.Header.Get("Origin"))
@@ -227,6 +230,19 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		} else if stale {
 			retry := 30
 			writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "overview is stale", snapshotGen, &retry)
+			return
+		}
+	}
+	if endpoint == "routability" || endpoint == "models" || endpoint == "providers" {
+		if stale, snapshotGen, perr := m.h.routabilityStaleProbe(r.Context(), now); perr != nil {
+			writeError(w, r, http.StatusInternalServerError, codeInternal, "routability probe failed", now, nil)
+			return
+		} else if stale {
+			if snapshotGen.IsZero() {
+				snapshotGen = now
+			}
+			retry := 30
+			writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "routability is stale", snapshotGen, &retry)
 			return
 		}
 	}
@@ -292,6 +308,12 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		m.h.handleProvider(rec, r, ar)
 	case "health":
 		m.h.handleHealth(rec, r, ar)
+	case "routability":
+		m.h.handleRoutability(rec, r, ar)
+	case "models":
+		m.h.handleModels(rec, r, ar)
+	case "providers":
+		m.h.handleProviders(rec, r, ar)
 	}
 }
 

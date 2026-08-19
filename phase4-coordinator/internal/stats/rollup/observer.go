@@ -35,6 +35,7 @@ func ObserveRollupLagOnce(ctx context.Context, db *sql.DB, m *metrics.Metrics) {
 		"leaderboard_7d",
 		"leaderboard_30d",
 		"leaderboard_all",
+		"routability",
 	}
 	const q = `SELECT generated_at FROM stats_components_health WHERE component = $1`
 	now := time.Now().UTC()

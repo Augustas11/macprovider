@@ -1,7 +1,7 @@
 -- SPEC-017 v0.1.8 — bootstrap rows. The migration MUST seed these
 -- so NOT NULL constraints on stats_components_health.generated_at /
 -- last_ok_at hold even before the first rollup tick succeeds.
--- BUILD §A.9 + Step 2 "Bootstrap rule": all 7 component rows
+-- BUILD §A.9 + Step 2 "Bootstrap rule": all component rows
 -- pre-seeded at the epoch sentinel; /v1/stats/health derives
 -- `status = "down"` until each component's first tick succeeds.
 -- BUILD §9.1a: all 4 rewards_populated rows pre-seeded at `false`
@@ -15,7 +15,8 @@ VALUES
     ('leaderboard_24h',  'epoch'::timestamptz, 'epoch'::timestamptz),
     ('leaderboard_7d',   'epoch'::timestamptz, 'epoch'::timestamptz),
     ('leaderboard_30d',  'epoch'::timestamptz, 'epoch'::timestamptz),
-    ('leaderboard_all',  'epoch'::timestamptz, 'epoch'::timestamptz)
+    ('leaderboard_all',  'epoch'::timestamptz, 'epoch'::timestamptz),
+    ('routability',      'epoch'::timestamptz, 'epoch'::timestamptz)
 ON CONFLICT (component) DO NOTHING;
 
 INSERT INTO stats_rewards_populated (window_label, rewards_populated, generated_at)

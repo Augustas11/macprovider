@@ -471,7 +471,7 @@
     {
       "spec_id": "SPEC-017",
       "title": "Network Stats API",
-      "version": "0.1.9",
+      "version": "0.2.0",
       "path": "specs/SPEC-017-network-stats-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -3827,9 +3827,7 @@
       "spec_id": "SPEC-006",
       "state": "conformant",
       "implementation": [
-        "phase5-gateway/internal/auth/keys.go:Validate",
-        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
-        "phase4-coordinator/internal/buyer/server.go:handleChatCompletions"
+        "phase5-gateway/internal/auth/keys.go:Validate"
       ],
       "tests": [
         "phase5-gateway/internal/router/integration_test.go:TestStrangerKeyOpenAIChatUsageFlow",
@@ -4196,8 +4194,6 @@
       "spec_id": "SPEC-022",
       "state": "conformant",
       "implementation": [
-        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
-        "phase4-coordinator/internal/buyer/server.go:handleChatCompletions",
         "phase4-coordinator/internal/buyer/server.go:selectProvider"
       ],
       "tests": [
@@ -4227,7 +4223,6 @@
       "spec_id": "SPEC-022",
       "state": "conformant",
       "implementation": [
-        "phase4-coordinator/internal/billing/route_snapshot.go:InsertRouteSnapshot",
         "phase4-coordinator/internal/billing/route_snapshot.go:Digest"
       ],
       "tests": [

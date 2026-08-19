@@ -285,6 +285,29 @@ if [ "$PASS_O" -ne 50 ] || [ "$PASS_L" -ne 50 ]; then
 fi
 [ "$FAIL" -eq 0 ] && ok "per-endpoint isolation: 50 /overview + 50 /leaderboard share no quota"
 
+# Step 6a — SPEC-017 v0.2.0 current-health public views use their own
+# limiter buckets and their nginx-generated 429s carry the same public
+# cache row as origin errors/success responses.
+docker restart "$NGINX_CID" >/dev/null
+refresh_base
+sleep 2
+PASS_R=0
+for i in $(seq 1 60); do
+  c=$(curl -s -o /dev/null -w '%{http_code}' "${BASE}/v1/stats/routability")
+  if [ "$c" = "200" ]; then PASS_R=$((PASS_R+1)); fi
+done
+if [ "$PASS_R" -ne 60 ]; then fail "current-health 429: 60 anonymous /routability passes = $PASS_R, want 60"; fi
+RESP_R=$(curl -s -i "${BASE}/v1/stats/routability")
+if ! grep -q '^HTTP/1.1 429' <<<"$RESP_R"; then fail "current-health 429: 61st request did not return 429: $(head -1 <<<"$RESP_R")"; fi
+if ! grep -qi '^Cache-Control: public, max-age=30, s-maxage=30, stale-while-revalidate=60' <<<"$RESP_R"; then
+  fail "current-health 429: missing public cache row: $(grep -i '^Cache-Control:' <<<"$RESP_R" || true)"
+fi
+if ! grep -qi '^Vary: Accept-Encoding, Origin' <<<"$RESP_R"; then
+  fail "current-health 429: missing public Vary row: $(grep -i '^Vary:' <<<"$RESP_R" || true)"
+fi
+if ! grep -q '"code":"rate_limited"' <<<"$RESP_R"; then fail "current-health 429: missing rate_limited envelope"; fi
+[ "$FAIL" -eq 0 ] && ok "current-health 429: /routability returns public cache row + §5.9 envelope"
+
 # Step 6b — AC-3 (nginx-tier): `Bearer garbage` reaches upstream,
 # which returns 401. nginx must NOT short-circuit at the edge and
 # must NOT serve a cached public 200 (proxy_cache_bypass on

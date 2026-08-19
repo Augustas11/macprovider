@@ -160,7 +160,8 @@ func RecoverForTest(logger zerolog.Logger, next http.Handler) http.Handler {
 // reaches the /v1/stats/* mux.
 //
 // Step 4.C fields (per BUILD §2 Step 4.C):
-//   - endpoint        — overview / leaderboard / provider / health / "" for 404
+//   - endpoint        — overview / leaderboard / provider / health /
+//     routability / models / providers / "" for 404
 //   - status          — final HTTP status code emitted by the stack
 //   - latency_ms      — wall-clock from middleware entry to handler return
 //   - generated_at_age_ms — set by handler via withGeneratedAtAgeContext (0 if unset)
@@ -207,7 +208,7 @@ func accessLogMiddleware(logger zerolog.Logger, m *metrics.Metrics) func(http.Ha
 			// locked endpoints; the 404-on-unknown-/v1/stats/*
 			// path returns endpoint="" from trimEndpointFromPath
 			// and would otherwise pollute the closed
-			// `endpoint ∈ {overview, leaderboard, provider, health}` set.
+			// closed endpoint set.
 			if m != nil && endpoint != "" {
 				tier := "public"
 				if pkid != 0 {

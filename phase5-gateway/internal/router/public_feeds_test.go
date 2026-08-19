@@ -15,9 +15,12 @@ import (
 )
 
 const (
-	testRateCardBody = `{"version":"abc123","policy_version":"autotune-policy-v1","rows":{}}` + "\n"
-	testRateCardSig  = `{"key_id":"test","signature":"deadbeef"}` + "\n"
-	testStatsBody    = `{"generated_at":"2026-08-16T00:00:00Z","network":{"tokens_served_total":1}}` + "\n"
+	testRateCardBody         = `{"version":"abc123","policy_version":"autotune-policy-v1","rows":{}}` + "\n"
+	testRateCardSig          = `{"key_id":"test","signature":"deadbeef"}` + "\n"
+	testStatsBody            = `{"generated_at":"2026-08-16T00:00:00Z","network":{"tokens_served_total":1}}` + "\n"
+	testStatsRoutabilityBody = `{"generated_at":"2026-08-16T00:00:00Z","summary":{"state":"operational"}}` + "\n"
+	testStatsModelsBody      = `{"generated_at":"2026-08-16T00:00:00Z","models":[]}` + "\n"
+	testStatsProvidersBody   = `{"generated_at":"2026-08-16T00:00:00Z","providers":[]}` + "\n"
 )
 
 func TestPublicFeedsUnauthenticatedExactBytes(t *testing.T) {
@@ -46,6 +49,12 @@ func TestPublicFeedsUnauthenticatedExactBytes(t *testing.T) {
 				"X-Stats-Generated-At":   []string{"2026-08-16T00:00:00Z"},
 				"X-MacProvider-Internal": []string{"strip-me"},
 			}, testStatsBody), nil
+		case r.URL.Host == "operator.test" && r.URL.Path == "/v1/stats/routability":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testStatsRoutabilityBody), nil
+		case r.URL.Host == "operator.test" && r.URL.Path == "/v1/stats/models":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testStatsModelsBody), nil
+		case r.URL.Host == "operator.test" && r.URL.Path == "/v1/stats/providers":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testStatsProvidersBody), nil
 		default:
 			t.Errorf("unexpected upstream %s %s", r.Method, r.URL.String())
 			return responseWithBody(http.StatusNotFound, nil, `{"error":"unexpected"}`), nil
@@ -92,6 +101,18 @@ func TestPublicFeedsUnauthenticatedExactBytes(t *testing.T) {
 	alias := assertStatus(t, h, http.MethodGet, "/v1/network-stats", "", "", "192.0.2.10", http.StatusOK)
 	if got := alias.Body.String(); got != testStatsBody {
 		t.Fatalf("network-stats alias body=%q want overview bytes", got)
+	}
+	routability := assertStatus(t, h, http.MethodGet, "/v1/stats/routability", "sk-should-not-forward", "", "192.0.2.10", http.StatusOK)
+	if got := routability.Body.String(); got != testStatsRoutabilityBody {
+		t.Fatalf("stats routability body=%q want exact upstream bytes", got)
+	}
+	models := assertStatus(t, h, http.MethodGet, "/v1/stats/models", "", "", "192.0.2.10", http.StatusOK)
+	if got := models.Body.String(); got != testStatsModelsBody {
+		t.Fatalf("stats models body=%q want exact upstream bytes", got)
+	}
+	providers := assertStatus(t, h, http.MethodGet, "/v1/stats/providers", "", "", "192.0.2.10", http.StatusOK)
+	if got := providers.Body.String(); got != testStatsProvidersBody {
+		t.Fatalf("stats providers body=%q want exact upstream bytes", got)
 	}
 	if sawAuth.Load() {
 		t.Fatal("public feed proxy forwarded buyer credentials upstream")
@@ -396,6 +417,66 @@ func TestPublicFeedsCacheCollapsesRepeatReads(t *testing.T) {
 	}
 }
 
+func TestPublicStatsRateLimitAppliesBeforeCachePerEndpoint(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		pathHits = map[string]int{}
+	)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		pathHits[r.URL.Path]++
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/v1/stats/routability":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testStatsRoutabilityBody), nil
+		case "/v1/stats/models":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testStatsModelsBody), nil
+		default:
+			t.Errorf("unexpected upstream %s", r.URL.String())
+			return responseWithBody(http.StatusNotFound, nil, ""), nil
+		}
+	})}
+	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://buyer.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+
+	for i := 0; i < publicStatsRPM; i++ {
+		resp := assertStatus(t, h, http.MethodGet, "/v1/stats/routability", "", "", "192.0.2.10", http.StatusOK)
+		if got := resp.Body.String(); got != testStatsRoutabilityBody {
+			t.Fatalf("routability body=%q want cached upstream bytes", got)
+		}
+	}
+	limited := assertStatus(t, h, http.MethodGet, "/v1/stats/routability", "", "", "192.0.2.10", http.StatusTooManyRequests)
+	if got := limited.Header().Get("Retry-After"); got != "60" {
+		t.Fatalf("Retry-After=%q want 60", got)
+	}
+	if got := limited.Header().Get("Cache-Control"); got != "public, max-age=30, s-maxage=30, stale-while-revalidate=60" {
+		t.Fatalf("Cache-Control=%q want public stats error row", got)
+	}
+	if !strings.Contains(limited.Body.String(), `"code":"rate_limited"`) {
+		t.Fatalf("rate-limit body missing code: %s", limited.Body.String())
+	}
+
+	models := assertStatus(t, h, http.MethodGet, "/v1/stats/models", "", "", "192.0.2.10", http.StatusOK)
+	if got := models.Body.String(); got != testStatsModelsBody {
+		t.Fatalf("models body=%q want independent endpoint success", got)
+	}
+	otherIP := assertStatus(t, h, http.MethodGet, "/v1/stats/routability", "", "", "192.0.2.11", http.StatusOK)
+	if got := otherIP.Body.String(); got != testStatsRoutabilityBody {
+		t.Fatalf("other IP routability body=%q want cached upstream bytes", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if pathHits["/v1/stats/routability"] != 1 {
+		t.Fatalf("routability upstream hits=%d want 1; limiter must count cached reads", pathHits["/v1/stats/routability"])
+	}
+	if pathHits["/v1/stats/models"] != 1 {
+		t.Fatalf("models upstream hits=%d want 1", pathHits["/v1/stats/models"])
+	}
+}
+
 func TestPublicFeedsRejectRedirectsAndOversizedBodies(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Path {
@@ -562,6 +643,9 @@ func TestAPINginxKeepsPublicFeedsOnGatewayMux(t *testing.T) {
 		"location = /v1/rate-card",
 		"location = /v1/rate-card.sig",
 		"location = /v1/stats/overview",
+		"location = /v1/stats/routability",
+		"location = /v1/stats/models",
+		"location = /v1/stats/providers",
 		"location = /v1/network-stats",
 		"location = /v1/stats/leaderboard",
 	} {

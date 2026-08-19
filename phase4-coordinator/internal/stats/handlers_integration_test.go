@@ -464,8 +464,8 @@ func TestAC7_HealthAlways200(t *testing.T) {
 		t.Errorf("rollup_lag_seconds missing from health")
 	}
 	comps, ok := body["components"].(map[string]any)
-	if !ok || len(comps) != 7 {
-		t.Errorf("components has %d keys, want 7: %v", len(comps), comps)
+	if !ok || len(comps) != 8 {
+		t.Errorf("components has %d keys, want 8: %v", len(comps), comps)
 	}
 }
 

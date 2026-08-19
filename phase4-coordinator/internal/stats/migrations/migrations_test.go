@@ -45,6 +45,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{22, "malibu_useful_work_rewards"},
 		{23, "malibu_reward_audit_events"},
 		{24, "malibu_epoch_disposition_facts"},
+		{25, "routability_current"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -74,14 +75,14 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 //   - stats_components_health MUST NOT have a `status` column
 //     (status is derived at request time per §5.3; BUILD §A.4
 //     CRITICAL).
-//   - The 7-component enum CHECK constraint MUST include all
-//     seven v0.1.7 values.
+//   - The component enum CHECK constraint MUST include all
+//     v0.2.0 values.
 func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	all, err := All()
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm, powW2HelloGateGrants, onboardingDecisionReason, hardwareMemoryReverification, autotuneCurrentHardwareGateGrants, hardwareTrustApproval, waitingTrustChipProfileProjection, malibuEpochDispositionFacts string
+	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm, powW2HelloGateGrants, onboardingDecisionReason, hardwareMemoryReverification, autotuneCurrentHardwareGateGrants, hardwareTrustApproval, waitingTrustChipProfileProjection, malibuEpochDispositionFacts, routabilityCurrent string
 	for _, m := range all {
 		switch m.Name {
 		case "stats_tables":
@@ -112,6 +113,8 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 			waitingTrustChipProfileProjection = m.SQL
 		case "malibu_epoch_disposition_facts":
 			malibuEpochDispositionFacts = m.SQL
+		case "routability_current":
+			routabilityCurrent = m.SQL
 		}
 	}
 	if schema == "" {
@@ -122,6 +125,9 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	}
 	if malibuEpochDispositionFacts == "" {
 		t.Fatal("malibu_epoch_disposition_facts migration body is empty")
+	}
+	if routabilityCurrent == "" {
+		t.Fatal("routability_current migration body is empty")
 	}
 	// The forbidden-substring checks must scan code, not
 	// comments. The migration's prose comments document v0.1.7
@@ -144,21 +150,28 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	mustNotContainColumn(t, chBlock, "status",
 		"BUILD §A.4 — stats_components_health.status would be CRITICAL")
 
-	// All 7 component enum values present.
+	// All component enum values present.
 	for _, c := range []string{
 		"'overview'", "'timeseries_rpm'", "'timeseries_tpm'",
 		"'leaderboard_24h'", "'leaderboard_7d'",
-		"'leaderboard_30d'", "'leaderboard_all'",
+		"'leaderboard_30d'", "'leaderboard_all'", "'routability'",
 	} {
 		mustContain(t, schema, c,
-			"v0.1.7 component enum")
+			"v0.2.0 component enum")
 	}
 
-	// Bootstrap seeds exactly 7 component rows.
+	// Bootstrap seeds component rows.
 	for _, c := range []string{"overview", "timeseries_rpm", "timeseries_tpm",
-		"leaderboard_24h", "leaderboard_7d", "leaderboard_30d", "leaderboard_all"} {
+		"leaderboard_24h", "leaderboard_7d", "leaderboard_30d", "leaderboard_all", "routability"} {
 		mustContain(t, bootstrap, "'"+c+"'",
 			"bootstrap row for component "+c)
+	}
+	for _, needle := range []string{
+		"CREATE TABLE IF NOT EXISTS stats_routability_current",
+		"GRANT SELECT ON stats_routability_current TO stats_reader",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON stats_routability_current TO stats_rollup",
+	} {
+		mustContain(t, routabilityCurrent, needle, "routability migration")
 	}
 
 	if spec026 == "" {

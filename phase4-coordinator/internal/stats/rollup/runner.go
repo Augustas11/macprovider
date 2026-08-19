@@ -81,12 +81,15 @@ func New(db *sql.DB, cfg Config, snap SnapshotProvider, logger zerolog.Logger) (
 	}, nil
 }
 
-// Start spawns the seven per-table goroutines AND the nightly
+// Start spawns the per-table goroutines AND the nightly
 // rebuild scheduler. Returns immediately; the goroutines run
 // until ctx is cancelled. Use Wait() at shutdown to drain them.
 func (r *Runner) Start(ctx context.Context) {
 	r.spawnTick(ctx, "overview", r.cfg.OverviewInterval, componentOverview, func(c context.Context) error {
 		return runOverviewTick(c, r.db, r.cfg, r.snap, r.logger)
+	})
+	r.spawnTick(ctx, "routability", r.cfg.OverviewInterval, componentRoutability, func(c context.Context) error {
+		return runRoutabilityTick(c, r.db, r.snap)
 	})
 	r.spawnTick(ctx, "timeseries_rpm", r.cfg.TimeseriesRpmInterval, componentTimeseriesRpm, func(c context.Context) error {
 		return runTimeseriesRpmTick(c, r.db, r.cfg)
@@ -155,8 +158,9 @@ func RunLateEventsRetention(ctx context.Context, db *sql.DB, cfg Config) error {
 // `m.RollupErrorsTotal.Inc()` calls.
 //
 // `comp` MUST be one of the §9.5 component identifiers
-// (overview, timeseries_rpm, timeseries_tpm, leaderboard_24h,
-// leaderboard_7d, leaderboard_30d, leaderboard_all) so the metric
+// (overview, routability, timeseries_rpm, timeseries_tpm,
+// leaderboard_24h, leaderboard_7d, leaderboard_30d, leaderboard_all)
+// so the metric
 // emit + healthFail UPDATE land on a real component row. Pass ""
 // to drive the rewards_populated tick's success-skip branch.
 //

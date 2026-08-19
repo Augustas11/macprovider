@@ -1,7 +1,7 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.1.9 (2026-07-29, **LOCKED** — A6 label-honesty patch adds explicit `/v1/stats/overview` source labels for synthetic hardware capacity estimates without changing the 14 numeric metrics. v0.1.8 lock history: codex round-10 returned 0 CRITICAL + 0 MAJOR + 0 MINOR + 0 QUESTIONS, verdict READY TO LOCK. Round 10 narrative: `specs/SPEC-017-r10-audit.md`. Round 9 (initial v0.1.8 draft) returned 0C+2M; v0.1.8 fix pass absorbed M1 (removed `partner_keys.rate_limit_burst` column + CLI flag) and M2 (added §5.6 auth-failure tier + AC-22). r10 closure narrative: `specs/SPEC-017-r10-audit.md`. The v0.1.8 deltas vs v0.1.7 came from the 3-lane IMPL-prompt audit surfacing two SPEC contradictions: (1) §9.4 named rebuild Shape A/B but §7.2.2 grant set lacks the required privileges — v0.1.8 added Shape C (single-tx DELETE+INSERT) executable under locked grants; (2) §5.6 "burst 120" was inconsistent with AC-8 — v0.1.8 dropped burst from both tiers + added Authorization-aware nginx keying + auth-failure tier limiter + AC-22. Trajectory across 10 rounds: r1 3C+10M+5m, r2 2C+5M+2m, r3 0C+4M+3m, r4 0C+4M+2m, r5 0C+2M+2m, r6 0C+1M+1m, r7 0/0/0 → LOCK v0.1.6, r8 0/0/0 → LOCK v0.1.7 (Claude fix pass), r9 0C+2M+0m, r10 0/0/0 → LOCK v0.1.8 (IMPL-audit-driven SPEC fix pass).)
-**Status:** **LOCKED** at v0.1.9 (2026-07-29). v0.1.8 was the prior LOCK; v0.1.9 supersedes it for A6 label-honesty source labels while preserving the separately audited v0.1.8 implementation-prompt history. The §11 open questions remain genuine v0.2+ design questions, not v0.1 blockers.
+**Version:** 0.2.0 (2026-08-19, **DRAFT** — issue #1063 adds public current network-health/routability read models: `/v1/stats/routability`, `/v1/stats/models`, and `/v1/stats/providers`. v0.1.9 remains the last locked baseline.)
+**Status:** **DRAFT** v0.2.0. This draft is additive to the v0.1.9 locked surface: it exposes redacted current-health projections without changing buyer routing behavior or operator-only `/poolz` semantics.
 **Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
 ---
@@ -13,6 +13,16 @@ Audit-narrative-by-round detail lives in the per-round audit files under
 entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
+
+**v0.2.0 (2026-08-19, draft — issue #1063 network-health surface):**
+Adds a `routability` rollup component and singleton
+`stats_routability_current` JSONB read model. Public clients can read
+current network/model/provider health through `/v1/stats/routability`,
+`/v1/stats/models`, and `/v1/stats/providers`. The projection is
+derived from live provider pool state at rollup time and is explicitly
+redacted: no raw provider IDs, assigned IDs, hostnames, endpoint URLs,
+buyer IDs, prompt data, API keys, receipt public keys, model hashes, or
+hardware serial/identity material are exposed.
 
 **v0.1.8 (2026-06-26, draft — IMPL-prompt-audit-driven SPEC fix pass):**
 The 3-lane codex IMPL-prompt audit on the v0.1.7-anchored IMPL prompt
@@ -542,6 +552,9 @@ explorer. Both reach Postgres but via distinct DB roles; see §7.2.
 | `GET /v1/stats/leaderboard` | Optional `Bearer <partner_key>` | yes; key MAY unlock a separate cache projection | yes, behind key |
 | `GET /v1/stats/provider/<provider_id>` | Required `Bearer <partner_key>` bound to `provider_id` | no; private only | yes, for that provider only |
 | `GET /v1/stats/health` | None | short cache (10s) | no |
+| `GET /v1/stats/routability` | None | yes, public | no |
+| `GET /v1/stats/models` | None | yes, public | no |
+| `GET /v1/stats/providers` | None | yes, public | no |
 
 `HEAD` MUST be supported on every `GET`. `OPTIONS` MUST return CORS
 preflight per §5.7. Any other verb MUST return `405 Method Not Allowed`
@@ -885,6 +898,100 @@ then filter an all-provider exact leaderboard client-side. The server
 performs the provider binding and returns only the requested provider's
 row.
 
+### 5.2a `GET /v1/stats/routability`
+
+**Request.** No query parameters, no auth.
+
+**Response (200 OK).**
+
+```json
+{
+  "generated_at": "2026-08-19T12:00:00Z",
+  "stale_after": "2026-08-19T12:00:30Z",
+  "summary": {
+    "state": "redundant",
+    "providers_total": 3,
+    "providers_routable": 2,
+    "providers_serving_capable": 3,
+    "models_total": 2,
+    "models_redundant": 1,
+    "models_operational": 1,
+    "models_degraded": 0,
+    "models_unknown": 0,
+    "models_offline": 0
+  },
+  "models": [
+    {
+      "model_id": "llama-3.1-8b",
+      "state": "redundant",
+      "provider_count": 2,
+      "routable_provider_count": 2,
+      "serving_capable_provider_count": 2,
+      "slots_free": 3,
+      "slots_total": 4,
+      "max_context_tokens": 131072,
+      "recent_success_provider_count_1h": 1
+    }
+  ],
+  "providers": [
+    {
+      "provider_ref": "provider_000001",
+      "model_id": "llama-3.1-8b",
+      "state": "online",
+      "routable": true,
+      "serving_capable": true,
+      "routability_score": 100,
+      "slots_free": 1,
+      "slots_total": 2,
+      "last_heartbeat_age_seconds": 8,
+      "uptime_bucket": "1h_24h",
+      "recent_success_1h": true,
+      "receipt_validity": "present",
+      "attestation": "hardware",
+      "compute_integrity": "hash_verified",
+      "stale_data": false
+    }
+  ],
+  "methodology": {
+    "version": "SPEC-017-v0.2.0",
+    "provider_identity": "provider_ref is a per-snapshot ordinal alias sorted by public health fields and is not derived from provider_id",
+    "state_basis": "current public-admitted coordinator pool snapshot at generated_at",
+    "redaction": "public projection omits raw provider identifiers, network endpoints, keys, hashes, prompts, buyer IDs, hardware identity material, and provider sessions that failed public admission gates"
+  }
+}
+```
+
+`/v1/stats/models` returns the same `generated_at`, `stale_after`,
+`models`, and `methodology` fields. `/v1/stats/providers` returns the
+same `generated_at`, `stale_after`, `providers`, and `methodology`
+fields. The split endpoints are convenience views over the same
+`stats_routability_current` row. Each endpoint's ETag MUST remain
+stable until that row's `generated_at` or projected JSON section
+changes.
+
+**State rules.** Model states are derived from current public-admitted
+providers for that model. Providers excluded by credential trust,
+catalog admission, benchmark quarantine, admission-ceiling, stale
+admission evidence, or sandbox gates MUST NOT contribute to these
+public read models. Supported-model declarations MUST contribute only
+when the provider explicitly publishes supported models. Model states
+are `redundant` when at least two providers are routable,
+`operational` when exactly one provider is routable, `degraded` when no
+provider is routable but at least one is currently serving-capable,
+`unknown` when the model is only declared in supported-model metadata,
+and `offline` when the model has no current live provider in this
+projection. Provider states are `online` for routable providers,
+`degraded` for serving-capable but not routable providers,
+`unknown` for live providers whose most recent heartbeat is beyond the
+freshness target but within the 503 budget, and `offline` for unavailable
+or draining live sessions.
+
+**Response headers.** Public projection only:
+`Cache-Control: public, max-age=30, s-maxage=30,
+stale-while-revalidate=60`; `Vary: Accept-Encoding, Origin`.
+`generated_at` older than 120 seconds MUST return the standard
+`stats_stale` 503 envelope and `Retry-After: 30`.
+
 ### 5.3 `GET /v1/stats/health`
 
 **Request.** No query parameters, no auth.
@@ -903,13 +1010,15 @@ row.
     "leaderboard_24h":  {"status": "ok", "generated_at": "2026-06-25T18:13:00Z"},
     "leaderboard_7d":   {"status": "ok", "generated_at": "2026-06-25T18:10:00Z"},
     "leaderboard_30d":  {"status": "ok", "generated_at": "2026-06-25T17:30:00Z"},
-    "leaderboard_all":  {"status": "ok", "generated_at": "2026-06-25T17:00:00Z"}
+    "leaderboard_all":  {"status": "ok", "generated_at": "2026-06-25T17:00:00Z"},
+    "routability":      {"status": "ok", "generated_at": "2026-06-25T18:14:00Z"}
   }
 }
 ```
 
-The `components` map has exactly 7 entries (`overview`,
+The `components` map has exactly 8 entries (`overview`,
 `timeseries_rpm`, `timeseries_tpm`, and four `leaderboard_*` keys).
+v0.2.0 adds `routability` for the current-health public read model.
 The earlier single `timeseries` key is removed because the two
 timeseries tables (§9.1 `stats_timeseries_rpm_30m` /
 `stats_timeseries_tpm_30m`) drift independently and conflating them
@@ -1673,6 +1782,7 @@ GRANT SELECT ON
   stats_leaderboard_7d,
   stats_leaderboard_30d,
   stats_leaderboard_all,
+  stats_routability_current,
   stats_components_health,
   provider_visibility,
   partner_keys
@@ -1682,6 +1792,8 @@ TO stats_reader;
 These are the **request-path readable** tables. Notes:
 
 - `stats_components_health` feeds `/v1/stats/health` (§5.3).
+- `stats_routability_current` feeds `/v1/stats/routability`,
+  `/v1/stats/models`, and `/v1/stats/providers` (§5.2a).
 - `provider_visibility` is SELECT-only at request time (the rollup
   joins it; the handler does not query it directly). The handler
   role still needs the grant because the rollup runs as a separate
@@ -1725,6 +1837,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   stats_leaderboard_7d,
   stats_leaderboard_30d,
   stats_leaderboard_all,
+  stats_routability_current,
   stats_components_health,
   stats_late_events
 TO stats_rollup;
@@ -2024,7 +2137,8 @@ CREATE TABLE stats_components_health (
     --   'overview',
     --   'timeseries_rpm', 'timeseries_tpm',
     --   'leaderboard_24h', 'leaderboard_7d',
-    --   'leaderboard_30d', 'leaderboard_all'
+    --   'leaderboard_30d', 'leaderboard_all',
+    --   'routability'
     -- v0.1.7 split the single 'timeseries' key into
     -- 'timeseries_rpm' and 'timeseries_tpm' so single-axis rollup-job
     -- failure is visible (the two tables drift independently).
@@ -2032,6 +2146,15 @@ CREATE TABLE stats_components_health (
   last_ok_at               TIMESTAMPTZ NOT NULL,
   last_error_at            TIMESTAMPTZ,
   last_error_message       TEXT
+);
+
+CREATE TABLE stats_routability_current (
+  singleton                BOOLEAN PRIMARY KEY DEFAULT TRUE
+    CHECK (singleton = TRUE),
+  generated_at             TIMESTAMPTZ NOT NULL,
+  summary                  JSONB NOT NULL,
+  models                   JSONB NOT NULL,
+  providers                JSONB NOT NULL
 );
 
 CREATE TABLE stats_late_events (
@@ -2273,6 +2396,7 @@ false-positive on legitimate arithmetic noise; a looser one (e.g.
 | Endpoint | Target staleness | 503 budget (§5.8) |
 |---|---|---|
 | `/v1/stats/overview` | 30s | 120s |
+| `/v1/stats/{routability,models,providers}` | 30s | 120s |
 | `/v1/stats/leaderboard?window=24h` | 60s | 300s |
 | `/v1/stats/leaderboard?window=7d` | 5 min | 30 min |
 | `/v1/stats/leaderboard?window=30d` | 30 min | 4 hours |

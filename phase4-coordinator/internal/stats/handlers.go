@@ -54,6 +54,17 @@ func (h *Handler) overviewStaleProbe(ctx context.Context, now time.Time) (bool, 
 	return overviewStaleFor503(now, ov.GeneratedAt), ov.GeneratedAt, nil
 }
 
+func (h *Handler) routabilityStaleProbe(ctx context.Context, now time.Time) (bool, time.Time, error) {
+	row, err := h.Store.Routability(ctx)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	if row == nil {
+		return true, time.Time{}, nil
+	}
+	return routabilityStaleFor503(now, row.GeneratedAt), row.GeneratedAt, nil
+}
+
 // ===========================================================================
 // §5.1 /v1/stats/overview
 // ===========================================================================
@@ -770,13 +781,130 @@ func (h *Handler) shouldExposePartialHistorySince(window string, now time.Time) 
 }
 
 // ===========================================================================
+// §5.2a /v1/stats/{routability,models,providers}
+// ===========================================================================
+
+type routabilityResponse struct {
+	GeneratedAt string                 `json:"generated_at"`
+	StaleAfter  string                 `json:"stale_after"`
+	Summary     json.RawMessage        `json:"summary"`
+	Models      json.RawMessage        `json:"models"`
+	Providers   json.RawMessage        `json:"providers"`
+	Methodology routabilityMethodology `json:"methodology"`
+}
+
+type modelsRoutabilityResponse struct {
+	GeneratedAt string                 `json:"generated_at"`
+	StaleAfter  string                 `json:"stale_after"`
+	Models      json.RawMessage        `json:"models"`
+	Methodology routabilityMethodology `json:"methodology"`
+}
+
+type providersRoutabilityResponse struct {
+	GeneratedAt string                 `json:"generated_at"`
+	StaleAfter  string                 `json:"stale_after"`
+	Providers   json.RawMessage        `json:"providers"`
+	Methodology routabilityMethodology `json:"methodology"`
+}
+
+type routabilityMethodology struct {
+	Version          string `json:"version"`
+	ProviderIdentity string `json:"provider_identity"`
+	StateBasis       string `json:"state_basis"`
+	Redaction        string `json:"redaction"`
+}
+
+var publicRoutabilityMethodology = routabilityMethodology{
+	Version:          "SPEC-017-v0.2.0",
+	ProviderIdentity: "provider_ref is a per-snapshot ordinal alias sorted by public health fields and is not derived from provider_id",
+	StateBasis:       "current public-admitted coordinator pool snapshot at generated_at",
+	Redaction:        "public projection omits raw provider identifiers, network endpoints, keys, hashes, prompts, buyer IDs, hardware identity material, and provider sessions that failed public admission gates",
+}
+
+func (h *Handler) handleRoutability(w http.ResponseWriter, r *http.Request, ar authResult) {
+	row, ok := h.readFreshRoutability(w, r)
+	if !ok {
+		return
+	}
+	resp := routabilityResponse{
+		GeneratedAt: row.GeneratedAt.UTC().Format(time.RFC3339),
+		StaleAfter:  row.GeneratedAt.Add(30 * time.Second).UTC().Format(time.RFC3339),
+		Summary:     json.RawMessage(row.SummaryJSON),
+		Models:      json.RawMessage(row.ModelsJSON),
+		Providers:   json.RawMessage(row.ProvidersJSON),
+		Methodology: publicRoutabilityMethodology,
+	}
+	writeJSON(w, r, http.StatusOK, resp, row.GeneratedAt,
+		"public, max-age=30, s-maxage=30, stale-while-revalidate=60",
+		varyForPublic(),
+		ar)
+}
+
+func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request, ar authResult) {
+	row, ok := h.readFreshRoutability(w, r)
+	if !ok {
+		return
+	}
+	resp := modelsRoutabilityResponse{
+		GeneratedAt: row.GeneratedAt.UTC().Format(time.RFC3339),
+		StaleAfter:  row.GeneratedAt.Add(30 * time.Second).UTC().Format(time.RFC3339),
+		Models:      json.RawMessage(row.ModelsJSON),
+		Methodology: publicRoutabilityMethodology,
+	}
+	writeJSON(w, r, http.StatusOK, resp, row.GeneratedAt,
+		"public, max-age=30, s-maxage=30, stale-while-revalidate=60",
+		varyForPublic(),
+		ar)
+}
+
+func (h *Handler) handleProviders(w http.ResponseWriter, r *http.Request, ar authResult) {
+	row, ok := h.readFreshRoutability(w, r)
+	if !ok {
+		return
+	}
+	resp := providersRoutabilityResponse{
+		GeneratedAt: row.GeneratedAt.UTC().Format(time.RFC3339),
+		StaleAfter:  row.GeneratedAt.Add(30 * time.Second).UTC().Format(time.RFC3339),
+		Providers:   json.RawMessage(row.ProvidersJSON),
+		Methodology: publicRoutabilityMethodology,
+	}
+	writeJSON(w, r, http.StatusOK, resp, row.GeneratedAt,
+		"public, max-age=30, s-maxage=30, stale-while-revalidate=60",
+		varyForPublic(),
+		ar)
+}
+
+func (h *Handler) readFreshRoutability(w http.ResponseWriter, r *http.Request) (*store.RoutabilityRow, bool) {
+	ctx := r.Context()
+	now := h.nowFn()
+	row, err := h.Store.Routability(ctx)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "routability read failed", now, nil)
+		return nil, false
+	}
+	if row == nil || routabilityStaleFor503(now, row.GeneratedAt) {
+		retry := 30
+		gen := now
+		if row != nil {
+			gen = row.GeneratedAt
+		}
+		writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "routability is stale", gen, &retry)
+		return nil, false
+	}
+	if obs := requestObsFromContext(r.Context()); obs != nil {
+		obs.GeneratedAtAgeMs = time.Since(row.GeneratedAt).Milliseconds()
+	}
+	return row, true
+}
+
+// ===========================================================================
 // §5.3 /v1/stats/health
 // ===========================================================================
 
 // healthResponse mirrors the locked §5.3 wire shape:
 //
 //	{ status, generated_at, rollup_lag_seconds,
-//	  components{7 keys} }
+//	  components{8 keys} }
 type healthResponse struct {
 	Status           string                     `json:"status"`
 	GeneratedAt      string                     `json:"generated_at"`
@@ -789,7 +917,7 @@ type healthComponent struct {
 	GeneratedAt string `json:"generated_at"`
 }
 
-// healthComponentKeys is the locked §5.3 7-key set. The
+// healthComponentKeys is the locked §5.3 key set. The
 // handler emits every key even if a `stats_components_health`
 // row is missing — missing rows default to "down" with epoch
 // generated_at.
@@ -801,6 +929,7 @@ var healthComponentKeys = []string{
 	"leaderboard_7d",
 	"leaderboard_30d",
 	"leaderboard_all",
+	"routability",
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request, ar authResult) {
@@ -816,7 +945,7 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request, ar authRe
 	for _, c := range comps {
 		byKey[c.Component] = c.GeneratedAt
 	}
-	compMap := make(map[string]healthComponent, 7)
+	compMap := make(map[string]healthComponent, len(healthComponentKeys))
 	var oldest time.Time
 	for _, k := range healthComponentKeys {
 		gen, ok := byKey[k]
@@ -932,7 +1061,8 @@ var _ = context.Background
 
 // trimEndpointFromPath returns the route token Step 3 keys the
 // per-endpoint rate-limit buckets on. Returns one of
-// "overview", "leaderboard", "health" or "" for paths outside
+// "overview", "leaderboard", "health", "routability", "models",
+// "providers" or "" for paths outside
 // the /v1/stats/* subtree.
 //
 // Round-1 SECURITY L2 fix: only EXACT-match paths are accepted;
@@ -945,7 +1075,7 @@ func trimEndpointFromPath(p string) string {
 	}
 	rest := p[len(prefix):]
 	switch rest {
-	case "overview", "leaderboard", "health":
+	case "overview", "leaderboard", "health", "routability", "models", "providers":
 		return rest
 	}
 	if providerIDFromPath(p) != "" {

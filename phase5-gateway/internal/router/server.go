@@ -63,6 +63,7 @@ type Server struct {
 	adminMetrics             *adminStateWriteMetrics
 	chatStartLimits          *requestRateLimiter
 	relayBlindMetadataLimits *requestRateLimiter
+	publicStatsLimits        *publicStatsRateLimiter
 	// idlessDedupe backs the #762 id-less retry replay/coalesce cache. It is
 	// per-process and non-authoritative; see idless_dedupe.go.
 	idlessDedupe *idlessDedupeIndex
@@ -185,6 +186,7 @@ func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Optio
 		adminMetrics:             newAdminStateWriteMetrics(),
 		chatStartLimits:          newRequestRateLimiter(),
 		relayBlindMetadataLimits: newRequestRateLimiter(),
+		publicStatsLimits:        newPublicStatsRateLimiter(),
 		idlessDedupe:             newIdlessDedupeIndex(),
 		journal:                  discardSettlementJournal{},
 		journalAttempts:          newSettlementJournalAttempts(),
@@ -247,6 +249,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/rate-card", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicRateCard)))
 	mux.Handle("/v1/rate-card.sig", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicRateCardSig)))
 	mux.Handle("/v1/stats/overview", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicStatsOverview)))
+	mux.Handle("/v1/stats/routability", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicStatsRoutability)))
+	mux.Handle("/v1/stats/models", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicStatsModels)))
+	mux.Handle("/v1/stats/providers", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicStatsProviders)))
 	mux.Handle("/v1/network-stats", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicStatsOverview)))
 	mux.HandleFunc("/v1/feedback", s.handleFeedback)
 	mux.HandleFunc("/healthz", s.handleHealthz)

@@ -92,14 +92,14 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 //
 // Public projection is used for: row 1 anonymous, any 4xx/5xx
 // before/during auth dispatch (including 401), and all error
-// paths on /overview + /health (which are §4.3 Auth: None).
+// paths on Auth: None endpoints.
 func errorHeadersForRequest(r *http.Request, status int) (string, string) {
 	if r == nil {
 		return "no-store", "Accept-Encoding, Origin"
 	}
 	partner := partnerProjectionFromContext(r.Context())
 	switch trimEndpointFromPath(r.URL.Path) {
-	case "overview":
+	case "overview", "routability", "models", "providers":
 		return "public, max-age=30, s-maxage=30, stale-while-revalidate=60",
 			"Accept-Encoding, Origin"
 	case "leaderboard":

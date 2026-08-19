@@ -806,15 +806,15 @@ func TestSchemaShapeSanity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Health table has exactly 7 component rows (v0.1.7 split).
+	// Health table has exactly 8 component rows (v0.2.0 adds routability).
 	var n int
 	if err := adminDB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM stats_components_health`,
 	).Scan(&n); err != nil {
 		t.Fatalf("count components_health: %v", err)
 	}
-	if n != 7 {
-		t.Errorf("stats_components_health row count = %d, want 7", n)
+	if n != 8 {
+		t.Errorf("stats_components_health row count = %d, want 8", n)
 	}
 
 	// Rewards-populated bootstrap has 4 rows, all false.
@@ -893,14 +893,14 @@ func TestMigrationsIdempotent(t *testing.T) {
 		t.Fatalf("second Apply: %v", err)
 	}
 
-	// stats_components_health still has 7 rows (the ON CONFLICT
+	// stats_components_health still has 8 rows (the ON CONFLICT
 	// DO NOTHING in 002 protects it).
 	var n int
 	if err := adminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM stats_components_health`).Scan(&n); err != nil {
 		t.Fatalf("count components_health: %v", err)
 	}
-	if n != 7 {
-		t.Errorf("after re-apply, components_health row count = %d, want 7", n)
+	if n != 8 {
+		t.Errorf("after re-apply, components_health row count = %d, want 8", n)
 	}
 }
 
@@ -1051,13 +1051,13 @@ func TestMigrationsConcurrent(t *testing.T) {
 		t.Errorf("schema_migrations_spec017 distinct versions = %d, want %d", rows, wantMigrations)
 	}
 
-	// stats_components_health still has exactly 7 rows.
+	// stats_components_health still has exactly 8 rows.
 	var comps int
 	if err := adminDB1.QueryRowContext(ctx, `SELECT COUNT(*) FROM stats_components_health`).Scan(&comps); err != nil {
 		t.Fatalf("count components_health: %v", err)
 	}
-	if comps != 7 {
-		t.Errorf("stats_components_health row count = %d, want 7", comps)
+	if comps != 8 {
+		t.Errorf("stats_components_health row count = %d, want 8", comps)
 	}
 }
 

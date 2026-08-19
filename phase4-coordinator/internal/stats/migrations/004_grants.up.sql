@@ -32,6 +32,7 @@ GRANT SELECT ON
     stats_leaderboard_7d,
     stats_leaderboard_30d,
     stats_leaderboard_all,
+    stats_routability_current,
     stats_components_health,
     stats_rewards_populated,
     provider_visibility,
@@ -57,6 +58,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
     stats_leaderboard_7d,
     stats_leaderboard_30d,
     stats_leaderboard_all,
+    stats_routability_current,
     stats_components_health,
     stats_late_events,
     stats_rewards_populated
@@ -127,6 +129,7 @@ REVOKE ALL ON
     stats_leaderboard_7d,
     stats_leaderboard_30d,
     stats_leaderboard_all,
+    stats_routability_current,
     stats_components_health,
     stats_late_events,
     stats_rewards_populated,

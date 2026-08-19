@@ -11,7 +11,7 @@ package metrics
 //   - the partner_key_id label only takes positive-integer
 //     decimal strings (no prefix, no label-text)
 //   - tier ∈ {public, partner}
-//   - endpoint ∈ {overview, leaderboard, provider, health}
+//   - endpoint ∈ {overview, leaderboard, provider, health, routability, models, providers}
 //   - component ∈ the locked §9.5 component set
 
 import (
@@ -25,11 +25,12 @@ import (
 var (
 	bodyShape = regexp.MustCompile(`[A-Za-z0-9_-]{43}`)
 	allowTier = map[string]bool{"public": true, "partner": true}
-	allowEP   = map[string]bool{"overview": true, "leaderboard": true, "provider": true, "health": true}
+	allowEP   = map[string]bool{"overview": true, "leaderboard": true, "provider": true, "health": true, "routability": true, "models": true, "providers": true}
 	allowComp = map[string]bool{
 		"overview": true, "timeseries_rpm": true, "timeseries_tpm": true,
 		"leaderboard_24h": true, "leaderboard_7d": true,
 		"leaderboard_30d": true, "leaderboard_all": true,
+		"routability": true,
 	}
 	allowIdlePrewarmEvent = map[string]bool{
 		"idle_prewarm_fired":                     true,

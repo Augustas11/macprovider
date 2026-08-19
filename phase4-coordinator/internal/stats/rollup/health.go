@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// component is one of the seven SPEC §9.1 v0.1.7 enum values.
+// component is one of the SPEC §9.1 enum values.
 // Each per-table rollup job owns exactly one component row in
 // `stats_components_health`.
 type component string
@@ -20,6 +20,7 @@ const (
 	componentLeaderboard7d  component = "leaderboard_7d"
 	componentLeaderboard30d component = "leaderboard_30d"
 	componentLeaderboardAll component = "leaderboard_all"
+	componentRoutability    component = "routability"
 )
 
 // healthOK marks the component as having a fresh successful

@@ -12,7 +12,7 @@ import (
 // `stats_reader` role's *sql.DB. Per SPEC §7.2.1 the
 // stats_reader role has SELECT on stats_overview_current,
 // stats_timeseries_{rpm,tpm}_30m, stats_leaderboard_*,
-// stats_components_health, stats_rewards_populated,
+// stats_components_health, stats_routability_current, stats_rewards_populated,
 // stats_idle_prewarm_events,
 // partner_keys, provider_visibility — and is explicitly
 // DENIED on ledger_* + provider_rewards_ledger +

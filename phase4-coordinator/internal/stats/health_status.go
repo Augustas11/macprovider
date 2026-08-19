@@ -38,7 +38,7 @@ func thresholdsForComponent(c string) healthThresholds {
 	// match the overview shape since they tick at the same
 	// cadence.
 	switch c {
-	case "overview":
+	case "overview", "routability":
 		return healthThresholds{targetSec: 30, budgetSec: 120}
 	case "timeseries_rpm", "timeseries_tpm":
 		return healthThresholds{targetSec: 30, budgetSec: 120}
@@ -84,5 +84,13 @@ func overviewStaleFor503(now, generatedAt time.Time) bool {
 		return true
 	}
 	t := thresholdsForComponent("overview")
+	return now.Sub(generatedAt).Seconds() > float64(t.budgetSec)
+}
+
+func routabilityStaleFor503(now, generatedAt time.Time) bool {
+	if generatedAt.IsZero() {
+		return true
+	}
+	t := thresholdsForComponent("routability")
 	return now.Sub(generatedAt).Seconds() > float64(t.budgetSec)
 }
