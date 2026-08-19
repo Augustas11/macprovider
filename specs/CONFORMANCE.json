@@ -1252,7 +1252,7 @@
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
       "evidence": [],
-      "requirement_id_migration": "pending",
+      "requirement_id_migration": "complete",
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
@@ -5097,6 +5097,219 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/926",
         "rationale": "The repo now contains the Malibu-domain hosted agent onboarding skill source, discovery index, and drift validator; the requirement remains pending until the public get.malibu.tech route is published and byte-compared against the repo artifact."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R001",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Pool object + signed manifest + identity/rollback (pool_id as digest of a stable identity core; versioned policy core): NOT yet implemented. The signed manifest write/verify path is a future slice; pool state is seeded in-memory today (internal/trustpool). Gated in the SPEC-042 R010 v0.1 promotion checklist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R002",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/pool_selection.go:func (s *Server) resolvePoolSelection",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) selectProviderExcluding"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/pool_selection_test.go:TestPoolSelection_AuthorizedAndCapable_EmitsHeader"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "pool_id authority threading + credential-bound selection authorization: implemented across gateway selection-auth and coordinator routing/record threading (#1069/#1072/#1076). Conformance promotion (signed journey-result evidence) deferred; per-key pool scope + wallet-session selection remain future slices."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R003",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Revoke",
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Snapshot"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/registry_test.go:TestRevoke_RemovesMemberAndBumpsGeneration",
+        "phase4-coordinator/internal/trustpool/registry_test.go:TestRevoke_IsDurableBlocklist"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Pool-scoped membership + durable revocation blocklist: in-memory registry with consistent snapshot + generation bump implemented (#1069). Durable, restart-surviving persistence (R003 durable ledger) and the manifest-driven write path are deferred to a later slice."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R004",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/server.go:func poolBinaryFloorMet",
+        "phase4-coordinator/internal/buyer/server.go:func (c *eligibilityCtx) ProviderMeetsPoolBinaryFloor"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/spec042_pool_binary_floor_test.go:TestPoolBinaryFloor_AllBelowFloor_FailsClosed"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Pool-enforceable fail-closed trust predicates: the minimum-binary-version predicate is implemented fail-closed on every dispatch path (#1079). Other R004 predicates (attestation-tier-as-pool-predicate, require_encrypted_leg, model-hash policy, hardware_mda) and SPEC-020 signed-version evidence are deferred; the binary floor keys off self-reported binary_version (documented carry)."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R005",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/server.go:func (c *eligibilityCtx) ProviderInPool",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) poolGenerationStale"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_PinnedNonMemberRejected"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Per-attempt pool-scoped tenant isolation + generation fence: implemented on the ordinary filter and every by-hand dispatch path with a select->dispatch generation fence (#1069). Conformance promotion (signed journey-result evidence) deferred."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R006",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/route_snapshot.go:func (s *Store) InsertRouteSnapshot",
+        "phase4-coordinator/internal/billing/route_snapshot.go:func (r RouteSnapshot) Value"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/route_snapshot_test.go:TestRouteSnapshotPoolID_DigestBinding",
+        "phase4-coordinator/internal/billing/route_snapshot_test.go:TestRouteSnapshotPoolID_RoundTripsThroughSettlementLoader"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Labels-only pool-scoped settlement bound to the route snapshot: pool_id is bound into the canonical route-snapshot digest and persisted (#1072). label_disputed mismatch handling and creator revenue-split (SPEC-005/016 V1) are deferred."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R007",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Pool-scoped observability + field-level retention matrix: NOT yet implemented (the retention-matrix field list is a deferred v0.1 detailed-design deliverable in the R010 promotion checklist)."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R008",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Buyer-verifiable pool_policy.json + coordinator-attested pool_status.json (closed schemas): NOT yet implemented; the JSON schemas are deferred v0.1 detailed-design deliverables."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R009",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Layer 3 compatibility fields + claim control + privacy binding: NOT yet implemented and blocked until SPEC-041/SPEC-040 are amended; SPEC-042 v0.1 makes no relay-blind/content-confidentiality claim."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R010",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/pool_selection.go:func (s *Server) resolvePoolSelection",
+        "phase5-gateway/internal/router/pool_selection.go:errPoolUnavailable"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/spec042_pools_advertisement_test.go:TestInternalRoutingAdvertisesPoolCapability",
+        "phase5-gateway/internal/router/pool_selection_test.go:TestPoolSelection_CoordinatorDeclinesCapability_FailsClosed"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Config default-off, staged rollout, non-disclosing error taxonomy, and positive coordinator<->gateway capability negotiation: implemented (#1076). The provider-half full close (capability challenge) and predicate-specific error codes are deferred; per-requirement CONFORMANCE promotion pending signed journey-result evidence."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R011",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Pool lifecycle, provider migration, and failover/restart reconstruction: NOT yet implemented (lifecycle state machine + min_eligible_members readiness are future slices)."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R012",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Manifest authority + signer-set key lifecycle: NOT yet implemented; depends on the signed-manifest machinery (R001) which is a future slice."
       }
     }
   ]
