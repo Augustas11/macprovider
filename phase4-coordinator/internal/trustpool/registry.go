@@ -13,7 +13,12 @@
 // populate. The Registry is safe for concurrent use.
 package trustpool
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+
+	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
+)
 
 // Registry maps pool_id -> membership/revocation state.
 type Registry struct {
@@ -29,7 +34,14 @@ type poolState struct {
 	// path explicitly is not.
 	members map[string]struct{}
 	revoked map[string]struct{}
-	// generation increments on every membership/revocation change so the
+	// minBinaryVersion is the pool's minimum provider binary version
+	// (SPEC-042 R004 predicate). A member whose binary_version is below this
+	// floor is not eligible for the pool's traffic (SPEC-042 R010
+	// pool_binary_too_old). "" means no floor is configured — the gate is a
+	// strict no-op. The floor rides this consistent snapshot so a route
+	// attempt evaluates membership AND floor against one coherent view.
+	minBinaryVersion string
+	// generation increments on every membership/revocation/floor change so the
 	// routing generation fence (SPEC-042 R005) can detect a snapshot that
 	// is no longer current.
 	generation uint64
@@ -44,7 +56,11 @@ type Snapshot struct {
 	PoolID     string
 	Exists     bool
 	Members    map[string]bool // non-revoked members, keyed by provider identity
-	Generation uint64
+	// MinBinaryVersion is the pool's minimum provider binary version floor
+	// (SPEC-042 R004), captured under the same lock as Members/Generation.
+	// "" means no floor — the eligibility gate is inert.
+	MinBinaryVersion string
+	Generation       uint64
 }
 
 // NewRegistry returns an empty registry.
@@ -101,9 +117,38 @@ func (r *Registry) Revoke(poolID, providerID string) {
 	ps.generation++
 }
 
-// Snapshot returns a consistent read of the pool's non-revoked members and
-// its generation. For an unknown pool, Exists is false and Members is empty,
-// which the routing layer treats as fail-closed (no eligible member).
+// SetMinBinaryVersion sets the pool's minimum provider binary version floor
+// (SPEC-042 R004) and bumps the generation. Bumping the generation means a
+// raised floor invalidates in-flight reservations fenced to the prior
+// generation (SPEC-042 R005), so the new floor applies at the very next
+// dispatch rather than leaking a window of under-version routing. "" clears
+// the floor. Seed helper / control-plane action.
+//
+// The floor MUST be a version the coordinator's canonical comparator can parse
+// (versionfloor.Valid); a malformed floor is REJECTED here rather than stored,
+// because a stored-but-unparseable floor makes versionfloor.Compare fail for
+// every provider and bricks the whole pool with pool_binary_too_old (an
+// avoidable, confusing pool-wide outage from a config typo). Invalid input is a
+// no-op that returns an error and does not bump the generation.
+func (r *Registry) SetMinBinaryVersion(poolID, version string) error {
+	if version != "" && !versionfloor.Valid(version) {
+		return fmt.Errorf("trustpool: invalid pool min binary version %q for pool %q", version, poolID)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ps := r.ensure(poolID)
+	if ps.minBinaryVersion == version {
+		return nil
+	}
+	ps.minBinaryVersion = version
+	ps.generation++
+	return nil
+}
+
+// Snapshot returns a consistent read of the pool's non-revoked members, its
+// binary-version floor, and its generation. For an unknown pool, Exists is
+// false and Members is empty, which the routing layer treats as fail-closed
+// (no eligible member).
 func (r *Registry) Snapshot(poolID string) Snapshot {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -118,7 +163,7 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		}
 		members[id] = true
 	}
-	return Snapshot{PoolID: poolID, Exists: true, Members: members, Generation: ps.generation}
+	return Snapshot{PoolID: poolID, Exists: true, Members: members, MinBinaryVersion: ps.minBinaryVersion, Generation: ps.generation}
 }
 
 // Generation returns the current generation for a pool (0 for unknown pools).
