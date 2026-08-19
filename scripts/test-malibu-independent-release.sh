@@ -139,14 +139,21 @@ valid_cli_tag="v$valid_cli_version"
 policy_file="$work/release-policy.env"
 bash "$root/scripts/release-staged-version-policy.sh" "$valid_cli_tag" > "$policy_file"
 source "$policy_file"
-staged_coordinator_policy="--allow-previous-stable=$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION"
-staged_candidate_policy="--staged-candidate=$MACPROVIDER_RELEASE_CANDIDATE_VERSION"
 
-"$validator" "$valid_cli_tag" "$valid_cli_version" "$valid_sha" "$valid_archive_sha" \
-  "$staged_coordinator_policy" "$staged_candidate_policy" >/dev/null
+run_validator() {
+  if [[ "$MACPROVIDER_RELEASE_STAGED" == true ]]; then
+    "$validator" "$@" \
+      "--allow-previous-stable=$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION" \
+      "--staged-candidate=$MACPROVIDER_RELEASE_CANDIDATE_VERSION"
+  else
+    "$validator" "$@"
+  fi
+}
+
+run_validator "$valid_cli_tag" "$valid_cli_version" "$valid_sha" "$valid_archive_sha" >/dev/null
 
 expect_failure() {
-  if "$validator" "$@" "$staged_coordinator_policy" "$staged_candidate_policy" >/dev/null 2>&1; then
+  if run_validator "$@" >/dev/null 2>&1; then
     echo "Malibu release CLI input validation unexpectedly succeeded: $*" >&2
     exit 1
   fi
