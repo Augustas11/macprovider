@@ -18,9 +18,31 @@ trap 'rm -rf "$work"' EXIT
 policy_file="$work/release-policy.env"
 bash "$policy_guard" "v$binary_version" > "$policy_file"
 source "$policy_file"
-[[ "$MACPROVIDER_RELEASE_STAGED" == true ]]
-staged_coordinator_policy="--allow-previous-stable=$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION"
-staged_candidate_policy="--staged-candidate=$MACPROVIDER_RELEASE_CANDIDATE_VERSION"
+if [[ "$MACPROVIDER_RELEASE_STAGED" == true ]]; then
+  staged_coordinator_policy="--allow-previous-stable=$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION"
+  staged_candidate_policy="--staged-candidate=$MACPROVIDER_RELEASE_CANDIDATE_VERSION"
+else
+  [[ -z "$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION" ]]
+  previous_patch="$(python3 - "$binary_version" <<'PY'
+import sys
+
+major, minor, patch = (int(part) for part in sys.argv[1].split("."))
+if patch <= 0:
+    raise SystemExit("cannot synthesize a previous stable patch version")
+print(f"{major}.{minor}.{patch - 1}")
+PY
+)"
+  staged_coordinator_policy="--allow-previous-stable=$previous_patch"
+  staged_candidate_policy="--staged-candidate=$binary_version"
+fi
+
+run_version_guard() {
+  if [[ "$MACPROVIDER_RELEASE_STAGED" == true ]]; then
+    bash "$version_guard" "v$binary_version" "$staged_coordinator_policy" "$staged_candidate_policy"
+  else
+    bash "$version_guard" "v$binary_version"
+  fi
+}
 
 fixture="$work/repo"
 reset_fixture() {
@@ -39,25 +61,59 @@ reset_fixture() {
   cp "$repo_root/phase4-coordinator/dist/coordinator.yaml.example" "$fixture/phase4-coordinator/dist/coordinator.yaml.example"
 }
 
+run_fixture_guard() {
+  if [[ "$MACPROVIDER_RELEASE_STAGED" == true ]]; then
+    bash "$fixture/scripts/test-coordinator-advertised-version.sh" "v$binary_version" "$staged_coordinator_policy" "$staged_candidate_policy"
+  else
+    bash "$fixture/scripts/test-coordinator-advertised-version.sh" "v$binary_version"
+  fi
+}
+
 expect_fixture_failure() {
   label="$1"
   pattern="$2"
-  if bash "$fixture/scripts/test-coordinator-advertised-version.sh" "v$binary_version" "$staged_coordinator_policy" "$staged_candidate_policy" >"$work/$label.out" 2>&1; then
+  if run_fixture_guard >"$work/$label.out" 2>&1; then
     echo "version guard accepted invalid fixture: $label" >&2
     exit 1
   fi
   grep -q "$pattern" "$work/$label.out"
 }
 
-if bash "$version_guard" "v$binary_version" >"$work/strict-staging.out" 2>&1; then
-  echo "strict version guard accepted an unpublished candidate against the previous recommendation" >&2
-  exit 1
-fi
-grep -q "advertises $MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION; expected $binary_version" "$work/strict-staging.out"
-base_output="$(bash "$version_guard" "v$binary_version" "$staged_coordinator_policy" "$staged_candidate_policy")"
-grep -q "staged with previous stable coordinator recommendation $MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION" <<<"$base_output"
+if [[ "$MACPROVIDER_RELEASE_STAGED" == true ]]; then
+  if bash "$version_guard" "v$binary_version" >"$work/strict-staging.out" 2>&1; then
+    echo "strict version guard accepted an unpublished candidate against the previous recommendation" >&2
+    exit 1
+  fi
+  grep -q "advertises $MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION; expected $binary_version" "$work/strict-staging.out"
+  base_output="$(run_version_guard)"
+  grep -q "staged with previous stable coordinator recommendation $MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION" <<<"$base_output"
+else
+  base_output="$(bash "$version_guard" "v$binary_version")"
+  grep -q "CLI and coordinator advertised versions are aligned at $binary_version" <<<"$base_output"
 
-if bash "$version_guard" "v$binary_version" "$staged_coordinator_policy" --staged-candidate=1.8.91 >"$work/candidate-drift.out" 2>&1; then
+  reset_fixture
+  for config in \
+    "$fixture/phase4-coordinator/dist/coordinator.yaml" \
+    "$fixture/phase4-coordinator/coordinator.yaml.example" \
+    "$fixture/phase4-coordinator/dist/coordinator.yaml.example"; do
+    sed "s/latest_binary_version: \"$binary_version\"/latest_binary_version: \"$previous_patch\"/" "$config" > "$config.next"
+    mv "$config.next" "$config"
+  done
+  if bash "$fixture/scripts/test-coordinator-advertised-version.sh" "v$binary_version" >"$work/strict-staging.out" 2>&1; then
+    echo "strict version guard accepted an unpublished candidate against the previous recommendation" >&2
+    exit 1
+  fi
+  grep -q "advertises $previous_patch; expected $binary_version" "$work/strict-staging.out"
+  staged_output="$(bash "$fixture/scripts/test-coordinator-advertised-version.sh" "v$binary_version" "$staged_coordinator_policy" "$staged_candidate_policy")"
+  grep -q "staged with previous stable coordinator recommendation $previous_patch" <<<"$staged_output"
+fi
+
+staged_fixture_guard="$version_guard"
+if [[ "$MACPROVIDER_RELEASE_STAGED" == false ]]; then
+  staged_fixture_guard="$fixture/scripts/test-coordinator-advertised-version.sh"
+fi
+
+if bash "$staged_fixture_guard" "v$binary_version" "$staged_coordinator_policy" --staged-candidate=1.8.91 >"$work/candidate-drift.out" 2>&1; then
   echo "version guard accepted a staged exception for a different candidate" >&2
   exit 1
 fi
@@ -92,13 +148,13 @@ expect_fixture_failure duplicate-build 'exactly one numeric CURRENT_PROJECT_VERS
 reset_fixture
 sed "s/$app_version/$future_version/g" "$fixture/phase3-binary/app/project.yml" > "$fixture/phase3-binary/app/project.yml.next"
 mv "$fixture/phase3-binary/app/project.yml.next" "$fixture/phase3-binary/app/project.yml"
-if bash "$fixture/scripts/test-coordinator-advertised-version.sh" "v$binary_version" "$staged_coordinator_policy" "$staged_candidate_policy" >"$work/future-missing-build.out" 2>&1; then
+if run_fixture_guard >"$work/future-missing-build.out" 2>&1; then
   echo "version guard accepted a future release without a release-build ledger entry" >&2
   exit 1
 fi
 grep -q "exactly one entry for $future_version" "$work/future-missing-build.out"
 printf '%s\t%s\n' "$future_version" "$app_build" >> "$fixture/phase3-binary/app/release-builds.tsv"
-if bash "$fixture/scripts/test-coordinator-advertised-version.sh" "v$binary_version" "$staged_coordinator_policy" "$staged_candidate_policy" >"$work/future-reused-build.out" 2>&1; then
+if run_fixture_guard >"$work/future-reused-build.out" 2>&1; then
   echo "version guard accepted a future release that reused build $app_build" >&2
   exit 1
 fi
@@ -107,6 +163,6 @@ sed "s/${future_version_pattern}[[:space:]]*$app_build/$future_version $future_b
 mv "$fixture/phase3-binary/app/release-builds.tsv.next" "$fixture/phase3-binary/app/release-builds.tsv"
 sed "s/CURRENT_PROJECT_VERSION: \"$app_build\"/CURRENT_PROJECT_VERSION: \"$future_build\"/" "$fixture/phase3-binary/app/project.yml" > "$fixture/phase3-binary/app/project.yml.next"
 mv "$fixture/phase3-binary/app/project.yml.next" "$fixture/phase3-binary/app/project.yml"
-bash "$fixture/scripts/test-coordinator-advertised-version.sh" "v$binary_version" "$staged_coordinator_policy" "$staged_candidate_policy"
+run_fixture_guard
 
 echo "independent Malibu and CLI release-version regression checks passed"
