@@ -33,7 +33,11 @@ require_line 'Would enable launchd service: launchctl enable gui/$UID/$PROVIDER_
 require_line 'Installing as a background launchd service.' "automatic launchd install message"
 require_line 'MACPROVIDER_NO_LAUNCHD=1 expert/debug override' "explicit no-launchd escape hatch"
 require_line 'holding_executable="$(lsof -a -p "$holding_pid" -d txt -Fn' "listener executable identity lookup"
-require_line 'if [ "$holding_executable" = "$INSTALL_DIR/macprovider-cli" ]; then' "exact installed provider process recognition"
+require_line 'if [ "$INSTALL_TX_SERVICE_WAS_ACTIVE" -eq 0 ] && [ "$INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE" -eq 0 ]; then' \
+  "legacy launchd upgrades skip manual-process capture"
+require_line 'launchctl print "gui/$UID/$LEGACY_PROVIDER_LABEL"' "legacy LaunchAgent snapshot"
+require_line 'could not bootstrap the previous legacy provider service' "legacy LaunchAgent rollback restore"
+require_line 'could not bootstrap the previous legacy watchdog service' "legacy watchdog rollback restore"
 require_line '<key>MACPROVIDER_CONFIG</key>' "launchd absolute config env key"
 require_line '<string>$config_path</string>' "launchd absolute config env value"
 require_line 'Model download ${bar}' "model download progress bar"

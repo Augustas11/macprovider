@@ -574,19 +574,37 @@ case "$*" in
     service_file="$CASE_ROOT/recovery-service-active"
     disabled_file="$CASE_ROOT/recovery-service-disabled"
     ;;
+  *streamvc.macprovider-watchdog*)
+    service_file="$CASE_ROOT/legacy-watchdog-service-active"
+    disabled_file="$CASE_ROOT/legacy-watchdog-service-disabled"
+    ;;
   *macprovider-watchdog*|*malibu.provider-watchdog*)
     service_file="$CASE_ROOT/watchdog-service-active"
     disabled_file="$CASE_ROOT/watchdog-service-disabled"
+    ;;
+  *streamvc.macprovider*)
+    service_file="$CASE_ROOT/legacy-service-active"
+    disabled_file="$CASE_ROOT/legacy-service-disabled"
     ;;
 esac
 case "$1" in
   print)
     [ -f "$service_file" ] || exit 1
     case "$*" in
+      *streamvc.macprovider-watchdog*)
+        printf 'program = %s\npath = %s\n' \
+          "$CASE_ROOT/home/.local/share/macprovider-watchdog/macprovider-health-monitor" \
+          "$CASE_ROOT/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+        ;;
       *macprovider-watchdog*|*malibu.provider-watchdog*)
         printf 'program = %s\npath = %s\n' \
           "$CASE_ROOT/home/.local/share/macprovider-watchdog/macprovider-health-monitor" \
           "$CASE_ROOT/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+        ;;
+      *streamvc.macprovider*)
+        printf 'program = %s\npath = %s\n' \
+          "$CASE_ROOT/home/macprovider/macprovider-cli" \
+          "$CASE_ROOT/home/Library/LaunchAgents/live.streamvc.macprovider.plist"
         ;;
       *)
         printf 'program = %s\npath = %s\n' \
@@ -908,6 +926,27 @@ run_case() {
     rm -f "$root/service-active"
     start_manual_fixture "$root"
   fi
+  if [ "$prior_state" = "legacy" ]; then
+    rm -f "$root/service-active" "$root/watchdog-service-active"
+    : > "$root/legacy-service-active"
+    : > "$root/legacy-watchdog-service-active"
+    printf '%s\n' \
+      '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<plist version="1.0"><dict>' \
+      '<key>Label</key><string>live.streamvc.macprovider</string>' \
+      '<key>ProgramArguments</key><array>' \
+      "<string>$root/home/macprovider/macprovider-cli</string>" \
+      '</array><key>Comment</key><string>old-legacy-provider-plist</string>' \
+      '</dict></plist>' > "$root/home/Library/LaunchAgents/live.streamvc.macprovider.plist"
+    printf '%s\n' \
+      '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<plist version="1.0"><dict>' \
+      '<key>Label</key><string>live.streamvc.macprovider-watchdog</string>' \
+      '<key>ProgramArguments</key><array>' \
+      "<string>$root/home/.local/share/macprovider-watchdog/macprovider-health-monitor</string>" \
+      '</array><key>Comment</key><string>old-legacy-watchdog-plist</string>' \
+      '</dict></plist>' > "$root/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+  fi
   if [ "$install_phase" = "credential-self-test" ]; then
     printf 'model: old-model\n' > "$root/home/.config/macprovider/config.yaml"
   elif [ "$install_phase" = "ordinary-token-self-test" ]; then
@@ -973,20 +1012,24 @@ run_case() {
       INSTALL_TX_COMMITTED=0
       INSTALL_TX_BACKUP=""
       INSTALL_TX_SERVICE_WAS_ACTIVE=0
+      INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE=0
       INSTALL_TX_HAD_INSTALL_DIR=0
       INSTALL_TX_HAD_BINARY_PATH=0
       INSTALL_TX_HAD_CONFIG=0
       INSTALL_TX_HAD_PROVIDER_ID=0
       INSTALL_TX_HAD_RECOMMENDATION=0
       INSTALL_TX_HAD_PLIST=0
+      INSTALL_TX_HAD_LEGACY_PLIST=0
       INSTALL_TX_HAD_WATCHDOG_DIR=0
       INSTALL_TX_HAD_WATCHDOG_PLIST=0
+      INSTALL_TX_HAD_LEGACY_WATCHDOG_PLIST=0
       INSTALL_TX_HAD_MANIFEST=0
       INSTALL_TX_HAD_LIFECYCLE_STATE=0
       INSTALL_TX_LIFECYCLE_SNAPSHOT_WRITER=""
       INSTALL_TX_LIFECYCLE_SNAPSHOT_OPERATOR_PAUSED=false
       INSTALL_TX_SERVICE_WAS_DISABLED=0
       INSTALL_TX_WATCHDOG_WAS_ACTIVE=0
+      INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE=0
       INSTALL_TX_WATCHDOG_WAS_DISABLED=0
       INSTALL_TX_ROLLING_BACK=0
       INSTALL_TX_BINARY_KIND="symlink"
@@ -1142,6 +1185,9 @@ MANUAL
       && [ "$case_rc" -ne 9 ]; then
     cat "$root/stderr.log" >&2
   fi
+  if [ "$case_name" = "legacy_loaded_rollback" ] && [ "$case_rc" -ne 9 ]; then
+    cat "$root/stderr.log" >&2
+  fi
 }
 
 # Assert the non-lifecycle installation was rolled back. Cases whose snapshot is
@@ -1202,6 +1248,34 @@ assert_old_install "$TMP/success"
 [ -z "$(recovery_dir "$TMP/success")" ]
 grep -F 'bootstrap gui/' "$TMP/success/launchctl.log" >/dev/null
 grep -F 'kickstart -k gui/' "$TMP/success/launchctl.log" >/dev/null
+
+# A loaded live.streamvc.macprovider LaunchAgent is an owned upgrade, not a
+# manual process. Rollback after cutover must restore that legacy label.
+run_case legacy_loaded_rollback "" "" "" mutation legacy
+[ "$(cat "$TMP/legacy_loaded_rollback/rc")" -eq 9 ]
+assert_old_install "$TMP/legacy_loaded_rollback"
+[ -f "$TMP/legacy_loaded_rollback/legacy-service-active" ]
+[ -f "$TMP/legacy_loaded_rollback/legacy-watchdog-service-active" ]
+[ ! -f "$TMP/legacy_loaded_rollback/service-active" ]
+[ ! -f "$TMP/legacy_loaded_rollback/watchdog-service-active" ]
+grep -F 'old-legacy-provider-plist' \
+  "$TMP/legacy_loaded_rollback/home/Library/LaunchAgents/live.streamvc.macprovider.plist" >/dev/null
+grep -F 'old-legacy-watchdog-plist' \
+  "$TMP/legacy_loaded_rollback/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" >/dev/null
+grep -F "bootstrap gui/$(id -u) $TMP/legacy_loaded_rollback/home/Library/LaunchAgents/live.streamvc.macprovider.plist" \
+  "$TMP/legacy_loaded_rollback/launchctl.log" >/dev/null
+grep -F "kickstart -k gui/$(id -u)/live.streamvc.macprovider" \
+  "$TMP/legacy_loaded_rollback/launchctl.log" >/dev/null
+grep -F "bootstrap gui/$(id -u) $TMP/legacy_loaded_rollback/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" \
+  "$TMP/legacy_loaded_rollback/launchctl.log" >/dev/null
+grep -F "kickstart -k gui/$(id -u)/live.streamvc.macprovider-watchdog" \
+  "$TMP/legacy_loaded_rollback/launchctl.log" >/dev/null
+legacy_recovery="$(recovery_dir "$TMP/legacy_loaded_rollback" || true)"
+if [ -n "$legacy_recovery" ] && [ -f "$legacy_recovery/manual-provider.json" ]; then
+  echo "legacy launchd rollback captured a manual provider" >&2
+  exit 1
+fi
+[ -z "$(recovery_dir "$TMP/legacy_loaded_rollback")" ]
 
 # (a) Lifecycle-state rollback restores the exact prior contents byte-for-byte.
 # The mutation phase overwrote the file with an installer-written

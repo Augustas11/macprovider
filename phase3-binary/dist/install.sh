@@ -111,18 +111,22 @@ INSTALL_TX_ACTIVE=0
 INSTALL_TX_COMMITTED=0
 INSTALL_TX_BACKUP=""
 INSTALL_TX_SERVICE_WAS_ACTIVE=0
+INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE=0
 INSTALL_TX_HAD_INSTALL_DIR=0
 INSTALL_TX_HAD_BINARY_PATH=0
 INSTALL_TX_HAD_CONFIG=0
 INSTALL_TX_HAD_PROVIDER_ID=0
 INSTALL_TX_HAD_RECOMMENDATION=0
 INSTALL_TX_HAD_PLIST=0
+INSTALL_TX_HAD_LEGACY_PLIST=0
 INSTALL_TX_HAD_WATCHDOG_DIR=0
 INSTALL_TX_HAD_WATCHDOG_PLIST=0
+INSTALL_TX_HAD_LEGACY_WATCHDOG_PLIST=0
 INSTALL_TX_HAD_MANIFEST=0
 INSTALL_TX_HAD_LIFECYCLE_STATE=0
 INSTALL_TX_SERVICE_WAS_DISABLED=0
 INSTALL_TX_WATCHDOG_WAS_ACTIVE=0
+INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE=0
 INSTALL_TX_WATCHDOG_WAS_DISABLED=0
 INSTALL_TX_ROLLING_BACK=0
 INSTALL_TX_BINARY_KIND="symlink"
@@ -2151,13 +2155,21 @@ write_install_recovery_artifacts() {
     printf 'REC_HAD_PROVIDER_ID=%q\n' "$INSTALL_TX_HAD_PROVIDER_ID"
     printf 'REC_HAD_RECOMMENDATION=%q\n' "$INSTALL_TX_HAD_RECOMMENDATION"
     printf 'REC_HAD_PLIST=%q\n' "$INSTALL_TX_HAD_PLIST"
+    printf 'REC_HAD_LEGACY_PLIST=%q\n' "$INSTALL_TX_HAD_LEGACY_PLIST"
     printf 'REC_HAD_WATCHDOG_DIR=%q\n' "$INSTALL_TX_HAD_WATCHDOG_DIR"
     printf 'REC_HAD_WATCHDOG_PLIST=%q\n' "$INSTALL_TX_HAD_WATCHDOG_PLIST"
+    printf 'REC_HAD_LEGACY_WATCHDOG_PLIST=%q\n' "$INSTALL_TX_HAD_LEGACY_WATCHDOG_PLIST"
     printf 'REC_HAD_MANIFEST=%q\n' "$INSTALL_TX_HAD_MANIFEST"
     printf 'REC_HAD_LIFECYCLE_STATE=%q\n' "$INSTALL_TX_HAD_LIFECYCLE_STATE"
     printf 'REC_SERVICE_WAS_ACTIVE=%q\n' "$INSTALL_TX_SERVICE_WAS_ACTIVE"
+    printf 'REC_LEGACY_SERVICE_WAS_ACTIVE=%q\n' "$INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE"
+    printf 'REC_LEGACY_PROVIDER_LABEL=%q\n' "$LEGACY_PROVIDER_LABEL"
+    printf 'REC_LEGACY_PLIST_PATH=%q\n' "$LEGACY_PLIST_PATH"
     printf 'REC_SERVICE_WAS_DISABLED=%q\n' "$INSTALL_TX_SERVICE_WAS_DISABLED"
     printf 'REC_WATCHDOG_WAS_ACTIVE=%q\n' "$INSTALL_TX_WATCHDOG_WAS_ACTIVE"
+    printf 'REC_LEGACY_WATCHDOG_WAS_ACTIVE=%q\n' "$INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE"
+    printf 'REC_LEGACY_WATCHDOG_LABEL=%q\n' "$LEGACY_WATCHDOG_LABEL"
+    printf 'REC_LEGACY_WATCHDOG_PLIST_PATH=%q\n' "$LEGACY_WATCHDOG_PLIST_PATH"
     printf 'REC_WATCHDOG_WAS_DISABLED=%q\n' "$INSTALL_TX_WATCHDOG_WAS_DISABLED"
     printf 'REC_BINARY_KIND=%q\n' "$INSTALL_TX_BINARY_KIND"
     printf 'REC_REFERRAL_REPLACE_INCUMBENT=%q\n' "$REFERRAL_REPLACE_INCUMBENT"
@@ -2244,6 +2256,14 @@ done
 # shellcheck disable=SC1091
 . "$RECOVERY_DIR/state.sh" || exit 70
 REC_PROVIDER_LABEL="${REC_PROVIDER_LABEL:-live.malibu.provider}"
+REC_LEGACY_PROVIDER_LABEL="${REC_LEGACY_PROVIDER_LABEL:-live.streamvc.macprovider}"
+REC_LEGACY_PLIST_PATH="${REC_LEGACY_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist}"
+REC_LEGACY_SERVICE_WAS_ACTIVE="${REC_LEGACY_SERVICE_WAS_ACTIVE:-0}"
+REC_HAD_LEGACY_PLIST="${REC_HAD_LEGACY_PLIST:-0}"
+REC_LEGACY_WATCHDOG_LABEL="${REC_LEGACY_WATCHDOG_LABEL:-live.streamvc.macprovider-watchdog}"
+REC_LEGACY_WATCHDOG_PLIST_PATH="${REC_LEGACY_WATCHDOG_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist}"
+REC_LEGACY_WATCHDOG_WAS_ACTIVE="${REC_LEGACY_WATCHDOG_WAS_ACTIVE:-0}"
+REC_HAD_LEGACY_WATCHDOG_PLIST="${REC_HAD_LEGACY_WATCHDOG_PLIST:-0}"
 
 recovery_log() { printf '[macprovider-recovery] %s\n' "$*" >&2; }
 acquire_recovery_claim() {
@@ -4847,6 +4867,21 @@ if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-sta
       "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
       || recovery_failed "pre-cutover provider service has an unexpected identity"
   fi
+  if [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
+    if ! launchctl print "gui/$REC_UID/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1; then
+      [ "$REC_HAD_LEGACY_PLIST" -eq 1 ] \
+        || recovery_failed "the prior legacy provider service disappeared before cutover and no launchd plist was preserved"
+      paths_match "$RECOVERY_DIR/legacy-provider.plist" "$REC_LEGACY_PLIST_PATH" file \
+        || recovery_failed "the pre-cutover legacy provider plist changed after the recovery snapshot"
+      launchctl bootstrap "gui/$REC_UID" "$REC_LEGACY_PLIST_PATH" >/dev/null 2>&1 \
+        || recovery_failed "could not restore the unexpectedly inactive pre-cutover legacy provider service"
+      launchctl kickstart -k "gui/$REC_UID/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1 \
+        || recovery_failed "could not start the unexpectedly inactive pre-cutover legacy provider service"
+    fi
+    service_identity_matches "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_PATH" \
+      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      || recovery_failed "pre-cutover legacy provider service has an unexpected identity"
+  fi
   if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
     if ! launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1; then
       [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ] \
@@ -4861,6 +4896,21 @@ if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-sta
     service_identity_matches "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_PATH" \
       "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
       || recovery_failed "pre-cutover watchdog service has an unexpected identity"
+  fi
+  if [ "$REC_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
+    if ! launchctl print "gui/$REC_UID/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1; then
+      [ "$REC_HAD_LEGACY_WATCHDOG_PLIST" -eq 1 ] \
+        || recovery_failed "the prior legacy watchdog was active but no launchd plist was preserved"
+      paths_match "$RECOVERY_DIR/legacy-watchdog.plist" "$REC_LEGACY_WATCHDOG_PLIST_PATH" file \
+        || recovery_failed "the pre-cutover legacy watchdog plist changed after the recovery snapshot"
+      launchctl bootstrap "gui/$REC_UID" "$REC_LEGACY_WATCHDOG_PLIST_PATH" >/dev/null 2>&1 \
+        || recovery_failed "could not restore the pre-cutover legacy watchdog service"
+    fi
+    launchctl kickstart -k "gui/$REC_UID/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1 \
+      || recovery_failed "could not start the pre-cutover legacy watchdog service"
+    service_identity_matches "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_PATH" \
+      "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+      || recovery_failed "pre-cutover legacy watchdog service has an unexpected identity"
   fi
   recovery_log "Cutover never started; incumbent provider files and process were left untouched."
   exit 0
@@ -5032,8 +5082,10 @@ CONFIG_CANDIDATE="$RESTORE_STAGING_DIR/config.yaml"
 PROVIDER_ID_CANDIDATE="$RESTORE_STAGING_DIR/provider_id"
 RECOMMENDATION_CANDIDATE="$RESTORE_STAGING_DIR/last-recommendation.json"
 PLIST_CANDIDATE="$RESTORE_STAGING_DIR/provider.plist"
+LEGACY_PLIST_CANDIDATE="$RESTORE_STAGING_DIR/legacy-provider.plist"
 WATCHDOG_DIR_CANDIDATE="$RESTORE_STAGING_DIR/watchdog-dir"
 WATCHDOG_PLIST_CANDIDATE="$RESTORE_STAGING_DIR/watchdog.plist"
+LEGACY_WATCHDOG_PLIST_CANDIDATE="$RESTORE_STAGING_DIR/legacy-watchdog.plist"
 MANIFEST_CANDIDATE="$RESTORE_STAGING_DIR/install-manifest.json"
 FAILED_CURRENT_DIR="$RECOVERY_DIR/failed-current/$RUN_ID"
 
@@ -5057,11 +5109,17 @@ fi
 if [ "$REC_HAD_PLIST" -eq 1 ]; then
   stage_restore "$RECOVERY_DIR/provider.plist" "$PLIST_CANDIDATE" file || recovery_failed "could not stage and verify the previous launchd plist"
 fi
+if [ "$REC_HAD_LEGACY_PLIST" -eq 1 ]; then
+  stage_restore "$RECOVERY_DIR/legacy-provider.plist" "$LEGACY_PLIST_CANDIDATE" file || recovery_failed "could not stage and verify the previous legacy launchd plist"
+fi
 if [ "$REC_HAD_WATCHDOG_DIR" -eq 1 ]; then
   stage_restore "$RECOVERY_DIR/watchdog-dir" "$WATCHDOG_DIR_CANDIDATE" directory || recovery_failed "could not stage and verify the previous watchdog directory"
 fi
 if [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ]; then
   stage_restore "$RECOVERY_DIR/watchdog.plist" "$WATCHDOG_PLIST_CANDIDATE" file || recovery_failed "could not stage and verify the previous watchdog plist"
+fi
+if [ "$REC_HAD_LEGACY_WATCHDOG_PLIST" -eq 1 ]; then
+  stage_restore "$RECOVERY_DIR/legacy-watchdog.plist" "$LEGACY_WATCHDOG_PLIST_CANDIDATE" file || recovery_failed "could not stage and verify the previous legacy watchdog plist"
 fi
 if [ "$REC_HAD_MANIFEST" -eq 1 ]; then
   stage_restore "$RECOVERY_DIR/install-manifest.json" "$MANIFEST_CANDIDATE" file || recovery_failed "could not stage and verify the previous install manifest"
@@ -5111,6 +5169,12 @@ else
   fi
   service_loaded "$REC_PROVIDER_LABEL" && recovery_failed "provider service is active even though it was inactive before the failed install"
 fi
+if [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
+  [ "$REC_HAD_LEGACY_PLIST" -eq 1 ] || recovery_failed "the prior legacy provider service was active but no recoverable plist was preserved"
+  stop_loaded_service "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_PATH" \
+    "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+    "the incumbent legacy provider service"
+fi
 if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "the prior watchdog was active but no recoverable plist was preserved"
   stop_loaded_service "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_PATH" \
@@ -5123,6 +5187,12 @@ else
       "the transaction watchdog service"
   fi
   service_loaded "$REC_WATCHDOG_LABEL" && recovery_failed "watchdog service is active even though it was inactive before the failed install"
+fi
+if [ "$REC_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
+  [ "$REC_HAD_LEGACY_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "the prior legacy watchdog was active but no recoverable plist was preserved"
+  stop_loaded_service "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_PATH" \
+    "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+    "the incumbent legacy watchdog service"
 fi
 # INSTALL_DIR intentionally permits unrelated support files. Stop all owners
 # first, then move the live directory to a stable private name before merging
@@ -5168,8 +5238,10 @@ else
     || recovery_failed "could not preserve the installer bootstrap identity through rollback"
 fi
 swap_restore provider.plist "$REC_PLIST_PATH" "$PLIST_CANDIDATE" "$REC_HAD_PLIST" || recovery_failed "could not restore the previous launchd plist"
+swap_restore legacy-provider.plist "$REC_LEGACY_PLIST_PATH" "$LEGACY_PLIST_CANDIDATE" "$REC_HAD_LEGACY_PLIST" || recovery_failed "could not restore the previous legacy launchd plist"
 swap_restore watchdog-dir "$REC_WATCHDOG_DIR" "$WATCHDOG_DIR_CANDIDATE" "$REC_HAD_WATCHDOG_DIR" || recovery_failed "could not restore the previous watchdog directory"
 swap_restore watchdog.plist "$REC_WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_CANDIDATE" "$REC_HAD_WATCHDOG_PLIST" || recovery_failed "could not restore the previous watchdog plist"
+swap_restore legacy-watchdog.plist "$REC_LEGACY_WATCHDOG_PLIST_PATH" "$LEGACY_WATCHDOG_PLIST_CANDIDATE" "$REC_HAD_LEGACY_WATCHDOG_PLIST" || recovery_failed "could not restore the previous legacy watchdog plist"
 swap_restore install-manifest.json "$REC_MANIFEST_PATH" "$MANIFEST_CANDIDATE" "$REC_HAD_MANIFEST" || recovery_failed "could not restore the previous install manifest"
 # The lifecycle-state file is restored last so the transactional intermediate
 # state (rollback_in_progress) authored before recovery began stays observable
@@ -5198,9 +5270,19 @@ if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   service_identity_matches "$REC_PROVIDER_LABEL" "$REC_PLIST_PATH" \
     "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
     || recovery_failed "previous provider service has an unexpected identity"
+elif [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
+  [ "$REC_HAD_LEGACY_PLIST" -eq 1 ] || recovery_failed "previous legacy service was active but no previous plist was preserved"
+  launchctl bootstrap "gui/$REC_UID" "$REC_LEGACY_PLIST_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous legacy provider service"
+  launchctl kickstart -k "gui/$REC_UID/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous legacy provider service"
+  service_identity_matches "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_PATH" \
+    "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+    || recovery_failed "previous legacy provider service has an unexpected identity"
 else
   if launchctl print "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1; then
     recovery_failed "provider service is active even though it was inactive before the failed install"
+  fi
+  if launchctl print "gui/$REC_UID/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1; then
+    recovery_failed "legacy provider service is active even though it was inactive before the failed install"
   fi
 fi
 
@@ -5216,14 +5298,25 @@ if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   service_identity_matches "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_PATH" \
     "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
     || recovery_failed "previous watchdog service has an unexpected identity"
+elif [ "$REC_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
+  [ "$REC_HAD_LEGACY_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "previous legacy watchdog was active but no previous plist was preserved"
+  launchctl bootstrap "gui/$REC_UID" "$REC_LEGACY_WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous legacy watchdog service"
+  launchctl kickstart -k "gui/$REC_UID/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous legacy watchdog service"
+  service_identity_matches "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_PATH" \
+    "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+    || recovery_failed "previous legacy watchdog service has an unexpected identity"
 else
   if launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1; then
     recovery_failed "watchdog service is active even though it was inactive before the failed install"
+  fi
+  if launchctl print "gui/$REC_UID/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1; then
+    recovery_failed "legacy watchdog service is active even though it was inactive before the failed install"
   fi
 fi
 
 if [ -s "$RECOVERY_DIR/manual-provider.json" ]; then
   [ "$REC_SERVICE_WAS_ACTIVE" -eq 0 ] || recovery_failed "manual provider record conflicts with an active prior launchd service"
+  [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 0 ] || recovery_failed "manual provider record conflicts with an active prior legacy launchd service"
   mkdir -p "$REC_LOG_DIR" || recovery_failed "could not recreate the previous manual provider log directory"
   python3 - "$RECOVERY_DIR/manual-provider.json" "$REC_INSTALL_DIR/macprovider-cli" \
     "$REC_LOG_DIR/macprovider.out.log" "$REC_LOG_DIR/macprovider.err.log" \
@@ -5577,6 +5670,7 @@ capture_manual_provider_for_recovery() {
   manual_pid="$1"
   [ "$INSTALL_TX_ACTIVE" -eq 1 ] || die 70 "manual provider capture requires an active install transaction"
   [ "$INSTALL_TX_SERVICE_WAS_ACTIVE" -eq 0 ] || return 0
+  [ "$INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE" -eq 0 ] || return 0
   case "$manual_pid" in
     ''|*[!0-9]*) die 70 "manual provider pid is invalid" ;;
   esac
@@ -5849,14 +5943,44 @@ begin_install_transaction() {
   if [ "$INSTALL_TX_HAD_INSTALL_DIR" -eq 1 ] || [ "$INSTALL_TX_HAD_BINARY_PATH" -eq 1 ] || [ "$INSTALL_TX_HAD_MANIFEST" -eq 1 ]; then
     EXISTING_INSTALL_WAS_PRESENT=1
   fi
-  if launchctl print "gui/$UID/live.malibu.provider" >/dev/null 2>&1; then
+  if launchctl print "gui/$UID/$PROVIDER_LABEL" >/dev/null 2>&1; then
     INSTALL_TX_SERVICE_WAS_ACTIVE=1
   fi
-  if launchd_label_is_disabled "live.malibu.provider"; then
+  if launchctl print "gui/$UID/$LEGACY_PROVIDER_LABEL" >/dev/null 2>&1; then
+    INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE=1
+  fi
+  if [ "$INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
+    [ -f "$LEGACY_PLIST_PATH" ] \
+      || {
+        rm -rf -- "$recovery_staging" \
+          || die 70 "loaded legacy provider has no recoverable launchd plist and partial recovery data could not be removed"
+        die 70 "loaded legacy provider has no recoverable launchd plist; current install was not changed"
+      }
+    stage_install_tx_plist "$LEGACY_PLIST_PATH" "$recovery_staging/legacy-provider.plist" \
+      "$LEGACY_PROVIDER_LABEL" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
+      || die 70 "could not stage and verify the previous legacy launchd plist; current install was not changed (partial recovery data: $recovery_staging)"
+    INSTALL_TX_HAD_LEGACY_PLIST=1
+  fi
+  if launchd_label_is_disabled "$PROVIDER_LABEL"; then
     INSTALL_TX_SERVICE_WAS_DISABLED=1
   fi
   if launchctl print "gui/$UID/$WATCHDOG_LABEL" >/dev/null 2>&1; then
     INSTALL_TX_WATCHDOG_WAS_ACTIVE=1
+  fi
+  if launchctl print "gui/$UID/$LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1; then
+    INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE=1
+  fi
+  if [ "$INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
+    [ -f "$LEGACY_WATCHDOG_PLIST_PATH" ] \
+      || {
+        rm -rf -- "$recovery_staging" \
+          || die 70 "loaded legacy watchdog has no recoverable launchd plist and partial recovery data could not be removed"
+        die 70 "loaded legacy watchdog has no recoverable launchd plist; current install was not changed"
+      }
+    stage_install_tx_plist "$LEGACY_WATCHDOG_PLIST_PATH" "$recovery_staging/legacy-watchdog.plist" \
+      "$LEGACY_WATCHDOG_LABEL" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
+      || die 70 "could not stage and verify the previous legacy watchdog plist; current install was not changed (partial recovery data: $recovery_staging)"
+    INSTALL_TX_HAD_LEGACY_WATCHDOG_PLIST=1
   fi
   if launchd_label_is_disabled "$WATCHDOG_LABEL"; then
     INSTALL_TX_WATCHDOG_WAS_DISABLED=1
@@ -5869,10 +5993,20 @@ begin_install_transaction() {
       || die 70 "loaded provider has no recoverable launchd plist and partial recovery data could not be removed"
     die 70 "loaded provider has no recoverable launchd plist; current install was not changed"
   fi
+  if [ "$INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ] && [ "$INSTALL_TX_HAD_LEGACY_PLIST" -ne 1 ]; then
+    rm -rf -- "$recovery_staging" \
+      || die 70 "loaded legacy provider has no recoverable launchd plist and partial recovery data could not be removed"
+    die 70 "loaded legacy provider has no recoverable launchd plist; current install was not changed"
+  fi
   if [ "$INSTALL_TX_WATCHDOG_WAS_ACTIVE" -eq 1 ] && [ "$INSTALL_TX_HAD_WATCHDOG_PLIST" -ne 1 ]; then
     rm -rf -- "$recovery_staging" \
       || die 70 "loaded watchdog has no recoverable launchd plist and partial recovery data could not be removed"
     die 70 "loaded watchdog has no recoverable launchd plist; current install was not changed"
+  fi
+  if [ "$INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ] && [ "$INSTALL_TX_HAD_LEGACY_WATCHDOG_PLIST" -ne 1 ]; then
+    rm -rf -- "$recovery_staging" \
+      || die 70 "loaded legacy watchdog has no recoverable launchd plist and partial recovery data could not be removed"
+    die 70 "loaded legacy watchdog has no recoverable launchd plist; current install was not changed"
   fi
   write_install_recovery_artifacts "$recovery_staging" \
     || die 70 "could not create verified recovery instructions; current install was not changed (partial recovery data: $recovery_staging)"
@@ -5890,6 +6024,10 @@ begin_install_transaction() {
   if [ "$INSTALL_TX_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
     reclaim_launchd_service "$WATCHDOG_LABEL" \
       || die 70 "could not suspend the existing watchdog for the protected install transaction"
+  fi
+  if [ "$INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
+    reclaim_legacy_launchd_service "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_PATH" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
+      || die 70 "could not suspend the existing legacy watchdog for the protected install transaction"
   fi
 }
 
@@ -6511,7 +6649,7 @@ ensure_port_free() {
       return
     fi
     log "Existing macprovider-cli holding port $PORT; stopping it for upgrade-in-place."
-    if [ "$INSTALL_TX_SERVICE_WAS_ACTIVE" -eq 0 ]; then
+    if [ "$INSTALL_TX_SERVICE_WAS_ACTIVE" -eq 0 ] && [ "$INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE" -eq 0 ]; then
       case "$holding_pids" in
         *$'\n'*) die 70 "multiple manual macprovider-cli processes hold port $PORT; refusing ambiguous recovery capture" ;;
       esac
