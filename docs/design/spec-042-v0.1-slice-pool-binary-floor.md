@@ -103,7 +103,50 @@ member-specific check, before the generic no-provider error.
 - Provider binary/handshake → **unchanged** (reuses the existing `binary_version`).
 - Default-off preserved: `trustPools == nil` → no pool paths execute at all.
 
-## 7. Test plan (conformance-first, mirror `spec042_pool_isolation_test.go`)
+## 7. Known limitations (money-path audit — accepted, documented carries)
+
+Two HIGH findings from the codex money-path audit (security + architect lanes)
+are **intentional scope boundaries of Option A**, accepted and documented rather
+than resolved in this slice. Both are recorded here so no one over-reads the
+guarantee, and both have a clean, localized upgrade path.
+
+1. **`binary_version` is an unauthenticated advertisement, not signed evidence
+   (security + architect).** The gate compares against the provider's
+   self-reported `binary_version` from the WebSocket `hello` handshake, which is
+   not cryptographically bound to the running binary. R004 literally requires a
+   *signed* minimum provider binary version, and R004's own answer is
+   coordinator-held SPEC-020 release evidence. So a **compromised, already-admitted
+   pool member** could spoof a high `binary_version` to pass the floor while
+   running old code. Why this is accepted for the MVP: (a) it reuses the *exact*
+   signal the pre-existing #768 model-version floor and the global-admission
+   `RequiredBinaryVersion` floor already trust — the slice does **not worsen** the
+   coordinator's version-trust model, it extends it; (b) the primary trust
+   boundary, pool **membership**, is an authenticated SPEC-003 identity explicitly
+   admitted by the pool creator, so the spoof threat is bounded to a
+   creator-admitted-then-compromised member, not an arbitrary provider; (c) there
+   is **no** coordinator-held verified binary evidence today (attestation binds
+   the SE key/tier, not the version; there is no SPEC-020 evidence store), so a
+   real fix is a separate, sizeable build; (d) the feature is default-off and
+   unenabled — no live exposure. **Upgrade path (localized):** when a
+   coordinator-held verified/attested binary version bound to provider identity
+   exists (SPEC-020 release evidence), change only what `poolBinaryFloorMet`
+   compares against (`p.BinaryVersion` → the verified field). The enforcement
+   rails (all dispatch paths, fail-safe, fence) are unchanged.
+
+2. **Floorless pools are inert (architect).** A pool with no floor configured
+   applies no binary gate, so an under-version member can serve its traffic. This
+   is spec-legitimate — R004's binary-version predicate is **optional** (a pool
+   MAY require it) — and is not a live isolation break today because the provider
+   does nothing pool-specific at serve time (pool trust is coordinator-enforced in
+   routing/settlement). Enforcing per-pool policy completeness (require a floor,
+   or advertise per-pool readiness before routing) belongs to the **enable path**
+   and the signed manifest / `pool_status.json` readiness (R001/R008/R011), which
+   are separate slices. Until then, operating a pool that requires the binary
+   predicate is the operator's responsibility to configure via
+   `SetMinBinaryVersion`. The default (no floor = inert) preserves byte-identical
+   behavior for the unenabled feature.
+
+## 8. Test plan (conformance-first, mirror `spec042_pool_isolation_test.go`)
 - `poolProvider` variant that sets `BinaryVersion`; below-floor member excluded on the filter path, the pinned path, and the slot-queue path.
 - All-members-under-floor → `pool_binary_too_old`, non-retryable, no spill (no dispatch).
 - At/above-floor member → served (passes the gate).

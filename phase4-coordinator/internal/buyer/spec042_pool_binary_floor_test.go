@@ -17,6 +17,60 @@ func poolProviderVer(providerID, version string) pool.Provider {
 	return p
 }
 
+// poolBinaryFloorMet must delegate to the coordinator's canonical
+// versionfloor.Compare so the pool gate keeps identical version semantics
+// (v-prefix tolerated, pre-release/extra-component rejected, empty floor
+// inert, empty/malformed provider version fail-safe excluded).
+func TestPoolBinaryFloorMet(t *testing.T) {
+	cases := []struct {
+		version, floor string
+		want           bool
+	}{
+		{"1.8.0", "1.8.0", true},   // equal meets
+		{"1.8.1", "1.8.0", true},   // above meets
+		{"1.7.9", "1.8.0", false},  // below excluded
+		{"v1.8.0", "1.8.0", true},  // v-prefix tolerated by the comparator
+		{"1.8.0", "v1.8.0", true},  // v-prefix on the floor too
+		{"2", "1.8.0", true},       // short form, above
+		{"1.8", "1.8.0", true},     // short form, equal (zero-fill)
+		{"1.8.0-rc1", "1.8.0", false}, // pre-release unparseable -> excluded (fail-safe)
+		{"1.2.3.4", "1.8.0", false},   // too many components -> excluded (fail-safe)
+		{"", "1.8.0", false},          // empty provider version -> excluded (fail-safe)
+		{"garbage", "1.8.0", false},   // non-numeric -> excluded (fail-safe)
+		{"1.0.0", "", true},           // empty floor -> inert (always met)
+		{"", "", true},                // no floor, no version -> inert
+	}
+	for _, tc := range cases {
+		if got := poolBinaryFloorMet(tc.version, tc.floor); got != tc.want {
+			t.Errorf("poolBinaryFloorMet(%q,%q)=%v want %v", tc.version, tc.floor, got, tc.want)
+		}
+	}
+}
+
+// A malformed floor is rejected at set time (SetMinBinaryVersion returns an
+// error and does not store it), so a config typo cannot brick a pool with a
+// stored-but-unparseable floor that fails every provider.
+func TestPoolBinaryFloor_SetRejectsMalformedFloor(t *testing.T) {
+	_, _, tp := poolIsolationServer(t)
+	for _, bad := range []string{"latest", "1.8.0.1", "1.8.0-rc1", "v", "1.x"} {
+		if err := tp.SetMinBinaryVersion("P", bad); err == nil {
+			t.Fatalf("SetMinBinaryVersion(%q) accepted a malformed floor", bad)
+		}
+	}
+	// A valid floor and clearing ("") are accepted.
+	if err := tp.SetMinBinaryVersion("P", "1.8.0"); err != nil {
+		t.Fatalf("valid floor rejected: %v", err)
+	}
+	if err := tp.SetMinBinaryVersion("P", ""); err != nil {
+		t.Fatalf("clearing floor rejected: %v", err)
+	}
+	// A rejected floor left no floor stored -> a low-version member is still
+	// served (the bad set was a no-op, not a silent brick).
+	if tp.Snapshot("P").MinBinaryVersion != "" {
+		t.Fatalf("rejected/cleared floor left a stored value: %q", tp.Snapshot("P").MinBinaryVersion)
+	}
+}
+
 // Ordinary filter path: a pool whose only member is below the floor fails
 // closed with the non-retryable pool_binary_too_old — never spilling to the
 // under-version member or to global (SPEC-042 R004/R010).

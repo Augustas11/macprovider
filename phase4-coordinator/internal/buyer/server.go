@@ -6900,6 +6900,16 @@ func (c *eligibilityCtx) ProviderMeetsPoolBinaryFloor(p pool.Provider) bool {
 // canonical comparator; an empty or unparseable provider version is treated as
 // below the floor (fail-safe, mirroring the #768 malformed-version posture and
 // the global admission floor).
+//
+// TRUST NOTE (money-path audit, accepted carry): providerVersion is the
+// provider's self-reported binary_version from the hello handshake — an
+// unauthenticated advertisement, the SAME signal the #768 model-version floor
+// already trusts. It is NOT the SPEC-020 signed release evidence R004 ultimately
+// requires, so a compromised already-admitted member could spoof it. Membership
+// (authenticated SPEC-003 identity, creator-admitted) is the primary boundary;
+// this floor is a secondary predicate. When coordinator-held verified binary
+// evidence exists, swap the compared value here — the rails are unchanged. See
+// docs/design/spec-042-v0.1-slice-pool-binary-floor.md §7.
 func poolBinaryFloorMet(providerVersion, floor string) bool {
 	if floor == "" {
 		return true

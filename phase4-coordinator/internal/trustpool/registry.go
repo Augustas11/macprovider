@@ -13,7 +13,12 @@
 // populate. The Registry is safe for concurrent use.
 package trustpool
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+
+	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
+)
 
 // Registry maps pool_id -> membership/revocation state.
 type Registry struct {
@@ -118,15 +123,26 @@ func (r *Registry) Revoke(poolID, providerID string) {
 // generation (SPEC-042 R005), so the new floor applies at the very next
 // dispatch rather than leaking a window of under-version routing. "" clears
 // the floor. Seed helper / control-plane action.
-func (r *Registry) SetMinBinaryVersion(poolID, version string) {
+//
+// The floor MUST be a version the coordinator's canonical comparator can parse
+// (versionfloor.Valid); a malformed floor is REJECTED here rather than stored,
+// because a stored-but-unparseable floor makes versionfloor.Compare fail for
+// every provider and bricks the whole pool with pool_binary_too_old (an
+// avoidable, confusing pool-wide outage from a config typo). Invalid input is a
+// no-op that returns an error and does not bump the generation.
+func (r *Registry) SetMinBinaryVersion(poolID, version string) error {
+	if version != "" && !versionfloor.Valid(version) {
+		return fmt.Errorf("trustpool: invalid pool min binary version %q for pool %q", version, poolID)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ps := r.ensure(poolID)
 	if ps.minBinaryVersion == version {
-		return
+		return nil
 	}
 	ps.minBinaryVersion = version
 	ps.generation++
+	return nil
 }
 
 // Snapshot returns a consistent read of the pool's non-revoked members, its
