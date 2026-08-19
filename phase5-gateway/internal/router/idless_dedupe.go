@@ -37,7 +37,7 @@ const (
 	// idlessDedupeFingerprintVersion is mixed into every fingerprint so a
 	// future change to the keying inputs can never collide with entries
 	// computed by an older build.
-	idlessDedupeFingerprintVersion = "mpg-idless-v2"
+	idlessDedupeFingerprintVersion = "mpg-idless-v3"
 
 	idlessDedupeEntrypointChat      = "chat"
 	idlessDedupeEntrypointResponses = "responses"
@@ -96,7 +96,13 @@ const (
 //  6. retryHint — X-MacProvider-Retry, which copyForwardHeaders forwards to
 //     the coordinator where it changes retry/failover behaviour. Two requests
 //     that differ only in this header are NOT the same dispatch.
-//  7. SHA-256 of the raw body bytes.
+//  7. poolID — the resolved SPEC-042 Trusted Pool (X-MacProvider-Pool-Select).
+//     Because the pool selector is a header, not a body field, two requests
+//     with identical bodies but different pools (or pool vs global) would
+//     otherwise share a fingerprint and the second could replay the first —
+//     a silent pool<->global / cross-pool reassignment SPEC-042-R002 forbids.
+//     "" (global) is a distinct key from any named pool.
+//  8. SHA-256 of the raw body bytes.
 //
 // Everything else that changes the generated answer is inside those bytes
 // (model, messages, stream, max_tokens, response_format). Transport-level
@@ -106,10 +112,10 @@ const (
 // Adding a component is a keying change: bump idlessDedupeFingerprintVersion
 // when one is added to a build that is already deployed, so old and new
 // fingerprints cannot collide.
-func idlessRequestFingerprint(entrypoint, accountID, demoTokenHash, conversationTag, retryHint string, body []byte) string {
+func idlessRequestFingerprint(entrypoint, accountID, demoTokenHash, conversationTag, retryHint, poolID string, body []byte) string {
 	bodyDigest := sha256.Sum256(body)
 	h := sha256.New()
-	for _, part := range []string{idlessDedupeFingerprintVersion, entrypoint, accountID, demoTokenHash, conversationTag, retryHint} {
+	for _, part := range []string{idlessDedupeFingerprintVersion, entrypoint, accountID, demoTokenHash, conversationTag, retryHint, poolID} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}

@@ -846,6 +846,15 @@ func (s *Server) handleInternalRouting(w http.ResponseWriter, r *http.Request) {
 			"retry_per_attempt_timeout_s":   int(s.retryPerAttemptTimeout.Seconds()),
 			"max_providers_faulted_request": s.maxFaultedPerRequest,
 		},
+		// SPEC-042-R010 positive pool-capability advertisement. The gateway
+		// refuses to emit a pool-required dispatch unless this reads true, so
+		// an old coordinator (which omits the block and cannot understand
+		// pool_id) fails the gateway closed instead of silently routing pool
+		// traffic from the global snapshot. trustPools is the pool-feature
+		// handle (WithPoolMembership): nil = feature off = advertise false.
+		"pools": map[string]any{
+			"enabled": s.trustPools != nil,
+		},
 		"tier2": s.internalTier2Metadata(),
 	})
 }

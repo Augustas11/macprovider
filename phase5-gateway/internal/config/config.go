@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -272,6 +273,35 @@ type FeaturesConfig struct {
 	ResponsesAPIEnabled      bool                     `yaml:"responses_api_enabled"`
 	AnthropicMessagesEnabled bool                     `yaml:"anthropic_messages_enabled"`
 	RelayBlindRequests       RelayBlindRequestsConfig `yaml:"relay_blind_requests"`
+	TrustedPools             TrustedPoolsConfig       `yaml:"trusted_pools"`
+}
+
+// TrustedPoolsConfig is the SPEC-042 Layer 2 gateway feature. Default-off.
+// AccountPools binds the authorized-pool ceiling to a buyer credential at
+// account granularity (a key belongs to exactly one account, so this is a
+// safe superset-free binding until per-key pool scopes land). A request may
+// select only a pool present in its account's list; an account absent from
+// the map authorizes no pool (fail-closed).
+type TrustedPoolsConfig struct {
+	Enabled      bool                `yaml:"enabled"`
+	AccountPools map[string][]string `yaml:"account_pools"`
+}
+
+// Authorizes reports whether accountID is configured to select poolID.
+// Fail-closed: empty inputs and accounts absent from account_pools authorize
+// nothing. This is a pure map lookup with no coordinator interaction, so it
+// runs before any capability roundtrip and cannot become an existence oracle
+// (SPEC-042-R010).
+func (t TrustedPoolsConfig) Authorizes(accountID, poolID string) bool {
+	if accountID == "" || poolID == "" {
+		return false
+	}
+	for _, p := range t.AccountPools[accountID] {
+		if p == poolID {
+			return true
+		}
+	}
+	return false
 }
 
 type RelayBlindRequestsConfig struct {
@@ -578,6 +608,9 @@ func (c Config) Validate() error {
 	if err := validateRelayBlindRequestsConfig(c); err != nil {
 		return err
 	}
+	if err := validateTrustedPoolsConfig(c); err != nil {
+		return err
+	}
 	if len(c.Auth.OAuth.CallbackAllowlist) == 0 {
 		return fmt.Errorf("auth.oauth.callback_allowlist must not be empty")
 	}
@@ -861,6 +894,76 @@ func validateWalletSessionsConfig(c Config) error {
 		return fmt.Errorf("auth.wallet_sessions wallet_fingerprint_secret rotation is not supported in v0.1")
 	}
 	return rejectWalletSessionSecretReuse(c)
+}
+
+// validateTrustedPoolsConfig enforces SPEC-042 gateway config hygiene. When
+// disabled (default) any account_pools content is inert and not validated.
+// When enabled, every account id and pool id MUST be non-empty and every pool
+// id MUST be safe to carry in the coordinator-bound X-MacProvider-Pool header
+// (1-128 bytes, no C0/DEL/C1 control bytes) — an id the coordinator's opaque
+// header sanitizer would reject decodes to empty there and would be routed as
+// GLOBAL, a silent pool->global spill (SPEC-042-R002 forbids that), so it is
+// rejected at config load instead.
+func validateTrustedPoolsConfig(c Config) error {
+	tp := c.Features.TrustedPools
+	if !tp.Enabled {
+		return nil
+	}
+	for accountID, pools := range tp.AccountPools {
+		if strings.TrimSpace(accountID) == "" {
+			return fmt.Errorf("features.trusted_pools.account_pools contains an empty account id")
+		}
+		for _, poolID := range pools {
+			if strings.TrimSpace(poolID) == "" {
+				return fmt.Errorf("features.trusted_pools.account_pools[%q] contains an empty pool id", accountID)
+			}
+			if !PoolIDHeaderSafe(poolID) {
+				return fmt.Errorf("features.trusted_pools.account_pools[%q] pool id %q is not a valid header value (1-128 bytes, no control characters)", accountID, poolID)
+			}
+			if !poolIDBase64URLShape(poolID) {
+				return fmt.Errorf("features.trusted_pools.account_pools[%q] pool id %q must be base64url (A-Za-z0-9-_); SPEC-042-R001 derives pool_id as base64url(SHA256(...))", accountID, poolID)
+			}
+		}
+	}
+	return nil
+}
+
+// poolIDBase64URLShape rejects pool ids outside the base64url alphabet
+// (A-Za-z0-9-_). SPEC-042-R001 derives pool_id as base64url(SHA256(identity
+// core)[0:16]); a value with spaces, punctuation, or non-ASCII cannot be a
+// canonical pool_id even though it may be header-safe. Length is NOT pinned to
+// 22 chars yet because the R001 derivation is not implemented and ids are
+// currently opaque operator strings; tighten to the exact decoded length when
+// derivation lands.
+func poolIDBase64URLShape(v string) bool {
+	if v == "" {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		b := v[i]
+		if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-' || b == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// PoolIDHeaderSafe mirrors the coordinator's sanitizeOpaqueHeader byte rules
+// (phase4 buyer/server.go): 1-128 bytes, valid UTF-8, no C0 (0x00-0x1f), DEL
+// (0x7f), or C1 (0x80-0x9f) bytes. A base64url pool_id (A-Za-z0-9-_) passes.
+// Kept here (not imported) because the two modules are intentionally separate.
+func PoolIDHeaderSafe(v string) bool {
+	if v == "" || len(v) > 128 || !utf8.ValidString(v) {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		b := v[i]
+		if b < 0x20 || b == 0x7f || (b >= 0x80 && b <= 0x9f) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateRelayBlindRequestsConfig(c Config) error {

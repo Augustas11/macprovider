@@ -1416,6 +1416,13 @@ var gatewayPermanentCodes = map[string]bool{
 	// from the buyer's perspective even though the underlying cause is a
 	// provider response.
 	"stream_malformed": true, "stream_output_exceeded": true, "stream_truncated": true,
+	// SPEC-042-R010 pool taxonomy. Both non-retryable: pool_unavailable is the
+	// generic non-disclosing denial (retrying the identical request cannot flip
+	// authorization/capability), and pool_selection_invalid is a deterministic
+	// client-side conflict. A 503 pool_unavailable carries no Retry-After
+	// (setGatewayRetryAfter only fires for retryable codes), matching the
+	// SPEC-042 R010 table (503 | no).
+	"pool_unavailable": true, "pool_selection_invalid": true,
 }
 
 func gatewayRetryable(code string) bool {

@@ -272,6 +272,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "n_must_be_1", "n must be 1")
 		return
 	}
+	// SPEC-042-R002: authorize any Trusted Pool selection BEFORE quota
+	// reservation or dispatch. Resolves to "" (global, byte-identical) when the
+	// feature is off or no pool is named; a typed rejection otherwise. The
+	// resolved id is emitted as X-MacProvider-Pool inside buildUpReq below.
+	// Only plain API-key credentials may select a pool; wallet sessions and
+	// demo traffic may not (see resolvePoolSelection row 0).
+	poolSelectionAllowed := !authn.Demo && authn.WalletSession == nil
+	poolID, poolErr := s.resolvePoolSelection(upCtx, r.Header, subject.AccountID, poolSelectionAllowed)
+	if poolErr != nil {
+		writeError(w, poolErr.status, poolErr.typ, poolErr.code, poolErr.message)
+		return
+	}
 	maxTokens := maxAllowed
 	if chat.MaxTokens != nil {
 		maxTokens = *chat.MaxTokens
@@ -321,6 +333,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			subject.DemoTokenHash,
 			strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")),
 			strings.TrimSpace(r.Header.Get("X-MacProvider-Retry")),
+			poolID,
 			dedupeBody,
 		)
 		entry, adopted := s.idlessDedupe.claim(dedupeFingerprint, requestID(r), s.now(), dedupeWindow)
@@ -621,6 +634,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if subject.AccountID != "" {
 			upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 			upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
+			// SPEC-042-R002 emit: the pool authority header is set ONLY for an
+			// authenticated account context (the coordinator honors it only
+			// under the service-token bearer + account, both set just above)
+			// and ONLY when resolvePoolSelection returned an authorized,
+			// capability-satisfied pool. Empty poolID (global) emits nothing,
+			// keeping the poolless path byte-identical.
+			if poolID != "" {
+				upReq.Header.Set(poolEmitHeader, poolID)
+			}
 		}
 		if internalConversation != "" {
 			// Authorization + X-MacProvider-Account are set
