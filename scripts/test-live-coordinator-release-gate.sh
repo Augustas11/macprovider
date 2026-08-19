@@ -544,8 +544,10 @@ def require_rollout(workflow_path):
         raise SystemExit("post-publication rollout proof must share the production serialization")
     if "contents: write" not in workflow or "secrets." in workflow:
         raise SystemExit("post-publication rollout must have only GitHub contents publication authority")
-    if "runs-on: macos-15-intel" not in workflow or "runs-on: ubuntu-" in workflow:
-        raise SystemExit("rollout anonymous discovery proof must run on the reviewed Intel macOS runner")
+    if "    runs-on: macos-15-intel" not in workflow or "runs-on: ubuntu-" in workflow:
+        raise SystemExit("rollout publication proof must run on the reviewed Intel macOS runner")
+    if "anonymous-smoke:" not in workflow or "    runs-on: macos-15\n" not in workflow:
+        raise SystemExit("rollout anonymous discovery proof must run on the reviewed arm64 macOS runner")
     for required in (
         "- name: Seal reviewed OpenSSL 3",
         "id: protected_openssl",
@@ -596,6 +598,13 @@ def require_rollout(workflow_path):
         "macprovider-release-discovery.json",
         "--require-immutable",
         "https://coordinator.malibu.tech",
+        '"repos/$GITHUB_REPOSITORY/releases/tags/$transport_tag"',
+        "existing_transport_status=$?",
+        'cp "$existing_transport_json" "$transport_release_json"',
+        "needs: verify",
+        "target_commit: ${{ steps.rollout.outputs.target_commit }}",
+        "TRANSPORT_TAG: ${{ needs.verify.outputs.transport_tag }}",
+        'ref: ${{ github.sha }}',
     ):
         if required not in workflow:
             raise SystemExit(f"rollout proof omits {required}")
