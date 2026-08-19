@@ -146,5 +146,19 @@ grep -Fq 'releases?per_page=100' "$verifier" \
   || fail "anonymous verifier must page enough public releases to observe the head"
 grep -Fq 'MACPROVIDER_DISCOVERY_LISTING_ATTEMPTS' "$verifier" \
   || fail "anonymous verifier must retry a lagging public listing"
+grep -Fq 'MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN' "$verifier" \
+  || fail "anonymous verifier must allow authenticated fixture setup in CI"
+grep -Fq -- '-u MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN' "$verifier" \
+  || fail "anonymous verifier must remove fixture tokens before running the client"
+grep -Fq -- '-u GITHUB_TOKEN' "$verifier" \
+  || fail "anonymous verifier must remove GitHub tokens before running the client"
+grep -Fq -- '-u RELEASE_POSTURE_TOKEN' "$verifier" \
+  || fail "anonymous verifier must remove release posture tokens before running the client"
+grep -Fq 'rm -f -- "$github_api_curl_config"' "$verifier" \
+  || fail "anonymous verifier must delete fixture auth config before running the client"
+grep -Fq 'unset \' "$verifier" \
+  || fail "anonymous verifier must unset fixture auth environment after listing"
+grep -Fq 'MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN \' "$verifier" \
+  || fail "anonymous verifier must unset fixture auth token after listing"
 
 printf '[test-select-public-discovery-transport] ok\n'
