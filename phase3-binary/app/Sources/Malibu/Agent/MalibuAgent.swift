@@ -48,6 +48,7 @@ final class MalibuAgent: ObservableObject {
     private var lastRequestsRateSample: (total: Int, date: Date)?
     private var latestReleaseFetchedAt: Date?
     private var cliUpdateTask: Task<Void, Never>?
+    private var providerSoftwareRepairTask: Task<Void, Never>?
     private var hardwareVerificationRetryTask: Task<Void, Never>?
     /// Set while corrective `--recover-hardware-admission` may have drained
     /// launchd and therefore owes a restore/bootstrap. Cleared on success.
@@ -329,6 +330,7 @@ final class MalibuAgent: ObservableObject {
 
     func updateCLINow() async {
         guard !snapshot.cliUpdateInProgress else { return }
+        guard !snapshot.providerSoftwareRepairInProgress else { return }
         guard AgentSnapshotPresenter.updateAvailable(snapshot) else { return }
         cliUpdateTask?.cancel()
         snapshot.cliUpdateInProgress = true
@@ -344,6 +346,7 @@ final class MalibuAgent: ObservableObject {
                     }
                 }
                 self.snapshot.cliUpdateLastError = nil
+                self.recordProviderSoftwareInstallHandledAutoupdateACL()
                 if let port = ProviderConfig.readHTTPPort() {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     await self.applyProviderSnapshot(port: port)
@@ -354,6 +357,80 @@ final class MalibuAgent: ObservableObject {
             self.snapshot.cliUpdateInProgress = false
         }
         await cliUpdateTask?.value
+    }
+
+    func repairProviderSoftware() async {
+        guard !isShuttingDown,
+              AgentSnapshotPresenter.canRepairProviderSoftware(snapshot) else { return }
+        if let previous = providerSoftwareRepairTask {
+            previous.cancel()
+            await previous.value
+        }
+        guard !isShuttingDown, !Task.isCancelled else { return }
+        snapshot.providerSoftwareRepairInProgress = true
+        snapshot.providerSoftwareRepairLastError = nil
+        providerSoftwareRepairTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if !self.isShuttingDown {
+                    self.snapshot.providerSoftwareRepairInProgress = false
+                }
+            }
+            do {
+                try await CLIInstallRunner.run(
+                    referralCode: nil,
+                    replacingIncumbentProvider: false,
+                    repairExistingInstall: true
+                ) { line in
+                    self.logLines.append(LogTailBuffer.redacted(line))
+                    if self.logLines.count > 400 {
+                        self.logLines.removeFirst(self.logLines.count - 400)
+                    }
+                }
+                guard !Task.isCancelled, !self.isShuttingDown else { return }
+                self.snapshot.providerSoftwareRepairLastError = nil
+                self.snapshot.providerSoftwareRepairRecommended = false
+                self.recordProviderSoftwareInstallHandledAutoupdateACL()
+                do {
+                    try await ProviderConfig.importExistingCLIConfig()
+                } catch {
+                    self.logLines.append("Provider import after repair will retry after provider restart.")
+                }
+                if let port = ProviderConfig.readHTTPPort() {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    guard !Task.isCancelled, !self.isShuttingDown else { return }
+                    await self.applyProviderSnapshot(port: port)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, !self.isShuttingDown else { return }
+                self.snapshot.providerSoftwareRepairLastError = error.localizedDescription
+            }
+        }
+        await providerSoftwareRepairTask?.value
+    }
+
+    private func recordProviderSoftwareInstallHandledAutoupdateACL(paths: ProviderPaths = .current) {
+        do {
+            try FileManager.default.createDirectory(
+                at: paths.watchdogLog.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            let line = "[\(timestamp)] \(ProviderLogDiagnostics.providerSoftwareInstallHandledAutoupdateACLMarker)\n"
+            let data = Data(line.utf8)
+            if FileManager.default.fileExists(atPath: paths.watchdogLog.path) {
+                let handle = try FileHandle(forWritingTo: paths.watchdogLog)
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+                try handle.close()
+            } else {
+                try data.write(to: paths.watchdogLog, options: .atomic)
+            }
+        } catch {
+            logLines.append("Provider software repair marker could not be recorded; diagnostics may show an older update-recovery hint.")
+        }
     }
 
     func repairProviderCredential() async {
@@ -470,6 +547,10 @@ final class MalibuAgent: ObservableObject {
         reconnectTask?.cancel(); reconnectTask = nil
         healthPollTask?.cancel(); healthPollTask = nil
         cliUpdateTask?.cancel(); cliUpdateTask = nil
+        let repairSoftwareTask = providerSoftwareRepairTask
+        providerSoftwareRepairTask = nil
+        repairSoftwareTask?.cancel()
+        await repairSoftwareTask?.value
         referralStatusExpiryTask?.cancel(); referralStatusExpiryTask = nil
         let hardwareRetryTask = hardwareVerificationRetryTask
         hardwareVerificationRetryTask = nil
@@ -1440,6 +1521,8 @@ final class MalibuAgent: ObservableObject {
         watchdogLogTailCancellable = tail.$watchdogLines
             .sink { [weak self] lines in
                 self?.watchdogLogLines = lines
+                self?.snapshot.providerSoftwareRepairRecommended =
+                    ProviderLogDiagnostics.homeAutoupdateACLRejection(lines: lines) != nil
             }
         providerLogTail = tail
         tail.start(paths: paths)

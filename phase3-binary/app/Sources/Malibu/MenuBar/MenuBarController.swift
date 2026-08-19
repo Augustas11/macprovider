@@ -10,6 +10,7 @@ final class MenuBarController {
         case resume
         case checkForUpdates
         case updateCLI
+        case repairProviderSoftware
         case exportDiagnostics
         case resetProviderService
         case openSettings
@@ -89,7 +90,13 @@ final class MenuBarController {
         cliVersionItem.isHidden = true
         menu.addItem(cliVersionItem)
 
-        let updateItem = action("Check for Updates…", key: "") { self.onAction(.checkForUpdates) }
+        let updateItem = action("Check for Updates…", key: "") {
+            if AgentSnapshotPresenter.canRepairProviderSoftware(self.latestSnapshot) {
+                self.onAction(.repairProviderSoftware)
+            } else {
+                self.onAction(.checkForUpdates)
+            }
+        }
         updateItem.identifier = .updateAction
         menu.addItem(updateItem)
 
@@ -172,14 +179,20 @@ final class MenuBarController {
         }
         if let updateItem = menu.item(withIdentifier: .updateAction) {
             updateItem.isHidden = false
-            updateItem.isEnabled = AgentSnapshotPresenter.updateAvailable(snapshot)
-                && !snapshot.cliUpdateInProgress
-            if AgentSnapshotPresenter.updateAvailable(snapshot) {
+            if snapshot.providerSoftwareRepairInProgress {
+                updateItem.title = "Repairing provider software…"
+                updateItem.isEnabled = false
+            } else if AgentSnapshotPresenter.canRepairProviderSoftware(snapshot) {
+                updateItem.title = "Repair provider software…"
+                updateItem.isEnabled = true
+            } else if AgentSnapshotPresenter.updateAvailable(snapshot) {
                 updateItem.title = snapshot.cliUpdateInProgress
-                    ? "Updating provider software…"
-                    : "Update provider software…"
+                    ? "Installing latest provider software…"
+                    : "Install latest provider software…"
+                updateItem.isEnabled = !snapshot.cliUpdateInProgress
             } else {
                 updateItem.title = "Provider software is current"
+                updateItem.isEnabled = false
             }
         }
         if let backlog = AgentSnapshotPresenter.backlogLine(snapshot),

@@ -2,6 +2,9 @@ import Foundation
 
 /// Maps macprovider-cli stderr lines (launchd or Malibu-spawned) to operator-facing text.
 enum ProviderLogDiagnostics {
+    static let providerSoftwareInstallHandledAutoupdateACLMarker =
+        "autoupdate acl_home_repair_handled=malibu_provider_software_install_success"
+
     static let staleLaunchAgentMessage =
         "Provider setup is blocked by a previous installation. "
         + "Click Launch Provider to repair the background service. "
@@ -93,6 +96,42 @@ enum ProviderLogDiagnostics {
                 + "Update provider software and pick the recommended model again."
         ),
     ]
+
+    static func homeAutoupdateACLRejection(
+        lines: [String],
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> Finding? {
+        let needle = "autoupdate recovery_error=acl_write_rejected:"
+        let homePath = homeDirectory.standardizedFileURL.path
+        for line in lines.reversed() {
+            let lower = line.lowercased()
+            if lower.contains(providerSoftwareInstallHandledAutoupdateACLMarker)
+                || lower.contains("autoupdate lifecycle_transition=watchdog_recovery ") {
+                return nil
+            }
+            guard let range = lower.range(of: needle) else { continue }
+            let rawPath = String(line[range.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if URL(fileURLWithPath: rawPath).standardizedFileURL.path == homePath {
+                return Finding(
+                    id: "autoupdate_home_acl_rejected",
+                    userMessage:
+                        "Provider software repair is needed. A macOS folder permission is blocking automatic update recovery; Malibu can repair the provider software while keeping your provider identity and downloaded model files.",
+                    matchedLine: line
+                )
+            }
+            let firstField = rawPath.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? rawPath
+            let rejectedPath = URL(fileURLWithPath: firstField).standardizedFileURL.path
+            guard rejectedPath == homePath else { continue }
+            return Finding(
+                id: "autoupdate_home_acl_rejected",
+                userMessage:
+                    "Provider software repair is needed. A macOS folder permission is blocking automatic update recovery; Malibu can repair the provider software while keeping your provider identity and downloaded model files.",
+                matchedLine: line
+            )
+        }
+        return nil
+    }
 
     static func diagnose(lines: [String]) -> Finding? {
         for line in lines.reversed() {

@@ -93,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .pause: Task { await agent.pause() }
         case .resume: Task { await agent.resume() }
         case .checkForUpdates, .updateCLI: Task { await agent.updateCLINow() }
+        case .repairProviderSoftware: Task { await agent.repairProviderSoftware() }
         case .exportDiagnostics: exportDiagnostics()
         case .resetProviderService: resetProviderService()
         case .openSettings:

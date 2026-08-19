@@ -152,6 +152,9 @@ struct AgentSnapshot: Equatable {
     var latestReleaseVersion: String?
     var cliUpdateInProgress: Bool
     var cliUpdateLastError: String?
+    var providerSoftwareRepairRecommended: Bool
+    var providerSoftwareRepairInProgress: Bool
+    var providerSoftwareRepairLastError: String?
     /// Dashboard-triggered online recommend/apply/submit for #582 hello-gate recovery.
     var hardwareVerificationRetryInProgress: Bool = false
     var hardwareVerificationRetryLastError: String? = nil
@@ -278,6 +281,7 @@ struct AgentSnapshot: Equatable {
         compatibilitySetID = nil
         compatibilitySetSHA256 = nil
         coordinatorRecommendedVersion = nil
+        latestReleaseVersion = nil
         referralAvailability = .unsupported
         referralStatus = nil
         referralLastError = nil
@@ -393,6 +397,9 @@ struct AgentSnapshot: Equatable {
         latestReleaseVersion: nil,
         cliUpdateInProgress: false,
         cliUpdateLastError: nil,
+        providerSoftwareRepairRecommended: false,
+        providerSoftwareRepairInProgress: false,
+        providerSoftwareRepairLastError: nil,
         pauseAcknowledged: false
     )
 }
@@ -404,6 +411,7 @@ enum AgentSnapshotPresenter {
     enum ExecutableRecoveryAction: Equatable {
         case retryHardwareVerification
         case updateProviderSoftware
+        case repairProviderSoftware
         case repairCredential
         case repairAdmissionIdentity
         case exportDiagnostics
@@ -665,6 +673,21 @@ enum AgentSnapshotPresenter {
     }
 
     static func publicStatus(_ s: AgentSnapshot) -> PublicStatus {
+        if s.providerSoftwareRepairInProgress {
+            return PublicStatus(
+                title: "Repairing provider software",
+                detail: "Malibu is reinstalling the bundled provider software and watchdog. Keep Malibu open.",
+                safeNextAction: "Repair is in progress."
+            )
+        }
+        if canRepairProviderSoftware(s) {
+            return PublicStatus(
+                title: "Provider software repair available",
+                detail: "A permission on your home folder blocked automatic update recovery.",
+                safeNextAction: "Repair provider software. Malibu will reinstall the bundled provider software and watchdog. Your provider identity and downloaded models will be kept.",
+                executableAction: .repairProviderSoftware
+            )
+        }
         if s.state == .paused {
             return PublicStatus(
                 title: "Provider is paused",
@@ -710,7 +733,7 @@ enum AgentSnapshotPresenter {
             return PublicStatus(
                 title: "This Mac is not currently eligible",
                 detail: "Provider software must be updated before this Mac can receive customer work.",
-                safeNextAction: "Update provider software.",
+                safeNextAction: "Install latest provider software.",
                 executableAction: updateAvailable(s) ? .updateProviderSoftware : nil
             )
         }
@@ -753,17 +776,21 @@ enum AgentSnapshotPresenter {
         switch s.state {
         case .error:
             let action: String
-            if canRepairCredential(s) {
+            if canRepairProviderSoftware(s) {
+                action = "Repair provider software."
+            } else if canRepairCredential(s) {
                 action = "Repair saved access."
             } else if canRepairAdmissionIdentity(s) {
                 action = "\(admissionIdentityRepairButtonTitle(s))."
             } else if updateAvailable(s) {
-                action = "Update provider software."
+                action = "Install latest provider software."
             } else {
                 action = "Export diagnostics for support."
             }
             let executable: ExecutableRecoveryAction?
-            if canRepairCredential(s) {
+            if canRepairProviderSoftware(s) {
+                executable = .repairProviderSoftware
+            } else if canRepairCredential(s) {
                 executable = .repairCredential
             } else if canRepairAdmissionIdentity(s) {
                 executable = .repairAdmissionIdentity
@@ -1329,7 +1356,7 @@ enum AgentSnapshotPresenter {
         case "identity_migration_required":
             return "Use Repair network verification"
         case "catalog_incompatible":
-            return "Update provider software, then retry"
+            return "Install latest provider software, then retry"
         case "paused_by_operator":
             return "Choose Resume when ready"
         case "network_offline":
@@ -1576,6 +1603,12 @@ enum AgentSnapshotPresenter {
         updateTargetVersion(s) != nil || compatibilityRepairAvailable(s)
     }
 
+    static func canRepairProviderSoftware(_ s: AgentSnapshot) -> Bool {
+        s.providerSoftwareRepairRecommended
+            && !s.providerSoftwareRepairInProgress
+            && !s.cliUpdateInProgress
+    }
+
     /// A binary-only legacy update can report the latest CLI version while
     /// still lacking the signed compatibility-set resources. Only a fresh
     /// versioned status observation may expose that repair action; a transient
@@ -1621,7 +1654,13 @@ enum AgentSnapshotPresenter {
 
     static func cliUpdateStatusLine(_ s: AgentSnapshot) -> String? {
         if s.cliUpdateInProgress {
-            return "Updating provider software…"
+            return "Installing latest provider software…"
+        }
+        if s.providerSoftwareRepairInProgress {
+            return "Repairing provider software…"
+        }
+        if let error = s.providerSoftwareRepairLastError {
+            return publicErrorDetail(error)
         }
         if let error = s.cliUpdateLastError {
             return publicErrorDetail(error)
