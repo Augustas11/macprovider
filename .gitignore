@@ -85,3 +85,5 @@ test/e2e/thermal-soak/*.ndjson
 scratchpad/615-audit/
 audits/2026-08-19/gateway-pool-auth-fulldiff.patch
 scratchpad-*.log
+audits/2026-08-19/manifest-encoding-fulldiff.patch
+scratchpad-*.log
