@@ -45,6 +45,11 @@ type forwardState struct {
 	poolMembers    map[string]bool
 	poolGeneration uint64
 	poolGenSet     bool
+	// poolMinBinaryVersion is the selected pool's binary-version floor
+	// (SPEC-042 R004), captured with the membership snapshot so the by-hand
+	// dispatch paths (pinned/self-route/slot-queue) apply the same floor as
+	// the ordinary filter. "" means no floor.
+	poolMinBinaryVersion string
 
 	// routingDone is the wall-clock at which the current provider was
 	// selected. Updated on every advanceToNextProvider so the

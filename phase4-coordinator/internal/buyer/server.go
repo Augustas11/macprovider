@@ -84,6 +84,7 @@ var spec018RetryableByCode = map[string]bool{
 	// SPEC-042 R005/R010 tenant isolation.
 	"pool_state_stale":        true,  // 503, pool membership changed during routing; re-select
 	"pool_no_eligible_member": false, // 503, no member satisfies the pool; same reservation must not be retried
+	"pool_binary_too_old":     false, // 503, members exist but all below the pool binary floor; retry cannot make a binary newer
 	// Permanent/client errors — retrying will not help (SPEC-006 §5.2).
 	"model_not_found":                                         false,
 	"context_exceeds_capacity":                                false,
@@ -5572,15 +5573,18 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// nothing here changes and selection stays byte-identical.
 	var poolMembers map[string]bool
 	var poolGen uint64
+	var poolMin string
 	poolActive := s.trustPools != nil && req.poolID != ""
 	if poolActive {
 		snap := s.trustPools.Snapshot(req.poolID)
 		poolMembers = snap.Members
 		poolGen = snap.Generation
+		poolMin = snap.MinBinaryVersion
 		if state != nil {
 			state.poolID = req.poolID
 			state.poolMembers = snap.Members
 			state.poolGeneration = snap.Generation
+			state.poolMinBinaryVersion = snap.MinBinaryVersion
 			state.poolGenSet = true
 		}
 	}
@@ -5595,6 +5599,11 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 					// eligibility filter, so re-apply pool membership here or
 					// a pin would route a pool request to a non-member.
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "Pinned session provider is not a member of the selected pool"}
+				}
+				if poolActive && !poolBinaryFloorMet(p.BinaryVersion, poolMin) {
+					// SPEC-042 R004/R010: same reason the filter drops an
+					// under-version member — a pin must not bypass the floor.
+					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_binary_too_old", message: "Pinned session provider is below the pool minimum binary version"}
 				}
 				provider, routeErr := s.validatePinnedProviderForRequest(p, req.Model, estimatedTokens, "Pinned session not available", class)
 				if routeErr != nil {
@@ -5613,6 +5622,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			if p.ProviderID == providerID {
 				if poolActive && !poolMembers[p.ProviderID] {
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "Pinned provider is not a member of the selected pool"}
+				}
+				if poolActive && !poolBinaryFloorMet(p.BinaryVersion, poolMin) {
+					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_binary_too_old", message: "Pinned provider is below the pool minimum binary version"}
 				}
 				provider, routeErr := s.validatePinnedProviderForRequest(p, req.Model, estimatedTokens, "Pinned provider not available", class)
 				if routeErr != nil {
@@ -5646,6 +5658,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		checker.poolID = req.poolID
 		checker.poolMembers = poolMembers
 		checker.poolGeneration = poolGen // local snapshot value; avoids a nil-state deref
+		checker.poolMinBinaryVersion = poolMin
 	}
 	result := routing.EligibleCandidates(providers, exSet, pool.Provider.SortKey, checker)
 	candidates := result.Eligible
@@ -5705,6 +5718,14 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		// version) so an actual pool MEMBER that failed a specific gate — the
 		// pool gate is first in the filter, so those counts are members only —
 		// still yields its specific, actionable error.
+		// SPEC-042 R004/R010: the pool HAS members, they are just below the
+		// pool's minimum binary version. Checked before pool_no_eligible_member
+		// because a present-but-under-version member is a more specific,
+		// actionable signal (upgrade the provider) than "no member". Non-
+		// retryable — retrying cannot make an old binary new.
+		if poolActive && result.Counts[routing.ReasonPoolBinaryTooOld] > 0 {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_binary_too_old", message: "No pool member meets the minimum binary version for the selected pool"}
+		}
 		if poolActive && result.Counts[routing.ReasonPoolNotMember] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "No eligible member is available for the selected pool"}
 		}
@@ -6180,6 +6201,8 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
 			key = "receipt_key_missing"
 		case routing.ReasonPoolNotMember:
 			key = "pool_not_member" // SPEC-042 R005: distinct so pool-isolation drops are observable, not "other"
+		case routing.ReasonPoolBinaryTooOld:
+			key = "pool_binary_too_old" // SPEC-042 R004/R010: under-version pool member, observable distinctly
 		default:
 			key = "other"
 		}
@@ -6576,6 +6599,12 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		if state != nil && state.poolID != "" && !state.poolMembers[provider.ProviderID] {
 			return pool.Provider{}, queuedProviderTerminal
 		}
+		// SPEC-042 R004/R010: same reason as the #768 per-model floor below —
+		// a same-ID reconnect below the pool's binary floor must not be served
+		// off the queue. Uses the floor from the selection snapshot.
+		if state != nil && state.poolID != "" && !poolBinaryFloorMet(provider.BinaryVersion, state.poolMinBinaryVersion) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
 		if !s.providerMatchesRequest(provider, model, class) || provider.MaxContextTokens < estimatedTokens {
 			return pool.Provider{}, queuedProviderTerminal
 		}
@@ -6625,6 +6654,11 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
 		// so the pool-membership gate must be re-applied here too or a
 		// non-member could be queued for and eventually served a pool request.
 		if !checker.ProviderInPool(provider) {
+			continue
+		}
+		// SPEC-042 R004/R010: re-apply the pool binary floor by hand too, so an
+		// under-version member is never queued for the pool's traffic.
+		if !checker.ProviderMeetsPoolBinaryFloor(provider) {
 			continue
 		}
 		// The slot queue re-derives the public routing gate list by hand; the
@@ -6777,6 +6811,11 @@ type eligibilityCtx struct {
 	poolID         string
 	poolMembers    map[string]bool
 	poolGeneration uint64
+	// poolMinBinaryVersion is the selected pool's minimum provider binary
+	// version floor (SPEC-042 R004), captured from the SAME consistent
+	// snapshot as poolMembers/poolGeneration. "" means no floor -> the
+	// ProviderMeetsPoolBinaryFloor gate is inert.
+	poolMinBinaryVersion string
 }
 
 // ProviderMatchesRequest combines the model/class match and the
@@ -6840,6 +6879,33 @@ func (c *eligibilityCtx) ProviderInPool(p pool.Provider) bool {
 		return true
 	}
 	return c.poolMembers[p.ProviderID]
+}
+
+// ProviderMeetsPoolBinaryFloor implements the SPEC-042 R004/R010 provider-half
+// gate: a pool member is eligible only if its reported binary_version meets the
+// pool's minimum. Inert for global requests (poolID == "") and for pools with
+// no floor configured (poolMinBinaryVersion == ""), so poolless/floorless
+// selection is byte-identical. Evaluated only after ProviderInPool, so a
+// non-member is never reported here (membership dominates).
+func (c *eligibilityCtx) ProviderMeetsPoolBinaryFloor(p pool.Provider) bool {
+	if c.poolID == "" {
+		return true
+	}
+	return poolBinaryFloorMet(p.BinaryVersion, c.poolMinBinaryVersion)
+}
+
+// poolBinaryFloorMet reports whether providerVersion satisfies a pool binary
+// floor. An empty floor is inert (always met). A non-empty floor requires the
+// provider version to parse and be >= the floor via the coordinator's single
+// canonical comparator; an empty or unparseable provider version is treated as
+// below the floor (fail-safe, mirroring the #768 malformed-version posture and
+// the global admission floor).
+func poolBinaryFloorMet(providerVersion, floor string) bool {
+	if floor == "" {
+		return true
+	}
+	cmp, ok := versionfloor.Compare(providerVersion, floor)
+	return ok && cmp >= 0
 }
 
 // poolGenerationStale implements the SPEC-042 R005 generation fence for the

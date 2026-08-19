@@ -59,6 +59,20 @@ const (
 	// dropped for this reason the eligible list is empty and the request
 	// surfaces the no-eligible-member 503 with no spill to global.
 	ReasonPoolNotMember
+	// ReasonPoolBinaryTooOld — the request carries a pool_id (SPEC-042) and
+	// the provider IS a current member, but its reported binary_version is
+	// below the pool's configured minimum (SPEC-042 R004 predicate), so it
+	// cannot safely serve the pool's traffic under a mixed-binary rollout
+	// (SPEC-042 R010, the provider half of the positive capability handshake).
+	// A false ProviderMeetsPoolBinaryFloor return is reported here. Membership
+	// dominates: a non-member is reported ReasonPoolNotMember and never also
+	// evaluated for the floor. With no pool selected, or no floor configured
+	// for the pool, the checker returns true for every provider and this
+	// reason never fires — poolless and floorless selection stay byte-identical.
+	// Fail-closed: when members exist but all are dropped for this reason the
+	// request surfaces pool_binary_too_old (503) with no spill to an
+	// under-version or global provider.
+	ReasonPoolBinaryTooOld
 )
 
 // EligibilityChecker is the cross-package boundary between the
@@ -139,6 +153,19 @@ type EligibilityChecker interface {
 	// consistent snapshot (SPEC-042 R003) so a revocation cannot leave
 	// a stale member passing this gate.
 	ProviderInPool(p pool.Provider) bool
+
+	// ProviderMeetsPoolBinaryFloor reports whether a pool MEMBER's reported
+	// binary_version satisfies the selected pool's minimum version floor
+	// (SPEC-042 R004 / R010 provider half). A false return is reported as
+	// ReasonPoolBinaryTooOld. This is evaluated only after ProviderInPool
+	// (membership dominates). Implementations MUST return true for every
+	// provider when the request carries no pool selection OR the pool has no
+	// floor configured, so poolless and floorless selection stay
+	// byte-identical. The floor MUST come from the SAME consistent snapshot as
+	// membership/generation (SPEC-042 R003), and an empty/unparseable
+	// binary_version while a floor is in force MUST be treated as below the
+	// floor (fail-safe, mirroring the #768 malformed-version posture).
+	ProviderMeetsPoolBinaryFloor(p pool.Provider) bool
 }
 
 // RejectedProvider records a single provider drop with enough
@@ -225,6 +252,15 @@ func EligibleCandidates(
 		// byte-identical to pre-SPEC-042.
 		if !checker.ProviderInPool(p) {
 			res.Counts[ReasonPoolNotMember]++
+			continue
+		}
+		// SPEC-042 R004/R010 provider half: a pool MEMBER whose binary_version
+		// is below the pool's configured floor cannot serve the pool's traffic
+		// under a mixed-binary rollout. Evaluated after membership (which
+		// dominates). No-op for global requests and for pools with no floor,
+		// so poolless/floorless selection stays byte-identical.
+		if !checker.ProviderMeetsPoolBinaryFloor(p) {
+			res.Counts[ReasonPoolBinaryTooOld]++
 			continue
 		}
 		if !checker.ProviderMatchesRequest(p) {
