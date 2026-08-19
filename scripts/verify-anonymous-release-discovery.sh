@@ -27,6 +27,21 @@ curl_args=(
   --fail --show-error --silent --location --proto '=https' --tlsv1.2
   --connect-timeout 20 --max-time 240 --retry 5 --retry-delay 2
 )
+github_api_curl_args=(
+  "${curl_args[@]}"
+  -H "Accept: application/vnd.github+json"
+  -H "User-Agent: macprovider-release-verifier"
+)
+fixture_github_token="${MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN:-}"
+github_api_curl_config=
+if [ -n "$fixture_github_token" ]; then
+  github_api_curl_config="$work/github-api-curl.conf"
+  old_umask="$(umask)"
+  umask 077
+  printf 'header = "Authorization: Bearer %s"\n' "$fixture_github_token" > "$github_api_curl_config"
+  umask "$old_umask"
+  github_api_curl_args+=(--config "$github_api_curl_config")
+fi
 api="https://api.github.com/repos/$repository"
 listing_attempts="${MACPROVIDER_DISCOVERY_LISTING_ATTEMPTS:-15}"
 listing_retry_seconds="${MACPROVIDER_DISCOVERY_LISTING_RETRY_SECONDS:-2}"
@@ -34,7 +49,7 @@ listing_retry_seconds="${MACPROVIDER_DISCOVERY_LISTING_RETRY_SECONDS:-2}"
 [[ "$listing_retry_seconds" =~ ^[1-9][0-9]*$ ]] || die "invalid discovery listing retry interval"
 listing_attempt=1
 while true; do
-  curl "${curl_args[@]}" "$api/releases?per_page=100" -o "$work/releases.json"
+  curl "${github_api_curl_args[@]}" "$api/releases?per_page=100" -o "$work/releases.json"
   set +e
   python3 "$root/scripts/select_public_discovery_transport.py" \
     "$work/releases.json" \
@@ -54,6 +69,17 @@ while true; do
   listing_attempt=$((listing_attempt + 1))
   sleep "$listing_retry_seconds"
 done
+if [ -n "$github_api_curl_config" ]; then
+  rm -f -- "$github_api_curl_config"
+fi
+unset \
+  MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN \
+  GITHUB_TOKEN \
+  GH_TOKEN \
+  RELEASE_POSTURE_TOKEN \
+  fixture_github_token \
+  github_api_curl_config \
+  github_api_curl_args
 
 while IFS=$'\t' read -r name url; do
   curl "${curl_args[@]}" "$url" -o "$work/$name"
@@ -91,8 +117,19 @@ client="$work/client/macprovider-cli"
 codesign --verify --strict --verbose=2 "$client"
 [[ "$("$client" --version)" == "${client_tag#v}" ]] || die "client binary version differs"
 
-mkdir "$work/home"
-output="$(HOME="$work/home" CFFIXED_USER_HOME="$work/home" "$client" update --check 2>&1)" || {
+mkdir "$work/home" "$work/client-tmp"
+output="$(
+  env \
+    -u MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN \
+    -u GITHUB_TOKEN \
+    -u GH_TOKEN \
+    -u RELEASE_POSTURE_TOKEN \
+    HOME="$work/home" \
+    CFFIXED_USER_HOME="$work/home" \
+    RUNNER_TEMP="$work/client-tmp" \
+    TMPDIR="$work/client-tmp" \
+    "$client" update --check 2>&1
+)" || {
   printf '%s\n' "$output" >&2
   die "$client_tag could not discover $target_tag anonymously"
 }

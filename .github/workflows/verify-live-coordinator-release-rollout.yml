@@ -273,6 +273,7 @@ jobs:
       - name: Verify anonymous discovery through released arm64 client
         shell: bash
         env:
+          MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN: ${{ github.token }}
           TAG: ${{ needs.verify.outputs.tag }}
           TARGET_COMMIT: ${{ needs.verify.outputs.target_commit }}
           TRANSPORT_TAG: ${{ needs.verify.outputs.transport_tag }}

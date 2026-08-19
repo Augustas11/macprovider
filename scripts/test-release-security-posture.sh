@@ -31,11 +31,34 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/release-security-posture.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
 bash -n "$sealed_openssl_installer" "$sealed_openssl_wrapper" "$anonymous_discovery_verifier"
-grep -Fq "HOME=\"\$work/home\" CFFIXED_USER_HOME=\"\$work/home\" \"\$client\" update --check" \
-  "$anonymous_discovery_verifier" || {
-    echo "anonymous release discovery must isolate both shell and Foundation homes" >&2
-    exit 1
-  }
+for requirement in \
+  'HOME="$work/home"' \
+  'CFFIXED_USER_HOME="$work/home"' \
+  'RUNNER_TEMP="$work/client-tmp"' \
+  'TMPDIR="$work/client-tmp"' \
+  '"$client" update --check' \
+  '-u MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN' \
+  '-u GITHUB_TOKEN' \
+  '-u GH_TOKEN' \
+  '-u RELEASE_POSTURE_TOKEN'
+do
+  grep -Fq -- "$requirement" "$anonymous_discovery_verifier" || {
+      echo "anonymous release discovery must isolate homes and remove GitHub token variables" >&2
+      exit 1
+    }
+done
+token_cleanup="$(grep -Fn 'rm -f -- "$github_api_curl_config"' "$anonymous_discovery_verifier" | cut -d: -f1)"
+env_cleanup="$(grep -Fn 'MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN \' "$anonymous_discovery_verifier" | cut -d: -f1 | head -n 1)"
+asset_download="$(grep -Fn 'curl "${curl_args[@]}" "$url"' "$anonymous_discovery_verifier" | cut -d: -f1)"
+client_exec="$(grep -Fn '"$client" update --check' "$anonymous_discovery_verifier" | cut -d: -f1)"
+if [[ ! "$token_cleanup" =~ ^[1-9][0-9]*$ || ! "$asset_download" =~ ^[1-9][0-9]*$ || "$token_cleanup" -ge "$asset_download" ]]; then
+  echo "anonymous release discovery must delete fixture auth config before post-listing downloads" >&2
+  exit 1
+fi
+if [[ ! "$env_cleanup" =~ ^[1-9][0-9]*$ || "$env_cleanup" -ge "$asset_download" || ! "$client_exec" =~ ^[1-9][0-9]*$ ]]; then
+  echo "anonymous release discovery must unset fixture token env before post-listing downloads" >&2
+  exit 1
+fi
 printf '%s\n' ": > \"\$BASH_ENV_PROBE\"" > "$work/injected-bash-env"
 if BASH_ENV="$work/injected-bash-env" BASH_ENV_PROBE="$work/bash-env-ran" \
   "$sealed_openssl_wrapper" >"$work/wrapper.out" 2>&1; then
@@ -1466,6 +1489,7 @@ for requirement in (
     'cp "$existing_transport_json" "$transport_release_json"',
     "needs: verify",
     "target_commit: ${{ steps.rollout.outputs.target_commit }}",
+    'MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN: ${{ github.token }}',
     "TRANSPORT_TAG: ${{ needs.verify.outputs.transport_tag }}",
     'ref: ${{ github.sha }}',
 ):

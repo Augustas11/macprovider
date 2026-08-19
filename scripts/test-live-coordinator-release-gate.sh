@@ -603,6 +603,7 @@ def require_rollout(workflow_path):
         'cp "$existing_transport_json" "$transport_release_json"',
         "needs: verify",
         "target_commit: ${{ steps.rollout.outputs.target_commit }}",
+        'MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN: ${{ github.token }}',
         "TRANSPORT_TAG: ${{ needs.verify.outputs.transport_tag }}",
         'ref: ${{ github.sha }}',
     ):
