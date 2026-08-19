@@ -207,6 +207,7 @@ CREATE TABLE IF NOT EXISTS settlement_route_snapshots (
     provider_id TEXT NOT NULL,
     provider_session_id TEXT NULL,
     provider_generation_id TEXT NULL,
+    pool_id TEXT NULL,
     paid_entrypoint TEXT NOT NULL,
     provider_receipt_key_id TEXT NOT NULL CHECK(length(provider_receipt_key_id) = 79 AND substr(provider_receipt_key_id, 1, 15) = 'ed25519-sha256:' AND substr(provider_receipt_key_id, 16) NOT GLOB '*[^0-9a-f]*'),
     provider_receipt_key_source TEXT NOT NULL CHECK(provider_receipt_key_source IN ('auth_session','rotation_grace','operator_pin')),
@@ -410,6 +411,7 @@ func (s *Store) ensureSettlementRouteSnapshotComputeIntegrityColumns(ctx context
 		name string
 		sql  string
 	}{
+		{"pool_id", `ALTER TABLE settlement_route_snapshots ADD COLUMN pool_id TEXT NULL`},
 		{"compute_integrity_capture_required", `ALTER TABLE settlement_route_snapshots ADD COLUMN compute_integrity_capture_required INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_capture_required IN (0,1))`},
 		{"compute_integrity_sampling_profile_covered", `ALTER TABLE settlement_route_snapshots ADD COLUMN compute_integrity_sampling_profile_covered INTEGER NOT NULL DEFAULT 0 CHECK(compute_integrity_sampling_profile_covered IN (0,1))`},
 		{"compute_integrity_hardware_runtime_class_digest", `ALTER TABLE settlement_route_snapshots ADD COLUMN compute_integrity_hardware_runtime_class_digest TEXT NULL CHECK(compute_integrity_hardware_runtime_class_digest IS NULL OR (length(compute_integrity_hardware_runtime_class_digest) = 71 AND substr(compute_integrity_hardware_runtime_class_digest, 1, 7) = 'sha256:' AND substr(compute_integrity_hardware_runtime_class_digest, 8) NOT GLOB '*[^0-9a-f]*'))`},

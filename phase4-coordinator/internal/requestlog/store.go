@@ -65,7 +65,11 @@ type Row struct {
 	// across two accounts cannot be attributed back to the correct
 	// gateway account (issue #211, follow-up to #196). Empty for
 	// direct legacy buyer calls without the header.
-	AccountID             string
+	AccountID string
+	// PoolID is the SPEC-042 Trusted Pool that served this request ("" ->
+	// NULL for global). Recorded for per-pool attribution/observability
+	// (SPEC-042 R002); a pure label column, not part of any digest.
+	PoolID                string
 	Model                 string
 	ProviderAssignedID    string
 	PromptTokens          *int64
@@ -187,6 +191,7 @@ CREATE TABLE IF NOT EXISTS request_log (
     request_id           TEXT    NOT NULL,
     external_request_id  TEXT    NULL,
     account_id           TEXT    NULL,
+    pool_id              TEXT    NULL,
     model                TEXT    NOT NULL,
     provider_assigned_id TEXT    NULL,
     prompt_tokens        INTEGER NULL,
@@ -470,6 +475,7 @@ INSERT INTO request_log (
     request_id,
     external_request_id,
     account_id,
+    pool_id,
     model,
     provider_assigned_id,
     prompt_tokens,
@@ -492,11 +498,12 @@ INSERT INTO request_log (
     provider_header,
     retried,
     attempt_n
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sqliteTimeText(row.TSUtc),
 		row.RequestID,
 		nullString(row.ExternalRequestID),
 		nullString(row.AccountID),
+		nullString(row.PoolID),
 		row.Model,
 		nullString(row.ProviderAssignedID),
 		nullInt64(row.PromptTokens),
@@ -536,6 +543,7 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		name string
 		sql  string
 	}{
+		{name: "pool_id", sql: `ALTER TABLE request_log ADD COLUMN pool_id TEXT NULL`},
 		{name: "provider_assigned_id", sql: `ALTER TABLE request_log ADD COLUMN provider_assigned_id TEXT NULL`},
 		{name: "prompt_tokens", sql: `ALTER TABLE request_log ADD COLUMN prompt_tokens INTEGER NULL`},
 		{name: "cached_prompt_tokens", sql: `ALTER TABLE request_log ADD COLUMN cached_prompt_tokens INTEGER NULL`},

@@ -827,15 +827,21 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	if providerGeneration.Valid {
 		r.ProviderGenerationID = &providerGeneration.String
 	}
-	var algorithms struct {
+	var recovered struct {
 		ProviderReported string `json:"provider_reported_model_hash_algorithm"`
 		ExpectedCatalog  string `json:"expected_catalog_model_hash_algorithm"`
+		// SPEC-042 R006: pool_id is carried in route_snapshot_json (not a
+		// column), so it MUST be recovered here before the digest recompute
+		// below, or a pool snapshot's recompute-digest would omit pool_id and
+		// mismatch the stored insert-digest.
+		PoolID string `json:"pool_id"`
 	}
-	if err := json.Unmarshal([]byte(routeSnapshotJSON), &algorithms); err != nil {
+	if err := json.Unmarshal([]byte(routeSnapshotJSON), &recovered); err != nil {
 		return RouteSnapshot{}, "", fmt.Errorf("settlement route snapshot identity metadata invalid: %w", err)
 	}
-	r.ProviderReportedModelHashAlgorithm = algorithms.ProviderReported
-	r.ExpectedCatalogModelHashAlgorithm = algorithms.ExpectedCatalog
+	r.ProviderReportedModelHashAlgorithm = recovered.ProviderReported
+	r.ExpectedCatalogModelHashAlgorithm = recovered.ExpectedCatalog
+	r.PoolID = recovered.PoolID
 	r.ComputeIntegrityCaptureRequired = computeIntegrityCaptureRequired == 1
 	r.ComputeIntegritySamplingCovered = computeIntegritySamplingCovered == 1
 	if computeIntegrityHardwareDigest.Valid {

@@ -121,6 +121,9 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		PendingDeadlineSeconds:             int64(pendingDeadline),
 		PromptHashBasis:                    promptHashBasisCoordinatorV1,
 		PromptHash:                         promptHash,
+		// SPEC-042 R006: label the settlement route-snapshot with the pool
+		// that served the request ("" for global -> omitted from the digest).
+		PoolID: b.state.poolID,
 	}
 	computeIntegrityRequired, computeIntegrityCovered, computeIntegrityHardwareDigest, err := computeIntegrityRouteBinding(provider, routeMode)
 	if err != nil {

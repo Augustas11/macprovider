@@ -12,6 +12,33 @@ import (
 	"time"
 )
 
+func TestRequestLogPoolIDPersistsAndNullForGlobal(t *testing.T) {
+	// SPEC-042 R002: pool_id is recorded per request; global (poolless)
+	// requests store NULL, so existing rows/behaviour are unchanged.
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.Insert(ctx, Row{TSUtc: time.Now().UTC(), RequestID: "req-pool", PoolID: "pool-abc", Model: "model-a", Status: 200, BuyerIP: "127.0.0.1:1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Insert(ctx, Row{TSUtc: time.Now().UTC(), RequestID: "req-global", Model: "model-a", Status: 200, BuyerIP: "127.0.0.1:1"}); err != nil {
+		t.Fatal(err)
+	}
+	var poolID sql.NullString
+	if err := store.DB().QueryRow(`SELECT pool_id FROM request_log WHERE request_id='req-pool'`).Scan(&poolID); err != nil {
+		t.Fatal(err)
+	}
+	if !poolID.Valid || poolID.String != "pool-abc" {
+		t.Fatalf("pool request pool_id = %v, want pool-abc", poolID)
+	}
+	if err := store.DB().QueryRow(`SELECT pool_id FROM request_log WHERE request_id='req-global'`).Scan(&poolID); err != nil {
+		t.Fatal(err)
+	}
+	if poolID.Valid {
+		t.Fatalf("global request pool_id = %q, want NULL", poolID.String)
+	}
+}
+
 func TestRequestLogInsertAndRead(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()

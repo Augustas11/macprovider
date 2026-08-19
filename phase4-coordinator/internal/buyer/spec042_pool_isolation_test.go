@@ -3,10 +3,13 @@ package buyer
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/routing"
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 	"github.com/rs/zerolog"
@@ -152,6 +155,58 @@ func TestPoolIsolation_SlotQueuePollExcludesNonMember(t *testing.T) {
 	state := &forwardState{poolID: "P", poolMembers: tp.Snapshot("P").Members}
 	if _, status := s.pollQueuedProvider(w, "model-a", nil, 100, state); status != queuedProviderTerminal {
 		t.Fatalf("poll status = %v, want terminal (non-member off the queue)", status)
+	}
+}
+
+// T2-ordinary (R005/R010): a non-pinned pool request whose only providers are
+// non-members fails closed with the NON-RETRYABLE pool_no_eligible_member, not
+// the retryable generic no_provider_available (which would let clients retry a
+// terminal condition).
+func TestPoolIsolation_OrdinaryNoMember_ReturnsPoolNoEligibleMember(t *testing.T) {
+	s, registry, tp := poolIsolationServer(t)
+	z := poolProvider("nonmember-z")
+	registry.Register(&z, nil)
+	tp.AddPool("P") // pool P exists but has no members; z is a global non-member
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq("P"), http.Header{}, nil, "2024-01-01", &forwardState{})
+	if routeErr == nil || routeErr.code != "pool_no_eligible_member" {
+		t.Fatalf("ordinary all-non-member: want pool_no_eligible_member, got %+v", routeErr)
+	}
+	if spec018RetryableByCode[routeErr.code] {
+		t.Fatalf("pool_no_eligible_member must be non-retryable")
+	}
+}
+
+// T7-loop (generation fence, R005): the fence is enforced at the top of the
+// forwardWithFailover dispatch loop, so a stale pool generation is rejected
+// BEFORE any dispatch — covering the retry/failover re-dispatch windows, not
+// just the initial selection.
+func TestPoolIsolation_LoopFenceRejectsStaleBeforeDispatch(t *testing.T) {
+	s, _, tp := poolIsolationServer(t)
+	tp.AddMember("P", "member-x")
+	startedAt := time.Unix(1716768000, 0)
+	// Selection captured generation g; membership then advances -> stale.
+	state := &forwardState{poolID: "P", poolGeneration: tp.Generation("P"), poolGenSet: true, faultedRoutes: map[string]struct{}{}}
+	tp.Revoke("P", "member-x")
+	state.phaseTiming.init(startedAt)
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+	rec := s.newBillingRecorder(r, state, startedAt, "rid", "", "", requestlog.AuthenticatedAccount{}, false)
+	dispatched := false
+	tx := transportCallbacks{
+		dispatch: func(http.ResponseWriter, *http.Request, chatRequest, string, string, time.Time, *forwardState, *billingRecorder) (dispatchedAttempt, bool) {
+			dispatched = true
+			return dispatchedAttempt{}, false
+		},
+	}
+	s.forwardWithFailover(w, r, poolChatReq("P"), "rid", "rid", startedAt, state, nil, rec, tx)
+	if dispatched {
+		t.Fatal("dispatch ran under a stale pool generation; the loop fence did not fire")
+	}
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want 409 (SPEC-042 R010 pool_state_stale)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "pool_state_stale") {
+		t.Fatalf("body=%s, want pool_state_stale", w.Body.String())
 	}
 }
 
