@@ -4,7 +4,7 @@ import "net/http"
 
 const corsMaxAge = "3600"
 
-var corsAllowedHeaders = "Accept, Anthropic-Beta, Anthropic-Version, Authorization, Content-Type, Idempotency-Key, X-Api-Key, X-Demo-Token, X-MacProvider-Session-Signature, X-MacProvider-Session-Timestamp, X-Request-ID"
+var corsAllowedHeaders = "Accept, Anthropic-Beta, Anthropic-Version, Authorization, Content-Type, Idempotency-Key, X-Api-Key, X-Demo-Token, X-MacProvider-Pool-Select, X-MacProvider-Session-Signature, X-MacProvider-Session-Timestamp, X-Request-ID"
 
 func (s *Server) withCORS(method string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

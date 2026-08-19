@@ -155,6 +155,12 @@ type coordinatorRoutingMetadata struct {
 		Enabled    bool `json:"enabled"`
 		TTLSeconds int  `json:"ttl_seconds"`
 	} `json:"sticky"`
+	// Pools is the SPEC-042-R010 positive pool-capability advertisement. An
+	// old coordinator omits it entirely, decoding to the zero value
+	// (Enabled=false) so the gateway fails pool dispatch closed.
+	Pools struct {
+		Enabled bool `json:"enabled"`
+	} `json:"pools"`
 	Tier2 struct {
 		Phase     any `json:"phase"`
 		ModelHash struct {

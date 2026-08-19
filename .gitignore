@@ -83,3 +83,5 @@ test/e2e/thermal-soak/*.ndjson
 
 # Local #615 audit artifacts (reports/diffs; keep out of PRs)
 scratchpad/615-audit/
+audits/2026-08-19/gateway-pool-auth-fulldiff.patch
+scratchpad-*.log

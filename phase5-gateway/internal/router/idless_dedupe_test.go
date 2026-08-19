@@ -1083,19 +1083,21 @@ func TestIdlessDedupeIndex_WaiterCapAndContextExpiry(t *testing.T) {
 }
 
 func TestIdlessRequestFingerprintIsKeyedOnEveryPart(t *testing.T) {
-	base := idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`))
+	base := idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", "", []byte(`{"a":1}`))
 	cases := map[string]string{
-		"same inputs":            idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
-		"other entrypoint":       idlessRequestFingerprint(idlessDedupeEntrypointResponses, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
-		"messages entrypoint":    idlessRequestFingerprint(idlessDedupeEntrypointMessages, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
-		"other account":       idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct2", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
-		"other demo token":    idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash-2", "thread-1", "", []byte(`{"a":1}`)),
-		"other conversation":  idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-2", "", []byte(`{"a":1}`)),
-		"retry hint present":  idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "1", []byte(`{"a":1}`)),
-		"other retry hint":    idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "2", []byte(`{"a":1}`)),
-		"other body":          idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", []byte(`{"a":2}`)),
-		"whitespace in body":  idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", []byte(`{"a": 1}`)),
-		"field-shifted parts": idlessRequestFingerprint(idlessDedupeEntrypointChat, "acc", "tdemo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"same inputs":         idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", "", []byte(`{"a":1}`)),
+		"other entrypoint":    idlessRequestFingerprint(idlessDedupeEntrypointResponses, "acct", "demo-hash", "thread-1", "", "", []byte(`{"a":1}`)),
+		"messages entrypoint": idlessRequestFingerprint(idlessDedupeEntrypointMessages, "acct", "demo-hash", "thread-1", "", "", []byte(`{"a":1}`)),
+		"other account":       idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct2", "demo-hash", "thread-1", "", "", []byte(`{"a":1}`)),
+		"other demo token":    idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash-2", "thread-1", "", "", []byte(`{"a":1}`)),
+		"other conversation":  idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-2", "", "", []byte(`{"a":1}`)),
+		"retry hint present":  idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "1", "", []byte(`{"a":1}`)),
+		"other retry hint":    idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "2", "", []byte(`{"a":1}`)),
+		"pool selected":       idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", "poolone", []byte(`{"a":1}`)),
+		"other pool":          idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", "pooltwo", []byte(`{"a":1}`)),
+		"other body":          idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", "", []byte(`{"a":2}`)),
+		"whitespace in body":  idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", "", []byte(`{"a": 1}`)),
+		"field-shifted parts": idlessRequestFingerprint(idlessDedupeEntrypointChat, "acc", "tdemo-hash", "thread-1", "", "", []byte(`{"a":1}`)),
 	}
 	for name, got := range cases {
 		if name == "same inputs" {
@@ -1110,6 +1112,9 @@ func TestIdlessRequestFingerprintIsKeyedOnEveryPart(t *testing.T) {
 	}
 	if cases["retry hint present"] == cases["other retry hint"] {
 		t.Fatal("two different X-MacProvider-Retry values produced the same fingerprint")
+	}
+	if cases["pool selected"] == cases["other pool"] {
+		t.Fatal("two different pool selections produced the same fingerprint")
 	}
 }
 
