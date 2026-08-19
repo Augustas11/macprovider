@@ -1224,7 +1224,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.10",
+      "version": "0.0.11",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5106,12 +5106,16 @@
       "implementation": [
         "phase4-coordinator/internal/poolmanifest/manifest.go:func (ic IdentityCore) PoolID",
         "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) ManifestCoreDigest",
-        "phase4-coordinator/internal/poolmanifest/signature.go:func VerifyPoolIDBinding"
+        "phase4-coordinator/internal/poolmanifest/signature.go:func VerifyPoolIDBinding",
+        "phase4-coordinator/internal/poolmanifest/policyhistory.go:func BuildPolicyHistory",
+        "phase4-coordinator/internal/poolmanifest/policyhistory.go:func (h *PolicyHistory) ActivePolicy"
       ],
       "tests": [
         "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestGoldenVectors",
         "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestDigestSensitivity",
-        "phase4-coordinator/internal/poolmanifest/signature_test.go:TestVerifyPoolIDBinding"
+        "phase4-coordinator/internal/poolmanifest/signature_test.go:TestVerifyPoolIDBinding",
+        "phase4-coordinator/internal/poolmanifest/policyhistory_test.go:TestActivePolicySelection",
+        "phase4-coordinator/internal/poolmanifest/policyhistory_test.go:TestBuildPolicyHistoryRejects"
       ],
       "journeys": [],
       "evidence": [],
@@ -5119,7 +5123,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool object + signed manifest + identity/rollback: slice 1 implements the canonical identity-core and versioned-policy-core byte grammar with pool_id (base64url(SHA256(identity core)[0:16])) and manifest_core_digest derivations, frozen by golden vectors (v0.0.8); slice 2 adds the pool_id-binding recompute-and-compare check (VerifyPoolIDBinding) and the policy-core signature layer (see SPEC-042-R012), v0.0.9. Still deferred to later R001/R012 slices: the root-issuer/signer-set authority log, mutable operational fields, active-policy selection + durable version history, durable persistence, and routing wiring."
+        "rationale": "Pool object + signed manifest + identity/rollback: slice 1 (v0.0.8) canonical identity/policy-core encoding with pool_id + manifest_core_digest; slice 2 (v0.0.9) pool_id-binding check + policy-core signature layer (see R012); slice 4 (v0.0.11) the versioned policy-core history + active-policy selection (BuildPolicyHistory / PolicyHistory.ActivePolicy): per-core signature verification against the authority-log signer set, pool_id binding, monotonic manifest_version/rollback reject, prev_manifest_core_hash chain, non-overlapping half-open validity windows, and pool_policy_stale fail-closed selection. Still deferred: durable persistence + restart reconstruction of the policy-core history and the acceptance-verdict record, mutable operational fields, and routing wiring."
       }
     },
     {
