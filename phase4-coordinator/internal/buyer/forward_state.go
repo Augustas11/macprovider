@@ -34,6 +34,18 @@ import (
 // Audit refs: REPO_AUDIT.md §3.1 item 3 (ARCH-1 / CODE-1),
 // REMAINING_WORK.md M2-1.
 type forwardState struct {
+	// SPEC-042 R002/R005 tenant isolation. poolID is the selected Trusted
+	// Pool ("" = global). poolMembers is the consistent membership snapshot
+	// captured with poolGeneration at selection time (SPEC-042 R003 single
+	// read). poolGeneration is re-validated as a dispatch fence (SPEC-042
+	// R005) so a membership/revocation change between selection and dispatch
+	// forces fresh selection instead of dispatching to a stale candidate.
+	// poolGenSet distinguishes "no pool" from "generation 0".
+	poolID         string
+	poolMembers    map[string]bool
+	poolGeneration uint64
+	poolGenSet     bool
+
 	// routingDone is the wall-clock at which the current provider was
 	// selected. Updated on every advanceToNextProvider so the
 	// request_log.routing_ms column reflects the latest routing

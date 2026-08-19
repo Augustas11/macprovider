@@ -692,6 +692,8 @@ var coordinatorEmittedErrorCodes = []string{
 	"tool_call_id_not_found", "tool_call_result_out_of_order", "tool_result_too_large",
 	"tool_results_aggregate_too_large", "unauthorized", "unsupported_content_shape",
 	"unsupported_modelID_for_multi_turn",
+	// SPEC-042 R005/R010 tenant isolation.
+	"pool_no_eligible_member", "pool_state_stale",
 }
 
 // TestCoordinatorErrorCodeCompleteness closes L-R2-2 coordinator-side: every

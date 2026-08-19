@@ -17,6 +17,7 @@ type stubChecker struct {
 	tier2          map[string]routing.RejectionReason
 	tier2Hash      map[string]pool.HashStatus
 	quotaOK        map[string]bool
+	poolMember     map[string]bool
 }
 
 func (s *stubChecker) ProviderMatchesRequest(p pool.Provider) bool {
@@ -48,6 +49,15 @@ func (s *stubChecker) Tier2Decision(p pool.Provider) (routing.RejectionReason, p
 }
 func (s *stubChecker) QuotaPermits(p pool.Provider) bool {
 	if v, ok := s.quotaOK[p.ProviderID]; ok {
+		return v
+	}
+	return true
+}
+func (s *stubChecker) ProviderInPool(p pool.Provider) bool {
+	// Default true (no pool selected / provider is a member) so poolless
+	// selection stays byte-identical; tests set poolMember[id]=false for
+	// non-members of the selected pool.
+	if v, ok := s.poolMember[p.ProviderID]; ok {
 		return v
 	}
 	return true
@@ -222,6 +232,7 @@ type recordingChecker struct {
 	contextFail      map[string]bool
 	tier2Reason      map[string]routing.RejectionReason
 	quotaFail        map[string]bool
+	poolNonMember    map[string]bool
 }
 
 func (r *recordingChecker) ProviderMatchesRequest(p pool.Provider) bool {
@@ -247,6 +258,10 @@ func (r *recordingChecker) Tier2Decision(p pool.Provider) (routing.RejectionReas
 func (r *recordingChecker) QuotaPermits(p pool.Provider) bool {
 	r.calls = append(r.calls, p.ProviderID+"/quota")
 	return !r.quotaFail[p.ProviderID]
+}
+func (r *recordingChecker) ProviderInPool(p pool.Provider) bool {
+	r.calls = append(r.calls, p.ProviderID+"/pool")
+	return !r.poolNonMember[p.ProviderID]
 }
 
 func TestEligibleCandidates_OrderingExcludedShortCircuitsEverything(t *testing.T) {
@@ -287,7 +302,9 @@ func TestEligibleCandidates_OrderingPerProviderSequence(t *testing.T) {
 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
 	checker := &recordingChecker{t: t}
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
-	want := []string{"p/match", "p/version_floor", "p/receipt_key", "p/context", "p/tier2", "p/quota"}
+	// SPEC-042 R005 pool-membership gate is first among property gates
+	// (right after excluded), before the model match.
+	want := []string{"p/pool", "p/match", "p/version_floor", "p/receipt_key", "p/context", "p/tier2", "p/quota"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("call count: want %d, got %d (calls=%v)", len(want), len(checker.calls), checker.calls)
 	}
@@ -303,7 +320,7 @@ func TestEligibleCandidates_OrderingContextRejectStopsBeforeTier2AndQuota(t *tes
 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
 	checker := &recordingChecker{t: t, contextFail: map[string]bool{"p": true}}
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
-	want := []string{"p/match", "p/version_floor", "p/receipt_key", "p/context"}
+	want := []string{"p/pool", "p/match", "p/version_floor", "p/receipt_key", "p/context"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("context-reject: want sequence %v, got %v", want, checker.calls)
 	}
@@ -328,6 +345,60 @@ func TestEligibleCandidates_ReceiptKeyMissingExcluded(t *testing.T) {
 	}
 	if res.Counts[routing.ReasonReceiptKeyMissing] != 1 {
 		t.Fatalf("want ReasonReceiptKeyMissing==1, got %d (counts=%v)", res.Counts[routing.ReasonReceiptKeyMissing], res.Counts)
+	}
+}
+
+func TestEligibleCandidates_PoolNonMemberExcluded(t *testing.T) {
+	// SPEC-042 R005: a request carrying pool_id=P must consider only
+	// members of P. A provider the checker reports as a non-member MUST be
+	// dropped with ReasonPoolNotMember and MUST NOT appear in Eligible;
+	// members are unaffected. This is the filter-level tenant-isolation
+	// gate covering the ordinary/failover/sticky/preflight paths.
+	t.Parallel()
+	providers := []pool.Provider{mkProvider("member-x"), mkProvider("nonmember-z")}
+	checker := &stubChecker{poolMember: map[string]bool{"nonmember-z": false}}
+	res := routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+	if len(res.Eligible) != 1 || res.Eligible[0].ProviderID != "member-x" {
+		t.Fatalf("want only member-x eligible (no spill to non-member), got %+v", res.Eligible)
+	}
+	if res.Counts[routing.ReasonPoolNotMember] != 1 {
+		t.Fatalf("want ReasonPoolNotMember==1, got %d (counts=%v)", res.Counts[routing.ReasonPoolNotMember], res.Counts)
+	}
+}
+
+func TestEligibleCandidates_PoolNoMember_FailsClosedEmpty(t *testing.T) {
+	// SPEC-042 R005 fail-closed: when the pool has no eligible member
+	// (every candidate is a non-member), the eligible list is empty and
+	// PreQuotaCount is 0 — so the caller surfaces the no-eligible-member
+	// 503 with NO spill to global/other-pool supply, and does NOT take the
+	// 429-vs-503 quota branch.
+	t.Parallel()
+	providers := []pool.Provider{mkProvider("z1"), mkProvider("z2")}
+	checker := &stubChecker{poolMember: map[string]bool{"z1": false, "z2": false}}
+	res := routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+	if len(res.Eligible) != 0 {
+		t.Fatalf("want 0 eligible (fail closed), got %d", len(res.Eligible))
+	}
+	if res.PreQuotaCount != 0 {
+		t.Fatalf("want PreQuotaCount 0, got %d", res.PreQuotaCount)
+	}
+	if res.Counts[routing.ReasonPoolNotMember] != 2 {
+		t.Fatalf("want 2 pool_not_member, got %d", res.Counts[routing.ReasonPoolNotMember])
+	}
+}
+
+func TestEligibleCandidates_NoPoolSelected_ByteIdentical(t *testing.T) {
+	// SPEC-042 R002/R010: with no pool selected the checker returns true
+	// for every provider, so global selection is unchanged — all providers
+	// eligible, no ReasonPoolNotMember counts.
+	t.Parallel()
+	providers := []pool.Provider{mkProvider("a"), mkProvider("b"), mkProvider("c")}
+	res := routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, &stubChecker{})
+	if len(res.Eligible) != 3 {
+		t.Fatalf("no-pool: want 3 eligible, got %d", len(res.Eligible))
+	}
+	if res.Counts[routing.ReasonPoolNotMember] != 0 {
+		t.Fatalf("no-pool: want 0 pool_not_member, got %d", res.Counts[routing.ReasonPoolNotMember])
 	}
 }
 
@@ -402,7 +473,7 @@ func TestEligibleCandidates_OrderingVersionFloorRejectStopsBeforeContext(t *test
 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
 	checker := &recordingChecker{t: t, versionFloorFail: map[string]bool{"p": true}}
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
-	want := []string{"p/match", "p/version_floor"}
+	want := []string{"p/pool", "p/match", "p/version_floor"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("calls = %v, want exactly %v", checker.calls, want)
 	}
