@@ -471,9 +471,9 @@
     {
       "spec_id": "SPEC-017",
       "title": "Network Stats API",
-      "version": "0.1.9",
+      "version": "0.2.0",
       "path": "specs/SPEC-017-network-stats-api.md",
-      "status": "normative",
+      "status": "draft",
       "owner": "@Augustas11",
       "authority_domains": [
         "network-stats"
@@ -3828,8 +3828,7 @@
       "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/auth/keys.go:Validate",
-        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
-        "phase4-coordinator/internal/buyer/server.go:handleChatCompletions"
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions"
       ],
       "tests": [
         "phase5-gateway/internal/router/integration_test.go:TestStrangerKeyOpenAIChatUsageFlow",
@@ -4197,7 +4196,6 @@
       "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
-        "phase4-coordinator/internal/buyer/server.go:handleChatCompletions",
         "phase4-coordinator/internal/buyer/server.go:selectProvider"
       ],
       "tests": [

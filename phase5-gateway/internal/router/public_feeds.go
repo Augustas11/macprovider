@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,12 +27,16 @@ const (
 	publicUpstreamTimeout     = 10 * time.Second
 	publicStatsCacheTTL       = 30 * time.Second
 	publicRateCardCacheTTL    = 5 * time.Minute
+	publicStatsRPM            = 60
 )
 
 const (
-	publicRateCardPath    = "/v1/rate-card"
-	publicRateCardSigPath = "/v1/rate-card.sig"
-	publicStatsPath       = "/v1/stats/overview"
+	publicRateCardPath         = "/v1/rate-card"
+	publicRateCardSigPath      = "/v1/rate-card.sig"
+	publicStatsPath            = "/v1/stats/overview"
+	publicStatsRoutabilityPath = "/v1/stats/routability"
+	publicStatsModelsPath      = "/v1/stats/models"
+	publicStatsProvidersPath   = "/v1/stats/providers"
 )
 
 var errInvalidPublicUpstream = errors.New("invalid public upstream")
@@ -73,7 +78,16 @@ type publicFeedFetch struct {
 
 func isPublicFeedPath(path string) bool {
 	switch path {
-	case publicRateCardPath, publicRateCardSigPath, publicStatsPath, "/v1/network-stats":
+	case publicRateCardPath, publicRateCardSigPath, publicStatsPath, publicStatsRoutabilityPath, publicStatsModelsPath, publicStatsProvidersPath, "/v1/network-stats":
+		return true
+	default:
+		return false
+	}
+}
+
+func isPublicStatsPath(path string) bool {
+	switch path {
+	case publicStatsPath, publicStatsRoutabilityPath, publicStatsModelsPath, publicStatsProvidersPath, "/v1/network-stats":
 		return true
 	default:
 		return false
@@ -96,7 +110,7 @@ func publicFeedMaxBytes(upstreamPath string) int64 {
 }
 
 func publicFeedCacheTTL(upstreamPath string) time.Duration {
-	if upstreamPath == publicStatsPath {
+	if isPublicStatsPath(upstreamPath) {
 		return publicStatsCacheTTL
 	}
 	return publicRateCardCacheTTL
@@ -114,9 +128,24 @@ func (s *Server) handlePublicStatsOverview(w http.ResponseWriter, r *http.Reques
 	s.proxyPublicUpstream(w, r, s.coordinatorOperatorURL(), publicStatsPath, "coordinator_stats_error", "Coordinator stats error")
 }
 
+func (s *Server) handlePublicStatsRoutability(w http.ResponseWriter, r *http.Request) {
+	s.proxyPublicUpstream(w, r, s.coordinatorOperatorURL(), publicStatsRoutabilityPath, "coordinator_stats_error", "Coordinator stats error")
+}
+
+func (s *Server) handlePublicStatsModels(w http.ResponseWriter, r *http.Request) {
+	s.proxyPublicUpstream(w, r, s.coordinatorOperatorURL(), publicStatsModelsPath, "coordinator_stats_error", "Coordinator stats error")
+}
+
+func (s *Server) handlePublicStatsProviders(w http.ResponseWriter, r *http.Request) {
+	s.proxyPublicUpstream(w, r, s.coordinatorOperatorURL(), publicStatsProvidersPath, "coordinator_stats_error", "Coordinator stats error")
+}
+
 func (s *Server) proxyPublicUpstream(w http.ResponseWriter, r *http.Request, baseURL, upstreamPath, errorCode, errorMessage string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
+		return
+	}
+	if isPublicStatsPath(upstreamPath) && !s.admitPublicStatsFeed(w, r, upstreamPath) {
 		return
 	}
 	if cached, ok := s.lookupPublicFeed(upstreamPath); ok {
@@ -128,6 +157,29 @@ func (s *Server) proxyPublicUpstream(w http.ResponseWriter, r *http.Request, bas
 		return
 	}
 	s.proxySinglePublicFeed(w, r, baseURL, upstreamPath, errorCode, errorMessage)
+}
+
+func (s *Server) admitPublicStatsFeed(w http.ResponseWriter, r *http.Request, upstreamPath string) bool {
+	if s == nil || s.publicStatsLimits == nil {
+		return true
+	}
+	ip := s.clientIP(r)
+	if ip == "" {
+		ip = "unknown"
+	}
+	decision := s.publicStatsLimits.allow(ip+"|"+upstreamPath, s.now())
+	if decision.Admitted {
+		return true
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(decision.RetryAfterSeconds))
+	w.Header().Set("Cache-Control", "public, max-age=30, s-maxage=30, stale-while-revalidate=60")
+	w.Header().Set("Vary", "Accept-Encoding, Origin")
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": map[string]any{
+		"code":                "rate_limited",
+		"message":             "rate limited",
+		"retry_after_seconds": decision.RetryAfterSeconds,
+	}})
+	return false
 }
 
 func (s *Server) proxySinglePublicFeed(w http.ResponseWriter, r *http.Request, baseURL, upstreamPath, errorCode, errorMessage string) {

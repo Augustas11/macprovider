@@ -1,4 +1,4 @@
-// Package metrics declares the SPEC-017 v0.1.8 §8 Prometheus
+// Package metrics declares the SPEC-017 §8 Prometheus
 // metric surface plus SPEC-026 register counters. Wired by Step 4.C
 // per BUILD §2:
 //
@@ -23,11 +23,13 @@
 //     never reached a partner-key match).
 //
 //   - `endpoint` is a closed set: "overview" / "leaderboard" /
-//     "provider" / "health" (mirrors the Step 3 mux verbs).
+//     "provider" / "health" / "routability" / "models" /
+//     "providers" (mirrors the Step 3 mux verbs).
 //
 //   - `component` is a closed set from §9.5: "overview",
 //     "timeseries_rpm", "timeseries_tpm", "leaderboard_24h",
-//     "leaderboard_7d", "leaderboard_30d", "leaderboard_all".
+//     "leaderboard_7d", "leaderboard_30d", "leaderboard_all",
+//     "routability".
 //
 //   - `status` is the HTTP status code as a decimal string.
 //

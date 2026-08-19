@@ -134,7 +134,8 @@ CREATE INDEX IF NOT EXISTS stats_leaderboard_all_rank_jobs_idx
 
 -- v0.1.7 §9.1 — component enum has 7 values: overview,
 -- timeseries_rpm, timeseries_tpm, leaderboard_24h, leaderboard_7d,
--- leaderboard_30d, leaderboard_all. The handler-derived JSON
+-- leaderboard_30d, leaderboard_all. v0.2.0 adds routability.
+-- The handler-derived JSON
 -- `status` field is computed at request time; there is no `status`
 -- column here (BUILD §A.4 CRITICAL invariant).
 CREATE TABLE IF NOT EXISTS stats_components_health (
@@ -146,12 +147,22 @@ CREATE TABLE IF NOT EXISTS stats_components_health (
                                  'leaderboard_24h',
                                  'leaderboard_7d',
                                  'leaderboard_30d',
-                                 'leaderboard_all'
+                                 'leaderboard_all',
+                                 'routability'
                              )),
     generated_at             TIMESTAMPTZ NOT NULL,
     last_ok_at               TIMESTAMPTZ NOT NULL,
     last_error_at            TIMESTAMPTZ,
     last_error_message       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS stats_routability_current (
+    singleton                BOOLEAN PRIMARY KEY DEFAULT TRUE
+                             CHECK (singleton = TRUE),
+    generated_at             TIMESTAMPTZ NOT NULL,
+    summary                  JSONB NOT NULL,
+    models                   JSONB NOT NULL,
+    providers                JSONB NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS stats_late_events (

@@ -314,6 +314,7 @@ func smoke(ctx context.Context, p *Pools) error {
 			db:   p.Reader,
 			positiveSQLs: []string{
 				`SELECT 1 FROM stats_components_health LIMIT 1`,
+				`SELECT 1 FROM stats_routability_current LIMIT 1`,
 				`SELECT idle_prewarm_pool_pct_with_b1_active, idle_prewarm_skips_by_reason_last_1h FROM stats_overview_current LIMIT 1`,
 				`SELECT 1 FROM stats_idle_prewarm_events LIMIT 1`,
 			},
@@ -325,6 +326,7 @@ func smoke(ctx context.Context, p *Pools) error {
 			db:   p.Rollup,
 			positiveSQLs: []string{
 				`SELECT 1 FROM stats_components_health LIMIT 1`,
+				`SELECT 1 FROM stats_routability_current LIMIT 1`,
 				`SELECT 1 FROM stats_idle_prewarm_events LIMIT 1`,
 			},
 			boolSQLs: []string{
