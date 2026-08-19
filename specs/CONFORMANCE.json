@@ -1220,6 +1220,45 @@
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
         "rationale": "Relay-blind buyer privacy is a new authority domain. The first implementation must land default-off with local tests and no conformance promotion until signed journey-result evidence exists."
       }
+    },
+    {
+      "spec_id": "SPEC-042",
+      "title": "Pool Control Plane and Trusted-Pool Manifest",
+      "version": "0.0.7",
+      "path": "specs/SPEC-042-pool-control-plane.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "pool-control-plane"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-010",
+        "SPEC-015",
+        "SPEC-016",
+        "SPEC-020",
+        "SPEC-022",
+        "SPEC-040",
+        "SPEC-041"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Pool control plane is a new authority domain (pool-control-plane). No pool_id exists across routing/admission/snapshots/logs/receipts/settlement/payout/disclosure today, so Layer 2 traffic is deploy-blocked. First implementation lands default-off with fail-closed conformance tests; no conformance promotion until signed journey-result evidence exists. Layer 2 administrative trust only; cryptographic privacy is SPEC-041/Layer 3."
+      }
     }
   ],
   "requirements": [
