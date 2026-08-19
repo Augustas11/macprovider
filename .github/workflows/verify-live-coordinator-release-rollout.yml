@@ -25,6 +25,10 @@ jobs:
     environment: production-release
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.rollout.outputs.tag }}
+      target_commit: ${{ steps.rollout.outputs.target_commit }}
+      transport_tag: ${{ steps.rollout.outputs.transport_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -48,6 +52,7 @@ jobs:
           printf 'bin=%s\n' "$sealed_bin" >> "$GITHUB_OUTPUT"
 
       - name: Verify public immutable release and live rollout
+        id: rollout
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -161,14 +166,30 @@ jobs:
             --target-tag "$TAG" \
             --target-commit "$target_commit" \
             --openssl "$OPENSSL_BIN" >/dev/null
-          if git ls-remote --tags origin "$transport_tag" | grep -q .; then
-            echo "discovery transport tag already exists: $transport_tag" >&2
+          existing_transport_json="$RUNNER_TEMP/discovery-existing.json"
+          existing_transport_error="$RUNNER_TEMP/discovery-existing.err"
+          transport_exists=false
+          set +e
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$transport_tag" \
+            > "$existing_transport_json" \
+            2> "$existing_transport_error"
+          existing_transport_status=$?
+          set -e
+          if [ "$existing_transport_status" -eq 0 ]; then
+            transport_exists=true
+          elif ! grep -Eq 'HTTP 404|Not Found' "$existing_transport_error"; then
+            cat "$existing_transport_error" >&2
+            exit "$existing_transport_status"
+          elif git ls-remote --tags origin "$transport_tag" | grep -q .; then
+            echo "discovery transport tag exists without a published release: $transport_tag" >&2
             exit 1
           fi
-          gh api --paginate --slurp -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            > "$RUNNER_TEMP/releases-before-discovery.json"
-          python3 - "$RUNNER_TEMP/releases-before-discovery.json" "$transport_tag" <<'PY'
+          if [ "$transport_exists" = false ]; then
+            gh api --paginate --slurp -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              > "$RUNNER_TEMP/releases-before-discovery.json"
+            python3 - "$RUNNER_TEMP/releases-before-discovery.json" "$transport_tag" <<'PY'
           import json
           import pathlib
           import sys
@@ -181,6 +202,7 @@ jobs:
           ):
               raise SystemExit("append-only discovery release already exists")
           PY
+          fi
           # GitHub concurrency serializes this publisher, but it cannot lock
           # the external Pearl recommendation. Re-check immediately before
           # the irreversible append-only discovery publication.
@@ -192,29 +214,34 @@ jobs:
             --coordinator-url https://coordinator.malibu.tech \
             --openssl "$OPENSSL_BIN" \
             --publication-phase post-publication
-          notes="$RUNNER_TEMP/discovery-notes.md"
-          printf 'Signed append-only discovery transport for %s.\n' "$TAG" > "$notes"
-          gh release create "$transport_tag" \
-            "$assets/compatibility-artifact-index.json" \
-            "$assets/macprovider-release-discovery.json" \
-            "$assets/macprovider-release-discovery.json.sig" \
-            --title "macprovider signed release discovery" \
-            --notes-file "$notes" \
-            --target "$target_commit" \
-            --draft \
-            --prerelease \
-            --latest=false
-          transport_id="$(gh release view "$transport_tag" --json databaseId --jq .databaseId)"
-          [[ "$transport_id" =~ ^[1-9][0-9]*$ ]]
-          gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
-            -F draft=false -F prerelease=true -f make_latest=false \
-            > "$RUNNER_TEMP/discovery-published.json"
-          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
-            > "$RUNNER_TEMP/discovery-immutable.json"
+          transport_release_json="$RUNNER_TEMP/discovery-immutable.json"
+          if [ "$transport_exists" = false ]; then
+            notes="$RUNNER_TEMP/discovery-notes.md"
+            printf 'Signed append-only discovery transport for %s.\n' "$TAG" > "$notes"
+            gh release create "$transport_tag" \
+              "$assets/compatibility-artifact-index.json" \
+              "$assets/macprovider-release-discovery.json" \
+              "$assets/macprovider-release-discovery.json.sig" \
+              --title "macprovider signed release discovery" \
+              --notes-file "$notes" \
+              --target "$target_commit" \
+              --draft \
+              --prerelease \
+              --latest=false
+            transport_id="$(gh release view "$transport_tag" --json databaseId --jq .databaseId)"
+            [[ "$transport_id" =~ ^[1-9][0-9]*$ ]]
+            gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
+              -F draft=false -F prerelease=true -f make_latest=false \
+              > "$RUNNER_TEMP/discovery-published.json"
+            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
+              > "$transport_release_json"
+          else
+            cp "$existing_transport_json" "$transport_release_json"
+          fi
           python3 scripts/verify-release-discovery-transport.py \
-            --release-json "$RUNNER_TEMP/discovery-immutable.json" \
+            --release-json "$transport_release_json" \
             --head "$assets/macprovider-release-discovery.json" \
             --signature "$assets/macprovider-release-discovery.json.sig" \
             --artifact-index "$assets/compatibility-artifact-index.json" \
@@ -225,6 +252,32 @@ jobs:
             --target-commit "$target_commit" \
             --require-immutable \
             --openssl "$OPENSSL_BIN" >/dev/null
+          {
+            printf 'tag=%s\n' "$TAG"
+            printf 'target_commit=%s\n' "$target_commit"
+            printf 'transport_tag=%s\n' "$transport_tag"
+          } >> "$GITHUB_OUTPUT"
+
+  anonymous-smoke:
+    name: Verify anonymous arm64 discovery
+    needs: verify
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify anonymous discovery through released arm64 client
+        shell: bash
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          TARGET_COMMIT: ${{ needs.verify.outputs.target_commit }}
+          TRANSPORT_TAG: ${{ needs.verify.outputs.transport_tag }}
+        run: |
+          set -euo pipefail
           GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
             scripts/verify-anonymous-release-discovery.sh \
-              "$TAG" "$target_commit" "$TAG" "$transport_tag"
+              "$TAG" "$TARGET_COMMIT" "$TAG" "$TRANSPORT_TAG"

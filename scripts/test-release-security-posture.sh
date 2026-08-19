@@ -1444,6 +1444,8 @@ if transport_verify < transport_publish or anonymous < transport_verify:
 for requirement in (
     "contents: write",
     "runs-on: macos-15-intel",
+    "anonymous-smoke:",
+    "    runs-on: macos-15\n",
     "- name: Seal reviewed OpenSSL 3",
     "id: protected_openssl",
     "scripts/install-sealed-release-openssl.sh",
@@ -1459,6 +1461,13 @@ for requirement in (
     "--prerelease",
     "--latest=false",
     'git ls-remote --tags origin "$transport_tag"',
+    '"repos/$GITHUB_REPOSITORY/releases/tags/$transport_tag"',
+    "existing_transport_status=$?",
+    'cp "$existing_transport_json" "$transport_release_json"',
+    "needs: verify",
+    "target_commit: ${{ steps.rollout.outputs.target_commit }}",
+    "TRANSPORT_TAG: ${{ needs.verify.outputs.transport_tag }}",
+    'ref: ${{ github.sha }}',
 ):
     if requirement not in rollout:
         raise SystemExit(f"post-publication rollout omits: {requirement}")
