@@ -27,21 +27,22 @@ import (
 const policyCoreSigTag = "macprovider/spec042/policy-core-sig/v1"
 
 var (
-	errSignerSetEmpty    = errors.New("poolmanifest: signer set has no keys")
-	errThresholdRange    = errors.New("poolmanifest: signer set threshold must satisfy 1 <= M <= N")
-	errSignerKeyID       = errors.New("poolmanifest: signer set key id must be non-empty and distinct")
-	errSignerKeyLen      = errors.New("poolmanifest: signer set public key must be ed25519.PublicKeySize bytes")
-	errSignerKeyDup      = errors.New("poolmanifest: signer set public keys must be distinct")
-	errSignerSetWindow   = errors.New("poolmanifest: signer set validity window must satisfy not_before < expires")
-	errSignerSetVersion  = errors.New("poolmanifest: policy core signer_set_version does not match signer set")
-	errSignerSetRevoked  = errors.New("poolmanifest: signer set is revoked")
-	errSignerSetInactive = errors.New("poolmanifest: signer set window does not contain policy not_before")
-	errDuplicateSigner   = errors.New("poolmanifest: duplicate signer key id in signature list")
-	errUnknownSigner     = errors.New("poolmanifest: signature key id not in signer set")
-	errBadSignature      = errors.New("poolmanifest: invalid signature")
-	errThresholdNotMet   = errors.New("poolmanifest: fewer authorized signatures than threshold")
-	errPoolIDMismatch    = errors.New("poolmanifest: pool_id does not match recomputed identity-core digest")
-	errDigestLen         = errors.New("poolmanifest: manifest_core_digest must be 32 bytes")
+	errSignerSetEmpty       = errors.New("poolmanifest: signer set has no keys")
+	errSignerSetVersionZero = errors.New("poolmanifest: signer set version 0 is reserved")
+	errThresholdRange       = errors.New("poolmanifest: signer set threshold must satisfy 1 <= M <= N")
+	errSignerKeyID          = errors.New("poolmanifest: signer set key id must be non-empty and distinct")
+	errSignerKeyLen         = errors.New("poolmanifest: signer set public key must be ed25519.PublicKeySize bytes")
+	errSignerKeyDup         = errors.New("poolmanifest: signer set public keys must be distinct")
+	errSignerSetWindow      = errors.New("poolmanifest: signer set validity window must satisfy not_before < expires")
+	errSignerSetVersion     = errors.New("poolmanifest: policy core signer_set_version does not match signer set")
+	errSignerSetRevoked     = errors.New("poolmanifest: signer set is revoked")
+	errSignerSetInactive    = errors.New("poolmanifest: signer set window does not contain policy not_before")
+	errDuplicateSigner      = errors.New("poolmanifest: duplicate signer key id in signature list")
+	errUnknownSigner        = errors.New("poolmanifest: signature key id not in signer set")
+	errBadSignature         = errors.New("poolmanifest: invalid signature")
+	errThresholdNotMet      = errors.New("poolmanifest: fewer authorized signatures than threshold")
+	errPoolIDMismatch       = errors.New("poolmanifest: pool_id does not match recomputed identity-core digest")
+	errDigestLen            = errors.New("poolmanifest: manifest_core_digest must be 32 bytes")
 )
 
 // Signature is a detached Ed25519 signature by one signer key over a
@@ -86,6 +87,12 @@ type SignerSet struct {
 // key. Rejecting duplicate public keys here (the trust-primitive boundary) closes
 // that collapse regardless of how the slice-3 authority log constructs the set.
 func (ss SignerSet) Validate() error {
+	// Version 0 is reserved as the authority-log root-authorizer sentinel
+	// (AuthorizingSignerSetVersion == 0 means "root issuer"), so no real signer set
+	// may take version 0; signer_set_version numbering starts at 1.
+	if ss.Version == 0 {
+		return errSignerSetVersionZero
+	}
 	n := len(ss.Keys)
 	if n == 0 {
 		return errSignerSetEmpty
@@ -115,6 +122,23 @@ func (ss SignerSet) Validate() error {
 		return errSignerSetWindow
 	}
 	return nil
+}
+
+// deepCopy returns a SignerSet whose Keys slice and every public-key byte slice
+// are freshly allocated, so the copy shares no backing storage with the original.
+// The authority log uses this so a materialized signer set cannot be mutated
+// through the caller's original entries nor through a prior lookup's returned value.
+func (ss SignerSet) deepCopy() SignerSet {
+	out := ss
+	if ss.Keys != nil {
+		out.Keys = make([]SignerKey, len(ss.Keys))
+		for i, k := range ss.Keys {
+			pk := make(ed25519.PublicKey, len(k.PublicKey))
+			copy(pk, k.PublicKey)
+			out.Keys[i] = SignerKey{KeyID: k.KeyID, PublicKey: pk}
+		}
+	}
+	return out
 }
 
 // keyByID returns the public key for id, or ok=false if id is not in the set.
@@ -170,17 +194,27 @@ func VerifyPolicyCore(core PolicyCore, sigs []Signature, ss SignerSet) error {
 	return verifyThreshold(digest, sigs, ss)
 }
 
-// verifyThreshold enforces M-of-N over distinct authorized valid signatures. The
-// signature list must be clean: each entry authorized (key id in the set),
-// cryptographically valid over the policy-core signing message, and distinct by
-// key id; then len(sigs) >= Threshold. This makes M-of-N mean "M distinct
-// authorized keys signed the same digest", never M signatures from one key nor M
-// good signatures padded with garbage. ss is assumed already Validate()d.
+// verifyThreshold enforces M-of-N over distinct authorized valid signatures for a
+// policy core. ss is assumed already Validate()d. It delegates to the generic
+// message-based primitive; the only policy-core-specific part is the signing
+// message construction.
 func verifyThreshold(manifestCoreDigest []byte, sigs []Signature, ss SignerSet) error {
 	msg, err := PolicyCoreSigningMessage(manifestCoreDigest)
 	if err != nil {
 		return err
 	}
+	return verifyThresholdMessage(msg, sigs, ss)
+}
+
+// verifyThresholdMessage enforces M-of-N over distinct authorized valid signatures
+// on an arbitrary domain-separated message. The signature list must be clean: each
+// entry authorized (key id in the set), cryptographically valid over msg, and
+// distinct by key id; then len(sigs) >= Threshold. This makes M-of-N mean "M
+// distinct authorized keys signed the same message", never M signatures from one
+// key nor M good signatures padded with an unauthorized one. ss is assumed already
+// Validate()d. Reused by both policy-core (slice 2) and authority-log-entry
+// (slice 3) verification with their own domain-separated messages.
+func verifyThresholdMessage(msg []byte, sigs []Signature, ss SignerSet) error {
 	seen := make(map[string]struct{}, len(sigs))
 	for _, s := range sigs {
 		if _, dup := seen[s.KeyID]; dup {
