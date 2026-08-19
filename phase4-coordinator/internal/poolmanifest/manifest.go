@@ -68,7 +68,16 @@ type PolicyCore struct {
 	SplitExecutionStatus string
 	RetentionPolicyID    string
 	MinEligibleMembers   uint64
-	PrivacyMode          string
+	// Layer 3 compatibility fields (SPEC-042-R009), forward-declared so the
+	// later Layer-3 amendment is additive rather than a breaking re-encode.
+	// v0.1 is Layer 2: PrivacyMode MUST be "none" and the rest are inert
+	// defaults; the coordinator fails closed on a non-default PrivacyMode.
+	PrivacyMode          string // "none" in v0.1
+	RelayBlindCapable    bool
+	ReceiptContract      string
+	MetadataVisible      string
+	DowngradePolicy      string
+	StickyRoutingAllowed bool // default false for trust-sensitive pools
 	NotBeforeUnix        uint64
 	ExpiresAtUnix        uint64
 }
@@ -166,6 +175,9 @@ func (pc PolicyCore) CanonicalBytes() ([]byte, error) {
 	e.bytesf(pc.PrevManifestCoreHash)
 	e.u64(pc.SignerSetVersion)
 	// list(model_allowlist): count then each element length-prefixed, set-ordered.
+	if uint64(len(allow)) > uint64(^uint32(0)) {
+		return nil, errFieldTooLong
+	}
 	var count [4]byte
 	binary.BigEndian.PutUint32(count[:], uint32(len(allow)))
 	e.buf = append(e.buf, count[:]...)
@@ -180,7 +192,13 @@ func (pc PolicyCore) CanonicalBytes() ([]byte, error) {
 	e.str(pc.SplitExecutionStatus)
 	e.str(pc.RetentionPolicyID)
 	e.u64(pc.MinEligibleMembers)
+	// SPEC-042-R009 Layer 3 compatibility field group, in R009's declared order.
 	e.str(pc.PrivacyMode)
+	e.boolean(pc.RelayBlindCapable)
+	e.str(pc.ReceiptContract)
+	e.str(pc.MetadataVisible)
+	e.str(pc.DowngradePolicy)
+	e.boolean(pc.StickyRoutingAllowed)
 	e.u64(pc.NotBeforeUnix)
 	e.u64(pc.ExpiresAtUnix)
 	if e.err != nil {

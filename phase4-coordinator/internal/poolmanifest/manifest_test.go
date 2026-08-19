@@ -28,9 +28,12 @@ const (
 	goldenIdentityCoreHex  = "6d616370726f76696465722f737065633034322f6964656e746974792d636f72652f76310000000a726f6f742d6b65792d310000001167656e657369732d6e6f6e63652d616263"
 	goldenPoolID           = "ijUnc-ZQf-LJeRvkhi-0iQ"
 	goldenPoolIDMin        = "b9BZHgbPy9CckfctwRuRQw"
-	goldenPolicyCoreHex    = "6d616370726f76696465722f737065633034322f706f6c6963792d636f72652f763100000016696a556e632d5a51662d4c4a6552766b68692d3069510000000000000001000000200000000000000000000000000000000000000000000000000000000000000000000000000000000100000002000000076d6f64656c2d61000000076d6f64656c2d6200000005312e382e300000000b73656c665f7369676e65640100000007656e666f7263650000000000000000000000156465636c617265645f6e6f745f6578656375746564000000057265742d310000000000000001000000046e6f6e6500000000000003e800000000000007d0"
-	goldenManifestDigest   = "08f8fb21fea650d4e2afce2c7b580e650abebc83585104e165b038d92e376f4d"
-	goldenManifestDigestV2 = "68fe471af45933339556e9bfc26996fcfb8a32c74ecfea5402a765f82c388897"
+	goldenPolicyCoreHex    = "6d616370726f76696465722f737065633034322f706f6c6963792d636f72652f763100000016696a556e632d5a51662d4c4a6552766b68692d3069510000000000000001000000200000000000000000000000000000000000000000000000000000000000000000000000000000000100000002000000076d6f64656c2d61000000076d6f64656c2d6200000005312e382e300000000b73656c665f7369676e65640100000007656e666f7263650000000000000000000000156465636c617265645f6e6f745f6578656375746564000000057265742d310000000000000001000000046e6f6e65000000000000000000000000000000000000000003e800000000000007d0"
+	goldenManifestDigest   = "237806f14c4bef1a2a0ec853c0309b24fc3db7c6cd14d5d71b9e186245ead2b6"
+	goldenManifestDigestV2 = "cea4a9b115f9f4d54bbedafa24fb130662990212efabf279e73fbfdad2f6dbfa"
+	// Empty model allowlist: list count encodes as 0x00000000 with no elements.
+	goldenEmptyAllowlistPolicyHex = "6d616370726f76696465722f737065633034322f706f6c6963792d636f72652f763100000016696a556e632d5a51662d4c4a6552766b68692d306951000000000000000100000020000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000005312e382e300000000b73656c665f7369676e65640100000007656e666f7263650000000000000000000000156465636c617265645f6e6f745f6578656375746564000000057265742d310000000000000001000000046e6f6e65000000000000000000000000000000000000000003e800000000000007d0"
+	goldenEmptyAllowlistDigest    = "25ddd6d6ceb19de9d1d5ce1017dd742fc3c804c3187f8d6df2b314d5c828b59b"
 )
 
 func must(b []byte, err error) []byte {
@@ -62,6 +65,26 @@ func TestGoldenVectors(t *testing.T) {
 	pc2.PrevManifestCoreHash = must(pc.ManifestCoreDigest())
 	if got := hex.EncodeToString(must(pc2.ManifestCoreDigest())); got != goldenManifestDigestV2 {
 		t.Fatalf("v2 manifest_core_digest=%s, want %s", got, goldenManifestDigestV2)
+	}
+}
+
+// TestEmptyAllowlistVector pins the count-zero encoding of an empty model
+// allowlist so the "no elements" branch of the list grammar is frozen too.
+func TestEmptyAllowlistVector(t *testing.T) {
+	pid, _ := sampleIdentity().PoolID()
+	pc := samplePolicy(pid)
+	pc.ModelAllowlist = nil
+	if got := hex.EncodeToString(must(pc.CanonicalBytes())); got != goldenEmptyAllowlistPolicyHex {
+		t.Fatalf("empty-allowlist policy bytes drifted:\n got=%s\nwant=%s", got, goldenEmptyAllowlistPolicyHex)
+	}
+	if got := hex.EncodeToString(must(pc.ManifestCoreDigest())); got != goldenEmptyAllowlistDigest {
+		t.Fatalf("empty-allowlist digest=%s, want %s", got, goldenEmptyAllowlistDigest)
+	}
+	// An empty allowlist (nil) and a zero-length slice encode identically.
+	pc2 := samplePolicy(pid)
+	pc2.ModelAllowlist = []string{}
+	if string(must(pc.CanonicalBytes())) != string(must(pc2.CanonicalBytes())) {
+		t.Fatal("nil and empty allowlist encode differently")
 	}
 }
 
@@ -131,6 +154,11 @@ func TestDigestSensitivity(t *testing.T) {
 		"split_bps":     func(p *PolicyCore) { p.RevenueSplitBps = 500 },
 		"min_members":   func(p *PolicyCore) { p.MinEligibleMembers = 3 },
 		"privacy_mode":  func(p *PolicyCore) { p.PrivacyMode = "relay_blind" },
+		"relay_capable": func(p *PolicyCore) { p.RelayBlindCapable = true },
+		"receipt_ctr":   func(p *PolicyCore) { p.ReceiptContract = "v0.4" },
+		"metadata_vis":  func(p *PolicyCore) { p.MetadataVisible = "minimal" },
+		"downgrade":     func(p *PolicyCore) { p.DowngradePolicy = "reject" },
+		"sticky":        func(p *PolicyCore) { p.StickyRoutingAllowed = true },
 		"not_before":    func(p *PolicyCore) { p.NotBeforeUnix = 1 },
 		"expires":       func(p *PolicyCore) { p.ExpiresAtUnix = 9 },
 		"allowlist":     func(p *PolicyCore) { p.ModelAllowlist = []string{"model-c"} },

@@ -75,9 +75,14 @@ cannot be lifted to another pool):
 12. `str(split_execution_status)`       — "declared_not_executed" in v0.1.
 13. `str(retention_policy_id)`
 14. `u64(min_eligible_members)`
-15. `str(privacy_mode)`                 — R009 Layer-3 compat field, "none" default (forward-declared).
-16. `u64(not_before_unix)`
-17. `u64(expires_at_unix)`
+15. `str(privacy_mode)`                 — R009 Layer-3 compat group (forward-declared, "none" in v0.1).
+16. `bool(relay_blind_capable)`
+17. `str(receipt_contract)`
+18. `str(metadata_visible)`
+19. `str(downgrade_policy)`
+20. `bool(sticky_routing_allowed)`      — default false for trust-sensitive pools.
+21. `u64(not_before_unix)`
+22. `u64(expires_at_unix)`
 
 ```
 manifest_core_digest = SHA256(policy_core_bytes)   // 32 bytes
@@ -87,8 +92,12 @@ manifest_core_digest = SHA256(policy_core_bytes)   // 32 bytes
 - The genesis `prev_manifest_core_hash` is fixed at 32 zero bytes (a defined
   genesis value, R001). A non-genesis version carries the previous version's
   `manifest_core_digest`.
-- `privacy_mode` is forward-declared per R009 so the later Layer-3 amendment is
-  additive; v0.1 uses `"none"` and makes no relay-blind claim.
+- The full R009 Layer-3 compatibility group (`privacy_mode`,
+  `relay_blind_capable`, `receipt_contract`, `metadata_visible`,
+  `downgrade_policy`, `sticky_routing_allowed`) is forward-declared per R009 so
+  the later Layer-3 amendment is **additive** (populate the reserved fields)
+  rather than a breaking re-encode. v0.1 uses `privacy_mode="none"` and makes no
+  relay-blind claim.
 - Field 2 (`pool_id`) binding: including the pool_id reference in the policy-core
   preimage means a signed policy core is non-transferable to a different pool,
   even though pool_id is derived solely from the identity core.
