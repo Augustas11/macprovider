@@ -1873,6 +1873,8 @@ jobs:
           # source, tag, repository-posture, numeric-ID, and asset assertion
           # directly before changing draft=false. The coordinator may still
           # advertise the previous stable CLI until this release is public.
+          # Pearl /healthz may already be a runtime-only patch ahead of that
+          # advertisement; it must not be older than the advertised CLI.
           GITHUB_SHA="$commit" bash scripts/verify-release-source.sh \
             "$tag" "$commit" origin --require-existing
           GH_TOKEN="$RELEASE_POSTURE_TOKEN" \

@@ -394,6 +394,9 @@ def main() -> int:
             fail(f"/healthz status is {healthz.get('status')!r}, expected 'ok'")
         live_version = parse_semver(healthz.get("version"), "/healthz version")
         required_version = parse_semver(expected_version, "release version")
+        # Pre-publication /healthz may already be at or above the candidate
+        # (Pearl deployed first). The branch below only constrains the case
+        # where Pearl is still older than the CLI being published.
         if live_version < required_version:
             previous_version = None
             if (
@@ -404,11 +407,19 @@ def main() -> int:
                     args.expected_previous_recommendation,
                     "expected previous recommendation",
                 )
-            if previous_version is None or live_version != previous_version:
+            if previous_version is None:
                 fail(
                     f"/healthz version {healthz.get('version')!r} is older than "
                     f"release {expected_version}"
                 )
+            if live_version < previous_version:
+                fail(
+                    f"/healthz version {healthz.get('version')!r} is older than "
+                    f"previous stable {args.expected_previous_recommendation}"
+                )
+            # previous_version <= live_version < required_version is allowed:
+            # Pearl runtime-only patches may advance /healthz without moving
+            # the advertised CLI recommendation.
         recommended_value = healthz.get("recommended_binary_version")
         if (
             args.publication_phase == "pre-publication"
