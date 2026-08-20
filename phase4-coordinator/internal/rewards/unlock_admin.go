@@ -22,8 +22,9 @@ import (
 // or the route fails closed. This mirrors the provider-auth-policy operator
 // model in internal/ws/admin_endpoints.go.
 type TrustAdminDeps struct {
-	DB           *sql.DB
-	OperatorKeys map[string]string
+	DB            *sql.DB
+	OperatorKeys  map[string]string
+	TrustObserver TrustTierObserver
 }
 
 // dualControlReady reports whether the configured operator keys can support
@@ -138,6 +139,9 @@ func NewTrustPromotionApproveHandler(deps TrustAdminDeps) http.Handler {
 		if err != nil {
 			writeTrustJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
+		}
+		if deps.TrustObserver != nil {
+			deps.TrustObserver.ProviderTrustTierChanged(providerID, TierTrusted)
 		}
 		writeTrustJSON(w, http.StatusOK, map[string]any{
 			"pending_id":  pendingID,

@@ -934,8 +934,9 @@ func main() {
 	providerMux.Handle("/admin/ledger/", billingHandler)
 	if rewardsDB != nil {
 		providerMux.Handle("/admin/trust-promotion/", rewards.TrustPromotionMux(rewards.TrustAdminDeps{
-			DB:           rewardsDB,
-			OperatorKeys: cfg.Auth.OperatorKeys,
+			DB:            rewardsDB,
+			OperatorKeys:  cfg.Auth.OperatorKeys,
+			TrustObserver: rewards.TrustTierObserverFunc(func(providerID, tier string) { wsServer.ApplyRewardsTrustTier(providerID, tier) }),
 		}))
 		providerMux.Handle("/admin/malibu-reward-audit", malibuRewardAuditAdminHandler(cfg, rewardsDB))
 	}

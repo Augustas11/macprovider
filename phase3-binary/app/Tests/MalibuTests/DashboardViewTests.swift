@@ -310,6 +310,18 @@ final class DashboardViewTests: XCTestCase {
             "Complete 2 more trust criteria to unlock withdrawals."
         )
 
+        provisional.malibuHoldReasons = ["demotion_cooldown"]
+        provisional.trustCriteriaMet = 2
+        provisional.trustCriteriaRequired = 2
+        let cooldownHealth = AgentSnapshotPresenter.miningHealth(provisional)
+        XCTAssertEqual(cooldownHealth.trustSummary, "Trust: Provisional · requalification cooldown active")
+        XCTAssertEqual(cooldownHealth.nextAction, "Re-qualify for Trusted to clear the cooldown.")
+        XCTAssertEqual(AgentSnapshotPresenter.trustLine(provisional), "Provisional — requalification cooldown active")
+
+        var trustedWithHistoricalHold = provisional
+        trustedWithHistoricalHold.trustTier = .trusted
+        XCTAssertEqual(AgentSnapshotPresenter.trustLine(trustedWithHistoricalHold), "Trusted — 2 of 2 criteria met · Unlock Trusted →")
+
         var walletCap = miningBase()
         walletCap.malibuHeld = 2
         walletCap.malibuHoldReasons = ["per_wallet_daily_cap"]

@@ -520,12 +520,29 @@ func ApproveTrustPromotion(ctx context.Context, db *sql.DB, pendingID, approvedB
 		return "", errors.New("approved_by must differ from requested_by")
 	}
 	now := time.Now().UTC()
+	trustTierChanged, err := commitTrustPromotionTx(ctx, tx, providerID, approvedBy, reason, pendingID, now)
+	if err != nil {
+		return "", err
+	}
+	if trustTierChanged {
+		if err := auditTrustTierChangedTx(ctx, tx, providerID, TierTrusted, now); err != nil {
+			return "", err
+		}
+	}
+	return providerID, tx.Commit()
+}
+
+func commitTrustPromotionTx(ctx context.Context, tx *sql.Tx, providerID, approvedBy, reason, pendingID string, now time.Time) (bool, error) {
+	previousTier, err := trustTierTx(ctx, tx, providerID)
+	if err != nil {
+		return false, err
+	}
 	if _, err := tx.ExecContext(ctx, `
         UPDATE provider_trust_promotion_pending
            SET status = 'committed', approved_by = $2, committed_at = $3
          WHERE pending_id = $1
     `, pendingID, approvedBy, now); err != nil {
-		return "", err
+		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `
         INSERT INTO provider_trust_operator_promotions
@@ -537,7 +554,23 @@ func ApproveTrustPromotion(ctx context.Context, db *sql.DB, pendingID, approvedB
             pending_id = EXCLUDED.pending_id,
             promoted_at = EXCLUDED.promoted_at
     `, providerID, approvedBy, reason, pendingID, now); err != nil {
-		return "", err
+		return false, err
 	}
-	return providerID, tx.Commit()
+	if err := setTrustTier(ctx, tx, providerID, TierTrusted); err != nil {
+		return false, err
+	}
+	return !strings.EqualFold(strings.TrimSpace(previousTier), TierTrusted), nil
+}
+
+func trustTierTx(ctx context.Context, tx *sql.Tx, providerID string) (string, error) {
+	var tier string
+	err := tx.QueryRowContext(ctx, `
+        SELECT trust_tier
+          FROM provider_emission_state
+         WHERE provider_id = $1
+    `, providerID).Scan(&tier)
+	if err == sql.ErrNoRows {
+		return TierProvisional, nil
+	}
+	return tier, err
 }

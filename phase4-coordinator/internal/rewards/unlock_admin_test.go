@@ -1,11 +1,14 @@
 package rewards
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDualControlReady(t *testing.T) {
@@ -167,5 +170,102 @@ func TestWriteTrustJSON_NoStore(t *testing.T) {
 	writeTrustJSON(rr, http.StatusOK, map[string]any{"ok": true})
 	if got := rr.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
 		t.Fatalf("Cache-Control=%q", got)
+	}
+}
+
+func TestCommitTrustPromotionSetsTrustedAndClearsCooldown(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, stmt := range []string{
+		`CREATE TABLE provider_trust_promotion_pending (
+			pending_id TEXT PRIMARY KEY,
+			provider_id TEXT NOT NULL,
+			requested_by TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			incident_id TEXT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			committed_at TEXT NULL,
+			approved_by TEXT NULL,
+			status TEXT NOT NULL
+		)`,
+		`CREATE TABLE provider_trust_operator_promotions (
+			provider_id TEXT PRIMARY KEY,
+			promoted_by TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			pending_id TEXT NOT NULL,
+			promoted_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE provider_emission_state (
+			provider_id TEXT PRIMARY KEY,
+			trust_tier TEXT NOT NULL,
+			demotion_cooldown_until TEXT NULL,
+			updated_at TEXT NULL
+		)`,
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO provider_emission_state (provider_id, trust_tier, demotion_cooldown_until)
+		VALUES ('mac', 'provisional', '2026-08-22T14:55:27Z')
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	pendingID := "4d2644a7-fc82-4750-b43f-2d9f73abc62a"
+	if err := RequestTrustPromotion(ctx, db, pendingID, "mac", "operator:alice", "incident override", "INC-7"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	trustTierChanged, err := commitTrustPromotionTx(ctx, tx, "mac", "operator:bob", "incident override", pendingID, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !trustTierChanged {
+		t.Fatal("trust tier change not reported")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	var tier string
+	var cooldown sql.NullString
+	if err := db.QueryRowContext(ctx, `
+		SELECT trust_tier, demotion_cooldown_until
+		  FROM provider_emission_state
+		 WHERE provider_id = 'mac'
+	`).Scan(&tier, &cooldown); err != nil {
+		t.Fatal(err)
+	}
+	if tier != TierTrusted || cooldown.Valid {
+		t.Fatalf("trust state tier=%q cooldown=%v", tier, cooldown)
+	}
+
+	var promotedBy, status string
+	if err := db.QueryRowContext(ctx, `
+		SELECT promoted_by
+		  FROM provider_trust_operator_promotions
+		 WHERE provider_id = 'mac'
+	`).Scan(&promotedBy); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `
+		SELECT status
+		  FROM provider_trust_promotion_pending
+		 WHERE pending_id = ?
+	`, pendingID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if promotedBy != "operator:bob" || status != "committed" {
+		t.Fatalf("promotion promoted_by=%q status=%q", promotedBy, status)
 	}
 }
