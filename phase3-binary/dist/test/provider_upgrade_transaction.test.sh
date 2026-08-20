@@ -67,6 +67,10 @@ if 'local cli_path="$MACPROVIDER_CLI_EXECUTABLE"' not in helper:
 recommend_helper = source[source.index("run_autotune_recommend_apply() {"):source.index("use_fresh_recommendation_if_available() {")]
 if '--port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH"' not in recommend_helper:
     raise SystemExit("recommendation benchmarks do not use a reserved non-live port")
+if "stage_bundled_repair_payload" not in source:
+    raise SystemExit("existing-install repair must stage the Malibu.app bundled CLI")
+if "existing-install repair requires MACPROVIDER_BUNDLED_APP from Malibu.app" not in main:
+    raise SystemExit("repair without MACPROVIDER_BUNDLED_APP must fail closed")
 PY
 
 die() {
@@ -171,6 +175,35 @@ chmod 644 "$REPAIR_PLIST_PATH"
   [ -z "$REFERRAL_CODE_SOURCE_FILE" ]
   [ "$FRESH_REFERRAL_BOOTSTRAP" -eq 0 ]
 )
+if chmod +a "group:everyone allow add_file,add_subdirectory" "$REPAIR_HOME" 2>/dev/null; then
+  (
+    HOME="$REPAIR_HOME"
+    INSTALL_DIR="$REPAIR_INSTALL_DIR"
+    BINARY_PATH="$REPAIR_BINARY_PATH"
+    CONFIG_PATH="$REPAIR_CONFIG_PATH"
+    PROVIDER_ID_PATH="$REPAIR_PROVIDER_ID_PATH"
+    MANIFEST_PATH="$REPAIR_MANIFEST_PATH"
+    PLIST_PATH="$REPAIR_PLIST_PATH"
+    PROVIDER_LABEL="live.malibu.provider"
+    DRY_RUN=0
+    EMERGENCY_ROLLBACK=0
+    REFERRAL_REPLACE_INCUMBENT=0
+    REPAIR_EXISTING_INSTALL=1
+    REFERRAL_CODE_SOURCE_FILE=""
+    FRESH_REFERRAL_BOOTSTRAP=0
+    NO_PROMPT=1
+    log() { :; }
+    die() { exit "$1"; }
+    prepare_fresh_referral_code
+    [ -z "$REFERRAL_CODE_SOURCE_FILE" ]
+    [ "$FRESH_REFERRAL_BOOTSTRAP" -eq 0 ]
+  ) || {
+    echo "repair rejected a write-style ACL on HOME" >&2
+    chmod -a "group:everyone allow add_file,add_subdirectory" "$REPAIR_HOME" 2>/dev/null || true
+    exit 1
+  }
+  chmod -a "group:everyone allow add_file,add_subdirectory" "$REPAIR_HOME" 2>/dev/null || true
+fi
 chmod 664 "$REPAIR_PLIST_PATH"
 if (
   HOME="$REPAIR_HOME"
@@ -197,7 +230,8 @@ if (
 fi
 chmod 644 "$REPAIR_PLIST_PATH"
 rm -f "$REPAIR_MANIFEST_PATH"
-if (
+repair_missing_rc=0
+(
   HOME="$REPAIR_HOME"
   INSTALL_DIR="$REPAIR_INSTALL_DIR"
   BINARY_PATH="$REPAIR_BINARY_PATH"
@@ -216,8 +250,17 @@ if (
   log() { :; }
   die() { exit "$1"; }
   prepare_fresh_referral_code
-); then
+) || repair_missing_rc=$?
+if [ "$repair_missing_rc" -eq 0 ]; then
   echo "repair bypassed referral admission without complete evidence" >&2
+  exit 1
+fi
+if [ "$repair_missing_rc" -eq 20 ]; then
+  echo "repair evidence failure reused the missing-invite exit 20" >&2
+  exit 1
+fi
+if [ "$repair_missing_rc" -ne 28 ]; then
+  echo "repair evidence failure used exit $repair_missing_rc instead of 28" >&2
   exit 1
 fi
 

@@ -923,6 +923,18 @@ jobs:
             -exec cp -R {} "$APP/Contents/MacOS"/ \;
           cp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"
           cmp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"
+          [ -d "$WORK/compatibility-set-local" ] || {
+            echo "::error::signed CLI payload lacks compatibility-set-local for Malibu.app bundled repair" >&2
+            exit 1
+          }
+          rm -rf "$APP/Contents/Resources/compatibility-set-local"
+          cp -R "$WORK/compatibility-set-local" "$APP/Contents/Resources/compatibility-set-local"
+          [ -d "$WORK/catalog-release" ] || {
+            echo "::error::signed CLI payload lacks catalog-release for Malibu.app bundled repair" >&2
+            exit 1
+          }
+          rm -rf "$APP/Contents/Resources/catalog-release"
+          cp -R "$WORK/catalog-release" "$APP/Contents/Resources/catalog-release"
 
           # Re-verify after bundling and before codesign so copied payloads
           # cannot introduce a symlink or Sparkle runtime into the target.

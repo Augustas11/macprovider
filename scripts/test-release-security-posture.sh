@@ -712,6 +712,8 @@ for requirement in (
     'cp -R "$WORK/compatibility-set-local" "$PKG_ROOT/compatibility-set-local"',
     '"$APP/Contents/Resources/compatibility-set.json"',
     'cmp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"',
+    'cp -R "$WORK/compatibility-set-local" "$APP/Contents/Resources/compatibility-set-local"',
+    'cp -R "$WORK/catalog-release" "$APP/Contents/Resources/catalog-release"',
     'release_assets+=("$compatibility_manifest")',
     'cmp "$compatibility_manifest" "$compatibility_extract/compatibility-set.json"',
 ):

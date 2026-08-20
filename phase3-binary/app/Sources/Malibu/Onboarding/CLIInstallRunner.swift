@@ -9,6 +9,8 @@ enum CLIInstallRunner {
         case compatibilityManifestNotFound
         case invalidPinnedVersion(String)
         case referralFailure(ReferralFailure)
+        case repairEvidenceMissing
+        case bundledCLINotFound
         case nonZeroExit(Int32)
         case launchFailed(String)
 
@@ -46,12 +48,58 @@ enum CLIInstallRunner {
                 return "Provider install version pin is invalid: \(version)."
             case let .referralFailure(failure):
                 return failure.message
+            case .repairEvidenceMissing:
+                return "Provider software could not be verified for repair. Your provider identity was not changed."
+            case .bundledCLINotFound:
+                return "Provider software for repair was not found in Malibu. Your provider identity was not changed."
             case let .nonZeroExit(code):
-                return "Provider install failed (exit \(code)). See the log above for details."
-            case let .launchFailed(message):
-                return "Could not start the provider installer: \(message)"
+                return "Provider software install failed (exit \(code)). Your provider identity was not changed."
+            case .launchFailed(_):
+                return "Provider software could not start the installer. Your provider identity was not changed."
             }
         }
+    }
+
+    /// Maps installer exits. Repair must never reuse the missing-invite copy:
+    /// exit 20 during `MACPROVIDER_REPAIR_EXISTING_INSTALL=1` is missing
+    /// trusted incumbent evidence, not a new-join referral requirement.
+    static func classifiedInstallError(
+        exitCode: Int32,
+        repairExistingInstall: Bool
+    ) -> Error? {
+        if exitCode == 0 {
+            return nil
+        }
+        if repairExistingInstall, exitCode == 20 || exitCode == 28 {
+            return Error.repairEvidenceMissing
+        }
+        if let failure = Error.ReferralFailure(rawValue: exitCode) {
+            return Error.referralFailure(failure)
+        }
+        return Error.nonZeroExit(exitCode)
+    }
+
+    /// Repair must install the bundled provider/watchdog, not GitHub "latest"
+    /// (currently 1.8.102) or coordinator advertisement. Fresh joins stay
+    /// unpinned so they follow signed release discovery.
+    static func resolvedPinnedVersion(
+        pinnedVersion: String?,
+        repairExistingInstall: Bool,
+        bundledVersion: String? = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String
+    ) throws -> String? {
+        if let pinnedVersion {
+            return pinnedVersion
+        }
+        guard repairExistingInstall else {
+            return nil
+        }
+        guard let bundledVersion,
+              ProviderCLIVersion.strictNormalize(bundledVersion) != nil else {
+            throw Error.invalidPinnedVersion(bundledVersion ?? "")
+        }
+        return bundledVersion
     }
 
     /// Invokes `install.sh` with `MACPROVIDER_NO_PROMPT=1`. Delivers stdout/stderr
@@ -74,13 +122,21 @@ enum CLIInstallRunner {
             if let referralFileURL { try? FileManager.default.removeItem(at: referralFileURL) }
         }
         let installPort = resolveInstallPort()
+        let resolvedPin = try resolvedPinnedVersion(
+            pinnedVersion: pinnedVersion,
+            repairExistingInstall: repairExistingInstall
+        )
+        let bundledCLIPath = repairExistingInstall ? try resolveBundledCLI() : nil
+        let bundledAppPath = repairExistingInstall ? Bundle.main.bundleURL : nil
         let environment = try installerEnvironment(
             parentEnvironment: ProcessInfo.processInfo.environment,
             installPort: installPort,
-            pinnedVersion: pinnedVersion,
+            pinnedVersion: resolvedPin,
             referralCodeFile: referralFileURL,
             replacingIncumbentProvider: replacingIncumbentProvider,
-            repairExistingInstall: repairExistingInstall
+            repairExistingInstall: repairExistingInstall,
+            bundledCLIPath: bundledCLIPath,
+            bundledAppPath: bundledAppPath
         )
         if let installPort {
             await onLogLine("[macprovider-install] Using local HTTP port \(installPort) for provider install.")
@@ -132,16 +188,12 @@ enum CLIInstallRunner {
                 continuation.resume(returning: process.terminationStatus)
             }
         }
-        if exitCode == 0 {
-            return
+        if let classified = classifiedInstallError(
+            exitCode: exitCode,
+            repairExistingInstall: repairExistingInstall
+        ) {
+            throw classified
         }
-        if let failure = Error.ReferralFailure(rawValue: exitCode) {
-            throw Error.referralFailure(failure)
-        }
-        // Every non-zero installer exit leaves the durable transaction
-        // uncommitted and triggers rollback. A healthy local process may be
-        // the restored previous release, so it cannot prove this install won.
-        throw Error.nonZeroExit(exitCode)
     }
 
     static func installerEnvironment(
@@ -151,6 +203,8 @@ enum CLIInstallRunner {
         referralCodeFile: URL? = nil,
         replacingIncumbentProvider: Bool = false,
         repairExistingInstall: Bool = false,
+        bundledCLIPath: URL? = nil,
+        bundledAppPath: URL? = nil,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default
     ) throws -> [String: String] {
@@ -192,6 +246,11 @@ enum CLIInstallRunner {
         }
         if repairExistingInstall {
             explicit["MACPROVIDER_REPAIR_EXISTING_INSTALL"] = "1"
+            guard let bundledCLIPath, let bundledAppPath else {
+                throw Error.bundledCLINotFound
+            }
+            explicit["MACPROVIDER_BUNDLED_CLI"] = bundledCLIPath.path
+            explicit["MACPROVIDER_BUNDLED_APP"] = bundledAppPath.path
         }
         return try ProcessEnvironmentSanitizer.sanitized(
             from: [:],
@@ -217,6 +276,24 @@ enum CLIInstallRunner {
             return false
         }
         return await InstalledProviderMonitor.isHealthy(port: port)
+    }
+
+    /// Repair copies this Malibu.app CLI through install.sh instead of
+    /// downloading a GitHub tag that may not exist yet.
+    static func resolveBundledCLI(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundleURL: URL = Bundle.main.bundleURL
+    ) throws -> URL {
+        if let override = environment["MALIBU_CLI_PATH"], !override.isEmpty {
+            #if DEBUG
+            return URL(fileURLWithPath: override)
+            #endif
+        }
+        let bundled = bundleURL.appendingPathComponent("Contents/MacOS/macprovider-cli")
+        if FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return bundled
+        }
+        throw Error.bundledCLINotFound
     }
 
     /// Visible install stages for onboarding. Tests inject process and log

@@ -146,6 +146,9 @@ struct AgentSnapshot: Equatable {
     /// dashboard on "Provider is ready" across WebSocket blips that rewrite
     /// `network_state` to `live_verified` / `buyer_serving_unknown`.
     var lastBuyerServingAt: Date? = nil
+    /// Last-known USDC/MALIBU values may be shown across a Malibu relaunch
+    /// until a fresh projection arrives. Distinct from `providerEarningsFresh`.
+    var hasObservedProviderEarnings: Bool = false
     var advertisedMaxConcurrency: Int?
     var catalogState: String?
     var catalogReleaseID: String?
@@ -196,6 +199,13 @@ struct AgentSnapshot: Equatable {
             }
             return
         }
+        if isLocalStatusObservationCurrent(at: now),
+           lastBuyerServingAt == nil,
+           hasIncumbentBuyerServingEvidence,
+           networkState == "live_verified" || networkState == "buyer_serving_unknown" {
+            lastBuyerServingAt = now
+            return
+        }
         if shouldClearBuyerServingHold {
             lastBuyerServingAt = nil
         }
@@ -230,14 +240,20 @@ struct AgentSnapshot: Equatable {
     }
 
     func isHoldingBuyerServingReady(at now: Date = Date()) -> Bool {
-        guard lastBuyerServingAt != nil, !shouldClearBuyerServingHold else { return false }
+        guard !shouldClearBuyerServingHold else { return false }
         guard isLocalStatusObservationCurrent(at: now) else { return false }
         switch networkState {
         case "buyer_serving_unknown", "live_verified":
-            return true
+            return lastBuyerServingAt != nil || hasIncumbentBuyerServingEvidence
         default:
             return false
         }
+    }
+
+    var hasIncumbentBuyerServingEvidence: Bool {
+        (requestsServedAllTime ?? 0) > 0
+            || (requestsServedToday ?? 0) > 0
+            || (earningsUsdcLifetime ?? 0) > 0
     }
 
     func isLocalStatusObservationCurrent(at now: Date = Date()) -> Bool {
@@ -566,7 +582,7 @@ enum AgentSnapshotPresenter {
                 action: "Keep Malibu open while setup continues."
             )
         }
-        if !s.providerEarningsFresh {
+        if !s.providerEarningsFresh && !s.hasObservedProviderEarnings {
             return result(
                 status: "Reward status unavailable",
                 code: "reward_projection_unavailable",
@@ -607,7 +623,7 @@ enum AgentSnapshotPresenter {
                     action: "Wait for the next UTC day or use a wallet below the cap."
                 )
             }
-            if s.trustTier == .provisional || s.malibuHoldReasons.contains("trust_tier_provisional") {
+            if s.trustTier == .provisional {
                 return result(
                     status: "Locked until Trusted",
                     code: "trust_tier_provisional",
@@ -615,7 +631,8 @@ enum AgentSnapshotPresenter {
                     action: trustCriteriaAction(s) ?? "Complete trust criteria to unlock withdrawals."
                 )
             }
-            if !s.malibuHoldReasons.isEmpty || (s.malibuHeld ?? 0) > 0 {
+            if !shouldIgnoreLeftoverProvisionalLock(s),
+               !displayMalibuHoldReasons(s).isEmpty || (s.malibuHeld ?? 0) > 0 {
                 return result(
                     status: "Rewards held",
                     code: "rewards_held",
@@ -676,7 +693,7 @@ enum AgentSnapshotPresenter {
     }
 
     private static func miningRewardSummary(_ s: AgentSnapshot) -> String {
-        let usdc = s.providerEarningsFresh
+        let usdc = canShowLastKnownUSDC(s)
             ? s.earningsUsdcToday.map { "\(formatUSDC($0)) USDC today" } ?? "n/a USDC today"
             : "USDC unavailable"
         let malibu: String
@@ -699,6 +716,9 @@ enum AgentSnapshotPresenter {
         let tier = s.trustTier.rawValue.capitalized
         if hasDemotionCooldown(s) {
             return "Trust: \(tier) · requalification cooldown active"
+        }
+        if s.trustTier == .trusted {
+            return "Trust: Trusted"
         }
         if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
             return "Trust: \(tier) · \(met) of \(required) criteria met"
@@ -738,14 +758,35 @@ enum AgentSnapshotPresenter {
     }
 
     static func publicStatus(_ s: AgentSnapshot) -> PublicStatus {
+        // A still-serving (or paused) CLI must keep earnings/traffic/USDC and
+        // the ready/paused truth. HOME-ACL repair is a software update, not a
+        // stop — including while auto-repair is running.
+        if s.providerSoftwareRepairInProgress, isLiveProviderVisibleDuringSoftwareRepair(s) {
+            if s.state == .paused {
+                return PublicStatus(
+                    title: "Provider is paused",
+                    detail: "Installing a software update in the background. This Mac will not receive customer work until it is resumed. Your identity stays on this Mac.",
+                    safeNextAction: "Keep Malibu open. You do not need a new invite."
+                )
+            }
+            return PublicStatus(
+                title: "Provider is ready",
+                detail: "This Mac is approved and available for customer work. Installing a software update in the background. Your identity, models, and payout stay on this Mac.",
+                safeNextAction: "Keep Malibu open. You do not need a new invite."
+            )
+        }
         if s.providerSoftwareRepairInProgress {
             return PublicStatus(
                 title: "Repairing provider software",
-                detail: "Malibu is reinstalling the bundled provider software and watchdog. Keep Malibu open.",
-                safeNextAction: "Repair is in progress."
+                detail: "Malibu is reinstalling the bundled provider software and watchdog. Keep Malibu open. Your identity, models, and payout stay on this Mac.",
+                safeNextAction: "Keep Malibu open. You do not need a new invite."
             )
         }
-        if canRepairProviderSoftware(s) {
+        // A still-serving (or paused) CLI must keep earnings/traffic/USDC and
+        // the ready/paused truth. HOME-ACL repair is a software update, not a
+        // stop. Only hide that live state when the provider is not currently
+        // usable for customer work.
+        if canRepairProviderSoftware(s), !isLiveProviderVisibleDuringSoftwareRepair(s) {
             return PublicStatus(
                 title: "Provider software repair available",
                 detail: "A permission on your home folder blocked automatic update recovery.",
@@ -754,17 +795,23 @@ enum AgentSnapshotPresenter {
             )
         }
         if s.state == .paused {
-            return PublicStatus(
-                title: "Provider is paused",
-                detail: "This Mac will not receive customer work until it is resumed.",
-                safeNextAction: "Choose Resume when ready."
+            return withHomeACLRepairIfNeeded(
+                PublicStatus(
+                    title: "Provider is paused",
+                    detail: "This Mac will not receive customer work until it is resumed.",
+                    safeNextAction: "Choose Resume when ready."
+                ),
+                s
             )
         }
         if isNetworkReady(s, at: Date()) {
-            return PublicStatus(
-                title: "Provider is ready",
-                detail: "This Mac is approved and available for customer work.",
-                safeNextAction: nil
+            return withHomeACLRepairIfNeeded(
+                PublicStatus(
+                    title: "Provider is ready",
+                    detail: "This Mac is approved and available for customer work.",
+                    safeNextAction: nil
+                ),
+                s
             )
         }
         if isPendingHardwareVerification(s) {
@@ -1018,7 +1065,7 @@ enum AgentSnapshotPresenter {
         switch s.state {
         case .serving where !isNetworkReady(s):
             return status.detail
-        case .serving where !s.providerEarningsFresh:
+        case .serving where !s.providerEarningsFresh && !s.hasObservedProviderEarnings:
             return "Ready for customer work · earnings unavailable"
         case .serving where idleEarningsAreZero(s):
             return idleHonestySubtitle(s)
@@ -1085,10 +1132,10 @@ enum AgentSnapshotPresenter {
 
     static func earningsLine(_ s: AgentSnapshot) -> String {
         if !s.providerEarningsFresh || !s.malibuProjectionFresh {
-            if s.earningsUsdcToday == nil, s.malibuAccruedToday == nil {
+            if !canShowLastKnownUSDC(s), s.malibuAccruedToday == nil {
                 return isActive(s) ? "Today: reward status unavailable" : "Today: not running"
             }
-            let usdc = s.providerEarningsFresh
+            let usdc = canShowLastKnownUSDC(s)
                 ? s.earningsUsdcToday.map { formatUSDC($0) } ?? "n/a"
                 : "n/a"
             let malibu = s.malibuProjectionFresh
@@ -1113,7 +1160,7 @@ enum AgentSnapshotPresenter {
     /// counts. Gated by `providerEarningsFresh` since idle-prewarm data
     /// arrives on the same projection as the other earnings fields.
     static func eligibilityLine(_ s: AgentSnapshot) -> String? {
-        if let eligibility = authoritativeRewardEligibility(s) {
+        if let eligibility = displayRewardEligibility(s) {
             return rewardEligibilityLine(eligibility)
         }
         guard s.providerEarningsFresh else { return nil }
@@ -1470,7 +1517,7 @@ enum AgentSnapshotPresenter {
     }
 
     static func usdcFullLine(_ s: AgentSnapshot) -> String {
-        if !s.providerEarningsFresh {
+        if !canShowLastKnownUSDC(s) {
             let today = "n/a today"
             return "\(today) · n/a wk · n/a accrued · n/a life"
         }
@@ -1490,7 +1537,7 @@ enum AgentSnapshotPresenter {
     }
 
     static func usdcTodayDisplay(_ s: AgentSnapshot) -> String {
-        guard s.providerEarningsFresh else {
+        guard canShowLastKnownUSDC(s) else {
             return "n/a"
         }
         return s.earningsUsdcToday.map { formatUSDC($0) } ?? "n/a"
@@ -1504,7 +1551,7 @@ enum AgentSnapshotPresenter {
         let today = malibuTodayLine(s, compact: true)
         let allTime = s.malibuAccruedAllTime.map { String(format: "%.2f all-time", $0) }
             ?? "n/a all-time"
-        if let eligibility = authoritativeRewardEligibility(s) {
+        if let eligibility = displayRewardEligibility(s) {
             switch eligibility.withdrawalState {
             case "withdrawable":
                 return "\(today) · \(allTime)"
@@ -1534,7 +1581,7 @@ enum AgentSnapshotPresenter {
         guard s.malibuProjectionFresh,
               s.malibuWithdrawable != nil || s.malibuHeld != nil else { return nil }
         let withdrawable: String
-        if let eligibility = authoritativeRewardEligibility(s) {
+        if let eligibility = displayRewardEligibility(s) {
             withdrawable = malibuWithdrawableDisplay(s.malibuWithdrawable, eligibility: eligibility)
         } else {
             withdrawable = s.malibuWithdrawable.map { String(format: "%.2f available", $0) } ?? "n/a available"
@@ -1561,21 +1608,22 @@ enum AgentSnapshotPresenter {
     }
 
     static func malibuHoldLine(_ s: AgentSnapshot) -> String? {
-        if let eligibility = authoritativeRewardEligibility(s),
+        if let eligibility = displayRewardEligibility(s),
            eligibility.withdrawalState != "withdrawable" {
             return "MALIBU status: \(rewardReasonCopy(eligibility.primaryReason)) Next: \(rewardReasonNextAction(eligibility.primaryReason))"
         }
-        guard s.malibuProjectionFresh, !s.malibuHoldReasons.isEmpty else { return nil }
-        let reasons = s.malibuHoldReasons.map { malibuHoldReasonCopy($0) }
+        let holdReasons = displayMalibuHoldReasons(s)
+        guard s.malibuProjectionFresh, !holdReasons.isEmpty else { return nil }
+        let reasons = holdReasons.map { malibuHoldReasonCopy($0) }
         let nextAction: String
-        if s.malibuHoldReasons.contains("trust_tier_provisional"),
+        if holdReasons.contains("trust_tier_provisional"),
            let met = s.trustCriteriaMet,
            let required = s.trustCriteriaRequired,
            required > met {
             nextAction = "Complete \(required - met) more trust criteria to unlock withdrawals."
-        } else if s.malibuHoldReasons.contains("per_wallet_daily_cap") {
+        } else if holdReasons.contains("per_wallet_daily_cap") {
             nextAction = "The wallet cap resets at the next UTC day."
-        } else if s.malibuHoldReasons.contains("demotion_cooldown") {
+        } else if holdReasons.contains("demotion_cooldown") {
             nextAction = "Re-qualify for Trusted to clear the cooldown."
         } else {
             nextAction = "Review the hold reason above before withdrawing."
@@ -1588,6 +1636,9 @@ enum AgentSnapshotPresenter {
         let tier = s.trustTier.rawValue.capitalized
         if hasDemotionCooldown(s) {
             return "\(tier) — requalification cooldown active"
+        }
+        if s.trustTier == .trusted {
+            return "Trusted"
         }
         if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
             return "\(tier) — \(met) of \(required) criteria met · Unlock Trusted →"
@@ -1677,6 +1728,24 @@ enum AgentSnapshotPresenter {
         s.providerSoftwareRepairRecommended
             && !s.providerSoftwareRepairInProgress
             && !s.cliUpdateInProgress
+    }
+
+    private static func isLiveProviderVisibleDuringSoftwareRepair(_ s: AgentSnapshot) -> Bool {
+        s.state == .paused || isNetworkReady(s, at: Date())
+    }
+
+    private static func withHomeACLRepairIfNeeded(
+        _ status: PublicStatus,
+        _ s: AgentSnapshot
+    ) -> PublicStatus {
+        guard canRepairProviderSoftware(s) else { return status }
+        return PublicStatus(
+            title: status.title,
+            detail: status.detail,
+            safeNextAction:
+                "Repair provider software. Malibu will reinstall the bundled provider software and watchdog. Your provider identity and downloaded models will be kept.",
+            executableAction: .repairProviderSoftware
+        )
     }
 
     /// A binary-only legacy update can report the latest CLI version while
@@ -1842,7 +1911,7 @@ enum AgentSnapshotPresenter {
     }
 
     private static func malibuDisplay(_ amount: Double, snapshot: AgentSnapshot, compact: Bool = false) -> String {
-        if let eligibility = authoritativeRewardEligibility(snapshot) {
+        if let eligibility = displayRewardEligibility(snapshot) {
             switch eligibility.withdrawalState {
             case "withdrawable":
                 return String(format: "%.2f MALIBU", amount)
@@ -1896,6 +1965,9 @@ enum AgentSnapshotPresenter {
         return s.malibuRewardEligibility ?? MalibuRewardEligibility.unavailableForMissingObject()
     }
 
+    /// Current demotion cooldown only. A historical `demotion_cooldown` hold
+    /// row on an already-Trusted snapshot must not hide Trusted or show
+    /// requalification copy.
     private static func hasDemotionCooldown(_ s: AgentSnapshot) -> Bool {
         guard s.trustTier == .provisional else {
             return false
@@ -1904,6 +1976,49 @@ enum AgentSnapshotPresenter {
             return true
         }
         return authoritativeRewardEligibility(s)?.primaryReason == "held_demotion_cooldown"
+    }
+
+    private static let leftoverProvisionalHoldReasons: Set<String> = [
+        "trust_tier_provisional",
+        "demotion_cooldown",
+    ]
+    private static let leftoverProvisionalEligibilityReasons: Set<String> = [
+        "held_provisional_trust_tier",
+        "held_demotion_cooldown",
+    ]
+
+    /// Trusted snapshots can still carry leftover provisional hold rows from
+    /// 1.8.102. Those must not tell a Trusted earner they are locked.
+    private static func displayMalibuHoldReasons(_ s: AgentSnapshot) -> [String] {
+        guard s.trustTier == .trusted else { return s.malibuHoldReasons }
+        return s.malibuHoldReasons.filter { !leftoverProvisionalHoldReasons.contains($0) }
+    }
+
+    private static func displayRewardEligibility(_ s: AgentSnapshot) -> MalibuRewardEligibility? {
+        guard let eligibility = authoritativeRewardEligibility(s) else { return nil }
+        guard s.trustTier == .trusted,
+              leftoverProvisionalEligibilityReasons.contains(eligibility.primaryReason) else {
+            return eligibility
+        }
+        return nil
+    }
+
+    private static func shouldIgnoreLeftoverProvisionalLock(_ s: AgentSnapshot) -> Bool {
+        guard s.trustTier == .trusted, displayMalibuHoldReasons(s).isEmpty else {
+            return false
+        }
+        if s.malibuHoldReasons.contains(where: leftoverProvisionalHoldReasons.contains) {
+            return true
+        }
+        if let eligibility = authoritativeRewardEligibility(s),
+           leftoverProvisionalEligibilityReasons.contains(eligibility.primaryReason) {
+            return true
+        }
+        return false
+    }
+
+    private static func canShowLastKnownUSDC(_ s: AgentSnapshot) -> Bool {
+        s.providerEarningsFresh || (s.hasObservedProviderEarnings && s.earningsUsdcToday != nil)
     }
 
     private static func rewardEligibilityLine(_ eligibility: MalibuRewardEligibility) -> String {

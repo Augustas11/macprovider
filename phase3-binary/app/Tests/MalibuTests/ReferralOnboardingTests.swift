@@ -155,13 +155,32 @@ final class ReferralOnboardingTests: XCTestCase {
     }
 
     func testInstallerEnvironmentPassesRepairIntentOnlyWhenRequested() throws {
+        let bundledCLI = URL(fileURLWithPath: "/Applications/Malibu.app/Contents/MacOS/macprovider-cli")
+        let bundledApp = URL(fileURLWithPath: "/Applications/Malibu.app")
         let repairEnvironment = try CLIInstallRunner.installerEnvironment(
             parentEnvironment: ["MACPROVIDER_REPAIR_EXISTING_INSTALL": "1"],
             installPort: nil,
             pinnedVersion: nil,
-            repairExistingInstall: true
+            repairExistingInstall: true,
+            bundledCLIPath: bundledCLI,
+            bundledAppPath: bundledApp
         )
         XCTAssertEqual(repairEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"], "1")
+        XCTAssertEqual(repairEnvironment["MACPROVIDER_BUNDLED_CLI"], bundledCLI.path)
+        XCTAssertEqual(repairEnvironment["MACPROVIDER_BUNDLED_APP"], bundledApp.path)
+
+        XCTAssertThrowsError(
+            try CLIInstallRunner.installerEnvironment(
+                parentEnvironment: [:],
+                installPort: nil,
+                pinnedVersion: nil,
+                repairExistingInstall: true
+            )
+        ) { error in
+            guard case CLIInstallRunner.Error.bundledCLINotFound = error else {
+                return XCTFail("repair without a bundled CLI must fail closed: \(error)")
+            }
+        }
 
         let normalEnvironment = try CLIInstallRunner.installerEnvironment(
             parentEnvironment: ["MACPROVIDER_REPAIR_EXISTING_INSTALL": "1"],
@@ -169,6 +188,66 @@ final class ReferralOnboardingTests: XCTestCase {
             pinnedVersion: nil
         )
         XCTAssertNil(normalEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"])
+        XCTAssertNil(normalEnvironment["MACPROVIDER_BUNDLED_CLI"])
+    }
+
+    func testRepairResolvesPinnedVersionToBundledRelease() throws {
+        XCTAssertEqual(
+            try CLIInstallRunner.resolvedPinnedVersion(
+                pinnedVersion: nil,
+                repairExistingInstall: true,
+                bundledVersion: "1.8.104"
+            ),
+            "1.8.104"
+        )
+        XCTAssertNil(
+            try CLIInstallRunner.resolvedPinnedVersion(
+                pinnedVersion: nil,
+                repairExistingInstall: false,
+                bundledVersion: "1.8.104"
+            )
+        )
+        let repairEnvironment = try CLIInstallRunner.installerEnvironment(
+            parentEnvironment: [:],
+            installPort: nil,
+            pinnedVersion: try CLIInstallRunner.resolvedPinnedVersion(
+                pinnedVersion: nil,
+                repairExistingInstall: true,
+                bundledVersion: "1.8.104"
+            ),
+            repairExistingInstall: true,
+            bundledCLIPath: URL(fileURLWithPath: "/Applications/Malibu.app/Contents/MacOS/macprovider-cli"),
+            bundledAppPath: URL(fileURLWithPath: "/Applications/Malibu.app")
+        )
+        XCTAssertEqual(repairEnvironment["MACPROVIDER_VERSION"], "v1.8.104")
+        XCTAssertEqual(repairEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"], "1")
+        XCTAssertEqual(
+            repairEnvironment["MACPROVIDER_BUNDLED_CLI"],
+            "/Applications/Malibu.app/Contents/MacOS/macprovider-cli"
+        )
+        XCTAssertEqual(repairEnvironment["MACPROVIDER_BUNDLED_APP"], "/Applications/Malibu.app")
+    }
+
+    func testRepairInstallExitsDoNotMapToInviteCopy() {
+        switch CLIInstallRunner.classifiedInstallError(exitCode: 20, repairExistingInstall: false) {
+        case .referralFailure(.required)?:
+            break
+        default:
+            XCTFail("new-join exit 20 must stay invite-required")
+        }
+        switch CLIInstallRunner.classifiedInstallError(exitCode: 20, repairExistingInstall: true) {
+        case .repairEvidenceMissing?:
+            break
+        default:
+            XCTFail("repair exit 20 must not reuse invite copy")
+        }
+        switch CLIInstallRunner.classifiedInstallError(exitCode: 28, repairExistingInstall: true) {
+        case .repairEvidenceMissing?:
+            break
+        default:
+            XCTFail("repair exit 28 must be missing evidence, not an invite")
+        }
+        XCTAssertNil(CLIInstallRunner.classifiedInstallError(exitCode: 0, repairExistingInstall: true))
     }
 
     func testInstallerEnvironmentCarriesManifestSelectedInstallDirectory() throws {
@@ -213,6 +292,11 @@ final class ReferralOnboardingTests: XCTestCase {
             script.contains(#"[ "$FRESH_REFERRAL_BOOTSTRAP" -eq 1 ] || return 0"#)
         )
         XCTAssertTrue(script.contains(#""enable_receipts"] = "true""#))
+        XCTAssertTrue(script.contains("MACPROVIDER_BUNDLED_APP"))
+        XCTAssertTrue(script.contains("Repairing from Malibu.app bundled provider CLI"))
+        XCTAssertTrue(script.contains("existing-install repair requires MACPROVIDER_BUNDLED_APP from Malibu.app"))
+        XCTAssertTrue(script.contains("stage_bundled_repair_payload"))
+        XCTAssertTrue(script.contains("matching compatibility set without downloading GitHub"))
     }
 
     private struct Fixture {

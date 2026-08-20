@@ -420,10 +420,10 @@ enum InstalledProviderMonitor {
 
         let relativePath = String(directoryPath.dropFirst(homePath.count))
         var current = URL(fileURLWithPath: homePath, isDirectory: true)
-        guard isSafePrivateDirectory(atPath: current.path) else { return false }
+        guard isSafePrivateDirectory(atPath: current.path, homePath: homePath) else { return false }
         for component in relativePath.split(separator: "/") {
             current.appendPathComponent(String(component), isDirectory: true)
-            guard isSafePrivateDirectory(atPath: current.path) else { return false }
+            guard isSafePrivateDirectory(atPath: current.path, homePath: homePath) else { return false }
         }
         return true
     }
@@ -440,10 +440,10 @@ enum InstalledProviderMonitor {
 
         let relativePath = String(directoryPath.dropFirst(homePath.count))
         var current = URL(fileURLWithPath: homePath, isDirectory: true)
-        guard isSafePrivateDirectory(atPath: current.path) else { return false }
+        guard isSafePrivateDirectory(atPath: current.path, homePath: homePath) else { return false }
         for component in relativePath.split(separator: "/") {
             current.appendPathComponent(String(component), isDirectory: true)
-            if isSafePrivateDirectory(atPath: current.path) {
+            if isSafePrivateDirectory(atPath: current.path, homePath: homePath) {
                 continue
             }
             var identity = stat()
@@ -472,7 +472,7 @@ enum InstalledProviderMonitor {
         return isSafePrivateDirectoryChainAllowingMissingLeaf(directory, under: home)
     }
 
-    private static func isSafePrivateDirectory(atPath path: String) -> Bool {
+    private static func isSafePrivateDirectory(atPath path: String, homePath: String) -> Bool {
         let descriptor = path.withCString {
             Darwin.open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
         }
@@ -480,17 +480,27 @@ enum InstalledProviderMonitor {
         defer { _ = Darwin.close(descriptor) }
 
         var info = stat()
-        return Darwin.fstat(descriptor, &info) == 0
+        guard Darwin.fstat(descriptor, &info) == 0
             && (info.st_mode & S_IFMT) == S_IFDIR
             && info.st_uid == getuid()
             && info.st_nlink >= 1
-            // macOS commonly adds a deny-delete ACL to user directory
-            // ancestors (including $HOME and ~/Library). It does not grant
-            // write access, so directory-chain trust remains based on the
-            // owner, no-follow, and mode checks above. Files carrying
-            // authoritative launchd/configuration data stay strict below.
-            && info.st_mode & (S_IWGRP | S_IWOTH) == 0
-            && hasSafeDirectoryACL(descriptor)
+            && info.st_mode & (S_IWGRP | S_IWOTH) == 0 else {
+            return false
+        }
+        // $HOME may carry a write-style ACL that stranded the old watchdog
+        // (`acl_write_rejected:$HOME`). The watchdog exception is exact-path
+        // HOME only; descendants and evidence files stay strict. Matching that
+        // here lets Malibu attach to a still-serving CLI and admit repair
+        // instead of treating an admitted provider as a new join.
+        if path == homePath {
+            return true
+        }
+        // macOS commonly adds a deny-delete ACL to user directory ancestors
+        // (including ~/Library). It does not grant write access, so
+        // directory-chain trust remains based on the owner, no-follow, and
+        // mode checks above. Files carrying authoritative launchd/configuration
+        // data stay strict below.
+        return hasSafeDirectoryACL(descriptor)
     }
 
     private static func sameFileIdentity(_ lhs: stat, _ rhs: stat) -> Bool {

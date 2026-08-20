@@ -320,7 +320,31 @@ final class DashboardViewTests: XCTestCase {
 
         var trustedWithHistoricalHold = provisional
         trustedWithHistoricalHold.trustTier = .trusted
-        XCTAssertEqual(AgentSnapshotPresenter.trustLine(trustedWithHistoricalHold), "Trusted — 2 of 2 criteria met · Unlock Trusted →")
+        XCTAssertEqual(AgentSnapshotPresenter.trustLine(trustedWithHistoricalHold), "Trusted")
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.miningHealth(trustedWithHistoricalHold).reasonCode,
+            "trust_tier_provisional"
+        )
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.miningHealth(trustedWithHistoricalHold).reasonCode,
+            "rewards_held"
+        )
+        XCTAssertFalse(
+            AgentSnapshotPresenter.miningHealth(trustedWithHistoricalHold).status.contains("Locked")
+        )
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.eligibilityLine(trustedWithHistoricalHold),
+            "MALIBU is locked until Trusted"
+        )
+
+        var unlockTrusted = miningBase()
+        unlockTrusted.trustTier = .provisional
+        unlockTrusted.trustCriteriaMet = 1
+        unlockTrusted.trustCriteriaRequired = 3
+        XCTAssertEqual(
+            AgentSnapshotPresenter.trustLine(unlockTrusted),
+            "Provisional — 1 of 3 criteria met · Unlock Trusted →"
+        )
 
         var walletCap = miningBase()
         walletCap.malibuHeld = 2
@@ -383,6 +407,22 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertEqual(staleHealth.reasonCode, "reward_projection_unavailable")
         XCTAssertFalse(staleHealth.rewardSummary.contains("$0.00"))
         XCTAssertFalse(staleHealth.rewardSummary.contains("0.00 MALIBU"))
+
+        var lastKnown = miningBase()
+        lastKnown.providerEarningsFresh = false
+        lastKnown.malibuProjectionFresh = false
+        lastKnown.hasObservedProviderEarnings = true
+        lastKnown.earningsUsdcToday = 0.04
+        lastKnown.malibuWithdrawable = 2
+        lastKnown.malibuHeld = 0
+        let lastKnownHealth = AgentSnapshotPresenter.miningHealth(lastKnown)
+        XCTAssertNotEqual(lastKnownHealth.reasonCode, "reward_projection_unavailable")
+        XCTAssertTrue(lastKnownHealth.rewardSummary.contains("$0.04 USDC today"))
+        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(lastKnown), "$0.04")
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.dashboardSubtitle(lastKnown),
+            "Ready for customer work · earnings unavailable"
+        )
     }
 
     private func miningBase() -> AgentSnapshot {

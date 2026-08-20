@@ -172,6 +172,12 @@ if "require-cli-se-entitlements.sh" not in signer:
 if signer.count('shasum -a 256 "$app/Contents/MacOS/macprovider-cli"') != 2:
     raise SystemExit("acceptance signer must prove embedded CLI bytes before and after outer app signing")
 for value in (
+    'cp -R "$cli_work/compatibility-set-local" "$app/Contents/Resources/compatibility-set-local"',
+    'cp -R "$cli_work/catalog-release" "$app/Contents/Resources/catalog-release"',
+):
+    if value not in signer:
+        raise SystemExit(f"acceptance Malibu.app omits bundled repair payload: {value}")
+for value in (
     'keychain="acceptance-signing-${run_id}-${run_attempt}-${keychain_nonce}.keychain"',
     'acceptance_keychain_capture_default || die',
     'acceptance_keychain_create_and_select "$keychain" "$keychain_password"',

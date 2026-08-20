@@ -165,6 +165,80 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
     }
 
+    func testPersistedBuyerServingHoldKeepsReadyAfterRelaunchBlip() {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dashboard-observation-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let providerID = "mp-1962fb3ccb9fa0d227767c3a77b54fbe"
+        let servedAt = Date().addingTimeInterval(-120)
+        DashboardObservationStore.save(
+            DashboardObservationStore.Record(
+                providerID: providerID,
+                lastBuyerServingAt: servedAt,
+                hasObservedProviderEarnings: true,
+                earningsUsdcToday: 0.04,
+                earningsUsdcWeek: 0.12,
+                earningsUsdcPending: 0.01,
+                earningsUsdcLifetime: 18.4,
+                malibuAccruedToday: 2,
+                malibuAccruedAllTime: 8,
+                malibuWithdrawable: 8,
+                malibuHeld: 0,
+                walletBound: true,
+                recordedAt: Date()
+            ),
+            fileURL: fileURL
+        )
+
+        let record = DashboardObservationStore.load(providerID: providerID, fileURL: fileURL)
+        XCTAssertEqual(
+            record?.lastBuyerServingAt?.timeIntervalSince1970 ?? 0,
+            servedAt.timeIntervalSince1970,
+            accuracy: 1
+        )
+        XCTAssertEqual(record?.earningsUsdcToday, 0.04)
+        XCTAssertNil(DashboardObservationStore.load(providerID: "mp-other", fileURL: fileURL))
+
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .starting
+        snapshot.localProviderID = providerID
+        snapshot.lastBuyerServingAt = record?.lastBuyerServingAt
+        snapshot.hasObservedProviderEarnings = record?.hasObservedProviderEarnings ?? false
+        snapshot.earningsUsdcToday = record?.earningsUsdcToday
+        snapshot.state = .serving
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.networkState = "live_verified"
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationID = "obs-relaunch"
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.statusObservationFresh = true
+
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "$0.04")
+    }
+
+    func testIncumbentJobHistoryHoldsReadyOnFirstLaunchWithoutPersistFile() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.networkState = "live_verified"
+        snapshot.coordinatorConnected = false
+        snapshot.requestsServedAllTime = 12
+        snapshot.earningsUsdcLifetime = 18.4
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationID = "obs-incumbent"
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.statusObservationFresh = true
+        snapshot.updateBuyerServingHold()
+
+        XCTAssertNotNil(snapshot.lastBuyerServingAt)
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+    }
+
     func testBuyerServingHoldClearsOnCoordinatorNotServing() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
@@ -1099,18 +1173,53 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             reasons: ["held_provisional_trust_tier"]
         )
 
-        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "MALIBU is locked until Trusted")
+        XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(snapshot))
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuAvailabilityLine(snapshot),
-            "MALIBU: not withdrawable · 0.00 held"
+            "MALIBU: 2.00 available · 0.00 held"
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuFullLine(snapshot),
-            "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
+            "2.00 MALIBU · 2.00 all-time"
         )
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "MALIBU status: Trust verification is incomplete Next: Complete the remaining trust criteria to unlock withdrawals."
+        XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(snapshot))
+    }
+
+    func testTrustedSnapshotIgnoresLeftoverProvisionalHoldCopy() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "buyer_serving"
+        snapshot.trustTier = .trusted
+        snapshot.providerEarningsFresh = true
+        snapshot.malibuProjectionFresh = true
+        snapshot.walletBound = true
+        snapshot.malibuAccruedToday = 2
+        snapshot.malibuAccruedAllTime = 2
+        snapshot.malibuWithdrawable = 2
+        snapshot.malibuHeld = 12.5
+        snapshot.malibuHoldReasons = ["trust_tier_provisional", "demotion_cooldown"]
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
+
+        let health = AgentSnapshotPresenter.miningHealth(snapshot)
+        XCTAssertNotEqual(health.reasonCode, "trust_tier_provisional")
+        XCTAssertNotEqual(health.reasonCode, "rewards_held")
+        XCTAssertFalse(health.status.contains("Locked"))
+        XCTAssertFalse(health.status.contains("Rewards held"))
+        XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(snapshot))
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.eligibilityLine(snapshot),
+            "MALIBU is locked until Trusted"
+        )
+        XCTAssertFalse(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("locked"))
+        XCTAssertFalse(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("Locked"))
+        XCTAssertFalse(
+            (AgentSnapshotPresenter.malibuHoldLine(snapshot) ?? "")
+                .contains("Trust verification is incomplete")
         )
     }
 
@@ -1128,10 +1237,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             reasons: ["held_provisional_trust_tier"]
         )
 
-        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "MALIBU is locked until Trusted")
+        XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(snapshot))
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuFullLine(snapshot),
-            "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
+            "2.00 MALIBU · 2.00 all-time"
         )
     }
 
@@ -1270,14 +1379,16 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.networkState = "buyer_serving"
         snapshot.localStatusCapabilities = ["status_observation_v1"]
         snapshot.statusObservationFresh = true
+        snapshot.statusObservationID = "obs-ready-repair"
         snapshot.statusObservedAt = Date()
         snapshot.statusObservationValidForMS = 5_000
         snapshot.providerSoftwareRepairRecommended = true
 
         let status = AgentSnapshotPresenter.publicStatus(snapshot)
 
-        XCTAssertEqual(status.title, "Provider software repair available")
+        XCTAssertEqual(status.title, "Provider is ready")
         XCTAssertEqual(status.executableAction, .repairProviderSoftware)
+        XCTAssertTrue(AgentSnapshotPresenter.canRepairProviderSoftware(snapshot))
     }
 
     func testProviderSoftwareRepairRecommendedTakesPausedStateAction() {
@@ -1287,7 +1398,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         let status = AgentSnapshotPresenter.publicStatus(snapshot)
 
-        XCTAssertEqual(status.title, "Provider software repair available")
+        XCTAssertEqual(status.title, "Provider is paused")
         XCTAssertEqual(status.executableAction, .repairProviderSoftware)
     }
 
@@ -1342,9 +1453,30 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(status.title, "Repairing provider software")
         XCTAssertEqual(
             status.detail,
-            "Malibu is reinstalling the bundled provider software and watchdog. Keep Malibu open."
+            "Malibu is reinstalling the bundled provider software and watchdog. Keep Malibu open. Your identity, models, and payout stay on this Mac."
         )
-        XCTAssertEqual(status.safeNextAction, "Repair is in progress.")
+        XCTAssertEqual(status.safeNextAction, "Keep Malibu open. You do not need a new invite.")
+        XCTAssertNil(status.executableAction)
+    }
+
+    func testProviderSoftwareRepairInProgressKeepsReadyWhenStillServing() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "buyer_serving"
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationFresh = true
+        snapshot.statusObservationID = "obs-repair-live"
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.providerSoftwareRepairRecommended = true
+        snapshot.providerSoftwareRepairInProgress = true
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+
+        XCTAssertEqual(status.title, "Provider is ready")
+        XCTAssertTrue(status.detail?.contains("approved and available") == true)
+        XCTAssertTrue(status.detail?.contains("software update") == true)
+        XCTAssertEqual(status.safeNextAction, "Keep Malibu open. You do not need a new invite.")
         XCTAssertNil(status.executableAction)
     }
 
@@ -1450,6 +1582,28 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             + "Your provider identity and model files will be kept."
 
         XCTAssertEqual(AgentSnapshotPresenter.publicErrorDetail(message), message)
+    }
+
+    func testRepairFailureMessagesRemainUserVisible() {
+        let missing =
+            "Provider software could not be verified for repair. Your provider identity was not changed."
+        let absent =
+            "Provider software for repair was not found in Malibu. Your provider identity was not changed."
+
+        XCTAssertEqual(AgentSnapshotPresenter.publicErrorDetail(missing), missing)
+        XCTAssertEqual(AgentSnapshotPresenter.publicErrorDetail(absent), absent)
+
+        let failedInstall = CLIInstallRunner.Error.nonZeroExit(5)
+        let failedLaunch = CLIInstallRunner.Error.launchFailed("coordinator join /tmp/macprovider.err.log")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicErrorDetail(failedInstall.localizedDescription),
+            "Provider software install failed (exit 5). Your provider identity was not changed."
+        )
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicErrorDetail(failedLaunch.localizedDescription),
+            "Provider software could not start the installer. Your provider identity was not changed."
+        )
+        XCTAssertFalse(failedLaunch.localizedDescription.contains("/tmp"))
     }
 
     func testOnboardingAdvancedFailureDiagnosticsKeepsRedactedDetails() {

@@ -215,6 +215,11 @@ rm -f "$cli_notary"
 install -m 0755 "$cli_work/macprovider-cli" "$app/Contents/MacOS/macprovider-cli"
 install -m 0644 "$cli_work/compatibility-set.json" "$app/Contents/Resources/compatibility-set.json"
 cmp "$cli_work/compatibility-set.json" "$app/Contents/Resources/compatibility-set.json"
+[[ -d "$cli_work/catalog-release" && ! -L "$cli_work/catalog-release" ]] ||
+  die "PR589 catalog-release is absent"
+rm -rf "$app/Contents/Resources/compatibility-set-local" "$app/Contents/Resources/catalog-release"
+cp -R "$cli_work/compatibility-set-local" "$app/Contents/Resources/compatibility-set-local"
+cp -R "$cli_work/catalog-release" "$app/Contents/Resources/catalog-release"
 embedded_cli_sha256="$(shasum -a 256 "$app/Contents/MacOS/macprovider-cli" | awk '{print $1}')"
 codesign --force \
   --options runtime \
