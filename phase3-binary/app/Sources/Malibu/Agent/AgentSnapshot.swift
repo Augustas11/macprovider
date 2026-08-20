@@ -641,6 +641,9 @@ enum AgentSnapshotPresenter {
             return "MALIBU trust telemetry not published yet"
         }
         let tier = s.trustTier.rawValue.capitalized
+        if hasDemotionCooldown(s) {
+            return "Trust: \(tier) · requalification cooldown active"
+        }
         if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
             return "Trust: \(tier) · \(met) of \(required) criteria met"
         }
@@ -648,6 +651,9 @@ enum AgentSnapshotPresenter {
     }
 
     private static func trustCriteriaAction(_ s: AgentSnapshot) -> String? {
+        if hasDemotionCooldown(s) {
+            return "Re-qualify for Trusted to clear the cooldown."
+        }
         guard let met = s.trustCriteriaMet,
               let required = s.trustCriteriaRequired,
               required > met else { return nil }
@@ -1519,6 +1525,9 @@ enum AgentSnapshotPresenter {
     static func trustLine(_ s: AgentSnapshot) -> String {
         guard s.malibuProjectionFresh else { return "MALIBU trust telemetry not published yet" }
         let tier = s.trustTier.rawValue.capitalized
+        if hasDemotionCooldown(s) {
+            return "\(tier) — requalification cooldown active"
+        }
         if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
             return "\(tier) — \(met) of \(required) criteria met · Unlock Trusted →"
         }
@@ -1824,6 +1833,16 @@ enum AgentSnapshotPresenter {
     private static func authoritativeRewardEligibility(_ s: AgentSnapshot) -> MalibuRewardEligibility? {
         guard s.malibuProjectionFresh else { return nil }
         return s.malibuRewardEligibility ?? MalibuRewardEligibility.unavailableForMissingObject()
+    }
+
+    private static func hasDemotionCooldown(_ s: AgentSnapshot) -> Bool {
+        guard s.trustTier == .provisional else {
+            return false
+        }
+        if s.malibuHoldReasons.contains("demotion_cooldown") {
+            return true
+        }
+        return authoritativeRewardEligibility(s)?.primaryReason == "held_demotion_cooldown"
     }
 
     private static func rewardEligibilityLine(_ eligibility: MalibuRewardEligibility) -> String {
