@@ -325,6 +325,17 @@ final class DashboardViewTests: XCTestCase {
             AgentSnapshotPresenter.miningHealth(trustedWithHistoricalHold).reasonCode,
             "trust_tier_provisional"
         )
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.miningHealth(trustedWithHistoricalHold).reasonCode,
+            "rewards_held"
+        )
+        XCTAssertFalse(
+            AgentSnapshotPresenter.miningHealth(trustedWithHistoricalHold).status.contains("Locked")
+        )
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.eligibilityLine(trustedWithHistoricalHold),
+            "MALIBU is locked until Trusted"
+        )
 
         var unlockTrusted = miningBase()
         unlockTrusted.trustTier = .provisional

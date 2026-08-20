@@ -53,9 +53,9 @@ enum CLIInstallRunner {
             case .bundledCLINotFound:
                 return "Provider software for repair was not found in Malibu. Your provider identity was not changed."
             case let .nonZeroExit(code):
-                return "Provider install failed (exit \(code)). See the log above for details."
-            case let .launchFailed(message):
-                return "Could not start the provider installer: \(message)"
+                return "Provider software install failed (exit \(code)). Your provider identity was not changed."
+            case .launchFailed(_):
+                return "Provider software could not start the installer. Your provider identity was not changed."
             }
         }
     }

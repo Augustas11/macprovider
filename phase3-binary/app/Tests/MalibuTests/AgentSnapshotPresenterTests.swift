@@ -1173,18 +1173,53 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             reasons: ["held_provisional_trust_tier"]
         )
 
-        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "MALIBU is locked until Trusted")
+        XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(snapshot))
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuAvailabilityLine(snapshot),
-            "MALIBU: not withdrawable · 0.00 held"
+            "MALIBU: 2.00 available · 0.00 held"
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuFullLine(snapshot),
-            "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
+            "2.00 MALIBU · 2.00 all-time"
         )
-        XCTAssertEqual(
-            AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "MALIBU status: Trust verification is incomplete Next: Complete the remaining trust criteria to unlock withdrawals."
+        XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(snapshot))
+    }
+
+    func testTrustedSnapshotIgnoresLeftoverProvisionalHoldCopy() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "buyer_serving"
+        snapshot.trustTier = .trusted
+        snapshot.providerEarningsFresh = true
+        snapshot.malibuProjectionFresh = true
+        snapshot.walletBound = true
+        snapshot.malibuAccruedToday = 2
+        snapshot.malibuAccruedAllTime = 2
+        snapshot.malibuWithdrawable = 2
+        snapshot.malibuHeld = 12.5
+        snapshot.malibuHoldReasons = ["trust_tier_provisional", "demotion_cooldown"]
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
+
+        let health = AgentSnapshotPresenter.miningHealth(snapshot)
+        XCTAssertNotEqual(health.reasonCode, "trust_tier_provisional")
+        XCTAssertNotEqual(health.reasonCode, "rewards_held")
+        XCTAssertFalse(health.status.contains("Locked"))
+        XCTAssertFalse(health.status.contains("Rewards held"))
+        XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(snapshot))
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.eligibilityLine(snapshot),
+            "MALIBU is locked until Trusted"
+        )
+        XCTAssertFalse(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("locked"))
+        XCTAssertFalse(AgentSnapshotPresenter.malibuFullLine(snapshot).contains("Locked"))
+        XCTAssertFalse(
+            (AgentSnapshotPresenter.malibuHoldLine(snapshot) ?? "")
+                .contains("Trust verification is incomplete")
         )
     }
 
@@ -1202,10 +1237,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             reasons: ["held_provisional_trust_tier"]
         )
 
-        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "MALIBU is locked until Trusted")
+        XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(snapshot))
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuFullLine(snapshot),
-            "2.00 MALIBU today (locked) · 2.00 all-time · locked until eligible"
+            "2.00 MALIBU · 2.00 all-time"
         )
     }
 
@@ -1418,9 +1453,9 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(status.title, "Repairing provider software")
         XCTAssertEqual(
             status.detail,
-            "Malibu is reinstalling the bundled provider software and watchdog. Keep Malibu open."
+            "Malibu is reinstalling the bundled provider software and watchdog. Keep Malibu open. Your identity, models, and payout stay on this Mac."
         )
-        XCTAssertEqual(status.safeNextAction, "Repair is in progress.")
+        XCTAssertEqual(status.safeNextAction, "Keep Malibu open. You do not need a new invite.")
         XCTAssertNil(status.executableAction)
     }
 
@@ -1557,6 +1592,18 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         XCTAssertEqual(AgentSnapshotPresenter.publicErrorDetail(missing), missing)
         XCTAssertEqual(AgentSnapshotPresenter.publicErrorDetail(absent), absent)
+
+        let failedInstall = CLIInstallRunner.Error.nonZeroExit(5)
+        let failedLaunch = CLIInstallRunner.Error.launchFailed("coordinator join /tmp/macprovider.err.log")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicErrorDetail(failedInstall.localizedDescription),
+            "Provider software install failed (exit 5). Your provider identity was not changed."
+        )
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicErrorDetail(failedLaunch.localizedDescription),
+            "Provider software could not start the installer. Your provider identity was not changed."
+        )
+        XCTAssertFalse(failedLaunch.localizedDescription.contains("/tmp"))
     }
 
     func testOnboardingAdvancedFailureDiagnosticsKeepsRedactedDetails() {

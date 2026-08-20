@@ -631,7 +631,8 @@ enum AgentSnapshotPresenter {
                     action: trustCriteriaAction(s) ?? "Complete trust criteria to unlock withdrawals."
                 )
             }
-            if !s.malibuHoldReasons.isEmpty || (s.malibuHeld ?? 0) > 0 {
+            if !shouldIgnoreLeftoverProvisionalLock(s),
+               !displayMalibuHoldReasons(s).isEmpty || (s.malibuHeld ?? 0) > 0 {
                 return result(
                     status: "Rewards held",
                     code: "rewards_held",
@@ -777,8 +778,8 @@ enum AgentSnapshotPresenter {
         if s.providerSoftwareRepairInProgress {
             return PublicStatus(
                 title: "Repairing provider software",
-                detail: "Malibu is reinstalling the bundled provider software and watchdog. Keep Malibu open.",
-                safeNextAction: "Repair is in progress."
+                detail: "Malibu is reinstalling the bundled provider software and watchdog. Keep Malibu open. Your identity, models, and payout stay on this Mac.",
+                safeNextAction: "Keep Malibu open. You do not need a new invite."
             )
         }
         // A still-serving (or paused) CLI must keep earnings/traffic/USDC and
@@ -1159,7 +1160,7 @@ enum AgentSnapshotPresenter {
     /// counts. Gated by `providerEarningsFresh` since idle-prewarm data
     /// arrives on the same projection as the other earnings fields.
     static func eligibilityLine(_ s: AgentSnapshot) -> String? {
-        if let eligibility = authoritativeRewardEligibility(s) {
+        if let eligibility = displayRewardEligibility(s) {
             return rewardEligibilityLine(eligibility)
         }
         guard s.providerEarningsFresh else { return nil }
@@ -1550,7 +1551,7 @@ enum AgentSnapshotPresenter {
         let today = malibuTodayLine(s, compact: true)
         let allTime = s.malibuAccruedAllTime.map { String(format: "%.2f all-time", $0) }
             ?? "n/a all-time"
-        if let eligibility = authoritativeRewardEligibility(s) {
+        if let eligibility = displayRewardEligibility(s) {
             switch eligibility.withdrawalState {
             case "withdrawable":
                 return "\(today) · \(allTime)"
@@ -1580,7 +1581,7 @@ enum AgentSnapshotPresenter {
         guard s.malibuProjectionFresh,
               s.malibuWithdrawable != nil || s.malibuHeld != nil else { return nil }
         let withdrawable: String
-        if let eligibility = authoritativeRewardEligibility(s) {
+        if let eligibility = displayRewardEligibility(s) {
             withdrawable = malibuWithdrawableDisplay(s.malibuWithdrawable, eligibility: eligibility)
         } else {
             withdrawable = s.malibuWithdrawable.map { String(format: "%.2f available", $0) } ?? "n/a available"
@@ -1607,21 +1608,22 @@ enum AgentSnapshotPresenter {
     }
 
     static func malibuHoldLine(_ s: AgentSnapshot) -> String? {
-        if let eligibility = authoritativeRewardEligibility(s),
+        if let eligibility = displayRewardEligibility(s),
            eligibility.withdrawalState != "withdrawable" {
             return "MALIBU status: \(rewardReasonCopy(eligibility.primaryReason)) Next: \(rewardReasonNextAction(eligibility.primaryReason))"
         }
-        guard s.malibuProjectionFresh, !s.malibuHoldReasons.isEmpty else { return nil }
-        let reasons = s.malibuHoldReasons.map { malibuHoldReasonCopy($0) }
+        let holdReasons = displayMalibuHoldReasons(s)
+        guard s.malibuProjectionFresh, !holdReasons.isEmpty else { return nil }
+        let reasons = holdReasons.map { malibuHoldReasonCopy($0) }
         let nextAction: String
-        if s.malibuHoldReasons.contains("trust_tier_provisional"),
+        if holdReasons.contains("trust_tier_provisional"),
            let met = s.trustCriteriaMet,
            let required = s.trustCriteriaRequired,
            required > met {
             nextAction = "Complete \(required - met) more trust criteria to unlock withdrawals."
-        } else if s.malibuHoldReasons.contains("per_wallet_daily_cap") {
+        } else if holdReasons.contains("per_wallet_daily_cap") {
             nextAction = "The wallet cap resets at the next UTC day."
-        } else if s.malibuHoldReasons.contains("demotion_cooldown") {
+        } else if holdReasons.contains("demotion_cooldown") {
             nextAction = "Re-qualify for Trusted to clear the cooldown."
         } else {
             nextAction = "Review the hold reason above before withdrawing."
@@ -1909,7 +1911,7 @@ enum AgentSnapshotPresenter {
     }
 
     private static func malibuDisplay(_ amount: Double, snapshot: AgentSnapshot, compact: Bool = false) -> String {
-        if let eligibility = authoritativeRewardEligibility(snapshot) {
+        if let eligibility = displayRewardEligibility(snapshot) {
             switch eligibility.withdrawalState {
             case "withdrawable":
                 return String(format: "%.2f MALIBU", amount)
@@ -1974,6 +1976,45 @@ enum AgentSnapshotPresenter {
             return true
         }
         return authoritativeRewardEligibility(s)?.primaryReason == "held_demotion_cooldown"
+    }
+
+    private static let leftoverProvisionalHoldReasons: Set<String> = [
+        "trust_tier_provisional",
+        "demotion_cooldown",
+    ]
+    private static let leftoverProvisionalEligibilityReasons: Set<String> = [
+        "held_provisional_trust_tier",
+        "held_demotion_cooldown",
+    ]
+
+    /// Trusted snapshots can still carry leftover provisional hold rows from
+    /// 1.8.102. Those must not tell a Trusted earner they are locked.
+    private static func displayMalibuHoldReasons(_ s: AgentSnapshot) -> [String] {
+        guard s.trustTier == .trusted else { return s.malibuHoldReasons }
+        return s.malibuHoldReasons.filter { !leftoverProvisionalHoldReasons.contains($0) }
+    }
+
+    private static func displayRewardEligibility(_ s: AgentSnapshot) -> MalibuRewardEligibility? {
+        guard let eligibility = authoritativeRewardEligibility(s) else { return nil }
+        guard s.trustTier == .trusted,
+              leftoverProvisionalEligibilityReasons.contains(eligibility.primaryReason) else {
+            return eligibility
+        }
+        return nil
+    }
+
+    private static func shouldIgnoreLeftoverProvisionalLock(_ s: AgentSnapshot) -> Bool {
+        guard s.trustTier == .trusted, displayMalibuHoldReasons(s).isEmpty else {
+            return false
+        }
+        if s.malibuHoldReasons.contains(where: leftoverProvisionalHoldReasons.contains) {
+            return true
+        }
+        if let eligibility = authoritativeRewardEligibility(s),
+           leftoverProvisionalEligibilityReasons.contains(eligibility.primaryReason) {
+            return true
+        }
+        return false
     }
 
     private static func canShowLastKnownUSDC(_ s: AgentSnapshot) -> Bool {
