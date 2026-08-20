@@ -1224,7 +1224,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.11",
+      "version": "0.0.12",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5298,15 +5298,21 @@
       "requirement_id": "SPEC-042-R011",
       "spec_id": "SPEC-042",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/poolmanifest/persist.go:func ReconstructPool",
+        "phase4-coordinator/internal/poolmanifest/persist.go:func ParseManifestSnapshot"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/poolmanifest/persist_test.go:TestManifestSnapshotRoundTrip",
+        "phase4-coordinator/internal/poolmanifest/persist_test.go:TestReconstructGrandfathersRevokedSigner"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool lifecycle, provider migration, and failover/restart reconstruction: NOT yet implemented (lifecycle state machine + min_eligible_members readiness are future slices)."
+        "rationale": "Pool lifecycle/migration/failover reconstruction: slice 5 (v0.0.12) implements the MANIFEST half of R011's durable-reconstruction requirement \u2014 a reversible canonical snapshot codec (ManifestSnapshot.CanonicalBytes / ParseManifestSnapshot) and ReconstructPool, which rebuilds the authority log + policy-core history from durable records, replaying the recorded acceptance verdicts (R012) so a policy accepted before its signer set was later revoked survives restart, while re-verifying the timeless authority-log chain and each verdict's signature. Still deferred: wiring the snapshot into the coordinator durable store (schema + record-on-acceptance + read-at-boot); the membership-ledger/blocklist/lifecycle-state reconstruction (trustpool/registry layer); the pool lifecycle state machine (created/active/paused/draining/retired) and min_eligible_members runtime; and emergency signed lifecycle control messages."
       }
     },
     {
@@ -5332,7 +5338,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Manifest authority + signer-set key lifecycle: slice 2 (v0.0.9) implements policy-core signature verification against a signer set; slice 3 (v0.0.10) implements the append-only, hash-chained AUTHORITY LOG that establishes/versions those signer sets and sets their revocation state - the authority-log-entry content byte grammar + hash + signing preimage, and BuildAuthorityLog chain-replay verification (structural signer-set validation, strictly-monotonic signer_set_version/rollback reject, prev-hash chain, revokes_versions prior-existing-only, and authorization by one root-issuer signature or M-of-N of a prior still-authorized lower-versioned set), materializing signer_set_version -> SignerSet for policy-core verification - frozen by golden vectors (genesis->rotate->revoke). Still deferred: durable persistence + restart/failover reconstruction of the log and the highest-accepted-version store, the durable per-request acceptance-verdict record, signed emergency pool-lifecycle control messages (R011/R003), operator-provenance binding, and root-issuer-compromise supersedes lineage."
+        "rationale": "Manifest authority + signer-set key lifecycle: slice 2 (v0.0.9) implements policy-core signature verification against a signer set; slice 3 (v0.0.10) implements the append-only, hash-chained AUTHORITY LOG that establishes/versions those signer sets and sets their revocation state - the authority-log-entry content byte grammar + hash + signing preimage, and BuildAuthorityLog chain-replay verification (structural signer-set validation, strictly-monotonic signer_set_version/rollback reject, prev-hash chain, revokes_versions prior-existing-only, and authorization by one root-issuer signature or M-of-N of a prior still-authorized lower-versioned set), materializing signer_set_version -> SignerSet for policy-core verification - frozen by golden vectors (genesis->rotate->revoke). Slice 5 (v0.0.12) adds verdict-replay reconstruction (ReconstructPool in persist.go): a recorded acceptance verdict is replayed on restart rather than re-evaluated against the current wall-clock, grandfathering a policy accepted before its signer set was later revoked. Still deferred: wiring the durable snapshot into the coordinator store and the highest-accepted-version persistence, signed emergency pool-lifecycle control messages (R011/R003), operator-provenance binding, and root-issuer-compromise supersedes lineage."
       }
     }
   ]

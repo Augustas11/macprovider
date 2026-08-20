@@ -50,7 +50,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-039 | Paged KV / paged-attention engine | v0.1 | draft | complete | pending: 14 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |
 | SPEC-040 | Wallet-Native Buyer Sessions | 0.1.8 | draft | complete | pending: 10 | [SPEC-040-wallet-native-buyer-sessions.md](SPEC-040-wallet-native-buyer-sessions.md) |
 | SPEC-041 | Relay-Blind Request Encryption | 0.1.0 | draft | complete | pending: 8 | [SPEC-041-relay-blind-request-encryption.md](SPEC-041-relay-blind-request-encryption.md) |
-| SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.11 | draft | complete | pending: 12 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
+| SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.12 | draft | complete | pending: 12 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**

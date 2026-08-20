@@ -92,6 +92,18 @@ type PolicyHistory struct {
 // reject; the accepted cores are deep-copied so later mutation of the inputs cannot
 // alter the history.
 func BuildPolicyHistory(ic IdentityCore, authLog *AuthorityLog, cores []SignedPolicyCore) (*PolicyHistory, error) {
+	return buildPolicyHistory(ic, authLog, cores, VerifyPolicyCore)
+}
+
+// buildPolicyHistory is the shared acceptance loop for the online build (slice 4)
+// and durable reconstruction (slice 5). The structural rules (pool_id binding,
+// window well-formedness, monotonic manifest_version, prev-hash chain, non-overlap,
+// signer-set lookup) are identical; only the per-core `verify` step differs — the
+// online path passes the full VerifyPolicyCore (time-dependent revoked/window gate
+// applied), while reconstruction passes the timeless verifyPolicyCoreSignature
+// (recorded verdict replayed). Sharing one loop keeps the structural rules from
+// drifting between the two paths.
+func buildPolicyHistory(ic IdentityCore, authLog *AuthorityLog, cores []SignedPolicyCore, verify func(PolicyCore, []Signature, SignerSet) error) (*PolicyHistory, error) {
 	if authLog == nil {
 		return nil, errAuthEmpty
 	}
@@ -148,7 +160,7 @@ func BuildPolicyHistory(ic IdentityCore, authLog *AuthorityLog, cores []SignedPo
 		if !ok {
 			return nil, errPolicyUnknownSignerSet
 		}
-		if err := VerifyPolicyCore(core, spc.Signatures, ss); err != nil {
+		if err := verify(core, spc.Signatures, ss); err != nil {
 			return nil, err
 		}
 
