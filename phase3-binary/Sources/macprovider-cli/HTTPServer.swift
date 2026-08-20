@@ -1649,7 +1649,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 networkState = "local_donor"
             } else if (trustState == "live_verified"
                 || (trustState == "safe_offline_fallback" && snapshot.catalogCompatibilityConfirmed))
-                && localReady && snapshot.coordinatorConnected {
+                && localReady {
+                // Pool /v1/pool/check is the routing verdict. A WebSocket blip
+                // (NSPOSIX 54/57/60) must not rewrite that into catalog
+                // `live_verified`, which Malibu presents as "waiting for
+                // network approval" — a first-join phrase, not reconnect.
                 switch coordinatorBuyerServing {
                 case .some(true):
                     networkState = "buyer_serving"

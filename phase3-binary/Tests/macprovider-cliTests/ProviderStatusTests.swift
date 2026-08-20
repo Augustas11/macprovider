@@ -592,6 +592,46 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(rejected["buyer_serving_authority"] as? String, "coordinator")
     }
 
+    func testStatusKeepsPoolVerdictWhenCoordinatorSocketDrops() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        await status.setCoordinatorSession(connected: false, assignedID: "session-a")
+        let context = ProviderCatalogStatusContext(
+            trust: ServeCommand.CatalogRuntimeTrust(
+                state: "live_verified",
+                releaseID: "release-a",
+                digest: String(repeating: "a", count: 64),
+                signerKeyID: "signer-v5",
+                source: "coordinator"
+            ),
+            donorMode: false,
+            catalogKey: "model-key",
+            catalogModelID: "org/model",
+            modelRevision: nil,
+            artifactSHA256: nil,
+            configuredReleaseID: nil,
+            configuredCatalogDigest: nil
+        )
+
+        let serving = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.malibu.tech/ws/provider",
+            catalogStatus: context,
+            coordinatorBuyerServing: true
+        )
+        let unknown = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.malibu.tech/ws/provider",
+            catalogStatus: context
+        )
+
+        XCTAssertEqual(serving["network_state"] as? String, "buyer_serving")
+        XCTAssertEqual((serving["catalog"] as? [String: Any])?["state"] as? String, "live_verified")
+        XCTAssertEqual(unknown["network_state"] as? String, "buyer_serving_unknown")
+        XCTAssertNotEqual(unknown["network_state"] as? String, "live_verified")
+    }
+
     func testCoordinatorReadinessURLUsesPublicReadinessEndpoint() throws {
         let url = try XCTUnwrap(CoordinatorReadinessClient.readinessURL(
             coordinatorURL: "wss://coordinator.malibu.tech/v1/ws/provider?ignored=true",

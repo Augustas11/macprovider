@@ -2608,7 +2608,7 @@ struct LocalStatusFormatter {
         if donorMode || networkState == "local_donor" {
             title = "Provider is running locally"
             nextStep = "Open Malibu when you are ready to join the network."
-        } else if networkState == "buyer_serving" && connected && modelLoaded && !["draining", "unavailable"].contains(localState) {
+        } else if networkState == "buyer_serving" && modelLoaded && !["draining", "unavailable"].contains(localState) {
             title = "Provider is ready"
             nextStep = nil
         } else if lifecycleReason == "autotune_evidence_required" {
