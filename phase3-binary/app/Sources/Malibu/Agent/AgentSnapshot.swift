@@ -738,6 +738,23 @@ enum AgentSnapshotPresenter {
     }
 
     static func publicStatus(_ s: AgentSnapshot) -> PublicStatus {
+        // A still-serving (or paused) CLI must keep earnings/traffic/USDC and
+        // the ready/paused truth. HOME-ACL repair is a software update, not a
+        // stop — including while auto-repair is running.
+        if s.providerSoftwareRepairInProgress, isLiveProviderVisibleDuringSoftwareRepair(s) {
+            if s.state == .paused {
+                return PublicStatus(
+                    title: "Provider is paused",
+                    detail: "Installing a software update in the background. This Mac will not receive customer work until it is resumed. Your identity stays on this Mac.",
+                    safeNextAction: "Keep Malibu open. You do not need a new invite."
+                )
+            }
+            return PublicStatus(
+                title: "Provider is ready",
+                detail: "This Mac is approved and available for customer work. Installing a software update in the background. Your identity, models, and payout stay on this Mac.",
+                safeNextAction: "Keep Malibu open. You do not need a new invite."
+            )
+        }
         if s.providerSoftwareRepairInProgress {
             return PublicStatus(
                 title: "Repairing provider software",

@@ -1350,6 +1350,27 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertNil(status.executableAction)
     }
 
+    func testProviderSoftwareRepairInProgressKeepsReadyWhenStillServing() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "buyer_serving"
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationFresh = true
+        snapshot.statusObservationID = "obs-repair-live"
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.providerSoftwareRepairRecommended = true
+        snapshot.providerSoftwareRepairInProgress = true
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+
+        XCTAssertEqual(status.title, "Provider is ready")
+        XCTAssertTrue(status.detail?.contains("approved and available") == true)
+        XCTAssertTrue(status.detail?.contains("software update") == true)
+        XCTAssertEqual(status.safeNextAction, "Keep Malibu open. You do not need a new invite.")
+        XCTAssertNil(status.executableAction)
+    }
+
     func testProviderSoftwareRepairStatusLine() {
         var snapshot = AgentSnapshot.empty
         snapshot.providerSoftwareRepairInProgress = true
