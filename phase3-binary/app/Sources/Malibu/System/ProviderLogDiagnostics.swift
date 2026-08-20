@@ -133,6 +133,28 @@ enum ProviderLogDiagnostics {
         return nil
     }
 
+    static func homeAutoupdateACLRejection(
+        logFile: URL,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        maxBytes: Int = 512 * 1024
+    ) -> Finding? {
+        guard let handle = try? FileHandle(forReadingFrom: logFile) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+        do {
+            try handle.seek(toOffset: start)
+            guard let data = try handle.readToEnd(),
+                  let text = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            let lines = text.split(whereSeparator: \.isNewline).map(String.init)
+            return homeAutoupdateACLRejection(lines: lines, homeDirectory: homeDirectory)
+        } catch {
+            return nil
+        }
+    }
+
     static func diagnose(lines: [String]) -> Finding? {
         for line in lines.reversed() {
             let normalized = line.lowercased()

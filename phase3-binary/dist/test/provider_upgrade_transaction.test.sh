@@ -67,6 +67,10 @@ if 'local cli_path="$MACPROVIDER_CLI_EXECUTABLE"' not in helper:
 recommend_helper = source[source.index("run_autotune_recommend_apply() {"):source.index("use_fresh_recommendation_if_available() {")]
 if '--port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH"' not in recommend_helper:
     raise SystemExit("recommendation benchmarks do not use a reserved non-live port")
+if "stage_bundled_repair_payload" not in source:
+    raise SystemExit("existing-install repair must stage the Malibu.app bundled CLI")
+if "existing-install repair requires MACPROVIDER_BUNDLED_CLI from Malibu.app" not in main:
+    raise SystemExit("repair without MACPROVIDER_BUNDLED_CLI must fail closed")
 PY
 
 die() {

@@ -10,6 +10,7 @@ enum CLIInstallRunner {
         case invalidPinnedVersion(String)
         case referralFailure(ReferralFailure)
         case repairEvidenceMissing
+        case bundledCLINotFound
         case nonZeroExit(Int32)
         case launchFailed(String)
 
@@ -49,6 +50,8 @@ enum CLIInstallRunner {
                 return failure.message
             case .repairEvidenceMissing:
                 return "Malibu could not verify the existing provider install to repair it. Your provider identity was not changed."
+            case .bundledCLINotFound:
+                return "Malibu could not find the bundled provider software to repair with. Your provider identity was not changed."
             case let .nonZeroExit(code):
                 return "Provider install failed (exit \(code)). See the log above for details."
             case let .launchFailed(message):
@@ -123,13 +126,15 @@ enum CLIInstallRunner {
             pinnedVersion: pinnedVersion,
             repairExistingInstall: repairExistingInstall
         )
+        let bundledCLIPath = repairExistingInstall ? try resolveBundledCLI() : nil
         let environment = try installerEnvironment(
             parentEnvironment: ProcessInfo.processInfo.environment,
             installPort: installPort,
             pinnedVersion: resolvedPin,
             referralCodeFile: referralFileURL,
             replacingIncumbentProvider: replacingIncumbentProvider,
-            repairExistingInstall: repairExistingInstall
+            repairExistingInstall: repairExistingInstall,
+            bundledCLIPath: bundledCLIPath
         )
         if let installPort {
             await onLogLine("[macprovider-install] Using local HTTP port \(installPort) for provider install.")
@@ -196,6 +201,7 @@ enum CLIInstallRunner {
         referralCodeFile: URL? = nil,
         replacingIncumbentProvider: Bool = false,
         repairExistingInstall: Bool = false,
+        bundledCLIPath: URL? = nil,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default
     ) throws -> [String: String] {
@@ -237,6 +243,10 @@ enum CLIInstallRunner {
         }
         if repairExistingInstall {
             explicit["MACPROVIDER_REPAIR_EXISTING_INSTALL"] = "1"
+            guard let bundledCLIPath else {
+                throw Error.bundledCLINotFound
+            }
+            explicit["MACPROVIDER_BUNDLED_CLI"] = bundledCLIPath.path
         }
         return try ProcessEnvironmentSanitizer.sanitized(
             from: [:],
@@ -262,6 +272,24 @@ enum CLIInstallRunner {
             return false
         }
         return await InstalledProviderMonitor.isHealthy(port: port)
+    }
+
+    /// Repair copies this Malibu.app CLI through install.sh instead of
+    /// downloading a GitHub tag that may not exist yet.
+    static func resolveBundledCLI(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundleURL: URL = Bundle.main.bundleURL
+    ) throws -> URL {
+        if let override = environment["MALIBU_CLI_PATH"], !override.isEmpty {
+            #if DEBUG
+            return URL(fileURLWithPath: override)
+            #endif
+        }
+        let bundled = bundleURL.appendingPathComponent("Contents/MacOS/macprovider-cli")
+        if FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return bundled
+        }
+        throw Error.bundledCLINotFound
     }
 
     /// Visible install stages for onboarding. Tests inject process and log

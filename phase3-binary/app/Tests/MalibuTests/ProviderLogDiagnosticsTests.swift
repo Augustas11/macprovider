@@ -97,6 +97,30 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
         XCTAssertNil(finding)
     }
 
+    func testHomeAutoupdateACLRejectionReadsPastInMemoryTailFromLogFile() throws {
+        let log = FileManager.default.temporaryDirectory
+            .appendingPathComponent("watchdog-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: log) }
+        var lines = (0..<250).map { "noise line \($0)" }
+        lines.insert(
+            "[2026-08-19T01:05:42Z] autoupdate recovery_error=acl_write_rejected:/Users/provider",
+            at: 0
+        )
+        try (lines.joined(separator: "\n") + "\n").write(to: log, atomically: true, encoding: .utf8)
+
+        XCTAssertNil(
+            ProviderLogDiagnostics.homeAutoupdateACLRejection(
+                lines: Array(lines.suffix(200)),
+                homeDirectory: URL(fileURLWithPath: "/Users/provider")
+            )
+        )
+        let finding = ProviderLogDiagnostics.homeAutoupdateACLRejection(
+            logFile: log,
+            homeDirectory: URL(fileURLWithPath: "/Users/provider")
+        )
+        XCTAssertEqual(finding?.id, "autoupdate_home_acl_rejected")
+    }
+
     func testDiagnosePrefersMostRecentMatchingLine() {
         let finding = ProviderLogDiagnostics.diagnose(lines: [
             "model artifact hash mismatch for /tmp/old",

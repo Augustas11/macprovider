@@ -98,7 +98,6 @@ final class MalibuAgent: ObservableObject {
 
     func start() async {
         guard !isShuttingDown else { return }
-        invalidateProviderProjectionFreshness()
 
         guard ProviderConfig.readProviderID() != nil else {
             snapshot.state = .error
@@ -120,6 +119,7 @@ final class MalibuAgent: ObservableObject {
         await releaseSpawnedChildForLaunchdMonitor()
 
         snapshot.state = .starting
+        restoreDashboardObservation()
         startProviderLogTail()
         if await monitorInstalledProviderIfPresent() {
             return
@@ -417,8 +417,11 @@ final class MalibuAgent: ObservableObject {
     private func scheduleHomeACLAutoRepairIfNeeded() {
         guard !homeACLAutoRepairAttempted, !isShuttingDown else { return }
         guard AgentSnapshotPresenter.canRepairProviderSoftware(snapshot) else { return }
-        homeACLAutoRepairAttempted = true
-        Task { await self.repairProviderSoftware() }
+        guard providerSoftwareRepairTask == nil else { return }
+        Task { [weak self] in
+            await self?.repairProviderSoftware()
+            self?.homeACLAutoRepairAttempted = true
+        }
     }
 
     private func recordProviderSoftwareInstallHandledAutoupdateACL(paths: ProviderPaths = .current) {
@@ -740,6 +743,7 @@ final class MalibuAgent: ObservableObject {
             snapshot.catalogSource = status.catalogSource
             snapshot.compatibilitySetID = status.compatibilitySetID
             snapshot.compatibilitySetSHA256 = status.compatibilitySetSHA256
+            restoreDashboardObservation(providerID: expectedProviderID)
             if let version = status.binaryVersion {
                 snapshot.cliVersion = ProviderCLIVersion.normalize(version)
             }
@@ -868,6 +872,7 @@ final class MalibuAgent: ObservableObject {
             snapshot.pauseAcknowledged = false
         }
         snapshot.updateBuyerServingHold()
+        persistDashboardObservation()
         let observationCurrent = snapshot.isLocalStatusObservationCurrent()
         let buyerServing = observationCurrent && snapshot.networkState == "buyer_serving"
         let holdReady = snapshot.isHoldingBuyerServingReady()
@@ -1243,6 +1248,70 @@ final class MalibuAgent: ObservableObject {
         providerProjectionEligible = false
     }
 
+    private func restoreDashboardObservation(providerID: String? = nil) {
+        let id = providerID ?? ProviderConfig.readProviderID()
+        guard let id,
+              let record = DashboardObservationStore.load(
+                  providerID: id,
+                  fileURL: DashboardObservationStore.fileURL()
+              ) else {
+            return
+        }
+        if snapshot.lastBuyerServingAt == nil {
+            snapshot.lastBuyerServingAt = record.lastBuyerServingAt
+        }
+        guard record.hasObservedProviderEarnings, !snapshot.hasObservedProviderEarnings else {
+            return
+        }
+        snapshot.hasObservedProviderEarnings = true
+        snapshot.earningsUsdcToday = record.earningsUsdcToday
+        snapshot.earningsUsdcWeek = record.earningsUsdcWeek
+        snapshot.earningsUsdcPending = record.earningsUsdcPending
+        snapshot.earningsUsdcLifetime = record.earningsUsdcLifetime
+        snapshot.malibuAccruedToday = record.malibuAccruedToday
+        snapshot.malibuAccruedAllTime = record.malibuAccruedAllTime
+        snapshot.malibuWithdrawable = record.malibuWithdrawable
+        snapshot.malibuHeld = record.malibuHeld
+        if let walletBound = record.walletBound {
+            snapshot.walletBound = walletBound
+        }
+    }
+
+    private func persistDashboardObservation() {
+        guard let providerID = snapshot.localProviderID ?? ProviderConfig.readProviderID(),
+              !providerID.isEmpty else {
+            return
+        }
+        let fileURL = DashboardObservationStore.fileURL()
+        var holdDate = snapshot.lastBuyerServingAt
+        if snapshot.shouldClearBuyerServingHold {
+            holdDate = nil
+        } else if holdDate == nil {
+            holdDate = DashboardObservationStore.load(
+                providerID: providerID,
+                fileURL: fileURL
+            )?.lastBuyerServingAt
+        }
+        DashboardObservationStore.save(
+            DashboardObservationStore.Record(
+                providerID: providerID,
+                lastBuyerServingAt: holdDate,
+                hasObservedProviderEarnings: snapshot.hasObservedProviderEarnings,
+                earningsUsdcToday: snapshot.earningsUsdcToday,
+                earningsUsdcWeek: snapshot.earningsUsdcWeek,
+                earningsUsdcPending: snapshot.earningsUsdcPending,
+                earningsUsdcLifetime: snapshot.earningsUsdcLifetime,
+                malibuAccruedToday: snapshot.malibuAccruedToday,
+                malibuAccruedAllTime: snapshot.malibuAccruedAllTime,
+                malibuWithdrawable: snapshot.malibuWithdrawable,
+                malibuHeld: snapshot.malibuHeld,
+                walletBound: snapshot.walletBound,
+                recordedAt: Date()
+            ),
+            fileURL: fileURL
+        )
+    }
+
     func consume(_ frame: ControlFrame) {
         switch frame {
         case let .statusResponse(model, state):
@@ -1289,6 +1358,7 @@ final class MalibuAgent: ObservableObject {
                                  && inputTokensAllTime == nil && outputTokensAllTime == nil
             if looksLikeStub {
                 clearRuntimeMetrics()
+                snapshot.hasObservedProviderEarnings = false
             } else {
                 snapshot.earningsUsdcToday = usdc
                 snapshot.malibuAccruedToday = malibu
@@ -1330,12 +1400,17 @@ final class MalibuAgent: ObservableObject {
                 snapshot.trustCriteriaMet = providerEarnings.trustCriteriaMet
                 snapshot.trustCriteriaRequired = providerEarnings.trustCriteriaRequired
                 snapshot.idlePrewarmSummary = providerEarnings.idlePrewarm
+                if providerProjectionEligible && providerEarnings.earningsProjectionFresh {
+                    snapshot.hasObservedProviderEarnings = true
+                }
             }
+            persistDashboardObservation()
         case let .pauseAck(accepted, reason):
             if accepted {
                 snapshot.state = .paused
                 snapshot.pauseAcknowledged = true
                 snapshot.lastBuyerServingAt = nil
+                persistDashboardObservation()
             } else {
                 snapshot.lastError = reason ?? "Pause was refused"
             }
@@ -1538,10 +1613,15 @@ final class MalibuAgent: ObservableObject {
                 self.watchdogLogLines = lines
                 self.snapshot.providerSoftwareRepairRecommended =
                     ProviderLogDiagnostics.homeAutoupdateACLRejection(lines: lines) != nil
+                    || ProviderLogDiagnostics.homeAutoupdateACLRejection(logFile: paths.watchdogLog) != nil
                 self.scheduleHomeACLAutoRepairIfNeeded()
             }
         providerLogTail = tail
         tail.start(paths: paths)
+        if ProviderLogDiagnostics.homeAutoupdateACLRejection(logFile: paths.watchdogLog) != nil {
+            snapshot.providerSoftwareRepairRecommended = true
+            scheduleHomeACLAutoRepairIfNeeded()
+        }
     }
 
     private func stopProviderLogTail() {

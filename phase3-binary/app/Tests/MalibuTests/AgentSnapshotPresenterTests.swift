@@ -165,6 +165,60 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
     }
 
+    func testPersistedBuyerServingHoldKeepsReadyAfterRelaunchBlip() {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dashboard-observation-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let providerID = "mp-1962fb3ccb9fa0d227767c3a77b54fbe"
+        let servedAt = Date().addingTimeInterval(-120)
+        DashboardObservationStore.save(
+            DashboardObservationStore.Record(
+                providerID: providerID,
+                lastBuyerServingAt: servedAt,
+                hasObservedProviderEarnings: true,
+                earningsUsdcToday: 0.04,
+                earningsUsdcWeek: 0.12,
+                earningsUsdcPending: 0.01,
+                earningsUsdcLifetime: 18.4,
+                malibuAccruedToday: 2,
+                malibuAccruedAllTime: 8,
+                malibuWithdrawable: 8,
+                malibuHeld: 0,
+                walletBound: true,
+                recordedAt: Date()
+            ),
+            fileURL: fileURL
+        )
+
+        let record = DashboardObservationStore.load(providerID: providerID, fileURL: fileURL)
+        XCTAssertEqual(
+            record?.lastBuyerServingAt?.timeIntervalSince1970 ?? 0,
+            servedAt.timeIntervalSince1970,
+            accuracy: 1
+        )
+        XCTAssertEqual(record?.earningsUsdcToday, 0.04)
+        XCTAssertNil(DashboardObservationStore.load(providerID: "mp-other", fileURL: fileURL))
+
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .starting
+        snapshot.localProviderID = providerID
+        snapshot.lastBuyerServingAt = record?.lastBuyerServingAt
+        snapshot.hasObservedProviderEarnings = record?.hasObservedProviderEarnings ?? false
+        snapshot.earningsUsdcToday = record?.earningsUsdcToday
+        snapshot.state = .serving
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.networkState = "live_verified"
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationID = "obs-relaunch"
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.statusObservationFresh = true
+
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "$0.04")
+    }
+
     func testBuyerServingHoldClearsOnCoordinatorNotServing() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving

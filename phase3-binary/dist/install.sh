@@ -19,10 +19,12 @@ CREATED_REFERRAL_CODE_SOURCE_FILE=0
 FRESH_REFERRAL_BOOTSTRAP=0
 REFERRAL_REPLACE_INCUMBENT="${MACPROVIDER_REFERRAL_REPLACE_INCUMBENT:-0}"
 REPAIR_EXISTING_INSTALL="${MACPROVIDER_REPAIR_EXISTING_INSTALL:-0}"
+BUNDLED_CLI="${MACPROVIDER_BUNDLED_CLI:-}"
 REFERRAL_BOOTSTRAP_COMPLETED=0
 unset MACPROVIDER_REFERRAL_CODE_FILE
 unset MACPROVIDER_REFERRAL_REPLACE_INCUMBENT
 unset MACPROVIDER_REPAIR_EXISTING_INSTALL
+unset MACPROVIDER_BUNDLED_CLI
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
@@ -7644,6 +7646,89 @@ print(path)
 PY
 }
 
+validated_bundled_cli() {
+  raw="$1"
+  python3 - "$raw" <<'PY'
+import os
+import stat
+import sys
+
+raw = sys.argv[1]
+if not raw.startswith("/") or any(part in {".", ".."} for part in raw.split("/")):
+    raise SystemExit("bundled CLI path must be an absolute canonical path")
+path = os.path.realpath(raw)
+info = os.lstat(path)
+if not stat.S_ISREG(info.st_mode):
+    raise SystemExit("bundled CLI must be a regular file")
+if info.st_uid != os.getuid():
+    raise SystemExit("bundled CLI must be owned by the installing user")
+if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    raise SystemExit("bundled CLI must not be group/world-writable")
+if not (info.st_mode & stat.S_IXUSR):
+    raise SystemExit("bundled CLI must be executable")
+if info.st_size < 16 or info.st_size > 512 * 1024 * 1024:
+    raise SystemExit("bundled CLI has an invalid size")
+print(path)
+PY
+}
+
+stage_bundled_repair_payload() {
+  [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ] \
+    || die 7 "bundled CLI staging is only allowed for existing-install repair"
+  [ -n "${BUNDLED_CLI:-}" ] \
+    || die 7 "existing-install repair requires MACPROVIDER_BUNDLED_CLI from Malibu.app"
+  [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] \
+    && die 7 "bundled repair cannot mix acceptance assets"
+  [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] \
+    && die 7 "bundled repair cannot mix emergency rollback"
+  bundled_cli="$(validated_bundled_cli "$BUNDLED_CLI")" \
+    || die 7 "unsafe MACPROVIDER_BUNDLED_CLI"
+  [ -n "$TMPDIR_PATH" ] || die 5 "bundled repair staging requires a temp directory"
+  staging_dir="$TMPDIR_PATH/staging"
+  rm -rf "$staging_dir"
+  mkdir -p "$staging_dir"
+  cp -p "$bundled_cli" "$staging_dir/macprovider-cli" \
+    || die 5 "failed to stage the Malibu.app bundled provider CLI"
+  chmod 0755 "$staging_dir/macprovider-cli" \
+    || die 5 "failed to mark the staged bundled provider CLI executable"
+  [ -x "$staging_dir/macprovider-cli" ] \
+    || die 5 "staged bundled macprovider-cli is not executable"
+  if [ ! -d "$INSTALL_DIR" ]; then
+    die 5 "existing-install repair requires the current provider directory at $INSTALL_DIR"
+  fi
+  for support_file in mlx.metallib THIRD-PARTY-NOTICES.txt compatibility-set.json; do
+    if [ -f "$INSTALL_DIR/$support_file" ]; then
+      cp -p "$INSTALL_DIR/$support_file" "$staging_dir/$support_file" \
+        || die 5 "failed to stage $support_file from the current provider install"
+    fi
+  done
+  for support_dir in compatibility-set-local catalog-release; do
+    if [ -d "$INSTALL_DIR/$support_dir" ]; then
+      cp -R "$INSTALL_DIR/$support_dir" "$staging_dir/$support_dir" \
+        || die 5 "failed to stage $support_dir from the current provider install"
+    fi
+  done
+  find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$staging_dir"/ \;
+  [ -f "$staging_dir/compatibility-set.json" ] \
+    || die 5 "existing-install repair is missing compatibility-set.json from the current provider directory"
+  [ -d "$staging_dir/compatibility-set-local" ] \
+    || die 5 "existing-install repair is missing compatibility-set-local from the current provider directory"
+  [ -d "$staging_dir/catalog-release" ] \
+    || die 5 "existing-install repair is missing catalog-release from the current provider directory"
+  staged_version="$("$staging_dir/macprovider-cli" --version 2>/dev/null | tr -d '\r\n')" \
+    || die 5 "bundled provider CLI did not report a version"
+  case "$staged_version" in
+    v*) ;;
+    *) staged_version="v$staged_version" ;;
+  esac
+  [ "$staged_version" = "$tag" ] \
+    || die 5 "bundled provider CLI version $staged_version does not match pinned repair target $tag"
+  MACPROVIDER_CLI_EXECUTABLE="$staging_dir/macprovider-cli"
+  asset_kind="bundled"
+  asset_path="$bundled_cli"
+  log "Staged Malibu.app bundled provider CLI $staged_version without downloading GitHub release assets."
+}
+
 download_release() {
   tag="$1"
   tarball_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
@@ -8085,6 +8170,10 @@ stage_release_payload() {
   mkdir -p "$staging_dir"
 
   case "$asset_kind" in
+    bundled)
+      stage_bundled_repair_payload
+      return
+      ;;
     tar)
       tar xzf "$asset_path" -C "$staging_dir" || die 5 "failed to extract release tarball"
       ;;
@@ -8772,6 +8861,10 @@ clear_quarantine() {
   fi
   if [ "${asset_kind:-}" = "pkg" ]; then
     log "Package release passed Gatekeeper assessment; quarantine cleanup is not required."
+    return
+  fi
+  if [ "${asset_kind:-}" = "bundled" ]; then
+    log "Malibu.app bundled provider CLI does not require GitHub quarantine cleanup."
     return
   fi
   log "Tarball release may carry a quarantine attribute. Clearing it lets macOS run the staged CLI."
@@ -11504,9 +11597,19 @@ main() {
   else
     log "Latest release: $tag"
   fi
-  download_release "$tag"
-  verify_sha256
-  validate_release_payload
+  if [ -n "${BUNDLED_CLI}" ]; then
+    [ "$REPAIR_EXISTING_INSTALL" -eq 1 ] \
+      || die 7 "MACPROVIDER_BUNDLED_CLI is only allowed for existing-install repair"
+    TMPDIR_PATH="$(mktemp -d)"
+    asset_kind="bundled"
+    log "Repairing from Malibu.app bundled provider CLI (no GitHub download)."
+  else
+    [ "$REPAIR_EXISTING_INSTALL" -eq 0 ] \
+      || die 7 "existing-install repair requires MACPROVIDER_BUNDLED_CLI from Malibu.app"
+    download_release "$tag"
+    verify_sha256
+    validate_release_payload
+  fi
   check_install_dir_clean
   begin_install_transaction
   stage_release_payload

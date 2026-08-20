@@ -146,6 +146,9 @@ struct AgentSnapshot: Equatable {
     /// dashboard on "Provider is ready" across WebSocket blips that rewrite
     /// `network_state` to `live_verified` / `buyer_serving_unknown`.
     var lastBuyerServingAt: Date? = nil
+    /// Last-known USDC/MALIBU values may be shown across a Malibu relaunch
+    /// until a fresh projection arrives. Distinct from `providerEarningsFresh`.
+    var hasObservedProviderEarnings: Bool = false
     var advertisedMaxConcurrency: Int?
     var catalogState: String?
     var catalogReleaseID: String?
@@ -566,7 +569,7 @@ enum AgentSnapshotPresenter {
                 action: "Keep Malibu open while setup continues."
             )
         }
-        if !s.providerEarningsFresh {
+        if !s.providerEarningsFresh && !s.hasObservedProviderEarnings {
             return result(
                 status: "Reward status unavailable",
                 code: "reward_projection_unavailable",
@@ -676,7 +679,7 @@ enum AgentSnapshotPresenter {
     }
 
     private static func miningRewardSummary(_ s: AgentSnapshot) -> String {
-        let usdc = s.providerEarningsFresh
+        let usdc = canShowLastKnownUSDC(s)
             ? s.earningsUsdcToday.map { "\(formatUSDC($0)) USDC today" } ?? "n/a USDC today"
             : "USDC unavailable"
         let malibu: String
@@ -699,6 +702,9 @@ enum AgentSnapshotPresenter {
         let tier = s.trustTier.rawValue.capitalized
         if hasDemotionCooldown(s) {
             return "Trust: \(tier) · requalification cooldown active"
+        }
+        if s.trustTier == .trusted {
+            return "Trust: Trusted"
         }
         if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
             return "Trust: \(tier) · \(met) of \(required) criteria met"
@@ -1045,7 +1051,7 @@ enum AgentSnapshotPresenter {
         switch s.state {
         case .serving where !isNetworkReady(s):
             return status.detail
-        case .serving where !s.providerEarningsFresh:
+        case .serving where !s.providerEarningsFresh && !s.hasObservedProviderEarnings:
             return "Ready for customer work · earnings unavailable"
         case .serving where idleEarningsAreZero(s):
             return idleHonestySubtitle(s)
@@ -1112,10 +1118,10 @@ enum AgentSnapshotPresenter {
 
     static func earningsLine(_ s: AgentSnapshot) -> String {
         if !s.providerEarningsFresh || !s.malibuProjectionFresh {
-            if s.earningsUsdcToday == nil, s.malibuAccruedToday == nil {
+            if !canShowLastKnownUSDC(s), s.malibuAccruedToday == nil {
                 return isActive(s) ? "Today: reward status unavailable" : "Today: not running"
             }
-            let usdc = s.providerEarningsFresh
+            let usdc = canShowLastKnownUSDC(s)
                 ? s.earningsUsdcToday.map { formatUSDC($0) } ?? "n/a"
                 : "n/a"
             let malibu = s.malibuProjectionFresh
@@ -1497,7 +1503,7 @@ enum AgentSnapshotPresenter {
     }
 
     static func usdcFullLine(_ s: AgentSnapshot) -> String {
-        if !s.providerEarningsFresh {
+        if !canShowLastKnownUSDC(s) {
             let today = "n/a today"
             return "\(today) · n/a wk · n/a accrued · n/a life"
         }
@@ -1517,7 +1523,7 @@ enum AgentSnapshotPresenter {
     }
 
     static func usdcTodayDisplay(_ s: AgentSnapshot) -> String {
-        guard s.providerEarningsFresh else {
+        guard canShowLastKnownUSDC(s) else {
             return "n/a"
         }
         return s.earningsUsdcToday.map { formatUSDC($0) } ?? "n/a"
@@ -1615,6 +1621,9 @@ enum AgentSnapshotPresenter {
         let tier = s.trustTier.rawValue.capitalized
         if hasDemotionCooldown(s) {
             return "\(tier) — requalification cooldown active"
+        }
+        if s.trustTier == .trusted {
+            return "Trusted"
         }
         if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
             return "\(tier) — \(met) of \(required) criteria met · Unlock Trusted →"
@@ -1952,6 +1961,10 @@ enum AgentSnapshotPresenter {
             return true
         }
         return authoritativeRewardEligibility(s)?.primaryReason == "held_demotion_cooldown"
+    }
+
+    private static func canShowLastKnownUSDC(_ s: AgentSnapshot) -> Bool {
+        s.providerEarningsFresh || (s.hasObservedProviderEarnings && s.earningsUsdcToday != nil)
     }
 
     private static func rewardEligibilityLine(_ eligibility: MalibuRewardEligibility) -> String {

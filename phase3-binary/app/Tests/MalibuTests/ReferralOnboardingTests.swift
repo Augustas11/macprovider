@@ -155,13 +155,29 @@ final class ReferralOnboardingTests: XCTestCase {
     }
 
     func testInstallerEnvironmentPassesRepairIntentOnlyWhenRequested() throws {
+        let bundledCLI = URL(fileURLWithPath: "/Applications/Malibu.app/Contents/MacOS/macprovider-cli")
         let repairEnvironment = try CLIInstallRunner.installerEnvironment(
             parentEnvironment: ["MACPROVIDER_REPAIR_EXISTING_INSTALL": "1"],
             installPort: nil,
             pinnedVersion: nil,
-            repairExistingInstall: true
+            repairExistingInstall: true,
+            bundledCLIPath: bundledCLI
         )
         XCTAssertEqual(repairEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"], "1")
+        XCTAssertEqual(repairEnvironment["MACPROVIDER_BUNDLED_CLI"], bundledCLI.path)
+
+        XCTAssertThrowsError(
+            try CLIInstallRunner.installerEnvironment(
+                parentEnvironment: [:],
+                installPort: nil,
+                pinnedVersion: nil,
+                repairExistingInstall: true
+            )
+        ) { error in
+            guard case CLIInstallRunner.Error.bundledCLINotFound = error else {
+                return XCTFail("repair without a bundled CLI must fail closed: \(error)")
+            }
+        }
 
         let normalEnvironment = try CLIInstallRunner.installerEnvironment(
             parentEnvironment: ["MACPROVIDER_REPAIR_EXISTING_INSTALL": "1"],
@@ -169,6 +185,7 @@ final class ReferralOnboardingTests: XCTestCase {
             pinnedVersion: nil
         )
         XCTAssertNil(normalEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"])
+        XCTAssertNil(normalEnvironment["MACPROVIDER_BUNDLED_CLI"])
     }
 
     func testRepairResolvesPinnedVersionToBundledRelease() throws {
@@ -195,10 +212,15 @@ final class ReferralOnboardingTests: XCTestCase {
                 repairExistingInstall: true,
                 bundledVersion: "1.8.104"
             ),
-            repairExistingInstall: true
+            repairExistingInstall: true,
+            bundledCLIPath: URL(fileURLWithPath: "/Applications/Malibu.app/Contents/MacOS/macprovider-cli")
         )
         XCTAssertEqual(repairEnvironment["MACPROVIDER_VERSION"], "v1.8.104")
         XCTAssertEqual(repairEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"], "1")
+        XCTAssertEqual(
+            repairEnvironment["MACPROVIDER_BUNDLED_CLI"],
+            "/Applications/Malibu.app/Contents/MacOS/macprovider-cli"
+        )
     }
 
     func testRepairInstallExitsDoNotMapToInviteCopy() {
@@ -265,6 +287,10 @@ final class ReferralOnboardingTests: XCTestCase {
             script.contains(#"[ "$FRESH_REFERRAL_BOOTSTRAP" -eq 1 ] || return 0"#)
         )
         XCTAssertTrue(script.contains(#""enable_receipts"] = "true""#))
+        XCTAssertTrue(script.contains("MACPROVIDER_BUNDLED_CLI"))
+        XCTAssertTrue(script.contains("Repairing from Malibu.app bundled provider CLI"))
+        XCTAssertTrue(script.contains("existing-install repair requires MACPROVIDER_BUNDLED_CLI from Malibu.app"))
+        XCTAssertTrue(script.contains("stage_bundled_repair_payload"))
     }
 
     private struct Fixture {
