@@ -171,6 +171,28 @@ final class ReferralOnboardingTests: XCTestCase {
         XCTAssertNil(normalEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"])
     }
 
+    func testRepairInstallExitsDoNotMapToInviteCopy() {
+        switch CLIInstallRunner.classifiedInstallError(exitCode: 20, repairExistingInstall: false) {
+        case .referralFailure(.required)?:
+            break
+        default:
+            XCTFail("new-join exit 20 must stay invite-required")
+        }
+        switch CLIInstallRunner.classifiedInstallError(exitCode: 20, repairExistingInstall: true) {
+        case .repairEvidenceMissing?:
+            break
+        default:
+            XCTFail("repair exit 20 must not reuse invite copy")
+        }
+        switch CLIInstallRunner.classifiedInstallError(exitCode: 28, repairExistingInstall: true) {
+        case .repairEvidenceMissing?:
+            break
+        default:
+            XCTFail("repair exit 28 must be missing evidence, not an invite")
+        }
+        XCTAssertNil(CLIInstallRunner.classifiedInstallError(exitCode: 0, repairExistingInstall: true))
+    }
+
     func testInstallerEnvironmentCarriesManifestSelectedInstallDirectory() throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("installer-custom-home-\(UUID().uuidString)")

@@ -407,23 +407,46 @@ final class InstalledProviderMonitorTests: XCTestCase {
     }
 
     func testSafePrivateDirectoryChainRejectsDirectoryWriteGrantACL() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("malibu-launchd-acl-write-tests-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("malibu-launchd-acl-write-home-\(UUID().uuidString)")
+        let descendant = home.appendingPathComponent("Library")
+        try FileManager.default.createDirectory(at: descendant, withIntermediateDirectories: true)
         defer {
-            _ = Self.runChmod(arguments: ["-a", "group:everyone allow add_file,add_subdirectory", root.path])
-            try? FileManager.default.removeItem(at: root)
+            _ = Self.runChmod(arguments: ["-a", "group:everyone allow add_file,add_subdirectory", descendant.path])
+            try? FileManager.default.removeItem(at: home)
         }
 
         guard Self.runChmod(
-            arguments: ["+a", "group:everyone allow add_file,add_subdirectory", root.path]
+            arguments: ["+a", "group:everyone allow add_file,add_subdirectory", descendant.path]
         ) else {
             throw XCTSkip("macOS ACL mutation is unavailable in this test environment")
         }
 
         XCTAssertFalse(
-            InstalledProviderMonitor.isSafePrivateDirectoryChain(root, under: root),
-            "a directory ACL granting everyone file creation must fail closed"
+            InstalledProviderMonitor.isSafePrivateDirectoryChain(descendant, under: home),
+            "a directory ACL granting everyone file creation on a descendant must fail closed"
+        )
+    }
+
+    func testSafePrivateDirectoryChainAllowsHomeWriteGrantACL() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("malibu-launchd-acl-write-home-root-\(UUID().uuidString)")
+        let descendant = home.appendingPathComponent("Library")
+        try FileManager.default.createDirectory(at: descendant, withIntermediateDirectories: true)
+        defer {
+            _ = Self.runChmod(arguments: ["-a", "group:everyone allow add_file,add_subdirectory", home.path])
+            try? FileManager.default.removeItem(at: home)
+        }
+
+        guard Self.runChmod(
+            arguments: ["+a", "group:everyone allow add_file,add_subdirectory", home.path]
+        ) else {
+            throw XCTSkip("macOS ACL mutation is unavailable in this test environment")
+        }
+
+        XCTAssertTrue(
+            InstalledProviderMonitor.isSafePrivateDirectoryChain(descendant, under: home),
+            "a write-style ACL on $HOME must not hide a serving provider from Malibu attach or repair"
         )
     }
 

@@ -5861,7 +5861,7 @@ begin_install_transaction() {
   validate_transaction_path_kinds
   if [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ]; then
     repair_safe_incumbent_present \
-      || die 20 "trusted existing-install evidence changed before the transaction snapshot"
+      || die 28 "trusted existing-install evidence changed before the transaction snapshot"
   fi
   recovery_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   recovery_staging="$CONFIG_DIR/install-recovery-$recovery_id.staging"
@@ -6378,6 +6378,22 @@ def safe_parent_chain(path):
             return False
     except ValueError:
         return False
+    # $HOME itself may carry a write-style ACL (stranded autoupdate). Confirm
+    # owner/mode/no-follow, but do not apply the descendant ACL predicate.
+    home_fd = os.open(
+        home,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow,
+    )
+    try:
+        home_info = os.fstat(home_fd)
+        if (
+            not stat.S_ISDIR(home_info.st_mode)
+            or home_info.st_uid != uid
+            or home_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            return False
+    finally:
+        os.close(home_fd)
     current = home
     relative = os.path.relpath(parent, home)
     components = [] if relative == "." else relative.split(os.sep)
@@ -6547,7 +6563,7 @@ prepare_fresh_referral_code() {
     0) ;;
     1)
       repair_safe_incumbent_present \
-        || die 20 "trusted existing-install evidence is required for Malibu repair"
+        || die 28 "trusted existing-install evidence is required for Malibu repair"
       log "Trusted existing-install evidence found; repairing without a referral code."
       return 0
       ;;

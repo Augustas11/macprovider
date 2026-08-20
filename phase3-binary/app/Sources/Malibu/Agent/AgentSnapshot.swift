@@ -745,7 +745,11 @@ enum AgentSnapshotPresenter {
                 safeNextAction: "Repair is in progress."
             )
         }
-        if canRepairProviderSoftware(s) {
+        // A still-serving (or paused) CLI must keep earnings/traffic/USDC and
+        // the ready/paused truth. HOME-ACL repair is a software update, not a
+        // stop. Only hide that live state when the provider is not currently
+        // usable for customer work.
+        if canRepairProviderSoftware(s), !isLiveProviderVisibleDuringSoftwareRepair(s) {
             return PublicStatus(
                 title: "Provider software repair available",
                 detail: "A permission on your home folder blocked automatic update recovery.",
@@ -754,17 +758,23 @@ enum AgentSnapshotPresenter {
             )
         }
         if s.state == .paused {
-            return PublicStatus(
-                title: "Provider is paused",
-                detail: "This Mac will not receive customer work until it is resumed.",
-                safeNextAction: "Choose Resume when ready."
+            return withHomeACLRepairIfNeeded(
+                PublicStatus(
+                    title: "Provider is paused",
+                    detail: "This Mac will not receive customer work until it is resumed.",
+                    safeNextAction: "Choose Resume when ready."
+                ),
+                s
             )
         }
         if isNetworkReady(s, at: Date()) {
-            return PublicStatus(
-                title: "Provider is ready",
-                detail: "This Mac is approved and available for customer work.",
-                safeNextAction: nil
+            return withHomeACLRepairIfNeeded(
+                PublicStatus(
+                    title: "Provider is ready",
+                    detail: "This Mac is approved and available for customer work.",
+                    safeNextAction: nil
+                ),
+                s
             )
         }
         if isPendingHardwareVerification(s) {
@@ -1679,6 +1689,24 @@ enum AgentSnapshotPresenter {
             && !s.cliUpdateInProgress
     }
 
+    private static func isLiveProviderVisibleDuringSoftwareRepair(_ s: AgentSnapshot) -> Bool {
+        s.state == .paused || isNetworkReady(s, at: Date())
+    }
+
+    private static func withHomeACLRepairIfNeeded(
+        _ status: PublicStatus,
+        _ s: AgentSnapshot
+    ) -> PublicStatus {
+        guard canRepairProviderSoftware(s) else { return status }
+        return PublicStatus(
+            title: status.title,
+            detail: status.detail,
+            safeNextAction:
+                "Repair provider software. Malibu will reinstall the bundled provider software and watchdog. Your provider identity and downloaded models will be kept.",
+            executableAction: .repairProviderSoftware
+        )
+    }
+
     /// A binary-only legacy update can report the latest CLI version while
     /// still lacking the signed compatibility-set resources. Only a fresh
     /// versioned status observation may expose that repair action; a transient
@@ -1896,6 +1924,9 @@ enum AgentSnapshotPresenter {
         return s.malibuRewardEligibility ?? MalibuRewardEligibility.unavailableForMissingObject()
     }
 
+    /// Current demotion cooldown only. A historical `demotion_cooldown` hold
+    /// row on an already-Trusted snapshot must not hide Trusted or show
+    /// requalification copy.
     private static func hasDemotionCooldown(_ s: AgentSnapshot) -> Bool {
         guard s.trustTier == .provisional else {
             return false

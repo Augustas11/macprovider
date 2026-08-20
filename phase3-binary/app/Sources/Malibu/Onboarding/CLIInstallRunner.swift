@@ -9,6 +9,7 @@ enum CLIInstallRunner {
         case compatibilityManifestNotFound
         case invalidPinnedVersion(String)
         case referralFailure(ReferralFailure)
+        case repairEvidenceMissing
         case nonZeroExit(Int32)
         case launchFailed(String)
 
@@ -46,12 +47,33 @@ enum CLIInstallRunner {
                 return "Provider install version pin is invalid: \(version)."
             case let .referralFailure(failure):
                 return failure.message
+            case .repairEvidenceMissing:
+                return "Malibu could not verify the existing provider install to repair it. Your provider identity was not changed."
             case let .nonZeroExit(code):
                 return "Provider install failed (exit \(code)). See the log above for details."
             case let .launchFailed(message):
                 return "Could not start the provider installer: \(message)"
             }
         }
+    }
+
+    /// Maps installer exits. Repair must never reuse the missing-invite copy:
+    /// exit 20 during `MACPROVIDER_REPAIR_EXISTING_INSTALL=1` is missing
+    /// trusted incumbent evidence, not a new-join referral requirement.
+    static func classifiedInstallError(
+        exitCode: Int32,
+        repairExistingInstall: Bool
+    ) -> Error? {
+        if exitCode == 0 {
+            return nil
+        }
+        if repairExistingInstall, exitCode == 20 || exitCode == 28 {
+            return Error.repairEvidenceMissing
+        }
+        if let failure = Error.ReferralFailure(rawValue: exitCode) {
+            return Error.referralFailure(failure)
+        }
+        return Error.nonZeroExit(exitCode)
     }
 
     /// Invokes `install.sh` with `MACPROVIDER_NO_PROMPT=1`. Delivers stdout/stderr
@@ -132,16 +154,12 @@ enum CLIInstallRunner {
                 continuation.resume(returning: process.terminationStatus)
             }
         }
-        if exitCode == 0 {
-            return
+        if let classified = classifiedInstallError(
+            exitCode: exitCode,
+            repairExistingInstall: repairExistingInstall
+        ) {
+            throw classified
         }
-        if let failure = Error.ReferralFailure(rawValue: exitCode) {
-            throw Error.referralFailure(failure)
-        }
-        // Every non-zero installer exit leaves the durable transaction
-        // uncommitted and triggers rollback. A healthy local process may be
-        // the restored previous release, so it cannot prove this install won.
-        throw Error.nonZeroExit(exitCode)
     }
 
     static func installerEnvironment(

@@ -49,6 +49,9 @@ final class MalibuAgent: ObservableObject {
     private var latestReleaseFetchedAt: Date?
     private var cliUpdateTask: Task<Void, Never>?
     private var providerSoftwareRepairTask: Task<Void, Never>?
+    /// HOME-ACL stranded installs get one automatic repair attempt per session
+    /// so a sideloaded Malibu.app actually lands the bundled watchdog/CLI.
+    private var homeACLAutoRepairAttempted = false
     private var hardwareVerificationRetryTask: Task<Void, Never>?
     /// Set while corrective `--recover-hardware-admission` may have drained
     /// launchd and therefore owes a restore/bootstrap. Cleared on success.
@@ -409,6 +412,13 @@ final class MalibuAgent: ObservableObject {
             }
         }
         await providerSoftwareRepairTask?.value
+    }
+
+    private func scheduleHomeACLAutoRepairIfNeeded() {
+        guard !homeACLAutoRepairAttempted, !isShuttingDown else { return }
+        guard AgentSnapshotPresenter.canRepairProviderSoftware(snapshot) else { return }
+        homeACLAutoRepairAttempted = true
+        Task { await self.repairProviderSoftware() }
     }
 
     private func recordProviderSoftwareInstallHandledAutoupdateACL(paths: ProviderPaths = .current) {
@@ -1524,9 +1534,11 @@ final class MalibuAgent: ObservableObject {
             }
         watchdogLogTailCancellable = tail.$watchdogLines
             .sink { [weak self] lines in
-                self?.watchdogLogLines = lines
-                self?.snapshot.providerSoftwareRepairRecommended =
+                guard let self else { return }
+                self.watchdogLogLines = lines
+                self.snapshot.providerSoftwareRepairRecommended =
                     ProviderLogDiagnostics.homeAutoupdateACLRejection(lines: lines) != nil
+                self.scheduleHomeACLAutoRepairIfNeeded()
             }
         providerLogTail = tail
         tail.start(paths: paths)

@@ -1270,14 +1270,16 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.networkState = "buyer_serving"
         snapshot.localStatusCapabilities = ["status_observation_v1"]
         snapshot.statusObservationFresh = true
+        snapshot.statusObservationID = "obs-ready-repair"
         snapshot.statusObservedAt = Date()
         snapshot.statusObservationValidForMS = 5_000
         snapshot.providerSoftwareRepairRecommended = true
 
         let status = AgentSnapshotPresenter.publicStatus(snapshot)
 
-        XCTAssertEqual(status.title, "Provider software repair available")
+        XCTAssertEqual(status.title, "Provider is ready")
         XCTAssertEqual(status.executableAction, .repairProviderSoftware)
+        XCTAssertTrue(AgentSnapshotPresenter.canRepairProviderSoftware(snapshot))
     }
 
     func testProviderSoftwareRepairRecommendedTakesPausedStateAction() {
@@ -1287,7 +1289,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         let status = AgentSnapshotPresenter.publicStatus(snapshot)
 
-        XCTAssertEqual(status.title, "Provider software repair available")
+        XCTAssertEqual(status.title, "Provider is paused")
         XCTAssertEqual(status.executableAction, .repairProviderSoftware)
     }
 
