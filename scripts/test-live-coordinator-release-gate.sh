@@ -177,6 +177,7 @@ run_guard() {
 run_guard_phase() {
   local directory="$1"
   local phase="$2"
+  local previous="${3:-1.8.67}"
   python3 "$guard" \
     --tag v1.8.68 \
     --pearl-release-json "$directory/pearl-release.json" \
@@ -184,7 +185,7 @@ run_guard_phase() {
     --coordinator-url https://coordinator.fixture.invalid \
     --coordinator-dir "$directory/live" \
     --now 2026-07-30T12:05:00Z \
-    ${phase:+--expected-previous-recommendation 1.8.67} \
+    ${phase:+--expected-previous-recommendation "$previous"} \
     --publication-phase "$phase"
 }
 
@@ -238,9 +239,9 @@ grep -q 'recommended_binary_version is missing or not the expected previous stab
 
 make_fixture "$work/previous-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
 if ! run_guard_phase "$work/previous-recommended" pre-publication >"$work/previous-recommended.out" 2>&1; then
-  fail "pre-publication gate rejected the previous stable recommendation"
+  fail "pre-publication gate rejected Pearl already on the candidate while still advertising the previous CLI"
 fi
-grep -q 'recommended_binary_version=1.8.67 publication_phase=pre-publication' \
+grep -q 'healthz_version=v1.8.68 recommended_binary_version=1.8.67 publication_phase=pre-publication' \
   "$work/previous-recommended.out"
 
 make_fixture "$work/previous-healthz-and-recommended" v1.8.68 v1.8.67 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
@@ -254,8 +255,23 @@ make_fixture "$work/too-old-prepublication-healthz" v1.8.68 v1.8.66 2026-07-30T1
 if run_guard_phase "$work/too-old-prepublication-healthz" pre-publication >"$work/too-old-prepublication-healthz.out" 2>&1; then
   fail "pre-publication gate accepted a coordinator older than the previous stable version"
 fi
-grep -q "/healthz version 'v1.8.66' is older than release 1.8.68" \
+grep -q "/healthz version 'v1.8.66' is older than previous stable 1.8.67" \
   "$work/too-old-prepublication-healthz.out"
+
+make_fixture "$work/pearl-runtime-ahead" v1.8.68 v1.8.67 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.66
+if ! run_guard_phase "$work/pearl-runtime-ahead" pre-publication 1.8.66 >"$work/pearl-runtime-ahead.out" 2>&1; then
+  fail "pre-publication gate rejected a Pearl runtime-only patch ahead of the advertised CLI"
+fi
+grep -q 'healthz_version=v1.8.67 recommended_binary_version=1.8.66 publication_phase=pre-publication' \
+  "$work/pearl-runtime-ahead.out"
+
+make_fixture "$work/pearl-runtime-ahead-wrong-recommendation" v1.8.68 v1.8.67 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
+if run_guard_phase "$work/pearl-runtime-ahead-wrong-recommendation" pre-publication 1.8.66 \
+  >"$work/pearl-runtime-ahead-wrong-recommendation.out" 2>&1; then
+  fail "pre-publication gate accepted a Pearl-ahead healthz that also moved the advertised CLI"
+fi
+grep -q "/healthz recommended_binary_version '1.8.67' does not match expected previous stable 1.8.66" \
+  "$work/pearl-runtime-ahead-wrong-recommendation.out"
 
 make_fixture "$work/malformed-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 latest
 if run_guard "$work/malformed-recommended" >"$work/malformed-recommended.out" 2>&1; then
