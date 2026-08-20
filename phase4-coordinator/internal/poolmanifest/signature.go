@@ -194,6 +194,29 @@ func VerifyPolicyCore(core PolicyCore, sigs []Signature, ss SignerSet) error {
 	return verifyThreshold(digest, sigs, ss)
 }
 
+// verifyPolicyCoreSignature verifies a policy core's M-of-N signatures against a
+// signer set WITHOUT the time-dependent revoked/window gate — the timeless crypto
+// half of VerifyPolicyCore (signer-set structural validity, exact signer_set_version
+// match, recomputed digest, and M-of-N distinct authorized signatures). Durable
+// reconstruction (slice 5) uses it to re-verify a recorded acceptance verdict's
+// signature (a valid signature stays valid forever, and re-verifying it catches
+// store corruption) while REPLAYING — not re-evaluating — the recorded
+// time-dependent verdict, so a policy accepted before its signer set was later
+// revoked or expired is not retroactively rejected on restart (SPEC-042-R012).
+func verifyPolicyCoreSignature(core PolicyCore, sigs []Signature, ss SignerSet) error {
+	if err := ss.Validate(); err != nil {
+		return err
+	}
+	if ss.Version != core.SignerSetVersion {
+		return errSignerSetVersion
+	}
+	digest, err := core.ManifestCoreDigest()
+	if err != nil {
+		return err
+	}
+	return verifyThreshold(digest, sigs, ss)
+}
+
 // verifyThreshold enforces M-of-N over distinct authorized valid signatures for a
 // policy core. ss is assumed already Validate()d. It delegates to the generic
 // message-based primitive; the only policy-core-specific part is the signing
