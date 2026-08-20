@@ -199,6 +199,13 @@ struct AgentSnapshot: Equatable {
             }
             return
         }
+        if isLocalStatusObservationCurrent(at: now),
+           lastBuyerServingAt == nil,
+           hasIncumbentBuyerServingEvidence,
+           networkState == "live_verified" || networkState == "buyer_serving_unknown" {
+            lastBuyerServingAt = now
+            return
+        }
         if shouldClearBuyerServingHold {
             lastBuyerServingAt = nil
         }
@@ -233,14 +240,20 @@ struct AgentSnapshot: Equatable {
     }
 
     func isHoldingBuyerServingReady(at now: Date = Date()) -> Bool {
-        guard lastBuyerServingAt != nil, !shouldClearBuyerServingHold else { return false }
+        guard !shouldClearBuyerServingHold else { return false }
         guard isLocalStatusObservationCurrent(at: now) else { return false }
         switch networkState {
         case "buyer_serving_unknown", "live_verified":
-            return true
+            return lastBuyerServingAt != nil || hasIncumbentBuyerServingEvidence
         default:
             return false
         }
+    }
+
+    var hasIncumbentBuyerServingEvidence: Bool {
+        (requestsServedAllTime ?? 0) > 0
+            || (requestsServedToday ?? 0) > 0
+            || (earningsUsdcLifetime ?? 0) > 0
     }
 
     func isLocalStatusObservationCurrent(at now: Date = Date()) -> Bool {
@@ -610,7 +623,7 @@ enum AgentSnapshotPresenter {
                     action: "Wait for the next UTC day or use a wallet below the cap."
                 )
             }
-            if s.trustTier == .provisional || s.malibuHoldReasons.contains("trust_tier_provisional") {
+            if s.trustTier == .provisional {
                 return result(
                     status: "Locked until Trusted",
                     code: "trust_tier_provisional",

@@ -321,6 +321,10 @@ final class DashboardViewTests: XCTestCase {
         var trustedWithHistoricalHold = provisional
         trustedWithHistoricalHold.trustTier = .trusted
         XCTAssertEqual(AgentSnapshotPresenter.trustLine(trustedWithHistoricalHold), "Trusted")
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.miningHealth(trustedWithHistoricalHold).reasonCode,
+            "trust_tier_provisional"
+        )
 
         var unlockTrusted = miningBase()
         unlockTrusted.trustTier = .provisional

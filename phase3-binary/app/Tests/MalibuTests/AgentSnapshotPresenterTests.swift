@@ -219,6 +219,26 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "$0.04")
     }
 
+    func testIncumbentJobHistoryHoldsReadyOnFirstLaunchWithoutPersistFile() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.networkState = "live_verified"
+        snapshot.coordinatorConnected = false
+        snapshot.requestsServedAllTime = 12
+        snapshot.earningsUsdcLifetime = 18.4
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationID = "obs-incumbent"
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.statusObservationFresh = true
+        snapshot.updateBuyerServingHold()
+
+        XCTAssertNotNil(snapshot.lastBuyerServingAt)
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+    }
+
     func testBuyerServingHoldClearsOnCoordinatorNotServing() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
@@ -1527,6 +1547,16 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             + "Your provider identity and model files will be kept."
 
         XCTAssertEqual(AgentSnapshotPresenter.publicErrorDetail(message), message)
+    }
+
+    func testRepairFailureMessagesRemainUserVisible() {
+        let missing =
+            "Provider software could not be verified for repair. Your provider identity was not changed."
+        let absent =
+            "Provider software for repair was not found in Malibu. Your provider identity was not changed."
+
+        XCTAssertEqual(AgentSnapshotPresenter.publicErrorDetail(missing), missing)
+        XCTAssertEqual(AgentSnapshotPresenter.publicErrorDetail(absent), absent)
     }
 
     func testOnboardingAdvancedFailureDiagnosticsKeepsRedactedDetails() {

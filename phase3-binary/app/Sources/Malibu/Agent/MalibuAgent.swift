@@ -52,6 +52,8 @@ final class MalibuAgent: ObservableObject {
     /// HOME-ACL stranded installs get one automatic repair attempt per session
     /// so a sideloaded Malibu.app actually lands the bundled watchdog/CLI.
     private var homeACLAutoRepairAttempted = false
+    /// Attach first so a still-serving provider keeps Ready copy, then repair.
+    private var homeACLAutoRepairAllowed = false
     private var hardwareVerificationRetryTask: Task<Void, Never>?
     /// Set while corrective `--recover-hardware-admission` may have drained
     /// launchd and therefore owes a restore/bootstrap. Cleared on success.
@@ -120,10 +122,14 @@ final class MalibuAgent: ObservableObject {
 
         snapshot.state = .starting
         restoreDashboardObservation()
-        startProviderLogTail()
         if await monitorInstalledProviderIfPresent() {
+            homeACLAutoRepairAllowed = true
+            scheduleHomeACLAutoRepairIfNeeded()
             return
         }
+        homeACLAutoRepairAllowed = true
+        startProviderLogTail()
+        scheduleHomeACLAutoRepairIfNeeded()
 
         if let failure = providerStartFailure {
             snapshot.state = .error
@@ -415,7 +421,7 @@ final class MalibuAgent: ObservableObject {
     }
 
     private func scheduleHomeACLAutoRepairIfNeeded() {
-        guard !homeACLAutoRepairAttempted, !isShuttingDown else { return }
+        guard homeACLAutoRepairAllowed, !homeACLAutoRepairAttempted, !isShuttingDown else { return }
         guard AgentSnapshotPresenter.canRepairProviderSoftware(snapshot) else { return }
         guard providerSoftwareRepairTask == nil else { return }
         Task { [weak self] in
@@ -1357,6 +1363,10 @@ final class MalibuAgent: ObservableObject {
                                  && inputTokensToday == nil && outputTokensToday == nil
                                  && inputTokensAllTime == nil && outputTokensAllTime == nil
             if looksLikeStub {
+                if snapshot.hasObservedProviderEarnings {
+                    persistDashboardObservation()
+                    return
+                }
                 clearRuntimeMetrics()
                 snapshot.hasObservedProviderEarnings = false
             } else {

@@ -44,6 +44,8 @@ required = (
     "test \"$actual_sha\" = \"$EXPECTED_DMG_SHA256\"",
     "-name '*.bundle'",
     '"$app/Contents/MacOS/mlx.metallib"',
+    'cp -R "$payload_dir/compatibility-set-local"',
+    'cp -R "$payload_dir/catalog-release"',
     "Print :CFBundleIdentifier",
     "Print :CFBundleVersion",
     "stat -f '%Lp'",

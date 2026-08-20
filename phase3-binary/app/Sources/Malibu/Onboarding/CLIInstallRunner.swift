@@ -49,9 +49,9 @@ enum CLIInstallRunner {
             case let .referralFailure(failure):
                 return failure.message
             case .repairEvidenceMissing:
-                return "Malibu could not verify the existing provider install to repair it. Your provider identity was not changed."
+                return "Provider software could not be verified for repair. Your provider identity was not changed."
             case .bundledCLINotFound:
-                return "Malibu could not find the bundled provider software to repair with. Your provider identity was not changed."
+                return "Provider software for repair was not found in Malibu. Your provider identity was not changed."
             case let .nonZeroExit(code):
                 return "Provider install failed (exit \(code)). See the log above for details."
             case let .launchFailed(message):
@@ -127,6 +127,7 @@ enum CLIInstallRunner {
             repairExistingInstall: repairExistingInstall
         )
         let bundledCLIPath = repairExistingInstall ? try resolveBundledCLI() : nil
+        let bundledAppPath = repairExistingInstall ? Bundle.main.bundleURL : nil
         let environment = try installerEnvironment(
             parentEnvironment: ProcessInfo.processInfo.environment,
             installPort: installPort,
@@ -134,7 +135,8 @@ enum CLIInstallRunner {
             referralCodeFile: referralFileURL,
             replacingIncumbentProvider: replacingIncumbentProvider,
             repairExistingInstall: repairExistingInstall,
-            bundledCLIPath: bundledCLIPath
+            bundledCLIPath: bundledCLIPath,
+            bundledAppPath: bundledAppPath
         )
         if let installPort {
             await onLogLine("[macprovider-install] Using local HTTP port \(installPort) for provider install.")
@@ -202,6 +204,7 @@ enum CLIInstallRunner {
         replacingIncumbentProvider: Bool = false,
         repairExistingInstall: Bool = false,
         bundledCLIPath: URL? = nil,
+        bundledAppPath: URL? = nil,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default
     ) throws -> [String: String] {
@@ -243,10 +246,11 @@ enum CLIInstallRunner {
         }
         if repairExistingInstall {
             explicit["MACPROVIDER_REPAIR_EXISTING_INSTALL"] = "1"
-            guard let bundledCLIPath else {
+            guard let bundledCLIPath, let bundledAppPath else {
                 throw Error.bundledCLINotFound
             }
             explicit["MACPROVIDER_BUNDLED_CLI"] = bundledCLIPath.path
+            explicit["MACPROVIDER_BUNDLED_APP"] = bundledAppPath.path
         }
         return try ProcessEnvironmentSanitizer.sanitized(
             from: [:],

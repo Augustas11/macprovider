@@ -156,15 +156,18 @@ final class ReferralOnboardingTests: XCTestCase {
 
     func testInstallerEnvironmentPassesRepairIntentOnlyWhenRequested() throws {
         let bundledCLI = URL(fileURLWithPath: "/Applications/Malibu.app/Contents/MacOS/macprovider-cli")
+        let bundledApp = URL(fileURLWithPath: "/Applications/Malibu.app")
         let repairEnvironment = try CLIInstallRunner.installerEnvironment(
             parentEnvironment: ["MACPROVIDER_REPAIR_EXISTING_INSTALL": "1"],
             installPort: nil,
             pinnedVersion: nil,
             repairExistingInstall: true,
-            bundledCLIPath: bundledCLI
+            bundledCLIPath: bundledCLI,
+            bundledAppPath: bundledApp
         )
         XCTAssertEqual(repairEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"], "1")
         XCTAssertEqual(repairEnvironment["MACPROVIDER_BUNDLED_CLI"], bundledCLI.path)
+        XCTAssertEqual(repairEnvironment["MACPROVIDER_BUNDLED_APP"], bundledApp.path)
 
         XCTAssertThrowsError(
             try CLIInstallRunner.installerEnvironment(
@@ -213,7 +216,8 @@ final class ReferralOnboardingTests: XCTestCase {
                 bundledVersion: "1.8.104"
             ),
             repairExistingInstall: true,
-            bundledCLIPath: URL(fileURLWithPath: "/Applications/Malibu.app/Contents/MacOS/macprovider-cli")
+            bundledCLIPath: URL(fileURLWithPath: "/Applications/Malibu.app/Contents/MacOS/macprovider-cli"),
+            bundledAppPath: URL(fileURLWithPath: "/Applications/Malibu.app")
         )
         XCTAssertEqual(repairEnvironment["MACPROVIDER_VERSION"], "v1.8.104")
         XCTAssertEqual(repairEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"], "1")
@@ -221,6 +225,7 @@ final class ReferralOnboardingTests: XCTestCase {
             repairEnvironment["MACPROVIDER_BUNDLED_CLI"],
             "/Applications/Malibu.app/Contents/MacOS/macprovider-cli"
         )
+        XCTAssertEqual(repairEnvironment["MACPROVIDER_BUNDLED_APP"], "/Applications/Malibu.app")
     }
 
     func testRepairInstallExitsDoNotMapToInviteCopy() {
@@ -287,10 +292,11 @@ final class ReferralOnboardingTests: XCTestCase {
             script.contains(#"[ "$FRESH_REFERRAL_BOOTSTRAP" -eq 1 ] || return 0"#)
         )
         XCTAssertTrue(script.contains(#""enable_receipts"] = "true""#))
-        XCTAssertTrue(script.contains("MACPROVIDER_BUNDLED_CLI"))
+        XCTAssertTrue(script.contains("MACPROVIDER_BUNDLED_APP"))
         XCTAssertTrue(script.contains("Repairing from Malibu.app bundled provider CLI"))
-        XCTAssertTrue(script.contains("existing-install repair requires MACPROVIDER_BUNDLED_CLI from Malibu.app"))
+        XCTAssertTrue(script.contains("existing-install repair requires MACPROVIDER_BUNDLED_APP from Malibu.app"))
         XCTAssertTrue(script.contains("stage_bundled_repair_payload"))
+        XCTAssertTrue(script.contains("matching compatibility set without downloading GitHub"))
     }
 
     private struct Fixture {

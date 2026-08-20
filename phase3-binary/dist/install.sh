@@ -20,11 +20,13 @@ FRESH_REFERRAL_BOOTSTRAP=0
 REFERRAL_REPLACE_INCUMBENT="${MACPROVIDER_REFERRAL_REPLACE_INCUMBENT:-0}"
 REPAIR_EXISTING_INSTALL="${MACPROVIDER_REPAIR_EXISTING_INSTALL:-0}"
 BUNDLED_CLI="${MACPROVIDER_BUNDLED_CLI:-}"
+BUNDLED_APP="${MACPROVIDER_BUNDLED_APP:-}"
 REFERRAL_BOOTSTRAP_COMPLETED=0
 unset MACPROVIDER_REFERRAL_CODE_FILE
 unset MACPROVIDER_REFERRAL_REPLACE_INCUMBENT
 unset MACPROVIDER_REPAIR_EXISTING_INSTALL
 unset MACPROVIDER_BUNDLED_CLI
+unset MACPROVIDER_BUNDLED_APP
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
@@ -7660,14 +7662,49 @@ path = os.path.realpath(raw)
 info = os.lstat(path)
 if not stat.S_ISREG(info.st_mode):
     raise SystemExit("bundled CLI must be a regular file")
-if info.st_uid != os.getuid():
-    raise SystemExit("bundled CLI must be owned by the installing user")
 if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
     raise SystemExit("bundled CLI must not be group/world-writable")
-if not (info.st_mode & stat.S_IXUSR):
-    raise SystemExit("bundled CLI must be executable")
+if not os.access(path, os.R_OK | os.X_OK):
+    raise SystemExit("bundled CLI must be readable and executable by the installing user")
 if info.st_size < 16 or info.st_size > 512 * 1024 * 1024:
     raise SystemExit("bundled CLI has an invalid size")
+print(path)
+PY
+}
+
+validated_bundled_app() {
+  raw="$1"
+  python3 - "$raw" <<'PY'
+import os
+import stat
+import sys
+
+raw = sys.argv[1]
+if not raw.startswith("/") or any(part in {".", ".."} for part in raw.split("/")):
+    raise SystemExit("bundled Malibu.app path must be an absolute canonical path")
+path = os.path.realpath(raw)
+info = os.lstat(path)
+if not stat.S_ISDIR(info.st_mode):
+    raise SystemExit("bundled Malibu.app must be a directory")
+if not path.endswith(".app"):
+    raise SystemExit("bundled payload must be a Malibu.app bundle")
+if info.st_mode & stat.S_IWOTH:
+    raise SystemExit("bundled Malibu.app must not be world-writable")
+if not os.access(path, os.R_OK | os.X_OK):
+    raise SystemExit("bundled Malibu.app must be readable by the installing user")
+required = [
+    os.path.join(path, "Contents/MacOS/macprovider-cli"),
+    os.path.join(path, "Contents/Resources/compatibility-set.json"),
+]
+for candidate in required:
+    if not os.path.isfile(candidate):
+        raise SystemExit(f"Malibu.app is missing {os.path.relpath(candidate, path)}")
+for directory in (
+    os.path.join(path, "Contents/Resources/compatibility-set-local"),
+    os.path.join(path, "Contents/Resources/catalog-release"),
+):
+    if not os.path.isdir(directory):
+        raise SystemExit(f"Malibu.app is missing {os.path.relpath(directory, path)}")
 print(path)
 PY
 }
@@ -7675,14 +7712,23 @@ PY
 stage_bundled_repair_payload() {
   [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ] \
     || die 7 "bundled CLI staging is only allowed for existing-install repair"
-  [ -n "${BUNDLED_CLI:-}" ] \
-    || die 7 "existing-install repair requires MACPROVIDER_BUNDLED_CLI from Malibu.app"
+  [ -n "${BUNDLED_APP:-}" ] \
+    || die 7 "existing-install repair requires MACPROVIDER_BUNDLED_APP from Malibu.app"
   [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] \
     && die 7 "bundled repair cannot mix acceptance assets"
   [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] \
     && die 7 "bundled repair cannot mix emergency rollback"
-  bundled_cli="$(validated_bundled_cli "$BUNDLED_CLI")" \
-    || die 7 "unsafe MACPROVIDER_BUNDLED_CLI"
+  bundled_app="$(validated_bundled_app "$BUNDLED_APP")" \
+    || die 7 "unsafe MACPROVIDER_BUNDLED_APP"
+  if [ -n "${BUNDLED_CLI:-}" ]; then
+    bundled_cli="$(validated_bundled_cli "$BUNDLED_CLI")" \
+      || die 7 "unsafe MACPROVIDER_BUNDLED_CLI"
+    [ "$bundled_cli" = "$(validated_bundled_cli "$bundled_app/Contents/MacOS/macprovider-cli")" ] \
+      || die 7 "MACPROVIDER_BUNDLED_CLI must be the Malibu.app embedded provider CLI"
+  else
+    bundled_cli="$(validated_bundled_cli "$bundled_app/Contents/MacOS/macprovider-cli")" \
+      || die 7 "Malibu.app is missing an executable provider CLI"
+  fi
   [ -n "$TMPDIR_PATH" ] || die 5 "bundled repair staging requires a temp directory"
   staging_dir="$TMPDIR_PATH/staging"
   rm -rf "$staging_dir"
@@ -7693,28 +7739,23 @@ stage_bundled_repair_payload() {
     || die 5 "failed to mark the staged bundled provider CLI executable"
   [ -x "$staging_dir/macprovider-cli" ] \
     || die 5 "staged bundled macprovider-cli is not executable"
-  if [ ! -d "$INSTALL_DIR" ]; then
-    die 5 "existing-install repair requires the current provider directory at $INSTALL_DIR"
+  macos_dir="$bundled_app/Contents/MacOS"
+  resources_dir="$bundled_app/Contents/Resources"
+  [ -f "$macos_dir/mlx.metallib" ] \
+    || die 5 "Malibu.app is missing mlx.metallib next to the bundled provider CLI"
+  cp -p "$macos_dir/mlx.metallib" "$staging_dir/mlx.metallib" \
+    || die 5 "failed to stage mlx.metallib from Malibu.app"
+  find "$macos_dir" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$staging_dir"/ \;
+  cp -p "$resources_dir/compatibility-set.json" "$staging_dir/compatibility-set.json" \
+    || die 5 "failed to stage compatibility-set.json from Malibu.app"
+  cp -R "$resources_dir/compatibility-set-local" "$staging_dir/compatibility-set-local" \
+    || die 5 "failed to stage compatibility-set-local from Malibu.app"
+  cp -R "$resources_dir/catalog-release" "$staging_dir/catalog-release" \
+    || die 5 "failed to stage catalog-release from Malibu.app"
+  if [ -f "$resources_dir/THIRD-PARTY-NOTICES.txt" ]; then
+    cp -p "$resources_dir/THIRD-PARTY-NOTICES.txt" "$staging_dir/THIRD-PARTY-NOTICES.txt" \
+      || die 5 "failed to stage THIRD-PARTY-NOTICES.txt from Malibu.app"
   fi
-  for support_file in mlx.metallib THIRD-PARTY-NOTICES.txt compatibility-set.json; do
-    if [ -f "$INSTALL_DIR/$support_file" ]; then
-      cp -p "$INSTALL_DIR/$support_file" "$staging_dir/$support_file" \
-        || die 5 "failed to stage $support_file from the current provider install"
-    fi
-  done
-  for support_dir in compatibility-set-local catalog-release; do
-    if [ -d "$INSTALL_DIR/$support_dir" ]; then
-      cp -R "$INSTALL_DIR/$support_dir" "$staging_dir/$support_dir" \
-        || die 5 "failed to stage $support_dir from the current provider install"
-    fi
-  done
-  find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$staging_dir"/ \;
-  [ -f "$staging_dir/compatibility-set.json" ] \
-    || die 5 "existing-install repair is missing compatibility-set.json from the current provider directory"
-  [ -d "$staging_dir/compatibility-set-local" ] \
-    || die 5 "existing-install repair is missing compatibility-set-local from the current provider directory"
-  [ -d "$staging_dir/catalog-release" ] \
-    || die 5 "existing-install repair is missing catalog-release from the current provider directory"
   staged_version="$("$staging_dir/macprovider-cli" --version 2>/dev/null | tr -d '\r\n')" \
     || die 5 "bundled provider CLI did not report a version"
   case "$staged_version" in
@@ -7723,10 +7764,19 @@ stage_bundled_repair_payload() {
   esac
   [ "$staged_version" = "$tag" ] \
     || die 5 "bundled provider CLI version $staged_version does not match pinned repair target $tag"
+  manifest_version="$(python3 - "$staging_dir/compatibility-set.json" <<'PY'
+import json, sys
+envelope = json.load(open(sys.argv[1], encoding="utf-8"))
+version = envelope["signed"]["components"]["provider_cli"]["version"]
+print("v" + version if not str(version).startswith("v") else version)
+PY
+)" || die 5 "Malibu.app compatibility-set.json is not a signed provider payload"
+  [ "$manifest_version" = "$tag" ] \
+    || die 5 "Malibu.app compatibility-set.json version $manifest_version does not match pinned repair target $tag"
   MACPROVIDER_CLI_EXECUTABLE="$staging_dir/macprovider-cli"
   asset_kind="bundled"
   asset_path="$bundled_cli"
-  log "Staged Malibu.app bundled provider CLI $staged_version without downloading GitHub release assets."
+  log "Staged Malibu.app bundled provider CLI $staged_version and matching compatibility set without downloading GitHub release assets."
 }
 
 download_release() {
@@ -11597,15 +11647,15 @@ main() {
   else
     log "Latest release: $tag"
   fi
-  if [ -n "${BUNDLED_CLI}" ]; then
+  if [ -n "${BUNDLED_APP}" ]; then
     [ "$REPAIR_EXISTING_INSTALL" -eq 1 ] \
-      || die 7 "MACPROVIDER_BUNDLED_CLI is only allowed for existing-install repair"
+      || die 7 "MACPROVIDER_BUNDLED_APP is only allowed for existing-install repair"
     TMPDIR_PATH="$(mktemp -d)"
     asset_kind="bundled"
     log "Repairing from Malibu.app bundled provider CLI (no GitHub download)."
   else
     [ "$REPAIR_EXISTING_INSTALL" -eq 0 ] \
-      || die 7 "existing-install repair requires MACPROVIDER_BUNDLED_CLI from Malibu.app"
+      || die 7 "existing-install repair requires MACPROVIDER_BUNDLED_APP from Malibu.app"
     download_release "$tag"
     verify_sha256
     validate_release_payload

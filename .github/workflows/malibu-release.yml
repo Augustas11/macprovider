@@ -301,6 +301,20 @@ jobs:
             -exec cp -R {} "$app/Contents/MacOS"/ \;
           cp "$payload_dir/compatibility-set.json" \
             "$app/Contents/Resources/compatibility-set.json"
+          [ -d "$payload_dir/compatibility-set-local" ] || {
+            echo "::error::CLI payload lacks compatibility-set-local for Malibu.app bundled repair" >&2
+            exit 1
+          }
+          rm -rf "$app/Contents/Resources/compatibility-set-local"
+          cp -R "$payload_dir/compatibility-set-local" \
+            "$app/Contents/Resources/compatibility-set-local"
+          [ -d "$payload_dir/catalog-release" ] || {
+            echo "::error::CLI payload lacks catalog-release for Malibu.app bundled repair" >&2
+            exit 1
+          }
+          rm -rf "$app/Contents/Resources/catalog-release"
+          cp -R "$payload_dir/catalog-release" \
+            "$app/Contents/Resources/catalog-release"
           # The app must execute the exact installer authenticated by the
           # signed compatibility set, never the source-tree post-build copy.
           cp "$payload_dir/compatibility-set-local/install.sh" \
