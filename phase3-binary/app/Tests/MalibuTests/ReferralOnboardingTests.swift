@@ -171,6 +171,36 @@ final class ReferralOnboardingTests: XCTestCase {
         XCTAssertNil(normalEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"])
     }
 
+    func testRepairResolvesPinnedVersionToBundledRelease() throws {
+        XCTAssertEqual(
+            try CLIInstallRunner.resolvedPinnedVersion(
+                pinnedVersion: nil,
+                repairExistingInstall: true,
+                bundledVersion: "1.8.104"
+            ),
+            "1.8.104"
+        )
+        XCTAssertNil(
+            try CLIInstallRunner.resolvedPinnedVersion(
+                pinnedVersion: nil,
+                repairExistingInstall: false,
+                bundledVersion: "1.8.104"
+            )
+        )
+        let repairEnvironment = try CLIInstallRunner.installerEnvironment(
+            parentEnvironment: [:],
+            installPort: nil,
+            pinnedVersion: try CLIInstallRunner.resolvedPinnedVersion(
+                pinnedVersion: nil,
+                repairExistingInstall: true,
+                bundledVersion: "1.8.104"
+            ),
+            repairExistingInstall: true
+        )
+        XCTAssertEqual(repairEnvironment["MACPROVIDER_VERSION"], "v1.8.104")
+        XCTAssertEqual(repairEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"], "1")
+    }
+
     func testRepairInstallExitsDoNotMapToInviteCopy() {
         switch CLIInstallRunner.classifiedInstallError(exitCode: 20, repairExistingInstall: false) {
         case .referralFailure(.required)?:

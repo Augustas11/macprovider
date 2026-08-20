@@ -76,6 +76,29 @@ enum CLIInstallRunner {
         return Error.nonZeroExit(exitCode)
     }
 
+    /// Repair must install the bundled provider/watchdog, not GitHub "latest"
+    /// (currently 1.8.102) or coordinator advertisement. Fresh joins stay
+    /// unpinned so they follow signed release discovery.
+    static func resolvedPinnedVersion(
+        pinnedVersion: String?,
+        repairExistingInstall: Bool,
+        bundledVersion: String? = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String
+    ) throws -> String? {
+        if let pinnedVersion {
+            return pinnedVersion
+        }
+        guard repairExistingInstall else {
+            return nil
+        }
+        guard let bundledVersion,
+              ProviderCLIVersion.strictNormalize(bundledVersion) != nil else {
+            throw Error.invalidPinnedVersion(bundledVersion ?? "")
+        }
+        return bundledVersion
+    }
+
     /// Invokes `install.sh` with `MACPROVIDER_NO_PROMPT=1`. Delivers stdout/stderr
     /// lines to `onLogLine` on the main actor.
     static func run(
@@ -96,10 +119,14 @@ enum CLIInstallRunner {
             if let referralFileURL { try? FileManager.default.removeItem(at: referralFileURL) }
         }
         let installPort = resolveInstallPort()
+        let resolvedPin = try resolvedPinnedVersion(
+            pinnedVersion: pinnedVersion,
+            repairExistingInstall: repairExistingInstall
+        )
         let environment = try installerEnvironment(
             parentEnvironment: ProcessInfo.processInfo.environment,
             installPort: installPort,
-            pinnedVersion: pinnedVersion,
+            pinnedVersion: resolvedPin,
             referralCodeFile: referralFileURL,
             replacingIncumbentProvider: replacingIncumbentProvider,
             repairExistingInstall: repairExistingInstall
