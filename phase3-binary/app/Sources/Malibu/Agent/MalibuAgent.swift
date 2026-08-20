@@ -848,6 +848,7 @@ final class MalibuAgent: ObservableObject {
             snapshot.state = .paused
             snapshot.pauseAcknowledged = true
             snapshot.lastError = nil
+            snapshot.lastBuyerServingAt = nil
             return
         }
         if snapshot.state == .paused {
@@ -856,9 +857,11 @@ final class MalibuAgent: ObservableObject {
             snapshot.state = localReady ? .reconnecting : .starting
             snapshot.pauseAcknowledged = false
         }
+        snapshot.updateBuyerServingHold()
         let observationCurrent = snapshot.isLocalStatusObservationCurrent()
         let buyerServing = observationCurrent && snapshot.networkState == "buyer_serving"
-        if localReady && buyerServing {
+        let holdReady = snapshot.isHoldingBuyerServingReady()
+        if localReady && (buyerServing || holdReady) {
             snapshot.state = .serving
             snapshot.lastError = nil
             return
@@ -1322,6 +1325,7 @@ final class MalibuAgent: ObservableObject {
             if accepted {
                 snapshot.state = .paused
                 snapshot.pauseAcknowledged = true
+                snapshot.lastBuyerServingAt = nil
             } else {
                 snapshot.lastError = reason ?? "Pause was refused"
             }

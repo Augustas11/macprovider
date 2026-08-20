@@ -154,7 +154,7 @@ final class StatusCommandTests: XCTestCase {
             ("catalog_update_required", "ready", true, true, "This Mac is not currently eligible"),
             ("live_verified", "unavailable", true, false, "Model is preparing"),
             ("live_verified", "ready", false, true, "Provider is connecting"),
-            ("buyer_serving", "ready", false, true, "Provider is connecting"),
+            ("buyer_serving", "ready", false, true, "Provider is ready"),
         ]
 
         for (networkState, localState, connected, modelLoaded, expectedTitle) in cases {

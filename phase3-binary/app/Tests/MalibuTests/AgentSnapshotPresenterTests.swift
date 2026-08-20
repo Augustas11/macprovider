@@ -121,6 +121,92 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.publicStatus(ready).title, "Provider is ready")
     }
 
+    func testPublicStatusHoldsReadyAcrossTransientLiveVerifiedBlip() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.networkState = "live_verified"
+        snapshot.coordinatorConnected = false
+        snapshot.lastBuyerServingAt = Date()
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationID = "obs-hold"
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.statusObservationFresh = true
+
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot), "Serving")
+    }
+
+    func testPublicStatusHoldsReadyAcrossBuyerServingUnknown() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.networkState = "buyer_serving_unknown"
+        snapshot.coordinatorConnected = true
+        snapshot.lastBuyerServingAt = Date()
+        snapshot.statusObservationFresh = true
+
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+    }
+
+    func testPublicStatusStillWaitsForApprovalOnFirstJoin() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .reconnecting
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.networkState = "live_verified"
+        snapshot.coordinatorConnected = true
+        snapshot.lastBuyerServingAt = nil
+
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicStatus(snapshot).title,
+            "Waiting for network approval"
+        )
+    }
+
+    func testBuyerServingHoldClearsOnCoordinatorNotServing() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.currentModelID = "qwen3-8b"
+        snapshot.networkState = "not_buyer_serving"
+        snapshot.lastBuyerServingAt = Date()
+        snapshot.updateBuyerServingHold()
+
+        XCTAssertNil(snapshot.lastBuyerServingAt)
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicStatus(snapshot).title,
+            "Customer availability is temporarily interrupted"
+        )
+    }
+
+    func testBuyerServingHoldClearsOnStatusInvalidation() {
+        var snapshot = buyerServingObservationSnapshot(observedAt: Date())
+        snapshot.updateBuyerServingHold()
+        XCTAssertNotNil(snapshot.lastBuyerServingAt)
+        XCTAssertTrue(AgentSnapshotPresenter.isNetworkReady(snapshot))
+
+        snapshot.invalidateLocalStatusObservation()
+
+        XCTAssertNil(snapshot.lastBuyerServingAt)
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
+        XCTAssertNotEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
+    }
+
+    func testBuyerServingHoldRequiresCurrentObservation() {
+        var snapshot = buyerServingObservationSnapshot(
+            observedAt: Date().addingTimeInterval(
+                -(LocalStatusObservationPolicy.displayRetentionSeconds + 1)
+            )
+        )
+        snapshot.lastBuyerServingAt = Date().addingTimeInterval(-30)
+        snapshot.networkState = "live_verified"
+
+        XCTAssertFalse(snapshot.isLocalStatusObservationCurrent())
+        XCTAssertFalse(snapshot.isHoldingBuyerServingReady())
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
+    }
+
     func testPublicStatusDistinguishesHardwareVerificationFromGenericReconnect() {
         var pending = AgentSnapshot.empty
         pending.state = .reconnecting

@@ -142,6 +142,10 @@ struct AgentSnapshot: Equatable {
     /// Canonical provider state reported by /v1/status. `buyer_serving` is the
     /// only state backed by the coordinator's routing-readiness verdict.
     var networkState: String?
+    /// Last time Malibu observed a current `buyer_serving` verdict. Holds the
+    /// dashboard on "Provider is ready" across WebSocket blips that rewrite
+    /// `network_state` to `live_verified` / `buyer_serving_unknown`.
+    var lastBuyerServingAt: Date? = nil
     var advertisedMaxConcurrency: Int?
     var catalogState: String?
     var catalogReleaseID: String?
@@ -185,6 +189,57 @@ struct AgentSnapshot: Equatable {
         networkState = "buyer_serving_unknown"
     }
 
+    mutating func updateBuyerServingHold(at now: Date = Date()) {
+        if isLocalStatusObservationCurrent(at: now), networkState == "buyer_serving" {
+            if lastBuyerServingAt == nil {
+                lastBuyerServingAt = now
+            }
+            return
+        }
+        if shouldClearBuyerServingHold {
+            lastBuyerServingAt = nil
+        }
+    }
+
+    var shouldClearBuyerServingHold: Bool {
+        if state == .paused || state == .idle || state == .error {
+            return true
+        }
+        switch networkState {
+        case "not_buyer_serving",
+             "catalog_update_required",
+             "compatibility_update_required",
+             "catalog_integrity_failure",
+             "safe_offline_fallback",
+             "local_donor",
+             "network_offline":
+            return true
+        default:
+            break
+        }
+        switch lifecycleReason {
+        case "autotune_evidence_required",
+             "autotune_evidence_invalid",
+             "autotune_evidence_binary_version_mismatch",
+             "autotune_model_cap_exceeded",
+             "autotune_model_uncatalogued":
+            return true
+        default:
+            return lifecycleState == "catalog_incompatible"
+        }
+    }
+
+    func isHoldingBuyerServingReady(at now: Date = Date()) -> Bool {
+        guard lastBuyerServingAt != nil, !shouldClearBuyerServingHold else { return false }
+        guard isLocalStatusObservationCurrent(at: now) else { return false }
+        switch networkState {
+        case "buyer_serving_unknown", "live_verified":
+            return true
+        default:
+            return false
+        }
+    }
+
     func isLocalStatusObservationCurrent(at now: Date = Date()) -> Bool {
         guard localStatusCapabilities.contains("status_observation_v1") else { return true }
         guard statusObservationFresh != false,
@@ -226,6 +281,7 @@ struct AgentSnapshot: Equatable {
     }
 
     mutating func invalidateLocalStatusObservation() {
+        lastBuyerServingAt = nil
         if localStatusCapabilities.contains("status_observation_v1") {
             statusObservationFresh = false
         }
@@ -666,7 +722,10 @@ enum AgentSnapshotPresenter {
 
     static func isNetworkReady(_ s: AgentSnapshot, at now: Date = Date()) -> Bool {
         guard s.state == .serving else { return false }
-        return s.isLocalStatusObservationCurrent(at: now) && s.networkState == "buyer_serving"
+        if s.isLocalStatusObservationCurrent(at: now) && s.networkState == "buyer_serving" {
+            return true
+        }
+        return s.isHoldingBuyerServingReady(at: now)
     }
 
     private static func isLocalOnly(_ s: AgentSnapshot) -> Bool {
@@ -845,6 +904,7 @@ enum AgentSnapshotPresenter {
     }
 
     private static func isWaitingForNetworkApproval(_ s: AgentSnapshot) -> Bool {
+        guard !s.isHoldingBuyerServingReady() else { return false }
         guard s.isLocalStatusObservationCurrent() else { return false }
         guard s.currentModelID != nil || s.state == .serving || s.state == .reconnecting else {
             return false
@@ -860,6 +920,7 @@ enum AgentSnapshotPresenter {
     }
 
     private static func isCheckingCustomerAvailability(_ s: AgentSnapshot) -> Bool {
+        guard !s.isHoldingBuyerServingReady() else { return false }
         guard s.state == .serving || s.state == .reconnecting else { return false }
         if s.networkState == nil { return true }
         return s.networkState == "buyer_serving_unknown"
