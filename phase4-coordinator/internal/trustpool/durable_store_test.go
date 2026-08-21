@@ -23,22 +23,21 @@ func TestDurableStore_AppendValidatedEventRejectsRawActivation(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	ts := time.Unix(1800000500, 0).UTC()
+	root := newRootFixture(t)
 	prefix := []trustpool.DurableEvent{
-		ev("op-create", ts, trustpool.EventPoolCreated, "pool-a", func(e *trustpool.DurableEvent) {
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
 			e.CreatorAccountID = "creator-a"
 			e.ApprovalRecordID = "approval-v1"
 		}),
-		ev("op-manifest", ts.Add(time.Second), trustpool.EventManifestAccepted, "pool-a", func(e *trustpool.DurableEvent) {
-			e.ManifestVersion = 1
-			e.ManifestCoreDigest = "digest-a"
-		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
 	}
 	for _, e := range prefix {
 		if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
 			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
 		}
 	}
-	active := ev("op-active", ts.Add(2*time.Second), trustpool.EventLifecycleChanged, "pool-a", func(e *trustpool.DurableEvent) {
+	active := ev("op-active", ts.Add(3*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
 		e.Lifecycle = trustpool.LifecycleActive
 	})
 	if _, _, _, err := store.AppendValidatedEvent(ctx, active); !errors.Is(err, trustpool.ErrActivationRequiresPromotion) {
@@ -48,7 +47,7 @@ func TestDurableStore_AppendValidatedEventRejectsRawActivation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconstruct: %v", err)
 	}
-	if got := reconstructed.Pools["pool-a"].Lifecycle; got != trustpool.LifecycleCreated {
+	if got := reconstructed.Pools[root.poolID].Lifecycle; got != trustpool.LifecycleCreated {
 		t.Fatalf("lifecycle after rejected activation = %q, want created", got)
 	}
 }
@@ -62,31 +61,30 @@ func TestDurableStore_ReconstructsRouteableRegistryAcrossRestart(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	ts := time.Unix(1800000000, 0).UTC()
+	root := newRootFixture(t)
 	events := []trustpool.DurableEvent{
-		ev("op-create", ts, trustpool.EventPoolCreated, "pool-a", func(e *trustpool.DurableEvent) {
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
 			e.CreatorAccountID = "creator-a"
 			e.ApprovalRecordID = "approval-v1"
 		}),
-		ev("op-manifest", ts.Add(time.Second), trustpool.EventManifestAccepted, "pool-a", func(e *trustpool.DurableEvent) {
-			e.ManifestVersion = 1
-			e.ManifestCoreDigest = "digest-a"
-		}),
-		ev("op-floor", ts.Add(2*time.Second), trustpool.EventMinBinaryVersionSet, "pool-a", func(e *trustpool.DurableEvent) {
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+		ev("op-floor", ts.Add(3*time.Second), trustpool.EventMinBinaryVersionSet, root.poolID, func(e *trustpool.DurableEvent) {
 			e.MinBinaryVersion = "1.8.33"
 		}),
-		ev("op-member-a", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, "pool-a", func(e *trustpool.DurableEvent) {
+		ev("op-member-a", ts.Add(4*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
 			e.ProviderID = "provider-a"
 		}),
-		ev("op-member-b", ts.Add(4*time.Second), trustpool.EventMemberAdmitted, "pool-a", func(e *trustpool.DurableEvent) {
+		ev("op-member-b", ts.Add(5*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
 			e.ProviderID = "provider-b"
 		}),
-		ev("op-revoke-b", ts.Add(5*time.Second), trustpool.EventMemberRevoked, "pool-a", func(e *trustpool.DurableEvent) {
+		ev("op-revoke-b", ts.Add(6*time.Second), trustpool.EventMemberRevoked, root.poolID, func(e *trustpool.DurableEvent) {
 			e.ProviderID = "provider-b"
 		}),
-		ev("op-buyer", ts.Add(6*time.Second), trustpool.EventBuyerAuthorized, "pool-a", func(e *trustpool.DurableEvent) {
+		ev("op-buyer", ts.Add(7*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
 			e.BuyerAccountID = "acct-a"
 		}),
-		ev("op-active", ts.Add(7*time.Second), trustpool.EventLifecycleChanged, "pool-a", func(e *trustpool.DurableEvent) {
+		ev("op-active", ts.Add(8*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
 			e.Lifecycle = trustpool.LifecycleActive
 		}),
 	}
@@ -108,11 +106,11 @@ func TestDurableStore_ReconstructsRouteableRegistryAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconstruct: %v", err)
 	}
-	poolState := reconstructed.Pools["pool-a"]
+	poolState := reconstructed.Pools[root.poolID]
 	if poolState == nil {
 		t.Fatal("pool-a missing after replay")
 	}
-	if poolState.CreatorAccountID != "creator-a" || poolState.ManifestVersion != 1 || poolState.ManifestCoreDigest != "digest-a" {
+	if poolState.CreatorAccountID != "creator-a" || poolState.ManifestVersion != 1 || poolState.ManifestCoreDigest == "" {
 		t.Fatalf("unexpected admin state: %+v", poolState)
 	}
 	if !poolState.BuyerAccounts["acct-a"] {
@@ -123,7 +121,7 @@ func TestDurableStore_ReconstructsRouteableRegistryAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildRegistry: %v", err)
 	}
-	snap := registry.Snapshot("pool-a")
+	snap := registry.Snapshot(root.poolID)
 	if !snap.Exists {
 		t.Fatal("pool-a should exist in registry")
 	}
@@ -136,10 +134,10 @@ func TestDurableStore_ReconstructsRouteableRegistryAcrossRestart(t *testing.T) {
 	if snap.Generation != uint64(len(events)) {
 		t.Fatalf("generation = %d, want durable event count %d", snap.Generation, len(events))
 	}
-	if !registry.BuyerAuthorized("pool-a", "acct-a") {
+	if !registry.BuyerAuthorized(root.poolID, "acct-a") {
 		t.Fatal("acct-a should be authorized for pool-a after durable replay")
 	}
-	if registry.BuyerAuthorized("pool-a", "acct-other") {
+	if registry.BuyerAuthorized(root.poolID, "acct-other") {
 		t.Fatal("acct-other should not be authorized for pool-a")
 	}
 }
@@ -153,22 +151,21 @@ func TestDurableStore_PausedPoolReplaysButFailsClosedForRouting(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	ts := time.Unix(1800001000, 0).UTC()
+	root := newRootFixture(t)
 	events := []trustpool.DurableEvent{
-		ev("op-create", ts, trustpool.EventPoolCreated, "pool-paused", func(e *trustpool.DurableEvent) {
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
 			e.CreatorAccountID = "creator-a"
 			e.ApprovalRecordID = "approval-v1"
 		}),
-		ev("op-member", ts.Add(time.Second), trustpool.EventMemberAdmitted, "pool-paused", func(e *trustpool.DurableEvent) {
+		ev("op-member", ts.Add(time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
 			e.ProviderID = "provider-a"
 		}),
-		ev("op-manifest", ts.Add(2*time.Second), trustpool.EventManifestAccepted, "pool-paused", func(e *trustpool.DurableEvent) {
-			e.ManifestVersion = 1
-			e.ManifestCoreDigest = "digest-paused"
-		}),
-		ev("op-active", ts.Add(3*time.Second), trustpool.EventLifecycleChanged, "pool-paused", func(e *trustpool.DurableEvent) {
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(2*time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifest(t, "op-manifest", ts.Add(3*time.Second), root.poolID, 1, root),
+		ev("op-active", ts.Add(4*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
 			e.Lifecycle = trustpool.LifecycleActive
 		}),
-		ev("op-pause", ts.Add(4*time.Second), trustpool.EventLifecycleChanged, "pool-paused", func(e *trustpool.DurableEvent) {
+		ev("op-pause", ts.Add(5*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
 			e.Lifecycle = trustpool.LifecyclePaused
 			e.Reason = "creator_suspended"
 		}),
@@ -186,14 +183,14 @@ func TestDurableStore_PausedPoolReplaysButFailsClosedForRouting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconstruct: %v", err)
 	}
-	if got := reconstructed.Pools["pool-paused"].Lifecycle; got != trustpool.LifecyclePaused {
+	if got := reconstructed.Pools[root.poolID].Lifecycle; got != trustpool.LifecyclePaused {
 		t.Fatalf("lifecycle = %q, want paused", got)
 	}
 	registry, err := reconstructed.BuildRegistry()
 	if err != nil {
 		t.Fatalf("BuildRegistry: %v", err)
 	}
-	snap := registry.Snapshot("pool-paused")
+	snap := registry.Snapshot(root.poolID)
 	if !snap.Exists {
 		t.Fatal("paused pool should still exist so the coordinator can fail closed for selected pool traffic")
 	}
@@ -237,6 +234,84 @@ func TestDurableStore_IdempotentOperationAndConflict(t *testing.T) {
 	}
 	if len(events) != 1 {
 		t.Fatalf("stored events = %d, want 1", len(events))
+	}
+}
+
+func TestDurableStore_RootRegistrationNonceIssuedConsumedAndServerTimed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	root := newRootFixture(t)
+	ts := time.Unix(1800002500, 0).UTC()
+	create := ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-a"
+		e.ApprovalRecordID = "approval-v1"
+	})
+	if _, _, _, err := store.AppendValidatedEvent(ctx, create); err != nil {
+		t.Fatalf("AppendValidatedEvent create: %v", err)
+	}
+
+	unissued := signedRootRegistration(t, "op-root-unissued", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", root)
+	if _, _, _, err := store.AppendValidatedEvent(ctx, unissued); !errors.Is(err, trustpool.ErrRootRegistrationNonce) {
+		t.Fatalf("unissued nonce err=%v, want ErrRootRegistrationNonce", err)
+	}
+
+	nonce := issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour))
+	accepted := signedRootRegistrationForIssue(t, "op-root", ts.Add(2*time.Second), root.poolID, "creator-a", "approval-v1", nonce, root)
+	if _, _, _, err := store.AppendValidatedEvent(ctx, accepted); err != nil {
+		t.Fatalf("AppendValidatedEvent root: %v", err)
+	}
+	reuse := accepted
+	reuse.OperationID = "op-root-reuse"
+	if _, _, _, err := store.AppendValidatedEvent(ctx, reuse); !errors.Is(err, trustpool.ErrRootRegistrationNonce) {
+		t.Fatalf("reused nonce err=%v, want ErrRootRegistrationNonce", err)
+	}
+
+	root2 := newRootFixture(t)
+	create2 := ev("op-create-2", ts, trustpool.EventPoolCreated, root2.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-b"
+		e.ApprovalRecordID = "approval-v1"
+	})
+	if _, _, _, err := store.AppendValidatedEvent(ctx, create2); err != nil {
+		t.Fatalf("AppendValidatedEvent create2: %v", err)
+	}
+	expired, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		CreatorAccountID:       "creator-b",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		Purpose:                trustpool.RootRegistrationPurposeDefault,
+		ExpiresAtUTC:           time.Now().Add(50 * time.Millisecond),
+	})
+	if err != nil {
+		t.Fatalf("IssueRootRegistrationNonce short TTL: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	backdated := signedRootRegistrationForIssue(t, "op-root-expired", ts.Add(3*time.Second), root2.poolID, "creator-b", "approval-v1", expired, root2)
+	if _, _, _, err := store.AppendValidatedEvent(ctx, backdated); !errors.Is(err, trustpool.ErrRootRegistrationNonce) {
+		t.Fatalf("backdated expired nonce err=%v, want ErrRootRegistrationNonce", err)
+	}
+}
+
+func TestReconstructEvents_RejectsLegacyUnsignedManifestAccepted(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800002700, 0).UTC()
+	events := []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, "legacy-pool", func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		ev("op-manifest-legacy", ts.Add(time.Second), trustpool.EventManifestAccepted, "legacy-pool", func(e *trustpool.DurableEvent) {
+			e.ManifestVersion = 1
+			e.ManifestCoreDigest = hexDigest("legacy")
+		}),
+	}
+	if _, err := trustpool.ReconstructEvents(events); err == nil {
+		t.Fatal("legacy unsigned manifest replay should fail closed")
 	}
 }
 
@@ -311,17 +386,16 @@ func TestReconstructEvents_RejectsMalformedStateMachine(t *testing.T) {
 func TestReconstructEvents_RejectsInvalidLifecycleTransitions(t *testing.T) {
 	t.Parallel()
 	ts := time.Unix(1800003500, 0).UTC()
+	root := newRootFixture(t)
 	prefix := func() []trustpool.DurableEvent {
 		return []trustpool.DurableEvent{
-			ev("op-create", ts, trustpool.EventPoolCreated, "pool-a", func(e *trustpool.DurableEvent) {
+			ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
 				e.CreatorAccountID = "creator-a"
 				e.ApprovalRecordID = "approval-v1"
 			}),
-			ev("op-manifest", ts.Add(time.Second), trustpool.EventManifestAccepted, "pool-a", func(e *trustpool.DurableEvent) {
-				e.ManifestVersion = 1
-				e.ManifestCoreDigest = "digest-a"
-			}),
-			ev("op-active", ts.Add(2*time.Second), trustpool.EventLifecycleChanged, "pool-a", func(e *trustpool.DurableEvent) {
+			signedRootRegistration(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", root),
+			signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+			ev("op-active", ts.Add(3*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
 				e.Lifecycle = trustpool.LifecycleActive
 			}),
 		}
@@ -333,10 +407,10 @@ func TestReconstructEvents_RejectsInvalidLifecycleTransitions(t *testing.T) {
 		{
 			name: "draining cannot reactivate",
 			events: append(prefix(),
-				ev("op-draining", ts.Add(3*time.Second), trustpool.EventLifecycleChanged, "pool-a", func(e *trustpool.DurableEvent) {
+				ev("op-draining", ts.Add(4*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
 					e.Lifecycle = trustpool.LifecycleDraining
 				}),
-				ev("op-reactivate", ts.Add(4*time.Second), trustpool.EventLifecycleChanged, "pool-a", func(e *trustpool.DurableEvent) {
+				ev("op-reactivate", ts.Add(5*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
 					e.Lifecycle = trustpool.LifecycleActive
 				}),
 			),
@@ -344,7 +418,7 @@ func TestReconstructEvents_RejectsInvalidLifecycleTransitions(t *testing.T) {
 		{
 			name: "active cannot return to created",
 			events: append(prefix(),
-				ev("op-created-again", ts.Add(3*time.Second), trustpool.EventLifecycleChanged, "pool-a", func(e *trustpool.DurableEvent) {
+				ev("op-created-again", ts.Add(4*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
 					e.Lifecycle = trustpool.LifecycleCreated
 				}),
 			),
@@ -364,10 +438,10 @@ func TestReconstructEvents_RejectsInvalidLifecycleTransitions(t *testing.T) {
 		{
 			name: "paused cannot reactivate through raw lifecycle event",
 			events: append(prefix(),
-				ev("op-pause", ts.Add(3*time.Second), trustpool.EventLifecycleChanged, "pool-a", func(e *trustpool.DurableEvent) {
+				ev("op-pause", ts.Add(4*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
 					e.Lifecycle = trustpool.LifecyclePaused
 				}),
-				ev("op-reactivate", ts.Add(4*time.Second), trustpool.EventLifecycleChanged, "pool-a", func(e *trustpool.DurableEvent) {
+				ev("op-reactivate", ts.Add(5*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
 					e.Lifecycle = trustpool.LifecycleActive
 				}),
 			),
@@ -407,16 +481,15 @@ func TestReconstructEvents_RejectsDuplicateOperationIDs(t *testing.T) {
 func TestReconstructEvents_RejectsManifestAndFloorDowngrades(t *testing.T) {
 	t.Parallel()
 	ts := time.Unix(1800004200, 0).UTC()
+	root := newRootFixture(t)
 	prefix := []trustpool.DurableEvent{
-		ev("op-create", ts, trustpool.EventPoolCreated, "pool-a", func(e *trustpool.DurableEvent) {
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
 			e.CreatorAccountID = "creator-a"
 			e.ApprovalRecordID = "approval-v1"
 		}),
-		ev("op-manifest-2", ts.Add(time.Second), trustpool.EventManifestAccepted, "pool-a", func(e *trustpool.DurableEvent) {
-			e.ManifestVersion = 2
-			e.ManifestCoreDigest = "digest-v2"
-		}),
-		ev("op-floor-2", ts.Add(2*time.Second), trustpool.EventMinBinaryVersionSet, "pool-a", func(e *trustpool.DurableEvent) {
+		signedRootRegistration(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", root),
+		signedManifest(t, "op-manifest-1", ts.Add(2*time.Second), root.poolID, 1, root),
+		ev("op-floor-2", ts.Add(3*time.Second), trustpool.EventMinBinaryVersionSet, root.poolID, func(e *trustpool.DurableEvent) {
 			e.MinBinaryVersion = "1.8.2"
 		}),
 	}
@@ -425,21 +498,18 @@ func TestReconstructEvents_RejectsManifestAndFloorDowngrades(t *testing.T) {
 		event trustpool.DurableEvent
 	}{
 		{
-			name: "manifest version cannot go backward",
-			event: ev("op-manifest-1", ts.Add(3*time.Second), trustpool.EventManifestAccepted, "pool-a", func(e *trustpool.DurableEvent) {
-				e.ManifestVersion = 1
-				e.ManifestCoreDigest = "digest-v1"
-			}),
+			name:  "manifest version cannot go backward",
+			event: signedManifest(t, "op-manifest-1", ts.Add(4*time.Second), root.poolID, 1, root),
 		},
 		{
 			name: "binary floor cannot be lowered",
-			event: ev("op-floor-low", ts.Add(3*time.Second), trustpool.EventMinBinaryVersionSet, "pool-a", func(e *trustpool.DurableEvent) {
+			event: ev("op-floor-low", ts.Add(4*time.Second), trustpool.EventMinBinaryVersionSet, root.poolID, func(e *trustpool.DurableEvent) {
 				e.MinBinaryVersion = "1.8.1"
 			}),
 		},
 		{
 			name: "binary floor cannot be cleared",
-			event: ev("op-floor-clear", ts.Add(3*time.Second), trustpool.EventMinBinaryVersionSet, "pool-a", func(e *trustpool.DurableEvent) {
+			event: ev("op-floor-clear", ts.Add(4*time.Second), trustpool.EventMinBinaryVersionSet, root.poolID, func(e *trustpool.DurableEvent) {
 				e.MinBinaryVersion = ""
 			}),
 		},

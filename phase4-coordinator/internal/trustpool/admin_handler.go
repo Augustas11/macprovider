@@ -155,6 +155,8 @@ func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "operation_conflict"}})
 	case errors.Is(err, ErrActivationRequiresPromotion):
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "activation_requires_promotion"}})
+	case errors.Is(err, ErrRootRegistrationNonce):
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_root_registration_nonce"}})
 	case errors.Is(err, ErrMalformedDurableEvent):
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
 	default:
@@ -193,24 +195,45 @@ func normalizeAdminEvent(r *http.Request, e DurableEvent) (DurableEvent, error) 
 	e.Reason = strings.TrimSpace(e.Reason)
 	e.MinBinaryVersion = strings.TrimSpace(e.MinBinaryVersion)
 	e.ManifestCoreDigest = strings.TrimSpace(e.ManifestCoreDigest)
+	e.ManifestSignature = strings.TrimSpace(e.ManifestSignature)
+	e.ManifestSnapshot = strings.TrimSpace(e.ManifestSnapshot)
+	e.CurrentApprovalVersion = strings.TrimSpace(e.CurrentApprovalVersion)
+	e.RootIssuerKeyID = strings.TrimSpace(e.RootIssuerKeyID)
+	e.RootIssuerPublicKeyDER = strings.TrimSpace(e.RootIssuerPublicKeyDER)
+	e.RootIssuerPublicKeyFingerprint = strings.TrimSpace(e.RootIssuerPublicKeyFingerprint)
+	e.RootSignatureAlgorithm = strings.TrimSpace(e.RootSignatureAlgorithm)
+	e.ManifestAuthorityRootKeyID = strings.TrimSpace(e.ManifestAuthorityRootKeyID)
+	e.ManifestAuthorityRootPublicKey = strings.TrimSpace(e.ManifestAuthorityRootPublicKey)
+	e.RootRegistrationSignature = strings.TrimSpace(e.RootRegistrationSignature)
+	e.StructuredKeyCustodyDisclosureHash = strings.TrimSpace(e.StructuredKeyCustodyDisclosureHash)
+	e.GenesisNonceDigest = strings.TrimSpace(e.GenesisNonceDigest)
+	e.IntendedPoolDisplayNameHash = strings.TrimSpace(e.IntendedPoolDisplayNameHash)
+	e.LaunchEnvironment = strings.TrimSpace(e.LaunchEnvironment)
+	e.RootRegistrationNonce = strings.TrimSpace(e.RootRegistrationNonce)
+	e.RootRegistrationNonceExpiry = strings.TrimSpace(e.RootRegistrationNonceExpiry)
+	e.RootRegistrationPurpose = strings.TrimSpace(e.RootRegistrationPurpose)
+	e.RootRegistrationEnvironment = strings.TrimSpace(e.RootRegistrationEnvironment)
 	return e, nil
 }
 
 type adminPoolState struct {
-	PoolID             string   `json:"pool_id"`
-	CreatorAccountID   string   `json:"creator_account_id"`
-	ApprovalRecordID   string   `json:"approval_record_id"`
-	Lifecycle          string   `json:"lifecycle"`
-	LifecycleReason    string   `json:"lifecycle_reason,omitempty"`
-	ManifestVersion    uint64   `json:"manifest_version"`
-	ManifestCoreDigest string   `json:"manifest_core_digest,omitempty"`
-	MinBinaryVersion   string   `json:"min_binary_version,omitempty"`
-	Members            []string `json:"members"`
-	Revoked            []string `json:"revoked"`
-	BuyerAccounts      []string `json:"buyer_accounts"`
-	Generation         uint64   `json:"generation"`
-	LastEventAtUTC     string   `json:"last_event_at_utc,omitempty"`
-	Routeable          bool     `json:"routeable"`
+	PoolID                         string   `json:"pool_id"`
+	CreatorAccountID               string   `json:"creator_account_id"`
+	ApprovalRecordID               string   `json:"approval_record_id"`
+	Lifecycle                      string   `json:"lifecycle"`
+	LifecycleReason                string   `json:"lifecycle_reason,omitempty"`
+	ManifestVersion                uint64   `json:"manifest_version"`
+	ManifestCoreDigest             string   `json:"manifest_core_digest,omitempty"`
+	RootIssuerKeyID                string   `json:"root_issuer_key_id,omitempty"`
+	RootIssuerPublicKeyFingerprint string   `json:"root_issuer_public_key_fingerprint,omitempty"`
+	LaunchEnvironment              string   `json:"launch_environment,omitempty"`
+	MinBinaryVersion               string   `json:"min_binary_version,omitempty"`
+	Members                        []string `json:"members"`
+	Revoked                        []string `json:"revoked"`
+	BuyerAccounts                  []string `json:"buyer_accounts"`
+	Generation                     uint64   `json:"generation"`
+	LastEventAtUTC                 string   `json:"last_event_at_utc,omitempty"`
+	Routeable                      bool     `json:"routeable"`
 }
 
 func adminPoolResponse(p *ReconstructedPoolState) adminPoolState {
@@ -225,21 +248,45 @@ func adminPoolResponse(p *ReconstructedPoolState) adminPoolState {
 		lastEventAt = p.LastEventAtUTC.UTC().Format(time.RFC3339Nano)
 	}
 	return adminPoolState{
-		PoolID:             p.PoolID,
-		CreatorAccountID:   p.CreatorAccountID,
-		ApprovalRecordID:   p.ApprovalRecordID,
-		Lifecycle:          p.Lifecycle,
-		LifecycleReason:    p.LifecycleReason,
-		ManifestVersion:    p.ManifestVersion,
-		ManifestCoreDigest: p.ManifestCoreDigest,
-		MinBinaryVersion:   p.MinBinaryVersion,
-		Members:            members,
-		Revoked:            revoked,
-		BuyerAccounts:      buyers,
-		Generation:         p.Generation,
-		LastEventAtUTC:     lastEventAt,
-		Routeable:          p.Lifecycle == LifecycleActive,
+		PoolID:                         p.PoolID,
+		CreatorAccountID:               p.CreatorAccountID,
+		ApprovalRecordID:               p.ApprovalRecordID,
+		Lifecycle:                      p.Lifecycle,
+		LifecycleReason:                p.LifecycleReason,
+		ManifestVersion:                p.ManifestVersion,
+		ManifestCoreDigest:             p.ManifestCoreDigest,
+		RootIssuerKeyID:                rootIssuerKeyID(p),
+		RootIssuerPublicKeyFingerprint: rootIssuerFingerprint(p),
+		LaunchEnvironment:              rootIssuerLaunchEnvironment(p),
+		MinBinaryVersion:               p.MinBinaryVersion,
+		Members:                        members,
+		Revoked:                        revoked,
+		BuyerAccounts:                  buyers,
+		Generation:                     p.Generation,
+		LastEventAtUTC:                 lastEventAt,
+		Routeable:                      p.Lifecycle == LifecycleActive,
 	}
+}
+
+func rootIssuerKeyID(p *ReconstructedPoolState) string {
+	if p == nil || p.RootIssuer == nil {
+		return ""
+	}
+	return p.RootIssuer.KeyID
+}
+
+func rootIssuerFingerprint(p *ReconstructedPoolState) string {
+	if p == nil || p.RootIssuer == nil {
+		return ""
+	}
+	return p.RootIssuer.PublicKeyFingerprint
+}
+
+func rootIssuerLaunchEnvironment(p *ReconstructedPoolState) string {
+	if p == nil || p.RootIssuer == nil {
+		return ""
+	}
+	return p.RootIssuer.LaunchEnvironment
 }
 
 func sortedTrueKeys(in map[string]bool) []string {
