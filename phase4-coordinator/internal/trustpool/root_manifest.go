@@ -18,6 +18,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
+	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 )
 
 const (
@@ -155,91 +156,154 @@ func VerifyRootIssuerRegistrationEvent(e DurableEvent) error {
 	return verifyP256Signature(pub, msg, sig)
 }
 
-func VerifyManifestAcceptedEvent(e DurableEvent, root ReconstructedRootIssuer) (string, error) {
+func VerifyManifestAcceptedEvent(e DurableEvent, root ReconstructedRootIssuer) (string, poolmanifest.PolicyCore, error) {
 	if err := requireLowerHex64(e.ManifestCoreDigest); err != nil {
-		return "", err
+		return "", poolmanifest.PolicyCore{}, err
 	}
 	der, err := canonicalBase64(root.PublicKeyDER)
 	if err != nil {
-		return "", err
+		return "", poolmanifest.PolicyCore{}, err
 	}
 	pub, err := parseRootPublicKey(der)
 	if err != nil {
-		return "", err
+		return "", poolmanifest.PolicyCore{}, err
 	}
 	fingerprint, err := RootIssuerPublicKeyFingerprint(root.SignatureAlgorithm, der)
 	if err != nil {
-		return "", err
+		return "", poolmanifest.PolicyCore{}, err
 	}
 	if fingerprint != root.PublicKeyFingerprint || e.RootIssuerPublicKeyFingerprint != root.PublicKeyFingerprint {
-		return "", errRootFingerprint
+		return "", poolmanifest.PolicyCore{}, errRootFingerprint
 	}
-	prevDigest, err := verifyManifestSnapshot(e, root)
+	prevDigest, core, err := verifyManifestSnapshot(e, root)
 	if err != nil {
-		return "", err
+		return "", poolmanifest.PolicyCore{}, err
 	}
 	sig, err := canonicalBase64(e.ManifestSignature)
 	if err != nil {
-		return "", err
+		return "", poolmanifest.PolicyCore{}, err
 	}
 	msg, err := ManifestAcceptanceSigningMessage(e)
 	if err != nil {
-		return "", err
+		return "", poolmanifest.PolicyCore{}, err
 	}
-	return prevDigest, verifyP256Signature(pub, msg, sig)
+	return prevDigest, core, verifyP256Signature(pub, msg, sig)
 }
 
-func verifyManifestSnapshot(e DurableEvent, root ReconstructedRootIssuer) (string, error) {
+func verifyManifestSnapshot(e DurableEvent, root ReconstructedRootIssuer) (string, poolmanifest.PolicyCore, error) {
 	raw, err := canonicalBase64(e.ManifestSnapshot)
 	if err != nil {
-		return "", err
+		return "", poolmanifest.PolicyCore{}, err
 	}
 	snapshot, err := poolmanifest.ParseManifestSnapshot(raw)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", errManifestSnapshot, err)
+		return "", poolmanifest.PolicyCore{}, fmt.Errorf("%w: %v", errManifestSnapshot, err)
 	}
 	authorityRoot, err := canonicalBase64(root.ManifestAuthorityRootPublicKey)
 	if err != nil {
-		return "", err
+		return "", poolmanifest.PolicyCore{}, err
 	}
 	if snapshot.IdentityCore.RootIssuerKeyID != root.ManifestAuthorityRootKeyID ||
 		snapshot.RootIssuerKey.KeyID != root.ManifestAuthorityRootKeyID ||
 		!bytes.Equal(snapshot.RootIssuerKey.PublicKey, ed25519.PublicKey(authorityRoot)) {
-		return "", errManifestSnapshot
+		return "", poolmanifest.PolicyCore{}, errManifestSnapshot
 	}
 	genesisDigest := sha256.Sum256(snapshot.IdentityCore.GenesisNonce)
 	if hex.EncodeToString(genesisDigest[:]) != root.GenesisNonceDigest {
-		return "", errManifestSnapshot
+		return "", poolmanifest.PolicyCore{}, errManifestSnapshot
 	}
 	poolID, err := snapshot.IdentityCore.PoolID()
 	if err != nil {
-		return "", err
+		return "", poolmanifest.PolicyCore{}, err
 	}
 	if poolID != e.PoolID {
-		return "", errManifestSnapshot
+		return "", poolmanifest.PolicyCore{}, errManifestSnapshot
 	}
 	reconstructed, err := poolmanifest.ReconstructPool(snapshot)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", errManifestSnapshot, err)
+		return "", poolmanifest.PolicyCore{}, fmt.Errorf("%w: %v", errManifestSnapshot, err)
 	}
 	if reconstructed.PolicyHistory.HighestVersion() != e.ManifestVersion {
-		return "", errManifestSnapshot
+		return "", poolmanifest.PolicyCore{}, errManifestSnapshot
 	}
 	if len(snapshot.Policies) == 0 {
-		return "", errManifestSnapshot
+		return "", poolmanifest.PolicyCore{}, errManifestSnapshot
 	}
 	last := snapshot.Policies[len(snapshot.Policies)-1].SignedCore.Core
 	if last.ManifestVersion != e.ManifestVersion {
-		return "", errManifestSnapshot
+		return "", poolmanifest.PolicyCore{}, errManifestSnapshot
 	}
 	digest, err := last.ManifestCoreDigest()
 	if err != nil {
-		return "", err
+		return "", poolmanifest.PolicyCore{}, err
 	}
 	if hex.EncodeToString(digest) != e.ManifestCoreDigest {
-		return "", errManifestSnapshot
+		return "", poolmanifest.PolicyCore{}, errManifestSnapshot
 	}
-	return hex.EncodeToString(last.PrevManifestCoreHash), nil
+	return hex.EncodeToString(last.PrevManifestCoreHash), last, nil
+}
+
+func acceptedPolicyCoreFromManifestSnapshot(e DurableEvent) (poolmanifest.PolicyCore, error) {
+	raw, err := canonicalBase64(e.ManifestSnapshot)
+	if err != nil {
+		return poolmanifest.PolicyCore{}, err
+	}
+	snapshot, err := poolmanifest.ParseManifestSnapshot(raw)
+	if err != nil {
+		return poolmanifest.PolicyCore{}, fmt.Errorf("%w: %v", errManifestSnapshot, err)
+	}
+	if len(snapshot.Policies) == 0 {
+		return poolmanifest.PolicyCore{}, errManifestSnapshot
+	}
+	core := snapshot.Policies[len(snapshot.Policies)-1].SignedCore.Core
+	if core.ManifestVersion != e.ManifestVersion {
+		return poolmanifest.PolicyCore{}, errManifestSnapshot
+	}
+	digest, err := core.ManifestCoreDigest()
+	if err != nil {
+		return poolmanifest.PolicyCore{}, err
+	}
+	if hex.EncodeToString(digest) != e.ManifestCoreDigest {
+		return poolmanifest.PolicyCore{}, errManifestSnapshot
+	}
+	return core, nil
+}
+
+func validateCandidatePolicyCoreClaims(core poolmanifest.PolicyCore) error {
+	if core.MinEligibleMembers == 0 || core.MinEligibleMembers > uint64(maxInt()) {
+		return errManifestSnapshot
+	}
+	if core.PrivacyMode != "none" ||
+		core.RelayBlindCapable ||
+		core.ReceiptContract != "" ||
+		core.MetadataVisible != "standard" ||
+		core.DowngradePolicy != "reject" ||
+		core.StickyRoutingAllowed {
+		return ErrProhibitedPromiseClaim
+	}
+	if core.SplitExecutionStatus != "declared_not_executed" {
+		return ErrProhibitedPromiseClaim
+	}
+	if err := ValidatePromiseClaimsText(core.ModelAllowlist...); err != nil {
+		return err
+	}
+	if err := ValidatePromiseClaimsText(
+		core.MinBinaryVersion,
+		core.MinAttestationTier,
+		core.SettlementMode,
+		core.SplitExecutionStatus,
+		core.RetentionPolicyID,
+		core.PrivacyMode,
+		core.ReceiptContract,
+		core.MetadataVisible,
+		core.DowngradePolicy,
+	); err != nil {
+		return err
+	}
+	if core.MinBinaryVersion != "" && !versionfloor.Valid(core.MinBinaryVersion) {
+		return errManifestSnapshot
+	}
+	return nil
 }
 
 func taggedCanonicalJSON(tag string, value map[string]any) ([]byte, error) {

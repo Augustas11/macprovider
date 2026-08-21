@@ -172,6 +172,8 @@ var spec018RetryableByCode = map[string]bool{
 	"invalid_tools":           false, // client request-shape validation, permanent
 	"pool_status_not_found":   false, // pool status lookup is non-enumerating for unknown/unauthorized pools
 	"pool_status_unavailable": true,  // transient durable status reconstruction/read fault
+	"pool_policy_not_found":   false, // pool policy lookup is non-enumerating for unknown/unauthorized pools
+	"pool_policy_unavailable": true,  // transient durable policy reconstruction/read fault
 	// route_snapshot_failed is a pre-dispatch durable-store write failure
 	// (route_snapshot.go:149) — a retry can succeed once storage recovers,
 	// unlike the other internal-fault codes above which are left false.
@@ -784,6 +786,8 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/v1/autotune-candidates", s.handleAutotuneCandidates)
 	r.Get("/v1/autotune-candidates.sig", s.handleAutotuneCandidatesSig)
 	r.Get("/v1/autotune-release", s.handleAutotuneRelease)
+	r.With(s.gatewayContextMiddleware).Get("/v1/trust-pools/{pool_id}/pool_policy.json", s.handleTrustPoolPolicy)
+	r.With(s.gatewayContextMiddleware).Get("/v1/trust-pools/{pool_id}/policy", s.handleTrustPoolPolicy)
 	r.With(s.gatewayContextMiddleware).Get("/v1/trust-pools/{pool_id}/pool_status.json", s.handleTrustPoolStatus)
 	r.With(s.gatewayContextMiddleware).Get("/v1/trust-pools/{pool_id}/status", s.handleTrustPoolStatus)
 	r.Get("/v1/pool/check", s.handlePoolCheck)
@@ -850,6 +854,30 @@ func (s *Server) handleTrustPoolStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(doc); err != nil {
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("trusted pool status encode failed")
+	}
+}
+
+func (s *Server) handleTrustPoolPolicy(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	account, ok := authenticatedAccountFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Gateway account context is required")
+		return
+	}
+	poolID := sanitizeAccountID(chi.URLParam(r, "pool_id"))
+	doc, found, err := trustpool.BuildPolicyDocument(r.Context(), s.trustPoolStatusStore, s.trustPools, poolID, account.ID(), s.now())
+	if err != nil {
+		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("trusted pool policy reconstruction failed")
+		writeError(w, http.StatusServiceUnavailable, "pool_policy_unavailable", "Pool policy unavailable")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "pool_policy_not_found", "Pool policy not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(doc); err != nil {
+		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("trusted pool policy encode failed")
 	}
 }
 
