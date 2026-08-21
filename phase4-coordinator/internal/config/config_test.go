@@ -640,6 +640,20 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	}
 }
 
+func TestTrustedPoolsEnabledRequiresGatewayContext(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.TrustedPools.Enabled = true
+	cfg.Coordinator.RequireGatewayContext = false
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "trusted_pools.enabled") {
+		t.Fatalf("trusted pools without gateway context validation err=%v", err)
+	}
+
+	cfg.Coordinator.RequireGatewayContext = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("trusted pools with gateway context should validate: %v", err)
+	}
+}
+
 func TestRateCardEntryCacheRateDefaultAndExplicitZero(t *testing.T) {
 	var omitted RateCardEntry
 	if err := yaml.Unmarshal([]byte("prompt_credits_per_mtok: 500000\ncompletion_credits_per_mtok: 1000000\n"), &omitted); err != nil {

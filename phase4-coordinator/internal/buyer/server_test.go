@@ -29,6 +29,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
 )
@@ -143,6 +144,119 @@ func TestGatewayContextRequiredAllowsAuthenticatedGatewayContext(t *testing.T) {
 	}
 }
 
+func TestPoolHeaderWithPoolFeatureOffFailsClosed(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithGatewayServiceToken("gateway-secret"),
+		buyer.WithRequireGatewayContext(true),
+	)
+	body := `{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	req.Header.Set("X-MacProvider-Account", "acct_gateway")
+	req.Header.Set("X-MacProvider-Pool", "pool-a")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "pool_unavailable") {
+		t.Fatalf("body=%s, want pool_unavailable", rr.Body.String())
+	}
+	assertPoolUnavailableNonRetryable(t, rr)
+}
+
+func TestInvalidPoolHeaderFailsClosedInsteadOfGlobalRouting(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithGatewayServiceToken("gateway-secret"),
+		buyer.WithRequireGatewayContext(true),
+		buyer.WithPoolMembership(trustpool.NewRegistry()),
+	)
+	body := `{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	req.Header.Set("X-MacProvider-Account", "acct_gateway")
+	req.Header.Set("X-MacProvider-Pool", strings.Repeat("p", 129))
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "pool_unavailable") {
+		t.Fatalf("body=%s, want pool_unavailable", rr.Body.String())
+	}
+	assertPoolUnavailableNonRetryable(t, rr)
+}
+
+func TestPoolHeaderRequiresAuthorizedBuyerAccount(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	trustPools := trustpool.NewRegistry()
+	trustPools.AddPool("pool-a")
+	trustPools.AuthorizeBuyer("pool-a", "acct_allowed")
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithGatewayServiceToken("gateway-secret"),
+		buyer.WithRequireGatewayContext(true),
+		buyer.WithPoolMembership(trustPools),
+	)
+	body := `{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	req.Header.Set("X-MacProvider-Account", "acct_denied")
+	req.Header.Set("X-MacProvider-Pool", "pool-a")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "pool_unavailable") {
+		t.Fatalf("body=%s, want pool_unavailable", rr.Body.String())
+	}
+	assertPoolUnavailableNonRetryable(t, rr)
+}
+
+func TestPoolHeaderForNonRouteablePoolFailsUnavailable(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	trustPools := trustpool.NewRegistry()
+	if err := trustPools.LoadRouteableSnapshot(trustpool.RouteableSnapshot{
+		PoolID:        "pool-paused",
+		Members:       []string{"provider-a"},
+		BuyerAccounts: []string{"acct_gateway"},
+		Routeable:     false,
+		Generation:    7,
+	}); err != nil {
+		t.Fatalf("LoadRouteableSnapshot: %v", err)
+	}
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithGatewayServiceToken("gateway-secret"),
+		buyer.WithRequireGatewayContext(true),
+		buyer.WithPoolMembership(trustPools),
+	)
+	body := `{"model":"unknown-model","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	req.Header.Set("X-MacProvider-Account", "acct_gateway")
+	req.Header.Set("X-MacProvider-Pool", "pool-paused")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503", rr.Code, rr.Body.String())
+	}
+	assertPoolUnavailableNonRetryable(t, rr)
+}
+
 func TestRateCardProjectionReturnsRecommendationSchema(t *testing.T) {
 	rewards := config.RewardsConfig{
 		GlobalMultiplier: 1.25,
@@ -225,6 +339,28 @@ func TestRateCardProjectionReturnsRecommendationSchema(t *testing.T) {
 	sum := sha256.Sum256([]byte(canonical))
 	if got.Version != hex.EncodeToString(sum[:]) {
 		t.Fatalf("version hash mismatch: got %s want hash of %s", got.Version, canonical)
+	}
+}
+
+func assertPoolUnavailableNonRetryable(t *testing.T, rr *httptest.ResponseRecorder) {
+	t.Helper()
+	if got := rr.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After=%q, want absent for pool_unavailable", got)
+	}
+	var body struct {
+		Error struct {
+			Code      string `json:"code"`
+			Retryable bool   `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error response: %v body=%s", err, rr.Body.String())
+	}
+	if body.Error.Code != "pool_unavailable" {
+		t.Fatalf("error.code=%q body=%s, want pool_unavailable", body.Error.Code, rr.Body.String())
+	}
+	if body.Error.Retryable {
+		t.Fatalf("pool_unavailable retryable=true body=%s, want false", rr.Body.String())
 	}
 }
 

@@ -78,6 +78,7 @@ type Config struct {
 	Auth                         AuthConfig                   `yaml:"auth"`
 	Referrals                    ReferralConfig               `yaml:"referrals"`
 	Storage                      StorageConfig                `yaml:"storage"`
+	TrustedPools                 TrustedPoolsConfig           `yaml:"trusted_pools"`
 	Logging                      LoggingConfig                `yaml:"logging"`
 	Rewards                      RewardsConfig                `yaml:"rewards"`
 	Settlement                   SettlementConfig             `yaml:"settlement"`
@@ -1020,6 +1021,15 @@ type StorageConfig struct {
 	// operator_model_swap audit_log table (and any future audit event
 	// types). Default 90 days mirrors request_log_retention_days.
 	AuditLogRetentionDays int `yaml:"audit_log_retention_days"`
+}
+
+// TrustedPoolsConfig is the coordinator-side SPEC-043 enablement switch. Default
+// false keeps the existing coordinator from advertising pool support. When true,
+// startup must reconstruct the durable trustpool ledger and wire buyer routing
+// with that reconstructed registry; reconstruction failure disables pool support
+// while preserving global routing.
+type TrustedPoolsConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type LoggingConfig struct {
@@ -2085,6 +2095,9 @@ func (c Config) Validate() error {
 		if serviceToken == strings.TrimSpace(operatorKey) {
 			return fmt.Errorf("auth.gateway_service_token must differ from auth.operator_keys.%s (service credentials must not grant a named operator identity)", name)
 		}
+	}
+	if c.TrustedPools.Enabled && !c.Coordinator.RequireGatewayContext {
+		return fmt.Errorf("trusted_pools.enabled requires coordinator.require_gateway_context=true")
 	}
 	if err := c.validateCompatibilitySet(); err != nil {
 		return err

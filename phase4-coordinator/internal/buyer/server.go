@@ -83,6 +83,7 @@ var spec018RetryableByCode = map[string]bool{
 	"rate_limited":              true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
 	// SPEC-042 R005/R010 tenant isolation.
 	"pool_state_stale":        true,  // 503, pool membership changed during routing; re-select
+	"pool_unavailable":        false, // 503, unknown/unauthorized/disabled/non-active pool; same request must not be retried unchanged
 	"pool_no_eligible_member": false, // 503, no member satisfies the pool; same reservation must not be retried
 	"pool_binary_too_old":     false, // 503, members exist but all below the pool binary floor; retry cannot make a binary newer
 	// Permanent/client errors — retrying will not help (SPEC-006 §5.2).
@@ -182,9 +183,9 @@ func spec018Retryable(code string) bool {
 type Server struct {
 	pool *pool.Registry
 	// trustPools holds SPEC-042 Trusted Pool membership/revocation state.
-	// Nil unless WithPoolMembership is supplied — when nil the pool feature
-	// is OFF and any inbound pool_id is ignored (global routing), so default
-	// deployments stay byte-identical (SPEC-042 R010 default-off).
+	// Nil unless WithPoolMembership is supplied. Without a pool authority
+	// header, default deployments stay byte-identical; with one, nil fails
+	// closed so pool-selected traffic cannot downgrade to global routing.
 	trustPools         *trustpool.Registry
 	log                zerolog.Logger
 	createdAt          int64
@@ -465,17 +466,18 @@ func WithStreamingMetricsMaxSamples(maxSamples int) Option {
 	}
 }
 
-// WithModelVersionFloors installs the #768 per-model minimum-binary-version
 // WithPoolMembership wires the SPEC-042 Trusted Pool registry that the R005
-// tenant-isolation gate consults. When not supplied the pool feature is OFF
-// (any inbound pool_id is ignored, global routing), so default deployments
-// stay byte-identical.
+// tenant-isolation gate consults. When not supplied the pool feature is OFF:
+// requests without a pool authority header stay byte-identical, while any
+// inbound pool authority header fails closed instead of downgrading to global
+// routing.
 func WithPoolMembership(r *trustpool.Registry) Option {
 	return func(s *Server) {
 		s.trustPools = r
 	}
 }
 
+// WithModelVersionFloors installs the #768 per-model minimum-binary-version
 // map. Unset (or empty) keeps routing byte-identical to pre-#768 behavior.
 func WithModelVersionFloors(floors map[string]string) Option {
 	return func(s *Server) {
@@ -1880,7 +1882,9 @@ type chatRequest struct {
 	// poolID is the SPEC-042 Trusted Pool selected for this request (from
 	// the authorized X-MacProvider-Pool header). "" means global (poolless)
 	// routing — the default — which keeps selection byte-identical.
-	poolID string
+	poolID          string
+	poolSnapshot    trustpool.Snapshot
+	poolSnapshotSet bool
 }
 
 type chatMessage struct {
@@ -1989,16 +1993,42 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	rec.setModel(req.Model)
 	rec.setStream(req.Stream)
 	// SPEC-042 R002: honor the authorized pool selection header only when the
-	// pool feature is configured AND the request carries an authenticated
-	// (gateway-context) account. The gateway emits X-MacProvider-Pool only for
-	// a credential-authorized pool (narrow-only, R002); the coordinator trusts
-	// that gateway authority stamp like X-MacProvider-Account. Defense in depth:
+	// pool feature is configured, the request carries an authenticated
+	// (gateway-context) account, and the reconstructed pool registry authorizes
+	// that account for the selected pool. Defense in depth:
 	// X-MacProvider-Pool is also in hasInternalRoutingHeader, so an unauthorized
-	// buyer-port request carrying it is rejected before routing. With no
-	// registry the header is ignored (global routing), so default deployments
-	// are byte-identical.
-	if s.trustPools != nil && hasAuthenticatedAccount {
-		req.poolID = sanitizeAccountID(r.Header.Get("X-MacProvider-Pool"))
+	// buyer-port request carrying it is rejected before routing. A non-empty
+	// authenticated pool header with no registry MUST fail closed here, not be
+	// silently downgraded to global routing during gateway/coordinator rollback
+	// races. Default byte-identical behavior is preserved only for requests with
+	// no pool authority header.
+	rawPoolHeader := strings.TrimSpace(r.Header.Get("X-MacProvider-Pool"))
+	poolHeader := sanitizeAccountID(rawPoolHeader)
+	if rawPoolHeader != "" && poolHeader == "" {
+		rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
+		writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
+		return
+	}
+	if rawPoolHeader != "" && !hasAuthenticatedAccount {
+		rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
+		writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
+		return
+	}
+	if rawPoolHeader != "" && s.trustPools == nil {
+		rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
+		writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
+		return
+	}
+	if rawPoolHeader != "" {
+		snap, authorized := s.trustPools.AuthorizeAndSnapshot(poolHeader, accountID)
+		if !authorized || !snap.Exists || !snap.Routeable {
+			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
+			writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
+			return
+		}
+		req.poolID = poolHeader
+		req.poolSnapshot = snap
+		req.poolSnapshotSet = true
 	}
 	if idempotencyKey := normalizeIdempotencyKey(r.Header.Get("Idempotency-Key")); idempotencyKey != "" {
 		if s.reqLogStore == nil {
@@ -5576,7 +5606,13 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	var poolMin string
 	poolActive := s.trustPools != nil && req.poolID != ""
 	if poolActive {
-		snap := s.trustPools.Snapshot(req.poolID)
+		snap := req.poolSnapshot
+		if !req.poolSnapshotSet {
+			snap = s.trustPools.Snapshot(req.poolID)
+		}
+		if !snap.Exists || !snap.Routeable {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_unavailable", message: "Pool unavailable"}
+		}
 		poolMembers = snap.Members
 		poolGen = snap.Generation
 		poolMin = snap.MinBinaryVersion
@@ -6806,8 +6842,9 @@ type eligibilityCtx struct {
 	// When a request selects a pool, poolID is set and poolMembers is the
 	// consistent membership snapshot (member provider IDs) captured
 	// together with poolGeneration (SPEC-042 R003 single-read rule). The
-	// request-path wiring that populates these lands in the R002 threading
-	// stage; until then no code sets poolID, so this gate is inert.
+	// request path populates these only after coordinator-side buyer
+	// authorization and routeability checks, so selected-pool requests fail
+	// closed before quota/model routing when the snapshot is unavailable.
 	poolID         string
 	poolMembers    map[string]bool
 	poolGeneration uint64

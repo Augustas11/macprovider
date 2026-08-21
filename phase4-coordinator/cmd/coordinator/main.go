@@ -44,6 +44,7 @@ import (
 	statsprewarm "github.com/augstar/macprovider-coordinator/internal/stats/prewarm"
 	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
 	statsstore "github.com/augstar/macprovider-coordinator/internal/stats/store"
+	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
@@ -851,10 +852,7 @@ func main() {
 		rewardsRunner.Start(shutdownCtx)
 		logger.Info().Msg("SPEC-MALIBU-EMISSION-LEDGER accrual runner started")
 	}
-	buyerServer := buyer.NewServer(
-		registry,
-		logger,
-		startedAt,
+	buyerOpts := []buyer.Option{
 		buyer.WithVersion(version),
 		buyer.WithPreflightConfig(cfg.Routing.PreflightThresholdTokens, time.Duration(cfg.Routing.PreflightTimeoutS)*time.Second),
 		buyer.WithRecoveryConfig(time.Duration(cfg.Pool.DegradedBackoffS)*time.Second, cfg.Pool.DegradedMaxRetries, cfg.Pool.DegradedProbeAfter502),
@@ -881,12 +879,35 @@ func main() {
 			ack, ok, err := wsServer.Preflight(provider, requestID, estimatedTokens, timeout)
 			return buyer.PreflightResult{Accepted: ack.Accepted, Reason: ack.Reason}, ok, err
 		}),
-	)
+	}
+	var trustPoolStore *trustpool.Store
+	var trustPoolRegistry *trustpool.Registry
+	if cfg.TrustedPools.Enabled {
+		var trustPoolsReady bool
+		trustPoolStore, trustPoolRegistry, trustPoolsReady, err = loadTrustedPools(context.Background(), reqLogStore.DB(), logger)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("trusted pools durable store open failed")
+		}
+		if trustPoolsReady {
+			buyerOpts = append(buyerOpts, buyer.WithPoolMembership(trustPoolRegistry))
+		}
+	} else {
+		logger.Info().Msg("trusted pools disabled; coordinator will not advertise pool support")
+	}
+	buyerServer := buyer.NewServer(registry, logger, startedAt, buyerOpts...)
 	providerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
 	buyerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
 	providerMux := http.NewServeMux()
 	providerMux.Handle("/", wsServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
+	if cfg.TrustedPools.Enabled && trustPoolStore != nil && trustPoolRegistry != nil {
+		providerMux.Handle("/admin/trust-pools/", trustpool.NewAdminHandler(trustpool.AdminDeps{
+			Store:       trustPoolStore,
+			Registry:    trustPoolRegistry,
+			OperatorKey: cfg.Auth.OperatorKey,
+		}))
+		logger.Info().Msg("trusted pools operator admin route mounted at /admin/trust-pools/")
+	}
 	// Phase 3: MicroMDM command webhook for DeviceAttestation ingest.
 	// Point MicroMDM `-command-webhook-url` here. Auth is loopback-only
 	// unless tier2.mdm.command_webhook_secret is set (X-MDM-Webhook-Secret).
@@ -2272,6 +2293,27 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 		ReadTimeout:       310 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+}
+
+func loadTrustedPools(ctx context.Context, db *sql.DB, logger zerolog.Logger) (*trustpool.Store, *trustpool.Registry, bool, error) {
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	reconstructed, err := store.Reconstruct(ctx)
+	if err != nil {
+		logger.Error().Err(err).Msg("trusted pools durable reconstruction failed; pool support disabled")
+		return nil, nil, false, nil
+	}
+	registry, err := reconstructed.BuildRegistry()
+	if err != nil {
+		logger.Error().Err(err).Msg("trusted pools routeable registry build failed; pool support disabled")
+		return nil, nil, false, nil
+	}
+	logger.Info().
+		Int("pool_count", len(reconstructed.Pools)).
+		Msg("trusted pools durable state reconstructed and routing enabled")
+	return store, registry, true, nil
 }
 
 func listenAddress(host string, port int) string {
