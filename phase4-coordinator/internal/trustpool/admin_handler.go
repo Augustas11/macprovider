@@ -46,6 +46,10 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/admin/trust-pools/events":
 		h.handleAppendEvent(w, r)
+	case r.URL.Path == "/admin/trust-pools/creators":
+		h.handleUpsertCreator(w, r)
+	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/creators/"):
+		h.handleGetCreator(w, r)
 	case r.URL.Path == "/admin/trust-pools/pools":
 		h.handleListPools(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/"):
@@ -53,6 +57,70 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
 	}
+}
+
+func (h *adminHandler) handleUpsertCreator(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	var approval CreatorApproval
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&approval); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	committed, err := h.deps.Store.UpsertCreatorApproval(r.Context(), approval)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+		return
+	}
+	if h.deps.Registry != nil {
+		if state.Revision > h.deps.Registry.Revision() {
+			if err := h.deps.Registry.LoadRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
+				writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
+				return
+			}
+		}
+	}
+	writeAdminJSON(w, http.StatusAccepted, map[string]any{"creator": committed})
+}
+
+func (h *adminHandler) handleGetCreator(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	creatorID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/admin/trust-pools/creators/"))
+	if creatorID == "" || strings.Contains(creatorID, "/") {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	approval, ok, err := h.deps.Store.CreatorApproval(r.Context(), creatorID)
+	if err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "creator_lookup_failed"}})
+		return
+	}
+	if !ok {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"creator": approval})
 }
 
 func (h *adminHandler) handleAppendEvent(w http.ResponseWriter, r *http.Request) {
@@ -157,6 +225,8 @@ func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "activation_requires_promotion"}})
 	case errors.Is(err, ErrRootRegistrationNonce):
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_root_registration_nonce"}})
+	case errors.Is(err, ErrCreatorApprovalGate):
+		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "creator_approval_gate_failed"}})
 	case errors.Is(err, ErrMalformedDurableEvent):
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
 	default:
@@ -234,6 +304,7 @@ type adminPoolState struct {
 	Generation                     uint64   `json:"generation"`
 	LastEventAtUTC                 string   `json:"last_event_at_utc,omitempty"`
 	Routeable                      bool     `json:"routeable"`
+	CreatorGateReason              string   `json:"creator_gate_reason,omitempty"`
 }
 
 func adminPoolResponse(p *ReconstructedPoolState) adminPoolState {
@@ -264,7 +335,8 @@ func adminPoolResponse(p *ReconstructedPoolState) adminPoolState {
 		BuyerAccounts:                  buyers,
 		Generation:                     p.Generation,
 		LastEventAtUTC:                 lastEventAt,
-		Routeable:                      p.Lifecycle == LifecycleActive,
+		Routeable:                      p.Lifecycle == LifecycleActive && p.CreatorGateReason == "",
+		CreatorGateReason:              p.CreatorGateReason,
 	}
 }
 

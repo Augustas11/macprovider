@@ -24,6 +24,7 @@ func TestAdminHandler_AppendsCandidateEventsAndRejectsActivation(t *testing.T) {
 		OperatorKey: "operator-secret",
 	})
 	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
 
 	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
 		EventType:        trustpool.EventPoolCreated,
@@ -50,8 +51,8 @@ func TestAdminHandler_AppendsCandidateEventsAndRejectsActivation(t *testing.T) {
 	}, "op-active", http.StatusConflict)
 
 	snap := registry.Snapshot(root.poolID)
-	if !snap.Exists || snap.Routeable || snap.Generation != 5 {
-		t.Fatalf("registry snapshot = %+v, want non-routeable candidate pool generation 5", snap)
+	if !snap.Exists || snap.Routeable || snap.Generation != 6 {
+		t.Fatalf("registry snapshot = %+v, want non-routeable candidate pool generation 6", snap)
 	}
 	if len(snap.Members) != 0 {
 		t.Fatalf("candidate pool exposed routeable members: %v", snap.Members)
@@ -73,6 +74,7 @@ func TestAdminHandler_RejectsUnsignedManifest(t *testing.T) {
 		OperatorKey: "operator-secret",
 	})
 	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
 	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
 		EventType:        trustpool.EventPoolCreated,
 		PoolID:           root.poolID,
@@ -88,6 +90,91 @@ func TestAdminHandler_RejectsUnsignedManifest(t *testing.T) {
 		RootIssuerKeyID:                "root-key-1",
 		RootIssuerPublicKeyFingerprint: root.fingerprint,
 	}, "op-manifest-unsigned", http.StatusBadRequest)
+}
+
+func TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	registry := trustpool.NewRegistry()
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    registry,
+		OperatorKey: "operator-secret",
+	})
+	root := newRootFixture(t)
+	approval := approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	events := []trustpool.DurableEvent{
+		{
+			EventType:        trustpool.EventPoolCreated,
+			PoolID:           root.poolID,
+			CreatorAccountID: "creator-a",
+			ApprovalRecordID: "approval-v1",
+		},
+		signedRootRegistrationForIssue(t, "op-root", testAdminTS(1), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", testAdminTS(3600)), root),
+		signedManifest(t, "op-manifest", testAdminTS(2), root.poolID, 1, root),
+		{
+			EventType:  trustpool.EventMemberAdmitted,
+			PoolID:     root.poolID,
+			ProviderID: "provider-a",
+		},
+		{
+			EventType:      trustpool.EventBuyerAuthorized,
+			PoolID:         root.poolID,
+			BuyerAccountID: "acct-a",
+		},
+		{
+			EventType: trustpool.EventLifecycleChanged,
+			PoolID:    root.poolID,
+			Lifecycle: trustpool.LifecycleActive,
+		},
+	}
+	for i, e := range events {
+		e.OperationID = []string{"op-create", "op-root", "op-manifest", "op-member", "op-buyer", "op-active"}[i]
+		e.TimestampUTC = testAdminTS(int64(i))
+		if e.EventType == trustpool.EventLifecycleChanged && e.Lifecycle == trustpool.LifecycleActive {
+			insertPromotedEvent(t, ctx, db, e)
+			continue
+		}
+		if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
+			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+		}
+	}
+	state, err := store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	if err := registry.LoadRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
+		t.Fatalf("initial registry load: %v", err)
+	}
+	if snap := registry.Snapshot(root.poolID); !snap.Routeable {
+		t.Fatalf("initial snapshot = %+v, want routeable", snap)
+	}
+	approval.Status = trustpool.CreatorStatusSuspended
+	approval.SuspensionReason = "agreement_hold"
+	postAdminCreator(t, handler, "operator-secret", approval, http.StatusAccepted)
+	snap := registry.Snapshot(root.poolID)
+	if !snap.Exists || snap.Routeable || len(snap.Members) != 0 {
+		t.Fatalf("snapshot after creator suspension = %+v, want present but non-routeable", snap)
+	}
+	suspendedGeneration := snap.Generation
+	postAdminCreator(t, handler, "operator-secret", approval, http.StatusAccepted)
+	retrySnap := registry.Snapshot(root.poolID)
+	if retrySnap.Generation != suspendedGeneration {
+		t.Fatalf("duplicate creator approval generation = %d, want unchanged %d", retrySnap.Generation, suspendedGeneration)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/trust-pools/creators/creator-a", nil)
+	req.Header.Set("Authorization", "Bearer operator-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET creator status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	assertAdminSchemaVersion(t, rec)
 }
 
 func TestAdminHandler_RejectsUnauthorized(t *testing.T) {
@@ -119,6 +206,7 @@ func TestAdminHandler_ReplayChecksBeforeAppend(t *testing.T) {
 		Registry:    trustpool.NewRegistry(),
 		OperatorKey: "operator-secret",
 	})
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
 
 	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
 		EventType:        trustpool.EventPoolCreated,
@@ -152,6 +240,7 @@ func TestAdminHandler_IdempotencyConflict(t *testing.T) {
 		Registry:    trustpool.NewRegistry(),
 		OperatorKey: "operator-secret",
 	})
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
 
 	create := trustpool.DurableEvent{
 		EventType:        trustpool.EventPoolCreated,
@@ -210,6 +299,22 @@ func postAdminEvent(t *testing.T, h http.Handler, operatorKey string, e trustpoo
 	h.ServeHTTP(rec, req)
 	if rec.Code != want {
 		t.Fatalf("POST event %s status=%d body=%s, want %d", operationID, rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+}
+
+func postAdminCreator(t *testing.T, h http.Handler, operatorKey string, approval trustpool.CreatorApproval, want int) {
+	t.Helper()
+	body, err := json.Marshal(approval)
+	if err != nil {
+		t.Fatalf("marshal creator approval: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/creators", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+operatorKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST creator status=%d body=%s, want %d", rec.Code, rec.Body.String(), want)
 	}
 	assertAdminSchemaVersion(t, rec)
 }

@@ -40,13 +40,15 @@ var (
 	ErrMalformedDurableEvent       = errors.New("trustpool: malformed durable event history")
 	ErrActivationRequiresPromotion = errors.New("trustpool: active lifecycle requires promotion gate")
 	ErrRootRegistrationNonce       = errors.New("trustpool: invalid root registration nonce")
+	ErrCreatorApprovalGate         = errors.New("trustpool: creator approval gate failed")
 )
 
-// DurableEvent is one append-only SPEC-043 pool control-plane fact. It is
-// intentionally narrow for the first MVP slice: it records enough to rebuild
-// routeable pool membership, lifecycle, creator ownership for accepted pools,
-// buyer scopes, creator root registration, and signed manifest labels without
-// implementing the creator approval store or creator-admin API yet.
+// DurableEvent is one append-only SPEC-043 pool control-plane fact. It records
+// enough to rebuild routeable pool membership, lifecycle, creator ownership for
+// accepted pools, buyer scopes, creator root registration, and signed manifest
+// labels. Creator approval itself is durable coordinator state layered beside
+// the append-only event ledger so suspension can affect routeability without
+// appending a pool event.
 type DurableEvent struct {
 	OperationID        string    `json:"operation_id"`
 	TimestampUTC       time.Time `json:"timestamp_utc"`
@@ -85,6 +87,41 @@ type DurableEvent struct {
 // Store persists DurableEvent rows in the coordinator SQLite DB.
 type Store struct {
 	db *sql.DB
+}
+
+const (
+	CreatorStatusEnabled   = "enabled"
+	CreatorStatusSuspended = "suspended"
+)
+
+type CreatorApproval struct {
+	CreatorAccountID                  string    `json:"creator_account_id"`
+	ApprovalRecordID                  string    `json:"approval_record_id"`
+	CurrentApprovalVersion            string    `json:"current_approval_version"`
+	PublicDisplayName                 string    `json:"public_display_name"`
+	LegalSupportContact               string    `json:"legal_support_contact"`
+	BillingContact                    string    `json:"billing_contact"`
+	EmergencyNotificationEndpoint     string    `json:"emergency_notification_endpoint"`
+	AcknowledgedMaxResponseTime       string    `json:"acknowledged_max_response_time"`
+	AllowedProductCategory            string    `json:"allowed_product_category"`
+	DataRetentionCategory             string    `json:"data_retention_category"`
+	SupportOwner                      string    `json:"support_owner"`
+	AllowedLaunchEnvironment          string    `json:"allowed_launch_environment"`
+	CreatorAgreementID                string    `json:"creator_agreement_id"`
+	CreatorAgreementVersion           string    `json:"creator_agreement_version"`
+	CreatorAgreementExpiresAtUTC      time.Time `json:"creator_agreement_expires_at_utc"`
+	CreatorAgreementGraceEndsAtUTC    time.Time `json:"creator_agreement_grace_ends_at_utc"`
+	PricingScheduleID                 string    `json:"pricing_schedule_id"`
+	PricingScheduleVersion            string    `json:"pricing_schedule_version"`
+	ProhibitedClaimAcknowledgmentHash string    `json:"prohibited_claim_acknowledgment_hash"`
+	BuyerDisclosureCommitmentHash     string    `json:"buyer_disclosure_commitment_hash"`
+	ApprovalCriteriaHash              string    `json:"approval_criteria_hash"`
+	ApprovedBy                        string    `json:"approved_by"`
+	ApprovedAtUTC                     time.Time `json:"approved_at_utc"`
+	ApprovalRevision                  uint64    `json:"approval_revision"`
+	Status                            string    `json:"status"`
+	SuspensionReason                  string    `json:"suspension_reason,omitempty"`
+	UpdatedAtUTC                      time.Time `json:"updated_at_utc"`
 }
 
 func NewStore(db *sql.DB) (*Store, error) {
@@ -140,8 +177,47 @@ CREATE TABLE IF NOT EXISTS trustpool_root_registration_nonces (
     consumed_at_utc TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_trustpool_root_registration_nonces_creator ON trustpool_root_registration_nonces(creator_account_id, issued_at_utc);
+CREATE TABLE IF NOT EXISTS trustpool_creator_approvals (
+    creator_account_id TEXT PRIMARY KEY,
+    approval_record_id TEXT NOT NULL,
+    current_approval_version TEXT NOT NULL,
+    public_display_name TEXT NOT NULL,
+    legal_support_contact TEXT NOT NULL,
+    billing_contact TEXT NOT NULL,
+    emergency_notification_endpoint TEXT NOT NULL,
+    acknowledged_max_response_time TEXT NOT NULL,
+    allowed_product_category TEXT NOT NULL,
+    data_retention_category TEXT NOT NULL,
+    support_owner TEXT NOT NULL,
+    allowed_launch_environment TEXT NOT NULL,
+    creator_agreement_id TEXT NOT NULL,
+    creator_agreement_version TEXT NOT NULL,
+    creator_agreement_expires_at_utc TEXT NOT NULL,
+    creator_agreement_grace_ends_at_utc TEXT NOT NULL,
+    pricing_schedule_id TEXT NOT NULL,
+    pricing_schedule_version TEXT NOT NULL,
+    prohibited_claim_acknowledgment_hash TEXT NOT NULL,
+    buyer_disclosure_commitment_hash TEXT NOT NULL,
+    approval_criteria_hash TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    approved_at_utc TEXT NOT NULL,
+    approval_revision INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    suspension_reason TEXT,
+    updated_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trustpool_creator_approvals_status ON trustpool_creator_approvals(status, updated_at_utc);
 `)
 	if err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "trustpool_creator_approvals", "approval_revision", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "trustpool_creator_approvals", "acknowledged_max_response_time", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "trustpool_creator_approvals", "data_retention_category", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "trustpool_events", "approval_record_id", "TEXT"); err != nil {
@@ -187,6 +263,162 @@ type RootRegistrationNonceRecord struct {
 	IssuedAtUTC            time.Time
 }
 
+func (s *Store) UpsertCreatorApproval(ctx context.Context, approval CreatorApproval) (CreatorApproval, error) {
+	if s == nil || s.db == nil {
+		return CreatorApproval{}, ErrStoreClosed
+	}
+	approval = normalizeCreatorApproval(approval)
+	if err := validateCreatorApproval(approval); err != nil {
+		return CreatorApproval{}, err
+	}
+	now := time.Now().UTC()
+	approval.UpdatedAtUTC = now
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		currentApprovals, err := creatorApprovalsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		if current, ok := currentApprovals[approval.CreatorAccountID]; ok && sameCreatorApprovalExceptRevision(current, approval) {
+			approval = current
+			return nil
+		}
+		if err := validateCreatorReactivation(ctx, conn, currentApprovals, approval, now); err != nil {
+			return err
+		}
+		approval.ApprovalRevision = currentApprovals[approval.CreatorAccountID].ApprovalRevision + 1
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO trustpool_creator_approvals (
+    creator_account_id, approval_record_id, current_approval_version,
+    public_display_name, legal_support_contact, billing_contact, emergency_notification_endpoint,
+    acknowledged_max_response_time, allowed_product_category, data_retention_category,
+    support_owner, allowed_launch_environment,
+    creator_agreement_id, creator_agreement_version, creator_agreement_expires_at_utc,
+    creator_agreement_grace_ends_at_utc, pricing_schedule_id, pricing_schedule_version,
+    prohibited_claim_acknowledgment_hash, buyer_disclosure_commitment_hash, approval_criteria_hash,
+    approved_by, approved_at_utc, approval_revision, status, suspension_reason, updated_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(creator_account_id) DO UPDATE SET
+    approval_record_id = excluded.approval_record_id,
+    current_approval_version = excluded.current_approval_version,
+    public_display_name = excluded.public_display_name,
+    legal_support_contact = excluded.legal_support_contact,
+    billing_contact = excluded.billing_contact,
+    emergency_notification_endpoint = excluded.emergency_notification_endpoint,
+    acknowledged_max_response_time = excluded.acknowledged_max_response_time,
+    allowed_product_category = excluded.allowed_product_category,
+    data_retention_category = excluded.data_retention_category,
+    support_owner = excluded.support_owner,
+    allowed_launch_environment = excluded.allowed_launch_environment,
+    creator_agreement_id = excluded.creator_agreement_id,
+    creator_agreement_version = excluded.creator_agreement_version,
+    creator_agreement_expires_at_utc = excluded.creator_agreement_expires_at_utc,
+    creator_agreement_grace_ends_at_utc = excluded.creator_agreement_grace_ends_at_utc,
+    pricing_schedule_id = excluded.pricing_schedule_id,
+    pricing_schedule_version = excluded.pricing_schedule_version,
+    prohibited_claim_acknowledgment_hash = excluded.prohibited_claim_acknowledgment_hash,
+    buyer_disclosure_commitment_hash = excluded.buyer_disclosure_commitment_hash,
+    approval_criteria_hash = excluded.approval_criteria_hash,
+    approved_by = excluded.approved_by,
+    approved_at_utc = excluded.approved_at_utc,
+    approval_revision = excluded.approval_revision,
+    status = excluded.status,
+    suspension_reason = excluded.suspension_reason,
+    updated_at_utc = excluded.updated_at_utc`,
+			approval.CreatorAccountID,
+			approval.ApprovalRecordID,
+			approval.CurrentApprovalVersion,
+			nullString(approval.PublicDisplayName),
+			nullString(approval.LegalSupportContact),
+			nullString(approval.BillingContact),
+			nullString(approval.EmergencyNotificationEndpoint),
+			approval.AcknowledgedMaxResponseTime,
+			nullString(approval.AllowedProductCategory),
+			approval.DataRetentionCategory,
+			nullString(approval.SupportOwner),
+			approval.AllowedLaunchEnvironment,
+			approval.CreatorAgreementID,
+			approval.CreatorAgreementVersion,
+			approval.CreatorAgreementExpiresAtUTC.Format(time.RFC3339Nano),
+			approval.CreatorAgreementGraceEndsAtUTC.Format(time.RFC3339Nano),
+			nullString(approval.PricingScheduleID),
+			nullString(approval.PricingScheduleVersion),
+			approval.ProhibitedClaimAcknowledgmentHash,
+			approval.BuyerDisclosureCommitmentHash,
+			approval.ApprovalCriteriaHash,
+			approval.ApprovedBy,
+			approval.ApprovedAtUTC.Format(time.RFC3339Nano),
+			approval.ApprovalRevision,
+			approval.Status,
+			nullString(approval.SuspensionReason),
+			approval.UpdatedAtUTC.Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+		if approval.Status == CreatorStatusSuspended {
+			return invalidateCreatorPendingRootNonces(ctx, conn, approval)
+		}
+		return nil
+	})
+	if err != nil {
+		return CreatorApproval{}, err
+	}
+	return approval, nil
+}
+
+func validateCreatorReactivation(ctx context.Context, conn *sql.Conn, currentApprovals map[string]CreatorApproval, next CreatorApproval, now time.Time) error {
+	current, existed := currentApprovals[next.CreatorAccountID]
+	if !existed {
+		return nil
+	}
+	events, err := eventsFromQueryer(ctx, conn)
+	if err != nil {
+		return err
+	}
+	currentState, err := reconstructEventsWithApprovals(events, currentApprovals, now)
+	if err != nil {
+		return err
+	}
+	for _, p := range currentState.Pools {
+		if p.CreatorAccountID != next.CreatorAccountID || p.Lifecycle != LifecycleActive || p.RootIssuer == nil {
+			continue
+		}
+		if current.ValidFor(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now) {
+			continue
+		}
+		if next.ValidFor(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now) {
+			return ErrCreatorApprovalGate
+		}
+	}
+	return nil
+}
+
+func invalidateCreatorPendingRootNonces(ctx context.Context, conn *sql.Conn, approval CreatorApproval) error {
+	invalidatedOperationID := fmt.Sprintf("creator_approval_suspended:%s:%d", approval.CreatorAccountID, approval.ApprovalRevision)
+	_, err := conn.ExecContext(ctx, `
+UPDATE trustpool_root_registration_nonces
+SET consumed_operation_id = ?, consumed_at_utc = ?
+WHERE creator_account_id = ? AND consumed_operation_id IS NULL`,
+		invalidatedOperationID,
+		approval.UpdatedAtUTC.Format(time.RFC3339Nano),
+		approval.CreatorAccountID,
+	)
+	return err
+}
+
+func (s *Store) CreatorApproval(ctx context.Context, creatorAccountID string) (CreatorApproval, bool, error) {
+	if s == nil || s.db == nil {
+		return CreatorApproval{}, false, ErrStoreClosed
+	}
+	return creatorApprovalFromQueryer(ctx, s.db, strings.TrimSpace(creatorAccountID))
+}
+
+func (s *Store) creatorApprovals(ctx context.Context) (map[string]CreatorApproval, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrStoreClosed
+	}
+	return creatorApprovalsFromQueryer(ctx, s.db)
+}
+
 func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegistrationNonceIssue) (RootRegistrationNonceRecord, error) {
 	if s == nil || s.db == nil {
 		return RootRegistrationNonceRecord{}, ErrStoreClosed
@@ -222,20 +454,30 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 		ExpiresAtUTC:           expires,
 		IssuedAtUTC:            now,
 	}
-	_, err := s.db.ExecContext(ctx, `
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		approval, ok, err := creatorApprovalFromQueryer(ctx, conn, issue.CreatorAccountID)
+		if err != nil {
+			return err
+		}
+		if !ok || !approval.ValidFor(issue.ApprovalRecordID, issue.CurrentApprovalVersion, issue.LaunchEnvironment, now) {
+			return ErrCreatorApprovalGate
+		}
+		_, err = conn.ExecContext(ctx, `
 INSERT INTO trustpool_root_registration_nonces (
     nonce, creator_account_id, approval_record_id, current_approval_version,
     launch_environment, purpose, expires_at_utc, issued_at_utc
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		record.Nonce,
-		record.CreatorAccountID,
-		record.ApprovalRecordID,
-		record.CurrentApprovalVersion,
-		record.LaunchEnvironment,
-		record.Purpose,
-		record.ExpiresAtUTC.Format(time.RFC3339Nano),
-		record.IssuedAtUTC.Format(time.RFC3339Nano),
-	)
+			record.Nonce,
+			record.CreatorAccountID,
+			record.ApprovalRecordID,
+			record.CurrentApprovalVersion,
+			record.LaunchEnvironment,
+			record.Purpose,
+			record.ExpiresAtUTC.Format(time.RFC3339Nano),
+			record.IssuedAtUTC.Format(time.RFC3339Nano),
+		)
+		return err
+	})
 	if err != nil {
 		return RootRegistrationNonceRecord{}, err
 	}
@@ -375,6 +617,10 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 		if err != nil {
 			return err
 		}
+		approvals, err := creatorApprovalsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
 		for _, existing := range events {
 			if existing.OperationID != e.OperationID {
 				continue
@@ -396,7 +642,7 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 			if string(existingPayload) != string(payload) {
 				return ErrConflictingOperationID
 			}
-			reconstructed, err = ReconstructEvents(events)
+			reconstructed, err = reconstructEventsWithApprovals(events, approvals, time.Now().UTC())
 			committed = existing
 			applied = false
 			return err
@@ -405,6 +651,13 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 			e.TimestampUTC = time.Now().UTC()
 		}
 		if err := validateEvent(e); err != nil {
+			return err
+		}
+		preState, err := reconstructEventsWithApprovals(events, approvals, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if err := preState.validateMutationCreatorGate(e, time.Now().UTC()); err != nil {
 			return err
 		}
 		if e.EventType == EventRootIssuerRegistered {
@@ -417,7 +670,7 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 			return err
 		}
 		next := append(append([]DurableEvent(nil), events...), e)
-		state, err := ReconstructEvents(next)
+		state, err := reconstructEventsWithApprovals(next, approvals, time.Now().UTC())
 		if err != nil {
 			return err
 		}
@@ -558,35 +811,173 @@ func eventsFromQueryer(ctx context.Context, q eventQueryer) ([]DurableEvent, err
 	return events, rows.Err()
 }
 
+func creatorApprovalFromQueryer(ctx context.Context, q eventQueryer, creatorAccountID string) (CreatorApproval, bool, error) {
+	if creatorAccountID == "" {
+		return CreatorApproval{}, false, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+SELECT creator_account_id, approval_record_id, current_approval_version,
+       public_display_name, legal_support_contact, billing_contact, emergency_notification_endpoint,
+       acknowledged_max_response_time, allowed_product_category, data_retention_category,
+       support_owner, allowed_launch_environment,
+       creator_agreement_id, creator_agreement_version, creator_agreement_expires_at_utc,
+       creator_agreement_grace_ends_at_utc, pricing_schedule_id, pricing_schedule_version,
+       prohibited_claim_acknowledgment_hash, buyer_disclosure_commitment_hash, approval_criteria_hash,
+       approved_by, approved_at_utc, approval_revision, status, suspension_reason, updated_at_utc
+FROM trustpool_creator_approvals
+WHERE creator_account_id = ?`, creatorAccountID)
+	if err != nil {
+		return CreatorApproval{}, false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return CreatorApproval{}, false, rows.Err()
+	}
+	approval, err := scanCreatorApproval(rows)
+	if err != nil {
+		return CreatorApproval{}, false, err
+	}
+	if rows.Next() {
+		return CreatorApproval{}, false, fmt.Errorf("trustpool: duplicate creator approval for %q", creatorAccountID)
+	}
+	return approval, true, rows.Err()
+}
+
+func creatorApprovalsFromQueryer(ctx context.Context, q eventQueryer) (map[string]CreatorApproval, error) {
+	rows, err := q.QueryContext(ctx, `
+SELECT creator_account_id, approval_record_id, current_approval_version,
+       public_display_name, legal_support_contact, billing_contact, emergency_notification_endpoint,
+       acknowledged_max_response_time, allowed_product_category, data_retention_category,
+       support_owner, allowed_launch_environment,
+       creator_agreement_id, creator_agreement_version, creator_agreement_expires_at_utc,
+       creator_agreement_grace_ends_at_utc, pricing_schedule_id, pricing_schedule_version,
+       prohibited_claim_acknowledgment_hash, buyer_disclosure_commitment_hash, approval_criteria_hash,
+       approved_by, approved_at_utc, approval_revision, status, suspension_reason, updated_at_utc
+FROM trustpool_creator_approvals`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]CreatorApproval)
+	for rows.Next() {
+		approval, err := scanCreatorApproval(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[approval.CreatorAccountID] = approval
+	}
+	return out, rows.Err()
+}
+
+type creatorApprovalScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanCreatorApproval(row creatorApprovalScanner) (CreatorApproval, error) {
+	var approval CreatorApproval
+	var display, legal, billing, emergency, category, supportOwner, pricingID, pricingVersion, suspension sql.NullString
+	var expiresRaw, graceRaw, approvedRaw, updatedRaw string
+	if err := row.Scan(
+		&approval.CreatorAccountID,
+		&approval.ApprovalRecordID,
+		&approval.CurrentApprovalVersion,
+		&display,
+		&legal,
+		&billing,
+		&emergency,
+		&approval.AcknowledgedMaxResponseTime,
+		&category,
+		&approval.DataRetentionCategory,
+		&supportOwner,
+		&approval.AllowedLaunchEnvironment,
+		&approval.CreatorAgreementID,
+		&approval.CreatorAgreementVersion,
+		&expiresRaw,
+		&graceRaw,
+		&pricingID,
+		&pricingVersion,
+		&approval.ProhibitedClaimAcknowledgmentHash,
+		&approval.BuyerDisclosureCommitmentHash,
+		&approval.ApprovalCriteriaHash,
+		&approval.ApprovedBy,
+		&approvedRaw,
+		&approval.ApprovalRevision,
+		&approval.Status,
+		&suspension,
+		&updatedRaw,
+	); err != nil {
+		return CreatorApproval{}, err
+	}
+	var err error
+	approval.CreatorAgreementExpiresAtUTC, err = time.Parse(time.RFC3339Nano, expiresRaw)
+	if err != nil {
+		return CreatorApproval{}, err
+	}
+	approval.CreatorAgreementGraceEndsAtUTC, err = time.Parse(time.RFC3339Nano, graceRaw)
+	if err != nil {
+		return CreatorApproval{}, err
+	}
+	approval.ApprovedAtUTC, err = time.Parse(time.RFC3339Nano, approvedRaw)
+	if err != nil {
+		return CreatorApproval{}, err
+	}
+	approval.UpdatedAtUTC, err = time.Parse(time.RFC3339Nano, updatedRaw)
+	if err != nil {
+		return CreatorApproval{}, err
+	}
+	approval.PublicDisplayName = display.String
+	approval.LegalSupportContact = legal.String
+	approval.BillingContact = billing.String
+	approval.EmergencyNotificationEndpoint = emergency.String
+	approval.AcknowledgedMaxResponseTime = strings.TrimSpace(approval.AcknowledgedMaxResponseTime)
+	approval.AllowedProductCategory = category.String
+	approval.DataRetentionCategory = strings.TrimSpace(approval.DataRetentionCategory)
+	approval.SupportOwner = supportOwner.String
+	approval.PricingScheduleID = pricingID.String
+	approval.PricingScheduleVersion = pricingVersion.String
+	approval.SuspensionReason = suspension.String
+	return approval, nil
+}
+
 func (s *Store) Reconstruct(ctx context.Context) (*ReconstructedState, error) {
 	events, err := s.Events(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return ReconstructEvents(events)
+	approvals, err := s.creatorApprovals(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return reconstructEventsWithApprovals(events, approvals, time.Now().UTC())
 }
 
 // ReconstructedState is the coordinator's query/admin view after durable replay.
 type ReconstructedState struct {
-	Pools    map[string]*ReconstructedPoolState
-	Revision uint64
+	Pools              map[string]*ReconstructedPoolState
+	CreatorApprovals   map[string]CreatorApproval
+	RouteGateCheckedAt time.Time
+	Revision           uint64
+	rootNonces         map[string]string
 }
 
 type ReconstructedPoolState struct {
-	PoolID             string
-	CreatorAccountID   string
-	ApprovalRecordID   string
-	Lifecycle          string
-	LifecycleReason    string
-	MinBinaryVersion   string
-	ManifestVersion    uint64
-	ManifestCoreDigest string
-	RootIssuer         *ReconstructedRootIssuer
-	Members            map[string]bool
-	Revoked            map[string]bool
-	BuyerAccounts      map[string]bool
-	Generation         uint64
-	LastEventAtUTC     time.Time
+	PoolID                  string
+	CreatorAccountID        string
+	ApprovalRecordID        string
+	Lifecycle               string
+	LifecycleReason         string
+	MinBinaryVersion        string
+	ManifestVersion         uint64
+	ManifestCoreDigest      string
+	RootIssuer              *ReconstructedRootIssuer
+	Members                 map[string]bool
+	Revoked                 map[string]bool
+	BuyerAccounts           map[string]bool
+	Generation              uint64
+	RouteableGeneration     uint64
+	LastEventAtUTC          time.Time
+	CreatorGateReason       string
+	CreatorGateExpiresAtUTC time.Time
 }
 
 type ReconstructedRootIssuer struct {
@@ -606,7 +997,18 @@ type ReconstructedRootIssuer struct {
 }
 
 func ReconstructEvents(events []DurableEvent) (*ReconstructedState, error) {
-	state := &ReconstructedState{Pools: make(map[string]*ReconstructedPoolState)}
+	return reconstructEventsWithApprovals(events, nil, time.Time{})
+}
+
+func reconstructEventsWithApprovals(events []DurableEvent, approvals map[string]CreatorApproval, gateAt time.Time) (*ReconstructedState, error) {
+	state := &ReconstructedState{Pools: make(map[string]*ReconstructedPoolState), rootNonces: make(map[string]string)}
+	if approvals != nil {
+		state.CreatorApprovals = make(map[string]CreatorApproval, len(approvals))
+		for k, v := range approvals {
+			state.CreatorApprovals[k] = v
+		}
+		state.RouteGateCheckedAt = gateAt.UTC()
+	}
 	seenOps := make(map[string]int)
 	for i, e := range events {
 		if err := validateEvent(e); err != nil {
@@ -623,8 +1025,18 @@ func ReconstructEvents(events []DurableEvent) (*ReconstructedState, error) {
 		p.Generation = uint64(i + 1)
 		p.LastEventAtUTC = e.TimestampUTC.UTC()
 	}
-	state.Revision = uint64(len(events))
+	state.Revision = routeableRevision(len(events), state.CreatorApprovals)
+	state.applyCreatorRouteGates()
+	state.rootNonces = nil
 	return state, nil
+}
+
+func routeableRevision(eventCount int, approvals map[string]CreatorApproval) uint64 {
+	revision := uint64(eventCount)
+	for _, approval := range approvals {
+		revision += approval.ApprovalRevision
+	}
+	return revision
 }
 
 func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*ReconstructedPoolState, error) {
@@ -649,6 +1061,9 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 	case EventRootIssuerRegistered:
 		if p.RootIssuer != nil {
 			return nil, fmt.Errorf("%w: event %d duplicate root_issuer_registered for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
+		}
+		if priorPool, ok := s.rootNonces[e.RootRegistrationNonce]; ok {
+			return nil, fmt.Errorf("%w: event %d root registration nonce reused by pools %q and %q", ErrMalformedDurableEvent, index, priorPool, e.PoolID)
 		}
 		if p.ManifestVersion != 0 {
 			return nil, fmt.Errorf("%w: event %d root_issuer_registered after manifest_accepted for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
@@ -677,6 +1092,7 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 			RegistrationNonce:               e.RootRegistrationNonce,
 			RegistrationNonceExpiry:         e.RootRegistrationNonceExpiry,
 		}
+		s.rootNonces[e.RootRegistrationNonce] = e.PoolID
 	case EventManifestAccepted:
 		if p.RootIssuer == nil {
 			return nil, fmt.Errorf("%w: event %d manifest_accepted before root_issuer_registered for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
@@ -746,6 +1162,91 @@ func (s *ReconstructedState) rootFingerprintOwner(fingerprint string) (string, b
 	return "", false
 }
 
+func (s *ReconstructedState) applyCreatorRouteGates() {
+	if s == nil || s.CreatorApprovals == nil {
+		return
+	}
+	for _, p := range s.Pools {
+		p.CreatorGateReason = ""
+		approval, ok := s.CreatorApprovals[p.CreatorAccountID]
+		if !ok {
+			p.CreatorGateReason = "creator_approval_missing"
+			p.RouteableGeneration = p.Generation + 1
+			continue
+		}
+		p.RouteableGeneration = p.Generation + approval.ApprovalRevision
+		version := ""
+		environment := ""
+		if p.RootIssuer != nil {
+			version = p.RootIssuer.CurrentApprovalVersion
+			environment = p.RootIssuer.LaunchEnvironment
+		}
+		if version == "" {
+			version = approval.CurrentApprovalVersion
+		}
+		if environment == "" {
+			environment = approval.AllowedLaunchEnvironment
+		}
+		if !approval.ValidFor(p.ApprovalRecordID, version, environment, s.RouteGateCheckedAt) {
+			p.CreatorGateReason = approval.InvalidReason(p.ApprovalRecordID, version, environment, s.RouteGateCheckedAt)
+			continue
+		}
+		p.CreatorGateExpiresAtUTC = approval.CreatorAgreementGraceEndsAtUTC
+	}
+}
+
+func (s *ReconstructedState) validateMutationCreatorGate(e DurableEvent, now time.Time) error {
+	if s == nil || s.CreatorApprovals == nil {
+		return nil
+	}
+	creatorID := e.CreatorAccountID
+	approvalID := e.ApprovalRecordID
+	version := e.CurrentApprovalVersion
+	environment := e.LaunchEnvironment
+	if e.EventType != EventPoolCreated && e.EventType != EventRootIssuerRegistered {
+		p := s.Pools[e.PoolID]
+		if p == nil {
+			return ErrMalformedDurableEvent
+		}
+		creatorID = p.CreatorAccountID
+		approvalID = p.ApprovalRecordID
+		if p.RootIssuer != nil {
+			version = p.RootIssuer.CurrentApprovalVersion
+			environment = p.RootIssuer.LaunchEnvironment
+		}
+	}
+	if creatorID == "" || approvalID == "" {
+		return ErrCreatorApprovalGate
+	}
+	approval, ok := s.CreatorApprovals[creatorID]
+	if !ok {
+		return ErrCreatorApprovalGate
+	}
+	if version == "" {
+		version = approval.CurrentApprovalVersion
+	}
+	if environment == "" {
+		environment = approval.AllowedLaunchEnvironment
+	}
+	if mutationRequiresEnabledCreator(e) && !approval.ValidFor(approvalID, version, environment, now) {
+		return ErrCreatorApprovalGate
+	}
+	return nil
+}
+
+func mutationRequiresEnabledCreator(e DurableEvent) bool {
+	switch e.EventType {
+	case EventPoolCreated, EventRootIssuerRegistered, EventManifestAccepted, EventMemberAdmitted, EventBuyerAuthorized:
+		return true
+	case EventLifecycleChanged:
+		return e.Lifecycle == LifecycleActive
+	case EventMinBinaryVersionSet:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 	if s == nil {
 		return nil
@@ -758,8 +1259,9 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 	out := make([]RouteableSnapshot, 0, len(ids))
 	for _, id := range ids {
 		p := s.Pools[id]
+		routeable := p.Lifecycle == LifecycleActive && p.CreatorGateReason == ""
 		members := make([]string, 0, len(p.Members))
-		if p.Lifecycle == LifecycleActive {
+		if routeable {
 			for id := range p.Members {
 				if !p.Revoked[id] {
 					members = append(members, id)
@@ -778,16 +1280,27 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		sort.Strings(revoked)
 		sort.Strings(buyers)
 		out = append(out, RouteableSnapshot{
-			PoolID:           p.PoolID,
-			Members:          members,
-			Revoked:          revoked,
-			BuyerAccounts:    buyers,
-			MinBinaryVersion: p.MinBinaryVersion,
-			Routeable:        p.Lifecycle == LifecycleActive,
-			Generation:       p.Generation,
+			PoolID:            p.PoolID,
+			Members:           members,
+			Revoked:           revoked,
+			BuyerAccounts:     buyers,
+			MinBinaryVersion:  p.MinBinaryVersion,
+			Routeable:         routeable,
+			Generation:        p.EffectiveGeneration(),
+			RouteableUntilUTC: p.CreatorGateExpiresAtUTC,
 		})
 	}
 	return out
+}
+
+func (p *ReconstructedPoolState) EffectiveGeneration() uint64 {
+	if p == nil {
+		return 0
+	}
+	if p.RouteableGeneration != 0 {
+		return p.RouteableGeneration
+	}
+	return p.Generation
 }
 
 func (s *ReconstructedState) BuildRegistry() (*Registry, error) {
@@ -908,4 +1421,120 @@ func nullString(v string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: v, Valid: true}
+}
+
+func normalizeCreatorApproval(a CreatorApproval) CreatorApproval {
+	a.CreatorAccountID = strings.TrimSpace(a.CreatorAccountID)
+	a.ApprovalRecordID = strings.TrimSpace(a.ApprovalRecordID)
+	a.CurrentApprovalVersion = strings.TrimSpace(a.CurrentApprovalVersion)
+	a.PublicDisplayName = strings.TrimSpace(a.PublicDisplayName)
+	a.LegalSupportContact = strings.TrimSpace(a.LegalSupportContact)
+	a.BillingContact = strings.TrimSpace(a.BillingContact)
+	a.EmergencyNotificationEndpoint = strings.TrimSpace(a.EmergencyNotificationEndpoint)
+	a.AcknowledgedMaxResponseTime = strings.TrimSpace(a.AcknowledgedMaxResponseTime)
+	a.AllowedProductCategory = strings.TrimSpace(a.AllowedProductCategory)
+	a.DataRetentionCategory = strings.TrimSpace(a.DataRetentionCategory)
+	a.SupportOwner = strings.TrimSpace(a.SupportOwner)
+	a.AllowedLaunchEnvironment = strings.TrimSpace(a.AllowedLaunchEnvironment)
+	a.CreatorAgreementID = strings.TrimSpace(a.CreatorAgreementID)
+	a.CreatorAgreementVersion = strings.TrimSpace(a.CreatorAgreementVersion)
+	a.PricingScheduleID = strings.TrimSpace(a.PricingScheduleID)
+	a.PricingScheduleVersion = strings.TrimSpace(a.PricingScheduleVersion)
+	a.ProhibitedClaimAcknowledgmentHash = strings.TrimSpace(a.ProhibitedClaimAcknowledgmentHash)
+	a.BuyerDisclosureCommitmentHash = strings.TrimSpace(a.BuyerDisclosureCommitmentHash)
+	a.ApprovalCriteriaHash = strings.TrimSpace(a.ApprovalCriteriaHash)
+	a.ApprovedBy = strings.TrimSpace(a.ApprovedBy)
+	a.Status = strings.TrimSpace(a.Status)
+	a.SuspensionReason = strings.TrimSpace(a.SuspensionReason)
+	if a.Status == "" {
+		a.Status = CreatorStatusEnabled
+	}
+	a.CreatorAgreementExpiresAtUTC = a.CreatorAgreementExpiresAtUTC.UTC()
+	a.CreatorAgreementGraceEndsAtUTC = a.CreatorAgreementGraceEndsAtUTC.UTC()
+	a.ApprovedAtUTC = a.ApprovedAtUTC.UTC()
+	a.UpdatedAtUTC = a.UpdatedAtUTC.UTC()
+	return a
+}
+
+func validateCreatorApproval(a CreatorApproval) error {
+	if a.CreatorAccountID == "" || a.ApprovalRecordID == "" || a.CurrentApprovalVersion == "" ||
+		a.PublicDisplayName == "" || a.LegalSupportContact == "" || a.BillingContact == "" ||
+		a.EmergencyNotificationEndpoint == "" || a.AcknowledgedMaxResponseTime == "" ||
+		a.AllowedProductCategory == "" || a.DataRetentionCategory == "" || a.SupportOwner == "" ||
+		a.AllowedLaunchEnvironment == "" || a.CreatorAgreementID == "" || a.CreatorAgreementVersion == "" ||
+		a.PricingScheduleID == "" || a.PricingScheduleVersion == "" ||
+		a.ProhibitedClaimAcknowledgmentHash == "" || a.BuyerDisclosureCommitmentHash == "" ||
+		a.ApprovalCriteriaHash == "" || a.ApprovedBy == "" ||
+		a.CreatorAgreementExpiresAtUTC.IsZero() || a.CreatorAgreementGraceEndsAtUTC.IsZero() || a.ApprovedAtUTC.IsZero() {
+		return ErrCreatorApprovalGate
+	}
+	if a.CreatorAgreementGraceEndsAtUTC.Before(a.CreatorAgreementExpiresAtUTC) {
+		return ErrCreatorApprovalGate
+	}
+	if !validSHA256Hex(a.ProhibitedClaimAcknowledgmentHash) ||
+		!validSHA256Hex(a.BuyerDisclosureCommitmentHash) ||
+		!validSHA256Hex(a.ApprovalCriteriaHash) {
+		return ErrCreatorApprovalGate
+	}
+	switch a.Status {
+	case CreatorStatusEnabled:
+		return nil
+	case CreatorStatusSuspended:
+		if a.SuspensionReason == "" {
+			return ErrCreatorApprovalGate
+		}
+		return nil
+	default:
+		return ErrCreatorApprovalGate
+	}
+}
+
+func sameCreatorApprovalExceptRevision(a, b CreatorApproval) bool {
+	a = normalizeCreatorApproval(a)
+	b = normalizeCreatorApproval(b)
+	a.ApprovalRevision = 0
+	b.ApprovalRevision = 0
+	a.UpdatedAtUTC = time.Time{}
+	b.UpdatedAtUTC = time.Time{}
+	return a == b
+}
+
+func validSHA256Hex(v string) bool {
+	if len(v) != 64 {
+		return false
+	}
+	for _, c := range v {
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func (a CreatorApproval) ValidFor(approvalRecordID, currentApprovalVersion, launchEnvironment string, now time.Time) bool {
+	return a.InvalidReason(approvalRecordID, currentApprovalVersion, launchEnvironment, now) == ""
+}
+
+func (a CreatorApproval) InvalidReason(approvalRecordID, currentApprovalVersion, launchEnvironment string, now time.Time) string {
+	approvalRecordID = strings.TrimSpace(approvalRecordID)
+	currentApprovalVersion = strings.TrimSpace(currentApprovalVersion)
+	launchEnvironment = strings.TrimSpace(launchEnvironment)
+	now = now.UTC()
+	switch {
+	case a.CreatorAccountID == "":
+		return "creator_approval_missing"
+	case a.Status != CreatorStatusEnabled:
+		return "creator_suspended"
+	case approvalRecordID == "" || approvalRecordID != a.ApprovalRecordID:
+		return "approval_record_mismatch"
+	case currentApprovalVersion == "" || currentApprovalVersion != a.CurrentApprovalVersion:
+		return "approval_version_mismatch"
+	case launchEnvironment == "" || launchEnvironment != a.AllowedLaunchEnvironment:
+		return "launch_environment_mismatch"
+	case a.CreatorAgreementGraceEndsAtUTC.IsZero() || !now.Before(a.CreatorAgreementGraceEndsAtUTC):
+		return "creator_agreement_expired"
+	default:
+		return ""
+	}
 }

@@ -343,6 +343,11 @@ func manifestSnapshot(t *testing.T, version uint64, root rootFixture) (string, s
 
 func issueRootNonce(t *testing.T, store *trustpool.Store, creatorID, approvalID string, expiresAt time.Time) trustpool.RootRegistrationNonceRecord {
 	t.Helper()
+	if approval, ok, err := store.CreatorApproval(context.Background(), creatorID); err != nil {
+		t.Fatalf("CreatorApproval: %v", err)
+	} else if !ok || !approval.ValidFor(approvalID, "approval-version-1", "candidate", time.Now()) {
+		approveCreator(t, store, creatorID, approvalID, "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	}
 	nonce, err := store.IssueRootRegistrationNonce(context.Background(), trustpool.RootRegistrationNonceIssue{
 		CreatorAccountID:       creatorID,
 		ApprovalRecordID:       approvalID,
@@ -355,6 +360,52 @@ func issueRootNonce(t *testing.T, store *trustpool.Store, creatorID, approvalID 
 		t.Fatalf("IssueRootRegistrationNonce: %v", err)
 	}
 	return nonce
+}
+
+func approveCreator(t *testing.T, store *trustpool.Store, creatorID, approvalID, approvalVersion, environment string, graceEndsAt time.Time, status string) trustpool.CreatorApproval {
+	t.Helper()
+	approval, err := store.UpsertCreatorApproval(context.Background(), validCreatorApproval(creatorID, approvalID, approvalVersion, environment, graceEndsAt, status))
+	if err != nil {
+		t.Fatalf("UpsertCreatorApproval: %v", err)
+	}
+	return approval
+}
+
+func validCreatorApproval(creatorID, approvalID, approvalVersion, environment string, graceEndsAt time.Time, status string) trustpool.CreatorApproval {
+	return trustpool.CreatorApproval{
+		CreatorAccountID:                  creatorID,
+		ApprovalRecordID:                  approvalID,
+		CurrentApprovalVersion:            approvalVersion,
+		PublicDisplayName:                 "Creator " + creatorID,
+		LegalSupportContact:               "legal@example.test",
+		BillingContact:                    "billing@example.test",
+		EmergencyNotificationEndpoint:     "https://example.test/emergency",
+		AcknowledgedMaxResponseTime:       "15m",
+		AllowedProductCategory:            "design-partner",
+		DataRetentionCategory:             "standard",
+		SupportOwner:                      "ops",
+		AllowedLaunchEnvironment:          environment,
+		CreatorAgreementID:                "agreement-" + approvalID,
+		CreatorAgreementVersion:           "v1",
+		CreatorAgreementExpiresAtUTC:      graceEndsAt.Add(-time.Hour),
+		CreatorAgreementGraceEndsAtUTC:    graceEndsAt,
+		PricingScheduleID:                 "pricing-" + approvalID,
+		PricingScheduleVersion:            "v1",
+		ProhibitedClaimAcknowledgmentHash: hexDigest("claims-" + creatorID),
+		BuyerDisclosureCommitmentHash:     hexDigest("disclosure-" + creatorID),
+		ApprovalCriteriaHash:              hexDigest("criteria-" + creatorID),
+		ApprovedBy:                        "operator-a",
+		ApprovedAtUTC:                     time.Unix(1800000000, 0).UTC(),
+		Status:                            status,
+		SuspensionReason:                  suspensionReasonForStatus(status),
+	}
+}
+
+func suspensionReasonForStatus(status string) string {
+	if status == trustpool.CreatorStatusSuspended {
+		return "test_suspension"
+	}
+	return ""
 }
 
 func signP256ASN1(t *testing.T, key *ecdsa.PrivateKey, msg []byte) string {

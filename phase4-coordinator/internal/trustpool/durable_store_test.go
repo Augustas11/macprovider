@@ -131,8 +131,8 @@ func TestDurableStore_ReconstructsRouteableRegistryAcrossRestart(t *testing.T) {
 	if snap.MinBinaryVersion != "1.8.33" {
 		t.Fatalf("min floor = %q, want 1.8.33", snap.MinBinaryVersion)
 	}
-	if snap.Generation != uint64(len(events)) {
-		t.Fatalf("generation = %d, want durable event count %d", snap.Generation, len(events))
+	if snap.Generation != uint64(len(events)+1) {
+		t.Fatalf("generation = %d, want durable event count plus creator approval revision %d", snap.Generation, len(events)+1)
 	}
 	if !registry.BuyerAuthorized(root.poolID, "acct-a") {
 		t.Fatal("acct-a should be authorized for pool-a after durable replay")
@@ -200,8 +200,8 @@ func TestDurableStore_PausedPoolReplaysButFailsClosedForRouting(t *testing.T) {
 	if len(snap.Members) != 0 {
 		t.Fatalf("paused pool exposed routeable members: %v", snap.Members)
 	}
-	if snap.Generation != uint64(len(events)) {
-		t.Fatalf("paused generation = %d, want %d", snap.Generation, len(events))
+	if snap.Generation != uint64(len(events)+1) {
+		t.Fatalf("paused generation = %d, want durable event count plus creator approval revision %d", snap.Generation, len(events)+1)
 	}
 }
 
@@ -213,6 +213,7 @@ func TestDurableStore_IdempotentOperationAndConflict(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	ts := time.Unix(1800002000, 0).UTC()
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
 	create := ev("op-create", ts, trustpool.EventPoolCreated, "pool-a", func(e *trustpool.DurableEvent) {
 		e.CreatorAccountID = "creator-a"
 		e.ApprovalRecordID = "approval-v1"
@@ -247,6 +248,7 @@ func TestDurableStore_RootRegistrationNonceIssuedConsumedAndServerTimed(t *testi
 	}
 	root := newRootFixture(t)
 	ts := time.Unix(1800002500, 0).UTC()
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
 	create := ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
 		e.CreatorAccountID = "creator-a"
 		e.ApprovalRecordID = "approval-v1"
@@ -272,6 +274,7 @@ func TestDurableStore_RootRegistrationNonceIssuedConsumedAndServerTimed(t *testi
 	}
 
 	root2 := newRootFixture(t)
+	approveCreator(t, store, "creator-b", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
 	create2 := ev("op-create-2", ts, trustpool.EventPoolCreated, root2.poolID, func(e *trustpool.DurableEvent) {
 		e.CreatorAccountID = "creator-b"
 		e.ApprovalRecordID = "approval-v1"
@@ -294,6 +297,317 @@ func TestDurableStore_RootRegistrationNonceIssuedConsumedAndServerTimed(t *testi
 	backdated := signedRootRegistrationForIssue(t, "op-root-expired", ts.Add(3*time.Second), root2.poolID, "creator-b", "approval-v1", expired, root2)
 	if _, _, _, err := store.AppendValidatedEvent(ctx, backdated); !errors.Is(err, trustpool.ErrRootRegistrationNonce) {
 		t.Fatalf("backdated expired nonce err=%v, want ErrRootRegistrationNonce", err)
+	}
+}
+
+func TestDurableStore_ReconstructRejectsDuplicateRootRegistrationNonce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	rootA := newRootFixture(t)
+	rootB := newRootFixture(t)
+	ts := time.Unix(1800002520, 0).UTC()
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	for _, create := range []trustpool.DurableEvent{
+		ev("op-create-a", ts, trustpool.EventPoolCreated, rootA.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		ev("op-create-b", ts.Add(time.Second), trustpool.EventPoolCreated, rootB.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+	} {
+		if _, _, _, err := store.AppendValidatedEvent(ctx, create); err != nil {
+			t.Fatalf("AppendValidatedEvent(%s): %v", create.OperationID, err)
+		}
+	}
+	nonce := issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour))
+	rootEventA := signedRootRegistrationForIssue(t, "op-root-a", ts.Add(2*time.Second), rootA.poolID, "creator-a", "approval-v1", nonce, rootA)
+	rootEventB := signedRootRegistrationForIssue(t, "op-root-b", ts.Add(3*time.Second), rootB.poolID, "creator-a", "approval-v1", nonce, rootB)
+	insertPromotedEvent(t, ctx, db, rootEventA)
+	insertPromotedEvent(t, ctx, db, rootEventB)
+	if _, err := store.Reconstruct(ctx); !errors.Is(err, trustpool.ErrMalformedDurableEvent) {
+		t.Fatalf("Reconstruct duplicate root nonce err=%v, want ErrMalformedDurableEvent", err)
+	}
+}
+
+func TestDurableStore_CreatorApprovalGatesNonceAndExpansiveMutations(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800002550, 0).UTC()
+	if _, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		CreatorAccountID:       "creator-a",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		Purpose:                trustpool.RootRegistrationPurposeDefault,
+		ExpiresAtUTC:           time.Now().Add(time.Hour),
+	}); !errors.Is(err, trustpool.ErrCreatorApprovalGate) {
+		t.Fatalf("unapproved nonce err=%v, want ErrCreatorApprovalGate", err)
+	}
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusSuspended)
+	if _, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		CreatorAccountID:       "creator-a",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		Purpose:                trustpool.RootRegistrationPurposeDefault,
+		ExpiresAtUTC:           time.Now().Add(time.Hour),
+	}); !errors.Is(err, trustpool.ErrCreatorApprovalGate) {
+		t.Fatalf("suspended nonce err=%v, want ErrCreatorApprovalGate", err)
+	}
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusEnabled)
+	if _, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		CreatorAccountID:       "creator-a",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-2",
+		LaunchEnvironment:      "candidate",
+		Purpose:                trustpool.RootRegistrationPurposeDefault,
+		ExpiresAtUTC:           time.Now().Add(time.Hour),
+	}); !errors.Is(err, trustpool.ErrCreatorApprovalGate) {
+		t.Fatalf("wrong version nonce err=%v, want ErrCreatorApprovalGate", err)
+	}
+	if _, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		CreatorAccountID:       "creator-a",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "production",
+		Purpose:                trustpool.RootRegistrationPurposeDefault,
+		ExpiresAtUTC:           time.Now().Add(time.Hour),
+	}); !errors.Is(err, trustpool.ErrCreatorApprovalGate) {
+		t.Fatalf("wrong environment nonce err=%v, want ErrCreatorApprovalGate", err)
+	}
+	root := newRootFixture(t)
+	pendingNonce, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		CreatorAccountID:       "creator-a",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		Purpose:                trustpool.RootRegistrationPurposeDefault,
+		ExpiresAtUTC:           time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("IssueRootRegistrationNonce pending: %v", err)
+	}
+	create := ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-a"
+		e.ApprovalRecordID = "approval-v1"
+	})
+	if _, _, _, err := store.AppendValidatedEvent(ctx, create); err != nil {
+		t.Fatalf("AppendValidatedEvent create: %v", err)
+	}
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusSuspended)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusEnabled)
+	staleRoot := signedRootRegistrationForIssue(t, "op-root-stale", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", pendingNonce, root)
+	if _, _, _, err := store.AppendValidatedEvent(ctx, staleRoot); !errors.Is(err, trustpool.ErrRootRegistrationNonce) {
+		t.Fatalf("root registration with suspension-invalidated nonce err=%v, want ErrRootRegistrationNonce", err)
+	}
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusSuspended)
+	buyer := ev("op-buyer", ts.Add(2*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+		e.BuyerAccountID = "acct-a"
+	})
+	if _, _, _, err := store.AppendValidatedEvent(ctx, buyer); !errors.Is(err, trustpool.ErrCreatorApprovalGate) {
+		t.Fatalf("buyer authorization while suspended err=%v, want ErrCreatorApprovalGate", err)
+	}
+	retire := ev("op-retire", ts.Add(3*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
+		e.Lifecycle = trustpool.LifecycleRetired
+		e.Reason = "creator_suspended"
+	})
+	if _, _, _, err := store.AppendValidatedEvent(ctx, retire); err != nil {
+		t.Fatalf("restrictive retire should remain available to operators: %v", err)
+	}
+}
+
+func TestDurableStore_CreatorApprovalRequiresR001Fields(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		mutate func(*trustpool.CreatorApproval)
+	}{
+		{name: "public_display_name", mutate: func(a *trustpool.CreatorApproval) { a.PublicDisplayName = "" }},
+		{name: "legal_support_contact", mutate: func(a *trustpool.CreatorApproval) { a.LegalSupportContact = "" }},
+		{name: "billing_contact", mutate: func(a *trustpool.CreatorApproval) { a.BillingContact = "" }},
+		{name: "emergency_notification_endpoint", mutate: func(a *trustpool.CreatorApproval) { a.EmergencyNotificationEndpoint = "" }},
+		{name: "acknowledged_max_response_time", mutate: func(a *trustpool.CreatorApproval) { a.AcknowledgedMaxResponseTime = "" }},
+		{name: "allowed_product_category", mutate: func(a *trustpool.CreatorApproval) { a.AllowedProductCategory = "" }},
+		{name: "data_retention_category", mutate: func(a *trustpool.CreatorApproval) { a.DataRetentionCategory = "" }},
+		{name: "support_owner", mutate: func(a *trustpool.CreatorApproval) { a.SupportOwner = "" }},
+		{name: "pricing_schedule_id", mutate: func(a *trustpool.CreatorApproval) { a.PricingScheduleID = "" }},
+		{name: "pricing_schedule_version", mutate: func(a *trustpool.CreatorApproval) { a.PricingScheduleVersion = "" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := trustpool.NewStore(openTrustPoolDB(t))
+			if err != nil {
+				t.Fatalf("NewStore: %v", err)
+			}
+			approval := validCreatorApproval("creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusEnabled)
+			tc.mutate(&approval)
+			if _, err := store.UpsertCreatorApproval(ctx, approval); !errors.Is(err, trustpool.ErrCreatorApprovalGate) {
+				t.Fatalf("UpsertCreatorApproval missing %s err=%v, want ErrCreatorApprovalGate", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestDurableStore_CreatorApprovalExactRetryDoesNotBumpRevision(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	approval := validCreatorApproval("creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusEnabled)
+	first, err := store.UpsertCreatorApproval(ctx, approval)
+	if err != nil {
+		t.Fatalf("first UpsertCreatorApproval: %v", err)
+	}
+	second, err := store.UpsertCreatorApproval(ctx, approval)
+	if err != nil {
+		t.Fatalf("retry UpsertCreatorApproval: %v", err)
+	}
+	if second.ApprovalRevision != first.ApprovalRevision {
+		t.Fatalf("retry approval_revision = %d, want unchanged %d", second.ApprovalRevision, first.ApprovalRevision)
+	}
+	withReturnedFields := second
+	third, err := store.UpsertCreatorApproval(ctx, withReturnedFields)
+	if err != nil {
+		t.Fatalf("GET-body retry UpsertCreatorApproval: %v", err)
+	}
+	if third.ApprovalRevision != first.ApprovalRevision {
+		t.Fatalf("GET-body retry approval_revision = %d, want unchanged %d", third.ApprovalRevision, first.ApprovalRevision)
+	}
+}
+
+func TestDurableStore_CreatorApprovalControlsRouteability(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800002580, 0).UTC()
+	root := newRootFixture(t)
+	events := []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+		ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-a"
+		}),
+		ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+			e.BuyerAccountID = "acct-a"
+		}),
+		ev("op-active", ts.Add(5*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
+			e.Lifecycle = trustpool.LifecycleActive
+		}),
+	}
+	for _, e := range events {
+		if e.EventType == trustpool.EventLifecycleChanged && e.Lifecycle == trustpool.LifecycleActive {
+			insertPromotedEvent(t, ctx, db, e)
+			continue
+		}
+		if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
+			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+		}
+	}
+	reconstructed, err := store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct enabled: %v", err)
+	}
+	registry, err := reconstructed.BuildRegistry()
+	if err != nil {
+		t.Fatalf("BuildRegistry enabled: %v", err)
+	}
+	enabledSnap := registry.Snapshot(root.poolID)
+	if !enabledSnap.Routeable || !enabledSnap.Members["provider-a"] {
+		t.Fatalf("enabled creator snapshot = %+v, want routeable provider-a", enabledSnap)
+	}
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusSuspended)
+	reconstructed, err = store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct suspended: %v", err)
+	}
+	poolState := reconstructed.Pools[root.poolID]
+	if poolState.CreatorGateReason != "creator_suspended" {
+		t.Fatalf("creator gate reason = %q, want creator_suspended", poolState.CreatorGateReason)
+	}
+	registry, err = reconstructed.BuildRegistry()
+	if err != nil {
+		t.Fatalf("BuildRegistry suspended: %v", err)
+	}
+	snap := registry.Snapshot(root.poolID)
+	if !snap.Exists || snap.Routeable || len(snap.Members) != 0 {
+		t.Fatalf("suspended creator snapshot = %+v, want present but non-routeable with no members", snap)
+	}
+	if snap.Generation <= enabledSnap.Generation {
+		t.Fatalf("suspended creator generation = %d, want > pre-suspension generation %d", snap.Generation, enabledSnap.Generation)
+	}
+	reEnable, ok, err := store.CreatorApproval(ctx, "creator-a")
+	if err != nil {
+		t.Fatalf("CreatorApproval suspended: %v", err)
+	}
+	if !ok {
+		t.Fatal("creator approval missing after suspension")
+	}
+	reEnable.Status = trustpool.CreatorStatusEnabled
+	reEnable.SuspensionReason = ""
+	reEnable.CreatorAgreementGraceEndsAtUTC = time.Now().Add(time.Hour).UTC()
+	reEnable.CreatorAgreementExpiresAtUTC = reEnable.CreatorAgreementGraceEndsAtUTC.Add(-time.Hour)
+	if _, err := store.UpsertCreatorApproval(ctx, reEnable); !errors.Is(err, trustpool.ErrCreatorApprovalGate) {
+		t.Fatalf("valid re-enable without reactivation sweep err=%v, want ErrCreatorApprovalGate", err)
+	}
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(-time.Hour), trustpool.CreatorStatusEnabled)
+	reconstructed, err = store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct expired: %v", err)
+	}
+	if got := reconstructed.Pools[root.poolID].CreatorGateReason; got != "creator_agreement_expired" {
+		t.Fatalf("expired gate reason = %q, want creator_agreement_expired", got)
+	}
+}
+
+func TestRegistryRouteableUntilExpiresAtRouteTimeAndBumpsGeneration(t *testing.T) {
+	t.Parallel()
+	registry := trustpool.NewRegistry()
+	expiresAt := time.Now().Add(50 * time.Millisecond).UTC()
+	if err := registry.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{
+		{
+			PoolID:            "pool-a",
+			Members:           []string{"provider-a"},
+			BuyerAccounts:     []string{"acct-a"},
+			Routeable:         true,
+			Generation:        7,
+			RouteableUntilUTC: expiresAt,
+		},
+	}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	snap, authorized := registry.AuthorizeAndSnapshot("pool-a", "acct-a")
+	if !authorized || !snap.Routeable || snap.Generation != 7 {
+		t.Fatalf("pre-expiry snap=%+v authorized=%v, want routeable generation 7", snap, authorized)
+	}
+	time.Sleep(80 * time.Millisecond)
+	expired := registry.Snapshot("pool-a")
+	if !expired.Exists || expired.Routeable || expired.Generation <= snap.Generation {
+		t.Fatalf("post-expiry snap=%+v, want non-routeable with advanced generation over %d", expired, snap.Generation)
+	}
+	if registry.Generation("pool-a") != expired.Generation {
+		t.Fatalf("Generation() = %d, want expired snapshot generation %d", registry.Generation("pool-a"), expired.Generation)
 	}
 }
 
