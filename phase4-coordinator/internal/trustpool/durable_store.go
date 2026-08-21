@@ -2,7 +2,9 @@ package trustpool
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 
 const (
 	EventPoolCreated          = "pool_created"
+	EventRootIssuerRegistered = "root_issuer_registered"
 	EventManifestAccepted     = "manifest_accepted"
 	EventLifecycleChanged     = "lifecycle_changed"
 	EventMemberAdmitted       = "member_admitted"
@@ -36,13 +39,14 @@ var (
 	ErrConflictingOperationID      = errors.New("trustpool: conflicting operation id")
 	ErrMalformedDurableEvent       = errors.New("trustpool: malformed durable event history")
 	ErrActivationRequiresPromotion = errors.New("trustpool: active lifecycle requires promotion gate")
+	ErrRootRegistrationNonce       = errors.New("trustpool: invalid root registration nonce")
 )
 
 // DurableEvent is one append-only SPEC-043 pool control-plane fact. It is
 // intentionally narrow for the first MVP slice: it records enough to rebuild
 // routeable pool membership, lifecycle, creator ownership for accepted pools,
-// buyer scopes, and manifest labels without implementing the creator approval
-// store or creator-admin API yet.
+// buyer scopes, creator root registration, and signed manifest labels without
+// implementing the creator approval store or creator-admin API yet.
 type DurableEvent struct {
 	OperationID        string    `json:"operation_id"`
 	TimestampUTC       time.Time `json:"timestamp_utc"`
@@ -57,6 +61,25 @@ type DurableEvent struct {
 	MinBinaryVersion   string    `json:"min_binary_version,omitempty"`
 	ManifestVersion    uint64    `json:"manifest_version,omitempty"`
 	ManifestCoreDigest string    `json:"manifest_core_digest,omitempty"`
+	ManifestSignature  string    `json:"manifest_signature,omitempty"`
+	ManifestSnapshot   string    `json:"manifest_snapshot,omitempty"`
+
+	CurrentApprovalVersion             string `json:"current_approval_version,omitempty"`
+	RootIssuerKeyID                    string `json:"root_issuer_key_id,omitempty"`
+	RootIssuerPublicKeyDER             string `json:"root_issuer_public_key_der,omitempty"`
+	RootIssuerPublicKeyFingerprint     string `json:"root_issuer_public_key_fingerprint,omitempty"`
+	RootSignatureAlgorithm             string `json:"root_signature_algorithm,omitempty"`
+	ManifestAuthorityRootKeyID         string `json:"manifest_authority_root_key_id,omitempty"`
+	ManifestAuthorityRootPublicKey     string `json:"manifest_authority_root_public_key,omitempty"`
+	RootRegistrationSignature          string `json:"proof_of_possession_signature,omitempty"`
+	StructuredKeyCustodyDisclosureHash string `json:"structured_key_custody_disclosure_hash,omitempty"`
+	GenesisNonceDigest                 string `json:"genesis_nonce_digest,omitempty"`
+	IntendedPoolDisplayNameHash        string `json:"intended_pool_display_name_hash,omitempty"`
+	LaunchEnvironment                  string `json:"launch_environment,omitempty"`
+	RootRegistrationNonce              string `json:"nonce,omitempty"`
+	RootRegistrationNonceExpiry        string `json:"nonce_expiry,omitempty"`
+	RootRegistrationPurpose            string `json:"purpose,omitempty"`
+	RootRegistrationEnvironment        string `json:"environment,omitempty"`
 }
 
 // Store persists DurableEvent rows in the coordinator SQLite DB.
@@ -94,12 +117,29 @@ CREATE TABLE IF NOT EXISTS trustpool_events (
     min_binary_version TEXT,
     manifest_version INTEGER NOT NULL DEFAULT 0,
     manifest_core_digest TEXT,
+    root_issuer_key_id TEXT,
+    root_issuer_public_key_fingerprint TEXT,
+    launch_environment TEXT,
+    current_approval_version TEXT,
     reason TEXT,
     payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trustpool_events_pool_id ON trustpool_events(pool_id, id);
 CREATE INDEX IF NOT EXISTS idx_trustpool_events_creator ON trustpool_events(creator_account_id, id);
 CREATE INDEX IF NOT EXISTS idx_trustpool_events_event_type ON trustpool_events(event_type, id);
+CREATE TABLE IF NOT EXISTS trustpool_root_registration_nonces (
+    nonce TEXT PRIMARY KEY,
+    creator_account_id TEXT NOT NULL,
+    approval_record_id TEXT NOT NULL,
+    current_approval_version TEXT NOT NULL,
+    launch_environment TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    expires_at_utc TEXT NOT NULL,
+    issued_at_utc TEXT NOT NULL,
+    consumed_operation_id TEXT,
+    consumed_at_utc TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_trustpool_root_registration_nonces_creator ON trustpool_root_registration_nonces(creator_account_id, issued_at_utc);
 `)
 	if err != nil {
 		return err
@@ -107,8 +147,99 @@ CREATE INDEX IF NOT EXISTS idx_trustpool_events_event_type ON trustpool_events(e
 	if err := s.ensureColumn(ctx, "trustpool_events", "approval_record_id", "TEXT"); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_trustpool_events_approval ON trustpool_events(approval_record_id, id)`)
+	for _, c := range []struct {
+		name string
+		decl string
+	}{
+		{name: "root_issuer_key_id", decl: "TEXT"},
+		{name: "root_issuer_public_key_fingerprint", decl: "TEXT"},
+		{name: "launch_environment", decl: "TEXT"},
+		{name: "current_approval_version", decl: "TEXT"},
+	} {
+		if err := s.ensureColumn(ctx, "trustpool_events", c.name, c.decl); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_trustpool_events_approval ON trustpool_events(approval_record_id, id)`); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_trustpool_events_root_fingerprint ON trustpool_events(root_issuer_public_key_fingerprint, id)`)
 	return err
+}
+
+type RootRegistrationNonceIssue struct {
+	CreatorAccountID       string
+	ApprovalRecordID       string
+	CurrentApprovalVersion string
+	LaunchEnvironment      string
+	Purpose                string
+	ExpiresAtUTC           time.Time
+}
+
+type RootRegistrationNonceRecord struct {
+	Nonce                  string
+	CreatorAccountID       string
+	ApprovalRecordID       string
+	CurrentApprovalVersion string
+	LaunchEnvironment      string
+	Purpose                string
+	ExpiresAtUTC           time.Time
+	IssuedAtUTC            time.Time
+}
+
+func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegistrationNonceIssue) (RootRegistrationNonceRecord, error) {
+	if s == nil || s.db == nil {
+		return RootRegistrationNonceRecord{}, ErrStoreClosed
+	}
+	issue.CreatorAccountID = strings.TrimSpace(issue.CreatorAccountID)
+	issue.ApprovalRecordID = strings.TrimSpace(issue.ApprovalRecordID)
+	issue.CurrentApprovalVersion = strings.TrimSpace(issue.CurrentApprovalVersion)
+	issue.LaunchEnvironment = strings.TrimSpace(issue.LaunchEnvironment)
+	issue.Purpose = strings.TrimSpace(issue.Purpose)
+	if issue.Purpose == "" {
+		issue.Purpose = RootRegistrationPurposeDefault
+	}
+	if issue.CreatorAccountID == "" || issue.ApprovalRecordID == "" || issue.CurrentApprovalVersion == "" ||
+		issue.LaunchEnvironment == "" || issue.Purpose != RootRegistrationPurposeDefault || issue.ExpiresAtUTC.IsZero() {
+		return RootRegistrationNonceRecord{}, ErrRootRegistrationNonce
+	}
+	now := time.Now().UTC()
+	expires := issue.ExpiresAtUTC.UTC()
+	if !now.Before(expires) {
+		return RootRegistrationNonceRecord{}, ErrRootRegistrationNonce
+	}
+	var nonceBytes [32]byte
+	if _, err := rand.Read(nonceBytes[:]); err != nil {
+		return RootRegistrationNonceRecord{}, err
+	}
+	record := RootRegistrationNonceRecord{
+		Nonce:                  base64.RawURLEncoding.EncodeToString(nonceBytes[:]),
+		CreatorAccountID:       issue.CreatorAccountID,
+		ApprovalRecordID:       issue.ApprovalRecordID,
+		CurrentApprovalVersion: issue.CurrentApprovalVersion,
+		LaunchEnvironment:      issue.LaunchEnvironment,
+		Purpose:                issue.Purpose,
+		ExpiresAtUTC:           expires,
+		IssuedAtUTC:            now,
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO trustpool_root_registration_nonces (
+    nonce, creator_account_id, approval_record_id, current_approval_version,
+    launch_environment, purpose, expires_at_utc, issued_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.Nonce,
+		record.CreatorAccountID,
+		record.ApprovalRecordID,
+		record.CurrentApprovalVersion,
+		record.LaunchEnvironment,
+		record.Purpose,
+		record.ExpiresAtUTC.Format(time.RFC3339Nano),
+		record.IssuedAtUTC.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return RootRegistrationNonceRecord{}, err
+	}
+	return record, nil
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table, column, decl string) error {
@@ -165,10 +296,11 @@ func (s *Store) appendEventUnchecked(ctx context.Context, e DurableEvent) error 
 	}
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO trustpool_events (
-    operation_id, ts_utc, event_type, pool_id, creator_account_id, approval_record_id, provider_id,
-    buyer_account_id, lifecycle, min_binary_version, manifest_version,
-    manifest_core_digest, reason, payload_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	    operation_id, ts_utc, event_type, pool_id, creator_account_id, approval_record_id, provider_id,
+	    buyer_account_id, lifecycle, min_binary_version, manifest_version,
+	    manifest_core_digest, root_issuer_key_id, root_issuer_public_key_fingerprint,
+	    launch_environment, current_approval_version, reason, payload_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.OperationID,
 		e.TimestampUTC.Format(time.RFC3339Nano),
 		e.EventType,
@@ -181,6 +313,10 @@ INSERT INTO trustpool_events (
 		nullString(e.MinBinaryVersion),
 		e.ManifestVersion,
 		nullString(e.ManifestCoreDigest),
+		nullString(e.RootIssuerKeyID),
+		nullString(e.RootIssuerPublicKeyFingerprint),
+		nullString(e.LaunchEnvironment),
+		nullString(e.CurrentApprovalVersion),
 		nullString(e.Reason),
 		string(payload),
 	)
@@ -271,6 +407,11 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 		if err := validateEvent(e); err != nil {
 			return err
 		}
+		if e.EventType == EventRootIssuerRegistered {
+			if err := consumeRootRegistrationNonce(ctx, conn, e, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
 		payload, err := json.Marshal(e)
 		if err != nil {
 			return err
@@ -281,11 +422,12 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 			return err
 		}
 		_, err = conn.ExecContext(ctx, `
-INSERT INTO trustpool_events (
-    operation_id, ts_utc, event_type, pool_id, creator_account_id, approval_record_id, provider_id,
-    buyer_account_id, lifecycle, min_binary_version, manifest_version,
-    manifest_core_digest, reason, payload_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	INSERT INTO trustpool_events (
+	    operation_id, ts_utc, event_type, pool_id, creator_account_id, approval_record_id, provider_id,
+	    buyer_account_id, lifecycle, min_binary_version, manifest_version,
+	    manifest_core_digest, root_issuer_key_id, root_issuer_public_key_fingerprint,
+	    launch_environment, current_approval_version, reason, payload_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			e.OperationID,
 			e.TimestampUTC.Format(time.RFC3339Nano),
 			e.EventType,
@@ -298,6 +440,10 @@ INSERT INTO trustpool_events (
 			nullString(e.MinBinaryVersion),
 			e.ManifestVersion,
 			nullString(e.ManifestCoreDigest),
+			nullString(e.RootIssuerKeyID),
+			nullString(e.RootIssuerPublicKeyFingerprint),
+			nullString(e.LaunchEnvironment),
+			nullString(e.CurrentApprovalVersion),
 			nullString(e.Reason),
 			string(payload),
 		)
@@ -313,6 +459,68 @@ INSERT INTO trustpool_events (
 		return nil, DurableEvent{}, false, err
 	}
 	return reconstructed, committed, applied, nil
+}
+
+func consumeRootRegistrationNonce(ctx context.Context, conn *sql.Conn, e DurableEvent, acceptedAt time.Time) error {
+	var creatorAccountID, approvalRecordID, currentApprovalVersion, launchEnvironment, purpose, expiresRaw string
+	var consumedOperationID sql.NullString
+	err := conn.QueryRowContext(ctx, `
+SELECT creator_account_id, approval_record_id, current_approval_version, launch_environment,
+       purpose, expires_at_utc, consumed_operation_id
+FROM trustpool_root_registration_nonces
+WHERE nonce = ?`, e.RootRegistrationNonce).Scan(
+		&creatorAccountID,
+		&approvalRecordID,
+		&currentApprovalVersion,
+		&launchEnvironment,
+		&purpose,
+		&expiresRaw,
+		&consumedOperationID,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrRootRegistrationNonce
+	}
+	if err != nil {
+		return err
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, expiresRaw)
+	if err != nil {
+		return ErrRootRegistrationNonce
+	}
+	if creatorAccountID != e.CreatorAccountID ||
+		approvalRecordID != e.ApprovalRecordID ||
+		currentApprovalVersion != e.CurrentApprovalVersion ||
+		launchEnvironment != e.LaunchEnvironment ||
+		purpose != e.RootRegistrationPurpose ||
+		e.RootRegistrationEnvironment != e.LaunchEnvironment ||
+		e.RootRegistrationNonceExpiry != expiresAt.UTC().Format(time.RFC3339Nano) {
+		return ErrRootRegistrationNonce
+	}
+	if consumedOperationID.Valid {
+		return ErrRootRegistrationNonce
+	}
+	if !acceptedAt.UTC().Before(expiresAt.UTC()) {
+		return ErrRootRegistrationNonce
+	}
+	res, err := conn.ExecContext(ctx, `
+UPDATE trustpool_root_registration_nonces
+SET consumed_operation_id = ?, consumed_at_utc = ?
+WHERE nonce = ? AND consumed_operation_id IS NULL`,
+		e.OperationID,
+		acceptedAt.UTC().Format(time.RFC3339Nano),
+		e.RootRegistrationNonce,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrRootRegistrationNonce
+	}
+	return nil
 }
 
 type eventQueryer interface {
@@ -373,11 +581,28 @@ type ReconstructedPoolState struct {
 	MinBinaryVersion   string
 	ManifestVersion    uint64
 	ManifestCoreDigest string
+	RootIssuer         *ReconstructedRootIssuer
 	Members            map[string]bool
 	Revoked            map[string]bool
 	BuyerAccounts      map[string]bool
 	Generation         uint64
 	LastEventAtUTC     time.Time
+}
+
+type ReconstructedRootIssuer struct {
+	KeyID                           string
+	PublicKeyDER                    string
+	PublicKeyFingerprint            string
+	SignatureAlgorithm              string
+	CurrentApprovalVersion          string
+	ManifestAuthorityRootKeyID      string
+	ManifestAuthorityRootPublicKey  string
+	StructuredCustodyDisclosureHash string
+	GenesisNonceDigest              string
+	IntendedPoolDisplayNameHash     string
+	LaunchEnvironment               string
+	RegistrationNonce               string
+	RegistrationNonceExpiry         string
 }
 
 func ReconstructEvents(events []DurableEvent) (*ReconstructedState, error) {
@@ -421,9 +646,57 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		return nil, fmt.Errorf("%w: event %d %s after retired pool %q", ErrMalformedDurableEvent, index, e.EventType, e.PoolID)
 	}
 	switch e.EventType {
+	case EventRootIssuerRegistered:
+		if p.RootIssuer != nil {
+			return nil, fmt.Errorf("%w: event %d duplicate root_issuer_registered for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
+		}
+		if p.ManifestVersion != 0 {
+			return nil, fmt.Errorf("%w: event %d root_issuer_registered after manifest_accepted for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
+		}
+		if e.CreatorAccountID != p.CreatorAccountID || e.ApprovalRecordID != p.ApprovalRecordID {
+			return nil, fmt.Errorf("%w: event %d root registration creator approval mismatch for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
+		}
+		if priorPool, ok := s.rootFingerprintOwner(e.RootIssuerPublicKeyFingerprint); ok && priorPool != e.PoolID {
+			return nil, fmt.Errorf("%w: event %d root fingerprint reused by pools %q and %q", ErrMalformedDurableEvent, index, priorPool, e.PoolID)
+		}
+		if err := VerifyRootIssuerRegistrationEvent(e); err != nil {
+			return nil, fmt.Errorf("%w: event %d root registration invalid: %v", ErrMalformedDurableEvent, index, err)
+		}
+		p.RootIssuer = &ReconstructedRootIssuer{
+			KeyID:                           e.RootIssuerKeyID,
+			PublicKeyDER:                    e.RootIssuerPublicKeyDER,
+			PublicKeyFingerprint:            e.RootIssuerPublicKeyFingerprint,
+			SignatureAlgorithm:              e.RootSignatureAlgorithm,
+			CurrentApprovalVersion:          e.CurrentApprovalVersion,
+			ManifestAuthorityRootKeyID:      e.ManifestAuthorityRootKeyID,
+			ManifestAuthorityRootPublicKey:  e.ManifestAuthorityRootPublicKey,
+			StructuredCustodyDisclosureHash: e.StructuredKeyCustodyDisclosureHash,
+			GenesisNonceDigest:              e.GenesisNonceDigest,
+			IntendedPoolDisplayNameHash:     e.IntendedPoolDisplayNameHash,
+			LaunchEnvironment:               e.LaunchEnvironment,
+			RegistrationNonce:               e.RootRegistrationNonce,
+			RegistrationNonceExpiry:         e.RootRegistrationNonceExpiry,
+		}
 	case EventManifestAccepted:
-		if e.ManifestVersion <= p.ManifestVersion {
-			return nil, fmt.Errorf("%w: event %d manifest version %d not newer than current %d for pool %q", ErrMalformedDurableEvent, index, e.ManifestVersion, p.ManifestVersion, e.PoolID)
+		if p.RootIssuer == nil {
+			return nil, fmt.Errorf("%w: event %d manifest_accepted before root_issuer_registered for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
+		}
+		if e.RootIssuerKeyID != p.RootIssuer.KeyID || e.RootIssuerPublicKeyFingerprint != p.RootIssuer.PublicKeyFingerprint {
+			return nil, fmt.Errorf("%w: event %d manifest root issuer mismatch for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
+		}
+		prevDigest, err := VerifyManifestAcceptedEvent(e, *p.RootIssuer)
+		if err != nil {
+			return nil, fmt.Errorf("%w: event %d manifest signature invalid: %v", ErrMalformedDurableEvent, index, err)
+		}
+		if e.ManifestVersion != p.ManifestVersion+1 {
+			return nil, fmt.Errorf("%w: event %d manifest version %d does not extend current %d for pool %q", ErrMalformedDurableEvent, index, e.ManifestVersion, p.ManifestVersion, e.PoolID)
+		}
+		wantPrev := strings.Repeat("0", 64)
+		if p.ManifestVersion != 0 {
+			wantPrev = p.ManifestCoreDigest
+		}
+		if prevDigest != wantPrev {
+			return nil, fmt.Errorf("%w: event %d manifest prev hash %q does not match current digest %q for pool %q", ErrMalformedDurableEvent, index, prevDigest, wantPrev, e.PoolID)
 		}
 		p.ManifestVersion = e.ManifestVersion
 		p.ManifestCoreDigest = e.ManifestCoreDigest
@@ -462,6 +735,15 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		return nil, fmt.Errorf("trustpool: unknown event type %q", e.EventType)
 	}
 	return p, nil
+}
+
+func (s *ReconstructedState) rootFingerprintOwner(fingerprint string) (string, bool) {
+	for poolID, p := range s.Pools {
+		if p.RootIssuer != nil && p.RootIssuer.PublicKeyFingerprint == fingerprint {
+			return poolID, true
+		}
+	}
+	return "", false
 }
 
 func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
@@ -547,9 +829,31 @@ func validateEvent(e DurableEvent) error {
 		if e.CreatorAccountID == "" || e.ApprovalRecordID == "" {
 			return fmt.Errorf("pool_created requires creator_account_id and approval_record_id")
 		}
+	case EventRootIssuerRegistered:
+		if e.CreatorAccountID == "" || e.ApprovalRecordID == "" || e.CurrentApprovalVersion == "" {
+			return fmt.Errorf("root_issuer_registered requires creator_account_id, approval_record_id, and current_approval_version")
+		}
+		if e.RootIssuerKeyID == "" || e.RootIssuerPublicKeyDER == "" || e.RootIssuerPublicKeyFingerprint == "" ||
+			e.RootSignatureAlgorithm == "" || e.RootRegistrationSignature == "" {
+			return fmt.Errorf("root_issuer_registered requires root issuer key fields and proof")
+		}
+		if e.ManifestAuthorityRootKeyID == "" || e.ManifestAuthorityRootPublicKey == "" {
+			return fmt.Errorf("root_issuer_registered requires delegated manifest authority root")
+		}
+		if e.StructuredKeyCustodyDisclosureHash == "" || e.GenesisNonceDigest == "" ||
+			e.IntendedPoolDisplayNameHash == "" || e.LaunchEnvironment == "" {
+			return fmt.Errorf("root_issuer_registered requires custody, genesis, display, and launch environment bindings")
+		}
+		if e.RootRegistrationNonce == "" || e.RootRegistrationNonceExpiry == "" ||
+			e.RootRegistrationPurpose == "" || e.RootRegistrationEnvironment == "" {
+			return fmt.Errorf("root_issuer_registered requires nonce commitment fields")
+		}
 	case EventManifestAccepted:
-		if e.ManifestVersion == 0 || e.ManifestCoreDigest == "" {
-			return fmt.Errorf("manifest_accepted requires manifest_version and manifest_core_digest")
+		if e.ManifestVersion == 0 || e.ManifestCoreDigest == "" || e.ManifestSignature == "" || e.ManifestSnapshot == "" {
+			return fmt.Errorf("manifest_accepted requires manifest_version, manifest_core_digest, manifest_snapshot, and manifest_signature")
+		}
+		if e.RootIssuerKeyID == "" || e.RootIssuerPublicKeyFingerprint == "" {
+			return fmt.Errorf("manifest_accepted requires root issuer binding")
 		}
 	case EventLifecycleChanged:
 		if !validLifecycle(e.Lifecycle) {
