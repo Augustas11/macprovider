@@ -889,7 +889,11 @@ func main() {
 			logger.Fatal().Err(err).Msg("trusted pools durable store open failed")
 		}
 		if trustPoolsReady {
-			buyerOpts = append(buyerOpts, buyer.WithPoolMembership(trustPoolRegistry))
+			buyerOpts = append(
+				buyerOpts,
+				buyer.WithPoolMembership(trustPoolRegistry),
+				buyer.WithTrustPoolStatusStore(trustPoolStore),
+			)
 			trustpool.StartRefreshLoop(
 				shutdownCtx,
 				trustPoolStore,
