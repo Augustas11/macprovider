@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 )
@@ -51,7 +52,8 @@ type poolState struct {
 	// generation increments on every membership/revocation/floor change so the
 	// routing generation fence (SPEC-042 R005) can detect a snapshot that
 	// is no longer current.
-	generation uint64
+	generation        uint64
+	routeableUntilUTC time.Time
 }
 
 // Snapshot is a single consistent read of a pool's routable membership and
@@ -66,10 +68,11 @@ type Snapshot struct {
 	// MinBinaryVersion is the pool's minimum provider binary version floor
 	// (SPEC-042 R004), captured under the same lock as Members/Generation.
 	// "" means no floor — the eligibility gate is inert.
-	MinBinaryVersion string
-	Routeable        bool
-	Generation       uint64
-	Revision         uint64
+	MinBinaryVersion  string
+	Routeable         bool
+	Generation        uint64
+	Revision          uint64
+	RouteableUntilUTC time.Time
 }
 
 // RouteableSnapshot is a durable reconstruction input: one coherent pool state
@@ -77,13 +80,14 @@ type Snapshot struct {
 // routeable RIGHT NOW; non-active pools should pass an empty member set so the
 // routing gate fails closed while preserving the pool's generation fence.
 type RouteableSnapshot struct {
-	PoolID           string
-	Members          []string
-	Revoked          []string
-	BuyerAccounts    []string
-	MinBinaryVersion string
-	Routeable        bool
-	Generation       uint64
+	PoolID            string
+	Members           []string
+	Revoked           []string
+	BuyerAccounts     []string
+	MinBinaryVersion  string
+	Routeable         bool
+	Generation        uint64
+	RouteableUntilUTC time.Time
 }
 
 // NewRegistry returns an empty registry.
@@ -243,12 +247,13 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pools[s.PoolID] = &poolState{
-		members:          members,
-		revoked:          revoked,
-		buyers:           buyers,
-		routeable:        s.Routeable,
-		minBinaryVersion: s.MinBinaryVersion,
-		generation:       s.Generation,
+		members:           members,
+		revoked:           revoked,
+		buyers:            buyers,
+		routeable:         s.Routeable,
+		minBinaryVersion:  s.MinBinaryVersion,
+		generation:        s.Generation,
+		routeableUntilUTC: s.RouteableUntilUTC.UTC(),
 	}
 	return nil
 }
@@ -266,6 +271,12 @@ func (r *Registry) LoadRouteableSnapshots(snapshots []RouteableSnapshot) error {
 // mutation.
 func (r *Registry) LoadRouteableSnapshotsAtRevision(revision uint64, snapshots []RouteableSnapshot) error {
 	return r.loadRouteableSnapshots(revision, snapshots, true)
+}
+
+func (r *Registry) Revision() uint64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.revision
 }
 
 func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []RouteableSnapshot, enforceRevision bool) error {
@@ -303,12 +314,13 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 			buyers[id] = struct{}{}
 		}
 		next[s.PoolID] = &poolState{
-			members:          members,
-			revoked:          revoked,
-			buyers:           buyers,
-			routeable:        s.Routeable,
-			minBinaryVersion: s.MinBinaryVersion,
-			generation:       s.Generation,
+			members:           members,
+			revoked:           revoked,
+			buyers:            buyers,
+			routeable:         s.Routeable,
+			minBinaryVersion:  s.MinBinaryVersion,
+			generation:        s.Generation,
+			routeableUntilUTC: s.RouteableUntilUTC.UTC(),
 		}
 	}
 
@@ -357,13 +369,14 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 		sort.Strings(revoked)
 		sort.Strings(buyers)
 		out = append(out, RouteableSnapshot{
-			PoolID:           poolID,
-			Members:          members,
-			Revoked:          revoked,
-			BuyerAccounts:    buyers,
-			MinBinaryVersion: ps.minBinaryVersion,
-			Routeable:        ps.routeable,
-			Generation:       ps.generation,
+			PoolID:            poolID,
+			Members:           members,
+			Revoked:           revoked,
+			BuyerAccounts:     buyers,
+			MinBinaryVersion:  ps.minBinaryVersion,
+			Routeable:         ps.routeable,
+			Generation:        ps.generation,
+			RouteableUntilUTC: ps.routeableUntilUTC,
 		})
 	}
 	return out
@@ -380,6 +393,7 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 	if ps == nil {
 		return Snapshot{PoolID: poolID, Exists: false, Members: map[string]bool{}}
 	}
+	now := time.Now().UTC()
 	members := make(map[string]bool, len(ps.members))
 	for id := range ps.members {
 		if _, revoked := ps.revoked[id]; revoked {
@@ -387,7 +401,16 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		}
 		members[id] = true
 	}
-	return Snapshot{PoolID: poolID, Exists: true, Members: members, MinBinaryVersion: ps.minBinaryVersion, Routeable: ps.routeable, Generation: ps.generation, Revision: r.revision}
+	return Snapshot{
+		PoolID:            poolID,
+		Exists:            true,
+		Members:           members,
+		MinBinaryVersion:  ps.minBinaryVersion,
+		Routeable:         ps.routeableAt(now),
+		Generation:        ps.generationAt(now),
+		Revision:          r.revision,
+		RouteableUntilUTC: ps.routeableUntilUTC,
+	}
 }
 
 // AuthorizeAndSnapshot reads buyer authorization, routeability, membership, and
@@ -404,6 +427,7 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 	if ps == nil {
 		return Snapshot{PoolID: poolID, Exists: false, Members: map[string]bool{}, Revision: r.revision}, false
 	}
+	now := time.Now().UTC()
 	members := make(map[string]bool, len(ps.members))
 	for id := range ps.members {
 		if _, revoked := ps.revoked[id]; revoked {
@@ -413,13 +437,14 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 	}
 	_, authorized := ps.buyers[buyerAccountID]
 	return Snapshot{
-		PoolID:           poolID,
-		Exists:           true,
-		Members:          members,
-		MinBinaryVersion: ps.minBinaryVersion,
-		Routeable:        ps.routeable,
-		Generation:       ps.generation,
-		Revision:         r.revision,
+		PoolID:            poolID,
+		Exists:            true,
+		Members:           members,
+		MinBinaryVersion:  ps.minBinaryVersion,
+		Routeable:         ps.routeableAt(now),
+		Generation:        ps.generationAt(now),
+		Revision:          r.revision,
+		RouteableUntilUTC: ps.routeableUntilUTC,
 	}, authorized
 }
 
@@ -445,7 +470,27 @@ func (r *Registry) Generation(poolID string) uint64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if ps := r.pools[poolID]; ps != nil {
-		return ps.generation
+		return ps.generationAt(time.Now().UTC())
 	}
 	return 0
+}
+
+func (ps *poolState) routeableAt(now time.Time) bool {
+	if ps == nil || !ps.routeable {
+		return false
+	}
+	if ps.routeableUntilUTC.IsZero() {
+		return true
+	}
+	return now.UTC().Before(ps.routeableUntilUTC.UTC())
+}
+
+func (ps *poolState) generationAt(now time.Time) uint64 {
+	if ps == nil {
+		return 0
+	}
+	if ps.routeable && !ps.routeableUntilUTC.IsZero() && !now.UTC().Before(ps.routeableUntilUTC.UTC()) {
+		return ps.generation + 1
+	}
+	return ps.generation
 }

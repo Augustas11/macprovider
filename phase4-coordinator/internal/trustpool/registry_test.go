@@ -2,6 +2,7 @@ package trustpool_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 )
@@ -83,6 +84,36 @@ func TestSnapshot_IsolatedAcrossPools(t *testing.T) {
 	}
 	if r.Snapshot("Q").Members["x"] {
 		t.Fatal("pool Q must not see pool P's member x")
+	}
+}
+
+func TestRouteableSnapshotsPreservesRouteableUntilUTC(t *testing.T) {
+	t.Parallel()
+	expiresAt := time.Now().Add(40 * time.Millisecond).UTC()
+	r := trustpool.NewRegistry()
+	if err := r.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{
+		{
+			PoolID:            "pool-a",
+			Members:           []string{"provider-a"},
+			BuyerAccounts:     []string{"acct-a"},
+			Routeable:         true,
+			Generation:        9,
+			RouteableUntilUTC: expiresAt,
+		},
+	}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	exported := r.RouteableSnapshots()
+	if len(exported) != 1 || !exported[0].RouteableUntilUTC.Equal(expiresAt) {
+		t.Fatalf("exported snapshots = %+v, want routeable_until_utc %s", exported, expiresAt.Format(time.RFC3339Nano))
+	}
+	reloaded := trustpool.NewRegistry()
+	if err := reloaded.LoadRouteableSnapshotsAtRevision(1, exported); err != nil {
+		t.Fatalf("reload exported snapshots: %v", err)
+	}
+	time.Sleep(70 * time.Millisecond)
+	if snap := reloaded.Snapshot("pool-a"); !snap.Exists || snap.Routeable || snap.Generation <= 9 {
+		t.Fatalf("reloaded post-expiry snapshot = %+v, want non-routeable with advanced generation", snap)
 	}
 }
 
