@@ -219,10 +219,20 @@ func signedRootRegistration(t *testing.T, op string, ts time.Time, poolID, creat
 
 func signedRootRegistrationForIssue(t *testing.T, op string, ts time.Time, poolID, creatorID, approvalID string, issue trustpool.RootRegistrationNonceRecord, root rootFixture) trustpool.DurableEvent {
 	t.Helper()
-	return signedRootRegistrationWithNonce(t, op, ts, poolID, creatorID, approvalID, issue.Nonce, issue.ExpiresAtUTC.UTC().Format(time.RFC3339Nano), root)
+	return signedRootRegistrationForIssueInEnvironment(t, op, ts, poolID, creatorID, approvalID, issue, root, "candidate")
+}
+
+func signedRootRegistrationForIssueInEnvironment(t *testing.T, op string, ts time.Time, poolID, creatorID, approvalID string, issue trustpool.RootRegistrationNonceRecord, root rootFixture, environment string) trustpool.DurableEvent {
+	t.Helper()
+	return signedRootRegistrationWithNonceInEnvironment(t, op, ts, poolID, creatorID, approvalID, issue.Nonce, issue.ExpiresAtUTC.UTC().Format(time.RFC3339Nano), root, environment)
 }
 
 func signedRootRegistrationWithNonce(t *testing.T, op string, ts time.Time, poolID, creatorID, approvalID, nonce, nonceExpiry string, root rootFixture) trustpool.DurableEvent {
+	t.Helper()
+	return signedRootRegistrationWithNonceInEnvironment(t, op, ts, poolID, creatorID, approvalID, nonce, nonceExpiry, root, "candidate")
+}
+
+func signedRootRegistrationWithNonceInEnvironment(t *testing.T, op string, ts time.Time, poolID, creatorID, approvalID, nonce, nonceExpiry string, root rootFixture, environment string) trustpool.DurableEvent {
 	t.Helper()
 	e := ev(op, ts, trustpool.EventRootIssuerRegistered, poolID, func(e *trustpool.DurableEvent) {
 		e.CreatorAccountID = creatorID
@@ -237,11 +247,11 @@ func signedRootRegistrationWithNonce(t *testing.T, op string, ts time.Time, pool
 		e.StructuredKeyCustodyDisclosureHash = hexDigest("custody")
 		e.GenesisNonceDigest = hexBytesDigest(root.identityCore.GenesisNonce)
 		e.IntendedPoolDisplayNameHash = hexDigest("display")
-		e.LaunchEnvironment = "candidate"
+		e.LaunchEnvironment = environment
 		e.RootRegistrationNonce = nonce
 		e.RootRegistrationNonceExpiry = nonceExpiry
 		e.RootRegistrationPurpose = trustpool.RootRegistrationPurposeDefault
-		e.RootRegistrationEnvironment = "candidate"
+		e.RootRegistrationEnvironment = environment
 	})
 	msg, err := trustpool.RootRegistrationSigningMessage(e)
 	if err != nil {
@@ -343,16 +353,21 @@ func manifestSnapshot(t *testing.T, version uint64, root rootFixture) (string, s
 
 func issueRootNonce(t *testing.T, store *trustpool.Store, creatorID, approvalID string, expiresAt time.Time) trustpool.RootRegistrationNonceRecord {
 	t.Helper()
+	return issueRootNonceInEnvironment(t, store, creatorID, approvalID, "candidate", expiresAt)
+}
+
+func issueRootNonceInEnvironment(t *testing.T, store *trustpool.Store, creatorID, approvalID, environment string, expiresAt time.Time) trustpool.RootRegistrationNonceRecord {
+	t.Helper()
 	if approval, ok, err := store.CreatorApproval(context.Background(), creatorID); err != nil {
 		t.Fatalf("CreatorApproval: %v", err)
-	} else if !ok || !approval.ValidFor(approvalID, "approval-version-1", "candidate", time.Now()) {
-		approveCreator(t, store, creatorID, approvalID, "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	} else if !ok || !approval.ValidFor(approvalID, "approval-version-1", environment, time.Now()) {
+		approveCreator(t, store, creatorID, approvalID, "approval-version-1", environment, time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
 	}
 	nonce, err := store.IssueRootRegistrationNonce(context.Background(), trustpool.RootRegistrationNonceIssue{
 		CreatorAccountID:       creatorID,
 		ApprovalRecordID:       approvalID,
 		CurrentApprovalVersion: "approval-version-1",
-		LaunchEnvironment:      "candidate",
+		LaunchEnvironment:      environment,
 		Purpose:                trustpool.RootRegistrationPurposeDefault,
 		ExpiresAtUTC:           expiresAt,
 	})

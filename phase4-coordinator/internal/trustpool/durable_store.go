@@ -32,6 +32,8 @@ const (
 	LifecyclePaused   = "paused"
 	LifecycleDraining = "draining"
 	LifecycleRetired  = "retired"
+
+	promotionLaunchEnvironmentCandidate = "candidate"
 )
 
 var (
@@ -39,9 +41,25 @@ var (
 	ErrConflictingOperationID      = errors.New("trustpool: conflicting operation id")
 	ErrMalformedDurableEvent       = errors.New("trustpool: malformed durable event history")
 	ErrActivationRequiresPromotion = errors.New("trustpool: active lifecycle requires promotion gate")
+	ErrPromotionPreconditionFailed = errors.New("trustpool: promotion precondition failed")
 	ErrRootRegistrationNonce       = errors.New("trustpool: invalid root registration nonce")
 	ErrCreatorApprovalGate         = errors.New("trustpool: creator approval gate failed")
 )
+
+type PromotionPreconditionError struct {
+	Reason string
+}
+
+func (e PromotionPreconditionError) Error() string {
+	if e.Reason == "" {
+		return ErrPromotionPreconditionFailed.Error()
+	}
+	return ErrPromotionPreconditionFailed.Error() + ": " + e.Reason
+}
+
+func (e PromotionPreconditionError) Is(target error) bool {
+	return target == ErrPromotionPreconditionFailed
+}
 
 // DurableEvent is one append-only SPEC-043 pool control-plane fact. It records
 // enough to rebuild routeable pool membership, lifecycle, creator ownership for
@@ -714,6 +732,122 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 	return reconstructed, committed, applied, nil
 }
 
+// PromotePool is the only durable write path allowed to append an active
+// lifecycle event. It preflights the reconstructed pool state before writing,
+// then replays the full event history including the activation event before the
+// transaction commits. Raw AppendValidatedEvent keeps rejecting active lifecycle
+// events so operators cannot bypass these checks through the generic event API.
+func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*ReconstructedState, DurableEvent, bool, error) {
+	if s == nil || s.db == nil {
+		return nil, DurableEvent{}, false, ErrStoreClosed
+	}
+	e.EventType = EventLifecycleChanged
+	e.Lifecycle = LifecycleActive
+	timestampProvided := !e.TimestampUTC.IsZero()
+	if timestampProvided {
+		e.TimestampUTC = e.TimestampUTC.UTC()
+	}
+	var reconstructed *ReconstructedState
+	var committed DurableEvent
+	var applied bool
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		events, err := eventsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		approvals, err := creatorApprovalsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		for _, existing := range events {
+			if existing.OperationID != e.OperationID {
+				continue
+			}
+			if !timestampProvided {
+				e.TimestampUTC = existing.TimestampUTC.UTC()
+			}
+			if err := validateEvent(e); err != nil {
+				return err
+			}
+			payload, err := json.Marshal(e)
+			if err != nil {
+				return err
+			}
+			existingPayload, err := json.Marshal(existing)
+			if err != nil {
+				return err
+			}
+			if string(existingPayload) != string(payload) {
+				return ErrConflictingOperationID
+			}
+			reconstructed, err = reconstructEventsWithApprovals(events, approvals, time.Now().UTC())
+			committed = existing
+			applied = false
+			return err
+		}
+		if !timestampProvided {
+			e.TimestampUTC = time.Now().UTC()
+		}
+		if err := validateEvent(e); err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		preState, err := reconstructEventsWithApprovals(events, approvals, now)
+		if err != nil {
+			return err
+		}
+		if err := preState.validatePromotion(e, now); err != nil {
+			return err
+		}
+		next := append(append([]DurableEvent(nil), events...), e)
+		state, err := reconstructEventsWithApprovals(next, approvals, now)
+		if err != nil {
+			return err
+		}
+		payload, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		_, err = conn.ExecContext(ctx, `
+	INSERT INTO trustpool_events (
+	    operation_id, ts_utc, event_type, pool_id, creator_account_id, approval_record_id, provider_id,
+	    buyer_account_id, lifecycle, min_binary_version, manifest_version,
+	    manifest_core_digest, root_issuer_key_id, root_issuer_public_key_fingerprint,
+	    launch_environment, current_approval_version, reason, payload_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			e.OperationID,
+			e.TimestampUTC.Format(time.RFC3339Nano),
+			e.EventType,
+			e.PoolID,
+			nullString(e.CreatorAccountID),
+			nullString(e.ApprovalRecordID),
+			nullString(e.ProviderID),
+			nullString(e.BuyerAccountID),
+			nullString(e.Lifecycle),
+			nullString(e.MinBinaryVersion),
+			e.ManifestVersion,
+			nullString(e.ManifestCoreDigest),
+			nullString(e.RootIssuerKeyID),
+			nullString(e.RootIssuerPublicKeyFingerprint),
+			nullString(e.LaunchEnvironment),
+			nullString(e.CurrentApprovalVersion),
+			nullString(e.Reason),
+			string(payload),
+		)
+		if err != nil {
+			return err
+		}
+		reconstructed = state
+		committed = e
+		applied = true
+		return nil
+	})
+	if err != nil {
+		return nil, DurableEvent{}, false, err
+	}
+	return reconstructed, committed, applied, nil
+}
+
 func consumeRootRegistrationNonce(ctx context.Context, conn *sql.Conn, e DurableEvent, acceptedAt time.Time) error {
 	var creatorAccountID, approvalRecordID, currentApprovalVersion, launchEnvironment, purpose, expiresRaw string
 	var consumedOperationID sql.NullString
@@ -1232,6 +1366,60 @@ func (s *ReconstructedState) validateMutationCreatorGate(e DurableEvent, now tim
 		return ErrCreatorApprovalGate
 	}
 	return nil
+}
+
+func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time) error {
+	if s == nil {
+		return PromotionPreconditionError{Reason: "state_unavailable"}
+	}
+	if e.EventType != EventLifecycleChanged || e.Lifecycle != LifecycleActive {
+		return PromotionPreconditionError{Reason: "invalid_promotion_event"}
+	}
+	p := s.Pools[e.PoolID]
+	if p == nil {
+		return PromotionPreconditionError{Reason: "pool_not_found"}
+	}
+	if p.Lifecycle != LifecycleCreated {
+		return PromotionPreconditionError{Reason: "lifecycle_" + p.Lifecycle}
+	}
+	if p.RootIssuer == nil {
+		return PromotionPreconditionError{Reason: "root_issuer_missing"}
+	}
+	if p.RootIssuer.LaunchEnvironment != promotionLaunchEnvironmentCandidate {
+		return PromotionPreconditionError{Reason: "launch_environment_not_candidate"}
+	}
+	if p.ManifestVersion == 0 || p.ManifestCoreDigest == "" {
+		return PromotionPreconditionError{Reason: "manifest_missing"}
+	}
+	if p.CreatorGateReason != "" {
+		return PromotionPreconditionError{Reason: p.CreatorGateReason}
+	}
+	if len(p.BuyerAccounts) == 0 {
+		return PromotionPreconditionError{Reason: "buyer_authorization_missing"}
+	}
+	if nonRevokedMemberCountFromMaps(p.Members, p.Revoked) == 0 {
+		return PromotionPreconditionError{Reason: "member_missing"}
+	}
+	if s.CreatorApprovals != nil {
+		approval, ok := s.CreatorApprovals[p.CreatorAccountID]
+		if !ok {
+			return PromotionPreconditionError{Reason: "creator_approval_missing"}
+		}
+		if !approval.ValidFor(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now) {
+			return PromotionPreconditionError{Reason: approval.InvalidReason(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now)}
+		}
+	}
+	return nil
+}
+
+func nonRevokedMemberCountFromMaps(members, revoked map[string]bool) int {
+	var n int
+	for id := range members {
+		if !revoked[id] {
+			n++
+		}
+	}
+	return n
 }
 
 func mutationRequiresEnabledCreator(e DurableEvent) bool {

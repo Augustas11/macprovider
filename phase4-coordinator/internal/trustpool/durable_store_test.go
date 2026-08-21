@@ -52,6 +52,259 @@ func TestDurableStore_AppendValidatedEventRejectsRawActivation(t *testing.T) {
 	}
 }
 
+func TestDurableStore_PromotePoolActivatesAfterPreflight(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000600, 0).UTC()
+	root := newRootFixture(t)
+	events := []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+		ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-a"
+		}),
+		ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+			e.BuyerAccountID = "acct-a"
+		}),
+	}
+	for _, e := range events {
+		if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
+			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+		}
+	}
+
+	state, committed, applied, err := store.PromotePool(ctx, trustpool.DurableEvent{
+		OperationID: "op-promote",
+		PoolID:      root.poolID,
+	})
+	if err != nil {
+		t.Fatalf("PromotePool: %v", err)
+	}
+	if !applied || committed.EventType != trustpool.EventLifecycleChanged || committed.Lifecycle != trustpool.LifecycleActive {
+		t.Fatalf("promotion committed=%+v applied=%v, want new active event", committed, applied)
+	}
+	if got := state.Pools[root.poolID].Lifecycle; got != trustpool.LifecycleActive {
+		t.Fatalf("lifecycle after promotion = %q, want active", got)
+	}
+	registry, err := state.BuildRegistry()
+	if err != nil {
+		t.Fatalf("BuildRegistry: %v", err)
+	}
+	snap := registry.Snapshot(root.poolID)
+	if !snap.Exists || !snap.Routeable || !snap.Members["provider-a"] {
+		t.Fatalf("routeable snapshot after promotion = %+v, want provider-a routeable", snap)
+	}
+	if !registry.BuyerAuthorized(root.poolID, "acct-a") {
+		t.Fatal("acct-a should remain authorized after promotion")
+	}
+
+	againState, againCommitted, againApplied, err := store.PromotePool(ctx, trustpool.DurableEvent{
+		OperationID: "op-promote",
+		PoolID:      root.poolID,
+	})
+	if err != nil {
+		t.Fatalf("PromotePool idempotent retry: %v", err)
+	}
+	if againApplied {
+		t.Fatal("idempotent promotion retry applied a second event")
+	}
+	if againCommitted.OperationID != committed.OperationID || againCommitted.TimestampUTC != committed.TimestampUTC {
+		t.Fatalf("idempotent committed event = %+v, want original %+v", againCommitted, committed)
+	}
+	if againState.Revision != state.Revision {
+		t.Fatalf("idempotent revision = %d, want unchanged %d", againState.Revision, state.Revision)
+	}
+}
+
+func TestDurableStore_PromotePoolRejectsMissingPreconditions(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	ts := time.Unix(1800000700, 0).UTC()
+	tests := []struct {
+		name   string
+		build  func(*testing.T, *trustpool.Store, rootFixture)
+		poolID func(rootFixture) string
+		want   string
+	}{
+		{
+			name:   "pool not found",
+			build:  func(*testing.T, *trustpool.Store, rootFixture) {},
+			poolID: func(root rootFixture) string { return root.poolID },
+			want:   "pool_not_found",
+		},
+		{
+			name: "root issuer missing",
+			build: func(t *testing.T, store *trustpool.Store, root rootFixture) {
+				appendTrustPoolEvents(t, ctx, store,
+					ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+						e.CreatorAccountID = "creator-a"
+						e.ApprovalRecordID = "approval-v1"
+					}),
+				)
+			},
+			want: "root_issuer_missing",
+		},
+		{
+			name: "manifest missing",
+			build: func(t *testing.T, store *trustpool.Store, root rootFixture) {
+				appendTrustPoolEvents(t, ctx, store,
+					ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+						e.CreatorAccountID = "creator-a"
+						e.ApprovalRecordID = "approval-v1"
+					}),
+					signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+				)
+			},
+			want: "manifest_missing",
+		},
+		{
+			name: "member missing",
+			build: func(t *testing.T, store *trustpool.Store, root rootFixture) {
+				appendTrustPoolEvents(t, ctx, store,
+					ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+						e.CreatorAccountID = "creator-a"
+						e.ApprovalRecordID = "approval-v1"
+					}),
+					signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+					signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+					ev("op-buyer", ts.Add(3*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+						e.BuyerAccountID = "acct-a"
+					}),
+				)
+			},
+			want: "member_missing",
+		},
+		{
+			name: "buyer authorization missing",
+			build: func(t *testing.T, store *trustpool.Store, root rootFixture) {
+				appendTrustPoolEvents(t, ctx, store,
+					ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+						e.CreatorAccountID = "creator-a"
+						e.ApprovalRecordID = "approval-v1"
+					}),
+					signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+					signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+					ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+						e.ProviderID = "provider-a"
+					}),
+				)
+			},
+			want: "buyer_authorization_missing",
+		},
+		{
+			name: "creator suspended",
+			build: func(t *testing.T, store *trustpool.Store, root rootFixture) {
+				appendTrustPoolEvents(t, ctx, store,
+					ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+						e.CreatorAccountID = "creator-a"
+						e.ApprovalRecordID = "approval-v1"
+					}),
+					signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+					signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+					ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+						e.ProviderID = "provider-a"
+					}),
+					ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+						e.BuyerAccountID = "acct-a"
+					}),
+				)
+				approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusSuspended)
+			},
+			want: "creator_suspended",
+		},
+		{
+			name: "production launch environment requires future gate",
+			build: func(t *testing.T, store *trustpool.Store, root rootFixture) {
+				approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "production", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+				appendTrustPoolEvents(t, ctx, store,
+					ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+						e.CreatorAccountID = "creator-a"
+						e.ApprovalRecordID = "approval-v1"
+					}),
+					signedRootRegistrationForIssueInEnvironment(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonceInEnvironment(t, store, "creator-a", "approval-v1", "production", ts.Add(time.Hour)), root, "production"),
+					signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+					ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+						e.ProviderID = "provider-a"
+					}),
+					ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+						e.BuyerAccountID = "acct-a"
+					}),
+				)
+			},
+			want: "launch_environment_not_candidate",
+		},
+		{
+			name: "paused reactivation requires future sweep",
+			build: func(t *testing.T, store *trustpool.Store, root rootFixture) {
+				appendTrustPoolEvents(t, ctx, store,
+					ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+						e.CreatorAccountID = "creator-a"
+						e.ApprovalRecordID = "approval-v1"
+					}),
+					signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+					signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+					ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+						e.ProviderID = "provider-a"
+					}),
+					ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+						e.BuyerAccountID = "acct-a"
+					}),
+				)
+				if _, _, _, err := store.PromotePool(ctx, trustpool.DurableEvent{
+					OperationID:  "op-first-promote",
+					TimestampUTC: ts.Add(5 * time.Second),
+					PoolID:       root.poolID,
+				}); err != nil {
+					t.Fatalf("first PromotePool: %v", err)
+				}
+				appendTrustPoolEvents(t, ctx, store,
+					ev("op-pause", ts.Add(6*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
+						e.Lifecycle = trustpool.LifecyclePaused
+					}),
+				)
+			},
+			want: "lifecycle_paused",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, err := trustpool.NewStore(openTrustPoolDB(t))
+			if err != nil {
+				t.Fatalf("NewStore: %v", err)
+			}
+			root := newRootFixture(t)
+			poolID := root.poolID
+			if tc.poolID == nil {
+				tc.poolID = func(rootFixture) string { return poolID }
+			}
+			approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+			tc.build(t, store, root)
+			_, _, _, err = store.PromotePool(ctx, trustpool.DurableEvent{
+				OperationID: "op-promote",
+				PoolID:      tc.poolID(root),
+			})
+			var precondition trustpool.PromotionPreconditionError
+			if !errors.As(err, &precondition) {
+				t.Fatalf("PromotePool err=%v, want PromotionPreconditionError", err)
+			}
+			if precondition.Reason != tc.want {
+				t.Fatalf("precondition reason = %q, want %q", precondition.Reason, tc.want)
+			}
+		})
+	}
+}
+
 func TestDurableStore_ReconstructsRouteableRegistryAcrossRestart(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -750,7 +1003,7 @@ func TestReconstructEvents_RejectsInvalidLifecycleTransitions(t *testing.T) {
 			},
 		},
 		{
-			name: "paused cannot reactivate through raw lifecycle event",
+			name: "paused cannot reactivate without sweep evidence",
 			events: append(prefix(),
 				ev("op-pause", ts.Add(4*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
 					e.Lifecycle = trustpool.LifecyclePaused
@@ -954,6 +1207,15 @@ INSERT INTO trustpool_events (
 		string(raw),
 	); err != nil {
 		t.Fatalf("insert promoted event: %v", err)
+	}
+}
+
+func appendTrustPoolEvents(t *testing.T, ctx context.Context, store *trustpool.Store, events ...trustpool.DurableEvent) {
+	t.Helper()
+	for _, e := range events {
+		if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
+			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+		}
 	}
 }
 
