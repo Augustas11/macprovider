@@ -1286,7 +1286,7 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			BuyerAccounts:     buyers,
 			MinBinaryVersion:  p.MinBinaryVersion,
 			Routeable:         routeable,
-			Generation:        p.EffectiveGeneration(),
+			Generation:        p.RouteableSnapshotGeneration(),
 			RouteableUntilUTC: p.CreatorGateExpiresAtUTC,
 		})
 	}
@@ -1301,6 +1301,14 @@ func (p *ReconstructedPoolState) EffectiveGeneration() uint64 {
 		return p.RouteableGeneration
 	}
 	return p.Generation
+}
+
+func (p *ReconstructedPoolState) RouteableSnapshotGeneration() uint64 {
+	generation := p.EffectiveGeneration()
+	if p != nil && p.Lifecycle == LifecycleActive && p.CreatorGateReason != "" {
+		generation++
+	}
+	return generation
 }
 
 func (s *ReconstructedState) BuildRegistry() (*Registry, error) {

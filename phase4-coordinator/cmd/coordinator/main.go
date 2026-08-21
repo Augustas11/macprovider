@@ -890,6 +890,25 @@ func main() {
 		}
 		if trustPoolsReady {
 			buyerOpts = append(buyerOpts, buyer.WithPoolMembership(trustPoolRegistry))
+			trustpool.StartRefreshLoop(
+				shutdownCtx,
+				trustPoolStore,
+				trustPoolRegistry,
+				time.Duration(cfg.TrustedPools.RefreshIntervalS)*time.Second,
+				func(result trustpool.RefreshResult, err error) {
+					if err != nil {
+						logger.Error().Err(err).Msg("trusted pools refresh failed; retaining last routeable registry")
+						return
+					}
+					if result.Changed {
+						logger.Info().
+							Uint64("revision", result.Revision).
+							Int("pool_count", result.PoolCount).
+							Int("routeable_pool_count", result.RouteableCount).
+							Msg("trusted pools routeable registry refreshed")
+					}
+				},
+			)
 		}
 	} else {
 		logger.Info().Msg("trusted pools disabled; coordinator will not advertise pool support")

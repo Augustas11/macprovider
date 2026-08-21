@@ -166,7 +166,7 @@ func (h *adminHandler) handleAppendEvent(w http.ResponseWriter, r *http.Request)
 	}
 	writeAdminJSON(w, http.StatusAccepted, map[string]any{
 		"event": committed,
-		"pool":  adminPoolResponse(state.Pools[committed.PoolID]),
+		"pool":  adminPoolResponse(state.Pools[committed.PoolID], state.RouteGateCheckedAt),
 	})
 }
 
@@ -188,7 +188,7 @@ func (h *adminHandler) handleListPools(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(ids)
 	pools := make([]adminPoolState, 0, len(ids))
 	for _, id := range ids {
-		pools = append(pools, adminPoolResponse(state.Pools[id]))
+		pools = append(pools, adminPoolResponse(state.Pools[id], state.RouteGateCheckedAt))
 	}
 	writeAdminJSON(w, http.StatusOK, map[string]any{"pools": pools})
 }
@@ -214,7 +214,7 @@ func (h *adminHandler) handleGetPool(w http.ResponseWriter, r *http.Request) {
 		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
 		return
 	}
-	writeAdminJSON(w, http.StatusOK, map[string]any{"pool": adminPoolResponse(pool)})
+	writeAdminJSON(w, http.StatusOK, map[string]any{"pool": adminPoolResponse(pool, state.RouteGateCheckedAt)})
 }
 
 func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
@@ -302,12 +302,15 @@ type adminPoolState struct {
 	Revoked                        []string `json:"revoked"`
 	BuyerAccounts                  []string `json:"buyer_accounts"`
 	Generation                     uint64   `json:"generation"`
+	RouteableGeneration            uint64   `json:"routeable_generation"`
 	LastEventAtUTC                 string   `json:"last_event_at_utc,omitempty"`
 	Routeable                      bool     `json:"routeable"`
 	CreatorGateReason              string   `json:"creator_gate_reason,omitempty"`
+	CreatorGateExpiresAtUTC        string   `json:"creator_gate_expires_at_utc,omitempty"`
+	RouteGateCheckedAtUTC          string   `json:"route_gate_checked_at_utc,omitempty"`
 }
 
-func adminPoolResponse(p *ReconstructedPoolState) adminPoolState {
+func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) adminPoolState {
 	if p == nil {
 		return adminPoolState{}
 	}
@@ -317,6 +320,14 @@ func adminPoolResponse(p *ReconstructedPoolState) adminPoolState {
 	lastEventAt := ""
 	if !p.LastEventAtUTC.IsZero() {
 		lastEventAt = p.LastEventAtUTC.UTC().Format(time.RFC3339Nano)
+	}
+	creatorGateExpiresAt := ""
+	if !p.CreatorGateExpiresAtUTC.IsZero() {
+		creatorGateExpiresAt = p.CreatorGateExpiresAtUTC.UTC().Format(time.RFC3339Nano)
+	}
+	routeGateCheckedAtRaw := ""
+	if !routeGateCheckedAt.IsZero() {
+		routeGateCheckedAtRaw = routeGateCheckedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return adminPoolState{
 		PoolID:                         p.PoolID,
@@ -334,9 +345,12 @@ func adminPoolResponse(p *ReconstructedPoolState) adminPoolState {
 		Revoked:                        revoked,
 		BuyerAccounts:                  buyers,
 		Generation:                     p.Generation,
+		RouteableGeneration:            p.RouteableSnapshotGeneration(),
 		LastEventAtUTC:                 lastEventAt,
 		Routeable:                      p.Lifecycle == LifecycleActive && p.CreatorGateReason == "",
 		CreatorGateReason:              p.CreatorGateReason,
+		CreatorGateExpiresAtUTC:        creatorGateExpiresAt,
+		RouteGateCheckedAtUTC:          routeGateCheckedAtRaw,
 	}
 }
 

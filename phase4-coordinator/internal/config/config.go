@@ -1029,7 +1029,8 @@ type StorageConfig struct {
 // with that reconstructed registry; reconstruction failure disables pool support
 // while preserving global routing.
 type TrustedPoolsConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled          bool `yaml:"enabled"`
+	RefreshIntervalS int  `yaml:"refresh_interval_s"`
 }
 
 type LoggingConfig struct {
@@ -1340,6 +1341,10 @@ func Default() Config {
 			SnapshotIntervalS:       300,
 			RequestLogRetentionDays: 90,
 			AuditLogRetentionDays:   90,
+		},
+		TrustedPools: TrustedPoolsConfig{
+			Enabled:          false,
+			RefreshIntervalS: 30,
 		},
 		Logging: LoggingConfig{
 			Level:  "info",
@@ -2098,6 +2103,9 @@ func (c Config) Validate() error {
 	}
 	if c.TrustedPools.Enabled && !c.Coordinator.RequireGatewayContext {
 		return fmt.Errorf("trusted_pools.enabled requires coordinator.require_gateway_context=true")
+	}
+	if c.TrustedPools.Enabled && (c.TrustedPools.RefreshIntervalS <= 0 || c.TrustedPools.RefreshIntervalS > 60) {
+		return fmt.Errorf("trusted_pools.refresh_interval_s must be in [1,60] when trusted_pools.enabled=true")
 	}
 	if err := c.validateCompatibilitySet(); err != nil {
 		return err
