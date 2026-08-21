@@ -1,6 +1,10 @@
 package trustpool
 
 import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -48,12 +52,20 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleAppendEvent(w, r)
 	case r.URL.Path == "/admin/trust-pools/creators":
 		h.handleUpsertCreator(w, r)
+	case r.URL.Path == "/admin/trust-pools/root-registration-nonces":
+		h.handleIssueRootRegistrationNonce(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/creators/"):
 		h.handleGetCreator(w, r)
 	case r.URL.Path == "/admin/trust-pools/pools":
 		h.handleListPools(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/promote"):
 		h.handlePromotePool(w, r)
+	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/audit"):
+		h.handlePoolAudit(w, r)
+	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/health"):
+		h.handlePoolHealth(w, r)
+	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/distribution"):
+		h.handlePoolDistribution(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/"):
 		h.handleGetPool(w, r)
 	default:
@@ -118,6 +130,38 @@ func (h *adminHandler) handleGetCreator(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeAdminJSON(w, http.StatusOK, map[string]any{"creator": approval})
+}
+
+func (h *adminHandler) handleIssueRootRegistrationNonce(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	var issue RootRegistrationNonceIssue
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&issue); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	operationID, err := resolveOperationID(strings.TrimSpace(issue.OperationID), r.Header)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	issue.OperationID = operationID
+	record, err := h.deps.Store.IssueRootRegistrationNonce(r.Context(), issue)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	writeAdminJSON(w, http.StatusCreated, map[string]any{"root_registration_nonce": record})
 }
 
 func (h *adminHandler) handleAppendEvent(w http.ResponseWriter, r *http.Request) {
@@ -269,6 +313,177 @@ func (h *adminHandler) handleGetPool(w http.ResponseWriter, r *http.Request) {
 	writeAdminJSON(w, http.StatusOK, map[string]any{"pool": adminPoolResponse(pool, state.RouteGateCheckedAt)})
 }
 
+func (h *adminHandler) handlePoolAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := poolIDFromSuffixedAdminPath(r.URL.Path, "/audit")
+	if poolID == "" {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+		return
+	}
+	if state.Pools[poolID] == nil {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	events, err := h.deps.Store.Events(r.Context())
+	if err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "audit_lookup_failed"}})
+		return
+	}
+	filtered := make([]DurableEvent, 0)
+	rootRegistrationOps := make(map[string]bool)
+	for _, e := range events {
+		if e.PoolID == poolID {
+			filtered = append(filtered, e)
+			if e.EventType == EventRootIssuerRegistered && e.OperationID != "" {
+				rootRegistrationOps[e.OperationID] = true
+			}
+		}
+	}
+	nonceAudit, err := h.rootRegistrationNonceAuditRecords(r.Context(), state.Pools[poolID], rootRegistrationOps)
+	if err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "audit_lookup_failed"}})
+		return
+	}
+	var creatorApproval any
+	if approval, ok := state.CreatorApprovals[state.Pools[poolID].CreatorAccountID]; ok {
+		creatorApproval = approval
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{
+		"pool_id":                   poolID,
+		"creator_approval":          creatorApproval,
+		"root_registration_nonces":  nonceAudit,
+		"events":                    filtered,
+		"nonce_material_disclosure": "nonce digests are exported here; consumed nonce material may still appear inside root-registration durable events for replay compatibility",
+	})
+}
+
+type adminRootRegistrationNonceAudit struct {
+	OperationID            string `json:"operation_id,omitempty"`
+	NonceSHA256            string `json:"nonce_sha256"`
+	CreatorAccountID       string `json:"creator_account_id"`
+	ApprovalRecordID       string `json:"approval_record_id"`
+	CurrentApprovalVersion string `json:"current_approval_version"`
+	LaunchEnvironment      string `json:"launch_environment"`
+	Purpose                string `json:"purpose"`
+	ExpiresAtUTC           string `json:"expires_at_utc"`
+	IssuedAtUTC            string `json:"issued_at_utc"`
+	ConsumedOperationID    string `json:"consumed_operation_id,omitempty"`
+	ConsumedAtUTC          string `json:"consumed_at_utc,omitempty"`
+}
+
+func (h *adminHandler) rootRegistrationNonceAuditRecords(ctx context.Context, pool *ReconstructedPoolState, rootRegistrationOps map[string]bool) ([]adminRootRegistrationNonceAudit, error) {
+	if h == nil || h.deps.Store == nil || h.deps.Store.db == nil || pool == nil || len(rootRegistrationOps) == 0 {
+		return nil, nil
+	}
+	rows, err := h.deps.Store.db.QueryContext(ctx, `
+SELECT operation_id, nonce, creator_account_id, approval_record_id, current_approval_version,
+       launch_environment, purpose, expires_at_utc, issued_at_utc, consumed_operation_id, consumed_at_utc
+FROM trustpool_root_registration_nonces
+WHERE creator_account_id = ? AND approval_record_id = ?
+ORDER BY issued_at_utc`, pool.CreatorAccountID, pool.ApprovalRecordID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]adminRootRegistrationNonceAudit, 0)
+	for rows.Next() {
+		var record adminRootRegistrationNonceAudit
+		var operationID, consumedOperationID, consumedAt sql.NullString
+		var nonce string
+		if err := rows.Scan(
+			&operationID,
+			&nonce,
+			&record.CreatorAccountID,
+			&record.ApprovalRecordID,
+			&record.CurrentApprovalVersion,
+			&record.LaunchEnvironment,
+			&record.Purpose,
+			&record.ExpiresAtUTC,
+			&record.IssuedAtUTC,
+			&consumedOperationID,
+			&consumedAt,
+		); err != nil {
+			return nil, err
+		}
+		if !consumedOperationID.Valid || !rootRegistrationOps[consumedOperationID.String] {
+			continue
+		}
+		if operationID.Valid {
+			record.OperationID = operationID.String
+		}
+		digest := sha256.Sum256([]byte(nonce))
+		record.NonceSHA256 = hex.EncodeToString(digest[:])
+		if consumedOperationID.Valid {
+			record.ConsumedOperationID = consumedOperationID.String
+		}
+		if consumedAt.Valid {
+			record.ConsumedAtUTC = consumedAt.String
+		}
+		out = append(out, record)
+	}
+	return out, rows.Err()
+}
+
+func (h *adminHandler) handlePoolHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := poolIDFromSuffixedAdminPath(r.URL.Path, "/health")
+	if poolID == "" {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+		return
+	}
+	pool := state.Pools[poolID]
+	if pool == nil {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{
+		"pool_id":       poolID,
+		"health_events": adminHealthEvents(pool, state.RouteGateCheckedAt),
+	})
+}
+
+func (h *adminHandler) handlePoolDistribution(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := poolIDFromSuffixedAdminPath(r.URL.Path, "/distribution")
+	if poolID == "" {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+		return
+	}
+	pool := state.Pools[poolID]
+	if pool == nil {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"distribution_package": buildAdminDistributionPackage(pool, state)})
+}
+
 func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrConflictingOperationID):
@@ -342,6 +557,14 @@ func normalizeAdminEvent(r *http.Request, e DurableEvent) (DurableEvent, error) 
 	e.RootRegistrationPurpose = strings.TrimSpace(e.RootRegistrationPurpose)
 	e.RootRegistrationEnvironment = strings.TrimSpace(e.RootRegistrationEnvironment)
 	return e, nil
+}
+
+func poolIDFromSuffixedAdminPath(path, suffix string) string {
+	poolID := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(path, suffix), "/admin/trust-pools/pools/"))
+	if poolID == "" || strings.Contains(poolID, "/") {
+		return ""
+	}
+	return poolID
 }
 
 func resolveOperationID(bodyOperationID string, headers http.Header) (string, error) {
@@ -429,6 +652,90 @@ func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) 
 	}
 }
 
+type adminHealthEvent struct {
+	EventClass            string `json:"event_class"`
+	Severity              string `json:"severity"`
+	PoolID                string `json:"pool_id"`
+	Lifecycle             string `json:"lifecycle"`
+	Reason                string `json:"reason,omitempty"`
+	Routeable             bool   `json:"routeable"`
+	Generation            uint64 `json:"generation"`
+	RouteGateCheckedAtUTC string `json:"route_gate_checked_at_utc,omitempty"`
+}
+
+func adminHealthEvents(p *ReconstructedPoolState, routeGateCheckedAt time.Time) []adminHealthEvent {
+	routeable := p.Lifecycle == LifecycleActive && p.CreatorGateReason == ""
+	reason := p.CreatorGateReason
+	if reason == "" && p.Lifecycle != LifecycleActive {
+		reason = "lifecycle_" + p.Lifecycle
+	}
+	severity := "info"
+	eventClass := "pool_routeable"
+	if !routeable {
+		severity = "warning"
+		eventClass = "pool_not_routeable"
+	}
+	checkedAt := ""
+	if !routeGateCheckedAt.IsZero() {
+		checkedAt = routeGateCheckedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return []adminHealthEvent{{
+		EventClass:            eventClass,
+		Severity:              severity,
+		PoolID:                p.PoolID,
+		Lifecycle:             p.Lifecycle,
+		Reason:                reason,
+		Routeable:             routeable,
+		Generation:            p.EffectiveGeneration(),
+		RouteGateCheckedAtUTC: checkedAt,
+	}}
+}
+
+type adminDistributionPackage struct {
+	PackageSchemaVersion string   `json:"package_schema_version"`
+	PoolID               string   `json:"pool_id"`
+	CreatorAccountID     string   `json:"creator_account_id"`
+	PublicDisplayName    string   `json:"public_display_name,omitempty"`
+	Lifecycle            string   `json:"lifecycle"`
+	LaunchEnvironment    string   `json:"launch_environment,omitempty"`
+	Routeable            bool     `json:"routeable"`
+	CandidateOnly        bool     `json:"candidate_only"`
+	ProductionReady      bool     `json:"production_ready"`
+	ManifestVersion      uint64   `json:"manifest_version"`
+	ManifestCoreDigest   string   `json:"manifest_core_digest,omitempty"`
+	BuyerAccounts        []string `json:"buyer_accounts"`
+	Disclosures          []string `json:"disclosures"`
+}
+
+func buildAdminDistributionPackage(p *ReconstructedPoolState, state *ReconstructedState) adminDistributionPackage {
+	pkg := adminDistributionPackage{
+		PackageSchemaVersion: "macprovider.trustpool-distribution-package.v1",
+		PoolID:               p.PoolID,
+		CreatorAccountID:     p.CreatorAccountID,
+		Lifecycle:            p.Lifecycle,
+		LaunchEnvironment:    rootIssuerLaunchEnvironment(p),
+		Routeable:            p.Lifecycle == LifecycleActive && p.CreatorGateReason == "",
+		CandidateOnly:        true,
+		ProductionReady:      false,
+		ManifestVersion:      p.ManifestVersion,
+		ManifestCoreDigest:   p.ManifestCoreDigest,
+		BuyerAccounts:        sortedTrueKeys(p.BuyerAccounts),
+		Disclosures: []string{
+			"pool_id is not a bearer secret; access is credential-bound",
+			"this distribution package is candidate/admin evidence and is not a production launch artifact",
+			"prompts and responses are visible to the MacProvider coordinator",
+			"prompts and responses may be visible to the selected provider operator",
+			"this package describes a Trusted Pool, not a Privacy Pool",
+		},
+	}
+	if state != nil {
+		if approval, ok := state.CreatorApprovals[p.CreatorAccountID]; ok {
+			pkg.PublicDisplayName = approval.PublicDisplayName
+		}
+	}
+	return pkg
+}
+
 func rootIssuerKeyID(p *ReconstructedPoolState) string {
 	if p == nil || p.RootIssuer == nil {
 		return ""
@@ -463,6 +770,7 @@ func sortedTrueKeys(in map[string]bool) []string {
 
 func writeAdminJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	envelope := map[string]any{"schema_version": AdminSchemaVersion}
 	if fields, ok := payload.(map[string]any); ok {

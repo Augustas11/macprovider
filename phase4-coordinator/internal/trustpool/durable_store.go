@@ -182,19 +182,20 @@ CREATE TABLE IF NOT EXISTS trustpool_events (
 CREATE INDEX IF NOT EXISTS idx_trustpool_events_pool_id ON trustpool_events(pool_id, id);
 CREATE INDEX IF NOT EXISTS idx_trustpool_events_creator ON trustpool_events(creator_account_id, id);
 CREATE INDEX IF NOT EXISTS idx_trustpool_events_event_type ON trustpool_events(event_type, id);
-CREATE TABLE IF NOT EXISTS trustpool_root_registration_nonces (
-    nonce TEXT PRIMARY KEY,
-    creator_account_id TEXT NOT NULL,
-    approval_record_id TEXT NOT NULL,
-    current_approval_version TEXT NOT NULL,
+	CREATE TABLE IF NOT EXISTS trustpool_root_registration_nonces (
+	    nonce TEXT PRIMARY KEY,
+	    operation_id TEXT,
+	    creator_account_id TEXT NOT NULL,
+	    approval_record_id TEXT NOT NULL,
+	    current_approval_version TEXT NOT NULL,
     launch_environment TEXT NOT NULL,
     purpose TEXT NOT NULL,
     expires_at_utc TEXT NOT NULL,
     issued_at_utc TEXT NOT NULL,
     consumed_operation_id TEXT,
     consumed_at_utc TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_trustpool_root_registration_nonces_creator ON trustpool_root_registration_nonces(creator_account_id, issued_at_utc);
+	);
+	CREATE INDEX IF NOT EXISTS idx_trustpool_root_registration_nonces_creator ON trustpool_root_registration_nonces(creator_account_id, issued_at_utc);
 CREATE TABLE IF NOT EXISTS trustpool_creator_approvals (
     creator_account_id TEXT PRIMARY KEY,
     approval_record_id TEXT NOT NULL,
@@ -238,6 +239,9 @@ CREATE INDEX IF NOT EXISTS idx_trustpool_creator_approvals_status ON trustpool_c
 	if err := s.ensureColumn(ctx, "trustpool_creator_approvals", "data_retention_category", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "trustpool_root_registration_nonces", "operation_id", "TEXT"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "trustpool_events", "approval_record_id", "TEXT"); err != nil {
 		return err
 	}
@@ -257,28 +261,33 @@ CREATE INDEX IF NOT EXISTS idx_trustpool_creator_approvals_status ON trustpool_c
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_trustpool_events_approval ON trustpool_events(approval_record_id, id)`); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_trustpool_events_root_fingerprint ON trustpool_events(root_issuer_public_key_fingerprint, id)`)
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_trustpool_events_root_fingerprint ON trustpool_events(root_issuer_public_key_fingerprint, id)`); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_trustpool_root_registration_nonces_operation ON trustpool_root_registration_nonces(operation_id) WHERE operation_id IS NOT NULL`)
 	return err
 }
 
 type RootRegistrationNonceIssue struct {
-	CreatorAccountID       string
-	ApprovalRecordID       string
-	CurrentApprovalVersion string
-	LaunchEnvironment      string
-	Purpose                string
-	ExpiresAtUTC           time.Time
+	OperationID            string    `json:"operation_id"`
+	CreatorAccountID       string    `json:"creator_account_id"`
+	ApprovalRecordID       string    `json:"approval_record_id"`
+	CurrentApprovalVersion string    `json:"current_approval_version"`
+	LaunchEnvironment      string    `json:"launch_environment"`
+	Purpose                string    `json:"purpose,omitempty"`
+	ExpiresAtUTC           time.Time `json:"expires_at_utc"`
 }
 
 type RootRegistrationNonceRecord struct {
-	Nonce                  string
-	CreatorAccountID       string
-	ApprovalRecordID       string
-	CurrentApprovalVersion string
-	LaunchEnvironment      string
-	Purpose                string
-	ExpiresAtUTC           time.Time
-	IssuedAtUTC            time.Time
+	Nonce                  string    `json:"nonce"`
+	OperationID            string    `json:"operation_id"`
+	CreatorAccountID       string    `json:"creator_account_id"`
+	ApprovalRecordID       string    `json:"approval_record_id"`
+	CurrentApprovalVersion string    `json:"current_approval_version"`
+	LaunchEnvironment      string    `json:"launch_environment"`
+	Purpose                string    `json:"purpose"`
+	ExpiresAtUTC           time.Time `json:"expires_at_utc"`
+	IssuedAtUTC            time.Time `json:"issued_at_utc"`
 }
 
 func (s *Store) UpsertCreatorApproval(ctx context.Context, approval CreatorApproval) (CreatorApproval, error) {
@@ -441,6 +450,7 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 	if s == nil || s.db == nil {
 		return RootRegistrationNonceRecord{}, ErrStoreClosed
 	}
+	issue.OperationID = strings.TrimSpace(issue.OperationID)
 	issue.CreatorAccountID = strings.TrimSpace(issue.CreatorAccountID)
 	issue.ApprovalRecordID = strings.TrimSpace(issue.ApprovalRecordID)
 	issue.CurrentApprovalVersion = strings.TrimSpace(issue.CurrentApprovalVersion)
@@ -449,7 +459,7 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 	if issue.Purpose == "" {
 		issue.Purpose = RootRegistrationPurposeDefault
 	}
-	if issue.CreatorAccountID == "" || issue.ApprovalRecordID == "" || issue.CurrentApprovalVersion == "" ||
+	if issue.OperationID == "" || issue.CreatorAccountID == "" || issue.ApprovalRecordID == "" || issue.CurrentApprovalVersion == "" ||
 		issue.LaunchEnvironment == "" || issue.Purpose != RootRegistrationPurposeDefault || issue.ExpiresAtUTC.IsZero() {
 		return RootRegistrationNonceRecord{}, ErrRootRegistrationNonce
 	}
@@ -464,6 +474,7 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 	}
 	record := RootRegistrationNonceRecord{
 		Nonce:                  base64.RawURLEncoding.EncodeToString(nonceBytes[:]),
+		OperationID:            issue.OperationID,
 		CreatorAccountID:       issue.CreatorAccountID,
 		ApprovalRecordID:       issue.ApprovalRecordID,
 		CurrentApprovalVersion: issue.CurrentApprovalVersion,
@@ -473,6 +484,17 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 		IssuedAtUTC:            now,
 	}
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		existing, ok, err := rootRegistrationNonceByOperationID(ctx, conn, issue.OperationID)
+		if err != nil {
+			return err
+		}
+		if ok {
+			if rootRegistrationNonceMatchesIssue(existing, issue) {
+				record = existing
+				return nil
+			}
+			return ErrConflictingOperationID
+		}
 		approval, ok, err := creatorApprovalFromQueryer(ctx, conn, issue.CreatorAccountID)
 		if err != nil {
 			return err
@@ -481,11 +503,12 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 			return ErrCreatorApprovalGate
 		}
 		_, err = conn.ExecContext(ctx, `
-INSERT INTO trustpool_root_registration_nonces (
-    nonce, creator_account_id, approval_record_id, current_approval_version,
-    launch_environment, purpose, expires_at_utc, issued_at_utc
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	INSERT INTO trustpool_root_registration_nonces (
+	    nonce, operation_id, creator_account_id, approval_record_id, current_approval_version,
+	    launch_environment, purpose, expires_at_utc, issued_at_utc
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			record.Nonce,
+			record.OperationID,
 			record.CreatorAccountID,
 			record.ApprovalRecordID,
 			record.CurrentApprovalVersion,
@@ -494,12 +517,76 @@ INSERT INTO trustpool_root_registration_nonces (
 			record.ExpiresAtUTC.Format(time.RFC3339Nano),
 			record.IssuedAtUTC.Format(time.RFC3339Nano),
 		)
+		if err != nil {
+			existing, ok, lookupErr := rootRegistrationNonceByOperationID(ctx, conn, issue.OperationID)
+			if lookupErr == nil && ok {
+				if rootRegistrationNonceMatchesIssue(existing, issue) {
+					record = existing
+					return nil
+				}
+				return ErrConflictingOperationID
+			}
+		}
 		return err
 	})
 	if err != nil {
 		return RootRegistrationNonceRecord{}, err
 	}
 	return record, nil
+}
+
+type rootNonceQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func rootRegistrationNonceByOperationID(ctx context.Context, q rootNonceQueryer, operationID string) (RootRegistrationNonceRecord, bool, error) {
+	if strings.TrimSpace(operationID) == "" {
+		return RootRegistrationNonceRecord{}, false, nil
+	}
+	var record RootRegistrationNonceRecord
+	var expiresRaw, issuedRaw string
+	err := q.QueryRowContext(ctx, `
+SELECT nonce, operation_id, creator_account_id, approval_record_id, current_approval_version,
+       launch_environment, purpose, expires_at_utc, issued_at_utc
+FROM trustpool_root_registration_nonces
+WHERE operation_id = ?`, strings.TrimSpace(operationID)).Scan(
+		&record.Nonce,
+		&record.OperationID,
+		&record.CreatorAccountID,
+		&record.ApprovalRecordID,
+		&record.CurrentApprovalVersion,
+		&record.LaunchEnvironment,
+		&record.Purpose,
+		&expiresRaw,
+		&issuedRaw,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RootRegistrationNonceRecord{}, false, nil
+	}
+	if err != nil {
+		return RootRegistrationNonceRecord{}, false, err
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, expiresRaw)
+	if err != nil {
+		return RootRegistrationNonceRecord{}, false, ErrRootRegistrationNonce
+	}
+	issuedAt, err := time.Parse(time.RFC3339Nano, issuedRaw)
+	if err != nil {
+		return RootRegistrationNonceRecord{}, false, ErrRootRegistrationNonce
+	}
+	record.ExpiresAtUTC = expiresAt.UTC()
+	record.IssuedAtUTC = issuedAt.UTC()
+	return record, true, nil
+}
+
+func rootRegistrationNonceMatchesIssue(record RootRegistrationNonceRecord, issue RootRegistrationNonceIssue) bool {
+	return record.OperationID == strings.TrimSpace(issue.OperationID) &&
+		record.CreatorAccountID == strings.TrimSpace(issue.CreatorAccountID) &&
+		record.ApprovalRecordID == strings.TrimSpace(issue.ApprovalRecordID) &&
+		record.CurrentApprovalVersion == strings.TrimSpace(issue.CurrentApprovalVersion) &&
+		record.LaunchEnvironment == strings.TrimSpace(issue.LaunchEnvironment) &&
+		record.Purpose == strings.TrimSpace(issue.Purpose) &&
+		record.ExpiresAtUTC.UTC().Equal(issue.ExpiresAtUTC.UTC())
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table, column, decl string) error {

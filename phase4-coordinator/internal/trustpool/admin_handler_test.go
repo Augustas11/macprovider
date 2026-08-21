@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -306,6 +307,168 @@ func TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry(t *testing.T) {
 	}
 	if body.Pool.CreatorGateReason != "creator_suspended" || body.Pool.RouteableGeneration == 0 || body.Pool.RouteGateCheckedAtUTC == "" {
 		t.Fatalf("GET pool gate fields = %+v, want suspended gate status", body.Pool)
+	}
+}
+
+func TestAdminHandler_IssuesRootNonceAndExportsPoolArtifacts(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    trustpool.NewRegistry(),
+		OperatorKey: "operator-secret",
+	})
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+
+	nonceBody, err := json.Marshal(trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce",
+		CreatorAccountID:       "creator-a",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		ExpiresAtUTC:           testAdminTS(3600),
+	})
+	if err != nil {
+		t.Fatalf("marshal nonce issue: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/root-registration-nonces", bytes.NewReader(nonceBody))
+	req.Header.Set("Authorization", "Bearer operator-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST nonce status=%d body=%s, want 201", rec.Code, rec.Body.String())
+	}
+	assertAdminSchemaVersion(t, rec)
+	var nonceResp struct {
+		RootRegistrationNonce trustpool.RootRegistrationNonceRecord `json:"root_registration_nonce"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &nonceResp); err != nil {
+		t.Fatalf("decode nonce response: %v", err)
+	}
+	if nonceResp.RootRegistrationNonce.Nonce == "" || nonceResp.RootRegistrationNonce.CreatorAccountID != "creator-a" {
+		t.Fatalf("nonce response = %+v", nonceResp.RootRegistrationNonce)
+	}
+	retryReq := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/root-registration-nonces", bytes.NewReader(nonceBody))
+	retryReq.Header.Set("Authorization", "Bearer operator-secret")
+	retryRec := httptest.NewRecorder()
+	handler.ServeHTTP(retryRec, retryReq)
+	if retryRec.Code != http.StatusCreated {
+		t.Fatalf("POST nonce retry status=%d body=%s, want 201", retryRec.Code, retryRec.Body.String())
+	}
+	var retryNonceResp struct {
+		RootRegistrationNonce trustpool.RootRegistrationNonceRecord `json:"root_registration_nonce"`
+	}
+	if err := json.Unmarshal(retryRec.Body.Bytes(), &retryNonceResp); err != nil {
+		t.Fatalf("decode retry nonce response: %v", err)
+	}
+	if retryNonceResp.RootRegistrationNonce.Nonce != nonceResp.RootRegistrationNonce.Nonce {
+		t.Fatalf("retry nonce = %q, want original %q", retryNonceResp.RootRegistrationNonce.Nonce, nonceResp.RootRegistrationNonce.Nonce)
+	}
+
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:        trustpool.EventPoolCreated,
+		PoolID:           root.poolID,
+		CreatorAccountID: "creator-a",
+		ApprovalRecordID: "approval-v1",
+	}, "op-create", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", signedRootRegistrationForIssue(t, "op-root", testAdminTS(1), root.poolID, "creator-a", "approval-v1", nonceResp.RootRegistrationNonce, root), "op-root", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", signedManifest(t, "op-manifest", testAdminTS(2), root.poolID, 1, root), "op-manifest", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberAdmitted,
+		PoolID:     root.poolID,
+		ProviderID: "provider-a",
+	}, "op-member", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:      trustpool.EventBuyerAuthorized,
+		PoolID:         root.poolID,
+		BuyerAccountID: "acct-a",
+	}, "op-buyer", http.StatusAccepted)
+
+	root2 := newRootFixture(t)
+	nonceBody2, err := json.Marshal(trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce-2",
+		CreatorAccountID:       "creator-a",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		ExpiresAtUTC:           testAdminTS(7200),
+	})
+	if err != nil {
+		t.Fatalf("marshal second nonce issue: %v", err)
+	}
+	req2 := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/root-registration-nonces", bytes.NewReader(nonceBody2))
+	req2.Header.Set("Authorization", "Bearer operator-secret")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("POST second nonce status=%d body=%s, want 201", rec2.Code, rec2.Body.String())
+	}
+	var nonceResp2 struct {
+		RootRegistrationNonce trustpool.RootRegistrationNonceRecord `json:"root_registration_nonce"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &nonceResp2); err != nil {
+		t.Fatalf("decode second nonce response: %v", err)
+	}
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:        trustpool.EventPoolCreated,
+		PoolID:           root2.poolID,
+		CreatorAccountID: "creator-a",
+		ApprovalRecordID: "approval-v1",
+	}, "op-create-2", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", signedRootRegistrationForIssue(t, "op-root-2", testAdminTS(3), root2.poolID, "creator-a", "approval-v1", nonceResp2.RootRegistrationNonce, root2), "op-root-2", http.StatusAccepted)
+
+	for _, tc := range []struct {
+		path        string
+		wants       []string
+		wantsAbsent []string
+	}{
+		{
+			path: "/admin/trust-pools/pools/" + root.poolID + "/audit",
+			wants: []string{
+				`"events"`,
+				`"creator_approval"`,
+				`"root_registration_nonces"`,
+				`"nonce_sha256"`,
+				`"operation_id":"op-nonce"`,
+			},
+			wantsAbsent: []string{`op-nonce-2`},
+		},
+		{path: "/admin/trust-pools/pools/" + root.poolID + "/health", wants: []string{`"health_events"`}},
+		{
+			path: "/admin/trust-pools/pools/" + root.poolID + "/distribution",
+			wants: []string{
+				`"distribution_package"`,
+				`"candidate_only":true`,
+				`"production_ready":false`,
+				`"launch_environment":"candidate"`,
+			},
+		},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.Header.Set("Authorization", "Bearer operator-secret")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status=%d body=%s, want 200", tc.path, rec.Code, rec.Body.String())
+		}
+		assertAdminSchemaVersion(t, rec)
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("GET %s Cache-Control=%q, want no-store", tc.path, got)
+		}
+		for _, want := range tc.wants {
+			if !strings.Contains(rec.Body.String(), want) {
+				t.Fatalf("GET %s body=%s missing %s", tc.path, rec.Body.String(), want)
+			}
+		}
+		for _, wantAbsent := range tc.wantsAbsent {
+			if strings.Contains(rec.Body.String(), wantAbsent) {
+				t.Fatalf("GET %s body=%s unexpectedly included %s", tc.path, rec.Body.String(), wantAbsent)
+			}
+		}
 	}
 }
 

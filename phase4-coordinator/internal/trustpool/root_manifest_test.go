@@ -363,7 +363,12 @@ func issueRootNonceInEnvironment(t *testing.T, store *trustpool.Store, creatorID
 	} else if !ok || !approval.ValidFor(approvalID, "approval-version-1", environment, time.Now()) {
 		approveCreator(t, store, creatorID, approvalID, "approval-version-1", environment, time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
 	}
+	var operationBytes [8]byte
+	if _, err := rand.Read(operationBytes[:]); err != nil {
+		t.Fatalf("rand operation id: %v", err)
+	}
 	nonce, err := store.IssueRootRegistrationNonce(context.Background(), trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce-" + base64.RawURLEncoding.EncodeToString(operationBytes[:]),
 		CreatorAccountID:       creatorID,
 		ApprovalRecordID:       approvalID,
 		CurrentApprovalVersion: "approval-version-1",
