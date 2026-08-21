@@ -24,6 +24,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
@@ -49,6 +50,38 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 	}
 	if server.IdleTimeout == 0 {
 		t.Fatal("IdleTimeout must be set")
+	}
+}
+
+func TestLoadTrustedPoolsDisablesPoolSupportOnReconstructionFailure(t *testing.T) {
+	ctx := context.Background()
+	reqLogStore, err := requestlog.OpenStore(filepath.Join(t.TempDir(), "request-log.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = reqLogStore.Close() })
+	if _, err := trustpool.NewStore(reqLogStore.DB()); err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if _, err := reqLogStore.DB().ExecContext(ctx, `
+INSERT INTO trustpool_events (operation_id, ts_utc, event_type, pool_id, payload_json)
+VALUES (?, ?, ?, ?, ?)`,
+		"op-bad", time.Unix(1800009000, 0).UTC().Format(time.RFC3339Nano), trustpool.EventPoolCreated, "pool-a", "{not-json",
+	); err != nil {
+		t.Fatalf("insert malformed trustpool event: %v", err)
+	}
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	store, registry, ready, err := loadTrustedPools(ctx, reqLogStore.DB(), logger)
+	if err != nil {
+		t.Fatalf("loadTrustedPools error = %v, want non-fatal nil", err)
+	}
+	if ready || store != nil || registry != nil {
+		t.Fatalf("loadTrustedPools ready=%v store=%v registry=%v, want pool support disabled", ready, store != nil, registry != nil)
+	}
+	if !strings.Contains(logs.String(), "pool support disabled") {
+		t.Fatalf("logs missing disabled message: %s", logs.String())
 	}
 }
 

@@ -75,7 +75,7 @@
         "SPEC-002",
         "SPEC-034"
       ],
-      "implementation_status": "pending-reconciliation",
+      "implementation_status": "partial",
       "production_status": "pending-verification",
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
@@ -1258,6 +1258,44 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
         "rationale": "Pool control plane is a new authority domain (pool-control-plane). No pool_id exists across routing/admission/snapshots/logs/receipts/settlement/payout/disclosure today, so Layer 2 traffic is deploy-blocked. First implementation lands default-off with fail-closed conformance tests; no conformance promotion until signed journey-result evidence exists. Layer 2 administrative trust only; cryptographic privacy is SPEC-041/Layer 3."
+      }
+    },
+    {
+      "spec_id": "SPEC-043",
+      "title": "Trusted Pool Creator Onboarding MVP",
+      "version": "0.1.0",
+      "path": "specs/SPEC-043-trusted-pool-creator-onboarding.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "trusted-pool-creator-onboarding"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-015",
+        "SPEC-016",
+        "SPEC-020",
+        "SPEC-022",
+        "SPEC-040",
+        "SPEC-042"
+      ],
+      "implementation_status": "partial",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, replay-checked operator admin event append surface for candidate/restrictive state, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin mutations, coordinator-side buyer authorization enforcement, and lifecycle fail-closed tests. Raw operator admin events cannot activate a routeable pool; requirements remain pending until creator approval, root-key registration, signed manifest verification, creator-managed buyer scope administration, promise surfaces, signed journey, and rollback gates are implemented."
       }
     }
   ],
@@ -5339,6 +5377,294 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
         "rationale": "Manifest authority + signer-set key lifecycle: slice 2 (v0.0.9) implements policy-core signature verification against a signer set; slice 3 (v0.0.10) implements the append-only, hash-chained AUTHORITY LOG that establishes/versions those signer sets and sets their revocation state - the authority-log-entry content byte grammar + hash + signing preimage, and BuildAuthorityLog chain-replay verification (structural signer-set validation, strictly-monotonic signer_set_version/rollback reject, prev-hash chain, revokes_versions prior-existing-only, and authorization by one root-issuer signature or M-of-N of a prior still-authorized lower-versioned set), materializing signer_set_version -> SignerSet for policy-core verification - frozen by golden vectors (genesis->rotate->revoke). Slice 5 (v0.0.12) adds verdict-replay reconstruction (ReconstructPool in persist.go): a recorded acceptance verdict is replayed on restart rather than re-evaluated against the current wall-clock, grandfathering a policy accepted before its signer set was later revoked. Still deferred: wiring the durable snapshot into the coordinator store and the highest-accepted-version persistence, signed emergency pool-lifecycle control messages (R011/R003), operator-provenance binding, and root-issuer-compromise supersedes lineage."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R001",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Approved creator account: no creator approval store or launch approval workflow exists yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R002",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/poolmanifest/manifest.go:type IdentityCore"
+      ],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Creator root issuer registration: SPEC-042 identity-core primitives exist, but no creator-bound root-key registration workflow or durable registry exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R003",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/poolmanifest/authoritylog.go:func BuildAuthorityLog",
+        "phase4-coordinator/internal/poolmanifest/policyhistory.go:func BuildPolicyHistory"
+      ],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Pool creation request: manifest verification primitives exist, but no external creation request handler, duplicate-pool check, durable acceptance write, or created-state initialization exists."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R004",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/poolmanifest/persist.go:func ReconstructPool",
+        "phase4-coordinator/internal/trustpool/registry.go:type Registry",
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) LoadRouteableSnapshotsAtRevision",
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Snapshot",
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) AuthorizeAndSnapshot",
+        "phase4-coordinator/internal/trustpool/durable_store.go:type Store",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) AppendValidatedEvent",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) Reconstruct",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *ReconstructedState) BuildRegistry"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ReconstructsRouteableRegistryAcrossRestart",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_AppendValidatedEventRejectsRawActivation",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PausedPoolReplaysButFailsClosedForRouting",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_IdempotentOperationAndConflict",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestReconstructEvents_RejectsMalformedStateMachine",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestReconstructEvents_RejectsInvalidLifecycleTransitions",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestReconstructEvents_RejectsManifestAndFloorDowngrades",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestReconstructEvents_RejectsDuplicateOperationIDs",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_RejectsColumnPayloadOperationMismatchOnReplay",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_ReplayChecksBeforeAppend",
+        "phase4-coordinator/internal/buyer/server_test.go:TestPoolHeaderForNonRouteablePoolFailsUnavailable",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestRegistryLoadRouteableSnapshots_AllOrNothingValidation",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestRegistryLoadRouteableSnapshotsAtRevisionRejectsStalePublish"
+      ],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Durable coordinator state: a default-off SQLite event ledger, idempotent append path, replay-checked candidate/restrictive admin append path, exported-append rejection of raw active lifecycle publication, read-at-boot replay model, routeable registry reconstruction, membership/blocklist/lifecycle snapshotting, revision-fenced live registry refresh, buyer-authorization snapshot reads, and startup wiring are implemented locally. Still pending: signed manifest acceptance write path, root/authority records beyond MVP labels, production promotion append path, production migration evidence, and signed journey evidence."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R005",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/trustpool/admin_handler.go:type AdminDeps",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func NewAdminHandler",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleAppendEvent",
+        "phase4-coordinator/cmd/coordinator/main.go:func main"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_AppendsCandidateEventsAndRejectsActivation",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_RejectsUnauthorized",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_ReplayChecksBeforeAppend",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_IdempotencyConflict",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_ConflictingOperationIDSourcesRejected"
+      ],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Creator administration surface: a default-off operator-only API now appends replay-checked durable pool-control events for candidate/restrictive state, returns schema-versioned envelopes, rejects conflicting operation-id sources, rejects raw active lifecycle transitions, and refreshes live non-routeable candidate state including buyer authorization grants. Still pending: creator-authenticated CLI/API, approval/root gates, signed manifest submission, signer rotation, audited promotion path, audit export, and policy-aware authorization beyond raw MVP events."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R006",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) AddMember",
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Revoke",
+        "phase4-coordinator/internal/trustpool/durable_store.go:EventMemberAdmitted",
+        "phase4-coordinator/internal/trustpool/durable_store.go:EventMemberRevoked",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func ReconstructEvents"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ReconstructsRouteableRegistryAcrossRestart",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PausedPoolReplaysButFailsClosedForRouting"
+      ],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Single-operator membership model: durable member-admit/member-revoke events now replay into the routeable registry and preserve revoked-provider fail-closed behavior across restart. Still pending: creator-owned admin authorization, delegation proof verification, admitted-Mac ownership checks, and predicate verification at admission time."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R007",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/config/config.go:type TrustedPoolsConfig",
+        "phase5-gateway/internal/router/pool_selection.go:func (s *Server) resolvePoolSelection",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *ReconstructedState) RouteableSnapshots",
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) BuyerAuthorized",
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) AuthorizeAndSnapshot",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) handleChatCompletions"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ReconstructsRouteableRegistryAcrossRestart",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_AppendsCandidateEventsAndRejectsActivation",
+        "phase4-coordinator/internal/buyer/server_test.go:TestPoolHeaderRequiresAuthorizedBuyerAccount",
+        "phase4-coordinator/internal/buyer/server_test.go:TestPoolHeaderForNonRouteablePoolFailsUnavailable"
+      ],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Buyer authorization: static gateway account_pools config exists as a seam, and coordinator-side durable buyer authorization events now replay into the trustpool registry and fail closed at pool-selected request time. Still pending: creator-managed buyer/API-key administration, gateway DB refresh from coordinator state, per-key scopes, wallet-session pool binding, and negative-path timing oracle proof."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R008",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/server.go:func WithPoolMembership",
+        "phase4-coordinator/internal/config/config.go:type TrustedPoolsConfig",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func NewAdminHandler",
+        "phase4-coordinator/cmd/coordinator/main.go:func main"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ReconstructsRouteableRegistryAcrossRestart",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PausedPoolReplaysButFailsClosedForRouting",
+        "phase4-coordinator/internal/buyer/server_test.go:TestPoolHeaderWithPoolFeatureOffFailsClosed",
+        "phase4-coordinator/internal/buyer/server_test.go:TestInvalidPoolHeaderFailsClosedInsteadOfGlobalRouting",
+        "phase4-coordinator/internal/config/config_test.go:TestTrustedPoolsEnabledRequiresGatewayContext",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_AppendsCandidateEventsAndRejectsActivation",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestLoadTrustedPoolsDisablesPoolSupportOnReconstructionFailure",
+        "phase4-coordinator/internal/buyer/spec042_pools_advertisement_test.go:TestInternalRoutingAdvertisesPoolCapability"
+      ],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Production enablement gate: coordinator startup now has a default-off trusted_pools.enabled switch that reconstructs durable state, wires WithPoolMembership only after successful replay, mounts a candidate/restrictive operator admin surface only in the enabled mode, and disables pool support without failing global startup when durable reconstruction fails; otherwise it does not advertise pool support. The current admin/exported append surfaces reject raw active lifecycle transitions, so routeable production activation still requires a future promotion gate. Still pending: creator approval/root gates, promise surfaces, live activation checks, signed launch evidence, and production rollout proof."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R009",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Public promise and claim control: pool_policy.json, pool_status.json, creator provenance disclosure, and machine-enforced overclaim rejection are not implemented."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R010",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/route_snapshot.go:type RouteSnapshot"
+      ],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Settlement and payout boundaries: route-snapshot pool_id binding exists, but creator split payout is intentionally not implemented and manifest version/digest settlement context remains incomplete."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R011",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) poolGenerationStale",
+        "phase4-coordinator/internal/trustpool/durable_store.go:EventLifecycleChanged",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *ReconstructedState) RouteableSnapshots"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PausedPoolReplaysButFailsClosedForRouting",
+        "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_LoopFenceRejectsStaleBeforeDispatch"
+      ],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Lifecycle and emergency control: durable lifecycle-change events now replay into routeable snapshots, and non-active pools expose zero routeable members while preserving generation. Existing buyer generation fencing remains in place. Still pending: signed lifecycle commands, break-glass RBAC/audit/status, notifications, positive override TTL, and root-compromise retirement controls."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R012",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "Launch evidence and rollback: no signed create-to-route-to-settle-to-pause journey exists yet."
       }
     }
   ]

@@ -13,7 +13,8 @@
         "SPEC-002",
         "SPEC-003",
         "SPEC-008",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-043"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -29,7 +30,8 @@
         "SPEC-006",
         "SPEC-031",
         "SPEC-032",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-043"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -44,7 +46,8 @@
         "SPEC-025",
         "SPEC-026",
         "SPEC-027",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-043"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -78,7 +81,8 @@
         "SPEC-039",
         "SPEC-040",
         "SPEC-041",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-043"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -96,7 +100,8 @@
         "SPEC-024",
         "SPEC-040",
         "SPEC-041",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-043"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -122,7 +127,8 @@
         "SPEC-022",
         "SPEC-032",
         "SPEC-033",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-043"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -240,7 +246,8 @@
         "SPEC-039",
         "SPEC-040",
         "SPEC-041",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-043"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -253,7 +260,8 @@
       "consumers": [
         "SPEC-021",
         "SPEC-022",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-043"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -304,7 +312,8 @@
         "SPEC-003",
         "SPEC-025",
         "SPEC-026",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-043"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -333,7 +342,8 @@
         "SPEC-021",
         "SPEC-040",
         "SPEC-041",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-043"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -573,7 +583,8 @@
       "owner_spec": "SPEC-040",
       "consumers": [
         "SPEC-041",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-043"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -594,6 +605,17 @@
     {
       "id": "pool-control-plane",
       "owner_spec": "SPEC-042",
+      "consumers": [
+        "SPEC-043"
+      ],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/1053"
+    },
+    {
+      "id": "trusted-pool-creator-onboarding",
+      "owner_spec": "SPEC-043",
       "consumers": [],
       "status": "declared",
       "requires_signed_journey_result": true,
