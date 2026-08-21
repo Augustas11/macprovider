@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 	_ "modernc.org/sqlite"
@@ -125,6 +128,69 @@ func TestDurableStore_PromotePoolActivatesAfterPreflight(t *testing.T) {
 	}
 }
 
+func TestDurableStore_RouteabilityFailsClosedWhenMinEligibleMembersDropsAfterPromotion(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000650, 0).UTC()
+	root := newRootFixture(t)
+	events := []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifestWithPolicyCoreMutation(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+			core.MinEligibleMembers = 2
+		}),
+		ev("op-member-a", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-a"
+		}),
+		ev("op-member-b", ts.Add(4*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-b"
+		}),
+		ev("op-buyer", ts.Add(5*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+			e.BuyerAccountID = "acct-a"
+		}),
+	}
+	for _, e := range events {
+		if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
+			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+		}
+	}
+	if _, _, _, err := store.PromotePool(ctx, trustpool.DurableEvent{
+		OperationID: "op-promote",
+		PoolID:      root.poolID,
+	}); err != nil {
+		t.Fatalf("PromotePool: %v", err)
+	}
+	if _, _, _, err := store.AppendValidatedEvent(ctx, ev("op-revoke-b", ts.Add(6*time.Second), trustpool.EventMemberRevoked, root.poolID, func(e *trustpool.DurableEvent) {
+		e.ProviderID = "provider-b"
+	})); err != nil {
+		t.Fatalf("AppendValidatedEvent revoke: %v", err)
+	}
+	state, err := store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	poolState := state.Pools[root.poolID]
+	registry, err := state.BuildRegistry()
+	if err != nil {
+		t.Fatalf("BuildRegistry: %v", err)
+	}
+	snap := registry.Snapshot(root.poolID)
+	if !snap.Exists || snap.Routeable || len(snap.Members) != 0 {
+		t.Fatalf("routeable snapshot after under-minimum revocation = %+v, want present but non-routeable with no members", snap)
+	}
+	if snap.Generation <= poolState.EffectiveGeneration() {
+		t.Fatalf("routeable generation = %d, want advanced over effective generation %d", snap.Generation, poolState.EffectiveGeneration())
+	}
+}
+
 func TestDurableStore_PromotePoolRejectsMissingPreconditions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -199,6 +265,28 @@ func TestDurableStore_PromotePoolRejectsMissingPreconditions(t *testing.T) {
 				)
 			},
 			want: "buyer_authorization_missing",
+		},
+		{
+			name: "manifest min eligible members unmet",
+			build: func(t *testing.T, store *trustpool.Store, root rootFixture) {
+				appendTrustPoolEvents(t, ctx, store,
+					ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+						e.CreatorAccountID = "creator-a"
+						e.ApprovalRecordID = "approval-v1"
+					}),
+					signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+					signedManifestWithPolicyCoreMutation(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+						core.MinEligibleMembers = 2
+					}),
+					ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+						e.ProviderID = "provider-a"
+					}),
+					ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+						e.BuyerAccountID = "acct-a"
+					}),
+				)
+			},
+			want: "member_missing",
 		},
 		{
 			name: "creator suspended",
@@ -754,6 +842,103 @@ func TestDurableStore_CreatorApprovalRequiresR001Fields(t *testing.T) {
 	}
 }
 
+func TestDurableStore_CreatorApprovalRejectsBuyerVisiblePromiseClaims(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		mutate func(*trustpool.CreatorApproval)
+	}{
+		{name: "creator_account_id", mutate: func(a *trustpool.CreatorApproval) { a.CreatorAccountID = "privacy-pool-law" }},
+		{name: "approval_record_id", mutate: func(a *trustpool.CreatorApproval) { a.ApprovalRecordID = "approval-zero-knowledge" }},
+		{name: "current_approval_version", mutate: func(a *trustpool.CreatorApproval) { a.CurrentApprovalVersion = "end-to-end-encryption-v1" }},
+		{name: "public_display_name", mutate: func(a *trustpool.CreatorApproval) { a.PublicDisplayName = "Privacy Pool" }},
+		{name: "ferpa_public_display_name", mutate: func(a *trustpool.CreatorApproval) { a.PublicDisplayName = "FERPA compliant pool" }},
+		{name: "allowed_product_category", mutate: func(a *trustpool.CreatorApproval) { a.AllowedProductCategory = "confidential compute" }},
+		{name: "data_retention_category", mutate: func(a *trustpool.CreatorApproval) { a.DataRetentionCategory = "HIPAA" }},
+		{name: "allowed_launch_environment", mutate: func(a *trustpool.CreatorApproval) { a.AllowedLaunchEnvironment = "zk inference" }},
+		{name: "zk_public_display_name", mutate: func(a *trustpool.CreatorApproval) { a.PublicDisplayName = "ZK proof pool" }},
+		{name: "standalone_zk_public_display_name", mutate: func(a *trustpool.CreatorApproval) { a.PublicDisplayName = "ZK-backed Trusted Pool" }},
+		{name: "creator_agreement_id", mutate: func(a *trustpool.CreatorApproval) { a.CreatorAgreementID = "agreement-soc2" }},
+		{name: "creator_agreement_version", mutate: func(a *trustpool.CreatorApproval) { a.CreatorAgreementVersion = "gdpr adequacy" }},
+		{name: "pricing_schedule_id", mutate: func(a *trustpool.CreatorApproval) { a.PricingScheduleID = "pci-dss" }},
+		{name: "pricing_schedule_version", mutate: func(a *trustpool.CreatorApproval) { a.PricingScheduleVersion = "anonymous routing" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := trustpool.NewStore(openTrustPoolDB(t))
+			if err != nil {
+				t.Fatalf("NewStore: %v", err)
+			}
+			approval := validCreatorApproval("creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusEnabled)
+			tc.mutate(&approval)
+			if _, err := store.UpsertCreatorApproval(ctx, approval); !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+				t.Fatalf("UpsertCreatorApproval %s err=%v, want ErrProhibitedPromiseClaim", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestDurableStore_LegacyCreatorApprovalOverclaimFailsClosedOnRead(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	approval := validCreatorApproval("creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusEnabled)
+	approval.PublicDisplayName = "Privacy Pool"
+	now := time.Unix(1800004000, 0).UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO trustpool_creator_approvals (
+    creator_account_id, approval_record_id, current_approval_version,
+    public_display_name, legal_support_contact, billing_contact, emergency_notification_endpoint,
+    acknowledged_max_response_time, allowed_product_category, data_retention_category,
+    support_owner, allowed_launch_environment,
+    creator_agreement_id, creator_agreement_version, creator_agreement_expires_at_utc,
+    creator_agreement_grace_ends_at_utc, pricing_schedule_id, pricing_schedule_version,
+    prohibited_claim_acknowledgment_hash, buyer_disclosure_commitment_hash, approval_criteria_hash,
+    approved_by, approved_at_utc, approval_revision, status, suspension_reason, updated_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		approval.CreatorAccountID,
+		approval.ApprovalRecordID,
+		approval.CurrentApprovalVersion,
+		approval.PublicDisplayName,
+		approval.LegalSupportContact,
+		approval.BillingContact,
+		approval.EmergencyNotificationEndpoint,
+		approval.AcknowledgedMaxResponseTime,
+		approval.AllowedProductCategory,
+		approval.DataRetentionCategory,
+		approval.SupportOwner,
+		approval.AllowedLaunchEnvironment,
+		approval.CreatorAgreementID,
+		approval.CreatorAgreementVersion,
+		approval.CreatorAgreementExpiresAtUTC.Format(time.RFC3339Nano),
+		approval.CreatorAgreementGraceEndsAtUTC.Format(time.RFC3339Nano),
+		approval.PricingScheduleID,
+		approval.PricingScheduleVersion,
+		approval.ProhibitedClaimAcknowledgmentHash,
+		approval.BuyerDisclosureCommitmentHash,
+		approval.ApprovalCriteriaHash,
+		approval.ApprovedBy,
+		approval.ApprovedAtUTC.Format(time.RFC3339Nano),
+		1,
+		approval.Status,
+		approval.SuspensionReason,
+		now,
+	); err != nil {
+		t.Fatalf("insert legacy approval: %v", err)
+	}
+	if _, _, err := store.CreatorApproval(ctx, "creator-a"); !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+		t.Fatalf("CreatorApproval err=%v, want ErrProhibitedPromiseClaim", err)
+	}
+	if _, err := store.Reconstruct(ctx); !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+		t.Fatalf("Reconstruct err=%v, want ErrProhibitedPromiseClaim", err)
+	}
+}
+
 func TestDurableStore_CreatorApprovalExactRetryDoesNotBumpRevision(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1086,6 +1271,25 @@ func TestReconstructEvents_RejectsDuplicateOperationIDs(t *testing.T) {
 	}
 }
 
+func TestReconstructEvents_RejectsLifecycleReasonPromiseClaims(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800004100, 0).UTC()
+	root := newRootFixture(t)
+	events := []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		ev("op-pause", ts.Add(time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
+			e.Lifecycle = trustpool.LifecyclePaused
+			e.Reason = "HIPAA Privacy Pool review"
+		}),
+	}
+	if _, err := trustpool.ReconstructEvents(events); !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+		t.Fatalf("ReconstructEvents error = %v, want ErrProhibitedPromiseClaim", err)
+	}
+}
+
 func TestReconstructEvents_RejectsManifestAndFloorDowngrades(t *testing.T) {
 	t.Parallel()
 	ts := time.Unix(1800004200, 0).UTC()
@@ -1131,6 +1335,191 @@ func TestReconstructEvents_RejectsManifestAndFloorDowngrades(t *testing.T) {
 				t.Fatalf("ReconstructEvents error = %v, want ErrMalformedDurableEvent", err)
 			}
 		})
+	}
+}
+
+func TestReconstructEvents_RejectsExplicitFloorBelowManifestFloor(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800004300, 0).UTC()
+	root := newRootFixture(t)
+	prefix := []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistration(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", root),
+		signedManifestWithPolicyCoreMutation(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+			core.MinBinaryVersion = "1.8.33"
+		}),
+	}
+	tests := []struct {
+		name  string
+		event trustpool.DurableEvent
+	}{
+		{
+			name: "explicit floor cannot lower manifest floor",
+			event: ev("op-floor-low", ts.Add(3*time.Second), trustpool.EventMinBinaryVersionSet, root.poolID, func(e *trustpool.DurableEvent) {
+				e.MinBinaryVersion = "1.8.32"
+			}),
+		},
+		{
+			name: "explicit floor cannot clear manifest floor",
+			event: ev("op-floor-clear", ts.Add(3*time.Second), trustpool.EventMinBinaryVersionSet, root.poolID, func(e *trustpool.DurableEvent) {
+				e.MinBinaryVersion = ""
+			}),
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := trustpool.ReconstructEvents(append(append([]trustpool.DurableEvent(nil), prefix...), tc.event))
+			if !errors.Is(err, trustpool.ErrMalformedDurableEvent) {
+				t.Fatalf("ReconstructEvents error = %v, want ErrMalformedDurableEvent", err)
+			}
+		})
+	}
+}
+
+func TestReconstructEvents_RejectsManifestFloorDowngrade(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800004400, 0).UTC()
+	root := newRootFixture(t)
+	v1 := signedManifestWithPolicyCoreMutation(t, "op-manifest-1", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+		core.MinBinaryVersion = "1.8.33"
+		core.ExpiresAtUnix = 100
+	})
+	prefix := []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistration(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", root),
+		v1,
+	}
+	tests := []struct {
+		name string
+		v2   trustpool.DurableEvent
+	}{
+		{
+			name: "manifest floor cannot lower previous manifest floor",
+			v2: signedManifestExtendingWithPolicyCoreMutation(t, "op-manifest-2-low", ts.Add(3*time.Second), v1, root, func(core *poolmanifest.PolicyCore) {
+				core.MinBinaryVersion = "1.8.32"
+			}),
+		},
+		{
+			name: "manifest floor cannot clear previous manifest floor",
+			v2: signedManifestExtendingWithPolicyCoreMutation(t, "op-manifest-2-clear", ts.Add(3*time.Second), v1, root, func(core *poolmanifest.PolicyCore) {
+				core.MinBinaryVersion = ""
+			}),
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := trustpool.ReconstructEvents(append(append([]trustpool.DurableEvent(nil), prefix...), tc.v2))
+			if !errors.Is(err, trustpool.ErrMalformedDurableEvent) {
+				t.Fatalf("ReconstructEvents error = %v, want ErrMalformedDurableEvent", err)
+			}
+		})
+	}
+}
+
+func TestReconstructEvents_ManifestRaiseOverridesOlderExplicitFloor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800004500, 0).UTC()
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusEnabled)
+	v1 := signedManifestWithPolicyCoreMutation(t, "op-manifest-1", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+		core.MinBinaryVersion = "1.8.2"
+		core.ExpiresAtUnix = 100
+	})
+	v2 := signedManifestExtendingWithPolicyCoreMutation(t, "op-manifest-2-high", ts.Add(4*time.Second), v1, root, func(core *poolmanifest.PolicyCore) {
+		core.MinBinaryVersion = "1.8.33"
+	})
+	events := []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		v1,
+		ev("op-floor-explicit-low", ts.Add(3*time.Second), trustpool.EventMinBinaryVersionSet, root.poolID, func(e *trustpool.DurableEvent) {
+			e.MinBinaryVersion = "1.8.2"
+		}),
+		v2,
+		ev("op-member", ts.Add(5*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-a"
+		}),
+		ev("op-buyer", ts.Add(6*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+			e.BuyerAccountID = "acct-a"
+		}),
+	}
+	for _, e := range events {
+		if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
+			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+		}
+	}
+	state, err := store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	snapshots := state.RouteableSnapshots()
+	if len(snapshots) != 1 {
+		t.Fatalf("RouteableSnapshots len=%d, want 1", len(snapshots))
+	}
+	if snapshots[0].MinBinaryVersion != "1.8.33" {
+		t.Fatalf("routeable min_binary_version = %q, want raised manifest floor", snapshots[0].MinBinaryVersion)
+	}
+	registry, err := state.BuildRegistry()
+	if err != nil {
+		t.Fatalf("BuildRegistry: %v", err)
+	}
+	if snap := registry.Snapshot(root.poolID); snap.MinBinaryVersion != "1.8.33" {
+		t.Fatalf("registry min_binary_version = %q, want raised manifest floor", snap.MinBinaryVersion)
+	}
+	statusDoc, found, err := trustpool.BuildStatusDocument(ctx, store, registry, root.poolID, "acct-a", ts.Add(7*time.Second))
+	if err != nil || !found {
+		t.Fatalf("BuildStatusDocument found=%v err=%v, want found nil", found, err)
+	}
+	if statusDoc.Policy.MinBinaryVersion != "1.8.33" {
+		t.Fatalf("status min_binary_version = %q, want raised manifest floor", statusDoc.Policy.MinBinaryVersion)
+	}
+	policyDoc, found, err := trustpool.BuildPolicyDocument(ctx, store, registry, root.poolID, "acct-a", ts.Add(7*time.Second))
+	if err != nil || !found {
+		t.Fatalf("BuildPolicyDocument found=%v err=%v, want found nil", found, err)
+	}
+	if policyDoc.Policy.MinBinaryVersion != "1.8.33" {
+		t.Fatalf("policy min_binary_version = %q, want raised manifest floor", policyDoc.Policy.MinBinaryVersion)
+	}
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    registry,
+		OperatorKey: "operator-secret",
+	})
+	req := httptest.NewRequest(http.MethodGet, "/admin/trust-pools/pools/"+root.poolID, nil)
+	req.Header.Set("Authorization", "Bearer operator-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET pool status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Pool struct {
+			MinBinaryVersion string `json:"min_binary_version"`
+		} `json:"pool"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode GET pool body: %v", err)
+	}
+	if body.Pool.MinBinaryVersion != "1.8.33" {
+		t.Fatalf("admin min_binary_version = %q, want raised manifest floor", body.Pool.MinBinaryVersion)
 	}
 }
 

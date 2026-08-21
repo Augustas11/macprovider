@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
@@ -44,6 +45,7 @@ var (
 	ErrPromotionPreconditionFailed = errors.New("trustpool: promotion precondition failed")
 	ErrRootRegistrationNonce       = errors.New("trustpool: invalid root registration nonce")
 	ErrCreatorApprovalGate         = errors.New("trustpool: creator approval gate failed")
+	ErrProhibitedPromiseClaim      = errors.New("trustpool: prohibited promise claim")
 )
 
 type PromotionPreconditionError struct {
@@ -1157,6 +1159,10 @@ func scanCreatorApproval(row creatorApprovalScanner) (CreatorApproval, error) {
 	approval.PricingScheduleID = pricingID.String
 	approval.PricingScheduleVersion = pricingVersion.String
 	approval.SuspensionReason = suspension.String
+	approval = normalizeCreatorApproval(approval)
+	if err := validateCreatorApproval(approval); err != nil {
+		return CreatorApproval{}, err
+	}
 	return approval, nil
 }
 
@@ -1182,23 +1188,27 @@ type ReconstructedState struct {
 }
 
 type ReconstructedPoolState struct {
-	PoolID                  string
-	CreatorAccountID        string
-	ApprovalRecordID        string
-	Lifecycle               string
-	LifecycleReason         string
-	MinBinaryVersion        string
-	ManifestVersion         uint64
-	ManifestCoreDigest      string
-	RootIssuer              *ReconstructedRootIssuer
-	Members                 map[string]bool
-	Revoked                 map[string]bool
-	BuyerAccounts           map[string]bool
-	Generation              uint64
-	RouteableGeneration     uint64
-	LastEventAtUTC          time.Time
-	CreatorGateReason       string
-	CreatorGateExpiresAtUTC time.Time
+	PoolID                       string
+	CreatorAccountID             string
+	ApprovalRecordID             string
+	Lifecycle                    string
+	LifecycleReason              string
+	MinBinaryVersion             string
+	ManifestVersion              uint64
+	ManifestCoreDigest           string
+	ManifestMinEligibleMembers   uint64
+	ManifestMinBinaryVersion     string
+	ManifestRetentionPolicyID    string
+	ManifestSplitExecutionStatus string
+	RootIssuer                   *ReconstructedRootIssuer
+	Members                      map[string]bool
+	Revoked                      map[string]bool
+	BuyerAccounts                map[string]bool
+	Generation                   uint64
+	RouteableGeneration          uint64
+	LastEventAtUTC               time.Time
+	CreatorGateReason            string
+	CreatorGateExpiresAtUTC      time.Time
 }
 
 type ReconstructedRootIssuer struct {
@@ -1321,7 +1331,7 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		if e.RootIssuerKeyID != p.RootIssuer.KeyID || e.RootIssuerPublicKeyFingerprint != p.RootIssuer.PublicKeyFingerprint {
 			return nil, fmt.Errorf("%w: event %d manifest root issuer mismatch for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
 		}
-		prevDigest, err := VerifyManifestAcceptedEvent(e, *p.RootIssuer)
+		prevDigest, core, err := VerifyManifestAcceptedEvent(e, *p.RootIssuer)
 		if err != nil {
 			return nil, fmt.Errorf("%w: event %d manifest signature invalid: %v", ErrMalformedDurableEvent, index, err)
 		}
@@ -1335,8 +1345,22 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		if prevDigest != wantPrev {
 			return nil, fmt.Errorf("%w: event %d manifest prev hash %q does not match current digest %q for pool %q", ErrMalformedDurableEvent, index, prevDigest, wantPrev, e.PoolID)
 		}
+		currentFloor := policyMinBinaryVersion(p)
+		if currentFloor != "" && core.MinBinaryVersion == "" {
+			return nil, fmt.Errorf("%w: event %d clears min binary version for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
+		}
+		if currentFloor != "" && core.MinBinaryVersion != "" {
+			cmp, ok := versionfloor.Compare(core.MinBinaryVersion, currentFloor)
+			if !ok || cmp < 0 {
+				return nil, fmt.Errorf("%w: event %d lowers min binary version from %q to %q for pool %q", ErrMalformedDurableEvent, index, currentFloor, core.MinBinaryVersion, e.PoolID)
+			}
+		}
 		p.ManifestVersion = e.ManifestVersion
 		p.ManifestCoreDigest = e.ManifestCoreDigest
+		p.ManifestMinEligibleMembers = core.MinEligibleMembers
+		p.ManifestMinBinaryVersion = core.MinBinaryVersion
+		p.ManifestRetentionPolicyID = core.RetentionPolicyID
+		p.ManifestSplitExecutionStatus = core.SplitExecutionStatus
 	case EventLifecycleChanged:
 		if e.Lifecycle == LifecycleActive && p.ManifestVersion == 0 {
 			return nil, fmt.Errorf("%w: event %d active lifecycle before manifest_accepted for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
@@ -1358,13 +1382,14 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 	case EventBuyerAuthorizationRm:
 		delete(p.BuyerAccounts, e.BuyerAccountID)
 	case EventMinBinaryVersionSet:
-		if e.MinBinaryVersion == "" && p.MinBinaryVersion != "" {
+		currentFloor := policyMinBinaryVersion(p)
+		if e.MinBinaryVersion == "" && currentFloor != "" {
 			return nil, fmt.Errorf("%w: event %d clears min binary version for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
 		}
-		if p.MinBinaryVersion != "" && e.MinBinaryVersion != "" {
-			cmp, ok := versionfloor.Compare(e.MinBinaryVersion, p.MinBinaryVersion)
+		if currentFloor != "" && e.MinBinaryVersion != "" {
+			cmp, ok := versionfloor.Compare(e.MinBinaryVersion, currentFloor)
 			if !ok || cmp < 0 {
-				return nil, fmt.Errorf("%w: event %d lowers min binary version from %q to %q for pool %q", ErrMalformedDurableEvent, index, p.MinBinaryVersion, e.MinBinaryVersion, e.PoolID)
+				return nil, fmt.Errorf("%w: event %d lowers min binary version from %q to %q for pool %q", ErrMalformedDurableEvent, index, currentFloor, e.MinBinaryVersion, e.PoolID)
 			}
 		}
 		p.MinBinaryVersion = e.MinBinaryVersion
@@ -1484,7 +1509,7 @@ func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time) er
 	if len(p.BuyerAccounts) == 0 {
 		return PromotionPreconditionError{Reason: "buyer_authorization_missing"}
 	}
-	if nonRevokedMemberCountFromMaps(p.Members, p.Revoked) == 0 {
+	if nonRevokedMemberCountFromMaps(p.Members, p.Revoked) < policyMinEligibleMembers(p) {
 		return PromotionPreconditionError{Reason: "member_missing"}
 	}
 	if s.CreatorApprovals != nil {
@@ -1534,7 +1559,7 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 	out := make([]RouteableSnapshot, 0, len(ids))
 	for _, id := range ids {
 		p := s.Pools[id]
-		routeable := p.Lifecycle == LifecycleActive && p.CreatorGateReason == ""
+		routeable, _ := poolRouteability(p)
 		members := make([]string, 0, len(p.Members))
 		if routeable {
 			for id := range p.Members {
@@ -1559,7 +1584,7 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			Members:           members,
 			Revoked:           revoked,
 			BuyerAccounts:     buyers,
-			MinBinaryVersion:  p.MinBinaryVersion,
+			MinBinaryVersion:  policyMinBinaryVersion(p),
 			Routeable:         routeable,
 			Generation:        p.RouteableSnapshotGeneration(),
 			RouteableUntilUTC: p.CreatorGateExpiresAtUTC,
@@ -1580,8 +1605,10 @@ func (p *ReconstructedPoolState) EffectiveGeneration() uint64 {
 
 func (p *ReconstructedPoolState) RouteableSnapshotGeneration() uint64 {
 	generation := p.EffectiveGeneration()
-	if p != nil && p.Lifecycle == LifecycleActive && p.CreatorGateReason != "" {
-		generation++
+	if p != nil && p.Lifecycle == LifecycleActive {
+		if routeable, _ := poolRouteability(p); !routeable {
+			generation++
+		}
 	}
 	return generation
 }
@@ -1620,6 +1647,9 @@ func validateEvent(e DurableEvent) error {
 	if e.PoolID == "" {
 		return fmt.Errorf("pool_id is required")
 	}
+	if err := ValidatePromiseClaimsText(e.PoolID); err != nil {
+		return err
+	}
 	switch e.EventType {
 	case EventPoolCreated:
 		if e.CreatorAccountID == "" || e.ApprovalRecordID == "" {
@@ -1636,6 +1666,16 @@ func validateEvent(e DurableEvent) error {
 		if e.ManifestAuthorityRootKeyID == "" || e.ManifestAuthorityRootPublicKey == "" {
 			return fmt.Errorf("root_issuer_registered requires delegated manifest authority root")
 		}
+		if err := ValidatePromiseClaimsText(
+			e.CreatorAccountID,
+			e.ApprovalRecordID,
+			e.CurrentApprovalVersion,
+			e.RootIssuerKeyID,
+			e.ManifestAuthorityRootKeyID,
+			e.LaunchEnvironment,
+		); err != nil {
+			return err
+		}
 		if e.StructuredKeyCustodyDisclosureHash == "" || e.GenesisNonceDigest == "" ||
 			e.IntendedPoolDisplayNameHash == "" || e.LaunchEnvironment == "" {
 			return fmt.Errorf("root_issuer_registered requires custody, genesis, display, and launch environment bindings")
@@ -1651,9 +1691,28 @@ func validateEvent(e DurableEvent) error {
 		if e.RootIssuerKeyID == "" || e.RootIssuerPublicKeyFingerprint == "" {
 			return fmt.Errorf("manifest_accepted requires root issuer binding")
 		}
+		raw, err := canonicalBase64(e.ManifestSnapshot)
+		if err != nil {
+			return err
+		}
+		if utf8.Valid(raw) {
+			if err := ValidatePromiseClaimsText(string(raw)); err != nil {
+				return err
+			}
+		}
+		core, err := acceptedPolicyCoreFromManifestSnapshot(e)
+		if err != nil {
+			return err
+		}
+		if err := validateCandidatePolicyCoreClaims(core); err != nil {
+			return err
+		}
 	case EventLifecycleChanged:
 		if !validLifecycle(e.Lifecycle) {
 			return fmt.Errorf("invalid lifecycle %q", e.Lifecycle)
+		}
+		if err := ValidatePromiseClaimsText(e.Reason); err != nil {
+			return err
 		}
 	case EventMemberAdmitted, EventMemberRevoked:
 		if e.ProviderID == "" {
@@ -1758,6 +1817,21 @@ func validateCreatorApproval(a CreatorApproval) error {
 		!validSHA256Hex(a.BuyerDisclosureCommitmentHash) ||
 		!validSHA256Hex(a.ApprovalCriteriaHash) {
 		return ErrCreatorApprovalGate
+	}
+	if err := ValidatePromiseClaimsText(
+		a.CreatorAccountID,
+		a.ApprovalRecordID,
+		a.CurrentApprovalVersion,
+		a.PublicDisplayName,
+		a.AllowedProductCategory,
+		a.DataRetentionCategory,
+		a.AllowedLaunchEnvironment,
+		a.CreatorAgreementID,
+		a.CreatorAgreementVersion,
+		a.PricingScheduleID,
+		a.PricingScheduleVersion,
+	); err != nil {
+		return err
 	}
 	switch a.Status {
 	case CreatorStatusEnabled:

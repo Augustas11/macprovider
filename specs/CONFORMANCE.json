@@ -1295,7 +1295,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance, a gateway-authenticated buyer status surface, an explicit operator-only candidate promotion path that preflights local activation prerequisites, lifecycle fail-closed tests, and a CLI-first operator-mediated admin workflow with nonce issuance plus pool health/audit/distribution exports. Raw operator admin events cannot activate a routeable pool; requirements remain pending until authenticated creator self-service/administration, public policy/status promise surfaces, signed journey, rollback-resistant promotion authorization/evidence, public pool-status freshness fail-closed enforcement, full production activation gates, and production rollout proof are implemented."
+        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces, an explicit operator-only candidate promotion path that preflights local activation prerequisites, lifecycle fail-closed tests, and a CLI-first operator-mediated admin workflow with nonce issuance plus pool health/audit/distribution exports. Raw operator admin events cannot activate a routeable pool; requirements remain pending until authenticated creator self-service/administration, public publicly_announced policy/status exposure, signed journey, rollback-resistant promotion authorization/evidence, public pool-status freshness fail-closed enforcement, custody-class and retention-policy production gates, full production activation gates, and production rollout proof are implemented."
       }
     }
   ],
@@ -5675,11 +5675,29 @@
       "spec_id": "SPEC-043",
       "state": "pending",
       "implementation": [
+        "phase4-coordinator/internal/trustpool/policy.go:func BuildPolicyDocument",
+        "phase4-coordinator/internal/trustpool/policy.go:func ValidatePromiseClaimsText",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func validateCreatorApproval",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func validateEvent",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) writeMutationError",
         "phase4-coordinator/internal/trustpool/status.go:func BuildStatusDocument",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) handleTrustPoolPolicy",
         "phase4-coordinator/internal/buyer/server.go:func (s *Server) handleTrustPoolStatus",
         "phase4-coordinator/internal/buyer/server.go:func WithTrustPoolStatusStore"
       ],
       "tests": [
+        "phase4-coordinator/internal/trustpool/policy_test.go:TestBuildPolicyDocumentReturnsBuyerSafeCandidatePolicyShape",
+        "phase4-coordinator/internal/trustpool/policy_test.go:TestBuildPolicyDocumentCollapsesUnauthorizedAndUnknown",
+        "phase4-coordinator/internal/trustpool/policy_test.go:TestPromiseClaimControlRejectsSubmittedProhibitedTerms",
+        "phase4-coordinator/internal/trustpool/root_manifest_test.go:TestReconstructEvents_RejectsRootIssuerBuyerVisiblePromiseClaims",
+        "phase4-coordinator/internal/trustpool/root_manifest_test.go:TestReconstructEvents_RejectsManifestPositivePromiseOverclaim",
+        "phase4-coordinator/internal/trustpool/root_manifest_test.go:TestReconstructEvents_RejectsManifestLayer3PrivacyClaims",
+        "phase4-coordinator/internal/trustpool/root_manifest_test.go:TestReconstructEvents_RejectsManifestProhibitedOrInvalidMinBinaryVersion",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_CreatorApprovalRejectsBuyerVisiblePromiseClaims",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_LegacyCreatorApprovalOverclaimFailsClosedOnRead",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_RouteabilityFailsClosedWhenMinEligibleMembersDropsAfterPromotion",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestReconstructEvents_RejectsLifecycleReasonPromiseClaims",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_RejectsManifestPromiseOverclaim",
         "phase4-coordinator/internal/trustpool/status_test.go:TestBuildStatusDocumentReturnsBuyerSafePromiseShape",
         "phase4-coordinator/internal/trustpool/status_test.go:TestBuildStatusDocumentCollapsesUnauthorizedAndUnknown",
         "phase4-coordinator/internal/buyer/server_test.go:TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus"
@@ -5692,7 +5710,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Public promise and claim control: a gateway-authenticated buyer status surface is implemented locally with authorized-buyer-only reconstruction, no-store cache control, count-only control-plane membership disclosure, live eligibility marked not_evaluated, non-enumerating 404s, and explicit non-Privacy-Pool/coordinator-visible-content disclosures. Still pending: public pool_policy.json, public/visibility pool_status.json freshness fail-closed enforcement, live route-time readiness/eligible-count derivation, creator provenance disclosure, and machine-enforced overclaim rejection."
+        "rationale": "Public promise and claim control: gateway-authenticated buyer policy/status surfaces are implemented locally with authorized-buyer-only reconstruction, no-store cache control, non-enumerating 404s, creator provenance fields, accepted-manifest min_eligible_members, min_binary_version, and retention id projection, manifest digest/policy hash disclosure, count-only membership/status disclosure, shared single-operator supply disclosure, live eligibility marked not_evaluated, explicit coordinator/provider plaintext-visibility disclosures, active routeability fail-closed behavior below accepted-manifest member minimums, separator-normalized prohibited-term rejection for buyer-visible creator approval metadata at write and read/reconstruct time, pool ids, root issuer key labels, lifecycle reasons, and manifest snapshots, invalid manifest min_binary_version rejection, exact candidate split_execution_status enforcement, and structured Layer-3 privacy-field rejection for relay-blind mode/capability in the v0.1 candidate path. Still pending: public publicly_announced policy/status exposure, public pool-status freshness fail-closed enforcement, live route-time readiness/eligible-count derivation, immutable approved root issuer custody class from registration, retention-policy registry resolution, and claim-control coverage for every future mutable operational field and creator-submitted disclosure surface."
       }
     },
     {

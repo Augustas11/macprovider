@@ -501,6 +501,8 @@ func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_root_registration_nonce"}})
 	case errors.Is(err, ErrCreatorApprovalGate):
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "creator_approval_gate_failed"}})
+	case errors.Is(err, ErrProhibitedPromiseClaim):
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "prohibited_promise_claim"}})
 	case errors.Is(err, ErrMalformedDurableEvent):
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
 	default:
@@ -638,14 +640,14 @@ func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) 
 		RootIssuerKeyID:                rootIssuerKeyID(p),
 		RootIssuerPublicKeyFingerprint: rootIssuerFingerprint(p),
 		LaunchEnvironment:              rootIssuerLaunchEnvironment(p),
-		MinBinaryVersion:               p.MinBinaryVersion,
+		MinBinaryVersion:               policyMinBinaryVersion(p),
 		Members:                        members,
 		Revoked:                        revoked,
 		BuyerAccounts:                  buyers,
 		Generation:                     p.Generation,
 		RouteableGeneration:            p.RouteableSnapshotGeneration(),
 		LastEventAtUTC:                 lastEventAt,
-		Routeable:                      p.Lifecycle == LifecycleActive && p.CreatorGateReason == "",
+		Routeable:                      adminPoolRouteable(p),
 		CreatorGateReason:              p.CreatorGateReason,
 		CreatorGateExpiresAtUTC:        creatorGateExpiresAt,
 		RouteGateCheckedAtUTC:          routeGateCheckedAtRaw,
@@ -664,11 +666,7 @@ type adminHealthEvent struct {
 }
 
 func adminHealthEvents(p *ReconstructedPoolState, routeGateCheckedAt time.Time) []adminHealthEvent {
-	routeable := p.Lifecycle == LifecycleActive && p.CreatorGateReason == ""
-	reason := p.CreatorGateReason
-	if reason == "" && p.Lifecycle != LifecycleActive {
-		reason = "lifecycle_" + p.Lifecycle
-	}
+	routeable, reason := poolRouteability(p)
 	severity := "info"
 	eventClass := "pool_routeable"
 	if !routeable {
@@ -714,7 +712,7 @@ func buildAdminDistributionPackage(p *ReconstructedPoolState, state *Reconstruct
 		CreatorAccountID:     p.CreatorAccountID,
 		Lifecycle:            p.Lifecycle,
 		LaunchEnvironment:    rootIssuerLaunchEnvironment(p),
-		Routeable:            p.Lifecycle == LifecycleActive && p.CreatorGateReason == "",
+		Routeable:            adminPoolRouteable(p),
 		CandidateOnly:        true,
 		ProductionReady:      false,
 		ManifestVersion:      p.ManifestVersion,
@@ -734,6 +732,11 @@ func buildAdminDistributionPackage(p *ReconstructedPoolState, state *Reconstruct
 		}
 	}
 	return pkg
+}
+
+func adminPoolRouteable(p *ReconstructedPoolState) bool {
+	routeable, _ := poolRouteability(p)
+	return routeable
 }
 
 func rootIssuerKeyID(p *ReconstructedPoolState) string {

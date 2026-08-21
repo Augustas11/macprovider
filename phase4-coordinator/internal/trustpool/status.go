@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 )
 
 const StatusSchemaVersion = "macprovider.trustpool-status.v1"
@@ -110,12 +112,13 @@ func BuildStatusDocument(ctx context.Context, store *Store, registry *Registry, 
 		generatedAt = time.Now().UTC()
 	}
 	nonRevoked := nonRevokedMemberCount(p)
-	routeable := false
 	readiness := "unknown"
 	readinessReason := readinessReasonForPool(p)
-	if p.Lifecycle != LifecycleActive || p.CreatorGateReason != "" {
+	_, routeabilityReason := poolRouteability(p)
+	if routeabilityReason != "" {
 		readiness = "unavailable"
 	}
+	statusRouteable := false
 	doc := StatusDocument{
 		SchemaVersion:  StatusSchemaVersion,
 		GeneratedAtUTC: generatedAt.Format(time.RFC3339Nano),
@@ -145,14 +148,14 @@ func BuildStatusDocument(ctx context.Context, store *Store, registry *Registry, 
 		Policy: StatusPolicy{
 			ManifestVersion:    p.ManifestVersion,
 			ManifestCoreDigest: p.ManifestCoreDigest,
-			MinBinaryVersion:   p.MinBinaryVersion,
+			MinBinaryVersion:   policyMinBinaryVersion(p),
 			RootIssuerKeyID:    statusRootIssuerKeyID(p),
 			RootIssuerKeyHash:  statusRootIssuerFingerprint(p),
 			CustodyEvidence:    statusCustodyEvidence(p),
-			RetentionPolicyID:  approval.DataRetentionCategory,
+			RetentionPolicyID:  policyRetentionPolicyID(p, approval),
 		},
 		Membership: StatusMembership{
-			MinEligibleMembers:           1,
+			MinEligibleMembers:           policyMinEligibleMembers(p),
 			CurrentMemberCount:           len(p.Members),
 			CurrentAdmittedMemberCount:   len(p.Members),
 			CurrentNonRevokedMemberCount: nonRevoked,
@@ -162,16 +165,16 @@ func BuildStatusDocument(ctx context.Context, store *Store, registry *Registry, 
 			LiveEligibilityEvaluation:    "not_evaluated",
 		},
 		Routeability: StatusRouteability{
-			Routeable:               routeable,
+			Routeable:               statusRouteable,
 			Generation:              p.Generation,
 			RouteableGeneration:     p.RouteableSnapshotGeneration(),
 			RouteGateCheckedAtUTC:   formatOptionalTime(state.RouteGateCheckedAt),
 			RouteableUntilUTC:       formatOptionalTime(p.CreatorGateExpiresAtUTC),
-			CreatorGateReason:       p.CreatorGateReason,
+			CreatorGateReason:       routeabilityReason,
 			CreatorGateExpiresAtUTC: formatOptionalTime(p.CreatorGateExpiresAtUTC),
 		},
 		Settlement: StatusSettlement{
-			SplitExecutionStatus: "declared_not_executed",
+			SplitExecutionStatus: policySplitExecutionStatus(p),
 		},
 		Confidentiality: StatusConfidentiality{
 			Scope: "trusted_pool_not_privacy_pool",
@@ -188,16 +191,26 @@ func BuildStatusDocument(ctx context.Context, store *Store, registry *Registry, 
 }
 
 func readinessReasonForPool(p *ReconstructedPoolState) string {
-	if p == nil {
-		return "pool_not_found"
-	}
-	if p.CreatorGateReason != "" {
-		return p.CreatorGateReason
-	}
-	if p.Lifecycle != LifecycleActive {
-		return "lifecycle_" + p.Lifecycle
+	if _, reason := poolRouteability(p); reason != "" {
+		return reason
 	}
 	return "live_eligibility_not_evaluated"
+}
+
+func poolRouteability(p *ReconstructedPoolState) (bool, string) {
+	if p == nil {
+		return false, "pool_not_found"
+	}
+	if p.CreatorGateReason != "" {
+		return false, p.CreatorGateReason
+	}
+	if p.Lifecycle != LifecycleActive {
+		return false, "lifecycle_" + p.Lifecycle
+	}
+	if nonRevokedMemberCount(p) < policyMinEligibleMembers(p) {
+		return false, "min_eligible_members_unmet"
+	}
+	return true, ""
 }
 
 func nonRevokedMemberCount(p *ReconstructedPoolState) int {
@@ -232,6 +245,51 @@ func statusCustodyEvidence(p *ReconstructedPoolState) string {
 		return ""
 	}
 	return p.RootIssuer.StructuredCustodyDisclosureHash
+}
+
+func policyMinEligibleMembers(p *ReconstructedPoolState) int {
+	if p != nil && p.ManifestMinEligibleMembers > 0 {
+		if p.ManifestMinEligibleMembers > uint64(maxInt()) {
+			return maxInt()
+		}
+		return int(p.ManifestMinEligibleMembers)
+	}
+	return 1
+}
+
+func maxInt() int {
+	return int(^uint(0) >> 1)
+}
+
+func policyMinBinaryVersion(p *ReconstructedPoolState) string {
+	if p == nil {
+		return ""
+	}
+	if p.MinBinaryVersion == "" {
+		return p.ManifestMinBinaryVersion
+	}
+	if p.ManifestMinBinaryVersion == "" {
+		return p.MinBinaryVersion
+	}
+	cmp, ok := versionfloor.Compare(p.ManifestMinBinaryVersion, p.MinBinaryVersion)
+	if ok && cmp > 0 {
+		return p.ManifestMinBinaryVersion
+	}
+	return p.MinBinaryVersion
+}
+
+func policyRetentionPolicyID(p *ReconstructedPoolState, approval CreatorApproval) string {
+	if p != nil && p.ManifestRetentionPolicyID != "" {
+		return p.ManifestRetentionPolicyID
+	}
+	return approval.DataRetentionCategory
+}
+
+func policySplitExecutionStatus(p *ReconstructedPoolState) string {
+	if p != nil && p.ManifestSplitExecutionStatus != "" {
+		return p.ManifestSplitExecutionStatus
+	}
+	return "declared_not_executed"
 }
 
 func formatOptionalTime(t time.Time) string {

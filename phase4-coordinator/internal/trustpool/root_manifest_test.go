@@ -108,6 +108,105 @@ func TestReconstructEvents_RejectsManifestBeforeRootOrWrongSigner(t *testing.T) 
 	}
 }
 
+func TestReconstructEvents_RejectsManifestPositivePromiseOverclaim(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800012200, 0).UTC()
+	root := newRootFixture(t)
+	create := ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-a"
+		e.ApprovalRecordID = "approval-v1"
+	})
+	rootEvent := signedRootRegistration(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", root)
+	manifest := signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root)
+	manifest.ManifestSnapshot = base64.StdEncoding.EncodeToString([]byte(`{"buyer_visible_claim":"Privacy Pool with anonymous routing"}`))
+	if _, err := trustpool.ReconstructEvents([]trustpool.DurableEvent{create, rootEvent, manifest}); !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+		t.Fatalf("overclaim error=%v, want ErrProhibitedPromiseClaim", err)
+	}
+}
+
+func TestReconstructEvents_RejectsRootIssuerBuyerVisiblePromiseClaims(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800012250, 0).UTC()
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusEnabled)
+	create := ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-a"
+		e.ApprovalRecordID = "approval-v1"
+	})
+	if _, _, _, err := store.AppendValidatedEvent(ctx, create); err != nil {
+		t.Fatalf("AppendValidatedEvent create: %v", err)
+	}
+	rootEvent := signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root)
+	rootEvent.RootIssuerKeyID = "privacy-pool-root"
+	if _, _, _, err := store.AppendValidatedEvent(ctx, rootEvent); !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+		t.Fatalf("AppendValidatedEvent root issuer overclaim error=%v, want ErrProhibitedPromiseClaim", err)
+	}
+}
+
+func TestReconstructEvents_RejectsManifestLayer3PrivacyClaims(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800012300, 0).UTC()
+	root := newRootFixture(t)
+	create := ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-a"
+		e.ApprovalRecordID = "approval-v1"
+	})
+	rootEvent := signedRootRegistration(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", root)
+	for _, tc := range []struct {
+		name   string
+		mutate func(*poolmanifest.PolicyCore)
+	}{
+		{name: "privacy_mode", mutate: func(core *poolmanifest.PolicyCore) { core.PrivacyMode = "relay_blind" }},
+		{name: "relay_blind_capable", mutate: func(core *poolmanifest.PolicyCore) { core.RelayBlindCapable = true }},
+		{name: "split_execution_status", mutate: func(core *poolmanifest.PolicyCore) { core.SplitExecutionStatus = "executed" }},
+		{name: "model_allowlist", mutate: func(core *poolmanifest.PolicyCore) { core.ModelAllowlist = []string{"privacy-pool-model"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := signedManifestWithPolicyCoreMutation(t, "op-manifest-"+tc.name, ts.Add(2*time.Second), root.poolID, 1, root, tc.mutate)
+			if _, err := trustpool.ReconstructEvents([]trustpool.DurableEvent{create, rootEvent, manifest}); !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+				t.Fatalf("%s error=%v, want ErrProhibitedPromiseClaim", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestReconstructEvents_RejectsManifestProhibitedOrInvalidMinBinaryVersion(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800012400, 0).UTC()
+	root := newRootFixture(t)
+	create := ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-a"
+		e.ApprovalRecordID = "approval-v1"
+	})
+	rootEvent := signedRootRegistration(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", root)
+	for _, tc := range []struct {
+		name           string
+		version        string
+		wantProhibited bool
+	}{
+		{name: "prohibited claim", version: "privacy-pool", wantProhibited: true},
+		{name: "invalid version", version: "not-a-version"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := signedManifestWithPolicyCoreMutation(t, "op-manifest-"+strings.ReplaceAll(tc.name, " ", "-"), ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+				core.MinBinaryVersion = tc.version
+			})
+			_, err := trustpool.ReconstructEvents([]trustpool.DurableEvent{create, rootEvent, manifest})
+			if err == nil {
+				t.Fatalf("min_binary_version %q accepted, want rejection", tc.version)
+			}
+			if tc.wantProhibited && !errors.Is(err, trustpool.ErrProhibitedPromiseClaim) {
+				t.Fatalf("min_binary_version %q error=%v, want ErrProhibitedPromiseClaim", tc.version, err)
+			}
+		})
+	}
+}
+
 func TestReconstructEvents_RejectsStandaloneHigherVersionManifestFork(t *testing.T) {
 	t.Parallel()
 	ts := time.Unix(1800012500, 0).UTC()
@@ -263,10 +362,15 @@ func signedRootRegistrationWithNonceInEnvironment(t *testing.T, op string, ts ti
 
 func signedManifest(t *testing.T, op string, ts time.Time, poolID string, version uint64, root rootFixture) trustpool.DurableEvent {
 	t.Helper()
+	return signedManifestWithPolicyCoreMutation(t, op, ts, poolID, version, root, nil)
+}
+
+func signedManifestWithPolicyCoreMutation(t *testing.T, op string, ts time.Time, poolID string, version uint64, root rootFixture, mutate func(*poolmanifest.PolicyCore)) trustpool.DurableEvent {
+	t.Helper()
 	if poolID != root.poolID {
 		t.Fatalf("signedManifest poolID=%q, want fixture pool %q", poolID, root.poolID)
 	}
-	snapshot, digest := manifestSnapshot(t, version, root)
+	snapshot, digest := manifestSnapshotWithPolicyCoreMutation(t, version, root, mutate)
 	e := ev(op, ts, trustpool.EventManifestAccepted, poolID, func(e *trustpool.DurableEvent) {
 		e.ManifestVersion = version
 		e.ManifestCoreDigest = digest
@@ -282,7 +386,72 @@ func signedManifest(t *testing.T, op string, ts time.Time, poolID string, versio
 	return e
 }
 
+func signedManifestExtendingWithPolicyCoreMutation(t *testing.T, op string, ts time.Time, previous trustpool.DurableEvent, root rootFixture, mutate func(*poolmanifest.PolicyCore)) trustpool.DurableEvent {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(previous.ManifestSnapshot)
+	if err != nil {
+		t.Fatalf("decode previous manifest snapshot: %v", err)
+	}
+	snapshot, err := poolmanifest.ParseManifestSnapshot(raw)
+	if err != nil {
+		t.Fatalf("parse previous manifest snapshot: %v", err)
+	}
+	if len(snapshot.Policies) == 0 {
+		t.Fatal("previous manifest snapshot has no policies")
+	}
+	prevDigest, err := hex.DecodeString(previous.ManifestCoreDigest)
+	if err != nil {
+		t.Fatalf("decode previous manifest digest: %v", err)
+	}
+	prevCore := snapshot.Policies[len(snapshot.Policies)-1].SignedCore.Core
+	core := prevCore
+	core.ManifestVersion = previous.ManifestVersion + 1
+	core.PrevManifestCoreHash = prevDigest
+	core.NotBeforeUnix = prevCore.ExpiresAtUnix
+	core.ExpiresAtUnix = prevCore.ExpiresAtUnix + 1000
+	if mutate != nil {
+		mutate(&core)
+	}
+	digest, err := core.ManifestCoreDigest()
+	if err != nil {
+		t.Fatalf("ManifestCoreDigest extending: %v", err)
+	}
+	policyMsg, err := poolmanifest.PolicyCoreSigningMessage(digest)
+	if err != nil {
+		t.Fatalf("PolicyCoreSigningMessage extending: %v", err)
+	}
+	snapshot.Policies = append(snapshot.Policies, poolmanifest.AcceptedPolicyRecord{
+		SignedCore: poolmanifest.SignedPolicyCore{
+			Core:       core,
+			Signatures: []poolmanifest.Signature{{KeyID: root.policySigner.KeyID, Sig: ed25519.Sign(root.policySignerPrivateKey, policyMsg)}},
+		},
+		AcceptedAtUnix: uint64(ts.Unix()),
+	})
+	nextRaw, err := snapshot.CanonicalBytes()
+	if err != nil {
+		t.Fatalf("extended ManifestSnapshot CanonicalBytes: %v", err)
+	}
+	e := ev(op, ts, trustpool.EventManifestAccepted, previous.PoolID, func(e *trustpool.DurableEvent) {
+		e.ManifestVersion = core.ManifestVersion
+		e.ManifestCoreDigest = hex.EncodeToString(digest)
+		e.RootIssuerKeyID = "root-key-1"
+		e.RootIssuerPublicKeyFingerprint = root.fingerprint
+		e.ManifestSnapshot = base64.StdEncoding.EncodeToString(nextRaw)
+	})
+	msg, err := trustpool.ManifestAcceptanceSigningMessage(e)
+	if err != nil {
+		t.Fatalf("ManifestAcceptanceSigningMessage extending: %v", err)
+	}
+	e.ManifestSignature = signP256ASN1(t, root.privateKey, msg)
+	return e
+}
+
 func manifestSnapshot(t *testing.T, version uint64, root rootFixture) (string, string) {
+	t.Helper()
+	return manifestSnapshotWithPolicyCoreMutation(t, version, root, nil)
+}
+
+func manifestSnapshotWithPolicyCoreMutation(t *testing.T, version uint64, root rootFixture, mutate func(*poolmanifest.PolicyCore)) (string, string) {
 	t.Helper()
 	authEntry := poolmanifest.AuthorityLogEntry{
 		PoolID:                      root.poolID,
@@ -323,6 +492,9 @@ func manifestSnapshot(t *testing.T, version uint64, root rootFixture) (string, s
 		DowngradePolicy:      "reject",
 		NotBeforeUnix:        2,
 		ExpiresAtUnix:        9999999999,
+	}
+	if mutate != nil {
+		mutate(&core)
 	}
 	digest, err := core.ManifestCoreDigest()
 	if err != nil {

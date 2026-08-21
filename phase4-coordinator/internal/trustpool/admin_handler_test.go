@@ -2,6 +2,7 @@ package trustpool_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 )
 
@@ -203,6 +205,54 @@ func TestAdminHandler_RejectsUnsignedManifest(t *testing.T) {
 	}, "op-manifest-unsigned", http.StatusBadRequest)
 }
 
+func TestAdminHandler_RejectsManifestPromiseOverclaim(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    trustpool.NewRegistry(),
+		OperatorKey: "operator-secret",
+	})
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:        trustpool.EventPoolCreated,
+		PoolID:           root.poolID,
+		CreatorAccountID: "creator-a",
+		ApprovalRecordID: "approval-v1",
+	}, "op-create", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", signedRootRegistrationForIssue(t, "op-root", testAdminTS(1), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", testAdminTS(3600)), root), "op-root", http.StatusAccepted)
+	manifest := signedManifest(t, "op-manifest-overclaim", testAdminTS(2), root.poolID, 1, root)
+	manifest.ManifestSnapshot = base64.StdEncoding.EncodeToString([]byte(`{"buyer_visible_claim":"Privacy Pool with anonymous routing"}`))
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer operator-secret")
+	req.Header.Set("Idempotency-Key", "op-manifest-overclaim")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST overclaim status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	assertAdminSchemaVersion(t, rec)
+	var got struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode overclaim response: %v", err)
+	}
+	if got.Error.Code != "prohibited_promise_claim" {
+		t.Fatalf("error code=%q body=%s, want prohibited_promise_claim", got.Error.Code, rec.Body.String())
+	}
+}
+
 func TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -227,7 +277,9 @@ func TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry(t *testing.T) {
 			ApprovalRecordID: "approval-v1",
 		},
 		signedRootRegistrationForIssue(t, "op-root", testAdminTS(1), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", testAdminTS(3600)), root),
-		signedManifest(t, "op-manifest", testAdminTS(2), root.poolID, 1, root),
+		signedManifestWithPolicyCoreMutation(t, "op-manifest", testAdminTS(2), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+			core.MinBinaryVersion = "1.8.33"
+		}),
 		{
 			EventType:  trustpool.EventMemberAdmitted,
 			PoolID:     root.poolID,
@@ -300,6 +352,7 @@ func TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry(t *testing.T) {
 			CreatorGateReason     string `json:"creator_gate_reason"`
 			RouteableGeneration   uint64 `json:"routeable_generation"`
 			RouteGateCheckedAtUTC string `json:"route_gate_checked_at_utc"`
+			MinBinaryVersion      string `json:"min_binary_version"`
 		} `json:"pool"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -307,6 +360,9 @@ func TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry(t *testing.T) {
 	}
 	if body.Pool.CreatorGateReason != "creator_suspended" || body.Pool.RouteableGeneration == 0 || body.Pool.RouteGateCheckedAtUTC == "" {
 		t.Fatalf("GET pool gate fields = %+v, want suspended gate status", body.Pool)
+	}
+	if body.Pool.MinBinaryVersion != "1.8.33" {
+		t.Fatalf("GET pool min_binary_version = %q, want manifest-only floor", body.Pool.MinBinaryVersion)
 	}
 }
 

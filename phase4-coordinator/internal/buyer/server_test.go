@@ -346,6 +346,59 @@ func TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus(t *testing.T) {
 		t.Fatalf("status leaked provider identity: %s", rr.Body.String())
 	}
 
+	policyReq := httptest.NewRequest(http.MethodGet, "/v1/trust-pools/pool-a/pool_policy.json", nil)
+	policyReq.Header.Set("Authorization", "Bearer gateway-secret")
+	policyReq.Header.Set("X-MacProvider-Account", "acct_allowed")
+	policyRR := httptest.NewRecorder()
+	server.Handler().ServeHTTP(policyRR, policyReq)
+	if policyRR.Code != http.StatusOK {
+		t.Fatalf("policy status=%d body=%s, want 200", policyRR.Code, policyRR.Body.String())
+	}
+	if got := policyRR.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("policy Cache-Control=%q, want no-store", got)
+	}
+	var policyDoc struct {
+		SchemaVersion string `json:"schema_version"`
+		Pool          struct {
+			PoolID            string `json:"pool_id"`
+			Visibility        string `json:"visibility"`
+			PubliclyAnnounced bool   `json:"publicly_announced"`
+			ProviderSupply    string `json:"provider_supply"`
+			CandidateOnly     bool   `json:"candidate_only"`
+			ProductionReady   bool   `json:"production_ready"`
+		} `json:"pool"`
+		RootIssuer struct {
+			CustodyClass    string `json:"custody_class"`
+			CustodyEvidence string `json:"custody_evidence"`
+		} `json:"root_issuer"`
+		Confidentiality struct {
+			CoordinatorPlaintextVisibility     string `json:"coordinator_plaintext_visibility"`
+			SelectedProviderOperatorVisibility string `json:"selected_provider_operator_visibility"`
+		} `json:"confidentiality"`
+		Disclosures []string `json:"disclosures"`
+	}
+	if err := json.Unmarshal(policyRR.Body.Bytes(), &policyDoc); err != nil {
+		t.Fatalf("policy json: %v", err)
+	}
+	if policyDoc.SchemaVersion != trustpool.PolicySchemaVersion || policyDoc.Pool.PoolID != "pool-a" {
+		t.Fatalf("unexpected policy doc: %+v", policyDoc)
+	}
+	if policyDoc.Pool.Visibility != "authorized" || policyDoc.Pool.PubliclyAnnounced || !policyDoc.Pool.CandidateOnly || policyDoc.Pool.ProductionReady || policyDoc.Pool.ProviderSupply != "shared" {
+		t.Fatalf("policy pool=%+v", policyDoc.Pool)
+	}
+	if policyDoc.RootIssuer.CustodyClass != "unverified" || policyDoc.RootIssuer.CustodyEvidence != "missing_root_registration" {
+		t.Fatalf("policy root issuer=%+v", policyDoc.RootIssuer)
+	}
+	if policyDoc.Confidentiality.CoordinatorPlaintextVisibility != "prompt_and_response_visible" || policyDoc.Confidentiality.SelectedProviderOperatorVisibility == "" {
+		t.Fatalf("policy confidentiality=%+v", policyDoc.Confidentiality)
+	}
+	if strings.Contains(policyRR.Body.String(), "provider-secret") {
+		t.Fatalf("policy leaked provider identity: %s", policyRR.Body.String())
+	}
+	if !strings.Contains(policyRR.Body.String(), "not a Privacy Pool") {
+		t.Fatalf("policy missing non-privacy-pool disclosure: %s", policyRR.Body.String())
+	}
+
 	denied := httptest.NewRequest(http.MethodGet, "/v1/trust-pools/pool-a/status", nil)
 	denied.Header.Set("Authorization", "Bearer gateway-secret")
 	denied.Header.Set("X-MacProvider-Account", "acct_denied")
@@ -358,11 +411,30 @@ func TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus(t *testing.T) {
 		t.Fatalf("denied Cache-Control=%q, want no-store", got)
 	}
 
+	deniedPolicy := httptest.NewRequest(http.MethodGet, "/v1/trust-pools/pool-a/policy", nil)
+	deniedPolicy.Header.Set("Authorization", "Bearer gateway-secret")
+	deniedPolicy.Header.Set("X-MacProvider-Account", "acct_denied")
+	deniedPolicyRR := httptest.NewRecorder()
+	server.Handler().ServeHTTP(deniedPolicyRR, deniedPolicy)
+	if deniedPolicyRR.Code != http.StatusNotFound || !strings.Contains(deniedPolicyRR.Body.String(), "pool_policy_not_found") {
+		t.Fatalf("denied policy status=%d body=%s, want non-enumerating 404", deniedPolicyRR.Code, deniedPolicyRR.Body.String())
+	}
+	if got := deniedPolicyRR.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("denied policy Cache-Control=%q, want no-store", got)
+	}
+
 	unauth := httptest.NewRequest(http.MethodGet, "/v1/trust-pools/pool-a/pool_status.json", nil)
 	unauthRR := httptest.NewRecorder()
 	server.Handler().ServeHTTP(unauthRR, unauth)
 	if unauthRR.Code != http.StatusUnauthorized {
 		t.Fatalf("unauth status=%d body=%s, want 401", unauthRR.Code, unauthRR.Body.String())
+	}
+
+	unauthPolicy := httptest.NewRequest(http.MethodGet, "/v1/trust-pools/pool-a/pool_policy.json", nil)
+	unauthPolicyRR := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unauthPolicyRR, unauthPolicy)
+	if unauthPolicyRR.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth policy status=%d body=%s, want 401", unauthPolicyRR.Code, unauthPolicyRR.Body.String())
 	}
 }
 
