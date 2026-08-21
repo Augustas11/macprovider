@@ -536,6 +536,7 @@ func TestDurableStore_RootRegistrationNonceIssuedConsumedAndServerTimed(t *testi
 		t.Fatalf("AppendValidatedEvent create2: %v", err)
 	}
 	expired, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce-expired",
 		CreatorAccountID:       "creator-b",
 		ApprovalRecordID:       "approval-v1",
 		CurrentApprovalVersion: "approval-version-1",
@@ -550,6 +551,41 @@ func TestDurableStore_RootRegistrationNonceIssuedConsumedAndServerTimed(t *testi
 	backdated := signedRootRegistrationForIssue(t, "op-root-expired", ts.Add(3*time.Second), root2.poolID, "creator-b", "approval-v1", expired, root2)
 	if _, _, _, err := store.AppendValidatedEvent(ctx, backdated); !errors.Is(err, trustpool.ErrRootRegistrationNonce) {
 		t.Fatalf("backdated expired nonce err=%v, want ErrRootRegistrationNonce", err)
+	}
+}
+
+func TestDurableStore_RootRegistrationNonceIssueIsIdempotent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusEnabled)
+	issue := trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce",
+		CreatorAccountID:       "creator-a",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		Purpose:                trustpool.RootRegistrationPurposeDefault,
+		ExpiresAtUTC:           time.Now().Add(time.Hour).UTC().Truncate(time.Nanosecond),
+	}
+	first, err := store.IssueRootRegistrationNonce(ctx, issue)
+	if err != nil {
+		t.Fatalf("IssueRootRegistrationNonce first: %v", err)
+	}
+	second, err := store.IssueRootRegistrationNonce(ctx, issue)
+	if err != nil {
+		t.Fatalf("IssueRootRegistrationNonce retry: %v", err)
+	}
+	if second.Nonce != first.Nonce || !second.IssuedAtUTC.Equal(first.IssuedAtUTC) || second.OperationID != "op-nonce" {
+		t.Fatalf("retry record = %+v, want original %+v", second, first)
+	}
+	conflict := issue
+	conflict.LaunchEnvironment = "production"
+	if _, err := store.IssueRootRegistrationNonce(ctx, conflict); !errors.Is(err, trustpool.ErrConflictingOperationID) {
+		t.Fatalf("conflicting nonce issue err=%v, want ErrConflictingOperationID", err)
 	}
 }
 
@@ -598,6 +634,7 @@ func TestDurableStore_CreatorApprovalGatesNonceAndExpansiveMutations(t *testing.
 	}
 	ts := time.Unix(1800002550, 0).UTC()
 	if _, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce-unapproved",
 		CreatorAccountID:       "creator-a",
 		ApprovalRecordID:       "approval-v1",
 		CurrentApprovalVersion: "approval-version-1",
@@ -609,6 +646,7 @@ func TestDurableStore_CreatorApprovalGatesNonceAndExpansiveMutations(t *testing.
 	}
 	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusSuspended)
 	if _, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce-suspended",
 		CreatorAccountID:       "creator-a",
 		ApprovalRecordID:       "approval-v1",
 		CurrentApprovalVersion: "approval-version-1",
@@ -620,6 +658,7 @@ func TestDurableStore_CreatorApprovalGatesNonceAndExpansiveMutations(t *testing.
 	}
 	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusEnabled)
 	if _, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce-wrong-version",
 		CreatorAccountID:       "creator-a",
 		ApprovalRecordID:       "approval-v1",
 		CurrentApprovalVersion: "approval-version-2",
@@ -630,6 +669,7 @@ func TestDurableStore_CreatorApprovalGatesNonceAndExpansiveMutations(t *testing.
 		t.Fatalf("wrong version nonce err=%v, want ErrCreatorApprovalGate", err)
 	}
 	if _, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce-wrong-environment",
 		CreatorAccountID:       "creator-a",
 		ApprovalRecordID:       "approval-v1",
 		CurrentApprovalVersion: "approval-version-1",
@@ -641,6 +681,7 @@ func TestDurableStore_CreatorApprovalGatesNonceAndExpansiveMutations(t *testing.
 	}
 	root := newRootFixture(t)
 	pendingNonce, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce-pending",
 		CreatorAccountID:       "creator-a",
 		ApprovalRecordID:       "approval-v1",
 		CurrentApprovalVersion: "approval-version-1",
