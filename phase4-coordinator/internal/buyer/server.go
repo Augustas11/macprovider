@@ -170,6 +170,8 @@ var spec018RetryableByCode = map[string]bool{
 	// rate_limited entry above was already covered; :124 was not).
 	"autotune_feed_not_found": false, // Tier-2 feed disabled/unconfigured, permanent
 	"invalid_tools":           false, // client request-shape validation, permanent
+	"pool_status_not_found":   false, // pool status lookup is non-enumerating for unknown/unauthorized pools
+	"pool_status_unavailable": true,  // transient durable status reconstruction/read fault
 	// route_snapshot_failed is a pre-dispatch durable-store write failure
 	// (route_snapshot.go:149) — a retry can succeed once storage recovers,
 	// unlike the other internal-fault codes above which are left false.
@@ -186,25 +188,26 @@ type Server struct {
 	// Nil unless WithPoolMembership is supplied. Without a pool authority
 	// header, default deployments stay byte-identical; with one, nil fails
 	// closed so pool-selected traffic cannot downgrade to global routing.
-	trustPools         *trustpool.Registry
-	log                zerolog.Logger
-	createdAt          int64
-	preflight          PreflightFunc
-	preflightThreshold int
-	preflightTimeout   time.Duration
-	recoveryBackoff    time.Duration
-	recoveryMaxRetries int
-	recoveryProbe      bool
-	breakerThreshold   int
-	breakerWindow      time.Duration
-	relay              RelayFunc
-	settlementRelay    SettlementRelayFunc
-	admission          *providerws.AdmissionManager
-	requestTimeout     time.Duration
-	failoverEnabled    bool
-	failoverTimeout    time.Duration
-	tiebreakRandomize  bool
-	tiebreakEpsilon    float64
+	trustPools           *trustpool.Registry
+	trustPoolStatusStore *trustpool.Store
+	log                  zerolog.Logger
+	createdAt            int64
+	preflight            PreflightFunc
+	preflightThreshold   int
+	preflightTimeout     time.Duration
+	recoveryBackoff      time.Duration
+	recoveryMaxRetries   int
+	recoveryProbe        bool
+	breakerThreshold     int
+	breakerWindow        time.Duration
+	relay                RelayFunc
+	settlementRelay      SettlementRelayFunc
+	admission            *providerws.AdmissionManager
+	requestTimeout       time.Duration
+	failoverEnabled      bool
+	failoverTimeout      time.Duration
+	tiebreakRandomize    bool
+	tiebreakEpsilon      float64
 	// routingMu guards modelClasses, which is hot-swapped on SIGHUP
 	// when routing.model_classes shape changes (issue #266 T1).
 	// Pre-SIGHUP readers (handleModels iteration at modelEntry build;
@@ -474,6 +477,15 @@ func WithStreamingMetricsMaxSamples(maxSamples int) Option {
 func WithPoolMembership(r *trustpool.Registry) Option {
 	return func(s *Server) {
 		s.trustPools = r
+	}
+}
+
+// WithTrustPoolStatusStore wires the durable SPEC-043 status source. Status
+// fetches also require WithPoolMembership because authorization must consult
+// the live routeable registry before reconstructing buyer-visible promises.
+func WithTrustPoolStatusStore(store *trustpool.Store) Option {
+	return func(s *Server) {
+		s.trustPoolStatusStore = store
 	}
 }
 
@@ -772,6 +784,8 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/v1/autotune-candidates", s.handleAutotuneCandidates)
 	r.Get("/v1/autotune-candidates.sig", s.handleAutotuneCandidatesSig)
 	r.Get("/v1/autotune-release", s.handleAutotuneRelease)
+	r.With(s.gatewayContextMiddleware).Get("/v1/trust-pools/{pool_id}/pool_status.json", s.handleTrustPoolStatus)
+	r.With(s.gatewayContextMiddleware).Get("/v1/trust-pools/{pool_id}/status", s.handleTrustPoolStatus)
 	r.Get("/v1/pool/check", s.handlePoolCheck)
 	r.Get("/v1/receipt-keys/{provider_id}", s.handleReceiptKeys)
 	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotations.
@@ -813,6 +827,30 @@ func (s *Server) gatewayContextMiddleware(next http.Handler) http.Handler {
 func authenticatedAccountFromContext(ctx context.Context) (requestlog.AuthenticatedAccount, bool) {
 	account, ok := ctx.Value(authenticatedAccountContextKey{}).(requestlog.AuthenticatedAccount)
 	return account, ok
+}
+
+func (s *Server) handleTrustPoolStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	account, ok := authenticatedAccountFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Gateway account context is required")
+		return
+	}
+	poolID := sanitizeAccountID(chi.URLParam(r, "pool_id"))
+	doc, found, err := trustpool.BuildStatusDocument(r.Context(), s.trustPoolStatusStore, s.trustPools, poolID, account.ID(), s.now())
+	if err != nil {
+		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("trusted pool status reconstruction failed")
+		writeError(w, http.StatusServiceUnavailable, "pool_status_unavailable", "Pool status unavailable")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "pool_status_not_found", "Pool status not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(doc); err != nil {
+		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("trusted pool status encode failed")
+	}
 }
 
 func (s *Server) handleStreamingMetrics(w http.ResponseWriter, r *http.Request) {

@@ -28,6 +28,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
@@ -255,6 +256,114 @@ func TestPoolHeaderForNonRouteablePoolFailsUnavailable(t *testing.T) {
 		t.Fatalf("status=%d body=%s, want 503", rr.Code, rr.Body.String())
 	}
 	assertPoolUnavailableNonRetryable(t, rr)
+}
+
+func TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus(t *testing.T) {
+	ctx := context.Background()
+	trustStore := openBuyerTrustPoolStore(t)
+	now := time.Unix(1800000900, 0).UTC()
+	approveBuyerTrustPoolCreator(t, trustStore, now.Add(24*time.Hour))
+	for _, e := range []trustpool.DurableEvent{
+		buyerTrustPoolEvent("op-create", now, trustpool.EventPoolCreated, "pool-a", func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		buyerTrustPoolEvent("op-member", now.Add(time.Second), trustpool.EventMemberAdmitted, "pool-a", func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-secret"
+		}),
+		buyerTrustPoolEvent("op-buyer", now.Add(2*time.Second), trustpool.EventBuyerAuthorized, "pool-a", func(e *trustpool.DurableEvent) {
+			e.BuyerAccountID = "acct_allowed"
+		}),
+	} {
+		if _, _, _, err := trustStore.AppendValidatedEvent(ctx, e); err != nil {
+			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+		}
+	}
+	state, err := trustStore.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	trustRegistry, err := state.BuildRegistry()
+	if err != nil {
+		t.Fatalf("BuildRegistry: %v", err)
+	}
+	server := buyer.NewServer(
+		pool.NewRegistry(nil),
+		zerolog.Nop(),
+		now,
+		buyer.WithGatewayServiceToken("gateway-secret"),
+		buyer.WithRequireGatewayContext(true),
+		buyer.WithPoolMembership(trustRegistry),
+		buyer.WithTrustPoolStatusStore(trustStore),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/trust-pools/pool-a/pool_status.json", nil)
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	req.Header.Set("X-MacProvider-Account", "acct_allowed")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control=%q, want no-store", got)
+	}
+	var doc struct {
+		SchemaVersion string `json:"schema_version"`
+		Pool          struct {
+			PoolID    string `json:"pool_id"`
+			Readiness string `json:"readiness"`
+		} `json:"pool"`
+		Membership struct {
+			CurrentMemberCount           int    `json:"current_member_count"`
+			CurrentAdmittedMemberCount   int    `json:"current_admitted_member_count"`
+			CurrentNonRevokedMemberCount int    `json:"current_non_revoked_member_count"`
+			CurrentEligibleMemberCount   int    `json:"current_eligible_member_count"`
+			AuthorizedBuyerCount         int    `json:"authorized_buyer_count"`
+			LiveEligibilityEvaluation    string `json:"live_eligibility_evaluation"`
+		} `json:"membership"`
+		Confidentiality struct {
+			Scope string `json:"scope"`
+		} `json:"confidentiality"`
+		Disclosures []string `json:"disclosures"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if doc.SchemaVersion != trustpool.StatusSchemaVersion || doc.Pool.PoolID != "pool-a" {
+		t.Fatalf("unexpected status doc: %+v", doc)
+	}
+	if doc.Pool.Readiness != "unavailable" {
+		t.Fatalf("readiness=%q, want unavailable before promoted activation", doc.Pool.Readiness)
+	}
+	if doc.Membership.CurrentMemberCount != 1 || doc.Membership.CurrentAdmittedMemberCount != 1 || doc.Membership.CurrentNonRevokedMemberCount != 1 || doc.Membership.CurrentEligibleMemberCount != 0 || doc.Membership.AuthorizedBuyerCount != 1 || doc.Membership.LiveEligibilityEvaluation != "not_evaluated" {
+		t.Fatalf("membership=%+v", doc.Membership)
+	}
+	if doc.Confidentiality.Scope != "trusted_pool_not_privacy_pool" {
+		t.Fatalf("confidentiality=%+v", doc.Confidentiality)
+	}
+	if strings.Contains(rr.Body.String(), "provider-secret") {
+		t.Fatalf("status leaked provider identity: %s", rr.Body.String())
+	}
+
+	denied := httptest.NewRequest(http.MethodGet, "/v1/trust-pools/pool-a/status", nil)
+	denied.Header.Set("Authorization", "Bearer gateway-secret")
+	denied.Header.Set("X-MacProvider-Account", "acct_denied")
+	deniedRR := httptest.NewRecorder()
+	server.Handler().ServeHTTP(deniedRR, denied)
+	if deniedRR.Code != http.StatusNotFound || !strings.Contains(deniedRR.Body.String(), "pool_status_not_found") {
+		t.Fatalf("denied status=%d body=%s, want non-enumerating 404", deniedRR.Code, deniedRR.Body.String())
+	}
+	if got := deniedRR.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("denied Cache-Control=%q, want no-store", got)
+	}
+
+	unauth := httptest.NewRequest(http.MethodGet, "/v1/trust-pools/pool-a/pool_status.json", nil)
+	unauthRR := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unauthRR, unauth)
+	if unauthRR.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth status=%d body=%s, want 401", unauthRR.Code, unauthRR.Body.String())
+	}
 }
 
 func TestRateCardProjectionReturnsRecommendationSchema(t *testing.T) {
@@ -6600,6 +6709,68 @@ func openBuyerRequestLog(t *testing.T) (*requestlog.Store, string) {
 	}
 	createBuyerAuditLogForTest(t, store.DB())
 	return store, dbPath
+}
+
+func openBuyerTrustPoolStore(t *testing.T) *trustpool.Store {
+	t.Helper()
+	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(filepath.Join(t.TempDir(), "trustpool.sqlite")))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	return store
+}
+
+func approveBuyerTrustPoolCreator(t *testing.T, store *trustpool.Store, graceEndsAt time.Time) {
+	t.Helper()
+	_, err := store.UpsertCreatorApproval(context.Background(), trustpool.CreatorApproval{
+		CreatorAccountID:                  "creator-a",
+		ApprovalRecordID:                  "approval-v1",
+		CurrentApprovalVersion:            "approval-version-1",
+		PublicDisplayName:                 "Creator A",
+		LegalSupportContact:               "legal@example.test",
+		BillingContact:                    "billing@example.test",
+		EmergencyNotificationEndpoint:     "https://example.test/emergency",
+		AcknowledgedMaxResponseTime:       "15m",
+		AllowedProductCategory:            "design-partner",
+		DataRetentionCategory:             "standard",
+		SupportOwner:                      "ops",
+		AllowedLaunchEnvironment:          "candidate",
+		CreatorAgreementID:                "agreement-v1",
+		CreatorAgreementVersion:           "v1",
+		CreatorAgreementExpiresAtUTC:      graceEndsAt.Add(-time.Hour),
+		CreatorAgreementGraceEndsAtUTC:    graceEndsAt,
+		PricingScheduleID:                 "pricing-v1",
+		PricingScheduleVersion:            "v1",
+		ProhibitedClaimAcknowledgmentHash: buyerTestHash,
+		BuyerDisclosureCommitmentHash:     buyerOtherHash,
+		ApprovalCriteriaHash:              buyerTestHash,
+		ApprovedBy:                        "operator-a",
+		ApprovedAtUTC:                     time.Unix(1800000000, 0).UTC(),
+		Status:                            trustpool.CreatorStatusEnabled,
+	})
+	if err != nil {
+		t.Fatalf("UpsertCreatorApproval: %v", err)
+	}
+}
+
+func buyerTrustPoolEvent(op string, ts time.Time, typ, poolID string, mutate func(*trustpool.DurableEvent)) trustpool.DurableEvent {
+	e := trustpool.DurableEvent{
+		OperationID:  op,
+		TimestampUTC: ts,
+		EventType:    typ,
+		PoolID:       poolID,
+	}
+	if mutate != nil {
+		mutate(&e)
+	}
+	return e
 }
 
 func createBuyerAuditLogForTest(t *testing.T, db *sql.DB) {

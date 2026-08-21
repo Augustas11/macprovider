@@ -694,6 +694,8 @@ var coordinatorEmittedErrorCodes = []string{
 	"unsupported_modelID_for_multi_turn",
 	// SPEC-042 R005/R010 tenant isolation.
 	"pool_no_eligible_member", "pool_state_stale", "pool_unavailable", "pool_binary_too_old",
+	// SPEC-043 creator promise/status surface.
+	"pool_status_not_found", "pool_status_unavailable",
 }
 
 // TestCoordinatorErrorCodeCompleteness closes L-R2-2 coordinator-side: every
