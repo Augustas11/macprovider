@@ -117,6 +117,57 @@ func TestRouteableSnapshotsPreservesRouteableUntilUTC(t *testing.T) {
 	}
 }
 
+func TestRefreshRouteableSnapshotsAtRevisionAllowsSameRevisionTimeGateClose(t *testing.T) {
+	t.Parallel()
+	registry := trustpool.NewRegistry()
+	if err := registry.LoadRouteableSnapshotsAtRevision(3, []trustpool.RouteableSnapshot{
+		{
+			PoolID:        "pool-a",
+			Members:       []string{"provider-a"},
+			BuyerAccounts: []string{"acct-a"},
+			Routeable:     true,
+			Generation:    7,
+		},
+	}); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	changed, err := registry.RefreshRouteableSnapshotsAtRevision(3, []trustpool.RouteableSnapshot{
+		{
+			PoolID:        "pool-a",
+			BuyerAccounts: []string{"acct-a"},
+			Routeable:     false,
+			Generation:    8,
+		},
+	})
+	if err != nil {
+		t.Fatalf("same-revision refresh: %v", err)
+	}
+	if !changed {
+		t.Fatal("same-revision routeability change was not reported")
+	}
+	snap := registry.Snapshot("pool-a")
+	if !snap.Exists || snap.Routeable || snap.Generation != 8 || len(snap.Members) != 0 {
+		t.Fatalf("snapshot after same-revision refresh = %+v, want closed generation 8", snap)
+	}
+	changed, err = registry.RefreshRouteableSnapshotsAtRevision(3, []trustpool.RouteableSnapshot{
+		{
+			PoolID:        "pool-a",
+			BuyerAccounts: []string{"acct-a"},
+			Routeable:     false,
+			Generation:    8,
+		},
+	})
+	if err != nil {
+		t.Fatalf("idempotent same-revision refresh: %v", err)
+	}
+	if changed {
+		t.Fatal("idempotent same-revision refresh reported a change")
+	}
+	if _, err := registry.RefreshRouteableSnapshotsAtRevision(2, nil); err == nil {
+		t.Fatal("stale lower revision refresh unexpectedly succeeded")
+	}
+}
+
 func TestSnapshot_ConsistentMembersAndGenerationUnderConcurrency(t *testing.T) {
 	// The (members, generation) pair must be captured atomically: a snapshot
 	// must never show a member that was revoked at-or-before the generation

@@ -175,6 +175,28 @@ func TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry(t *testing.T) {
 		t.Fatalf("GET creator status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
 	assertAdminSchemaVersion(t, rec)
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/trust-pools/pools/"+root.poolID, nil)
+	req.Header.Set("Authorization", "Bearer operator-secret")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET pool status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	assertAdminSchemaVersion(t, rec)
+	var body struct {
+		Pool struct {
+			CreatorGateReason     string `json:"creator_gate_reason"`
+			RouteableGeneration   uint64 `json:"routeable_generation"`
+			RouteGateCheckedAtUTC string `json:"route_gate_checked_at_utc"`
+		} `json:"pool"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode GET pool body: %v", err)
+	}
+	if body.Pool.CreatorGateReason != "creator_suspended" || body.Pool.RouteableGeneration == 0 || body.Pool.RouteGateCheckedAtUTC == "" {
+		t.Fatalf("GET pool gate fields = %+v, want suspended gate status", body.Pool)
+	}
 }
 
 func TestAdminHandler_RejectsUnauthorized(t *testing.T) {

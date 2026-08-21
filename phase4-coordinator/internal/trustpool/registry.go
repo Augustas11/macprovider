@@ -262,7 +262,8 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 // set. The all-or-nothing validation pass avoids partially loaded pool state if
 // one reconstructed pool is malformed.
 func (r *Registry) LoadRouteableSnapshots(snapshots []RouteableSnapshot) error {
-	return r.loadRouteableSnapshots(0, snapshots, false)
+	_, err := r.loadRouteableSnapshots(0, snapshots, false, false)
+	return err
 }
 
 // LoadRouteableSnapshotsAtRevision replaces the registry only when revision is
@@ -270,7 +271,15 @@ func (r *Registry) LoadRouteableSnapshots(snapshots []RouteableSnapshot) error {
 // to prevent an older post-commit refresh from overwriting a newer restrictive
 // mutation.
 func (r *Registry) LoadRouteableSnapshotsAtRevision(revision uint64, snapshots []RouteableSnapshot) error {
-	return r.loadRouteableSnapshots(revision, snapshots, true)
+	_, err := r.loadRouteableSnapshots(revision, snapshots, true, false)
+	return err
+}
+
+// RefreshRouteableSnapshotsAtRevision replaces the registry at the current
+// revision when the durable replay output changes due to time-based gates.
+// Event/approval mutation publishers should keep using LoadRouteableSnapshotsAtRevision.
+func (r *Registry) RefreshRouteableSnapshotsAtRevision(revision uint64, snapshots []RouteableSnapshot) (bool, error) {
+	return r.loadRouteableSnapshots(revision, snapshots, true, true)
 }
 
 func (r *Registry) Revision() uint64 {
@@ -279,29 +288,29 @@ func (r *Registry) Revision() uint64 {
 	return r.revision
 }
 
-func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []RouteableSnapshot, enforceRevision bool) error {
+func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []RouteableSnapshot, enforceRevision bool, allowSameRevisionRefresh bool) (bool, error) {
 	next := make(map[string]*poolState, len(snapshots))
 	for _, s := range snapshots {
 		if s.PoolID == "" {
-			return fmt.Errorf("trustpool: routeable snapshot pool id is required")
+			return false, fmt.Errorf("trustpool: routeable snapshot pool id is required")
 		}
 		if _, exists := next[s.PoolID]; exists {
-			return fmt.Errorf("trustpool: duplicate routeable snapshot for pool %q", s.PoolID)
+			return false, fmt.Errorf("trustpool: duplicate routeable snapshot for pool %q", s.PoolID)
 		}
 		if s.MinBinaryVersion != "" && !versionfloor.Valid(s.MinBinaryVersion) {
-			return fmt.Errorf("trustpool: invalid pool min binary version %q for pool %q", s.MinBinaryVersion, s.PoolID)
+			return false, fmt.Errorf("trustpool: invalid pool min binary version %q for pool %q", s.MinBinaryVersion, s.PoolID)
 		}
 		members := make(map[string]struct{}, len(s.Members))
 		for _, id := range s.Members {
 			if id == "" {
-				return fmt.Errorf("trustpool: routeable snapshot for pool %q contains empty member id", s.PoolID)
+				return false, fmt.Errorf("trustpool: routeable snapshot for pool %q contains empty member id", s.PoolID)
 			}
 			members[id] = struct{}{}
 		}
 		revoked := make(map[string]struct{}, len(s.Revoked))
 		for _, id := range s.Revoked {
 			if id == "" {
-				return fmt.Errorf("trustpool: routeable snapshot for pool %q contains empty revoked id", s.PoolID)
+				return false, fmt.Errorf("trustpool: routeable snapshot for pool %q contains empty revoked id", s.PoolID)
 			}
 			revoked[id] = struct{}{}
 			delete(members, id)
@@ -309,7 +318,7 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 		buyers := make(map[string]struct{}, len(s.BuyerAccounts))
 		for _, id := range s.BuyerAccounts {
 			if id == "" {
-				return fmt.Errorf("trustpool: routeable snapshot for pool %q contains empty buyer account id", s.PoolID)
+				return false, fmt.Errorf("trustpool: routeable snapshot for pool %q contains empty buyer account id", s.PoolID)
 			}
 			buyers[id] = struct{}{}
 		}
@@ -326,14 +335,60 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if enforceRevision && r.revision != 0 && revision <= r.revision {
-		return fmt.Errorf("trustpool: stale routeable snapshot revision %d <= current %d", revision, r.revision)
+	if enforceRevision && r.revision != 0 {
+		switch {
+		case revision < r.revision:
+			return false, fmt.Errorf("trustpool: stale routeable snapshot revision %d < current %d", revision, r.revision)
+		case revision == r.revision && !allowSameRevisionRefresh:
+			return false, fmt.Errorf("trustpool: stale routeable snapshot revision %d <= current %d", revision, r.revision)
+		case revision == r.revision && poolStateMapsEqual(r.pools, next):
+			return false, nil
+		}
 	}
+	changed := r.revision != revision || !poolStateMapsEqual(r.pools, next)
 	r.pools = next
 	if enforceRevision {
 		r.revision = revision
 	}
-	return nil
+	return changed, nil
+}
+
+func poolStateMapsEqual(a, b map[string]*poolState) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for poolID, ap := range a {
+		bp := b[poolID]
+		if bp == nil || !poolStatesEqual(ap, bp) {
+			return false
+		}
+	}
+	return true
+}
+
+func poolStatesEqual(a, b *poolState) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.routeable == b.routeable &&
+		a.minBinaryVersion == b.minBinaryVersion &&
+		a.generation == b.generation &&
+		a.routeableUntilUTC.Equal(b.routeableUntilUTC) &&
+		stringSetsEqual(a.members, b.members) &&
+		stringSetsEqual(a.revoked, b.revoked) &&
+		stringSetsEqual(a.buyers, b.buyers)
+}
+
+func stringSetsEqual(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // RouteableSnapshots returns a deterministic durable-style export of all

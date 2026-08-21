@@ -654,6 +654,24 @@ func TestTrustedPoolsEnabledRequiresGatewayContext(t *testing.T) {
 	}
 }
 
+func TestTrustedPoolsEnabledRequiresBoundedRefreshInterval(t *testing.T) {
+	for _, interval := range []int{0, 61} {
+		cfg := validTestConfig()
+		cfg.TrustedPools.Enabled = true
+		cfg.TrustedPools.RefreshIntervalS = interval
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "trusted_pools.refresh_interval_s") {
+			t.Fatalf("trusted pools refresh interval %d validation err=%v", interval, err)
+		}
+	}
+
+	cfg := validTestConfig()
+	cfg.TrustedPools.Enabled = true
+	cfg.TrustedPools.RefreshIntervalS = 60
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("trusted pools refresh interval 60 should validate: %v", err)
+	}
+}
+
 func TestRateCardEntryCacheRateDefaultAndExplicitZero(t *testing.T) {
 	var omitted RateCardEntry
 	if err := yaml.Unmarshal([]byte("prompt_credits_per_mtok: 500000\ncompletion_credits_per_mtok: 1000000\n"), &omitted); err != nil {
