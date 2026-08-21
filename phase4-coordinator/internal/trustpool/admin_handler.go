@@ -52,6 +52,8 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleGetCreator(w, r)
 	case r.URL.Path == "/admin/trust-pools/pools":
 		h.handleListPools(w, r)
+	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/promote"):
+		h.handlePromotePool(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/"):
 		h.handleGetPool(w, r)
 	default:
@@ -89,13 +91,8 @@ func (h *adminHandler) handleUpsertCreator(w http.ResponseWriter, r *http.Reques
 		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
 		return
 	}
-	if h.deps.Registry != nil {
-		if state.Revision > h.deps.Registry.Revision() {
-			if err := h.deps.Registry.LoadRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
-				writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
-				return
-			}
-		}
+	if !h.refreshRegistryIfAhead(w, state) {
+		return
 	}
 	writeAdminJSON(w, http.StatusAccepted, map[string]any{"creator": committed})
 }
@@ -153,16 +150,71 @@ func (h *adminHandler) handleAppendEvent(w http.ResponseWriter, r *http.Request)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	state, committed, applied, err := h.deps.Store.AppendValidatedEvent(r.Context(), e)
+	state, committed, _, err := h.deps.Store.AppendValidatedEvent(r.Context(), e)
 	if err != nil {
 		h.writeMutationError(w, err)
 		return
 	}
-	if h.deps.Registry != nil && applied {
-		if err := h.deps.Registry.LoadRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
-			writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
-			return
-		}
+	if !h.refreshRegistryIfAhead(w, state) {
+		return
+	}
+	writeAdminJSON(w, http.StatusAccepted, map[string]any{
+		"event": committed,
+		"pool":  adminPoolResponse(state.Pools[committed.PoolID], state.RouteGateCheckedAt),
+	})
+}
+
+type promotionRequest struct {
+	OperationID  string    `json:"operation_id,omitempty"`
+	TimestampUTC time.Time `json:"timestamp_utc,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
+}
+
+func (h *adminHandler) handlePromotePool(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(r.URL.Path, "/promote"), "/admin/trust-pools/pools/"))
+	if poolID == "" || strings.Contains(poolID, "/") {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	var body promotionRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil && err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	operationID, err := resolveOperationID(strings.TrimSpace(body.OperationID), r.Header)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	e := DurableEvent{
+		OperationID:  operationID,
+		TimestampUTC: body.TimestampUTC,
+		EventType:    EventLifecycleChanged,
+		PoolID:       poolID,
+		Lifecycle:    LifecycleActive,
+		Reason:       strings.TrimSpace(body.Reason),
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state, committed, _, err := h.deps.Store.PromotePool(r.Context(), e)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	if !h.refreshRegistryIfAhead(w, state) {
+		return
 	}
 	writeAdminJSON(w, http.StatusAccepted, map[string]any{
 		"event": committed,
@@ -223,6 +275,13 @@ func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "operation_conflict"}})
 	case errors.Is(err, ErrActivationRequiresPromotion):
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "activation_requires_promotion"}})
+	case errors.Is(err, ErrPromotionPreconditionFailed):
+		precondition := PromotionPreconditionError{}
+		reason := "promotion_precondition_failed"
+		if errors.As(err, &precondition) && precondition.Reason != "" {
+			reason = precondition.Reason
+		}
+		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "promotion_precondition_failed", "reason": reason}})
 	case errors.Is(err, ErrRootRegistrationNonce):
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_root_registration_nonce"}})
 	case errors.Is(err, ErrCreatorApprovalGate):
@@ -234,22 +293,21 @@ func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
 	}
 }
 
+func (h *adminHandler) refreshRegistryIfAhead(w http.ResponseWriter, state *ReconstructedState) bool {
+	if h.deps.Registry == nil || state == nil || state.Revision <= h.deps.Registry.Revision() {
+		return true
+	}
+	if err := h.deps.Registry.LoadRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
+		return false
+	}
+	return true
+}
+
 func normalizeAdminEvent(r *http.Request, e DurableEvent) (DurableEvent, error) {
-	bodyOperationID := strings.TrimSpace(e.OperationID)
-	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	legacyOperationID := strings.TrimSpace(r.Header.Get("X-Operation-ID"))
-	operationID := bodyOperationID
-	for _, candidate := range []string{idempotencyKey, legacyOperationID} {
-		if candidate == "" {
-			continue
-		}
-		if operationID == "" {
-			operationID = candidate
-			continue
-		}
-		if operationID != candidate {
-			return DurableEvent{}, ErrConflictingOperationID
-		}
+	operationID, err := resolveOperationID(strings.TrimSpace(e.OperationID), r.Header)
+	if err != nil {
+		return DurableEvent{}, err
 	}
 	e.OperationID = operationID
 	if !e.TimestampUTC.IsZero() {
@@ -284,6 +342,23 @@ func normalizeAdminEvent(r *http.Request, e DurableEvent) (DurableEvent, error) 
 	e.RootRegistrationPurpose = strings.TrimSpace(e.RootRegistrationPurpose)
 	e.RootRegistrationEnvironment = strings.TrimSpace(e.RootRegistrationEnvironment)
 	return e, nil
+}
+
+func resolveOperationID(bodyOperationID string, headers http.Header) (string, error) {
+	operationID := strings.TrimSpace(bodyOperationID)
+	for _, candidate := range []string{strings.TrimSpace(headers.Get("Idempotency-Key")), strings.TrimSpace(headers.Get("X-Operation-ID"))} {
+		if candidate == "" {
+			continue
+		}
+		if operationID == "" {
+			operationID = candidate
+			continue
+		}
+		if operationID != candidate {
+			return "", ErrConflictingOperationID
+		}
+	}
+	return operationID, nil
 }
 
 type adminPoolState struct {

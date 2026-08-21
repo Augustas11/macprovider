@@ -1295,7 +1295,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance, a gateway-authenticated buyer status surface, and lifecycle fail-closed tests. Raw operator admin events cannot activate a routeable pool; requirements remain pending until creator self-service/administration, production promotion evidence, public policy/status promise surfaces, signed journey, rollback-resistant promotion gates, public pool-status freshness fail-closed enforcement, and production activation gates are implemented."
+        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance, a gateway-authenticated buyer status surface, an explicit operator-only candidate promotion path that preflights local activation prerequisites, and lifecycle fail-closed tests. Raw operator admin events cannot activate a routeable pool; requirements remain pending until creator self-service/administration, public policy/status promise surfaces, signed journey, rollback-resistant promotion authorization/evidence, public pool-status freshness fail-closed enforcement, full production activation gates, and production rollout proof are implemented."
       }
     }
   ],
@@ -5479,6 +5479,8 @@
         "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Generation",
         "phase4-coordinator/internal/trustpool/durable_store.go:type Store",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) AppendValidatedEvent",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) PromotePool",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *ReconstructedState) validatePromotion",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertCreatorApproval",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) Reconstruct",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *ReconstructedState) BuildRegistry",
@@ -5504,7 +5506,9 @@
         "phase4-coordinator/internal/trustpool/registry_test.go:TestRouteableSnapshotsPreservesRouteableUntilUTC",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestRegistryRouteableUntilExpiresAtRouteTimeAndBumpsGeneration",
         "phase4-coordinator/internal/trustpool/registry_test.go:TestRefreshRouteableSnapshotsAtRevisionAllowsSameRevisionTimeGateClose",
-        "phase4-coordinator/internal/trustpool/refresher_test.go:TestRefreshRegistryClosesExpiredCreatorGateAtSameRevision"
+        "phase4-coordinator/internal/trustpool/refresher_test.go:TestRefreshRegistryClosesExpiredCreatorGateAtSameRevision",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PromotePoolActivatesAfterPreflight",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PromotePoolRejectsMissingPreconditions"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -5514,7 +5518,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Durable coordinator state: a default-off SQLite event ledger, durable creator approval table with monotonic per-creator approval revisions, idempotent append path, replay-checked candidate/restrictive admin append path, rejection of raw active lifecycle publication, read-at-boot replay model, creator approval route gate, routeable registry reconstruction, membership/blocklist/lifecycle snapshotting, root nonce reuse rejection during durable replay, revision-fenced live registry refresh after event and approval mutations, route-time grace expiry checks, same-revision background routeability expiry refresh, routeable snapshot export of grace-expiry timestamps, buyer-authorization snapshot reads, and startup wiring are implemented locally. Still pending: production promotion append path, production migration evidence, public status/promise freshness, and signed journey evidence."
+        "rationale": "Durable coordinator state: a default-off SQLite event ledger, durable creator approval table with monotonic per-creator approval revisions, idempotent append path, replay-checked candidate/restrictive admin append path, rejection of raw active lifecycle publication, explicit candidate promotion append path with local preflight, read-at-boot replay model, creator approval route gate, routeable registry reconstruction, membership/blocklist/lifecycle snapshotting, root nonce reuse rejection during durable replay, revision-fenced live registry refresh after event and approval mutations, route-time grace expiry checks, same-revision background routeability expiry refresh, routeable snapshot export of grace-expiry timestamps, buyer-authorization snapshot reads, and startup wiring are implemented locally. Still pending: rollback-resistant production promotion authorization/evidence, production migration evidence, public status/promise freshness, and signed journey evidence."
       }
     },
     {
@@ -5525,6 +5529,7 @@
         "phase4-coordinator/internal/trustpool/admin_handler.go:type AdminDeps",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func NewAdminHandler",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleAppendEvent",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handlePromotePool",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleUpsertCreator",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleGetCreator",
         "phase4-coordinator/cmd/coordinator/main.go:func main"
@@ -5535,7 +5540,9 @@
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_ReplayChecksBeforeAppend",
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_IdempotencyConflict",
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_ConflictingOperationIDSourcesRejected",
-        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry"
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_PromoteRejectsMissingPrecondition",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_PromoteRetryRefreshesStaleRegistry"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -5545,7 +5552,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Creator administration surface: a default-off operator-only API now appends replay-checked durable pool-control events for candidate/restrictive state, upserts/reads creator approval records, returns schema-versioned envelopes, rejects conflicting operation-id sources, rejects raw active lifecycle transitions, maps creator-gate failures to closed error codes, and refreshes live state after accepted event or approval mutations. Still pending: creator-authenticated CLI/API, signer rotation, audited promotion path, audit export, and policy-aware authorization beyond raw MVP events."
+        "rationale": "Creator administration surface: a default-off operator-only API now appends replay-checked durable pool-control events for candidate/restrictive state, exposes an operator-only promotion endpoint for the local candidate activation gate, upserts/reads creator approval records, returns schema-versioned envelopes, rejects conflicting operation-id sources, rejects raw active lifecycle transitions, maps creator/promotion gate failures to closed error codes, and refreshes live state after accepted event, promotion, or approval mutations. Still pending: creator-authenticated CLI/API, signer rotation, rollback-resistant production promotion authorization, audit export, and policy-aware authorization beyond raw MVP events."
       }
     },
     {
@@ -5612,6 +5619,8 @@
         "phase4-coordinator/internal/config/config.go:type TrustedPoolsConfig",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func NewAdminHandler",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (a CreatorApproval) ValidFor",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) PromotePool",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *ReconstructedState) validatePromotion",
         "phase4-coordinator/internal/trustpool/refresher.go:func RefreshRegistry",
         "phase4-coordinator/internal/trustpool/refresher.go:func StartRefreshLoop",
         "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) RefreshRouteableSnapshotsAtRevision",
@@ -5627,6 +5636,10 @@
         "phase4-coordinator/internal/config/config_test.go:TestTrustedPoolsEnabledRequiresGatewayContext",
         "phase4-coordinator/internal/config/config_test.go:TestTrustedPoolsEnabledRequiresBoundedRefreshInterval",
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_AppendsCandidateEventsAndRejectsActivation",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_PromoteRejectsMissingPrecondition",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_PromoteRetryRefreshesStaleRegistry",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PromotePoolActivatesAfterPreflight",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PromotePoolRejectsMissingPreconditions",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_CreatorApprovalControlsRouteability",
         "phase4-coordinator/internal/trustpool/registry_test.go:TestRouteableSnapshotsPreservesRouteableUntilUTC",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestRegistryRouteableUntilExpiresAtRouteTimeAndBumpsGeneration",
@@ -5643,7 +5656,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Production enablement gate: coordinator startup now has a default-off trusted_pools.enabled switch that reconstructs durable state, applies creator approval routeability gates at reconstruction/publication time, publishes route-time grace expiry deadlines into the registry, wires WithPoolMembership and the buyer-authenticated status store only after successful replay, runs a bounded background refresher that replays durable state and updates same-revision time-gate closures without replacing the live registry on refresh error, mounts a candidate/restrictive operator admin surface only in the enabled mode, and disables pool support without failing global startup when durable reconstruction fails; otherwise it does not advertise pool support. The current admin append surface rejects raw active lifecycle transitions, so routeable production activation still requires a future promotion gate. Still pending: public promise surfaces, public pool-status freshness fail-closed enforcement, full live activation checks, signed launch evidence, and production rollout proof."
+        "rationale": "Production enablement gate: coordinator startup now has a default-off trusted_pools.enabled switch that reconstructs durable state, applies creator approval routeability gates at reconstruction/publication time, publishes route-time grace expiry deadlines into the registry, wires WithPoolMembership and the buyer-authenticated status store only after successful replay, runs a bounded background refresher that replays durable state and updates same-revision time-gate closures without replacing the live registry on refresh error, mounts a candidate/restrictive operator admin surface only in the enabled mode, and disables pool support without failing global startup when durable reconstruction fails; otherwise it does not advertise pool support. A local operator-only candidate promotion gate can move created candidate pools to active after preflighting root registration, accepted manifest, enabled creator approval, buyer authorization, and non-revoked membership; raw active lifecycle transitions still fail closed, production-labeled promotion is rejected, and paused-pool reactivation remains blocked pending a durable R006 re-verification sweep path. Still pending: public promise surfaces, public pool-status freshness fail-closed enforcement, full live activation checks including the R006 reactivation sweep, signed launch evidence, rollback-resistant production promotion authorization, and production rollout proof."
       }
     },
     {
@@ -5697,6 +5710,7 @@
       "implementation": [
         "phase4-coordinator/internal/buyer/server.go:func (s *Server) poolGenerationStale",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertCreatorApproval",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) PromotePool",
         "phase4-coordinator/internal/trustpool/durable_store.go:EventLifecycleChanged",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *ReconstructedState) RouteableSnapshots",
         "phase4-coordinator/internal/trustpool/refresher.go:func RefreshRegistry"
@@ -5705,6 +5719,8 @@
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PausedPoolReplaysButFailsClosedForRouting",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_CreatorApprovalControlsRouteability",
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_AppendsCandidateEventsAndRejectsActivation",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PromotePoolActivatesAfterPreflight",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestRegistryRouteableUntilExpiresAtRouteTimeAndBumpsGeneration",
         "phase4-coordinator/internal/trustpool/refresher_test.go:TestRefreshRegistryClosesExpiredCreatorGateAtSameRevision",
         "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_LoopFenceRejectsStaleBeforeDispatch"
@@ -5717,7 +5733,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Lifecycle and emergency control: durable lifecycle-change events now replay into routeable snapshots, non-active pools expose zero routeable members while preserving generation, creator suspension/expiry gates publish affected pools as non-routeable with empty routeable membership, and approval revisions plus route-time/background expiry advance affected pool generations for the existing buyer dispatch fence. Still pending: signed lifecycle commands, break-glass RBAC/audit/status, notifications, public pool_status expiry freshness, positive override TTL, full R006 reactivation sweep, and root-compromise retirement controls."
+        "rationale": "Lifecycle and emergency control: durable lifecycle-change events now replay into routeable snapshots, non-active pools expose zero routeable members while preserving generation, raw active events are rejected, the explicit promotion path can publish an active snapshot from created candidate pools only after local preflight, production-labeled promotion and paused-pool reactivation remain blocked pending durable production authorization and R006 re-verification sweep paths, creator suspension/expiry gates publish affected pools as non-routeable with empty routeable membership, and approval revisions plus route-time/background expiry advance affected pool generations for the existing buyer dispatch fence. Still pending: signed lifecycle commands, break-glass RBAC/audit/status, notifications, public pool_status expiry freshness, positive override TTL, full R006 reactivation sweep, rollback-resistant positive override, and root-compromise retirement controls."
       }
     },
     {
