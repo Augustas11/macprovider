@@ -141,6 +141,34 @@
 
     /* Surface A */
     .surface-title { font-size:18px; font-weight:600; margin:0 0 14px 0; }
+
+    .dash { max-width:640px; }
+    .dash-head {
+      display:flex; align-items:baseline; justify-content:space-between;
+      gap:16px; margin-bottom:28px;
+    }
+    .dash-status { font-size:22px; font-weight:600; letter-spacing:-.02em; }
+    .dash-status.ok { color:var(--seafoam-teal); }
+    .dash-status.warn { color:var(--sunset-coral); }
+    .dash-trust { color:var(--muted); font-size:13px; }
+    .dash-hero { margin-bottom:22px; }
+    .dash-kicker {
+      font-size:12px; color:var(--muted); letter-spacing:.08em;
+      text-transform:uppercase; font-weight:500; margin-bottom:6px;
+    }
+    .dash-amt { font-size:44px; font-weight:600; letter-spacing:-.03em; line-height:1.05; }
+    .dash-sub { margin-top:10px; color:var(--muted); font-size:14px; }
+    .dash-malibu { font-size:16px; margin-top:8px; }
+    .dash-note { margin-top:8px; font-size:13px; color:var(--muted); }
+    .dash-note.hold { color:var(--sunset-coral); }
+    .dash-wallet { margin-top:14px; font-size:13px; color:var(--muted); }
+    .dash-exception {
+      margin-top:22px; padding:14px 16px;
+      border:1px solid rgba(247,107,87,.35);
+      background:var(--accent-dim); border-radius:12px;
+    }
+    .dash-exception .ex-reason { font-size:14px; }
+    .dash-exception .ex-action { margin-top:6px; color:var(--muted); font-size:13px; }
     .headstrip {
       display:flex; flex-wrap:wrap; gap:10px 18px;
       align-items:center;
@@ -2552,19 +2580,74 @@
           el("div", { class: "val mono" }, lifeUSDC)));
     }
 
+    function dashPayoutAddress() {
+      var raw = state.wallet.data;
+      if (!raw) return "";
+      var normalized = normalizedProviderWalletStatus(raw);
+      if (normalized && !normalized.unavailable && normalized.payout_wallet &&
+          typeof normalized.payout_wallet.address === "string") {
+        return normalized.payout_wallet.address;
+      }
+      if (raw.payout_wallet && typeof raw.payout_wallet.address === "string") {
+        return raw.payout_wallet.address;
+      }
+      return "";
+    }
+
+    function dashNeedsAttention(health) {
+      return health.code !== "earning" &&
+        health.code !== "idle_no_work" &&
+        health.code !== "trusted_withdrawable" &&
+        health.code !== "eligible_idle";
+    }
+
     function renderEarn() {
       var d = state.earn.data;
+      var malibu = state.malibu.data;
       var loading = state.earn.inflight && !d;
-      var errSub = state.earn.err
-        ? "Earnings request returned HTTP " + state.earn.err.status + "."
+      var health = computePortalMiningHealth();
+      var today = d && typeof d.usdc_today === "number" ? fmtUSDC(d.usdc_today) : (loading ? "…" : "—");
+      var week = d && typeof d.usdc_week === "number" ? fmtUSDC(d.usdc_week) : (loading ? "…" : "n/a");
+      var pending = d && typeof d.usdc_pending === "number" ? fmtUSDC(d.usdc_pending) : (loading ? "…" : "n/a");
+      var life = d && typeof d.usdc_lifetime === "number" ? fmtUSDC(d.usdc_lifetime) : (loading ? "…" : "n/a");
+      var eligibility = normalizedMalibuRewardEligibility(malibu);
+      var hold = eligibility && rewardStatusIsHold(eligibility.primary_reason);
+      var eligCopy = eligibility
+        ? (eligibility.primary_reason === "earning_verified_work"
+          ? "Earning MALIBU from verified work"
+          : malibuRewardReasonCopy(eligibility.primary_reason))
         : null;
-      return el("div", null,
-        el("h1", { class: "surface-title" }, "Earn"),
-        renderMiningHealthCard(),
-        el("h2", { class: "section-h" }, "USDC"),
-        renderUsdcRow(d, loading, errSub),
-        renderMalibuRewardsCard(),
-        renderProviderWalletCard());
+      var wd = malibu ? Number(malibu.withdrawable_malibu) : NaN;
+      var hd = malibu ? Number(malibu.held_malibu) : NaN;
+      var malibuLine = malibu
+        ? ((isFinite(wd) ? wd.toFixed(2) : "n/a") + " MALIBU withdrawable / " +
+          (isFinite(hd) ? hd.toFixed(2) : "n/a") + " held")
+        : (state.malibu.inflight ? "MALIBU …" : "");
+      var addr = dashPayoutAddress();
+      var kids = [
+        el("div", { class: "dash-head" },
+          el("div", { class: "dash-status" + (dashNeedsAttention(health) ? " warn" : " ok") }, health.status),
+          el("div", { class: "dash-trust" }, health.trustSummary === "Trust status unavailable" ? "" : health.trustSummary)),
+        el("div", { class: "dash-hero" },
+          el("div", { class: "dash-kicker" }, "Today"),
+          el("div", { class: "dash-amt mono" }, today),
+          el("div", { class: "dash-sub" }, week + " wk · " + pending + " accrued · " + life + " life")),
+      ];
+      if (malibuLine) kids.push(el("div", { class: "dash-malibu" }, malibuLine));
+      if (eligCopy) {
+        kids.push(el("div", { class: hold ? "dash-note hold" : "dash-note" }, eligCopy));
+      }
+      if (addr) {
+        kids.push(el("div", { class: "dash-wallet mono" }, "Payout wallet " + truncateWalletAddress(addr)));
+      } else if (malibu && malibu.wallet_bound === false) {
+        kids.push(el("div", { class: "dash-note hold" }, "Add a payout wallet in Malibu."));
+      }
+      if (dashNeedsAttention(health) && health.reason) {
+        kids.push(el("div", { class: "dash-exception" },
+          el("div", { class: "ex-reason" }, health.reason),
+          health.action ? el("div", { class: "ex-action" }, health.action) : null));
+      }
+      return el("div", { class: "dash" }, kids);
     }
 
     /* ---- Surface D — Monitoring (placeholder) ---- */
