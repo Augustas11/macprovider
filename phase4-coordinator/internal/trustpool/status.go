@@ -56,13 +56,16 @@ type StatusCreator struct {
 }
 
 type StatusPolicy struct {
-	ManifestVersion    uint64 `json:"manifest_version"`
-	ManifestCoreDigest string `json:"manifest_core_digest,omitempty"`
-	MinBinaryVersion   string `json:"min_binary_version,omitempty"`
-	RootIssuerKeyID    string `json:"root_issuer_key_id,omitempty"`
-	RootIssuerKeyHash  string `json:"root_issuer_public_key_fingerprint,omitempty"`
-	CustodyEvidence    string `json:"custody_evidence,omitempty"`
-	RetentionPolicyID  string `json:"retention_policy_id,omitempty"`
+	ManifestVersion                 uint64   `json:"manifest_version"`
+	ManifestCoreDigest              string   `json:"manifest_core_digest,omitempty"`
+	MinBinaryVersion                string   `json:"min_binary_version,omitempty"`
+	RootIssuerKeyID                 string   `json:"root_issuer_key_id,omitempty"`
+	RootIssuerKeyHash               string   `json:"root_issuer_public_key_fingerprint,omitempty"`
+	CustodyEvidence                 string   `json:"custody_evidence,omitempty"`
+	RetentionPolicyID               string   `json:"retention_policy_id,omitempty"`
+	RetentionPolicyStatus           string   `json:"retention_policy_status"`
+	RetentionPolicyGoverningVersion string   `json:"retention_policy_governing_version,omitempty"`
+	RetentionPolicyFieldCategories  []string `json:"retention_policy_field_categories,omitempty"`
 }
 
 type StatusMembership struct {
@@ -177,6 +180,11 @@ func buildStatusDocumentForPool(state *ReconstructedState, p *ReconstructedPoolS
 	eligibleMemberCount := eligibleMemberCountFromSnapshot(snapshot, p, live, coherentSnapshot)
 	readiness, readinessReason := readinessForSnapshot(p, snapshot, eligibleMemberCount, live != nil, coherentSnapshot)
 	_, routeabilityReason := poolRouteability(p)
+	retention, retentionResolved := resolveRetentionPolicyForPool(p, approval)
+	retentionStatus := "registered"
+	if !retentionResolved {
+		retentionStatus = "unknown_policy_activation_blocked"
+	}
 	statusRouteable := readiness == "ready"
 	routeableGeneration := snapshot.Generation
 	if routeableGeneration == 0 {
@@ -232,13 +240,16 @@ func buildStatusDocumentForPool(state *ReconstructedState, p *ReconstructedPoolS
 			Status:                       approval.Status,
 		},
 		Policy: StatusPolicy{
-			ManifestVersion:    p.ManifestVersion,
-			ManifestCoreDigest: p.ManifestCoreDigest,
-			MinBinaryVersion:   policyMinBinaryVersion(p),
-			RootIssuerKeyID:    statusRootIssuerKeyID(p),
-			RootIssuerKeyHash:  statusRootIssuerFingerprint(p),
-			CustodyEvidence:    statusCustodyEvidence(p),
-			RetentionPolicyID:  policyRetentionPolicyID(p, approval),
+			ManifestVersion:                 p.ManifestVersion,
+			ManifestCoreDigest:              p.ManifestCoreDigest,
+			MinBinaryVersion:                policyMinBinaryVersion(p),
+			RootIssuerKeyID:                 statusRootIssuerKeyID(p),
+			RootIssuerKeyHash:               statusRootIssuerFingerprint(p),
+			CustodyEvidence:                 statusCustodyEvidence(p),
+			RetentionPolicyID:               retentionPolicyIDForPool(p, approval),
+			RetentionPolicyStatus:           retentionStatus,
+			RetentionPolicyGoverningVersion: retention.GoverningPolicyVersion,
+			RetentionPolicyFieldCategories:  retention.FieldCategories,
 		},
 		Membership: StatusMembership{
 			MinEligibleMembers:           policyMinEligibleMembers(p),
@@ -460,6 +471,9 @@ func poolRouteability(p *ReconstructedPoolState) (bool, string) {
 	if nonRevokedMemberCount(p) < policyMinEligibleMembers(p) {
 		return false, "min_eligible_members_unmet"
 	}
+	if !poolManifestRetentionPolicyResolved(p) {
+		return false, "retention_policy_unresolved"
+	}
 	return true, ""
 }
 
@@ -526,13 +540,6 @@ func policyMinBinaryVersion(p *ReconstructedPoolState) string {
 		return p.ManifestMinBinaryVersion
 	}
 	return p.MinBinaryVersion
-}
-
-func policyRetentionPolicyID(p *ReconstructedPoolState, approval CreatorApproval) string {
-	if p != nil && p.ManifestRetentionPolicyID != "" {
-		return p.ManifestRetentionPolicyID
-	}
-	return approval.DataRetentionCategory
 }
 
 func policySplitExecutionStatus(p *ReconstructedPoolState) string {

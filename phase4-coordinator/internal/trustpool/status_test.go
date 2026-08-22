@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 )
 
@@ -93,6 +94,13 @@ func TestBuildStatusDocumentReturnsBuyerSafePromiseShape(t *testing.T) {
 	if doc.Policy.ManifestVersion != 1 || doc.Policy.MinBinaryVersion != "1.8.33" || doc.Policy.RootIssuerKeyID == "" {
 		t.Fatalf("policy=%+v", doc.Policy)
 	}
+	if doc.Policy.RetentionPolicyID != "standard" ||
+		doc.Policy.RetentionPolicyStatus != "registered" ||
+		doc.Policy.RetentionPolicyGoverningVersion != "retention-policy-v1" ||
+		!stringSliceContains(doc.Policy.RetentionPolicyFieldCategories, "request_log") ||
+		!stringSliceContains(doc.Policy.RetentionPolicyFieldCategories, "pool_audit_log") {
+		t.Fatalf("status retention policy=%+v, want resolved standard registry record", doc.Policy)
+	}
 	if doc.Settlement.SplitExecutionStatus != "declared_not_executed" {
 		t.Fatalf("settlement=%+v", doc.Settlement)
 	}
@@ -123,6 +131,60 @@ func TestBuildStatusDocumentReturnsBuyerSafePromiseShape(t *testing.T) {
 	}
 	if emptyLiveDoc.Pool.Readiness != "unavailable" || emptyLiveDoc.Pool.ReadinessReason != "live_provider_eligible_members_unmet" || emptyLiveDoc.Membership.CurrentEligibleMemberCount != 0 || emptyLiveDoc.Routeability.Routeable {
 		t.Fatalf("empty live readiness=%q reason=%q eligible=%d routeable=%v", emptyLiveDoc.Pool.Readiness, emptyLiveDoc.Pool.ReadinessReason, emptyLiveDoc.Membership.CurrentEligibleMemberCount, emptyLiveDoc.Routeability.Routeable)
+	}
+}
+
+func TestBuildStatusDocumentDoesNotFallbackToApprovalRetentionAfterManifest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000625, 0).UTC()
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	for _, e := range []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifestWithPolicyCoreMutation(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+			core.RetentionPolicyID = ""
+		}),
+		ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-a"
+		}),
+		ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+			e.BuyerAccountID = "acct-a"
+		}),
+	} {
+		if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
+			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+		}
+	}
+	state, err := store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	registry, err := state.BuildRegistry()
+	if err != nil {
+		t.Fatalf("BuildRegistry: %v", err)
+	}
+	doc, found, err := trustpool.BuildStatusDocument(ctx, store, registry, root.poolID, "acct-a", time.Unix(1800000701, 0).UTC())
+	if err != nil {
+		t.Fatalf("BuildStatusDocument: %v", err)
+	}
+	if !found {
+		t.Fatal("BuildStatusDocument found=false, want true")
+	}
+	if doc.Policy.RetentionPolicyID != "" ||
+		doc.Policy.RetentionPolicyStatus != "unknown_policy_activation_blocked" ||
+		doc.Policy.RetentionPolicyGoverningVersion != "" ||
+		len(doc.Policy.RetentionPolicyFieldCategories) != 0 {
+		t.Fatalf("status retention fallback=%+v, want manifest-empty activation-blocked without registry fields", doc.Policy)
 	}
 }
 

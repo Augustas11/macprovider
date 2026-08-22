@@ -32,7 +32,7 @@ func TestBuildPolicyDocumentReturnsBuyerSafeCandidatePolicyShape(t *testing.T) {
 		signedManifestWithPolicyCoreMutation(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
 			core.MinEligibleMembers = 2
 			core.MinBinaryVersion = "1.8.33"
-			core.RetentionPolicyID = "retention-from-manifest"
+			core.RetentionPolicyID = "extended-dispute"
 		}),
 		ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
 			e.ProviderID = "provider-secret"
@@ -83,8 +83,21 @@ func TestBuildPolicyDocumentReturnsBuyerSafeCandidatePolicyShape(t *testing.T) {
 	if !policyPredicatePresent(doc.Predicates.Enforced, "min_binary_version") {
 		t.Fatalf("enforced predicates=%+v, want manifest-only min_binary_version predicate", doc.Predicates.Enforced)
 	}
-	if doc.Policy.RetentionPolicyID != "retention-from-manifest" || doc.Policy.RetentionPolicyStatus != "approval_category_only_not_registry_resolved" || doc.Policy.SplitExecutionStatus != "declared_not_executed" {
+	if !policyPredicatePresent(doc.Predicates.Enforced, "retention_policy_registry_resolution") {
+		t.Fatalf("enforced predicates=%+v, want retention-policy registry predicate", doc.Predicates.Enforced)
+	}
+	if doc.Policy.RetentionPolicyID != "extended-dispute" ||
+		doc.Policy.RetentionPolicyStatus != "registered" ||
+		doc.Policy.RetentionPolicyGoverningVersion != "retention-policy-v1" ||
+		doc.Policy.RetentionPolicyMinPeriod != "365d" ||
+		doc.Policy.RetentionPolicyMaxPeriod != "730d" ||
+		doc.Policy.RetentionPolicyDeletionSLA != "45d_after_retention_window" ||
+		doc.Policy.RetentionPolicyDisputeAuditTrail != "365d" ||
+		doc.Policy.SplitExecutionStatus != "declared_not_executed" {
 		t.Fatalf("policy status=%+v", doc.Policy)
+	}
+	if !stringSliceContains(doc.Policy.RetentionPolicyFieldCategories, "pool_audit_log") || !stringSliceContains(doc.Policy.RetentionPolicyFieldCategories, "public_announcement_history") {
+		t.Fatalf("retention policy categories=%+v, want resolved registry categories", doc.Policy.RetentionPolicyFieldCategories)
 	}
 	if doc.RootIssuer.CustodyClass != "unverified" || doc.RootIssuer.CustodyEvidence != "hash_only_not_class_enforced" || doc.RootIssuer.PublicKeyFingerprint == "" {
 		t.Fatalf("root issuer=%+v", doc.RootIssuer)
@@ -108,6 +121,7 @@ func TestBuildPolicyDocumentReturnsBuyerSafeCandidatePolicyShape(t *testing.T) {
 		"public unauthenticated policy/status exposure requires an operator approval",
 		"root issuer custody class is not yet recorded",
 		"supply_mode shared",
+		"retention policy id is resolved",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("policy missing disclosure %q: %s", want, body)
@@ -115,9 +129,76 @@ func TestBuildPolicyDocumentReturnsBuyerSafeCandidatePolicyShape(t *testing.T) {
 	}
 }
 
+func TestBuildPolicyDocumentDoesNotFallbackToApprovalRetentionAfterManifest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000925, 0).UTC()
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	for _, e := range []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifestWithPolicyCoreMutation(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+			core.RetentionPolicyID = ""
+		}),
+		ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-a"
+		}),
+		ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+			e.BuyerAccountID = "acct-a"
+		}),
+	} {
+		if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
+			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+		}
+	}
+	state, err := store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	registry, err := state.BuildRegistry()
+	if err != nil {
+		t.Fatalf("BuildRegistry: %v", err)
+	}
+	doc, found, err := trustpool.BuildPolicyDocument(ctx, store, registry, root.poolID, "acct-a", time.Unix(1800001001, 0).UTC())
+	if err != nil {
+		t.Fatalf("BuildPolicyDocument: %v", err)
+	}
+	if !found {
+		t.Fatal("BuildPolicyDocument found=false, want true")
+	}
+	if doc.Policy.RetentionPolicyID != "" ||
+		doc.Policy.RetentionPolicyStatus != "unknown_policy_activation_blocked" ||
+		doc.Policy.RetentionPolicyGoverningVersion != "" ||
+		len(doc.Policy.RetentionPolicyFieldCategories) != 0 ||
+		doc.Policy.RetentionPolicyMinPeriod != "" ||
+		doc.Policy.RetentionPolicyMaxPeriod != "" ||
+		doc.Policy.RetentionPolicyDeletionSLA != "" ||
+		doc.Policy.RetentionPolicyDisputeAuditTrail != "" {
+		t.Fatalf("policy retention fallback=%+v, want manifest-empty activation-blocked without registry fields", doc.Policy)
+	}
+}
+
 func policyPredicatePresent(predicates []trustpool.PolicyPredicate, id string) bool {
 	for _, predicate := range predicates {
 		if predicate.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
 			return true
 		}
 	}
@@ -294,7 +375,7 @@ func TestBuildPublicPolicyDocumentRequiresMatchingAnnouncementApproval(t *testin
 	}
 
 	nextManifest := signedManifestExtendingWithPolicyCoreMutation(t, "op-manifest-v2", ts.Add(4*time.Second), manifest, root, func(core *poolmanifest.PolicyCore) {
-		core.RetentionPolicyID = "retention-v2"
+		core.RetentionPolicyID = "extended-dispute"
 	})
 	if _, _, _, err := store.AppendValidatedEvent(ctx, nextManifest); err != nil {
 		t.Fatalf("AppendValidatedEvent(%s): %v", nextManifest.OperationID, err)
