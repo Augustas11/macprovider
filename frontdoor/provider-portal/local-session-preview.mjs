@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-// Local-only preview of the operator-minted portal session. Not production.
+// Local preview of the portal bundle against LIVE Pearl.
+// Same GET paths Malibu.app uses. Browser never sees the Keychain FR-P12 token.
+// Not production: production is portal.malibu.tech with an operator-minted ?ps=.
 import { createServer } from "node:http";
 import { readFileSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -9,11 +12,25 @@ import { homedir } from "node:os";
 const here = fileURLToPath(new URL(".", import.meta.url));
 const port = Number(process.env.PORTAL_PREVIEW_PORT || 8765);
 const previewToken = "mps1_localpreview";
-let providerId = "mp-local-preview";
+const upstreamOrigin = (process.env.PORTAL_UPSTREAM || "https://portal.malibu.tech").replace(/\/$/, "");
+const coordinatorOrigin = (
+  process.env.COORDINATOR_UPSTREAM || "https://coordinator.malibu.tech"
+).replace(/\/$/, "");
+
+let providerId = "";
 const idPath = join(homedir(), ".config", "macprovider", "provider_id");
 if (existsSync(idPath)) {
-  const raw = readFileSync(idPath, "utf8").trim();
-  if (raw) providerId = raw;
+  providerId = readFileSync(idPath, "utf8").trim();
+}
+if (!providerId) {
+  process.stderr.write("no ~/.config/macprovider/provider_id — cannot proxy live earnings\n");
+  process.exit(1);
+}
+
+const keychainToken = loadProviderToken(providerId);
+if (!keychainToken) {
+  process.stderr.write("no FR-P12 token in Keychain for this Mac — cannot proxy live earnings\n");
+  process.exit(1);
 }
 
 const config = {
@@ -22,6 +39,26 @@ const config = {
   require_provider_tokens: true,
   github_oauth_enabled: false,
 };
+
+function loadProviderToken(id) {
+  const services = [
+    "live.malibu.provider.provider-token.v1",
+    "live.streamvc.macprovider.provider-token.v1",
+  ];
+  for (const service of services) {
+    try {
+      const raw = execFileSync(
+        "security",
+        ["find-generic-password", "-s", service, "-a", id, "-w"],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      ).trim();
+      if (raw) return raw;
+    } catch (_) {
+      // try next service
+    }
+  }
+  return "";
+}
 
 function json(res, status, body) {
   res.writeHead(status, {
@@ -34,6 +71,61 @@ function json(res, status, body) {
 function bearer(req) {
   const header = req.headers.authorization || "";
   return header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+}
+
+function livePath(pathname) {
+  if (pathname === "/v1/pool/check") return true;
+  if (pathname === "/v1/provider/malibu-accrual") return true;
+  if (pathname === "/v1/provider/wallet") return true;
+  if (pathname === "/v1/provider/malibu-reward-audit") return true;
+  return /^\/providers\/[^/]+\/earnings$/.test(pathname);
+}
+
+async function proxyLive(req, res, url) {
+  if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
+  if (bearer(req) !== previewToken && url.pathname !== "/v1/pool/check") {
+    return json(res, 401, { error: "unauthorized" });
+  }
+  const pathAndQuery = url.pathname + url.search;
+  const origins = url.pathname === "/v1/provider/wallet"
+    ? [upstreamOrigin, coordinatorOrigin]
+    : [upstreamOrigin];
+  let lastStatus = 502;
+  let lastType = "application/json";
+  let lastBuf = Buffer.from(JSON.stringify({ error: "upstream_failed" }));
+  for (const origin of origins) {
+    try {
+      const upstream = await fetch(origin + pathAndQuery, {
+        method: "GET",
+        headers: {
+          Authorization: "Bearer " + keychainToken,
+          Accept: "application/json",
+        },
+        cache: "no-store",
+      });
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      const type = upstream.headers.get("content-type") || "application/json";
+      lastStatus = upstream.status;
+      lastType = type;
+      lastBuf = buf;
+      const looksJSON = type.includes("json") || (buf.length > 0 && buf[0] === 0x7b);
+      if (looksJSON || origins.length === 1) {
+        res.writeHead(upstream.status, {
+          "content-type": looksJSON ? "application/json" : type,
+          "cache-control": "no-store",
+        });
+        res.end(buf);
+        return;
+      }
+    } catch (_) {
+      lastStatus = 502;
+    }
+  }
+  res.writeHead(lastStatus, {
+    "content-type": lastType.includes("json") ? "application/json" : lastType,
+    "cache-control": "no-store",
+  });
+  res.end(lastBuf);
 }
 
 const server = createServer((req, res) => {
@@ -49,46 +141,9 @@ const server = createServer((req, res) => {
       scope: "portal_read",
     });
   }
-  if (url.pathname === "/v1/pool/check") {
-    return json(res, 200, { provider_id: providerId, state: "ready", tier: "trusted" });
-  }
-  if (url.pathname === `/providers/${providerId}/earnings`) {
-    if (bearer(req) !== previewToken) return json(res, 401, { error: "unauthorized" });
-    return json(res, 200, {
-      provider_id: providerId,
-      total_credits: 80000,
-      current_window_credits: 7500,
-      usdc_today: 0.0041,
-      usdc_week: 0.0075,
-      usdc_pending: 0.06,
-      usdc_lifetime: 0.08,
-    });
-  }
-  if (url.pathname === "/v1/provider/malibu-accrual") {
-    if (bearer(req) !== previewToken) return json(res, 401, { error: "unauthorized" });
-    return json(res, 200, {
-      provider_id: providerId,
-      accrued_malibu: 257.03,
-      withdrawable_malibu: 43.49,
-      held_malibu: 213.54,
-      trust_tier: "trusted",
-      reward_eligibility: {
-        schema_version: "malibu_reward_eligibility.v1",
-        earning_state: "earning",
-        withdrawal_state: "held",
-        primary_reason: "earning_verified_work",
-        reasons: ["earning_verified_work"],
-      },
-    });
-  }
-  if (url.pathname === "/v1/provider/wallet") {
-    if (bearer(req) !== previewToken) return json(res, 401, { error: "unauthorized" });
-    return json(res, 200, {
-      schema_version: "provider_wallet_status.v1",
-      provider_id: providerId,
-      wallet_bound: false,
-      unavailable: false,
-    });
+  if (livePath(url.pathname)) {
+    proxyLive(req, res, url).catch(() => json(res, 502, { error: "upstream_failed" }));
+    return;
   }
   if (url.pathname === "/" || url.pathname === "/index.html") {
     const html = readFileSync(join(here, "index.html"));
@@ -101,6 +156,8 @@ const server = createServer((req, res) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  const link = `http://127.0.0.1:${port}/?ps=${previewToken}`;
-  process.stdout.write(`portal preview for ${providerId}\n${link}\n`);
+  process.stdout.write(
+    `live Pearl proxy for ${providerId} via ${upstreamOrigin}\n` +
+      `http://127.0.0.1:${port}/?ps=${previewToken}\n`,
+  );
 });
