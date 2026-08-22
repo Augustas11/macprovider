@@ -3,7 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Malibu — Provider</title>
+  <title>Malibu</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
   <script>
     const PAIR_OT_CAPTURED = (function() {
       if (location.pathname !== "/claim") return null;
@@ -15,29 +19,40 @@
   </script>
   <style>
     :root {
-      --bg:#0c0d10;
-      --sb:#111316;
-      --surface:#16181d;
-      --border:#252830;
-      --border2:#323743;
-      --text:#e1e3e8;
-      --muted:#878d99;
-      --hint:#4a5060;
-      --accent:#7c6af6;
-      --accent-dim:rgba(124,106,246,.14);
-      --ok:#22c55e;
-      --warn:#f59e0b;
-      --bad:#ef4444;
+      --ice-white:#fafbff;
+      --ocean-night:#143a45;
+      --ocean-night-muted:#113540;
+      --ocean-night-deep:#0c3a45;
+      --sunset-coral:#f76b57;
+      --sunset-coral-hover:#e05a48;
+      --ocean-breeze:#4bb8d0;
+      --malibu-gold:#ffc629;
+      --seafoam-teal:#60ab9a;
+      --ink-blue:#101d29;
+      --bg:var(--ink-blue);
+      --sb:var(--ocean-night);
+      --surface:var(--ocean-night-muted);
+      --border:rgba(250,251,255,.12);
+      --border2:rgba(250,251,255,.18);
+      --line:rgba(250,251,255,.12);
+      --text:var(--ice-white);
+      --muted:#fafbffb8;
+      --hint:#fafbff80;
+      --accent:var(--sunset-coral);
+      --accent-dim:#f76b572e;
+      --ok:#00e889;
+      --warn:var(--malibu-gold);
+      --bad:#ff6b6b;
       color-scheme:dark;
     }
     * { box-sizing:border-box; }
     html, body { margin:0; padding:0; background:var(--bg); color:var(--text); height:100%; }
     body {
-      font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
+      font:14px/1.5 "Hanken Grotesk", system-ui, sans-serif;
       -webkit-font-smoothing:antialiased;
     }
-    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    a { color:var(--accent); text-decoration:none; }
+    code, .mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color:var(--malibu-gold); text-decoration:none; }
     a:hover { text-decoration:underline; }
     button { font:inherit; color:inherit; cursor:pointer; }
 
@@ -51,22 +66,33 @@
       padding:18px 0;
     }
     .brand {
-      padding:0 18px 14px 18px;
-      font-weight:700; letter-spacing:.2px;
+      padding:0 16px 14px 16px;
       border-bottom:1px solid var(--border);
       margin-bottom:10px;
-      display:flex; align-items:center; gap:7px;
     }
-    .brand-icon { color:var(--accent); font-size:18px; line-height:1; }
-    .brand .brand-sub { display:block; color:var(--muted); font-weight:400; font-size:12px; margin-top:2px; }
+    .brand-lockup {
+      display:inline-flex; align-items:center; gap:10px;
+      color:inherit; text-decoration:none;
+    }
+    .brand-mark { width:28px; height:28px; display:block; flex-shrink:0; }
+    .brand-wordmark {
+      letter-spacing:-.01em; color:var(--ice-white);
+      font-size:17px; font-weight:500; line-height:1;
+      white-space:nowrap;
+    }
+    .brand-period {
+      width:.24em; height:.24em; margin-left:.02em;
+      background:var(--sunset-coral); border-radius:1px;
+      display:inline-block; vertical-align:baseline;
+    }
     .nav { display:flex; flex-direction:column; gap:2px; padding:6px 8px; }
     .nav-item {
       display:block; width:100%; text-align:left;
       background:transparent; border:0;
-      color:var(--text); padding:8px 12px; border-radius:6px;
-      font-size:13px;
+      color:var(--muted); padding:8px 12px; border-radius:8px;
+      font-size:13px; font-weight:500;
     }
-    .nav-item:hover { background:var(--accent-dim); }
+    .nav-item:hover { background:var(--ice-white-10, #fafbff1a); color:var(--text); }
     .nav-item.active { background:var(--accent-dim); color:var(--text); border-left:2px solid var(--accent); padding-left:10px; }
     .nav-spacer { flex:1; }
     .nav-footer {
@@ -170,7 +196,7 @@
       margin-top:4px;
     }
     .row .row-cta code {
-      background:#0a0b0e; border:1px solid var(--border2);
+      background:var(--ink-blue); border:1px solid var(--border2);
       padding:5px 8px; border-radius:6px; font-size:12px;
     }
     .row .copy-btn {
@@ -219,6 +245,7 @@
       border-radius:12px;
       padding:28px 26px;
     }
+    .signin-card .brand-lockup { margin-bottom:16px; }
     .signin-card h1 { margin:0 0 4px 0; font-size:18px; }
     .signin-card .h-sub { color:var(--muted); font-size:13px; margin-bottom:18px; }
     .signin-field { display:flex; flex-direction:column; gap:6px; margin-bottom:14px; }
@@ -232,8 +259,8 @@
     }
     .signin-field input:focus { outline:1px solid var(--accent); border-color:var(--accent); }
     .signin-submit {
-      width:100%; background:var(--accent); border:0; color:#fff;
-      padding:10px; border-radius:8px; font-weight:600;
+      width:100%; background:var(--accent); border:0; color:var(--ice-white);
+      padding:10px; border-radius:12px; font-weight:600;
       margin-top:6px;
     }
     .signin-submit:hover { filter:brightness(1.08); }
@@ -248,8 +275,8 @@
     .signin-guide { margin-top:14px; color:var(--muted); font-size:13px; text-align:center; }
     .github-btn {
       display:block; width:100%;
-      background:var(--accent); border:0; color:#fff;
-      padding:10px; border-radius:8px; font-weight:600;
+      background:var(--accent); border:0; color:var(--ice-white);
+      padding:10px; border-radius:12px; font-weight:600;
       text-align:center;
     }
     .github-btn:hover { filter:brightness(1.08); text-decoration:none; }
@@ -279,7 +306,7 @@
     }
     .unavail-card h1 { margin:0 0 8px 0; font-size:18px; color:var(--warn); }
     .unavail-card p { color:var(--muted); font-size:13px; line-height:1.6; }
-    .unavail-card code { background:#0a0b0e; border:1px solid var(--border2); padding:2px 6px; border-radius:4px; font-size:12px; color:var(--text); }
+    .unavail-card code { background:var(--ink-blue); border:1px solid var(--border2); padding:2px 6px; border-radius:4px; font-size:12px; color:var(--text); }
 
     /* Surface B */
     .section { margin-bottom:22px; }
@@ -475,6 +502,49 @@
     }
     function clear(node) {
       while (node.firstChild) node.removeChild(node.firstChild);
+    }
+
+    function brandMark() {
+      var NS = "http://www.w3.org/2000/svg";
+      var svg = document.createElementNS(NS, "svg");
+      svg.setAttribute("viewBox", "0 0 64 64");
+      svg.setAttribute("class", "brand-mark");
+      svg.setAttribute("aria-hidden", "true");
+      var tile = document.createElementNS(NS, "rect");
+      tile.setAttribute("width", "64");
+      tile.setAttribute("height", "64");
+      tile.setAttribute("rx", "14");
+      tile.setAttribute("fill", "#143A45");
+      svg.appendChild(tile);
+      var g = document.createElementNS(NS, "g");
+      g.setAttribute("fill", "#FF6E5B");
+      var paths = [
+        "M19.50 38.00 A12.5 12.5 0 0 1 44.50 38.00 Z",
+        "M44.75 33.56 L59.39 32.18 L45.45 36.87 Z",
+        "M42.54 29.56 L55.87 23.37 L44.30 32.44 Z",
+        "M39.11 26.53 L49.62 16.24 L41.74 28.66 Z",
+        "M34.88 24.81 L41.35 11.61 L38.07 25.94 Z",
+        "M30.31 24.61 L32.00 10.00 L33.69 24.61 Z",
+        "M25.93 25.94 L22.65 11.61 L29.12 24.81 Z",
+        "M22.26 28.66 L14.38 16.24 L24.89 26.53 Z",
+        "M19.70 32.44 L8.13 23.37 L21.46 29.56 Z",
+        "M18.55 36.87 L4.61 32.18 L19.25 33.56 Z",
+      ];
+      for (var i = 0; i < paths.length; i++) {
+        var p = document.createElementNS(NS, "path");
+        p.setAttribute("d", paths[i]);
+        g.appendChild(p);
+      }
+      svg.appendChild(g);
+      return svg;
+    }
+
+    function brandLockup() {
+      return el("div", { class: "brand-lockup" },
+        brandMark(),
+        el("span", { class: "brand-wordmark" },
+          "Malibu",
+          el("span", { class: "brand-period", "aria-hidden": "true" })));
     }
 
     /* =====================================================================
@@ -1336,7 +1406,8 @@
           tokInput),
         el("button", { type: "submit", class: "signin-submit" }, "Sign in"));
       var card = el("div", { class: "signin-card" },
-        el("h1", null, "Malibu"),
+        brandLockup(),
+        el("h1", null, "Your Mac"),
         el("p", { class: "h-sub" },
           "Open the portal link from Malibu. This page should not ask you to paste a token."),
         form,
@@ -1353,7 +1424,8 @@
         onclick: function () { startGitHubOAuth("/", null); },
       }, "Continue with GitHub");
       var card = el("div", { class: "signin-card" },
-        el("h1", null, "Malibu"),
+        brandLockup(),
+        el("h1", null, "Your Mac"),
         el("p", { class: "h-sub" }, "Sign in to view Macs linked to your GitHub account."),
         button,
         state.proxyMissing
@@ -1492,10 +1564,7 @@
         }, it.label);
       });
       return el("aside", { class: "sidebar" + (state.sidebarOpen ? " open" : "") },
-        el("div", { class: "brand" },
-          el("span", { class: "brand-icon" }, "⬡"),
-          el("span", null, "Malibu",
-            el("span", { class: "brand-sub" }, "Provider"))),
+        el("div", { class: "brand" }, brandLockup()),
         el("nav", { class: "nav" }, navNodes),
         el("div", { class: "nav-spacer" }),
         el("div", { class: "nav-footer" },

@@ -150,6 +150,11 @@ const server = createServer((req, res) => {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     return res.end(html);
   }
+  if (url.pathname === "/favicon.svg") {
+    const svg = readFileSync(join(here, "favicon.svg"));
+    res.writeHead(200, { "content-type": "image/svg+xml" });
+    return res.end(svg);
+  }
   const type = extname(url.pathname) === ".json" ? "application/json" : "text/plain";
   res.writeHead(404, { "content-type": type });
   res.end("not found");

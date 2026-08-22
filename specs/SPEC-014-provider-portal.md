@@ -17,6 +17,10 @@
     is not GitHub OAuth. TTL is 12 hours. Mint is capped at 5
     successful issues per `provider_id` per hour. GitHub-OAuth cookie
     mode and its earnings gap are unchanged.
+  Visual tokens leave the SPEC-009 purple MacProvider console skin.
+    The seller portal uses the live Malibu Construction system from
+    `malibu.tech/console` and `MalibuBrand` (ocean night, sunset
+    coral, ice white, Hanken Grotesk, Construction sunburst).
 **Change log v0.9 (2026-07-13, GitHub-OAuth dual-mode drift reconciliation — spec matched to shipped code; code is source of truth):**
   The portal + coordinator shipped a full **config-gated GitHub-OAuth
   cookie-session** provider-binding flow in commit `0935d1e` (2026-06-22, one day
@@ -132,8 +136,8 @@
   - SPEC-005 v0.3 (§1.3 out-of-scope; §2.1 D1 donation-only; §2.11
     D11 no-new-delivery-infra; §11.4
     `GET /providers/{id}/earnings`; §11.5 route-disabled mode)
-  - SPEC-009 v0.1 (visual tokens, sidebar geometry, ASCII layout
-    style)
+  - SPEC-009 v0.1 (sidebar geometry and ASCII layout style only;
+    visual tokens are Malibu Construction, not SPEC-009 purple)
   - SPEC-013 v0.3 (§6 / NFR-4 telemetry / privacy egress contract)
 
 ---
@@ -170,9 +174,10 @@ earnings data is a documented carried gap, not working behavior.
 
 Five surfaces ship in v0.1: **A Machine** (default), **B Setup &
 Updates**, **C Earn**, **D Monitoring** (placeholder card, zero API
-calls), and **E Identity** (read-only). The portal inherits SPEC-009
-§6 visual tokens verbatim so a provider who also tries the buyer
-console recognises the family.
+calls), and **E Identity** (read-only). The portal uses the Malibu
+Construction brand (`malibu.tech/console`, `MalibuBrand`) so a
+provider who already runs Malibu.app sees the same mark and palette.
+SPEC-009 purple tokens are not inherited.
 
 The portal is **available ONLY when the coordinator runs with
 `auth.require_provider_tokens = true`**. In any other deployment
@@ -880,8 +885,9 @@ future operator-driven unlink flow. Document this as a known gap, not a control.
 
 ## 3. Layout and host string
 
-ASCII layout in the style of SPEC-009 §2 — same 220 px sidebar,
-same brand mark, same dark surface palette:
+ASCII layout in the style of SPEC-009 §2 — same 220 px sidebar.
+Brand mark and palette are Malibu Construction, not the SPEC-009
+purple hexagon:
 
 ```
 ┌──────────────┬──────────────────────────────────────────┐
@@ -1476,13 +1482,22 @@ coordinator default. JSON-path column is required only for table
 
 ## 6. Visual design tokens
 
-Inherits SPEC-009 §6 verbatim; deviations enumerated below.
+Does **not** inherit SPEC-009 purple MacProvider tokens. The portal
+uses the live Malibu Construction system (`malibu.tech/console`,
+`MalibuBrand` / DESIGN.md):
 
-**Deviations:** none in v0.1.
+| Token | Value |
+| --- | --- |
+| `--ink-blue` / page | `#101d29` |
+| `--ocean-night` / sidebar | `#143a45` |
+| `--ocean-night-muted` / surface | `#113540` |
+| `--ice-white` / copy | `#fafbff` |
+| `--sunset-coral` / accent | `#f76b57` |
+| `--malibu-gold` / links | `#ffc629` |
+| Type | Hanken Grotesk + JetBrains Mono |
+| Mark | Construction sunburst (same SVG as `malibu-icon.svg`) |
 
-Type families, dark surface palette, accent purple, sidebar
-geometry (220 px), and the empty-state hero layout are all
-imported as-is from SPEC-009 §6 + §2.
+Sidebar geometry stays 220 px. No purple hexagon, no `#7c6af6`.
 
 ---
 
