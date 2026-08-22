@@ -50,28 +50,28 @@ const server = createServer((req, res) => {
     });
   }
   if (url.pathname === "/v1/pool/check") {
-    return json(res, 200, { provider_id: providerId, state: "ready", tier: "provisional" });
+    return json(res, 200, { provider_id: providerId, state: "ready", tier: "trusted" });
   }
   if (url.pathname === `/providers/${providerId}/earnings`) {
     if (bearer(req) !== previewToken) return json(res, 401, { error: "unauthorized" });
     return json(res, 200, {
       provider_id: providerId,
-      total_credits: 1250000,
-      current_window_credits: 42000,
-      usdc_today: 1.25,
-      usdc_week: 8.4,
-      usdc_pending: 12.5,
-      usdc_lifetime: 12.5,
+      total_credits: 80000,
+      current_window_credits: 7500,
+      usdc_today: 0.0041,
+      usdc_week: 0.0075,
+      usdc_pending: 0.06,
+      usdc_lifetime: 0.08,
     });
   }
   if (url.pathname === "/v1/provider/malibu-accrual") {
     if (bearer(req) !== previewToken) return json(res, 401, { error: "unauthorized" });
     return json(res, 200, {
       provider_id: providerId,
-      accrued_malibu: 3.2,
-      withdrawable_malibu: 1.1,
-      held_malibu: 2.1,
-      trust_tier: "provisional",
+      accrued_malibu: 257.03,
+      withdrawable_malibu: 43.49,
+      held_malibu: 213.54,
+      trust_tier: "trusted",
       reward_eligibility: {
         schema_version: "malibu_reward_eligibility.v1",
         earning_state: "earning",

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>MacProvider — Provider Portal</title>
+  <title>Malibu — Provider</title>
   <script>
     const PAIR_OT_CAPTURED = (function() {
       if (location.pathname !== "/claim") return null;
@@ -52,10 +52,12 @@
     }
     .brand {
       padding:0 18px 14px 18px;
-      font-weight:600; letter-spacing:.2px;
+      font-weight:700; letter-spacing:.2px;
       border-bottom:1px solid var(--border);
       margin-bottom:10px;
+      display:flex; align-items:center; gap:7px;
     }
+    .brand-icon { color:var(--accent); font-size:18px; line-height:1; }
     .brand .brand-sub { display:block; color:var(--muted); font-weight:400; font-size:12px; margin-top:2px; }
     .nav { display:flex; flex-direction:column; gap:2px; padding:6px 8px; }
     .nav-item {
@@ -1334,7 +1336,7 @@
           tokInput),
         el("button", { type: "submit", class: "signin-submit" }, "Sign in"));
       var card = el("div", { class: "signin-card" },
-        el("h1", null, "MacProvider — Provider Portal"),
+        el("h1", null, "Malibu"),
         el("p", { class: "h-sub" },
           "Open the portal link from Malibu. This page should not ask you to paste a token."),
         form,
@@ -1351,7 +1353,7 @@
         onclick: function () { startGitHubOAuth("/", null); },
       }, "Continue with GitHub");
       var card = el("div", { class: "signin-card" },
-        el("h1", null, "MacProvider — Provider Portal"),
+        el("h1", null, "Malibu"),
         el("p", { class: "h-sub" }, "Sign in to view Macs linked to your GitHub account."),
         button,
         state.proxyMissing
@@ -1403,7 +1405,7 @@
         el("h1", { class: "surface-title" }, "Machine"),
         el("div", { class: "panel" },
           el("h2", null, "Waiting for a Mac to come online"),
-          el("p", null, "Install MacProvider on a Mac. After install, your Mac will auto-open a browser to link itself."),
+          el("p", null, "Install Malibu on a Mac. After install, your Mac will auto-open a browser to link itself."),
           snippetNode("curl -fsSL https://get.malibu.tech/install.sh | bash", "waiting-install")));
     }
 
@@ -1428,7 +1430,7 @@
       var sidebar = renderSidebar();
       var topbar = el("div", { class: "topbar" },
         el("button", { class: "hamburger", onclick: function () { state.sidebarOpen = !state.sidebarOpen; render(); } }, "☰ Menu"),
-        el("span", null, "MacProvider — Provider Portal"));
+        el("span", null, "Malibu"));
       var pane = el("div", { class: "surface-pane" });
       if (state.proxyMissing) {
         pane.appendChild(renderProxyMissingBanner());
@@ -1491,8 +1493,9 @@
       });
       return el("aside", { class: "sidebar" + (state.sidebarOpen ? " open" : "") },
         el("div", { class: "brand" },
-          "MacProvider",
-          el("span", { class: "brand-sub" }, "Provider Portal")),
+          el("span", { class: "brand-icon" }, "⬡"),
+          el("span", null, "Malibu",
+            el("span", { class: "brand-sub" }, "Provider"))),
         el("nav", { class: "nav" }, navNodes),
         el("div", { class: "nav-spacer" }),
         el("div", { class: "nav-footer" },
@@ -2436,67 +2439,40 @@
     }
 
     /* ---- Surface C — Earn ---- */
-    function renderEarn() {
-      var d = state.earn.data;
-      var loading = state.earn.inflight && !d;
-      var totalTxt = d && typeof d.total_credits === "number" ? fmtInt(d.total_credits) : (loading ? "…" : "—");
-      var curTxt = d && typeof d.current_window_credits === "number" ? fmtInt(d.current_window_credits) : (loading ? "…" : "—");
-      var lp = d && d.last_payout_ready ? d.last_payout_ready : null;
-      var lpVal = lp && typeof lp.provider_credits === "number" ? fmtInt(lp.provider_credits) : (loading ? "…" : "—");
-      var lpSub = lp && lp.window_start_utc && lp.window_end_utc
-        ? (lp.window_start_utc + " → " + lp.window_end_utc)
-        : null;
-      var errSub = state.earn.err
-        ? "Earnings request returned HTTP " + state.earn.err.status + "."
-        : null;
-      var creditsRow = el("div", { class: "counters" },
-        el("div", { class: "card" },
-          el("h3", null, "Lifetime credits"),
-          el("div", { class: "val mono" }, totalTxt),
-          el("div", { class: "sub" }, "total_credits"),
-          errSub ? el("div", { class: "sub" }, errSub) : null),
-        el("div", { class: "card" },
-          el("h3", null, "Current window"),
-          el("div", { class: "val mono" }, curTxt),
-          el("div", { class: "sub" }, "current_window_credits")),
-        el("div", { class: "card" },
-          el("h3", null, "Last payout-ready window"),
-          el("div", { class: "val mono" }, lpVal),
-          el("div", { class: "sub" }, "last_payout_ready.provider_credits"),
-          lpSub ? el("div", { class: "sub mono" }, lpSub) : null));
-      var fiatCard = el("div", { class: "fiat-card" },
-        el("h3", null, "Fiat payout rail"),
-        el("div", { class: "fiat-body" }, "Fiat payout rail not yet specified — future spec."),
-        el("div", { class: "fiat-cite" }, "SPEC-005 §1.3 / §2.1 D1; SPEC-014 Open Q3."));
+    function renderUsdcRow(d, loading, errSub) {
       var todayUSDC = d && typeof d.usdc_today === "number" ? fmtUSDC(d.usdc_today) : (loading ? "…" : "—");
       var weekUSDC = d && typeof d.usdc_week === "number" ? fmtUSDC(d.usdc_week) : (loading ? "…" : "—");
       var pendingUSDC = d && typeof d.usdc_pending === "number" ? fmtUSDC(d.usdc_pending) : (loading ? "…" : "—");
       var lifeUSDC = d && typeof d.usdc_lifetime === "number" ? fmtUSDC(d.usdc_lifetime) : (loading ? "…" : "—");
-      var usdcRow = el("div", { class: "counters" },
+      return el("div", { class: "counters" },
         el("div", { class: "card" },
-          el("h3", null, "USDC today"),
-          el("div", { class: "val mono" }, todayUSDC)),
+          el("h3", null, "Today"),
+          el("div", { class: "val mono" }, todayUSDC),
+          errSub ? el("div", { class: "sub" }, errSub) : null),
         el("div", { class: "card" },
-          el("h3", null, "USDC this week"),
+          el("h3", null, "This week"),
           el("div", { class: "val mono" }, weekUSDC)),
         el("div", { class: "card" },
-          el("h3", null, "USDC pending"),
+          el("h3", null, "Pending"),
           el("div", { class: "val mono" }, pendingUSDC)),
         el("div", { class: "card" },
-          el("h3", null, "USDC lifetime"),
+          el("h3", null, "Lifetime"),
           el("div", { class: "val mono" }, lifeUSDC)));
+    }
+
+    function renderEarn() {
+      var d = state.earn.data;
+      var loading = state.earn.inflight && !d;
+      var errSub = state.earn.err
+        ? "Earnings request returned HTTP " + state.earn.err.status + "."
+        : null;
       return el("div", null,
         el("h1", { class: "surface-title" }, "Earn"),
         renderMiningHealthCard(),
         el("h2", { class: "section-h" }, "USDC"),
-        usdcRow,
-        el("h2", { class: "section-h" }, "Credit totals"),
-        creditsRow,
+        renderUsdcRow(d, loading, errSub),
         renderMalibuRewardsCard(),
-        renderProviderWalletCard(),
-        el("div", { style: "margin-top:18px;" },
-          el("h2", { class: "section-h" }, "Payout status"),
-          fiatCard));
+        renderProviderWalletCard());
     }
 
     /* ---- Surface D — Monitoring (placeholder) ---- */
@@ -2615,31 +2591,10 @@
     function renderCounters() {
       var d = state.earn.data;
       var loading = state.earn.inflight && !d;
-      var totalTxt = d && typeof d.total_credits === "number" ? fmtInt(d.total_credits) : (loading ? "…" : "—");
-      var curTxt = d && typeof d.current_window_credits === "number" ? fmtInt(d.current_window_credits) : (loading ? "…" : "—");
-      var lp = d && d.last_payout_ready ? d.last_payout_ready : null;
-      var lpVal = lp && typeof lp.provider_credits === "number" ? fmtInt(lp.provider_credits) : (loading ? "…" : "—");
-      var lpSub = lp && lp.window_start_utc && lp.window_end_utc
-        ? (lp.window_start_utc + " → " + lp.window_end_utc)
-        : null;
       var errSub = state.earn.err
         ? "Earnings request returned HTTP " + state.earn.err.status + "."
         : null;
-      return el("div", { class: "counters" },
-        el("div", { class: "card" },
-          el("h3", null, "Lifetime credits"),
-          el("div", { class: "val mono" }, totalTxt),
-          el("div", { class: "sub" }, "total_credits"),
-          errSub ? el("div", { class: "sub" }, errSub) : null),
-        el("div", { class: "card" },
-          el("h3", null, "Current window"),
-          el("div", { class: "val mono" }, curTxt),
-          el("div", { class: "sub" }, "current_window_credits")),
-        el("div", { class: "card" },
-          el("h3", null, "Last payout-ready window"),
-          el("div", { class: "val mono" }, lpVal),
-          el("div", { class: "sub" }, "last_payout_ready.provider_credits"),
-          lpSub ? el("div", { class: "sub mono" }, lpSub) : null));
+      return renderUsdcRow(d, loading, errSub);
     }
 
     function renderIdlePrewarmPanel() {
@@ -2709,10 +2664,11 @@
     }
     function fmtUSDC(n) {
       if (typeof n !== "number" || !isFinite(n)) return "—";
+      var digits = (n !== 0 && Math.abs(n) < 0.01) ? 4 : 2;
       try {
-        return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        return "$" + n.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
       } catch (_) {
-        return "$" + String(n);
+        return "$" + n.toFixed(digits);
       }
     }
 
