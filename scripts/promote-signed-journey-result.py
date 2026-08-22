@@ -16,6 +16,7 @@ from typing import Any
 from check_spec_governance import (
     JOURNEY_RESULT_ENVELOPE_SCHEMA,
     JOURNEY_RESULT_PUBLIC_KEY_SHA256,
+    TRUSTED_POOL_LAYER2_JOURNEY_ID,
     ValidationResult,
     _load_json,
     _source_under_journey_evidence,
@@ -64,7 +65,7 @@ def require_relative_evidence_source(source: str) -> str:
     return normalized
 
 
-def require_signed_metadata(root: Path, source: str) -> tuple[str, str, str]:
+def require_signed_metadata(root: Path, source: str) -> tuple[str, str, str, str]:
     if not _source_under_journey_evidence(root, source):
         die("signed evidence source must be under journeys/evidence/")
     envelope = load_json_object(root / source, "signed journey-result")
@@ -76,13 +77,16 @@ def require_signed_metadata(root: Path, source: str) -> tuple[str, str, str]:
     repository = signed.get("repository")
     if not isinstance(repository, dict) or not isinstance(repository.get("commit"), str):
         die("signed evidence must bind repository.commit")
+    journey_id = signed.get("journey_id")
+    if not isinstance(journey_id, str):
+        die("signed evidence must bind journey_id")
     captured_at = signed.get("captured_at")
     expires_at = signed.get("expires_at")
     if not isinstance(captured_at, str) or len(captured_at) < 10:
         die("signed evidence must bind captured_at")
     if not isinstance(expires_at, str):
         die("signed evidence must bind expires_at")
-    return repository["commit"], captured_at[:10], expires_at
+    return repository["commit"], captured_at[:10], expires_at, journey_id
 
 
 def require_valid_signed_result(
@@ -158,7 +162,9 @@ def promote(
     if len(matches) != 1:
         die(f"requirement must exist exactly once: {requirement_id}")
     requirement = matches[0]
-    commit, captured_at, expires_at = require_signed_metadata(root, evidence_source)
+    commit, captured_at, expires_at, journey_id = require_signed_metadata(root, evidence_source)
+    if journey_id == TRUSTED_POOL_LAYER2_JOURNEY_ID:
+        die(f"{TRUSTED_POOL_LAYER2_JOURNEY_ID} is evidence-only and cannot promote full SPEC-042 requirement rows")
     require_valid_signed_result(root, requirement, evidence_source, commit, trusted_public_key_sha256, trusted_openssl)
     evidence_path = root / evidence_source
     digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
