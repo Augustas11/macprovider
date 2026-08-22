@@ -54,6 +54,23 @@ type fakeIdlePrewarmReader struct {
 	err     error
 }
 
+type portalSessionTokens struct {
+	sessions map[string]string
+}
+
+func (p portalSessionTokens) ValidateToken(context.Context, string) (string, bool, error) {
+	return "", false, nil
+}
+
+func (p portalSessionTokens) ValidateAndMarkTokenUsed(context.Context, string) (string, bool, error) {
+	return "", false, nil
+}
+
+func (p portalSessionTokens) ValidatePortalReadSession(_ context.Context, raw string, _ time.Time) (string, bool, error) {
+	providerID, ok := p.sessions[raw]
+	return providerID, ok, nil
+}
+
 func (f fakeIdlePrewarmReader) ProviderIdlePrewarm(context.Context, string) (statsprewarm.Summary, error) {
 	if f.err != nil {
 		return statsprewarm.Summary{}, f.err
@@ -765,6 +782,27 @@ func TestEarningsEndpoint_TokenRequired(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("wrong subject status=%d want 403", w.Code)
+	}
+}
+
+func TestEarningsEndpointAcceptsPortalReadSession(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	insertCredit(t, store.db, "provider-a", time.Now().UTC(), 500)
+	tokens := portalSessionTokens{sessions: map[string]string{"mps1_testsession": "provider-a"}}
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings", nil)
+	req.Header.Set("Authorization", "Bearer mps1_testsession")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", tokens, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/providers/provider-b/earnings", nil)
+	req.Header.Set("Authorization", "Bearer mps1_testsession")
+	w = httptest.NewRecorder()
+	store.Handlers("operator", tokens, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("cross-provider status=%d want 403", w.Code)
 	}
 }
 

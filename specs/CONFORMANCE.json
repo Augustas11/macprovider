@@ -370,7 +370,7 @@
     {
       "spec_id": "SPEC-014",
       "title": "Provider Portal (seller-facing web surface)",
-      "version": "0.9",
+      "version": "0.10",
       "path": "specs/SPEC-014-provider-portal.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -6075,6 +6075,53 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Release evidence, automated coverage, and signed journey results for the Malibu model catalog economics experience do not exist yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-014-R001",
+      "spec_id": "SPEC-014",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/auth/portal_sessions.go:func (s *Store) MintPortalReadSession",
+        "phase4-coordinator/internal/auth/portal_sessions_http.go:func NewPortalSessionMintHandler",
+        "phase4-coordinator/cmd/coordinator/main.go:providerMux.Handle(\"/admin/portal-sessions\""
+      ],
+      "tests": [
+        "phase4-coordinator/internal/auth/portal_sessions_test.go::TestMintAndValidatePortalReadSession",
+        "phase4-coordinator/internal/auth/portal_sessions_test.go::TestPortalReadSessionMintRateLimit",
+        "phase4-coordinator/internal/auth/portal_sessions_test.go::TestPortalSessionMintAndMeHandlers"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Operator-minted portal read session is implemented and unit-tested; production mint against Pearl and a physical provider open of portal_url remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-014-R002",
+      "spec_id": "SPEC-014",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/auth/portal_sessions.go:func ValidateProviderAPIReadAndMark",
+        "phase4-coordinator/internal/billing/endpoints.go:func (h *handler) earnings",
+        "phase4-coordinator/internal/rewards/endpoints.go:func NewAccrualHandler",
+        "frontdoor/provider-portal/index.html:function consumePortalSessionFromURL"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/endpoints_test.go::TestEarningsEndpointAcceptsPortalReadSession",
+        "phase4-coordinator/internal/auth/portal_sessions_test.go::TestPortalReadSessionExpires",
+        "phase4-coordinator/cmd/coordinator/main_test.go::TestNginxPortalSessionMeRouteBeforeV1CatchAll"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Portal session is accepted on earnings/accrual/wallet/audit reads and consumed from /?ps=; live portal.malibu.tech deploy evidence is pending."
       }
     }
   ]

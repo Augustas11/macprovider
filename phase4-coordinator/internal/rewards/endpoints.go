@@ -15,10 +15,6 @@ type tokenValidator interface {
 	ValidateAndMarkTokenUsed(ctx context.Context, raw string) (subject string, ok bool, err error)
 }
 
-type readOnlyTokenValidator interface {
-	ValidateTokenReadOnly(ctx context.Context, raw string) (subject string, ok bool, err error)
-}
-
 // AccrualHandlerDeps wires the provider MALIBU accrual endpoint.
 type AccrualHandlerDeps struct {
 	DB                    *sql.DB
@@ -52,7 +48,7 @@ func NewAccrualHandler(deps AccrualHandlerDeps) http.Handler {
 			_, _ = w.Write([]byte(`{"error":"unauthorized"}` + "\n"))
 			return
 		}
-		providerID, ok, err := deps.TokenStore.ValidateAndMarkTokenUsed(r.Context(), raw)
+		providerID, ok, err := auth.ValidateProviderAPIReadAndMark(r.Context(), deps.TokenStore, raw)
 		if err != nil || !ok || providerID == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -176,10 +172,7 @@ func NewRewardAuditHandler(deps AuditHandlerDeps) http.Handler {
 }
 
 func validateAuditToken(ctx context.Context, store tokenValidator, raw string) (string, bool, error) {
-	if ro, ok := store.(readOnlyTokenValidator); ok {
-		return ro.ValidateTokenReadOnly(ctx, raw)
-	}
-	return store.ValidateAndMarkTokenUsed(ctx, raw)
+	return auth.ValidateProviderAPIRead(ctx, store, raw)
 }
 
 // NewRewardAuditAdminHandler serves GET /admin/malibu-reward-audit?provider_id=...

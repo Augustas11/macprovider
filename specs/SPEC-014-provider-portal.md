@@ -1,10 +1,22 @@
 # SPEC-014 — Provider Portal (seller-facing web surface)
 
-**Version:** 0.9
-**Status:** Draft (v0.9 GitHub-OAuth drift reconciliation — reconciled to shipped
-config-gated dual-mode auth, incl. the shipped OAuth mode's incompletely-wired
-state; codex 3-lane audit converged 0 C/H/M over 8 rounds)
-**Date drafted:** 2026-06-21 (v0.9 reconciliation 2026-07-13)
+**Version:** 0.10
+**Status:** Draft (v0.10 operator-minted portal read session)
+**Date drafted:** 2026-06-21 (v0.10 operator-minted session 2026-08-22)
+**Change log v0.10 (2026-08-22, operator-minted portal read session):**
+  Adds a third auth path that does **not** ask the provider to paste
+    `provider_token`. An operator holding `operator_key` may mint a
+    short-lived **portal read session** (`mps1_…`) for an existing
+    `provider_id` that already has an active FR-P12 token. The
+    coordinator returns a one-time `portal_url` (`/?ps=<token>`). The
+    portal strips `ps` from the address bar, learns `provider_id` from
+    `GET /v1/portal/session`, and uses the session as a Bearer on
+    the existing read APIs (earnings, MALIBU accrual, wallet, reward
+    audit). The session does not rotate or revoke the provider token,
+    does not mint a new `provider_id`, does not authorize writes, and
+    is not GitHub OAuth. TTL is 12 hours. Mint is capped at 5
+    successful issues per `provider_id` per hour. GitHub-OAuth cookie
+    mode and its earnings gap are unchanged.
 **Change log v0.9 (2026-07-13, GitHub-OAuth dual-mode drift reconciliation — spec matched to shipped code; code is source of truth):**
   The portal + coordinator shipped a full **config-gated GitHub-OAuth
   cookie-session** provider-binding flow in commit `0935d1e` (2026-06-22, one day
@@ -267,6 +279,53 @@ selected at load time by `portal-config.json:github_oauth_enabled`:
   AUTH-1/AUTH-2). This is the default and the mode running in current prod.
 - `github_oauth_enabled: true` → **GitHub-OAuth cookie-session mode** (§2.5),
   which requires the coordinator to also run with `GITHUB_OAUTH_ENABLED=true`.
+
+**v0.10 operator-minted portal read session** is the launch sign-in
+path. Paste-bearer remains as a fallback for operators and older
+sessions; the provider-facing copy MUST NOT ask a serving provider to
+paste `provider_token` when a `/?ps=` link is present.
+
+### 2.6 AUTH-4 — Operator-minted portal read session (v0.10)
+
+**Who may mint.** Only the coordinator `operator_key` (same class as
+`/admin/*`). The portal MUST NOT expose a mint control. The provider
+bearer MUST NOT mint a portal session in this iteration.
+
+**What is minted.** One portal read session token. Prefix `mps1_`.
+32 CSPRNG bytes, lowercase hex. Store SHA-256 of the full token
+only. Return the cleartext once, only in `portal_url`.
+
+**What must be true at mint.** `provider_id` already has at least one
+unrevoked `provider_tokens` row. The coordinator MUST NOT create a
+`provider_id`, MUST NOT insert/rotate/revoke an FR-P12 token, and
+MUST NOT emit `pair_ot` / `claim_url`.
+
+**What it may read.** Subject of the session equals the bound
+`provider_id`. Allowed routes: `GET /v1/portal/session`,
+`GET /providers/{id}/earnings` (path id must equal subject),
+`GET /v1/provider/malibu-accrual`, `GET /v1/provider/wallet`,
+`GET /v1/provider/malibu-reward-audit`, and the already-public
+`GET /v1/pool/check`.
+
+**What invalidates it.** Expiry (`now >= expires_at`) or a revoked
+row. Use does not refresh TTL.
+
+**Durability.** 12 hours from mint. JS memory only after the portal
+strips `ps` via `history.replaceState`. Reload without the URL is
+signed out.
+
+**Rate limit.** 5 successful mints per `provider_id` per rolling
+hour. Further mints return `429` with `Retry-After`.
+
+**Observe vs enforce.** This session is seller-read only. It MUST NOT
+change routing, billing, trust tier, or payout mutation.
+
+**Wire.**
+
+- `POST /admin/portal-sessions` `{ "provider_id": "…" }` →
+  `200 { provider_id, expires_at, portal_url, scope: "portal_read" }`
+- `GET /v1/portal/session` with `Authorization: Bearer mps1_…` →
+  `200 { provider_id, expires_at, scope: "portal_read" }`
 
 In **paste-bearer mode** the portal asks the provider to paste BOTH `provider_id`
 AND `provider_token` at the sign-in screen. Both are required.
@@ -1193,8 +1252,8 @@ disposition as C.3; covered by Open Q4.
 
 - Authoritative endpoint: `GET /providers/{provider_id}/earnings`
   (SPEC-005 §11.4).
-- Auth: FR-P12 provider bearer token, subject == path
-  `provider_id` (SPEC-005 §11.5).
+- Auth: FR-P12 provider bearer token **or** a valid portal read
+  session (AUTH-4), subject == path `provider_id` (SPEC-005 §11.5).
 - Deployment-mode dependency: §2.4 above.
 
 **C.6 MALIBU reward availability projection (read-only).** The

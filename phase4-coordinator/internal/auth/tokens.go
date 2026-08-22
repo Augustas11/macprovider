@@ -313,7 +313,10 @@ CREATE INDEX IF NOT EXISTS idx_token_hash ON provider_tokens(token_hash);
 	if err := s.ensureActiveProviderIDUniqueness(ctx); err != nil {
 		return err
 	}
-	return s.ensureGitHubAuthSchema(ctx)
+	if err := s.ensureGitHubAuthSchema(ctx); err != nil {
+		return err
+	}
+	return s.ensurePortalReadSessionSchema(ctx)
 }
 
 func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {

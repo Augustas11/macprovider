@@ -1090,6 +1090,8 @@ func main() {
 		}
 	}
 	providerMux.Handle("/admin/metrics", operatorMetricsHandler(cfg.Auth.OperatorKey, metricsRegistry))
+	portalBaseURL := strings.TrimSpace(cfg.Auth.GitHubOAuth.PortalBaseURL)
+	providerMux.Handle("/admin/portal-sessions", auth.NewPortalSessionMintHandler(tokenStore, cfg.Auth.OperatorKey, portalBaseURL))
 
 	var register http.HandlerFunc
 	var hardwareEvidence http.HandlerFunc
@@ -1157,6 +1159,7 @@ func main() {
 		malibuAccrualHandler(cfg, tokenStore, rewardsDB, payoutReadDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
 		malibuRewardAuditHandler(cfg, tokenStore, rewardsDB, rewardAuditLimiter),
 	)
+	buyerHandler = withPortalSessionMe(buyerHandler, tokenStore)
 	if liveMDAService != nil {
 		buyerHandler = withMDMDeviceBinding(buyerHandler, liveMDAService.HandleDeviceBinding)
 		logger.Info().Msg("Phase 3 device binding claim mounted at /v1/mdm/device-binding")
@@ -2354,6 +2357,13 @@ func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Ha
 		}
 		metrics.ServeHTTP(w, r)
 	})
+}
+
+func withPortalSessionMe(base http.Handler, store *auth.Store) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/v1/portal/session", auth.NewPortalSessionMeHandler(store))
+	mux.Handle("/", base)
+	return mux
 }
 
 func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence, enroll http.HandlerFunc, providerWallet, malibuAccrual, malibuRewardAudit http.Handler) http.Handler {
