@@ -880,13 +880,18 @@ func (s *Server) handlePublicTrustPoolStatus(w http.ResponseWriter, r *http.Requ
 	}
 	defer release()
 	poolID := sanitizeAccountID(chi.URLParam(r, "pool_id"))
-	doc, found, err := trustpool.BuildPublicStatusDocument(r.Context(), s.trustPoolStatusStore, poolID, s.now())
+	generatedAt := s.now()
+	doc, found, err := trustpool.BuildPublicStatusDocument(r.Context(), s.trustPoolStatusStore, poolID, generatedAt)
 	if err != nil {
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("public trusted pool status reconstruction failed")
 		writeError(w, http.StatusServiceUnavailable, "pool_status_unavailable", "Pool status unavailable")
 		return
 	}
 	if !found {
+		writeError(w, http.StatusNotFound, "pool_status_not_found", "Pool status not found")
+		return
+	}
+	if !publicTrustPoolDocumentFresh(doc.FreshUntilUTC, s.now()) {
 		writeError(w, http.StatusNotFound, "pool_status_not_found", "Pool status not found")
 		return
 	}
@@ -911,7 +916,8 @@ func (s *Server) handlePublicTrustPoolPolicy(w http.ResponseWriter, r *http.Requ
 	}
 	defer release()
 	poolID := sanitizeAccountID(chi.URLParam(r, "pool_id"))
-	doc, found, err := trustpool.BuildPublicPolicyDocument(r.Context(), s.trustPoolStatusStore, poolID, s.now())
+	generatedAt := s.now()
+	doc, found, err := trustpool.BuildPublicPolicyDocument(r.Context(), s.trustPoolStatusStore, poolID, generatedAt)
 	if err != nil {
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("public trusted pool policy reconstruction failed")
 		writeError(w, http.StatusServiceUnavailable, "pool_policy_unavailable", "Pool policy unavailable")
@@ -921,10 +927,26 @@ func (s *Server) handlePublicTrustPoolPolicy(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotFound, "pool_policy_not_found", "Pool policy not found")
 		return
 	}
+	if !publicTrustPoolDocumentFresh(doc.FreshUntilUTC, s.now()) {
+		writeError(w, http.StatusNotFound, "pool_policy_not_found", "Pool policy not found")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(doc); err != nil {
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("public trusted pool policy encode failed")
 	}
+}
+
+func publicTrustPoolDocumentFresh(freshUntilUTC string, observedAt time.Time) bool {
+	freshUntil, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(freshUntilUTC))
+	if err != nil {
+		return false
+	}
+	observedAt = observedAt.UTC()
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	return freshUntil.After(observedAt)
 }
 
 func (s *Server) acquirePublicTrustPoolWork() (func(), bool) {

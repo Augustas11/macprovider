@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -604,6 +605,53 @@ func TestEstimatedCompletionTokensFromBytes(t *testing.T) {
 	got = estimatedCompletionTokensFromBytes(5, 16)
 	if got == nil || *got != 1 {
 		t.Fatalf("five-byte estimate with configured ceiling = %v, want 1", got)
+	}
+}
+
+func TestPublicTrustPoolDocumentFreshFailsClosed(t *testing.T) {
+	now := time.Unix(1800001000, 0).UTC()
+	cases := []struct {
+		name          string
+		freshUntilUTC string
+		want          bool
+	}{
+		{
+			name:          "future",
+			freshUntilUTC: now.Add(time.Second).Format(time.RFC3339Nano),
+			want:          true,
+		},
+		{
+			name:          "equal_is_expired",
+			freshUntilUTC: now.Format(time.RFC3339Nano),
+			want:          false,
+		},
+		{
+			name:          "past",
+			freshUntilUTC: now.Add(-time.Nanosecond).Format(time.RFC3339Nano),
+			want:          false,
+		},
+		{
+			name:          "malformed",
+			freshUntilUTC: "not-a-time",
+			want:          false,
+		},
+		{
+			name:          "blank",
+			freshUntilUTC: " ",
+			want:          false,
+		},
+		{
+			name:          "trimmed",
+			freshUntilUTC: " " + now.Add(time.Second).Format(time.RFC3339Nano) + " ",
+			want:          true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := publicTrustPoolDocumentFresh(tc.freshUntilUTC, now); got != tc.want {
+				t.Fatalf("publicTrustPoolDocumentFresh(%q)=%v, want %v", tc.freshUntilUTC, got, tc.want)
+			}
+		})
 	}
 }
 
