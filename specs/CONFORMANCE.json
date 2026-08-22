@@ -1297,6 +1297,42 @@
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
         "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces, an explicit operator-only candidate promotion path that preflights local activation prerequisites, lifecycle fail-closed tests, and a CLI-first operator-mediated admin workflow with nonce issuance plus pool health/audit/distribution exports. Raw operator admin events cannot activate a routeable pool; requirements remain pending until authenticated creator self-service/administration, public publicly_announced policy/status exposure, signed journey, rollback-resistant promotion authorization/evidence, public pool-status freshness fail-closed enforcement, custody-class and retention-policy production gates, full production activation gates, and production rollout proof are implemented."
       }
+    },
+    {
+      "spec_id": "SPEC-044",
+      "title": "Malibu Model Catalog Economics",
+      "version": "0.1.0",
+      "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "malibu-model-economics-ux"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-005",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-013",
+        "SPEC-020",
+        "SPEC-023",
+        "SPEC-025",
+        "SPEC-032",
+        "SPEC-033"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Malibu currently exposes a model switcher, but the production experience is static around the model chosen during installer autotune. The next release needs a CLI-owned catalog and economics projection before the app can safely show additional catalog models, signed catalog rates, readiness, and preparation/switch actions without making earning guarantees or bypassing provider safety gates."
+      }
     }
   ],
   "requirements": [
@@ -5780,6 +5816,186 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
         "rationale": "Launch evidence and rollback: no signed create-to-route-to-settle-to-pause journey exists yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R001",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "CLI-owned economics projection is not implemented yet; Malibu must continue using the existing static model-management fallback until a signed compatible CLI projection lands."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R002",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "The versioned catalog economics projection, closed row schema, forced model-action and long-evaluation confirmation, action descriptors, and transaction-event stream have not been implemented or decoded by Malibu yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R003",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Signed-feed trust, stale/fallback priority, invalid max-age handling, and money-action disablement are not yet projected through the new Malibu contract."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R004",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Provider-safe rate display and forbidden earnings-claim copy checks are not implemented for the new model catalog view."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R005",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Provider-friendly ranking, localized row-warning attribution, and hidden-row rules are not implemented for the new catalog experience."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R006",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Immediate/deferred switch gating, null action-model non-actionability, and per-action unavailable reasons are not wired through the CLI/Malibu transaction path."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R007",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Preparation confirmation, isolated staging, long-evaluation progress, cancellation, and cleanup affordances are not implemented for catalog model preparation."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R008",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "The sectioned Malibu catalog layout and projection-failed fallback state are not implemented yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R009",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Localization, accessibility, forbidden-meaning checks, and RTL release evidence are not implemented for the new strings and controls."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R010",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "The new projection privacy boundary and diagnostics redaction behavior have not been implemented or tested."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R011",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Post-action projection refresh, timeout handling, cancel-after-commit disclosure, late projection recovery, and terminal-event reconciliation are not implemented for catalog model transactions."
+      }
+    },
+    {
+      "requirement_id": "SPEC-044-R012",
+      "spec_id": "SPEC-044",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Release evidence, automated coverage, and signed journey results for the Malibu model catalog economics experience do not exist yet."
       }
     }
   ]

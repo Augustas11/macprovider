@@ -14,7 +14,8 @@
         "SPEC-003",
         "SPEC-008",
         "SPEC-042",
-        "SPEC-043"
+        "SPEC-043",
+        "SPEC-044"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -82,7 +83,8 @@
         "SPEC-040",
         "SPEC-041",
         "SPEC-042",
-        "SPEC-043"
+        "SPEC-043",
+        "SPEC-044"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -158,7 +160,8 @@
         "SPEC-037",
         "SPEC-038",
         "SPEC-039",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-044"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -170,7 +173,8 @@
       "owner_spec": "SPEC-011",
       "consumers": [
         "SPEC-012",
-        "SPEC-020"
+        "SPEC-020",
+        "SPEC-044"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -214,7 +218,8 @@
         "SPEC-025",
         "SPEC-026",
         "SPEC-032",
-        "SPEC-033"
+        "SPEC-033",
+        "SPEC-044"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -313,7 +318,8 @@
         "SPEC-025",
         "SPEC-026",
         "SPEC-042",
-        "SPEC-043"
+        "SPEC-043",
+        "SPEC-044"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -359,7 +365,8 @@
         "SPEC-026",
         "SPEC-032",
         "SPEC-033",
-        "SPEC-038"
+        "SPEC-038",
+        "SPEC-044"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -387,7 +394,8 @@
       "id": "native-app-lifecycle",
       "owner_spec": "SPEC-025",
       "consumers": [
-        "SPEC-026"
+        "SPEC-026",
+        "SPEC-044"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -477,7 +485,8 @@
         "SPEC-008",
         "SPEC-023",
         "SPEC-031",
-        "SPEC-033"
+        "SPEC-033",
+        "SPEC-044"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -490,7 +499,8 @@
       "consumers": [
         "SPEC-023",
         "SPEC-031",
-        "SPEC-032"
+        "SPEC-032",
+        "SPEC-044"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -621,6 +631,15 @@
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
       "issue": "https://github.com/Augustas11/macprovider/issues/1053"
+    },
+    {
+      "id": "malibu-model-economics-ux",
+      "owner_spec": "SPEC-044",
+      "consumers": [],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
     }
   ]
 }
