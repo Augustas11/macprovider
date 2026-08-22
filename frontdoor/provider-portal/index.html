@@ -2111,7 +2111,7 @@
         code = "rewards_held";
       } else if (Number(malibu.withdrawable_malibu) > 0) {
         code = "trusted_withdrawable";
-      } else if (typeof earn.current_window_credits === "number" && earn.current_window_credits > 0) {
+      } else if (typeof earn.usdc_today === "number" && earn.usdc_today > 0) {
         code = "earning";
       } else if (pool && (pool.state === "ready" || pool.state === "draining")) {
         code = "idle_no_work";
@@ -2121,13 +2121,19 @@
         code = "customer_availability_pending";
       }
       var vocab = miningReasonVocabulary(code);
-      var credits = earn && typeof earn.current_window_credits === "number"
-        ? "Credits current window: " + fmtInt(earn.current_window_credits)
-        : "Credits unavailable";
-      var rewardSummary = credits + " · " + (malibu
-        ? "MALIBU: " + formatMalibuAmount(malibu.withdrawable_malibu) + " withdrawable / " +
-            formatMalibuAmount(malibu.held_malibu) + " held"
-        : "MALIBU unavailable");
+      var usdc = earn && typeof earn.usdc_today === "number" && isFinite(earn.usdc_today)
+        ? fmtUSDC(earn.usdc_today) + " USDC today"
+        : "USDC unavailable";
+      var malibuLine = "MALIBU unavailable";
+      if (malibu) {
+        var withdrawable = Number(malibu.withdrawable_malibu);
+        var held = Number(malibu.held_malibu);
+        malibuLine = "MALIBU " +
+          (isFinite(withdrawable) ? withdrawable.toFixed(2) + " withdrawable" : "n/a withdrawable") +
+          " / " +
+          (isFinite(held) ? held.toFixed(2) + " held" : "n/a held");
+      }
+      var rewardSummary = usdc + " · " + malibuLine;
       var trustSummary = "Trust status unavailable";
       if (malibu) {
         trustSummary = "Trust: " + (

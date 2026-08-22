@@ -46,7 +46,7 @@ function loadPortalContext() {
 function baseState(context) {
   context.state.pool = { data: { state: "ready" }, ts: Date.now(), err: null, inflight: false };
   context.state.earn = {
-    data: { current_window_credits: 0, idle_prewarm: { skips_by_reason_last_1h: {} } },
+    data: { usdc_today: 0, idle_prewarm: { skips_by_reason_last_1h: {} } },
     ts: Date.now(),
     err: null,
     inflight: false,
@@ -85,7 +85,7 @@ test("portal mining health does not render unavailable rewards as zero", () => {
   const health = vm.runInContext("computePortalMiningHealth()", context);
 
   assert.equal(health.code, "reward_projection_unavailable");
-  assert.equal(health.rewardSummary, "Credits unavailable · MALIBU unavailable");
+  assert.equal(health.rewardSummary, "USDC unavailable · MALIBU unavailable");
 }
 );
 
@@ -111,7 +111,7 @@ test("portal mining health distinguishes fresh zero from unavailable", () => {
   assert.equal(health.code, "idle_no_work");
   assert.equal(
     health.rewardSummary,
-    "Credits current window: 0 · MALIBU: 0.00 MALIBU withdrawable / 0.00 MALIBU held"
+    "$0.00 USDC today · MALIBU 0.00 withdrawable / 0.00 held"
   );
 }
 );
