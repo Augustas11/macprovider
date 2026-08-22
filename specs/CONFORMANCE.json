@@ -1224,7 +1224,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.12",
+      "version": "0.0.13",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1257,7 +1257,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool control plane is a new authority domain (pool-control-plane). No pool_id exists across routing/admission/snapshots/logs/receipts/settlement/payout/disclosure today, so Layer 2 traffic is deploy-blocked. First implementation lands default-off with fail-closed conformance tests; no conformance promotion until signed journey-result evidence exists. Layer 2 administrative trust only; cryptographic privacy is SPEC-041/Layer 3."
+        "rationale": "Pool control plane is a new authority domain (pool-control-plane). Current merged code contains substantial default-off pool plumbing and SPEC-043 creator-onboarding enablement, including pool_id threading, manifest crypto primitives, route isolation, labeled route snapshots, buyer/public policy and status surfaces, claim-control rejection, and an MVP retention-policy registry. SPEC-042 remains pending-reconciliation and not-deployed because signed journey evidence, durable production wiring, complete fail-closed predicate coverage, SPEC-042-owned schema/retention promotion, production activation gates, and five-lane audit are still outstanding. Layer 2 administrative trust only; cryptographic privacy is SPEC-041/Layer 3."
       }
     },
     {
@@ -5197,7 +5197,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool object + signed manifest + identity/rollback: slice 1 (v0.0.8) canonical identity/policy-core encoding with pool_id + manifest_core_digest; slice 2 (v0.0.9) pool_id-binding check + policy-core signature layer (see R012); slice 4 (v0.0.11) the versioned policy-core history + active-policy selection (BuildPolicyHistory / PolicyHistory.ActivePolicy): per-core signature verification against the authority-log signer set, pool_id binding, monotonic manifest_version/rollback reject, prev_manifest_core_hash chain, non-overlapping half-open validity windows, and pool_policy_stale fail-closed selection. Still deferred: durable persistence + restart reconstruction of the policy-core history and the acceptance-verdict record, mutable operational fields, and routing wiring."
+        "rationale": "Pool object + signed manifest + identity/rollback: slice 1 (v0.0.8) canonical identity/policy-core encoding with pool_id + manifest_core_digest; slice 2 (v0.0.9) pool_id-binding check + policy-core signature layer (see R012); slice 4 (v0.0.11) the versioned policy-core history + active-policy selection (BuildPolicyHistory / PolicyHistory.ActivePolicy): per-core signature verification against the authority-log signer set, pool_id binding, monotonic manifest_version/rollback reject, prev_manifest_core_hash chain, non-overlapping half-open validity windows, and pool_policy_stale fail-closed selection. Slice 5 (v0.0.12) adds reversible manifest snapshot encoding and verdict-replay reconstruction for the authority log + policy-core history + recorded acceptance verdicts. Still deferred: wiring that snapshot/acceptance verdict into the coordinator durable store, mutable operational fields, live routing acceptance path, and signed journey evidence."
       }
     },
     {
@@ -5306,45 +5306,78 @@
       "requirement_id": "SPEC-042-R007",
       "spec_id": "SPEC-042",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/trustpool/retention_policy.go:var registeredRetentionPolicies",
+        "phase4-coordinator/internal/trustpool/retention_policy.go:func resolveRetentionPolicyForPool",
+        "phase4-coordinator/internal/trustpool/policy.go:func buildPolicyDocumentForPool",
+        "phase4-coordinator/internal/trustpool/status.go:func buildStatusDocumentForPool"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/policy_test.go:TestBuildPolicyDocumentReturnsBuyerSafeCandidatePolicyShape",
+        "phase4-coordinator/internal/trustpool/policy_test.go:TestBuildPolicyDocumentDoesNotFallbackToApprovalRetentionAfterManifest",
+        "phase4-coordinator/internal/trustpool/status_test.go:TestBuildStatusDocumentReturnsBuyerSafePromiseShape",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_RouteabilityFailsClosedForActivePoolWithUnresolvedRetentionPolicy"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool-scoped observability + field-level retention matrix: NOT yet implemented (the retention-matrix field list is a deferred v0.1 detailed-design deliverable in the R010 promotion checklist)."
+        "rationale": "Pool-scoped observability + field-level retention matrix: partial MVP evidence now exists through the SPEC-043 trustpool retention-policy registry and buyer/public policy/status projections. The registry exposes closed retention policy ids, field categories, min/max periods, deletion SLA, governing policy version, and dispute-audit minimums, and active routeability fails closed when an accepted manifest references an unknown/non-canonical retention-policy id. Still deferred for SPEC-042 promotion: a production field-level retention matrix covering all retained coordinator/gateway/provider/payout/disclosure fields, operational deletion/audit enforcement, counsel/compliance review for regulated vertical packages, signed journey evidence, and an explicit decision that the SPEC-043 MVP registry satisfies or is superseded by SPEC-042 R007."
       }
     },
     {
       "requirement_id": "SPEC-042-R008",
       "spec_id": "SPEC-042",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/trustpool/policy.go:func BuildPolicyDocument(",
+        "phase4-coordinator/internal/trustpool/policy.go:func BuildPublicPolicyDocument(",
+        "phase4-coordinator/internal/trustpool/status.go:func BuildStatusDocument(",
+        "phase4-coordinator/internal/trustpool/status.go:func BuildPublicStatusDocument(",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) handleTrustPoolPolicy(",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) handleTrustPoolStatus("
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/policy_test.go:TestBuildPolicyDocumentReturnsBuyerSafeCandidatePolicyShape",
+        "phase4-coordinator/internal/trustpool/policy_test.go:TestBuildPublicPolicyDocumentRequiresMatchingAnnouncementApproval",
+        "phase4-coordinator/internal/trustpool/status_test.go:TestBuildStatusDocumentReturnsBuyerSafePromiseShape",
+        "phase4-coordinator/internal/buyer/server_test.go:TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus",
+        "phase4-coordinator/internal/buyer/server_internal_test.go:TestPublicTrustPoolDocumentFreshFailsClosed"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Buyer-verifiable pool_policy.json + coordinator-attested pool_status.json (closed schemas): NOT yet implemented; the JSON schemas are deferred v0.1 detailed-design deliverables."
+        "rationale": "Buyer-verifiable pool_policy.json + coordinator-attested pool_status.json (closed schemas): partial MVP evidence now exists through SPEC-043 trustpool policy/status documents and coordinator endpoints for authorized buyers plus public endpoints gated by digest-bound public-announcement approval and freshness. The surfaces disclose Trusted Pool/non-Privacy-Pool scope, coordinator/provider plaintext visibility, manifest digest/policy hash, lifecycle/readiness, retention-policy registry fields, and no-store/freshness behavior. Still deferred for SPEC-042 promotion: creator-signed pool_policy.json canonical signature, SPEC-042-owned closed JSON schema artifacts, provider-half capability/status evidence, production-ready public promise lifecycle ownership, signed journey evidence, and an explicit decision that the SPEC-043 surfaces satisfy or are replaced by SPEC-042 R008."
       }
     },
     {
       "requirement_id": "SPEC-042-R009",
       "spec_id": "SPEC-042",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/trustpool/policy.go:func ValidatePromiseClaimsText(",
+        "phase4-coordinator/internal/trustpool/root_manifest.go:func VerifyManifestAcceptedEvent(",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func validateEvent(",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) writeMutationError("
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/policy_test.go:TestPromiseClaimControlRejectsSubmittedProhibitedTerms",
+        "phase4-coordinator/internal/trustpool/root_manifest_test.go:TestReconstructEvents_RejectsManifestPositivePromiseOverclaim",
+        "phase4-coordinator/internal/trustpool/root_manifest_test.go:TestReconstructEvents_RejectsManifestLayer3PrivacyClaims",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_RejectsManifestPromiseOverclaim"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Layer 3 compatibility fields + claim control + privacy binding: NOT yet implemented and blocked until SPEC-041/SPEC-040 are amended; SPEC-042 v0.1 makes no relay-blind/content-confidentiality claim."
+        "rationale": "Layer 3 compatibility fields + claim control + privacy binding: claim-control enforcement is partially implemented for the SPEC-043 MVP surfaces. The trustpool store/admin path rejects prohibited promise terms, positive Privacy Pool/anonymous-routing overclaims, non-candidate split execution, and structured Layer 3 privacy fields such as relay_blind mode/capability before routeable/public publication. Still absent for SPEC-042 R009 promotion: SPEC-041/SPEC-040 amendments binding pool_id, manifest_version, manifest_core_digest, pool_generation/pool_state_epoch_hash into relay-blind reservations/AAD/wallet signatures; any non-default privacy_mode; and signed journey evidence. SPEC-042 v0.1 continues to make no relay-blind/content-confidentiality claim."
       }
     },
     {
