@@ -350,12 +350,15 @@
     .rewards-card .reward-grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:12px; margin-top:12px; }
     .rewards-card .reward-label { color:var(--muted); font-size:12px; }
     .rewards-card .reward-value { font-size:18px; margin-top:3px; }
-    .rewards-card .reward-hold { color:var(--bad); margin-top:12px; font-size:13px; line-height:1.45; }
-    .rewards-card .reward-next { margin-top:6px; font-size:13px; line-height:1.45; }
+    .rewards-card .reward-hold { color:var(--sunset-coral); margin-top:12px; font-size:13px; line-height:1.45; }
+    .rewards-card .reward-ok { color:var(--seafoam-teal); margin-top:12px; font-size:13px; line-height:1.45; }
+    .rewards-card .reward-next { margin-top:6px; font-size:13px; line-height:1.45; color:var(--muted); }
     .wallet-card { margin-top:18px; }
     .wallet-card .wallet-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; margin-top:12px; }
     .wallet-card .wallet-label { color:var(--muted); font-size:12px; }
     .wallet-card .wallet-value { margin-top:3px; overflow-wrap:anywhere; }
+    .wallet-card .reward-hold { color:var(--sunset-coral); }
+    .wallet-card .reward-ok { color:var(--seafoam-teal); }
     .wallet-card .audit-list { margin-top:12px; border-top:1px solid var(--line); }
     .wallet-card .audit-row { padding:10px 0; border-bottom:1px solid var(--line); }
     .wallet-card .audit-row .audit-type { font-size:13px; }
@@ -1930,11 +1933,23 @@
         case "compute_integrity_blocked":
         case "provider_token_untrusted":
           return "Review diagnostics before withdrawing.";
+        case "earning_verified_work":
+        case "eligible_idle_no_work":
         case "withdrawable_balance_available":
         case "withdrawable_no_balance":
-          return "No withdrawal hold action is required.";
-        default: return "Try again when reward status refreshes.";
+          return "";
+        default: return "";
       }
+    }
+
+    function rewardStatusIsHold(reason) {
+      return reason === "held_provisional_trust_tier" ||
+        reason === "held_provider_daily_cap" ||
+        reason === "held_wallet_daily_cap" ||
+        reason === "held_demotion_cooldown" ||
+        reason === "missing_wallet_binding" ||
+        reason === "compute_integrity_blocked" ||
+        reason === "provider_token_untrusted";
     }
 
     function malibuRewardStatusCopy(e) {
@@ -2241,10 +2256,11 @@
           el("div", null, el("div", { class: "reward-label" }, "Accrued"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.accrued_malibu))),
           el("div", null, el("div", { class: "reward-label" }, malibuWithdrawableGridLabel(eligibility)), el("div", { class: "reward-value mono" }, malibuWithdrawableGridValue(d, eligibility))),
           el("div", null, el("div", { class: "reward-label" }, "Held"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.held_malibu)))),
-        el("div", { class: "reward-next" }, "Trust tier: ",
+        el("div", { class: "reward-next" }, "Trust: ",
           typeof d.trust_tier === "string" && d.trust_tier.trim() ? d.trust_tier : "n/a"),
-        el("div", { class: "reward-hold" }, eligibility ? "Reward status: " : "Held because: ", holdText),
-        el("div", { class: "reward-next" }, "Next: ", nextAction),
+        el("div", { class: eligibility && rewardStatusIsHold(eligibility.primary_reason) ? "reward-hold" : "reward-ok" },
+          holdText),
+        nextAction ? el("div", { class: "reward-next" }, nextAction) : null,
         capParts.length ? el("div", { class: "fiat-cite" }, capParts.join(" · ")) : null);
     }
 
@@ -2427,9 +2443,16 @@
       return Number.isFinite(Number(value));
     }
 
+    function truncateWalletAddress(address) {
+      if (typeof address !== "string") return "";
+      var trimmed = address.trim();
+      if (trimmed.length < 12) return trimmed;
+      return trimmed.slice(0, 6) + "…" + trimmed.slice(-4);
+    }
+
     function walletAddressLine(wallet) {
       if (!wallet || !wallet.address) return "No wallet bound";
-      return wallet.address;
+      return truncateWalletAddress(wallet.address);
     }
 
     function walletCapLine(amounts) {
@@ -2465,20 +2488,14 @@
       var raw = state.wallet.data;
       var loading = state.wallet.inflight && !raw;
       if (!raw && !loading && !state.wallet.err) return null;
-      if (!raw) {
-        return el("div", { class: "fiat-card wallet-card" },
-          el("h3", null, "Wallet & eligibility"),
-          el("div", { class: "fiat-body" }, loading ? "Loading wallet status…" : "Wallet status unavailable."),
-          state.wallet.err ? el("div", { class: "fiat-cite" }, state.wallet.err.unavailable
-            ? "Wallet status is temporarily unavailable while the read-only route is being deployed."
-            : "Wallet status returned HTTP " + state.wallet.err.status + ".") : null);
-      }
+      if (!raw) return null;
       var d = normalizedProviderWalletStatus(raw);
       if (d && d.unavailable) {
+        var fallback = raw.payout_wallet && raw.payout_wallet.address;
+        if (typeof fallback !== "string" || !fallback.trim()) return null;
         return el("div", { class: "fiat-card wallet-card" },
-          el("h3", null, "Wallet & eligibility"),
-          el("div", { class: "fiat-body" }, "Wallet status schema is unavailable."),
-          el("div", { class: "fiat-cite mono" }, "schema_version: " + d.schema_version));
+          el("h3", null, "Wallet"),
+          el("div", { class: "fiat-body mono" }, "Payout wallet " + truncateWalletAddress(fallback)));
       }
       var payout = d.payout_wallet;
       var reward = d.reward_wallet || {};
