@@ -2158,10 +2158,10 @@
       ],
       "evidence": [
         {
-          "artifact": "commit:b60f4fd1672fb230e8cf392b8d0afcec0ef3782b",
+          "artifact": "commit:c43e286a0bc17e73feef3c70a31b778ac6a5ce65",
           "source": null,
-          "captured_at": "2026-08-09",
-          "expires_at": "2026-11-09"
+          "captured_at": "2026-08-22",
+          "expires_at": "2026-11-22"
         },
         {
           "artifact": "sha256:a3a7bb8dc18ddd7a0da8d7cdc337a14ca1430d03cb14c5a5289b46eb65166353",
