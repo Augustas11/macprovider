@@ -1295,7 +1295,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces, an explicit operator-only candidate promotion path that preflights local activation prerequisites, lifecycle fail-closed tests, and a CLI-first operator-mediated admin workflow with nonce issuance plus pool health/audit/distribution exports. Raw operator admin events cannot activate a routeable pool; requirements remain pending until authenticated creator self-service/administration, public publicly_announced policy/status exposure, signed journey, rollback-resistant promotion authorization/evidence, public pool-status freshness fail-closed enforcement, custody-class and retention-policy production gates, full production activation gates, and production rollout proof are implemented."
+        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites, lifecycle fail-closed tests, operator-only admin API mutations for public-announcement/reviewed-artifact records, and an environment-key-only CLI for nonce issuance plus pool health/audit/distribution exports. Raw operator admin events cannot activate a routeable pool; requirements remain pending until authenticated creator self-service/administration, signed journey, rollback-resistant promotion authorization/evidence, public pool-status freshness fail-closed enforcement, custody-class and retention-policy production gates, full production activation gates, CLI wrappers for reviewed-artifact/public-announcement mutations, and production rollout proof are implemented."
       }
     },
     {
@@ -5498,7 +5498,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool creation request: manifest verification primitives and durable created-state initialization exist through the operator-mediated event path, and pool creation is gated on a matching enabled creator approval. Still pending: creator-authenticated external creation request handler, signed SPEC-042 identity core acceptance, intended buyer disclosure validation, public announcement approval, and signed journey evidence."
+        "rationale": "Pool creation request: manifest verification primitives and durable created-state initialization exist through the operator-mediated event path, and pool creation is gated on a matching enabled creator approval. Operator-approved public announcement is implemented as a separate approval record and derived replay visibility state bound to the current manifest digest and creator approval binding. Still pending: creator-authenticated external creation request handler, signed SPEC-042 identity core acceptance, intended buyer disclosure validation, and signed journey evidence."
       }
     },
     {
@@ -5518,7 +5518,10 @@
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) PromotePool",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *ReconstructedState) validatePromotion",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertCreatorApproval",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertReviewedDistributionArtifact",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertPublicAnnouncementApproval",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) Reconstruct",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *ReconstructedState) applyPublicVisibilityGates",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *ReconstructedState) BuildRegistry",
         "phase4-coordinator/internal/trustpool/refresher.go:func RefreshRegistry",
         "phase4-coordinator/internal/trustpool/refresher.go:func StartRefreshLoop"
@@ -5544,7 +5547,9 @@
         "phase4-coordinator/internal/trustpool/registry_test.go:TestRefreshRouteableSnapshotsAtRevisionAllowsSameRevisionTimeGateClose",
         "phase4-coordinator/internal/trustpool/refresher_test.go:TestRefreshRegistryClosesExpiredCreatorGateAtSameRevision",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PromotePoolActivatesAfterPreflight",
-        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PromotePoolRejectsMissingPreconditions"
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PromotePoolRejectsMissingPreconditions",
+        "phase4-coordinator/internal/trustpool/policy_test.go:TestBuildPublicPolicyDocumentRequiresMatchingAnnouncementApproval",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_PublicAnnouncementApprovalIsDigestBound"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -5554,7 +5559,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Durable coordinator state: a default-off SQLite event ledger, durable creator approval table with monotonic per-creator approval revisions, idempotent append path, replay-checked candidate/restrictive admin append path, rejection of raw active lifecycle publication, explicit candidate promotion append path with local preflight, read-at-boot replay model, creator approval route gate, routeable registry reconstruction, membership/blocklist/lifecycle snapshotting, root nonce reuse rejection during durable replay, revision-fenced live registry refresh after event and approval mutations, route-time grace expiry checks, same-revision background routeability expiry refresh, routeable snapshot export of grace-expiry timestamps, buyer-authorization snapshot reads, and startup wiring are implemented locally. Still pending: rollback-resistant production promotion authorization/evidence, production migration evidence, public status/promise freshness, and signed journey evidence."
+        "rationale": "Durable coordinator state: a default-off SQLite event ledger, durable creator approval table with monotonic per-creator approval revisions, durable reviewed-distribution artifact records/history, durable public-announcement approval records bound to operation id, manifest digest, stored current reviewed distribution artifact digest, and creator approval state, immutable public-announcement history, idempotent append path, replay-checked candidate/restrictive admin append path, rejection of raw active lifecycle publication, explicit candidate promotion append path with local preflight, read-at-boot replay model, creator approval route gate, public-visibility replay gate/generation, routeable registry reconstruction, membership/blocklist/lifecycle snapshotting, root nonce reuse rejection during durable replay, revision-fenced live registry refresh after event and approval mutations, route-time grace expiry checks, same-revision background routeability expiry refresh, routeable snapshot export of grace-expiry timestamps, buyer-authorization snapshot reads, and startup wiring are implemented locally. Still pending: rollback-resistant production promotion authorization/evidence, production migration evidence, public status/promise freshness, and signed journey evidence."
       }
     },
     {
@@ -5572,6 +5577,8 @@
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handlePoolAudit",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handlePoolHealth",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handlePoolDistribution",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleReviewedDistributionArtifact",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handlePublicAnnouncementApproval",
         "phase4-coordinator/cmd/coordinator-cli/trust_pool_admin.go:func trustPoolAdmin(args []string, getenv func(string) string, stdin io.Reader, stdout io.Writer) error",
         "phase4-coordinator/cmd/coordinator/main.go:func main"
       ],
@@ -5584,6 +5591,7 @@
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry",
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_PromoteRejectsMissingPrecondition",
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_PromoteRetryRefreshesStaleRegistry",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_PublicAnnouncementApprovalIsDigestBound",
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_IssuesRootNonceAndExportsPoolArtifacts",
         "phase4-coordinator/cmd/coordinator-cli/trust_pool_admin_test.go:TestTrustPoolAdminCLIEventAndExports",
         "phase4-coordinator/cmd/coordinator-cli/trust_pool_admin_test.go:TestTrustPoolAdminCLIIssueRootNonceUsesStructuredJSON",
@@ -5599,7 +5607,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Creator administration surface: a default-off operator-only API now appends replay-checked durable pool-control events for candidate/restrictive state, exposes an operator-only promotion endpoint for the local candidate activation gate, upserts/reads creator approval records, issues idempotent root-registration nonces, returns schema-versioned no-store envelopes, rejects conflicting operation-id sources, rejects raw active lifecycle transitions, maps creator/promotion gate failures to closed error codes, refreshes live state after accepted event, promotion, or approval mutations, and exports per-pool health, audit, and candidate-marked distribution packages through an environment-key-only CLI wrapper. Still pending: creator-authenticated CLI/API, signer rotation, rollback-resistant production promotion authorization, public promise surfaces, and policy-aware authorization beyond raw MVP events."
+        "rationale": "Creator administration surface: a default-off operator-only API now appends replay-checked durable pool-control events for candidate/restrictive state, exposes an operator-only promotion endpoint for the local candidate activation gate, upserts/reads creator approval records, issues idempotent root-registration nonces, records reviewed distribution artifacts as operation-id-bound durable state, records operation-id-bound, digest-bound, stored-reviewed-artifact-bound, non-candidate-launch-bound, and creator-state-bound public-announcement approvals, returns schema-versioned no-store envelopes, rejects conflicting operation-id sources and cross-mutation operation-id reuse, rejects raw active lifecycle transitions, maps creator/promotion/public-announcement gate failures to closed error codes, refreshes live state after accepted event, promotion, or approval mutations, exposes operator-only admin API mutations for reviewed-artifact/public-announcement records, and exports per-pool health, audit, reviewed-artifact history, public-announcement approval/history, and candidate-marked distribution packages through the existing environment-key-only CLI wrapper. Still pending: creator-authenticated CLI/API, signer rotation, rollback-resistant production promotion authorization, production reviewed-artifact lifecycle, CLI wrappers for reviewed-artifact/public-announcement mutations, and policy-aware authorization beyond raw MVP events."
       }
     },
     {
@@ -5703,7 +5711,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Production enablement gate: coordinator startup now has a default-off trusted_pools.enabled switch that reconstructs durable state, applies creator approval routeability gates at reconstruction/publication time, publishes route-time grace expiry deadlines into the registry, wires WithPoolMembership and the buyer-authenticated status store only after successful replay, runs a bounded background refresher that replays durable state and updates same-revision time-gate closures without replacing the live registry on refresh error, mounts a candidate/restrictive operator admin surface only in the enabled mode, and disables pool support without failing global startup when durable reconstruction fails; otherwise it does not advertise pool support. A local operator-only candidate promotion gate can move created candidate pools to active after preflighting root registration, accepted manifest, enabled creator approval, buyer authorization, and at least the accepted-manifest `min_eligible_members` non-revoked members; raw active lifecycle transitions still fail closed, production-labeled promotion is rejected, and paused-pool reactivation remains blocked pending a durable R006 re-verification sweep path. Still pending: public promise surfaces, public pool-status freshness fail-closed enforcement, full live activation checks including the R006 reactivation sweep, signed launch evidence, rollback-resistant production promotion authorization, and production rollout proof."
+        "rationale": "Production enablement gate: coordinator startup now has a default-off trusted_pools.enabled switch that reconstructs durable state, applies creator approval routeability gates at reconstruction/publication time, publishes route-time grace expiry deadlines into the registry, wires WithPoolMembership and the buyer-authenticated status store only after successful replay, runs a bounded background refresher that replays durable state and updates same-revision time-gate closures without replacing the live registry on refresh error, mounts a candidate/restrictive operator admin surface only in the enabled mode, and disables pool support without failing global startup when durable reconstruction fails; otherwise it does not advertise pool support. A local operator-only candidate promotion gate can move created candidate pools to active after preflighting root registration, accepted manifest, enabled creator approval, buyer authorization, and at least the accepted-manifest `min_eligible_members` non-revoked members; public promise surfaces now fail closed when public-announcement approval is absent, launch environment is candidate, manifest-stale, reviewed-artifact-stale, or creator-approval-state-stale and expose a distinct visibility generation; raw active lifecycle transitions still fail closed, production-labeled promotion is rejected, and paused-pool reactivation remains blocked pending a durable R006 re-verification sweep path. Still pending: public pool-status freshness fail-closed enforcement, full live activation checks including the R006 reactivation sweep, signed launch evidence, rollback-resistant production promotion authorization, and production rollout proof."
       }
     },
     {
@@ -5715,10 +5723,18 @@
         "phase4-coordinator/internal/trustpool/policy.go:func ValidatePromiseClaimsText",
         "phase4-coordinator/internal/trustpool/durable_store.go:func validateCreatorApproval",
         "phase4-coordinator/internal/trustpool/durable_store.go:func validateEvent",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertReviewedDistributionArtifact",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertPublicAnnouncementApproval",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) writeMutationError",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleReviewedDistributionArtifact",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handlePublicAnnouncementApproval",
         "phase4-coordinator/internal/trustpool/status.go:func BuildStatusDocument",
+        "phase4-coordinator/internal/trustpool/status.go:func BuildPublicStatusDocument",
+        "phase4-coordinator/internal/trustpool/status.go:func matchingPublicAnnouncement",
         "phase4-coordinator/internal/buyer/server.go:func (s *Server) handleTrustPoolPolicy",
         "phase4-coordinator/internal/buyer/server.go:func (s *Server) handleTrustPoolStatus",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) handlePublicTrustPoolPolicy",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) handlePublicTrustPoolStatus",
         "phase4-coordinator/internal/buyer/server.go:func WithTrustPoolStatusStore"
       ],
       "tests": [
@@ -5734,9 +5750,14 @@
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_RouteabilityFailsClosedWhenMinEligibleMembersDropsAfterPromotion",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestReconstructEvents_RejectsLifecycleReasonPromiseClaims",
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_RejectsManifestPromiseOverclaim",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_PublicAnnouncementApprovalIsDigestBound",
         "phase4-coordinator/internal/trustpool/status_test.go:TestBuildStatusDocumentReturnsBuyerSafePromiseShape",
         "phase4-coordinator/internal/trustpool/status_test.go:TestBuildStatusDocumentCollapsesUnauthorizedAndUnknown",
-        "phase4-coordinator/internal/buyer/server_test.go:TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus"
+        "phase4-coordinator/internal/trustpool/status_test.go:TestBuildPublicStatusDocumentRequiresMatchingAnnouncementApproval",
+        "phase4-coordinator/internal/trustpool/policy_test.go:TestBuildPublicPolicyDocumentRequiresMatchingAnnouncementApproval",
+        "phase4-coordinator/internal/trustpool/policy_test.go:TestBuildPublicPolicyDocumentIgnoresLegacyUnboundPublicAnnouncementRows",
+        "phase4-coordinator/internal/buyer/server_test.go:TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus",
+        "phase4-coordinator/internal/buyer/server_test.go:TestTrustPoolPublicPolicyStatusAreRateLimitedBeforeLookup"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -5746,7 +5767,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Public promise and claim control: gateway-authenticated buyer policy/status surfaces are implemented locally with authorized-buyer-only reconstruction, no-store cache control, non-enumerating 404s, creator provenance fields, accepted-manifest min_eligible_members, min_binary_version, and retention id projection, manifest digest/policy hash disclosure, count-only membership/status disclosure, shared single-operator supply disclosure, live eligibility marked not_evaluated, explicit coordinator/provider plaintext-visibility disclosures, active routeability fail-closed behavior below accepted-manifest member minimums, separator-normalized prohibited-term rejection for buyer-visible creator approval metadata at write and read/reconstruct time, pool ids, root issuer key labels, lifecycle reasons, and manifest snapshots, invalid manifest min_binary_version rejection, exact candidate split_execution_status enforcement, and structured Layer-3 privacy-field rejection for relay-blind mode/capability in the v0.1 candidate path. Still pending: public publicly_announced policy/status exposure, public pool-status freshness fail-closed enforcement, live route-time readiness/eligible-count derivation, immutable approved root issuer custody class from registration, retention-policy registry resolution, and claim-control coverage for every future mutable operational field and creator-submitted disclosure surface."
+        "rationale": "Public promise and claim control: gateway-authenticated buyer policy/status surfaces are implemented locally with authorized-buyer-only reconstruction, no-store cache control, non-enumerating 404s, creator provenance fields, accepted-manifest min_eligible_members, min_binary_version, and retention id projection, manifest digest/policy hash disclosure, count-only membership/status disclosure, shared single-operator supply disclosure, live eligibility marked not_evaluated, explicit coordinator/provider plaintext-visibility disclosures, active routeability fail-closed behavior below accepted-manifest member minimums, separator-normalized prohibited-term rejection for buyer-visible creator approval metadata at write and read/reconstruct time, pool ids, root issuer key labels, lifecycle reasons, and manifest snapshots, invalid manifest min_binary_version rejection, exact candidate split_execution_status enforcement, and structured Layer-3 privacy-field rejection for relay-blind mode/capability in the v0.1 candidate path. Public-announcement approval is now implemented locally: unauthenticated public policy/status endpoints are per-source rate-limited, globally work-limited before replay, and serve redacted documents only when an operator approval matches the current operation id, pool_id, non-candidate launch environment, manifest_core_digest, stored current reviewed_distribution_artifact_digest, creator approval record/version, and creator approval revision; public documents redact internal creator approval, Agreement, root-key, lifecycle-reason, route-gate, buyer-count, and supply-count fields; missing or mismatched reviewed artifacts fail approval, stale approvals are rejected at write time, operation-id reuse across trustpool mutation classes is rejected, public audit exports immutable reviewed-artifact and announcement history, and manifest, reviewed-artifact distribution digest, or creator-approval changes collapse public lookup back to non-enumerating 404 while advancing public visibility generation. Still pending: public pool-status freshness fail-closed enforcement, live route-time readiness/eligible-count derivation, immutable approved root issuer custody class from registration, retention-policy registry resolution, production reviewed-artifact lifecycle, and claim-control coverage for every future mutable operational field and creator-submitted disclosure surface."
       }
     },
     {

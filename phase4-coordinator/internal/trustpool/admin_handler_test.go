@@ -366,6 +366,171 @@ func TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry(t *testing.T) {
 	}
 }
 
+func TestAdminHandler_PublicAnnouncementApprovalIsDigestBound(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    trustpool.NewRegistry(),
+		OperatorKey: "operator-secret",
+	})
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "public", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:        trustpool.EventPoolCreated,
+		PoolID:           root.poolID,
+		CreatorAccountID: "creator-a",
+		ApprovalRecordID: "approval-v1",
+	}, "op-create", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", signedRootRegistrationForIssueInEnvironment(t, "op-root", testAdminTS(1), root.poolID, "creator-a", "approval-v1", issueRootNonceInEnvironment(t, store, "creator-a", "approval-v1", "public", testAdminTS(3600)), root, "public"), "op-root", http.StatusAccepted)
+	manifest := signedManifest(t, "op-manifest", testAdminTS(2), root.poolID, 1, root)
+	postAdminEvent(t, handler, "operator-secret", manifest, "op-manifest", http.StatusAccepted)
+	reviewedArtifactDigest := hexDigest("reviewed-artifact-v1")
+
+	postAdminPublicAnnouncement(t, handler, "operator-secret", root.poolID, trustpool.PublicAnnouncementApproval{
+		OperationID:                "op-public-mismatch",
+		PoolID:                     "different-pool",
+		ManifestCoreDigest:         manifest.ManifestCoreDigest,
+		ReviewedDistributionDigest: reviewedArtifactDigest,
+		ApprovalRecordID:           "public-announcement-v1",
+		ApprovedBy:                 "operator-a",
+		ApprovedAtUTC:              testAdminTS(3),
+	}, http.StatusBadRequest)
+	postAdminPublicAnnouncement(t, handler, "operator-secret", root.poolID, trustpool.PublicAnnouncementApproval{
+		OperationID:                "op-public-stale",
+		ManifestCoreDigest:         hexDigest("stale-manifest"),
+		ReviewedDistributionDigest: reviewedArtifactDigest,
+		ApprovalRecordID:           "public-announcement-v1",
+		ApprovedBy:                 "operator-a",
+		ApprovedAtUTC:              testAdminTS(3),
+	}, http.StatusConflict)
+	postAdminPublicAnnouncement(t, handler, "operator-secret", root.poolID, trustpool.PublicAnnouncementApproval{
+		OperationID:                "op-public-before-review",
+		ManifestCoreDigest:         manifest.ManifestCoreDigest,
+		ReviewedDistributionDigest: reviewedArtifactDigest,
+		ApprovalRecordID:           "public-announcement-v1",
+		ApprovedBy:                 "operator-a",
+		ApprovedAtUTC:              testAdminTS(3),
+	}, http.StatusConflict)
+	postAdminReviewedDistributionArtifact(t, handler, "operator-secret", root.poolID, trustpool.ReviewedDistributionArtifact{
+		OperationID:                "op-reviewed-artifact-v1",
+		ManifestCoreDigest:         manifest.ManifestCoreDigest,
+		ReviewedDistributionDigest: reviewedArtifactDigest,
+		ArtifactURI:                "https://example.test/trusted-pools/" + root.poolID,
+		ClaimControlDigest:         hexDigest("claim-control-v1"),
+		ReviewedBy:                 "operator-a",
+		ReviewedAtUTC:              testAdminTS(3),
+	}, http.StatusAccepted)
+	postAdminReviewedDistributionArtifact(t, handler, "operator-secret", root.poolID, trustpool.ReviewedDistributionArtifact{
+		OperationID:                "op-reviewed-artifact-v1",
+		ManifestCoreDigest:         manifest.ManifestCoreDigest,
+		ReviewedDistributionDigest: reviewedArtifactDigest,
+		ArtifactURI:                "https://example.test/trusted-pools/" + root.poolID,
+		ClaimControlDigest:         hexDigest("claim-control-v1"),
+		ReviewedBy:                 "operator-a",
+		ReviewedAtUTC:              testAdminTS(3),
+	}, http.StatusAccepted)
+	postAdminReviewedDistributionArtifact(t, handler, "operator-secret", root.poolID, trustpool.ReviewedDistributionArtifact{
+		OperationID:                "op-reviewed-artifact-same-content",
+		ManifestCoreDigest:         manifest.ManifestCoreDigest,
+		ReviewedDistributionDigest: reviewedArtifactDigest,
+		ArtifactURI:                "https://example.test/trusted-pools/" + root.poolID,
+		ClaimControlDigest:         hexDigest("claim-control-v1"),
+		ReviewedBy:                 "operator-a",
+		ReviewedAtUTC:              testAdminTS(3),
+	}, http.StatusConflict)
+	postAdminPublicAnnouncement(t, handler, "operator-secret", root.poolID, trustpool.PublicAnnouncementApproval{
+		OperationID:                "op-reviewed-artifact-v1",
+		ManifestCoreDigest:         manifest.ManifestCoreDigest,
+		ReviewedDistributionDigest: reviewedArtifactDigest,
+		ApprovalRecordID:           "public-announcement-v1",
+		ApprovedBy:                 "operator-a",
+		ApprovedAtUTC:              testAdminTS(4),
+	}, http.StatusConflict)
+	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-reviewed-artifact-v1", http.StatusConflict)
+	rec := postAdminPublicAnnouncement(t, handler, "operator-secret", root.poolID, trustpool.PublicAnnouncementApproval{
+		OperationID:                "op-public-v1",
+		ManifestCoreDigest:         manifest.ManifestCoreDigest,
+		ReviewedDistributionDigest: reviewedArtifactDigest,
+		ApprovalRecordID:           "public-announcement-v1",
+		ApprovedBy:                 "operator-a",
+		ApprovedAtUTC:              testAdminTS(4),
+	}, http.StatusAccepted)
+	var body struct {
+		PublicAnnouncement trustpool.PublicAnnouncementApproval `json:"public_announcement"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode public announcement response: %v", err)
+	}
+	if body.PublicAnnouncement.OperationID != "op-public-v1" ||
+		body.PublicAnnouncement.PoolID != root.poolID ||
+		body.PublicAnnouncement.ManifestCoreDigest != manifest.ManifestCoreDigest ||
+		body.PublicAnnouncement.ReviewedDistributionDigest != reviewedArtifactDigest ||
+		body.PublicAnnouncement.PublicAnnouncementRevision != 1 {
+		t.Fatalf("public announcement response=%+v", body.PublicAnnouncement)
+	}
+	retry := postAdminPublicAnnouncement(t, handler, "operator-secret", root.poolID, trustpool.PublicAnnouncementApproval{
+		OperationID:                "op-public-v1",
+		ManifestCoreDigest:         manifest.ManifestCoreDigest,
+		ReviewedDistributionDigest: reviewedArtifactDigest,
+		ApprovalRecordID:           "public-announcement-v1",
+		ApprovedBy:                 "operator-a",
+		ApprovedAtUTC:              testAdminTS(4),
+	}, http.StatusAccepted)
+	var retryBody struct {
+		PublicAnnouncement trustpool.PublicAnnouncementApproval `json:"public_announcement"`
+	}
+	if err := json.Unmarshal(retry.Body.Bytes(), &retryBody); err != nil {
+		t.Fatalf("decode public announcement retry response: %v", err)
+	}
+	if retryBody.PublicAnnouncement.PublicAnnouncementRevision != 1 {
+		t.Fatalf("public announcement retry revision=%d, want 1", retryBody.PublicAnnouncement.PublicAnnouncementRevision)
+	}
+	postAdminPublicAnnouncement(t, handler, "operator-secret", root.poolID, trustpool.PublicAnnouncementApproval{
+		OperationID:                "op-public-v1",
+		ManifestCoreDigest:         manifest.ManifestCoreDigest,
+		ReviewedDistributionDigest: hexDigest("different-reviewed-artifact"),
+		ApprovalRecordID:           "public-announcement-v1",
+		ApprovedBy:                 "operator-a",
+		ApprovedAtUTC:              testAdminTS(4),
+	}, http.StatusConflict)
+	postAdminReviewedDistributionArtifact(t, handler, "operator-secret", root.poolID, trustpool.ReviewedDistributionArtifact{
+		OperationID:                "op-public-v1",
+		ManifestCoreDigest:         manifest.ManifestCoreDigest,
+		ReviewedDistributionDigest: hexDigest("reviewed-artifact-v2"),
+		ArtifactURI:                "https://example.test/trusted-pools/" + root.poolID + "/v2",
+		ClaimControlDigest:         hexDigest("claim-control-v2"),
+		ReviewedBy:                 "operator-a",
+		ReviewedAtUTC:              testAdminTS(5),
+	}, http.StatusConflict)
+	auditReq := httptest.NewRequest(http.MethodGet, "/admin/trust-pools/pools/"+root.poolID+"/audit", nil)
+	auditReq.Header.Set("Authorization", "Bearer operator-secret")
+	auditRec := httptest.NewRecorder()
+	handler.ServeHTTP(auditRec, auditReq)
+	if auditRec.Code != http.StatusOK {
+		t.Fatalf("GET audit status=%d body=%s, want 200", auditRec.Code, auditRec.Body.String())
+	}
+	var auditBody struct {
+		ReviewedDistributionArtifactHistory []trustpool.ReviewedDistributionArtifact `json:"reviewed_distribution_artifact_history"`
+		PublicAnnouncementHistory           []trustpool.PublicAnnouncementApproval   `json:"public_announcement_history"`
+	}
+	if err := json.Unmarshal(auditRec.Body.Bytes(), &auditBody); err != nil {
+		t.Fatalf("decode audit response: %v", err)
+	}
+	if len(auditBody.ReviewedDistributionArtifactHistory) != 1 || auditBody.ReviewedDistributionArtifactHistory[0].OperationID != "op-reviewed-artifact-v1" {
+		t.Fatalf("reviewed artifact history=%+v, want one immutable op-reviewed-artifact-v1 row", auditBody.ReviewedDistributionArtifactHistory)
+	}
+	if len(auditBody.PublicAnnouncementHistory) != 1 || auditBody.PublicAnnouncementHistory[0].OperationID != "op-public-v1" {
+		t.Fatalf("public announcement history=%+v, want one immutable op-public-v1 row", auditBody.PublicAnnouncementHistory)
+	}
+	if _, found, err := trustpool.BuildPublicPolicyDocument(t.Context(), store, root.poolID, testAdminTS(5)); err != nil || !found {
+		t.Fatalf("BuildPublicPolicyDocument found=%v err=%v, want true nil", found, err)
+	}
+}
+
 func TestAdminHandler_IssuesRootNonceAndExportsPoolArtifacts(t *testing.T) {
 	t.Parallel()
 	store, err := trustpool.NewStore(openTrustPoolDB(t))
@@ -668,6 +833,40 @@ func postAdminCreator(t *testing.T, h http.Handler, operatorKey string, approval
 		t.Fatalf("POST creator status=%d body=%s, want %d", rec.Code, rec.Body.String(), want)
 	}
 	assertAdminSchemaVersion(t, rec)
+}
+
+func postAdminPublicAnnouncement(t *testing.T, h http.Handler, operatorKey, poolID string, approval trustpool.PublicAnnouncementApproval, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(approval)
+	if err != nil {
+		t.Fatalf("marshal public announcement approval: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/pools/"+poolID+"/public-announcement", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+operatorKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST public announcement status=%d body=%s, want %d", rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+	return rec
+}
+
+func postAdminReviewedDistributionArtifact(t *testing.T, h http.Handler, operatorKey, poolID string, artifact trustpool.ReviewedDistributionArtifact, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatalf("marshal reviewed distribution artifact: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/pools/"+poolID+"/reviewed-distribution-artifact", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+operatorKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST reviewed distribution artifact status=%d body=%s, want %d", rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+	return rec
 }
 
 func postAdminPromote(t *testing.T, h http.Handler, operatorKey, poolID, operationID string, want int) {

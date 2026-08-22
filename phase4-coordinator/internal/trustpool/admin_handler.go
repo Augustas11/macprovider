@@ -58,6 +58,10 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleGetCreator(w, r)
 	case r.URL.Path == "/admin/trust-pools/pools":
 		h.handleListPools(w, r)
+	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/reviewed-distribution-artifact"):
+		h.handleReviewedDistributionArtifact(w, r)
+	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/public-announcement"):
+		h.handlePublicAnnouncementApproval(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/promote"):
 		h.handlePromotePool(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/audit"):
@@ -266,6 +270,102 @@ func (h *adminHandler) handlePromotePool(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+func (h *adminHandler) handlePublicAnnouncementApproval(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := poolIDFromSuffixedAdminPath(r.URL.Path, "/public-announcement")
+	if poolID == "" {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	var approval PublicAnnouncementApproval
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&approval); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	if bodyPoolID := strings.TrimSpace(approval.PoolID); bodyPoolID != "" && bodyPoolID != poolID {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "pool_id_mismatch"}})
+		return
+	}
+	operationID, err := resolveOperationID(strings.TrimSpace(approval.OperationID), r.Header)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	approval.PoolID = poolID
+	approval.OperationID = operationID
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	committed, err := h.deps.Store.UpsertPublicAnnouncementApproval(r.Context(), approval)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+		return
+	}
+	writeAdminJSON(w, http.StatusAccepted, map[string]any{
+		"public_announcement": committed,
+		"pool":                adminPoolResponse(state.Pools[poolID], state.RouteGateCheckedAt),
+	})
+}
+
+func (h *adminHandler) handleReviewedDistributionArtifact(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := poolIDFromSuffixedAdminPath(r.URL.Path, "/reviewed-distribution-artifact")
+	if poolID == "" {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	var artifact ReviewedDistributionArtifact
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&artifact); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	if bodyPoolID := strings.TrimSpace(artifact.PoolID); bodyPoolID != "" && bodyPoolID != poolID {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "pool_id_mismatch"}})
+		return
+	}
+	operationID, err := resolveOperationID(strings.TrimSpace(artifact.OperationID), r.Header)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	artifact.PoolID = poolID
+	artifact.OperationID = operationID
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	committed, err := h.deps.Store.UpsertReviewedDistributionArtifact(r.Context(), artifact)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	writeAdminJSON(w, http.StatusAccepted, map[string]any{"reviewed_distribution_artifact": committed})
+}
+
 func (h *adminHandler) handleListPools(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -357,12 +457,37 @@ func (h *adminHandler) handlePoolAudit(w http.ResponseWriter, r *http.Request) {
 	if approval, ok := state.CreatorApprovals[state.Pools[poolID].CreatorAccountID]; ok {
 		creatorApproval = approval
 	}
+	var publicAnnouncement any
+	if approval, ok := state.PublicAnnouncements[poolID]; ok {
+		publicAnnouncement = approval
+	}
+	publicAnnouncementHistory, err := h.deps.Store.PublicAnnouncementHistory(r.Context(), poolID)
+	if err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "audit_lookup_failed"}})
+		return
+	}
+	var reviewedArtifact any
+	if artifact, ok, err := h.deps.Store.ReviewedDistributionArtifact(r.Context(), poolID); err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "audit_lookup_failed"}})
+		return
+	} else if ok {
+		reviewedArtifact = artifact
+	}
+	reviewedArtifactHistory, err := h.deps.Store.ReviewedDistributionArtifactHistory(r.Context(), poolID)
+	if err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "audit_lookup_failed"}})
+		return
+	}
 	writeAdminJSON(w, http.StatusOK, map[string]any{
-		"pool_id":                   poolID,
-		"creator_approval":          creatorApproval,
-		"root_registration_nonces":  nonceAudit,
-		"events":                    filtered,
-		"nonce_material_disclosure": "nonce digests are exported here; consumed nonce material may still appear inside root-registration durable events for replay compatibility",
+		"pool_id":                                poolID,
+		"creator_approval":                       creatorApproval,
+		"reviewed_distribution_artifact":         reviewedArtifact,
+		"reviewed_distribution_artifact_history": reviewedArtifactHistory,
+		"public_announcement":                    publicAnnouncement,
+		"public_announcement_history":            publicAnnouncementHistory,
+		"root_registration_nonces":               nonceAudit,
+		"events":                                 filtered,
+		"nonce_material_disclosure":              "nonce digests are exported here; consumed nonce material may still appear inside root-registration durable events for replay compatibility",
 	})
 }
 
@@ -501,6 +626,8 @@ func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_root_registration_nonce"}})
 	case errors.Is(err, ErrCreatorApprovalGate):
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "creator_approval_gate_failed"}})
+	case errors.Is(err, ErrPublicAnnouncementGate):
+		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "public_announcement_gate_failed"}})
 	case errors.Is(err, ErrProhibitedPromiseClaim):
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "prohibited_promise_claim"}})
 	case errors.Is(err, ErrMalformedDurableEvent):
@@ -603,6 +730,10 @@ type adminPoolState struct {
 	BuyerAccounts                  []string `json:"buyer_accounts"`
 	Generation                     uint64   `json:"generation"`
 	RouteableGeneration            uint64   `json:"routeable_generation"`
+	PubliclyAnnounced              bool     `json:"publicly_announced"`
+	PublicVisibilityGeneration     uint64   `json:"public_visibility_generation"`
+	PublicAnnouncementApprovalID   string   `json:"public_announcement_approval_id,omitempty"`
+	PublicReviewedArtifactDigest   string   `json:"public_reviewed_distribution_artifact_digest,omitempty"`
 	LastEventAtUTC                 string   `json:"last_event_at_utc,omitempty"`
 	Routeable                      bool     `json:"routeable"`
 	CreatorGateReason              string   `json:"creator_gate_reason,omitempty"`
@@ -646,6 +777,10 @@ func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) 
 		BuyerAccounts:                  buyers,
 		Generation:                     p.Generation,
 		RouteableGeneration:            p.RouteableSnapshotGeneration(),
+		PubliclyAnnounced:              p.PubliclyAnnounced,
+		PublicVisibilityGeneration:     p.PublicVisibilityGeneration,
+		PublicAnnouncementApprovalID:   p.PublicAnnouncementApprovalID,
+		PublicReviewedArtifactDigest:   p.PublicReviewedArtifactDigest,
 		LastEventAtUTC:                 lastEventAt,
 		Routeable:                      adminPoolRouteable(p),
 		CreatorGateReason:              p.CreatorGateReason,

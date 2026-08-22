@@ -24,26 +24,29 @@ type PolicyDocument struct {
 }
 
 type PolicyPool struct {
-	PoolID               string `json:"pool_id"`
-	Lifecycle            string `json:"lifecycle"`
-	Visibility           string `json:"visibility"`
-	PubliclyAnnounced    bool   `json:"publicly_announced"`
-	MVPMode              string `json:"mvp_mode"`
-	SupplyMode           string `json:"supply_mode"`
-	ProviderSupply       string `json:"provider_supply"`
-	CandidateOnly        bool   `json:"candidate_only"`
-	ProductionReady      bool   `json:"production_ready"`
-	ProductionBlocker    string `json:"production_blocker"`
-	LaunchEnvironment    string `json:"launch_environment,omitempty"`
-	LifecycleReason      string `json:"lifecycle_reason,omitempty"`
-	CreatorGateReason    string `json:"creator_gate_reason,omitempty"`
-	CreatorGateExpiresAt string `json:"creator_gate_expires_at_utc,omitempty"`
+	PoolID                 string `json:"pool_id"`
+	Lifecycle              string `json:"lifecycle"`
+	Visibility             string `json:"visibility"`
+	PubliclyAnnounced      bool   `json:"publicly_announced"`
+	VisibilityGeneration   uint64 `json:"visibility_generation"`
+	PublicApprovalID       string `json:"public_announcement_approval_id,omitempty"`
+	ReviewedArtifactDigest string `json:"reviewed_distribution_artifact_digest,omitempty"`
+	MVPMode                string `json:"mvp_mode"`
+	SupplyMode             string `json:"supply_mode"`
+	ProviderSupply         string `json:"provider_supply"`
+	CandidateOnly          bool   `json:"candidate_only"`
+	ProductionReady        bool   `json:"production_ready"`
+	ProductionBlocker      string `json:"production_blocker"`
+	LaunchEnvironment      string `json:"launch_environment,omitempty"`
+	LifecycleReason        string `json:"lifecycle_reason,omitempty"`
+	CreatorGateReason      string `json:"creator_gate_reason,omitempty"`
+	CreatorGateExpiresAt   string `json:"creator_gate_expires_at_utc,omitempty"`
 }
 
 type PolicyCreator struct {
-	CreatorAccountID             string `json:"creator_account_id"`
+	CreatorAccountID             string `json:"creator_account_id,omitempty"`
 	PublicDisplayName            string `json:"public_display_name,omitempty"`
-	ApprovalRecordID             string `json:"approval_record_id"`
+	ApprovalRecordID             string `json:"approval_record_id,omitempty"`
 	CurrentApprovalVersion       string `json:"current_approval_version,omitempty"`
 	AllowedProductCategory       string `json:"allowed_product_category,omitempty"`
 	AllowedLaunchEnvironment     string `json:"allowed_launch_environment,omitempty"`
@@ -117,30 +120,76 @@ func BuildPolicyDocument(ctx context.Context, store *Store, registry *Registry, 
 		return PolicyDocument{}, false, nil
 	}
 	approval := state.CreatorApprovals[p.CreatorAccountID]
+	return buildPolicyDocumentForPool(p, approval, generatedAt, false), true, nil
+}
+
+func BuildPublicPolicyDocument(ctx context.Context, store *Store, poolID string, generatedAt time.Time) (PolicyDocument, bool, error) {
+	poolID = strings.TrimSpace(poolID)
+	if store == nil || poolID == "" {
+		return PolicyDocument{}, false, nil
+	}
+	state, err := store.Reconstruct(ctx)
+	if err != nil {
+		return PolicyDocument{}, false, err
+	}
+	p := state.Pools[poolID]
+	if p == nil {
+		return PolicyDocument{}, false, nil
+	}
+	if _, ok := matchingPublicAnnouncement(state, p); !ok {
+		return PolicyDocument{}, false, nil
+	}
+	approval := state.CreatorApprovals[p.CreatorAccountID]
+	return redactPublicPolicyDocument(buildPolicyDocumentForPool(p, approval, generatedAt, true)), true, nil
+}
+
+func buildPolicyDocumentForPool(p *ReconstructedPoolState, approval CreatorApproval, generatedAt time.Time, publiclyAnnounced bool) PolicyDocument {
 	generatedAt = generatedAt.UTC()
 	if generatedAt.IsZero() {
 		generatedAt = time.Now().UTC()
 	}
 	root := policyRootIssuer(p)
+	visibility := "authorized"
+	productionBlocker := "public_announcement_and_production_gates_not_implemented"
+	claimValidationStatus := "manifest_overclaim_rejection_enabled_candidate_surface_not_public"
+	disclosures := []string{
+		"prompts and responses are visible to the MacProvider coordinator",
+		"prompts and responses may be visible to the selected provider operator",
+		"supply_mode shared means admitted providers may also serve global traffic",
+		"single-operator Trusted Pools do not provide a high-availability guarantee",
+		"root issuer custody class is not yet recorded as an immutable approved class; production activation remains blocked",
+		"retention policy is currently represented by the creator approval category, not a resolved retention-policy registry record",
+		"this policy document is not a Privacy Pool, anonymous-routing, zero-knowledge, confidential-compute, end-to-end-encryption, or regulated-compliance claim",
+		"public unauthenticated policy/status exposure requires an operator approval bound to the current manifest digest",
+	}
+	if publiclyAnnounced {
+		visibility = "publicly_announced"
+		productionBlocker = "production_gates_not_implemented"
+		claimValidationStatus = "manifest_overclaim_rejection_enabled_publicly_announced_surface"
+		disclosures[len(disclosures)-1] = "public unauthenticated policy/status exposure is approved only for the current manifest_core_digest and reviewed_distribution_artifact_digest and fails closed after either digest changes"
+	}
 	doc := PolicyDocument{
 		SchemaVersion:  PolicySchemaVersion,
 		GeneratedAtUTC: generatedAt.Format(time.RFC3339Nano),
 		FreshUntilUTC:  generatedAt.Add(StatusFreshnessTTL).Format(time.RFC3339Nano),
 		Pool: PolicyPool{
-			PoolID:               p.PoolID,
-			Lifecycle:            p.Lifecycle,
-			Visibility:           "authorized",
-			PubliclyAnnounced:    false,
-			MVPMode:              "single_operator",
-			SupplyMode:           "creator_admitted",
-			ProviderSupply:       "shared",
-			CandidateOnly:        true,
-			ProductionReady:      false,
-			ProductionBlocker:    "public_announcement_and_production_gates_not_implemented",
-			LaunchEnvironment:    root.LaunchEnvironment,
-			LifecycleReason:      p.LifecycleReason,
-			CreatorGateReason:    p.CreatorGateReason,
-			CreatorGateExpiresAt: formatOptionalTime(p.CreatorGateExpiresAtUTC),
+			PoolID:                 p.PoolID,
+			Lifecycle:              p.Lifecycle,
+			Visibility:             visibility,
+			PubliclyAnnounced:      publiclyAnnounced,
+			VisibilityGeneration:   p.PublicVisibilityGeneration,
+			PublicApprovalID:       p.PublicAnnouncementApprovalID,
+			ReviewedArtifactDigest: p.PublicReviewedArtifactDigest,
+			MVPMode:                "single_operator",
+			SupplyMode:             "creator_admitted",
+			ProviderSupply:         "shared",
+			CandidateOnly:          true,
+			ProductionReady:        false,
+			ProductionBlocker:      productionBlocker,
+			LaunchEnvironment:      root.LaunchEnvironment,
+			LifecycleReason:        p.LifecycleReason,
+			CreatorGateReason:      p.CreatorGateReason,
+			CreatorGateExpiresAt:   formatOptionalTime(p.CreatorGateExpiresAtUTC),
 		},
 		Creator: PolicyCreator{
 			CreatorAccountID:             p.CreatorAccountID,
@@ -166,26 +215,39 @@ func BuildPolicyDocument(ctx context.Context, store *Store, registry *Registry, 
 			SplitExecutionStatus:  policySplitExecutionStatus(p),
 		},
 		RootIssuer:      root,
-		Predicates:      policyPredicates(p),
+		Predicates:      policyPredicates(p, publiclyAnnounced),
 		Confidentiality: policyConfidentiality(),
 		ClaimControl: PolicyClaimControl{
 			CanonicalName:     "Trusted Pool",
-			ValidationStatus:  "manifest_overclaim_rejection_enabled_candidate_surface_not_public",
+			ValidationStatus:  claimValidationStatus,
 			ProhibitedClaims:  ProhibitedPromiseClaims(),
 			AllowedClaimScope: "creator-run Trusted Pool with explicit policy controls; not content privacy, unlinkability, confidential compute, or regulated compliance",
 		},
-		Disclosures: []string{
-			"prompts and responses are visible to the MacProvider coordinator",
-			"prompts and responses may be visible to the selected provider operator",
-			"supply_mode shared means admitted providers may also serve global traffic",
-			"single-operator Trusted Pools do not provide a high-availability guarantee",
-			"root issuer custody class is not yet recorded as an immutable approved class; production activation remains blocked",
-			"retention policy is currently represented by the creator approval category, not a resolved retention-policy registry record",
-			"this policy document is not a Privacy Pool, anonymous-routing, zero-knowledge, confidential-compute, end-to-end-encryption, or regulated-compliance claim",
-			"public unauthenticated policy/status exposure is unavailable until a publicly_announced approval state exists",
-		},
+		Disclosures: disclosures,
 	}
-	return doc, true, nil
+	return doc
+}
+
+func redactPublicPolicyDocument(doc PolicyDocument) PolicyDocument {
+	doc.Pool.PublicApprovalID = ""
+	doc.Pool.LaunchEnvironment = ""
+	doc.Pool.LifecycleReason = ""
+	doc.Pool.CreatorGateReason = ""
+	doc.Pool.CreatorGateExpiresAt = ""
+	doc.Creator.CreatorAccountID = ""
+	doc.Creator.ApprovalRecordID = ""
+	doc.Creator.CurrentApprovalVersion = ""
+	doc.Creator.AllowedLaunchEnvironment = ""
+	doc.Creator.CreatorAgreementID = ""
+	doc.Creator.CreatorAgreementVersion = ""
+	doc.Creator.CreatorAgreementExpiresAtUTC = ""
+	doc.Creator.CreatorAgreementGraceEndsUTC = ""
+	doc.Creator.Status = ""
+	doc.RootIssuer.KeyID = ""
+	doc.RootIssuer.PublicKeyFingerprint = ""
+	doc.RootIssuer.CustodyDisclosureHash = ""
+	doc.RootIssuer.LaunchEnvironment = ""
+	return doc
 }
 
 func policyRootIssuer(p *ReconstructedPoolState) PolicyRootIssuer {
@@ -205,7 +267,7 @@ func policyRootIssuer(p *ReconstructedPoolState) PolicyRootIssuer {
 	}
 }
 
-func policyPredicates(p *ReconstructedPoolState) PolicyPredicates {
+func policyPredicates(p *ReconstructedPoolState, publiclyAnnounced bool) PolicyPredicates {
 	predicates := PolicyPredicates{
 		Enforced: []PolicyPredicate{
 			{ID: "buyer_account_authorized", Status: "enforced", Scope: "gateway_authenticated_account"},
@@ -217,10 +279,14 @@ func policyPredicates(p *ReconstructedPoolState) PolicyPredicates {
 			{ID: "live_eligible_member_count", Status: "not_evaluated", Scope: "status_surface"},
 			{ID: "root_issuer_custody_class", Status: "not_enforced", Scope: "production_gate"},
 			{ID: "retention_policy_registry_resolution", Status: "not_enforced", Scope: "production_gate"},
-			{ID: "publicly_announced_approval", Status: "not_implemented", Scope: "visibility_gate"},
 			{ID: "creator_self_service_authentication", Status: "not_implemented", Scope: "admin_surface"},
 			{ID: "signed_launch_journey", Status: "not_implemented", Scope: "production_gate"},
 		},
+	}
+	if publiclyAnnounced {
+		predicates.Enforced = append(predicates.Enforced, PolicyPredicate{ID: "publicly_announced_approval", Status: "enforced", Scope: "visibility_gate"})
+	} else {
+		predicates.ObserveOnly = append(predicates.ObserveOnly, PolicyPredicate{ID: "publicly_announced_approval", Status: "not_enabled", Scope: "visibility_gate"})
 	}
 	if policyMinBinaryVersion(p) != "" {
 		predicates.Enforced = append(predicates.Enforced, PolicyPredicate{ID: "min_binary_version", Status: "enforced", Scope: "routeable_registry"})
