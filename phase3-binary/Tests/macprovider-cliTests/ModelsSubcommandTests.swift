@@ -92,6 +92,122 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertNotNil(rows.first?["weights_present_locally"] as? Bool)
     }
 
+    func testModelsCatalogEconomicsJSONFallbackProjectsStaticEconomics() async throws {
+        let socketPath = try makeSocketPath()
+        let command = try ModelsCatalogEconomicsCommand.parse([
+            "--json",
+            "--ctl-socket-path", socketPath.path,
+            "--model", "mlx-community/Qwen3-8B-4bit",
+            "--supported-models", "mlx-community/Qwen3-8B-4bit",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+        XCTAssertNil(capture.error)
+        let lines = capture.stdout.split(whereSeparator: \.isNewline)
+        XCTAssertEqual(lines.count, 1)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(lines[0].utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(object["schema"] as? String, "model_catalog_economics.v1")
+        XCTAssertNotNil(object["generated_at"] as? String)
+        XCTAssertEqual(object["projection_sequence"] as? Int, 1)
+        XCTAssertEqual(object["warnings"] as? [String], ["feed_fallback", "feed_stale"])
+        let source = try XCTUnwrap(object["source"] as? [String: Any])
+        XCTAssertEqual(source["cli_version"] as? String, CoordinatorClient.binaryVersion)
+        XCTAssertEqual(source["projection_protocol_version"] as? String, "spec-044-cli-v1")
+        XCTAssertEqual(source["rate_card_source"] as? String, "static_signed")
+        XCTAssertNotNil(source["rate_card_digest"] as? String)
+        XCTAssertTrue(source.keys.contains("rate_card_signature_digest"))
+        XCTAssertNotNil(source["demand_feed_digest"] as? String)
+        XCTAssertNotNil(source["candidate_feed_digest"] as? String)
+        XCTAssertEqual(source["rate_card_max_age_seconds"] as? Int, 604_800)
+
+        let rows = try XCTUnwrap(object["rows"] as? [[String: Any]])
+        let qwen = try XCTUnwrap(rows.first { ($0["model_key"] as? String) == "qwen3-8b" })
+        XCTAssertEqual(qwen["display_model_id"] as? String, "mlx-community/Qwen3-8B-4bit")
+        XCTAssertEqual(qwen["rate_source"] as? String, "static_signed")
+        XCTAssertEqual(qwen["economics_state"] as? String, "stale")
+        XCTAssertEqual(qwen["rate_card_key"] as? String, "qwen3-8b")
+        XCTAssertEqual(qwen["provider_share_bps"] as? Int, 9_000)
+        XCTAssertEqual(try XCTUnwrap(qwen["prompt_rate_usd_per_million_tokens"] as? Double), 0.0135, accuracy: 0.000_001)
+        XCTAssertEqual(try XCTUnwrap(qwen["completion_rate_usd_per_million_tokens"] as? Double), 0.027, accuracy: 0.000_001)
+        XCTAssertEqual(try XCTUnwrap(qwen["provider_prompt_payout_usd_per_million_tokens"] as? Double), 0.01215, accuracy: 0.000_001)
+        XCTAssertEqual(try XCTUnwrap(qwen["provider_completion_payout_usd_per_million_tokens"] as? Double), 0.0243, accuracy: 0.000_001)
+        XCTAssertEqual(qwen["demand_rank"] as? Int, 18)
+        XCTAssertEqual(try XCTUnwrap(qwen["demand_weight"] as? Double), 0.38, accuracy: 0.000_001)
+        let warningCodes = try XCTUnwrap(qwen["warning_codes"] as? [String])
+        XCTAssertTrue(warningCodes.contains("feed_fallback"))
+        XCTAssertTrue(warningCodes.contains("feed_stale"))
+        let actions = try XCTUnwrap(qwen["actions"] as? [String: Any])
+        let switchAction = try XCTUnwrap(actions["switch"] as? [String: Any])
+        XCTAssertEqual(switchAction["available"] as? Bool, false)
+        XCTAssertEqual(switchAction["requires_confirmation"] as? Bool, false)
+        XCTAssertEqual(switchAction["unavailable_reason"] as? String, "static_fallback_not_trusted")
+        XCTAssertTrue(switchAction.keys.contains("transaction_kind"))
+        XCTAssertTrue(switchAction.keys.contains("transaction_id"))
+    }
+
+    func testCatalogEconomicsBlocksMoneyStateFromIndependentBlockConditions() {
+        XCTAssertTrue(ModelCatalogEconomicsProjectionBuilder.economicsBlocked(
+            runtimeStatus: "blocked",
+            fit: "fits"
+        ))
+        XCTAssertTrue(ModelCatalogEconomicsProjectionBuilder.economicsBlocked(
+            runtimeStatus: "recommendable",
+            fit: "does_not_fit"
+        ))
+        XCTAssertFalse(ModelCatalogEconomicsProjectionBuilder.economicsBlocked(
+            runtimeStatus: "recommendable",
+            fit: "fits"
+        ))
+    }
+
+    func testCatalogEconomicsEmitsBlockedRowWithNullMoneyFieldsForCurrentBlockedModel() throws {
+        let demandBytes = Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
+        let candidateBytes = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        let rateBytes = Data(AutotuneStaticInputs.bakedRateCardJSON.utf8)
+        let demand = try AutotuneStaticInputs.decodeDemandRank(demandBytes)
+        var candidate = try AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(candidateBytes)
+        let rateCard = try AutotuneStaticInputs.decodeRateCard(rateBytes)
+        var blockedRow = try XCTUnwrap(candidate.rows["qwen3-8b"])
+        blockedRow.runtimeStatus = "blocked"
+        candidate.rows["qwen3-8b"] = blockedRow
+
+        let wire = try ModelCatalogEconomicsProjectionBuilder.build(
+            currentModelID: blockedRow.modelID,
+            supportedModels: [blockedRow.modelID],
+            authorizedModelKeys: Set([modelIDKey(blockedRow.modelID)]),
+            processLaunchID: "test-launch",
+            processStartedAt: Date(timeIntervalSince1970: 0),
+            demand: demand,
+            candidate: candidate,
+            rateCard: rateCard,
+            demandBytes: demandBytes,
+            candidateBytes: candidateBytes,
+            rateBytes: rateBytes
+        )
+        let encoded = try ModelSwitchingWireCodec.encode(wire)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+        let rows = try XCTUnwrap(object["rows"] as? [[String: Any]])
+        let qwen = try XCTUnwrap(rows.first { ($0["model_key"] as? String) == "qwen3-8b" })
+
+        XCTAssertEqual(qwen["runtime_state"] as? String, "current")
+        XCTAssertEqual(qwen["disabled_reason"] as? String, "catalog_blocked")
+        XCTAssertEqual(qwen["rate_source"] as? String, "none")
+        XCTAssertEqual(qwen["economics_state"] as? String, "blocked")
+        XCTAssertTrue(qwen["action_model_id"] is NSNull)
+        XCTAssertTrue(qwen["rate_card_version"] is NSNull)
+        XCTAssertTrue(qwen["rate_card_generated_at"] is NSNull)
+        XCTAssertTrue(qwen["rate_card_key"] is NSNull)
+        XCTAssertTrue(qwen["prompt_rate_usd_per_million_tokens"] is NSNull)
+        XCTAssertTrue(qwen["completion_rate_usd_per_million_tokens"] is NSNull)
+        XCTAssertTrue(qwen["provider_share_bps"] is NSNull)
+        XCTAssertTrue(qwen["provider_prompt_payout_usd_per_million_tokens"] is NSNull)
+        XCTAssertTrue(qwen["provider_completion_payout_usd_per_million_tokens"] is NSNull)
+        let warningCodes = try XCTUnwrap(qwen["warning_codes"] as? [String])
+        XCTAssertTrue(warningCodes.contains("model_not_supported"))
+    }
+
     func testModelsListJSONFallbackDeduplicatesModelIDsIgnoringCase() async throws {
         let socketPath = try makeSocketPath()
         let command = try ModelsListCommand.parse([

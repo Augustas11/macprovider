@@ -215,6 +215,211 @@ struct ModelsBrowseWire: Codable, Equatable, Sendable {
     }
 }
 
+struct ModelCatalogEconomicsWire: Codable, Equatable, Sendable {
+    struct Source: Codable, Equatable, Sendable {
+        let cliVersion: String
+        let cliBuildCommit: String
+        let processLaunchID: String
+        let processStartedAt: String
+        let projectionProtocolVersion: String
+        let rateCardSource: String
+        let rateCardDigest: String?
+        let rateCardSignatureDigest: String?
+        let demandFeedDigest: String?
+        let candidateFeedDigest: String?
+        let rateCardMaxAgeSeconds: Int
+
+        enum CodingKeys: String, CodingKey {
+            case cliVersion = "cli_version"
+            case cliBuildCommit = "cli_build_commit"
+            case processLaunchID = "process_launch_id"
+            case processStartedAt = "process_started_at"
+            case projectionProtocolVersion = "projection_protocol_version"
+            case rateCardSource = "rate_card_source"
+            case rateCardDigest = "rate_card_digest"
+            case rateCardSignatureDigest = "rate_card_signature_digest"
+            case demandFeedDigest = "demand_feed_digest"
+            case candidateFeedDigest = "candidate_feed_digest"
+            case rateCardMaxAgeSeconds = "rate_card_max_age_seconds"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(cliVersion, forKey: .cliVersion)
+            try container.encode(cliBuildCommit, forKey: .cliBuildCommit)
+            try container.encode(processLaunchID, forKey: .processLaunchID)
+            try container.encode(processStartedAt, forKey: .processStartedAt)
+            try container.encode(projectionProtocolVersion, forKey: .projectionProtocolVersion)
+            try container.encode(rateCardSource, forKey: .rateCardSource)
+            try container.encodeOptionalOrNull(rateCardDigest, forKey: .rateCardDigest)
+            try container.encodeOptionalOrNull(rateCardSignatureDigest, forKey: .rateCardSignatureDigest)
+            try container.encodeOptionalOrNull(demandFeedDigest, forKey: .demandFeedDigest)
+            try container.encodeOptionalOrNull(candidateFeedDigest, forKey: .candidateFeedDigest)
+            try container.encode(rateCardMaxAgeSeconds, forKey: .rateCardMaxAgeSeconds)
+        }
+    }
+
+    struct ActionSet: Codable, Equatable, Sendable {
+        let switchAction: Action
+        let prepare: Action
+        let evaluate: Action
+        let adoptRecommendation: Action
+        let cleanupStaging: Action
+
+        enum CodingKeys: String, CodingKey {
+            case switchAction = "switch"
+            case prepare
+            case evaluate
+            case adoptRecommendation = "adopt_recommendation"
+            case cleanupStaging = "cleanup_staging"
+        }
+    }
+
+    struct Action: Codable, Equatable, Sendable {
+        let available: Bool
+        let requiresConfirmation: Bool
+        let transactionKind: String?
+        let transactionID: String?
+        let actionTimeoutSeconds: Int?
+        let estimatedBytes: Int64?
+        let unavailableReason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case available
+            case requiresConfirmation = "requires_confirmation"
+            case transactionKind = "transaction_kind"
+            case transactionID = "transaction_id"
+            case actionTimeoutSeconds = "action_timeout_seconds"
+            case estimatedBytes = "estimated_bytes"
+            case unavailableReason = "unavailable_reason"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(available, forKey: .available)
+            try container.encode(requiresConfirmation, forKey: .requiresConfirmation)
+            try container.encodeOptionalOrNull(transactionKind, forKey: .transactionKind)
+            try container.encodeOptionalOrNull(transactionID, forKey: .transactionID)
+            try container.encodeOptionalOrNull(actionTimeoutSeconds, forKey: .actionTimeoutSeconds)
+            try container.encodeOptionalOrNull(estimatedBytes, forKey: .estimatedBytes)
+            try container.encodeOptionalOrNull(unavailableReason, forKey: .unavailableReason)
+        }
+    }
+
+    struct Row: Codable, Equatable, Sendable {
+        let modelKey: String
+        let servedModelID: String
+        let displayModelID: String
+        let actionModelID: String?
+        let isCurrent: Bool
+        let weightsPresentLocally: Bool
+        let runtimeState: String
+        let estimatedGB: Double?
+        let fit: String
+        let disabledReason: String?
+        let warningCodes: [String]
+        let rateCardVersion: String?
+        let rateCardGeneratedAt: String?
+        let rateCardKey: String?
+        let rateSource: String
+        let promptRateUSDPerMillionTokens: Double?
+        let completionRateUSDPerMillionTokens: Double?
+        let providerShareBPS: Int64?
+        let providerPromptPayoutUSDPerMillionTokens: Double?
+        let providerCompletionPayoutUSDPerMillionTokens: Double?
+        let economicsState: String
+        let demandRank: Int?
+        let demandWeight: Double?
+        let readyProviderCount: Int?
+        let supplyDeficitScore: Double?
+        let actions: ActionSet
+
+        enum CodingKeys: String, CodingKey {
+            case modelKey = "model_key"
+            case servedModelID = "served_model_id"
+            case displayModelID = "display_model_id"
+            case actionModelID = "action_model_id"
+            case isCurrent = "is_current"
+            case weightsPresentLocally = "weights_present_locally"
+            case runtimeState = "runtime_state"
+            case estimatedGB = "estimated_gb"
+            case fit
+            case disabledReason = "disabled_reason"
+            case warningCodes = "warning_codes"
+            case rateCardVersion = "rate_card_version"
+            case rateCardGeneratedAt = "rate_card_generated_at"
+            case rateCardKey = "rate_card_key"
+            case rateSource = "rate_source"
+            case promptRateUSDPerMillionTokens = "prompt_rate_usd_per_million_tokens"
+            case completionRateUSDPerMillionTokens = "completion_rate_usd_per_million_tokens"
+            case providerShareBPS = "provider_share_bps"
+            case providerPromptPayoutUSDPerMillionTokens = "provider_prompt_payout_usd_per_million_tokens"
+            case providerCompletionPayoutUSDPerMillionTokens = "provider_completion_payout_usd_per_million_tokens"
+            case economicsState = "economics_state"
+            case demandRank = "demand_rank"
+            case demandWeight = "demand_weight"
+            case readyProviderCount = "ready_provider_count"
+            case supplyDeficitScore = "supply_deficit_score"
+            case actions
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(modelKey, forKey: .modelKey)
+            try container.encode(servedModelID, forKey: .servedModelID)
+            try container.encode(displayModelID, forKey: .displayModelID)
+            try container.encodeOptionalOrNull(actionModelID, forKey: .actionModelID)
+            try container.encode(isCurrent, forKey: .isCurrent)
+            try container.encode(weightsPresentLocally, forKey: .weightsPresentLocally)
+            try container.encode(runtimeState, forKey: .runtimeState)
+            try container.encodeOptionalOrNull(estimatedGB, forKey: .estimatedGB)
+            try container.encode(fit, forKey: .fit)
+            try container.encodeOptionalOrNull(disabledReason, forKey: .disabledReason)
+            try container.encode(warningCodes, forKey: .warningCodes)
+            try container.encodeOptionalOrNull(rateCardVersion, forKey: .rateCardVersion)
+            try container.encodeOptionalOrNull(rateCardGeneratedAt, forKey: .rateCardGeneratedAt)
+            try container.encodeOptionalOrNull(rateCardKey, forKey: .rateCardKey)
+            try container.encode(rateSource, forKey: .rateSource)
+            try container.encodeOptionalOrNull(promptRateUSDPerMillionTokens, forKey: .promptRateUSDPerMillionTokens)
+            try container.encodeOptionalOrNull(completionRateUSDPerMillionTokens, forKey: .completionRateUSDPerMillionTokens)
+            try container.encodeOptionalOrNull(providerShareBPS, forKey: .providerShareBPS)
+            try container.encodeOptionalOrNull(providerPromptPayoutUSDPerMillionTokens, forKey: .providerPromptPayoutUSDPerMillionTokens)
+            try container.encodeOptionalOrNull(providerCompletionPayoutUSDPerMillionTokens, forKey: .providerCompletionPayoutUSDPerMillionTokens)
+            try container.encode(economicsState, forKey: .economicsState)
+            try container.encodeOptionalOrNull(demandRank, forKey: .demandRank)
+            try container.encodeOptionalOrNull(demandWeight, forKey: .demandWeight)
+            try container.encodeOptionalOrNull(readyProviderCount, forKey: .readyProviderCount)
+            try container.encodeOptionalOrNull(supplyDeficitScore, forKey: .supplyDeficitScore)
+            try container.encode(actions, forKey: .actions)
+        }
+    }
+
+    let schema: String
+    let generatedAt: String
+    let projectionSequence: Int
+    let source: Source
+    let warnings: [String]
+    let rows: [Row]
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case generatedAt = "generated_at"
+        case projectionSequence = "projection_sequence"
+        case source
+        case warnings
+        case rows
+    }
+
+    init(generatedAt: String, projectionSequence: Int, source: Source, warnings: [String], rows: [Row]) {
+        schema = "model_catalog_economics.v1"
+        self.generatedAt = generatedAt
+        self.projectionSequence = projectionSequence
+        self.source = source
+        self.warnings = warnings
+        self.rows = rows
+    }
+}
+
 struct ModelSwitchEventWire: Codable, Equatable, Sendable {
     let schemaVersion: String
     let type: String
@@ -589,6 +794,16 @@ enum ModelSwitchingWireCodec {
         case .tight: return "tight"
         case .wontFit: return "wont_fit"
         case .unknown: return "unknown"
+        }
+    }
+}
+
+private extension KeyedEncodingContainer {
+    mutating func encodeOptionalOrNull<T: Encodable>(_ value: T?, forKey key: Key) throws {
+        if let value {
+            try encode(value, forKey: key)
+        } else {
+            try encodeNil(forKey: key)
         }
     }
 }

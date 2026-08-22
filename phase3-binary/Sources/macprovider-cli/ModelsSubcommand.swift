@@ -12,6 +12,7 @@ struct ModelsCommand: AsyncParsableCommand {
             ModelsSwitchCommand.self,
             ModelsStatusCommand.self,
             ModelsBrowseCommand.self,
+            ModelsCatalogEconomicsCommand.self,
             ModelsAdoptRecommendationCommand.self,
         ]
     )
@@ -782,12 +783,12 @@ struct ModelsSwitchOptions: Sendable, Equatable {
     let switchStatePath: String?
 }
 
-private struct ModelsStatus: Sendable, Equatable {
+struct ModelsStatus: Sendable, Equatable {
     let currentModelID: String
     let runtimeState: SwapState
 }
 
-private func loadModelsConfig(
+func loadModelsConfig(
     config: String?,
     model: String?,
     supportedModels: String?,
@@ -1487,7 +1488,7 @@ private func connectAndReadStatusOrExit(socketPath: URL) async throws -> (Contro
     }
 }
 
-private func connectAndReadStatus(socketPath: URL) async throws -> (ControlSocketConnection, ModelsStatus) {
+func connectAndReadStatus(socketPath: URL) async throws -> (ControlSocketConnection, ModelsStatus) {
     let connection = try await ControlSocketClient.connect(socketPath: socketPath)
     try await connection.send(.statusRequest)
     do {
@@ -1503,7 +1504,7 @@ private func connectAndReadStatus(socketPath: URL) async throws -> (ControlSocke
     }
 }
 
-private func idleCatalog(from config: AppConfig) -> [String] {
+func idleCatalog(from config: AppConfig) -> [String] {
     if let supportedModels = config.supportedModels, !supportedModels.isEmpty {
         return supportedModels
     }
@@ -1529,7 +1530,7 @@ private func printModelsTable(currentModelID: String?, supportedModels: [String]
     }
 }
 
-private func modelIDKey(_ modelID: String) -> String {
+func modelIDKey(_ modelID: String) -> String {
     modelID.lowercased(with: nil)
 }
 
@@ -1623,7 +1624,7 @@ private func makeModelsListWire(
     )
 }
 
-private func exactLocalArtifactPresent(modelID: String) -> Bool {
+func exactLocalArtifactPresent(modelID: String) -> Bool {
     // A plain directory is insufficient evidence: the runtime requires the
     // signed catalog revision and canonical artifact hash. Unknown rows stay
     // false so Malibu cannot promote an idle partial/stale cache to Ready.

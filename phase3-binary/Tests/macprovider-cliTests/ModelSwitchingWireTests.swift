@@ -90,6 +90,88 @@ final class ModelSwitchingWireTests: XCTestCase {
         XCTAssertTrue(rows.first?.keys.contains("estimated_gb") == true)
     }
 
+    func testCatalogEconomicsWireUsesSchemaAndActionNulls() throws {
+        let unavailable = ModelCatalogEconomicsWire.Action(
+            available: false,
+            requiresConfirmation: false,
+            transactionKind: nil,
+            transactionID: nil,
+            actionTimeoutSeconds: nil,
+            estimatedBytes: nil,
+            unavailableReason: "static_fallback_not_trusted"
+        )
+        let wire = ModelCatalogEconomicsWire(
+            generatedAt: "2026-08-22T00:00:01.000Z",
+            projectionSequence: 1,
+            source: ModelCatalogEconomicsWire.Source(
+                cliVersion: "1.8.104",
+                cliBuildCommit: "unknown",
+                processLaunchID: "11111111-2222-4333-8444-555555555555",
+                processStartedAt: "2026-08-22T00:00:00.000Z",
+                projectionProtocolVersion: "spec-044-cli-v1",
+                rateCardSource: "static_signed",
+                rateCardDigest: "digest",
+                rateCardSignatureDigest: nil,
+                demandFeedDigest: "demand",
+                candidateFeedDigest: "candidate",
+                rateCardMaxAgeSeconds: 604_800
+            ),
+            warnings: ["feed_fallback"],
+            rows: [ModelCatalogEconomicsWire.Row(
+                modelKey: "qwen3-8b",
+                servedModelID: "qwen3-8b",
+                displayModelID: "mlx-community/Qwen3-8B-4bit",
+                actionModelID: nil,
+                isCurrent: false,
+                weightsPresentLocally: false,
+                runtimeState: "needs_preparation",
+                estimatedGB: 4.0,
+                fit: "fits",
+                disabledReason: "weights_not_prepared",
+                warningCodes: ["feed_fallback"],
+                rateCardVersion: "rate",
+                rateCardGeneratedAt: "2026-08-22T00:00:00.000Z",
+                rateCardKey: "qwen3-8b",
+                rateSource: "static_signed",
+                promptRateUSDPerMillionTokens: 0.0135,
+                completionRateUSDPerMillionTokens: 0.027,
+                providerShareBPS: 9_000,
+                providerPromptPayoutUSDPerMillionTokens: 0.01215,
+                providerCompletionPayoutUSDPerMillionTokens: 0.0243,
+                economicsState: "fallback",
+                demandRank: 18,
+                demandWeight: 0.38,
+                readyProviderCount: nil,
+                supplyDeficitScore: 1.0,
+                actions: ModelCatalogEconomicsWire.ActionSet(
+                    switchAction: unavailable,
+                    prepare: unavailable,
+                    evaluate: unavailable,
+                    adoptRecommendation: unavailable,
+                    cleanupStaging: unavailable
+                )
+            )]
+        )
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(try ModelSwitchingWireCodec.encode(wire).utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(object["schema"] as? String, "model_catalog_economics.v1")
+        XCTAssertEqual(object["generated_at"] as? String, "2026-08-22T00:00:01.000Z")
+        XCTAssertEqual(object["projection_sequence"] as? Int, 1)
+        XCTAssertEqual(object["warnings"] as? [String], ["feed_fallback"])
+        let rows = try XCTUnwrap(object["rows"] as? [[String: Any]])
+        let first = try XCTUnwrap(rows.first)
+        XCTAssertTrue(first.keys.contains("action_model_id"))
+        let actions = try XCTUnwrap(first["actions"] as? [String: Any])
+        let switchAction = try XCTUnwrap(actions["switch"] as? [String: Any])
+        XCTAssertEqual(switchAction["available"] as? Bool, false)
+        XCTAssertTrue(switchAction.keys.contains("transaction_kind"))
+        XCTAssertTrue(switchAction.keys.contains("transaction_id"))
+        XCTAssertTrue(switchAction.keys.contains("action_timeout_seconds"))
+        XCTAssertTrue(switchAction.keys.contains("estimated_bytes"))
+    }
+
     func testRecommendationCheckAndAdoptionFramesUseExpectedSchemas() throws {
         let check = ModelRecommendationCheckEventWire(
             type: "accepted",
