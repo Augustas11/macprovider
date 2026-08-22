@@ -1224,7 +1224,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.13",
+      "version": "0.0.14",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5211,7 +5211,9 @@
       "tests": [
         "phase5-gateway/internal/router/pool_selection_test.go:TestPoolSelection_AuthorizedAndCapable_EmitsHeader"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -5272,7 +5274,9 @@
       "tests": [
         "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_PinnedNonMemberRejected"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -5293,7 +5297,9 @@
         "phase4-coordinator/internal/billing/route_snapshot_test.go:TestRouteSnapshotPoolID_DigestBinding",
         "phase4-coordinator/internal/billing/route_snapshot_test.go:TestRouteSnapshotPoolID_RoundTripsThroughSettlementLoader"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -5392,7 +5398,9 @@
         "phase4-coordinator/internal/buyer/spec042_pools_advertisement_test.go:TestInternalRoutingAdvertisesPoolCapability",
         "phase5-gateway/internal/router/pool_selection_test.go:TestPoolSelection_CoordinatorDeclinesCapability_FailsClosed"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",

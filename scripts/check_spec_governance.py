@@ -118,6 +118,32 @@ BUYER_ENFORCE_PROMOTABLE_REQUIREMENT_IDS = {
     "SPEC-022-R009",
     "SPEC-022-R011",
 }
+TRUSTED_POOL_LAYER2_JOURNEY_ID = "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
+TRUSTED_POOL_LAYER2_EXECUTION_MODE = "isolated-candidate-trusted-pool-layer2-mvp"
+TRUSTED_POOL_LAYER2_ARTIFACT_ID = "redacted-trusted-pool-layer2"
+TRUSTED_POOL_LAYER2_STEP_ID_ORDER = (
+    "step-01-capture-pool-context",
+    "step-02-successful-pooled-request",
+    "step-03-fail-closed-unsatisfied-pool",
+    "step-04-settlement-and-logs",
+    "step-05-redaction",
+)
+TRUSTED_POOL_LAYER2_STEP_IDS = set(TRUSTED_POOL_LAYER2_STEP_ID_ORDER)
+TRUSTED_POOL_LAYER2_EVIDENCE_REQUIREMENT_IDS = {
+    "SPEC-042-R002",
+    "SPEC-042-R005",
+    "SPEC-042-R006",
+    "SPEC-042-R010",
+}
+TRUSTED_POOL_LAYER2_FORBIDDEN_OVERCLAIM_RE = re.compile(
+    r"(?i)\b("
+    r"privacy\s+pool(s)?|"
+    r"unlinkab(le|ility)|"
+    r"coordinator[- ]?blind(ness)?|"
+    r"provider[- ]?operator[- ]?blind(ness)?|"
+    r"operator[- ]?blind(ness)?"
+    r")\b"
+)
 SIGNED_JOURNEY_RESULT_REQUIRED_KEYS = {
     "schema_version",
     "journey_id",
@@ -521,6 +547,20 @@ def _looks_like_signed_journey_result(root: Path, source: str) -> bool:
         return False
     probe = _load_json(path, ValidationResult())
     return isinstance(probe, dict) and probe.get("schema_version") == JOURNEY_RESULT_ENVELOPE_SCHEMA
+
+
+def _signed_journey_result_journey_id(root: Path, source: str) -> str | None:
+    path = _repository_path(root, source, source, ValidationResult())
+    if path is None:
+        return None
+    envelope = _load_json(path, ValidationResult())
+    if not isinstance(envelope, dict):
+        return None
+    signed = envelope.get("signed")
+    if not isinstance(signed, dict):
+        return None
+    journey_id = signed.get("journey_id")
+    return journey_id if isinstance(journey_id, str) else None
 
 
 def _verify_journey_result_signature(
@@ -1081,6 +1121,147 @@ def _validate_buyer_enforce_journey_result(
     _validate_named_journey_steps(steps, BUYER_ENFORCE_STEP_IDS, location, result, "enforce")
 
 
+def _validate_trusted_pool_layer2_no_overclaim_text(value: Any, location: str, result: ValidationResult) -> None:
+    if isinstance(value, str) and TRUSTED_POOL_LAYER2_FORBIDDEN_OVERCLAIM_RE.search(value):
+        result.error(location, "must not claim Privacy Pool unlinkability, coordinator blindness, or provider/operator blindness")
+
+
+def _validate_trusted_pool_layer2_journey_result(
+    signed: dict[str, Any],
+    requirement_id: str,
+    journeys: list[str],
+    artifacts: list[Any],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    if signed.get("journey_id") != TRUSTED_POOL_LAYER2_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {TRUSTED_POOL_LAYER2_JOURNEY_ID!r}")
+    if TRUSTED_POOL_LAYER2_JOURNEY_ID not in journeys:
+        result.error(location, f"trusted-pool Layer 2 requirement journeys must include {TRUSTED_POOL_LAYER2_JOURNEY_ID!r}")
+    if signed.get("execution_mode") != TRUSTED_POOL_LAYER2_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {TRUSTED_POOL_LAYER2_EXECUTION_MODE!r}")
+
+    run_result = signed.get("result")
+    if isinstance(run_result, dict):
+        _validate_trusted_pool_layer2_no_overclaim_text(
+            run_result.get("summary"),
+            f"{location}.signed.result.summary",
+            result,
+        )
+
+    valid_artifacts = [artifact for artifact in artifacts if isinstance(artifact, dict)]
+    if len(valid_artifacts) != 1:
+        result.error(f"{location}.signed.artifacts", "trusted-pool Layer 2 journey-result must contain exactly one redacted evidence artifact")
+    for index, artifact in enumerate(artifacts):
+        if not isinstance(artifact, dict):
+            continue
+        artifact_id = artifact.get("id")
+        source = artifact.get("source")
+        if artifact_id != TRUSTED_POOL_LAYER2_ARTIFACT_ID:
+            result.error(f"{location}.signed.artifacts[{index}].id", f"must equal {TRUSTED_POOL_LAYER2_ARTIFACT_ID!r}")
+        if not isinstance(source, str) or not source.startswith("journeys/evidence/trusted-pool-layer2-") or not source.endswith(".redacted.json"):
+            result.error(
+                f"{location}.signed.artifacts[{index}].source",
+                "must match journeys/evidence/trusted-pool-layer2-*.redacted.json",
+            )
+
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        _validate_trusted_pool_layer2_no_overclaim_text(
+            step.get("assertion"),
+            f"{location}.signed.steps[{index}].assertion",
+            result,
+        )
+        if step.get("artifacts") != [TRUSTED_POOL_LAYER2_ARTIFACT_ID]:
+            result.error(
+                f"{location}.signed.steps[{index}].artifacts",
+                f"must equal [{TRUSTED_POOL_LAYER2_ARTIFACT_ID!r}]",
+            )
+
+    observations = signed.get("observations")
+    if _expect_object(observations, f"{location}.signed.observations", result):
+        true_fields = {
+            "isolated_environment",
+            "raw_prompt_output_redacted",
+            "successful_pooled_request",
+            "pool_required_fail_closed",
+            "pool_id_bound_to_route_snapshot",
+            "pool_selection_authorized",
+            "tenant_isolation_generation_fenced",
+        }
+        false_fields = {
+            "production_side_effects",
+            "global_fallback_observed",
+            "unauthorized_pool_oracle_observed",
+            "coordinator_plaintext_privacy_claimed",
+            "provider_operator_blindness_claimed",
+            "payout_ready_mutated",
+        }
+        required_obs = true_fields | false_fields
+        _expect_keys(
+            observations,
+            required_obs,
+            required_obs,
+            f"{location}.signed.observations",
+            result,
+        )
+        for field_name in sorted(required_obs):
+            if field_name not in observations:
+                result.error(f"{location}.signed.observations.{field_name}", "is required")
+        for field_name in sorted(true_fields):
+            if observations.get(field_name) is not True:
+                result.error(f"{location}.signed.observations.{field_name}", "must be true")
+        for field_name in sorted(false_fields):
+            if observations.get(field_name) is not False:
+                result.error(f"{location}.signed.observations.{field_name}", "must be false")
+
+    identity = signed.get("candidate_identity")
+    if _expect_object(identity, f"{location}.signed.candidate_identity", result):
+        fingerprint_fields = {
+            "manifest_core_digest",
+            "route_snapshot_digest",
+            "gateway_config_sha256",
+            "coordinator_config_sha256",
+            "provider_identity_fingerprint",
+            "buyer_credential_fingerprint",
+        }
+        string_fields = {"pool_id", "manifest_version", "pool_generation"}
+        required_identity = fingerprint_fields | string_fields
+        _expect_keys(identity, required_identity, required_identity, f"{location}.signed.candidate_identity", result)
+        for field_name in sorted(fingerprint_fields):
+            value = identity.get(field_name)
+            if not isinstance(value, str) or not SHA256_HEX_RE.fullmatch(value):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a 64-char hex fingerprint")
+        for field_name in sorted(string_fields):
+            if not isinstance(identity.get(field_name), str) or not identity.get(field_name):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a non-empty string")
+
+    signed_requirement_ids = signed.get("requirement_ids")
+    if not isinstance(signed_requirement_ids, list) or requirement_id not in signed_requirement_ids:
+        result.error(f"{location}.signed.requirement_ids", f"must include the requirement being promoted: {requirement_id}")
+    unexpected = [
+        item
+        for item in (signed_requirement_ids or [])
+        if isinstance(item, str) and item not in TRUSTED_POOL_LAYER2_EVIDENCE_REQUIREMENT_IDS
+    ]
+    if unexpected:
+        result.error(
+            f"{location}.signed.requirement_ids",
+            "trusted-pool Layer 2 journey-result cannot promote " + ", ".join(sorted(unexpected)),
+        )
+    if requirement_id not in TRUSTED_POOL_LAYER2_EVIDENCE_REQUIREMENT_IDS:
+        result.error(f"{location}.signed.requirement_ids", f"trusted-pool Layer 2 journey-result cannot promote {requirement_id}")
+    _validate_named_journey_steps(steps, TRUSTED_POOL_LAYER2_STEP_IDS, location, result, "trusted-pool Layer 2")
+    ordered_step_ids = [step.get("id") for step in steps if isinstance(step, dict) and isinstance(step.get("id"), str)]
+    if ordered_step_ids != list(TRUSTED_POOL_LAYER2_STEP_ID_ORDER):
+        result.error(
+            f"{location}.signed.steps",
+            f"trusted-pool Layer 2 physical steps must be ordered as {list(TRUSTED_POOL_LAYER2_STEP_ID_ORDER)}",
+        )
+
+
 def _validate_spec016_payout_journey_result(
     root: Path,
     signed: dict[str, Any],
@@ -1534,6 +1715,16 @@ def _validate_signed_journey_result(
             location,
             result,
         )
+    if journey_id == TRUSTED_POOL_LAYER2_JOURNEY_ID:
+        _validate_trusted_pool_layer2_journey_result(
+            signed,
+            requirement_id,
+            [item for item in journeys if isinstance(item, str)],
+            artifact_records,
+            steps,
+            location,
+            result,
+        )
 
     return len(result.errors) == before
 
@@ -1575,6 +1766,11 @@ def _signed_journey_result_satisfies(
             if not _looks_like_signed_journey_result(root, source):
                 continue
             saw_candidate = True
+            if _signed_journey_result_journey_id(root, source) == TRUSTED_POOL_LAYER2_JOURNEY_ID:
+                candidate_errors.append(
+                    f"{location}.evidence[{index}].source: trusted-pool Layer 2 journey-result is evidence-only and cannot satisfy conformant requirements"
+                )
+                continue
             candidate_result = ValidationResult()
             if _validate_signed_journey_result(
                 root,
