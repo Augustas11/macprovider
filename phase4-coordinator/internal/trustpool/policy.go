@@ -276,7 +276,7 @@ func policyPredicates(p *ReconstructedPoolState, publiclyAnnounced bool) PolicyP
 			{ID: "coordinator_pool_id_binding", Status: "enforced", Scope: "buyer_dispatch"},
 		},
 		ObserveOnly: []PolicyPredicate{
-			{ID: "live_eligible_member_count", Status: "not_evaluated", Scope: "status_surface"},
+			{ID: "live_eligible_member_count", Status: "evaluated", Scope: "pool_status_live_provider_snapshot"},
 			{ID: "root_issuer_custody_class", Status: "not_enforced", Scope: "production_gate"},
 			{ID: "retention_policy_registry_resolution", Status: "not_enforced", Scope: "production_gate"},
 			{ID: "creator_self_service_authentication", Status: "not_implemented", Scope: "admin_surface"},

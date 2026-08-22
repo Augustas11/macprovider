@@ -336,7 +336,7 @@ func TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus(t *testing.T) {
 	if doc.Pool.Readiness != "unavailable" {
 		t.Fatalf("readiness=%q, want unavailable before promoted activation", doc.Pool.Readiness)
 	}
-	if doc.Membership.CurrentMemberCount != 1 || doc.Membership.CurrentAdmittedMemberCount != 1 || doc.Membership.CurrentNonRevokedMemberCount != 1 || doc.Membership.CurrentEligibleMemberCount != 0 || doc.Membership.AuthorizedBuyerCount != 1 || doc.Membership.LiveEligibilityEvaluation != "not_evaluated" {
+	if doc.Membership.CurrentMemberCount != 1 || doc.Membership.CurrentAdmittedMemberCount != 1 || doc.Membership.CurrentNonRevokedMemberCount != 1 || doc.Membership.CurrentEligibleMemberCount != 0 || doc.Membership.AuthorizedBuyerCount != 1 || doc.Membership.LiveEligibilityEvaluation != "live_provider_snapshot" {
 		t.Fatalf("membership=%+v", doc.Membership)
 	}
 	if doc.Confidentiality.Scope != "trusted_pool_not_privacy_pool" {

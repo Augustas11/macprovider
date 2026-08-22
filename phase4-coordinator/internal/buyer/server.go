@@ -849,7 +849,7 @@ func (s *Server) handleTrustPoolStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	poolID := sanitizeAccountID(chi.URLParam(r, "pool_id"))
-	doc, found, err := trustpool.BuildStatusDocument(r.Context(), s.trustPoolStatusStore, s.trustPools, poolID, account.ID(), s.now())
+	doc, found, err := trustpool.BuildStatusDocumentWithLiveProviders(r.Context(), s.trustPoolStatusStore, s.trustPools, poolID, account.ID(), s.now(), s.trustPoolStatusLiveProviders())
 	if err != nil {
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("trusted pool status reconstruction failed")
 		writeError(w, http.StatusServiceUnavailable, "pool_status_unavailable", "Pool status unavailable")
@@ -881,7 +881,7 @@ func (s *Server) handlePublicTrustPoolStatus(w http.ResponseWriter, r *http.Requ
 	defer release()
 	poolID := sanitizeAccountID(chi.URLParam(r, "pool_id"))
 	generatedAt := s.now()
-	doc, found, err := trustpool.BuildPublicStatusDocument(r.Context(), s.trustPoolStatusStore, poolID, generatedAt)
+	doc, found, err := trustpool.BuildPublicStatusDocumentWithLiveProviders(r.Context(), s.trustPoolStatusStore, s.trustPools, poolID, generatedAt, s.trustPoolStatusLiveProviders())
 	if err != nil {
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("public trusted pool status reconstruction failed")
 		writeError(w, http.StatusServiceUnavailable, "pool_status_unavailable", "Pool status unavailable")
@@ -899,6 +899,22 @@ func (s *Server) handlePublicTrustPoolStatus(w http.ResponseWriter, r *http.Requ
 	if err := json.NewEncoder(w).Encode(doc); err != nil {
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("public trusted pool status encode failed")
 	}
+}
+
+func (s *Server) trustPoolStatusLiveProviders() trustpool.StatusLiveProviderSet {
+	if s == nil || s.pool == nil {
+		return trustpool.StatusLiveProviderSet{}
+	}
+	providers := s.pool.Snapshot()
+	out := make([]trustpool.StatusLiveProvider, 0, len(providers))
+	for _, provider := range providers {
+		out = append(out, trustpool.StatusLiveProvider{
+			ProviderID:     provider.ProviderID,
+			ServingCapable: provider.ServingCapable(),
+			BinaryVersion:  provider.BinaryVersion,
+		})
+	}
+	return trustpool.StatusLiveProviderSet{Providers: out}
 }
 
 func (s *Server) handlePublicTrustPoolPolicy(w http.ResponseWriter, r *http.Request) {
