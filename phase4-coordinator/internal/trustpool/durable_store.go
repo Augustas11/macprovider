@@ -174,6 +174,18 @@ type ReviewedDistributionArtifact struct {
 	UpdatedAtUTC               time.Time `json:"updated_at_utc"`
 }
 
+type ManifestAcceptanceProjection struct {
+	PoolID                 string
+	ManifestVersion        uint64
+	OperationID            string
+	AcceptedAtUTC          time.Time
+	ManifestCoreDigest     string
+	RootIssuerKeyID        string
+	RootIssuerPublicKeyFP  string
+	ManifestSignature      string
+	ManifestSnapshotSHA256 string
+}
+
 func NewStore(db *sql.DB) (*Store, error) {
 	if db == nil {
 		return nil, ErrStoreClosed
@@ -376,8 +388,76 @@ CREATE TABLE IF NOT EXISTS trustpool_creator_approvals (
 	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_trustpool_reviewed_distribution_history_operation ON trustpool_reviewed_distribution_artifact_history(operation_id)`); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_trustpool_root_registration_nonces_operation ON trustpool_root_registration_nonces(operation_id) WHERE operation_id IS NOT NULL`)
-	return err
+	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_trustpool_root_registration_nonces_operation ON trustpool_root_registration_nonces(operation_id) WHERE operation_id IS NOT NULL`); err != nil {
+		return err
+	}
+	return s.migrateManifestAcceptanceTables(ctx)
+}
+
+func (s *Store) migrateManifestAcceptanceTables(ctx context.Context) error {
+	return sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS trustpool_manifest_acceptances (
+    pool_id TEXT NOT NULL,
+    manifest_version INTEGER NOT NULL,
+    operation_id TEXT NOT NULL UNIQUE,
+    accepted_at_utc TEXT NOT NULL,
+    manifest_core_digest TEXT NOT NULL,
+    root_issuer_key_id TEXT NOT NULL,
+    root_issuer_public_key_fingerprint TEXT NOT NULL,
+    manifest_signature TEXT NOT NULL,
+    manifest_snapshot_sha256 TEXT NOT NULL,
+    PRIMARY KEY(pool_id, manifest_version)
+);
+CREATE TABLE IF NOT EXISTS trustpool_manifest_acceptance_high_water (
+    pool_id TEXT PRIMARY KEY,
+    manifest_version INTEGER NOT NULL,
+    operation_id TEXT NOT NULL UNIQUE,
+    accepted_at_utc TEXT NOT NULL,
+    manifest_core_digest TEXT NOT NULL,
+    root_issuer_key_id TEXT NOT NULL,
+    root_issuer_public_key_fingerprint TEXT NOT NULL,
+    manifest_signature TEXT NOT NULL,
+    manifest_snapshot_sha256 TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS trustpool_manifest_acceptance_migration (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    completed_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trustpool_manifest_acceptances_operation ON trustpool_manifest_acceptances(operation_id);
+`); err != nil {
+			return err
+		}
+		events, err := eventsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		var completedAt string
+		err = conn.QueryRowContext(ctx, `SELECT completed_at_utc FROM trustpool_manifest_acceptance_migration WHERE id = 1`).Scan(&completedAt)
+		switch {
+		case err == nil:
+			if _, err := time.Parse(time.RFC3339Nano, completedAt); err != nil {
+				return fmt.Errorf("%w: manifest acceptance migration completed_at_utc: %v", ErrMalformedDurableEvent, err)
+			}
+		case errors.Is(err, sql.ErrNoRows):
+			for _, e := range events {
+				if e.EventType != EventManifestAccepted {
+					continue
+				}
+				if err := insertManifestAcceptanceProjection(ctx, conn, e); err != nil {
+					return err
+				}
+			}
+			if err := verifyManifestAcceptanceState(ctx, conn, events); err != nil {
+				return err
+			}
+			_, err = conn.ExecContext(ctx, `INSERT INTO trustpool_manifest_acceptance_migration (id, completed_at_utc) VALUES (1, ?)`, time.Now().UTC().Format(time.RFC3339Nano))
+			return err
+		default:
+			return err
+		}
+		return verifyManifestAcceptanceState(ctx, conn, events)
+	})
 }
 
 type RootRegistrationNonceIssue struct {
@@ -415,6 +495,9 @@ func (s *Store) UpsertCreatorApproval(ctx context.Context, approval CreatorAppro
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		currentApprovals, err := creatorApprovalsFromQueryer(ctx, conn)
 		if err != nil {
+			return err
+		}
+		if err := verifyManifestAcceptanceStateFromQueryer(ctx, conn); err != nil {
 			return err
 		}
 		if current, ok := currentApprovals[approval.CreatorAccountID]; ok && sameCreatorApprovalExceptRevision(current, approval) {
@@ -558,6 +641,14 @@ func (s *Store) creatorApprovals(ctx context.Context) (map[string]CreatorApprova
 	return creatorApprovalsFromQueryer(ctx, s.db)
 }
 
+func verifyManifestAcceptanceStateFromQueryer(ctx context.Context, q eventQueryer) error {
+	events, err := eventsFromQueryer(ctx, q)
+	if err != nil {
+		return err
+	}
+	return verifyManifestAcceptanceState(ctx, q, events)
+}
+
 func (s *Store) UpsertReviewedDistributionArtifact(ctx context.Context, artifact ReviewedDistributionArtifact) (ReviewedDistributionArtifact, error) {
 	if s == nil || s.db == nil {
 		return ReviewedDistributionArtifact{}, ErrStoreClosed
@@ -569,6 +660,13 @@ func (s *Store) UpsertReviewedDistributionArtifact(ctx context.Context, artifact
 	now := time.Now().UTC()
 	artifact.UpdatedAtUTC = now
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		events, err := eventsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		if err := verifyManifestAcceptanceState(ctx, conn, events); err != nil {
+			return err
+		}
 		if existing, ok, err := reviewedDistributionArtifactByOperationID(ctx, conn, artifact.OperationID); err != nil {
 			return err
 		} else if ok {
@@ -582,10 +680,6 @@ func (s *Store) UpsertReviewedDistributionArtifact(ctx context.Context, artifact
 			return err
 		} else if used {
 			return ErrConflictingOperationID
-		}
-		events, err := eventsFromQueryer(ctx, conn)
-		if err != nil {
-			return err
 		}
 		creatorApprovals, err := creatorApprovalsFromQueryer(ctx, conn)
 		if err != nil {
@@ -702,6 +796,13 @@ func (s *Store) UpsertPublicAnnouncementApproval(ctx context.Context, approval P
 	now := time.Now().UTC()
 	approval.UpdatedAtUTC = now
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		events, err := eventsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		if err := verifyManifestAcceptanceState(ctx, conn, events); err != nil {
+			return err
+		}
 		if existing, ok, err := publicAnnouncementApprovalByOperationID(ctx, conn, approval.OperationID); err != nil {
 			return err
 		} else if ok {
@@ -715,10 +816,6 @@ func (s *Store) UpsertPublicAnnouncementApproval(ctx context.Context, approval P
 			return err
 		} else if used {
 			return ErrConflictingOperationID
-		}
-		events, err := eventsFromQueryer(ctx, conn)
-		if err != nil {
-			return err
 		}
 		creatorApprovals, err := creatorApprovalsFromQueryer(ctx, conn)
 		if err != nil {
@@ -858,6 +955,8 @@ func operationIDExists(ctx context.Context, q eventQueryer, operationID string) 
 	for _, query := range []string{
 		`SELECT 1 FROM trustpool_events WHERE operation_id = ? LIMIT 1`,
 		`SELECT 1 FROM trustpool_root_registration_nonces WHERE operation_id = ? LIMIT 1`,
+		`SELECT 1 FROM trustpool_manifest_acceptances WHERE operation_id = ? LIMIT 1`,
+		`SELECT 1 FROM trustpool_manifest_acceptance_high_water WHERE operation_id = ? LIMIT 1`,
 		`SELECT 1 FROM trustpool_reviewed_distribution_artifact_history WHERE operation_id = ? LIMIT 1`,
 		`SELECT 1 FROM trustpool_public_announcement_history WHERE operation_id = ? LIMIT 1`,
 	} {
@@ -879,6 +978,214 @@ func operationIDExists(ctx context.Context, q eventQueryer, operationID string) 
 		}
 	}
 	return false, nil
+}
+
+func insertManifestAcceptanceProjection(ctx context.Context, conn *sql.Conn, e DurableEvent) error {
+	if e.EventType != EventManifestAccepted {
+		return nil
+	}
+	p := manifestAcceptanceProjectionFromEvent(e)
+	if _, err := conn.ExecContext(ctx, `
+INSERT INTO trustpool_manifest_acceptances (
+    pool_id, manifest_version, operation_id, accepted_at_utc, manifest_core_digest,
+    root_issuer_key_id, root_issuer_public_key_fingerprint, manifest_signature,
+    manifest_snapshot_sha256
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(pool_id, manifest_version) DO UPDATE SET
+    operation_id = excluded.operation_id,
+    accepted_at_utc = excluded.accepted_at_utc,
+    manifest_core_digest = excluded.manifest_core_digest,
+    root_issuer_key_id = excluded.root_issuer_key_id,
+    root_issuer_public_key_fingerprint = excluded.root_issuer_public_key_fingerprint,
+    manifest_signature = excluded.manifest_signature,
+    manifest_snapshot_sha256 = excluded.manifest_snapshot_sha256`,
+		p.PoolID,
+		p.ManifestVersion,
+		p.OperationID,
+		p.AcceptedAtUTC.Format(time.RFC3339Nano),
+		p.ManifestCoreDigest,
+		p.RootIssuerKeyID,
+		p.RootIssuerPublicKeyFP,
+		p.ManifestSignature,
+		p.ManifestSnapshotSHA256,
+	); err != nil {
+		return err
+	}
+	_, err := conn.ExecContext(ctx, `
+INSERT INTO trustpool_manifest_acceptance_high_water (
+    pool_id, manifest_version, operation_id, accepted_at_utc, manifest_core_digest,
+    root_issuer_key_id, root_issuer_public_key_fingerprint, manifest_signature,
+    manifest_snapshot_sha256
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(pool_id) DO UPDATE SET
+    manifest_version = excluded.manifest_version,
+    operation_id = excluded.operation_id,
+    accepted_at_utc = excluded.accepted_at_utc,
+    manifest_core_digest = excluded.manifest_core_digest,
+    root_issuer_key_id = excluded.root_issuer_key_id,
+    root_issuer_public_key_fingerprint = excluded.root_issuer_public_key_fingerprint,
+    manifest_signature = excluded.manifest_signature,
+    manifest_snapshot_sha256 = excluded.manifest_snapshot_sha256
+WHERE excluded.manifest_version >= trustpool_manifest_acceptance_high_water.manifest_version`,
+		p.PoolID,
+		p.ManifestVersion,
+		p.OperationID,
+		p.AcceptedAtUTC.Format(time.RFC3339Nano),
+		p.ManifestCoreDigest,
+		p.RootIssuerKeyID,
+		p.RootIssuerPublicKeyFP,
+		p.ManifestSignature,
+		p.ManifestSnapshotSHA256,
+	)
+	return err
+}
+
+func manifestAcceptanceProjectionFromEvent(e DurableEvent) ManifestAcceptanceProjection {
+	return ManifestAcceptanceProjection{
+		PoolID:                 e.PoolID,
+		ManifestVersion:        e.ManifestVersion,
+		OperationID:            e.OperationID,
+		AcceptedAtUTC:          e.TimestampUTC.UTC(),
+		ManifestCoreDigest:     e.ManifestCoreDigest,
+		RootIssuerKeyID:        e.RootIssuerKeyID,
+		RootIssuerPublicKeyFP:  e.RootIssuerPublicKeyFingerprint,
+		ManifestSignature:      e.ManifestSignature,
+		ManifestSnapshotSHA256: manifestSnapshotSHA256(e.ManifestSnapshot),
+	}
+}
+
+func manifestAcceptanceProjectionsFromQueryer(ctx context.Context, q eventQueryer) (map[string]ManifestAcceptanceProjection, error) {
+	rows, err := q.QueryContext(ctx, `
+SELECT pool_id, manifest_version, operation_id, accepted_at_utc, manifest_core_digest,
+       root_issuer_key_id, root_issuer_public_key_fingerprint, manifest_signature,
+       manifest_snapshot_sha256
+FROM trustpool_manifest_acceptances`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]ManifestAcceptanceProjection)
+	for rows.Next() {
+		p, err := scanManifestAcceptanceProjection(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[manifestAcceptanceProjectionKey(p.PoolID, p.ManifestVersion)] = p
+	}
+	return out, rows.Err()
+}
+
+func manifestAcceptanceHighWaterFromQueryer(ctx context.Context, q eventQueryer) (map[string]ManifestAcceptanceProjection, error) {
+	rows, err := q.QueryContext(ctx, `
+SELECT pool_id, manifest_version, operation_id, accepted_at_utc, manifest_core_digest,
+       root_issuer_key_id, root_issuer_public_key_fingerprint, manifest_signature,
+       manifest_snapshot_sha256
+FROM trustpool_manifest_acceptance_high_water`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]ManifestAcceptanceProjection)
+	for rows.Next() {
+		p, err := scanManifestAcceptanceProjection(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[p.PoolID] = p
+	}
+	return out, rows.Err()
+}
+
+type manifestAcceptanceScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanManifestAcceptanceProjection(row manifestAcceptanceScanner) (ManifestAcceptanceProjection, error) {
+	var p ManifestAcceptanceProjection
+	var acceptedRaw string
+	if err := row.Scan(
+		&p.PoolID,
+		&p.ManifestVersion,
+		&p.OperationID,
+		&acceptedRaw,
+		&p.ManifestCoreDigest,
+		&p.RootIssuerKeyID,
+		&p.RootIssuerPublicKeyFP,
+		&p.ManifestSignature,
+		&p.ManifestSnapshotSHA256,
+	); err != nil {
+		return ManifestAcceptanceProjection{}, err
+	}
+	acceptedAt, err := time.Parse(time.RFC3339Nano, acceptedRaw)
+	if err != nil {
+		return ManifestAcceptanceProjection{}, fmt.Errorf("%w: manifest acceptance %s/%d accepted_at_utc: %v", ErrMalformedDurableEvent, p.PoolID, p.ManifestVersion, err)
+	}
+	p.AcceptedAtUTC = acceptedAt.UTC()
+	return p, nil
+}
+
+func verifyManifestAcceptanceState(ctx context.Context, q eventQueryer, events []DurableEvent) error {
+	projections, err := manifestAcceptanceProjectionsFromQueryer(ctx, q)
+	if err != nil {
+		return err
+	}
+	highWater, err := manifestAcceptanceHighWaterFromQueryer(ctx, q)
+	if err != nil {
+		return err
+	}
+	expected := make(map[string]ManifestAcceptanceProjection)
+	latest := make(map[string]ManifestAcceptanceProjection)
+	for _, e := range events {
+		if e.EventType != EventManifestAccepted {
+			continue
+		}
+		p := manifestAcceptanceProjectionFromEvent(e)
+		expected[manifestAcceptanceProjectionKey(p.PoolID, p.ManifestVersion)] = p
+		if cur, ok := latest[p.PoolID]; !ok || p.ManifestVersion > cur.ManifestVersion {
+			latest[p.PoolID] = p
+		}
+	}
+	if len(projections) != len(expected) {
+		return fmt.Errorf("%w: manifest acceptance projection count %d != event count %d", ErrMalformedDurableEvent, len(projections), len(expected))
+	}
+	for key, want := range expected {
+		got, ok := projections[key]
+		if !ok {
+			return fmt.Errorf("%w: missing manifest acceptance projection %s", ErrMalformedDurableEvent, key)
+		}
+		if !manifestAcceptanceProjectionEqual(got, want) {
+			return fmt.Errorf("%w: manifest acceptance projection mismatch %s", ErrMalformedDurableEvent, key)
+		}
+	}
+	if len(highWater) != len(latest) {
+		return fmt.Errorf("%w: manifest acceptance high-water count %d != pool count %d", ErrMalformedDurableEvent, len(highWater), len(latest))
+	}
+	for poolID, want := range latest {
+		got, ok := highWater[poolID]
+		if !ok {
+			return fmt.Errorf("%w: missing manifest acceptance high-water %s", ErrMalformedDurableEvent, poolID)
+		}
+		if !manifestAcceptanceProjectionEqual(got, want) {
+			return fmt.Errorf("%w: manifest acceptance high-water mismatch %s", ErrMalformedDurableEvent, poolID)
+		}
+	}
+	return nil
+}
+
+func manifestAcceptanceProjectionKey(poolID string, version uint64) string {
+	return fmt.Sprintf("%s/%d", poolID, version)
+}
+
+func manifestAcceptanceProjectionEqual(a, b ManifestAcceptanceProjection) bool {
+	return a.PoolID == b.PoolID &&
+		a.ManifestVersion == b.ManifestVersion &&
+		a.OperationID == b.OperationID &&
+		a.AcceptedAtUTC.UTC().Equal(b.AcceptedAtUTC.UTC()) &&
+		a.ManifestCoreDigest == b.ManifestCoreDigest &&
+		a.RootIssuerKeyID == b.RootIssuerKeyID &&
+		a.RootIssuerPublicKeyFP == b.RootIssuerPublicKeyFP &&
+		a.ManifestSignature == b.ManifestSignature &&
+		a.ManifestSnapshotSHA256 == b.ManifestSnapshotSHA256
 }
 
 func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegistrationNonceIssue) (RootRegistrationNonceRecord, error) {
@@ -919,6 +1226,9 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 		IssuedAtUTC:            now,
 	}
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		if err := verifyManifestAcceptanceStateFromQueryer(ctx, conn); err != nil {
+			return err
+		}
 		existing, ok, err := rootRegistrationNonceByOperationID(ctx, conn, issue.OperationID)
 		if err != nil {
 			return err
@@ -1162,6 +1472,9 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 		if err != nil {
 			return err
 		}
+		if err := verifyManifestAcceptanceState(ctx, conn, events); err != nil {
+			return err
+		}
 		approvals, err := creatorApprovalsFromQueryer(ctx, conn)
 		if err != nil {
 			return err
@@ -1253,6 +1566,12 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 		if err != nil {
 			return err
 		}
+		if err := insertManifestAcceptanceProjection(ctx, conn, e); err != nil {
+			return err
+		}
+		if err := verifyManifestAcceptanceState(ctx, conn, next); err != nil {
+			return err
+		}
 		reconstructed = state
 		committed = e
 		applied = true
@@ -1285,6 +1604,9 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		events, err := eventsFromQueryer(ctx, conn)
 		if err != nil {
+			return err
+		}
+		if err := verifyManifestAcceptanceState(ctx, conn, events); err != nil {
 			return err
 		}
 		approvals, err := creatorApprovalsFromQueryer(ctx, conn)
@@ -1372,6 +1694,12 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 			string(payload),
 		)
 		if err != nil {
+			return err
+		}
+		if err := insertManifestAcceptanceProjection(ctx, conn, e); err != nil {
+			return err
+		}
+		if err := verifyManifestAcceptanceState(ctx, conn, next); err != nil {
 			return err
 		}
 		reconstructed = state
@@ -1468,7 +1796,7 @@ func eventsFromQueryer(ctx context.Context, q eventQueryer) ([]DurableEvent, err
 		}
 		var e DurableEvent
 		if err := json.Unmarshal([]byte(raw), &e); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: row %d payload_json: %v", ErrMalformedDurableEvent, id, err)
 		}
 		if e.OperationID != operationID {
 			return nil, fmt.Errorf("%w: row %d operation_id column %q != payload %q", ErrMalformedDurableEvent, id, operationID, e.OperationID)
@@ -1582,19 +1910,19 @@ func scanCreatorApproval(row creatorApprovalScanner) (CreatorApproval, error) {
 	var err error
 	approval.CreatorAgreementExpiresAtUTC, err = time.Parse(time.RFC3339Nano, expiresRaw)
 	if err != nil {
-		return CreatorApproval{}, err
+		return CreatorApproval{}, fmt.Errorf("%w: creator approval %s creator_agreement_expires_at_utc: %v", ErrMalformedDurableEvent, approval.CreatorAccountID, err)
 	}
 	approval.CreatorAgreementGraceEndsAtUTC, err = time.Parse(time.RFC3339Nano, graceRaw)
 	if err != nil {
-		return CreatorApproval{}, err
+		return CreatorApproval{}, fmt.Errorf("%w: creator approval %s creator_agreement_grace_ends_at_utc: %v", ErrMalformedDurableEvent, approval.CreatorAccountID, err)
 	}
 	approval.ApprovedAtUTC, err = time.Parse(time.RFC3339Nano, approvedRaw)
 	if err != nil {
-		return CreatorApproval{}, err
+		return CreatorApproval{}, fmt.Errorf("%w: creator approval %s approved_at_utc: %v", ErrMalformedDurableEvent, approval.CreatorAccountID, err)
 	}
 	approval.UpdatedAtUTC, err = time.Parse(time.RFC3339Nano, updatedRaw)
 	if err != nil {
-		return CreatorApproval{}, err
+		return CreatorApproval{}, fmt.Errorf("%w: creator approval %s updated_at_utc: %v", ErrMalformedDurableEvent, approval.CreatorAccountID, err)
 	}
 	approval.PublicDisplayName = display.String
 	approval.LegalSupportContact = legal.String
@@ -1851,11 +2179,11 @@ func scanPublicAnnouncementApproval(row publicAnnouncementApprovalScanner) (Publ
 	var err error
 	approval.ApprovedAtUTC, err = time.Parse(time.RFC3339Nano, approvedRaw)
 	if err != nil {
-		return PublicAnnouncementApproval{}, err
+		return PublicAnnouncementApproval{}, fmt.Errorf("%w: public announcement %s approved_at_utc: %v", ErrMalformedDurableEvent, approval.PoolID, err)
 	}
 	approval.UpdatedAtUTC, err = time.Parse(time.RFC3339Nano, updatedRaw)
 	if err != nil {
-		return PublicAnnouncementApproval{}, err
+		return PublicAnnouncementApproval{}, fmt.Errorf("%w: public announcement %s updated_at_utc: %v", ErrMalformedDurableEvent, approval.PoolID, err)
 	}
 	approval = normalizePublicAnnouncementApproval(approval)
 	if err := validateScannedPublicAnnouncementApproval(approval); err != nil {
@@ -1884,11 +2212,11 @@ func scanReviewedDistributionArtifact(row reviewedDistributionArtifactScanner) (
 	var err error
 	artifact.ReviewedAtUTC, err = time.Parse(time.RFC3339Nano, reviewedRaw)
 	if err != nil {
-		return ReviewedDistributionArtifact{}, err
+		return ReviewedDistributionArtifact{}, fmt.Errorf("%w: reviewed distribution artifact %s reviewed_at_utc: %v", ErrMalformedDurableEvent, artifact.PoolID, err)
 	}
 	artifact.UpdatedAtUTC, err = time.Parse(time.RFC3339Nano, updatedRaw)
 	if err != nil {
-		return ReviewedDistributionArtifact{}, err
+		return ReviewedDistributionArtifact{}, fmt.Errorf("%w: reviewed distribution artifact %s updated_at_utc: %v", ErrMalformedDurableEvent, artifact.PoolID, err)
 	}
 	artifact = normalizeReviewedDistributionArtifact(artifact)
 	if err := validateReviewedDistributionArtifact(artifact); err != nil {
@@ -1898,23 +2226,37 @@ func scanReviewedDistributionArtifact(row reviewedDistributionArtifactScanner) (
 }
 
 func (s *Store) Reconstruct(ctx context.Context) (*ReconstructedState, error) {
-	events, err := s.Events(ctx)
+	if s == nil || s.db == nil {
+		return nil, ErrStoreClosed
+	}
+	var state *ReconstructedState
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		events, err := eventsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		if err := verifyManifestAcceptanceState(ctx, conn, events); err != nil {
+			return err
+		}
+		approvals, err := creatorApprovalsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		publicAnnouncements, err := publicAnnouncementApprovalsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		reviewedArtifacts, err := reviewedDistributionArtifactsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		state, err = reconstructEventsWithApprovalsAndPublicAnnouncements(events, approvals, publicAnnouncements, reviewedArtifacts, time.Now().UTC())
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	approvals, err := s.creatorApprovals(ctx)
-	if err != nil {
-		return nil, err
-	}
-	publicAnnouncements, err := s.publicAnnouncementApprovals(ctx)
-	if err != nil {
-		return nil, err
-	}
-	reviewedArtifacts, err := s.reviewedDistributionArtifacts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return reconstructEventsWithApprovalsAndPublicAnnouncements(events, approvals, publicAnnouncements, reviewedArtifacts, time.Now().UTC())
+	return state, nil
 }
 
 // ReconstructedState is the coordinator's query/admin view after durable replay.
@@ -2004,7 +2346,10 @@ func reconstructEventsWithApprovalsAndPublicAnnouncements(events []DurableEvent,
 	seenOps := make(map[string]int)
 	for i, e := range events {
 		if err := validateEvent(e); err != nil {
-			return nil, fmt.Errorf("trustpool: replay event %d: %w", i+1, err)
+			if errors.Is(err, ErrProhibitedPromiseClaim) {
+				return nil, fmt.Errorf("%w: replay event %d: %w", ErrMalformedDurableEvent, i+1, err)
+			}
+			return nil, fmt.Errorf("%w: replay event %d: %v", ErrMalformedDurableEvent, i+1, err)
 		}
 		if prior, ok := seenOps[e.OperationID]; ok {
 			return nil, fmt.Errorf("%w: operation_id %q appears in events %d and %d", ErrMalformedDurableEvent, e.OperationID, prior, i+1)

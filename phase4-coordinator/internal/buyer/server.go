@@ -851,6 +851,7 @@ func (s *Server) handleTrustPoolStatus(w http.ResponseWriter, r *http.Request) {
 	poolID := sanitizeAccountID(chi.URLParam(r, "pool_id"))
 	doc, found, err := trustpool.BuildStatusDocumentWithLiveProviders(r.Context(), s.trustPoolStatusStore, s.trustPools, poolID, account.ID(), s.now(), s.trustPoolStatusLiveProviders())
 	if err != nil {
+		s.disableTrustPoolsOnMalformedDurableState(err)
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("trusted pool status reconstruction failed")
 		writeError(w, http.StatusServiceUnavailable, "pool_status_unavailable", "Pool status unavailable")
 		return
@@ -883,6 +884,7 @@ func (s *Server) handlePublicTrustPoolStatus(w http.ResponseWriter, r *http.Requ
 	generatedAt := s.now()
 	doc, found, err := trustpool.BuildPublicStatusDocumentWithLiveProviders(r.Context(), s.trustPoolStatusStore, s.trustPools, poolID, generatedAt, s.trustPoolStatusLiveProviders())
 	if err != nil {
+		s.disableTrustPoolsOnMalformedDurableState(err)
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("public trusted pool status reconstruction failed")
 		writeError(w, http.StatusServiceUnavailable, "pool_status_unavailable", "Pool status unavailable")
 		return
@@ -935,6 +937,7 @@ func (s *Server) handlePublicTrustPoolPolicy(w http.ResponseWriter, r *http.Requ
 	generatedAt := s.now()
 	doc, found, err := trustpool.BuildPublicPolicyDocument(r.Context(), s.trustPoolStatusStore, poolID, generatedAt)
 	if err != nil {
+		s.disableTrustPoolsOnMalformedDurableState(err)
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("public trusted pool policy reconstruction failed")
 		writeError(w, http.StatusServiceUnavailable, "pool_policy_unavailable", "Pool policy unavailable")
 		return
@@ -987,6 +990,7 @@ func (s *Server) handleTrustPoolPolicy(w http.ResponseWriter, r *http.Request) {
 	poolID := sanitizeAccountID(chi.URLParam(r, "pool_id"))
 	doc, found, err := trustpool.BuildPolicyDocument(r.Context(), s.trustPoolStatusStore, s.trustPools, poolID, account.ID(), s.now())
 	if err != nil {
+		s.disableTrustPoolsOnMalformedDurableState(err)
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("trusted pool policy reconstruction failed")
 		writeError(w, http.StatusServiceUnavailable, "pool_policy_unavailable", "Pool policy unavailable")
 		return
@@ -999,6 +1003,28 @@ func (s *Server) handleTrustPoolPolicy(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(doc); err != nil {
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("trusted pool policy encode failed")
 	}
+}
+
+func (s *Server) disableTrustPoolsOnMalformedDurableState(err error) {
+	if s != nil && s.trustPools != nil && errors.Is(err, trustpool.ErrMalformedDurableEvent) {
+		s.trustPools.Disable()
+	}
+}
+
+func (s *Server) verifyTrustPoolDurableStateForRouting(ctx context.Context) error {
+	if s == nil || s.trustPoolStatusStore == nil {
+		if s != nil && s.trustPools != nil {
+			s.trustPools.Disable()
+		}
+		return trustpool.ErrStoreClosed
+	}
+	if _, err := s.trustPoolStatusStore.Reconstruct(ctx); err != nil {
+		if s.trustPools != nil {
+			s.trustPools.Disable()
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Server) handleStreamingMetrics(w http.ResponseWriter, r *http.Request) {
@@ -2179,9 +2205,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	rec.setModel(req.Model)
 	rec.setStream(req.Stream)
 	// SPEC-042 R002: honor the authorized pool selection header only when the
-	// pool feature is configured, the request carries an authenticated
-	// (gateway-context) account, and the reconstructed pool registry authorizes
-	// that account for the selected pool. Defense in depth:
+	// pool feature and durable store are configured, the request carries an
+	// authenticated (gateway-context) account, durable replay verifies cleanly,
+	// and the reconstructed pool registry authorizes that account for the
+	// selected pool. Defense in depth:
 	// X-MacProvider-Pool is also in hasInternalRoutingHeader, so an unauthorized
 	// buyer-port request carrying it is rejected before routing. A non-empty
 	// authenticated pool header with no registry MUST fail closed here, not be
@@ -2206,6 +2233,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rawPoolHeader != "" {
+		if err := s.verifyTrustPoolDurableStateForRouting(r.Context()); err != nil {
+			s.log.Warn().Err(err).Str("pool_id", poolHeader).Msg("trusted pool routing durable verification failed")
+			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
+			writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
+			return
+		}
 		snap, authorized := s.trustPools.AuthorizeAndSnapshot(poolHeader, accountID)
 		if !authorized || !snap.Exists || !snap.Routeable {
 			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")

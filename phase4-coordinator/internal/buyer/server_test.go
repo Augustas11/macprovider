@@ -458,6 +458,85 @@ func TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus(t *testing.T) {
 	}
 }
 
+func TestTrustPoolStatusMalformedDurableStateClearsRegistry(t *testing.T) {
+	trustStore, trustDB := openBuyerTrustPoolStoreWithDB(t)
+	now := time.Unix(1800000901, 0).UTC()
+	approveBuyerTrustPoolCreator(t, trustStore, now.Add(24*time.Hour))
+	if _, err := trustDB.Exec(`UPDATE trustpool_creator_approvals SET updated_at_utc = ? WHERE creator_account_id = ?`, "not-a-timestamp", "creator-a"); err != nil {
+		t.Fatalf("tamper creator approval updated_at_utc: %v", err)
+	}
+	trustRegistry := trustpool.NewRegistry()
+	trustRegistry.AddPool("pool-a")
+	trustRegistry.AddMember("pool-a", "provider-secret")
+	trustRegistry.AuthorizeBuyer("pool-a", "acct_allowed")
+	if snap := trustRegistry.Snapshot("pool-a"); !snap.Exists || !snap.Members["provider-secret"] || !trustRegistry.BuyerAuthorized("pool-a", "acct_allowed") {
+		t.Fatalf("pre-tamper registry snapshot = %+v buyer_auth=%v, want admitted provider/account", snap, trustRegistry.BuyerAuthorized("pool-a", "acct_allowed"))
+	}
+	server := buyer.NewServer(
+		pool.NewRegistry(nil),
+		zerolog.Nop(),
+		now,
+		buyer.WithGatewayServiceToken("gateway-secret"),
+		buyer.WithRequireGatewayContext(true),
+		buyer.WithPoolMembership(trustRegistry),
+		buyer.WithTrustPoolStatusStore(trustStore),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/trust-pools/pool-a/pool_status.json", nil)
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	req.Header.Set("X-MacProvider-Account", "acct_allowed")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "pool_status_unavailable") {
+		t.Fatalf("body=%s, want pool_status_unavailable", rr.Body.String())
+	}
+	if snap := trustRegistry.Snapshot("pool-a"); snap.Exists || len(snap.Members) != 0 || trustRegistry.BuyerAuthorized("pool-a", "acct_allowed") {
+		t.Fatalf("post-tamper registry snapshot = %+v buyer_auth=%v, want fail-closed empty", snap, trustRegistry.BuyerAuthorized("pool-a", "acct_allowed"))
+	}
+}
+
+func TestPoolHeaderMalformedDurableStateFailsClosedAndClearsRegistry(t *testing.T) {
+	trustStore, trustDB := openBuyerTrustPoolStoreWithDB(t)
+	now := time.Unix(1800000902, 0).UTC()
+	approveBuyerTrustPoolCreator(t, trustStore, now.Add(24*time.Hour))
+	if _, err := trustDB.Exec(`UPDATE trustpool_creator_approvals SET updated_at_utc = ? WHERE creator_account_id = ?`, "not-a-timestamp", "creator-a"); err != nil {
+		t.Fatalf("tamper creator approval updated_at_utc: %v", err)
+	}
+	trustRegistry := trustpool.NewRegistry()
+	trustRegistry.AddPool("pool-a")
+	trustRegistry.AddMember("pool-a", "provider-secret")
+	trustRegistry.AuthorizeBuyer("pool-a", "acct_allowed")
+	server := buyer.NewServer(
+		pool.NewRegistry(nil),
+		zerolog.Nop(),
+		now,
+		buyer.WithGatewayServiceToken("gateway-secret"),
+		buyer.WithRequireGatewayContext(true),
+		buyer.WithPoolMembership(trustRegistry),
+		buyer.WithTrustPoolStatusStore(trustStore),
+	)
+
+	body := `{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	req.Header.Set("X-MacProvider-Account", "acct_allowed")
+	req.Header.Set("X-MacProvider-Pool", "pool-a")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "pool_unavailable") {
+		t.Fatalf("body=%s, want pool_unavailable", rr.Body.String())
+	}
+	if snap := trustRegistry.Snapshot("pool-a"); snap.Exists || len(snap.Members) != 0 || trustRegistry.BuyerAuthorized("pool-a", "acct_allowed") {
+		t.Fatalf("post-route registry snapshot = %+v buyer_auth=%v, want fail-closed empty", snap, trustRegistry.BuyerAuthorized("pool-a", "acct_allowed"))
+	}
+}
+
 func TestTrustPoolPublicPolicyStatusAreRateLimitedBeforeLookup(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -6841,6 +6920,12 @@ func openBuyerRequestLog(t *testing.T) (*requestlog.Store, string) {
 
 func openBuyerTrustPoolStore(t *testing.T) *trustpool.Store {
 	t.Helper()
+	store, _ := openBuyerTrustPoolStoreWithDB(t)
+	return store
+}
+
+func openBuyerTrustPoolStoreWithDB(t *testing.T) (*trustpool.Store, *sql.DB) {
+	t.Helper()
 	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(filepath.Join(t.TempDir(), "trustpool.sqlite")))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -6852,7 +6937,7 @@ func openBuyerTrustPoolStore(t *testing.T) *trustpool.Store {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	return store
+	return store, db
 }
 
 func approveBuyerTrustPoolCreator(t *testing.T, store *trustpool.Store, graceEndsAt time.Time) {
