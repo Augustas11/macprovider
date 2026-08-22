@@ -94,13 +94,32 @@ type StatusConfidentiality struct {
 	Scope string `json:"scope"`
 }
 
+type StatusLiveProvider struct {
+	ProviderID     string
+	ServingCapable bool
+	BinaryVersion  string
+}
+
+type StatusLiveProviderSet struct {
+	Providers []StatusLiveProvider
+}
+
 func BuildStatusDocument(ctx context.Context, store *Store, registry *Registry, poolID, accountID string, generatedAt time.Time) (StatusDocument, bool, error) {
+	return buildStatusDocument(ctx, store, registry, poolID, accountID, generatedAt, nil)
+}
+
+func BuildStatusDocumentWithLiveProviders(ctx context.Context, store *Store, registry *Registry, poolID, accountID string, generatedAt time.Time, live StatusLiveProviderSet) (StatusDocument, bool, error) {
+	return buildStatusDocument(ctx, store, registry, poolID, accountID, generatedAt, &live)
+}
+
+func buildStatusDocument(ctx context.Context, store *Store, registry *Registry, poolID, accountID string, generatedAt time.Time, live *StatusLiveProviderSet) (StatusDocument, bool, error) {
 	poolID = strings.TrimSpace(poolID)
 	accountID = strings.TrimSpace(accountID)
 	if store == nil || registry == nil || poolID == "" || accountID == "" {
 		return StatusDocument{}, false, nil
 	}
-	if !registry.BuyerAuthorized(poolID, accountID) {
+	snapshot, authorized := registry.AuthorizeAndSnapshot(poolID, accountID)
+	if !authorized {
 		return StatusDocument{}, false, nil
 	}
 	state, err := store.Reconstruct(ctx)
@@ -112,10 +131,22 @@ func BuildStatusDocument(ctx context.Context, store *Store, registry *Registry, 
 		return StatusDocument{}, false, nil
 	}
 	approval := state.CreatorApprovals[p.CreatorAccountID]
-	return buildStatusDocumentForPool(state, p, approval, generatedAt, false), true, nil
+	return buildStatusDocumentForPool(state, p, approval, generatedAt, false, snapshot, live), true, nil
 }
 
 func BuildPublicStatusDocument(ctx context.Context, store *Store, poolID string, generatedAt time.Time) (StatusDocument, bool, error) {
+	return buildPublicStatusDocument(ctx, store, nil, poolID, generatedAt, nil)
+}
+
+func BuildPublicStatusDocumentWithRegistry(ctx context.Context, store *Store, registry *Registry, poolID string, generatedAt time.Time) (StatusDocument, bool, error) {
+	return buildPublicStatusDocument(ctx, store, registry, poolID, generatedAt, nil)
+}
+
+func BuildPublicStatusDocumentWithLiveProviders(ctx context.Context, store *Store, registry *Registry, poolID string, generatedAt time.Time, live StatusLiveProviderSet) (StatusDocument, bool, error) {
+	return buildPublicStatusDocument(ctx, store, registry, poolID, generatedAt, &live)
+}
+
+func buildPublicStatusDocument(ctx context.Context, store *Store, registry *Registry, poolID string, generatedAt time.Time, live *StatusLiveProviderSet) (StatusDocument, bool, error) {
 	poolID = strings.TrimSpace(poolID)
 	if store == nil || poolID == "" {
 		return StatusDocument{}, false, nil
@@ -132,34 +163,41 @@ func BuildPublicStatusDocument(ctx context.Context, store *Store, poolID string,
 		return StatusDocument{}, false, nil
 	}
 	approval := state.CreatorApprovals[p.CreatorAccountID]
-	return redactPublicStatusDocument(buildStatusDocumentForPool(state, p, approval, generatedAt, true)), true, nil
+	snapshot := statusSnapshotForPool(state, p, registry)
+	return redactPublicStatusDocument(buildStatusDocumentForPool(state, p, approval, generatedAt, true, snapshot, live)), true, nil
 }
 
-func buildStatusDocumentForPool(state *ReconstructedState, p *ReconstructedPoolState, approval CreatorApproval, generatedAt time.Time, publiclyAnnounced bool) StatusDocument {
+func buildStatusDocumentForPool(state *ReconstructedState, p *ReconstructedPoolState, approval CreatorApproval, generatedAt time.Time, publiclyAnnounced bool, snapshot Snapshot, live *StatusLiveProviderSet) StatusDocument {
 	generatedAt = generatedAt.UTC()
 	if generatedAt.IsZero() {
 		generatedAt = time.Now().UTC()
 	}
 	nonRevoked := nonRevokedMemberCount(p)
-	readiness := "unknown"
-	readinessReason := readinessReasonForPool(p)
+	coherentSnapshot := statusSnapshotCoherent(state, snapshot)
+	eligibleMemberCount := eligibleMemberCountFromSnapshot(snapshot, p, live, coherentSnapshot)
+	readiness, readinessReason := readinessForSnapshot(p, snapshot, eligibleMemberCount, live != nil, coherentSnapshot)
 	_, routeabilityReason := poolRouteability(p)
-	if routeabilityReason != "" {
-		readiness = "unavailable"
+	statusRouteable := readiness == "ready"
+	routeableGeneration := snapshot.Generation
+	if routeableGeneration == 0 {
+		routeableGeneration = p.RouteableSnapshotGeneration()
 	}
-	statusRouteable := false
+	routeableUntilUTC := snapshot.RouteableUntilUTC
+	if routeableUntilUTC.IsZero() {
+		routeableUntilUTC = p.CreatorGateExpiresAtUTC
+	}
 	visibility := "authorized"
 	disclosures := []string{
 		"prompts and responses are visible to the MacProvider coordinator",
 		"prompts and responses may be visible to the selected provider operator",
 		"single-operator Trusted Pools do not provide a high-availability guarantee",
-		"live eligible member count and route-time readiness are not evaluated by this buyer-authenticated status surface",
+		statusEligibilityDisclosure(false, live != nil),
 		"this status document is not a Privacy Pool, anonymous-routing, zero-knowledge, or regulated-compliance claim",
 		"public unauthenticated policy/status exposure requires an operator approval bound to the current manifest digest",
 	}
 	if publiclyAnnounced {
 		visibility = "publicly_announced"
-		disclosures[3] = "live eligible member count and route-time readiness are not evaluated by this public status surface"
+		disclosures[3] = statusEligibilityDisclosure(true, live != nil)
 		disclosures[len(disclosures)-1] = "public unauthenticated policy/status exposure is approved only for the current manifest_core_digest and reviewed_distribution_artifact_digest and fails closed after either digest changes"
 	}
 	doc := StatusDocument{
@@ -207,19 +245,19 @@ func buildStatusDocumentForPool(state *ReconstructedState, p *ReconstructedPoolS
 			CurrentMemberCount:           len(p.Members),
 			CurrentAdmittedMemberCount:   len(p.Members),
 			CurrentNonRevokedMemberCount: nonRevoked,
-			CurrentEligibleMemberCount:   0,
+			CurrentEligibleMemberCount:   eligibleMemberCount,
 			RevokedMemberCount:           len(p.Revoked),
 			AuthorizedBuyerCount:         len(p.BuyerAccounts),
-			LiveEligibilityEvaluation:    "not_evaluated",
+			LiveEligibilityEvaluation:    statusEligibilityEvaluation(live != nil),
 		},
 		Routeability: StatusRouteability{
 			Routeable:               statusRouteable,
 			Generation:              p.Generation,
-			RouteableGeneration:     p.RouteableSnapshotGeneration(),
+			RouteableGeneration:     routeableGeneration,
 			RouteGateCheckedAtUTC:   formatOptionalTime(state.RouteGateCheckedAt),
-			RouteableUntilUTC:       formatOptionalTime(p.CreatorGateExpiresAtUTC),
+			RouteableUntilUTC:       formatOptionalTime(routeableUntilUTC),
 			CreatorGateReason:       routeabilityReason,
-			CreatorGateExpiresAtUTC: formatOptionalTime(p.CreatorGateExpiresAtUTC),
+			CreatorGateExpiresAtUTC: formatOptionalTime(routeableUntilUTC),
 		},
 		Settlement: StatusSettlement{
 			SplitExecutionStatus: policySplitExecutionStatus(p),
@@ -260,6 +298,119 @@ func redactPublicStatusDocument(doc StatusDocument) StatusDocument {
 	return doc
 }
 
+func statusSnapshotForPool(state *ReconstructedState, p *ReconstructedPoolState, registry *Registry) Snapshot {
+	if p == nil {
+		return Snapshot{Members: map[string]bool{}}
+	}
+	if registry != nil {
+		return registry.Snapshot(p.PoolID)
+	}
+	routeable, _ := poolRouteability(p)
+	members := map[string]bool{}
+	if routeable {
+		for id := range p.Members {
+			if !p.Revoked[id] {
+				members[id] = true
+			}
+		}
+	}
+	var revision uint64
+	if state != nil {
+		revision = state.Revision
+	}
+	return Snapshot{
+		PoolID:            p.PoolID,
+		Exists:            true,
+		Members:           members,
+		Routeable:         routeable,
+		Generation:        p.RouteableSnapshotGeneration(),
+		Revision:          revision,
+		RouteableUntilUTC: p.CreatorGateExpiresAtUTC,
+	}
+}
+
+func statusSnapshotCoherent(state *ReconstructedState, snapshot Snapshot) bool {
+	if state == nil {
+		return true
+	}
+	return snapshot.Revision == state.Revision
+}
+
+func readinessForSnapshot(p *ReconstructedPoolState, snapshot Snapshot, eligibleMemberCount int, liveEvaluated bool, coherentSnapshot bool) (string, string) {
+	if _, reason := poolRouteability(p); reason != "" {
+		return "unavailable", reason
+	}
+	if !coherentSnapshot {
+		return "unavailable", "routeable_snapshot_stale"
+	}
+	if snapshot.Exists && snapshot.Routeable && (!liveEvaluated || eligibleMemberCount >= policyMinEligibleMembers(p)) {
+		if liveEvaluated {
+			return "ready", "live_provider_snapshot"
+		}
+		return "ready", "routeable_registry_snapshot"
+	}
+	if !snapshot.Exists {
+		return "unavailable", "routeable_snapshot_missing"
+	}
+	if !snapshot.Routeable && !snapshot.RouteableUntilUTC.IsZero() && !time.Now().UTC().Before(snapshot.RouteableUntilUTC.UTC()) {
+		return "unavailable", "creator_gate_expired"
+	}
+	if liveEvaluated {
+		return "unavailable", "live_provider_eligible_members_unmet"
+	}
+	return "unavailable", "routeable_snapshot_unavailable"
+}
+
+func eligibleMemberCountFromSnapshot(snapshot Snapshot, p *ReconstructedPoolState, live *StatusLiveProviderSet, coherentSnapshot bool) int {
+	if !coherentSnapshot || !snapshot.Exists || !snapshot.Routeable {
+		return 0
+	}
+	if live == nil {
+		return len(snapshot.Members)
+	}
+	minBinaryVersion := snapshot.MinBinaryVersion
+	if minBinaryVersion == "" {
+		minBinaryVersion = policyMinBinaryVersion(p)
+	}
+	var count int
+	for _, provider := range live.Providers {
+		if !provider.ServingCapable || !snapshot.Members[provider.ProviderID] {
+			continue
+		}
+		if !statusProviderMeetsBinaryFloor(provider.BinaryVersion, minBinaryVersion) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func statusProviderMeetsBinaryFloor(providerVersion, minBinaryVersion string) bool {
+	if minBinaryVersion == "" {
+		return true
+	}
+	cmp, ok := versionfloor.Compare(providerVersion, minBinaryVersion)
+	return ok && cmp >= 0
+}
+
+func statusEligibilityEvaluation(liveEvaluated bool) string {
+	if liveEvaluated {
+		return "live_provider_snapshot"
+	}
+	return "routeable_registry_snapshot"
+}
+
+func statusEligibilityDisclosure(publiclyAnnounced, liveEvaluated bool) string {
+	visibility := "buyer-authenticated"
+	if publiclyAnnounced {
+		visibility = "public"
+	}
+	if liveEvaluated {
+		return "live eligible member count and route-time readiness are evaluated from the " + visibility + " routeable registry snapshot plus live provider-serving and binary-floor state; readiness does not promise immediate free capacity"
+	}
+	return "live eligible member count and route-time readiness are evaluated from the " + visibility + " routeable registry snapshot; readiness does not promise immediate free capacity"
+}
+
 func matchingPublicAnnouncement(state *ReconstructedState, p *ReconstructedPoolState) (PublicAnnouncementApproval, bool) {
 	if state == nil || p == nil || p.ManifestCoreDigest == "" {
 		return PublicAnnouncementApproval{}, false
@@ -294,13 +445,6 @@ func matchingPublicAnnouncement(state *ReconstructedState, p *ReconstructedPoolS
 		return PublicAnnouncementApproval{}, false
 	}
 	return approval, true
-}
-
-func readinessReasonForPool(p *ReconstructedPoolState) string {
-	if _, reason := poolRouteability(p); reason != "" {
-		return reason
-	}
-	return "live_eligibility_not_evaluated"
 }
 
 func poolRouteability(p *ReconstructedPoolState) (bool, string) {

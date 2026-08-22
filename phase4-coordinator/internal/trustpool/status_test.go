@@ -65,7 +65,10 @@ func TestBuildStatusDocumentReturnsBuyerSafePromiseShape(t *testing.T) {
 		t.Fatalf("BuildRegistry: %v", err)
 	}
 	generatedAt := time.Unix(1800000700, 123).UTC()
-	doc, found, err := trustpool.BuildStatusDocument(ctx, store, registry, root.poolID, "acct-a", generatedAt)
+	doc, found, err := trustpool.BuildStatusDocumentWithLiveProviders(ctx, store, registry, root.poolID, "acct-a", generatedAt, trustpool.StatusLiveProviderSet{Providers: []trustpool.StatusLiveProvider{
+		{ProviderID: "provider-a", ServingCapable: true, BinaryVersion: "1.8.33"},
+		{ProviderID: "provider-b", ServingCapable: true, BinaryVersion: "1.8.33"},
+	}})
 	if err != nil {
 		t.Fatalf("BuildStatusDocument: %v", err)
 	}
@@ -81,10 +84,10 @@ func TestBuildStatusDocumentReturnsBuyerSafePromiseShape(t *testing.T) {
 	if doc.FreshUntilUTC != generatedAt.Add(trustpool.StatusFreshnessTTL).Format(time.RFC3339Nano) {
 		t.Fatalf("fresh_until_utc=%q", doc.FreshUntilUTC)
 	}
-	if doc.Pool.Readiness != "unknown" || doc.Pool.ReadinessReason != "live_eligibility_not_evaluated" || doc.Routeability.Routeable {
+	if doc.Pool.Readiness != "ready" || doc.Pool.ReadinessReason != "live_provider_snapshot" || !doc.Routeability.Routeable {
 		t.Fatalf("readiness=%q routeable=%v", doc.Pool.Readiness, doc.Routeability.Routeable)
 	}
-	if doc.Membership.CurrentMemberCount != 1 || doc.Membership.CurrentAdmittedMemberCount != 1 || doc.Membership.CurrentNonRevokedMemberCount != 1 || doc.Membership.CurrentEligibleMemberCount != 0 || doc.Membership.RevokedMemberCount != 1 || doc.Membership.LiveEligibilityEvaluation != "not_evaluated" {
+	if doc.Membership.CurrentMemberCount != 1 || doc.Membership.CurrentAdmittedMemberCount != 1 || doc.Membership.CurrentNonRevokedMemberCount != 1 || doc.Membership.CurrentEligibleMemberCount != 1 || doc.Membership.RevokedMemberCount != 1 || doc.Membership.LiveEligibilityEvaluation != "live_provider_snapshot" {
 		t.Fatalf("membership=%+v", doc.Membership)
 	}
 	if doc.Policy.ManifestVersion != 1 || doc.Policy.MinBinaryVersion != "1.8.33" || doc.Policy.RootIssuerKeyID == "" {
@@ -107,8 +110,88 @@ func TestBuildStatusDocumentReturnsBuyerSafePromiseShape(t *testing.T) {
 	if !strings.Contains(body, "not a Privacy Pool") {
 		t.Fatalf("status missing non-privacy-pool disclosure: %s", body)
 	}
-	if !strings.Contains(body, "live eligible member count and route-time readiness are not evaluated") {
+	if !strings.Contains(body, "live eligible member count and route-time readiness are evaluated from the buyer-authenticated routeable registry snapshot plus live provider-serving and binary-floor state") {
 		t.Fatalf("status missing live-eligibility disclosure: %s", body)
+	}
+
+	emptyLiveDoc, found, err := trustpool.BuildStatusDocumentWithLiveProviders(ctx, store, registry, root.poolID, "acct-a", generatedAt, trustpool.StatusLiveProviderSet{})
+	if err != nil {
+		t.Fatalf("BuildStatusDocumentWithLiveProviders empty live snapshot: %v", err)
+	}
+	if !found {
+		t.Fatal("BuildStatusDocumentWithLiveProviders empty live snapshot found=false, want true")
+	}
+	if emptyLiveDoc.Pool.Readiness != "unavailable" || emptyLiveDoc.Pool.ReadinessReason != "live_provider_eligible_members_unmet" || emptyLiveDoc.Membership.CurrentEligibleMemberCount != 0 || emptyLiveDoc.Routeability.Routeable {
+		t.Fatalf("empty live readiness=%q reason=%q eligible=%d routeable=%v", emptyLiveDoc.Pool.Readiness, emptyLiveDoc.Pool.ReadinessReason, emptyLiveDoc.Membership.CurrentEligibleMemberCount, emptyLiveDoc.Routeability.Routeable)
+	}
+}
+
+func TestBuildStatusDocumentFailsClosedOnStaleRouteableSnapshot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000750, 0).UTC()
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	for _, e := range []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+		ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-a"
+		}),
+		ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+			e.BuyerAccountID = "acct-a"
+		}),
+		ev("op-active", ts.Add(5*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
+			e.Lifecycle = trustpool.LifecycleActive
+		}),
+	} {
+		if e.EventType == trustpool.EventLifecycleChanged && e.Lifecycle == trustpool.LifecycleActive {
+			insertPromotedEvent(t, ctx, db, e)
+			continue
+		}
+		if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
+			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+		}
+	}
+	staleState, err := store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct stale state: %v", err)
+	}
+	staleRegistry, err := staleState.BuildRegistry()
+	if err != nil {
+		t.Fatalf("BuildRegistry stale: %v", err)
+	}
+	if _, _, _, err := store.AppendValidatedEvent(ctx, ev("op-floor-raised", ts.Add(6*time.Second), trustpool.EventMinBinaryVersionSet, root.poolID, func(e *trustpool.DurableEvent) {
+		e.MinBinaryVersion = "9.9.9"
+	})); err != nil {
+		t.Fatalf("AppendValidatedEvent floor: %v", err)
+	}
+	doc, found, err := trustpool.BuildStatusDocumentWithLiveProviders(ctx, store, staleRegistry, root.poolID, "acct-a", ts.Add(7*time.Second), trustpool.StatusLiveProviderSet{Providers: []trustpool.StatusLiveProvider{
+		{ProviderID: "provider-a", ServingCapable: true, BinaryVersion: "1.8.33"},
+	}})
+	if err != nil {
+		t.Fatalf("BuildStatusDocumentWithLiveProviders stale registry: %v", err)
+	}
+	if !found {
+		t.Fatal("BuildStatusDocumentWithLiveProviders stale registry found=false, want true")
+	}
+	if doc.Policy.MinBinaryVersion != "9.9.9" {
+		t.Fatalf("policy min_binary_version=%q, want durable raised floor", doc.Policy.MinBinaryVersion)
+	}
+	if doc.Pool.Readiness != "unavailable" || doc.Pool.ReadinessReason != "routeable_snapshot_stale" || doc.Routeability.Routeable || doc.Routeability.CreatorGateReason != "" {
+		t.Fatalf("stale registry readiness=%q reason=%q routeable=%v creator_gate_reason=%q", doc.Pool.Readiness, doc.Pool.ReadinessReason, doc.Routeability.Routeable, doc.Routeability.CreatorGateReason)
+	}
+	if doc.Membership.CurrentEligibleMemberCount != 0 || doc.Membership.LiveEligibilityEvaluation != "live_provider_snapshot" {
+		t.Fatalf("stale registry membership=%+v", doc.Membership)
 	}
 }
 
@@ -171,7 +254,14 @@ func TestBuildPublicStatusDocumentRequiresMatchingAnnouncementApproval(t *testin
 		ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
 			e.ProviderID = "provider-secret"
 		}),
+		ev("op-active", ts.Add(4*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
+			e.Lifecycle = trustpool.LifecycleActive
+		}),
 	} {
+		if e.EventType == trustpool.EventLifecycleChanged && e.Lifecycle == trustpool.LifecycleActive {
+			insertPromotedEvent(t, ctx, db, e)
+			continue
+		}
 		if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
 			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
 		}
@@ -222,5 +312,18 @@ func TestBuildPublicStatusDocumentRequiresMatchingAnnouncementApproval(t *testin
 	}
 	if !strings.Contains(body, "reviewed_distribution_artifact_digest") {
 		t.Fatalf("public status missing digest-bound disclosure: %s", body)
+	}
+
+	doc, found, err = trustpool.BuildPublicStatusDocumentWithLiveProviders(ctx, store, trustpool.NewRegistry(), root.poolID, ts, trustpool.StatusLiveProviderSet{Providers: []trustpool.StatusLiveProvider{
+		{ProviderID: "provider-secret", ServingCapable: true},
+	}})
+	if err != nil {
+		t.Fatalf("BuildPublicStatusDocumentWithLiveProviders missing registry snapshot: %v", err)
+	}
+	if !found {
+		t.Fatal("BuildPublicStatusDocumentWithLiveProviders missing registry snapshot found=false, want true")
+	}
+	if doc.Pool.Readiness != "unavailable" || doc.Pool.ReadinessReason != "routeable_snapshot_stale" || doc.Membership.CurrentEligibleMemberCount != 0 || doc.Routeability.Routeable {
+		t.Fatalf("missing registry snapshot readiness=%q reason=%q eligible=%d routeable=%v", doc.Pool.Readiness, doc.Pool.ReadinessReason, doc.Membership.CurrentEligibleMemberCount, doc.Routeability.Routeable)
 	}
 }
