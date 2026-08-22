@@ -81,6 +81,9 @@ function makeContext(url, fetchImpl) {
       readyState: "loading",
       addEventListener() {},
       createElement: makeNode,
+      createElementNS(_ns, tag) {
+        return makeNode(tag);
+      },
       createTextNode(text) {
         return { text: String(text) };
       },

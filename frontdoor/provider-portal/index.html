@@ -149,6 +149,7 @@
     }
     .dash-status { font-size:22px; font-weight:600; letter-spacing:-.02em; }
     .dash-status.ok { color:var(--seafoam-teal); }
+    .dash-status.idle { color:var(--muted); }
     .dash-status.warn { color:var(--sunset-coral); }
     .dash-trust { color:var(--muted); font-size:13px; }
     .dash-hero { margin-bottom:22px; }
@@ -169,39 +170,6 @@
     }
     .dash-exception .ex-reason { font-size:14px; }
     .dash-exception .ex-action { margin-top:6px; color:var(--muted); font-size:13px; }
-    .headstrip {
-      display:flex; flex-wrap:wrap; gap:10px 18px;
-      align-items:center;
-      background:var(--surface);
-      border:1px solid var(--border);
-      border-radius:10px;
-      padding:14px 18px;
-      margin-bottom:18px;
-    }
-    .headstrip .field { display:flex; flex-direction:column; gap:2px; }
-    .headstrip .field .lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
-    .headstrip .field .vl { font-size:14px; }
-    .headstrip .spacer { flex:1; }
-    .headstrip .refresh-btn {
-      background:var(--accent-dim); border:1px solid var(--border2);
-      color:var(--text); padding:6px 12px; border-radius:6px;
-      font-size:13px;
-    }
-    .headstrip .refresh-btn:disabled { opacity:.5; cursor:default; }
-    .pill { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:12px; }
-    .pill.online { background:rgba(34,197,94,.14); color:var(--ok); }
-    .pill.offline { background:rgba(239,68,68,.14); color:var(--bad); }
-    .pill.unknown { background:rgba(135,141,153,.14); color:var(--muted); }
-    .stamp { font-size:12px; color:var(--muted); }
-    .stamp.stale { color:var(--warn); }
-
-    .counters {
-      display:grid; gap:14px;
-      grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
-      margin-bottom:18px;
-    }
-    .counters .card .val.dim { color:var(--muted); font-size:18px; }
-
     .panel {
       background:var(--surface);
       border:1px solid var(--border);
@@ -276,22 +244,6 @@
     .signin-card .brand-lockup { margin-bottom:16px; }
     .signin-card h1 { margin:0 0 4px 0; font-size:18px; }
     .signin-card .h-sub { color:var(--muted); font-size:13px; margin-bottom:18px; }
-    .signin-field { display:flex; flex-direction:column; gap:6px; margin-bottom:14px; }
-    .signin-field label { font-size:12px; color:var(--muted); }
-    .signin-field input {
-      background:var(--bg);
-      border:1px solid var(--border2);
-      color:var(--text);
-      border-radius:8px; padding:9px 11px;
-      font:inherit;
-    }
-    .signin-field input:focus { outline:1px solid var(--accent); border-color:var(--accent); }
-    .signin-submit {
-      width:100%; background:var(--accent); border:0; color:var(--ice-white);
-      padding:10px; border-radius:12px; font-weight:600;
-      margin-top:6px;
-    }
-    .signin-submit:hover { filter:brightness(1.08); }
     .signin-err { color:var(--bad); font-size:13px; margin-top:10px; }
     .signin-misconfig {
       margin-top:14px; padding:10px 12px;
@@ -341,72 +293,8 @@
     .section-h { font-size:13px; color:var(--muted); margin:0 0 10px 0; text-transform:uppercase; letter-spacing:.5px; font-weight:500; }
     .section-sub { font-size:12px; color:var(--muted); margin:0 0 12px 0; }
     .grid-4 { display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); }
-    .req-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
-    .req-card .req-lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
-    .req-card .req-val { font-size:14px; }
-    .sizing-card { background:var(--surface); border:1px solid var(--border2); border-radius:10px; padding:16px 18px; border-left:2px solid var(--accent); }
-    .sizing-card table { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
-    .sizing-card th, .sizing-card td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); }
-    .sizing-card th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.4px; }
-    .sizing-card .hint-foot { font-size:12px; color:var(--muted); margin-top:10px; }
-    .step-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
-    .step-card + .step-card { margin-top:10px; }
-    .step-card .step-h { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
-    .step-card .step-num { background:var(--accent-dim); color:var(--text); border-radius:50%; width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; }
-    .step-card .step-title { font-size:14px; font-weight:600; }
-    .step-card .step-body { font-size:13px; color:var(--muted); margin:4px 0 8px 0; line-height:1.5; }
-    .step-card .step-cite { font-size:11px; color:var(--hint); margin-top:6px; }
     .snippet { display:flex; align-items:center; gap:8px; }
     .snippet code { flex:1; background:var(--bg); border:1px solid var(--border2); padding:7px 10px; border-radius:6px; font-size:12px; overflow-x:auto; white-space:nowrap; }
-    .release-list { display:flex; flex-direction:column; gap:10px; }
-    .release-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
-    .release-card .rel-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-    .release-card .rel-tag { font-size:13px; }
-    .release-card .rel-date { font-size:12px; color:var(--muted); }
-    .release-card .rel-spacer { flex:1; }
-    .release-card details { margin-top:8px; }
-    .release-card summary { font-size:12px; color:var(--muted); cursor:pointer; user-select:none; }
-    .release-card pre.rel-body { white-space:pre-wrap; word-break:break-word; max-height:200px; overflow:auto; background:var(--bg); border:1px solid var(--border2); border-radius:6px; padding:10px; font-size:12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin:8px 0; }
-    .release-card .rel-cta { margin-top:8px; }
-
-    /* Surface C / D / E */
-    .fiat-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:16px 18px; }
-    .fiat-card h3 { margin:0 0 6px 0; font-size:13px; color:var(--muted); font-weight:500; text-transform:uppercase; letter-spacing:.5px; }
-    .fiat-card .fiat-body { font-size:14px; }
-    .fiat-card .fiat-cite { font-size:11px; color:var(--hint); margin-top:8px; }
-    .rewards-card { margin-top:18px; }
-    .rewards-card .reward-grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:12px; margin-top:12px; }
-    .rewards-card .reward-label { color:var(--muted); font-size:12px; }
-    .rewards-card .reward-value { font-size:18px; margin-top:3px; }
-    .rewards-card .reward-hold { color:var(--sunset-coral); margin-top:12px; font-size:13px; line-height:1.45; }
-    .rewards-card .reward-ok { color:var(--seafoam-teal); margin-top:12px; font-size:13px; line-height:1.45; }
-    .rewards-card .reward-next { margin-top:6px; font-size:13px; line-height:1.45; color:var(--muted); }
-    .wallet-card { margin-top:18px; }
-    .wallet-card .wallet-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; margin-top:12px; }
-    .wallet-card .wallet-label { color:var(--muted); font-size:12px; }
-    .wallet-card .wallet-value { margin-top:3px; overflow-wrap:anywhere; }
-    .wallet-card .reward-hold { color:var(--sunset-coral); }
-    .wallet-card .reward-ok { color:var(--seafoam-teal); }
-    .wallet-card .audit-list { margin-top:12px; border-top:1px solid var(--line); }
-    .wallet-card .audit-row { padding:10px 0; border-bottom:1px solid var(--line); }
-    .wallet-card .audit-row .audit-type { font-size:13px; }
-    .wallet-card .audit-row .audit-summary { color:var(--muted); font-size:12px; line-height:1.4; margin-top:3px; }
-    .mining-health-card { margin-bottom:18px; border-left:2px solid var(--accent); }
-    .mining-health-card .mh-status { font-size:20px; font-weight:600; margin-top:2px; }
-    .mining-health-card .mh-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; margin-top:12px; }
-    .mining-health-card .mh-label { color:var(--muted); font-size:12px; }
-    .mining-health-card .mh-value { font-size:13px; margin-top:3px; line-height:1.45; }
-    @media (max-width: 720px) { .mining-health-card .mh-grid { grid-template-columns:1fr; } }
-    @media (max-width: 620px) { .rewards-card .reward-grid, .wallet-card .wallet-grid { grid-template-columns:1fr; } }
-    .monitor-card { background:var(--surface); border:1px dashed var(--border2); border-radius:10px; padding:16px 18px; }
-    .monitor-card h3 { margin:0 0 10px 0; font-size:14px; }
-    .monitor-card ul { margin:0; padding-left:18px; color:var(--muted); font-size:13px; line-height:1.6; }
-    .monitor-card .mon-cite { font-size:11px; color:var(--hint); margin-top:10px; }
-    .id-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:16px 18px; }
-    .id-card .id-grid { display:grid; grid-template-columns:140px 1fr; row-gap:10px; column-gap:14px; align-items:center; }
-    .id-card .id-lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
-    .id-card .id-val { font-size:14px; }
-    .id-card .id-foot { font-size:12px; color:var(--muted); margin-top:14px; padding-top:12px; border-top:1px solid var(--border); line-height:1.5; }
 
     /* Mobile */
     @media (max-width: 720px) {
@@ -436,8 +324,6 @@
     var POOL_POLL_MS = 30 * 1000;
     var EARN_POLL_MS = 60 * 1000;
     var EARN_CACHE_TTL_MS = 60 * 1000;
-    var STALE_FACTOR = 2; // stamp flips to "stale" past STALE_FACTOR x cadence
-    var STAMP_TICK_MS = 1000;
 
     var ALLOWED_CONFIG_KEYS = [
       "coordinator_base_url",
@@ -455,10 +341,6 @@
     var MALIBU_ACCRUAL_PATH = "/v1/provider/malibu-accrual";
     var PROVIDER_WALLET_PATH = "/v1/provider/wallet";
 
-    var RELEASES_HOST = "https://api.github.com";
-    var RELEASES_TTL_MS = 5 * 60 * 1000;
-    var RELEASES_MAX_ENTRIES = 12;
-
     /* =====================================================================
      * State container
      * ===================================================================== */
@@ -466,7 +348,7 @@
       cfg: null,
       session: null,
       sessionGeneration: 0,
-      route: "machine",
+      route: "dashboard",
       pool: { data: null, ts: 0, err: null, inflight: false },
       earn: { data: null, ts: 0, err: null, inflight: false },
       malibu: { data: null, ts: 0, err: null, inflight: false },
@@ -479,7 +361,6 @@
       copyEcho: null,
       configError: null,
       flagFalse: false,
-      releases: { list: null, ts: 0, err: null, inflight: false, rateLimited: false },
       githubAuthState: "idle",
       githubProviders: [],
       cookieFetch: null,
@@ -489,7 +370,6 @@
     var timers = {
       pool: null,
       earn: null,
-      stamp: null,
     };
 
     /* =====================================================================
@@ -794,7 +674,7 @@
         ? cookieJSON(earningsPath(pid), { method: "GET" })
         : coordFetch(earningsPath(pid), {
             auth: true,
-            surface: surface || "machine",
+            surface: surface || "dashboard",
             sessionGeneration: sessionGeneration
           });
       return fetchResult
@@ -812,7 +692,7 @@
             if (state.cfg && state.cfg.github_oauth_enabled && r.status === 401) {
               githubSessionExpired("/" + "?p=" + encodeURIComponent(pid));
             } else {
-              handleAuthRejection(r.status, surface || "machine");
+              handleAuthRejection(r.status, surface || "dashboard");
             }
             return;
           }
@@ -839,7 +719,7 @@
       render();
       return coordFetch(MALIBU_ACCRUAL_PATH, {
         auth: true,
-        surface: surface || "machine",
+        surface: surface || "dashboard",
         ignoreAuthFailureStatus: 404,
         sessionGeneration: sessionGeneration
       })
@@ -856,7 +736,7 @@
           state.malibu.data = null;
           state.malibu.ts = 0;
           if (r.status === 401 || r.status === 403) {
-            handleAuthRejection(r.status, surface || "machine");
+            handleAuthRejection(r.status, surface || "dashboard");
             return;
           }
           state.malibu.err = {
@@ -887,7 +767,7 @@
       render();
       return coordFetch(PROVIDER_WALLET_PATH, {
         auth: true,
-        surface: surface || "machine",
+        surface: surface || "dashboard",
         ignoreAuthFailureStatus: 404,
         sessionGeneration: sessionGeneration
       })
@@ -904,7 +784,7 @@
           state.wallet.data = null;
           state.wallet.ts = 0;
           if (r.status === 401 || r.status === 403) {
-            handleAuthRejection(r.status, surface || "machine");
+            handleAuthRejection(r.status, surface || "dashboard");
             return;
           }
           state.wallet.err = {
@@ -918,59 +798,6 @@
           state.wallet.inflight = false;
           state.wallet.data = null;
           state.wallet.ts = 0;
-          render();
-        });
-    }
-
-    /* =====================================================================
-     * GitHub Releases feed (§4.2 B.3, §5.1 table (a), §5.4 thresholds)
-     *
-     * Cross-origin to api.github.com. The bundle never reads the
-     * browser-suppressed CORS allow-origin response header as
-     * application data — a successful, readable fetch IS the CORS
-     * confirmation. Fail-loud on rate-limit
-     * (X-RateLimit-Remaining: 0) and on fetch() rejection.
-     * ===================================================================== */
-    function releasesFetch() {
-      if (!state.cfg) return Promise.resolve();
-      if (state.releases.inflight) return Promise.resolve();
-      if (state.releases.list && (Date.now() - state.releases.ts) < RELEASES_TTL_MS) {
-        return Promise.resolve();
-      }
-      state.releases.inflight = true;
-      render();
-      var url = RELEASES_HOST + "/repos/" + state.cfg.releases_repo_owner_name + "/releases";
-      return fetch(url, { cache: "no-store" })
-        .then(function (resp) {
-          var remaining = null;
-          try { remaining = resp.headers.get("X-RateLimit-Remaining"); } catch (_) {}
-          if (remaining === "0") {
-            state.releases.rateLimited = true;
-            state.releases.err = "GitHub API rate limit reached — release feed paused; refresh later.";
-            return null;
-          }
-          state.releases.rateLimited = false;
-          if (!resp.ok) {
-            state.releases.err = "HTTP " + resp.status + " from GitHub Releases.";
-            return null;
-          }
-          return resp.json().then(function (arr) {
-            if (!Array.isArray(arr)) {
-              state.releases.err = "Unexpected GitHub Releases response shape.";
-              return;
-            }
-            state.releases.list = arr;
-            state.releases.ts = Date.now();
-            state.releases.err = null;
-          }).catch(function () {
-            state.releases.err = "Malformed JSON from GitHub Releases.";
-          });
-        })
-        .catch(function () {
-          state.releases.err = "GitHub Releases unavailable — release feed disabled; see SPEC-014 Open Q2.";
-        })
-        .then(function () {
-          state.releases.inflight = false;
           render();
         });
     }
@@ -997,33 +824,31 @@
       render();
     }
     function signInRejectedCopy() {
-      return "Sign-in rejected. Please verify your provider_id and provider_token and try again.";
+      return "This portal link expired. Ask Malibu for a new one.";
     }
     function misconfigNoticeCopy() {
-      return "Your deployment may be misconfigured — ask your operator to verify portal-config.json against the coordinator's auth.require_provider_tokens setting.";
+      return "The portal could not verify this Malibu link. Try a fresh link from Malibu.";
     }
 
     /* =====================================================================
-     * Pollers + stamp tick
+     * Pollers
      * ===================================================================== */
     function startPollers() {
       stopPollers();
       timers.pool = setInterval(function () { poolCheck(); }, POOL_POLL_MS);
       timers.earn = setInterval(function () {
-        earnFetch("machine");
-        malibuFetch("machine");
-        walletFetch("machine");
+        earnFetch("dashboard");
+        malibuFetch("dashboard");
+        walletFetch("dashboard");
       }, EARN_POLL_MS);
-      timers.stamp = setInterval(function () { renderStampOnly(); }, STAMP_TICK_MS);
       poolCheck();
-      earnFetch("machine", { force: true });
-      malibuFetch("machine", { force: true });
-      walletFetch("machine", { force: true });
+      earnFetch("dashboard", { force: true });
+      malibuFetch("dashboard", { force: true });
+      walletFetch("dashboard", { force: true });
     }
     function stopPollers() {
       if (timers.pool) { clearInterval(timers.pool); timers.pool = null; }
       if (timers.earn) { clearInterval(timers.earn); timers.earn = null; }
-      if (timers.stamp) { clearInterval(timers.stamp); timers.stamp = null; }
     }
 
     /* =====================================================================
@@ -1039,12 +864,11 @@
         state.earn = { data: null, ts: 0, err: null, inflight: false };
         state.malibu = { data: null, ts: 0, err: null, inflight: false };
         state.wallet = { data: null, ts: 0, err: null, inflight: false };
-        state.releases = { list: null, ts: 0, err: null, inflight: false, rateLimited: false };
         state.authFailBySurface = {};
         state.proxyMissing = false;
         state.signinErr = null;
         state.signinMisconfigNotice = null;
-        state.route = "machine";
+        state.route = "dashboard";
         state.sidebarOpen = false;
         render();
         cookieJSON("/v1/auth/logout", { method: "POST", body: "{}" })
@@ -1058,38 +882,13 @@
       state.earn = { data: null, ts: 0, err: null, inflight: false };
       state.malibu = { data: null, ts: 0, err: null, inflight: false };
       state.wallet = { data: null, ts: 0, err: null, inflight: false };
-      state.releases = { list: null, ts: 0, err: null, inflight: false, rateLimited: false };
       state.authFailBySurface = {};
       state.proxyMissing = false;
       state.signinErr = null;
       state.signinMisconfigNotice = null;
-      state.route = "machine";
+      state.route = "dashboard";
       state.sidebarOpen = false;
       render();
-    }
-
-    /* =====================================================================
-     * Sign-in submit
-     * ===================================================================== */
-    function submitSignIn(providerId, providerToken) {
-      var pid = (providerId || "").trim();
-      var tok = (providerToken || "").trim();
-      if (!pid || !tok) {
-        state.signinErr = "Both provider_id and provider_token are required.";
-        render();
-        return;
-      }
-      state.sessionGeneration += 1;
-      state.session = { provider_id: pid, provider_token: tok };
-      state.signinErr = null;
-      state.signinMisconfigNotice = null;
-      state.route = "earn";
-      state.pool = { data: null, ts: 0, err: null, inflight: false };
-      state.earn = { data: null, ts: 0, err: null, inflight: false };
-      state.malibu = { data: null, ts: 0, err: null, inflight: false };
-      state.wallet = { data: null, ts: 0, err: null, inflight: false };
-      render();
-      startPollers();
     }
 
     /* =====================================================================
@@ -1138,7 +937,7 @@
           state.githubProviders = providers;
           if (providers.length === 0) {
             state.githubAuthState = "waiting";
-            state.route = "machine";
+            state.route = "dashboard";
             render();
             return;
           }
@@ -1150,7 +949,7 @@
           if (!selected && providers.length === 1) selected = providers[0];
           if (!selected) {
             state.githubAuthState = "providers";
-            state.route = "machine";
+            state.route = "dashboard";
             render();
             return;
           }
@@ -1166,7 +965,7 @@
       state.sessionGeneration += 1;
       state.session = { provider_id: providerId, provider_token: null };
       state.githubAuthState = "dashboard";
-      state.route = "machine";
+      state.route = "dashboard";
       state.pool = { data: null, ts: 0, err: null, inflight: false };
       state.earn = { data: null, ts: 0, err: null, inflight: false };
       state.malibu = { data: null, ts: 0, err: null, inflight: false };
@@ -1334,114 +1133,25 @@
     }
 
     function renderUnavailable_Config(errInfo) {
-      var heading = el("h1", null, "Portal unavailable");
-      var body;
-      switch (errInfo.kind) {
-        case "non-200":
-          body = el("p", null,
-            "The portal could not load ",
-            el("code", null, "/portal-config.json"),
-            " (HTTP status ", errInfo.status,
-            "). The operator must deploy this file at the portal host root before the portal can be used.");
-          break;
-        case "fetch-failed":
-          body = el("p", null,
-            "The portal could not fetch ",
-            el("code", null, "/portal-config.json"),
-            ". The operator must deploy this file at the portal host root before the portal can be used.");
-          break;
-        case "malformed-json":
-          body = el("p", null,
-            "The file ",
-            el("code", null, "/portal-config.json"),
-            " is not valid JSON. Fix the file and reload.");
-          break;
-        case "not-object":
-          body = el("p", null,
-            el("code", null, "/portal-config.json"),
-            " must be a JSON object with the keys ",
-            el("code", null, "coordinator_base_url"),
-            ", ",
-            el("code", null, "releases_repo_owner_name"),
-            ", and ",
-            el("code", null, "require_provider_tokens"),
-            ", and optionally ",
-            el("code", null, "github_oauth_enabled"),
-            ".");
-          break;
-        case "unknown-key":
-          body = el("p", null,
-            el("code", null, "/portal-config.json"),
-            " contains an unknown top-level key ",
-            el("code", null, errInfo.key),
-            ". Only ",
-            el("code", null, "coordinator_base_url"),
-            ", ",
-            el("code", null, "releases_repo_owner_name"),
-            ", and ",
-            el("code", null, "require_provider_tokens"),
-            ", plus optional ",
-            el("code", null, "github_oauth_enabled"),
-            " are permitted.");
-          break;
-        case "invalid-field":
-          body = el("p", null,
-            "The ",
-            el("code", null, errInfo.field),
-            " value in ",
-            el("code", null, "/portal-config.json"),
-            " is not valid. Refer to the example file and reload.");
-          break;
-        default:
-          body = el("p", null,
-            "The portal could not load ",
-            el("code", null, "/portal-config.json"),
-            ".");
-      }
       return el("div", { class: "unavail-wrap" },
         el("div", { class: "unavail-card" },
-          heading,
-          body,
-          el("p", null, "See SPEC-014 §2.3 (AUTH-3) for the deployment-mode loader contract.")));
+          el("h1", null, "Portal unavailable"),
+          el("p", null, "The Malibu dashboard is not ready right now. Open Malibu for local status and try the portal again later.")));
     }
 
     function renderUnavailable_FlagFalse() {
       return el("div", { class: "unavail-wrap" },
         el("div", { class: "unavail-card" },
           el("h1", null, "Portal unavailable"),
-          el("p", null,
-            "The portal needs the coordinator to run with ",
-            el("code", null, "auth.require_provider_tokens=true"),
-            ". SPEC-002 FR-P12 defines the flag and its enforcement semantics; SPEC-005 §11.5 is the binding route-disablement clause that disables ",
-            el("code", null, "GET /providers/{id}/earnings"),
-            " at the route layer in ",
-            el("code", null, "false"),
-            " mode."),
-          el("p", null,
-            "The current deployment runs with this flag set to ",
-            el("code", null, "false"),
-            ", which means the portal has no callable data path. Ask the operator to flip the coordinator config and re-deploy.")));
+          el("p", null, "The Malibu dashboard is not available for this link. Open Malibu for local status and try again later.")));
     }
 
     function renderSignIn() {
-      var pidInput = el("input", { type: "text", id: "pid", autocomplete: "off", spellcheck: "false" });
-      var tokInput = el("input", { type: "password", id: "tok", autocomplete: "off", spellcheck: "false" });
-      var form = el("form", {
-        onsubmit: function (e) { e.preventDefault(); submitSignIn(pidInput.value, tokInput.value); },
-      },
-        el("div", { class: "signin-field" },
-          el("label", { for: "pid" }, "provider_id"),
-          pidInput),
-        el("div", { class: "signin-field" },
-          el("label", { for: "tok" }, "provider_token"),
-          tokInput),
-        el("button", { type: "submit", class: "signin-submit" }, "Sign in"));
       var card = el("div", { class: "signin-card" },
         brandLockup(),
         el("h1", null, "Your Mac"),
         el("p", { class: "h-sub" },
           "Open the portal link from Malibu. This page should not ask you to paste a token."),
-        form,
         state.signinErr ? el("div", { class: "signin-err" }, state.signinErr) : null,
         state.signinMisconfigNotice
           ? el("div", { class: "signin-misconfig" }, state.signinMisconfigNotice)
@@ -1460,7 +1170,7 @@
         el("p", { class: "h-sub" }, "Sign in to view Macs linked to your GitHub account."),
         button,
         state.proxyMissing
-          ? el("div", { class: "signin-misconfig" }, "github_oauth_enabled is true but the coordinator has no GitHub OAuth endpoints. Set the flag to false or deploy the v0.2 coordinator.")
+          ? el("div", { class: "signin-misconfig" }, "The portal cannot reach Malibu sign-in right now. Try again later.")
           : null,
         el("div", { class: "signin-guide" },
           "New here? ",
@@ -1481,7 +1191,7 @@
         cardKids.push(
           el("p", { class: "h-sub" }, "This Mac is linked."),
           el("div", { class: "claim-ok" }, "GitHub: ", result.github_login || "linked"),
-          el("div", { class: "claim-ok mono" }, "Provider: ", result.provider_id || "unknown"),
+          el("div", { class: "claim-ok" }, "Your Mac is linked."),
           el("p", { class: "h-sub" }, "Redirecting to your dashboard…"));
       } else {
         var msg = "Something went wrong. Try running macprovider-cli claim again.";
@@ -1490,9 +1200,9 @@
           msg = "This link expired. Run `macprovider-cli claim` on your Mac for a fresh link.";
           withCopy = true;
         } else if (state.claim.error === "already_owned") {
-          msg = "This Mac is already linked to a different account. Contact the operator to unlink.";
+          msg = "This Mac is already linked to a different account. Open Malibu for account help.";
         } else if (state.claim.error === "proxy_missing") {
-          msg = "github_oauth_enabled is true but the coordinator has no GitHub OAuth endpoints. Set the flag to false or deploy the v0.2 coordinator.";
+          msg = "The portal cannot reach Malibu sign-in right now. Try again later.";
         }
         cardKids.push(el("p", { class: "h-sub" }, msg));
         if (withCopy) {
@@ -1505,7 +1215,7 @@
 
     function renderWaitingForMac() {
       return el("div", null,
-        el("h1", { class: "surface-title" }, "Machine"),
+        el("h1", { class: "surface-title" }, "Dashboard"),
         el("div", { class: "panel" },
           el("h2", null, "Waiting for a Mac to come online"),
           el("p", null, "Install Malibu on a Mac. After install, your Mac will auto-open a browser to link itself."),
@@ -1519,11 +1229,11 @@
           class: "provider-row",
           onclick: function () { selectGitHubProvider(pid, true); },
         },
-          el("span", { class: "mono" }, pid),
+          el("span", null, "Your Mac"),
           el("span", { class: "sub" }, p && p.last_seen_at ? ("last seen " + p.last_seen_at) : "select"));
       });
       return el("div", null,
-        el("h1", { class: "surface-title" }, "Machine"),
+        el("h1", { class: "surface-title" }, "Dashboard"),
         el("div", { class: "panel" },
           el("h2", null, "Choose a Mac"),
           el("div", { class: "provider-list" }, rows)));
@@ -1538,22 +1248,12 @@
       if (state.proxyMissing) {
         pane.appendChild(renderProxyMissingBanner());
       }
-      if (state.route === "machine") {
-        if (state.cfg && state.cfg.github_oauth_enabled && state.githubAuthState === "waiting") {
-          pane.appendChild(renderWaitingForMac());
-        } else if (state.cfg && state.cfg.github_oauth_enabled && state.githubAuthState === "providers" && !state.session) {
-          pane.appendChild(renderProviderChooser());
-        } else {
-          pane.appendChild(renderMachine());
-        }
-      } else if (state.route === "setup") {
-        pane.appendChild(renderSetup());
-      } else if (state.route === "earn") {
+      if (state.cfg && state.cfg.github_oauth_enabled && state.githubAuthState === "waiting") {
+        pane.appendChild(renderWaitingForMac());
+      } else if (state.cfg && state.cfg.github_oauth_enabled && state.githubAuthState === "providers" && !state.session) {
+        pane.appendChild(renderProviderChooser());
+      } else {
         pane.appendChild(renderEarn());
-      } else if (state.route === "monitoring") {
-        pane.appendChild(renderMonitoring());
-      } else if (state.route === "identity") {
-        pane.appendChild(renderIdentity());
       }
       var scrim = el("div", {
         class: "scrim" + (state.sidebarOpen ? " show" : ""),
@@ -1566,15 +1266,9 @@
     }
 
     function renderSidebar() {
-      var items = [
-        { id: "machine",    label: "Machine" },
-      ];
-      if (!(state.cfg && state.cfg.github_oauth_enabled && !state.session)) {
-        items.push(
-          { id: "earn",     label: "Earn" },
-          { id: "identity", label: "Identity" }
-        );
-      }
+      var items = state.cfg && state.cfg.github_oauth_enabled && !state.session
+        ? []
+        : [{ id: "dashboard", label: "Dashboard" }];
       var navNodes = items.map(function (it) {
         return el("button", {
           class: "nav-item" + (state.route === it.id ? " active" : ""),
@@ -1582,15 +1276,9 @@
             state.route = it.id;
             state.sidebarOpen = false;
             render();
-            if (it.id === "machine") {
-              earnFetch("machine");
-            } else if (it.id === "setup") {
-              releasesFetch();
-            } else if (it.id === "earn") {
-              earnFetch("earn");
-              malibuFetch("earn");
-              walletFetch("earn");
-            }
+            earnFetch("dashboard");
+            malibuFetch("dashboard");
+            walletFetch("dashboard");
           },
         }, it.label);
       });
@@ -1599,37 +1287,13 @@
         el("nav", { class: "nav" }, navNodes),
         el("div", { class: "nav-spacer" }),
         el("div", { class: "nav-footer" },
-          el("a", { href: "https://api.malibu.tech/docs", target: "_blank", rel: "noopener noreferrer" }, "↗ API Docs"),
           el("button", { onclick: signOut }, "⏋ Sign out")));
     }
 
     function renderProxyMissingBanner() {
       return el("div", { class: "banner bad" },
-        el("strong", null, "Same-origin proxy missing. "),
-        "The portal expects the operator's reverse proxy on this origin to forward ",
-        el("code", null, "/v1/pool/check"),
-        " and ",
-        el("code", null, "/providers/{id}/earnings"),
-        ", plus ",
-        el("code", null, "/v1/provider/malibu-accrual"),
-        ", ",
-        el("code", null, "/v1/provider/wallet"),
-        ", ",
-        el("code", null, "/v1/auth/github/*"),
-        ", ",
-        el("code", null, "/v1/auth/me/*"),
-        ", ",
-        el("code", null, "/v1/auth/logout"),
-        ", and ",
-        el("code", null, "/v1/install/pair/refresh"),
-        " to the coordinator. See SPEC-014 §3 and Open Q9.");
-    }
-
-    function renderStub(phaseLabel, title) {
-      return el("div", null,
-        el("h1", { class: "surface-title" }, title),
-        el("div", { class: "panel" },
-          el("p", null, "Coming in ", phaseLabel, ".")));
+        el("strong", null, "Portal connection issue. "),
+        "The dashboard cannot reach Malibu services right now. Refresh in a minute or open Malibu for local status.");
     }
 
     function snippetNode(text, key) {
@@ -1640,169 +1304,6 @@
         onclick: function () { copyText(text, key); },
       }, copied ? "Copied" : "Copy");
       return el("div", { class: "snippet" }, codeEl, btn);
-    }
-
-    /* ---- Surface B — Setup & Updates ---- */
-    function renderSetup() {
-      var wrap = el("div", null);
-      wrap.appendChild(el("h1", { class: "surface-title" }, "Setup & Updates"));
-      wrap.appendChild(renderRequirementsGrid());
-      wrap.appendChild(renderSizingCard());
-      wrap.appendChild(renderSetupSteps());
-      wrap.appendChild(renderReleasesFeed());
-      return wrap;
-    }
-
-    function renderRequirementsGrid() {
-      var rows = [
-        { lbl: "Hardware", val: "Apple Silicon Mac (M1, M2, M3, M4)" },
-        { lbl: "OS",       val: "macOS 14 (Sonoma) or later" },
-        { lbl: "Disk",     val: "~4-8 GB free disk space" },
-        { lbl: "Network",  val: "Internet connection" },
-      ];
-      var cards = rows.map(function (r) {
-        return el("div", { class: "req-card" },
-          el("div", { class: "req-lbl" }, r.lbl),
-          el("div", { class: "req-val" }, r.val));
-      });
-      return el("div", { class: "section" },
-        el("h2", { class: "section-h" }, "Requirements"),
-        el("p", { class: "section-sub" }, "SPEC-003 §5 / FR-D1."),
-        el("div", { class: "grid-4" }, cards));
-    }
-
-    function renderSizingCard() {
-      var rows = [
-        ["8 GB",   "Llama 3.2 3B",                  "Llama 3.2 3B"],
-        ["16 GB",  "Llama 3.2 3B / Qwen 2.5 7B",    "Qwen 2.5 7B"],
-        ["24 GB+", "+ Qwen 2.5 14B",                "Qwen 2.5 14B"],
-      ];
-      var thead = el("thead", null,
-        el("tr", null,
-          el("th", null, "RAM"),
-          el("th", null, "Recommended model"),
-          el("th", null, "Default")));
-      var tbody = el("tbody", null,
-        rows.map(function (r) {
-          return el("tr", null,
-            el("td", null, r[0]),
-            el("td", null, r[1]),
-            el("td", null, r[2]));
-        }));
-      return el("div", { class: "section" },
-        el("h2", { class: "section-h" }, "RAM-to-model sizing"),
-        el("p", { class: "section-sub" }, "SPEC-003 §5 / FR-D2 + FR-D2.1."),
-        el("div", { class: "sizing-card" },
-          el("table", null, thead, tbody),
-          el("div", { class: "hint-foot" }, "FR-D2 is a recommendation, not a hard requirement.")));
-    }
-
-    function renderSetupSteps() {
-      var steps = [
-        {
-          n: 1,
-          title: "Install",
-          body: "Run the install script once per Mac. The script writes the binary, the LaunchAgent, and the default config under ~/.config/macprovider/.",
-          snip: "curl -fsSL https://get.malibu.tech/install.sh | bash",
-          key: "step1-install",
-          cite: "SPEC-003 §4 / FR-C2.",
-        },
-        {
-          n: 2,
-          title: "Verify routable",
-          body: "Inspect local provider state — provider_id, tier, last admission. Run this after install and any time the Machine surface here shows offline.",
-          snip: "macprovider-cli status",
-          key: "step2-status",
-          cite: "SPEC-003 §4 / FR-C4 (per SPEC-003 §6.2).",
-        },
-        {
-          n: 3,
-          title: "(Optional) Autotune",
-          body: "Run before serving to pick conservative kv-bits / context / batch values. The portal does not render any autotune output — SPEC-013 §6 / NFR-4 forbids non-HF egress during autotune.",
-          snip: "macprovider-cli autotune",
-          key: "step3-autotune",
-          cite: "SPEC-013 §6 / NFR-4.",
-        },
-      ];
-      var cards = steps.map(function (s) {
-        return el("div", { class: "step-card" },
-          el("div", { class: "step-h" },
-            el("span", { class: "step-num" }, String(s.n)),
-            el("span", { class: "step-title" }, s.title)),
-          el("div", { class: "step-body" }, s.body),
-          snippetNode(s.snip, s.key),
-          el("div", { class: "step-cite" }, s.cite));
-      });
-      return el("div", { class: "section" },
-        el("h2", { class: "section-h" }, "Setup steps"),
-        cards);
-    }
-
-    function renderReleasesFeed() {
-      var owner = state.cfg.releases_repo_owner_name;
-      var section = el("div", { class: "section" },
-        el("h2", { class: "section-h" }, "Releases — " + owner),
-        el("p", { class: "section-sub" },
-          "GitHub Releases for ",
-          el("code", { class: "mono" }, owner),
-          ". Cached in memory for 5 minutes."));
-      if (state.releases.err) {
-        section.appendChild(el("div", { class: "banner bad" }, state.releases.err));
-      }
-      var hasList = state.releases.list && state.releases.list.length;
-      if (!hasList && state.releases.inflight) {
-        section.appendChild(el("div", { class: "panel" },
-          el("p", null, "Loading releases…")));
-      } else if (!hasList && !state.releases.err) {
-        section.appendChild(el("div", { class: "panel" },
-          el("p", null, "No releases yet.")));
-      } else if (hasList) {
-        var list = el("div", { class: "release-list" });
-        var entries = state.releases.list.slice(0, RELEASES_MAX_ENTRIES);
-        entries.forEach(function (r) { list.appendChild(renderReleaseCard(r)); });
-        section.appendChild(list);
-      }
-      return section;
-    }
-
-    function renderReleaseCard(r) {
-      var tag = (r && (r.tag_name || r.name)) ? (r.tag_name || r.name) : "(untagged)";
-      var date = "";
-      if (r && typeof r.published_at === "string" && r.published_at.length >= 10) {
-        date = r.published_at.slice(0, 10);
-      }
-      var body = (r && typeof r.body === "string") ? r.body : "";
-      var cardKids = [
-        el("div", { class: "rel-head" },
-          el("span", { class: "rel-tag mono" }, tag),
-          el("span", { class: "rel-spacer" }),
-          date ? el("span", { class: "rel-date" }, date) : null),
-      ];
-      if (body) {
-        cardKids.push(el("details", null,
-          el("summary", null, "Release notes"),
-          el("pre", { class: "rel-body mono" }, body)));
-      }
-      var updateCmd = "macprovider-cli update";
-      cardKids.push(el("div", { class: "rel-cta" },
-        snippetNode(updateCmd, "rel-update-" + tag)));
-      cardKids.push(el("div", { class: "step-cite" }, "SPEC-003 §4 / FR-C3 (per §6.2)."));
-      return el("div", { class: "release-card" }, cardKids);
-    }
-
-    function formatMalibuAmount(value) {
-      if (value === null || value === undefined) return "n/a";
-      var n = Number(value);
-      return typeof n === "number" && isFinite(n) ? n.toFixed(2) + " MALIBU" : "n/a";
-    }
-
-    function malibuReasonCopy(reason) {
-      switch (reason) {
-        case "trust_tier_provisional": return "Trust verification is incomplete";
-        case "per_wallet_daily_cap": return "the wallet daily limit has been reached";
-        case "demotion_cooldown": return "a Trust cooldown is active";
-        default: return "payout eligibility is still being verified";
-      }
     }
 
     function malibuNextAction(data, reasons) {
@@ -1923,7 +1424,7 @@
         case "earning_verified_work": return "Earning from verified work";
         case "eligible_idle_no_work": return "Eligible; waiting for work";
         case "held_provisional_trust_tier": return "Trust verification is incomplete";
-        case "held_provider_daily_cap": return "provider daily limit reached";
+        case "held_provider_daily_cap": return "daily limit reached";
         case "held_wallet_daily_cap": return "wallet daily limit reached";
         case "held_demotion_cooldown": return "Trust requalification is in progress";
         case "withdrawable_balance_available": return "MALIBU is available to withdraw";
@@ -1940,8 +1441,8 @@
         case "compute_integrity_unavailable":
         case "telemetry_unavailable":
           return "reward status is unavailable";
-        case "local_on_battery": return "provider is on battery";
-        case "local_thermal_pressure": return "provider is cooling down";
+        case "local_on_battery": return "This Mac is on battery";
+        case "local_thermal_pressure": return "This Mac is cooling down";
         case "model_not_ready": return "model is preparing";
         default: return "reward eligibility is still being verified";
       }
@@ -1949,7 +1450,7 @@
 
     function malibuRewardNextAction(reason) {
       switch (reason) {
-        case "held_provider_daily_cap": return "The provider cap resets at the next UTC day.";
+        case "held_provider_daily_cap": return "The daily limit resets at the next UTC day.";
         case "held_wallet_daily_cap": return "The wallet cap resets at the next UTC day.";
         case "held_provisional_trust_tier": return "Complete the remaining trust criteria to unlock withdrawals.";
         case "held_demotion_cooldown": return "Re-qualify for Trusted to clear the cooldown.";
@@ -1980,17 +1481,6 @@
         reason === "provider_token_untrusted";
     }
 
-    function malibuRewardStatusCopy(e) {
-      switch (e.withdrawal_state) {
-        case "withdrawable": return "MALIBU is available to withdraw";
-        case "held": return "MALIBU is locked until eligible";
-        case "capped": return "MALIBU is limited by a daily cap";
-        case "ineligible": return "MALIBU is not eligible for withdrawal";
-        case "unavailable": return "MALIBU reward status unavailable";
-        default: return malibuRewardReasonCopy(e.primary_reason);
-      }
-    }
-
     function miningReasonVocabulary(code) {
       switch (code) {
         case "earning":
@@ -2002,44 +1492,44 @@
         case "idle_no_work":
           return {
             status: "Eligible, idle",
-            reason: "This machine is eligible, but the network is quiet right now.",
-            action: "Keep the provider online.",
+            reason: "This Mac is eligible, but the network is quiet right now.",
+            action: "Keep Malibu online.",
           };
         case "not_running":
           return {
             status: "Not running",
-            reason: "The provider is not ready for customer work.",
-            action: "Start or repair the provider.",
+            reason: "This Mac is not ready for customer work.",
+            action: "Open Malibu and check local status.",
           };
         case "provider_paused":
           return {
             status: "Paused",
-            reason: "This machine will not receive customer work while paused.",
-            action: "Resume the provider when ready.",
+            reason: "This Mac will not receive customer work while paused.",
+            action: "Resume earning in Malibu when ready.",
           };
         case "provider_error":
           return {
             status: "Needs attention",
-            reason: "The provider reported an error.",
-            action: "Export diagnostics or repair the provider.",
+            reason: "Malibu needs attention on this Mac.",
+            action: "Open Malibu and check diagnostics.",
           };
         case "local_on_battery":
           return {
             status: "Blocked locally",
-            reason: "This machine is on battery.",
+            reason: "This Mac is on battery.",
             action: "Plug in power to earn.",
           };
         case "local_thermal_pressure":
           return {
             status: "Blocked locally",
             reason: "Thermal pressure is limiting local work.",
-            action: "Let this machine cool before earning resumes.",
+            action: "Let this Mac cool before earning resumes.",
           };
         case "local_model_preparing":
           return {
             status: "Preparing",
             reason: "The model is still loading or checking local setup.",
-            action: "Keep the provider online while setup continues.",
+            action: "Keep Malibu online while setup continues.",
           };
         case "reward_projection_unavailable":
           return {
@@ -2067,20 +1557,20 @@
           };
         case "provider_daily_cap_held":
           return {
-            status: "Provider cap held",
-            reason: "MALIBU above the provider daily cap is held.",
+            status: "Daily limit held",
+            reason: "MALIBU above the daily limit is held.",
             action: "Wait for the next UTC day.",
           };
         case "rewards_held":
           return {
             status: "Rewards held",
             reason: "Some MALIBU is held while payout eligibility is being verified.",
-            action: "Review the hold reason before withdrawing.",
+            action: "Check wallet and trust status in Malibu.",
           };
         case "trusted_withdrawable":
           return {
             status: "Withdrawable",
-            reason: "Trusted reward projection reports withdrawable MALIBU.",
+            reason: "Trusted status reports withdrawable MALIBU.",
             action: "No local action needed.",
           };
         case "eligible_waiting_settlement":
@@ -2214,82 +1704,6 @@
         rewardSummary: rewardSummary,
         trustSummary: trustSummary,
       };
-    }
-
-    function renderMiningHealthCard() {
-      var health = computePortalMiningHealth();
-      return el("div", { class: "fiat-card mining-health-card" },
-        el("h3", null, "Mining Health"),
-        el("div", { class: "mh-status" }, health.status),
-        el("div", { class: "mh-grid" },
-          el("div", null,
-            el("div", { class: "mh-label" }, "Reason"),
-            el("div", { class: "mh-value" }, health.reason)),
-          el("div", null,
-            el("div", { class: "mh-label" }, "Rewards"),
-            el("div", { class: "mh-value" }, health.rewardSummary)),
-          el("div", null,
-            el("div", { class: "mh-label" }, "Eligibility"),
-            el("div", { class: "mh-value" }, health.trustSummary)),
-          el("div", null,
-            el("div", { class: "mh-label" }, "Next safe action"),
-            el("div", { class: "mh-value" }, health.action))),
-        el("div", { class: "fiat-cite mono" }, "reason_code: " + (health.displayReasonCode || health.code)));
-    }
-
-    function malibuWithdrawableGridLabel(eligibility) {
-      return eligibility && eligibility.withdrawal_state !== "withdrawable" ? "Ledger amount" : "Withdrawable";
-    }
-
-    function malibuWithdrawableGridValue(data, eligibility) {
-      if (!eligibility || eligibility.withdrawal_state === "withdrawable") return formatMalibuAmount(data.withdrawable_malibu);
-      if (eligibility.withdrawal_state === "unavailable") return "n/a";
-      return formatMalibuAmount(data.withdrawable_malibu);
-    }
-
-    function renderMalibuRewardsCard() {
-      var d = state.malibu.data;
-      var loading = state.malibu.inflight && !d;
-      if (!d && !loading && !state.malibu.err) return null;
-      if (!d) {
-        return el("div", { class: "fiat-card rewards-card" },
-          el("h3", null, "MALIBU rewards"),
-          el("div", { class: "fiat-body" }, loading ? "Loading reward availability…" : "MALIBU rewards unavailable."),
-          state.malibu.err ? el("div", { class: "fiat-cite" }, state.malibu.err.unavailable
-            ? "Reward availability is temporarily unavailable while the MALIBU projection route is being deployed."
-            : "Read-only projection returned HTTP " + state.malibu.err.status + ".") : null);
-      }
-      var eligibility = normalizedMalibuRewardEligibility(d);
-      var reasons = eligibility ? eligibility.reasons : (Array.isArray(d.withdrawal_hold_reasons) ? d.withdrawal_hold_reasons : []);
-      var held = Number(d.held_malibu);
-      var hasHeld = typeof d.held_malibu === "number" && isFinite(d.held_malibu);
-      var holdText = eligibility
-        ? malibuRewardReasonCopy(eligibility.primary_reason)
-        : reasons.length
-        ? reasons.map(malibuReasonCopy).join("; ")
-        : (hasHeld ? (held > 0 ? "A payout eligibility hold is active." : "No active hold.") : "Hold status unavailable.");
-      var nextAction = eligibility ? malibuRewardNextAction(eligibility.primary_reason) : malibuNextAction(d, reasons);
-      var statusCopy = eligibility ? malibuRewardStatusCopy(eligibility) : "Read-only reward availability";
-      var capParts = [];
-      if (d.daily_cap_malibu !== null && d.daily_cap_malibu !== undefined) {
-        capParts.push("provider cap " + formatMalibuAmount(d.daily_cap_malibu) + "/day");
-      }
-      if (d.wallet_daily_cap_malibu !== null && d.wallet_daily_cap_malibu !== undefined) {
-        capParts.push("wallet cap " + formatMalibuAmount(d.wallet_daily_cap_malibu) + "/day");
-      }
-      return el("div", { class: "fiat-card rewards-card" },
-        el("h3", null, "MALIBU rewards"),
-        el("div", { class: "fiat-body" }, statusCopy),
-        el("div", { class: "reward-grid" },
-          el("div", null, el("div", { class: "reward-label" }, "Accrued"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.accrued_malibu))),
-          el("div", null, el("div", { class: "reward-label" }, malibuWithdrawableGridLabel(eligibility)), el("div", { class: "reward-value mono" }, malibuWithdrawableGridValue(d, eligibility))),
-          el("div", null, el("div", { class: "reward-label" }, "Held"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.held_malibu)))),
-        el("div", { class: "reward-next" }, "Trust: ",
-          typeof d.trust_tier === "string" && d.trust_tier.trim() ? d.trust_tier : "n/a"),
-        el("div", { class: eligibility && rewardStatusIsHold(eligibility.primary_reason) ? "reward-hold" : "reward-ok" },
-          holdText),
-        nextAction ? el("div", { class: "reward-next" }, nextAction) : null,
-        capParts.length ? el("div", { class: "fiat-cite" }, capParts.join(" · ")) : null);
     }
 
     function normalizedProviderWalletStatus(data) {
@@ -2478,108 +1892,7 @@
       return trimmed.slice(0, 6) + "…" + trimmed.slice(-4);
     }
 
-    function walletAddressLine(wallet) {
-      if (!wallet || !wallet.address) return "No wallet bound";
-      return truncateWalletAddress(wallet.address);
-    }
-
-    function walletCapLine(amounts) {
-      if (!amounts) return "Cap usage unavailable";
-      return formatMalibuAmount(amounts.wallet_day_malibu) + " of " +
-        formatMalibuAmount(amounts.wallet_daily_cap_malibu) + "/day";
-    }
-
-    function eligibilityInputLine(inputs) {
-      if (!inputs) return "Eligibility inputs unavailable";
-      var parts = [];
-      parts.push("trust " + (inputs.trust_tier || "n/a"));
-      parts.push("receipts " + fmtInt(inputs.verified_receipt_count || 0) + "/" + fmtInt(inputs.required_receipt_count || 0));
-      parts.push("compute " + (inputs.compute_integrity_state || "unknown"));
-      parts.push("attestation " + (inputs.attestation_tier || "n/a"));
-      return parts.join(" · ");
-    }
-
-    function renderRewardAuditList(page) {
-      var events = page && Array.isArray(page.events) ? page.events.slice(0, 5) : [];
-      if (!events.length) {
-        return el("div", { class: "fiat-cite" }, "No recent reward audit events.");
-      }
-      return el("div", { class: "audit-list" }, events.map(function (evt) {
-        return el("div", { class: "audit-row" },
-          el("div", { class: "audit-type mono" }, evt.event_type || "reward_event"),
-          el("div", { class: "audit-summary" }, evt.summary || "Reward event recorded."),
-          evt.occurred_at ? el("div", { class: "fiat-cite mono" }, evt.occurred_at) : null);
-      }));
-    }
-
-    function renderProviderWalletCard() {
-      var raw = state.wallet.data;
-      var loading = state.wallet.inflight && !raw;
-      if (!raw && !loading && !state.wallet.err) return null;
-      if (!raw) return null;
-      var d = normalizedProviderWalletStatus(raw);
-      if (d && d.unavailable) {
-        var fallback = raw.payout_wallet && raw.payout_wallet.address;
-        if (typeof fallback !== "string" || !fallback.trim()) return null;
-        return el("div", { class: "fiat-card wallet-card" },
-          el("h3", null, "Wallet"),
-          el("div", { class: "fiat-body mono" }, "Payout wallet " + truncateWalletAddress(fallback)));
-      }
-      var payout = d.payout_wallet;
-      var reward = d.reward_wallet || {};
-      var amounts = d.reward_amounts || {};
-      var inputs = d.eligibility_inputs || {};
-      var reason = d.hold_or_mismatch_reason || (d.wallet_bound ? "none" : "missing_wallet_binding");
-      return el("div", { class: "fiat-card wallet-card" },
-        el("h3", null, "Wallet & eligibility"),
-        el("div", { class: "fiat-body" }, d.wallet_mismatch
-          ? "Wallet projection mismatch; rewards fail closed until the mirror catches up."
-          : (d.wallet_bound ? "Wallet binding is visible to rewards." : "No payout wallet is bound.")),
-        el("div", { class: "wallet-grid" },
-          el("div", null,
-            el("div", { class: "wallet-label" }, "Payout wallet"),
-            el("div", { class: "wallet-value mono" }, walletAddressLine(payout))),
-          el("div", null,
-            el("div", { class: "wallet-label" }, "Reward wallet"),
-            el("div", { class: "wallet-value mono" }, walletAddressLine(reward))),
-          el("div", null,
-            el("div", { class: "wallet-label" }, "Eligible / held"),
-            el("div", { class: "wallet-value mono" }, formatMalibuAmount(amounts.withdrawable_malibu) + " eligible · " +
-              formatMalibuAmount(amounts.held_malibu) + " held")),
-          el("div", null,
-            el("div", { class: "wallet-label" }, "Wallet cap usage"),
-            el("div", { class: "wallet-value mono" }, walletCapLine(amounts)))),
-        el("div", { class: d.wallet_mismatch || reason !== "none" ? "reward-hold" : "reward-next" },
-          "Reason: ", reason),
-        el("div", { class: "reward-next" }, eligibilityInputLine(inputs)),
-        el("div", { class: "fiat-cite" }, "payout source: ",
-          payout && payout.verification_source ? payout.verification_source : "not_bound",
-          " · reward source: ", reward.verification_source || "not_bound"),
-        renderRewardAuditList(d.audit));
-    }
-
-    /* ---- Surface C — Earn ---- */
-    function renderUsdcRow(d, loading, errSub) {
-      var todayUSDC = d && typeof d.usdc_today === "number" ? fmtUSDC(d.usdc_today) : (loading ? "…" : "—");
-      var weekUSDC = d && typeof d.usdc_week === "number" ? fmtUSDC(d.usdc_week) : (loading ? "…" : "—");
-      var pendingUSDC = d && typeof d.usdc_pending === "number" ? fmtUSDC(d.usdc_pending) : (loading ? "…" : "—");
-      var lifeUSDC = d && typeof d.usdc_lifetime === "number" ? fmtUSDC(d.usdc_lifetime) : (loading ? "…" : "—");
-      return el("div", { class: "counters" },
-        el("div", { class: "card" },
-          el("h3", null, "Today"),
-          el("div", { class: "val mono" }, todayUSDC),
-          errSub ? el("div", { class: "sub" }, errSub) : null),
-        el("div", { class: "card" },
-          el("h3", null, "This week"),
-          el("div", { class: "val mono" }, weekUSDC)),
-        el("div", { class: "card" },
-          el("h3", null, "Pending"),
-          el("div", { class: "val mono" }, pendingUSDC)),
-        el("div", { class: "card" },
-          el("h3", null, "Lifetime"),
-          el("div", { class: "val mono" }, lifeUSDC)));
-    }
-
+    /* ---- Dashboard ---- */
     function dashPayoutAddress() {
       var raw = state.wallet.data;
       if (!raw) return "";
@@ -2594,11 +1907,100 @@
       return "";
     }
 
+    function decimalNumber(value) {
+      if (value === null || value === undefined) return NaN;
+      var n = Number(value);
+      return isFinite(n) ? n : NaN;
+    }
+
+    function formatMalibuBare(value) {
+      var n = decimalNumber(value);
+      return isFinite(n) ? n.toFixed(2) : "n/a";
+    }
+
+    function dashboardMalibuTodayLine(earn, malibu, eligibility) {
+      var today = earn && Object.prototype.hasOwnProperty.call(earn, "malibu_today")
+        ? decimalNumber(earn.malibu_today)
+        : NaN;
+      if (!isFinite(today) && malibu && Object.prototype.hasOwnProperty.call(malibu, "malibu_today")) {
+        today = decimalNumber(malibu.malibu_today);
+      }
+      if (!isFinite(today)) {
+        return malibu ? "MALIBU daily not reported yet" : "n/a MALIBU today";
+      }
+      if (eligibility) {
+        if (eligibility.withdrawal_state === "capped") {
+          return today.toFixed(2) + " MALIBU today (capped)";
+        }
+        if (eligibility.withdrawal_state === "held" || eligibility.withdrawal_state === "ineligible") {
+          return today.toFixed(2) + " MALIBU today (locked)";
+        }
+        if (eligibility.withdrawal_state === "unavailable") {
+          return "MALIBU today unavailable";
+        }
+      }
+      return today.toFixed(2) + " MALIBU today";
+    }
+
+    function dashboardMalibuLine(earn, malibu, eligibility) {
+      if (!malibu && state.malibu.inflight) return "MALIBU …";
+      if (!malibu) return "";
+      var allTime = isFinite(decimalNumber(malibu.accrued_malibu))
+        ? formatMalibuBare(malibu.accrued_malibu) + " all-time"
+        : "n/a all-time";
+      return dashboardMalibuTodayLine(earn, malibu, eligibility) + " · " + allTime;
+    }
+
+    function dashboardTrustLine(malibu) {
+      if (!malibu || typeof malibu.trust_tier !== "string" || !malibu.trust_tier.trim()) return "";
+      var tier = malibu.trust_tier.trim().toLowerCase();
+      var label = tier === "trusted" ? "Trusted" :
+        (tier === "provisional" ? "Provisional" : malibu.trust_tier.trim());
+      if (tier === "provisional" &&
+          typeof malibu.trust_criteria_met === "number" &&
+          typeof malibu.trust_criteria_required === "number") {
+        label += " · " + malibu.trust_criteria_met + " of " + malibu.trust_criteria_required;
+      }
+      return label;
+    }
+
+    function dashStatusClass(health) {
+      switch (health.code) {
+        case "earning":
+        case "trusted_withdrawable":
+          return "ok";
+        case "wallet_missing":
+        case "trust_tier_provisional":
+        case "wallet_daily_cap_held":
+        case "provider_daily_cap_held":
+        case "rewards_held":
+        case "local_on_battery":
+        case "local_thermal_pressure":
+        case "not_running":
+        case "provider_paused":
+        case "provider_error":
+          return "warn";
+        default:
+          return "idle";
+      }
+    }
+
     function dashNeedsAttention(health) {
-      return health.code !== "earning" &&
-        health.code !== "idle_no_work" &&
-        health.code !== "trusted_withdrawable" &&
-        health.code !== "eligible_idle";
+      return dashStatusClass(health) === "warn";
+    }
+
+    function dashboardEligibilityCopy(eligibility) {
+      if (!eligibility) return "";
+      switch (eligibility.primary_reason) {
+        case "earning_verified_work": return "Earning MALIBU from verified work";
+        case "eligible_idle_no_work": return "";
+        case "held_provisional_trust_tier": return "MALIBU unlocks at Trusted.";
+        case "held_wallet_daily_cap": return "MALIBU above the wallet daily limit is held.";
+        case "held_provider_daily_cap": return "MALIBU above the daily limit is held.";
+        case "held_demotion_cooldown": return "MALIBU is held while trust is rechecked.";
+        case "missing_wallet_binding": return "Add a payout wallet in Malibu.";
+        default: return "";
+      }
     }
 
     function renderEarn() {
@@ -2612,26 +2014,18 @@
       var life = d && typeof d.usdc_lifetime === "number" ? fmtUSDC(d.usdc_lifetime) : (loading ? "…" : "n/a");
       var eligibility = normalizedMalibuRewardEligibility(malibu);
       var hold = eligibility && rewardStatusIsHold(eligibility.primary_reason);
-      var eligCopy = eligibility
-        ? (eligibility.primary_reason === "earning_verified_work"
-          ? "Earning MALIBU from verified work"
-          : malibuRewardReasonCopy(eligibility.primary_reason))
-        : null;
-      var wd = malibu ? Number(malibu.withdrawable_malibu) : NaN;
-      var hd = malibu ? Number(malibu.held_malibu) : NaN;
-      var malibuLine = malibu
-        ? ((isFinite(wd) ? wd.toFixed(2) : "n/a") + " MALIBU withdrawable / " +
-          (isFinite(hd) ? hd.toFixed(2) : "n/a") + " held")
-        : (state.malibu.inflight ? "MALIBU …" : "");
+      var eligCopy = dashboardEligibilityCopy(eligibility);
+      var malibuLine = dashboardMalibuLine(d, malibu, eligibility);
       var addr = dashPayoutAddress();
       var kids = [
         el("div", { class: "dash-head" },
-          el("div", { class: "dash-status" + (dashNeedsAttention(health) ? " warn" : " ok") }, health.status),
-          el("div", { class: "dash-trust" }, health.trustSummary === "Trust status unavailable" ? "" : health.trustSummary)),
+          el("div", { class: "dash-status " + dashStatusClass(health) }, health.status),
+          el("div", { class: "dash-trust" }, dashboardTrustLine(malibu))),
         el("div", { class: "dash-hero" },
           el("div", { class: "dash-kicker" }, "Today"),
           el("div", { class: "dash-amt mono" }, today),
-          el("div", { class: "dash-sub" }, week + " wk · " + pending + " accrued · " + life + " life")),
+          el("div", { class: "dash-sub" }, week + " wk · " + pending + " accrued · " + life + " life"),
+          el("div", { class: "dash-note" }, "Accrued — payouts open in beta")),
       ];
       if (malibuLine) kids.push(el("div", { class: "dash-malibu" }, malibuLine));
       if (eligCopy) {
@@ -2650,193 +2044,9 @@
       return el("div", { class: "dash" }, kids);
     }
 
-    /* ---- Surface D — Monitoring (placeholder) ---- */
-    function renderMonitoring() {
-      return el("div", null,
-        el("h1", { class: "surface-title" }, "Monitoring"),
-        el("div", { class: "monitor-card" },
-          el("h3", null, "Monitoring — coming after SPEC-002 amendment"),
-          el("ul", null,
-            el("li", null, "Uptime history (24 h / 7 d / 30 d) — needs Open Q5 (SPEC-002 amendment)."),
-            el("li", null, "Current routing weight — needs Open Q5 (SPEC-002 amendment)."),
-            el("li", null, "Live request tail — needs Open Q5 AND a privacy-redaction policy decision (which fields a provider may see; what redaction applies to buyer prompts, completions, identity, API keys, and IPs).")),
-          el("div", { class: "mon-cite" }, "SPEC-014 §4.4.")));
-    }
-
-    /* ---- Surface E — Identity (read-only) ---- */
-    function renderIdentity() {
-      var pool = state.pool.data;
-      var tier = pool && pool.tier ? pool.tier : "—";
-      var stt = pool && pool.state ? pool.state : "—";
-      var coordBase = state.cfg && state.cfg.coordinator_base_url ? state.cfg.coordinator_base_url : "—";
-      var pillCls;
-      if (tier === "pinned") pillCls = "pill online";
-      else if (tier === "provisional") pillCls = "pill unknown";
-      else pillCls = "pill unknown";
-      var grid = el("div", { class: "id-grid" },
-        el("span", { class: "id-lbl" }, "provider_id"),
-        el("span", { class: "id-val mono" }, state.session.provider_id),
-        el("span", { class: "id-lbl" }, "Tier"),
-        el("span", { class: "id-val" }, el("span", { class: pillCls }, tier)),
-        el("span", { class: "id-lbl" }, "State"),
-        el("span", { class: "id-val mono" }, stt),
-        el("span", { class: "id-lbl" }, "Coordinator"),
-        el("span", { class: "id-val mono" }, coordBase));
-      var foot = el("div", { class: "id-foot" },
-        "Hardware and runtime fields (model, RAM, capacity, binary_version, attestation, endpoint_url, …) are deferred behind SPEC-014 Open Q5. Token rotation and machine removal are deferred behind Open Q6.");
-      return el("div", null,
-        el("h1", { class: "surface-title" }, "Identity"),
-        el("div", { class: "id-card" }, grid, foot));
-    }
-
-    /* ---- Surface A — Machine ---- */
-    function renderMachine() {
-      var wrap = el("div", null);
-      wrap.appendChild(el("h1", { class: "surface-title" }, "Machine"));
-      wrap.appendChild(renderHeadstrip());
-      wrap.appendChild(renderCounters());
-      wrap.appendChild(renderIdlePrewarmPanel());
-      wrap.appendChild(renderNeedsAttention());
-      return wrap;
-    }
-
-    function renderHeadstrip() {
-      var pool = state.pool.data;
-      var tier = pool && pool.tier ? pool.tier : "—";
-      var stt = pool && pool.state ? pool.state : "—";
-      var pillCls, pillTxt;
-      if (!pool) {
-        pillCls = "pill unknown"; pillTxt = "Loading…";
-      } else if (pool.state === "ready" || pool.state === "draining") {
-        pillCls = "pill online"; pillTxt = "Online";
-      } else {
-        pillCls = "pill offline"; pillTxt = "Offline";
-      }
-      var stamp = renderStampNode();
-      var refreshBtn = el("button", {
-        class: "refresh-btn",
-        disabled: state.pool.inflight,
-        onclick: function () { poolCheck(); },
-      }, state.pool.inflight ? "Refreshing…" : "Refresh");
-      return el("div", { class: "headstrip", id: "headstrip" },
-        el("div", { class: "field" },
-          el("span", { class: "lbl" }, "provider_id"),
-          el("span", { class: "vl mono" }, state.session.provider_id)),
-        el("div", { class: "field" },
-          el("span", { class: "lbl" }, "tier"),
-          el("span", { class: "vl" }, tier)),
-        el("div", { class: "field" },
-          el("span", { class: "lbl" }, "state"),
-          el("span", { class: "vl" }, stt)),
-        el("div", { class: "field" },
-          el("span", { class: "lbl" }, "status"),
-          el("span", { class: pillCls }, pillTxt)),
-        el("div", { class: "spacer" }),
-        el("div", { class: "field" },
-          el("span", { class: "lbl" }, "pool poll"),
-          el("span", { class: "stamp", id: "pool-stamp" }, stamp)),
-        refreshBtn);
-    }
-
-    function renderStampNode() {
-      return computeStampText();
-    }
-    function computeStampText() {
-      if (!state.pool.ts) return "No successful poll yet";
-      var ageMs = Date.now() - state.pool.ts;
-      if (ageMs > STALE_FACTOR * POOL_POLL_MS) {
-        return "stale";
-      }
-      var secs = Math.max(0, Math.floor(ageMs / 1000));
-      return "Last refreshed " + secs + "s ago";
-    }
-    function renderStampOnly() {
-      var node = document.getElementById("pool-stamp");
-      if (!node) return;
-      clear(node);
-      var txt = computeStampText();
-      node.appendChild(document.createTextNode(txt));
-      if (txt === "stale") {
-        if (!node.classList.contains("stale")) node.classList.add("stale");
-      } else {
-        if (node.classList.contains("stale")) node.classList.remove("stale");
-      }
-    }
-
-    function renderCounters() {
-      var d = state.earn.data;
-      var loading = state.earn.inflight && !d;
-      var errSub = state.earn.err
-        ? "Earnings request returned HTTP " + state.earn.err.status + "."
-        : null;
-      return renderUsdcRow(d, loading, errSub);
-    }
-
-    function renderIdlePrewarmPanel() {
-      var idle = state.earn.data && state.earn.data.idle_prewarm ? state.earn.data.idle_prewarm : null;
-      var events = idle && idle.events_last_1h ? idle.events_last_1h : {};
-      var skips = idle && idle.skips_by_reason_last_1h ? idle.skips_by_reason_last_1h : {};
-      var names = [
-        "idle_prewarm_fired",
-        "idle_prewarm_completed",
-        "idle_prewarm_skipped",
-        "idle_prewarm_cancelled_by_real_request",
-        "idle_prewarm_failed",
-      ];
-      var countRows = [];
-      for (var i = 0; i < names.length; i++) {
-        countRows.push(el("div", { class: "row" },
-          el("div", { class: "row-title mono" }, names[i]),
-          el("div", { class: "row-hint mono" }, fmtInt(events[names[i]] || 0))));
-      }
-      var skipKeys = Object.keys(skips).sort();
-      var skipText = skipKeys.length
-        ? skipKeys.map(function (k) { return k + "=" + fmtInt(skips[k] || 0); }).join("  ")
-        : "No skip reasons in the last hour";
-      return el("div", { class: "panel" },
-        el("h2", null, "Idle prewarm"),
-        el("div", { class: "row muted" },
-          el("div", null, "Last hour"),
-          el("div", { class: "row-hint mono" }, skipText)),
-        countRows);
-    }
-
-    function renderNeedsAttention() {
-      var st = state.pool.data ? state.pool.data.state : null;
-      var panelBody;
-      if (st === "unavailable" || st === "unknown") {
-        var rowTitle = "This machine is currently " + st + ".";
-        var hint = "Run macprovider-cli status to inspect local state; if the binary is healthy, re-check in a few seconds.";
-        var cmd = "macprovider-cli status";
-        var copyKey = "cli-status";
-        var copyBtn = el("button", {
-          class: "copy-btn",
-          onclick: function () { copyText(cmd, copyKey); },
-        }, "Copy");
-        var echo = state.copyEcho === copyKey ? el("span", { class: "copy-ok" }, "Copied") : null;
-        panelBody = el("div", { class: "row" },
-          el("div", { class: "row-title" }, rowTitle),
-          el("div", { class: "row-hint" }, hint),
-          el("div", { class: "row-cta" },
-            el("code", { class: "mono" }, cmd),
-            copyBtn,
-            echo));
-      } else {
-        panelBody = el("div", { class: "row muted" },
-          el("div", null, "Nothing to do — this Mac looks healthy."));
-      }
-      return el("div", { class: "panel" },
-        el("h2", null, "Needs attention"),
-        panelBody);
-    }
-
     /* =====================================================================
      * Formatting
      * ===================================================================== */
-    function fmtInt(n) {
-      if (typeof n !== "number" || !isFinite(n)) return "—";
-      try { return n.toLocaleString("en-US"); } catch (_) { return String(n); }
-    }
     function fmtUSDC(n) {
       if (typeof n !== "number" || !isFinite(n)) return "—";
       var digits = (n !== 0 && Math.abs(n) < 0.01) ? 4 : 2;
@@ -2857,9 +2067,9 @@
       state.sessionGeneration += 1;
       state.session = { provider_id: "", provider_token: token };
       state.signinErr = null;
-      state.route = "earn";
+      state.route = "dashboard";
       render();
-      return coordFetch(PORTAL_SESSION_PATH, { auth: true, surface: "earn" })
+      return coordFetch(PORTAL_SESSION_PATH, { auth: true, surface: "dashboard" })
         .then(function (r) {
           if (!r.ok || !r.body || !r.body.provider_id) {
             state.session = null;

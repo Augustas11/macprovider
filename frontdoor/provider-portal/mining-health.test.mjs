@@ -6,10 +6,19 @@ import vm from "node:vm";
 function loadPortalContext() {
   const html = fs.readFileSync(new URL("./index.html", import.meta.url), "utf8");
   const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]);
+  function FakeNode(tag) {
+    this.tagName = tag;
+    this.classList = { contains() { return false; }, add() {}, remove() {} };
+    this.style = {};
+  }
+  FakeNode.prototype.appendChild = function appendChild() {};
+  FakeNode.prototype.setAttribute = function setAttribute() {};
+  FakeNode.prototype.addEventListener = function addEventListener() {};
   const context = {
     console,
     Date,
     URL,
+    Node: FakeNode,
     Promise,
     setInterval() { return 0; },
     clearInterval() {},
@@ -21,15 +30,9 @@ function loadPortalContext() {
       readyState: "loading",
       getElementById() { return null; },
       createElement(tag) {
-        return {
-          tagName: tag,
-          classList: { contains() { return false; }, add() {}, remove() {} },
-          style: {},
-          appendChild() {},
-          setAttribute() {},
-          addEventListener() {},
-        };
+        return new FakeNode(tag);
       },
+      createElementNS(_ns, tag) { return new FakeNode(tag); },
       createTextNode(text) { return { textContent: text }; },
       addEventListener() {},
     },
@@ -349,8 +352,9 @@ test("provider wallet status requires reward eligibility and audit events", () =
   assert.equal(normalized.reward_eligibility.primary_reason, "eligible_idle_no_work");
 });
 
-test("provider wallet card helpers expose held, capped, mismatch inputs", () => {
+test("dashboard wallet helpers keep payout address and daily-limit copy provider-facing", () => {
   const context = loadPortalContext();
+  baseState(context);
   const wallet = {
     schema_version: "provider_wallet_status.v1",
     provider_id: "mp-test",
@@ -396,15 +400,15 @@ test("provider wallet card helpers expose held, capped, mismatch inputs", () => 
       uptime_ok: true,
     },
     reward_eligibility: rewardEligibility("capped", "capped", "held_provider_daily_cap"),
-	    audit: { events: [{ id: "evt-1", occurred_at: "2026-08-18T00:00:00Z", event_type: "wallet_bind_projected", summary: "Wallet projected." }] },
-	  };
+    audit: { events: [{ id: "evt-1", occurred_at: "2026-08-18T00:00:00Z", event_type: "wallet_bind_projected", summary: "Wallet projected." }] },
+  };
   context.state.wallet.data = wallet;
+  context.state.malibu.data.reward_eligibility = wallet.reward_eligibility;
 
-  assert.equal(vm.runInContext("walletAddressLine(state.wallet.data.payout_wallet)", context), "0xPayout");
-  assert.equal(vm.runInContext("walletCapLine(state.wallet.data.reward_amounts)", context), "100.00 MALIBU of 100.00 MALIBU/day");
+  assert.equal(vm.runInContext("dashPayoutAddress()", context), "0xPayout");
   assert.equal(
-    vm.runInContext("eligibilityInputLine(state.wallet.data.eligibility_inputs)", context),
-    "trust trusted · receipts 3/3 · compute unknown · attestation app_attested"
+    vm.runInContext("dashboardEligibilityCopy(normalizedMalibuRewardEligibility(state.malibu.data))", context),
+    "MALIBU above the daily limit is held."
   );
   assert.equal(vm.runInContext("normalizedProviderWalletStatus(state.wallet.data).hold_or_mismatch_reason", context), "wallet_projection_mismatch");
 }
@@ -422,7 +426,7 @@ test("portal accepts provider daily cap reward reason", () => {
   const eligibility = vm.runInContext("normalizedMalibuRewardEligibility(state.malibu.data)", context);
 
   assert.equal(eligibility.primary_reason, "held_provider_daily_cap");
-  assert.equal(vm.runInContext("malibuRewardReasonCopy('held_provider_daily_cap')", context), "provider daily limit reached");
+  assert.equal(vm.runInContext("malibuRewardReasonCopy('held_provider_daily_cap')", context), "daily limit reached");
   assert.equal(vm.runInContext("computePortalMiningHealth().code", context), "provider_daily_cap_held");
 }
 );
