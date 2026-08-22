@@ -45,6 +45,7 @@ var (
 	ErrPromotionPreconditionFailed = errors.New("trustpool: promotion precondition failed")
 	ErrRootRegistrationNonce       = errors.New("trustpool: invalid root registration nonce")
 	ErrCreatorApprovalGate         = errors.New("trustpool: creator approval gate failed")
+	ErrPublicAnnouncementGate      = errors.New("trustpool: public announcement gate failed")
 	ErrProhibitedPromiseClaim      = errors.New("trustpool: prohibited promise claim")
 )
 
@@ -144,6 +145,35 @@ type CreatorApproval struct {
 	UpdatedAtUTC                      time.Time `json:"updated_at_utc"`
 }
 
+type PublicAnnouncementApproval struct {
+	OperationID                string    `json:"operation_id"`
+	PoolID                     string    `json:"pool_id"`
+	ManifestCoreDigest         string    `json:"manifest_core_digest"`
+	ReviewedDistributionDigest string    `json:"reviewed_distribution_artifact_digest"`
+	CreatorAccountID           string    `json:"creator_account_id"`
+	CreatorApprovalRecordID    string    `json:"creator_approval_record_id"`
+	CreatorApprovalVersion     string    `json:"creator_approval_version"`
+	CreatorApprovalRevision    uint64    `json:"creator_approval_revision"`
+	ApprovalRecordID           string    `json:"approval_record_id"`
+	ApprovedBy                 string    `json:"approved_by"`
+	ApprovedAtUTC              time.Time `json:"approved_at_utc"`
+	PublicAnnouncementRevision uint64    `json:"public_announcement_revision"`
+	UpdatedAtUTC               time.Time `json:"updated_at_utc"`
+}
+
+type ReviewedDistributionArtifact struct {
+	OperationID                string    `json:"operation_id"`
+	PoolID                     string    `json:"pool_id"`
+	ManifestCoreDigest         string    `json:"manifest_core_digest"`
+	ReviewedDistributionDigest string    `json:"reviewed_distribution_artifact_digest"`
+	ArtifactURI                string    `json:"artifact_uri"`
+	ClaimControlDigest         string    `json:"claim_control_artifact_digest"`
+	ReviewedBy                 string    `json:"reviewed_by"`
+	ReviewedAtUTC              time.Time `json:"reviewed_at_utc"`
+	ReviewRevision             uint64    `json:"review_revision"`
+	UpdatedAtUTC               time.Time `json:"updated_at_utc"`
+}
+
 func NewStore(db *sql.DB) (*Store, error) {
 	if db == nil {
 		return nil, ErrStoreClosed
@@ -225,10 +255,69 @@ CREATE TABLE IF NOT EXISTS trustpool_creator_approvals (
     approval_revision INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     suspension_reason TEXT,
-    updated_at_utc TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_trustpool_creator_approvals_status ON trustpool_creator_approvals(status, updated_at_utc);
-`)
+	    updated_at_utc TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_trustpool_creator_approvals_status ON trustpool_creator_approvals(status, updated_at_utc);
+	CREATE TABLE IF NOT EXISTS trustpool_public_announcements (
+	    pool_id TEXT PRIMARY KEY,
+	    operation_id TEXT NOT NULL,
+	    manifest_core_digest TEXT NOT NULL,
+	    reviewed_distribution_artifact_digest TEXT NOT NULL,
+	    creator_account_id TEXT NOT NULL,
+	    creator_approval_record_id TEXT NOT NULL,
+	    creator_approval_version TEXT NOT NULL,
+	    creator_approval_revision INTEGER NOT NULL DEFAULT 0,
+	    approval_record_id TEXT NOT NULL,
+	    approved_by TEXT NOT NULL,
+	    approved_at_utc TEXT NOT NULL,
+	    public_announcement_revision INTEGER NOT NULL DEFAULT 0,
+	    updated_at_utc TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS trustpool_public_announcement_history (
+	    id INTEGER PRIMARY KEY AUTOINCREMENT,
+	    operation_id TEXT NOT NULL UNIQUE,
+	    pool_id TEXT NOT NULL,
+	    manifest_core_digest TEXT NOT NULL,
+	    reviewed_distribution_artifact_digest TEXT NOT NULL,
+	    creator_account_id TEXT NOT NULL,
+	    creator_approval_record_id TEXT NOT NULL,
+	    creator_approval_version TEXT NOT NULL,
+	    creator_approval_revision INTEGER NOT NULL DEFAULT 0,
+	    approval_record_id TEXT NOT NULL,
+	    approved_by TEXT NOT NULL,
+	    approved_at_utc TEXT NOT NULL,
+	    public_announcement_revision INTEGER NOT NULL DEFAULT 0,
+	    updated_at_utc TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_trustpool_public_announcement_history_pool ON trustpool_public_announcement_history(pool_id, id);
+	CREATE INDEX IF NOT EXISTS idx_trustpool_public_announcements_digest ON trustpool_public_announcements(manifest_core_digest, updated_at_utc);
+	CREATE TABLE IF NOT EXISTS trustpool_reviewed_distribution_artifacts (
+	    pool_id TEXT PRIMARY KEY,
+	    operation_id TEXT NOT NULL,
+	    manifest_core_digest TEXT NOT NULL,
+	    reviewed_distribution_artifact_digest TEXT NOT NULL,
+	    artifact_uri TEXT NOT NULL,
+	    claim_control_artifact_digest TEXT NOT NULL,
+	    reviewed_by TEXT NOT NULL,
+	    reviewed_at_utc TEXT NOT NULL,
+	    review_revision INTEGER NOT NULL DEFAULT 0,
+	    updated_at_utc TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS trustpool_reviewed_distribution_artifact_history (
+	    id INTEGER PRIMARY KEY AUTOINCREMENT,
+	    operation_id TEXT NOT NULL UNIQUE,
+	    pool_id TEXT NOT NULL,
+	    manifest_core_digest TEXT NOT NULL,
+	    reviewed_distribution_artifact_digest TEXT NOT NULL,
+	    artifact_uri TEXT NOT NULL,
+	    claim_control_artifact_digest TEXT NOT NULL,
+	    reviewed_by TEXT NOT NULL,
+	    reviewed_at_utc TEXT NOT NULL,
+	    review_revision INTEGER NOT NULL DEFAULT 0,
+	    updated_at_utc TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_trustpool_reviewed_distribution_history_pool ON trustpool_reviewed_distribution_artifact_history(pool_id, id);
+	`)
 	if err != nil {
 		return err
 	}
@@ -264,6 +353,27 @@ CREATE INDEX IF NOT EXISTS idx_trustpool_creator_approvals_status ON trustpool_c
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_trustpool_events_root_fingerprint ON trustpool_events(root_issuer_public_key_fingerprint, id)`); err != nil {
+		return err
+	}
+	for _, c := range []struct {
+		name string
+		decl string
+	}{
+		{name: "operation_id", decl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "reviewed_distribution_artifact_digest", decl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "creator_account_id", decl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "creator_approval_record_id", decl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "creator_approval_version", decl: "TEXT NOT NULL DEFAULT ''"},
+		{name: "creator_approval_revision", decl: "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := s.ensureColumn(ctx, "trustpool_public_announcements", c.name, c.decl); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_trustpool_public_announcement_history_operation ON trustpool_public_announcement_history(operation_id)`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_trustpool_reviewed_distribution_history_operation ON trustpool_reviewed_distribution_artifact_history(operation_id)`); err != nil {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_trustpool_root_registration_nonces_operation ON trustpool_root_registration_nonces(operation_id) WHERE operation_id IS NOT NULL`)
@@ -448,6 +558,329 @@ func (s *Store) creatorApprovals(ctx context.Context) (map[string]CreatorApprova
 	return creatorApprovalsFromQueryer(ctx, s.db)
 }
 
+func (s *Store) UpsertReviewedDistributionArtifact(ctx context.Context, artifact ReviewedDistributionArtifact) (ReviewedDistributionArtifact, error) {
+	if s == nil || s.db == nil {
+		return ReviewedDistributionArtifact{}, ErrStoreClosed
+	}
+	artifact = normalizeReviewedDistributionArtifact(artifact)
+	if err := validateReviewedDistributionArtifact(artifact); err != nil {
+		return ReviewedDistributionArtifact{}, err
+	}
+	now := time.Now().UTC()
+	artifact.UpdatedAtUTC = now
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		if existing, ok, err := reviewedDistributionArtifactByOperationID(ctx, conn, artifact.OperationID); err != nil {
+			return err
+		} else if ok {
+			if reviewedDistributionArtifactMatchesOperation(existing, artifact) {
+				artifact = existing
+				return nil
+			}
+			return ErrConflictingOperationID
+		}
+		if used, err := operationIDExists(ctx, conn, artifact.OperationID); err != nil {
+			return err
+		} else if used {
+			return ErrConflictingOperationID
+		}
+		events, err := eventsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		creatorApprovals, err := creatorApprovalsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		state, err := reconstructEventsWithApprovals(events, creatorApprovals, now)
+		if err != nil {
+			return err
+		}
+		p := state.Pools[artifact.PoolID]
+		if p == nil || p.ManifestCoreDigest == "" || p.ManifestCoreDigest != artifact.ManifestCoreDigest {
+			return ErrPublicAnnouncementGate
+		}
+		if _, ok := currentPublicAnnouncementBinding(state, p); !ok {
+			return ErrPublicAnnouncementGate
+		}
+		current, err := reviewedDistributionArtifactsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		if existing, ok := current[artifact.PoolID]; ok && sameReviewedDistributionArtifactExceptRevision(existing, artifact) {
+			if existing.OperationID == artifact.OperationID {
+				artifact = existing
+				return nil
+			}
+			return ErrConflictingOperationID
+		}
+		artifact.ReviewRevision = current[artifact.PoolID].ReviewRevision + 1
+		if _, err := conn.ExecContext(ctx, `
+	INSERT INTO trustpool_reviewed_distribution_artifact_history (
+	    operation_id, pool_id, manifest_core_digest, reviewed_distribution_artifact_digest,
+	    artifact_uri, claim_control_artifact_digest, reviewed_by, reviewed_at_utc,
+	    review_revision, updated_at_utc
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			artifact.OperationID,
+			artifact.PoolID,
+			artifact.ManifestCoreDigest,
+			artifact.ReviewedDistributionDigest,
+			artifact.ArtifactURI,
+			artifact.ClaimControlDigest,
+			artifact.ReviewedBy,
+			artifact.ReviewedAtUTC.Format(time.RFC3339Nano),
+			artifact.ReviewRevision,
+			artifact.UpdatedAtUTC.Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `
+	INSERT INTO trustpool_reviewed_distribution_artifacts (
+	    pool_id, operation_id, manifest_core_digest, reviewed_distribution_artifact_digest,
+	    artifact_uri, claim_control_artifact_digest, reviewed_by, reviewed_at_utc,
+	    review_revision, updated_at_utc
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(pool_id) DO UPDATE SET
+	    operation_id = excluded.operation_id,
+	    manifest_core_digest = excluded.manifest_core_digest,
+	    reviewed_distribution_artifact_digest = excluded.reviewed_distribution_artifact_digest,
+	    artifact_uri = excluded.artifact_uri,
+	    claim_control_artifact_digest = excluded.claim_control_artifact_digest,
+	    reviewed_by = excluded.reviewed_by,
+	    reviewed_at_utc = excluded.reviewed_at_utc,
+	    review_revision = excluded.review_revision,
+	    updated_at_utc = excluded.updated_at_utc`,
+			artifact.PoolID,
+			artifact.OperationID,
+			artifact.ManifestCoreDigest,
+			artifact.ReviewedDistributionDigest,
+			artifact.ArtifactURI,
+			artifact.ClaimControlDigest,
+			artifact.ReviewedBy,
+			artifact.ReviewedAtUTC.Format(time.RFC3339Nano),
+			artifact.ReviewRevision,
+			artifact.UpdatedAtUTC.Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return ReviewedDistributionArtifact{}, err
+	}
+	return artifact, nil
+}
+
+func (s *Store) ReviewedDistributionArtifact(ctx context.Context, poolID string) (ReviewedDistributionArtifact, bool, error) {
+	if s == nil || s.db == nil {
+		return ReviewedDistributionArtifact{}, false, ErrStoreClosed
+	}
+	return reviewedDistributionArtifactFromQueryer(ctx, s.db, strings.TrimSpace(poolID))
+}
+
+func (s *Store) ReviewedDistributionArtifactHistory(ctx context.Context, poolID string) ([]ReviewedDistributionArtifact, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrStoreClosed
+	}
+	return reviewedDistributionArtifactHistoryFromQueryer(ctx, s.db, strings.TrimSpace(poolID))
+}
+
+func (s *Store) reviewedDistributionArtifacts(ctx context.Context) (map[string]ReviewedDistributionArtifact, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrStoreClosed
+	}
+	return reviewedDistributionArtifactsFromQueryer(ctx, s.db)
+}
+
+func (s *Store) UpsertPublicAnnouncementApproval(ctx context.Context, approval PublicAnnouncementApproval) (PublicAnnouncementApproval, error) {
+	if s == nil || s.db == nil {
+		return PublicAnnouncementApproval{}, ErrStoreClosed
+	}
+	approval = normalizePublicAnnouncementApproval(approval)
+	if err := validatePublicAnnouncementApproval(approval); err != nil {
+		return PublicAnnouncementApproval{}, err
+	}
+	now := time.Now().UTC()
+	approval.UpdatedAtUTC = now
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		if existing, ok, err := publicAnnouncementApprovalByOperationID(ctx, conn, approval.OperationID); err != nil {
+			return err
+		} else if ok {
+			if publicAnnouncementApprovalMatchesOperation(existing, approval) {
+				approval = existing
+				return nil
+			}
+			return ErrConflictingOperationID
+		}
+		if used, err := operationIDExists(ctx, conn, approval.OperationID); err != nil {
+			return err
+		} else if used {
+			return ErrConflictingOperationID
+		}
+		events, err := eventsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		creatorApprovals, err := creatorApprovalsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		state, err := reconstructEventsWithApprovals(events, creatorApprovals, now)
+		if err != nil {
+			return err
+		}
+		p := state.Pools[approval.PoolID]
+		if p == nil || p.ManifestCoreDigest == "" || p.ManifestCoreDigest != approval.ManifestCoreDigest {
+			return ErrPublicAnnouncementGate
+		}
+		artifact, ok, err := reviewedDistributionArtifactFromQueryer(ctx, conn, approval.PoolID)
+		if err != nil {
+			return err
+		}
+		if !ok || artifact.ManifestCoreDigest != approval.ManifestCoreDigest || artifact.ReviewedDistributionDigest != approval.ReviewedDistributionDigest {
+			return ErrPublicAnnouncementGate
+		}
+		binding, ok := currentPublicAnnouncementBinding(state, p)
+		if !ok {
+			return ErrPublicAnnouncementGate
+		}
+		if !publicAnnouncementLaunchAllowed(p) {
+			return ErrPublicAnnouncementGate
+		}
+		approval.CreatorAccountID = binding.CreatorAccountID
+		approval.CreatorApprovalRecordID = binding.CreatorApprovalRecordID
+		approval.CreatorApprovalVersion = binding.CreatorApprovalVersion
+		approval.CreatorApprovalRevision = binding.CreatorApprovalRevision
+		if err := validateStoredPublicAnnouncementApproval(approval); err != nil {
+			return err
+		}
+		currentApprovals, err := publicAnnouncementApprovalsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		if current, ok := currentApprovals[approval.PoolID]; ok && samePublicAnnouncementApprovalExceptRevision(current, approval) {
+			approval = current
+			return nil
+		}
+		approval.PublicAnnouncementRevision = currentApprovals[approval.PoolID].PublicAnnouncementRevision + 1
+		if _, err := conn.ExecContext(ctx, `
+	INSERT INTO trustpool_public_announcement_history (
+	    operation_id, pool_id, manifest_core_digest, reviewed_distribution_artifact_digest,
+	    creator_account_id, creator_approval_record_id, creator_approval_version,
+	    creator_approval_revision, approval_record_id, approved_by, approved_at_utc,
+	    public_announcement_revision, updated_at_utc
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			approval.OperationID,
+			approval.PoolID,
+			approval.ManifestCoreDigest,
+			approval.ReviewedDistributionDigest,
+			approval.CreatorAccountID,
+			approval.CreatorApprovalRecordID,
+			approval.CreatorApprovalVersion,
+			approval.CreatorApprovalRevision,
+			approval.ApprovalRecordID,
+			approval.ApprovedBy,
+			approval.ApprovedAtUTC.Format(time.RFC3339Nano),
+			approval.PublicAnnouncementRevision,
+			approval.UpdatedAtUTC.Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `
+	INSERT INTO trustpool_public_announcements (
+	    pool_id, operation_id, manifest_core_digest, reviewed_distribution_artifact_digest,
+	    creator_account_id, creator_approval_record_id, creator_approval_version,
+	    creator_approval_revision, approval_record_id, approved_by,
+	    approved_at_utc, public_announcement_revision, updated_at_utc
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(pool_id) DO UPDATE SET
+	    operation_id = excluded.operation_id,
+	    manifest_core_digest = excluded.manifest_core_digest,
+	    reviewed_distribution_artifact_digest = excluded.reviewed_distribution_artifact_digest,
+	    creator_account_id = excluded.creator_account_id,
+	    creator_approval_record_id = excluded.creator_approval_record_id,
+	    creator_approval_version = excluded.creator_approval_version,
+	    creator_approval_revision = excluded.creator_approval_revision,
+	    approval_record_id = excluded.approval_record_id,
+	    approved_by = excluded.approved_by,
+	    approved_at_utc = excluded.approved_at_utc,
+	    public_announcement_revision = excluded.public_announcement_revision,
+	    updated_at_utc = excluded.updated_at_utc`,
+			approval.PoolID,
+			approval.OperationID,
+			approval.ManifestCoreDigest,
+			approval.ReviewedDistributionDigest,
+			approval.CreatorAccountID,
+			approval.CreatorApprovalRecordID,
+			approval.CreatorApprovalVersion,
+			approval.CreatorApprovalRevision,
+			approval.ApprovalRecordID,
+			approval.ApprovedBy,
+			approval.ApprovedAtUTC.Format(time.RFC3339Nano),
+			approval.PublicAnnouncementRevision,
+			approval.UpdatedAtUTC.Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return PublicAnnouncementApproval{}, err
+	}
+	return approval, nil
+}
+
+func (s *Store) PublicAnnouncementApproval(ctx context.Context, poolID string) (PublicAnnouncementApproval, bool, error) {
+	if s == nil || s.db == nil {
+		return PublicAnnouncementApproval{}, false, ErrStoreClosed
+	}
+	return publicAnnouncementApprovalFromQueryer(ctx, s.db, strings.TrimSpace(poolID))
+}
+
+func (s *Store) PublicAnnouncementHistory(ctx context.Context, poolID string) ([]PublicAnnouncementApproval, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrStoreClosed
+	}
+	return publicAnnouncementHistoryFromQueryer(ctx, s.db, strings.TrimSpace(poolID))
+}
+
+func (s *Store) publicAnnouncementApprovals(ctx context.Context) (map[string]PublicAnnouncementApproval, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrStoreClosed
+	}
+	return publicAnnouncementApprovalsFromQueryer(ctx, s.db)
+}
+
+func operationIDExists(ctx context.Context, q eventQueryer, operationID string) (bool, error) {
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" {
+		return false, nil
+	}
+	for _, query := range []string{
+		`SELECT 1 FROM trustpool_events WHERE operation_id = ? LIMIT 1`,
+		`SELECT 1 FROM trustpool_root_registration_nonces WHERE operation_id = ? LIMIT 1`,
+		`SELECT 1 FROM trustpool_reviewed_distribution_artifact_history WHERE operation_id = ? LIMIT 1`,
+		`SELECT 1 FROM trustpool_public_announcement_history WHERE operation_id = ? LIMIT 1`,
+	} {
+		rows, err := q.QueryContext(ctx, query, operationID)
+		if err != nil {
+			return false, err
+		}
+		found := rows.Next()
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		closeErr := rows.Close()
+		if closeErr != nil {
+			return false, closeErr
+		}
+		if found {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegistrationNonceIssue) (RootRegistrationNonceRecord, error) {
 	if s == nil || s.db == nil {
 		return RootRegistrationNonceRecord{}, ErrStoreClosed
@@ -495,6 +928,11 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 				record = existing
 				return nil
 			}
+			return ErrConflictingOperationID
+		}
+		if used, err := operationIDExists(ctx, conn, issue.OperationID); err != nil {
+			return err
+		} else if used {
 			return ErrConflictingOperationID
 		}
 		approval, ok, err := creatorApprovalFromQueryer(ctx, conn, issue.CreatorAccountID)
@@ -760,6 +1198,11 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 		if err := validateEvent(e); err != nil {
 			return err
 		}
+		if used, err := operationIDExists(ctx, conn, e.OperationID); err != nil {
+			return err
+		} else if used {
+			return ErrConflictingOperationID
+		}
 		preState, err := reconstructEventsWithApprovals(events, approvals, time.Now().UTC())
 		if err != nil {
 			return err
@@ -879,6 +1322,11 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 		}
 		if err := validateEvent(e); err != nil {
 			return err
+		}
+		if used, err := operationIDExists(ctx, conn, e.OperationID); err != nil {
+			return err
+		} else if used {
+			return ErrConflictingOperationID
 		}
 		now := time.Now().UTC()
 		preState, err := reconstructEventsWithApprovals(events, approvals, now)
@@ -1166,6 +1614,289 @@ func scanCreatorApproval(row creatorApprovalScanner) (CreatorApproval, error) {
 	return approval, nil
 }
 
+func publicAnnouncementApprovalFromQueryer(ctx context.Context, q eventQueryer, poolID string) (PublicAnnouncementApproval, bool, error) {
+	if poolID == "" {
+		return PublicAnnouncementApproval{}, false, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+	SELECT operation_id, pool_id, manifest_core_digest, reviewed_distribution_artifact_digest,
+	       creator_account_id, creator_approval_record_id, creator_approval_version,
+	       creator_approval_revision, approval_record_id, approved_by, approved_at_utc,
+	       public_announcement_revision, updated_at_utc
+	FROM trustpool_public_announcements
+	WHERE pool_id = ?`, poolID)
+	if err != nil {
+		return PublicAnnouncementApproval{}, false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return PublicAnnouncementApproval{}, false, rows.Err()
+	}
+	approval, err := scanPublicAnnouncementApproval(rows)
+	if err != nil {
+		return PublicAnnouncementApproval{}, false, err
+	}
+	if rows.Next() {
+		return PublicAnnouncementApproval{}, false, fmt.Errorf("trustpool: duplicate public announcement approval for %q", poolID)
+	}
+	return approval, true, rows.Err()
+}
+
+func reviewedDistributionArtifactFromQueryer(ctx context.Context, q eventQueryer, poolID string) (ReviewedDistributionArtifact, bool, error) {
+	if poolID == "" {
+		return ReviewedDistributionArtifact{}, false, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+	SELECT operation_id, pool_id, manifest_core_digest, reviewed_distribution_artifact_digest,
+	       artifact_uri, claim_control_artifact_digest, reviewed_by, reviewed_at_utc,
+	       review_revision, updated_at_utc
+	FROM trustpool_reviewed_distribution_artifacts
+	WHERE pool_id = ?`, poolID)
+	if err != nil {
+		return ReviewedDistributionArtifact{}, false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return ReviewedDistributionArtifact{}, false, rows.Err()
+	}
+	artifact, err := scanReviewedDistributionArtifact(rows)
+	if err != nil {
+		return ReviewedDistributionArtifact{}, false, err
+	}
+	if rows.Next() {
+		return ReviewedDistributionArtifact{}, false, fmt.Errorf("trustpool: duplicate reviewed distribution artifact for %q", poolID)
+	}
+	return artifact, true, rows.Err()
+}
+
+func reviewedDistributionArtifactsFromQueryer(ctx context.Context, q eventQueryer) (map[string]ReviewedDistributionArtifact, error) {
+	rows, err := q.QueryContext(ctx, `
+	SELECT operation_id, pool_id, manifest_core_digest, reviewed_distribution_artifact_digest,
+	       artifact_uri, claim_control_artifact_digest, reviewed_by, reviewed_at_utc,
+	       review_revision, updated_at_utc
+	FROM trustpool_reviewed_distribution_artifacts`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]ReviewedDistributionArtifact)
+	for rows.Next() {
+		artifact, err := scanReviewedDistributionArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[artifact.PoolID] = artifact
+	}
+	return out, rows.Err()
+}
+
+func reviewedDistributionArtifactByOperationID(ctx context.Context, q eventQueryer, operationID string) (ReviewedDistributionArtifact, bool, error) {
+	if operationID == "" {
+		return ReviewedDistributionArtifact{}, false, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+	SELECT operation_id, pool_id, manifest_core_digest, reviewed_distribution_artifact_digest,
+	       artifact_uri, claim_control_artifact_digest, reviewed_by, reviewed_at_utc,
+	       review_revision, updated_at_utc
+	FROM trustpool_reviewed_distribution_artifact_history
+	WHERE operation_id = ?`, operationID)
+	if err != nil {
+		return ReviewedDistributionArtifact{}, false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return ReviewedDistributionArtifact{}, false, rows.Err()
+	}
+	artifact, err := scanReviewedDistributionArtifact(rows)
+	if err != nil {
+		return ReviewedDistributionArtifact{}, false, err
+	}
+	if rows.Next() {
+		return ReviewedDistributionArtifact{}, false, fmt.Errorf("trustpool: duplicate reviewed distribution artifact operation %q", operationID)
+	}
+	return artifact, true, rows.Err()
+}
+
+func reviewedDistributionArtifactHistoryFromQueryer(ctx context.Context, q eventQueryer, poolID string) ([]ReviewedDistributionArtifact, error) {
+	if poolID == "" {
+		return nil, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+	SELECT operation_id, pool_id, manifest_core_digest, reviewed_distribution_artifact_digest,
+	       artifact_uri, claim_control_artifact_digest, reviewed_by, reviewed_at_utc,
+	       review_revision, updated_at_utc
+	FROM trustpool_reviewed_distribution_artifact_history
+	WHERE pool_id = ?
+	ORDER BY id`, poolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ReviewedDistributionArtifact, 0)
+	for rows.Next() {
+		artifact, err := scanReviewedDistributionArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, artifact)
+	}
+	return out, rows.Err()
+}
+
+func publicAnnouncementApprovalsFromQueryer(ctx context.Context, q eventQueryer) (map[string]PublicAnnouncementApproval, error) {
+	rows, err := q.QueryContext(ctx, `
+	SELECT operation_id, pool_id, manifest_core_digest, reviewed_distribution_artifact_digest,
+	       creator_account_id, creator_approval_record_id, creator_approval_version,
+	       creator_approval_revision, approval_record_id, approved_by, approved_at_utc,
+	       public_announcement_revision, updated_at_utc
+	FROM trustpool_public_announcements`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]PublicAnnouncementApproval)
+	for rows.Next() {
+		approval, err := scanPublicAnnouncementApproval(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[approval.PoolID] = approval
+	}
+	return out, rows.Err()
+}
+
+func publicAnnouncementApprovalByOperationID(ctx context.Context, q eventQueryer, operationID string) (PublicAnnouncementApproval, bool, error) {
+	if operationID == "" {
+		return PublicAnnouncementApproval{}, false, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+	SELECT operation_id, pool_id, manifest_core_digest, reviewed_distribution_artifact_digest,
+	       creator_account_id, creator_approval_record_id, creator_approval_version,
+	       creator_approval_revision, approval_record_id, approved_by, approved_at_utc,
+	       public_announcement_revision, updated_at_utc
+	FROM trustpool_public_announcement_history
+	WHERE operation_id = ?`, operationID)
+	if err != nil {
+		return PublicAnnouncementApproval{}, false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return PublicAnnouncementApproval{}, false, rows.Err()
+	}
+	approval, err := scanPublicAnnouncementApproval(rows)
+	if err != nil {
+		return PublicAnnouncementApproval{}, false, err
+	}
+	if rows.Next() {
+		return PublicAnnouncementApproval{}, false, fmt.Errorf("trustpool: duplicate public announcement operation %q", operationID)
+	}
+	return approval, true, rows.Err()
+}
+
+func publicAnnouncementHistoryFromQueryer(ctx context.Context, q eventQueryer, poolID string) ([]PublicAnnouncementApproval, error) {
+	if poolID == "" {
+		return nil, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+	SELECT operation_id, pool_id, manifest_core_digest, reviewed_distribution_artifact_digest,
+	       creator_account_id, creator_approval_record_id, creator_approval_version,
+	       creator_approval_revision, approval_record_id, approved_by, approved_at_utc,
+	       public_announcement_revision, updated_at_utc
+	FROM trustpool_public_announcement_history
+	WHERE pool_id = ?
+	ORDER BY id`, poolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]PublicAnnouncementApproval, 0)
+	for rows.Next() {
+		approval, err := scanPublicAnnouncementApproval(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, approval)
+	}
+	return out, rows.Err()
+}
+
+type publicAnnouncementApprovalScanner interface {
+	Scan(dest ...any) error
+}
+
+type reviewedDistributionArtifactScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanPublicAnnouncementApproval(row publicAnnouncementApprovalScanner) (PublicAnnouncementApproval, error) {
+	var approval PublicAnnouncementApproval
+	var approvedRaw, updatedRaw string
+	if err := row.Scan(
+		&approval.OperationID,
+		&approval.PoolID,
+		&approval.ManifestCoreDigest,
+		&approval.ReviewedDistributionDigest,
+		&approval.CreatorAccountID,
+		&approval.CreatorApprovalRecordID,
+		&approval.CreatorApprovalVersion,
+		&approval.CreatorApprovalRevision,
+		&approval.ApprovalRecordID,
+		&approval.ApprovedBy,
+		&approvedRaw,
+		&approval.PublicAnnouncementRevision,
+		&updatedRaw,
+	); err != nil {
+		return PublicAnnouncementApproval{}, err
+	}
+	var err error
+	approval.ApprovedAtUTC, err = time.Parse(time.RFC3339Nano, approvedRaw)
+	if err != nil {
+		return PublicAnnouncementApproval{}, err
+	}
+	approval.UpdatedAtUTC, err = time.Parse(time.RFC3339Nano, updatedRaw)
+	if err != nil {
+		return PublicAnnouncementApproval{}, err
+	}
+	approval = normalizePublicAnnouncementApproval(approval)
+	if err := validateScannedPublicAnnouncementApproval(approval); err != nil {
+		return PublicAnnouncementApproval{}, err
+	}
+	return approval, nil
+}
+
+func scanReviewedDistributionArtifact(row reviewedDistributionArtifactScanner) (ReviewedDistributionArtifact, error) {
+	var artifact ReviewedDistributionArtifact
+	var reviewedRaw, updatedRaw string
+	if err := row.Scan(
+		&artifact.OperationID,
+		&artifact.PoolID,
+		&artifact.ManifestCoreDigest,
+		&artifact.ReviewedDistributionDigest,
+		&artifact.ArtifactURI,
+		&artifact.ClaimControlDigest,
+		&artifact.ReviewedBy,
+		&reviewedRaw,
+		&artifact.ReviewRevision,
+		&updatedRaw,
+	); err != nil {
+		return ReviewedDistributionArtifact{}, err
+	}
+	var err error
+	artifact.ReviewedAtUTC, err = time.Parse(time.RFC3339Nano, reviewedRaw)
+	if err != nil {
+		return ReviewedDistributionArtifact{}, err
+	}
+	artifact.UpdatedAtUTC, err = time.Parse(time.RFC3339Nano, updatedRaw)
+	if err != nil {
+		return ReviewedDistributionArtifact{}, err
+	}
+	artifact = normalizeReviewedDistributionArtifact(artifact)
+	if err := validateReviewedDistributionArtifact(artifact); err != nil {
+		return ReviewedDistributionArtifact{}, err
+	}
+	return artifact, nil
+}
+
 func (s *Store) Reconstruct(ctx context.Context) (*ReconstructedState, error) {
 	events, err := s.Events(ctx)
 	if err != nil {
@@ -1175,16 +1906,26 @@ func (s *Store) Reconstruct(ctx context.Context) (*ReconstructedState, error) {
 	if err != nil {
 		return nil, err
 	}
-	return reconstructEventsWithApprovals(events, approvals, time.Now().UTC())
+	publicAnnouncements, err := s.publicAnnouncementApprovals(ctx)
+	if err != nil {
+		return nil, err
+	}
+	reviewedArtifacts, err := s.reviewedDistributionArtifacts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return reconstructEventsWithApprovalsAndPublicAnnouncements(events, approvals, publicAnnouncements, reviewedArtifacts, time.Now().UTC())
 }
 
 // ReconstructedState is the coordinator's query/admin view after durable replay.
 type ReconstructedState struct {
-	Pools              map[string]*ReconstructedPoolState
-	CreatorApprovals   map[string]CreatorApproval
-	RouteGateCheckedAt time.Time
-	Revision           uint64
-	rootNonces         map[string]string
+	Pools               map[string]*ReconstructedPoolState
+	CreatorApprovals    map[string]CreatorApproval
+	PublicAnnouncements map[string]PublicAnnouncementApproval
+	ReviewedArtifacts   map[string]ReviewedDistributionArtifact
+	RouteGateCheckedAt  time.Time
+	Revision            uint64
+	rootNonces          map[string]string
 }
 
 type ReconstructedPoolState struct {
@@ -1206,6 +1947,10 @@ type ReconstructedPoolState struct {
 	BuyerAccounts                map[string]bool
 	Generation                   uint64
 	RouteableGeneration          uint64
+	PubliclyAnnounced            bool
+	PublicVisibilityGeneration   uint64
+	PublicAnnouncementApprovalID string
+	PublicReviewedArtifactDigest string
 	LastEventAtUTC               time.Time
 	CreatorGateReason            string
 	CreatorGateExpiresAtUTC      time.Time
@@ -1232,6 +1977,10 @@ func ReconstructEvents(events []DurableEvent) (*ReconstructedState, error) {
 }
 
 func reconstructEventsWithApprovals(events []DurableEvent, approvals map[string]CreatorApproval, gateAt time.Time) (*ReconstructedState, error) {
+	return reconstructEventsWithApprovalsAndPublicAnnouncements(events, approvals, nil, nil, gateAt)
+}
+
+func reconstructEventsWithApprovalsAndPublicAnnouncements(events []DurableEvent, approvals map[string]CreatorApproval, publicAnnouncements map[string]PublicAnnouncementApproval, reviewedArtifacts map[string]ReviewedDistributionArtifact, gateAt time.Time) (*ReconstructedState, error) {
 	state := &ReconstructedState{Pools: make(map[string]*ReconstructedPoolState), rootNonces: make(map[string]string)}
 	if approvals != nil {
 		state.CreatorApprovals = make(map[string]CreatorApproval, len(approvals))
@@ -1239,6 +1988,18 @@ func reconstructEventsWithApprovals(events []DurableEvent, approvals map[string]
 			state.CreatorApprovals[k] = v
 		}
 		state.RouteGateCheckedAt = gateAt.UTC()
+	}
+	if publicAnnouncements != nil {
+		state.PublicAnnouncements = make(map[string]PublicAnnouncementApproval, len(publicAnnouncements))
+		for k, v := range publicAnnouncements {
+			state.PublicAnnouncements[k] = v
+		}
+	}
+	if reviewedArtifacts != nil {
+		state.ReviewedArtifacts = make(map[string]ReviewedDistributionArtifact, len(reviewedArtifacts))
+		for k, v := range reviewedArtifacts {
+			state.ReviewedArtifacts[k] = v
+		}
 	}
 	seenOps := make(map[string]int)
 	for i, e := range events {
@@ -1258,6 +2019,7 @@ func reconstructEventsWithApprovals(events []DurableEvent, approvals map[string]
 	}
 	state.Revision = routeableRevision(len(events), state.CreatorApprovals)
 	state.applyCreatorRouteGates()
+	state.applyPublicVisibilityGates()
 	state.rootNonces = nil
 	return state, nil
 }
@@ -1439,6 +2201,67 @@ func (s *ReconstructedState) applyCreatorRouteGates() {
 		}
 		p.CreatorGateExpiresAtUTC = approval.CreatorAgreementGraceEndsAtUTC
 	}
+}
+
+func (s *ReconstructedState) applyPublicVisibilityGates() {
+	if s == nil {
+		return
+	}
+	for _, p := range s.Pools {
+		p.PubliclyAnnounced = false
+		p.PublicVisibilityGeneration = p.EffectiveGeneration()
+		p.PublicAnnouncementApprovalID = ""
+		p.PublicReviewedArtifactDigest = ""
+		approval, ok := s.PublicAnnouncements[p.PoolID]
+		if !ok {
+			continue
+		}
+		artifact, artifactOK := s.ReviewedArtifacts[p.PoolID]
+		p.PublicVisibilityGeneration = p.EffectiveGeneration() + approval.PublicAnnouncementRevision
+		if artifactOK {
+			p.PublicVisibilityGeneration += artifact.ReviewRevision
+		}
+		if approval, ok := matchingPublicAnnouncement(s, p); ok {
+			p.PubliclyAnnounced = true
+			p.PublicAnnouncementApprovalID = approval.ApprovalRecordID
+			p.PublicReviewedArtifactDigest = approval.ReviewedDistributionDigest
+			continue
+		}
+		p.PublicVisibilityGeneration++
+	}
+}
+
+func currentPublicAnnouncementBinding(state *ReconstructedState, p *ReconstructedPoolState) (PublicAnnouncementApproval, bool) {
+	if state == nil || p == nil || p.CreatorGateReason != "" || state.CreatorApprovals == nil {
+		return PublicAnnouncementApproval{}, false
+	}
+	approval, ok := state.CreatorApprovals[p.CreatorAccountID]
+	if !ok {
+		return PublicAnnouncementApproval{}, false
+	}
+	version := approval.CurrentApprovalVersion
+	environment := approval.AllowedLaunchEnvironment
+	if p.RootIssuer != nil {
+		version = p.RootIssuer.CurrentApprovalVersion
+		environment = p.RootIssuer.LaunchEnvironment
+	}
+	if !approval.ValidFor(p.ApprovalRecordID, version, environment, state.RouteGateCheckedAt) {
+		return PublicAnnouncementApproval{}, false
+	}
+	return PublicAnnouncementApproval{
+		CreatorAccountID:        p.CreatorAccountID,
+		CreatorApprovalRecordID: p.ApprovalRecordID,
+		CreatorApprovalVersion:  version,
+		CreatorApprovalRevision: approval.ApprovalRevision,
+	}, true
+}
+
+func publicAnnouncementLaunchAllowed(p *ReconstructedPoolState) bool {
+	if p == nil || p.RootIssuer == nil {
+		return false
+	}
+	environment := strings.TrimSpace(p.RootIssuer.LaunchEnvironment)
+	return environment != "" && environment != promotionLaunchEnvironmentCandidate
 }
 
 func (s *ReconstructedState) validateMutationCreatorGate(e DurableEvent, now time.Time) error {
@@ -1851,6 +2674,138 @@ func sameCreatorApprovalExceptRevision(a, b CreatorApproval) bool {
 	b = normalizeCreatorApproval(b)
 	a.ApprovalRevision = 0
 	b.ApprovalRevision = 0
+	a.UpdatedAtUTC = time.Time{}
+	b.UpdatedAtUTC = time.Time{}
+	return a == b
+}
+
+func normalizePublicAnnouncementApproval(a PublicAnnouncementApproval) PublicAnnouncementApproval {
+	a.OperationID = strings.TrimSpace(a.OperationID)
+	a.PoolID = strings.TrimSpace(a.PoolID)
+	a.ManifestCoreDigest = strings.TrimSpace(strings.ToLower(a.ManifestCoreDigest))
+	a.ReviewedDistributionDigest = strings.TrimSpace(strings.ToLower(a.ReviewedDistributionDigest))
+	a.CreatorAccountID = strings.TrimSpace(a.CreatorAccountID)
+	a.CreatorApprovalRecordID = strings.TrimSpace(a.CreatorApprovalRecordID)
+	a.CreatorApprovalVersion = strings.TrimSpace(a.CreatorApprovalVersion)
+	a.ApprovalRecordID = strings.TrimSpace(a.ApprovalRecordID)
+	a.ApprovedBy = strings.TrimSpace(a.ApprovedBy)
+	a.ApprovedAtUTC = a.ApprovedAtUTC.UTC()
+	a.UpdatedAtUTC = a.UpdatedAtUTC.UTC()
+	return a
+}
+
+func normalizeReviewedDistributionArtifact(a ReviewedDistributionArtifact) ReviewedDistributionArtifact {
+	a.OperationID = strings.TrimSpace(a.OperationID)
+	a.PoolID = strings.TrimSpace(a.PoolID)
+	a.ManifestCoreDigest = strings.TrimSpace(strings.ToLower(a.ManifestCoreDigest))
+	a.ReviewedDistributionDigest = strings.TrimSpace(strings.ToLower(a.ReviewedDistributionDigest))
+	a.ArtifactURI = strings.TrimSpace(a.ArtifactURI)
+	a.ClaimControlDigest = strings.TrimSpace(strings.ToLower(a.ClaimControlDigest))
+	a.ReviewedBy = strings.TrimSpace(a.ReviewedBy)
+	a.ReviewedAtUTC = a.ReviewedAtUTC.UTC()
+	a.UpdatedAtUTC = a.UpdatedAtUTC.UTC()
+	return a
+}
+
+func validatePublicAnnouncementApproval(a PublicAnnouncementApproval) error {
+	if a.OperationID == "" || a.PoolID == "" || a.ManifestCoreDigest == "" || a.ReviewedDistributionDigest == "" ||
+		a.ApprovalRecordID == "" || a.ApprovedBy == "" || a.ApprovedAtUTC.IsZero() {
+		return ErrPublicAnnouncementGate
+	}
+	if !validSHA256Hex(a.ManifestCoreDigest) || !validSHA256Hex(a.ReviewedDistributionDigest) {
+		return ErrPublicAnnouncementGate
+	}
+	if err := ValidatePromiseClaimsText(a.OperationID, a.PoolID, a.ApprovalRecordID, a.ApprovedBy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateReviewedDistributionArtifact(a ReviewedDistributionArtifact) error {
+	if a.OperationID == "" || a.PoolID == "" || a.ManifestCoreDigest == "" || a.ReviewedDistributionDigest == "" ||
+		a.ArtifactURI == "" || a.ClaimControlDigest == "" || a.ReviewedBy == "" || a.ReviewedAtUTC.IsZero() {
+		return ErrPublicAnnouncementGate
+	}
+	if !validSHA256Hex(a.ManifestCoreDigest) || !validSHA256Hex(a.ReviewedDistributionDigest) || !validSHA256Hex(a.ClaimControlDigest) {
+		return ErrPublicAnnouncementGate
+	}
+	if err := ValidatePromiseClaimsText(a.OperationID, a.PoolID, a.ArtifactURI, a.ReviewedBy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateScannedPublicAnnouncementApproval(a PublicAnnouncementApproval) error {
+	if a.PoolID == "" || a.ManifestCoreDigest == "" || a.ApprovalRecordID == "" || a.ApprovedBy == "" || a.ApprovedAtUTC.IsZero() {
+		return ErrPublicAnnouncementGate
+	}
+	if !validSHA256Hex(a.ManifestCoreDigest) {
+		return ErrPublicAnnouncementGate
+	}
+	if a.ReviewedDistributionDigest != "" && !validSHA256Hex(a.ReviewedDistributionDigest) {
+		return ErrPublicAnnouncementGate
+	}
+	if err := ValidatePromiseClaimsText(a.OperationID, a.PoolID, a.ApprovalRecordID, a.ApprovedBy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateStoredPublicAnnouncementApproval(a PublicAnnouncementApproval) error {
+	if err := validatePublicAnnouncementApproval(a); err != nil {
+		return err
+	}
+	if a.CreatorAccountID == "" || a.CreatorApprovalRecordID == "" || a.CreatorApprovalVersion == "" || a.CreatorApprovalRevision == 0 {
+		return ErrPublicAnnouncementGate
+	}
+	if err := ValidatePromiseClaimsText(a.CreatorAccountID, a.CreatorApprovalRecordID, a.CreatorApprovalVersion); err != nil {
+		return err
+	}
+	return nil
+}
+
+func publicAnnouncementApprovalMatchesOperation(stored, input PublicAnnouncementApproval) bool {
+	stored = normalizePublicAnnouncementApproval(stored)
+	input = normalizePublicAnnouncementApproval(input)
+	return stored.OperationID == input.OperationID &&
+		stored.PoolID == input.PoolID &&
+		stored.ManifestCoreDigest == input.ManifestCoreDigest &&
+		stored.ReviewedDistributionDigest == input.ReviewedDistributionDigest &&
+		stored.ApprovalRecordID == input.ApprovalRecordID &&
+		stored.ApprovedBy == input.ApprovedBy &&
+		stored.ApprovedAtUTC.Equal(input.ApprovedAtUTC)
+}
+
+func reviewedDistributionArtifactMatchesOperation(stored, input ReviewedDistributionArtifact) bool {
+	stored = normalizeReviewedDistributionArtifact(stored)
+	input = normalizeReviewedDistributionArtifact(input)
+	return stored.OperationID == input.OperationID &&
+		stored.PoolID == input.PoolID &&
+		stored.ManifestCoreDigest == input.ManifestCoreDigest &&
+		stored.ReviewedDistributionDigest == input.ReviewedDistributionDigest &&
+		stored.ArtifactURI == input.ArtifactURI &&
+		stored.ClaimControlDigest == input.ClaimControlDigest &&
+		stored.ReviewedBy == input.ReviewedBy &&
+		stored.ReviewedAtUTC.Equal(input.ReviewedAtUTC)
+}
+
+func samePublicAnnouncementApprovalExceptRevision(a, b PublicAnnouncementApproval) bool {
+	a = normalizePublicAnnouncementApproval(a)
+	b = normalizePublicAnnouncementApproval(b)
+	a.PublicAnnouncementRevision = 0
+	b.PublicAnnouncementRevision = 0
+	a.UpdatedAtUTC = time.Time{}
+	b.UpdatedAtUTC = time.Time{}
+	return a == b
+}
+
+func sameReviewedDistributionArtifactExceptRevision(a, b ReviewedDistributionArtifact) bool {
+	a = normalizeReviewedDistributionArtifact(a)
+	b = normalizeReviewedDistributionArtifact(b)
+	a.OperationID = ""
+	b.OperationID = ""
+	a.ReviewRevision = 0
+	b.ReviewRevision = 0
 	a.UpdatedAtUTC = time.Time{}
 	b.UpdatedAtUTC = time.Time{}
 	return a == b

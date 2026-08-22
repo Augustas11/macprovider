@@ -563,6 +563,56 @@ func approveCreator(t *testing.T, store *trustpool.Store, creatorID, approvalID,
 	return approval
 }
 
+func approvePublicAnnouncement(t *testing.T, store *trustpool.Store, poolID, manifestCoreDigest string) trustpool.PublicAnnouncementApproval {
+	t.Helper()
+	artifact := approveReviewedDistributionArtifact(t, store, poolID, manifestCoreDigest)
+	var operationBytes [8]byte
+	if _, err := rand.Read(operationBytes[:]); err != nil {
+		t.Fatalf("rand public announcement operation id: %v", err)
+	}
+	approval, err := store.UpsertPublicAnnouncementApproval(context.Background(), trustpool.PublicAnnouncementApproval{
+		OperationID:                "op-public-announcement-" + base64.RawURLEncoding.EncodeToString(operationBytes[:]),
+		PoolID:                     poolID,
+		ManifestCoreDigest:         manifestCoreDigest,
+		ReviewedDistributionDigest: artifact.ReviewedDistributionDigest,
+		ApprovalRecordID:           "public-announcement-v1",
+		ApprovedBy:                 "operator-a",
+		ApprovedAtUTC:              time.Unix(1800000100, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("UpsertPublicAnnouncementApproval: %v", err)
+	}
+	return approval
+}
+
+func approveReviewedDistributionArtifact(t *testing.T, store *trustpool.Store, poolID, manifestCoreDigest string) trustpool.ReviewedDistributionArtifact {
+	t.Helper()
+	wantDigest := hexDigest("reviewed-distribution-" + poolID + "-" + manifestCoreDigest)
+	if artifact, ok, err := store.ReviewedDistributionArtifact(context.Background(), poolID); err != nil {
+		t.Fatalf("ReviewedDistributionArtifact: %v", err)
+	} else if ok && artifact.ManifestCoreDigest == manifestCoreDigest && artifact.ReviewedDistributionDigest == wantDigest {
+		return artifact
+	}
+	var operationBytes [8]byte
+	if _, err := rand.Read(operationBytes[:]); err != nil {
+		t.Fatalf("rand reviewed artifact operation id: %v", err)
+	}
+	artifact, err := store.UpsertReviewedDistributionArtifact(context.Background(), trustpool.ReviewedDistributionArtifact{
+		OperationID:                "op-reviewed-artifact-" + base64.RawURLEncoding.EncodeToString(operationBytes[:]),
+		PoolID:                     poolID,
+		ManifestCoreDigest:         manifestCoreDigest,
+		ReviewedDistributionDigest: wantDigest,
+		ArtifactURI:                "https://example.test/trusted-pools/" + poolID,
+		ClaimControlDigest:         hexDigest("claim-control-" + poolID + "-" + manifestCoreDigest),
+		ReviewedBy:                 "operator-a",
+		ReviewedAtUTC:              time.Unix(1800000050, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("UpsertReviewedDistributionArtifact: %v", err)
+	}
+	return artifact
+}
+
 func validCreatorApproval(creatorID, approvalID, approvalVersion, environment string, graceEndsAt time.Time, status string) trustpool.CreatorApproval {
 	return trustpool.CreatorApproval{
 		CreatorAccountID:                  creatorID,

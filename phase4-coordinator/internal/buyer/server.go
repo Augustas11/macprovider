@@ -253,6 +253,7 @@ type Server struct {
 	receiptKeysLimiters   map[string]receiptKeysBucket
 	receiptKeysMaxEntries int
 	receiptKeysTTL        time.Duration
+	publicTrustPoolWork   chan struct{}
 	streamingDowngrade    *streamingDowngradeStore
 	streamingTiming       *streamingTimingCollector
 	slotQueue             *slotQueue
@@ -482,9 +483,11 @@ func WithPoolMembership(r *trustpool.Registry) Option {
 	}
 }
 
-// WithTrustPoolStatusStore wires the durable SPEC-043 status source. Status
-// fetches also require WithPoolMembership because authorization must consult
-// the live routeable registry before reconstructing buyer-visible promises.
+// WithTrustPoolStatusStore wires the durable SPEC-043 policy/status source.
+// Buyer-authenticated fetches also require WithPoolMembership because
+// authorization must consult the live routeable registry before reconstructing
+// buyer-visible promises. Public fetches use only this store, but remain
+// rate-limited, globally work-limited, and digest-gated by durable replay.
 func WithTrustPoolStatusStore(store *trustpool.Store) Option {
 	return func(s *Server) {
 		s.trustPoolStatusStore = store
@@ -734,6 +737,7 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		receiptKeysLimiters:    map[string]receiptKeysBucket{},
 		receiptKeysMaxEntries:  4096,
 		receiptKeysTTL:         5 * time.Minute,
+		publicTrustPoolWork:    make(chan struct{}, 4),
 		streamingDowngrade:     newStreamingDowngradeStore(),
 		streamingTiming:        newStreamingTimingCollector(),
 		slotQueue:              newSlotQueue(slotQueueDefaultMaxPending),
@@ -786,6 +790,10 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/v1/autotune-candidates", s.handleAutotuneCandidates)
 	r.Get("/v1/autotune-candidates.sig", s.handleAutotuneCandidatesSig)
 	r.Get("/v1/autotune-release", s.handleAutotuneRelease)
+	r.Get("/v1/public/trust-pools/{pool_id}/pool_policy.json", s.handlePublicTrustPoolPolicy)
+	r.Get("/v1/public/trust-pools/{pool_id}/policy", s.handlePublicTrustPoolPolicy)
+	r.Get("/v1/public/trust-pools/{pool_id}/pool_status.json", s.handlePublicTrustPoolStatus)
+	r.Get("/v1/public/trust-pools/{pool_id}/status", s.handlePublicTrustPoolStatus)
 	r.With(s.gatewayContextMiddleware).Get("/v1/trust-pools/{pool_id}/pool_policy.json", s.handleTrustPoolPolicy)
 	r.With(s.gatewayContextMiddleware).Get("/v1/trust-pools/{pool_id}/policy", s.handleTrustPoolPolicy)
 	r.With(s.gatewayContextMiddleware).Get("/v1/trust-pools/{pool_id}/pool_status.json", s.handleTrustPoolStatus)
@@ -854,6 +862,80 @@ func (s *Server) handleTrustPoolStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(doc); err != nil {
 		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("trusted pool status encode failed")
+	}
+}
+
+func (s *Server) handlePublicTrustPoolStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !s.allowReceiptKeys(r) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "Trusted pool public document rate limit exceeded")
+		return
+	}
+	release, ok := s.acquirePublicTrustPoolWork()
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "Trusted pool public document work limit exceeded")
+		return
+	}
+	defer release()
+	poolID := sanitizeAccountID(chi.URLParam(r, "pool_id"))
+	doc, found, err := trustpool.BuildPublicStatusDocument(r.Context(), s.trustPoolStatusStore, poolID, s.now())
+	if err != nil {
+		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("public trusted pool status reconstruction failed")
+		writeError(w, http.StatusServiceUnavailable, "pool_status_unavailable", "Pool status unavailable")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "pool_status_not_found", "Pool status not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(doc); err != nil {
+		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("public trusted pool status encode failed")
+	}
+}
+
+func (s *Server) handlePublicTrustPoolPolicy(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !s.allowReceiptKeys(r) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "Trusted pool public document rate limit exceeded")
+		return
+	}
+	release, ok := s.acquirePublicTrustPoolWork()
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "Trusted pool public document work limit exceeded")
+		return
+	}
+	defer release()
+	poolID := sanitizeAccountID(chi.URLParam(r, "pool_id"))
+	doc, found, err := trustpool.BuildPublicPolicyDocument(r.Context(), s.trustPoolStatusStore, poolID, s.now())
+	if err != nil {
+		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("public trusted pool policy reconstruction failed")
+		writeError(w, http.StatusServiceUnavailable, "pool_policy_unavailable", "Pool policy unavailable")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "pool_policy_not_found", "Pool policy not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(doc); err != nil {
+		s.log.Warn().Err(err).Str("pool_id", poolID).Msg("public trusted pool policy encode failed")
+	}
+}
+
+func (s *Server) acquirePublicTrustPoolWork() (func(), bool) {
+	if s == nil || s.publicTrustPoolWork == nil {
+		return func() {}, true
+	}
+	select {
+	case s.publicTrustPoolWork <- struct{}{}:
+		return func() { <-s.publicTrustPoolWork }, true
+	default:
+		return nil, false
 	}
 }
 

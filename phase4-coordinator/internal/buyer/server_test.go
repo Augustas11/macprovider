@@ -423,6 +423,26 @@ func TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus(t *testing.T) {
 		t.Fatalf("denied policy Cache-Control=%q, want no-store", got)
 	}
 
+	publicStatus := httptest.NewRequest(http.MethodGet, "/v1/public/trust-pools/pool-a/pool_status.json", nil)
+	publicStatusRR := httptest.NewRecorder()
+	server.Handler().ServeHTTP(publicStatusRR, publicStatus)
+	if publicStatusRR.Code != http.StatusNotFound || !strings.Contains(publicStatusRR.Body.String(), "pool_status_not_found") {
+		t.Fatalf("public unannounced status=%d body=%s, want non-enumerating 404", publicStatusRR.Code, publicStatusRR.Body.String())
+	}
+	if got := publicStatusRR.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("public status Cache-Control=%q, want no-store", got)
+	}
+
+	publicPolicy := httptest.NewRequest(http.MethodGet, "/v1/public/trust-pools/pool-a/pool_policy.json", nil)
+	publicPolicyRR := httptest.NewRecorder()
+	server.Handler().ServeHTTP(publicPolicyRR, publicPolicy)
+	if publicPolicyRR.Code != http.StatusNotFound || !strings.Contains(publicPolicyRR.Body.String(), "pool_policy_not_found") {
+		t.Fatalf("public unannounced policy=%d body=%s, want non-enumerating 404", publicPolicyRR.Code, publicPolicyRR.Body.String())
+	}
+	if got := publicPolicyRR.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("public policy Cache-Control=%q, want no-store", got)
+	}
+
 	unauth := httptest.NewRequest(http.MethodGet, "/v1/trust-pools/pool-a/pool_status.json", nil)
 	unauthRR := httptest.NewRecorder()
 	server.Handler().ServeHTTP(unauthRR, unauth)
@@ -435,6 +455,42 @@ func TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus(t *testing.T) {
 	server.Handler().ServeHTTP(unauthPolicyRR, unauthPolicy)
 	if unauthPolicyRR.Code != http.StatusUnauthorized {
 		t.Fatalf("unauth policy status=%d body=%s, want 401", unauthPolicyRR.Code, unauthPolicyRR.Body.String())
+	}
+}
+
+func TestTrustPoolPublicPolicyStatusAreRateLimitedBeforeLookup(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		path string
+		code string
+	}{
+		{name: "status", path: "/v1/public/trust-pools/pool-a/pool_status.json", code: "pool_status_not_found"},
+		{name: "policy", path: "/v1/public/trust-pools/pool-a/pool_policy.json", code: "pool_policy_not_found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := buyer.NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Unix(1800000900, 0).UTC())
+			for i := 0; i < 10; i++ {
+				req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+				req.RemoteAddr = "203.0.113.10:1234"
+				rr := httptest.NewRecorder()
+				server.Handler().ServeHTTP(rr, req)
+				if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), tc.code) {
+					t.Fatalf("request %d status=%d body=%s, want first burst to reach lookup and 404 %s", i+1, rr.Code, rr.Body.String(), tc.code)
+				}
+			}
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.RemoteAddr = "203.0.113.10:1234"
+			rr := httptest.NewRecorder()
+			server.Handler().ServeHTTP(rr, req)
+			if rr.Code != http.StatusTooManyRequests || !strings.Contains(rr.Body.String(), "rate_limited") {
+				t.Fatalf("rate-limited status=%d body=%s, want 429 rate_limited", rr.Code, rr.Body.String())
+			}
+			if got := rr.Header().Get("Retry-After"); got != "1" {
+				t.Fatalf("Retry-After=%q, want 1", got)
+			}
+		})
 	}
 }
 

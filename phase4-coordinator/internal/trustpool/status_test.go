@@ -148,3 +148,79 @@ func TestBuildStatusDocumentCollapsesUnauthorizedAndUnknown(t *testing.T) {
 		t.Fatalf("unknown found=%v err=%v, want false nil", found, err)
 	}
 }
+
+func TestBuildPublicStatusDocumentRequiresMatchingAnnouncementApproval(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800001400, 0).UTC()
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "public", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	manifest := signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root)
+	for _, e := range []trustpool.DurableEvent{
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssueInEnvironment(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonceInEnvironment(t, store, "creator-a", "approval-v1", "public", ts.Add(time.Hour)), root, "public"),
+		manifest,
+		ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-secret"
+		}),
+	} {
+		if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
+			t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+		}
+	}
+	if _, found, err := trustpool.BuildPublicStatusDocument(ctx, store, root.poolID, ts); err != nil || found {
+		t.Fatalf("public status before approval found=%v err=%v, want false nil", found, err)
+	}
+	approval := approvePublicAnnouncement(t, store, root.poolID, manifest.ManifestCoreDigest)
+	doc, found, err := trustpool.BuildPublicStatusDocument(ctx, store, root.poolID, ts)
+	if err != nil {
+		t.Fatalf("BuildPublicStatusDocument: %v", err)
+	}
+	if !found {
+		t.Fatal("BuildPublicStatusDocument found=false, want true")
+	}
+	if doc.Pool.Visibility != "publicly_announced" || !doc.Pool.PubliclyAnnounced {
+		t.Fatalf("public status pool=%+v", doc.Pool)
+	}
+	if doc.Pool.VisibilityGeneration == 0 {
+		t.Fatalf("public status visibility generation=%d, want non-zero", doc.Pool.VisibilityGeneration)
+	}
+	if doc.Pool.PublicApprovalID != "" || doc.Pool.ReviewedArtifactDigest != approval.ReviewedDistributionDigest {
+		t.Fatalf("public status approval binding=%+v, want redacted approval id and artifact %q", doc.Pool, approval.ReviewedDistributionDigest)
+	}
+	if doc.Policy.RootIssuerKeyID != "" || doc.Policy.RootIssuerKeyHash != "" || doc.Policy.CustodyEvidence != "" {
+		t.Fatalf("public status policy=%+v, want root-key and custody evidence redacted", doc.Policy)
+	}
+	if doc.Membership.CurrentMemberCount != 0 ||
+		doc.Membership.CurrentAdmittedMemberCount != 0 ||
+		doc.Membership.CurrentNonRevokedMemberCount != 0 ||
+		doc.Membership.RevokedMemberCount != 0 ||
+		doc.Membership.AuthorizedBuyerCount != 0 {
+		t.Fatalf("public status membership=%+v, want supply and buyer counts redacted", doc.Membership)
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	body := string(raw)
+	if strings.Contains(body, "provider-secret") {
+		t.Fatalf("public status leaked provider identity: %s", body)
+	}
+	if strings.Contains(body, `"creator_account_id"`) || strings.Contains(body, `"approval_record_id"`) || strings.Contains(body, `"current_approval_version"`) {
+		t.Fatalf("public status leaked internal creator approval fields: %s", body)
+	}
+	if strings.Contains(body, `"custody_evidence"`) {
+		t.Fatalf("public status leaked custody evidence: %s", body)
+	}
+	if !strings.Contains(body, "reviewed_distribution_artifact_digest") {
+		t.Fatalf("public status missing digest-bound disclosure: %s", body)
+	}
+}
