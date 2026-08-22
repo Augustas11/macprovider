@@ -6084,7 +6084,7 @@
       "implementation": [
         "phase4-coordinator/internal/auth/portal_sessions.go:func (s *Store) MintPortalReadSession",
         "phase4-coordinator/internal/auth/portal_sessions_http.go:func NewPortalSessionMintHandler",
-        "phase4-coordinator/cmd/coordinator/main.go:providerMux.Handle(\"/admin/portal-sessions\""
+        "phase4-coordinator/cmd/coordinator/main.go:func main()"
       ],
       "tests": [
         "phase4-coordinator/internal/auth/portal_sessions_test.go::TestMintAndValidatePortalReadSession",
