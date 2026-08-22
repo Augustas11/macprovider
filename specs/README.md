@@ -53,6 +53,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.15 | draft | complete | pending: 12 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
 | SPEC-043 | Trusted Pool Creator Onboarding MVP | 0.1.0 | normative | complete | pending: 12 | [SPEC-043-trusted-pool-creator-onboarding.md](SPEC-043-trusted-pool-creator-onboarding.md) |
 | SPEC-044 | Malibu Model Catalog Economics | 0.1.0 | draft | complete | pending: 12 | [SPEC-044-malibu-model-catalog-economics.md](SPEC-044-malibu-model-catalog-economics.md) |
+| SPEC-045 | Local Consumer Endpoint Mode | 0.1.0 | draft | complete | pending: 8 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**

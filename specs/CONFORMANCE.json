@@ -1333,6 +1333,41 @@
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Malibu currently exposes a model switcher, but the production experience is static around the model chosen during installer autotune. The next release needs a CLI-owned catalog and economics projection before the app can safely show additional catalog models, signed catalog rates, readiness, and preparation/switch actions without making earning guarantees or bypassing provider safety gates."
       }
+    },
+    {
+      "spec_id": "SPEC-045",
+      "title": "Local Consumer Endpoint Mode",
+      "version": "0.1.0",
+      "path": "specs/SPEC-045-local-consumer-endpoint-mode.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "local-consumer-endpoint"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-010",
+        "SPEC-015",
+        "SPEC-018",
+        "SPEC-019",
+        "SPEC-023",
+        "SPEC-024"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "Issue #927 needs a buyer-side local endpoint that existing OpenAI-compatible tools can point at while keeping buyer credentials, model admission, local estimated-exposure limits, status, and restart behavior explicit. No standalone local consumer endpoint contract exists today."
+      }
     }
   ],
   "requirements": [
@@ -6105,6 +6140,126 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Release evidence, automated coverage, and signed journey results for the Malibu model catalog economics experience do not exist yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-045-R001",
+      "spec_id": "SPEC-045",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "The macOS plain-HTTP loopback-only `macprovider-cli consume` command, default port/collision behavior, allowlist-based bind validation, and redacted startup/status output have not been implemented or accepted yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-045-R002",
+      "spec_id": "SPEC-045",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "The local OpenAI-compatible endpoint subset, HTTP/1.1 method constraints, path normalization/rejection, default-empty model allowlist, post-auth aggregate resource limits, supported-method/path rejection, model list proxying, chat proxying, tool-calling/structured-output pass-through, and streaming preservation have not been implemented or tested."
+      }
+    },
+    {
+      "requirement_id": "SPEC-045-R003",
+      "spec_id": "SPEC-045",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "Upstream buyer credential source precedence, named environment variables and file-before-env rationale, credential-source class reporting, user-only credential file validation, local authorization/header stripping including forwarded/proxy/hop-by-hop/browser metadata headers, SDK placeholder guidance, exact-origin browser rejection including Origin:null and multi-value Origin rejection, CORS denial, credential metadata-change reload, credential deletion/rotation handling, and diagnostics redaction have not been implemented or tested."
+      }
+    },
+    {
+      "requirement_id": "SPEC-045-R004",
+      "spec_id": "SPEC-045",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "Local model allowlist, trusted metadata source validation, explicit chargeable-request classification, atomic conservative run-budget admission/reservation against exact gross buyer-exposure arithmetic in micro-USD, per-request max-cost admission, missing-output-bound estimation, stale-pricing status warnings, cache-discount exclusion, and unpriced-request override visibility still need implementation and product acceptance."
+      }
+    },
+    {
+      "requirement_id": "SPEC-045-R005",
+      "spec_id": "SPEC-045",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "The durable default budget ledger path, lock filename, ledger path classes, relative-path resolution, OS-enforced lock handling, redacted self-describing ledger schema with immutable run ids, unique reservation ids, micro-USD amount fields, closed state transitions, settlement policy including SSE terminal usage timing, streaming client-disconnect settlement/deadline, restart held-reservation behavior, and recovery command selectors/no-match failure have not been implemented or tested."
+      }
+    },
+    {
+      "requirement_id": "SPEC-045-R006",
+      "spec_id": "SPEC-045",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "The `GET /v1/status` endpoint, active endpoint descriptor path ownership/symlink/race hardening, process launch id generation, CLI status discovery/output, closed status enums/schema, pricing warning codes, no-store status caching, no-budget representation, bounded redacted error ring by count, total bytes, field bytes, and truncation marker, wall-clock upstream contact timestamp, diagnostic fields, failure classification, and redaction guarantees have not been implemented or tested."
+      }
+    },
+    {
+      "requirement_id": "SPEC-045-R007",
+      "spec_id": "SPEC-045",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "Gateway error preservation, local HTTP status-code mapping including deterministic upstream 502/503 split and `local_endpoint_busy`, post-header non-streaming truncation handling, compressed upstream response cap enforcement, `error.macprovider.forwarded_upstream` disclosure, startup-versus-HTTP error separation, and retry constraints have not been implemented or tested."
+      }
+    },
+    {
+      "requirement_id": "SPEC-045-R008",
+      "spec_id": "SPEC-045",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/927",
+        "rationale": "Automated proxy, origin-only upstream URL rejection, IPv4-mapped IPv6 upstream rejection, pre-auth HTTP parser/connection bounds, aggregate authenticated resource limits, ambiguous framing rejection, path normalization, bounded JSON parser work, upstream response resource caps including compressed response decoding, budget, exact gross buyer-exposure arithmetic vectors and micro-USD ledger fields, per-request cap including no-budget/unpriced interaction, pricing freshness revalidation, timing-safe local-token verification, credential reload zeroization, TLS peer-auth failure, browser-origin rejection including multi-value Origin cases, descriptor hardening, model allowlist, error mapping, status no-store/error-ring bounds, redaction, restart/recovery, streaming disconnect, ledger state/release/no-match cases, and staging-or-production signed journey evidence for local consumer endpoint mode do not exist yet."
       }
     }
   ]
