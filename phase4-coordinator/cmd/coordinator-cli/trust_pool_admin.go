@@ -16,7 +16,14 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 )
 
-var trustPoolAdminHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var trustPoolAdminHTTPClient = &http.Client{
+	Timeout:       30 * time.Second,
+	CheckRedirect: trustPoolAdminRejectRedirect,
+}
+
+func trustPoolAdminRejectRedirect(req *http.Request, via []*http.Request) error {
+	return http.ErrUseLastResponse
+}
 
 func trustPoolAdmin(args []string, getenv func(string) string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
@@ -47,6 +54,10 @@ func trustPoolAdmin(args []string, getenv func(string) string, stdin io.Reader, 
 		return trustPoolAdminEvent(args[1:], "set-binary-floor", trustpool.EventMinBinaryVersionSet, getenv, stdout)
 	case "promote":
 		return trustPoolAdminPromote(args[1:], getenv, stdout)
+	case "review-distribution-artifact":
+		return trustPoolAdminReviewDistributionArtifact(args[1:], getenv, stdout)
+	case "approve-public-announcement":
+		return trustPoolAdminApprovePublicAnnouncement(args[1:], getenv, stdout)
 	case "list-pools":
 		return trustPoolAdminGET(args[1:], "list-pools", "/admin/trust-pools/pools", getenv, stdout)
 	case "get-pool", "pool-status":
@@ -253,6 +264,157 @@ func trustPoolAdminPromote(args []string, getenv func(string) string, stdout io.
 		return err
 	}
 	return trustPoolAdminRequest(http.MethodPost, base+"/admin/trust-pools/pools/"+url.PathEscape(strings.TrimSpace(*poolID))+"/promote", key, strings.TrimSpace(*operationID), body, stdout)
+}
+
+func trustPoolAdminReviewDistributionArtifact(args []string, getenv func(string) string, stdout io.Writer) error {
+	flags := newTrustPoolAdminFlags("review-distribution-artifact")
+	operationID := flags.fs.String("operation-id", "", "idempotency key")
+	poolID := flags.fs.String("pool-id", "", "pool id")
+	manifestDigest := flags.fs.String("manifest-core-digest", "", "current manifest_core_digest")
+	reviewedDigest := flags.fs.String("reviewed-distribution-artifact-digest", "", "reviewed distribution artifact SHA-256 digest")
+	artifactURI := flags.fs.String("artifact-uri", "", "reviewed distribution artifact URI")
+	claimControlDigest := flags.fs.String("claim-control-artifact-digest", "", "claim-control artifact SHA-256 digest")
+	reviewedBy := flags.fs.String("reviewed-by", "", "review actor id")
+	reviewedAtRaw := flags.fs.String("reviewed-at", "", "RFC3339/RFC3339Nano review timestamp")
+	base, key, err := flags.parse(args, getenv)
+	if err != nil {
+		return err
+	}
+	reviewedAt, err := parseTrustPoolAdminTimeFlag("reviewed-at", *reviewedAtRaw)
+	if err != nil {
+		return err
+	}
+	artifact := trustpool.ReviewedDistributionArtifact{
+		OperationID:                strings.TrimSpace(*operationID),
+		PoolID:                     strings.TrimSpace(*poolID),
+		ManifestCoreDigest:         strings.TrimSpace(*manifestDigest),
+		ReviewedDistributionDigest: strings.TrimSpace(*reviewedDigest),
+		ArtifactURI:                strings.TrimSpace(*artifactURI),
+		ClaimControlDigest:         strings.TrimSpace(*claimControlDigest),
+		ReviewedBy:                 strings.TrimSpace(*reviewedBy),
+		ReviewedAtUTC:              reviewedAt,
+	}
+	if err := requireTrustPoolAdminFields([]trustPoolAdminRequiredField{
+		{name: "operation-id", value: artifact.OperationID},
+		{name: "pool-id", value: artifact.PoolID},
+		{name: "manifest-core-digest", value: artifact.ManifestCoreDigest},
+		{name: "reviewed-distribution-artifact-digest", value: artifact.ReviewedDistributionDigest},
+		{name: "artifact-uri", value: artifact.ArtifactURI},
+		{name: "claim-control-artifact-digest", value: artifact.ClaimControlDigest},
+		{name: "reviewed-by", value: artifact.ReviewedBy},
+	}); err != nil {
+		return err
+	}
+	type reviewedArtifactRequest struct {
+		OperationID                string    `json:"operation_id"`
+		PoolID                     string    `json:"pool_id"`
+		ManifestCoreDigest         string    `json:"manifest_core_digest"`
+		ReviewedDistributionDigest string    `json:"reviewed_distribution_artifact_digest"`
+		ArtifactURI                string    `json:"artifact_uri"`
+		ClaimControlDigest         string    `json:"claim_control_artifact_digest"`
+		ReviewedBy                 string    `json:"reviewed_by"`
+		ReviewedAtUTC              time.Time `json:"reviewed_at_utc"`
+	}
+	body, err := json.Marshal(reviewedArtifactRequest{
+		OperationID:                artifact.OperationID,
+		PoolID:                     artifact.PoolID,
+		ManifestCoreDigest:         artifact.ManifestCoreDigest,
+		ReviewedDistributionDigest: artifact.ReviewedDistributionDigest,
+		ArtifactURI:                artifact.ArtifactURI,
+		ClaimControlDigest:         artifact.ClaimControlDigest,
+		ReviewedBy:                 artifact.ReviewedBy,
+		ReviewedAtUTC:              artifact.ReviewedAtUTC,
+	})
+	if err != nil {
+		return err
+	}
+	return trustPoolAdminRequest(http.MethodPost, base+"/admin/trust-pools/pools/"+url.PathEscape(artifact.PoolID)+"/reviewed-distribution-artifact", key, artifact.OperationID, body, stdout)
+}
+
+func trustPoolAdminApprovePublicAnnouncement(args []string, getenv func(string) string, stdout io.Writer) error {
+	flags := newTrustPoolAdminFlags("approve-public-announcement")
+	operationID := flags.fs.String("operation-id", "", "idempotency key")
+	poolID := flags.fs.String("pool-id", "", "pool id")
+	manifestDigest := flags.fs.String("manifest-core-digest", "", "current manifest_core_digest")
+	reviewedDigest := flags.fs.String("reviewed-distribution-artifact-digest", "", "reviewed distribution artifact SHA-256 digest")
+	approvalRecordID := flags.fs.String("approval-record-id", "", "public announcement approval record id")
+	approvedBy := flags.fs.String("approved-by", "", "approval actor id")
+	approvedAtRaw := flags.fs.String("approved-at", "", "RFC3339/RFC3339Nano approval timestamp")
+	base, key, err := flags.parse(args, getenv)
+	if err != nil {
+		return err
+	}
+	approvedAt, err := parseTrustPoolAdminTimeFlag("approved-at", *approvedAtRaw)
+	if err != nil {
+		return err
+	}
+	approval := trustpool.PublicAnnouncementApproval{
+		OperationID:                strings.TrimSpace(*operationID),
+		PoolID:                     strings.TrimSpace(*poolID),
+		ManifestCoreDigest:         strings.TrimSpace(*manifestDigest),
+		ReviewedDistributionDigest: strings.TrimSpace(*reviewedDigest),
+		ApprovalRecordID:           strings.TrimSpace(*approvalRecordID),
+		ApprovedBy:                 strings.TrimSpace(*approvedBy),
+		ApprovedAtUTC:              approvedAt,
+	}
+	if err := requireTrustPoolAdminFields([]trustPoolAdminRequiredField{
+		{name: "operation-id", value: approval.OperationID},
+		{name: "pool-id", value: approval.PoolID},
+		{name: "manifest-core-digest", value: approval.ManifestCoreDigest},
+		{name: "reviewed-distribution-artifact-digest", value: approval.ReviewedDistributionDigest},
+		{name: "approval-record-id", value: approval.ApprovalRecordID},
+		{name: "approved-by", value: approval.ApprovedBy},
+	}); err != nil {
+		return err
+	}
+	type publicAnnouncementRequest struct {
+		OperationID                string    `json:"operation_id"`
+		PoolID                     string    `json:"pool_id"`
+		ManifestCoreDigest         string    `json:"manifest_core_digest"`
+		ReviewedDistributionDigest string    `json:"reviewed_distribution_artifact_digest"`
+		ApprovalRecordID           string    `json:"approval_record_id"`
+		ApprovedBy                 string    `json:"approved_by"`
+		ApprovedAtUTC              time.Time `json:"approved_at_utc"`
+	}
+	body, err := json.Marshal(publicAnnouncementRequest{
+		OperationID:                approval.OperationID,
+		PoolID:                     approval.PoolID,
+		ManifestCoreDigest:         approval.ManifestCoreDigest,
+		ReviewedDistributionDigest: approval.ReviewedDistributionDigest,
+		ApprovalRecordID:           approval.ApprovalRecordID,
+		ApprovedBy:                 approval.ApprovedBy,
+		ApprovedAtUTC:              approval.ApprovedAtUTC,
+	})
+	if err != nil {
+		return err
+	}
+	return trustPoolAdminRequest(http.MethodPost, base+"/admin/trust-pools/pools/"+url.PathEscape(approval.PoolID)+"/public-announcement", key, approval.OperationID, body, stdout)
+}
+
+func parseTrustPoolAdminTimeFlag(name, raw string) (time.Time, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return time.Time{}, fmt.Errorf("--%s is required", name)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("--%s must be RFC3339/RFC3339Nano: %w", name, err)
+	}
+	return parsed, nil
+}
+
+type trustPoolAdminRequiredField struct {
+	name  string
+	value string
+}
+
+func requireTrustPoolAdminFields(fields []trustPoolAdminRequiredField) error {
+	for _, field := range fields {
+		if strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("--%s is required", field.name)
+		}
+	}
+	return nil
 }
 
 func trustPoolAdminGET(args []string, name, path string, getenv func(string) string, stdout io.Writer) error {
