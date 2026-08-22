@@ -2335,6 +2335,9 @@ func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time) er
 	if nonRevokedMemberCountFromMaps(p.Members, p.Revoked) < policyMinEligibleMembers(p) {
 		return PromotionPreconditionError{Reason: "member_missing"}
 	}
+	if !poolManifestRetentionPolicyResolved(p) {
+		return PromotionPreconditionError{Reason: "retention_policy_unresolved"}
+	}
 	if s.CreatorApprovals != nil {
 		approval, ok := s.CreatorApprovals[p.CreatorAccountID]
 		if !ok {

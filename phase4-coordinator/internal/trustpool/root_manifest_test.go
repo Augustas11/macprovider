@@ -485,7 +485,7 @@ func manifestSnapshotWithPolicyCoreMutation(t *testing.T, version uint64, root r
 		SettlementMode:       "pool_label_only",
 		RevenueSplitBps:      0,
 		SplitExecutionStatus: "declared_not_executed",
-		RetentionPolicyID:    "retention-test",
+		RetentionPolicyID:    "standard",
 		MinEligibleMembers:   1,
 		PrivacyMode:          "none",
 		MetadataVisible:      "standard",

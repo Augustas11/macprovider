@@ -58,14 +58,20 @@ type PolicyCreator struct {
 }
 
 type PolicyPolicy struct {
-	ManifestVersion       uint64 `json:"manifest_version"`
-	PolicyHash            string `json:"policy_hash,omitempty"`
-	ManifestCoreDigest    string `json:"manifest_core_digest,omitempty"`
-	MinEligibleMembers    int    `json:"min_eligible_members"`
-	MinBinaryVersion      string `json:"min_binary_version,omitempty"`
-	RetentionPolicyID     string `json:"retention_policy_id,omitempty"`
-	RetentionPolicyStatus string `json:"retention_policy_status"`
-	SplitExecutionStatus  string `json:"split_execution_status"`
+	ManifestVersion                  uint64   `json:"manifest_version"`
+	PolicyHash                       string   `json:"policy_hash,omitempty"`
+	ManifestCoreDigest               string   `json:"manifest_core_digest,omitempty"`
+	MinEligibleMembers               int      `json:"min_eligible_members"`
+	MinBinaryVersion                 string   `json:"min_binary_version,omitempty"`
+	RetentionPolicyID                string   `json:"retention_policy_id,omitempty"`
+	RetentionPolicyStatus            string   `json:"retention_policy_status"`
+	RetentionPolicyGoverningVersion  string   `json:"retention_policy_governing_version,omitempty"`
+	RetentionPolicyFieldCategories   []string `json:"retention_policy_field_categories,omitempty"`
+	RetentionPolicyMinPeriod         string   `json:"retention_policy_min_period,omitempty"`
+	RetentionPolicyMaxPeriod         string   `json:"retention_policy_max_period,omitempty"`
+	RetentionPolicyDeletionSLA       string   `json:"retention_policy_deletion_sla,omitempty"`
+	RetentionPolicyDisputeAuditTrail string   `json:"retention_policy_dispute_audit_trail_min_period,omitempty"`
+	SplitExecutionStatus             string   `json:"split_execution_status"`
 }
 
 type PolicyRootIssuer struct {
@@ -149,6 +155,11 @@ func buildPolicyDocumentForPool(p *ReconstructedPoolState, approval CreatorAppro
 		generatedAt = time.Now().UTC()
 	}
 	root := policyRootIssuer(p)
+	retention, retentionResolved := resolveRetentionPolicyForPool(p, approval)
+	retentionStatus := "registered"
+	if !retentionResolved {
+		retentionStatus = "unknown_policy_activation_blocked"
+	}
 	visibility := "authorized"
 	productionBlocker := "public_announcement_and_production_gates_not_implemented"
 	claimValidationStatus := "manifest_overclaim_rejection_enabled_candidate_surface_not_public"
@@ -158,7 +169,7 @@ func buildPolicyDocumentForPool(p *ReconstructedPoolState, approval CreatorAppro
 		"supply_mode shared means admitted providers may also serve global traffic",
 		"single-operator Trusted Pools do not provide a high-availability guarantee",
 		"root issuer custody class is not yet recorded as an immutable approved class; production activation remains blocked",
-		"retention policy is currently represented by the creator approval category, not a resolved retention-policy registry record",
+		"retention policy id is resolved against MacProvider registered retention policy records; unknown ids fail activation",
 		"this policy document is not a Privacy Pool, anonymous-routing, zero-knowledge, confidential-compute, end-to-end-encryption, or regulated-compliance claim",
 		"public unauthenticated policy/status exposure requires an operator approval bound to the current manifest digest",
 	}
@@ -205,14 +216,20 @@ func buildPolicyDocumentForPool(p *ReconstructedPoolState, approval CreatorAppro
 			Status:                       approval.Status,
 		},
 		Policy: PolicyPolicy{
-			ManifestVersion:       p.ManifestVersion,
-			PolicyHash:            p.ManifestCoreDigest,
-			ManifestCoreDigest:    p.ManifestCoreDigest,
-			MinEligibleMembers:    policyMinEligibleMembers(p),
-			MinBinaryVersion:      policyMinBinaryVersion(p),
-			RetentionPolicyID:     policyRetentionPolicyID(p, approval),
-			RetentionPolicyStatus: "approval_category_only_not_registry_resolved",
-			SplitExecutionStatus:  policySplitExecutionStatus(p),
+			ManifestVersion:                  p.ManifestVersion,
+			PolicyHash:                       p.ManifestCoreDigest,
+			ManifestCoreDigest:               p.ManifestCoreDigest,
+			MinEligibleMembers:               policyMinEligibleMembers(p),
+			MinBinaryVersion:                 policyMinBinaryVersion(p),
+			RetentionPolicyID:                retentionPolicyIDForPool(p, approval),
+			RetentionPolicyStatus:            retentionStatus,
+			RetentionPolicyGoverningVersion:  retention.GoverningPolicyVersion,
+			RetentionPolicyFieldCategories:   retention.FieldCategories,
+			RetentionPolicyMinPeriod:         retention.MinRetentionPeriod,
+			RetentionPolicyMaxPeriod:         retention.MaxRetentionPeriod,
+			RetentionPolicyDeletionSLA:       retention.DeletionSLA,
+			RetentionPolicyDisputeAuditTrail: retention.DisputeAuditTrailMinRetention,
+			SplitExecutionStatus:             policySplitExecutionStatus(p),
 		},
 		RootIssuer:      root,
 		Predicates:      policyPredicates(p, publiclyAnnounced),
@@ -274,11 +291,11 @@ func policyPredicates(p *ReconstructedPoolState, publiclyAnnounced bool) PolicyP
 			{ID: "pool_lifecycle_non_active_fail_closed", Status: "enforced", Scope: "routeable_registry"},
 			{ID: "non_revoked_creator_admitted_member", Status: "enforced", Scope: "routeable_registry"},
 			{ID: "coordinator_pool_id_binding", Status: "enforced", Scope: "buyer_dispatch"},
+			{ID: "retention_policy_registry_resolution", Status: "enforced", Scope: "promotion_gate_and_routeable_registry"},
 		},
 		ObserveOnly: []PolicyPredicate{
 			{ID: "live_eligible_member_count", Status: "evaluated", Scope: "pool_status_live_provider_snapshot"},
 			{ID: "root_issuer_custody_class", Status: "not_enforced", Scope: "production_gate"},
-			{ID: "retention_policy_registry_resolution", Status: "not_enforced", Scope: "production_gate"},
 			{ID: "creator_self_service_authentication", Status: "not_implemented", Scope: "admin_surface"},
 			{ID: "signed_launch_journey", Status: "not_implemented", Scope: "production_gate"},
 		},

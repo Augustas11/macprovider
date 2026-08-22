@@ -191,6 +191,65 @@ func TestDurableStore_RouteabilityFailsClosedWhenMinEligibleMembersDropsAfterPro
 	}
 }
 
+func TestDurableStore_RouteabilityFailsClosedForActivePoolWithUnresolvedRetentionPolicy(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name              string
+		retentionPolicyID string
+	}{
+		{name: "unknown", retentionPolicyID: "unknown-retention-policy"},
+		{name: "noncanonical whitespace", retentionPolicyID: " standard "},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			db := openTrustPoolDB(t)
+			store, err := trustpool.NewStore(db)
+			if err != nil {
+				t.Fatalf("NewStore: %v", err)
+			}
+			ts := time.Unix(1800000675, 0).UTC()
+			root := newRootFixture(t)
+			for _, e := range []trustpool.DurableEvent{
+				ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+					e.CreatorAccountID = "creator-a"
+					e.ApprovalRecordID = "approval-v1"
+				}),
+				signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+				signedManifestWithPolicyCoreMutation(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+					core.RetentionPolicyID = tc.retentionPolicyID
+				}),
+				ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+					e.ProviderID = "provider-a"
+				}),
+				ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+					e.BuyerAccountID = "acct-a"
+				}),
+			} {
+				if _, _, _, err := store.AppendValidatedEvent(ctx, e); err != nil {
+					t.Fatalf("AppendValidatedEvent(%s): %v", e.OperationID, err)
+				}
+			}
+			insertPromotedEvent(t, ctx, db, ev("op-active", ts.Add(5*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
+				e.Lifecycle = trustpool.LifecycleActive
+			}))
+			state, err := store.Reconstruct(ctx)
+			if err != nil {
+				t.Fatalf("Reconstruct: %v", err)
+			}
+			registry, err := state.BuildRegistry()
+			if err != nil {
+				t.Fatalf("BuildRegistry: %v", err)
+			}
+			snap := registry.Snapshot(root.poolID)
+			if !snap.Exists || snap.Routeable || len(snap.Members) != 0 {
+				t.Fatalf("routeable snapshot with unresolved retention %q = %+v, want present but non-routeable with no members", tc.retentionPolicyID, snap)
+			}
+		})
+	}
+}
+
 func TestDurableStore_PromotePoolRejectsMissingPreconditions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -308,6 +367,50 @@ func TestDurableStore_PromotePoolRejectsMissingPreconditions(t *testing.T) {
 				approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(time.Hour), trustpool.CreatorStatusSuspended)
 			},
 			want: "creator_suspended",
+		},
+		{
+			name: "unknown retention policy",
+			build: func(t *testing.T, store *trustpool.Store, root rootFixture) {
+				appendTrustPoolEvents(t, ctx, store,
+					ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+						e.CreatorAccountID = "creator-a"
+						e.ApprovalRecordID = "approval-v1"
+					}),
+					signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+					signedManifestWithPolicyCoreMutation(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+						core.RetentionPolicyID = "unknown-retention-policy"
+					}),
+					ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+						e.ProviderID = "provider-a"
+					}),
+					ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+						e.BuyerAccountID = "acct-a"
+					}),
+				)
+			},
+			want: "retention_policy_unresolved",
+		},
+		{
+			name: "noncanonical retention policy",
+			build: func(t *testing.T, store *trustpool.Store, root rootFixture) {
+				appendTrustPoolEvents(t, ctx, store,
+					ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+						e.CreatorAccountID = "creator-a"
+						e.ApprovalRecordID = "approval-v1"
+					}),
+					signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+					signedManifestWithPolicyCoreMutation(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+						core.RetentionPolicyID = "standard "
+					}),
+					ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+						e.ProviderID = "provider-a"
+					}),
+					ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+						e.BuyerAccountID = "acct-a"
+					}),
+				)
+			},
+			want: "retention_policy_unresolved",
 		},
 		{
 			name: "production launch environment requires future gate",
