@@ -59,6 +59,7 @@ type StatusPolicy struct {
 	ManifestVersion                 uint64   `json:"manifest_version"`
 	ManifestCoreDigest              string   `json:"manifest_core_digest,omitempty"`
 	MinBinaryVersion                string   `json:"min_binary_version,omitempty"`
+	ModelAllowlist                  []string `json:"model_allowlist,omitempty"`
 	RootIssuerKeyID                 string   `json:"root_issuer_key_id,omitempty"`
 	RootIssuerKeyHash               string   `json:"root_issuer_public_key_fingerprint,omitempty"`
 	CustodyEvidence                 string   `json:"custody_evidence,omitempty"`
@@ -243,6 +244,7 @@ func buildStatusDocumentForPool(state *ReconstructedState, p *ReconstructedPoolS
 			ManifestVersion:                 p.ManifestVersion,
 			ManifestCoreDigest:              p.ManifestCoreDigest,
 			MinBinaryVersion:                policyMinBinaryVersion(p),
+			ModelAllowlist:                  policyModelAllowlist(p),
 			RootIssuerKeyID:                 statusRootIssuerKeyID(p),
 			RootIssuerKeyHash:               statusRootIssuerFingerprint(p),
 			CustodyEvidence:                 statusCustodyEvidence(p),
@@ -540,6 +542,13 @@ func policyMinBinaryVersion(p *ReconstructedPoolState) string {
 		return p.ManifestMinBinaryVersion
 	}
 	return p.MinBinaryVersion
+}
+
+func policyModelAllowlist(p *ReconstructedPoolState) []string {
+	if p == nil || len(p.ManifestModelAllowlist) == 0 {
+		return nil
+	}
+	return append([]string(nil), p.ManifestModelAllowlist...)
 }
 
 func policySplitExecutionStatus(p *ReconstructedPoolState) string {

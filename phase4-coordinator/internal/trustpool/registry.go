@@ -16,6 +16,7 @@ package trustpool
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +50,9 @@ type poolState struct {
 	// strict no-op. The floor rides this consistent snapshot so a route
 	// attempt evaluates membership AND floor against one coherent view.
 	minBinaryVersion string
+	// modelAllowlist is the pool manifest's request-model allowlist. Empty
+	// means no allowlist is configured and the route gate is inert.
+	modelAllowlist []string
 	// generation increments on every membership/revocation/floor change so the
 	// routing generation fence (SPEC-042 R005) can detect a snapshot that
 	// is no longer current.
@@ -69,6 +73,7 @@ type Snapshot struct {
 	// (SPEC-042 R004), captured under the same lock as Members/Generation.
 	// "" means no floor — the eligibility gate is inert.
 	MinBinaryVersion  string
+	ModelAllowlist    []string
 	Routeable         bool
 	Generation        uint64
 	Revision          uint64
@@ -85,6 +90,7 @@ type RouteableSnapshot struct {
 	Revoked           []string
 	BuyerAccounts     []string
 	MinBinaryVersion  string
+	ModelAllowlist    []string
 	Routeable         bool
 	Generation        uint64
 	RouteableUntilUTC time.Time
@@ -210,6 +216,26 @@ func (r *Registry) SetMinBinaryVersion(poolID, version string) error {
 	return nil
 }
 
+// SetModelAllowlist sets the pool's request-model allowlist and bumps the
+// generation. Empty clears the allowlist and makes the gate inert. Seed helper /
+// control-plane action.
+func (r *Registry) SetModelAllowlist(poolID string, models []string) error {
+	normalized, err := normalizeModelAllowlist(poolID, models)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ps := r.ensure(poolID)
+	ps.routeable = true
+	if stringSlicesEqual(ps.modelAllowlist, normalized) {
+		return nil
+	}
+	ps.modelAllowlist = normalized
+	ps.generation++
+	return nil
+}
+
 // LoadRouteableSnapshot replaces one pool with a durable reconstructed snapshot.
 // It is the boot/failover path for SPEC-043's pool store: the store computes the
 // current lifecycle/member view, and the hot routing registry receives only the
@@ -220,6 +246,10 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 	}
 	if s.MinBinaryVersion != "" && !versionfloor.Valid(s.MinBinaryVersion) {
 		return fmt.Errorf("trustpool: invalid pool min binary version %q for pool %q", s.MinBinaryVersion, s.PoolID)
+	}
+	modelAllowlist, err := normalizeModelAllowlist(s.PoolID, s.ModelAllowlist)
+	if err != nil {
+		return err
 	}
 	members := make(map[string]struct{}, len(s.Members))
 	for _, id := range s.Members {
@@ -252,6 +282,7 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 		buyers:            buyers,
 		routeable:         s.Routeable,
 		minBinaryVersion:  s.MinBinaryVersion,
+		modelAllowlist:    modelAllowlist,
 		generation:        s.Generation,
 		routeableUntilUTC: s.RouteableUntilUTC.UTC(),
 	}
@@ -312,6 +343,10 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 		if s.MinBinaryVersion != "" && !versionfloor.Valid(s.MinBinaryVersion) {
 			return false, fmt.Errorf("trustpool: invalid pool min binary version %q for pool %q", s.MinBinaryVersion, s.PoolID)
 		}
+		modelAllowlist, err := normalizeModelAllowlist(s.PoolID, s.ModelAllowlist)
+		if err != nil {
+			return false, err
+		}
 		members := make(map[string]struct{}, len(s.Members))
 		for _, id := range s.Members {
 			if id == "" {
@@ -340,6 +375,7 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 			buyers:            buyers,
 			routeable:         s.Routeable,
 			minBinaryVersion:  s.MinBinaryVersion,
+			modelAllowlist:    modelAllowlist,
 			generation:        s.Generation,
 			routeableUntilUTC: s.RouteableUntilUTC.UTC(),
 		}
@@ -384,6 +420,7 @@ func poolStatesEqual(a, b *poolState) bool {
 	}
 	return a.routeable == b.routeable &&
 		a.minBinaryVersion == b.minBinaryVersion &&
+		stringSlicesEqual(a.modelAllowlist, b.modelAllowlist) &&
 		a.generation == b.generation &&
 		a.routeableUntilUTC.Equal(b.routeableUntilUTC) &&
 		stringSetsEqual(a.members, b.members) &&
@@ -397,6 +434,46 @@ func stringSetsEqual(a, b map[string]struct{}) bool {
 	}
 	for k := range a {
 		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeModelAllowlist(poolID string, models []string) ([]string, error) {
+	if len(models) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return nil, fmt.Errorf("trustpool: model allowlist for pool %q contains empty model id", poolID)
+		}
+		if _, ok := seen[model]; ok {
+			return nil, fmt.Errorf("trustpool: model allowlist for pool %q contains duplicate model id %q", poolID, model)
+		}
+		seen[model] = struct{}{}
+		out = append(out, model)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func cloneStringSlice(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	return append([]string(nil), in...)
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}
@@ -441,6 +518,7 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 			Revoked:           revoked,
 			BuyerAccounts:     buyers,
 			MinBinaryVersion:  ps.minBinaryVersion,
+			ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
 			Routeable:         ps.routeable,
 			Generation:        ps.generation,
 			RouteableUntilUTC: ps.routeableUntilUTC,
@@ -473,6 +551,7 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		Exists:            true,
 		Members:           members,
 		MinBinaryVersion:  ps.minBinaryVersion,
+		ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
 		Routeable:         ps.routeableAt(now),
 		Generation:        ps.generationAt(now),
 		Revision:          r.revision,
@@ -508,6 +587,7 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 		Exists:            true,
 		Members:           members,
 		MinBinaryVersion:  ps.minBinaryVersion,
+		ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
 		Routeable:         ps.routeableAt(now),
 		Generation:        ps.generationAt(now),
 		Revision:          r.revision,
