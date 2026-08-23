@@ -2079,6 +2079,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		return "", ""
 	}
 	entry.EncryptedLeg = true
+	entry.TrustedPoolV1 = initial.Tier2Capabilities.TrustedPoolV1
 	entry.AttestationStatus = attestationStatus
 	if attestResult.SEResult != nil {
 		entry.SEPublicKey = append([]byte(nil), attestResult.SEResult.SEPublicKey...)

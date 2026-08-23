@@ -742,7 +742,8 @@ var coordinatorEmittedErrorCodes = []string{
 	"unsupported_modelID_for_multi_turn",
 	// SPEC-042 R005/R010 tenant isolation.
 	"pool_no_eligible_member", "pool_state_stale", "pool_unavailable", "pool_binary_too_old",
-	"pool_model_not_allowed", "pool_attestation_unsatisfied", "pool_encrypted_leg_unsatisfied", "pool_settlement_mode_unsatisfied",
+	"pool_model_not_allowed", "pool_attestation_unsatisfied", "pool_encrypted_leg_unsatisfied",
+	"pool_provider_capability_unsatisfied", "pool_settlement_mode_unsatisfied",
 	// SPEC-043 creator promise/status surface.
 	"pool_policy_not_found", "pool_policy_unavailable", "pool_status_not_found", "pool_status_unavailable",
 }

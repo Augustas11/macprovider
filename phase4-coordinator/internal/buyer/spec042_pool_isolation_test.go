@@ -72,6 +72,7 @@ func poolProvider(providerID string) pool.Provider {
 		InferencePath:    pool.InferencePathHTTPForwarding,
 		LastHeartbeatAt:  time.Now().UTC(),
 		ConnectedAt:      time.Now().UTC(),
+		TrustedPoolV1:    true,
 	}
 }
 
@@ -143,6 +144,21 @@ func TestPoolIsolation_PinnedMemberPassesPoolGate(t *testing.T) {
 	}
 	if provider.ProviderID != "member-x" {
 		t.Fatalf("selected %q, want member-x", provider.ProviderID)
+	}
+}
+
+func TestPoolIsolation_PinnedMemberWithoutPoolCapabilityRejected(t *testing.T) {
+	s, registry, tp := poolIsolationServer(t)
+	x := poolProvider("member-x")
+	x.TrustedPoolV1 = false
+	registry.Register(&x, nil)
+	tp.AddMember("P", "member-x")
+
+	headers := http.Header{}
+	headers.Set("X-MacProvider-Provider", "member-x")
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq("P"), headers, nil, "2024-01-01", &forwardState{})
+	if routeErr == nil || routeErr.code != "pool_provider_capability_unsatisfied" {
+		t.Fatalf("pin to non-capable pool member: want pool_provider_capability_unsatisfied, got %+v", routeErr)
 	}
 }
 

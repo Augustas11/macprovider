@@ -155,6 +155,11 @@ type Provider struct {
 	ExpectedModelHash     string     `json:"-"`
 	HashStatus            HashStatus `json:"hash_status,omitempty"`
 	EncryptedLeg          bool       `json:"encrypted_leg,omitempty"`
+	// TrustedPoolV1 is the provider-side half of SPEC-042-R010 positive
+	// pool-capability negotiation. Pool-selected traffic may route only to a
+	// member whose current session advertised this capability; global traffic
+	// remains unaffected.
+	TrustedPoolV1 bool `json:"trusted_pool_v1,omitempty"`
 	// Catalog admission captures the exact signed recommendation envelope that
 	// was accepted for this live session. Deployment canaries use these fields
 	// to distinguish a current catalog-aware provider from a legacy bridge

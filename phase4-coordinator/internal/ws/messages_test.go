@@ -766,6 +766,19 @@ func TestParseAuthInitialAcceptsLegacyAbsentSpec010(t *testing.T) {
 	}
 }
 
+func TestParseAuthInitialAcceptsTrustedPoolCapability(t *testing.T) {
+	payload := validAuthRequestInitial()
+	caps := payload["tier2_capabilities"].(map[string]any)
+	caps["trusted_pool_v1"] = true
+	req, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+	if err != nil {
+		t.Fatalf("ParseAuthRequest field=%q err=%v", field, err)
+	}
+	if !req.Tier2Capabilities.TrustedPoolV1 {
+		t.Fatal("trusted_pool_v1 capability was not parsed")
+	}
+}
+
 func TestHandshakeParsersRejectUnknownModelHashAlgorithm(t *testing.T) {
 	const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	authPayload := validAuthRequestInitial()

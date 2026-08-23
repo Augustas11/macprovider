@@ -19,6 +19,7 @@ type stubChecker struct {
 	quotaOK        map[string]bool
 	poolMember     map[string]bool
 	poolBinaryOK   map[string]bool
+	poolCapOK      map[string]bool
 }
 
 func (s *stubChecker) ProviderMatchesRequest(p pool.Provider) bool {
@@ -67,6 +68,12 @@ func (s *stubChecker) ProviderMeetsPoolBinaryFloor(p pool.Provider) bool {
 	// Default true (no floor / member meets it); tests set
 	// poolBinaryOK[id]=false for under-version members.
 	if v, ok := s.poolBinaryOK[p.ProviderID]; ok {
+		return v
+	}
+	return true
+}
+func (s *stubChecker) ProviderSupportsTrustedPools(p pool.Provider) bool {
+	if v, ok := s.poolCapOK[p.ProviderID]; ok {
 		return v
 	}
 	return true
@@ -273,6 +280,10 @@ func (r *recordingChecker) ProviderInPool(p pool.Provider) bool {
 	r.calls = append(r.calls, p.ProviderID+"/pool")
 	return !r.poolNonMember[p.ProviderID]
 }
+func (r *recordingChecker) ProviderSupportsTrustedPools(p pool.Provider) bool {
+	r.calls = append(r.calls, p.ProviderID+"/pool_cap")
+	return true
+}
 func (r *recordingChecker) ProviderMeetsPoolBinaryFloor(p pool.Provider) bool {
 	r.calls = append(r.calls, p.ProviderID+"/pool_binary")
 	return !r.poolBinaryFail[p.ProviderID]
@@ -318,7 +329,7 @@ func TestEligibleCandidates_OrderingPerProviderSequence(t *testing.T) {
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
 	// SPEC-042 R005 pool-membership gate is first among property gates
 	// (right after excluded), before the model match.
-	want := []string{"p/pool", "p/pool_binary", "p/match", "p/version_floor", "p/receipt_key", "p/context", "p/tier2", "p/quota"}
+	want := []string{"p/pool", "p/pool_cap", "p/pool_binary", "p/match", "p/version_floor", "p/receipt_key", "p/context", "p/tier2", "p/quota"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("call count: want %d, got %d (calls=%v)", len(want), len(checker.calls), checker.calls)
 	}
@@ -334,7 +345,7 @@ func TestEligibleCandidates_OrderingContextRejectStopsBeforeTier2AndQuota(t *tes
 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
 	checker := &recordingChecker{t: t, contextFail: map[string]bool{"p": true}}
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
-	want := []string{"p/pool", "p/pool_binary", "p/match", "p/version_floor", "p/receipt_key", "p/context"}
+	want := []string{"p/pool", "p/pool_cap", "p/pool_binary", "p/match", "p/version_floor", "p/receipt_key", "p/context"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("context-reject: want sequence %v, got %v", want, checker.calls)
 	}
@@ -487,7 +498,7 @@ func TestEligibleCandidates_OrderingVersionFloorRejectStopsBeforeContext(t *test
 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
 	checker := &recordingChecker{t: t, versionFloorFail: map[string]bool{"p": true}}
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
-	want := []string{"p/pool", "p/pool_binary", "p/match", "p/version_floor"}
+	want := []string{"p/pool", "p/pool_cap", "p/pool_binary", "p/match", "p/version_floor"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("calls = %v, want exactly %v", checker.calls, want)
 	}

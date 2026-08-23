@@ -82,14 +82,15 @@ var spec018RetryableByCode = map[string]bool{
 	"model_version_floor_unmet": true,
 	"rate_limited":              true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
 	// SPEC-042 R005/R010 tenant isolation.
-	"pool_state_stale":                 true,  // 409, pool membership changed during routing; re-select
-	"pool_unavailable":                 false, // 503, unknown/unauthorized/disabled/non-active pool; same request must not be retried unchanged
-	"pool_no_eligible_member":          false, // 503, no member satisfies the pool; same reservation must not be retried
-	"pool_binary_too_old":              false, // 503, members exist but all below the pool binary floor; retry cannot make a binary newer
-	"pool_model_not_allowed":           false, // 400, requested model is outside the selected pool manifest allowlist
-	"pool_attestation_unsatisfied":     false, // 503, pool members exist but none satisfy the required attestation tier
-	"pool_encrypted_leg_unsatisfied":   false, // 503, pool members exist but none satisfy the encrypted provider-leg requirement
-	"pool_settlement_mode_unsatisfied": false, // 503, pool members exist but none satisfy enforce-mode settlement prerequisites
+	"pool_state_stale":                     true,  // 409, pool membership changed during routing; re-select
+	"pool_unavailable":                     false, // 503, unknown/unauthorized/disabled/non-active pool; same request must not be retried unchanged
+	"pool_no_eligible_member":              false, // 503, no member satisfies the pool; same reservation must not be retried
+	"pool_provider_capability_unsatisfied": false, // 503, pool members exist but no current session advertises pool support
+	"pool_binary_too_old":                  false, // 503, members exist but all below the pool binary floor; retry cannot make a binary newer
+	"pool_model_not_allowed":               false, // 400, requested model is outside the selected pool manifest allowlist
+	"pool_attestation_unsatisfied":         false, // 503, pool members exist but none satisfy the required attestation tier
+	"pool_encrypted_leg_unsatisfied":       false, // 503, pool members exist but none satisfy the encrypted provider-leg requirement
+	"pool_settlement_mode_unsatisfied":     false, // 503, pool members exist but none satisfy enforce-mode settlement prerequisites
 	// Permanent/client errors — retrying will not help (SPEC-006 §5.2).
 	"model_not_found":                                         false,
 	"context_exceeds_capacity":                                false,
@@ -5922,6 +5923,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 					// a pin would route a pool request to a non-member.
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "Pinned session provider is not a member of the selected pool"}
 				}
+				if poolActive && !poolProviderSupportsTrustedPools(p) {
+					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_provider_capability_unsatisfied", message: "Pinned session provider does not advertise pool support"}
+				}
 				if poolActive && !poolBinaryFloorMet(p.BinaryVersion, poolMin) {
 					// SPEC-042 R004/R010: same reason the filter drops an
 					// under-version member — a pin must not bypass the floor.
@@ -5947,6 +5951,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			if p.ProviderID == providerID {
 				if poolActive && !poolMembers[p.ProviderID] {
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "Pinned provider is not a member of the selected pool"}
+				}
+				if poolActive && !poolProviderSupportsTrustedPools(p) {
+					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_provider_capability_unsatisfied", message: "Pinned provider does not advertise pool support"}
 				}
 				if poolActive && !poolBinaryFloorMet(p.BinaryVersion, poolMin) {
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_binary_too_old", message: "Pinned provider is below the pool minimum binary version"}
@@ -6066,6 +6073,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		// retryable — retrying cannot make an old binary new.
 		if poolActive && result.Counts[routing.ReasonPoolBinaryTooOld] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_binary_too_old", message: "No pool member meets the minimum binary version for the selected pool"}
+		}
+		if poolActive && result.Counts[routing.ReasonPoolProviderCapability] > 0 {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_provider_capability_unsatisfied", message: "No pool member advertises the required pool support capability"}
 		}
 		if poolActive && result.Counts[routing.ReasonPoolNotMember] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "No eligible member is available for the selected pool"}
@@ -6542,6 +6552,8 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
 			key = "receipt_key_missing"
 		case routing.ReasonPoolNotMember:
 			key = "pool_not_member" // SPEC-042 R005: distinct so pool-isolation drops are observable, not "other"
+		case routing.ReasonPoolProviderCapability:
+			key = "pool_provider_capability_unsatisfied" // SPEC-042 R010: provider-side positive capability advertisement missing
 		case routing.ReasonPoolBinaryTooOld:
 			key = "pool_binary_too_old" // SPEC-042 R004/R010: under-version pool member, observable distinctly
 		default:
@@ -6940,6 +6952,9 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		if state != nil && state.poolID != "" && !state.poolMembers[provider.ProviderID] {
 			return pool.Provider{}, queuedProviderTerminal
 		}
+		if state != nil && state.poolID != "" && !poolProviderSupportsTrustedPools(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
 		// SPEC-042 R004/R010: same reason as the #768 per-model floor below —
 		// a same-ID reconnect below the pool's binary floor must not be served
 		// off the queue. Uses the floor from the selection snapshot.
@@ -7001,6 +7016,9 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
 		// so the pool-membership gate must be re-applied here too or a
 		// non-member could be queued for and eventually served a pool request.
 		if !checker.ProviderInPool(provider) {
+			continue
+		}
+		if !checker.ProviderSupportsTrustedPools(provider) {
 			continue
 		}
 		// SPEC-042 R004/R010: re-apply the pool binary floor by hand too, so an
@@ -7230,6 +7248,20 @@ func (c *eligibilityCtx) ProviderInPool(p pool.Provider) bool {
 		return true
 	}
 	return c.poolMembers[p.ProviderID]
+}
+
+// ProviderSupportsTrustedPools implements the provider-side half of
+// SPEC-042-R010 positive pool-capability negotiation. Global traffic is inert;
+// pool traffic requires the current provider session to advertise support.
+func (c *eligibilityCtx) ProviderSupportsTrustedPools(p pool.Provider) bool {
+	if c.poolID == "" {
+		return true
+	}
+	return poolProviderSupportsTrustedPools(p)
+}
+
+func poolProviderSupportsTrustedPools(p pool.Provider) bool {
+	return p.TrustedPoolV1
 }
 
 // ProviderMeetsPoolBinaryFloor implements the SPEC-042 R004/R010 provider-half

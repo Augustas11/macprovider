@@ -73,6 +73,13 @@ const (
 	// request surfaces pool_binary_too_old (503) with no spill to an
 	// under-version or global provider.
 	ReasonPoolBinaryTooOld
+	// ReasonPoolProviderCapability — the request carries a pool_id
+	// (SPEC-042) and the provider IS a current member, but its live session
+	// did not positively advertise trusted_pool_v1. This is the provider
+	// half of SPEC-042-R010's mixed-binary rollback gate. With no pool
+	// selected, the checker returns true and this reason never fires, so
+	// poolless selection stays byte-identical.
+	ReasonPoolProviderCapability
 )
 
 // EligibilityChecker is the cross-package boundary between the
@@ -166,6 +173,13 @@ type EligibilityChecker interface {
 	// binary_version while a floor is in force MUST be treated as below the
 	// floor (fail-safe, mirroring the #768 malformed-version posture).
 	ProviderMeetsPoolBinaryFloor(p pool.Provider) bool
+
+	// ProviderSupportsTrustedPools reports whether a pool MEMBER's current
+	// session positively advertised the SPEC-042 pool-support capability.
+	// This is evaluated after membership and before other provider predicates,
+	// so a legacy/rolled-back provider cannot serve pool traffic even if it
+	// still appears in the durable membership set.
+	ProviderSupportsTrustedPools(p pool.Provider) bool
 }
 
 // RejectedProvider records a single provider drop with enough
@@ -211,7 +225,7 @@ type FilterResult struct {
 //     floor is keyed BY model; a no-op when no floors are
 //     configured, so default-config selection stays byte-identical
 //     (AC-SR-1).
-//  3b. ProviderHasSettlementReceiptKey — ReasonReceiptKeyMissing
+//     3b. ProviderHasSettlementReceiptKey — ReasonReceiptKeyMissing
 //     (SPEC-022 R-2.4/R-2.5). A no-op in observe mode / when the
 //     settlement store is unavailable, so default / observe selection
 //     stays byte-identical; under enforce it drops providers with no
@@ -252,6 +266,13 @@ func EligibleCandidates(
 		// byte-identical to pre-SPEC-042.
 		if !checker.ProviderInPool(p) {
 			res.Counts[ReasonPoolNotMember]++
+			continue
+		}
+		// SPEC-042 R010 provider half: membership alone is not enough under
+		// mixed-binary rollback. The current provider session must advertise
+		// pool support before any pool traffic can dispatch to it.
+		if !checker.ProviderSupportsTrustedPools(p) {
+			res.Counts[ReasonPoolProviderCapability]++
 			continue
 		}
 		// SPEC-042 R004/R010 provider half: a pool MEMBER whose binary_version
