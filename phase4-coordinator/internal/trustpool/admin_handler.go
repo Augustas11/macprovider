@@ -245,6 +245,7 @@ type signedLifecycleControlJSON struct {
 	SignerSetVersion   uint64 `json:"signer_set_version"`
 	OperationID        string `json:"operation_id"`
 	Action             string `json:"action"`
+	TargetProviderID   string `json:"target_provider_id,omitempty"`
 	Reason             string `json:"reason,omitempty"`
 	IssuedAtUnix       uint64 `json:"issued_at_unix"`
 	ExpiresAtUnix      uint64 `json:"expires_at_unix"`
@@ -351,7 +352,7 @@ func (h *adminHandler) handleSignedLifecycle(w http.ResponseWriter, r *http.Requ
 	control.OperationID = operationID
 	body.Control.OperationID = operationID
 	switch control.Action {
-	case LifecyclePaused, LifecycleDraining, LifecycleRetired:
+	case LifecyclePaused, LifecycleDraining, LifecycleRetired, poolmanifest.EmergencyLifecycleRevokeImmediate:
 	case LifecycleActive:
 		h.writeMutationError(w, ErrActivationRequiresPromotion)
 		return
@@ -384,6 +385,11 @@ func (h *adminHandler) handleSignedLifecycle(w http.ResponseWriter, r *http.Requ
 		ManifestCoreDigest: strings.TrimSpace(body.Control.ManifestCoreDigest),
 		SignedControl:      controlProof,
 		ControlSignatures:  sigProof,
+	}
+	if control.Action == poolmanifest.EmergencyLifecycleRevokeImmediate {
+		e.EventType = EventMemberRevoked
+		e.Lifecycle = ""
+		e.ProviderID = control.TargetProviderID
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -435,7 +441,7 @@ func (h *adminHandler) handleSignedLifecycle(w http.ResponseWriter, r *http.Requ
 		h.writeMutationError(w, err)
 		return
 	}
-	state, committed, _, err := h.deps.Store.AppendSignedLifecycleEvent(r.Context(), e)
+	state, committed, _, err := h.deps.Store.appendSignedControlEvent(r.Context(), e)
 	if err != nil {
 		h.writeMutationError(w, err)
 		return
@@ -972,6 +978,7 @@ func parseSignedLifecycleControl(in signedLifecycleControlJSON) (poolmanifest.Em
 		SignerSetVersion:   in.SignerSetVersion,
 		OperationID:        strings.TrimSpace(in.OperationID),
 		Action:             strings.TrimSpace(in.Action),
+		TargetProviderID:   strings.TrimSpace(in.TargetProviderID),
 		Reason:             strings.TrimSpace(in.Reason),
 		IssuedAtUnix:       in.IssuedAtUnix,
 		ExpiresAtUnix:      in.ExpiresAtUnix,
@@ -998,6 +1005,7 @@ func signedLifecycleProofs(control signedLifecycleControlJSON, sigs []signedLife
 	control.ManifestCoreDigest = strings.TrimSpace(control.ManifestCoreDigest)
 	control.OperationID = strings.TrimSpace(control.OperationID)
 	control.Action = strings.TrimSpace(control.Action)
+	control.TargetProviderID = strings.TrimSpace(control.TargetProviderID)
 	control.Reason = strings.TrimSpace(control.Reason)
 	controlBytes, err := json.Marshal(control)
 	if err != nil {

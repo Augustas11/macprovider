@@ -12,12 +12,13 @@ import (
 )
 
 const (
-	emergencyLifecycleControlTag    = "macprovider/spec042/emergency-lifecycle-control/v1"
-	emergencyLifecycleControlSigTag = "macprovider/spec042/emergency-lifecycle-control-sig/v1"
+	emergencyLifecycleControlTag    = "macprovider/spec042/emergency-lifecycle-control/v2"
+	emergencyLifecycleControlSigTag = "macprovider/spec042/emergency-lifecycle-control-sig/v2"
 
-	EmergencyLifecyclePaused   = "paused"
-	EmergencyLifecycleDraining = "draining"
-	EmergencyLifecycleRetired  = "retired"
+	EmergencyLifecyclePaused          = "paused"
+	EmergencyLifecycleDraining        = "draining"
+	EmergencyLifecycleRetired         = "retired"
+	EmergencyLifecycleRevokeImmediate = "revoke_immediate"
 )
 
 var (
@@ -31,6 +32,7 @@ var (
 	errEmergencyControlSignerSet    = errors.New("poolmanifest: emergency lifecycle signer set is not current")
 	errEmergencyControlUnknownSet   = errors.New("poolmanifest: emergency lifecycle signer set not in authority log")
 	errEmergencyControlEmptyHistory = errors.New("poolmanifest: emergency lifecycle snapshot has no accepted policy")
+	errEmergencyControlProviderID   = errors.New("poolmanifest: emergency lifecycle target_provider_id is invalid for action")
 )
 
 // EmergencyLifecycleControl is the signed SPEC-042-R011/R012 command that can
@@ -44,6 +46,7 @@ type EmergencyLifecycleControl struct {
 	SignerSetVersion   uint64
 	OperationID        string
 	Action             string
+	TargetProviderID   string
 	Reason             string
 	IssuedAtUnix       uint64
 	ExpiresAtUnix      uint64
@@ -55,6 +58,13 @@ func (c EmergencyLifecycleControl) CanonicalBytes() ([]byte, error) {
 	}
 	if !validEmergencyLifecycleAction(c.Action) {
 		return nil, errEmergencyControlAction
+	}
+	if c.Action == EmergencyLifecycleRevokeImmediate {
+		if c.TargetProviderID == "" {
+			return nil, errEmergencyControlProviderID
+		}
+	} else if c.TargetProviderID != "" {
+		return nil, errEmergencyControlProviderID
 	}
 	if len(c.ManifestCoreDigest) != manifestCoreHashLen {
 		return nil, errEmergencyControlDigestLen
@@ -70,6 +80,7 @@ func (c EmergencyLifecycleControl) CanonicalBytes() ([]byte, error) {
 	e.u64(c.SignerSetVersion)
 	e.str(c.OperationID)
 	e.str(c.Action)
+	e.str(c.TargetProviderID)
 	e.str(c.Reason)
 	e.u64(c.IssuedAtUnix)
 	e.u64(c.ExpiresAtUnix)
@@ -160,7 +171,7 @@ func VerifyEmergencyLifecycleControl(c EmergencyLifecycleControl, sigs []Signatu
 
 func validEmergencyLifecycleAction(v string) bool {
 	switch v {
-	case EmergencyLifecyclePaused, EmergencyLifecycleDraining, EmergencyLifecycleRetired:
+	case EmergencyLifecyclePaused, EmergencyLifecycleDraining, EmergencyLifecycleRetired, EmergencyLifecycleRevokeImmediate:
 		return true
 	default:
 		return false
