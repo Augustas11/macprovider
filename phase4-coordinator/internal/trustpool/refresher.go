@@ -2,6 +2,7 @@ package trustpool
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -25,6 +26,9 @@ func RefreshRegistry(ctx context.Context, store *Store, registry *Registry) (Ref
 	}
 	state, err := store.Reconstruct(ctx)
 	if err != nil {
+		if errors.Is(err, ErrMalformedDurableEvent) {
+			registry.Disable()
+		}
 		return RefreshResult{}, err
 	}
 	snapshots := state.RouteableSnapshots()

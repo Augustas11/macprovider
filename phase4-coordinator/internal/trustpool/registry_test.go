@@ -168,6 +168,56 @@ func TestRefreshRouteableSnapshotsAtRevisionAllowsSameRevisionTimeGateClose(t *t
 	}
 }
 
+func TestRegistryDisableClearsRouteableSnapshotsWithoutAdvancingRevision(t *testing.T) {
+	t.Parallel()
+	registry := trustpool.NewRegistry()
+	if err := registry.LoadRouteableSnapshotsAtRevision(3, []trustpool.RouteableSnapshot{
+		{
+			PoolID:        "pool-a",
+			Members:       []string{"provider-a"},
+			BuyerAccounts: []string{"acct-a"},
+			Routeable:     true,
+			Generation:    7,
+		},
+	}); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	if snap := registry.Snapshot("pool-a"); !snap.Exists || !snap.Routeable || !snap.Members["provider-a"] {
+		t.Fatalf("initial snapshot = %+v, want routeable provider-a", snap)
+	}
+	revision := registry.Revision()
+
+	registry.Disable()
+	if got := registry.Revision(); got != revision {
+		t.Fatalf("Disable revision = %d, want unchanged %d", got, revision)
+	}
+	if snap := registry.Snapshot("pool-a"); snap.Exists || snap.Routeable || len(snap.Members) != 0 {
+		t.Fatalf("disabled snapshot = %+v, want fail-closed empty", snap)
+	}
+	if registry.BuyerAuthorized("pool-a", "acct-a") {
+		t.Fatal("disabled registry still authorizes buyer")
+	}
+
+	changed, err := registry.RefreshRouteableSnapshotsAtRevision(revision, []trustpool.RouteableSnapshot{
+		{
+			PoolID:        "pool-a",
+			Members:       []string{"provider-a"},
+			BuyerAccounts: []string{"acct-a"},
+			Routeable:     true,
+			Generation:    7,
+		},
+	})
+	if err != nil {
+		t.Fatalf("same-revision reload after disable: %v", err)
+	}
+	if !changed {
+		t.Fatal("same-revision reload after disable did not report a change")
+	}
+	if snap := registry.Snapshot("pool-a"); !snap.Exists || !snap.Routeable || !snap.Members["provider-a"] || !registry.BuyerAuthorized("pool-a", "acct-a") {
+		t.Fatalf("reloaded snapshot = %+v buyer_auth=%v, want restored routeable provider-a/acct-a", snap, registry.BuyerAuthorized("pool-a", "acct-a"))
+	}
+}
+
 func TestSnapshot_ConsistentMembersAndGenerationUnderConcurrency(t *testing.T) {
 	// The (members, generation) pair must be captured atomically: a snapshot
 	// must never show a member that was revoked at-or-before the generation

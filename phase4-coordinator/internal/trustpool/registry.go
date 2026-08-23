@@ -288,6 +288,18 @@ func (r *Registry) Revision() uint64 {
 	return r.revision
 }
 
+// Disable clears all routeable trusted-pool snapshots without advancing the
+// durable revision. Malformed durable state must fail routing closed
+// immediately, while a repaired store at the same revision can republish.
+func (r *Registry) Disable() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pools = make(map[string]*poolState)
+}
+
 func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []RouteableSnapshot, enforceRevision bool, allowSameRevisionRefresh bool) (bool, error) {
 	next := make(map[string]*poolState, len(snapshots))
 	for _, s := range snapshots {
