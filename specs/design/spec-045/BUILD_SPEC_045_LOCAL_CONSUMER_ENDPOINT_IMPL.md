@@ -20,7 +20,9 @@ Ship `macprovider-cli consume` as a local development adapter: a macOS loopback-
    - non-streaming upstream forwarding, pinned dispatch, durable reservation settlement, failure provenance, and Phase 3D transport hardening.
 6. `BUILD_SPEC_045_PHASE_3E_RESOURCE_ACCOUNTING.md`
    - aggregate response-spool, upstream worker-task, upstream socket/file-descriptor, and streaming-response slot admission.
-7. `BUILD_SPEC_045_PHASE_4_CONFORMANCE_JOURNEY.md`
+7. `BUILD_SPEC_045_PHASE_3F_COMPRESSED_RESPONSE.md`
+   - compressed non-streaming upstream response decode-to-identity, decoded response caps, and settlement from decoded usage.
+8. `BUILD_SPEC_045_PHASE_4_CONFORMANCE_JOURNEY.md`
    - required automated coverage, fake-gateway integration harness, staging/production signed journey, and promotion evidence.
 
 ## Required sequencing
@@ -31,6 +33,7 @@ Ship `macprovider-cli consume` as a local development adapter: a macOS loopback-
 - Phase 3 must not forward chargeable requests until durable reservation append and conservative pricing admission are implemented.
 - Phase 3D may land without streaming/SSE forwarding, aggregate response-spool/socket admission, compressed non-streaming decode-to-identity, or mutable upstream invalid-credential state; those remain required before Phase 4 can claim conformance.
 - Phase 3E may land without streaming/SSE forwarding, compressed non-streaming decode-to-identity, or mutable upstream invalid-credential state; those remain required before Phase 4 can claim conformance.
+- Phase 3F may land without streaming/SSE forwarding, mutable upstream invalid-credential state, or fake/real conformance journeys; those remain required before Phase 4 can claim conformance.
 - Phase 4 must not claim production readiness until Phases 1-3 are implemented and the signed real-gateway journey exists.
 
 ## Non-goals

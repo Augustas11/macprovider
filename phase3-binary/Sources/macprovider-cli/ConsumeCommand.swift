@@ -7,6 +7,7 @@ import Network
 import Security
 @preconcurrency import NIO
 @preconcurrency import NIOHTTP1
+import zlib
 
 struct ConsumeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -653,6 +654,11 @@ enum ConsumeUpstreamForwardError: Error {
     case dispatchedUnavailable
 }
 
+private enum ConsumeUpstreamResponseContentCoding {
+    case identity
+    case gzip
+}
+
 struct ConsumeUpstreamTimeouts: Sendable {
     let connectNanoseconds: UInt64
     let sendNanoseconds: UInt64
@@ -1072,8 +1078,8 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
             guard !line.isEmpty, let colon = line.firstIndex(of: ":") else {
                 throw ConsumeUpstreamForwardError.dispatchedUnavailable
             }
-            let name = String(line[..<colon]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = trimHTTPOptionalWhitespace(line[..<colon])
+            let value = trimHTTPOptionalWhitespace(line[line.index(after: colon)...])
             guard validHTTPHeaderName(name),
                   validHTTPHeaderValue(value) else {
                 throw ConsumeUpstreamForwardError.dispatchedUnavailable
@@ -1142,12 +1148,26 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         return true
     }
 
+    private static func trimHTTPOptionalWhitespace(_ value: Substring) -> String {
+        var start = value.startIndex
+        var end = value.endIndex
+        while start < end, value[start] == " " || value[start] == "\t" {
+            start = value.index(after: start)
+        }
+        while start < end {
+            let previous = value.index(before: end)
+            guard value[previous] == " " || value[previous] == "\t" else { break }
+            end = previous
+        }
+        return String(value[start..<end])
+    }
+
     private static func chunkedTransferEncoding(_ headers: [(String, String)]) throws -> Bool {
         let tokens = headers
             .filter { name, _ in name.caseInsensitiveCompare("transfer-encoding") == .orderedSame }
             .flatMap { _, value in
                 value.split(separator: ",", omittingEmptySubsequences: false)
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                    .map { trimHTTPOptionalWhitespace($0).lowercased() }
             }
         guard tokens.allSatisfy({ !$0.isEmpty }) else {
             throw ConsumeUpstreamForwardError.dispatchedUnavailable
@@ -1158,23 +1178,10 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         return !tokens.isEmpty
     }
 
-    private static func upstreamResponseContentEncodingIsIdentity(_ headers: [(String, String)]) -> Bool {
-        for (name, value) in headers where name.caseInsensitiveCompare("content-encoding") == .orderedSame {
-            let tokens = value
-                .split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-                .filter { !$0.isEmpty }
-            guard !tokens.isEmpty, tokens.allSatisfy({ $0 == "identity" }) else {
-                return false
-            }
-        }
-        return true
-    }
-
     private static func contentLength(_ headers: [(String, String)]) throws -> Int? {
         let values = headers.compactMap { name, value -> String? in
             guard name.caseInsensitiveCompare("content-length") == .orderedSame else { return nil }
-            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimHTTPOptionalWhitespace(value[...])
         }
         guard values.count <= 1 else {
             throw ConsumeUpstreamForwardError.dispatchedUnavailable
@@ -1202,7 +1209,7 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
                 throw ConsumeUpstreamForwardError.dispatchedUnavailable
             }
             let sizeText = lineText.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
-            guard let chunkSize = Int(sizeText.trimmingCharacters(in: .whitespacesAndNewlines), radix: 16),
+            guard let chunkSize = Int(trimHTTPOptionalWhitespace(sizeText[...]), radix: 16),
                   chunkSize >= 0 else {
                 throw ConsumeUpstreamForwardError.dispatchedUnavailable
             }
@@ -3370,6 +3377,7 @@ enum ConsumeLocalLimits {
     static let headerCount = 96
     static let headerBytes = 64 * 1024
     static let bodyBytes = 1 * 1024 * 1024
+    static let nonStreamingResponseSpoolBytes = bodyBytes * 2
     static let headerReadTimeout: TimeAmount = .seconds(5)
     static let requestReadTimeout: TimeAmount = .seconds(15)
     static let bodyIdleTimeout: TimeAmount = .seconds(5)
@@ -4506,7 +4514,18 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             switch result {
             case .success(let response):
-                self.writeUpstreamResponse(response, context: contextBox.context, extraHeaders: extraHeaders)
+                do {
+                    let localResponse = try Self.responseForLocalDelivery(response)
+                    self.writeUpstreamResponse(localResponse, context: contextBox.context, extraHeaders: extraHeaders)
+                } catch {
+                    self.writeLocalError(
+                        context: contextBox.context,
+                        status: HTTPResponseStatus(statusCode: 502),
+                        code: "local_upstream_unavailable",
+                        forwardedUpstream: true,
+                        extraHeaders: extraHeaders
+                    )
+                }
             case .failure(let error):
                 let failure = Self.classifyUpstreamFailure(error)
                 self.writeLocalError(
@@ -4552,9 +4571,11 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             switch result {
             case .success(let response):
+                let localResponse: ConsumeUpstreamResponse
                 do {
+                    localResponse = try Self.responseForLocalDelivery(response)
                     let settlement = try self.settlementAmount(
-                        response: response,
+                        response: localResponse,
                         fallbackEstimate: estimate.amount,
                         pricingMatch: pricingMatch,
                         projection: projection
@@ -4577,11 +4598,44 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                             reason: settlement.reason
                         )
                     }
+                } catch ConsumeUpstreamForwardError.dispatchedUnavailable {
+                    do {
+                        try ledger.settle(
+                            runID: self.runtime.launchID,
+                            reservationID: reservationID,
+                            reservedAmount: reservedAmount,
+                            settledAmount: estimate.amount,
+                            reason: "settled_to_admission_estimate"
+                        )
+                    } catch {
+                        self.writeLocalError(
+                            context: contextBox.context,
+                            status: .serviceUnavailable,
+                            code: "local_budget_ledger_unavailable",
+                            forwardedUpstream: true,
+                            extraHeaders: extraHeaders
+                        )
+                        return
+                    }
+                    self.writeLocalError(
+                        context: contextBox.context,
+                        status: HTTPResponseStatus(statusCode: 502),
+                        code: "local_upstream_unavailable",
+                        forwardedUpstream: true,
+                        extraHeaders: extraHeaders
+                    )
+                    return
                 } catch {
-                    self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                    self.writeLocalError(
+                        context: contextBox.context,
+                        status: .serviceUnavailable,
+                        code: "local_budget_ledger_unavailable",
+                        forwardedUpstream: true,
+                        extraHeaders: extraHeaders
+                    )
                     return
                 }
-                self.writeUpstreamResponse(response, context: contextBox.context, extraHeaders: extraHeaders)
+                self.writeUpstreamResponse(localResponse, context: contextBox.context, extraHeaders: extraHeaders)
             case .failure(let error):
                 let failure = Self.classifyUpstreamFailure(error)
                 do {
@@ -4602,7 +4656,13 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                         )
                     }
                 } catch {
-                    self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                    self.writeLocalError(
+                        context: contextBox.context,
+                        status: .serviceUnavailable,
+                        code: "local_budget_ledger_unavailable",
+                        forwardedUpstream: failure.forwardedUpstream,
+                        extraHeaders: extraHeaders
+                    )
                     return
                 }
                 self.writeLocalError(
@@ -4661,7 +4721,9 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         extraHeaders: [(String, String)]
     ) -> Bool {
         guard upstreamResourceReservation == nil,
-              let reservation = runtime.reserveUpstreamExchange(responseSpoolBytes: ConsumeLocalLimits.bodyBytes) else {
+              let reservation = runtime.reserveUpstreamExchange(
+                responseSpoolBytes: ConsumeLocalLimits.nonStreamingResponseSpoolBytes
+              ) else {
             writeLocalError(
                 context: context,
                 status: .serviceUnavailable,
@@ -4705,9 +4767,6 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         pricingMatch: ConsumeTrustedRateCardMatch,
         projection: RateCardProjection
     ) throws -> (amount: ConsumeMicroUSD, reason: String) {
-        guard Self.upstreamResponseContentEncodingIsIdentity(response.headers) else {
-            return (fallbackEstimate, "settled_to_admission_estimate")
-        }
         guard let text = String(data: response.body, encoding: .utf8),
               case .object(let root) = try? StrictJSONParser.parse(text),
               case .object(let usage)? = root["usage"],
@@ -4724,6 +4783,119 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             return (fallbackEstimate, "settled_to_admission_estimate")
         }
         return (amount, "settled_to_upstream_usage")
+    }
+
+    private static func responseForLocalDelivery(_ response: ConsumeUpstreamResponse) throws -> ConsumeUpstreamResponse {
+        switch try upstreamResponseContentCoding(response.headers) {
+        case .identity:
+            return ConsumeUpstreamResponse(
+                statusCode: response.statusCode,
+                headers: response.headers.filter { name, _ in
+                    name.caseInsensitiveCompare("content-encoding") != .orderedSame &&
+                        name.caseInsensitiveCompare("content-length") != .orderedSame
+                },
+                body: response.body
+            )
+        case .gzip:
+            let decodedBody = try gunzip(response.body, maxDecodedBytes: ConsumeLocalLimits.bodyBytes)
+            return ConsumeUpstreamResponse(
+                statusCode: response.statusCode,
+                headers: response.headers.filter { name, _ in
+                    name.caseInsensitiveCompare("content-encoding") != .orderedSame &&
+                        name.caseInsensitiveCompare("content-length") != .orderedSame
+                },
+                body: decodedBody
+            )
+        }
+    }
+
+    private static func upstreamResponseContentCoding(_ headers: [(String, String)]) throws -> ConsumeUpstreamResponseContentCoding {
+        let tokens = headers
+            .filter { name, _ in name.caseInsensitiveCompare("content-encoding") == .orderedSame }
+            .flatMap { _, value in
+                value.split(separator: ",", omittingEmptySubsequences: false)
+                    .map { trimHTTPOptionalWhitespace($0).lowercased() }
+            }
+        guard tokens.allSatisfy({ !$0.isEmpty }) else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        if tokens.isEmpty || tokens == ["identity"] {
+            return .identity
+        }
+        if tokens == ["gzip"] {
+            return .gzip
+        }
+        throw ConsumeUpstreamForwardError.dispatchedUnavailable
+    }
+
+    private static func trimHTTPOptionalWhitespace(_ value: Substring) -> String {
+        var start = value.startIndex
+        var end = value.endIndex
+        while start < end, value[start] == " " || value[start] == "\t" {
+            start = value.index(after: start)
+        }
+        while start < end {
+            let previous = value.index(before: end)
+            guard value[previous] == " " || value[previous] == "\t" else { break }
+            end = previous
+        }
+        return String(value[start..<end])
+    }
+
+    private static func gunzip(_ body: Data, maxDecodedBytes: Int) throws -> Data {
+        guard body.count <= Int(UInt32.max), maxDecodedBytes >= 0 else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        var stream = z_stream()
+        let initStatus = inflateInit2_(
+            &stream,
+            16 + MAX_WBITS,
+            ZLIB_VERSION,
+            Int32(MemoryLayout<z_stream>.size)
+        )
+        guard initStatus == Z_OK else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        defer { inflateEnd(&stream) }
+
+        return try body.withUnsafeBytes { input in
+            stream.next_in = UnsafeMutablePointer<Bytef>(
+                mutating: input.bindMemory(to: Bytef.self).baseAddress
+            )
+            stream.avail_in = uInt(body.count)
+            var output = Data()
+            let chunkSize = 32 * 1024
+
+            while true {
+                var buffer = [UInt8](repeating: 0, count: chunkSize)
+                let status = buffer.withUnsafeMutableBytes { rawBuffer -> Int32 in
+                    stream.next_out = rawBuffer.bindMemory(to: Bytef.self).baseAddress
+                    stream.avail_out = uInt(chunkSize)
+                    return inflate(&stream, Z_NO_FLUSH)
+                }
+                let produced = chunkSize - Int(stream.avail_out)
+                if produced > 0 {
+                    guard output.count + produced <= maxDecodedBytes else {
+                        throw ConsumeUpstreamForwardError.dispatchedUnavailable
+                    }
+                    output.append(contentsOf: buffer.prefix(produced))
+                }
+
+                switch status {
+                case Z_STREAM_END:
+                    guard stream.avail_in == 0 else {
+                        throw ConsumeUpstreamForwardError.dispatchedUnavailable
+                    }
+                    return output
+                case Z_OK:
+                    guard produced > 0 || stream.avail_in > 0 else {
+                        throw ConsumeUpstreamForwardError.dispatchedUnavailable
+                    }
+                default:
+                    throw ConsumeUpstreamForwardError.dispatchedUnavailable
+                }
+            }
+        }
     }
 
     private func writeLocalUnpricedBudgetAdmission(budget: ConsumeMicroUSD, context: ChannelHandlerContext) {
@@ -4877,16 +5049,6 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         context: ChannelHandlerContext,
         extraHeaders: [(String, String)]
     ) {
-        guard Self.upstreamResponseContentEncodingIsIdentity(response.headers) else {
-            writeLocalError(
-                context: context,
-                status: HTTPResponseStatus(statusCode: 502),
-                code: "local_upstream_unavailable",
-                forwardedUpstream: true,
-                extraHeaders: extraHeaders
-            )
-            return
-        }
         var headers = HTTPHeaders()
         for (name, value) in response.headers {
             let normalized = name.lowercased()
@@ -4917,19 +5079,6 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
         context.close(promise: nil)
-    }
-
-    private static func upstreamResponseContentEncodingIsIdentity(_ headers: [(String, String)]) -> Bool {
-        for (name, value) in headers where name.caseInsensitiveCompare("content-encoding") == .orderedSame {
-            let tokens = value
-                .split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-                .filter { !$0.isEmpty }
-            guard !tokens.isEmpty, tokens.allSatisfy({ $0 == "identity" }) else {
-                return false
-            }
-        }
-        return true
     }
 
     private static func allowedUpstreamResponseHeader(_ normalizedName: String) -> Bool {
