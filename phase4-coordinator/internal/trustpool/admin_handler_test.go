@@ -2,7 +2,9 @@ package trustpool_test
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -494,6 +496,84 @@ func TestAdminHandler_RestrictiveLifecyclePausesRouteablePool(t *testing.T) {
 	}
 }
 
+func TestAdminHandler_SignedLifecyclePausesRouteablePool(t *testing.T) {
+	t.Parallel()
+	routeable := newRouteableAdminPool(t)
+	registry := routeable.registry
+	handler := routeable.handler
+	root := routeable.root
+	if snap := registry.Snapshot(root.poolID); !snap.Exists || !snap.Routeable || !snap.Members["provider-a"] {
+		t.Fatalf("pre-signed-pause snapshot = %+v, want routeable provider-a", snap)
+	}
+
+	rec := postAdminSignedLifecycle(t, routeable.store, handler, "", root, "op-signed-pause", trustpool.LifecyclePaused, "signed incident", false, http.StatusAccepted)
+	var body struct {
+		Event struct {
+			Lifecycle         string `json:"lifecycle"`
+			SignedControl     string `json:"signed_control"`
+			ControlSignatures string `json:"control_signatures"`
+		} `json:"event"`
+		Pool struct {
+			Lifecycle string `json:"lifecycle"`
+			Routeable bool   `json:"routeable"`
+		} `json:"pool"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode signed lifecycle response: %v", err)
+	}
+	if body.Event.Lifecycle != trustpool.LifecyclePaused || body.Event.SignedControl == "" || body.Event.ControlSignatures == "" {
+		t.Fatalf("signed lifecycle event=%+v, want paused with persisted proof", body.Event)
+	}
+	if body.Pool.Lifecycle != trustpool.LifecyclePaused || body.Pool.Routeable {
+		t.Fatalf("signed lifecycle pool=%+v, want paused/non-routeable", body.Pool)
+	}
+	paused := registry.Snapshot(root.poolID)
+	if !paused.Exists || paused.Routeable || len(paused.Members) != 0 || !registry.BuyerAuthorized(root.poolID, "acct-allowed") {
+		t.Fatalf("signed paused snapshot = %+v buyer_auth=%v, want fail-closed members with buyer allowlist retained", paused, registry.BuyerAuthorized(root.poolID, "acct-allowed"))
+	}
+}
+
+func TestAdminHandler_SignedLifecycleRejectsBadSignatureWithoutRegistryMutation(t *testing.T) {
+	t.Parallel()
+	routeable := newRouteableAdminPool(t)
+	registry := routeable.registry
+	handler := routeable.handler
+	root := routeable.root
+	before := registry.Snapshot(root.poolID)
+	if !before.Exists || !before.Routeable || !before.Members["provider-a"] {
+		t.Fatalf("pre-bad-signature snapshot = %+v, want routeable provider-a", before)
+	}
+
+	postAdminSignedLifecycle(t, routeable.store, handler, "operator-secret", root, "op-bad-signature-pause", trustpool.LifecyclePaused, "signed incident", true, http.StatusBadRequest)
+	after := registry.Snapshot(root.poolID)
+	if !after.Exists || !after.Routeable || !after.Members["provider-a"] || after.Generation != before.Generation {
+		t.Fatalf("post-bad-signature snapshot = %+v, want unchanged routeable generation %d", after, before.Generation)
+	}
+}
+
+func TestAdminHandler_SignedLifecycleIdempotentRetryDoesNotReverifyCurrentManifest(t *testing.T) {
+	t.Parallel()
+	routeable := newRouteableAdminPool(t)
+	handler := routeable.handler
+	root := routeable.root
+
+	body := signedLifecycleRequestBody(t, routeable.store, root, "op-signed-idempotent", trustpool.LifecyclePaused, "signed incident", false)
+	postAdminSignedLifecycleBody(t, handler, "operator-secret", root.poolID, body, "", http.StatusAccepted)
+	postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-retire-after-signed-pause", trustpool.LifecycleRetired, "retire", http.StatusAccepted)
+	postAdminSignedLifecycleBody(t, handler, "operator-secret", root.poolID, body, "", http.StatusAccepted)
+}
+
+func TestAdminHandler_SignedLifecycleRejectsHeaderOnlyOperationID(t *testing.T) {
+	t.Parallel()
+	routeable := newRouteableAdminPool(t)
+	handler := routeable.handler
+	root := routeable.root
+	body := signedLifecycleRequestBody(t, routeable.store, root, "op-header-only", trustpool.LifecyclePaused, "signed incident", false)
+	control := body["control"].(map[string]any)
+	control["operation_id"] = ""
+	postAdminSignedLifecycleBody(t, handler, "operator-secret", root.poolID, body, "op-header-only", http.StatusBadRequest)
+}
+
 func TestAdminHandler_PromoteReactivatesPausedPoolAfterPreflight(t *testing.T) {
 	t.Parallel()
 	routeable := newRouteableAdminPool(t)
@@ -627,6 +707,25 @@ func TestAdminHandler_RestrictiveLifecycleRejectsActivationAndInvalidTransition(
 	postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-pause", trustpool.LifecyclePaused, "prelaunch pause", http.StatusBadRequest)
 	if snap := registry.Snapshot(root.poolID); snap.Exists || snap.Routeable || len(snap.Members) != 0 {
 		t.Fatalf("post-invalid-transition snapshot = %+v, want fail-closed empty registry", snap)
+	}
+}
+
+func TestAdminHandler_AppendEventRejectsForgedSignedLifecycleProof(t *testing.T) {
+	t.Parallel()
+	routeable := newRouteableAdminPool(t)
+	handler := routeable.handler
+	root := routeable.root
+
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:         trustpool.EventLifecycleChanged,
+		PoolID:            root.poolID,
+		Lifecycle:         trustpool.LifecyclePaused,
+		Reason:            "forged",
+		SignedControl:     `{"operation_id":"op-forged"}`,
+		ControlSignatures: `[{"key_id":"k1","signature":"forged"}]`,
+	}, "op-forged", http.StatusBadRequest)
+	if snap := routeable.registry.Snapshot(root.poolID); !snap.Exists || !snap.Routeable || !snap.Members["provider-a"] {
+		t.Fatalf("forged proof mutated registry: %+v", snap)
 	}
 }
 
@@ -1392,6 +1491,92 @@ func postAdminLifecycleWithIDs(t *testing.T, h http.Handler, operatorKey, poolID
 	h.ServeHTTP(rec, req)
 	if rec.Code != want {
 		t.Fatalf("POST lifecycle body=%s header=%s %s status=%d body=%s, want %d", bodyOperationID, headerOperationID, lifecycle, rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+	return rec
+}
+
+func postAdminSignedLifecycle(t *testing.T, store *trustpool.Store, h http.Handler, operatorKey string, root rootFixture, operationID, lifecycle, reason string, corrupt bool, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	body := signedLifecycleRequestBody(t, store, root, operationID, lifecycle, reason, corrupt)
+	return postAdminSignedLifecycleBody(t, h, operatorKey, root.poolID, body, "", want)
+}
+
+func signedLifecycleRequestBody(t *testing.T, store *trustpool.Store, root rootFixture, operationID, lifecycle, reason string, corrupt bool) map[string]any {
+	t.Helper()
+	state, err := store.Reconstruct(t.Context())
+	if err != nil {
+		t.Fatalf("Reconstruct for signed lifecycle: %v", err)
+	}
+	pool := state.Pools[root.poolID]
+	if pool == nil {
+		t.Fatalf("pool %q not reconstructed", root.poolID)
+	}
+	digest, err := hex.DecodeString(pool.ManifestCoreDigest)
+	if err != nil {
+		t.Fatalf("decode manifest digest: %v", err)
+	}
+	issued := uint64(time.Now().Add(-time.Minute).Unix())
+	control := poolmanifest.EmergencyLifecycleControl{
+		PoolID:             root.poolID,
+		ManifestVersion:    pool.ManifestVersion,
+		ManifestCoreDigest: digest,
+		SignerSetVersion:   1,
+		OperationID:        operationID,
+		Action:             lifecycle,
+		Reason:             reason,
+		IssuedAtUnix:       issued,
+		ExpiresAtUnix:      issued + 600,
+	}
+	controlDigest, err := control.Digest()
+	if err != nil {
+		t.Fatalf("control Digest: %v", err)
+	}
+	msg, err := poolmanifest.EmergencyLifecycleControlSigningMessage(controlDigest)
+	if err != nil {
+		t.Fatalf("control signing message: %v", err)
+	}
+	sig := ed25519.Sign(root.policySignerPrivateKey, msg)
+	if corrupt {
+		sig = append([]byte(nil), sig...)
+		sig[0] ^= 0xff
+	}
+	return map[string]any{
+		"control": map[string]any{
+			"pool_id":              control.PoolID,
+			"manifest_version":     control.ManifestVersion,
+			"manifest_core_digest": pool.ManifestCoreDigest,
+			"signer_set_version":   control.SignerSetVersion,
+			"operation_id":         control.OperationID,
+			"action":               control.Action,
+			"reason":               control.Reason,
+			"issued_at_unix":       control.IssuedAtUnix,
+			"expires_at_unix":      control.ExpiresAtUnix,
+		},
+		"signatures": []map[string]string{{
+			"key_id":    root.policySigner.KeyID,
+			"signature": base64.StdEncoding.EncodeToString(sig),
+		}},
+	}
+}
+
+func postAdminSignedLifecycleBody(t *testing.T, h http.Handler, operatorKey, poolID string, payload map[string]any, headerOperationID string, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal signed lifecycle request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/pools/"+poolID+"/signed-lifecycle", bytes.NewReader(body))
+	if operatorKey != "" {
+		req.Header.Set("Authorization", "Bearer "+operatorKey)
+	}
+	if headerOperationID != "" {
+		req.Header.Set("Idempotency-Key", headerOperationID)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST signed lifecycle status=%d body=%s, want %d", rec.Code, rec.Body.String(), want)
 	}
 	assertAdminSchemaVersion(t, rec)
 	return rec
