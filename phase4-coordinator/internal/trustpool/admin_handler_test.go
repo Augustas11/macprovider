@@ -81,6 +81,290 @@ func TestAdminHandler_AppendsCandidateEventsAndRejectsActivation(t *testing.T) {
 	}, "op-active-after-promote", http.StatusConflict)
 }
 
+func TestAdminHandler_MalformedDurableStateClearsRouteableRegistry(t *testing.T) {
+	t.Parallel()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	registry := trustpool.NewRegistry()
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    registry,
+		OperatorKey: "operator-secret",
+	})
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:        trustpool.EventPoolCreated,
+		PoolID:           root.poolID,
+		CreatorAccountID: "creator-a",
+		ApprovalRecordID: "approval-v1",
+	}, "op-create", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", signedRootRegistrationForIssue(t, "op-root", testAdminTS(1), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", testAdminTS(3600)), root), "op-root", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", signedManifest(t, "op-manifest", testAdminTS(2), root.poolID, 1, root), "op-manifest", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberAdmitted,
+		PoolID:     root.poolID,
+		ProviderID: "provider-a",
+	}, "op-member", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:      trustpool.EventBuyerAuthorized,
+		PoolID:         root.poolID,
+		BuyerAccountID: "acct-a",
+	}, "op-buyer", http.StatusAccepted)
+	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote", http.StatusAccepted)
+	if snap := registry.Snapshot(root.poolID); !snap.Exists || !snap.Routeable || !snap.Members["provider-a"] || !registry.BuyerAuthorized(root.poolID, "acct-a") {
+		t.Fatalf("pre-tamper snapshot = %+v buyer_auth=%v, want routeable provider-a/acct-a", snap, registry.BuyerAuthorized(root.poolID, "acct-a"))
+	}
+	if _, err := db.Exec(`UPDATE trustpool_manifest_acceptances SET manifest_core_digest = ? WHERE pool_id = ? AND manifest_version = ?`, strings.Repeat("a", 64), root.poolID, uint64(1)); err != nil {
+		t.Fatalf("tamper manifest acceptance projection: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/trust-pools/pools", nil)
+	req.Header.Set("Authorization", "Bearer operator-secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("GET pools status=%d body=%s, want 500", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "reconstruct_failed") {
+		t.Fatalf("GET pools body=%s, want reconstruct_failed", rec.Body.String())
+	}
+	if snap := registry.Snapshot(root.poolID); snap.Exists || snap.Routeable || len(snap.Members) != 0 || registry.BuyerAuthorized(root.poolID, "acct-a") {
+		t.Fatalf("post-tamper snapshot = %+v buyer_auth=%v, want fail-closed empty", snap, registry.BuyerAuthorized(root.poolID, "acct-a"))
+	}
+}
+
+func TestAdminHandler_MalformedDurableStateRejectsMutationsAndClearsRegistry(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, handler http.Handler, root rootFixture)
+	}{
+		{
+			name: "append",
+			mutate: func(t *testing.T, handler http.Handler, root rootFixture) {
+				t.Helper()
+				postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+					EventType:  trustpool.EventMemberAdmitted,
+					PoolID:     root.poolID,
+					ProviderID: "provider-b",
+				}, "op-member-b", http.StatusBadRequest)
+			},
+		},
+		{
+			name: "promote",
+			mutate: func(t *testing.T, handler http.Handler, root rootFixture) {
+				t.Helper()
+				postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote", http.StatusBadRequest)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := openTrustPoolDB(t)
+			store, err := trustpool.NewStore(db)
+			if err != nil {
+				t.Fatalf("NewStore: %v", err)
+			}
+			registry := trustpool.NewRegistry()
+			if err := registry.LoadRouteableSnapshotsAtRevision(99, []trustpool.RouteableSnapshot{
+				{
+					PoolID:        "pool-a",
+					Members:       []string{"stale-provider"},
+					BuyerAccounts: []string{"acct-a"},
+					Routeable:     true,
+					Generation:    99,
+				},
+			}); err != nil {
+				t.Fatalf("seed stale registry: %v", err)
+			}
+			handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+				Store:       store,
+				Registry:    registry,
+				OperatorKey: "operator-secret",
+			})
+			root := newRootFixture(t)
+			approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+			postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+				EventType:        trustpool.EventPoolCreated,
+				PoolID:           root.poolID,
+				CreatorAccountID: "creator-a",
+				ApprovalRecordID: "approval-v1",
+			}, "op-create", http.StatusAccepted)
+			postAdminEvent(t, handler, "operator-secret", signedRootRegistrationForIssue(t, "op-root", testAdminTS(1), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", testAdminTS(3600)), root), "op-root", http.StatusAccepted)
+			postAdminEvent(t, handler, "operator-secret", signedManifest(t, "op-manifest", testAdminTS(2), root.poolID, 1, root), "op-manifest", http.StatusAccepted)
+			postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+				EventType:  trustpool.EventMemberAdmitted,
+				PoolID:     root.poolID,
+				ProviderID: "provider-a",
+			}, "op-member", http.StatusAccepted)
+			postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+				EventType:      trustpool.EventBuyerAuthorized,
+				PoolID:         root.poolID,
+				BuyerAccountID: "acct-a",
+			}, "op-buyer", http.StatusAccepted)
+			if _, err := db.Exec(`UPDATE trustpool_manifest_acceptances SET manifest_core_digest = ? WHERE pool_id = ? AND manifest_version = ?`, strings.Repeat("a", 64), root.poolID, uint64(1)); err != nil {
+				t.Fatalf("tamper manifest acceptance projection: %v", err)
+			}
+
+			tc.mutate(t, handler, root)
+			if snap := registry.Snapshot("pool-a"); snap.Exists || snap.Routeable || len(snap.Members) != 0 || registry.BuyerAuthorized("pool-a", "acct-a") {
+				t.Fatalf("post-mutation snapshot = %+v buyer_auth=%v, want fail-closed empty", snap, registry.BuyerAuthorized("pool-a", "acct-a"))
+			}
+		})
+	}
+}
+
+func TestAdminHandler_MalformedDurableStateRejectsMetadataMutationsAndClearsRegistry(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, handler http.Handler, root rootFixture, reviewedArtifactDigest string)
+	}{
+		{
+			name: "creator",
+			mutate: func(t *testing.T, handler http.Handler, _ rootFixture, _ string) {
+				t.Helper()
+				postAdminCreator(t, handler, "operator-secret", trustpool.CreatorApproval{
+					CreatorAccountID:                  "creator-a",
+					ApprovalRecordID:                  "approval-v2",
+					CurrentApprovalVersion:            "approval-version-2",
+					PublicDisplayName:                 "Creator A",
+					LegalSupportContact:               "legal@example.test",
+					BillingContact:                    "billing@example.test",
+					EmergencyNotificationEndpoint:     "https://example.test/emergency",
+					AcknowledgedMaxResponseTime:       "15m",
+					AllowedProductCategory:            "design-partner",
+					DataRetentionCategory:             "standard",
+					SupportOwner:                      "ops",
+					AllowedLaunchEnvironment:          "candidate",
+					CreatorAgreementID:                "agreement-v2",
+					CreatorAgreementVersion:           "v2",
+					CreatorAgreementExpiresAtUTC:      time.Now().Add(23 * time.Hour),
+					CreatorAgreementGraceEndsAtUTC:    time.Now().Add(24 * time.Hour),
+					PricingScheduleID:                 "pricing-v2",
+					PricingScheduleVersion:            "v2",
+					ProhibitedClaimAcknowledgmentHash: hexDigest("prohibited-v2"),
+					BuyerDisclosureCommitmentHash:     hexDigest("buyer-disclosure-v2"),
+					ApprovalCriteriaHash:              hexDigest("criteria-v2"),
+					ApprovedBy:                        "operator-a",
+					ApprovedAtUTC:                     testAdminTS(20),
+					Status:                            trustpool.CreatorStatusEnabled,
+				}, http.StatusBadRequest)
+			},
+		},
+		{
+			name: "creator_idempotent_replay",
+			mutate: func(t *testing.T, handler http.Handler, _ rootFixture, _ string) {
+				t.Helper()
+				postAdminCreator(t, handler, "operator-secret", validCreatorApproval("creator-a", "approval-v1", "approval-version-1", "candidate", testAdminTS(86400), trustpool.CreatorStatusEnabled), http.StatusBadRequest)
+			},
+		},
+		{
+			name: "nonce",
+			mutate: func(t *testing.T, handler http.Handler, _ rootFixture, _ string) {
+				t.Helper()
+				postAdminRootRegistrationNonce(t, handler, "operator-secret", trustpool.RootRegistrationNonceIssue{
+					OperationID:            "op-nonce-after-tamper",
+					CreatorAccountID:       "creator-a",
+					ApprovalRecordID:       "approval-v1",
+					CurrentApprovalVersion: "approval-version-1",
+					LaunchEnvironment:      "candidate",
+					ExpiresAtUTC:           testAdminTS(7200),
+				}, http.StatusBadRequest)
+			},
+		},
+		{
+			name: "reviewed_artifact",
+			mutate: func(t *testing.T, handler http.Handler, root rootFixture, reviewedArtifactDigest string) {
+				t.Helper()
+				postAdminReviewedDistributionArtifact(t, handler, "operator-secret", root.poolID, trustpool.ReviewedDistributionArtifact{
+					OperationID:                "op-reviewed-after-tamper",
+					ManifestCoreDigest:         signedManifest(t, "op-manifest-unused", testAdminTS(99), root.poolID, 1, root).ManifestCoreDigest,
+					ReviewedDistributionDigest: reviewedArtifactDigest,
+					ArtifactURI:                "https://example.test/reviewed-after-tamper.json",
+					ClaimControlDigest:         hexDigest("claims-after-tamper"),
+					ReviewedBy:                 "operator-a",
+					ReviewedAtUTC:              testAdminTS(21),
+				}, http.StatusBadRequest)
+			},
+		},
+		{
+			name: "public_announcement",
+			mutate: func(t *testing.T, handler http.Handler, root rootFixture, reviewedArtifactDigest string) {
+				t.Helper()
+				postAdminPublicAnnouncement(t, handler, "operator-secret", root.poolID, trustpool.PublicAnnouncementApproval{
+					OperationID:                "op-public-after-tamper",
+					ManifestCoreDigest:         signedManifest(t, "op-manifest-unused", testAdminTS(99), root.poolID, 1, root).ManifestCoreDigest,
+					ReviewedDistributionDigest: reviewedArtifactDigest,
+					ApprovalRecordID:           "public-after-tamper",
+					ApprovedBy:                 "operator-a",
+					ApprovedAtUTC:              testAdminTS(22),
+				}, http.StatusBadRequest)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := openTrustPoolDB(t)
+			store, err := trustpool.NewStore(db)
+			if err != nil {
+				t.Fatalf("NewStore: %v", err)
+			}
+			registry := trustpool.NewRegistry()
+			handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+				Store:       store,
+				Registry:    registry,
+				OperatorKey: "operator-secret",
+			})
+			root := newRootFixture(t)
+			approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", testAdminTS(86400), trustpool.CreatorStatusEnabled)
+			manifest := signedManifest(t, "op-manifest", testAdminTS(2), root.poolID, 1, root)
+			postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+				EventType:        trustpool.EventPoolCreated,
+				PoolID:           root.poolID,
+				CreatorAccountID: "creator-a",
+				ApprovalRecordID: "approval-v1",
+			}, "op-create", http.StatusAccepted)
+			postAdminEvent(t, handler, "operator-secret", signedRootRegistrationForIssue(t, "op-root", testAdminTS(1), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", testAdminTS(3600)), root), "op-root", http.StatusAccepted)
+			postAdminEvent(t, handler, "operator-secret", manifest, "op-manifest", http.StatusAccepted)
+			postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+				EventType:  trustpool.EventMemberAdmitted,
+				PoolID:     root.poolID,
+				ProviderID: "provider-a",
+			}, "op-member", http.StatusAccepted)
+			postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+				EventType:      trustpool.EventBuyerAuthorized,
+				PoolID:         root.poolID,
+				BuyerAccountID: "acct-a",
+			}, "op-buyer", http.StatusAccepted)
+			if err := registry.LoadRouteableSnapshotsAtRevision(99, []trustpool.RouteableSnapshot{
+				{
+					PoolID:        root.poolID,
+					Members:       []string{"stale-provider"},
+					BuyerAccounts: []string{"acct-a"},
+					Routeable:     true,
+					Generation:    99,
+				},
+			}); err != nil {
+				t.Fatalf("seed stale registry: %v", err)
+			}
+			reviewedArtifactDigest := hexDigest("reviewed-artifact-after-tamper")
+			if _, err := db.Exec(`UPDATE trustpool_manifest_acceptances SET manifest_core_digest = ? WHERE pool_id = ? AND manifest_version = ?`, strings.Repeat("a", 64), root.poolID, uint64(1)); err != nil {
+				t.Fatalf("tamper manifest acceptance projection: %v", err)
+			}
+
+			tc.mutate(t, handler, root, reviewedArtifactDigest)
+			if snap := registry.Snapshot(root.poolID); snap.Exists || snap.Routeable || len(snap.Members) != 0 || registry.BuyerAuthorized(root.poolID, "acct-a") {
+				t.Fatalf("post-metadata mutation snapshot = %+v buyer_auth=%v, want fail-closed empty", snap, registry.BuyerAuthorized(root.poolID, "acct-a"))
+			}
+		})
+	}
+}
+
 func TestAdminHandler_PromoteRejectsMissingPrecondition(t *testing.T) {
 	t.Parallel()
 	store, err := trustpool.NewStore(openTrustPoolDB(t))
@@ -831,6 +1115,22 @@ func postAdminCreator(t *testing.T, h http.Handler, operatorKey string, approval
 	h.ServeHTTP(rec, req)
 	if rec.Code != want {
 		t.Fatalf("POST creator status=%d body=%s, want %d", rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+}
+
+func postAdminRootRegistrationNonce(t *testing.T, h http.Handler, operatorKey string, issue trustpool.RootRegistrationNonceIssue, want int) {
+	t.Helper()
+	body, err := json.Marshal(issue)
+	if err != nil {
+		t.Fatalf("marshal root registration nonce issue: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/root-registration-nonces", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+operatorKey)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST root registration nonce status=%d body=%s, want %d", rec.Code, rec.Body.String(), want)
 	}
 	assertAdminSchemaVersion(t, rec)
 }

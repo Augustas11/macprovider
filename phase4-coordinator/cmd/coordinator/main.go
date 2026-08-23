@@ -2321,6 +2321,10 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 func loadTrustedPools(ctx context.Context, db *sql.DB, logger zerolog.Logger) (*trustpool.Store, *trustpool.Registry, bool, error) {
 	store, err := trustpool.NewStore(db)
 	if err != nil {
+		if errors.Is(err, trustpool.ErrMalformedDurableEvent) {
+			logger.Error().Err(err).Msg("trusted pools durable migration failed; pool support disabled")
+			return nil, nil, false, nil
+		}
 		return nil, nil, false, err
 	}
 	reconstructed, err := store.Reconstruct(ctx)

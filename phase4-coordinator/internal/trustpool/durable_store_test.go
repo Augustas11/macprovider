@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +126,91 @@ func TestDurableStore_PromotePoolActivatesAfterPreflight(t *testing.T) {
 	}
 	if againState.Revision != state.Revision {
 		t.Fatalf("idempotent revision = %d, want unchanged %d", againState.Revision, state.Revision)
+	}
+}
+
+func TestDurableStore_PersistsManifestAcceptanceProjection(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000620, 0).UTC()
+	root := newRootFixture(t)
+	manifest := signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root)
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		manifest,
+	)
+
+	var projectionOp, highWaterOp, projectionDigest, highWaterDigest string
+	if err := db.QueryRowContext(ctx, `SELECT operation_id, manifest_core_digest FROM trustpool_manifest_acceptances WHERE pool_id = ? AND manifest_version = ?`, root.poolID, uint64(1)).Scan(&projectionOp, &projectionDigest); err != nil {
+		t.Fatalf("query manifest acceptance projection: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT operation_id, manifest_core_digest FROM trustpool_manifest_acceptance_high_water WHERE pool_id = ?`, root.poolID).Scan(&highWaterOp, &highWaterDigest); err != nil {
+		t.Fatalf("query manifest acceptance high-water: %v", err)
+	}
+	if projectionOp != manifest.OperationID || highWaterOp != manifest.OperationID || projectionDigest != manifest.ManifestCoreDigest || highWaterDigest != manifest.ManifestCoreDigest {
+		t.Fatalf("projection op/digest=(%q,%q) high-water=(%q,%q), want manifest (%q,%q)", projectionOp, projectionDigest, highWaterOp, highWaterDigest, manifest.OperationID, manifest.ManifestCoreDigest)
+	}
+}
+
+func TestDurableStore_ManifestAcceptanceProjectionTamperFailsClosed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000621, 0).UTC()
+	root := newRootFixture(t)
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+	)
+	if _, err := db.ExecContext(ctx, `UPDATE trustpool_manifest_acceptances SET manifest_core_digest = ? WHERE pool_id = ? AND manifest_version = ?`, strings.Repeat("a", 64), root.poolID, uint64(1)); err != nil {
+		t.Fatalf("tamper manifest acceptance projection: %v", err)
+	}
+	if _, err := store.Reconstruct(ctx); !errors.Is(err, trustpool.ErrMalformedDurableEvent) {
+		t.Fatalf("Reconstruct err=%v, want ErrMalformedDurableEvent", err)
+	}
+}
+
+func TestDurableStore_ManifestAcceptanceProjectionTamperFailsClosedOnOpen(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000622, 0).UTC()
+	root := newRootFixture(t)
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+	)
+	if _, err := db.ExecContext(ctx, `UPDATE trustpool_manifest_acceptances SET manifest_core_digest = ? WHERE pool_id = ? AND manifest_version = ?`, strings.Repeat("a", 64), root.poolID, uint64(1)); err != nil {
+		t.Fatalf("tamper manifest acceptance projection: %v", err)
+	}
+
+	if _, err := trustpool.NewStore(db); !errors.Is(err, trustpool.ErrMalformedDurableEvent) {
+		t.Fatalf("reopen NewStore err=%v, want ErrMalformedDurableEvent", err)
 	}
 }
 

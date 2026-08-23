@@ -1224,7 +1224,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.14",
+      "version": "0.0.15",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5182,14 +5182,22 @@
         "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) ManifestCoreDigest",
         "phase4-coordinator/internal/poolmanifest/signature.go:func VerifyPoolIDBinding",
         "phase4-coordinator/internal/poolmanifest/policyhistory.go:func BuildPolicyHistory",
-        "phase4-coordinator/internal/poolmanifest/policyhistory.go:func (h *PolicyHistory) ActivePolicy"
+        "phase4-coordinator/internal/poolmanifest/policyhistory.go:func (h *PolicyHistory) ActivePolicy",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func insertManifestAcceptanceProjection",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func verifyManifestAcceptanceState(ctx context.Context, q eventQueryer, events []DurableEvent) error",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) AppendValidatedEvent",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) Reconstruct",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) migrateManifestAcceptanceTables"
       ],
       "tests": [
         "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestGoldenVectors",
         "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestDigestSensitivity",
         "phase4-coordinator/internal/poolmanifest/signature_test.go:TestVerifyPoolIDBinding",
         "phase4-coordinator/internal/poolmanifest/policyhistory_test.go:TestActivePolicySelection",
-        "phase4-coordinator/internal/poolmanifest/policyhistory_test.go:TestBuildPolicyHistoryRejects"
+        "phase4-coordinator/internal/poolmanifest/policyhistory_test.go:TestBuildPolicyHistoryRejects",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PersistsManifestAcceptanceProjection",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ManifestAcceptanceProjectionTamperFailsClosed",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ManifestAcceptanceProjectionTamperFailsClosedOnOpen"
       ],
       "journeys": [],
       "evidence": [],
@@ -5197,7 +5205,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool object + signed manifest + identity/rollback: slice 1 (v0.0.8) canonical identity/policy-core encoding with pool_id + manifest_core_digest; slice 2 (v0.0.9) pool_id-binding check + policy-core signature layer (see R012); slice 4 (v0.0.11) the versioned policy-core history + active-policy selection (BuildPolicyHistory / PolicyHistory.ActivePolicy): per-core signature verification against the authority-log signer set, pool_id binding, monotonic manifest_version/rollback reject, prev_manifest_core_hash chain, non-overlapping half-open validity windows, and pool_policy_stale fail-closed selection. Slice 5 (v0.0.12) adds reversible manifest snapshot encoding and verdict-replay reconstruction for the authority log + policy-core history + recorded acceptance verdicts. Still deferred: wiring that snapshot/acceptance verdict into the coordinator durable store, mutable operational fields, live routing acceptance path, and signed journey evidence."
+        "rationale": "Signed manifest identity/rollback controls remain pending for production, but the coordinator durable store now records accepted manifest verdict evidence in trustpool_manifest_acceptances plus trustpool_manifest_acceptance_high_water, guards one-time backfill with a durable migration marker, verifies the projection against replayed manifest events during reconstruction and later opens, and treats projection/event divergence as malformed durable state. Still pending: rollback-resistant production promotion authorization, signed journey evidence, full signer/delegation lifecycle reconstruction, and production migration/full-rollback proof."
       }
     },
     {
@@ -5392,11 +5400,22 @@
       "state": "pending",
       "implementation": [
         "phase5-gateway/internal/router/pool_selection.go:func (s *Server) resolvePoolSelection",
-        "phase5-gateway/internal/router/pool_selection.go:errPoolUnavailable"
+        "phase5-gateway/internal/router/pool_selection.go:errPoolUnavailable",
+        "phase4-coordinator/internal/trustpool/refresher.go:func RefreshRegistry",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) disableRegistryOnMalformed",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) disableTrustPoolsOnMalformedDurableState",
+        "phase4-coordinator/cmd/coordinator/main.go:func loadTrustedPools",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) verifyTrustPoolDurableStateForRouting"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/spec042_pools_advertisement_test.go:TestInternalRoutingAdvertisesPoolCapability",
-        "phase5-gateway/internal/router/pool_selection_test.go:TestPoolSelection_CoordinatorDeclinesCapability_FailsClosed"
+        "phase5-gateway/internal/router/pool_selection_test.go:TestPoolSelection_CoordinatorDeclinesCapability_FailsClosed",
+        "phase4-coordinator/internal/trustpool/refresher_test.go:TestRefreshRegistryClearsRouteableSnapshotsOnMalformedDurableState",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_MalformedDurableStateClearsRouteableRegistry",
+        "phase4-coordinator/internal/buyer/server_test.go:TestTrustPoolStatusMalformedDurableStateClearsRegistry",
+        "phase4-coordinator/cmd/coordinator/main_test.go:TestLoadTrustedPoolsDisablesPoolSupportOnReconstructionFailure",
+        "phase4-coordinator/internal/buyer/server_test.go:TestPoolHeaderMalformedDurableStateFailsClosedAndClearsRegistry",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_MalformedDurableStateRejectsMutationsAndClearsRegistry"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
@@ -5406,7 +5425,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Config default-off, staged rollout, non-disclosing error taxonomy, and positive coordinator<->gateway capability negotiation: implemented (#1076). The provider-half full close (capability challenge) and predicate-specific error codes are deferred; per-requirement CONFORMANCE promotion pending signed journey-result evidence."
+        "rationale": "Fail-closed error handling now clears routeable trusted-pool snapshots when reconstruction observes malformed durable state at startup, background refresh, admin reads/mutations, buyer policy/status reads, and pool-selected chat admission. Still pending: signed journey evidence, production activation evidence, full route/reroute/pinned-path conformance, emergency lifecycle controls, and 0 C/H/M launch audit."
       }
     },
     {
@@ -5415,11 +5434,22 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/poolmanifest/persist.go:func ReconstructPool",
-        "phase4-coordinator/internal/poolmanifest/persist.go:func ParseManifestSnapshot"
+        "phase4-coordinator/internal/poolmanifest/persist.go:func ParseManifestSnapshot",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func manifestAcceptanceProjectionsFromQueryer",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func manifestAcceptanceHighWaterFromQueryer",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func verifyManifestAcceptanceState(ctx context.Context, q eventQueryer, events []DurableEvent) error",
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Disable",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) migrateManifestAcceptanceTables"
       ],
       "tests": [
         "phase4-coordinator/internal/poolmanifest/persist_test.go:TestManifestSnapshotRoundTrip",
-        "phase4-coordinator/internal/poolmanifest/persist_test.go:TestReconstructGrandfathersRevokedSigner"
+        "phase4-coordinator/internal/poolmanifest/persist_test.go:TestReconstructGrandfathersRevokedSigner",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PersistsManifestAcceptanceProjection",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ManifestAcceptanceProjectionTamperFailsClosed",
+        "phase4-coordinator/internal/trustpool/registry_test.go:TestRegistryDisableClearsRouteableSnapshotsWithoutAdvancingRevision",
+        "phase4-coordinator/internal/trustpool/refresher_test.go:TestRefreshRegistryClearsRouteableSnapshotsOnMalformedDurableState",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ManifestAcceptanceProjectionTamperFailsClosedOnOpen",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_MalformedDurableStateRejectsMutationsAndClearsRegistry"
       ],
       "journeys": [],
       "evidence": [],
@@ -5427,7 +5457,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool lifecycle/migration/failover reconstruction: slice 5 (v0.0.12) implements the MANIFEST half of R011's durable-reconstruction requirement \u2014 a reversible canonical snapshot codec (ManifestSnapshot.CanonicalBytes / ParseManifestSnapshot) and ReconstructPool, which rebuilds the authority log + policy-core history from durable records, replaying the recorded acceptance verdicts (R012) so a policy accepted before its signer set was later revoked survives restart, while re-verifying the timeless authority-log chain and each verdict's signature. Still deferred: wiring the snapshot into the coordinator durable store (schema + record-on-acceptance + read-at-boot); the membership-ledger/blocklist/lifecycle-state reconstruction (trustpool/registry layer); the pool lifecycle state machine (created/active/paused/draining/retired) and min_eligible_members runtime; and emergency signed lifecycle control messages."
+        "rationale": "Pool lifecycle/migration/failover reconstruction now includes local coordinator-store wiring for accepted manifest verdict evidence: migration creates/backfills projection and high-water tables once behind a durable completion marker, append/promote paths verify projection state before mutation and after projection writes, reconstruction and later store opens verify event/projection/high-water consistency in one transaction, and malformed replay clears routeable snapshots through the registry disable path. Still pending: production migration evidence, tamper-evident full rollback protection, full membership/delegation/lifecycle reconstruction, emergency signed lifecycle controls, and signed journey evidence."
       }
     },
     {

@@ -104,7 +104,7 @@ func (h *adminHandler) handleUpsertCreator(w http.ResponseWriter, r *http.Reques
 	}
 	state, err := h.deps.Store.Reconstruct(r.Context())
 	if err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+		h.writeReconstructError(w, err)
 		return
 	}
 	if !h.refreshRegistryIfAhead(w, state) {
@@ -126,7 +126,7 @@ func (h *adminHandler) handleGetCreator(w http.ResponseWriter, r *http.Request) 
 	}
 	approval, ok, err := h.deps.Store.CreatorApproval(r.Context(), creatorID)
 	if err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "creator_lookup_failed"}})
+		h.writeLookupError(w, "creator_lookup_failed", err)
 		return
 	}
 	if !ok {
@@ -313,7 +313,7 @@ func (h *adminHandler) handlePublicAnnouncementApproval(w http.ResponseWriter, r
 	}
 	state, err := h.deps.Store.Reconstruct(r.Context())
 	if err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+		h.writeReconstructError(w, err)
 		return
 	}
 	writeAdminJSON(w, http.StatusAccepted, map[string]any{
@@ -374,7 +374,7 @@ func (h *adminHandler) handleListPools(w http.ResponseWriter, r *http.Request) {
 	}
 	state, err := h.deps.Store.Reconstruct(r.Context())
 	if err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+		h.writeReconstructError(w, err)
 		return
 	}
 	ids := make([]string, 0, len(state.Pools))
@@ -402,7 +402,7 @@ func (h *adminHandler) handleGetPool(w http.ResponseWriter, r *http.Request) {
 	}
 	state, err := h.deps.Store.Reconstruct(r.Context())
 	if err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+		h.writeReconstructError(w, err)
 		return
 	}
 	pool := state.Pools[poolID]
@@ -426,7 +426,7 @@ func (h *adminHandler) handlePoolAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	state, err := h.deps.Store.Reconstruct(r.Context())
 	if err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+		h.writeReconstructError(w, err)
 		return
 	}
 	if state.Pools[poolID] == nil {
@@ -435,7 +435,7 @@ func (h *adminHandler) handlePoolAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	events, err := h.deps.Store.Events(r.Context())
 	if err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "audit_lookup_failed"}})
+		h.writeLookupError(w, "audit_lookup_failed", err)
 		return
 	}
 	filtered := make([]DurableEvent, 0)
@@ -450,7 +450,7 @@ func (h *adminHandler) handlePoolAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	nonceAudit, err := h.rootRegistrationNonceAuditRecords(r.Context(), state.Pools[poolID], rootRegistrationOps)
 	if err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "audit_lookup_failed"}})
+		h.writeLookupError(w, "audit_lookup_failed", err)
 		return
 	}
 	var creatorApproval any
@@ -463,19 +463,19 @@ func (h *adminHandler) handlePoolAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	publicAnnouncementHistory, err := h.deps.Store.PublicAnnouncementHistory(r.Context(), poolID)
 	if err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "audit_lookup_failed"}})
+		h.writeLookupError(w, "audit_lookup_failed", err)
 		return
 	}
 	var reviewedArtifact any
 	if artifact, ok, err := h.deps.Store.ReviewedDistributionArtifact(r.Context(), poolID); err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "audit_lookup_failed"}})
+		h.writeLookupError(w, "audit_lookup_failed", err)
 		return
 	} else if ok {
 		reviewedArtifact = artifact
 	}
 	reviewedArtifactHistory, err := h.deps.Store.ReviewedDistributionArtifactHistory(r.Context(), poolID)
 	if err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "audit_lookup_failed"}})
+		h.writeLookupError(w, "audit_lookup_failed", err)
 		return
 	}
 	writeAdminJSON(w, http.StatusOK, map[string]any{
@@ -571,7 +571,7 @@ func (h *adminHandler) handlePoolHealth(w http.ResponseWriter, r *http.Request) 
 	}
 	state, err := h.deps.Store.Reconstruct(r.Context())
 	if err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+		h.writeReconstructError(w, err)
 		return
 	}
 	pool := state.Pools[poolID]
@@ -598,7 +598,7 @@ func (h *adminHandler) handlePoolDistribution(w http.ResponseWriter, r *http.Req
 	}
 	state, err := h.deps.Store.Reconstruct(r.Context())
 	if err != nil {
-		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+		h.writeReconstructError(w, err)
 		return
 	}
 	pool := state.Pools[poolID]
@@ -610,6 +610,7 @@ func (h *adminHandler) handlePoolDistribution(w http.ResponseWriter, r *http.Req
 }
 
 func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
+	h.disableRegistryOnMalformed(err)
 	switch {
 	case errors.Is(err, ErrConflictingOperationID):
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "operation_conflict"}})
@@ -634,6 +635,22 @@ func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
 	default:
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
+	}
+}
+
+func (h *adminHandler) writeReconstructError(w http.ResponseWriter, err error) {
+	h.disableRegistryOnMalformed(err)
+	writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "reconstruct_failed"}})
+}
+
+func (h *adminHandler) writeLookupError(w http.ResponseWriter, code string, err error) {
+	h.disableRegistryOnMalformed(err)
+	writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": code}})
+}
+
+func (h *adminHandler) disableRegistryOnMalformed(err error) {
+	if h != nil && h.deps.Registry != nil && errors.Is(err, ErrMalformedDurableEvent) {
+		h.deps.Registry.Disable()
 	}
 }
 
