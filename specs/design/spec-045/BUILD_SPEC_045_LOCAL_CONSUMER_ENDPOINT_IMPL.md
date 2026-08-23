@@ -26,7 +26,9 @@ Ship `macprovider-cli consume` as a local development adapter: a macOS loopback-
    - bounded buffered SSE upstream response relay, terminal `[DONE]` validation, and settlement from terminal stream usage evidence.
 9. `BUILD_SPEC_045_PHASE_3H_LIVE_SSE_EMISSION.md`
    - local live SSE emission, event-line/event-frame bounds, idle read deadline refresh, and conservative local-disconnect settlement.
-10. `BUILD_SPEC_045_PHASE_4_CONFORMANCE_JOURNEY.md`
+10. `BUILD_SPEC_045_PHASE_3I_INCREMENTAL_SSE_RELAY.md`
+   - fully incremental upstream socket-to-local SSE relay and upstream cancellation handles.
+11. `BUILD_SPEC_045_PHASE_4_CONFORMANCE_JOURNEY.md`
    - required automated coverage, fake-gateway integration harness, staging/production signed journey, and promotion evidence.
 
 ## Required sequencing
@@ -40,6 +42,7 @@ Ship `macprovider-cli consume` as a local development adapter: a macOS loopback-
 - Phase 3F may land without streaming/SSE forwarding, mutable upstream invalid-credential state, or fake/real conformance journeys; those remain required before Phase 4 can claim conformance.
 - Phase 3G may land without live incremental SSE flushing, disconnect cancellation, mutable upstream invalid-credential state, or fake/real conformance journeys; those remain required before Phase 4 can claim conformance.
 - Phase 3H may land without fully incremental upstream socket relay, mutable upstream invalid-credential state, or fake/real conformance journeys; those remain required before Phase 4 can claim conformance.
+- Phase 3I may land without mutable upstream invalid-credential state or fake/real conformance journeys; those remain required before Phase 4 can claim conformance.
 - Phase 4 must not claim production readiness until Phases 1-3 are implemented and the signed real-gateway journey exists.
 
 ## Non-goals
