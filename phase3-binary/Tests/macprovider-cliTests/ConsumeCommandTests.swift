@@ -1,6 +1,7 @@
 import ArgumentParser
 import Darwin
 import Foundation
+import NIOCore
 import NIOEmbedded
 import NIOHTTP1
 import XCTest
@@ -320,7 +321,7 @@ final class ConsumeCommandTests: XCTestCase {
             modelAllowlist: ["llama-test"],
             tokenVerifier: token.verifier
         )
-        runtime.beginRequest()
+        XCTAssertTrue(runtime.beginRequest())
         defer { runtime.endRequest() }
 
         let missingAuthHeaders = HTTPHeaders()
@@ -363,7 +364,7 @@ final class ConsumeCommandTests: XCTestCase {
             from: runtime,
             head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/chat/completions", headers: authorizedHeaders)
         )
-        XCTAssertEqual(wrongPath.status, HTTPResponseStatus.notFound)
+        XCTAssertEqual(wrongPath.status, HTTPResponseStatus.methodNotAllowed)
         let wrongPathError = try localError(from: wrongPath.body)
         XCTAssertEqual(wrongPathError["code"] as? String, "local_endpoint_unsupported")
         XCTAssertTrue(wrongPathError["param"] is NSNull)
@@ -391,9 +392,367 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(head.body, "")
     }
 
+    func testPhase2RejectsUnsafeTargetsFramingAndBrowserOrigins() throws {
+        let token = try ConsumeLocalToken.generate()
+        let runtime = consumeRuntime(token: token)
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let query = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/models?limit=1", headers: headers)
+        )
+        XCTAssertEqual(query.status, .badRequest)
+        XCTAssertEqual(try localError(from: query.body)["code"] as? String, "local_invalid_request")
+
+        let encodedPath = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/%6dodels", headers: headers)
+        )
+        XCTAssertEqual(encodedPath.status, .badRequest)
+        XCTAssertEqual(try localError(from: encodedPath.body)["code"] as? String, "local_invalid_request")
+
+        let encodedDot = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/%2e/status", headers: headers)
+        )
+        XCTAssertEqual(encodedDot.status, .badRequest)
+
+        var duplicateLength = headers
+        duplicateLength.add(name: "Content-Length", value: "1")
+        duplicateLength.add(name: "Content-Length", value: "1")
+        let duplicateLengthResponse = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: duplicateLength),
+            body: Data("{}".utf8)
+        )
+        XCTAssertEqual(duplicateLengthResponse.status, .badRequest)
+
+        var commaLength = headers
+        commaLength.add(name: "Content-Length", value: "1,")
+        let commaLengthResponse = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: commaLength),
+            body: Data("{}".utf8)
+        )
+        XCTAssertEqual(commaLengthResponse.status, .badRequest)
+
+        var trailingTransferCoding = headers
+        trailingTransferCoding.add(name: "Transfer-Encoding", value: "chunked,")
+        let trailingTransferCodingResponse = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: trailingTransferCoding),
+            body: Data("{}".utf8)
+        )
+        XCTAssertEqual(trailingTransferCodingResponse.status, .badRequest)
+
+        var leadingTransferCoding = headers
+        leadingTransferCoding.add(name: "Transfer-Encoding", value: ",chunked")
+        let leadingTransferCodingResponse = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: leadingTransferCoding),
+            body: Data("{}".utf8)
+        )
+        XCTAssertEqual(leadingTransferCodingResponse.status, .badRequest)
+
+        var originNull = headers
+        originNull.add(name: "Origin", value: "null")
+        let nullOrigin = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/status", headers: originNull)
+        )
+        XCTAssertEqual(nullOrigin.status, .badRequest)
+
+        var commaOrigin = headers
+        commaOrigin.add(name: "Origin", value: "http://127.0.0.1:11435, http://127.0.0.1:11436")
+        let commaOriginResponse = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/status", headers: commaOrigin)
+        )
+        XCTAssertEqual(commaOriginResponse.status, .badRequest)
+
+        var leadingCommaOrigin = headers
+        leadingCommaOrigin.add(name: "Origin", value: ",http://127.0.0.1:11435")
+        let leadingCommaOriginResponse = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/status", headers: leadingCommaOrigin)
+        )
+        XCTAssertEqual(leadingCommaOriginResponse.status, .badRequest)
+
+        var multipleOrigins = headers
+        multipleOrigins.add(name: "Origin", value: "http://127.0.0.1:11435")
+        multipleOrigins.add(name: "Origin", value: "http://127.0.0.1:11435")
+        let multipleOriginResponse = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/status", headers: multipleOrigins)
+        )
+        XCTAssertEqual(multipleOriginResponse.status, .badRequest)
+
+        var exactOrigin = headers
+        exactOrigin.add(name: "Origin", value: "http://127.0.0.1:11435")
+        exactOrigin.add(name: "Sec-Fetch-Site", value: "same-origin")
+        let exactOriginResponse = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/status", headers: exactOrigin)
+        )
+        XCTAssertEqual(exactOriginResponse.status, .ok)
+    }
+
+    func testPhase2NIOHTTPDecoderLimitsMatchLocalPolicy() {
+        let configuration = ConsumeLocalLimits.httpDecoderLimitConfiguration
+        XCTAssertEqual(configuration.maxHeaderFieldSize, ConsumeLocalLimits.headerBytes)
+        XCTAssertEqual(configuration.maxHeaderListSize, ConsumeLocalLimits.headerBytes)
+        XCTAssertEqual(configuration.maxHeaderFieldCount, ConsumeLocalLimits.headerCount)
+    }
+
+    func testPhase2RawPipelineRejectsOversizedStartLineBeforeHTTPDecoder() throws {
+        let token = try ConsumeLocalToken.generate()
+
+        let oversizedTargetRuntime = consumeRuntime(token: token)
+        let oversizedTargetChannel = try rawConsumeChannel(runtime: oversizedTargetRuntime)
+        let oversizedTarget = "/" + String(repeating: "a", count: ConsumeLocalLimits.requestTargetBytes + 1)
+        try writeRawRequest(
+            "GET \(oversizedTarget) HTTP/1.1\r\nHost: 127.0.0.1:11435\r\n\r\n",
+            to: oversizedTargetChannel
+        )
+        oversizedTargetChannel.embeddedEventLoop.run()
+        XCTAssertFalse(oversizedTargetChannel.isActive)
+        XCTAssertEqual(oversizedTargetRuntime.statusPayload()["active_request_count"] as? Int, 0)
+        XCTAssertNil(try oversizedTargetChannel.readOutbound(as: HTTPServerResponsePart.self))
+
+        let oversizedLineRuntime = consumeRuntime(token: token)
+        let oversizedLineChannel = try rawConsumeChannel(runtime: oversizedLineRuntime)
+        let oversizedLine = String(repeating: "A", count: ConsumeLocalLimits.requestLineBytes + 1)
+        try writeRawRequest(
+            "\(oversizedLine)\r\nHost: 127.0.0.1:11435\r\n\r\n",
+            to: oversizedLineChannel
+        )
+        oversizedLineChannel.embeddedEventLoop.run()
+        XCTAssertFalse(oversizedLineChannel.isActive)
+        XCTAssertEqual(oversizedLineRuntime.statusPayload()["active_request_count"] as? Int, 0)
+        XCTAssertNil(try oversizedLineChannel.readOutbound(as: HTTPServerResponsePart.self))
+
+        let splitLineRuntime = consumeRuntime(token: token)
+        let splitLineChannel = try rawConsumeChannel(runtime: splitLineRuntime)
+        try writeRawRequest(
+            "GET /" + String(repeating: "b", count: ConsumeLocalLimits.requestLineBytes - 6),
+            to: splitLineChannel
+        )
+        XCTAssertTrue(splitLineChannel.isActive)
+        XCTAssertEqual(splitLineRuntime.statusPayload()["active_request_count"] as? Int, 0)
+        try writeRawRequest("bb", to: splitLineChannel)
+        splitLineChannel.embeddedEventLoop.run()
+        XCTAssertFalse(splitLineChannel.isActive)
+        XCTAssertEqual(splitLineRuntime.statusPayload()["active_request_count"] as? Int, 0)
+        XCTAssertNil(try splitLineChannel.readOutbound(as: HTTPServerResponsePart.self))
+
+        let malformedVersionRuntime = consumeRuntime(token: token)
+        let malformedVersionChannel = try rawConsumeChannel(runtime: malformedVersionRuntime)
+        try writeRawRequest(
+            "GET /v1/status HTTP/2.0\r\nHost: 127.0.0.1:11435\r\n\r\n",
+            to: malformedVersionChannel
+        )
+        malformedVersionChannel.embeddedEventLoop.run()
+        XCTAssertFalse(malformedVersionChannel.isActive)
+        XCTAssertEqual(malformedVersionRuntime.statusPayload()["active_request_count"] as? Int, 0)
+
+        let malformedMethodRuntime = consumeRuntime(token: token)
+        let malformedMethodChannel = try rawConsumeChannel(runtime: malformedMethodRuntime)
+        try writeRawRequest(
+            "get /v1/status HTTP/1.1\r\nHost: 127.0.0.1:11435\r\n\r\n",
+            to: malformedMethodChannel
+        )
+        malformedMethodChannel.embeddedEventLoop.run()
+        XCTAssertFalse(malformedMethodChannel.isActive)
+        XCTAssertEqual(malformedMethodRuntime.statusPayload()["active_request_count"] as? Int, 0)
+    }
+
+    func testPhase2EnforcesLocalResourceCapsBeforeBuffering() throws {
+        let token = try ConsumeLocalToken.generate()
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        var declaredTooLarge = headers
+        declaredTooLarge.add(name: "Content-Length", value: "\(ConsumeLocalLimits.bodyBytes + 1)")
+        let declaredTooLargeResponse = try response(
+            from: consumeRuntime(token: token),
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: declaredTooLarge)
+        )
+        XCTAssertEqual(declaredTooLargeResponse.status, .payloadTooLarge)
+        XCTAssertEqual(try localError(from: declaredTooLargeResponse.body)["code"] as? String, "local_request_too_large")
+
+        let activeSaturated = try response(
+            from: consumeRuntime(
+                token: token,
+                requestCounter: ConsumeEndpointRequestCounter(maxActiveRequests: 0)
+            ),
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/status", headers: headers)
+        )
+        XCTAssertEqual(activeSaturated.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: activeSaturated.body)["code"] as? String, "local_endpoint_busy")
+
+        let bodyBufferSaturated = try response(
+            from: consumeRuntime(
+                token: token,
+                requestCounter: ConsumeEndpointRequestCounter(maxBufferedBodyBytes: 1)
+            ),
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data("{}".utf8)
+        )
+        XCTAssertEqual(bodyBufferSaturated.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: bodyBufferSaturated.body)["code"] as? String, "local_endpoint_busy")
+
+        let counter = ConsumeEndpointRequestCounter(maxIncompleteConnections: 1, maxActiveRequests: 1, maxBufferedBodyBytes: 2)
+        XCTAssertTrue(counter.beginIncompleteConnection())
+        XCTAssertFalse(counter.beginIncompleteConnection())
+        counter.completePreAuthConnection()
+        XCTAssertTrue(counter.beginIncompleteConnection())
+        counter.endIncompleteConnection()
+        XCTAssertTrue(counter.begin())
+        XCTAssertFalse(counter.begin())
+        counter.end()
+        XCTAssertTrue(counter.reserveBodyBytes(2))
+        XCTAssertFalse(counter.reserveBodyBytes(1))
+        counter.releaseBodyBytes(2)
+        XCTAssertTrue(counter.reserveBodyBytes(1))
+    }
+
+    func testPhase2PostHeaderIdleTimeoutReleasesActiveCapacity() throws {
+        let token = try ConsumeLocalToken.generate()
+        let counter = ConsumeEndpointRequestCounter(maxActiveRequests: 1)
+        let runtime = consumeRuntime(token: token, requestCounter: counter)
+        let channel = try rawConsumeChannel(runtime: runtime)
+
+        let request = "POST /v1/chat/completions HTTP/1.1\r\n"
+            + "Host: 127.0.0.1:11435\r\n"
+            + "Authorization: Bearer \(token.value)\r\n"
+            + "Content-Length: 2\r\n"
+            + "\r\n"
+        var buffer = channel.allocator.buffer(capacity: request.utf8.count)
+        buffer.writeString(request)
+        XCTAssertNoThrow(try channel.writeInbound(buffer))
+        XCTAssertEqual(runtime.statusPayload()["active_request_count"] as? Int, 1)
+
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        let saturated = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/status", headers: headers)
+        )
+        XCTAssertEqual(saturated.status, .serviceUnavailable)
+
+        channel.embeddedEventLoop.advanceTime(by: ConsumeLocalLimits.bodyIdleTimeout)
+        channel.embeddedEventLoop.run()
+
+        XCTAssertFalse(channel.isActive)
+        XCTAssertEqual(runtime.statusPayload()["active_request_count"] as? Int, 0)
+
+        let recovered = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/status", headers: headers)
+        )
+        XCTAssertEqual(recovered.status, .ok)
+    }
+
+    func testPhase2ChatValidatesBodyBeforeBudgetRequiredFailure() throws {
+        let token = try ConsumeLocalToken.generate()
+        let runtime = consumeRuntime(token: token)
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let valid = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
+        )
+        XCTAssertEqual(valid.status, .badRequest)
+        let validError = try localError(from: valid.body)
+        XCTAssertEqual(validError["code"] as? String, "local_budget_required")
+        XCTAssertEqual(try localForwardedFlag(from: valid.body), false)
+
+        let duplicateKey = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"a","model":"b"}"#.utf8)
+        )
+        XCTAssertEqual(duplicateKey.status, .badRequest)
+        XCTAssertEqual(try localError(from: duplicateKey.body)["code"] as? String, "local_invalid_request")
+
+        for invalidTopLevelJSON in ["[]", #""text""#, "true", "null"] {
+            let invalid = try response(
+                from: runtime,
+                head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+                body: Data(invalidTopLevelJSON.utf8)
+            )
+            XCTAssertEqual(invalid.status, .badRequest, invalidTopLevelJSON)
+            XCTAssertEqual(try localError(from: invalid.body)["code"] as? String, "local_invalid_request")
+        }
+
+        var gzip = headers
+        gzip.add(name: "Content-Encoding", value: "gzip")
+        let compressed = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: gzip),
+            body: Data("{}".utf8)
+        )
+        XCTAssertEqual(compressed.status.code, 415)
+        XCTAssertEqual(try localError(from: compressed.body)["code"] as? String, "local_content_encoding_unsupported")
+    }
+
+    func testPhase2ModelsReturnsOnlyLocalAllowlistEntries() throws {
+        let token = try ConsumeLocalToken.generate()
+        let runtime = consumeRuntime(
+            token: token,
+            allowedModels: ["llama-test", "mistral-test"]
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        headers.add(name: "Cookie", value: "local=secret")
+        headers.add(name: "Forwarded", value: "for=127.0.0.1")
+
+        let models = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/models", headers: headers)
+        )
+
+        XCTAssertEqual(models.status, .ok)
+        XCTAssertEqual(models.headers.first(name: "cache-control"), "no-store")
+        XCTAssertNil(models.headers.first(name: "set-cookie"))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(models.body.utf8)) as? [String: Any])
+        XCTAssertEqual(object["object"] as? String, "list")
+        let data = try XCTUnwrap(object["data"] as? [[String: Any]])
+        XCTAssertEqual(data.compactMap { $0["id"] as? String }, ["llama-test", "mistral-test"])
+        XCTAssertEqual(data.compactMap { $0["object"] as? String }, ["model", "model"])
+    }
+
+    func testPhase2ModelsDefaultEmptyAllowlistReturnsEmptyList() throws {
+        let token = try ConsumeLocalToken.generate()
+        let runtime = consumeRuntime(
+            token: token,
+            allowedModels: []
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let models = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/models", headers: headers)
+        )
+
+        XCTAssertEqual(models.status, .ok)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(models.body.utf8)) as? [String: Any])
+        let data = try XCTUnwrap(object["data"] as? [[String: Any]])
+        XCTAssertEqual(data.count, 0)
+    }
+
     private func localError(from body: String) throws -> [String: Any] {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
         return try XCTUnwrap(object["error"] as? [String: Any])
+    }
+
+    private func localForwardedFlag(from body: String) throws -> Bool {
+        let macprovider = try XCTUnwrap(localError(from: body)["macprovider"] as? [String: Any])
+        return try XCTUnwrap(macprovider["forwarded_upstream"] as? Bool)
     }
 
     private func writeCredential(_ value: String, under directory: URL, name: String) throws -> URL {
@@ -493,16 +852,57 @@ final class ConsumeCommandTests: XCTestCase {
         }
     }
 
+    private func consumeRuntime(
+        token: ConsumeLocalToken,
+        credentialStatus: ConsumeCredentialStatus = .missing,
+        allowedModels: [String] = ["llama-test"],
+        requestCounter: ConsumeEndpointRequestCounter = ConsumeEndpointRequestCounter()
+    ) -> ConsumeEndpointRuntime {
+        ConsumeEndpointRuntime(
+            launchID: "launch-phase2-test",
+            boundURL: "http://127.0.0.1:11435",
+            upstreamOrigin: "https://api.malibu.tech",
+            credentialSourceClass: credentialStatus.state == .loaded ? "environment" : "missing",
+            credentialStatus: credentialStatus,
+            modelAllowlist: allowedModels,
+            tokenVerifier: token.verifier,
+            requestCounter: requestCounter
+        )
+    }
+
+    private func rawConsumeChannel(runtime: ConsumeEndpointRuntime) throws -> EmbeddedChannel {
+        let channel = EmbeddedChannel()
+        try channel.pipeline.addHandler(ConsumeStartLineLimitHandler()).wait()
+        try channel.pipeline.configureHTTPServerPipeline(
+            withDecoderLimitConfiguration: ConsumeLocalLimits.httpDecoderLimitConfiguration
+        ).wait()
+        try channel.pipeline.addHandler(ConsumeLocalHandler(runtime: runtime)).wait()
+        try channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 11435)).wait()
+        return channel
+    }
+
+    private func writeRawRequest(_ request: String, to channel: EmbeddedChannel) throws {
+        var buffer = channel.allocator.buffer(capacity: request.utf8.count)
+        buffer.writeString(request)
+        try channel.writeInbound(buffer)
+    }
+
     private func response(
         from runtime: ConsumeEndpointRuntime,
-        head: HTTPRequestHead
+        head: HTTPRequestHead,
+        body requestBody: Data = Data()
     ) throws -> (status: HTTPResponseStatus, headers: HTTPHeaders, body: String) {
         let channel = EmbeddedChannel()
         try channel.pipeline.addHandler(ConsumeLocalHandler(runtime: runtime)).wait()
         var responseHead: HTTPResponseHead?
-        var body = Data()
+        var responseBody = Data()
 
         try channel.writeInbound(HTTPServerRequestPart.head(head))
+        if !requestBody.isEmpty {
+            var buffer = channel.allocator.buffer(capacity: requestBody.count)
+            buffer.writeBytes(requestBody)
+            try channel.writeInbound(HTTPServerRequestPart.body(buffer))
+        }
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         while let part = try channel.readOutbound(as: HTTPServerResponsePart.self) {
@@ -511,20 +911,20 @@ final class ConsumeCommandTests: XCTestCase {
                 responseHead = head
             case .body(.byteBuffer(var buffer)):
                 if let bytes = buffer.readBytes(length: buffer.readableBytes) {
-                    body.append(contentsOf: bytes)
+                    responseBody.append(contentsOf: bytes)
                 }
             case .end:
                 guard let responseHead else {
                     XCTFail("response head was not emitted")
                     return (.internalServerError, HTTPHeaders(), "")
                 }
-                return (responseHead.status, responseHead.headers, String(decoding: body, as: UTF8.self))
+                return (responseHead.status, responseHead.headers, String(decoding: responseBody, as: UTF8.self))
             default:
                 break
             }
         }
 
         XCTFail("response end was not emitted")
-        return (.internalServerError, HTTPHeaders(), String(decoding: body, as: UTF8.self))
+        return (.internalServerError, HTTPHeaders(), String(decoding: responseBody, as: UTF8.self))
     }
 }
