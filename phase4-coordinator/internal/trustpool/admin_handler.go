@@ -64,6 +64,8 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handlePublicAnnouncementApproval(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/promote"):
 		h.handlePromotePool(w, r)
+	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/lifecycle"):
+		h.handleRestrictiveLifecycle(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/audit"):
 		h.handlePoolAudit(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/health"):
@@ -218,6 +220,13 @@ type promotionRequest struct {
 	Reason       string    `json:"reason,omitempty"`
 }
 
+type restrictiveLifecycleRequest struct {
+	OperationID  string    `json:"operation_id,omitempty"`
+	TimestampUTC time.Time `json:"timestamp_utc,omitempty"`
+	Lifecycle    string    `json:"lifecycle"`
+	Reason       string    `json:"reason,omitempty"`
+}
+
 func (h *adminHandler) handlePromotePool(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -257,6 +266,68 @@ func (h *adminHandler) handlePromotePool(w http.ResponseWriter, r *http.Request)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	state, committed, _, err := h.deps.Store.PromotePool(r.Context(), e)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	if !h.refreshRegistryIfAhead(w, state) {
+		return
+	}
+	writeAdminJSON(w, http.StatusAccepted, map[string]any{
+		"event": committed,
+		"pool":  adminPoolResponse(state.Pools[committed.PoolID], state.RouteGateCheckedAt),
+	})
+}
+
+func (h *adminHandler) handleRestrictiveLifecycle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := poolIDFromSuffixedAdminPath(r.URL.Path, "/lifecycle")
+	if poolID == "" {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	var body restrictiveLifecycleRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	operationID, err := resolveOperationID(strings.TrimSpace(body.OperationID), r.Header)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	lifecycle := strings.TrimSpace(body.Lifecycle)
+	switch lifecycle {
+	case LifecyclePaused, LifecycleDraining, LifecycleRetired:
+	case LifecycleActive:
+		h.writeMutationError(w, ErrActivationRequiresPromotion)
+		return
+	default:
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
+		return
+	}
+	e := DurableEvent{
+		OperationID:  operationID,
+		TimestampUTC: body.TimestampUTC,
+		EventType:    EventLifecycleChanged,
+		PoolID:       poolID,
+		Lifecycle:    lifecycle,
+		Reason:       strings.TrimSpace(body.Reason),
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state, committed, _, err := h.deps.Store.AppendValidatedEvent(r.Context(), e)
 	if err != nil {
 		h.writeMutationError(w, err)
 		return
