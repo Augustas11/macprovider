@@ -1058,8 +1058,8 @@ struct CandidateCatalog: Decodable, Equatable {
     ]
 }
 
-struct RateCardProjection: Decodable, Equatable {
-    struct Row: Decodable, Equatable {
+struct RateCardProjection: Decodable, Equatable, Sendable {
+    struct Row: Decodable, Equatable, Sendable {
         var promptRatePerMtok: Int64
         var promptCacheHitRatePerMtok: Int64
         var completionRatePerMtok: Int64
@@ -1135,6 +1135,9 @@ struct RateCardProjection: Decodable, Equatable {
             throw AutotuneRecommendError.invalidRateCard("version/usd_per_million_credits")
         }
         for (key, row) in rows {
+            guard Self.validRateCardModelKey(key) else {
+                throw AutotuneRecommendError.invalidRateCard("invalid model key \(key)")
+            }
             guard row.promptRatePerMtok >= 0,
                   row.promptCacheHitRatePerMtok >= 0,
                   row.completionRatePerMtok >= 0,
@@ -1149,6 +1152,30 @@ struct RateCardProjection: Decodable, Equatable {
             throw AutotuneRecommendError.invalidRateCard("version must equal projection hash")
         }
         return self
+    }
+
+    private static func validRateCardModelKey(_ key: String) -> Bool {
+        if key == "default" {
+            return true
+        }
+        let scalars = Array(key.unicodeScalars)
+        guard !scalars.isEmpty, scalars.count <= 128 else {
+            return false
+        }
+        guard Self.isLowercaseASCIILetterOrDigit(scalars[0]) else {
+            return false
+        }
+        return scalars.allSatisfy { scalar in
+            Self.isLowercaseASCIILetterOrDigit(scalar)
+                || scalar.value == 0x2e
+                || scalar.value == 0x5f
+                || scalar.value == 0x2f
+                || scalar.value == 0x2d
+        }
+    }
+
+    private static func isLowercaseASCIILetterOrDigit(_ scalar: UnicodeScalar) -> Bool {
+        (scalar.value >= 0x61 && scalar.value <= 0x7a) || (scalar.value >= 0x30 && scalar.value <= 0x39)
     }
 
     var projectionHash: String {
