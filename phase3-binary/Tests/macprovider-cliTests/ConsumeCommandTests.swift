@@ -55,6 +55,23 @@ private final class ConsumeUpstreamRequestRecorder: @unchecked Sendable {
     }
 }
 
+private final class ConsumeInvocationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    func snapshot() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 private final class ConsumeUpstreamPromiseBox: @unchecked Sendable {
     private let lock = NSLock()
     private var promise: EventLoopPromise<ConsumeUpstreamResponse>?
@@ -743,6 +760,25 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertFalse(counter.reserveBodyBytes(1))
         counter.releaseBodyBytes(2)
         XCTAssertTrue(counter.reserveBodyBytes(1))
+        counter.releaseBodyBytes(1)
+
+        let resourceReservation = try XCTUnwrap(counter.reserveUpstreamExchange(responseSpoolBytes: ConsumeLocalLimits.bodyBytes))
+        var snapshot = counter.resourceSnapshot()
+        XCTAssertEqual(snapshot.responseSpoolBytes, ConsumeLocalLimits.bodyBytes)
+        XCTAssertEqual(snapshot.upstreamWorkerTasks, 1)
+        XCTAssertEqual(snapshot.upstreamSocketDescriptors, 1)
+        counter.releaseUpstreamExchange(resourceReservation)
+        snapshot = counter.resourceSnapshot()
+        XCTAssertEqual(snapshot.responseSpoolBytes, 0)
+        XCTAssertEqual(snapshot.upstreamWorkerTasks, 0)
+        XCTAssertEqual(snapshot.upstreamSocketDescriptors, 0)
+
+        let streamingCounter = ConsumeEndpointRequestCounter(maxOpenStreamingResponses: 1)
+        XCTAssertTrue(streamingCounter.beginStreamingResponse())
+        XCTAssertFalse(streamingCounter.beginStreamingResponse())
+        XCTAssertEqual(streamingCounter.resourceSnapshot().openStreamingResponses, 1)
+        streamingCounter.endStreamingResponse()
+        XCTAssertEqual(streamingCounter.resourceSnapshot().openStreamingResponses, 0)
     }
 
     func testPhase2PostHeaderIdleTimeoutReleasesActiveCapacity() throws {
@@ -1255,6 +1291,7 @@ final class ConsumeCommandTests: XCTestCase {
             ledgerPathClass: ledger.pathClass
         )
         let recorder = ConsumeUpstreamRequestRecorder()
+        let counter = ConsumeEndpointRequestCounter()
         let upstreamClient = ConsumeStubUpstreamClient { request, eventLoop in
             recorder.append(request)
             return eventLoop.makeFailedFuture(ConsumeUpstreamForwardError.dispatchedUnavailable)
@@ -1265,6 +1302,8 @@ final class ConsumeCommandTests: XCTestCase {
             trustedPricing: .available(trustedRateCard),
             upstreamClient: upstreamClient,
             now: { ConsumeCommandTests.phase3CTestNow }
+            ,
+            requestCounter: counter
         )
         var headers = HTTPHeaders()
         headers.add(name: "Authorization", value: "Bearer \(token.value)")
@@ -1351,6 +1390,7 @@ final class ConsumeCommandTests: XCTestCase {
             ledgerPathClass: ledger.pathClass
         )
         let recorder = ConsumeUpstreamRequestRecorder()
+        let counter = ConsumeEndpointRequestCounter()
         let upstreamClient = ConsumeStubUpstreamClient { request, eventLoop in
             recorder.append(request)
             return eventLoop.makeFailedFuture(ConsumeUpstreamForwardError.dispatchedUnavailable)
@@ -1362,7 +1402,8 @@ final class ConsumeCommandTests: XCTestCase {
             budget: budget,
             trustedPricing: .available(trustedRateCard),
             upstreamClient: upstreamClient,
-            now: { ConsumeCommandTests.phase3CTestNow }
+            now: { ConsumeCommandTests.phase3CTestNow },
+            requestCounter: counter
         )
         var headers = HTTPHeaders()
         headers.add(name: "Authorization", value: "Bearer \(token.value)")
@@ -1388,6 +1429,10 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(summary.reserved.rawValue, 0)
         XCTAssertEqual(summary.held.rawValue, expected.amount.rawValue)
         XCTAssertEqual(summary.heldReservationCount, 1)
+        let resourceSnapshot = counter.resourceSnapshot()
+        XCTAssertEqual(resourceSnapshot.responseSpoolBytes, 0)
+        XCTAssertEqual(resourceSnapshot.upstreamWorkerTasks, 0)
+        XCTAssertEqual(resourceSnapshot.upstreamSocketDescriptors, 0)
     }
 
     func testPhase3DPreDispatchTransportFailureSettlesReservationToZero() throws {
@@ -1408,6 +1453,7 @@ final class ConsumeCommandTests: XCTestCase {
             ledgerPathClass: ledger.pathClass
         )
         let recorder = ConsumeUpstreamRequestRecorder()
+        let counter = ConsumeEndpointRequestCounter()
         let upstreamClient = ConsumeStubUpstreamClient { request, eventLoop in
             recorder.append(request)
             return eventLoop.makeFailedFuture(ConsumeUpstreamForwardError.preDispatchUnavailable)
@@ -1419,7 +1465,8 @@ final class ConsumeCommandTests: XCTestCase {
             budget: budget,
             trustedPricing: .available(trustedRateCard),
             upstreamClient: upstreamClient,
-            now: { ConsumeCommandTests.phase3CTestNow }
+            now: { ConsumeCommandTests.phase3CTestNow },
+            requestCounter: counter
         )
         var headers = HTTPHeaders()
         headers.add(name: "Authorization", value: "Bearer \(token.value)")
@@ -1439,6 +1486,10 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(summary.held.rawValue, 0)
         XCTAssertEqual(summary.settled.rawValue, 0)
         XCTAssertEqual(summary.heldReservationCount, 0)
+        let resourceSnapshot = counter.resourceSnapshot()
+        XCTAssertEqual(resourceSnapshot.responseSpoolBytes, 0)
+        XCTAssertEqual(resourceSnapshot.upstreamWorkerTasks, 0)
+        XCTAssertEqual(resourceSnapshot.upstreamSocketDescriptors, 0)
     }
 
     func testPhase3DSendFailureIsPreDispatch() throws {
@@ -1468,6 +1519,7 @@ final class ConsumeCommandTests: XCTestCase {
             ledgerPathClass: ledger.pathClass
         )
         let recorder = ConsumeUpstreamRequestRecorder()
+        let counter = ConsumeEndpointRequestCounter()
         let upstreamClient = ConsumeStubUpstreamClient(
             resolver: { _, eventLoop in
                 eventLoop.makeFailedFuture(ConsumeUpstreamForwardError.preDispatchUnavailable)
@@ -1484,7 +1536,8 @@ final class ConsumeCommandTests: XCTestCase {
             budget: budget,
             trustedPricing: .available(trustedRateCard),
             upstreamClient: upstreamClient,
-            now: { ConsumeCommandTests.phase3CTestNow }
+            now: { ConsumeCommandTests.phase3CTestNow },
+            requestCounter: counter
         )
         var headers = HTTPHeaders()
         headers.add(name: "Authorization", value: "Bearer \(token.value)")
@@ -1504,6 +1557,163 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(summary.held.rawValue, 0)
         XCTAssertEqual(summary.settled.rawValue, 0)
         XCTAssertEqual(summary.heldReservationCount, 0)
+        let resourceSnapshot = counter.resourceSnapshot()
+        XCTAssertEqual(resourceSnapshot.responseSpoolBytes, 0)
+        XCTAssertEqual(resourceSnapshot.upstreamWorkerTasks, 0)
+        XCTAssertEqual(resourceSnapshot.upstreamSocketDescriptors, 0)
+    }
+
+    func testPhase3EAggregateUpstreamResourceLimitsRejectBeforeResolverLedgerAndForwarding() throws {
+        let token = try ConsumeLocalToken.generate()
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let cases: [(name: String, counter: ConsumeEndpointRequestCounter)] = [
+            ("worker", ConsumeEndpointRequestCounter(maxUpstreamWorkerTasks: 0)),
+            ("socket", ConsumeEndpointRequestCounter(maxUpstreamSocketDescriptors: 0)),
+            ("spool", ConsumeEndpointRequestCounter(maxResponseSpoolBytes: ConsumeLocalLimits.bodyBytes - 1)),
+        ]
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        let body = Data(#"{"model":"llama-test","messages":[],"max_tokens":10}"#.utf8)
+
+        for testCase in cases {
+            let home = try makeTemporaryDirectory()
+            let ledgerURL = home.appendingPathComponent("budget-\(testCase.name).jsonl")
+            let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+            let budget = ConsumeBudgetConfig(
+                mode: .budget(ConsumeMicroUSD(rawValue: 100_000_000)),
+                maxRequestMicroUSD: nil,
+                allowUnpriced: false,
+                ledger: ledger,
+                ledgerPathClass: ledger.pathClass
+            )
+            let resolverCalls = ConsumeInvocationCounter()
+            let recorder = ConsumeUpstreamRequestRecorder()
+            let upstreamClient = ConsumeStubUpstreamClient(
+                resolver: { _, eventLoop in
+                    resolverCalls.increment()
+                    return eventLoop.makeSucceededFuture("8.8.8.8")
+                },
+                handler: { request, eventLoop in
+                    recorder.append(request)
+                    return eventLoop.makeFailedFuture(ConsumeUpstreamForwardError.dispatchedUnavailable)
+                }
+            )
+            let runtime = consumeRuntime(
+                token: token,
+                budget: budget,
+                trustedPricing: .available(trustedRateCard),
+                upstreamClient: upstreamClient,
+                now: { ConsumeCommandTests.phase3CTestNow },
+                requestCounter: testCase.counter
+            )
+
+            let response = try response(
+                from: runtime,
+                head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+                body: body
+            )
+
+            XCTAssertEqual(response.status, .serviceUnavailable, testCase.name)
+            XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_endpoint_busy", testCase.name)
+            XCTAssertFalse(try localForwardedFlag(from: response.body), testCase.name)
+            XCTAssertEqual(resolverCalls.snapshot(), 0, testCase.name)
+            XCTAssertEqual(recorder.snapshot().count, 0, testCase.name)
+            let summary = try ledger.summary()
+            XCTAssertEqual(summary.reserved.rawValue, 0, testCase.name)
+            XCTAssertEqual(summary.held.rawValue, 0, testCase.name)
+            XCTAssertEqual(summary.settled.rawValue, 0, testCase.name)
+            XCTAssertEqual(summary.heldReservationCount, 0, testCase.name)
+        }
+    }
+
+    func testPhase3EUpstreamResourceReservationsAreHeldWhileForwardingAndReleasedAfterSuccess() throws {
+        let token = try ConsumeLocalToken.generate()
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let counter = ConsumeEndpointRequestCounter(
+            maxResponseSpoolBytes: ConsumeLocalLimits.bodyBytes,
+            maxUpstreamWorkerTasks: 1,
+            maxUpstreamSocketDescriptors: 1
+        )
+        let pendingPromise = ConsumeUpstreamPromiseBox()
+        let recorder = ConsumeUpstreamRequestRecorder()
+        let upstreamClient = ConsumeStubUpstreamClient { request, eventLoop in
+            recorder.append(request)
+            let promise = eventLoop.makePromise(of: ConsumeUpstreamResponse.self)
+            pendingPromise.set(promise)
+            return promise.futureResult
+        }
+        let runtime = consumeRuntime(
+            token: token,
+            credentialStatus: .environmentLoaded,
+            credentialCustody: consumeCredentialCustody("buyer-token"),
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            upstreamClient: upstreamClient,
+            now: { ConsumeCommandTests.phase3CTestNow },
+            requestCounter: counter
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        let body = Data(#"{"model":"llama-test","messages":[],"max_tokens":10}"#.utf8)
+
+        let firstChannel = EmbeddedChannel()
+        try firstChannel.pipeline.addHandler(ConsumeLocalHandler(runtime: runtime)).wait()
+        try firstChannel.writeInbound(HTTPServerRequestPart.head(
+            HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers)
+        ))
+        var firstBuffer = firstChannel.allocator.buffer(capacity: body.count)
+        firstBuffer.writeBytes(body)
+        try firstChannel.writeInbound(HTTPServerRequestPart.body(firstBuffer))
+        try firstChannel.writeInbound(HTTPServerRequestPart.end(nil))
+        firstChannel.embeddedEventLoop.run()
+
+        XCTAssertEqual(recorder.snapshot().count, 1)
+        var snapshot = counter.resourceSnapshot()
+        XCTAssertEqual(snapshot.responseSpoolBytes, ConsumeLocalLimits.bodyBytes)
+        XCTAssertEqual(snapshot.upstreamWorkerTasks, 1)
+        XCTAssertEqual(snapshot.upstreamSocketDescriptors, 1)
+        let status = runtime.statusPayload()
+        XCTAssertEqual(status["response_spool_bytes"] as? Int, ConsumeLocalLimits.bodyBytes)
+        XCTAssertEqual(status["upstream_worker_task_count"] as? Int, 1)
+        XCTAssertEqual(status["upstream_socket_descriptor_count"] as? Int, 1)
+
+        let saturated = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: body
+        )
+        XCTAssertEqual(saturated.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: saturated.body)["code"] as? String, "local_endpoint_busy")
+        XCTAssertFalse(try localForwardedFlag(from: saturated.body))
+        XCTAssertEqual(recorder.snapshot().count, 1)
+
+        pendingPromise.succeed(ConsumeUpstreamResponse(
+            statusCode: 200,
+            headers: [("content-type", "application/json")],
+            body: Data(#"{"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.utf8)
+        ))
+        firstChannel.embeddedEventLoop.run()
+        let forwarded = try drainResponse(from: firstChannel)
+        XCTAssertEqual(forwarded.status, .ok)
+        snapshot = counter.resourceSnapshot()
+        XCTAssertEqual(snapshot.responseSpoolBytes, 0)
+        XCTAssertEqual(snapshot.upstreamWorkerTasks, 0)
+        XCTAssertEqual(snapshot.upstreamSocketDescriptors, 0)
     }
 
     func testPhase3DForwardingKeepsActiveCapacityUntilUpstreamCompletes() throws {
@@ -1592,6 +1802,11 @@ final class ConsumeCommandTests: XCTestCase {
         )
         let endpointPromise = ConsumeEndpointPromiseBox()
         let recorder = ConsumeUpstreamRequestRecorder()
+        let counter = ConsumeEndpointRequestCounter(
+            maxResponseSpoolBytes: ConsumeLocalLimits.bodyBytes,
+            maxUpstreamWorkerTasks: 1,
+            maxUpstreamSocketDescriptors: 1
+        )
         let upstreamClient = ConsumeStubUpstreamClient(
             resolver: { _, eventLoop in
                 let promise = eventLoop.makePromise(of: String.self)
@@ -1608,7 +1823,8 @@ final class ConsumeCommandTests: XCTestCase {
             budget: budget,
             trustedPricing: .available(trustedRateCard),
             upstreamClient: upstreamClient,
-            now: { ConsumeCommandTests.phase3CTestNow }
+            now: { ConsumeCommandTests.phase3CTestNow },
+            requestCounter: counter
         )
         let channel = EmbeddedChannel()
         try channel.pipeline.addHandler(ConsumeLocalHandler(runtime: runtime)).wait()
@@ -1625,13 +1841,28 @@ final class ConsumeCommandTests: XCTestCase {
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
         channel.embeddedEventLoop.run()
         XCTAssertEqual(runtime.statusPayload()["active_request_count"] as? Int, 1)
+        var resourceSnapshot = counter.resourceSnapshot()
+        XCTAssertEqual(resourceSnapshot.responseSpoolBytes, ConsumeLocalLimits.bodyBytes)
+        XCTAssertEqual(resourceSnapshot.upstreamWorkerTasks, 1)
+        XCTAssertEqual(resourceSnapshot.upstreamSocketDescriptors, 1)
 
         try channel.close().wait()
+        channel.embeddedEventLoop.run()
+        XCTAssertEqual(runtime.statusPayload()["active_request_count"] as? Int, 0)
+        resourceSnapshot = counter.resourceSnapshot()
+        XCTAssertEqual(resourceSnapshot.responseSpoolBytes, 0)
+        XCTAssertEqual(resourceSnapshot.upstreamWorkerTasks, 0)
+        XCTAssertEqual(resourceSnapshot.upstreamSocketDescriptors, 0)
+
         endpointPromise.succeed("8.8.8.8")
         channel.embeddedEventLoop.run()
 
         XCTAssertEqual(runtime.statusPayload()["active_request_count"] as? Int, 0)
         XCTAssertEqual(recorder.snapshot().count, 0)
+        resourceSnapshot = counter.resourceSnapshot()
+        XCTAssertEqual(resourceSnapshot.responseSpoolBytes, 0)
+        XCTAssertEqual(resourceSnapshot.upstreamWorkerTasks, 0)
+        XCTAssertEqual(resourceSnapshot.upstreamSocketDescriptors, 0)
         let summary = try ledger.summary()
         XCTAssertEqual(summary.reserved.rawValue, 0)
         XCTAssertEqual(summary.held.rawValue, 0)
