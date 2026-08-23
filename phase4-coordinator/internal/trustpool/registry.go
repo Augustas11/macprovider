@@ -29,6 +29,7 @@ type Registry struct {
 	pools              map[string]*poolState
 	revision           uint64
 	revocationWatchers map[string]map[chan struct{}]struct{}
+	activeDeliveries   map[string]uint64
 }
 
 type poolState struct {
@@ -99,7 +100,11 @@ type RouteableSnapshot struct {
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{pools: make(map[string]*poolState), revocationWatchers: make(map[string]map[chan struct{}]struct{})}
+	return &Registry{
+		pools:              make(map[string]*poolState),
+		revocationWatchers: make(map[string]map[chan struct{}]struct{}),
+		activeDeliveries:   make(map[string]uint64),
+	}
 }
 
 func (r *Registry) ensure(poolID string) *poolState {
@@ -386,6 +391,96 @@ func (r *Registry) Disable() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pools = make(map[string]*poolState)
+}
+
+// BeginPoolDelivery records a provider-dispatched pool request until the
+// returned function is called. It is the route-time proof used by lifecycle
+// controls to distinguish delivery drain from later asynchronous settlement.
+func (r *Registry) BeginPoolDelivery(poolID string) func() {
+	if r == nil || poolID == "" {
+		return func() {}
+	}
+	r.mu.Lock()
+	if r.activeDeliveries == nil {
+		r.activeDeliveries = make(map[string]uint64)
+	}
+	r.activeDeliveries[poolID]++
+	r.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if r.activeDeliveries == nil {
+				return
+			}
+			if r.activeDeliveries[poolID] <= 1 {
+				delete(r.activeDeliveries, poolID)
+				return
+			}
+			r.activeDeliveries[poolID]--
+		})
+	}
+}
+
+// BeginPoolDeliveryAtGeneration starts delivery only if the selected pool is
+// still routeable at the generation captured by routing. This makes the final
+// dispatch authorization and delivery counter increment one atomic registry
+// decision, closing the selected-but-not-yet-tracked retirement race.
+func (r *Registry) BeginPoolDeliveryAtGeneration(poolID string, generation uint64) (func(), bool) {
+	if r == nil || poolID == "" {
+		return func() {}, false
+	}
+	r.mu.Lock()
+	ps := r.pools[poolID]
+	now := time.Now().UTC()
+	if ps == nil || !ps.routeableAt(now) || ps.generationAt(now) != generation {
+		r.mu.Unlock()
+		return func() {}, false
+	}
+	if r.activeDeliveries == nil {
+		r.activeDeliveries = make(map[string]uint64)
+	}
+	r.activeDeliveries[poolID]++
+	r.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if r.activeDeliveries == nil {
+				return
+			}
+			if r.activeDeliveries[poolID] <= 1 {
+				delete(r.activeDeliveries, poolID)
+				return
+			}
+			r.activeDeliveries[poolID]--
+		})
+	}, true
+}
+
+// PoolDeliveryDrained reports whether no provider-dispatched request for the
+// pool is still delivering output to a buyer. Settlement/receipt finalization
+// can continue after this turns true.
+func (r *Registry) PoolDeliveryDrained(poolID string) bool {
+	if r == nil || poolID == "" {
+		return true
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.activeDeliveries[poolID] == 0
+}
+
+func (r *Registry) ActivePoolDeliveries(poolID string) uint64 {
+	if r == nil || poolID == "" {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.activeDeliveries[poolID]
 }
 
 func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []RouteableSnapshot, enforceRevision bool, allowSameRevisionRefresh bool) (bool, error) {

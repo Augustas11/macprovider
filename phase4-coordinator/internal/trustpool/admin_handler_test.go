@@ -581,6 +581,39 @@ func TestAdminHandler_SignedRevokeImmediateRevokesProviderAndBumpsGeneration(t *
 	}
 }
 
+func TestAdminHandler_SignedLifecycleRetireRequiresDeliveryDrain(t *testing.T) {
+	t.Parallel()
+	routeable := newRouteableAdminPool(t)
+	registry := routeable.registry
+	handler := routeable.handler
+	root := routeable.root
+
+	postAdminSignedLifecycle(t, routeable.store, handler, "", root, "op-signed-drain", trustpool.LifecycleDraining, "signed drain", false, http.StatusAccepted)
+	endDelivery := registry.BeginPoolDelivery(root.poolID)
+	blocked := postAdminSignedLifecycle(t, routeable.store, handler, "", root, "op-signed-retire-blocked", trustpool.LifecycleRetired, "signed retire", false, http.StatusConflict)
+	var blockedBody struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(blocked.Body.Bytes(), &blockedBody); err != nil {
+		t.Fatalf("decode signed blocked retire response: %v", err)
+	}
+	if blockedBody.Error.Code != "delivery_drain_pending" {
+		t.Fatalf("signed blocked retire code=%q, want delivery_drain_pending", blockedBody.Error.Code)
+	}
+	if got := registry.ActivePoolDeliveries(root.poolID); got != 1 {
+		t.Fatalf("active deliveries after blocked retire=%d want 1", got)
+	}
+	endDelivery()
+
+	postAdminSignedLifecycle(t, routeable.store, handler, "", root, "op-signed-retire", trustpool.LifecycleRetired, "signed retire", false, http.StatusAccepted)
+	retired := registry.Snapshot(root.poolID)
+	if !retired.Exists || retired.Routeable || len(retired.Members) != 0 {
+		t.Fatalf("signed retired snapshot = %+v, want non-routeable empty members", retired)
+	}
+}
+
 func TestAdminHandler_SignedLifecycleRejectsBadSignatureWithoutRegistryMutation(t *testing.T) {
 	t.Parallel()
 	routeable := newRouteableAdminPool(t)
@@ -686,6 +719,21 @@ func TestAdminHandler_RestrictiveLifecycleDrainsAndRetiresRouteablePool(t *testi
 		t.Fatalf("draining snapshot = %+v, want non-routeable empty members", draining)
 	}
 
+	endDelivery := registry.BeginPoolDelivery(root.poolID)
+	blocked := postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-retire-blocked", trustpool.LifecycleRetired, "retire", http.StatusConflict)
+	var blockedBody struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(blocked.Body.Bytes(), &blockedBody); err != nil {
+		t.Fatalf("decode blocked retire response: %v", err)
+	}
+	if blockedBody.Error.Code != "delivery_drain_pending" {
+		t.Fatalf("blocked retire code=%q, want delivery_drain_pending", blockedBody.Error.Code)
+	}
+	endDelivery()
+
 	postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-retire", trustpool.LifecycleRetired, "retire", http.StatusAccepted)
 	retired := registry.Snapshot(root.poolID)
 	if !retired.Exists || retired.Routeable || len(retired.Members) != 0 {
@@ -698,17 +746,41 @@ func TestAdminHandler_RestrictiveLifecycleDrainsAndRetiresRouteablePool(t *testi
 	}
 }
 
-func TestAdminHandler_RestrictiveLifecycleRetiresRouteablePoolDirectly(t *testing.T) {
+func TestAdminHandler_RestrictiveLifecycleRejectsRouteableRetireUntilDrained(t *testing.T) {
 	t.Parallel()
 	routeable := newRouteableAdminPool(t)
 	registry := routeable.registry
 	handler := routeable.handler
 	root := routeable.root
 
+	endDelivery := registry.BeginPoolDelivery(root.poolID)
+	blocked := postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-retire-blocked", trustpool.LifecycleRetired, "retire", http.StatusConflict)
+	var blockedBody struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(blocked.Body.Bytes(), &blockedBody); err != nil {
+		t.Fatalf("decode direct blocked retire response: %v", err)
+	}
+	if blockedBody.Error.Code != "delivery_drain_pending" {
+		t.Fatalf("direct blocked retire code=%q, want delivery_drain_pending", blockedBody.Error.Code)
+	}
+	endDelivery()
+
+	blocked = postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-retire-routeable-blocked", trustpool.LifecycleRetired, "retire", http.StatusConflict)
+	if err := json.Unmarshal(blocked.Body.Bytes(), &blockedBody); err != nil {
+		t.Fatalf("decode routeable blocked retire response: %v", err)
+	}
+	if blockedBody.Error.Code != "delivery_drain_pending" {
+		t.Fatalf("routeable blocked retire code=%q, want delivery_drain_pending", blockedBody.Error.Code)
+	}
+
+	postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-drain-before-retire", trustpool.LifecycleDraining, "drain", http.StatusAccepted)
 	postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-retire", trustpool.LifecycleRetired, "retire", http.StatusAccepted)
 	retired := registry.Snapshot(root.poolID)
 	if !retired.Exists || retired.Routeable || len(retired.Members) != 0 {
-		t.Fatalf("direct retired snapshot = %+v, want non-routeable empty members", retired)
+		t.Fatalf("retired snapshot = %+v, want non-routeable empty members", retired)
 	}
 }
 

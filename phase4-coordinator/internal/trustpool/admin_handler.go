@@ -204,6 +204,10 @@ func (h *adminHandler) handleAppendEvent(w http.ResponseWriter, r *http.Request)
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "activation_requires_promotion"}})
 		return
 	}
+	if err := h.requireDeliveryDrained(e); err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	state, committed, _, err := h.deps.Store.AppendValidatedEvent(r.Context(), e)
@@ -441,6 +445,10 @@ func (h *adminHandler) handleSignedLifecycle(w http.ResponseWriter, r *http.Requ
 		h.writeMutationError(w, err)
 		return
 	}
+	if err := h.requireDeliveryDrained(e); err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
 	state, committed, _, err := h.deps.Store.appendSignedControlEvent(r.Context(), e)
 	if err != nil {
 		h.writeMutationError(w, err)
@@ -500,6 +508,10 @@ func (h *adminHandler) handleRestrictiveLifecycle(w http.ResponseWriter, r *http
 		PoolID:       poolID,
 		Lifecycle:    lifecycle,
 		Reason:       strings.TrimSpace(body.Reason),
+	}
+	if err := h.requireDeliveryDrained(e); err != nil {
+		h.writeMutationError(w, err)
+		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -876,6 +888,8 @@ func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "creator_approval_gate_failed"}})
 	case errors.Is(err, ErrPublicAnnouncementGate):
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "public_announcement_gate_failed"}})
+	case errors.Is(err, ErrDeliveryDrainPending):
+		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "delivery_drain_pending"}})
 	case errors.Is(err, ErrProhibitedPromiseClaim):
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "prohibited_promise_claim"}})
 	case errors.Is(err, ErrMalformedDurableEvent):
@@ -883,6 +897,23 @@ func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
 	default:
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
 	}
+}
+
+func (h *adminHandler) requireDeliveryDrained(e DurableEvent) error {
+	if e.EventType != EventLifecycleChanged || e.Lifecycle != LifecycleRetired {
+		return nil
+	}
+	if h == nil || h.deps.Registry == nil {
+		return ErrDeliveryDrainPending
+	}
+	snapshot := h.deps.Registry.Snapshot(e.PoolID)
+	if !snapshot.Exists || snapshot.Routeable {
+		return ErrDeliveryDrainPending
+	}
+	if !h.deps.Registry.PoolDeliveryDrained(e.PoolID) {
+		return ErrDeliveryDrainPending
+	}
+	return nil
 }
 
 func (h *adminHandler) writeReconstructError(w http.ResponseWriter, err error) {

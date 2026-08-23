@@ -48,6 +48,7 @@ var (
 	ErrPublicAnnouncementGate      = errors.New("trustpool: public announcement gate failed")
 	ErrProhibitedPromiseClaim      = errors.New("trustpool: prohibited promise claim")
 	ErrSignedControlProofPath      = errors.New("trustpool: signed control proof requires signed control path")
+	ErrDeliveryDrainPending        = errors.New("trustpool: delivery drain pending")
 )
 
 type PromotionPreconditionError struct {
@@ -2994,7 +2995,7 @@ func validLifecycleTransition(from, to string) bool {
 	case LifecycleCreated:
 		return to == LifecycleActive || to == LifecycleRetired
 	case LifecycleActive:
-		return to == LifecyclePaused || to == LifecycleDraining || to == LifecycleRetired
+		return to == LifecyclePaused || to == LifecycleDraining
 	case LifecyclePaused:
 		return to == LifecycleActive || to == LifecycleDraining || to == LifecycleRetired
 	case LifecycleDraining:

@@ -2455,6 +2455,17 @@ func (s *Server) forwardStreamSequence(
 			if settlementMetadata != nil {
 				declareInternalSettlementOutcomeTrailers(w.Header(), rec)
 			}
+			endPoolDelivery, ok := s.beginPoolDelivery(state)
+			if !ok {
+				s.releaseQueuedSlotReservation(state)
+				rec.logRow("", http.StatusConflict, nil, nil, "pool membership changed during routing", "pool_state_stale", state.explicitRetries)
+				if !rec.providerCredited {
+					w.Header().Set(settlementNoPriorDispatchHeader, "1")
+				}
+				writeError(w, http.StatusConflict, "pool_state_stale", "Pool membership changed during routing; please retry")
+				return dispatchedAttempt{}, false
+			}
+			defer endPoolDelivery()
 			// Route snapshot durably recorded; dispatching to the provider now
 			// (item 18 no-charge marker: any non-503 terminal from here bills).
 			rec.markProviderDispatched()
@@ -2661,6 +2672,17 @@ func (s *Server) forwardWSNonStreamSequence(
 				}
 				return nil
 			}
+			endPoolDelivery, ok := s.beginPoolDelivery(state)
+			if !ok {
+				s.releaseQueuedSlotReservation(state)
+				rec.logRow("", http.StatusConflict, nil, nil, "pool membership changed during routing", "pool_state_stale", state.explicitRetries)
+				if !rec.providerCredited {
+					w.Header().Set(settlementNoPriorDispatchHeader, "1")
+				}
+				writeError(w, http.StatusConflict, "pool_state_stale", "Pool membership changed during routing; please retry")
+				return dispatchedAttempt{}, false
+			}
+			defer endPoolDelivery()
 			// Route snapshot durably recorded; we are now dispatching to the
 			// provider. Any non-503 terminal from here bills (item 18).
 			rec.markProviderDispatched()
@@ -2856,6 +2878,17 @@ func (s *Server) forwardHTTPSequence(
 				writeRouteSnapshotError(w, rec, err)
 				return dispatchedAttempt{}, false
 			}
+			endPoolDelivery, ok := s.beginPoolDelivery(state)
+			if !ok {
+				s.releaseQueuedSlotReservation(state)
+				rec.logRow("", http.StatusConflict, nil, nil, "pool membership changed during routing", "pool_state_stale", state.explicitRetries)
+				if !rec.providerCredited {
+					w.Header().Set(settlementNoPriorDispatchHeader, "1")
+				}
+				writeError(w, http.StatusConflict, "pool_state_stale", "Pool membership changed during routing; please retry")
+				return dispatchedAttempt{}, false
+			}
+			defer endPoolDelivery()
 			// Route snapshot durably recorded; dispatching to the provider now
 			// (item 18 no-charge marker: any non-503 terminal from here bills).
 			rec.markProviderDispatched()
