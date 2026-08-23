@@ -152,6 +152,16 @@ storage:
   snapshot_interval_s: 300
   request_log_retention_days: 90
 
+trusted_pools:
+  enabled: false
+  refresh_interval_s: 30
+  # SPEC-042 production pool promotion is default-blocked. Configure only
+  # after signed launch evidence and root-custody review are complete.
+  production_activation:
+    allowed_launch_environments: []
+    evidence_sha256: ""
+    root_custody_hashes: []
+
 logging:
   level: "info"
   format: "json"

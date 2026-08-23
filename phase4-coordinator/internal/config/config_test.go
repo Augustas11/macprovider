@@ -672,6 +672,76 @@ func TestTrustedPoolsEnabledRequiresBoundedRefreshInterval(t *testing.T) {
 	}
 }
 
+func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	tests := []struct {
+		name  string
+		build func(*Config)
+		want  string
+	}{
+		{
+			name: "disabled trusted pools",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
+				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
+				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+			},
+			want: "trusted_pools.enabled=true",
+		},
+		{
+			name: "invalid evidence digest",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = strings.ToUpper(digest)
+				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
+				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+			},
+			want: "evidence_sha256",
+		},
+		{
+			name: "candidate environment rejected",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
+				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"candidate"}
+				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+			},
+			want: "non-candidate",
+		},
+		{
+			name: "invalid custody digest",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
+				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
+				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{"not-a-digest"}
+			},
+			want: "root_custody_hashes",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.TrustedPools.RefreshIntervalS = 30
+			tc.build(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate err=%v, want substring %q", err, tc.want)
+			}
+		})
+	}
+
+	cfg := validTestConfig()
+	cfg.TrustedPools.Enabled = true
+	cfg.TrustedPools.RefreshIntervalS = 30
+	cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
+	cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
+	cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("complete production activation gate should validate: %v", err)
+	}
+}
+
 func TestRateCardEntryCacheRateDefaultAndExplicitZero(t *testing.T) {
 	var omitted RateCardEntry
 	if err := yaml.Unmarshal([]byte("prompt_credits_per_mtok: 500000\ncompletion_credits_per_mtok: 1000000\n"), &omitted); err != nil {

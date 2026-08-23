@@ -20,6 +20,7 @@ import (
 )
 
 var providerIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
+var lowerHex64Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 const (
 	maxCompatibilitySetIDBytes   = 256
@@ -1029,8 +1030,15 @@ type StorageConfig struct {
 // with that reconstructed registry; reconstruction failure disables pool support
 // while preserving global routing.
 type TrustedPoolsConfig struct {
-	Enabled          bool `yaml:"enabled"`
-	RefreshIntervalS int  `yaml:"refresh_interval_s"`
+	Enabled              bool                                   `yaml:"enabled"`
+	RefreshIntervalS     int                                    `yaml:"refresh_interval_s"`
+	ProductionActivation TrustedPoolsProductionActivationConfig `yaml:"production_activation"`
+}
+
+type TrustedPoolsProductionActivationConfig struct {
+	AllowedLaunchEnvironments []string `yaml:"allowed_launch_environments"`
+	EvidenceSHA256            string   `yaml:"evidence_sha256"`
+	RootCustodyHashes         []string `yaml:"root_custody_hashes"`
 }
 
 type LoggingConfig struct {
@@ -1345,6 +1353,10 @@ func Default() Config {
 		TrustedPools: TrustedPoolsConfig{
 			Enabled:          false,
 			RefreshIntervalS: 30,
+			ProductionActivation: TrustedPoolsProductionActivationConfig{
+				AllowedLaunchEnvironments: []string{},
+				RootCustodyHashes:         []string{},
+			},
 		},
 		Logging: LoggingConfig{
 			Level:  "info",
@@ -2107,6 +2119,9 @@ func (c Config) Validate() error {
 	if c.TrustedPools.Enabled && (c.TrustedPools.RefreshIntervalS <= 0 || c.TrustedPools.RefreshIntervalS > 60) {
 		return fmt.Errorf("trusted_pools.refresh_interval_s must be in [1,60] when trusted_pools.enabled=true")
 	}
+	if err := validateTrustedPoolsProductionActivation(c.TrustedPools); err != nil {
+		return err
+	}
 	if err := c.validateCompatibilitySet(); err != nil {
 		return err
 	}
@@ -2537,6 +2552,49 @@ func (c Config) validateAdvertisedVersions() error {
 		if !versionfloor.Valid(floor) {
 			return fmt.Errorf("coordinator_advertised_version.per_model_required_binary_version[%q] = %q must be a bare numeric version (e.g. 1.8.33)", modelID, floor)
 		}
+	}
+	return nil
+}
+
+func validateTrustedPoolsProductionActivation(c TrustedPoolsConfig) error {
+	gate := c.ProductionActivation
+	configured := strings.TrimSpace(gate.EvidenceSHA256) != "" || len(gate.AllowedLaunchEnvironments) != 0 || len(gate.RootCustodyHashes) != 0
+	if !configured {
+		return nil
+	}
+	if !c.Enabled {
+		return fmt.Errorf("trusted_pools.production_activation requires trusted_pools.enabled=true")
+	}
+	if !lowerHex64Pattern.MatchString(strings.TrimSpace(gate.EvidenceSHA256)) {
+		return fmt.Errorf("trusted_pools.production_activation.evidence_sha256 must be a lowercase sha256 hex digest")
+	}
+	if len(gate.AllowedLaunchEnvironments) == 0 {
+		return fmt.Errorf("trusted_pools.production_activation.allowed_launch_environments must not be empty")
+	}
+	seenEnv := make(map[string]bool, len(gate.AllowedLaunchEnvironments))
+	for _, value := range gate.AllowedLaunchEnvironments {
+		value = strings.TrimSpace(value)
+		if value == "" || value == "candidate" {
+			return fmt.Errorf("trusted_pools.production_activation.allowed_launch_environments must contain non-candidate environment names")
+		}
+		if seenEnv[value] {
+			return fmt.Errorf("trusted_pools.production_activation.allowed_launch_environments must be unique")
+		}
+		seenEnv[value] = true
+	}
+	if len(gate.RootCustodyHashes) == 0 {
+		return fmt.Errorf("trusted_pools.production_activation.root_custody_hashes must not be empty")
+	}
+	seenCustody := make(map[string]bool, len(gate.RootCustodyHashes))
+	for _, value := range gate.RootCustodyHashes {
+		value = strings.TrimSpace(value)
+		if !lowerHex64Pattern.MatchString(value) {
+			return fmt.Errorf("trusted_pools.production_activation.root_custody_hashes must contain lowercase sha256 hex digests")
+		}
+		if seenCustody[value] {
+			return fmt.Errorf("trusted_pools.production_activation.root_custody_hashes must be unique")
+		}
+		seenCustody[value] = true
 	}
 	return nil
 }
