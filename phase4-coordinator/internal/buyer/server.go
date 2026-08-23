@@ -84,6 +84,7 @@ var spec018RetryableByCode = map[string]bool{
 	// SPEC-042 R005/R010 tenant isolation.
 	"pool_state_stale":                     true,  // 409, pool membership changed during routing; re-select
 	"pool_unavailable":                     false, // 503, unknown/unauthorized/disabled/non-active pool; same request must not be retried unchanged
+	"pool_policy_stale":                    true,  // 503, authorized pool policy/status freshness expired; retry after refresh
 	"pool_no_eligible_member":              false, // 503, no member satisfies the pool; same reservation must not be retried
 	"pool_provider_capability_unsatisfied": false, // 503, pool members exist but no current session advertises pool support
 	"pool_binary_too_old":                  false, // 503, members exist but all below the pool binary floor; retry cannot make a binary newer
@@ -2245,7 +2246,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		snap, authorized := s.trustPools.AuthorizeAndSnapshot(poolHeader, accountID)
-		if !authorized || !snap.Exists || !snap.Routeable {
+		if !authorized || !snap.Exists {
+			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
+			writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
+			return
+		}
+		if !snap.Routeable {
+			if snap.RouteableExpired {
+				rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool policy/status freshness is stale")
+				writeError(w, http.StatusServiceUnavailable, "pool_policy_stale", "Pool policy/status freshness is stale")
+				return
+			}
 			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
 			writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
 			return
@@ -5928,7 +5939,17 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		if !req.poolSnapshotSet {
 			snap = s.trustPools.Snapshot(req.poolID)
 		}
-		if !snap.Exists || !snap.Routeable {
+		if snap.Routeable && poolRouteableSnapshotExpiredAt(snap, time.Now().UTC()) {
+			snap.Routeable = false
+			snap.RouteableExpired = true
+		}
+		if !snap.Exists {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_unavailable", message: "Pool unavailable"}
+		}
+		if !snap.Routeable {
+			if snap.RouteableExpired {
+				return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_policy_stale", message: "Pool policy/status freshness is stale"}
+			}
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_unavailable", message: "Pool unavailable"}
 		}
 		poolMembers = snap.Members
@@ -6158,6 +6179,13 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		}
 	}
 	return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "preflight_rejected", message: "All providers rejected the request"}
+}
+
+func poolRouteableSnapshotExpiredAt(snap trustpool.Snapshot, now time.Time) bool {
+	if !snap.RouteableExpired && !snap.RouteableUntilUTC.IsZero() && !now.UTC().Before(snap.RouteableUntilUTC.UTC()) {
+		return true
+	}
+	return snap.RouteableExpired
 }
 
 func cloneModelClasses(in map[string]config.ModelClassConfig) map[string]config.ModelClassConfig {

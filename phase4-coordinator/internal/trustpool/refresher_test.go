@@ -71,8 +71,8 @@ func TestRefreshRegistryClosesExpiredCreatorGateAtSameRevision(t *testing.T) {
 		t.Fatalf("expired refresh = %+v, want changed", expired)
 	}
 	snap = registry.Snapshot(root.poolID)
-	if !snap.Exists || snap.Routeable || len(snap.Members) != 0 || snap.Generation <= initialGeneration {
-		t.Fatalf("post-expiry snapshot = %+v, want closed with generation > %d", snap, initialGeneration)
+	if !snap.Exists || snap.Routeable || !snap.RouteableExpired || len(snap.Members) != 0 || snap.Generation <= initialGeneration {
+		t.Fatalf("post-expiry snapshot = %+v, want expired closed with generation > %d", snap, initialGeneration)
 	}
 	if expired.NextRefreshAtUTC != (time.Time{}) {
 		t.Fatalf("expired refresh next deadline = %s, want none", expired.NextRefreshAtUTC)

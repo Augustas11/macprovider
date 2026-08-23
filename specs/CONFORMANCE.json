@@ -1224,7 +1224,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.25",
+      "version": "0.0.26",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5475,6 +5475,7 @@
         "phase4-coordinator/internal/pool/provider.go:type Provider struct",
         "phase4-coordinator/internal/routing/filter.go:func EligibleCandidates",
         "phase4-coordinator/internal/buyer/server.go:func (s *Server) selectProviderExcluding",
+        "phase4-coordinator/internal/trustpool/registry.go:type Snapshot",
         "phase4-coordinator/internal/buyer/server.go:func (c *eligibilityCtx) ProviderSupportsTrustedPools",
         "phase4-coordinator/internal/buyer/server.go:func poolModelAllowed",
         "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) SetModelAllowlist",
@@ -5515,6 +5516,11 @@
         "phase4-coordinator/internal/buyer/spec042_pool_model_allowlist_test.go:TestPoolModelAllowlist_SlotQueuePollExcludesDisallowed",
         "phase4-coordinator/internal/buyer/spec042_pool_model_allowlist_test.go:TestPoolModelAllowlist_ClassRequestRequiresWholeClassAllowed",
         "phase4-coordinator/internal/trustpool/registry_test.go:TestModelAllowlistSnapshotsAndGeneration",
+        "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_AuthorizedExpiredRouteableSnapshotReturnsPolicyStale",
+        "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_CachedRouteableSnapshotExpiryReturnsPolicyStale",
+        "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_RefreshedExpiredRouteableSnapshotReturnsPolicyStale",
+        "phase4-coordinator/internal/buyer/server_test.go:TestPoolHeaderForAuthorizedExpiredRouteableSnapshotFailsPolicyStale",
+        "phase4-coordinator/internal/trustpool/refresher_test.go:TestRefreshRegistryClosesExpiredCreatorGateAtSameRevision",
         "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_ActiveDispatchContextCancelledOnImmediateRevoke",
         "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_HTTPBodyReadCancelledOnImmediateRevoke",
         "phase4-coordinator/internal/trustpool/registry_test.go:TestWatchProviderRevokedClosesOnRevoke",
@@ -5532,7 +5538,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Fail-closed error handling now clears routeable trusted-pool snapshots when reconstruction observes malformed durable state at startup, background refresh, admin reads/mutations, buyer policy/status reads, and pool-selected chat admission. Local restrictive lifecycle admin controls now pause/drain/retire through the validated durable append path, refresh routeable snapshots after commit, reject raw active transitions with activation_requires_promotion, and fail closed on invalid lifecycle transitions. Signed emergency controls now pause/drain/retire and provider-bound `revoke_immediate` now appends durable revocation through the signed-control path; both refresh routeable snapshots after commit and keep generic admin events from forging signed-control proof fields. The promotion path can reactivate paused candidate pools only after rerunning local activation preflight, preserving promotion as the only routeability-increasing write path. Ordinary pool-selected routing now emits SPEC-042 closed-vocabulary codes for encrypted-leg absence, attestation unsatisfied, enforce-mode provider settlement-prerequisite failures, signed-manifest-derived model allowlist failures, and missing selected-provider `trusted_pool_v1` advertisement while preserving global Tier-2/settlement behavior. Pinned provider/session routes and slot-queue candidate/poll paths re-check the same allowlist and provider-capability verdicts. Active uncommitted dispatch attempts now return retryable `pool_state_stale` when provider-bound revoke_immediate closes the registry watch/cancels the shared attempt context; the gateway passes through and refunds only when the coordinator also supplies the positive no-prior-dispatch marker, and otherwise settles `pool_state_stale` as `upstream_provider_error` when a provider row may already have been credited or the gateway retry loop has already observed a provider-dispatched attempt. Still pending: signed journey evidence, production activation evidence, policy-level settlement observe-vs-enforce gating, policy/status stale conformance, production mixed-version rollout proof, and 0 C/H/M launch audit."
+        "rationale": "Fail-closed error handling now clears routeable trusted-pool snapshots when reconstruction observes malformed durable state at startup, background refresh, admin reads/mutations, buyer policy/status reads, and pool-selected chat admission. Local restrictive lifecycle admin controls now pause/drain/retire through the validated durable append path, refresh routeable snapshots after commit, reject raw active transitions with activation_requires_promotion, and fail closed on invalid lifecycle transitions. Signed emergency controls now pause/drain/retire and provider-bound `revoke_immediate` now appends durable revocation through the signed-control path; both refresh routeable snapshots after commit and keep generic admin events from forging signed-control proof fields. The promotion path can reactivate paused candidate pools only after rerunning local activation preflight, preserving promotion as the only routeability-increasing write path. Ordinary pool-selected routing now emits SPEC-042 closed-vocabulary codes for encrypted-leg absence, attestation unsatisfied, enforce-mode provider settlement-prerequisite failures, signed-manifest-derived model allowlist failures, missing selected-provider `trusted_pool_v1` advertisement, and authorized expired routeable/policy freshness while preserving global Tier-2/settlement behavior. Pinned provider/session routes and slot-queue candidate/poll paths re-check the same allowlist and provider-capability verdicts. Active uncommitted dispatch attempts now return retryable `pool_state_stale` when provider-bound revoke_immediate closes the registry watch/cancels the shared attempt context; the gateway passes through and refunds only when the coordinator also supplies the positive no-prior-dispatch marker, and otherwise settles `pool_state_stale` as `upstream_provider_error` when a provider row may already have been credited or the gateway retry loop has already observed a provider-dispatched attempt. Still pending: signed journey evidence, production activation evidence, policy-level settlement observe-vs-enforce gating, production mixed-version rollout proof, remaining production predicate evidence, and 0 C/H/M launch audit."
       }
     },
     {

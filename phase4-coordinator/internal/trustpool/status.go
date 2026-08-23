@@ -318,7 +318,7 @@ func statusSnapshotForPool(state *ReconstructedState, p *ReconstructedPoolState,
 	if registry != nil {
 		return registry.Snapshot(p.PoolID)
 	}
-	routeable, _ := poolRouteability(p)
+	routeable, routeabilityReason := poolRouteability(p)
 	members := map[string]bool{}
 	if routeable {
 		for id := range p.Members {
@@ -339,6 +339,7 @@ func statusSnapshotForPool(state *ReconstructedState, p *ReconstructedPoolState,
 		Generation:        p.RouteableSnapshotGeneration(),
 		Revision:          revision,
 		RouteableUntilUTC: p.CreatorGateExpiresAtUTC,
+		RouteableExpired:  routeabilityReason == "creator_agreement_expired",
 	}
 }
 

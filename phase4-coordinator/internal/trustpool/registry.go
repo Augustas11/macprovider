@@ -60,6 +60,7 @@ type poolState struct {
 	// is no longer current.
 	generation        uint64
 	routeableUntilUTC time.Time
+	routeableExpired  bool
 }
 
 // Snapshot is a single consistent read of a pool's routable membership and
@@ -80,6 +81,7 @@ type Snapshot struct {
 	Generation        uint64
 	Revision          uint64
 	RouteableUntilUTC time.Time
+	RouteableExpired  bool
 }
 
 // RouteableSnapshot is a durable reconstruction input: one coherent pool state
@@ -96,6 +98,7 @@ type RouteableSnapshot struct {
 	Routeable         bool
 	Generation        uint64
 	RouteableUntilUTC time.Time
+	RouteableExpired  bool
 }
 
 // NewRegistry returns an empty registry.
@@ -346,6 +349,7 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 		modelAllowlist:    modelAllowlist,
 		generation:        s.Generation,
 		routeableUntilUTC: s.RouteableUntilUTC.UTC(),
+		routeableExpired:  s.RouteableExpired,
 	}
 	r.notifyRevokedWatchersForPoolsLocked(map[string]*poolState{s.PoolID: r.pools[s.PoolID]})
 	return nil
@@ -530,6 +534,7 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 			modelAllowlist:    modelAllowlist,
 			generation:        s.Generation,
 			routeableUntilUTC: s.RouteableUntilUTC.UTC(),
+			routeableExpired:  s.RouteableExpired,
 		}
 	}
 
@@ -628,6 +633,7 @@ func poolStatesEqual(a, b *poolState) bool {
 		stringSlicesEqual(a.modelAllowlist, b.modelAllowlist) &&
 		a.generation == b.generation &&
 		a.routeableUntilUTC.Equal(b.routeableUntilUTC) &&
+		a.routeableExpired == b.routeableExpired &&
 		stringSetsEqual(a.members, b.members) &&
 		stringSetsEqual(a.revoked, b.revoked) &&
 		stringSetsEqual(a.buyers, b.buyers)
@@ -727,6 +733,7 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 			Routeable:         ps.routeable,
 			Generation:        ps.generation,
 			RouteableUntilUTC: ps.routeableUntilUTC,
+			RouteableExpired:  ps.routeableExpired,
 		})
 	}
 	return out
@@ -744,6 +751,7 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		return Snapshot{PoolID: poolID, Exists: false, Members: map[string]bool{}}
 	}
 	now := time.Now().UTC()
+	routeableExpired := ps.routeableExpired || ps.routeableExpiredAt(now)
 	members := make(map[string]bool, len(ps.members))
 	for id := range ps.members {
 		if _, revoked := ps.revoked[id]; revoked {
@@ -761,6 +769,7 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		Generation:        ps.generationAt(now),
 		Revision:          r.revision,
 		RouteableUntilUTC: ps.routeableUntilUTC,
+		RouteableExpired:  routeableExpired,
 	}
 }
 
@@ -779,6 +788,7 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 		return Snapshot{PoolID: poolID, Exists: false, Members: map[string]bool{}, Revision: r.revision}, false
 	}
 	now := time.Now().UTC()
+	routeableExpired := ps.routeableExpired || ps.routeableExpiredAt(now)
 	members := make(map[string]bool, len(ps.members))
 	for id := range ps.members {
 		if _, revoked := ps.revoked[id]; revoked {
@@ -797,6 +807,7 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 		Generation:        ps.generationAt(now),
 		Revision:          r.revision,
 		RouteableUntilUTC: ps.routeableUntilUTC,
+		RouteableExpired:  routeableExpired,
 	}, authorized
 }
 
@@ -831,17 +842,21 @@ func (ps *poolState) routeableAt(now time.Time) bool {
 	if ps == nil || !ps.routeable {
 		return false
 	}
-	if ps.routeableUntilUTC.IsZero() {
-		return true
+	if ps.routeableExpired {
+		return false
 	}
-	return now.UTC().Before(ps.routeableUntilUTC.UTC())
+	return !ps.routeableExpiredAt(now)
+}
+
+func (ps *poolState) routeableExpiredAt(now time.Time) bool {
+	return ps != nil && ps.routeable && !ps.routeableUntilUTC.IsZero() && !now.UTC().Before(ps.routeableUntilUTC.UTC())
 }
 
 func (ps *poolState) generationAt(now time.Time) uint64 {
 	if ps == nil {
 		return 0
 	}
-	if ps.routeable && !ps.routeableUntilUTC.IsZero() && !now.UTC().Before(ps.routeableUntilUTC.UTC()) {
+	if ps.routeableExpiredAt(now) {
 		return ps.generation + 1
 	}
 	return ps.generation
