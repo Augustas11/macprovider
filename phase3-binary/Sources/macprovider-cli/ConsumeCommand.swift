@@ -650,6 +650,11 @@ struct ConsumeUpstreamResponse: Sendable {
     let body: Data
 }
 
+private struct ConsumeSSEValidationResult: Sendable {
+    let eventBlocks: [Data]
+    let lastUsage: [String: JSONValue]?
+}
+
 enum ConsumeUpstreamForwardError: Error {
     case preDispatchUnavailable
     case dispatchedUnavailable
@@ -722,8 +727,10 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         func schedule(nanoseconds: UInt64, _ block: @escaping @Sendable () -> Void) {
             let work = DispatchWorkItem(block: block)
             lock.lock()
+            let previous = task
             task = work
             lock.unlock()
+            previous?.cancel()
             DispatchQueue.global(qos: .utility).asyncAfter(
                 deadline: .now() + .nanoseconds(Int(nanoseconds)),
                 execute: work
@@ -989,6 +996,10 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
                     }
                     if let data, !data.isEmpty {
                         state.received.append(data)
+                        deadline.schedule(nanoseconds: timeoutNanoseconds) {
+                            connection.cancel()
+                            finish(.failure(ConsumeUpstreamForwardError.dispatchedUnavailable))
+                        }
                     }
                     if let headerRange = state.received.range(of: headerTerminator) {
                         let bodyStart = headerRange.upperBound
@@ -3386,6 +3397,9 @@ enum ConsumeLocalLimits {
     static let headerBytes = 64 * 1024
     static let bodyBytes = 1 * 1024 * 1024
     static let nonStreamingResponseSpoolBytes = bodyBytes * 2
+    static let sseEventLineBytes = 64 * 1024
+    static let sseEventFrameBytes = 256 * 1024
+    static let sseEventBlocks = 4096
     static let headerReadTimeout: TimeAmount = .seconds(5)
     static let requestReadTimeout: TimeAmount = .seconds(15)
     static let bodyIdleTimeout: TimeAmount = .seconds(5)
@@ -4533,9 +4547,17 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             switch result {
             case .success(let response):
+                guard !self.shouldSuppressLateStreamingWrite(streaming: streaming) else {
+                    return
+                }
                 do {
                     let localResponse = try Self.responseForLocalDelivery(response, streaming: streaming)
-                    self.writeUpstreamResponse(localResponse, context: contextBox.context, extraHeaders: extraHeaders)
+                    self.writeUpstreamResponse(
+                        localResponse,
+                        streaming: streaming,
+                        context: contextBox.context,
+                        extraHeaders: extraHeaders
+                    )
                 } catch {
                     self.writeLocalError(
                         context: contextBox.context,
@@ -4547,6 +4569,9 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             case .failure(let error):
                 let failure = Self.classifyUpstreamFailure(error)
+                guard !self.shouldSuppressLateStreamingWrite(streaming: streaming) else {
+                    return
+                }
                 self.writeLocalError(
                     context: contextBox.context,
                     status: failure.status,
@@ -4592,6 +4617,15 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             switch result {
             case .success(let response):
+                if self.shouldSuppressLateStreamingWrite(streaming: streaming) {
+                    self.settleDisconnectedStreamingReservation(
+                        ledger: ledger,
+                        reservationID: reservationID,
+                        reservedAmount: reservedAmount,
+                        estimate: estimate.amount
+                    )
+                    return
+                }
                 let localResponse: ConsumeUpstreamResponse
                 do {
                     localResponse = try Self.responseForLocalDelivery(response, streaming: streaming)
@@ -4657,11 +4691,24 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                     )
                     return
                 }
-                self.writeUpstreamResponse(localResponse, context: contextBox.context, extraHeaders: extraHeaders)
+                self.writeUpstreamResponse(
+                    localResponse,
+                    streaming: streaming,
+                    context: contextBox.context,
+                    extraHeaders: extraHeaders
+                )
             case .failure(let error):
                 let failure = Self.classifyUpstreamFailure(error)
                 do {
-                    if failure.forwardedUpstream {
+                    if self.shouldSuppressLateStreamingWrite(streaming: streaming) {
+                        self.settleDisconnectedStreamingReservation(
+                            ledger: ledger,
+                            reservationID: reservationID,
+                            reservedAmount: reservedAmount,
+                            estimate: estimate.amount
+                        )
+                        return
+                    } else if failure.forwardedUpstream {
                         try ledger.hold(
                             runID: self.runtime.launchID,
                             reservationID: reservationID,
@@ -4678,6 +4725,9 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                         )
                     }
                 } catch {
+                    guard !self.shouldSuppressLateStreamingWrite(streaming: streaming) else {
+                        return
+                    }
                     self.writeLocalError(
                         context: contextBox.context,
                         status: .serviceUnavailable,
@@ -4685,6 +4735,9 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                         forwardedUpstream: failure.forwardedUpstream,
                         extraHeaders: extraHeaders
                     )
+                    return
+                }
+                guard !self.shouldSuppressLateStreamingWrite(streaming: streaming) else {
                     return
                 }
                 self.writeLocalError(
@@ -4728,6 +4781,9 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 self.upstreamForwardIsPending = false
                 let failure = Self.classifyUpstreamFailure(error)
+                guard !self.shouldSuppressLateStreamingWrite(streaming: streaming) else {
+                    return
+                }
                 self.writeLocalError(
                     context: contextBox.context,
                     status: failure.status,
@@ -4765,6 +4821,31 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         guard let reservation = upstreamResourceReservation else { return }
         upstreamResourceReservation = nil
         runtime.releaseUpstreamExchange(reservation)
+    }
+
+    private func shouldSuppressLateStreamingWrite(streaming: Bool) -> Bool {
+        streaming && channelInactiveWhileUpstreamPending
+    }
+
+    private func settleDisconnectedStreamingReservation(
+        ledger: ConsumeBudgetLedger,
+        reservationID: String,
+        reservedAmount: ConsumeMicroUSD,
+        estimate: ConsumeMicroUSD
+    ) {
+        do {
+            try ledger.settle(
+                runID: runtime.launchID,
+                reservationID: reservationID,
+                reservedAmount: reservedAmount,
+                settledAmount: estimate,
+                reason: "settled_to_admission_estimate"
+            )
+        } catch {
+            // The ledger marks itself unavailable on append/identity failure.
+            // With the local channel already closed, the safe recovery state is
+            // to suppress local writes and let subsequent admission fail closed.
+        }
     }
 
     private static func classifyUpstreamFailure(_ error: Error) -> ConsumeUpstreamFailureClassification {
@@ -4857,7 +4938,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
               upstreamResponseIsEventStream(response.headers) else {
             throw ConsumeUpstreamForwardError.dispatchedUnavailable
         }
-        _ = try lastSSEUsageObject(response.body)
+        _ = try validatedSSEStream(response.body)
         return ConsumeUpstreamResponse(
             statusCode: response.statusCode,
             headers: response.headers.filter { name, _ in
@@ -4881,17 +4962,39 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private static func lastSSEUsageObject(_ body: Data) throws -> [String: JSONValue]? {
+        try validatedSSEStream(body).lastUsage
+    }
+
+    private static func validatedSSEStream(_ body: Data) throws -> ConsumeSSEValidationResult {
         guard let text = String(data: body, encoding: .utf8) else {
             throw ConsumeUpstreamForwardError.dispatchedUnavailable
         }
         var dataLines: [String] = []
+        var eventLines: [String] = []
+        var eventFrameBytes = 0
+        var eventBlocks: [Data] = []
         var sawDone = false
         var lastUsage: [String: JSONValue]?
 
         func finishEvent() throws {
+            defer {
+                dataLines.removeAll(keepingCapacity: true)
+                eventLines.removeAll(keepingCapacity: true)
+                eventFrameBytes = 0
+            }
+            if !eventLines.isEmpty {
+                let block = eventLines.joined(separator: "\n") + "\n\n"
+                guard let blockData = block.data(using: .utf8),
+                      blockData.count <= ConsumeLocalLimits.sseEventFrameBytes else {
+                    throw ConsumeUpstreamForwardError.dispatchedUnavailable
+                }
+                guard eventBlocks.count < ConsumeLocalLimits.sseEventBlocks else {
+                    throw ConsumeUpstreamForwardError.dispatchedUnavailable
+                }
+                eventBlocks.append(blockData)
+            }
             guard !dataLines.isEmpty else { return }
             let payload = dataLines.joined(separator: "\n")
-            dataLines.removeAll(keepingCapacity: true)
             if payload == "[DONE]" {
                 guard !sawDone else {
                     throw ConsumeUpstreamForwardError.dispatchedUnavailable
@@ -4912,6 +5015,9 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
 
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = rawLine.last == "\r" ? rawLine.dropLast() : rawLine[...]
+            guard line.utf8.count <= ConsumeLocalLimits.sseEventLineBytes else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
             if line.isEmpty {
                 try finishEvent()
                 continue
@@ -4919,6 +5025,11 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             guard !sawDone else {
                 throw ConsumeUpstreamForwardError.dispatchedUnavailable
             }
+            eventFrameBytes += line.utf8.count + 1
+            guard eventFrameBytes <= ConsumeLocalLimits.sseEventFrameBytes else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            eventLines.append(String(line))
             if line.hasPrefix(":") {
                 continue
             }
@@ -4942,7 +5053,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         guard sawDone else {
             throw ConsumeUpstreamForwardError.dispatchedUnavailable
         }
-        return lastUsage
+        return ConsumeSSEValidationResult(eventBlocks: eventBlocks, lastUsage: lastUsage)
     }
 
     private static func upstreamResponseContentCoding(_ headers: [(String, String)]) throws -> ConsumeUpstreamResponseContentCoding {
@@ -5182,6 +5293,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func writeUpstreamResponse(
         _ response: ConsumeUpstreamResponse,
+        streaming: Bool,
         context: ChannelHandlerContext,
         extraHeaders: [(String, String)]
     ) {
@@ -5193,7 +5305,6 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             headers.add(name: name, value: value)
         }
-        headers.replaceOrAdd(name: "content-length", value: "\(response.body.count)")
         headers.replaceOrAdd(name: "connection", value: "close")
         for (name, value) in extraHeaders {
             if name.caseInsensitiveCompare("x-macprovider-warning") == .orderedSame,
@@ -5204,11 +5315,34 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 headers.replaceOrAdd(name: name, value: value)
             }
         }
+        let streamingBlocks: [Data]?
+        if streaming,
+           response.statusCode >= 200,
+           response.statusCode < 300,
+           Self.upstreamResponseIsEventStream(response.headers),
+           let parsed = try? Self.validatedSSEStream(response.body) {
+            streamingBlocks = parsed.eventBlocks
+        } else {
+            streamingBlocks = nil
+        }
+        if streamingBlocks == nil {
+            headers.replaceOrAdd(name: "content-length", value: "\(response.body.count)")
+        }
         let status = HTTPResponseStatus(statusCode: response.statusCode)
         let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
         responseStarted = true
-        context.write(wrapOutboundOut(.head(head)), promise: nil)
-        if !response.body.isEmpty {
+        if let streamingBlocks {
+            context.writeAndFlush(wrapOutboundOut(.head(head)), promise: nil)
+            for block in streamingBlocks {
+                guard !block.isEmpty else { continue }
+                var buffer = context.channel.allocator.buffer(capacity: block.count)
+                buffer.writeBytes(block)
+                context.writeAndFlush(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+            }
+        } else {
+            context.write(wrapOutboundOut(.head(head)), promise: nil)
+        }
+        if streamingBlocks == nil, !response.body.isEmpty {
             var buffer = context.channel.allocator.buffer(capacity: response.body.count)
             buffer.writeBytes(response.body)
             context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
