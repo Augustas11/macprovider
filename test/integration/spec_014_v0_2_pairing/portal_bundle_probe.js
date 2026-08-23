@@ -81,6 +81,9 @@ function makeContext(url, fetchImpl) {
       readyState: "loading",
       addEventListener() {},
       createElement: makeNode,
+      createElementNS(_ns, tag) {
+        return makeNode(tag);
+      },
       createTextNode(text) {
         return { text: String(text) };
       },
@@ -120,6 +123,162 @@ function assert(cond, msg) {
   vm.runInNewContext(scripts, claimContext);
   assert(claimContext.location.search === "", "claim route must strip ?ot before app work");
   assert(claimContext.location.pathname === "/claim", "claim route must remain on /claim after stripping token");
+
+  const portalSessionContext = makeContext("http://portal.test/?ps=PORTAL123&p=mp-local#dash", async () => ({
+    ok: false,
+    status: 500,
+    text: async () => "",
+  }));
+  vm.runInNewContext(scripts, portalSessionContext);
+  assert(portalSessionContext.PORTAL_SESSION_CAPTURED === "PORTAL123",
+    "portal session token must be captured before config work");
+  assert(portalSessionContext.location.search === "?p=mp-local",
+    "portal session token must be stripped while preserving non-secret query params");
+  assert(portalSessionContext.location.href === "http://portal.test/?p=mp-local#dash",
+    "portal session token stripping must preserve the current hash");
+
+  const portalOAuthFetches = [];
+  const portalOAuthContext = makeContext("http://portal.test/?ps=PORTAL456", async (path, opts) => {
+    portalOAuthFetches.push({ path, opts: opts || {} });
+    if (String(path).endsWith("portal-config.json")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          coordinator_base_url: "https://c.example",
+          releases_repo_owner_name: "Augustas11/macprovider",
+          require_provider_tokens: true,
+          github_oauth_enabled: true,
+        }),
+        text: async () => "{}",
+      };
+    }
+    if (String(path).endsWith("/v1/portal/session")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ provider_id: "mp-local" }),
+        text: async () => "{\"provider_id\":\"mp-local\"}",
+      };
+    }
+    if (String(path).endsWith("/providers/mp-local/earnings")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ usdc_today: 0, usdc_week: 0, usdc_pending: 0, usdc_lifetime: 0 }),
+        text: async () => "{}",
+      };
+    }
+    if (String(path).endsWith("/v1/provider/malibu-accrual")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          wallet_bound: true,
+          trust_tier: "trusted",
+          withdrawable_malibu: 0,
+          held_malibu: 0,
+          withdrawal_hold_reasons: [],
+          reward_eligibility: {
+            schema_version: "malibu_reward_eligibility.v1",
+            earning_state: "eligible_idle",
+            withdrawal_state: "withdrawable",
+            primary_reason: "eligible_idle_no_work",
+            reasons: ["eligible_idle_no_work"],
+          },
+        }),
+        text: async () => "{}",
+      };
+    }
+    if (String(path).endsWith("/v1/provider/wallet")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          schema_version: "provider_wallet_status.v1",
+          provider_id: "mp-local",
+          wallet_bound: true,
+          wallet_mismatch: false,
+          reward_wallet: {
+            verification_source: "provider_emission_state",
+            cap_replay_pending: false,
+          },
+          reward_amounts: {
+            accrued_malibu: "0",
+            withdrawable_malibu: "0",
+            held_malibu: "0",
+            provider_daily_cap_malibu: 25,
+            provider_day_malibu: "0",
+            provider_daily_capped: false,
+            wallet_daily_cap_malibu: 100,
+            wallet_day_malibu: "0",
+            wallet_daily_capped: false,
+          },
+          eligibility_inputs: {
+            trust_tier: "trusted",
+            quarantined: false,
+            receipt_quality: "sufficient_verified_receipts",
+            verified_receipt_count: 3,
+            required_receipt_count: 3,
+            compute_integrity_state: "unknown",
+            attestation_tier: "app_attested",
+            app_attested: true,
+            criteria_met: 3,
+            criteria_required: 3,
+            economic_criteria: [],
+            additional_criteria: [],
+            wallet_balance_ok: true,
+            uptime_ok: true,
+          },
+          reward_eligibility: {
+            schema_version: "malibu_reward_eligibility.v1",
+            earning_state: "eligible_idle",
+            withdrawal_state: "withdrawable",
+            primary_reason: "eligible_idle_no_work",
+            reasons: ["eligible_idle_no_work"],
+          },
+          audit: {
+            events: [{
+              id: "evt-1",
+              occurred_at: "2026-08-18T00:00:00Z",
+              event_type: "wallet_bind_projected",
+              summary: "Wallet projected.",
+            }],
+          },
+        }),
+        text: async () => "{}",
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => "{}",
+    };
+  });
+  vm.runInNewContext(scripts, portalOAuthContext);
+  await portalOAuthContext.bootstrap();
+  assert(portalOAuthFetches.some((call) => call.path === "/v1/portal/session"),
+    "captured portal session must be consumed before GitHub OAuth mode");
+  assert(!portalOAuthFetches.some((call) => call.path === "/v1/auth/me/providers"),
+    "captured portal session must not silently fall through to GitHub OAuth mode");
+  assert(portalOAuthContext.state.session.provider_id === "mp-local",
+    "captured portal session must establish the provider dashboard session");
+  assert(portalOAuthFetches.some((call) =>
+    call.path === "/providers/mp-local/earnings" &&
+    call.opts.headers &&
+    call.opts.headers.Authorization === "Bearer PORTAL456"),
+    "captured portal session earnings fetch must keep using bearer auth");
+  assert(portalOAuthFetches.some((call) =>
+    call.path === "/v1/provider/malibu-accrual" &&
+    call.opts.headers &&
+    call.opts.headers.Authorization === "Bearer PORTAL456"),
+    "captured portal session MALIBU fetch must keep using bearer auth");
+  assert(portalOAuthFetches.some((call) =>
+    call.path === "/v1/provider/wallet" &&
+    call.opts.headers &&
+    call.opts.headers.Authorization === "Bearer PORTAL456"),
+    "captured portal session wallet fetch must keep using bearer auth");
 
   const configContext = makeContext("http://portal.test/", async () => ({
     ok: true,

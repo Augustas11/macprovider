@@ -888,15 +888,26 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "provider tokens not available")
 		return
 	}
-	marker, canMark := h.tokenStore.(tokenUseMarker)
-	if !canMark {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "provider token use marker not available")
-		return
-	}
-	subject, ok, err := marker.ValidateAndMarkTokenUsed(r.Context(), raw)
-	if err != nil || !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "provider bearer token required")
-		return
+	var subject string
+	var ok bool
+	var err error
+	if auth.IsPortalReadSession(raw) {
+		subject, ok, err = auth.ValidateProviderAPIReadAndMark(r.Context(), h.tokenStore, raw)
+		if err != nil || !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "provider bearer token required")
+			return
+		}
+	} else {
+		marker, canMark := h.tokenStore.(tokenUseMarker)
+		if !canMark {
+			writeError(w, http.StatusServiceUnavailable, "unavailable", "provider token use marker not available")
+			return
+		}
+		subject, ok, err = marker.ValidateAndMarkTokenUsed(r.Context(), raw)
+		if err != nil || !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "provider bearer token required")
+			return
+		}
 	}
 	if subject != providerID {
 		writeError(w, http.StatusForbidden, "forbidden", "provider token subject mismatch")
