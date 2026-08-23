@@ -13,15 +13,18 @@ import zlib
 private final class ConsumeStubUpstreamClient: ConsumeUpstreamClient, @unchecked Sendable {
     private let resolver: @Sendable (String, EventLoop) -> EventLoopFuture<String>
     private let handler: @Sendable (ConsumeUpstreamRequest, EventLoop) -> EventLoopFuture<ConsumeUpstreamResponse>
+    private let streamingHandler: (@Sendable (ConsumeUpstreamRequest, EventLoop, ConsumeUpstreamStreamingCallbacks) -> EventLoopFuture<ConsumeUpstreamStreamingResult>)?
 
     init(
         resolver: @escaping @Sendable (String, EventLoop) -> EventLoopFuture<String> = { _, eventLoop in
             eventLoop.makeSucceededFuture("8.8.8.8")
         },
+        streamingHandler: (@Sendable (ConsumeUpstreamRequest, EventLoop, ConsumeUpstreamStreamingCallbacks) -> EventLoopFuture<ConsumeUpstreamStreamingResult>)? = nil,
         handler: @escaping @Sendable (ConsumeUpstreamRequest, EventLoop) -> EventLoopFuture<ConsumeUpstreamResponse>
     ) {
         self.resolver = resolver
         self.handler = handler
+        self.streamingHandler = streamingHandler
     }
 
     func resolveChatCompletionsEndpoint(
@@ -36,6 +39,24 @@ private final class ConsumeStubUpstreamClient: ConsumeUpstreamClient, @unchecked
         on eventLoop: EventLoop
     ) -> EventLoopFuture<ConsumeUpstreamResponse> {
         handler(request, eventLoop)
+    }
+
+    func forwardStreamingChatCompletions(
+        request: ConsumeUpstreamRequest,
+        on eventLoop: EventLoop,
+        callbacks: ConsumeUpstreamStreamingCallbacks
+    ) -> EventLoopFuture<ConsumeUpstreamStreamingResult> {
+        if let streamingHandler {
+            return streamingHandler(request, eventLoop, callbacks)
+        }
+        return handler(request, eventLoop).flatMapThrowing { response in
+            return ConsumeUpstreamStreamingResult(
+                statusCode: response.statusCode,
+                headers: response.headers,
+                body: response.body,
+                sseValidation: nil
+            )
+        }
     }
 }
 
@@ -70,6 +91,24 @@ private final class ConsumeInvocationCounter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return value
+    }
+}
+
+private final class ConsumeStreamingPromiseBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var promise: EventLoopPromise<ConsumeUpstreamStreamingResult>?
+
+    func store(_ promise: EventLoopPromise<ConsumeUpstreamStreamingResult>) {
+        lock.lock()
+        self.promise = promise
+        lock.unlock()
+    }
+
+    func succeed(_ result: ConsumeUpstreamStreamingResult) {
+        lock.lock()
+        let promise = self.promise
+        lock.unlock()
+        promise?.succeed(result)
     }
 }
 
@@ -3659,6 +3698,141 @@ final class ConsumeCommandTests: XCTestCase {
         ))
     }
 
+    func testPhase3IStreamingParserAcceptsFixedLengthIncrementalSSE() throws {
+        let firstBlock = Data("data: {\"choices\":[]}\n\n".utf8)
+        let doneBlock = Data("data: [DONE]\n\n".utf8)
+        let body = firstBlock + doneBlock
+        let head = Data((
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: text/event-stream\r\n" +
+            "Content-Length: \(body.count)\r\n" +
+            "Content-Encoding: identity\r\n" +
+            "X-Request-Id: parser-fixed\r\n" +
+            "\r\n"
+        ).utf8)
+
+        let parsed = try ConsumePinnedUpstreamClient.parseStreamingHTTPResponseForTesting(
+            [head, firstBlock, doneBlock],
+            maxBodyBytes: ConsumeLocalLimits.bodyBytes
+        )
+
+        XCTAssertEqual(parsed.result.statusCode, 200)
+        XCTAssertEqual(parsed.heads.count, 1)
+        XCTAssertEqual(parsed.heads.first?.0, 200)
+        XCTAssertEqual(parsed.heads.first?.1.first { $0.0.caseInsensitiveCompare("content-type") == .orderedSame }?.1, "text/event-stream")
+        XCTAssertNil(parsed.heads.first?.1.first { $0.0.caseInsensitiveCompare("content-length") == .orderedSame })
+        XCTAssertNil(parsed.heads.first?.1.first { $0.0.caseInsensitiveCompare("content-encoding") == .orderedSame })
+        XCTAssertEqual(parsed.eventBlocks, [firstBlock, doneBlock])
+    }
+
+    func testPhase3IStreamingParserAcceptsChunkedFinalTerminatorSplitAcrossReceives() throws {
+        let firstBlock = Data("data: {\"choices\":[]}\n\n".utf8)
+        let doneBlock = Data("data: [DONE]\n\n".utf8)
+        let head = Data((
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: text/event-stream\r\n" +
+            "Transfer-Encoding: chunked\r\n" +
+            "\r\n"
+        ).utf8)
+        let firstChunk = Data("\(String(firstBlock.count, radix: 16))\r\n".utf8) + firstBlock + Data("\r\n".utf8)
+        let doneChunk = Data("\(String(doneBlock.count, radix: 16))\r\n".utf8) + doneBlock + Data("\r\n".utf8)
+
+        let parsed = try ConsumePinnedUpstreamClient.parseStreamingHTTPResponseForTesting(
+            [head + firstChunk, doneChunk + Data("0\r\n".utf8), Data("\r\n".utf8)],
+            maxBodyBytes: ConsumeLocalLimits.bodyBytes
+        )
+
+        XCTAssertEqual(parsed.result.statusCode, 200)
+        XCTAssertEqual(parsed.heads.count, 1)
+        XCTAssertEqual(parsed.eventBlocks, [firstBlock, doneBlock])
+    }
+
+    func testPhase3IStreamingParserRejectsUnboundedChunkControlLine() throws {
+        let head = Data((
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: text/event-stream\r\n" +
+            "Transfer-Encoding: chunked\r\n" +
+            "\r\n"
+        ).utf8)
+        let oversizedControlLine = Data(repeating: UInt8(ascii: "a"), count: 4097)
+
+        XCTAssertThrowsError(try ConsumePinnedUpstreamClient.parseStreamingHTTPResponseForTesting(
+            [head, oversizedControlLine],
+            maxBodyBytes: ConsumeLocalLimits.bodyBytes
+        ))
+    }
+
+    func testPhase3IStreamingParserRejectsOversizedDeclaredChunkBeforeBufferingBody() throws {
+        let head = Data((
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: text/event-stream\r\n" +
+            "Transfer-Encoding: chunked\r\n" +
+            "\r\n"
+        ).utf8)
+
+        let outcome = ConsumePinnedUpstreamClient.parseStreamingHTTPResponseOutcomeForTesting(
+            [head + Data("9\r\n".utf8)],
+            maxBodyBytes: 8
+        )
+
+        XCTAssertThrowsError(try outcome.result.get())
+        XCTAssertTrue(outcome.heads.isEmpty)
+        XCTAssertTrue(outcome.eventBlocks.isEmpty)
+    }
+
+    func testPhase3IStreamingParserRejectsOversizedFixedLengthBeforeEmittingHead() throws {
+        let body = Data("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n".utf8)
+        let head = Data((
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: text/event-stream\r\n" +
+            "Content-Length: \(body.count)\r\n" +
+            "\r\n"
+        ).utf8)
+
+        let outcome = ConsumePinnedUpstreamClient.parseStreamingHTTPResponseOutcomeForTesting(
+            [head],
+            maxBodyBytes: body.count - 1
+        )
+
+        XCTAssertThrowsError(try outcome.result.get())
+        XCTAssertTrue(outcome.heads.isEmpty)
+        XCTAssertTrue(outcome.eventBlocks.isEmpty)
+    }
+
+    func testPhase3IStreamingParserRejectsMalformedBodyAfterHead() throws {
+        let body = Data("data: not json\n\n".utf8)
+        let head = Data((
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: text/event-stream\r\n" +
+            "Content-Length: \(body.count)\r\n" +
+            "\r\n"
+        ).utf8)
+
+        XCTAssertThrowsError(try ConsumePinnedUpstreamClient.parseStreamingHTTPResponseForTesting(
+            [head, body],
+            maxBodyBytes: ConsumeLocalLimits.bodyBytes
+        ))
+    }
+
+    func testPhase3IStreamingParserRejectsMalformedInitialBodyBeforeEmittingHead() throws {
+        let body = Data("data: not json\n\n".utf8)
+        let head = Data((
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: text/event-stream\r\n" +
+            "Content-Length: \(body.count)\r\n" +
+            "\r\n"
+        ).utf8)
+
+        let outcome = ConsumePinnedUpstreamClient.parseStreamingHTTPResponseOutcomeForTesting(
+            [head + body],
+            maxBodyBytes: ConsumeLocalLimits.bodyBytes
+        )
+
+        XCTAssertThrowsError(try outcome.result.get())
+        XCTAssertTrue(outcome.heads.isEmpty)
+        XCTAssertTrue(outcome.eventBlocks.isEmpty)
+    }
+
     func testPhase3DUpstreamParserRejectsHeaderControlCharacters() throws {
         for rawHeader in [
             "X-Request-Id: ok\nInjected: yes",
@@ -4113,6 +4287,204 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(summary.reserved.rawValue, 0)
         XCTAssertEqual(summary.held.rawValue, 0)
         XCTAssertEqual(summary.settled.rawValue, expected.amount.rawValue)
+    }
+
+    func testPhase3IStreamingSSEHeadAndEventsEmitBeforeUpstreamCompletion() throws {
+        let token = try ConsumeLocalToken.generate()
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let recorder = ConsumeUpstreamRequestRecorder()
+        let promiseBox = ConsumeStreamingPromiseBox()
+        let firstBlock = Data("data: {\"choices\":[]}\n\n".utf8)
+        let doneBlock = Data("data: [DONE]\n\n".utf8)
+        let upstreamClient = ConsumeStubUpstreamClient(
+            streamingHandler: { request, eventLoop, callbacks in
+                recorder.append(request)
+                do {
+                    try callbacks.receiveHead(200, [
+                        ("content-type", "text/event-stream"),
+                        ("content-length", "999"),
+                        ("content-encoding", "identity"),
+                    ])
+                    try callbacks.receiveEventBlock(firstBlock)
+                } catch {
+                    return eventLoop.makeFailedFuture(error)
+                }
+                let promise = eventLoop.makePromise(of: ConsumeUpstreamStreamingResult.self)
+                promiseBox.store(promise)
+                return promise.futureResult
+            },
+            handler: { _, eventLoop in
+                eventLoop.makeFailedFuture(ConsumeUpstreamForwardError.dispatchedUnavailable)
+            }
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            credentialStatus: .environmentLoaded,
+            credentialCustody: consumeCredentialCustody("buyer-token"),
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            upstreamClient: upstreamClient,
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        let channel = EmbeddedChannel()
+        try channel.pipeline.addHandler(ConsumeLocalHandler(runtime: runtime)).wait()
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        let head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers)
+        let body = Data(#"{"model":"llama-test","messages":[],"max_tokens":10,"stream":true}"#.utf8)
+
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        var buffer = channel.allocator.buffer(capacity: body.count)
+        buffer.writeBytes(body)
+        try channel.writeInbound(HTTPServerRequestPart.body(buffer))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        channel.embeddedEventLoop.run()
+
+        guard case .head(let responseHead)? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+            return XCTFail("streaming head was not emitted before upstream completion")
+        }
+        XCTAssertEqual(responseHead.status, .ok)
+        XCTAssertEqual(responseHead.headers.first(name: "content-type"), "text/event-stream")
+        XCTAssertNil(responseHead.headers.first(name: "content-length"))
+        XCTAssertNil(responseHead.headers.first(name: "content-encoding"))
+        guard case .body(.byteBuffer(var firstBody))? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+            return XCTFail("first SSE block was not emitted before upstream completion")
+        }
+        XCTAssertEqual(firstBody.readString(length: firstBody.readableBytes), String(decoding: firstBlock, as: UTF8.self))
+        XCTAssertNil(try channel.readOutbound(as: HTTPServerResponsePart.self))
+
+        promiseBox.succeed(ConsumeUpstreamStreamingResult(
+            statusCode: 200,
+            headers: [("content-type", "text/event-stream")],
+            body: Data(),
+            sseValidation: ConsumeSSEValidationResult(eventBlocks: [firstBlock, doneBlock], lastUsage: nil)
+        ))
+        channel.embeddedEventLoop.run()
+        guard case .end? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+            return XCTFail("streaming end was not emitted after upstream completion")
+        }
+        XCTAssertTrue(try XCTUnwrap(recorder.snapshot().first).streaming)
+    }
+
+    func testPhase3IIncrementalSSEFinishEmitsFinalEOFEvent() throws {
+        let firstBlock = Data("data: {\"choices\":[]}\n\n".utf8)
+        let doneBlock = Data("data: [DONE]\n\n".utf8)
+        let validator = ConsumeSSEIncrementalValidator()
+        var emitted: [Data] = []
+
+        try validator.receive(firstBlock) { emitted.append($0) }
+        try validator.receive(Data("data: [DONE]".utf8)) { emitted.append($0) }
+        let result = try validator.finish { emitted.append($0) }
+
+        XCTAssertEqual(emitted, [firstBlock, doneBlock])
+        XCTAssertEqual(result.eventBlocks, [firstBlock, doneBlock])
+    }
+
+    func testPhase3IStreamingDisconnectCancelsUpstreamAndReleasesResources() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 100_000_000)),
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        let cancellationObserved = ConsumeInvocationCounter()
+        let promiseBox = ConsumeStreamingPromiseBox()
+        let upstreamClient = ConsumeStubUpstreamClient(
+            streamingHandler: { request, eventLoop, callbacks in
+                request.cancellation?.setCancel {
+                    cancellationObserved.increment()
+                }
+                do {
+                    try callbacks.receiveHead(200, [("content-type", "text/event-stream")])
+                    try callbacks.receiveEventBlock(Data("data: {\"choices\":[]}\n\n".utf8))
+                } catch {
+                    return eventLoop.makeFailedFuture(error)
+                }
+                let promise = eventLoop.makePromise(of: ConsumeUpstreamStreamingResult.self)
+                promiseBox.store(promise)
+                return promise.futureResult
+            },
+            handler: { _, eventLoop in
+                eventLoop.makeFailedFuture(ConsumeUpstreamForwardError.dispatchedUnavailable)
+            }
+        )
+        let requestCounter = ConsumeEndpointRequestCounter()
+        let runtime = consumeRuntime(
+            token: token,
+            credentialStatus: .environmentLoaded,
+            credentialCustody: consumeCredentialCustody("buyer-token"),
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            upstreamClient: upstreamClient,
+            now: { ConsumeCommandTests.phase3CTestNow },
+            requestCounter: requestCounter
+        )
+        let channel = EmbeddedChannel()
+        try channel.pipeline.addHandler(ConsumeLocalHandler(runtime: runtime)).wait()
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        let bodyText = #"{"model":"llama-test","messages":[],"max_tokens":10,"stream":true}"#
+        let expected = try ConsumePricedExposureEstimator.estimate(
+            bodyByteCount: Data(bodyText.utf8).count,
+            request: StrictJSONParser.parse(bodyText),
+            match: XCTUnwrap(trustedRateCard.match(model: "llama-test")),
+            projection: trustedRateCard.projection
+        )
+
+        try channel.writeInbound(HTTPServerRequestPart.head(HTTPRequestHead(
+            version: .http1_1,
+            method: .POST,
+            uri: "/v1/chat/completions",
+            headers: headers
+        )))
+        var bodyBuffer = channel.allocator.buffer(capacity: bodyText.utf8.count)
+        bodyBuffer.writeString(bodyText)
+        try channel.writeInbound(HTTPServerRequestPart.body(bodyBuffer))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        channel.embeddedEventLoop.run()
+        _ = try channel.readOutbound(as: HTTPServerResponsePart.self)
+        _ = try channel.readOutbound(as: HTTPServerResponsePart.self)
+
+        try channel.close().wait()
+        promiseBox.succeed(ConsumeUpstreamStreamingResult(
+            statusCode: 200,
+            headers: [("content-type", "text/event-stream")],
+            body: Data(),
+            sseValidation: ConsumeSSEValidationResult(eventBlocks: [], lastUsage: nil)
+        ))
+        channel.embeddedEventLoop.run()
+
+        XCTAssertEqual(cancellationObserved.snapshot(), 1)
+        let summary = try ledger.summary()
+        XCTAssertEqual(summary.reserved.rawValue, 0)
+        XCTAssertEqual(summary.held.rawValue, 0)
+        XCTAssertEqual(summary.settled.rawValue, expected.amount.rawValue)
+        let resources = requestCounter.resourceSnapshot()
+        XCTAssertEqual(resources.openStreamingResponses, 0)
+        XCTAssertEqual(resources.upstreamWorkerTasks, 0)
+        XCTAssertEqual(resources.upstreamSocketDescriptors, 0)
+        XCTAssertNil(try channel.readOutbound(as: HTTPServerResponsePart.self))
     }
 
     func testPhase3CPricedEstimateCapRejectsBeforeLedgerAppend() throws {
