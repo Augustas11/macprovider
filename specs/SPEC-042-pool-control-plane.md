@@ -1,6 +1,6 @@
 # SPEC-042 - Pool Control Plane and Trusted-Pool Manifest
 
-**Version:** 0.0.17
+**Version:** 0.0.18
 Status: draft
 Maturity: partial implementation (pre-v0.1; not production-ready)
 Owner: @Augustas11
@@ -11,7 +11,7 @@ Audit history: Implementation reconciliation (2026-08-22). Earlier skeleton text
 {
   "spec_id": "SPEC-042",
   "title": "Pool Control Plane and Trusted-Pool Manifest",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "path": "specs/SPEC-042-pool-control-plane.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -216,7 +216,7 @@ SPEC-042 defines this minimal SPEC-006-compatible error taxonomy. Predicate-spec
 | `pool_encrypted_leg_unsatisfied` | 503 | no | authorized only | No member offers the required provider-leg encryption. |
 | `pool_binary_too_old` | 503 | no | authorized only | No member meets the minimum signed binary version. |
 | `pool_model_not_allowed` | 400 | no | authorized only | Requested model is not in the pool allowlist. |
-| `pool_settlement_mode_unsatisfied` | 503 | no | authorized only | Pool requires enforce-mode settlement but effective mode is observe. |
+| `pool_settlement_mode_unsatisfied` | 503 | no | authorized only | Pool requires enforce-mode settlement but effective mode or provider settlement prerequisites are unsatisfied. |
 | `pool_state_stale` | 409 | yes | authorized only | Route reservation's fenced pool generation no longer matches; obtain a fresh reservation. |
 | `pool_policy_stale` | 503 | yes | authorized only | Pool policy/status freshness is unknown or expired; fail closed. |
 
@@ -232,7 +232,7 @@ Promotion out of draft-skeleton requires, at minimum:
 - a coordinated SPEC-008 amendment promoting the live-MDA hardware verdict from observe to gating-grade before the `hardware_mda` predicate (SPEC-042-R004) can be enabled as a fail-closed gate;
 - the positive pool-capability negotiation handshake (SPEC-042-R010) specified in wire terms (coordinator/provider pool-support version advertisement + gateway refusal on absence);
 - a pool operator onboarding/tooling surface (root-key custody, M-of-N signer-set management, authority-log operation) — a CLI is acceptable for MVP, but it MUST exist because R001/R012 impose non-trivial operator machinery;
-- fail-closed conformance tests written first for tenant isolation and every mandatory predicate (MDA unavailable, SE stale, encrypted leg absent, binary too old, model not allowed, settlement observe where enforce required, policy/status stale, revoked member, stale pool generation) — each MUST fail closed; local admin controls for restrictive lifecycle transitions are implemented (v0.0.16), but signed emergency control messages remain a separate R012 blocker;
+- fail-closed conformance tests written first for tenant isolation and every mandatory predicate (MDA unavailable, SE stale, model not allowed, settlement observe where enforce required, policy/status stale, revoked member, stale pool generation) — each MUST fail closed; ordinary-route tests now cover encrypted-leg absent, attestation unsatisfied, binary too old, and settlement-prerequisite-missing failures with SPEC-042 closed-vocabulary codes (v0.0.18). Local admin controls for restrictive lifecycle transitions are implemented (v0.0.16), but signed emergency control messages remain a separate R012 blocker;
 - local tests for default-off behavior, `pool_id` propagation across all authority paths, selection authorization (narrow-only, conflict rejection, unauthorized→`pool_unavailable`), membership/revocation durability across restart, manifest signature/rollback/`pool_id`-mismatch rejection, settlement binding mismatch rejection, and mixed-binary rollback;
 - a signed `JOURNEY-TRUSTED-POOL-LAYER2-MVP` result for a pool-scoped request served only by an authorized admitted member, covering at most R002/R005/R006/R010;
 - a signed `JOURNEY-TRUSTED-POOL-LAYER2-MVP` result for pool-required-but-unsatisfied fail-closed behavior, covering at most R002/R005/R006/R010;
@@ -291,6 +291,7 @@ Local implementation evidence exists; no signed journey/conformance evidence has
 
 ## 7. Changelog and history
 
+- 0.0.18 - Added ordinary pool-route closed-vocabulary predicate errors for the SPEC-042 fail-closed taxonomy. Pool-selected routing now maps encrypted provider-leg failure to `pool_encrypted_leg_unsatisfied`, attestation predicate failure to `pool_attestation_unsatisfied`, and enforce-mode provider settlement-prerequisite failure to `pool_settlement_mode_unsatisfied`; global traffic keeps the pre-existing Tier-2 / settlement error codes. Added coordinator regression tests for those ordinary-route mappings and explicit retryability classification. No requirement is promoted: pinned-path predicate taxonomy, policy-level settlement observe-vs-enforce gating, model allowlist, policy/status stale, signed journey evidence, and production activation evidence remain blockers.
 - 0.0.17 - Added paused-pool reactivation through the existing `POST /admin/trust-pools/pools/{pool_id}/promote` path. `promote` now permits `created -> active` and `paused -> active` only, reruns the local activation preflight before appending the active event, refreshes routeable snapshots after commit, and keeps raw active lifecycle writes rejected through `/events` and `/lifecycle`. `draining` and `retired` remain non-reactivating. No requirement is promoted: this is local operator-token reactivation evidence, not R012 signed lifecycle control or production activation evidence.
 - 0.0.16 - Added a dedicated local restrictive lifecycle admin endpoint, `POST /admin/trust-pools/pools/{pool_id}/lifecycle`, for fail-closed `paused`/`draining`/`retired` transitions. The endpoint reuses the validated durable append path, refreshes routeable snapshots after commit, preserves buyer allowlist metadata while removing routeable members from paused/draining/retired pools, treats invalid lifecycle transitions as fail-closed registry-clearing malformed input, and rejects `active` with `activation_requires_promotion` so `promote` remains the only routeability-increasing path. No requirement is promoted: this is operator-token local admin control, not R012 signed emergency lifecycle messages; signed journey evidence, production migration evidence, full delegation/lifecycle reconstruction, and launch audit remain blockers.
 - 0.0.15 - Added local coordinator-store accepted-manifest projection and high-water evidence for the SPEC-042 manifest acceptance boundary. Migration creates/backfills `trustpool_manifest_acceptances` and `trustpool_manifest_acceptance_high_water` once behind a durable marker; accepted manifest appends record projection state in the same transaction as the durable event; open/reconstruct/admin mutation/refresher/buyer promise/pool-selected chat paths verify projection/high-water consistency and clear routeable snapshots on malformed durable state. No requirement is promoted to production conformance: signed journey evidence, production migration evidence, full authority-log/delegation/lifecycle reconstruction, tamper-evident full rollback protection, and launch audit remain blockers.

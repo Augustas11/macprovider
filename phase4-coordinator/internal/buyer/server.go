@@ -82,10 +82,13 @@ var spec018RetryableByCode = map[string]bool{
 	"model_version_floor_unmet": true,
 	"rate_limited":              true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
 	// SPEC-042 R005/R010 tenant isolation.
-	"pool_state_stale":        true,  // 503, pool membership changed during routing; re-select
-	"pool_unavailable":        false, // 503, unknown/unauthorized/disabled/non-active pool; same request must not be retried unchanged
-	"pool_no_eligible_member": false, // 503, no member satisfies the pool; same reservation must not be retried
-	"pool_binary_too_old":     false, // 503, members exist but all below the pool binary floor; retry cannot make a binary newer
+	"pool_state_stale":                 true,  // 503, pool membership changed during routing; re-select
+	"pool_unavailable":                 false, // 503, unknown/unauthorized/disabled/non-active pool; same request must not be retried unchanged
+	"pool_no_eligible_member":          false, // 503, no member satisfies the pool; same reservation must not be retried
+	"pool_binary_too_old":              false, // 503, members exist but all below the pool binary floor; retry cannot make a binary newer
+	"pool_attestation_unsatisfied":     false, // 503, pool members exist but none satisfy the required attestation tier
+	"pool_encrypted_leg_unsatisfied":   false, // 503, pool members exist but none satisfy the encrypted provider-leg requirement
+	"pool_settlement_mode_unsatisfied": false, // 503, pool members exist but none satisfy enforce-mode settlement prerequisites
 	// Permanent/client errors — retrying will not help (SPEC-006 §5.2).
 	"model_not_found":                                         false,
 	"context_exceeds_capacity":                                false,
@@ -5953,10 +5956,19 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			providerID := result.HashMismatches[0].Provider.ProviderID
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_hash_mismatch", message: "Provider `" + providerID + "` hash verification failed; excluded from pool.", typ: "server_error"}
 		}
+		if poolActive && result.Counts[routing.ReasonReceiptKeyMissing] > 0 {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_settlement_mode_unsatisfied", message: "No pool member satisfies the required settlement mode"}
+		}
 		if result.Counts[routing.ReasonTier2EncryptedLeg] > 0 {
+			if poolActive {
+				return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_encrypted_leg_unsatisfied", message: "No pool member offers the required encrypted provider leg", typ: "server_error"}
+			}
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_encrypted_leg_required", message: "No encrypted provider leg available for model `" + req.Model + "`.", typ: "server_error"}
 		}
 		if result.Counts[routing.ReasonTier2Attestation] > 0 {
+			if poolActive {
+				return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_attestation_unsatisfied", message: "No pool member satisfies the required attestation tier", typ: "server_error"}
+			}
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_attestation_required", message: "No attested provider available for model `" + req.Model + "`.", typ: "server_error"}
 		}
 		// #768: the pool has boxes for this model, they are just too old to
