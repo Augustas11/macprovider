@@ -124,6 +124,19 @@ function assert(cond, msg) {
   assert(claimContext.location.search === "", "claim route must strip ?ot before app work");
   assert(claimContext.location.pathname === "/claim", "claim route must remain on /claim after stripping token");
 
+  const portalSessionContext = makeContext("http://portal.test/?ps=PORTAL123&p=mp-local#dash", async () => ({
+    ok: false,
+    status: 500,
+    text: async () => "",
+  }));
+  vm.runInNewContext(scripts, portalSessionContext);
+  assert(portalSessionContext.PORTAL_SESSION_CAPTURED === "PORTAL123",
+    "portal session token must be captured before config work");
+  assert(portalSessionContext.location.search === "?p=mp-local",
+    "portal session token must be stripped while preserving non-secret query params");
+  assert(portalSessionContext.location.href === "http://portal.test/?p=mp-local#dash",
+    "portal session token stripping must preserve the current hash");
+
   const configContext = makeContext("http://portal.test/", async () => ({
     ok: true,
     status: 200,

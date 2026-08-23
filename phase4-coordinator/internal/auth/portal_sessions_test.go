@@ -37,7 +37,7 @@ func TestMintAndValidatePortalReadSession(t *testing.T) {
 	if _, _, err := store.IssueToken(ctx, "mp-local", "local mac"); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Add(-time.Minute)
 	mint, err := store.MintPortalReadSession(ctx, "mp-local", "https://portal.malibu.tech", now)
 	if err != nil {
 		t.Fatal(err)

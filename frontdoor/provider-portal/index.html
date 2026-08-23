@@ -16,6 +16,14 @@
       history.replaceState({}, "", "/claim");
       return ot;
     })();
+    var PORTAL_SESSION_CAPTURED = (function() {
+      const u = new URL(location.href);
+      const ps = (u.searchParams.get("ps") || "").trim();
+      if (!ps) return "";
+      u.searchParams.delete("ps");
+      history.replaceState({}, "", u.pathname + u.search + u.hash);
+      return ps;
+    })();
   </script>
   <style>
     :root {
@@ -2058,12 +2066,9 @@
     }
 
     function consumePortalSessionFromURL() {
-      var params = new URL(location.href).searchParams;
-      var token = (params.get("ps") || "").trim();
+      var token = PORTAL_SESSION_CAPTURED;
+      PORTAL_SESSION_CAPTURED = "";
       if (!token) return Promise.resolve(false);
-      try {
-        history.replaceState({}, "", location.pathname || "/");
-      } catch (_) {}
       state.sessionGeneration += 1;
       state.session = { provider_id: "", provider_token: token };
       state.signinErr = null;
