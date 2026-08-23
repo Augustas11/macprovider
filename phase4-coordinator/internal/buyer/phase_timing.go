@@ -199,6 +199,21 @@ func (w *noPriorDispatchResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
+func (w *noPriorDispatchResponseWriter) responseCommitted() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.claimed
+}
+
+type responseCommitTracker interface {
+	responseCommitted() bool
+}
+
+func responseWriterCommitted(w http.ResponseWriter) bool {
+	tracker, ok := w.(responseCommitTracker)
+	return ok && tracker.responseCommitted()
+}
+
 // mark is the one-shot latch. explicit distinguishes a real status assertion
 // (WriteHeader) from the implicit-200 that Write/Flush carry: once the terminal
 // is claimed, subsequent body writes and flushes are ordinary response traffic,

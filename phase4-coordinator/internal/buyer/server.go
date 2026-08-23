@@ -82,7 +82,7 @@ var spec018RetryableByCode = map[string]bool{
 	"model_version_floor_unmet": true,
 	"rate_limited":              true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
 	// SPEC-042 R005/R010 tenant isolation.
-	"pool_state_stale":                 true,  // 503, pool membership changed during routing; re-select
+	"pool_state_stale":                 true,  // 409, pool membership changed during routing; re-select
 	"pool_unavailable":                 false, // 503, unknown/unauthorized/disabled/non-active pool; same request must not be retried unchanged
 	"pool_no_eligible_member":          false, // 503, no member satisfies the pool; same reservation must not be retried
 	"pool_binary_too_old":              false, // 503, members exist but all below the pool binary floor; retry cannot make a binary newer
@@ -2896,14 +2896,24 @@ func (s *Server) forwardHTTPSequence(
 				state.phaseTiming.markProviderDone(phaseTimingNow(s))
 				if readErr != nil {
 					cancelAttempt()
+					if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
+						return cancelled, true
+					}
 					rec.logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 					writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 					return dispatchedAttempt{}, false
+				}
+				if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
+					cancelAttempt()
+					return cancelled, true
 				}
 				guard := tier2.NewPillarDGuard(s.tier2Config(), requestID, state.provider, s.log)
 				checkedBody, blockReason, guardErr := applyTier2OutputGuard(guard, respBody)
 				if guardErr != nil {
 					cancelAttempt()
+					if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
+						return cancelled, true
+					}
 					s.handleProviderFailure(state.provider, http.StatusBadGateway)
 					output := settlementOutputUnavailableFor(billing.TerminalStateProviderError)
 					if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, http.StatusBadGateway, nil, nil, nil, "Provider returned invalid Tier2 output encoding", blockReason, state.explicitRetries, nil, billing.FaultBreakerQualifying, output); err != nil {
@@ -2932,6 +2942,10 @@ func (s *Server) forwardHTTPSequence(
 				if bodyMutatedByGuard {
 					receiptValue = ""
 				}
+				if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
+					cancelAttempt()
+					return cancelled, true
+				}
 				terminalTS := time.Now().UTC().UnixMilli()
 				if providerTS, ok := trustedProviderTerminalStateTS(resp.Header.Get(receiptTerminalStateTSHeaderName), startedAt, time.Now().UTC()); ok {
 					terminalTS = providerTS
@@ -2939,6 +2953,10 @@ func (s *Server) forwardHTTPSequence(
 				output, outputOK := settlementOutputFromChatResponseAt(respBody, billing.TerminalStateNormalDone, terminalTS)
 				if !outputOK {
 					output = settlementOutputUnavailable()
+				}
+				if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
+					cancelAttempt()
+					return cancelled, true
 				}
 				if err := rec.logProviderRowWithCacheEstimateAndOutput(state.provider, http.StatusOK, promptTok, cachedPromptTok, completionTok, "", "", state.explicitRetries, estimatedCompletion, output); err != nil {
 					cancelAttempt()
@@ -2961,6 +2979,10 @@ func (s *Server) forwardHTTPSequence(
 				}
 				w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
 				w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
+				if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
+					cancelAttempt()
+					return cancelled, true
+				}
 				w.WriteHeader(http.StatusOK)
 				s.stickyStore(r.Header, state.provider, req.Model)
 				_, _ = w.Write(respBody)
@@ -2995,6 +3017,10 @@ func (s *Server) forwardHTTPSequence(
 				attempt.SettlementOutput = settlementOutputForContentAt("", nil, nil, terminalState, terminalTS)
 				if isSpec019ProviderDetailCode(attempt.ErrorCode) {
 					attempt.SettlementOutput = settlementOutputForContentAt("", nil, nil, terminalState, terminalTS)
+					if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
+						cancelAttempt()
+						return cancelled, true
+					}
 					if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, status, nil, nil, nil, http.StatusText(status), attempt.ErrorCode, state.explicitRetries, nil, billing.FaultBreakerQualifying, attempt.SettlementOutput); err != nil {
 						cancelAttempt()
 						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
@@ -3016,6 +3042,10 @@ func (s *Server) forwardHTTPSequence(
 					}
 					w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
 					w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
+					if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
+						cancelAttempt()
+						return cancelled, true
+					}
 					w.WriteHeader(status)
 					_, _ = w.Write(respBody)
 					cancelAttempt()
@@ -3028,6 +3058,10 @@ func (s *Server) forwardHTTPSequence(
 				if attempt.ErrorCode != "" && providerReceiptEligible(state.provider) {
 					if !s.shouldRetry(r, startedAt, state.explicitRetries, state.faultedProviders, status, nil) {
 						attempt.SettlementOutput = settlementOutputForContentAt("", nil, nil, terminalState, terminalTS)
+						if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
+							cancelAttempt()
+							return cancelled, true
+						}
 						if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, status, nil, nil, nil, http.StatusText(status), attempt.ErrorCode, state.explicitRetries, nil, billing.FaultNone, attempt.SettlementOutput); err != nil {
 							cancelAttempt()
 							writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
@@ -3049,6 +3083,10 @@ func (s *Server) forwardHTTPSequence(
 						}
 						w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
 						w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
+						if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
+							cancelAttempt()
+							return cancelled, true
+						}
 						w.WriteHeader(status)
 						_, _ = w.Write(respBody)
 						cancelAttempt()
@@ -3431,6 +3469,10 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				output = settlementOutputUnavailable()
 			}
 			attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CachedPromptTokens: cachedPromptTok, CompletionTokens: completionTok, EstimatedCompTokens: estimatedCompletion, FaultFlag: faultFlag, SettlementOutput: output, SettlementReceipt: receiptValue}
+			if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+				markProviderDone()
+				return wsForwardCancelled, requestLogAttempt{}
+			}
 			if logSuccess != nil {
 				if err := logSuccess(attempt); err != nil {
 					writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
@@ -3443,6 +3485,9 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 			setReceiptHeaderForProvider(w.Header(), receiptValue, provider)
 			markProviderDone()
+			if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+				return wsForwardCancelled, requestLogAttempt{}
+			}
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(checkedBody)
 			return wsForwardComplete, attempt
@@ -3590,6 +3635,11 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			}
 			return true, wsForwardFailed
 		}
+		if !committed && s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+			relay.Cancel("buyer_disconnected")
+			markProviderDone()
+			return true, wsForwardCancelled
+		}
 		commit()
 		if _, err := w.Write([]byte(checked)); err != nil {
 			relay.Cancel("buyer_disconnected")
@@ -3662,6 +3712,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				return wsForwardFailed, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
 			}
 			markProviderDone()
+			if !committed && s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+				return wsForwardCancelled, requestLogAttempt{}
+			}
 			commit()
 			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
 				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
@@ -3903,6 +3956,9 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 			w.Header().Set(streamingModeHeader, streamingMode)
+			if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+				return wsForwardCancelled, requestLogAttempt{}
+			}
 			w.WriteHeader(http.StatusOK)
 			if _, err := w.Write(out); err != nil {
 				relay.Cancel("buyer_disconnected")
@@ -3965,7 +4021,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			state.phaseTiming.markProviderDone(dispatchDone)
 		}
 		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider request failed")
-		if r.Context().Err() != nil {
+		if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
 			return wsForwardCancelled, 0, requestLogAttempt{}
 		}
 		// Issue #92 r2 fix: when providerhttp.Client.Timeout fires before
@@ -4195,6 +4251,10 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	// line-by-line forwarding loop for the remainder of the stream.
 	// From this point on, errors are committed-terminal — wsForwardCancelled
 	// / wsForwardProviderDisconnectedCommitted / wsForwardComplete only.
+	if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
+		markProviderDone()
+		return wsForwardCancelled, 0, requestLogAttempt{}
+	}
 	writeBuyerHeaders()
 	firstForwardedAt := s.now()
 	if _, writeErr := w.Write(preCommit.Bytes()); writeErr != nil {

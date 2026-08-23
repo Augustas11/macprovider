@@ -25,9 +25,10 @@ import (
 
 // Registry maps pool_id -> membership/revocation state.
 type Registry struct {
-	mu       sync.RWMutex
-	pools    map[string]*poolState
-	revision uint64
+	mu                 sync.RWMutex
+	pools              map[string]*poolState
+	revision           uint64
+	revocationWatchers map[string]map[chan struct{}]struct{}
 }
 
 type poolState struct {
@@ -98,7 +99,7 @@ type RouteableSnapshot struct {
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{pools: make(map[string]*poolState)}
+	return &Registry{pools: make(map[string]*poolState), revocationWatchers: make(map[string]map[chan struct{}]struct{})}
 }
 
 func (r *Registry) ensure(poolID string) *poolState {
@@ -150,6 +151,61 @@ func (r *Registry) Revoke(poolID, providerID string) {
 	ps.revoked[providerID] = struct{}{}
 	delete(ps.members, providerID)
 	ps.generation++
+	r.notifyProviderRevokedLocked(poolID, providerID)
+}
+
+// ProviderRevoked reports whether providerID is on poolID's durable revocation
+// blocklist. It is intentionally narrower than "not in Snapshot().Members":
+// restrictive lifecycle changes may make a pool non-routeable while still
+// allowing already-dispatched in-flight work to drain, but revoke_immediate
+// must cut that provider's active transport.
+func (r *Registry) ProviderRevoked(poolID, providerID string) bool {
+	if r == nil || poolID == "" || providerID == "" {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.providerRevokedLocked(poolID, providerID)
+}
+
+// WatchProviderRevoked returns a channel closed exactly when providerID lands
+// on poolID's durable revocation blocklist. The returned stop function only
+// unregisters the watch; it does not close the channel, so channel close remains
+// a pure revoke_immediate signal for active dispatch cancellation.
+func (r *Registry) WatchProviderRevoked(poolID, providerID string) (<-chan struct{}, func(), bool) {
+	ch := make(chan struct{})
+	if r == nil || poolID == "" || providerID == "" {
+		return ch, func() {}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.providerRevokedLocked(poolID, providerID) {
+		close(ch)
+		return ch, func() {}, true
+	}
+	if r.revocationWatchers == nil {
+		r.revocationWatchers = make(map[string]map[chan struct{}]struct{})
+	}
+	key := revocationWatchKey(poolID, providerID)
+	watchers := r.revocationWatchers[key]
+	if watchers == nil {
+		watchers = make(map[chan struct{}]struct{})
+		r.revocationWatchers[key] = watchers
+	}
+	watchers[ch] = struct{}{}
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			watchers := r.revocationWatchers[key]
+			delete(watchers, ch)
+			if len(watchers) == 0 {
+				delete(r.revocationWatchers, key)
+			}
+		})
+	}
+	return ch, stop, false
 }
 
 // AuthorizeBuyer grants a buyer account the ability to select a pool. Seed
@@ -286,6 +342,7 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 		generation:        s.Generation,
 		routeableUntilUTC: s.RouteableUntilUTC.UTC(),
 	}
+	r.notifyRevokedWatchersForPoolsLocked(map[string]*poolState{s.PoolID: r.pools[s.PoolID]})
 	return nil
 }
 
@@ -398,7 +455,60 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 	if enforceRevision {
 		r.revision = revision
 	}
+	if changed {
+		r.notifyRevokedWatchersForPoolsLocked(next)
+	}
 	return changed, nil
+}
+
+const revocationWatchSep = "\x00"
+
+func revocationWatchKey(poolID, providerID string) string {
+	return poolID + revocationWatchSep + providerID
+}
+
+func splitRevocationWatchKey(key string) (string, string, bool) {
+	poolID, providerID, ok := strings.Cut(key, revocationWatchSep)
+	return poolID, providerID, ok
+}
+
+func (r *Registry) providerRevokedLocked(poolID, providerID string) bool {
+	ps := r.pools[poolID]
+	if ps == nil {
+		return false
+	}
+	_, revoked := ps.revoked[providerID]
+	return revoked
+}
+
+func (r *Registry) notifyProviderRevokedLocked(poolID, providerID string) {
+	if r.revocationWatchers == nil {
+		return
+	}
+	key := revocationWatchKey(poolID, providerID)
+	for ch := range r.revocationWatchers[key] {
+		close(ch)
+	}
+	delete(r.revocationWatchers, key)
+}
+
+func (r *Registry) notifyRevokedWatchersForPoolsLocked(pools map[string]*poolState) {
+	if len(r.revocationWatchers) == 0 {
+		return
+	}
+	for key := range r.revocationWatchers {
+		poolID, providerID, ok := splitRevocationWatchKey(key)
+		if !ok {
+			continue
+		}
+		ps := pools[poolID]
+		if ps == nil {
+			continue
+		}
+		if _, revoked := ps.revoked[providerID]; revoked {
+			r.notifyProviderRevokedLocked(poolID, providerID)
+		}
+	}
 }
 
 func poolStateMapsEqual(a, b map[string]*poolState) bool {
