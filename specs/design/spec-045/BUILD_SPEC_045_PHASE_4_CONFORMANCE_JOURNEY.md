@@ -71,6 +71,7 @@ SPEC-045 has automated coverage for its local command, proxy, security boundarie
 - Fake-gateway tests cover all Phase 1-3 acceptance criteria that do not require real gateway behavior.
 - The signed real-gateway journey covers SDK interoperability, admission, budget denial, restart-held recovery, and redaction.
 - `specs/CONFORMANCE.json` remains pending until implementation evidence and journey artifacts are actually committed and reconciled.
+- Track automated fake-gateway coverage and pending signed-journey evidence in `BUILD_SPEC_045_PHASE_4_CONFORMANCE_MATRIX.md`.
 
 ## Non-goals
 

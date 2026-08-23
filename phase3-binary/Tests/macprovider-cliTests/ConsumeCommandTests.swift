@@ -60,6 +60,93 @@ private final class ConsumeStubUpstreamClient: ConsumeUpstreamClient, @unchecked
     }
 }
 
+private final class ConsumeFakeGatewayUpstreamClient: ConsumeUpstreamClient, @unchecked Sendable {
+    static let rateCardFixture = #"{"schema_version":"macprovider.rate_card.v1","version":"phase4-fake-rate-card","models":["llama-test"]}"#
+    static let rateCardSignatureFixture = "phase4-fake-rate-card.sig"
+
+    private let recorder = ConsumeUpstreamRequestRecorder()
+    private let nonStreamingStatusCode: Int
+    private let nonStreamingHeaders: [(String, String)]
+    private let nonStreamingBody: Data
+    private let streamingBlocks: [Data]
+
+    init(
+        nonStreamingStatusCode: Int = 200,
+        nonStreamingHeaders: [(String, String)] = [
+            ("content-type", "application/json"),
+            ("content-length", "999"),
+            ("set-cookie", "phase4=blocked"),
+            ("location", "https://example.invalid/redirect"),
+            ("x-ratelimit-remaining-requests", "10"),
+        ],
+        nonStreamingBody: String = #"{"id":"chatcmpl-phase4","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"phase4-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}"#,
+        streamingBlocks: [Data] = [
+            Data(#"data: {"id":"chatcmpl-phase4-stream","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"phase4"},"finish_reason":null}]}"#.utf8) + Data("\n\n".utf8),
+            Data(#"data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#.utf8) + Data("\n\n".utf8),
+            Data("data: [DONE]\n\n".utf8),
+        ]
+    ) {
+        self.nonStreamingStatusCode = nonStreamingStatusCode
+        self.nonStreamingHeaders = nonStreamingHeaders
+        self.nonStreamingBody = Data(nonStreamingBody.utf8)
+        self.streamingBlocks = streamingBlocks
+    }
+
+    func snapshot() -> [ConsumeUpstreamRequest] {
+        recorder.snapshot()
+    }
+
+    func expectedStreamingBodyChunks() -> [String] {
+        streamingBlocks.map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    func resolveChatCompletionsEndpoint(
+        origin: String,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<String> {
+        eventLoop.makeSucceededFuture("8.8.8.8")
+    }
+
+    func forwardChatCompletions(
+        request: ConsumeUpstreamRequest,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ConsumeUpstreamResponse> {
+        recorder.append(request)
+        return eventLoop.makeSucceededFuture(ConsumeUpstreamResponse(
+            statusCode: nonStreamingStatusCode,
+            headers: nonStreamingHeaders,
+            body: nonStreamingBody
+        ))
+    }
+
+    func forwardStreamingChatCompletions(
+        request: ConsumeUpstreamRequest,
+        on eventLoop: EventLoop,
+        callbacks: ConsumeUpstreamStreamingCallbacks
+    ) -> EventLoopFuture<ConsumeUpstreamStreamingResult> {
+        recorder.append(request)
+        do {
+            try callbacks.receiveHead(200, [
+                ("content-type", "text/event-stream"),
+                ("content-length", "999"),
+                ("content-encoding", "identity"),
+                ("set-cookie", "phase4=blocked"),
+            ])
+            for block in streamingBlocks {
+                try callbacks.receiveEventBlock(block)
+            }
+        } catch {
+            return eventLoop.makeFailedFuture(error)
+        }
+        return eventLoop.makeSucceededFuture(ConsumeUpstreamStreamingResult(
+            statusCode: 200,
+            headers: [("content-type", "text/event-stream")],
+            body: Data(),
+            sseValidation: ConsumeSSEValidationResult(eventBlocks: streamingBlocks, lastUsage: nil)
+        ))
+    }
+}
+
 private final class ConsumeUpstreamRequestRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [ConsumeUpstreamRequest] = []
@@ -4485,6 +4572,229 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(resources.upstreamWorkerTasks, 0)
         XCTAssertEqual(resources.upstreamSocketDescriptors, 0)
         XCTAssertNil(try channel.readOutbound(as: HTTPServerResponsePart.self))
+    }
+
+    func testPhase4FakeGatewayNonStreamingSDKPayloadPassesThroughAndSettlesUsage() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("phase4-budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 100_000_000)),
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        XCTAssertTrue(ConsumeFakeGatewayUpstreamClient.rateCardFixture.contains(#""llama-test""#))
+        XCTAssertFalse(ConsumeFakeGatewayUpstreamClient.rateCardSignatureFixture.isEmpty)
+        let gateway = ConsumeFakeGatewayUpstreamClient()
+        let runtime = consumeRuntime(
+            token: token,
+            credentialStatus: .environmentLoaded,
+            credentialCustody: consumeCredentialCustody("buyer-token"),
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            upstreamClient: gateway,
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        headers.add(name: "Origin", value: "http://127.0.0.1:11435")
+        headers.add(name: "Cookie", value: "local-secret=blocked")
+        headers.add(name: "Forwarded", value: "for=127.0.0.1")
+        let body = #"{"model":"llama-test","messages":[{"role":"user","content":"phase4 prompt must not be serialized"}],"tools":[{"type":"function","function":{"name":"emit_json","parameters":{"type":"object","properties":{"x":{"type":"string"}}}}}],"response_format":{"type":"json_schema","json_schema":{"name":"phase4_schema","schema":{"type":"object","properties":{"ok":{"type":"boolean"}}}}},"stream":false,"max_tokens":12}"#
+        let expected = try ConsumePricedExposureEstimator.actualUsageSettlement(
+            promptTokens: 3,
+            completionTokens: 4,
+            match: XCTUnwrap(trustedRateCard.match(model: "llama-test")),
+            projection: trustedRateCard.projection
+        )
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(body.utf8)
+        )
+
+        XCTAssertEqual(response.status, HTTPResponseStatus.ok)
+        XCTAssertEqual(response.headers.first(name: "content-type"), "application/json")
+        XCTAssertEqual(response.headers.first(name: "x-ratelimit-remaining-requests"), "10")
+        XCTAssertEqual(response.headers.first(name: "content-length"), "\(response.body.utf8.count)")
+        XCTAssertNil(response.headers.first(name: "set-cookie"))
+        XCTAssertNil(response.headers.first(name: "location"))
+        XCTAssertFalse(response.body.contains("buyer-token"))
+        XCTAssertFalse(response.body.contains(token.value))
+        let forwardedRequests = gateway.snapshot()
+        XCTAssertEqual(forwardedRequests.count, 1)
+        let forwarded = try XCTUnwrap(forwardedRequests.first)
+        XCTAssertEqual(forwarded.origin, "https://api.malibu.tech")
+        XCTAssertEqual(forwarded.endpoint, "8.8.8.8")
+        XCTAssertEqual(forwarded.bearerToken, "buyer-token")
+        XCTAssertFalse(forwarded.streaming)
+        XCTAssertEqual(forwarded.body, Data(body.utf8))
+        let summary = try ledger.summary()
+        XCTAssertEqual(summary.reserved.rawValue, 0)
+        XCTAssertEqual(summary.held.rawValue, 0)
+        XCTAssertEqual(summary.settled.rawValue, expected.rawValue)
+    }
+
+    func testPhase4FakeGatewayStreamingSDKPayloadEmitsOpenAICompatibleSSE() throws {
+        let token = try ConsumeLocalToken.generate()
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let gateway = ConsumeFakeGatewayUpstreamClient()
+        let runtime = consumeRuntime(
+            token: token,
+            credentialStatus: .environmentLoaded,
+            credentialCustody: consumeCredentialCustody("buyer-token"),
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            upstreamClient: gateway,
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        let body = #"{"model":"llama-test","messages":[{"role":"user","content":"phase4 stream"}],"stream":true,"tools":[{"type":"function","function":{"name":"emit_json","parameters":{"type":"object"}}}],"response_format":{"type":"json_object"},"max_tokens":8}"#
+
+        let response = try responseWithBodyChunks(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(body.utf8)
+        )
+
+        XCTAssertEqual(response.status, HTTPResponseStatus.ok)
+        XCTAssertEqual(response.headers.first(name: "content-type"), "text/event-stream")
+        XCTAssertNil(response.headers.first(name: "content-length"))
+        XCTAssertNil(response.headers.first(name: "content-encoding"))
+        XCTAssertNil(response.headers.first(name: "set-cookie"))
+        XCTAssertEqual(response.bodyChunks, gateway.expectedStreamingBodyChunks())
+        XCTAssertTrue(response.body.contains(#""object":"chat.completion.chunk""#))
+        XCTAssertTrue(response.body.contains(#""usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}"#))
+        XCTAssertTrue(response.body.contains("data: [DONE]\n\n"))
+        XCTAssertFalse(response.body.contains("buyer-token"))
+        XCTAssertFalse(response.body.contains(token.value))
+        let forwardedRequests = gateway.snapshot()
+        XCTAssertEqual(forwardedRequests.count, 1)
+        let forwarded = try XCTUnwrap(forwardedRequests.first)
+        XCTAssertTrue(forwarded.streaming)
+        XCTAssertEqual(forwarded.bearerToken, "buyer-token")
+        XCTAssertEqual(forwarded.body, Data(body.utf8))
+    }
+
+    func testPhase4FakeGatewayRedirectStatusIsPreservedWithoutLocationOrSecondDispatch() throws {
+        let token = try ConsumeLocalToken.generate()
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let gateway = ConsumeFakeGatewayUpstreamClient(
+            nonStreamingStatusCode: 307,
+            nonStreamingHeaders: [
+                ("content-type", "application/json"),
+                ("location", "https://redirect-target.example.invalid/v1/chat/completions"),
+                ("set-cookie", "phase4=blocked"),
+                ("x-request-id", "phase4-redirect"),
+            ],
+            nonStreamingBody: #"{"error":{"message":"temporary redirect","type":"upstream_redirect","code":"temporary_redirect"}}"#
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            credentialStatus: .environmentLoaded,
+            credentialCustody: consumeCredentialCustody("buyer-token"),
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            upstreamClient: gateway,
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        let body = #"{"model":"llama-test","messages":[],"max_tokens":1}"#
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(body.utf8)
+        )
+
+        XCTAssertEqual(response.status, HTTPResponseStatus(statusCode: 307))
+        XCTAssertEqual(response.headers.first(name: "content-type"), "application/json")
+        XCTAssertEqual(response.headers.first(name: "x-request-id"), "phase4-redirect")
+        XCTAssertNil(response.headers.first(name: "location"))
+        XCTAssertNil(response.headers.first(name: "set-cookie"))
+        XCTAssertFalse(response.body.contains("buyer-token"))
+        XCTAssertFalse(response.body.contains(token.value))
+        let forwardedRequests = gateway.snapshot()
+        XCTAssertEqual(forwardedRequests.count, 1)
+        let forwarded = try XCTUnwrap(forwardedRequests.first)
+        XCTAssertEqual(forwarded.bearerToken, "buyer-token")
+        XCTAssertEqual(forwarded.endpoint, "8.8.8.8")
+        XCTAssertEqual(forwarded.body, Data(body.utf8))
+    }
+
+    func testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized() throws {
+        let body = Data(#"{"model":"llama-test","messages":[{"role":"user","content":"phase4"}],"max_tokens":1}"#.utf8)
+        let generated = ConsumePinnedUpstreamClient.httpRequestBytesForTesting(
+            host: "api.malibu.tech",
+            port: 443,
+            bearerToken: "buyer-token",
+            body: body,
+            streaming: false
+        )
+        let request = String(decoding: generated, as: UTF8.self)
+        let headerEnd = try XCTUnwrap(request.range(of: "\r\n\r\n"))
+        let headers = String(request[..<headerEnd.lowerBound])
+
+        XCTAssertEqual(headers, [
+            "POST /v1/chat/completions HTTP/1.1",
+            "Host: api.malibu.tech",
+            "Authorization: Bearer buyer-token",
+            "Content-Type: application/json",
+            "Accept: application/json",
+            "Accept-Encoding: identity",
+            "Connection: close",
+            "Content-Length: \(body.count)",
+        ].joined(separator: "\r\n"))
+        XCTAssertEqual(String(request[headerEnd.upperBound...]), String(decoding: body, as: UTF8.self))
+        XCTAssertFalse(headers.contains("local-token"))
+        XCTAssertFalse(headers.localizedCaseInsensitiveContains("Cookie:"))
+        XCTAssertFalse(headers.localizedCaseInsensitiveContains("Forwarded:"))
+        XCTAssertFalse(headers.localizedCaseInsensitiveContains("X-Forwarded-For:"))
+        XCTAssertFalse(headers.localizedCaseInsensitiveContains("Origin:"))
+        XCTAssertFalse(headers.localizedCaseInsensitiveContains("Proxy-Authorization:"))
+
+        let streamingHeaders = String(decoding: ConsumePinnedUpstreamClient.httpRequestBytesForTesting(
+            host: "2001:db8::1",
+            port: 8443,
+            bearerToken: "buyer-token",
+            body: body,
+            streaming: true
+        ), as: UTF8.self)
+        XCTAssertTrue(streamingHeaders.contains("Host: [2001:db8::1]:8443\r\n"))
+        XCTAssertTrue(streamingHeaders.contains("Accept: text/event-stream\r\n"))
     }
 
     func testPhase3CPricedEstimateCapRejectsBeforeLedgerAppend() throws {

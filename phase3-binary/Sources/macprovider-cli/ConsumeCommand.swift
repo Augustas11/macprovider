@@ -1370,6 +1370,10 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         classifySendFailure(error)
     }
 
+    static func httpRequestBytesForTesting(host: String, port: Int, bearerToken: String, body: Data, streaming: Bool) -> Data {
+        httpRequestBytes(host: host, port: port, bearerToken: bearerToken, body: body, streaming: streaming)
+    }
+
     private static func readHTTPResponse(
         from connection: NWConnection,
         maxBodyBytes: Int,
