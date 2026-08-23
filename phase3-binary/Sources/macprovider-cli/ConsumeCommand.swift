@@ -3271,7 +3271,16 @@ struct ConsumeEndpointRuntime: Sendable {
         requestCounter.releaseBodyBytes(count)
     }
 
+    func reserveUpstreamExchange(responseSpoolBytes: Int) -> ConsumeEndpointResourceReservation? {
+        requestCounter.reserveUpstreamExchange(responseSpoolBytes: responseSpoolBytes)
+    }
+
+    func releaseUpstreamExchange(_ reservation: ConsumeEndpointResourceReservation) {
+        requestCounter.releaseUpstreamExchange(reservation)
+    }
+
     func statusPayload() -> [String: Any] {
+        let resourceSnapshot = requestCounter.resourceSnapshot()
         var payload: [String: Any] = [
             "schema_version": "local_consumer_endpoint.status.v1",
             "process_launch_id": launchID,
@@ -3282,6 +3291,11 @@ struct ConsumeEndpointRuntime: Sendable {
             "model_allowlist": modelAllowlist,
             "local_auth_state": "required",
             "active_request_count": requestCounter.current(),
+            "buffered_request_body_bytes": resourceSnapshot.bufferedBodyBytes,
+            "response_spool_bytes": resourceSnapshot.responseSpoolBytes,
+            "upstream_worker_task_count": resourceSnapshot.upstreamWorkerTasks,
+            "upstream_socket_descriptor_count": resourceSnapshot.upstreamSocketDescriptors,
+            "open_streaming_response_count": resourceSnapshot.openStreamingResponses,
             "last_successful_upstream_contact_at": NSNull(),
             "error_ring": [],
         ]
@@ -3379,23 +3393,53 @@ struct ConsumeValidatedRequest {
     let endpoint: ConsumeLocalEndpoint
 }
 
+struct ConsumeEndpointResourceReservation: Sendable {
+    let responseSpoolBytes: Int
+    let upstreamWorkerTasks: Int
+    let upstreamSocketDescriptors: Int
+}
+
+struct ConsumeEndpointResourceSnapshot: Sendable {
+    let bufferedBodyBytes: Int
+    let responseSpoolBytes: Int
+    let upstreamWorkerTasks: Int
+    let upstreamSocketDescriptors: Int
+    let openStreamingResponses: Int
+}
+
 final class ConsumeEndpointRequestCounter: @unchecked Sendable {
     private let lock = NSLock()
     private let maxIncompleteConnections: Int
     private let maxActiveRequests: Int
     private let maxBufferedBodyBytes: Int
+    private let maxResponseSpoolBytes: Int
+    private let maxOpenStreamingResponses: Int
+    private let maxUpstreamWorkerTasks: Int
+    private let maxUpstreamSocketDescriptors: Int
     private var incompleteConnections = 0
     private var value = 0
     private var bufferedBodyBytes = 0
+    private var responseSpoolBytes = 0
+    private var openStreamingResponses = 0
+    private var upstreamWorkerTasks = 0
+    private var upstreamSocketDescriptors = 0
 
     init(
         maxIncompleteConnections: Int = 16,
         maxActiveRequests: Int = 32,
-        maxBufferedBodyBytes: Int = 8 * 1024 * 1024
+        maxBufferedBodyBytes: Int = 8 * 1024 * 1024,
+        maxResponseSpoolBytes: Int = 8 * 1024 * 1024,
+        maxOpenStreamingResponses: Int = 16,
+        maxUpstreamWorkerTasks: Int = 32,
+        maxUpstreamSocketDescriptors: Int = 32
     ) {
         self.maxIncompleteConnections = maxIncompleteConnections
         self.maxActiveRequests = maxActiveRequests
         self.maxBufferedBodyBytes = maxBufferedBodyBytes
+        self.maxResponseSpoolBytes = maxResponseSpoolBytes
+        self.maxOpenStreamingResponses = maxOpenStreamingResponses
+        self.maxUpstreamWorkerTasks = maxUpstreamWorkerTasks
+        self.maxUpstreamSocketDescriptors = maxUpstreamSocketDescriptors
     }
 
     func beginIncompleteConnection() -> Bool {
@@ -3449,10 +3493,63 @@ final class ConsumeEndpointRequestCounter: @unchecked Sendable {
         lock.unlock()
     }
 
+    func reserveUpstreamExchange(responseSpoolBytes count: Int) -> ConsumeEndpointResourceReservation? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard count >= 0,
+              responseSpoolBytes <= maxResponseSpoolBytes - count,
+              upstreamWorkerTasks < maxUpstreamWorkerTasks,
+              upstreamSocketDescriptors < maxUpstreamSocketDescriptors else {
+            return nil
+        }
+        responseSpoolBytes += count
+        upstreamWorkerTasks += 1
+        upstreamSocketDescriptors += 1
+        return ConsumeEndpointResourceReservation(
+            responseSpoolBytes: count,
+            upstreamWorkerTasks: 1,
+            upstreamSocketDescriptors: 1
+        )
+    }
+
+    func releaseUpstreamExchange(_ reservation: ConsumeEndpointResourceReservation) {
+        lock.lock()
+        responseSpoolBytes = max(0, responseSpoolBytes - max(0, reservation.responseSpoolBytes))
+        upstreamWorkerTasks = max(0, upstreamWorkerTasks - max(0, reservation.upstreamWorkerTasks))
+        upstreamSocketDescriptors = max(0, upstreamSocketDescriptors - max(0, reservation.upstreamSocketDescriptors))
+        lock.unlock()
+    }
+
+    func beginStreamingResponse() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard openStreamingResponses < maxOpenStreamingResponses else { return false }
+        openStreamingResponses += 1
+        return true
+    }
+
+    func endStreamingResponse() {
+        lock.lock()
+        openStreamingResponses = max(0, openStreamingResponses - 1)
+        lock.unlock()
+    }
+
     func current() -> Int {
         lock.lock()
         defer { lock.unlock() }
         return value
+    }
+
+    func resourceSnapshot() -> ConsumeEndpointResourceSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return ConsumeEndpointResourceSnapshot(
+            bufferedBodyBytes: bufferedBodyBytes,
+            responseSpoolBytes: responseSpoolBytes,
+            upstreamWorkerTasks: upstreamWorkerTasks,
+            upstreamSocketDescriptors: upstreamSocketDescriptors,
+            openStreamingResponses: openStreamingResponses
+        )
     }
 }
 
@@ -3662,7 +3759,9 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
     private var connectionIsIncompletePreAuth = false
     private var requestIsActive = false
     private var reservedBodyBytes = 0
+    private var upstreamResourceReservation: ConsumeEndpointResourceReservation?
     private var upstreamForwardIsPending = false
+    private var upstreamForwardWasDispatched = false
     private var channelInactiveWhileUpstreamPending = false
     private var responseStarted = false
     private var headerDeadlineTask: Scheduled<Void>?
@@ -3747,6 +3846,10 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         if upstreamForwardIsPending {
             channelInactiveWhileUpstreamPending = true
+            if !upstreamForwardWasDispatched {
+                releaseUpstreamResourcesIfNeeded()
+                endRequestIfNeeded()
+            }
         }
         if !upstreamForwardIsPending {
             endRequestIfNeeded()
@@ -4392,10 +4495,13 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         )
         let contextBox = ConsumeNIOContextBox(context)
         upstreamForwardIsPending = true
+        upstreamForwardWasDispatched = true
         runtime.upstreamClient.forwardChatCompletions(request: request, on: context.eventLoop).whenComplete { [weak self] result in
             guard let self else { return }
             defer {
+                self.releaseUpstreamResourcesIfNeeded()
                 self.upstreamForwardIsPending = false
+                self.upstreamForwardWasDispatched = false
                 self.endRequestIfNeeded()
             }
             switch result {
@@ -4435,10 +4541,13 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         )
         let contextBox = ConsumeNIOContextBox(context)
         upstreamForwardIsPending = true
+        upstreamForwardWasDispatched = true
         runtime.upstreamClient.forwardChatCompletions(request: request, on: context.eventLoop).whenComplete { [weak self] result in
             guard let self else { return }
             defer {
+                self.releaseUpstreamResourcesIfNeeded()
                 self.upstreamForwardIsPending = false
+                self.upstreamForwardWasDispatched = false
                 self.endRequestIfNeeded()
             }
             switch result {
@@ -4513,7 +4622,9 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         onSuccess: @escaping @Sendable (String) -> Bool
     ) {
         let contextBox = ConsumeNIOContextBox(context)
+        guard reserveUpstreamResources(context: contextBox.context, extraHeaders: extraHeaders) else { return }
         upstreamForwardIsPending = true
+        upstreamForwardWasDispatched = false
         channelInactiveWhileUpstreamPending = false
         runtime.upstreamClient.resolveChatCompletionsEndpoint(origin: runtime.upstreamOrigin, on: context.eventLoop).whenComplete { [weak self] result in
             guard let self else { return }
@@ -4522,10 +4633,16 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             case .success(let endpoint):
                 self.upstreamForwardIsPending = false
                 if !onSuccess(endpoint) {
+                    self.upstreamForwardWasDispatched = false
+                    self.releaseUpstreamResourcesIfNeeded()
                     self.endRequestIfNeeded()
                 }
             case .failure(let error):
-                defer { self.endRequestIfNeeded() }
+                defer {
+                    self.releaseUpstreamResourcesIfNeeded()
+                    self.upstreamForwardWasDispatched = false
+                    self.endRequestIfNeeded()
+                }
                 self.upstreamForwardIsPending = false
                 let failure = Self.classifyUpstreamFailure(error)
                 self.writeLocalError(
@@ -4537,6 +4654,30 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 )
             }
         }
+    }
+
+    private func reserveUpstreamResources(
+        context: ChannelHandlerContext,
+        extraHeaders: [(String, String)]
+    ) -> Bool {
+        guard upstreamResourceReservation == nil,
+              let reservation = runtime.reserveUpstreamExchange(responseSpoolBytes: ConsumeLocalLimits.bodyBytes) else {
+            writeLocalError(
+                context: context,
+                status: .serviceUnavailable,
+                code: "local_endpoint_busy",
+                extraHeaders: extraHeaders
+            )
+            return false
+        }
+        upstreamResourceReservation = reservation
+        return true
+    }
+
+    private func releaseUpstreamResourcesIfNeeded() {
+        guard let reservation = upstreamResourceReservation else { return }
+        upstreamResourceReservation = nil
+        runtime.releaseUpstreamExchange(reservation)
     }
 
     private static func classifyUpstreamFailure(_ error: Error) -> ConsumeUpstreamFailureClassification {
