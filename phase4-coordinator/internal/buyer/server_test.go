@@ -208,6 +208,7 @@ func TestPoolHeaderRequiresAuthorizedBuyerAccount(t *testing.T) {
 		buyer.WithGatewayServiceToken("gateway-secret"),
 		buyer.WithRequireGatewayContext(true),
 		buyer.WithPoolMembership(trustPools),
+		buyer.WithTrustPoolStatusStore(openBuyerTrustPoolStore(t)),
 	)
 	body := `{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -244,6 +245,7 @@ func TestPoolHeaderForNonRouteablePoolFailsUnavailable(t *testing.T) {
 		buyer.WithGatewayServiceToken("gateway-secret"),
 		buyer.WithRequireGatewayContext(true),
 		buyer.WithPoolMembership(trustPools),
+		buyer.WithTrustPoolStatusStore(openBuyerTrustPoolStore(t)),
 	)
 	body := `{"model":"unknown-model","messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -256,6 +258,42 @@ func TestPoolHeaderForNonRouteablePoolFailsUnavailable(t *testing.T) {
 		t.Fatalf("status=%d body=%s, want 503", rr.Code, rr.Body.String())
 	}
 	assertPoolUnavailableNonRetryable(t, rr)
+}
+
+func TestPoolHeaderForAuthorizedExpiredRouteableSnapshotFailsPolicyStale(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	trustPools := trustpool.NewRegistry()
+	if err := trustPools.LoadRouteableSnapshot(trustpool.RouteableSnapshot{
+		PoolID:            "pool-stale",
+		Members:           []string{"provider-a"},
+		BuyerAccounts:     []string{"acct_gateway"},
+		Routeable:         true,
+		Generation:        7,
+		RouteableUntilUTC: time.Now().UTC().Add(30 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("LoadRouteableSnapshot: %v", err)
+	}
+	time.Sleep(70 * time.Millisecond)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithGatewayServiceToken("gateway-secret"),
+		buyer.WithRequireGatewayContext(true),
+		buyer.WithPoolMembership(trustPools),
+		buyer.WithTrustPoolStatusStore(openBuyerTrustPoolStore(t)),
+	)
+	body := `{"model":"unknown-model","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	req.Header.Set("X-MacProvider-Account", "acct_gateway")
+	req.Header.Set("X-MacProvider-Pool", "pool-stale")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503", rr.Code, rr.Body.String())
+	}
+	assertPoolPolicyStaleRetryable(t, rr)
 }
 
 func TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus(t *testing.T) {
@@ -677,6 +715,25 @@ func assertPoolUnavailableNonRetryable(t *testing.T, rr *httptest.ResponseRecord
 	}
 	if body.Error.Retryable {
 		t.Fatalf("pool_unavailable retryable=true body=%s, want false", rr.Body.String())
+	}
+}
+
+func assertPoolPolicyStaleRetryable(t *testing.T, rr *httptest.ResponseRecorder) {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code      string `json:"code"`
+			Retryable bool   `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error response: %v body=%s", err, rr.Body.String())
+	}
+	if body.Error.Code != "pool_policy_stale" {
+		t.Fatalf("error.code=%q body=%s, want pool_policy_stale", body.Error.Code, rr.Body.String())
+	}
+	if !body.Error.Retryable {
+		t.Fatalf("pool_policy_stale retryable=false body=%s, want true", rr.Body.String())
 	}
 }
 

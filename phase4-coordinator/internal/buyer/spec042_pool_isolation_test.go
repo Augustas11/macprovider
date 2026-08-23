@@ -217,6 +217,81 @@ func TestPoolIsolation_OrdinaryNoMember_ReturnsPoolNoEligibleMember(t *testing.T
 	}
 }
 
+func TestPoolIsolation_AuthorizedExpiredRouteableSnapshotReturnsPolicyStale(t *testing.T) {
+	s, registry, tp := poolIsolationServer(t)
+	x := poolProvider("member-x")
+	registry.Register(&x, nil)
+	if err := tp.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
+		PoolID:            "P",
+		Members:           []string{"member-x"},
+		BuyerAccounts:     []string{"acct-a"},
+		Routeable:         true,
+		Generation:        7,
+		RouteableUntilUTC: time.Now().UTC().Add(30 * time.Millisecond),
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	time.Sleep(70 * time.Millisecond)
+
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq("P"), http.Header{}, nil, "2024-01-01", &forwardState{})
+	if routeErr == nil || routeErr.code != "pool_policy_stale" || routeErr.status != http.StatusServiceUnavailable {
+		t.Fatalf("expired authorized pool: want pool_policy_stale 503, got %+v", routeErr)
+	}
+	if !spec018RetryableByCode[routeErr.code] {
+		t.Fatalf("pool_policy_stale must be retryable")
+	}
+}
+
+func TestPoolIsolation_CachedRouteableSnapshotExpiryReturnsPolicyStale(t *testing.T) {
+	s, registry, tp := poolIsolationServer(t)
+	x := poolProvider("member-x")
+	registry.Register(&x, nil)
+	if err := tp.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
+		PoolID:            "P",
+		Members:           []string{"member-x"},
+		BuyerAccounts:     []string{"acct-a"},
+		Routeable:         true,
+		Generation:        7,
+		RouteableUntilUTC: time.Now().UTC().Add(30 * time.Millisecond),
+		ModelAllowlist:    []string{"different-model"},
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	snap, authorized := tp.AuthorizeAndSnapshot("P", "acct-a")
+	if !authorized || !snap.Routeable || snap.RouteableExpired {
+		t.Fatalf("fresh authorized snapshot=%+v authorized=%v, want routeable non-expired", snap, authorized)
+	}
+	time.Sleep(70 * time.Millisecond)
+
+	req := poolChatReq("P")
+	req.poolSnapshot = snap
+	req.poolSnapshotSet = true
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", req, http.Header{}, nil, "2024-01-01", &forwardState{})
+	if routeErr == nil || routeErr.code != "pool_policy_stale" || routeErr.status != http.StatusServiceUnavailable {
+		t.Fatalf("expired cached pool snapshot: want pool_policy_stale 503, got %+v", routeErr)
+	}
+}
+
+func TestPoolIsolation_RefreshedExpiredRouteableSnapshotReturnsPolicyStale(t *testing.T) {
+	s, registry, tp := poolIsolationServer(t)
+	x := poolProvider("member-x")
+	registry.Register(&x, nil)
+	if err := tp.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
+		PoolID:           "P",
+		BuyerAccounts:    []string{"acct-a"},
+		Routeable:        false,
+		Generation:       8,
+		RouteableExpired: true,
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+
+	_, routeErr := s.selectProviderExcluding(context.Background(), "rid", poolChatReq("P"), http.Header{}, nil, "2024-01-01", &forwardState{})
+	if routeErr == nil || routeErr.code != "pool_policy_stale" || routeErr.status != http.StatusServiceUnavailable {
+		t.Fatalf("materialized expired pool snapshot: want pool_policy_stale 503, got %+v", routeErr)
+	}
+}
+
 // T7-loop (generation fence, R005): the fence is enforced at the top of the
 // forwardWithFailover dispatch loop, so a stale pool generation is rejected
 // BEFORE any dispatch — covering the retry/failover re-dispatch windows, not

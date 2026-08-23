@@ -2807,7 +2807,7 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 	out := make([]RouteableSnapshot, 0, len(ids))
 	for _, id := range ids {
 		p := s.Pools[id]
-		routeable, _ := poolRouteability(p)
+		routeable, routeabilityReason := poolRouteability(p)
 		members := make([]string, 0, len(p.Members))
 		if routeable {
 			for id := range p.Members {
@@ -2837,6 +2837,7 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			Routeable:         routeable,
 			Generation:        p.RouteableSnapshotGeneration(),
 			RouteableUntilUTC: p.CreatorGateExpiresAtUTC,
+			RouteableExpired:  routeabilityReason == "creator_agreement_expired",
 		})
 	}
 	return out
