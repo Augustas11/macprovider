@@ -1224,7 +1224,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.15",
+      "version": "0.0.16",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1257,7 +1257,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool control plane is a new authority domain (pool-control-plane). Current merged code contains substantial default-off pool plumbing and SPEC-043 creator-onboarding enablement, including pool_id threading, manifest crypto primitives, route isolation, labeled route snapshots, buyer/public policy and status surfaces, claim-control rejection, and an MVP retention-policy registry. SPEC-042 remains pending-reconciliation and not-deployed because signed journey evidence, durable production wiring, complete fail-closed predicate coverage, SPEC-042-owned schema/retention promotion, production activation gates, and five-lane audit are still outstanding. Layer 2 administrative trust only; cryptographic privacy is SPEC-041/Layer 3."
+        "rationale": "Pool control plane is a new authority domain (pool-control-plane). Current merged code contains substantial default-off pool plumbing and SPEC-043 creator-onboarding enablement, including pool_id threading, manifest crypto primitives, route isolation, labeled route snapshots, buyer/public policy and status surfaces, claim-control rejection, an MVP retention-policy registry, and local restrictive lifecycle admin controls. SPEC-042 remains pending-reconciliation and not-deployed because signed journey evidence, durable production wiring, complete fail-closed predicate coverage, signed emergency lifecycle controls, SPEC-042-owned schema/retention promotion, production activation gates, and five-lane audit are still outstanding. Layer 2 administrative trust only; cryptographic privacy is SPEC-041/Layer 3."
       }
     },
     {
@@ -5438,6 +5438,7 @@
         "phase5-gateway/internal/router/pool_selection.go:errPoolUnavailable",
         "phase4-coordinator/internal/trustpool/refresher.go:func RefreshRegistry",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) disableRegistryOnMalformed",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleRestrictiveLifecycle",
         "phase4-coordinator/internal/buyer/server.go:func (s *Server) disableTrustPoolsOnMalformedDurableState",
         "phase4-coordinator/cmd/coordinator/main.go:func loadTrustedPools",
         "phase4-coordinator/internal/buyer/server.go:func (s *Server) verifyTrustPoolDurableStateForRouting"
@@ -5450,7 +5451,11 @@
         "phase4-coordinator/internal/buyer/server_test.go:TestTrustPoolStatusMalformedDurableStateClearsRegistry",
         "phase4-coordinator/cmd/coordinator/main_test.go:TestLoadTrustedPoolsDisablesPoolSupportOnReconstructionFailure",
         "phase4-coordinator/internal/buyer/server_test.go:TestPoolHeaderMalformedDurableStateFailsClosedAndClearsRegistry",
-        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_MalformedDurableStateRejectsMutationsAndClearsRegistry"
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_MalformedDurableStateRejectsMutationsAndClearsRegistry",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_RestrictiveLifecyclePausesRouteablePool",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_RestrictiveLifecycleDrainsAndRetiresRouteablePool",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_RestrictiveLifecycleRetiresRouteablePoolDirectly",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_RestrictiveLifecycleRejectsActivationAndInvalidTransition"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
@@ -5460,7 +5465,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Fail-closed error handling now clears routeable trusted-pool snapshots when reconstruction observes malformed durable state at startup, background refresh, admin reads/mutations, buyer policy/status reads, and pool-selected chat admission. Still pending: signed journey evidence, production activation evidence, full route/reroute/pinned-path conformance, emergency lifecycle controls, and 0 C/H/M launch audit."
+        "rationale": "Fail-closed error handling now clears routeable trusted-pool snapshots when reconstruction observes malformed durable state at startup, background refresh, admin reads/mutations, buyer policy/status reads, and pool-selected chat admission. Local restrictive lifecycle admin controls now pause/drain/retire through the validated durable append path, refresh routeable snapshots after commit, reject active transitions with activation_requires_promotion, and fail closed on invalid lifecycle transitions. Still pending: signed journey evidence, production activation evidence, full route/reroute/pinned-path conformance, signed emergency lifecycle controls, and 0 C/H/M launch audit."
       }
     },
     {
@@ -5474,7 +5479,8 @@
         "phase4-coordinator/internal/trustpool/durable_store.go:func manifestAcceptanceHighWaterFromQueryer",
         "phase4-coordinator/internal/trustpool/durable_store.go:func verifyManifestAcceptanceState(ctx context.Context, q eventQueryer, events []DurableEvent) error",
         "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Disable",
-        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) migrateManifestAcceptanceTables"
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) migrateManifestAcceptanceTables",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleRestrictiveLifecycle"
       ],
       "tests": [
         "phase4-coordinator/internal/poolmanifest/persist_test.go:TestManifestSnapshotRoundTrip",
@@ -5484,7 +5490,11 @@
         "phase4-coordinator/internal/trustpool/registry_test.go:TestRegistryDisableClearsRouteableSnapshotsWithoutAdvancingRevision",
         "phase4-coordinator/internal/trustpool/refresher_test.go:TestRefreshRegistryClearsRouteableSnapshotsOnMalformedDurableState",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ManifestAcceptanceProjectionTamperFailsClosedOnOpen",
-        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_MalformedDurableStateRejectsMutationsAndClearsRegistry"
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_MalformedDurableStateRejectsMutationsAndClearsRegistry",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_RestrictiveLifecyclePausesRouteablePool",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_RestrictiveLifecycleDrainsAndRetiresRouteablePool",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_RestrictiveLifecycleRetiresRouteablePoolDirectly",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_RestrictiveLifecycleRejectsActivationAndInvalidTransition"
       ],
       "journeys": [],
       "evidence": [],
@@ -5492,7 +5502,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool lifecycle/migration/failover reconstruction now includes local coordinator-store wiring for accepted manifest verdict evidence: migration creates/backfills projection and high-water tables once behind a durable completion marker, append/promote paths verify projection state before mutation and after projection writes, reconstruction and later store opens verify event/projection/high-water consistency in one transaction, and malformed replay clears routeable snapshots through the registry disable path. Still pending: production migration evidence, tamper-evident full rollback protection, full membership/delegation/lifecycle reconstruction, emergency signed lifecycle controls, and signed journey evidence."
+        "rationale": "Pool lifecycle/migration/failover reconstruction now includes local coordinator-store wiring for accepted manifest verdict evidence: migration creates/backfills projection and high-water tables once behind a durable completion marker, append/promote paths verify projection state before mutation and after projection writes, reconstruction and later store opens verify event/projection/high-water consistency in one transaction, and malformed replay clears routeable snapshots through the registry disable path. Local restrictive lifecycle admin control is wired through the same validated durable event path: paused/draining/retired transitions survive replay, refresh the live registry, and active remains promotion-only for created-pool activation; resume-from-paused remains pending R011 work. Still pending: production migration evidence, tamper-evident full rollback protection, full membership/delegation/lifecycle reconstruction, signed emergency lifecycle controls, and signed journey evidence."
       }
     },
     {
@@ -5518,7 +5528,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Manifest authority + signer-set key lifecycle: slice 2 (v0.0.9) implements policy-core signature verification against a signer set; slice 3 (v0.0.10) implements the append-only, hash-chained AUTHORITY LOG that establishes/versions those signer sets and sets their revocation state - the authority-log-entry content byte grammar + hash + signing preimage, and BuildAuthorityLog chain-replay verification (structural signer-set validation, strictly-monotonic signer_set_version/rollback reject, prev-hash chain, revokes_versions prior-existing-only, and authorization by one root-issuer signature or M-of-N of a prior still-authorized lower-versioned set), materializing signer_set_version -> SignerSet for policy-core verification - frozen by golden vectors (genesis->rotate->revoke). Slice 5 (v0.0.12) adds verdict-replay reconstruction (ReconstructPool in persist.go): a recorded acceptance verdict is replayed on restart rather than re-evaluated against the current wall-clock, grandfathering a policy accepted before its signer set was later revoked. Still deferred: wiring the durable snapshot into the coordinator store and the highest-accepted-version persistence, signed emergency pool-lifecycle control messages (R011/R003), operator-provenance binding, and root-issuer-compromise supersedes lineage."
+        "rationale": "Manifest authority + signer-set key lifecycle: slice 2 (v0.0.9) implements policy-core signature verification against a signer set; slice 3 (v0.0.10) implements the append-only, hash-chained AUTHORITY LOG that establishes/versions those signer sets and sets their revocation state - the authority-log-entry content byte grammar + hash + signing preimage, and BuildAuthorityLog chain-replay verification (structural signer-set validation, strictly-monotonic signer_set_version/rollback reject, prev-hash chain, revokes_versions prior-existing-only, and authorization by one root-issuer signature or M-of-N of a prior still-authorized lower-versioned set), materializing signer_set_version -> SignerSet for policy-core verification - frozen by golden vectors (genesis->rotate->revoke). Slice 5 (v0.0.12) adds verdict-replay reconstruction (ReconstructPool in persist.go): a recorded acceptance verdict is replayed on restart rather than re-evaluated against the current wall-clock, grandfathering a policy accepted before its signer set was later revoked. v0.0.16 adds only local operator-token restrictive lifecycle admin controls; signed emergency pool-lifecycle control messages remain deferred. Still deferred: wiring the durable snapshot into the coordinator store and the highest-accepted-version persistence, signed emergency pool-lifecycle control messages (R011/R003), operator-provenance binding, and root-issuer-compromise supersedes lineage."
       }
     },
     {
