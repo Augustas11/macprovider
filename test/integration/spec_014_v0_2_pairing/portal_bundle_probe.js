@@ -137,6 +137,46 @@ function assert(cond, msg) {
   assert(portalSessionContext.location.href === "http://portal.test/?p=mp-local#dash",
     "portal session token stripping must preserve the current hash");
 
+  const portalOAuthFetches = [];
+  const portalOAuthContext = makeContext("http://portal.test/?ps=PORTAL456", async (path) => {
+    portalOAuthFetches.push(path);
+    if (String(path).endsWith("portal-config.json")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          coordinator_base_url: "https://c.example",
+          releases_repo_owner_name: "Augustas11/macprovider",
+          require_provider_tokens: true,
+          github_oauth_enabled: true,
+        }),
+        text: async () => "{}",
+      };
+    }
+    if (String(path).endsWith("/v1/portal/session")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ provider_id: "mp-local" }),
+        text: async () => "{\"provider_id\":\"mp-local\"}",
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => "{}",
+    };
+  });
+  vm.runInNewContext(scripts, portalOAuthContext);
+  await portalOAuthContext.bootstrap();
+  assert(portalOAuthFetches.includes("/v1/portal/session"),
+    "captured portal session must be consumed before GitHub OAuth mode");
+  assert(!portalOAuthFetches.includes("/v1/auth/me/providers"),
+    "captured portal session must not silently fall through to GitHub OAuth mode");
+  assert(portalOAuthContext.state.session.provider_id === "mp-local",
+    "captured portal session must establish the provider dashboard session");
+
   const configContext = makeContext("http://portal.test/", async () => ({
     ok: true,
     status: 200,

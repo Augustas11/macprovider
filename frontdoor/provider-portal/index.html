@@ -2100,12 +2100,16 @@
      * ===================================================================== */
     function bootstrap() {
       render();
-      loadConfig().then(function () {
-        if (state.cfg && state.cfg.github_oauth_enabled) {
-          initializeGitHubMode();
-          return;
+      return loadConfig().then(function () {
+        if (PORTAL_SESSION_CAPTURED) {
+          return consumePortalSessionFromURL().then(function (opened) {
+            if (!opened) render();
+          });
         }
-        consumePortalSessionFromURL().then(function (opened) {
+        if (state.cfg && state.cfg.github_oauth_enabled) {
+          return initializeGitHubMode();
+        }
+        return consumePortalSessionFromURL().then(function (opened) {
           if (!opened) render();
         });
       }, function () {
