@@ -2,6 +2,7 @@ import ArgumentParser
 import CryptoKit
 import Darwin
 import Foundation
+import MacProviderCore
 import Security
 @preconcurrency import NIO
 @preconcurrency import NIOHTTP1
@@ -59,6 +60,7 @@ struct ConsumeRunCommand: AsyncParsableCommand {
             )
             let credentialSourceClass = credential.sourceClass.rawValue
             let credentialStatus = credential.status
+            let credentialCustody = ConsumeCredentialCustody(credential: credential)
             credential.zeroize()
             let descriptorStore = ConsumeActiveEndpointStore(
                 homeDirectory: homeDirectoryForTesting ?? FileManager.default.homeDirectoryForCurrentUser
@@ -80,7 +82,8 @@ struct ConsumeRunCommand: AsyncParsableCommand {
                 credentialSourceClass: credentialSourceClass,
                 credentialStatus: credentialStatus,
                 modelAllowlist: allowedModels,
-                tokenVerifier: token.verifier
+                tokenVerifier: token.verifier,
+                credentialCustody: credentialCustody
             )
             let server = ConsumeLocalServer(
                 bindAddress: normalizedBind,
@@ -935,9 +938,9 @@ struct ConsumeEndpointRuntime: Sendable {
     let boundURL: String
     let upstreamOrigin: String
     let credentialSourceClass: String
-    let credentialStatus: ConsumeCredentialStatus
     let modelAllowlist: [String]
     let tokenVerifier: ConsumeLocalTokenVerifier
+    let credentialCustody: ConsumeCredentialCustody
     let requestCounter: ConsumeEndpointRequestCounter
 
     init(
@@ -948,24 +951,45 @@ struct ConsumeEndpointRuntime: Sendable {
         credentialStatus: ConsumeCredentialStatus,
         modelAllowlist: [String],
         tokenVerifier: ConsumeLocalTokenVerifier,
+        credentialCustody: ConsumeCredentialCustody? = nil,
         requestCounter: ConsumeEndpointRequestCounter = ConsumeEndpointRequestCounter()
     ) {
         self.launchID = launchID
         self.boundURL = boundURL
         self.upstreamOrigin = upstreamOrigin
         self.credentialSourceClass = credentialSourceClass
-        self.credentialStatus = credentialStatus
         self.modelAllowlist = modelAllowlist
         self.tokenVerifier = tokenVerifier
+        self.credentialCustody = credentialCustody ?? ConsumeCredentialCustody(status: credentialStatus)
         self.requestCounter = requestCounter
     }
 
-    func beginRequest() {
+    func beginIncompleteConnection() -> Bool {
+        requestCounter.beginIncompleteConnection()
+    }
+
+    func completePreAuthConnection() {
+        requestCounter.completePreAuthConnection()
+    }
+
+    func endIncompleteConnection() {
+        requestCounter.endIncompleteConnection()
+    }
+
+    func beginRequest() -> Bool {
         requestCounter.begin()
     }
 
     func endRequest() {
         requestCounter.end()
+    }
+
+    func reserveBodyBytes(_ count: Int) -> Bool {
+        requestCounter.reserveBodyBytes(count)
+    }
+
+    func releaseBodyBytes(_ count: Int) {
+        requestCounter.releaseBodyBytes(count)
     }
 
     func statusPayload() -> [String: Any] {
@@ -975,7 +999,7 @@ struct ConsumeEndpointRuntime: Sendable {
             "bound_url": boundURL,
             "upstream_gateway_origin": upstreamOrigin,
             "credential_source_class": credentialSourceClass,
-            "credential_state": credentialStatus.currentState().rawValue,
+            "credential_state": credentialCustody.currentState().rawValue,
             "model_allowlist": modelAllowlist,
             "local_auth_state": "required",
             "pricing_trust_state": "unavailable",
@@ -994,19 +1018,121 @@ struct ConsumeEndpointRuntime: Sendable {
     }
 }
 
+final class ConsumeCredentialCustody: @unchecked Sendable {
+    private let lock = NSLock()
+    private let status: ConsumeCredentialStatus
+
+    init(credential: ConsumeCredential) {
+        self.status = credential.status
+    }
+
+    init(status: ConsumeCredentialStatus) {
+        self.status = status
+    }
+
+    func currentState() -> ConsumeCredentialState {
+        lock.lock()
+        defer { lock.unlock() }
+        return status.currentState()
+    }
+}
+
+enum ConsumeLocalLimits {
+    static let requestLineBytes = 8 * 1024
+    static let requestTargetBytes = 2 * 1024
+    static let headerCount = 96
+    static let headerBytes = 64 * 1024
+    static let bodyBytes = 1 * 1024 * 1024
+    static let headerReadTimeout: TimeAmount = .seconds(5)
+    static let requestReadTimeout: TimeAmount = .seconds(15)
+    static let bodyIdleTimeout: TimeAmount = .seconds(5)
+
+    static var httpDecoderLimitConfiguration: NIOHTTPDecoderLimitConfiguration {
+        var configuration = NIOHTTPDecoderLimitConfiguration()
+        configuration.maxHeaderFieldSize = headerBytes
+        configuration.maxHeaderListSize = headerBytes
+        configuration.maxHeaderFieldCount = headerCount
+        return configuration
+    }
+}
+
+enum ConsumeLocalEndpoint: Sendable {
+    case status
+    case models
+    case chatCompletions
+}
+
+struct ConsumeValidatedRequest {
+    let endpoint: ConsumeLocalEndpoint
+}
+
 final class ConsumeEndpointRequestCounter: @unchecked Sendable {
     private let lock = NSLock()
+    private let maxIncompleteConnections: Int
+    private let maxActiveRequests: Int
+    private let maxBufferedBodyBytes: Int
+    private var incompleteConnections = 0
     private var value = 0
+    private var bufferedBodyBytes = 0
 
-    func begin() {
+    init(
+        maxIncompleteConnections: Int = 16,
+        maxActiveRequests: Int = 32,
+        maxBufferedBodyBytes: Int = 8 * 1024 * 1024
+    ) {
+        self.maxIncompleteConnections = maxIncompleteConnections
+        self.maxActiveRequests = maxActiveRequests
+        self.maxBufferedBodyBytes = maxBufferedBodyBytes
+    }
+
+    func beginIncompleteConnection() -> Bool {
         lock.lock()
-        value += 1
+        defer { lock.unlock() }
+        guard incompleteConnections < maxIncompleteConnections else { return false }
+        incompleteConnections += 1
+        return true
+    }
+
+    func completePreAuthConnection() {
+        lock.lock()
+        if incompleteConnections > 0 {
+            incompleteConnections -= 1
+        }
         lock.unlock()
+    }
+
+    func endIncompleteConnection() {
+        completePreAuthConnection()
+    }
+
+    func begin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard value < maxActiveRequests else { return false }
+        value += 1
+        return true
     }
 
     func end() {
         lock.lock()
         value = max(0, value - 1)
+        lock.unlock()
+    }
+
+    func reserveBodyBytes(_ count: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard count >= 0,
+              bufferedBodyBytes <= maxBufferedBodyBytes - count else {
+            return false
+        }
+        bufferedBodyBytes += count
+        return true
+    }
+
+    func releaseBodyBytes(_ count: Int) {
+        lock.lock()
+        bufferedBodyBytes = max(0, bufferedBodyBytes - max(0, count))
         lock.unlock()
     }
 
@@ -1103,7 +1229,11 @@ struct ConsumeLocalServer {
             .serverChannelOption(ChannelOptions.backlog, value: 16)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 0)
             .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline().flatMap {
+                channel.pipeline.addHandler(ConsumeStartLineLimitHandler()).flatMap {
+                    channel.pipeline.configureHTTPServerPipeline(
+                        withDecoderLimitConfiguration: ConsumeLocalLimits.httpDecoderLimitConfiguration
+                    )
+                }.flatMap {
                     channel.pipeline.addHandler(ConsumeLocalHandler(runtime: runtime))
                 }
             }
@@ -1127,75 +1257,531 @@ struct ConsumeLocalServer {
     }
 }
 
+final class ConsumeStartLineLimitHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+    typealias InboundOut = ByteBuffer
+
+    private var startLineComplete = false
+    private var bufferedBytes: [UInt8] = []
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard !startLineComplete else {
+            context.fireChannelRead(data)
+            return
+        }
+        let bytes = Array(unwrapInboundIn(data).readableBytesView)
+        for (index, byte) in bytes.enumerated() {
+            bufferedBytes.append(byte)
+            guard bufferedBytes.count <= ConsumeLocalLimits.requestLineBytes || byte == 0x0A else {
+                context.close(promise: nil)
+                return
+            }
+            if byte == 0x0A {
+                var line = bufferedBytes
+                line.removeLast()
+                if line.last == 0x0D {
+                    line.removeLast()
+                }
+                guard Self.isAllowedStartLine(line) else {
+                    context.close(promise: nil)
+                    return
+                }
+                startLineComplete = true
+                if index + 1 < bytes.count {
+                    bufferedBytes.append(contentsOf: bytes[(index + 1)...])
+                }
+                var forwarded = context.channel.allocator.buffer(capacity: bufferedBytes.count)
+                forwarded.writeBytes(bufferedBytes)
+                bufferedBytes.removeAll(keepingCapacity: false)
+                context.fireChannelRead(wrapInboundOut(forwarded))
+                return
+            }
+        }
+    }
+
+    private static func isAllowedStartLine(_ line: [UInt8]) -> Bool {
+        guard line.count <= ConsumeLocalLimits.requestLineBytes,
+              let methodEnd = line.firstIndex(of: 0x20) else {
+            return false
+        }
+        let method = line[..<methodEnd]
+        guard !method.isEmpty,
+              method.allSatisfy(isMethodTokenByte) else {
+            return false
+        }
+        let targetStart = methodEnd + 1
+        guard targetStart < line.endIndex,
+              let targetEnd = line[targetStart...].firstIndex(of: 0x20),
+              targetEnd > targetStart,
+              targetEnd - targetStart <= ConsumeLocalLimits.requestTargetBytes else {
+            return false
+        }
+        let versionStart = targetEnd + 1
+        guard versionStart < line.endIndex,
+              !line[versionStart...].contains(0x20) else {
+            return false
+        }
+        return Array(line[versionStart...]) == Array("HTTP/1.0".utf8)
+            || Array(line[versionStart...]) == Array("HTTP/1.1".utf8)
+    }
+
+    private static func isMethodTokenByte(_ byte: UInt8) -> Bool {
+        switch byte {
+        case 0x41...0x5A:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
     private let runtime: ConsumeEndpointRuntime
     private var requestHead: HTTPRequestHead?
+    private var validatedRequest: ConsumeValidatedRequest?
+    private var requestBody = Data()
+    private var connectionIsIncompletePreAuth = false
     private var requestIsActive = false
+    private var reservedBodyBytes = 0
+    private var responseStarted = false
+    private var headerDeadlineTask: Scheduled<Void>?
+    private var requestDeadlineTask: Scheduled<Void>?
+    private var bodyIdleDeadlineTask: Scheduled<Void>?
+    private var channelForDeadline: Channel?
 
     init(runtime: ConsumeEndpointRuntime) {
         self.runtime = runtime
     }
 
+    func channelActive(context: ChannelHandlerContext) {
+        guard runtime.beginIncompleteConnection() else {
+            context.close(promise: nil)
+            return
+        }
+        connectionIsIncompletePreAuth = true
+        channelForDeadline = context.channel
+        headerDeadlineTask = context.eventLoop.scheduleTask(in: ConsumeLocalLimits.headerReadTimeout) { [weak self] in
+            self?.closeIfHeaderMissing()
+        }
+        context.fireChannelActive()
+    }
+
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         switch unwrapInboundIn(data) {
         case .head(let head):
+            headerDeadlineTask?.cancel()
+            headerDeadlineTask = nil
             requestHead = head
-            runtime.beginRequest()
+            completeIncompletePreAuthConnection()
+            guard runtime.beginRequest() else {
+                writeLocalError(context: context, status: .serviceUnavailable, code: "local_endpoint_busy")
+                return
+            }
             requestIsActive = true
-        case .body:
-            break
+            startRequestDeadline(context: context)
+            handleHead(head, context: context)
+        case .body(var buffer):
+            guard !responseStarted else { return }
+            guard requestBody.count + buffer.readableBytes <= ConsumeLocalLimits.bodyBytes else {
+                writeLocalError(context: context, status: .payloadTooLarge, code: "local_request_too_large")
+                return
+            }
+            let readableBytes = buffer.readableBytes
+            guard runtime.reserveBodyBytes(readableBytes) else {
+                writeLocalError(context: context, status: .serviceUnavailable, code: "local_endpoint_busy")
+                return
+            }
+            if let bytes = buffer.readBytes(length: buffer.readableBytes) {
+                requestBody.append(contentsOf: bytes)
+                reservedBodyBytes += bytes.count
+                refreshBodyIdleDeadline(context: context)
+            } else {
+                runtime.releaseBodyBytes(readableBytes)
+            }
         case .end:
+            cancelPostHeaderDeadlines()
             guard let head = requestHead else {
                 context.close(promise: nil)
                 return
             }
-            handle(head: head, context: context)
+            guard !responseStarted else {
+                endRequestIfNeeded()
+                return
+            }
+            handleEnd(head: head, context: context)
             endRequestIfNeeded()
         }
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        headerDeadlineTask?.cancel()
+        headerDeadlineTask = nil
+        cancelPostHeaderDeadlines()
+        channelForDeadline = nil
+        if connectionIsIncompletePreAuth {
+            runtime.endIncompleteConnection()
+            connectionIsIncompletePreAuth = false
+        }
         endRequestIfNeeded()
     }
 
-    private func handle(head: HTTPRequestHead, context: ChannelHandlerContext) {
+    private func handleHead(_ head: HTTPRequestHead, context: ChannelHandlerContext) {
         if head.method == .HEAD {
-            writeJSON(context: context, status: .methodNotAllowed, body: NSNull())
+            writeHeadOnly(context: context, status: .methodNotAllowed)
+            return
+        }
+        if let error = validatePreAuthBoundsAndFraming(head) {
+            writeLocalError(context: context, status: error.status, code: error.code)
+            return
+        }
+        if let error = validateBrowserOrigin(head) {
+            writeLocalError(context: context, status: error.status, code: error.code)
             return
         }
         let statusNoStore = head.method == .GET && head.uri == "/v1/status"
         guard runtime.tokenVerifier.verify(headers: head.headers) else {
-            writeJSON(
+            writeLocalError(
                 context: context,
                 status: .unauthorized,
-                body: errorEnvelope(code: "local_auth_required"),
+                code: "local_auth_required",
                 extraHeaders: statusNoStore ? [("cache-control", "no-store")] : []
             )
             return
         }
-        guard head.uri == "/v1/status" else {
-            writeJSON(context: context, status: .notFound, body: errorEnvelope(code: "local_endpoint_unsupported"))
+        do {
+            validatedRequest = try validateEndpoint(head)
+        } catch let error as ConsumeLocalValidationError {
+            writeLocalError(context: context, status: error.status, code: error.code)
+        } catch {
+            writeLocalError(context: context, status: .badRequest, code: "local_invalid_request")
+        }
+    }
+
+    private func handleEnd(head: HTTPRequestHead, context: ChannelHandlerContext) {
+        guard let validatedRequest else {
             return
         }
-        guard head.method == .GET else {
-            writeJSON(context: context, status: .methodNotAllowed, body: errorEnvelope(code: "local_endpoint_unsupported"))
-            return
+        switch validatedRequest.endpoint {
+        case .status:
+            guard requestBody.isEmpty else {
+                writeLocalError(context: context, status: .badRequest, code: "local_invalid_request")
+                return
+            }
+            writeJSON(
+                context: context,
+                status: .ok,
+                body: runtime.statusPayload(),
+                extraHeaders: [("cache-control", "no-store")]
+            )
+        case .models:
+            guard requestBody.isEmpty else {
+                writeLocalError(context: context, status: .badRequest, code: "local_invalid_request")
+                return
+            }
+            writeLocalModels(context: context)
+        case .chatCompletions:
+            guard validateLocalBody(head: head, body: requestBody, requiresJSONObject: true, context: context) else {
+                return
+            }
+            writeLocalError(context: context, status: .badRequest, code: "local_budget_required")
+        }
+    }
+
+    private func validatePreAuthBoundsAndFraming(_ head: HTTPRequestHead) -> ConsumeLocalValidationError? {
+        let requestLineBytes = "\(head.method.rawValue) \(head.uri) HTTP/\(head.version.major).\(head.version.minor)".utf8.count
+        guard requestLineBytes <= ConsumeLocalLimits.requestLineBytes,
+              head.uri.utf8.count <= ConsumeLocalLimits.requestTargetBytes else {
+            return ConsumeLocalValidationError(status: .payloadTooLarge, code: "local_request_too_large")
+        }
+        var headerBytes = 0
+        var headerCount = 0
+        for (name, value) in head.headers {
+            headerCount += 1
+            headerBytes += name.utf8.count + value.utf8.count + 4
+        }
+        guard headerCount <= ConsumeLocalLimits.headerCount,
+              headerBytes <= ConsumeLocalLimits.headerBytes else {
+            return ConsumeLocalValidationError(status: .payloadTooLarge, code: "local_request_too_large")
+        }
+        let contentLengths = head.headers["content-length"]
+        guard contentLengths.count <= 1 else {
+            return ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        for value in contentLengths {
+            let normalized = value.trimmingCharacters(in: .whitespaces)
+            guard normalized.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil,
+                  !value.contains(","),
+                  let length = Int(normalized) else {
+                return ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+            }
+            guard length <= ConsumeLocalLimits.bodyBytes else {
+                return ConsumeLocalValidationError(status: .payloadTooLarge, code: "local_request_too_large")
+            }
+        }
+        let transferTokens = head.headers["transfer-encoding"]
+            .flatMap { value in
+                value.split(separator: ",", omittingEmptySubsequences: false)
+                    .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            }
+        guard transferTokens.allSatisfy({ !$0.isEmpty }) else {
+            return ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        guard contentLengths.isEmpty || transferTokens.isEmpty else {
+            return ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        guard transferTokens.isEmpty || transferTokens == ["chunked"] else {
+            return ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        return nil
+    }
+
+    private func validateBrowserOrigin(_ head: HTTPRequestHead) -> ConsumeLocalValidationError? {
+        if head.method == .OPTIONS,
+           !head.headers[canonicalForm: "access-control-request-method"].isEmpty {
+            return ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        var origins: [String] = []
+        for (name, value) in head.headers where name.caseInsensitiveCompare("origin") == .orderedSame {
+            origins.append(value)
+        }
+        guard origins.count <= 1 else {
+            return ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        if let origin = origins.first {
+            let normalized = origin.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard normalized == origin,
+                  origin != "null",
+                  !origin.contains(","),
+                  origin == runtime.boundURL else {
+                return ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+            }
+        }
+        for site in head.headers[canonicalForm: "sec-fetch-site"] {
+            let normalized = site.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard normalized == "same-origin" || normalized == "none" else {
+                return ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+            }
+        }
+        return nil
+    }
+
+    private func validateEndpoint(_ head: HTTPRequestHead) throws -> ConsumeValidatedRequest {
+        let target = try decodeExactRequestTarget(head.uri)
+        switch (head.method, target) {
+        case (.GET, "/v1/status"):
+            return ConsumeValidatedRequest(endpoint: .status)
+        case (.GET, "/v1/models"):
+            return ConsumeValidatedRequest(endpoint: .models)
+        case (.POST, "/v1/chat/completions"):
+            return ConsumeValidatedRequest(endpoint: .chatCompletions)
+        case (.POST, "/v1/status"), (.POST, "/v1/models"), (.GET, "/v1/chat/completions"):
+            throw ConsumeLocalValidationError(status: .methodNotAllowed, code: "local_endpoint_unsupported")
+        default:
+            throw ConsumeLocalValidationError(status: .notFound, code: "local_endpoint_unsupported")
+        }
+    }
+
+    private func decodeExactRequestTarget(_ rawTarget: String) throws -> String {
+        guard rawTarget.first == "/" else {
+            throw ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        if let hash = rawTarget.firstIndex(of: "#"), hash != rawTarget.endIndex {
+            throw ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        if let query = rawTarget.firstIndex(of: "?") {
+            let afterQuery = rawTarget.index(after: query)
+            guard afterQuery == rawTarget.endIndex else {
+                throw ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+            }
+            throw ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        guard !rawTarget.contains("\\") else {
+            throw ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        let lowercase = rawTarget.lowercased()
+        guard !lowercase.contains("%2f"), !lowercase.contains("%5c") else {
+            throw ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        let decoded = try percentDecodePath(rawTarget)
+        guard decoded == rawTarget else {
+            throw ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        let components = decoded.split(separator: "/", omittingEmptySubsequences: false)
+        guard !decoded.contains("//"),
+              !components.contains("."),
+              !components.contains("..") else {
+            throw ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        guard decoded == "/v1/status" || decoded == "/v1/models" || decoded == "/v1/chat/completions" else {
+            return decoded
+        }
+        return decoded
+    }
+
+    private func percentDecodePath(_ rawPath: String) throws -> String {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(rawPath.utf8.count)
+        var index = rawPath.utf8.startIndex
+        while index < rawPath.utf8.endIndex {
+            let byte = rawPath.utf8[index]
+            if byte == 0x25 {
+                let first = rawPath.utf8.index(after: index)
+                guard first < rawPath.utf8.endIndex else {
+                    throw ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+                }
+                let second = rawPath.utf8.index(after: first)
+                guard second < rawPath.utf8.endIndex,
+                      let high = hex(rawPath.utf8[first]),
+                      let low = hex(rawPath.utf8[second]) else {
+                    throw ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+                }
+                bytes.append(high << 4 | low)
+                index = rawPath.utf8.index(after: second)
+            } else {
+                bytes.append(byte)
+                index = rawPath.utf8.index(after: index)
+            }
+            guard bytes.count <= ConsumeLocalLimits.requestTargetBytes else {
+                throw ConsumeLocalValidationError(status: .payloadTooLarge, code: "local_request_too_large")
+            }
+        }
+        guard let decoded = String(bytes: bytes, encoding: .utf8) else {
+            throw ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
+        }
+        return decoded
+    }
+
+    private func hex(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case 48...57:
+            return byte - 48
+        case 65...70:
+            return byte - 55
+        case 97...102:
+            return byte - 87
+        default:
+            return nil
+        }
+    }
+
+    private func validateLocalBody(
+        head: HTTPRequestHead,
+        body: Data,
+        requiresJSONObject: Bool,
+        context: ChannelHandlerContext
+    ) -> Bool {
+        let encodings = head.headers[canonicalForm: "content-encoding"]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        guard encodings.isEmpty || encodings == ["identity"] else {
+            writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 415), code: "local_content_encoding_unsupported")
+            return false
+        }
+        guard body.count <= ConsumeLocalLimits.bodyBytes else {
+            writeLocalError(context: context, status: .payloadTooLarge, code: "local_request_too_large")
+            return false
+        }
+        guard !requiresJSONObject || !body.isEmpty,
+              let text = String(data: body, encoding: .utf8),
+              let parsed = try? StrictJSONParser.parse(text),
+              !requiresJSONObject || parsed.isObject else {
+            writeLocalError(context: context, status: .badRequest, code: "local_invalid_request")
+            return false
+        }
+        return true
+    }
+
+    private func writeLocalModels(context: ChannelHandlerContext) {
+        let models = runtime.modelAllowlist.map { modelID in
+            [
+                "id": modelID,
+                "object": "model",
+                "created": 0,
+                "owned_by": "macprovider",
+            ] as [String: Any]
         }
         writeJSON(
             context: context,
             status: .ok,
-            body: runtime.statusPayload(),
+            body: [
+                "object": "list",
+                "data": models,
+            ],
             extraHeaders: [("cache-control", "no-store")]
         )
     }
 
     private func endRequestIfNeeded() {
+        cancelPostHeaderDeadlines()
+        if reservedBodyBytes > 0 {
+            runtime.releaseBodyBytes(reservedBodyBytes)
+            reservedBodyBytes = 0
+        }
         guard requestIsActive else { return }
         requestIsActive = false
         runtime.endRequest()
+    }
+
+    private func completeIncompletePreAuthConnection() {
+        guard connectionIsIncompletePreAuth else { return }
+        connectionIsIncompletePreAuth = false
+        runtime.completePreAuthConnection()
+    }
+
+    private func closeIfHeaderMissing() {
+        guard requestHead == nil else { return }
+        channelForDeadline?.close(promise: nil)
+    }
+
+    private func startRequestDeadline(context: ChannelHandlerContext) {
+        requestDeadlineTask?.cancel()
+        requestDeadlineTask = context.eventLoop.scheduleTask(in: ConsumeLocalLimits.requestReadTimeout) { [weak self] in
+            self?.closeIfRequestIncomplete()
+        }
+        if shouldReadBody {
+            refreshBodyIdleDeadline(context: context)
+        }
+    }
+
+    private var shouldReadBody: Bool {
+        guard let endpoint = validatedRequest?.endpoint else { return true }
+        return endpoint == .chatCompletions
+    }
+
+    private func refreshBodyIdleDeadline(context: ChannelHandlerContext) {
+        bodyIdleDeadlineTask?.cancel()
+        bodyIdleDeadlineTask = context.eventLoop.scheduleTask(in: ConsumeLocalLimits.bodyIdleTimeout) { [weak self] in
+            self?.closeIfRequestIncomplete()
+        }
+    }
+
+    private func closeIfRequestIncomplete() {
+        guard requestIsActive, !responseStarted else { return }
+        channelForDeadline?.close(promise: nil)
+    }
+
+    private func cancelPostHeaderDeadlines() {
+        requestDeadlineTask?.cancel()
+        requestDeadlineTask = nil
+        bodyIdleDeadlineTask?.cancel()
+        bodyIdleDeadlineTask = nil
+    }
+
+    private func writeLocalError(
+        context: ChannelHandlerContext,
+        status: HTTPResponseStatus,
+        code: String,
+        forwardedUpstream: Bool = false,
+        extraHeaders: [(String, String)] = []
+    ) {
+        writeJSON(
+            context: context,
+            status: status,
+            body: errorEnvelope(code: code, forwardedUpstream: forwardedUpstream),
+            extraHeaders: extraHeaders
+        )
     }
 
     private func writeJSON(
@@ -1209,13 +1795,16 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 ? Data()
                 : JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
             var headers = HTTPHeaders()
-            headers.add(name: "content-type", value: "application/json")
+            if !(body is NSNull) {
+                headers.add(name: "content-type", value: "application/json")
+            }
             headers.add(name: "content-length", value: "\(data.count)")
             headers.add(name: "connection", value: "close")
             for (name, value) in extraHeaders {
                 headers.add(name: name, value: value)
             }
             let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
+            responseStarted = true
             context.write(wrapOutboundOut(.head(head)), promise: nil)
             if !data.isEmpty {
                 var buffer = context.channel.allocator.buffer(capacity: data.count)
@@ -1229,16 +1818,39 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    private func errorEnvelope(code: String) -> [String: Any] {
+    private func writeHeadOnly(context: ChannelHandlerContext, status: HTTPResponseStatus) {
+        var headers = HTTPHeaders()
+        headers.add(name: "content-length", value: "0")
+        headers.add(name: "connection", value: "close")
+        let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
+        responseStarted = true
+        context.write(wrapOutboundOut(.head(head)), promise: nil)
+        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        context.close(promise: nil)
+    }
+
+    private func errorEnvelope(code: String, forwardedUpstream: Bool) -> [String: Any] {
         [
             "error": [
                 "message": code,
                 "type": "macprovider_local_error",
                 "param": NSNull(),
                 "code": code,
-                "macprovider": ["forwarded_upstream": false],
+                "macprovider": ["forwarded_upstream": forwardedUpstream],
             ],
         ]
+    }
+}
+
+struct ConsumeLocalValidationError: Error {
+    let status: HTTPResponseStatus
+    let code: String
+}
+
+private extension JSONValue {
+    var isObject: Bool {
+        if case .object = self { return true }
+        return false
     }
 }
 
