@@ -641,6 +641,7 @@ struct ConsumeUpstreamRequest: Sendable {
     let endpoint: String
     let bearerToken: String
     let body: Data
+    let streaming: Bool
 }
 
 struct ConsumeUpstreamResponse: Sendable {
@@ -869,7 +870,8 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
             host: host,
             port: portValue,
             bearerToken: upstreamRequest.bearerToken,
-            body: upstreamRequest.body
+            body: upstreamRequest.body,
+            streaming: upstreamRequest.streaming
         )
         do {
             try await send(
@@ -1246,7 +1248,7 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         }
     }
 
-    private static func httpRequestBytes(host: String, port: Int, bearerToken: String, body: Data) -> Data {
+    private static func httpRequestBytes(host: String, port: Int, bearerToken: String, body: Data, streaming: Bool) -> Data {
         let hostHeader = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
         let authority = port == 443 ? hostHeader : "\(hostHeader):\(port)"
         var request = Data()
@@ -1254,7 +1256,7 @@ final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Senda
         request.append(Data("Host: \(authority)\r\n".utf8))
         request.append(Data("Authorization: Bearer \(bearerToken)\r\n".utf8))
         request.append(Data("Content-Type: application/json\r\n".utf8))
-        request.append(Data("Accept: application/json\r\n".utf8))
+        request.append(Data("Accept: \(streaming ? "text/event-stream" : "application/json")\r\n".utf8))
         request.append(Data("Accept-Encoding: identity\r\n".utf8))
         request.append(Data("Connection: close\r\n".utf8))
         request.append(Data("Content-Length: \(body.count)\r\n\r\n".utf8))
@@ -3278,8 +3280,14 @@ struct ConsumeEndpointRuntime: Sendable {
         requestCounter.releaseBodyBytes(count)
     }
 
-    func reserveUpstreamExchange(responseSpoolBytes: Int) -> ConsumeEndpointResourceReservation? {
-        requestCounter.reserveUpstreamExchange(responseSpoolBytes: responseSpoolBytes)
+    func reserveUpstreamExchange(
+        responseSpoolBytes: Int,
+        openStreamingResponse: Bool = false
+    ) -> ConsumeEndpointResourceReservation? {
+        requestCounter.reserveUpstreamExchange(
+            responseSpoolBytes: responseSpoolBytes,
+            openStreamingResponse: openStreamingResponse
+        )
     }
 
     func releaseUpstreamExchange(_ reservation: ConsumeEndpointResourceReservation) {
@@ -3405,6 +3413,7 @@ struct ConsumeEndpointResourceReservation: Sendable {
     let responseSpoolBytes: Int
     let upstreamWorkerTasks: Int
     let upstreamSocketDescriptors: Int
+    let openStreamingResponses: Int
 }
 
 struct ConsumeEndpointResourceSnapshot: Sendable {
@@ -3501,28 +3510,36 @@ final class ConsumeEndpointRequestCounter: @unchecked Sendable {
         lock.unlock()
     }
 
-    func reserveUpstreamExchange(responseSpoolBytes count: Int) -> ConsumeEndpointResourceReservation? {
+    func reserveUpstreamExchange(
+        responseSpoolBytes count: Int,
+        openStreamingResponse: Bool = false
+    ) -> ConsumeEndpointResourceReservation? {
         lock.lock()
         defer { lock.unlock() }
+        let streamingSlots = openStreamingResponse ? 1 : 0
         guard count >= 0,
               responseSpoolBytes <= maxResponseSpoolBytes - count,
+              openStreamingResponses <= maxOpenStreamingResponses - streamingSlots,
               upstreamWorkerTasks < maxUpstreamWorkerTasks,
               upstreamSocketDescriptors < maxUpstreamSocketDescriptors else {
             return nil
         }
         responseSpoolBytes += count
+        openStreamingResponses += streamingSlots
         upstreamWorkerTasks += 1
         upstreamSocketDescriptors += 1
         return ConsumeEndpointResourceReservation(
             responseSpoolBytes: count,
             upstreamWorkerTasks: 1,
-            upstreamSocketDescriptors: 1
+            upstreamSocketDescriptors: 1,
+            openStreamingResponses: streamingSlots
         )
     }
 
     func releaseUpstreamExchange(_ reservation: ConsumeEndpointResourceReservation) {
         lock.lock()
         responseSpoolBytes = max(0, responseSpoolBytes - max(0, reservation.responseSpoolBytes))
+        openStreamingResponses = max(0, openStreamingResponses - max(0, reservation.openStreamingResponses))
         upstreamWorkerTasks = max(0, upstreamWorkerTasks - max(0, reservation.upstreamWorkerTasks))
         upstreamSocketDescriptors = max(0, upstreamSocketDescriptors - max(0, reservation.upstreamSocketDescriptors))
         lock.unlock()
@@ -4181,10 +4198,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func writeLocalChatAdmissionFailure(model: String, request: JSONValue, bodyByteCount: Int, context: ChannelHandlerContext) {
-        guard request.objectBool("stream") != true else {
-            writeLocalError(context: context, status: .serviceUnavailable, code: "local_pricing_unavailable")
-            return
-        }
+        let isStreaming = request.objectBool("stream") == true
         let trustedPricing = runtime.trustedPricing.revalidated(now: runtime.now())
         let pricingMatch = trustedPricing.match(model: model)
         let trustedPricingWarnings = trustedPricing.warningCodes(match: pricingMatch)
@@ -4231,7 +4245,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             let headers = warningHeaders(runtime.budget.localWarningTokens + trustedPricingWarnings)
             let contextBox = ConsumeNIOContextBox(context)
-            resolveUpstreamEndpoint(context: context, extraHeaders: headers) { [weak self] endpoint in
+            resolveUpstreamEndpoint(streaming: isStreaming, context: context, extraHeaders: headers) { [weak self] endpoint in
                 guard let self else { return false }
                 guard !self.channelInactiveWhileUpstreamPending else { return false }
                 guard !self.runtime.pricingAdmissionGate.isEstimateExceeded() else {
@@ -4292,6 +4306,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                         case .reserved(let reservationID, let reservedAmount):
                             self.forwardUpstreamWithLedgerSettlement(
                                 body: self.requestBody,
+                                streaming: isStreaming,
                                 context: contextBox.context,
                                 endpoint: endpoint,
                                 bearerToken: bearerToken,
@@ -4312,6 +4327,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 self.forwardUpstreamWithoutLedger(
                     body: self.requestBody,
+                    streaming: isStreaming,
                     context: contextBox.context,
                     endpoint: endpoint,
                     bearerToken: bearerToken,
@@ -4379,7 +4395,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 let headers = warningHeaders(runtime.budget.localWarningTokens + trustedPricingWarnings)
                 let contextBox = ConsumeNIOContextBox(context)
-                resolveUpstreamEndpoint(context: context, extraHeaders: headers) { [weak self] endpoint in
+                resolveUpstreamEndpoint(streaming: isStreaming, context: context, extraHeaders: headers) { [weak self] endpoint in
                     guard let self else { return false }
                     guard !self.channelInactiveWhileUpstreamPending else { return false }
                     guard !self.runtime.pricingAdmissionGate.isEstimateExceeded() else {
@@ -4461,6 +4477,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                         case .reserved(let reservationID, let reservedAmount):
                             self.forwardUpstreamWithLedgerSettlement(
                                 body: self.requestBody,
+                                streaming: isStreaming,
                                 context: contextBox.context,
                                 endpoint: endpoint,
                                 bearerToken: bearerToken,
@@ -4490,6 +4507,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func forwardUpstreamWithoutLedger(
         body: Data,
+        streaming: Bool,
         context: ChannelHandlerContext,
         endpoint: String,
         bearerToken: String,
@@ -4499,7 +4517,8 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             origin: runtime.upstreamOrigin,
             endpoint: endpoint,
             bearerToken: bearerToken,
-            body: body
+            body: body,
+            streaming: streaming
         )
         let contextBox = ConsumeNIOContextBox(context)
         upstreamForwardIsPending = true
@@ -4515,7 +4534,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             switch result {
             case .success(let response):
                 do {
-                    let localResponse = try Self.responseForLocalDelivery(response)
+                    let localResponse = try Self.responseForLocalDelivery(response, streaming: streaming)
                     self.writeUpstreamResponse(localResponse, context: contextBox.context, extraHeaders: extraHeaders)
                 } catch {
                     self.writeLocalError(
@@ -4541,6 +4560,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func forwardUpstreamWithLedgerSettlement(
         body: Data,
+        streaming: Bool,
         context: ChannelHandlerContext,
         endpoint: String,
         bearerToken: String,
@@ -4556,7 +4576,8 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             origin: runtime.upstreamOrigin,
             endpoint: endpoint,
             bearerToken: bearerToken,
-            body: body
+            body: body,
+            streaming: streaming
         )
         let contextBox = ConsumeNIOContextBox(context)
         upstreamForwardIsPending = true
@@ -4573,9 +4594,10 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             case .success(let response):
                 let localResponse: ConsumeUpstreamResponse
                 do {
-                    localResponse = try Self.responseForLocalDelivery(response)
+                    localResponse = try Self.responseForLocalDelivery(response, streaming: streaming)
                     let settlement = try self.settlementAmount(
                         response: localResponse,
+                        streaming: streaming,
                         fallbackEstimate: estimate.amount,
                         pricingMatch: pricingMatch,
                         projection: projection
@@ -4677,12 +4699,13 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func resolveUpstreamEndpoint(
+        streaming: Bool,
         context: ChannelHandlerContext,
         extraHeaders: [(String, String)],
         onSuccess: @escaping @Sendable (String) -> Bool
     ) {
         let contextBox = ConsumeNIOContextBox(context)
-        guard reserveUpstreamResources(context: contextBox.context, extraHeaders: extraHeaders) else { return }
+        guard reserveUpstreamResources(streaming: streaming, context: contextBox.context, extraHeaders: extraHeaders) else { return }
         upstreamForwardIsPending = true
         upstreamForwardWasDispatched = false
         channelInactiveWhileUpstreamPending = false
@@ -4717,12 +4740,14 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func reserveUpstreamResources(
+        streaming: Bool,
         context: ChannelHandlerContext,
         extraHeaders: [(String, String)]
     ) -> Bool {
         guard upstreamResourceReservation == nil,
               let reservation = runtime.reserveUpstreamExchange(
-                responseSpoolBytes: ConsumeLocalLimits.nonStreamingResponseSpoolBytes
+                responseSpoolBytes: streaming ? 0 : ConsumeLocalLimits.nonStreamingResponseSpoolBytes,
+                openStreamingResponse: streaming
               ) else {
             writeLocalError(
                 context: context,
@@ -4763,13 +4788,24 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func settlementAmount(
         response: ConsumeUpstreamResponse,
+        streaming: Bool,
         fallbackEstimate: ConsumeMicroUSD,
         pricingMatch: ConsumeTrustedRateCardMatch,
         projection: RateCardProjection
     ) throws -> (amount: ConsumeMicroUSD, reason: String) {
-        guard let text = String(data: response.body, encoding: .utf8),
-              case .object(let root) = try? StrictJSONParser.parse(text),
-              case .object(let usage)? = root["usage"],
+        let usage: [String: JSONValue]?
+        if streaming, response.statusCode >= 200, response.statusCode < 300 {
+            usage = try Self.lastSSEUsageObject(response.body)
+        } else if streaming {
+            usage = nil
+        } else if let text = String(data: response.body, encoding: .utf8),
+                  case .object(let root) = try? StrictJSONParser.parse(text),
+                  case .object(let parsedUsage)? = root["usage"] {
+            usage = parsedUsage
+        } else {
+            usage = nil
+        }
+        guard let usage,
               case .int(let promptTokens)? = usage["prompt_tokens"],
               case .int(let completionTokens)? = usage["completion_tokens"] else {
             return (fallbackEstimate, "settled_to_admission_estimate")
@@ -4785,7 +4821,14 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         return (amount, "settled_to_upstream_usage")
     }
 
-    private static func responseForLocalDelivery(_ response: ConsumeUpstreamResponse) throws -> ConsumeUpstreamResponse {
+    private static func responseForLocalDelivery(_ response: ConsumeUpstreamResponse, streaming: Bool) throws -> ConsumeUpstreamResponse {
+        if streaming, response.statusCode >= 200, response.statusCode < 300 {
+            return try streamingResponseForLocalDelivery(response)
+        }
+        return try nonStreamingResponseForLocalDelivery(response)
+    }
+
+    private static func nonStreamingResponseForLocalDelivery(_ response: ConsumeUpstreamResponse) throws -> ConsumeUpstreamResponse {
         switch try upstreamResponseContentCoding(response.headers) {
         case .identity:
             return ConsumeUpstreamResponse(
@@ -4807,6 +4850,99 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 body: decodedBody
             )
         }
+    }
+
+    private static func streamingResponseForLocalDelivery(_ response: ConsumeUpstreamResponse) throws -> ConsumeUpstreamResponse {
+        guard try upstreamResponseContentCoding(response.headers) == .identity,
+              upstreamResponseIsEventStream(response.headers) else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        _ = try lastSSEUsageObject(response.body)
+        return ConsumeUpstreamResponse(
+            statusCode: response.statusCode,
+            headers: response.headers.filter { name, _ in
+                name.caseInsensitiveCompare("content-encoding") != .orderedSame &&
+                    name.caseInsensitiveCompare("content-length") != .orderedSame
+            },
+            body: response.body
+        )
+    }
+
+    private static func upstreamResponseIsEventStream(_ headers: [(String, String)]) -> Bool {
+        let values = headers
+            .filter { name, _ in name.caseInsensitiveCompare("content-type") == .orderedSame }
+            .map { _, value in trimHTTPOptionalWhitespace(value[...]).lowercased() }
+        guard values.count == 1,
+              let value = values.first else {
+            return false
+        }
+        let mediaType = value.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+        return trimHTTPOptionalWhitespace(mediaType[...]) == "text/event-stream"
+    }
+
+    private static func lastSSEUsageObject(_ body: Data) throws -> [String: JSONValue]? {
+        guard let text = String(data: body, encoding: .utf8) else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        var dataLines: [String] = []
+        var sawDone = false
+        var lastUsage: [String: JSONValue]?
+
+        func finishEvent() throws {
+            guard !dataLines.isEmpty else { return }
+            let payload = dataLines.joined(separator: "\n")
+            dataLines.removeAll(keepingCapacity: true)
+            if payload == "[DONE]" {
+                guard !sawDone else {
+                    throw ConsumeUpstreamForwardError.dispatchedUnavailable
+                }
+                sawDone = true
+                return
+            }
+            guard !sawDone else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            guard case .object(let root) = try? StrictJSONParser.parse(payload) else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            if case .object(let usage)? = root["usage"] {
+                lastUsage = usage
+            }
+        }
+
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.last == "\r" ? rawLine.dropLast() : rawLine[...]
+            if line.isEmpty {
+                try finishEvent()
+                continue
+            }
+            guard !sawDone else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            if line.hasPrefix(":") {
+                continue
+            }
+            if line == "data" {
+                dataLines.append("")
+                continue
+            }
+            if line.hasPrefix("data:") {
+                var value = line.dropFirst(5)
+                if value.first == " " {
+                    value = value.dropFirst()
+                }
+                dataLines.append(String(value))
+                continue
+            }
+            guard line.contains(":") else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+        }
+        try finishEvent()
+        guard sawDone else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        return lastUsage
     }
 
     private static func upstreamResponseContentCoding(_ headers: [(String, String)]) throws -> ConsumeUpstreamResponseContentCoding {
