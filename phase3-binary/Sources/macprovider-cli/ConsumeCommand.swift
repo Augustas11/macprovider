@@ -324,6 +324,114 @@ struct ConsumeMicroUSD: Equatable, Comparable, Sendable {
     }
 }
 
+struct ConsumePricedExposureEstimate: Equatable, Sendable {
+    let amount: ConsumeMicroUSD
+    let promptTokenUpperBound: Int64
+    let completionTokenUpperBound: Int64
+    let rateCardKey: String
+}
+
+enum ConsumePricedExposureEstimator {
+    static func estimate(
+        bodyByteCount: Int,
+        request: JSONValue,
+        match: ConsumeTrustedRateCardMatch,
+        projection: RateCardProjection
+    ) throws -> ConsumePricedExposureEstimate {
+        guard bodyByteCount >= 0,
+              let promptTokens = Int64(exactly: bodyByteCount),
+              let completionTokens = explicitOutputTokenBound(from: request) else {
+            throw ConsumeBudgetError(code: "local_pricing_unavailable")
+        }
+        return try estimate(
+            promptTokenUpperBound: promptTokens,
+            completionTokenUpperBound: completionTokens,
+            match: match,
+            projection: projection
+        )
+    }
+
+    static func estimate(
+        promptTokenUpperBound promptTokens: Int64,
+        completionTokenUpperBound completionTokens: Int64,
+        match: ConsumeTrustedRateCardMatch,
+        projection: RateCardProjection
+    ) throws -> ConsumePricedExposureEstimate {
+        guard promptTokens >= 0, completionTokens > 0 else {
+            throw ConsumeBudgetError(code: "local_pricing_unavailable")
+        }
+        let row = match.row
+        let prompt = try componentMicroUSD(
+            tokens: promptTokens,
+            ratePerMtok: row.promptRatePerMtok,
+            globalMultiplierPPM: row.globalMultiplierPPM,
+            usdPerMillionCredits: projection.usdPerMillionCredits
+        )
+        let completion = try componentMicroUSD(
+            tokens: completionTokens,
+            ratePerMtok: row.completionRatePerMtok,
+            globalMultiplierPPM: row.globalMultiplierPPM,
+            usdPerMillionCredits: projection.usdPerMillionCredits
+        )
+        let amount = try prompt + completion
+        guard amount > .zero else {
+            throw ConsumeBudgetError(code: "local_pricing_unavailable")
+        }
+        return ConsumePricedExposureEstimate(
+            amount: amount,
+            promptTokenUpperBound: promptTokens,
+            completionTokenUpperBound: completionTokens,
+            rateCardKey: match.rateCardKey
+        )
+    }
+
+    private static func explicitOutputTokenBound(from request: JSONValue) -> Int64? {
+        request.objectPositiveInt64("max_tokens")
+    }
+
+    private static func componentMicroUSD(
+        tokens: Int64,
+        ratePerMtok: Int64,
+        globalMultiplierPPM: Int64,
+        usdPerMillionCredits: Double
+    ) throws -> ConsumeMicroUSD {
+        guard tokens >= 0,
+              ratePerMtok >= 0,
+              globalMultiplierPPM >= 0,
+              usdPerMillionCredits.isFinite,
+              usdPerMillionCredits >= 0 else {
+            throw ConsumeBudgetError(code: "local_pricing_unavailable")
+        }
+        if tokens == 0 || ratePerMtok == 0 || globalMultiplierPPM == 0 || usdPerMillionCredits == 0 {
+            return .zero
+        }
+        guard let creditsDecimal = decimalUSDPerMillionCredits(usdPerMillionCredits) else {
+            throw ConsumeBudgetError(code: "local_pricing_unavailable")
+        }
+        let numerator = Decimal(tokens)
+            * Decimal(ratePerMtok)
+            * Decimal(globalMultiplierPPM)
+            * creditsDecimal
+        var quotient = numerator / Decimal(1_000_000_000_000 as Int64)
+        var rounded = Decimal()
+        NSDecimalRound(&rounded, &quotient, 0, .up)
+        let number = NSDecimalNumber(decimal: rounded)
+        guard number != NSDecimalNumber.notANumber,
+              number.compare(NSDecimalNumber(value: Int64.max)) != .orderedDescending,
+              number.compare(NSDecimalNumber.zero) != .orderedAscending else {
+            throw ConsumeBudgetError(code: "local_pricing_unavailable")
+        }
+        return ConsumeMicroUSD(rawValue: number.int64Value)
+    }
+
+    private static func decimalUSDPerMillionCredits(_ value: Double) -> Decimal? {
+        guard value == 1.0 else {
+            return nil
+        }
+        return Decimal(1)
+    }
+}
+
 enum ConsumeBudgetMode: Equatable, Sendable {
     case unconfigured
     case budget(ConsumeMicroUSD)
@@ -765,6 +873,41 @@ final class ConsumeBudgetLedger: @unchecked Sendable {
             reason: "upstream_proxy_not_implemented"
         )
         return .held(remaining)
+    }
+
+    func reserveAndHoldPricedEstimate(
+        runID: String,
+        budget: ConsumeMicroUSD,
+        estimate: ConsumeMicroUSD,
+        maxRequest: ConsumeMicroUSD?
+    ) throws -> ConsumeBudgetAdmissionResult {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        guard estimate > .zero else {
+            return .requestCapExceeded
+        }
+        if let maxRequest, estimate > maxRequest {
+            return .requestCapExceeded
+        }
+        let summary = try summaryUnlocked()
+        let committed = try summary.committedExposure()
+        let remaining = budget - committed
+        guard estimate <= remaining else {
+            return .budgetExceeded
+        }
+        let reservationID = try reserveUnlocked(
+            runID: runID,
+            amount: estimate,
+            reason: "priced_proxy_deferred"
+        )
+        try holdUnlocked(
+            runID: runID,
+            reservationID: reservationID,
+            amount: estimate,
+            reason: "upstream_proxy_not_implemented"
+        )
+        return .held(estimate)
     }
 
     func markHeldReservationsForRestart(excludingRunID: String) throws {
@@ -2619,7 +2762,12 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 writeLocalError(context: context, status: .badRequest, code: "local_model_not_allowed")
                 return
             }
-            writeLocalChatAdmissionFailure(model: model, context: context)
+            writeLocalChatAdmissionFailure(
+                model: model,
+                request: parsed,
+                bodyByteCount: requestBody.count,
+                context: context
+            )
         }
     }
 
@@ -2835,7 +2983,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         return parsed
     }
 
-    private func writeLocalChatAdmissionFailure(model: String, context: ChannelHandlerContext) {
+    private func writeLocalChatAdmissionFailure(model: String, request: JSONValue, bodyByteCount: Int, context: ChannelHandlerContext) {
         let trustedPricing = runtime.trustedPricing.revalidated(now: runtime.now())
         let pricingMatch = trustedPricing.match(model: model)
         let trustedPricingWarnings = trustedPricing.warningCodes(match: pricingMatch)
@@ -2864,46 +3012,86 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 code: "local_upstream_unavailable",
                 extraHeaders: warningHeaders(runtime.budget.localWarningTokens + trustedPricingWarnings)
             )
-        case .budget:
-            if pricingAdmitsCurrentRequest {
+        case .budget(let budget):
+            if pricingAdmitsCurrentRequest,
+               let pricingMatch,
+               case .available(let rateCard) = trustedPricing {
+                let estimate: ConsumePricedExposureEstimate
+                do {
+                    estimate = try ConsumePricedExposureEstimator.estimate(
+                        bodyByteCount: bodyByteCount,
+                        request: request,
+                        match: pricingMatch,
+                        projection: rateCard.projection
+                    )
+                } catch {
+                    if !runtime.budget.allowUnpriced {
+                        writeLocalError(context: context, status: .serviceUnavailable, code: "local_pricing_unavailable")
+                        return
+                    }
+                    return writeLocalUnpricedBudgetAdmission(budget: budget, context: context)
+                }
+                guard let ledger = runtime.budget.ledger else {
+                    writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                    return
+                }
+                do {
+                    switch try ledger.reserveAndHoldPricedEstimate(
+                        runID: runtime.launchID,
+                        budget: budget,
+                        estimate: estimate.amount,
+                        maxRequest: runtime.budget.maxRequestMicroUSD
+                    ) {
+                    case .budgetExceeded:
+                        writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_budget_exceeded")
+                    case .requestCapExceeded:
+                        writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                    case .held:
+                        writeLocalError(
+                            context: context,
+                            status: .serviceUnavailable,
+                            code: "local_upstream_unavailable",
+                            extraHeaders: warningHeaders(runtime.budget.localWarningTokens + trustedPricingWarnings)
+                        )
+                    }
+                    return
+                } catch {
+                    writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                    return
+                }
+            } else if !runtime.budget.allowUnpriced {
+                writeLocalError(context: context, status: .serviceUnavailable, code: "local_pricing_unavailable")
+                return
+            }
+            writeLocalUnpricedBudgetAdmission(budget: budget, context: context)
+        }
+    }
+
+    private func writeLocalUnpricedBudgetAdmission(budget: ConsumeMicroUSD, context: ChannelHandlerContext) {
+        do {
+            guard let ledger = runtime.budget.ledger else {
+                writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                return
+            }
+            switch try ledger.reserveAndHoldUnpricedRemaining(
+                runID: runtime.launchID,
+                budget: budget,
+                maxRequest: runtime.budget.maxRequestMicroUSD
+            ) {
+            case .budgetExceeded:
+                writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_budget_exceeded")
+            case .requestCapExceeded:
+                writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+            case .held:
                 writeLocalError(
                     context: context,
                     status: .serviceUnavailable,
                     code: "local_upstream_unavailable",
-                    extraHeaders: warningHeaders(runtime.budget.localWarningTokens + trustedPricingWarnings)
+                    extraHeaders: warningHeaders(runtime.budget.localWarningTokens)
                 )
-                return
             }
-            guard runtime.budget.allowUnpriced else {
-                writeLocalError(context: context, status: .serviceUnavailable, code: "local_pricing_unavailable")
-                return
-            }
-            do {
-                guard let ledger = runtime.budget.ledger,
-                      case .budget(let budget) = runtime.budget.mode else {
-                    writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
-                    return
-                }
-                switch try ledger.reserveAndHoldUnpricedRemaining(
-                    runID: runtime.launchID,
-                    budget: budget,
-                    maxRequest: runtime.budget.maxRequestMicroUSD
-                ) {
-                case .budgetExceeded:
-                    writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_budget_exceeded")
-                case .requestCapExceeded:
-                    writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
-                case .held:
-                    writeLocalError(
-                        context: context,
-                        status: .serviceUnavailable,
-                        code: "local_upstream_unavailable",
-                        extraHeaders: warningHeaders(runtime.budget.localWarningTokens)
-                    )
-                }
-            } catch {
-                writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
-            }
+        } catch {
+            writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
         }
     }
 
@@ -3078,6 +3266,15 @@ private extension JSONValue {
             return nil
         }
         return value
+    }
+
+    func objectPositiveInt64(_ key: String) -> Int64? {
+        guard case .object(let object) = self,
+              case .int(let value)? = object[key],
+              value > 0 else {
+            return nil
+        }
+        return Int64(value)
     }
 }
 
