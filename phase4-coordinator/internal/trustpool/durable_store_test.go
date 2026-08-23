@@ -697,6 +697,81 @@ func TestDurableStore_PromotePoolRejectsMissingPreconditions(t *testing.T) {
 	}
 }
 
+func TestDurableStore_PromotePoolProductionRequiresActivationEvidence(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	ts := time.Unix(1800000750, 0).UTC()
+	custodyHash := hexDigest("custody")
+	evidenceHash := strings.Repeat("b", 64)
+	tests := []struct {
+		name        string
+		gateCustody string
+		wantReason  string
+		wantActive  bool
+	}{
+		{
+			name:        "custody mismatch rejects",
+			gateCustody: strings.Repeat("c", 64),
+			wantReason:  "production_root_custody_unapproved",
+		},
+		{
+			name:        "matching evidence and custody activates",
+			gateCustody: custodyHash,
+			wantActive:  true,
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, err := trustpool.NewStore(openTrustPoolDB(t), trustpool.WithProductionActivationGate(trustpool.ProductionActivationGate{
+				AllowedLaunchEnvironments: []string{"production"},
+				RootCustodyHashes:         []string{tc.gateCustody},
+				EvidenceSHA256:            evidenceHash,
+			}))
+			if err != nil {
+				t.Fatalf("NewStore: %v", err)
+			}
+			root := newRootFixture(t)
+			approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "production", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+			appendTrustPoolEvents(t, ctx, store,
+				ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+					e.CreatorAccountID = "creator-a"
+					e.ApprovalRecordID = "approval-v1"
+				}),
+				signedRootRegistrationForIssueInEnvironment(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonceInEnvironment(t, store, "creator-a", "approval-v1", "production", ts.Add(time.Hour)), root, "production"),
+				signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+				ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+					e.ProviderID = "provider-a"
+				}),
+				ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+					e.BuyerAccountID = "acct-a"
+				}),
+			)
+			state, _, _, err := store.PromotePool(ctx, trustpool.DurableEvent{
+				OperationID: "op-promote",
+				PoolID:      root.poolID,
+			})
+			if tc.wantActive {
+				if err != nil {
+					t.Fatalf("PromotePool: %v", err)
+				}
+				if got := state.Pools[root.poolID].Lifecycle; got != trustpool.LifecycleActive {
+					t.Fatalf("promoted lifecycle=%q, want active", got)
+				}
+				return
+			}
+			var precondition trustpool.PromotionPreconditionError
+			if !errors.As(err, &precondition) {
+				t.Fatalf("PromotePool err=%v, want PromotionPreconditionError", err)
+			}
+			if precondition.Reason != tc.wantReason {
+				t.Fatalf("precondition reason=%q, want %q", precondition.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
 func TestDurableStore_ReconstructsRouteableRegistryAcrossRestart(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -884,7 +884,7 @@ func main() {
 	var trustPoolRegistry *trustpool.Registry
 	if cfg.TrustedPools.Enabled {
 		var trustPoolsReady bool
-		trustPoolStore, trustPoolRegistry, trustPoolsReady, err = loadTrustedPools(context.Background(), reqLogStore.DB(), logger)
+		trustPoolStore, trustPoolRegistry, trustPoolsReady, err = loadTrustedPools(context.Background(), reqLogStore.DB(), cfg.TrustedPools, logger)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("trusted pools durable store open failed")
 		}
@@ -2321,8 +2321,12 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
-func loadTrustedPools(ctx context.Context, db *sql.DB, logger zerolog.Logger) (*trustpool.Store, *trustpool.Registry, bool, error) {
-	store, err := trustpool.NewStore(db)
+func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsConfig, logger zerolog.Logger) (*trustpool.Store, *trustpool.Registry, bool, error) {
+	store, err := trustpool.NewStore(db, trustpool.WithProductionActivationGate(trustpool.ProductionActivationGate{
+		AllowedLaunchEnvironments: cfg.ProductionActivation.AllowedLaunchEnvironments,
+		RootCustodyHashes:         cfg.ProductionActivation.RootCustodyHashes,
+		EvidenceSHA256:            cfg.ProductionActivation.EvidenceSHA256,
+	}))
 	if err != nil {
 		if errors.Is(err, trustpool.ErrMalformedDurableEvent) {
 			logger.Error().Err(err).Msg("trusted pools durable migration failed; pool support disabled")

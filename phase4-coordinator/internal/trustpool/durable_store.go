@@ -111,7 +111,38 @@ type DurableEvent struct {
 
 // Store persists DurableEvent rows in the coordinator SQLite DB.
 type Store struct {
-	db *sql.DB
+	db                       *sql.DB
+	productionActivationGate productionActivationGate
+}
+
+type productionActivationGate struct {
+	enabled                  bool
+	allowedLaunchEnvironment map[string]bool
+	rootCustodyHashes        map[string]bool
+	evidenceSHA256           string
+}
+
+// ProductionActivationGate is the explicit, default-off SPEC-042 production
+// promotion authority. It does not validate the referenced evidence artifact;
+// it makes production promotion impossible unless the coordinator has been
+// started with a reviewed evidence digest and an approved root-custody hash.
+type ProductionActivationGate struct {
+	AllowedLaunchEnvironments []string
+	RootCustodyHashes         []string
+	EvidenceSHA256            string
+}
+
+type StoreOption func(*Store) error
+
+func WithProductionActivationGate(g ProductionActivationGate) StoreOption {
+	return func(s *Store) error {
+		normalized, err := normalizeProductionActivationGate(g)
+		if err != nil {
+			return err
+		}
+		s.productionActivationGate = normalized
+		return nil
+	}
 }
 
 const (
@@ -190,15 +221,57 @@ type ManifestAcceptanceProjection struct {
 	ManifestSnapshotSHA256 string
 }
 
-func NewStore(db *sql.DB) (*Store, error) {
+func NewStore(db *sql.DB, opts ...StoreOption) (*Store, error) {
 	if db == nil {
 		return nil, ErrStoreClosed
 	}
 	s := &Store{db: db}
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if err := opt(s); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.migrate(context.Background()); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+func normalizeProductionActivationGate(g ProductionActivationGate) (productionActivationGate, error) {
+	evidenceSHA := strings.TrimSpace(g.EvidenceSHA256)
+	if evidenceSHA == "" && len(g.AllowedLaunchEnvironments) == 0 && len(g.RootCustodyHashes) == 0 {
+		return productionActivationGate{}, nil
+	}
+	if requireLowerHex64(evidenceSHA) != nil {
+		return productionActivationGate{}, fmt.Errorf("%w: production activation evidence digest", ErrPromotionPreconditionFailed)
+	}
+	out := productionActivationGate{
+		enabled:                  true,
+		allowedLaunchEnvironment: make(map[string]bool),
+		rootCustodyHashes:        make(map[string]bool),
+		evidenceSHA256:           evidenceSHA,
+	}
+	for _, value := range g.AllowedLaunchEnvironments {
+		value = strings.TrimSpace(value)
+		if value == "" || value == promotionLaunchEnvironmentCandidate {
+			return productionActivationGate{}, fmt.Errorf("%w: production activation launch environment", ErrPromotionPreconditionFailed)
+		}
+		out.allowedLaunchEnvironment[value] = true
+	}
+	for _, value := range g.RootCustodyHashes {
+		value = strings.TrimSpace(value)
+		if requireLowerHex64(value) != nil {
+			return productionActivationGate{}, fmt.Errorf("%w: production activation custody hash", ErrPromotionPreconditionFailed)
+		}
+		out.rootCustodyHashes[value] = true
+	}
+	if len(out.allowedLaunchEnvironment) == 0 || len(out.rootCustodyHashes) == 0 {
+		return productionActivationGate{}, fmt.Errorf("%w: incomplete production activation gate", ErrPromotionPreconditionFailed)
+	}
+	return out, nil
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -1724,7 +1797,7 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 		if err != nil {
 			return err
 		}
-		if err := preState.validatePromotion(e, now); err != nil {
+		if err := preState.validatePromotion(e, now, s.productionActivationGate); err != nil {
 			return err
 		}
 		next := append(append([]DurableEvent(nil), events...), e)
@@ -2723,7 +2796,7 @@ func (s *ReconstructedState) validateMutationCreatorGate(e DurableEvent, now tim
 	return nil
 }
 
-func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time) error {
+func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time, gate productionActivationGate) error {
 	if s == nil {
 		return PromotionPreconditionError{Reason: "state_unavailable"}
 	}
@@ -2741,7 +2814,9 @@ func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time) er
 		return PromotionPreconditionError{Reason: "root_issuer_missing"}
 	}
 	if p.RootIssuer.LaunchEnvironment != promotionLaunchEnvironmentCandidate {
-		return PromotionPreconditionError{Reason: "launch_environment_not_candidate"}
+		if err := validateProductionPromotionGate(p.RootIssuer, gate); err != nil {
+			return err
+		}
 	}
 	if p.ManifestVersion == 0 || p.ManifestCoreDigest == "" {
 		return PromotionPreconditionError{Reason: "manifest_missing"}
@@ -2766,6 +2841,25 @@ func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time) er
 		if !approval.ValidFor(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now) {
 			return PromotionPreconditionError{Reason: approval.InvalidReason(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now)}
 		}
+	}
+	return nil
+}
+
+func validateProductionPromotionGate(root *ReconstructedRootIssuer, gate productionActivationGate) error {
+	if root == nil {
+		return PromotionPreconditionError{Reason: "root_issuer_missing"}
+	}
+	if !gate.enabled {
+		return PromotionPreconditionError{Reason: "launch_environment_not_candidate"}
+	}
+	if !gate.allowedLaunchEnvironment[root.LaunchEnvironment] {
+		return PromotionPreconditionError{Reason: "launch_environment_not_approved"}
+	}
+	if !gate.rootCustodyHashes[root.StructuredCustodyDisclosureHash] {
+		return PromotionPreconditionError{Reason: "production_root_custody_unapproved"}
+	}
+	if gate.evidenceSHA256 == "" {
+		return PromotionPreconditionError{Reason: "production_activation_evidence_missing"}
 	}
 	return nil
 }
