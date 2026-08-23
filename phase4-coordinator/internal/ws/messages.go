@@ -146,6 +146,7 @@ type Tier2Caps struct {
 	AEADSuites                     []string `json:"aead_suites"`
 	ResponseChunkPlaintextEnvelope bool     `json:"response_chunk_plaintext_envelope,omitempty"`
 	InBandAEADRekeyV1              bool     `json:"in_band_aead_rekey_v1,omitempty"`
+	TrustedPoolV1                  bool     `json:"trusted_pool_v1,omitempty"`
 }
 
 type AuthChallenge struct {

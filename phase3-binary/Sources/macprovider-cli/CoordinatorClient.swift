@@ -1404,10 +1404,10 @@ actor CoordinatorClient {
     ) async throws -> (publicKey: String, session: Tier2ProviderSession, response: [String: Any]) {
         let authAttempt = Tier2AuthAttempt()
         let publicKey = Data(newKey.publicKey.rawRepresentation).base64EncodedString()
-        let initialMessage = await authInitialMessage(
+        let initialMessage = trustedPoolCapableInitialMessage(await authInitialMessage(
             attempt: authAttempt,
             providerReceiptPublicKeyOverride: publicKey
-        )
+        ))
         try await send(initialMessage, to: socket)
         let challenge = try await receiveAuthChallenge(from: socket)
         try Task.checkCancellation()
@@ -1498,7 +1498,7 @@ actor CoordinatorClient {
     private func restoreReceiptRotationSession(on socket: ProviderWebSocketTask) async throws {
         do {
             let authAttempt = Tier2AuthAttempt()
-            let initialMessage = await authInitialMessage(attempt: authAttempt)
+            let initialMessage = trustedPoolCapableInitialMessage(await authInitialMessage(attempt: authAttempt))
             try await send(initialMessage, to: socket)
             let challenge = try await receiveAuthChallenge(from: socket)
             try Task.checkCancellation()
@@ -1651,7 +1651,7 @@ actor CoordinatorClient {
     private func connectAndRunTier2(socket: ProviderWebSocketTask) async throws {
         do {
             let authAttempt = Tier2AuthAttempt()
-            let initialMessage = await authInitialMessage(attempt: authAttempt)
+            let initialMessage = trustedPoolCapableInitialMessage(await authInitialMessage(attempt: authAttempt))
             try await send(initialMessage)
             let challenge: [String: Any] = try await receiveAuthChallenge(from: socket)
             let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
@@ -4728,6 +4728,14 @@ actor CoordinatorClient {
                 message["referral_code"] = bootstrapReferralCode
             }
         }
+        return message
+    }
+
+    private func trustedPoolCapableInitialMessage(_ message: [String: Any]) -> [String: Any] {
+        var message = message
+        var capabilities = message["tier2_capabilities"] as? [String: Any] ?? [:]
+        capabilities["trusted_pool_v1"] = true
+        message["tier2_capabilities"] = capabilities
         return message
     }
 
