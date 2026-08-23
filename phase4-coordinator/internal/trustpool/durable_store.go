@@ -1585,9 +1585,10 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 
 // PromotePool is the only durable write path allowed to append an active
 // lifecycle event. It preflights the reconstructed pool state before writing,
-// then replays the full event history including the activation event before the
-// transaction commits. Raw AppendValidatedEvent keeps rejecting active lifecycle
-// events so operators cannot bypass these checks through the generic event API.
+// then replays the full event history including the activation/reactivation
+// event before the transaction commits. Raw AppendValidatedEvent keeps
+// rejecting active lifecycle events so operators cannot bypass these checks
+// through the generic event API.
 func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*ReconstructedState, DurableEvent, bool, error) {
 	if s == nil || s.db == nil {
 		return nil, DurableEvent{}, false, ErrStoreClosed
@@ -2659,7 +2660,7 @@ func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time) er
 	if p == nil {
 		return PromotionPreconditionError{Reason: "pool_not_found"}
 	}
-	if p.Lifecycle != LifecycleCreated {
+	if p.Lifecycle != LifecycleCreated && p.Lifecycle != LifecyclePaused {
 		return PromotionPreconditionError{Reason: "lifecycle_" + p.Lifecycle}
 	}
 	if p.RootIssuer == nil {
@@ -2919,7 +2920,7 @@ func validLifecycleTransition(from, to string) bool {
 	case LifecycleActive:
 		return to == LifecyclePaused || to == LifecycleDraining || to == LifecycleRetired
 	case LifecyclePaused:
-		return to == LifecycleDraining || to == LifecycleRetired
+		return to == LifecycleActive || to == LifecycleDraining || to == LifecycleRetired
 	case LifecycleDraining:
 		return to == LifecycleRetired
 	case LifecycleRetired:

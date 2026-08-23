@@ -494,6 +494,45 @@ func TestAdminHandler_RestrictiveLifecyclePausesRouteablePool(t *testing.T) {
 	}
 }
 
+func TestAdminHandler_PromoteReactivatesPausedPoolAfterPreflight(t *testing.T) {
+	t.Parallel()
+	routeable := newRouteableAdminPool(t)
+	registry := routeable.registry
+	handler := routeable.handler
+	root := routeable.root
+
+	postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-pause", trustpool.LifecyclePaused, "maintenance", http.StatusAccepted)
+	paused := registry.Snapshot(root.poolID)
+	if !paused.Exists || paused.Routeable || len(paused.Members) != 0 {
+		t.Fatalf("paused snapshot = %+v, want non-routeable empty members", paused)
+	}
+
+	rec := postAdminPromote(t, handler, "operator-secret", root.poolID, "op-resume", http.StatusAccepted)
+	var body struct {
+		Pool struct {
+			Lifecycle           string `json:"lifecycle"`
+			Routeable           bool   `json:"routeable"`
+			RouteableGeneration uint64 `json:"routeable_generation"`
+		} `json:"pool"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode reactivation response: %v", err)
+	}
+	if body.Pool.Lifecycle != trustpool.LifecycleActive || !body.Pool.Routeable || body.Pool.RouteableGeneration != paused.Generation+1 {
+		t.Fatalf("reactivation response pool=%+v, want active routeable generation %d", body.Pool, paused.Generation+1)
+	}
+	active := registry.Snapshot(root.poolID)
+	if !active.Exists || !active.Routeable || !active.Members["provider-a"] || !registry.BuyerAuthorized(root.poolID, "acct-allowed") {
+		t.Fatalf("reactivated snapshot = %+v buyer_auth=%v, want routeable provider-a/acct-allowed", active, registry.BuyerAuthorized(root.poolID, "acct-allowed"))
+	}
+
+	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-resume", http.StatusAccepted)
+	retry := registry.Snapshot(root.poolID)
+	if retry.Generation != active.Generation || !retry.Routeable || !retry.Members["provider-a"] {
+		t.Fatalf("idempotent resume retry snapshot = %+v, want unchanged routeable generation %d", retry, active.Generation)
+	}
+}
+
 func TestAdminHandler_RestrictiveLifecycleDrainsAndRetiresRouteablePool(t *testing.T) {
 	t.Parallel()
 	routeable := newRouteableAdminPool(t)
@@ -1301,7 +1340,7 @@ func postAdminReviewedDistributionArtifact(t *testing.T, h http.Handler, operato
 	return rec
 }
 
-func postAdminPromote(t *testing.T, h http.Handler, operatorKey, poolID, operationID string, want int) {
+func postAdminPromote(t *testing.T, h http.Handler, operatorKey, poolID, operationID string, want int) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/pools/"+poolID+"/promote", nil)
 	req.Header.Set("Authorization", "Bearer "+operatorKey)
@@ -1312,6 +1351,7 @@ func postAdminPromote(t *testing.T, h http.Handler, operatorKey, poolID, operati
 		t.Fatalf("POST promote %s status=%d body=%s, want %d", operationID, rec.Code, rec.Body.String(), want)
 	}
 	assertAdminSchemaVersion(t, rec)
+	return rec
 }
 
 func postAdminLifecycle(t *testing.T, h http.Handler, operatorKey, poolID, operationID, lifecycle, reason string, want int) *httptest.ResponseRecorder {

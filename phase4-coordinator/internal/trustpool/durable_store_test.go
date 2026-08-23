@@ -129,6 +129,126 @@ func TestDurableStore_PromotePoolActivatesAfterPreflight(t *testing.T) {
 	}
 }
 
+func TestDurableStore_PromotePoolReactivatesPausedPoolAfterPreflight(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000650, 0).UTC()
+	root := newRootFixture(t)
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+		ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-a"
+		}),
+		ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+			e.BuyerAccountID = "acct-a"
+		}),
+	)
+	if _, _, _, err := store.PromotePool(ctx, trustpool.DurableEvent{
+		OperationID:  "op-promote",
+		TimestampUTC: ts.Add(5 * time.Second),
+		PoolID:       root.poolID,
+	}); err != nil {
+		t.Fatalf("initial PromotePool: %v", err)
+	}
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-pause", ts.Add(6*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
+			e.Lifecycle = trustpool.LifecyclePaused
+		}),
+	)
+
+	state, committed, applied, err := store.PromotePool(ctx, trustpool.DurableEvent{
+		OperationID:  "op-resume",
+		TimestampUTC: ts.Add(7 * time.Second),
+		PoolID:       root.poolID,
+		Reason:       "post-maintenance preflight passed",
+	})
+	if err != nil {
+		t.Fatalf("reactivation PromotePool: %v", err)
+	}
+	if !applied || committed.OperationID != "op-resume" || committed.Lifecycle != trustpool.LifecycleActive {
+		t.Fatalf("reactivation committed=%+v applied=%v, want active op-resume", committed, applied)
+	}
+	pool := state.Pools[root.poolID]
+	if pool == nil || pool.Lifecycle != trustpool.LifecycleActive || pool.LifecycleReason != "post-maintenance preflight passed" {
+		t.Fatalf("reactivated pool = %+v, want active with reason", pool)
+	}
+	registry, err := state.BuildRegistry()
+	if err != nil {
+		t.Fatalf("BuildRegistry: %v", err)
+	}
+	snap := registry.Snapshot(root.poolID)
+	if !snap.Exists || !snap.Routeable || !snap.Members["provider-a"] {
+		t.Fatalf("reactivated snapshot = %+v, want routeable provider-a", snap)
+	}
+	if !registry.BuyerAuthorized(root.poolID, "acct-a") {
+		t.Fatal("acct-a should remain authorized after reactivation")
+	}
+}
+
+func TestDurableStore_PromotePoolRejectsPausedPoolWhenPreflightRegresses(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := openTrustPoolDB(t)
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000655, 0).UTC()
+	root := newRootFixture(t)
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+		ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-a"
+		}),
+		ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+			e.BuyerAccountID = "acct-a"
+		}),
+	)
+	if _, _, _, err := store.PromotePool(ctx, trustpool.DurableEvent{
+		OperationID:  "op-promote",
+		TimestampUTC: ts.Add(5 * time.Second),
+		PoolID:       root.poolID,
+	}); err != nil {
+		t.Fatalf("initial PromotePool: %v", err)
+	}
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-pause", ts.Add(6*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
+			e.Lifecycle = trustpool.LifecyclePaused
+		}),
+		ev("op-remove-buyer", ts.Add(7*time.Second), trustpool.EventBuyerAuthorizationRm, root.poolID, func(e *trustpool.DurableEvent) {
+			e.BuyerAccountID = "acct-a"
+		}),
+	)
+
+	_, _, _, err = store.PromotePool(ctx, trustpool.DurableEvent{
+		OperationID:  "op-resume",
+		TimestampUTC: ts.Add(8 * time.Second),
+		PoolID:       root.poolID,
+	})
+	var precondition trustpool.PromotionPreconditionError
+	if !errors.As(err, &precondition) {
+		t.Fatalf("reactivation PromotePool err=%v, want PromotionPreconditionError", err)
+	}
+	if precondition.Reason != "buyer_authorization_missing" {
+		t.Fatalf("precondition reason = %q, want buyer_authorization_missing", precondition.Reason)
+	}
+}
+
 func TestDurableStore_PersistsManifestAcceptanceProjection(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -520,7 +640,7 @@ func TestDurableStore_PromotePoolRejectsMissingPreconditions(t *testing.T) {
 			want: "launch_environment_not_candidate",
 		},
 		{
-			name: "paused reactivation requires future sweep",
+			name: "active re-promotion requires a restrictive transition first",
 			build: func(t *testing.T, store *trustpool.Store, root rootFixture) {
 				appendTrustPoolEvents(t, ctx, store,
 					ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
@@ -543,13 +663,8 @@ func TestDurableStore_PromotePoolRejectsMissingPreconditions(t *testing.T) {
 				}); err != nil {
 					t.Fatalf("first PromotePool: %v", err)
 				}
-				appendTrustPoolEvents(t, ctx, store,
-					ev("op-pause", ts.Add(6*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
-						e.Lifecycle = trustpool.LifecyclePaused
-					}),
-				)
 			},
-			want: "lifecycle_paused",
+			want: "lifecycle_active",
 		},
 	}
 	for _, tc := range tests {
@@ -1416,17 +1531,6 @@ func TestReconstructEvents_RejectsInvalidLifecycleTransitions(t *testing.T) {
 					e.Lifecycle = trustpool.LifecyclePaused
 				}),
 			},
-		},
-		{
-			name: "paused cannot reactivate without sweep evidence",
-			events: append(prefix(),
-				ev("op-pause", ts.Add(4*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
-					e.Lifecycle = trustpool.LifecyclePaused
-				}),
-				ev("op-reactivate", ts.Add(5*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
-					e.Lifecycle = trustpool.LifecycleActive
-				}),
-			),
 		},
 	}
 	for _, tc := range tests {
