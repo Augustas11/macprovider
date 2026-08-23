@@ -12,15 +12,18 @@ Ship `macprovider-cli consume` as a local development adapter: a macOS loopback-
    - command shape, loopback bind, startup output, local token, active endpoint descriptor, CLI status, credential source loading, and redaction foundations.
 2. `BUILD_SPEC_045_PHASE_2_PROXY_SAFETY.md`
    - HTTP parser bounds, endpoint subset, path/query rejection, auth ordering, browser-origin denial, upstream origin/TLS/SSRF controls, header construction, proxying, and local error mapping.
-3. `BUILD_SPEC_045_PHASE_3_BUDGET_LEDGER.md`
-   - model allowlist, trusted pricing, local budget admission, per-request cap, micro-USD ledger, settlement, held reservation recovery, and restart/shutdown behavior.
-4. `BUILD_SPEC_045_PHASE_4_CONFORMANCE_JOURNEY.md`
+3. `BUILD_SPEC_045_PHASE_3A_BUDGET_LEDGER_FOUNDATION.md`
+   - budget flags, model admission ordering, fail-closed unpriced reservations, pinned micro-USD ledger, held reservation recovery, and truthful status.
+4. `BUILD_SPEC_045_PHASE_3_BUDGET_LEDGER.md`
+   - trusted pricing, conservative estimate math, chargeable proxy admission, settlement, `estimate_exceeded`, and restart/shutdown behavior.
+5. `BUILD_SPEC_045_PHASE_4_CONFORMANCE_JOURNEY.md`
    - required automated coverage, fake-gateway integration harness, staging/production signed journey, and promotion evidence.
 
 ## Required sequencing
 
 - Phase 1 may land without chargeable proxying.
 - Phase 2 may land with budgeted chat completions disabled unless Phase 3 has landed.
+- Phase 3A must not forward chargeable requests; it only establishes fail-closed local budget-ledger foundations.
 - Phase 3 must not forward chargeable requests until durable reservation append and conservative pricing admission are implemented.
 - Phase 4 must not claim production readiness until Phases 1-3 are implemented and the signed real-gateway journey exists.
 

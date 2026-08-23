@@ -11,7 +11,7 @@ struct ConsumeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "consume",
         abstract: "Start a loopback-only local consumer endpoint.",
-        subcommands: [ConsumeRunCommand.self, ConsumeStatusCommand.self],
+        subcommands: [ConsumeRunCommand.self, ConsumeStatusCommand.self, ConsumeBudgetCommand.self],
         defaultSubcommand: ConsumeRunCommand.self
     )
 }
@@ -37,8 +37,24 @@ struct ConsumeRunCommand: AsyncParsableCommand {
     @Option(name: .customLong("allow-model"), parsing: .upToNextOption, help: "Allowed model id. Repeat for multiple models.")
     var allowedModels: [String] = []
 
+    @Option(name: .customLong("budget-usd"), help: "Positive local run exposure cap in USD.")
+    var budgetUSD: String?
+
+    @Option(name: .customLong("max-request-usd"), help: "Optional positive per-request exposure cap in USD.")
+    var maxRequestUSD: String?
+
+    @Flag(name: .customLong("no-budget"), help: "Explicitly run without a local budget cap.")
+    var noBudget: Bool = false
+
+    @Option(name: .customLong("ledger"), help: "Budget ledger path. Relative paths resolve against the startup directory.")
+    var ledgerPath: String?
+
+    @Flag(name: .customLong("allow-unpriced"), help: "Allow unpriced requests by reserving the full remaining local budget.")
+    var allowUnpriced: Bool = false
+
     var environmentForTesting: [String: String]?
     var homeDirectoryForTesting: URL?
+    var startupDirectoryForTesting: URL?
 
     func run() async throws {
         try await run(stopAfterListeningForTesting: false)
@@ -53,6 +69,16 @@ struct ConsumeRunCommand: AsyncParsableCommand {
             }
             let launchID = UUID().uuidString.lowercased()
             let token = try ConsumeLocalToken.generate()
+            let budgetConfig = try ConsumeBudgetConfig.parse(
+                budgetUSD: budgetUSD,
+                maxRequestUSD: maxRequestUSD,
+                noBudget: noBudget,
+                ledgerPath: ledgerPath,
+                allowUnpriced: allowUnpriced,
+                runID: launchID,
+                homeDirectory: homeDirectoryForTesting ?? FileManager.default.homeDirectoryForCurrentUser,
+                startupDirectory: startupDirectoryForTesting ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            )
             var credential = try ConsumeCredentialLoader.load(
                 explicitCredentialFile: credentialFile,
                 environment: environmentForTesting ?? ProcessInfo.processInfo.environment,
@@ -72,7 +98,7 @@ struct ConsumeRunCommand: AsyncParsableCommand {
                 processID: Int(getpid()),
                 launchID: launchID,
                 startedAt: ConsumeEndpointStatus.iso8601(Date()),
-                ledgerPathClass: nil,
+                ledgerPathClass: budgetConfig.ledgerPathClass,
                 localToken: token.value
             )
             let runtime = ConsumeEndpointRuntime(
@@ -83,7 +109,8 @@ struct ConsumeRunCommand: AsyncParsableCommand {
                 credentialStatus: credentialStatus,
                 modelAllowlist: allowedModels,
                 tokenVerifier: token.verifier,
-                credentialCustody: credentialCustody
+                credentialCustody: credentialCustody,
+                budget: budgetConfig
             )
             let server = ConsumeLocalServer(
                 bindAddress: normalizedBind,
@@ -96,6 +123,7 @@ struct ConsumeRunCommand: AsyncParsableCommand {
                         localToken: token.value,
                         upstreamOrigin: origin,
                         modelAllowlist: allowedModels,
+                        budget: budgetConfig,
                         credentialSourceClass: credentialSourceClass,
                         credentialState: credentialStatus.state.rawValue
                     )
@@ -110,6 +138,92 @@ struct ConsumeRunCommand: AsyncParsableCommand {
             throw error.exitCode
         } catch let error as ConsumeCredentialError {
             ConsumeEndpointStatus.writeStderr("\(error.redactedCode)\n")
+            throw error.exitCode
+        } catch let error as ConsumeBudgetError {
+            ConsumeEndpointStatus.writeStderr("\(error.code)\n")
+            throw error.exitCode
+        }
+    }
+}
+
+struct ConsumeBudgetCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "budget",
+        abstract: "Inspect or recover the local consumer budget ledger.",
+        subcommands: [ConsumeBudgetStatusCommand.self, ConsumeBudgetReleaseHeldCommand.self]
+    )
+}
+
+struct ConsumeBudgetStatusCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "status")
+
+    @Option(name: .customLong("ledger"), help: "Budget ledger path or 'default'.")
+    var ledgerPath: String = "default"
+
+    var homeDirectoryForTesting: URL?
+    var startupDirectoryForTesting: URL?
+
+    func run() async throws {
+        do {
+            let ledger = try ConsumeBudgetLedger.open(
+                ledgerPath: ledgerPath,
+                homeDirectory: homeDirectoryForTesting ?? FileManager.default.homeDirectoryForCurrentUser,
+                startupDirectory: startupDirectoryForTesting ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            )
+            let summary = try ledger.summary()
+            try StatusCommand.writeJSON([
+                "schema_version": "local_consumer_endpoint.budget_status.v1",
+                "ledger_path_class": ledger.pathClass,
+                "reserved_micro_usd": "\(summary.reserved.rawValue)",
+                "settled_micro_usd": "\(summary.settled.rawValue)",
+                "held_micro_usd": "\(summary.held.rawValue)",
+                "released_micro_usd": "\(summary.released.rawValue)",
+                "estimate_exceeded_micro_usd": "\(summary.estimateExceeded.rawValue)",
+                "held_reservation_count": summary.heldReservationCount,
+            ])
+        } catch let error as ConsumeBudgetError {
+            ConsumeEndpointStatus.writeStderr("\(error.code)\n")
+            throw error.exitCode
+        }
+    }
+}
+
+struct ConsumeBudgetReleaseHeldCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "release-held")
+
+    @Option(name: .customLong("ledger"), help: "Budget ledger path or 'default'.")
+    var ledgerPath: String
+
+    @Option(name: .customLong("run-id"), help: "Run id whose held reservations may be released.")
+    var runID: String
+
+    @Flag(name: .customLong("confirm-release-held"), help: "Required confirmation for releasing held local reservations.")
+    var confirmReleaseHeld: Bool = false
+
+    var homeDirectoryForTesting: URL?
+    var startupDirectoryForTesting: URL?
+
+    func run() async throws {
+        do {
+            guard confirmReleaseHeld else {
+                throw ConsumeBudgetError(code: "local_budget_flag_rejected")
+            }
+            let ledger = try ConsumeBudgetLedger.open(
+                ledgerPath: ledgerPath,
+                homeDirectory: homeDirectoryForTesting ?? FileManager.default.homeDirectoryForCurrentUser,
+                startupDirectory: startupDirectoryForTesting ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            )
+            let released = try ledger.releaseHeld(runID: runID)
+            guard released > 0 else {
+                throw ConsumeBudgetError(code: "local_no_held_reservations", exitCode: ExitCode(4))
+            }
+            try StatusCommand.writeJSON([
+                "schema_version": "local_consumer_endpoint.release_held.v1",
+                "run_id": runID,
+                "released_reservation_count": released,
+            ])
+        } catch let error as ConsumeBudgetError {
+            ConsumeEndpointStatus.writeStderr("\(error.code)\n")
             throw error.exitCode
         }
     }
@@ -143,6 +257,984 @@ struct ConsumeStatusCommand: AsyncParsableCommand {
 
 enum ConsumeEndpointDefaults {
     static let upstreamGatewayOrigin = "https://api.malibu.tech"
+}
+
+struct ConsumeBudgetError: Error {
+    let code: String
+    let exitCode: ExitCode
+
+    init(code: String, exitCode: ExitCode = ExitCode(2)) {
+        self.code = code
+        self.exitCode = exitCode
+    }
+}
+
+struct ConsumeMicroUSD: Equatable, Comparable, Sendable {
+    let rawValue: Int64
+
+    static let zero = ConsumeMicroUSD(rawValue: 0)
+
+    static func < (lhs: ConsumeMicroUSD, rhs: ConsumeMicroUSD) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+
+    static func + (lhs: ConsumeMicroUSD, rhs: ConsumeMicroUSD) throws -> ConsumeMicroUSD {
+        let (value, overflow) = lhs.rawValue.addingReportingOverflow(rhs.rawValue)
+        guard !overflow else { throw ConsumeBudgetError(code: "local_pricing_unavailable") }
+        return ConsumeMicroUSD(rawValue: value)
+    }
+
+    static func - (lhs: ConsumeMicroUSD, rhs: ConsumeMicroUSD) -> ConsumeMicroUSD {
+        ConsumeMicroUSD(rawValue: max(0, lhs.rawValue - rhs.rawValue))
+    }
+
+    static func parsePositiveUSD(_ raw: String?) throws -> ConsumeMicroUSD? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.range(of: #"^[0-9]+(\.[0-9]{1,6})?$"#, options: .regularExpression) != nil else {
+            throw ConsumeBudgetError(code: "local_budget_flag_rejected")
+        }
+        let parts = trimmed.split(separator: ".", omittingEmptySubsequences: false)
+        guard let dollars = Int64(parts[0]) else {
+            throw ConsumeBudgetError(code: "local_budget_flag_rejected")
+        }
+        let microsText: String
+        if parts.count == 2 {
+            microsText = String(parts[1]).padding(toLength: 6, withPad: "0", startingAt: 0)
+        } else {
+            microsText = "000000"
+        }
+        guard let micros = Int64(microsText.prefix(6)) else {
+            throw ConsumeBudgetError(code: "local_budget_flag_rejected")
+        }
+        let (major, overflowMajor) = dollars.multipliedReportingOverflow(by: 1_000_000)
+        let (total, overflowTotal) = major.addingReportingOverflow(micros)
+        guard !overflowMajor, !overflowTotal, total > 0 else {
+            throw ConsumeBudgetError(code: "local_budget_flag_rejected")
+        }
+        return ConsumeMicroUSD(rawValue: total)
+    }
+}
+
+enum ConsumeBudgetMode: Equatable, Sendable {
+    case unconfigured
+    case budget(ConsumeMicroUSD)
+    case noBudget
+
+    var startupName: String {
+        switch self {
+        case .unconfigured: return "unconfigured"
+        case .budget: return "budget"
+        case .noBudget: return "no_budget"
+        }
+    }
+}
+
+struct ConsumeBudgetConfig: @unchecked Sendable {
+    let mode: ConsumeBudgetMode
+    let maxRequestMicroUSD: ConsumeMicroUSD?
+    let allowUnpriced: Bool
+    let ledger: ConsumeBudgetLedger?
+    let ledgerPathClass: String?
+
+    static let unconfigured = ConsumeBudgetConfig(
+        mode: .unconfigured,
+        maxRequestMicroUSD: nil,
+        allowUnpriced: false,
+        ledger: nil,
+        ledgerPathClass: nil
+    )
+
+    static func parse(
+        budgetUSD: String?,
+        maxRequestUSD: String?,
+        noBudget: Bool,
+        ledgerPath: String?,
+        allowUnpriced: Bool,
+        runID: String,
+        homeDirectory: URL,
+        startupDirectory: URL
+    ) throws -> ConsumeBudgetConfig {
+        let budget = try ConsumeMicroUSD.parsePositiveUSD(budgetUSD)
+        let maxRequest = try ConsumeMicroUSD.parsePositiveUSD(maxRequestUSD)
+        guard !(budget != nil && noBudget) else {
+            throw ConsumeBudgetError(code: "local_budget_flag_rejected")
+        }
+        guard budget != nil || noBudget || ledgerPath == nil else {
+            throw ConsumeBudgetError(code: "local_budget_flag_rejected")
+        }
+
+        let mode: ConsumeBudgetMode
+        if let budget {
+            mode = .budget(budget)
+        } else if noBudget {
+            mode = .noBudget
+        } else {
+            mode = .unconfigured
+        }
+        guard mode != .unconfigured else {
+            return ConsumeBudgetConfig(
+                mode: mode,
+                maxRequestMicroUSD: maxRequest,
+                allowUnpriced: allowUnpriced,
+                ledger: nil,
+                ledgerPathClass: nil
+            )
+        }
+        if mode == .noBudget && ledgerPath == nil {
+            return ConsumeBudgetConfig(
+                mode: mode,
+                maxRequestMicroUSD: maxRequest,
+                allowUnpriced: allowUnpriced,
+                ledger: nil,
+                ledgerPathClass: nil
+            )
+        }
+        let ledger = try ConsumeBudgetLedger.open(
+            ledgerPath: ledgerPath ?? "default",
+            homeDirectory: homeDirectory,
+            startupDirectory: startupDirectory
+        )
+        try ledger.markHeldReservationsForRestart(excludingRunID: runID)
+        return ConsumeBudgetConfig(
+            mode: mode,
+            maxRequestMicroUSD: maxRequest,
+            allowUnpriced: allowUnpriced,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+    }
+
+    func statusFields() -> [String: Any] {
+        let summary: ConsumeBudgetLedgerSummary?
+        if let ledger {
+            summary = try? ledger.summary()
+        } else {
+            summary = .empty
+        }
+        let committedExposure = try? summary?.committedExposure()
+        let ledgerIsHealthy = summary != nil && committedExposure != nil
+        let safeSummary = summary ?? .empty
+        let configured: Any
+        let used: Any
+        let held: Any
+        let remaining: Any
+        let noBudget: Bool
+        switch mode {
+        case .unconfigured:
+            configured = NSNull()
+            used = NSNull()
+            held = NSNull()
+            remaining = NSNull()
+            noBudget = false
+        case .budget(let budget):
+            configured = "\(budget.rawValue)"
+            used = ledgerIsHealthy ? "\(safeSummary.settled.rawValue)" : NSNull()
+            held = ledgerIsHealthy ? "\(safeSummary.held.rawValue)" : NSNull()
+            if ledgerIsHealthy, let committed = committedExposure {
+                remaining = budget > committed ? "\(budget.rawValue - committed.rawValue)" : "0"
+            } else {
+                remaining = NSNull()
+            }
+            noBudget = false
+        case .noBudget:
+            configured = NSNull()
+            used = NSNull()
+            held = NSNull()
+            remaining = NSNull()
+            noBudget = true
+        }
+        let ledgerClass: Any = ledgerPathClass ?? NSNull()
+        let ledgerState: Any = ledger == nil ? NSNull() : (ledgerIsHealthy ? "available" : "unavailable")
+        let pricingState: String
+        if case .unconfigured = mode {
+            pricingState = "unavailable"
+        } else {
+            pricingState = ledgerIsHealthy ? pricingTrustState : "unavailable"
+        }
+        return [
+            "pricing_trust_state": pricingState,
+            "pricing_warning_codes": pricingWarningCodes,
+            "unpriced_override": allowUnpriced,
+            "no_budget": noBudget,
+            "budget_configured_micro_usd": configured,
+            "budget_used_micro_usd": used,
+            "budget_held_micro_usd": held,
+            "budget_remaining_micro_usd": remaining,
+            "ledger_path_class": ledgerClass,
+            "budget_ledger_state": ledgerState,
+        ]
+    }
+
+    var pricingTrustState: String {
+        if allowUnpriced { return "unpriced_override" }
+        return "unavailable"
+    }
+
+    var pricingWarningCodes: [String] {
+        []
+    }
+
+    var localWarningTokens: [String] {
+        var warnings: [String] = []
+        if case .noBudget = mode { warnings.append("no_budget") }
+        if allowUnpriced { warnings.append("unpriced_override") }
+        return warnings
+    }
+}
+
+struct ConsumeBudgetLedgerSummary: Equatable {
+    static let empty = ConsumeBudgetLedgerSummary(
+        reserved: .zero,
+        settled: .zero,
+        held: .zero,
+        released: .zero,
+        estimateExceeded: .zero,
+        heldReservationCount: 0
+    )
+
+    let reserved: ConsumeMicroUSD
+    let settled: ConsumeMicroUSD
+    let held: ConsumeMicroUSD
+    let released: ConsumeMicroUSD
+    let estimateExceeded: ConsumeMicroUSD
+    let heldReservationCount: Int
+
+    func committedExposure() throws -> ConsumeMicroUSD {
+        try settled + held + reserved
+    }
+}
+
+enum ConsumeBudgetAdmissionResult: Equatable {
+    case held(ConsumeMicroUSD)
+    case budgetExceeded
+    case requestCapExceeded
+}
+
+final class ConsumeBudgetLedger: @unchecked Sendable {
+    static let schemaVersion = "local_consumer_endpoint.ledger.phase3a.v1"
+
+    let url: URL
+    let lockURL: URL
+    let pathClass: String
+    private let parentURL: URL
+    private let parentFD: Int32
+    private let parentIdentity: LedgerFileIdentity
+    private let parentChain: [LedgerPathIdentity]
+    private let lockFD: Int32
+    private let lockIdentity: LedgerFileIdentity
+    private let ledgerFD: Int32
+    private let ledgerIdentity: LedgerFileIdentity
+    private let lock = NSLock()
+    private var ledgerHealthy = true
+
+    private init(
+        url: URL,
+        lockURL: URL,
+        pathClass: String,
+        parentURL: URL,
+        parentFD: Int32,
+        parentIdentity: LedgerFileIdentity,
+        parentChain: [LedgerPathIdentity],
+        lockFD: Int32,
+        lockIdentity: LedgerFileIdentity,
+        ledgerFD: Int32,
+        ledgerIdentity: LedgerFileIdentity
+    ) {
+        self.url = url
+        self.lockURL = lockURL
+        self.pathClass = pathClass
+        self.parentURL = parentURL
+        self.parentFD = parentFD
+        self.parentIdentity = parentIdentity
+        self.parentChain = parentChain
+        self.lockFD = lockFD
+        self.lockIdentity = lockIdentity
+        self.ledgerFD = ledgerFD
+        self.ledgerIdentity = ledgerIdentity
+    }
+
+    deinit {
+        close(ledgerFD)
+        _ = flock(lockFD, LOCK_UN)
+        close(lockFD)
+        close(parentFD)
+    }
+
+    static func open(
+        ledgerPath: String,
+        homeDirectory: URL,
+        startupDirectory: URL
+    ) throws -> ConsumeBudgetLedger {
+        let resolved = try resolve(ledgerPath: ledgerPath, homeDirectory: homeDirectory, startupDirectory: startupDirectory)
+        let parentURL = resolved.url.deletingLastPathComponent()
+        let parent = try openPrivateDirectoryPath(parentURL)
+        let parentFD = parent.fd
+        var parentFDTransferred = false
+        defer {
+            if !parentFDTransferred {
+                close(parentFD)
+            }
+        }
+        let parentIdentity = parent.identity
+        let parentChain = parent.chain
+        let lockURL = URL(fileURLWithPath: resolved.url.path + ".lock")
+        let ledgerName = resolved.url.lastPathComponent
+        let lockName = ledgerName + ".lock"
+        let lockFD = try openPrivateStateFileAt(parentFD: parentFD, name: lockName, accessFlags: O_RDWR | O_CLOEXEC | O_NOFOLLOW)
+        var lockFDTransferred = false
+        var lockAcquired = false
+        defer {
+            if !lockFDTransferred {
+                if lockAcquired {
+                    _ = flock(lockFD, LOCK_UN)
+                }
+                close(lockFD)
+            }
+        }
+        var flockResult: Int32
+        repeat {
+            flockResult = flock(lockFD, LOCK_EX | LOCK_NB)
+        } while flockResult != 0 && errno == EINTR
+        guard flockResult == 0 else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        lockAcquired = true
+        guard privateRegularFile(lockFD),
+              (try? !ConsumeACL.hasExtendedACLEntry(fd: lockFD)) == true,
+              (try? verifyLocalFilesystem(fd: lockFD)) != nil else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        let lockIdentity = try ledgerFileIdentity(fd: lockFD)
+        let ledgerFD = try openPrivateStateFileAt(
+            parentFD: parentFD,
+            name: ledgerName,
+            accessFlags: O_RDWR | O_APPEND | O_CLOEXEC | O_NOFOLLOW
+        )
+        var ledgerFDTransferred = false
+        defer {
+            if !ledgerFDTransferred {
+                close(ledgerFD)
+            }
+        }
+        guard privateRegularFile(ledgerFD),
+              (try? !ConsumeACL.hasExtendedACLEntry(fd: ledgerFD)) == true,
+              (try? verifyLocalFilesystem(fd: ledgerFD)) != nil else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        let identity = try ledgerFileIdentity(fd: ledgerFD)
+        guard identity.device == lockIdentity.device else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        parentFDTransferred = true
+        lockFDTransferred = true
+        ledgerFDTransferred = true
+        return ConsumeBudgetLedger(
+            url: resolved.url,
+            lockURL: lockURL,
+            pathClass: resolved.pathClass,
+            parentURL: parentURL,
+            parentFD: parentFD,
+            parentIdentity: parentIdentity,
+            parentChain: parentChain,
+            lockFD: lockFD,
+            lockIdentity: lockIdentity,
+            ledgerFD: ledgerFD,
+            ledgerIdentity: identity
+        )
+    }
+
+    static func resolve(ledgerPath: String, homeDirectory: URL, startupDirectory: URL) throws -> (url: URL, pathClass: String) {
+        let trimmed = ledgerPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw ConsumeBudgetError(code: "local_budget_flag_rejected")
+        }
+        if trimmed == "default" {
+            return (
+                homeDirectory.appendingPathComponent("Library/Application Support/macprovider/consume/ledgers/default.jsonl"),
+                "default_user_state"
+            )
+        }
+        if NSString(string: trimmed).isAbsolutePath {
+            return (URL(fileURLWithPath: trimmed).standardizedFileURL, "explicit_absolute")
+        }
+        return (startupDirectory.appendingPathComponent(trimmed).standardizedFileURL, "explicit_relative")
+    }
+
+    func reserve(
+        runID: String,
+        amount: ConsumeMicroUSD,
+        reason: String,
+        unpricedOverride: Bool = false,
+        noBudget: Bool = false
+    ) throws -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        return try reserveUnlocked(
+            runID: runID,
+            amount: amount,
+            reason: reason,
+            unpricedOverride: unpricedOverride,
+            noBudget: noBudget
+        )
+    }
+
+    private func reserveUnlocked(
+        runID: String,
+        amount: ConsumeMicroUSD,
+        reason: String,
+        unpricedOverride: Bool = false,
+        noBudget: Bool = false
+    ) throws -> String {
+        let reservationID = try Self.randomReservationID()
+        try appendRowUnlocked([
+            "schema_version": Self.schemaVersion,
+            "transition": "reserved",
+            "state": "reserved",
+            "run_id": runID,
+            "reservation_id": reservationID,
+            "amount_micro_usd": "\(amount.rawValue)",
+            "unpriced_override": unpricedOverride,
+            "no_budget": noBudget,
+            "reason": reason,
+            "created_at": ConsumeEndpointStatus.iso8601(Date()),
+        ])
+        return reservationID
+    }
+
+    func hold(runID: String, reservationID: String, amount: ConsumeMicroUSD, reason: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        try holdUnlocked(runID: runID, reservationID: reservationID, amount: amount, reason: reason)
+    }
+
+    private func holdUnlocked(runID: String, reservationID: String, amount: ConsumeMicroUSD, reason: String) throws {
+        try appendRowUnlocked([
+            "schema_version": Self.schemaVersion,
+            "transition": "held",
+            "state": "held",
+            "run_id": runID,
+            "reservation_id": reservationID,
+            "amount_micro_usd": "\(amount.rawValue)",
+            "reason": reason,
+            "created_at": ConsumeEndpointStatus.iso8601(Date()),
+        ])
+    }
+
+    func reserveAndHoldUnpricedRemaining(
+        runID: String,
+        budget: ConsumeMicroUSD,
+        maxRequest: ConsumeMicroUSD?
+    ) throws -> ConsumeBudgetAdmissionResult {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        let summary = try summaryUnlocked()
+        let committed = try summary.committedExposure()
+        let remaining = budget - committed
+        guard remaining > .zero else {
+            return .budgetExceeded
+        }
+        if let maxRequest, remaining > maxRequest {
+            return .requestCapExceeded
+        }
+        let reservationID = try reserveUnlocked(
+            runID: runID,
+            amount: remaining,
+            reason: "unpriced_proxy_deferred",
+            unpricedOverride: true
+        )
+        try holdUnlocked(
+            runID: runID,
+            reservationID: reservationID,
+            amount: remaining,
+            reason: "upstream_proxy_not_implemented"
+        )
+        return .held(remaining)
+    }
+
+    func markHeldReservationsForRestart(excludingRunID: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        let states = try reservationStatesUnlocked()
+        for state in states.values where state.state == "reserved" && state.runID != excludingRunID {
+            try holdUnlocked(runID: state.runID, reservationID: state.reservationID, amount: state.amount, reason: "restart_recovery")
+        }
+    }
+
+    func releaseHeld(runID: String) throws -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        let states = try reservationStatesUnlocked()
+        var released = 0
+        for state in states.values where state.runID == runID && state.state == "held" {
+            try appendRowUnlocked([
+                "schema_version": Self.schemaVersion,
+                "transition": "released",
+                "state": "released",
+                "run_id": state.runID,
+                "reservation_id": state.reservationID,
+                "amount_micro_usd": "\(state.amount.rawValue)",
+                "reason": "operator_release_held",
+                "created_at": ConsumeEndpointStatus.iso8601(Date()),
+            ])
+            released += 1
+        }
+        return released
+    }
+
+    func summary() throws -> ConsumeBudgetLedgerSummary {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        return try summaryUnlocked()
+    }
+
+    private func summaryUnlocked() throws -> ConsumeBudgetLedgerSummary {
+        let states = try reservationStatesUnlocked()
+        var reserved = ConsumeMicroUSD.zero
+        let settled = ConsumeMicroUSD.zero
+        var held = ConsumeMicroUSD.zero
+        var released = ConsumeMicroUSD.zero
+        let estimateExceeded = ConsumeMicroUSD.zero
+        var heldCount = 0
+        for state in states.values {
+            switch state.state {
+            case "reserved":
+                reserved = try reserved + state.amount
+            case "held":
+                held = try held + state.amount
+                heldCount += 1
+            case "released":
+                released = try released + state.amount
+            default:
+                throw markLedgerUnavailable()
+            }
+        }
+        return ConsumeBudgetLedgerSummary(
+            reserved: reserved,
+            settled: settled,
+            held: held,
+            released: released,
+            estimateExceeded: estimateExceeded,
+            heldReservationCount: heldCount
+        )
+    }
+
+    private struct ReservationState {
+        let runID: String
+        let reservationID: String
+        let amount: ConsumeMicroUSD
+        let state: String
+    }
+
+    private func reservationStatesUnlocked() throws -> [String: ReservationState] {
+        let rows = try readRowsUnlocked()
+        var states: [String: ReservationState] = [:]
+        for row in rows {
+            guard row["schema_version"] as? String == Self.schemaVersion,
+                  let transition = row["transition"] as? String,
+                  let state = row["state"] as? String,
+                  transition == state,
+                  let runID = row["run_id"] as? String,
+                  let reservationID = row["reservation_id"] as? String,
+                  let amountText = row["amount_micro_usd"] as? String,
+                  let amountRaw = Int64(amountText),
+                  amountRaw >= 0,
+                  Self.allowedLedgerState(state),
+                  Self.closedRowSchema(row, state: state) else {
+                throw markLedgerUnavailable()
+            }
+            let current = states[reservationID]
+            guard current == nil || (current?.runID == runID && current?.amount == ConsumeMicroUSD(rawValue: amountRaw)),
+                  Self.transitionAllowed(from: current?.state, to: state) else {
+                throw markLedgerUnavailable()
+            }
+            states[reservationID] = ReservationState(
+                runID: runID,
+                reservationID: reservationID,
+                amount: ConsumeMicroUSD(rawValue: amountRaw),
+                state: state
+            )
+        }
+        return states
+    }
+
+    private static func transitionAllowed(from current: String?, to next: String) -> Bool {
+        guard let current else { return next == "reserved" }
+        switch (current, next) {
+        case ("reserved", "held"),
+             ("held", "released"):
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func allowedLedgerState(_ state: String) -> Bool {
+        state == "reserved" || state == "held" || state == "released"
+    }
+
+    private static func closedRowSchema(_ row: [String: Any], state: String) -> Bool {
+        let commonKeys: Set<String> = [
+            "schema_version", "transition", "state", "run_id",
+            "reservation_id", "amount_micro_usd", "reason", "created_at",
+        ]
+        let allowedKeys = state == "reserved"
+            ? commonKeys.union(["unpriced_override", "no_budget"])
+            : commonKeys
+        guard Set(row.keys).isSubset(of: allowedKeys),
+              row["schema_version"] is String,
+              row["transition"] is String,
+              row["state"] is String,
+              row["run_id"] is String,
+              row["reservation_id"] is String,
+              row["amount_micro_usd"] is String,
+              row["reason"] is String,
+              row["created_at"] is String else {
+            return false
+        }
+        if let value = row["unpriced_override"], !(value is Bool) { return false }
+        if let value = row["no_budget"], !(value is Bool) { return false }
+        return true
+    }
+
+    private func readRowsUnlocked() throws -> [[String: Any]] {
+        do {
+            try requireHealthyUnlocked()
+            try validatePinnedStateFiles()
+        } catch {
+            throw markLedgerUnavailable()
+        }
+        var info = stat()
+        guard fstat(ledgerFD, &info) == 0,
+              info.st_size >= 0,
+              info.st_size <= 16 * 1024 * 1024 else {
+            throw markLedgerUnavailable()
+        }
+        var data = Data()
+        data.reserveCapacity(Int(info.st_size))
+        var offset: off_t = 0
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while offset < info.st_size {
+            let remaining = Int(min(Int64(buffer.count), Int64(info.st_size - offset)))
+            let count = Darwin.pread(ledgerFD, &buffer, remaining, offset)
+            if count < 0, errno == EINTR { continue }
+            guard count > 0 else {
+                throw markLedgerUnavailable()
+            }
+            data.append(buffer, count: count)
+            offset += off_t(count)
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw markLedgerUnavailable()
+        }
+        var rows: [[String: Any]] = []
+        if text.isEmpty {
+            do {
+                try validatePinnedStateFiles()
+            } catch {
+                throw markLedgerUnavailable()
+            }
+            return rows
+        }
+        guard text.hasSuffix("\n") else {
+            throw markLedgerUnavailable()
+        }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        for (index, line) in lines.enumerated() {
+            if line.isEmpty {
+                guard index == lines.count - 1, !rows.isEmpty else {
+                    throw markLedgerUnavailable()
+                }
+                continue
+            }
+            guard case .object(let object) = try? StrictJSONParser.parse(String(line)) else {
+                throw markLedgerUnavailable()
+            }
+            rows.append(object.mapValues { $0.jsonObject })
+        }
+        do {
+            try validatePinnedStateFiles()
+        } catch {
+            throw markLedgerUnavailable()
+        }
+        return rows
+    }
+
+    private func appendRowUnlocked(_ row: [String: Any]) throws {
+        do {
+            try requireHealthyUnlocked()
+            try validatePinnedStateFiles()
+            let data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys, .withoutEscapingSlashes])
+            var line = Data()
+            line.append(data)
+            line.append(0x0a)
+            try line.withUnsafeBytes { raw in
+                var offset = 0
+                while offset < raw.count {
+                    let written = write(ledgerFD, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                    if written < 0, errno == EINTR { continue }
+                    guard written > 0 else { throw ConsumeBudgetError(code: "local_budget_ledger_unavailable") }
+                    offset += written
+                }
+            }
+            guard fsync(ledgerFD) == 0 else {
+                throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+            }
+            try validatePinnedStateFiles()
+        } catch {
+            throw markLedgerUnavailable()
+        }
+    }
+
+    private func requireHealthyUnlocked() throws {
+        guard ledgerHealthy else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+    }
+
+    private func markLedgerUnavailable() -> ConsumeBudgetError {
+        ledgerHealthy = false
+        return ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+    }
+
+    private static func randomReservationID() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func openPrivateDirectoryPath(_ directory: URL) throws -> (fd: Int32, identity: LedgerFileIdentity, chain: [LedgerPathIdentity]) {
+        let standardized = directory.standardizedFileURL
+        let components = standardized.pathComponents
+        guard components.first == "/", components.count > 1 else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        var currentFD = Darwin.open("/", O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard currentFD >= 0 else { throw ConsumeBudgetError(code: "local_budget_ledger_unavailable") }
+        var currentURL = URL(fileURLWithPath: "/")
+        var chain: [LedgerPathIdentity] = []
+        do {
+            try validateAncestorDirectory(fd: currentFD)
+            chain.append(LedgerPathIdentity(url: currentURL, identity: try ledgerFileIdentity(fd: currentFD)))
+            for component in components.dropFirst() {
+                guard !component.isEmpty, component != ".", component != "..", !component.contains("/") else {
+                    throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+                }
+                var info = stat()
+                let statResult = component.withCString {
+                    fstatat(currentFD, $0, &info, AT_SYMLINK_NOFOLLOW)
+                }
+                if statResult != 0 {
+                    guard errno == ENOENT else { throw ConsumeBudgetError(code: "local_budget_ledger_unavailable") }
+                    let mkdirResult = component.withCString {
+                        mkdirat(currentFD, $0, S_IRWXU)
+                    }
+                    guard mkdirResult == 0 else { throw ConsumeBudgetError(code: "local_budget_ledger_unavailable") }
+                    guard fsync(currentFD) == 0 else { throw ConsumeBudgetError(code: "local_budget_ledger_unavailable") }
+                } else {
+                    guard (info.st_mode & S_IFMT) == S_IFDIR else {
+                        throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+                    }
+                }
+                let nextFD = component.withCString {
+                    Darwin.openat(currentFD, $0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+                }
+                guard nextFD >= 0 else { throw ConsumeBudgetError(code: "local_budget_ledger_unavailable") }
+                var nextFDTransferred = false
+                defer {
+                    if !nextFDTransferred {
+                        close(nextFD)
+                    }
+                }
+                try validateAncestorDirectory(fd: nextFD)
+                currentURL.appendPathComponent(component)
+                chain.append(LedgerPathIdentity(url: currentURL, identity: try ledgerFileIdentity(fd: nextFD)))
+                close(currentFD)
+                currentFD = nextFD
+                nextFDTransferred = true
+            }
+            try validatePrivateDirectory(fd: currentFD)
+            return (currentFD, try ledgerFileIdentity(fd: currentFD), chain)
+        } catch {
+            close(currentFD)
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+    }
+
+    private static func privateRegularFile(_ fd: Int32) -> Bool {
+        var info = stat()
+        return fstat(fd, &info) == 0 &&
+            (info.st_mode & S_IFMT) == S_IFREG &&
+            info.st_uid == geteuid() &&
+            (info.st_mode & (S_IRWXG | S_IRWXO)) == 0 &&
+            info.st_nlink == 1
+    }
+
+    private static func privateDirectory(_ fd: Int32) -> Bool {
+        var info = stat()
+        return fstat(fd, &info) == 0 &&
+            (info.st_mode & S_IFMT) == S_IFDIR &&
+            info.st_uid == geteuid() &&
+            (info.st_mode & (S_IWGRP | S_IWOTH)) == 0
+    }
+
+    private static func validateAncestorDirectory(fd: Int32) throws {
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFDIR,
+              (info.st_uid == geteuid() || info.st_uid == 0),
+              (info.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+              (try? verifyLocalFilesystem(fd: fd)) != nil else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+    }
+
+    private static func validatePrivateDirectory(fd: Int32) throws {
+        guard privateDirectory(fd),
+              (try? !ConsumeACL.hasExtendedAllowEntry(fd: fd)) == true,
+              (try? verifyLocalFilesystem(fd: fd)) != nil else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+    }
+
+    private static func openPrivateStateFileAt(parentFD: Int32, name: String, accessFlags: Int32) throws -> Int32 {
+        guard !name.isEmpty, !name.contains("/") else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        let createFD = name.withCString {
+            Darwin.openat(parentFD, $0, accessFlags | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
+        }
+        if createFD >= 0 {
+            guard fchmod(createFD, S_IRUSR | S_IWUSR) == 0,
+                  privateRegularFile(createFD),
+                  (try? !ConsumeACL.hasExtendedACLEntry(fd: createFD)) == true else {
+                close(createFD)
+                throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+            }
+            guard fsync(parentFD) == 0 else {
+                close(createFD)
+                throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+            }
+            return createFD
+        }
+        guard errno == EEXIST else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        let existingFD = name.withCString {
+            Darwin.openat(parentFD, $0, accessFlags)
+        }
+        guard existingFD >= 0 else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        guard privateRegularFile(existingFD),
+              (try? !ConsumeACL.hasExtendedACLEntry(fd: existingFD)) == true else {
+            close(existingFD)
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        return existingFD
+    }
+
+    private static func verifyLocalFilesystem(fd: Int32) throws {
+        var fs = statfs()
+        guard fstatfs(fd, &fs) == 0,
+              (fs.f_flags & UInt32(MNT_LOCAL)) != 0 else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+    }
+
+    private struct LedgerFileIdentity: Equatable {
+        let device: UInt64
+        let inode: UInt64
+    }
+
+    private struct LedgerPathIdentity {
+        let url: URL
+        let identity: LedgerFileIdentity
+    }
+
+    private static func ledgerFileIdentity(fd: Int32) throws -> LedgerFileIdentity {
+        var info = stat()
+        guard fstat(fd, &info) == 0 else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        return LedgerFileIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino))
+    }
+
+    private func validatePinnedLedgerIdentity() throws {
+        var opened = stat()
+        var named = stat()
+        guard fstat(ledgerFD, &opened) == 0,
+              lstat(url.path, &named) == 0,
+              (named.st_mode & S_IFMT) == S_IFREG,
+              UInt64(opened.st_dev) == ledgerIdentity.device,
+              UInt64(opened.st_ino) == ledgerIdentity.inode,
+              opened.st_dev == named.st_dev,
+              opened.st_ino == named.st_ino,
+              Self.privateRegularFile(ledgerFD),
+              (try? !ConsumeACL.hasExtendedACLEntry(fd: ledgerFD)) == true,
+              (try? Self.verifyLocalFilesystem(fd: ledgerFD)) != nil else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+    }
+
+    private func validatePinnedParentIdentity() throws {
+        for entry in parentChain {
+            var named = stat()
+            guard lstat(entry.url.path, &named) == 0,
+                  (named.st_mode & S_IFMT) == S_IFDIR,
+                  UInt64(named.st_dev) == entry.identity.device,
+                  UInt64(named.st_ino) == entry.identity.inode,
+                  (named.st_uid == geteuid() || named.st_uid == 0),
+                  (named.st_mode & (S_IWGRP | S_IWOTH)) == 0 else {
+                throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+            }
+        }
+        var opened = stat()
+        var named = stat()
+        guard fstat(parentFD, &opened) == 0,
+              lstat(parentURL.path, &named) == 0,
+              (named.st_mode & S_IFMT) == S_IFDIR,
+              UInt64(opened.st_dev) == parentIdentity.device,
+              UInt64(opened.st_ino) == parentIdentity.inode,
+              opened.st_dev == named.st_dev,
+              opened.st_ino == named.st_ino,
+              Self.privateDirectory(parentFD),
+              (try? !ConsumeACL.hasExtendedAllowEntry(fd: parentFD)) == true,
+              (try? Self.verifyLocalFilesystem(fd: parentFD)) != nil else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+    }
+
+    private func validatePinnedLockIdentity() throws {
+        var opened = stat()
+        var named = stat()
+        guard fstat(lockFD, &opened) == 0,
+              lstat(lockURL.path, &named) == 0,
+              (named.st_mode & S_IFMT) == S_IFREG,
+              UInt64(opened.st_dev) == lockIdentity.device,
+              UInt64(opened.st_ino) == lockIdentity.inode,
+              opened.st_dev == named.st_dev,
+              opened.st_ino == named.st_ino,
+              Self.privateRegularFile(lockFD),
+              (try? !ConsumeACL.hasExtendedACLEntry(fd: lockFD)) == true,
+              (try? Self.verifyLocalFilesystem(fd: lockFD)) != nil else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+    }
+
+    private func validatePinnedStateFiles() throws {
+        try validatePinnedParentIdentity()
+        try validatePinnedLockIdentity()
+        try validatePinnedLedgerIdentity()
+    }
 }
 
 struct ConsumeStartupError: Error {
@@ -941,6 +2033,7 @@ struct ConsumeEndpointRuntime: Sendable {
     let modelAllowlist: [String]
     let tokenVerifier: ConsumeLocalTokenVerifier
     let credentialCustody: ConsumeCredentialCustody
+    let budget: ConsumeBudgetConfig
     let requestCounter: ConsumeEndpointRequestCounter
 
     init(
@@ -952,6 +2045,7 @@ struct ConsumeEndpointRuntime: Sendable {
         modelAllowlist: [String],
         tokenVerifier: ConsumeLocalTokenVerifier,
         credentialCustody: ConsumeCredentialCustody? = nil,
+        budget: ConsumeBudgetConfig = .unconfigured,
         requestCounter: ConsumeEndpointRequestCounter = ConsumeEndpointRequestCounter()
     ) {
         self.launchID = launchID
@@ -961,6 +2055,7 @@ struct ConsumeEndpointRuntime: Sendable {
         self.modelAllowlist = modelAllowlist
         self.tokenVerifier = tokenVerifier
         self.credentialCustody = credentialCustody ?? ConsumeCredentialCustody(status: credentialStatus)
+        self.budget = budget
         self.requestCounter = requestCounter
     }
 
@@ -993,7 +2088,7 @@ struct ConsumeEndpointRuntime: Sendable {
     }
 
     func statusPayload() -> [String: Any] {
-        [
+        var payload: [String: Any] = [
             "schema_version": "local_consumer_endpoint.status.v1",
             "process_launch_id": launchID,
             "bound_url": boundURL,
@@ -1002,19 +2097,14 @@ struct ConsumeEndpointRuntime: Sendable {
             "credential_state": credentialCustody.currentState().rawValue,
             "model_allowlist": modelAllowlist,
             "local_auth_state": "required",
-            "pricing_trust_state": "unavailable",
-            "pricing_warning_codes": [],
-            "unpriced_override": false,
-            "no_budget": false,
-            "budget_configured_micro_usd": NSNull(),
-            "budget_used_micro_usd": NSNull(),
-            "budget_held_micro_usd": NSNull(),
-            "budget_remaining_micro_usd": NSNull(),
-            "ledger_path_class": NSNull(),
             "active_request_count": requestCounter.current(),
             "last_successful_upstream_contact_at": NSNull(),
             "error_ring": [],
         ]
+        for (key, value) in budget.statusFields() {
+            payload[key] = value
+        }
+        return payload
     }
 }
 
@@ -1151,6 +2241,7 @@ struct ConsumeEndpointStatus {
         localToken: String,
         upstreamOrigin: String,
         modelAllowlist: [String],
+        budget: ConsumeBudgetConfig = .unconfigured,
         credentialSourceClass: String,
         credentialState: String
     ) {
@@ -1158,19 +2249,21 @@ struct ConsumeEndpointStatus {
         let allowlistSummary = modelAllowlist.isEmpty
             ? "count=0 warning=empty_model_allowlist"
             : "count=\(modelAllowlist.count) sample=\(sample)"
-        writeStderr(
-            [
-                "local_consumer_endpoint=started",
-                "base_url=\(boundURL)",
-                "local_token=\(localToken)",
-                "upstream_gateway_origin=\(upstreamOrigin)",
-                "model_allowlist=\(allowlistSummary)",
-                "budget_mode=unconfigured",
-                "unpriced_override=false",
-                "credential_source_class=\(credentialSourceClass)",
-                "credential_state=\(credentialState)",
-            ].joined(separator: " ") + "\n"
-        )
+        var fields = [
+            "local_consumer_endpoint=started",
+            "base_url=\(boundURL)",
+            "local_token=\(localToken)",
+            "upstream_gateway_origin=\(upstreamOrigin)",
+            "model_allowlist=\(allowlistSummary)",
+            "budget_mode=\(budget.mode.startupName)",
+            "unpriced_override=\(budget.allowUnpriced)",
+        ]
+        if !budget.localWarningTokens.isEmpty {
+            fields.append("warnings=\(budget.localWarningTokens.joined(separator: ","))")
+        }
+        fields.append("credential_source_class=\(credentialSourceClass)")
+        fields.append("credential_state=\(credentialState)")
+        writeStderr(fields.joined(separator: " ") + "\n")
     }
 
     static func writeStderr(_ text: String) {
@@ -1483,10 +2576,15 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             writeLocalModels(context: context)
         case .chatCompletions:
-            guard validateLocalBody(head: head, body: requestBody, requiresJSONObject: true, context: context) else {
+            guard let parsed = parseLocalBody(head: head, body: requestBody, requiresJSONObject: true, context: context) else {
                 return
             }
-            writeLocalError(context: context, status: .badRequest, code: "local_budget_required")
+            guard let model = parsed.objectString("model"),
+                  runtime.modelAllowlist.contains(model) else {
+                writeLocalError(context: context, status: .badRequest, code: "local_model_not_allowed")
+                return
+            }
+            writeLocalChatAdmissionFailure(context: context)
         }
     }
 
@@ -1673,24 +2771,83 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         requiresJSONObject: Bool,
         context: ChannelHandlerContext
     ) -> Bool {
+        parseLocalBody(head: head, body: body, requiresJSONObject: requiresJSONObject, context: context) != nil
+    }
+
+    private func parseLocalBody(
+        head: HTTPRequestHead,
+        body: Data,
+        requiresJSONObject: Bool,
+        context: ChannelHandlerContext
+    ) -> JSONValue? {
         let encodings = head.headers[canonicalForm: "content-encoding"]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
         guard encodings.isEmpty || encodings == ["identity"] else {
             writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 415), code: "local_content_encoding_unsupported")
-            return false
+            return nil
         }
         guard body.count <= ConsumeLocalLimits.bodyBytes else {
             writeLocalError(context: context, status: .payloadTooLarge, code: "local_request_too_large")
-            return false
+            return nil
         }
         guard !requiresJSONObject || !body.isEmpty,
               let text = String(data: body, encoding: .utf8),
               let parsed = try? StrictJSONParser.parse(text),
               !requiresJSONObject || parsed.isObject else {
             writeLocalError(context: context, status: .badRequest, code: "local_invalid_request")
-            return false
+            return nil
         }
-        return true
+        return parsed
+    }
+
+    private func writeLocalChatAdmissionFailure(context: ChannelHandlerContext) {
+        switch runtime.budget.mode {
+        case .unconfigured:
+            writeLocalError(context: context, status: .badRequest, code: "local_budget_required")
+        case .noBudget:
+            writeLocalError(
+                context: context,
+                status: .serviceUnavailable,
+                code: "local_pricing_unavailable",
+                extraHeaders: warningHeaders(runtime.budget.localWarningTokens)
+            )
+        case .budget:
+            guard runtime.budget.allowUnpriced else {
+                writeLocalError(context: context, status: .serviceUnavailable, code: "local_pricing_unavailable")
+                return
+            }
+            do {
+                guard let ledger = runtime.budget.ledger,
+                      case .budget(let budget) = runtime.budget.mode else {
+                    writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                    return
+                }
+                switch try ledger.reserveAndHoldUnpricedRemaining(
+                    runID: runtime.launchID,
+                    budget: budget,
+                    maxRequest: runtime.budget.maxRequestMicroUSD
+                ) {
+                case .budgetExceeded:
+                    writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_budget_exceeded")
+                case .requestCapExceeded:
+                    writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                case .held:
+                    writeLocalError(
+                        context: context,
+                        status: .serviceUnavailable,
+                        code: "local_upstream_unavailable",
+                        extraHeaders: warningHeaders(runtime.budget.localWarningTokens)
+                    )
+                }
+            } catch {
+                writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+            }
+        }
+    }
+
+    private func warningHeaders(_ warnings: [String]) -> [(String, String)] {
+        guard !warnings.isEmpty else { return [] }
+        return [("x-macprovider-warning", warnings.joined(separator: ","))]
     }
 
     private func writeLocalModels(context: ChannelHandlerContext) {
@@ -1851,6 +3008,14 @@ private extension JSONValue {
     var isObject: Bool {
         if case .object = self { return true }
         return false
+    }
+
+    func objectString(_ key: String) -> String? {
+        guard case .object(let object) = self,
+              case .string(let value)? = object[key] else {
+            return nil
+        }
+        return value
     }
 }
 
