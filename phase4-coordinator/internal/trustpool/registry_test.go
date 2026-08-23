@@ -74,6 +74,56 @@ func TestRevoke_IsDurableBlocklist(t *testing.T) {
 	}
 }
 
+func TestWatchProviderRevokedClosesOnRevoke(t *testing.T) {
+	t.Parallel()
+	r := trustpool.NewRegistry()
+	r.AddMember("P", "x")
+	ch, stop, already := r.WatchProviderRevoked("P", "x")
+	defer stop()
+	if already {
+		t.Fatal("watch reported already revoked before Revoke")
+	}
+	r.Revoke("P", "x")
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("provider revocation watch did not close on Revoke")
+	}
+}
+
+func TestWatchProviderRevokedClosesOnDurableSnapshotPublish(t *testing.T) {
+	t.Parallel()
+	r := trustpool.NewRegistry()
+	if err := r.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
+		PoolID:        "P",
+		Members:       []string{"x"},
+		BuyerAccounts: []string{"acct-a"},
+		Routeable:     true,
+		Generation:    1,
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	ch, stop, already := r.WatchProviderRevoked("P", "x")
+	defer stop()
+	if already {
+		t.Fatal("watch reported already revoked before durable revoke publish")
+	}
+	if err := r.LoadRouteableSnapshotsAtRevision(2, []trustpool.RouteableSnapshot{{
+		PoolID:        "P",
+		Revoked:       []string{"x"},
+		BuyerAccounts: []string{"acct-a"},
+		Routeable:     true,
+		Generation:    2,
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision revoke: %v", err)
+	}
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("provider revocation watch did not close on durable snapshot publish")
+	}
+}
+
 func TestSnapshot_IsolatedAcrossPools(t *testing.T) {
 	t.Parallel()
 	r := trustpool.NewRegistry()

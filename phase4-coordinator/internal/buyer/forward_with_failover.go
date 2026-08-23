@@ -82,6 +82,9 @@ func (s *Server) forwardWithFailover(
 			// HTTP 409 per the SPEC-042 R010 error table (retryable): the
 			// reservation's fenced pool generation conflicts with current state.
 			rec.logRow("", http.StatusConflict, nil, nil, "pool membership changed during routing", "", 0)
+			if !rec.providerCredited {
+				w.Header().Set(settlementNoPriorDispatchHeader, "1")
+			}
 			writeError(w, http.StatusConflict, "pool_state_stale", "Pool membership changed during routing; please retry")
 			return false
 		}
@@ -95,7 +98,18 @@ func (s *Server) forwardWithFailover(
 		// returns the classified result. HTTP's callback also owns its
 		// per-attempt context.WithTimeout setup and the cancelAttempt
 		// cleanup on EVERY exit path (success, terminal, retry-advance).
-		dispatched, ok := tx.dispatch(w, r, req, requestID, originalRequestID, startedAt, state, rec)
+		attemptReq := r
+		cancelPoolAttempt := func() {}
+		poolAttemptCancelled := func() bool { return false }
+		if state != nil && state.poolID != "" && state.provider.ProviderID != "" {
+			attemptCtx, stop, cancelled := s.withPoolProviderRevocationCancel(r.Context(), state, state.provider.ProviderID)
+			attemptReq = r.Clone(attemptCtx)
+			cancelPoolAttempt = stop
+			poolAttemptCancelled = cancelled
+		}
+		dispatched, ok := tx.dispatch(w, attemptReq, req, requestID, originalRequestID, startedAt, state, rec)
+		cancelledByPool := poolAttemptCancelled()
+		cancelPoolAttempt()
 		if !ok {
 			// Dispatch reported a terminal pre-classification error
 			// (dispatchBodyForProvider failure, request construction
@@ -104,6 +118,19 @@ func (s *Server) forwardWithFailover(
 			return false
 		}
 		tr := dispatched.tr
+		if cancelledByPool && !responseWriterCommitted(w) {
+			s.releaseQueuedSlotReservation(state)
+			rec.logRow("", http.StatusConflict, nil, nil, "pool member revoked during active dispatch", "pool_state_stale", 0)
+			// Active revoke cancellation is dispatched-but-unbilled when no
+			// provider row was credited before the cutoff. The generic
+			// noPriorDispatchResponseWriter withholds the marker for dispatched
+			// non-503 terminals, so stamp this SPEC-042 terminal explicitly.
+			if !rec.providerCredited {
+				w.Header().Set(settlementNoPriorDispatchHeader, "1")
+			}
+			writeError(w, http.StatusConflict, "pool_state_stale", "Pool membership changed during active dispatch; please retry")
+			return false
+		}
 
 		// Committed early-exit (streaming only — see invariant 3 above).
 		// Streaming's callback handles both wsForwardProviderDisconnected

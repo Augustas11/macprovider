@@ -1,9 +1,13 @@
 package buyer
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +15,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/routing"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
 	"github.com/rs/zerolog"
 )
@@ -23,13 +28,33 @@ func poolIsolationServer(t *testing.T) (*Server, *pool.Registry, *trustpool.Regi
 	t.Helper()
 	registry := pool.NewRegistry(nil)
 	tp := trustpool.NewRegistry()
+	trustStore := poolIsolationTrustPoolStore(t)
 	s := NewServer(
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
+		WithGatewayServiceToken("gateway-secret"),
+		WithRequireGatewayContext(true),
 		WithPoolMembership(tp),
+		WithTrustPoolStatusStore(trustStore),
 	)
 	return s, registry, tp
+}
+
+func poolIsolationTrustPoolStore(t *testing.T) *trustpool.Store {
+	t.Helper()
+	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(filepath.Join(t.TempDir(), "trustpool.sqlite")))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := trustpool.NewStore(db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	return store
 }
 
 func poolProvider(providerID string) pool.Provider {
@@ -204,6 +229,200 @@ func TestPoolIsolation_LoopFenceRejectsStaleBeforeDispatch(t *testing.T) {
 	}
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status=%d, want 409 (SPEC-042 R010 pool_state_stale)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "pool_state_stale") {
+		t.Fatalf("body=%s, want pool_state_stale", w.Body.String())
+	}
+	if got := w.Header().Get(settlementNoPriorDispatchHeader); got == "" {
+		t.Fatal("pool_state_stale without provider credit must carry no-prior-dispatch marker")
+	}
+}
+
+// T7-active (generation fence, R003/R005/R010): revoke_immediate must also
+// cut an already-dispatched transport attempt for the revoked provider. The
+// shared failover core wraps every transport callback's request context, so
+// HTTP, streaming, and WS relay paths inherit this provider-bound cancel
+// signal without each transport implementing its own membership watcher.
+func TestPoolIsolation_ActiveDispatchContextCancelledOnImmediateRevoke(t *testing.T) {
+	s, _, tp := poolIsolationServer(t)
+	tp.AddMember("P", "member-x")
+	startedAt := time.Unix(1716768000, 0)
+	state := &forwardState{
+		poolID:         "P",
+		poolGeneration: tp.Generation("P"),
+		poolGenSet:     true,
+		provider:       poolProvider("member-x"),
+		faultedRoutes:  map[string]struct{}{},
+	}
+	state.phaseTiming.init(startedAt)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+	rec := s.newBillingRecorder(r, state, startedAt, "rid", "", "", requestlog.AuthenticatedAccount{}, false)
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	done := make(chan struct{})
+	tx := transportCallbacks{
+		dispatch: func(_ http.ResponseWriter, r *http.Request, _ chatRequest, _ string, _ string, _ time.Time, _ *forwardState, _ *billingRecorder) (dispatchedAttempt, bool) {
+			close(started)
+			<-r.Context().Done()
+			close(cancelled)
+			return dispatchedAttempt{tr: transportResult{
+				status: http.StatusBadGateway,
+				err:    r.Context().Err(),
+				attempt: requestLogAttempt{
+					Status:    http.StatusBadGateway,
+					Error:     "Selected provider disconnected; buyer should retry",
+					ErrorCode: "provider_disconnected",
+				},
+				retryable: true,
+			}}, true
+		},
+		renderSuccess: func(http.ResponseWriter, *http.Request, chatRequest, dispatchedAttempt, *forwardState) {},
+		renderRetryExhausted: func(http.ResponseWriter, dispatchedAttempt, *forwardState) {
+			t.Fatal("revoke_immediate cancellation must not fall through to retry exhaustion")
+		},
+		logRetryAttempt: func(dispatchedAttempt, *forwardState) {
+			t.Fatal("revoke_immediate cancellation must not retry or spill to another provider")
+		},
+	}
+
+	go func() {
+		defer close(done)
+		s.forwardWithFailover(w, r, poolChatReq("P"), "rid", "rid", startedAt, state, nil, rec, tx)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatch did not start")
+	}
+	tp.Revoke("P", "member-x")
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("active dispatch context was not cancelled after revoke_immediate")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("forwardWithFailover did not return after revoke_immediate cancellation")
+	}
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want 409 (SPEC-042 R010 pool_state_stale)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "pool_state_stale") {
+		t.Fatalf("body=%s, want pool_state_stale", w.Body.String())
+	}
+	if got := w.Header().Get(settlementNoPriorDispatchHeader); got == "" {
+		t.Fatal("pool_state_stale without provider credit must carry no-prior-dispatch marker")
+	}
+}
+
+func TestPoolIsolation_HTTPBodyReadCancelledOnImmediateRevoke(t *testing.T) {
+	started := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	s, registry, tp := poolIsolationServer(t)
+	provider := poolProvider("member-x")
+	provider.EndpointURL = upstream.URL
+	registry.Register(&provider, nil)
+	tp.AddMember("P", "member-x")
+	tp.AuthorizeBuyer("P", "acct-a")
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`)))
+		req.Header.Set("Authorization", "Bearer gateway-secret")
+		req.Header.Set("X-MacProvider-Pool", "P")
+		req.Header.Set("X-MacProvider-Account", "acct-a")
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		_, _ = io.Copy(io.Discard, w.Result().Body)
+		done <- w
+	}()
+
+	select {
+	case <-started:
+	case w := <-done:
+		t.Fatalf("request returned before provider dispatch: status=%d body=%s", w.Code, w.Body.String())
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not receive HTTP dispatch")
+	}
+	tp.Revoke("P", "member-x")
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pool revoke did not cancel the blocked HTTP body read")
+	}
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want 409 (SPEC-042 R010 pool_state_stale), body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "pool_state_stale") {
+		t.Fatalf("body=%s, want pool_state_stale", w.Body.String())
+	}
+	if got := w.Header().Get(settlementNoPriorDispatchHeader); got == "" {
+		t.Fatal("streaming pool_state_stale without provider credit must carry no-prior-dispatch marker")
+	}
+}
+
+func TestPoolIsolation_HTTPStreamingPreCommitCancelledOnImmediateRevoke(t *testing.T) {
+	started := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	s, registry, tp := poolIsolationServer(t)
+	provider := poolProvider("member-x")
+	provider.EndpointURL = upstream.URL
+	registry.Register(&provider, nil)
+	tp.AddMember("P", "member-x")
+	tp.AuthorizeBuyer("P", "acct-a")
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
+		req.Header.Set("Authorization", "Bearer gateway-secret")
+		req.Header.Set("X-MacProvider-Pool", "P")
+		req.Header.Set("X-MacProvider-Account", "acct-a")
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		_, _ = io.Copy(io.Discard, w.Result().Body)
+		done <- w
+	}()
+
+	select {
+	case <-started:
+	case w := <-done:
+		t.Fatalf("streaming request returned before provider dispatch: status=%d body=%s", w.Code, w.Body.String())
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not receive streaming HTTP dispatch")
+	}
+	tp.Revoke("P", "member-x")
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pool revoke did not cancel the blocked streaming pre-commit read")
+	}
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want 409 (SPEC-042 R010 pool_state_stale), body=%s", w.Code, w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), "pool_state_stale") {
 		t.Fatalf("body=%s, want pool_state_stale", w.Body.String())

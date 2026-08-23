@@ -66,7 +66,8 @@ const (
 	// estimate. Keep in sync with
 	// phase4-coordinator/internal/buyer/route_snapshot.go (deploy coordinator
 	// first, roll back in reverse).
-	settlementNoPriorDispatchHeader = "X-MacProvider-Settlement-No-Prior-Dispatch"
+	settlementNoPriorDispatchHeader    = "X-MacProvider-Settlement-No-Prior-Dispatch"
+	gatewayPriorProviderDispatchHeader = "X-MacProvider-Gateway-Prior-Provider-Dispatch"
 	// settlementPolicyVersion is the current coordinator route-snapshot
 	// policy version (see billing.RouteSnapshotPolicyVersion). It was
 	// bumped v0 -> v1 when the settlement pending-deadline default moved
@@ -711,6 +712,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	timing.observeCoordinatorResponse(resp.Header, s.now())
+	if priorProviderDispatch {
+		if resp.Header == nil {
+			resp.Header = http.Header{}
+		}
+		resp.Header.Set(gatewayPriorProviderDispatchHeader, "1")
+	}
 
 	if chat.Stream {
 		// ISS-187 R1 architect/code MAJOR: thread the reservation
@@ -1770,6 +1777,14 @@ func readStreamingLineWithIdleTimeout(ctx context.Context, reader *bufio.Reader,
 }
 
 func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, promptEstimate, maxUsageTokens int64, retryExhausted bool, window string) {
+	if coordinatorPoolStateStaleError(resp.StatusCode, body) &&
+		(strings.TrimSpace(resp.Header.Get(gatewayPriorProviderDispatchHeader)) != "" || strings.TrimSpace(resp.Header.Get(settlementNoPriorDispatchHeader)) == "") {
+		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "upstream_error", resp.Header) {
+			return
+		}
+		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
+		return
+	}
 	if (resp.StatusCode >= 500 && resp.StatusCode < 600) || coordinatorTier2PolicyError(resp.StatusCode, body) {
 		if !s.recordRefundedCoordinatorAudit(w, r, subject, window, refundedCoordinatorAuditOutcome(resp.StatusCode, body)) {
 			return
@@ -1988,6 +2003,10 @@ func coordinatorIdempotencyError(status int, body []byte) bool {
 	return false
 }
 
+func coordinatorPoolStateStaleError(status int, body []byte) bool {
+	return status == http.StatusConflict && openAIErrorCode(body) == "pool_state_stale"
+}
+
 // coordinatorPreDispatchNoChargeError detects a coordinator 5xx emitted
 // BEFORE any provider was dispatched, where no inference ran and the buyer
 // must not be charged. The one case today is route_snapshot_failed — the
@@ -2039,7 +2058,10 @@ func coordinatorValidationError(status int, body []byte) bool {
 	if status < 400 || status >= 500 {
 		return false
 	}
-	if status == http.StatusConflict || status == http.StatusNotFound {
+	if status == http.StatusConflict {
+		return coordinatorPoolStateStaleError(status, body)
+	}
+	if status == http.StatusNotFound {
 		return false
 	}
 	return openAIErrorCode(body) != ""

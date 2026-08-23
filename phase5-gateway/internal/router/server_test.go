@@ -7472,6 +7472,146 @@ func TestCoordinator404ModelNotFoundPassesThroughAndDoesNotChargeQuota(t *testin
 const routeSnapshotFailedCoordBody = `{"error":{"code":"route_snapshot_failed","inference_ran":false,"message":"Could not durably record route snapshot","param":null,"request_id":null,"retryable":true,"settlement_ran":false,"type":"upstream_error"}}
 `
 
+const poolStateStaleCoordBody = `{"error":{"code":"pool_state_stale","inference_ran":false,"message":"Pool membership changed during active dispatch; please retry","param":null,"request_id":null,"retryable":true,"settlement_ran":false,"type":"invalid_request_error"}}
+`
+
+func TestCoordinatorPoolStateStaleNoCharge(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non_stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				hdr := http.Header{"Content-Type": []string{"application/json"}}
+				hdr.Set("X-MacProvider-Settlement-No-Prior-Dispatch", "1")
+				return responseWithBody(http.StatusConflict, hdr, poolStateStaleCoordBody), nil
+			})}
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			acct := "acct_pool_stale_" + name
+			fullKey := createAccountAndKey(t, store, cfg, acct)
+
+			body := `{"model":"model-a","max_tokens":1000,"messages":[{"role":"user","content":"x"}]}`
+			if stream {
+				body = `{"model":"model-a","max_tokens":1000,"stream":true,"messages":[{"role":"user","content":"x"}]}`
+			}
+			resp := postChat(t, h, fullKey, body, nil)
+
+			if resp.Code != http.StatusConflict {
+				t.Fatalf("status=%d body=%s — pool_state_stale must pass through as 409, not map to 502", resp.Code, resp.Body.String())
+			}
+			if got := resp.Body.String(); got != poolStateStaleCoordBody {
+				t.Fatalf("body must be the coordinator envelope verbatim.\n got=%q\nwant=%q", got, poolStateStaleCoordBody)
+			}
+			assertBodyRetryable(t, resp.Body.String(), true)
+
+			usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+			quota := readQuota(t, usageResp)
+			if used := quota["daily_tokens_used"].(float64); used != 0 {
+				t.Fatalf("daily_tokens_used=%v, want 0 — pool_state_stale must not charge (revoked provider terminal)", used)
+			}
+			if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+				t.Fatalf("daily_tokens_reserved=%v, want 0 — reservation must be refunded on pool_state_stale", reserved)
+			}
+		})
+	}
+}
+
+func TestCoordinatorPoolStateStaleWithoutMarkerSettles(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non_stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return responseWithBody(http.StatusConflict, http.Header{"Content-Type": []string{"application/json"}}, poolStateStaleCoordBody), nil
+			})}
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			acct := "acct_pool_stale_unmarked_" + name
+			fullKey := createAccountAndKey(t, store, cfg, acct)
+
+			body := `{"model":"model-a","max_tokens":8,"messages":[{"role":"user","content":"x"}]}`
+			if stream {
+				body = `{"model":"model-a","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"x"}]}`
+			}
+			resp := postChat(t, h, fullKey, body, nil)
+
+			if resp.Code != http.StatusBadGateway {
+				t.Fatalf("status=%d body=%s — unmarked pool_state_stale must settle, not refund/pass through", resp.Code, resp.Body.String())
+			}
+			assertErrorCode(t, resp.Body.String(), "upstream_provider_error")
+
+			usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+			quota := readQuota(t, usageResp)
+			if used := quota["daily_tokens_used"].(float64); used == 0 {
+				t.Fatalf("daily_tokens_used=0 — unmarked pool_state_stale must conservatively settle")
+			}
+			if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+				t.Fatalf("daily_tokens_reserved=%v, want 0", reserved)
+			}
+		})
+	}
+}
+
+func TestCoordinatorPoolStateStaleAfterPriorProviderDispatchSettles(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non_stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			attempts := 0
+			firstBody := `{"error":{"code":"provider_failed","message":"provider failed","param":null,"retryable":true,"type":"api_error"}}`
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				attempts++
+				if attempts == 1 {
+					// No no-prior-dispatch marker: this is a provider-dispatched
+					// retryable failure. A later pool_state_stale terminal response
+					// must not erase the already-dispatched attempt by refunding.
+					return responseWithBody(http.StatusBadGateway, http.Header{"Content-Type": []string{"application/json"}}, firstBody), nil
+				}
+				return responseWithBody(http.StatusConflict, http.Header{"Content-Type": []string{"application/json"}}, poolStateStaleCoordBody), nil
+			})}
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				cfg.Retry503.MaxAttempts = 2
+				cfg.Retry503.BackoffBaseMs = 10
+				cfg.Retry503.BackoffMaxMs = 10
+			}, WithHTTPClient(client))
+			acct := "acct_pool_stale_prior_" + name
+			fullKey := createAccountAndKey(t, store, cfg, acct)
+
+			body := `{"model":"model-a","max_tokens":8,"messages":[{"role":"user","content":"x"}]}`
+			if stream {
+				body = `{"model":"model-a","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"x"}]}`
+			}
+			resp := postChat(t, h, fullKey, body, nil)
+
+			if attempts != 2 {
+				t.Fatalf("coordinator attempts=%d, want 2", attempts)
+			}
+			if resp.Code != http.StatusBadGateway {
+				t.Fatalf("status=%d body=%s — pool_state_stale after prior provider dispatch must settle, not refund/pass through", resp.Code, resp.Body.String())
+			}
+			assertErrorCode(t, resp.Body.String(), "upstream_provider_error")
+
+			usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+			quota := readQuota(t, usageResp)
+			if used := quota["daily_tokens_used"].(float64); used == 0 {
+				t.Fatalf("daily_tokens_used=0 — a prior provider-dispatched attempt must settle instead of refunding pool_state_stale")
+			}
+			if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+				t.Fatalf("daily_tokens_reserved=%v, want 0", reserved)
+			}
+		})
+	}
+}
+
 // TestCoordinatorRouteSnapshotFailedPreDispatchNoCharge pins item 18: a
 // coordinator 500 route_snapshot_failed is emitted BEFORE any provider is
 // dispatched (SPEC-022 durable route-snapshot write failure) with no
