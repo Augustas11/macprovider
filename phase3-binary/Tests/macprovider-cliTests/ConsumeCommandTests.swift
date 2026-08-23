@@ -2,6 +2,7 @@ import ArgumentParser
 import Darwin
 import Dispatch
 import Foundation
+import MacProviderCore
 import NIOCore
 import NIOEmbedded
 import NIOHTTP1
@@ -985,12 +986,12 @@ final class ConsumeCommandTests: XCTestCase {
             ledger: nil,
             ledgerPathClass: nil
         )
-        var currentDate = ISO8601DateFormatter.autotuneInternet.date(from: "2026-09-01T00:00:01Z")!
+        let clock = LockedTestDate(ISO8601DateFormatter.autotuneInternet.date(from: "2026-09-01T00:00:01Z")!)
         let runtime = consumeRuntime(
             token: token,
             budget: budget,
             trustedPricing: trustedPricing,
-            now: { currentDate }
+            now: { clock.now }
         )
         var headers = HTTPHeaders()
         headers.add(name: "Authorization", value: "Bearer \(token.value)")
@@ -1000,7 +1001,7 @@ final class ConsumeCommandTests: XCTestCase {
             head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
             body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
         )
-        currentDate = ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-10T00:00:00Z")!
+        clock.now = ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-10T00:00:00Z")!
         let rolledBackResponse = try response(
             from: runtime,
             head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
@@ -1072,6 +1073,350 @@ final class ConsumeCommandTests: XCTestCase {
 
         XCTAssertEqual(status["pricing_trust_state"] as? String, "trusted")
         XCTAssertEqual(status["pricing_warning_codes"] as? [String], ["stale_pricing"])
+    }
+
+    func testPhase3CPricedEstimateUsesGrossRatesAndRoundsUp() throws {
+        let rateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 2_000_000,
+            promptCacheHitRatePerMtok: 1,
+            completionRatePerMtok: 4_000_000,
+            providerShareBPS: 1,
+            globalMultiplierPPM: 500_000,
+            usdPerMillionCredits: 1.0
+        )
+        let match = try XCTUnwrap(rateCard.match(model: "llama-test"))
+
+        let estimate = try ConsumePricedExposureEstimator.estimate(
+            promptTokenUpperBound: 3,
+            completionTokenUpperBound: 5,
+            match: match,
+            projection: rateCard.projection
+        )
+
+        XCTAssertEqual(estimate.amount.rawValue, 13)
+        XCTAssertEqual(estimate.rateCardKey, "llama-test")
+
+        let tinyRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1,
+            completionRatePerMtok: 0,
+            usdPerMillionCredits: 1.0
+        )
+        let tinyMatch = try XCTUnwrap(tinyRateCard.match(model: "llama-test"))
+        let rounded = try ConsumePricedExposureEstimator.estimate(
+            promptTokenUpperBound: 1,
+            completionTokenUpperBound: 1,
+            match: tinyMatch,
+            projection: tinyRateCard.projection
+        )
+        XCTAssertEqual(rounded.amount.rawValue, 1)
+    }
+
+    func testPhase3CBudgetedTrustedPricingReservesPricedEstimateBeforeProxyDeferred() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 100_000_000)),
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        let body = #"{"model":"llama-test","messages":[],"max_tokens":10}"#
+        let expected = try ConsumePricedExposureEstimator.estimate(
+            bodyByteCount: Data(body.utf8).count,
+            request: StrictJSONParser.parse(body),
+            match: XCTUnwrap(trustedRateCard.match(model: "llama-test")),
+            projection: trustedRateCard.projection
+        )
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(body.utf8)
+        )
+
+        XCTAssertEqual(response.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_upstream_unavailable")
+        XCTAssertNil(response.headers.first(name: "x-macprovider-warning"))
+        let summary = try ledger.summary()
+        XCTAssertEqual(summary.reserved.rawValue, 0)
+        XCTAssertEqual(summary.held.rawValue, expected.amount.rawValue)
+        XCTAssertEqual(summary.heldReservationCount, 1)
+        XCTAssertEqual(runtime.statusPayload()["budget_remaining_micro_usd"] as? String, "\(100_000_000 - expected.amount.rawValue)")
+    }
+
+    func testPhase3CPricedEstimateCapRejectsBeforeLedgerAppend() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let body = #"{"model":"llama-test","messages":[],"max_tokens":10}"#
+        let expected = try ConsumePricedExposureEstimator.estimate(
+            bodyByteCount: Data(body.utf8).count,
+            request: StrictJSONParser.parse(body),
+            match: XCTUnwrap(trustedRateCard.match(model: "llama-test")),
+            projection: trustedRateCard.projection
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 100_000_000)),
+            maxRequestMicroUSD: ConsumeMicroUSD(rawValue: expected.amount.rawValue - 1),
+            allowUnpriced: false,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(body.utf8)
+        )
+
+        XCTAssertEqual(response.status.code, 402)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_request_cap_exceeded")
+        let summary = try ledger.summary()
+        XCTAssertEqual(summary.reserved.rawValue, 0)
+        XCTAssertEqual(summary.held.rawValue, 0)
+    }
+
+    func testPhase3CDefaultPricingTierDoesNotReservePricedEstimate() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0,
+            includeModelRow: false
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 100_000_000)),
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[],"max_tokens":10}"#.utf8)
+        )
+
+        XCTAssertEqual(response.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_pricing_unavailable")
+        XCTAssertEqual(try ledger.summary().held.rawValue, 0)
+    }
+
+    func testPhase3COversizedOutputBoundFailsClosedBeforeLedgerAppend() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 100_000_000)),
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[],"max_tokens":9223372036854775808}"#.utf8)
+        )
+
+        XCTAssertEqual(response.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_pricing_unavailable")
+        XCTAssertEqual(try ledger.summary().held.rawValue, 0)
+    }
+
+    func testPhase3CMaxCompletionTokensAloneFailsClosedBeforeLedgerAppend() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 100_000_000)),
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[],"max_completion_tokens":1}"#.utf8)
+        )
+
+        XCTAssertEqual(response.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_pricing_unavailable")
+        XCTAssertEqual(try ledger.summary().held.rawValue, 0)
+    }
+
+    func testPhase3CNonUnitCreditConversionFailsClosedBeforeLedgerAppend() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.5
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 100_000_000)),
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            budget: budget,
+            trustedPricing: .available(trustedRateCard),
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[],"max_tokens":10}"#.utf8)
+        )
+
+        XCTAssertEqual(response.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_pricing_unavailable")
+        XCTAssertEqual(try ledger.summary().held.rawValue, 0)
+    }
+
+    func testPhase3CMissingOutputBoundFailsClosedOrFallsBackToUnpricedOverride() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let trustedRateCard = phase3CTrustedRateCard(
+            promptRatePerMtok: 1_000_000,
+            completionRatePerMtok: 2_000_000,
+            usdPerMillionCredits: 1.0
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+        let body = #"{"model":"llama-test","messages":[]}"#
+
+        do {
+            let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+            let budget = ConsumeBudgetConfig(
+                mode: .budget(ConsumeMicroUSD(rawValue: 1_000_000)),
+                maxRequestMicroUSD: nil,
+                allowUnpriced: false,
+                ledger: ledger,
+                ledgerPathClass: ledger.pathClass
+            )
+            let runtime = consumeRuntime(
+                token: token,
+                budget: budget,
+                trustedPricing: .available(trustedRateCard),
+                now: { ConsumeCommandTests.phase3CTestNow }
+            )
+            let response = try response(
+                from: runtime,
+                head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+                body: Data(body.utf8)
+            )
+            XCTAssertEqual(response.status, .serviceUnavailable)
+            XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_pricing_unavailable")
+            XCTAssertEqual(try ledger.summary().held.rawValue, 0)
+        }
+
+        let fallbackLedgerURL = home.appendingPathComponent("fallback-budget.jsonl")
+        let fallbackLedger = try ConsumeBudgetLedger.open(ledgerPath: fallbackLedgerURL.path, homeDirectory: home, startupDirectory: home)
+        let fallbackBudget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 1_000_000)),
+            maxRequestMicroUSD: nil,
+            allowUnpriced: true,
+            ledger: fallbackLedger,
+            ledgerPathClass: fallbackLedger.pathClass
+        )
+        let fallbackRuntime = consumeRuntime(
+            token: token,
+            budget: fallbackBudget,
+            trustedPricing: .available(trustedRateCard),
+            now: { ConsumeCommandTests.phase3CTestNow }
+        )
+        let fallbackResponse = try response(
+            from: fallbackRuntime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(body.utf8)
+        )
+        XCTAssertEqual(fallbackResponse.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: fallbackResponse.body)["code"] as? String, "local_upstream_unavailable")
+        XCTAssertEqual(fallbackResponse.headers.first(name: "x-macprovider-warning"), "unpriced_override")
+        XCTAssertEqual(try fallbackLedger.summary().held.rawValue, 1_000_000)
     }
 
     func testPhase3NoBudgetStatusUsesNullBudgetAmounts() throws {
@@ -1704,6 +2049,28 @@ final class ConsumeCommandTests: XCTestCase {
         let error: Error?
     }
 
+    private final class LockedTestDate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Date
+
+        init(_ value: Date) {
+            self.value = value
+        }
+
+        var now: Date {
+            get {
+                lock.lock()
+                defer { lock.unlock() }
+                return value
+            }
+            set {
+                lock.lock()
+                value = newValue
+                lock.unlock()
+            }
+        }
+    }
+
     private func captureStatusOutput(_ body: () async throws -> Void) async -> CapturedStatusOutput {
         var stderr = ""
         let restore = ConsumeEndpointStatus.replaceStderrSinkForTesting { stderr += $0 }
@@ -1772,6 +2139,8 @@ final class ConsumeCommandTests: XCTestCase {
         }
     }
 
+    private static let phase3CTestNow = ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-23T00:00:00Z")!
+
     private func consumeRuntime(
         token: ConsumeLocalToken,
         credentialStatus: ConsumeCredentialStatus = .missing,
@@ -1819,6 +2188,52 @@ final class ConsumeCommandTests: XCTestCase {
             policyVersion: "consume-test-policy",
             generatedAt: generatedDate,
             usdPerMillionCredits: 1.0,
+            rows: rows
+        )
+        projection.version = projection.projectionHash
+        return ConsumeTrustedRateCard(
+            version: projection.version,
+            policyVersion: projection.policyVersion,
+            generatedAt: generatedDate,
+            signerKeyID: "consume-test-key",
+            projection: projection,
+            stale: false
+        )
+    }
+
+    private func phase3CTrustedRateCard(
+        promptRatePerMtok: Int64,
+        promptCacheHitRatePerMtok: Int64? = nil,
+        completionRatePerMtok: Int64,
+        providerShareBPS: Int64 = 9_000,
+        globalMultiplierPPM: Int64 = 1_000_000,
+        usdPerMillionCredits: Double,
+        includeModelRow: Bool = true
+    ) -> ConsumeTrustedRateCard {
+        let generatedDate = ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-20T00:00:00Z")!
+        var rows: [String: RateCardProjection.Row] = [
+            "default": RateCardProjection.Row(
+                promptRatePerMtok: promptRatePerMtok,
+                promptCacheHitRatePerMtok: promptCacheHitRatePerMtok,
+                completionRatePerMtok: completionRatePerMtok,
+                providerShareBPS: providerShareBPS,
+                globalMultiplierPPM: globalMultiplierPPM
+            ),
+        ]
+        if includeModelRow {
+            rows["llama-test"] = RateCardProjection.Row(
+                promptRatePerMtok: promptRatePerMtok,
+                promptCacheHitRatePerMtok: promptCacheHitRatePerMtok,
+                completionRatePerMtok: completionRatePerMtok,
+                providerShareBPS: providerShareBPS,
+                globalMultiplierPPM: globalMultiplierPPM
+            )
+        }
+        var projection = RateCardProjection(
+            version: "",
+            policyVersion: "consume-test-policy",
+            generatedAt: generatedDate,
+            usdPerMillionCredits: usdPerMillionCredits,
             rows: rows
         )
         projection.version = projection.projectionHash
