@@ -63,6 +63,7 @@ type PolicyPolicy struct {
 	ManifestCoreDigest               string   `json:"manifest_core_digest,omitempty"`
 	MinEligibleMembers               int      `json:"min_eligible_members"`
 	MinBinaryVersion                 string   `json:"min_binary_version,omitempty"`
+	ModelAllowlist                   []string `json:"model_allowlist,omitempty"`
 	RetentionPolicyID                string   `json:"retention_policy_id,omitempty"`
 	RetentionPolicyStatus            string   `json:"retention_policy_status"`
 	RetentionPolicyGoverningVersion  string   `json:"retention_policy_governing_version,omitempty"`
@@ -221,6 +222,7 @@ func buildPolicyDocumentForPool(p *ReconstructedPoolState, approval CreatorAppro
 			ManifestCoreDigest:               p.ManifestCoreDigest,
 			MinEligibleMembers:               policyMinEligibleMembers(p),
 			MinBinaryVersion:                 policyMinBinaryVersion(p),
+			ModelAllowlist:                   policyModelAllowlist(p),
 			RetentionPolicyID:                retentionPolicyIDForPool(p, approval),
 			RetentionPolicyStatus:            retentionStatus,
 			RetentionPolicyGoverningVersion:  retention.GoverningPolicyVersion,

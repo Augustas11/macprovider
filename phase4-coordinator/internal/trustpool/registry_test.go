@@ -117,6 +117,55 @@ func TestRouteableSnapshotsPreservesRouteableUntilUTC(t *testing.T) {
 	}
 }
 
+func TestModelAllowlistSnapshotsAndGeneration(t *testing.T) {
+	t.Parallel()
+	r := trustpool.NewRegistry()
+	r.AddMember("P", "provider-a")
+	gen0 := r.Generation("P")
+	if err := r.SetModelAllowlist("P", []string{" model-b ", "model-a"}); err != nil {
+		t.Fatalf("SetModelAllowlist: %v", err)
+	}
+	if r.Generation("P") <= gen0 {
+		t.Fatalf("SetModelAllowlist did not bump generation: before=%d after=%d", gen0, r.Generation("P"))
+	}
+	snap := r.Snapshot("P")
+	if got := snap.ModelAllowlist; len(got) != 2 || got[0] != "model-a" || got[1] != "model-b" {
+		t.Fatalf("snapshot model allowlist = %+v, want sorted model-a/model-b", got)
+	}
+	gen1 := r.Generation("P")
+	if err := r.SetModelAllowlist("P", []string{"model-b", "model-a"}); err != nil {
+		t.Fatalf("SetModelAllowlist same set: %v", err)
+	}
+	if r.Generation("P") != gen1 {
+		t.Fatalf("same allowlist set bumped generation: before=%d after=%d", gen1, r.Generation("P"))
+	}
+	exported := r.RouteableSnapshots()
+	if len(exported) != 1 || len(exported[0].ModelAllowlist) != 2 || exported[0].ModelAllowlist[0] != "model-a" {
+		t.Fatalf("exported routeable snapshots = %+v, want model allowlist", exported)
+	}
+	reloaded := trustpool.NewRegistry()
+	if err := reloaded.LoadRouteableSnapshotsAtRevision(1, exported); err != nil {
+		t.Fatalf("reload exported snapshots: %v", err)
+	}
+	if got := reloaded.Snapshot("P").ModelAllowlist; len(got) != 2 || got[0] != "model-a" || got[1] != "model-b" {
+		t.Fatalf("reloaded snapshot allowlist = %+v, want model-a/model-b", got)
+	}
+}
+
+func TestModelAllowlistRejectsMalformedSnapshots(t *testing.T) {
+	t.Parallel()
+	r := trustpool.NewRegistry()
+	if err := r.SetModelAllowlist("P", []string{"model-a", "model-a"}); err == nil {
+		t.Fatal("SetModelAllowlist accepted duplicate model id")
+	}
+	if err := r.LoadRouteableSnapshot(trustpool.RouteableSnapshot{
+		PoolID:         "P",
+		ModelAllowlist: []string{"model-a", " "},
+	}); err == nil {
+		t.Fatal("LoadRouteableSnapshot accepted empty model id")
+	}
+}
+
 func TestRefreshRouteableSnapshotsAtRevisionAllowsSameRevisionTimeGateClose(t *testing.T) {
 	t.Parallel()
 	registry := trustpool.NewRegistry()

@@ -86,6 +86,7 @@ var spec018RetryableByCode = map[string]bool{
 	"pool_unavailable":                 false, // 503, unknown/unauthorized/disabled/non-active pool; same request must not be retried unchanged
 	"pool_no_eligible_member":          false, // 503, no member satisfies the pool; same reservation must not be retried
 	"pool_binary_too_old":              false, // 503, members exist but all below the pool binary floor; retry cannot make a binary newer
+	"pool_model_not_allowed":           false, // 400, requested model is outside the selected pool manifest allowlist
 	"pool_attestation_unsatisfied":     false, // 503, pool members exist but none satisfy the required attestation tier
 	"pool_encrypted_leg_unsatisfied":   false, // 503, pool members exist but none satisfy the encrypted provider-leg requirement
 	"pool_settlement_mode_unsatisfied": false, // 503, pool members exist but none satisfy enforce-mode settlement prerequisites
@@ -5826,6 +5827,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	var poolMembers map[string]bool
 	var poolGen uint64
 	var poolMin string
+	var poolModelAllowlist []string
 	poolActive := s.trustPools != nil && req.poolID != ""
 	if poolActive {
 		snap := req.poolSnapshot
@@ -5838,11 +5840,13 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		poolMembers = snap.Members
 		poolGen = snap.Generation
 		poolMin = snap.MinBinaryVersion
+		poolModelAllowlist = snap.ModelAllowlist
 		if state != nil {
 			state.poolID = req.poolID
 			state.poolMembers = snap.Members
 			state.poolGeneration = snap.Generation
 			state.poolMinBinaryVersion = snap.MinBinaryVersion
+			state.poolModelAllowlist = append([]string(nil), snap.ModelAllowlist...)
 			state.poolGenSet = true
 		}
 	}
@@ -5862,6 +5866,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 					// SPEC-042 R004/R010: same reason the filter drops an
 					// under-version member — a pin must not bypass the floor.
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_binary_too_old", message: "Pinned session provider is below the pool minimum binary version"}
+				}
+				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
+					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
 				}
 				provider, routeErr := s.validatePinnedProviderForRequest(p, req.Model, estimatedTokens, "Pinned session not available", class)
 				if routeErr != nil {
@@ -5884,6 +5891,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && !poolBinaryFloorMet(p.BinaryVersion, poolMin) {
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_binary_too_old", message: "Pinned provider is below the pool minimum binary version"}
 				}
+				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
+					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
+				}
 				provider, routeErr := s.validatePinnedProviderForRequest(p, req.Model, estimatedTokens, "Pinned provider not available", class)
 				if routeErr != nil {
 					return provider, routeErr
@@ -5895,6 +5905,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			}
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "Pinned provider not in pool"}
+	}
+	if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
+		return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
 	}
 
 	exSet := routing.NewExcluded(len(excluded))
@@ -5917,6 +5930,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		checker.poolMembers = poolMembers
 		checker.poolGeneration = poolGen // local snapshot value; avoids a nil-state deref
 		checker.poolMinBinaryVersion = poolMin
+		checker.poolModelAllowlist = poolModelAllowlist
 	}
 	result := routing.EligibleCandidates(providers, exSet, pool.Provider.SortKey, checker)
 	candidates := result.Eligible
@@ -6872,6 +6886,9 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		if state != nil && state.poolID != "" && !poolBinaryFloorMet(provider.BinaryVersion, state.poolMinBinaryVersion) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
+		if state != nil && state.poolID != "" && !poolModelAllowed(model, class, state.poolModelAllowlist) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
 		if !s.providerMatchesRequest(provider, model, class) || provider.MaxContextTokens < estimatedTokens {
 			return pool.Provider{}, queuedProviderTerminal
 		}
@@ -6909,6 +6926,9 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 }
 
 func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing.Excluded, checker *eligibilityCtx) []pool.Provider {
+	if checker != nil && !checker.PoolAllowsRequestedModel() {
+		return nil
+	}
 	out := make([]pool.Provider, 0, len(providers))
 	for _, provider := range providers {
 		if excluded.Has(provider.SortKey()) || !s.providerSlotQueueEligible(provider) {
@@ -7084,6 +7104,9 @@ type eligibilityCtx struct {
 	// snapshot as poolMembers/poolGeneration. "" means no floor -> the
 	// ProviderMeetsPoolBinaryFloor gate is inert.
 	poolMinBinaryVersion string
+	// poolModelAllowlist is the selected pool's manifest request-model
+	// allowlist. Empty means no allowlist -> inert.
+	poolModelAllowlist []string
 }
 
 // ProviderMatchesRequest combines the model/class match and the
@@ -7160,6 +7183,46 @@ func (c *eligibilityCtx) ProviderMeetsPoolBinaryFloor(p pool.Provider) bool {
 		return true
 	}
 	return poolBinaryFloorMet(p.BinaryVersion, c.poolMinBinaryVersion)
+}
+
+// PoolAllowsRequestedModel implements the SPEC-042 R004/R010 request-half gate:
+// a selected pool with a manifest model allowlist accepts only requests whose
+// requested model is in the allowlist. For class aliases, the request also
+// passes when every member of the resolved class is allowlisted; a partial
+// allowlist fails closed so an alias cannot widen the pool's model policy.
+func (c *eligibilityCtx) PoolAllowsRequestedModel() bool {
+	if c == nil || c.poolID == "" {
+		return true
+	}
+	return poolModelAllowed(c.model, c.class, c.poolModelAllowlist)
+}
+
+func poolModelAllowed(model string, class *config.ModelClassConfig, allowlist []string) bool {
+	if len(allowlist) == 0 {
+		return true
+	}
+	members := modelClassMembers(class)
+	if len(members) == 0 {
+		for _, allowed := range allowlist {
+			if modelIDEqual(allowed, model) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, member := range members {
+		memberAllowed := false
+		for _, allowed := range allowlist {
+			if modelIDEqual(allowed, member) {
+				memberAllowed = true
+				break
+			}
+		}
+		if !memberAllowed {
+			return false
+		}
+	}
+	return true
 }
 
 // poolBinaryFloorMet reports whether providerVersion satisfies a pool binary

@@ -80,6 +80,9 @@ func TestBuildPolicyDocumentReturnsBuyerSafeCandidatePolicyShape(t *testing.T) {
 	if doc.Policy.PolicyHash == "" || doc.Policy.PolicyHash != doc.Policy.ManifestCoreDigest || doc.Policy.MinEligibleMembers != 2 || doc.Policy.MinBinaryVersion != "1.8.33" {
 		t.Fatalf("policy=%+v", doc.Policy)
 	}
+	if len(doc.Policy.ModelAllowlist) != 1 || doc.Policy.ModelAllowlist[0] != "model-a" {
+		t.Fatalf("policy model_allowlist=%+v, want [model-a]", doc.Policy.ModelAllowlist)
+	}
 	if !policyPredicatePresent(doc.Predicates.Enforced, "min_binary_version") {
 		t.Fatalf("enforced predicates=%+v, want manifest-only min_binary_version predicate", doc.Predicates.Enforced)
 	}

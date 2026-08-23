@@ -94,6 +94,9 @@ func TestBuildStatusDocumentReturnsBuyerSafePromiseShape(t *testing.T) {
 	if doc.Policy.ManifestVersion != 1 || doc.Policy.MinBinaryVersion != "1.8.33" || doc.Policy.RootIssuerKeyID == "" {
 		t.Fatalf("policy=%+v", doc.Policy)
 	}
+	if len(doc.Policy.ModelAllowlist) != 1 || doc.Policy.ModelAllowlist[0] != "model-a" {
+		t.Fatalf("status model_allowlist=%+v, want [model-a]", doc.Policy.ModelAllowlist)
+	}
 	if doc.Policy.RetentionPolicyID != "standard" ||
 		doc.Policy.RetentionPolicyStatus != "registered" ||
 		doc.Policy.RetentionPolicyGoverningVersion != "retention-policy-v1" ||

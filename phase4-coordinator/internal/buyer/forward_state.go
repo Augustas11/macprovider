@@ -50,6 +50,10 @@ type forwardState struct {
 	// dispatch paths (pinned/self-route/slot-queue) apply the same floor as
 	// the ordinary filter. "" means no floor.
 	poolMinBinaryVersion string
+	// poolModelAllowlist is the selected pool's manifest model allowlist,
+	// captured with the same pool snapshot as membership/generation. Empty
+	// means no allowlist is configured.
+	poolModelAllowlist []string
 
 	// routingDone is the wall-clock at which the current provider was
 	// selected. Updated on every advanceToNextProvider so the

@@ -1770,12 +1770,15 @@ func TestReconstructEvents_ManifestRaiseOverridesOlderExplicitFloor(t *testing.T
 	if snapshots[0].MinBinaryVersion != "1.8.33" {
 		t.Fatalf("routeable min_binary_version = %q, want raised manifest floor", snapshots[0].MinBinaryVersion)
 	}
+	if len(snapshots[0].ModelAllowlist) != 1 || snapshots[0].ModelAllowlist[0] != "model-a" {
+		t.Fatalf("routeable model_allowlist = %+v, want [model-a]", snapshots[0].ModelAllowlist)
+	}
 	registry, err := state.BuildRegistry()
 	if err != nil {
 		t.Fatalf("BuildRegistry: %v", err)
 	}
-	if snap := registry.Snapshot(root.poolID); snap.MinBinaryVersion != "1.8.33" {
-		t.Fatalf("registry min_binary_version = %q, want raised manifest floor", snap.MinBinaryVersion)
+	if snap := registry.Snapshot(root.poolID); snap.MinBinaryVersion != "1.8.33" || len(snap.ModelAllowlist) != 1 || snap.ModelAllowlist[0] != "model-a" {
+		t.Fatalf("registry snapshot = %+v, want raised floor and model-a allowlist", snap)
 	}
 	statusDoc, found, err := trustpool.BuildStatusDocument(ctx, store, registry, root.poolID, "acct-a", ts.Add(7*time.Second))
 	if err != nil || !found {
@@ -1784,12 +1787,18 @@ func TestReconstructEvents_ManifestRaiseOverridesOlderExplicitFloor(t *testing.T
 	if statusDoc.Policy.MinBinaryVersion != "1.8.33" {
 		t.Fatalf("status min_binary_version = %q, want raised manifest floor", statusDoc.Policy.MinBinaryVersion)
 	}
+	if len(statusDoc.Policy.ModelAllowlist) != 1 || statusDoc.Policy.ModelAllowlist[0] != "model-a" {
+		t.Fatalf("status model_allowlist = %+v, want [model-a]", statusDoc.Policy.ModelAllowlist)
+	}
 	policyDoc, found, err := trustpool.BuildPolicyDocument(ctx, store, registry, root.poolID, "acct-a", ts.Add(7*time.Second))
 	if err != nil || !found {
 		t.Fatalf("BuildPolicyDocument found=%v err=%v, want found nil", found, err)
 	}
 	if policyDoc.Policy.MinBinaryVersion != "1.8.33" {
 		t.Fatalf("policy min_binary_version = %q, want raised manifest floor", policyDoc.Policy.MinBinaryVersion)
+	}
+	if len(policyDoc.Policy.ModelAllowlist) != 1 || policyDoc.Policy.ModelAllowlist[0] != "model-a" {
+		t.Fatalf("policy model_allowlist = %+v, want [model-a]", policyDoc.Policy.ModelAllowlist)
 	}
 	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
 		Store:       store,
