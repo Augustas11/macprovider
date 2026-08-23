@@ -1,5 +1,6 @@
 import ArgumentParser
 import Darwin
+import Dispatch
 import Foundation
 import NIOCore
 import NIOEmbedded
@@ -699,6 +700,676 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(try localError(from: compressed.body)["code"] as? String, "local_content_encoding_unsupported")
     }
 
+    func testPhase3BudgetFlagsParseAndRejectInvalidCombinations() throws {
+        XCTAssertEqual(try ConsumeMicroUSD.parsePositiveUSD("1.234567")?.rawValue, 1_234_567)
+        XCTAssertEqual(try ConsumeMicroUSD.parsePositiveUSD("12")?.rawValue, 12_000_000)
+
+        for invalid in ["0", "-1", "nan", "1.0000001"] {
+            XCTAssertThrowsError(try ConsumeMicroUSD.parsePositiveUSD(invalid)) { error in
+                XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_flag_rejected")
+            }
+        }
+
+        XCTAssertThrowsError(
+            try ConsumeBudgetConfig.parse(
+                budgetUSD: nil,
+                maxRequestUSD: nil,
+                noBudget: false,
+                ledgerPath: "ledger.jsonl",
+                allowUnpriced: false,
+                runID: "run",
+                homeDirectory: try makeTemporaryDirectory(),
+                startupDirectory: try makeTemporaryDirectory()
+            )
+        ) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_flag_rejected")
+        }
+
+        XCTAssertThrowsError(
+            try ConsumeBudgetConfig.parse(
+                budgetUSD: "1",
+                maxRequestUSD: nil,
+                noBudget: true,
+                ledgerPath: nil,
+                allowUnpriced: false,
+                runID: "run",
+                homeDirectory: try makeTemporaryDirectory(),
+                startupDirectory: try makeTemporaryDirectory()
+            )
+        ) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_flag_rejected")
+        }
+
+        let noBudgetHome = try makeTemporaryDirectory()
+        let noBudgetConfig = try ConsumeBudgetConfig.parse(
+            budgetUSD: nil,
+            maxRequestUSD: nil,
+            noBudget: true,
+            ledgerPath: nil,
+            allowUnpriced: false,
+            runID: "run",
+            homeDirectory: noBudgetHome,
+            startupDirectory: noBudgetHome
+        )
+        XCTAssertEqual(noBudgetConfig.mode, .noBudget)
+        XCTAssertNil(noBudgetConfig.ledger)
+        XCTAssertNil(noBudgetConfig.ledgerPathClass)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: noBudgetHome
+                .appendingPathComponent("Library/Application Support/macprovider/consume/ledgers/default.jsonl")
+                .path
+        ))
+
+        let explicitNoBudgetLedger = noBudgetHome.appendingPathComponent("explicit-no-budget.jsonl")
+        let explicitNoBudgetConfig = try ConsumeBudgetConfig.parse(
+            budgetUSD: nil,
+            maxRequestUSD: nil,
+            noBudget: true,
+            ledgerPath: explicitNoBudgetLedger.path,
+            allowUnpriced: false,
+            runID: "run",
+            homeDirectory: noBudgetHome,
+            startupDirectory: noBudgetHome
+        )
+        XCTAssertEqual(explicitNoBudgetConfig.mode, .noBudget)
+        XCTAssertNotNil(explicitNoBudgetConfig.ledger)
+        XCTAssertEqual(explicitNoBudgetConfig.ledgerPathClass, "explicit_absolute")
+    }
+
+    func testPhase3LedgerPathResolutionClassifiesDefaultAbsoluteAndRelative() throws {
+        let home = try makeTemporaryDirectory()
+        let startup = home.appendingPathComponent("startup")
+        let defaultResolution = try ConsumeBudgetLedger.resolve(
+            ledgerPath: "default",
+            homeDirectory: home,
+            startupDirectory: startup
+        )
+        XCTAssertEqual(defaultResolution.pathClass, "default_user_state")
+        XCTAssertEqual(
+            defaultResolution.url.path,
+            home.appendingPathComponent("Library/Application Support/macprovider/consume/ledgers/default.jsonl").path
+        )
+
+        let absoluteURL = home.appendingPathComponent("absolute-ledger.jsonl")
+        let absoluteResolution = try ConsumeBudgetLedger.resolve(
+            ledgerPath: absoluteURL.path,
+            homeDirectory: home,
+            startupDirectory: startup
+        )
+        XCTAssertEqual(absoluteResolution.pathClass, "explicit_absolute")
+        XCTAssertEqual(absoluteResolution.url.path, absoluteURL.standardizedFileURL.path)
+
+        let relativeName = "relative-\(UUID().uuidString)/budget.jsonl"
+        let relativeResolution = try ConsumeBudgetLedger.resolve(
+            ledgerPath: relativeName,
+            homeDirectory: home,
+            startupDirectory: startup
+        )
+        XCTAssertEqual(relativeResolution.pathClass, "explicit_relative")
+        XCTAssertEqual(
+            relativeResolution.url.path,
+            startup.appendingPathComponent(relativeName).standardizedFileURL.path
+        )
+    }
+
+    func testPhase3RunCommandStartupReportsBudgetMode() async throws {
+        let home = try makeTemporaryDirectory()
+        let port = try nextLoopbackPort()
+        var command = try ConsumeRunCommand.parse([
+            "--port", "\(port)",
+            "--allow-model", "llama-test",
+            "--budget-usd", "1.25",
+            "--allow-unpriced",
+        ])
+        command.environmentForTesting = [:]
+        command.homeDirectoryForTesting = home
+        command.startupDirectoryForTesting = home
+
+        let capture = await captureStatusOutput {
+            try await command.run(stopAfterListeningForTesting: true)
+        }
+
+        XCTAssertNil(capture.error)
+        XCTAssertTrue(capture.stderr.contains("budget_mode=budget"), capture.stderr)
+        XCTAssertTrue(capture.stderr.contains("unpriced_override=true"), capture.stderr)
+        XCTAssertTrue(capture.stderr.contains("warnings=unpriced_override"), capture.stderr)
+        XCTAssertFalse(capture.stderr.contains(home.path), capture.stderr)
+    }
+
+    func testPhase3ChatRejectsDisallowedModelBeforeBudget() throws {
+        let token = try ConsumeLocalToken.generate()
+        let runtime = consumeRuntime(token: token, allowedModels: ["llama-test"])
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"other-model","messages":[]}"#.utf8)
+        )
+
+        XCTAssertEqual(response.status, .badRequest)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_model_not_allowed")
+    }
+
+    func testPhase3NoBudgetStatusUsesNullBudgetAmounts() throws {
+        let token = try ConsumeLocalToken.generate()
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let runtime = consumeRuntime(token: token, budget: budget)
+        let status = runtime.statusPayload()
+
+        XCTAssertEqual(status["no_budget"] as? Bool, true)
+        XCTAssertTrue(status["budget_configured_micro_usd"] is NSNull)
+        XCTAssertTrue(status["budget_used_micro_usd"] is NSNull)
+        XCTAssertTrue(status["budget_held_micro_usd"] is NSNull)
+        XCTAssertTrue(status["budget_remaining_micro_usd"] is NSNull)
+        XCTAssertTrue(status["pricing_warning_codes"] as? [String] == [])
+    }
+
+    func testPhase3UnconfiguredStatusDoesNotTrustAllowUnpriced() throws {
+        let token = try ConsumeLocalToken.generate()
+        let budget = ConsumeBudgetConfig(
+            mode: .unconfigured,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: true,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let runtime = consumeRuntime(token: token, budget: budget)
+        let status = runtime.statusPayload()
+
+        XCTAssertEqual(status["pricing_trust_state"] as? String, "unavailable")
+        XCTAssertEqual(status["unpriced_override"] as? Bool, true)
+        XCTAssertTrue(status["budget_configured_micro_usd"] is NSNull)
+        XCTAssertTrue(status["budget_ledger_state"] is NSNull)
+    }
+
+    func testPhase3BudgetStatusDoesNotMaskCorruptLedger() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("corrupt.jsonl")
+        try Data("not-json\n".utf8).write(to: ledgerURL)
+        chmod(ledgerURL.path, 0o600)
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 1_000_000)),
+            maxRequestMicroUSD: nil,
+            allowUnpriced: true,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        let runtime = consumeRuntime(token: token, budget: budget)
+        let status = runtime.statusPayload()
+
+        XCTAssertEqual(status["pricing_trust_state"] as? String, "unavailable")
+        XCTAssertEqual(status["budget_ledger_state"] as? String, "unavailable")
+        XCTAssertTrue(status["budget_used_micro_usd"] is NSNull)
+        XCTAssertTrue(status["budget_held_micro_usd"] is NSNull)
+        XCTAssertTrue(status["budget_remaining_micro_usd"] is NSNull)
+    }
+
+    func testPhase3BudgetStatusDoesNotTrapOnOverflowingCommittedExposure() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("overflow.jsonl")
+        try writeLedgerRows(
+            [
+                [
+                    "schema_version": ConsumeBudgetLedger.schemaVersion,
+                    "transition": "reserved",
+                    "state": "reserved",
+                    "run_id": "run-a",
+                    "reservation_id": "reservation-1",
+                    "amount_micro_usd": "\(Int64.max)",
+                    "reason": "test",
+                    "created_at": "2026-08-23T00:00:00Z",
+                ],
+                [
+                    "schema_version": ConsumeBudgetLedger.schemaVersion,
+                    "transition": "reserved",
+                    "state": "reserved",
+                    "run_id": "run-b",
+                    "reservation_id": "reservation-2",
+                    "amount_micro_usd": "\(Int64.max)",
+                    "reason": "test",
+                    "created_at": "2026-08-23T00:00:01Z",
+                ],
+            ],
+            to: ledgerURL
+        )
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 1_000_000)),
+            maxRequestMicroUSD: nil,
+            allowUnpriced: true,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        let runtime = consumeRuntime(token: token, budget: budget)
+        let status = runtime.statusPayload()
+
+        XCTAssertEqual(status["pricing_trust_state"] as? String, "unavailable")
+        XCTAssertEqual(status["budget_ledger_state"] as? String, "unavailable")
+        XCTAssertTrue(status["budget_used_micro_usd"] is NSNull)
+        XCTAssertTrue(status["budget_held_micro_usd"] is NSNull)
+        XCTAssertTrue(status["budget_remaining_micro_usd"] is NSNull)
+    }
+
+    func testPhase3LedgerRejectsMalformedJSONAndUnsupportedTransitions() throws {
+        let home = try makeTemporaryDirectory()
+
+        let blankLineURL = home.appendingPathComponent("blank-line.jsonl")
+        try Data("\n".utf8).write(to: blankLineURL)
+        chmod(blankLineURL.path, 0o600)
+        let blankLineLedger = try ConsumeBudgetLedger.open(
+            ledgerPath: blankLineURL.path,
+            homeDirectory: home,
+            startupDirectory: home
+        )
+        XCTAssertThrowsError(try blankLineLedger.summary()) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+
+        let duplicateKeyURL = home.appendingPathComponent("duplicate-key.jsonl")
+        try Data("""
+        {"schema_version":"\(ConsumeBudgetLedger.schemaVersion)","transition":"reserved","state":"reserved","run_id":"run-a","reservation_id":"reservation-1","amount_micro_usd":"100","amount_micro_usd":"200","reason":"test","created_at":"2026-08-23T00:00:00Z"}
+
+        """.utf8).write(to: duplicateKeyURL)
+        chmod(duplicateKeyURL.path, 0o600)
+        let duplicateKeyLedger = try ConsumeBudgetLedger.open(
+            ledgerPath: duplicateKeyURL.path,
+            homeDirectory: home,
+            startupDirectory: home
+        )
+        XCTAssertThrowsError(try duplicateKeyLedger.summary()) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+
+        let invalidUTF8URL = home.appendingPathComponent("invalid-utf8.jsonl")
+        try Data([0xff, 0x0a]).write(to: invalidUTF8URL)
+        chmod(invalidUTF8URL.path, 0o600)
+        let invalidUTF8Ledger = try ConsumeBudgetLedger.open(
+            ledgerPath: invalidUTF8URL.path,
+            homeDirectory: home,
+            startupDirectory: home
+        )
+        XCTAssertThrowsError(try invalidUTF8Ledger.summary()) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+
+        let tornRowURL = home.appendingPathComponent("torn-row.jsonl")
+        try Data("""
+        {"schema_version":"\(ConsumeBudgetLedger.schemaVersion)","transition":"reserved","state":"reserved","run_id":"run-a","reservation_id":"reservation-1","amount_micro_usd":"100","reason":"test","created_at":"2026-08-23T00:00:00Z"}
+        """.trimmingCharacters(in: .newlines).utf8).write(to: tornRowURL)
+        chmod(tornRowURL.path, 0o600)
+        let tornRowLedger = try ConsumeBudgetLedger.open(
+            ledgerPath: tornRowURL.path,
+            homeDirectory: home,
+            startupDirectory: home
+        )
+        XCTAssertThrowsError(try tornRowLedger.summary()) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+
+        let settledTransitionURL = home.appendingPathComponent("settled.jsonl")
+        try writeLedgerRows(
+            [
+                [
+                    "schema_version": ConsumeBudgetLedger.schemaVersion,
+                    "transition": "reserved",
+                    "state": "reserved",
+                    "run_id": "run-a",
+                    "reservation_id": "reservation-1",
+                    "amount_micro_usd": "100",
+                    "reason": "test",
+                    "created_at": "2026-08-23T00:00:00Z",
+                ],
+                [
+                    "schema_version": ConsumeBudgetLedger.schemaVersion,
+                    "transition": "settled",
+                    "state": "settled",
+                    "run_id": "run-a",
+                    "reservation_id": "reservation-1",
+                    "amount_micro_usd": "100",
+                    "reason": "test",
+                    "created_at": "2026-08-23T00:00:01Z",
+                ],
+            ],
+            to: settledTransitionURL
+        )
+        let settledTransitionLedger = try ConsumeBudgetLedger.open(
+            ledgerPath: settledTransitionURL.path,
+            homeDirectory: home,
+            startupDirectory: home
+        )
+        XCTAssertThrowsError(try settledTransitionLedger.summary()) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+
+        let interiorBlankURL = home.appendingPathComponent("interior-blank.jsonl")
+        try Data("""
+        {"schema_version":"\(ConsumeBudgetLedger.schemaVersion)","transition":"reserved","state":"reserved","run_id":"run-a","reservation_id":"reservation-1","amount_micro_usd":"100","reason":"test","created_at":"2026-08-23T00:00:00Z"}
+
+
+        """.utf8).write(to: interiorBlankURL)
+        chmod(interiorBlankURL.path, 0o600)
+        let interiorBlankLedger = try ConsumeBudgetLedger.open(
+            ledgerPath: interiorBlankURL.path,
+            homeDirectory: home,
+            startupDirectory: home
+        )
+        XCTAssertThrowsError(try interiorBlankLedger.summary()) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+
+        let unsupportedTransitionURL = home.appendingPathComponent("estimate-exceeded.jsonl")
+        try writeLedgerRows(
+            [
+                [
+                    "schema_version": ConsumeBudgetLedger.schemaVersion,
+                    "transition": "reserved",
+                    "state": "reserved",
+                    "run_id": "run-a",
+                    "reservation_id": "reservation-1",
+                    "amount_micro_usd": "100",
+                    "reason": "test",
+                    "created_at": "2026-08-23T00:00:00Z",
+                ],
+                [
+                    "schema_version": ConsumeBudgetLedger.schemaVersion,
+                    "transition": "estimate_exceeded",
+                    "state": "estimate_exceeded",
+                    "run_id": "run-a",
+                    "reservation_id": "reservation-1",
+                    "amount_micro_usd": "100",
+                    "reason": "test",
+                    "created_at": "2026-08-23T00:00:01Z",
+                ],
+            ],
+            to: unsupportedTransitionURL
+        )
+        let unsupportedTransitionLedger = try ConsumeBudgetLedger.open(
+            ledgerPath: unsupportedTransitionURL.path,
+            homeDirectory: home,
+            startupDirectory: home
+        )
+        XCTAssertThrowsError(try unsupportedTransitionLedger.summary()) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+    }
+
+    func testPhase3LedgerRejectsPathReplacementAfterOpen() throws {
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+
+        try FileManager.default.removeItem(at: ledgerURL)
+        try Data("".utf8).write(to: ledgerURL)
+        chmod(ledgerURL.path, 0o600)
+
+        XCTAssertThrowsError(try ledger.summary()) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+
+    }
+
+    func testPhase3LedgerRejectsParentReplacementAfterOpen() throws {
+        let home = try makeTemporaryDirectory()
+        let parent = home.appendingPathComponent("parent", isDirectory: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let ledgerURL = parent.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        XCTAssertNoThrow(try ledger.summary())
+
+        let movedParent = home.appendingPathComponent("moved-parent", isDirectory: true)
+        try FileManager.default.moveItem(at: parent, to: movedParent)
+        try FileManager.default.createSymbolicLink(at: parent, withDestinationURL: movedParent)
+
+        XCTAssertThrowsError(try ledger.summary()) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+    }
+
+    func testPhase3LedgerRejectsLockReplacementAfterOpen() throws {
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let lockURL = URL(fileURLWithPath: ledgerURL.path + ".lock")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+
+        try FileManager.default.removeItem(at: lockURL)
+        try Data("".utf8).write(to: lockURL)
+        chmod(lockURL.path, 0o600)
+
+        XCTAssertThrowsError(try ledger.summary()) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+
+    }
+
+    func testPhase3LedgerRejectsConcurrentOpenOnSameLock() throws {
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        _ = ledger
+
+        XCTAssertThrowsError(try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+    }
+
+    func testPhase3LedgerRejectsUnsafeExistingLedgerOrLockMode() throws {
+        let home = try makeTemporaryDirectory()
+        let unsafeLedgerURL = home.appendingPathComponent("unsafe-ledger.jsonl")
+        try Data("".utf8).write(to: unsafeLedgerURL)
+        chmod(unsafeLedgerURL.path, 0o640)
+        XCTAssertThrowsError(try ConsumeBudgetLedger.open(ledgerPath: unsafeLedgerURL.path, homeDirectory: home, startupDirectory: home)) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+
+        let unsafeLockLedgerURL = home.appendingPathComponent("unsafe-lock.jsonl")
+        let unsafeLockURL = URL(fileURLWithPath: unsafeLockLedgerURL.path + ".lock")
+        try Data("".utf8).write(to: unsafeLockURL)
+        chmod(unsafeLockURL.path, 0o640)
+        XCTAssertThrowsError(try ConsumeBudgetLedger.open(ledgerPath: unsafeLockLedgerURL.path, homeDirectory: home, startupDirectory: home)) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+    }
+
+    func testPhase3LedgerCreationFailuresAreRedacted() throws {
+        let home = try makeTemporaryDirectory()
+        let blockingFile = home.appendingPathComponent("root")
+        try Data("not-a-directory".utf8).write(to: blockingFile)
+        chmod(blockingFile.path, 0o600)
+        let sensitiveLedger = blockingFile
+            .appendingPathComponent("sensitive-user")
+            .appendingPathComponent("budget.jsonl")
+
+        XCTAssertThrowsError(try ConsumeBudgetLedger.open(ledgerPath: sensitiveLedger.path, homeDirectory: home, startupDirectory: home)) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+            XCTAssertFalse(String(describing: error).contains("sensitive-user"))
+        }
+    }
+
+    func testPhase3LedgerRejectsRunIDAndAmountMutation() throws {
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        try writeLedgerRows(
+            [
+                [
+                    "schema_version": ConsumeBudgetLedger.schemaVersion,
+                    "transition": "reserved",
+                    "state": "reserved",
+                    "run_id": "run-a",
+                    "reservation_id": "reservation-1",
+                    "amount_micro_usd": "100",
+                    "reason": "test",
+                    "created_at": "2026-08-23T00:00:00Z",
+                ],
+                [
+                    "schema_version": ConsumeBudgetLedger.schemaVersion,
+                    "transition": "held",
+                    "state": "held",
+                    "run_id": "run-b",
+                    "reservation_id": "reservation-1",
+                    "amount_micro_usd": "100",
+                    "reason": "test",
+                    "created_at": "2026-08-23T00:00:01Z",
+                ],
+            ],
+            to: ledgerURL
+        )
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+
+        XCTAssertThrowsError(try ledger.summary()) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+
+        let amountMutationURL = home.appendingPathComponent("amount-mutation.jsonl")
+        try writeLedgerRows(
+            [
+                [
+                    "schema_version": ConsumeBudgetLedger.schemaVersion,
+                    "transition": "reserved",
+                    "state": "reserved",
+                    "run_id": "run-a",
+                    "reservation_id": "reservation-2",
+                    "amount_micro_usd": "100",
+                    "reason": "test",
+                    "created_at": "2026-08-23T00:00:02Z",
+                ],
+                [
+                    "schema_version": ConsumeBudgetLedger.schemaVersion,
+                    "transition": "held",
+                    "state": "held",
+                    "run_id": "run-a",
+                    "reservation_id": "reservation-2",
+                    "amount_micro_usd": "200",
+                    "reason": "test",
+                    "created_at": "2026-08-23T00:00:03Z",
+                ],
+            ],
+            to: amountMutationURL
+        )
+        let amountMutationLedger = try ConsumeBudgetLedger.open(
+            ledgerPath: amountMutationURL.path,
+            homeDirectory: home,
+            startupDirectory: home
+        )
+        XCTAssertThrowsError(try amountMutationLedger.summary()) { error in
+            XCTAssertEqual((error as? ConsumeBudgetError)?.code, "local_budget_ledger_unavailable")
+        }
+    }
+
+    func testPhase3ConcurrentUnpricedAdmissionSerializesFullBudget() throws {
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let resultLock = NSLock()
+        var results: [ConsumeBudgetAdmissionResult] = []
+        var errors: [Error] = []
+
+        DispatchQueue.concurrentPerform(iterations: 8) { index in
+            do {
+                let result = try ledger.reserveAndHoldUnpricedRemaining(
+                    runID: "run-\(index)",
+                    budget: ConsumeMicroUSD(rawValue: 1_000_000),
+                    maxRequest: nil
+                )
+                resultLock.lock()
+                results.append(result)
+                resultLock.unlock()
+            } catch {
+                resultLock.lock()
+                errors.append(error)
+                resultLock.unlock()
+            }
+        }
+
+        XCTAssertEqual(errors.count, 0)
+        XCTAssertEqual(results.filter { if case .held = $0 { return true }; return false }.count, 1)
+        XCTAssertEqual(results.filter { $0 == .budgetExceeded }.count, 7)
+        let summary = try ledger.summary()
+        XCTAssertEqual(summary.held.rawValue, 1_000_000)
+        XCTAssertEqual(summary.heldReservationCount, 1)
+    }
+
+    func testPhase3BudgetedUnpricedRequestIsHeldUntilRelease() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 1_000_000)),
+            maxRequestMicroUSD: nil,
+            allowUnpriced: true,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        let runtime = consumeRuntime(token: token, budget: budget)
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
+        )
+
+        XCTAssertEqual(response.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_upstream_unavailable")
+        XCTAssertEqual(response.headers.first(name: "x-macprovider-warning"), "unpriced_override")
+        var summary = try ledger.summary()
+        XCTAssertEqual(summary.reserved.rawValue, 0)
+        XCTAssertEqual(summary.held.rawValue, 1_000_000)
+        XCTAssertEqual(summary.heldReservationCount, 1)
+        XCTAssertEqual(runtime.statusPayload()["budget_remaining_micro_usd"] as? String, "0")
+
+        XCTAssertEqual(try ledger.releaseHeld(runID: "wrong-run"), 0)
+        summary = try ledger.summary()
+        XCTAssertEqual(summary.held.rawValue, 1_000_000)
+        XCTAssertEqual(summary.released.rawValue, 0)
+
+        XCTAssertEqual(try ledger.releaseHeld(runID: "launch-phase2-test"), 1)
+        summary = try ledger.summary()
+        XCTAssertEqual(summary.held.rawValue, 0)
+        XCTAssertEqual(summary.released.rawValue, 1_000_000)
+    }
+
+    func testPhase3PerRequestCapRejectsBeforeLedgerAppend() throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledgerURL = home.appendingPathComponent("budget.jsonl")
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: ledgerURL.path, homeDirectory: home, startupDirectory: home)
+        let budget = ConsumeBudgetConfig(
+            mode: .budget(ConsumeMicroUSD(rawValue: 1_000_000)),
+            maxRequestMicroUSD: ConsumeMicroUSD(rawValue: 100_000),
+            allowUnpriced: true,
+            ledger: ledger,
+            ledgerPathClass: ledger.pathClass
+        )
+        let runtime = consumeRuntime(token: token, budget: budget)
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
+        )
+
+        XCTAssertEqual(response.status.code, 402)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_request_cap_exceeded")
+        let summary = try ledger.summary()
+        XCTAssertEqual(summary.reserved.rawValue, 0)
+        XCTAssertEqual(summary.held.rawValue, 0)
+    }
+
     func testPhase2ModelsReturnsOnlyLocalAllowlistEntries() throws {
         let token = try ConsumeLocalToken.generate()
         let runtime = consumeRuntime(
@@ -760,6 +1431,16 @@ final class ConsumeCommandTests: XCTestCase {
         try Data((value + "\n").utf8).write(to: url)
         chmod(url.path, 0o600)
         return url
+    }
+
+    private func writeLedgerRows(_ rows: [[String: Any]], to url: URL) throws {
+        var data = Data()
+        for row in rows {
+            data.append(try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]))
+            data.append(0x0a)
+        }
+        try data.write(to: url)
+        chmod(url.path, 0o600)
     }
 
     private func makeTemporaryDirectory() throws -> URL {
@@ -856,6 +1537,7 @@ final class ConsumeCommandTests: XCTestCase {
         token: ConsumeLocalToken,
         credentialStatus: ConsumeCredentialStatus = .missing,
         allowedModels: [String] = ["llama-test"],
+        budget: ConsumeBudgetConfig = .unconfigured,
         requestCounter: ConsumeEndpointRequestCounter = ConsumeEndpointRequestCounter()
     ) -> ConsumeEndpointRuntime {
         ConsumeEndpointRuntime(
@@ -866,6 +1548,7 @@ final class ConsumeCommandTests: XCTestCase {
             credentialStatus: credentialStatus,
             modelAllowlist: allowedModels,
             tokenVerifier: token.verifier,
+            budget: budget,
             requestCounter: requestCounter
         )
     }
