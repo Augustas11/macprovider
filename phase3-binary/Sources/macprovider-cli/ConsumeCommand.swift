@@ -3,6 +3,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import MacProviderCore
+import Network
 import Security
 @preconcurrency import NIO
 @preconcurrency import NIOHTTP1
@@ -385,6 +386,31 @@ enum ConsumePricedExposureEstimator {
         )
     }
 
+    static func actualUsageSettlement(
+        promptTokens: Int64,
+        completionTokens: Int64,
+        match: ConsumeTrustedRateCardMatch,
+        projection: RateCardProjection
+    ) throws -> ConsumeMicroUSD {
+        guard promptTokens >= 0, completionTokens >= 0 else {
+            throw ConsumeBudgetError(code: "local_pricing_unavailable")
+        }
+        let row = match.row
+        let prompt = try componentMicroUSD(
+            tokens: promptTokens,
+            ratePerMtok: row.promptRatePerMtok,
+            globalMultiplierPPM: row.globalMultiplierPPM,
+            usdPerMillionCredits: projection.usdPerMillionCredits
+        )
+        let completion = try componentMicroUSD(
+            tokens: completionTokens,
+            ratePerMtok: row.completionRatePerMtok,
+            globalMultiplierPPM: row.globalMultiplierPPM,
+            usdPerMillionCredits: projection.usdPerMillionCredits
+        )
+        return try prompt + completion
+    }
+
     private static func explicitOutputTokenBound(from request: JSONValue) -> Int64? {
         request.objectPositiveInt64("max_tokens")
     }
@@ -521,7 +547,10 @@ struct ConsumeBudgetConfig: @unchecked Sendable {
         )
     }
 
-    func statusFields(trustedPricing: ConsumeTrustedPricingState = .notLoaded) -> [String: Any] {
+    func statusFields(
+        trustedPricing: ConsumeTrustedPricingState = .notLoaded,
+        pricingEstimateExceeded: Bool = false
+    ) -> [String: Any] {
         let summary: ConsumeBudgetLedgerSummary?
         if let ledger {
             summary = try? ledger.summary()
@@ -567,6 +596,9 @@ struct ConsumeBudgetConfig: @unchecked Sendable {
         if case .unconfigured = mode {
             pricingState = "unavailable"
             pricingWarnings = []
+        } else if pricingEstimateExceeded {
+            pricingState = "estimate_exceeded"
+            pricingWarnings = []
         } else {
             pricingState = ledgerIsHealthy ? pricingTrustState(trustedPricing: trustedPricing) : "unavailable"
             pricingWarnings = ledgerIsHealthy ? pricingWarningCodes(trustedPricing: trustedPricing) : []
@@ -603,6 +635,652 @@ struct ConsumeBudgetConfig: @unchecked Sendable {
     }
 }
 
+struct ConsumeUpstreamRequest: Sendable {
+    let origin: String
+    let endpoint: String
+    let bearerToken: String
+    let body: Data
+}
+
+struct ConsumeUpstreamResponse: Sendable {
+    let statusCode: Int
+    let headers: [(String, String)]
+    let body: Data
+}
+
+enum ConsumeUpstreamForwardError: Error {
+    case preDispatchUnavailable
+    case dispatchedUnavailable
+}
+
+struct ConsumeUpstreamTimeouts: Sendable {
+    let connectNanoseconds: UInt64
+    let sendNanoseconds: UInt64
+    let readNanoseconds: UInt64
+
+    static let `default` = ConsumeUpstreamTimeouts(
+        connectNanoseconds: 5_000_000_000,
+        sendNanoseconds: 5_000_000_000,
+        readNanoseconds: 30_000_000_000
+    )
+}
+
+private struct ConsumeUpstreamFailureClassification {
+    let status: HTTPResponseStatus
+    let forwardedUpstream: Bool
+}
+
+protocol ConsumeUpstreamClient: Sendable {
+    func resolveChatCompletionsEndpoint(
+        origin: String,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<String>
+
+    func forwardChatCompletions(
+        request: ConsumeUpstreamRequest,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ConsumeUpstreamResponse>
+}
+
+final class ConsumePinnedUpstreamClient: ConsumeUpstreamClient, @unchecked Sendable {
+    private let maxBodyBytes: Int
+    private let timeouts: ConsumeUpstreamTimeouts
+
+    private final class ReceiveState: @unchecked Sendable {
+        var received = Data()
+    }
+
+    private final class ContinuationGate<Value: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var resumed = false
+
+        func finish(_ result: Result<Value, Error>, continuation: CheckedContinuation<Value, Error>) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !resumed else { return }
+            resumed = true
+            switch result {
+            case .success(let value):
+                continuation.resume(returning: value)
+            case .failure(let error):
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    private final class DeadlineTimer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: DispatchWorkItem?
+
+        func schedule(nanoseconds: UInt64, _ block: @escaping @Sendable () -> Void) {
+            let work = DispatchWorkItem(block: block)
+            lock.lock()
+            task = work
+            lock.unlock()
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() + .nanoseconds(Int(nanoseconds)),
+                execute: work
+            )
+        }
+
+        func cancel() {
+            lock.lock()
+            let current = task
+            task = nil
+            lock.unlock()
+            current?.cancel()
+        }
+    }
+
+    init(
+        maxBodyBytes: Int = ConsumeLocalLimits.bodyBytes,
+        timeouts: ConsumeUpstreamTimeouts = .default
+    ) {
+        self.maxBodyBytes = maxBodyBytes
+        self.timeouts = timeouts
+    }
+
+    func resolveChatCompletionsEndpoint(
+        origin: String,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<String> {
+        let promise = eventLoop.makePromise(of: String.self)
+        Task { @Sendable in
+            do {
+                let endpoint = try await Self.resolveEndpoint(
+                    origin: origin,
+                    timeoutNanoseconds: timeouts.connectNanoseconds
+                )
+                promise.succeed(endpoint)
+            } catch {
+                promise.fail(error)
+            }
+        }
+        return promise.futureResult
+    }
+
+    func forwardChatCompletions(
+        request upstreamRequest: ConsumeUpstreamRequest,
+        on eventLoop: EventLoop
+    ) -> EventLoopFuture<ConsumeUpstreamResponse> {
+        let promise = eventLoop.makePromise(of: ConsumeUpstreamResponse.self)
+        Task { @Sendable in
+            do {
+                let response = try await Self.fetch(
+                    upstreamRequest: upstreamRequest,
+                    maxBodyBytes: maxBodyBytes,
+                    timeouts: timeouts
+                )
+                promise.succeed(response)
+            } catch {
+                promise.fail(error)
+            }
+        }
+        return promise.futureResult
+    }
+
+    private static func resolveEndpoint(origin: String, timeoutNanoseconds: UInt64) async throws -> String {
+        guard let host = upstreamTarget(origin: origin).host else {
+            throw ConsumeStartupError(code: "local_upstream_url_rejected")
+        }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            let gate = ContinuationGate<String>()
+            let deadline = DeadlineTimer()
+            @Sendable func finish(_ result: Result<String, Error>) {
+                deadline.cancel()
+                gate.finish(result, continuation: continuation)
+            }
+            let resolver = Task.detached(priority: .utility) {
+                do {
+                    let endpoints = try ConsumeEndpointConfig.validatedGlobalUpstreamEndpoints(host)
+                    guard let endpoint = endpoints.first else {
+                        throw ConsumeStartupError(code: "local_upstream_url_rejected")
+                    }
+                    finish(.success(endpoint))
+                } catch {
+                    finish(.failure(error))
+                }
+            }
+            deadline.schedule(nanoseconds: timeoutNanoseconds) {
+                resolver.cancel()
+                finish(.failure(ConsumeUpstreamForwardError.preDispatchUnavailable))
+            }
+        }
+    }
+
+    private static func upstreamTarget(origin: String) -> (host: String?, port: Int?) {
+        guard let components = URLComponents(string: origin),
+              components.scheme == "https",
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil else {
+            return (nil, nil)
+        }
+        return (components.host, components.port ?? 443)
+    }
+
+    private static func fetch(
+        upstreamRequest: ConsumeUpstreamRequest,
+        maxBodyBytes: Int,
+        timeouts: ConsumeUpstreamTimeouts
+    ) async throws -> ConsumeUpstreamResponse {
+        guard var components = URLComponents(string: upstreamRequest.origin),
+              components.scheme == "https",
+              let host = components.host,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil else {
+            throw ConsumeStartupError(code: "local_upstream_url_rejected")
+        }
+        let portValue = components.port ?? 443
+        guard (1...65_535).contains(portValue),
+              let port = NWEndpoint.Port(rawValue: UInt16(portValue)) else {
+            throw ConsumeStartupError(code: "local_upstream_url_rejected")
+        }
+        guard ConsumeEndpointConfig.isValidatedGlobalEndpoint(upstreamRequest.endpoint) else {
+            throw ConsumeStartupError(code: "local_upstream_url_rejected")
+        }
+        components.path = "/v1/chat/completions"
+        let connection = NWConnection(
+            host: NWEndpoint.Host(upstreamRequest.endpoint),
+            port: port,
+            using: tlsParameters(serverName: host)
+        )
+        let queue = DispatchQueue(label: "macprovider.consume.upstream.\(UUID().uuidString)")
+        connection.start(queue: queue)
+        do {
+            try await waitUntilReady(
+                connection,
+                timeoutNanoseconds: timeouts.connectNanoseconds
+            )
+        } catch {
+            connection.cancel()
+            throw ConsumeUpstreamForwardError.preDispatchUnavailable
+        }
+        let request = httpRequestBytes(
+            host: host,
+            port: portValue,
+            bearerToken: upstreamRequest.bearerToken,
+            body: upstreamRequest.body
+        )
+        do {
+            try await send(
+                request,
+                on: connection,
+                timeoutNanoseconds: timeouts.sendNanoseconds
+            )
+        } catch {
+            connection.cancel()
+            throw classifySendFailure(error)
+        }
+        do {
+            let response = try await readHTTPResponse(
+                from: connection,
+                maxBodyBytes: maxBodyBytes,
+                timeoutNanoseconds: timeouts.readNanoseconds
+            )
+            connection.cancel()
+            return response
+        } catch {
+            connection.cancel()
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+    }
+
+    private static func tlsParameters(serverName: String) -> NWParameters {
+        let tls = NWProtocolTLS.Options()
+        sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, serverName)
+        let parameters = NWParameters(tls: tls)
+        parameters.prohibitExpensivePaths = true
+        parameters.prohibitedInterfaceTypes = [.loopback]
+        return parameters
+    }
+
+    private static func waitUntilReady(_ connection: NWConnection, timeoutNanoseconds: UInt64) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let gate = ContinuationGate<Void>()
+            let deadline = DeadlineTimer()
+            @Sendable func finish(_ result: Result<Void, Error>) {
+                deadline.cancel()
+                gate.finish(result, continuation: continuation)
+            }
+            deadline.schedule(nanoseconds: timeoutNanoseconds) {
+                connection.cancel()
+                finish(.failure(ConsumeUpstreamForwardError.dispatchedUnavailable))
+            }
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    finish(.success(()))
+                case .failed(let error):
+                    finish(.failure(error))
+                case .cancelled:
+                    finish(.failure(ConsumeUpstreamForwardError.preDispatchUnavailable))
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    private static func send(_ data: Data, on connection: NWConnection, timeoutNanoseconds: UInt64) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let gate = ContinuationGate<Void>()
+            let deadline = DeadlineTimer()
+            @Sendable func finish(_ result: Result<Void, Error>) {
+                deadline.cancel()
+                gate.finish(result, continuation: continuation)
+            }
+            deadline.schedule(nanoseconds: timeoutNanoseconds) {
+                connection.cancel()
+                finish(.failure(ConsumeUpstreamForwardError.preDispatchUnavailable))
+            }
+            connection.send(content: data, completion: .contentProcessed { error in
+                if let error {
+                    finish(.failure(error))
+                } else {
+                    finish(.success(()))
+                }
+            })
+        }
+    }
+
+    private static func classifySendFailure(_ error: Error) -> ConsumeUpstreamForwardError {
+        .preDispatchUnavailable
+    }
+
+    static func sendFailureClassificationForTesting(_ error: Error) -> ConsumeUpstreamForwardError {
+        classifySendFailure(error)
+    }
+
+    private static func readHTTPResponse(
+        from connection: NWConnection,
+        maxBodyBytes: Int,
+        timeoutNanoseconds: UInt64
+    ) async throws -> ConsumeUpstreamResponse {
+        try await withCheckedThrowingContinuation { continuation in
+            let state = ReceiveState()
+            let gate = ContinuationGate<ConsumeUpstreamResponse>()
+            let headerTerminator = Data([13, 10, 13, 10])
+            let deadline = DeadlineTimer()
+            @Sendable func finish(_ result: Result<ConsumeUpstreamResponse, Error>) {
+                deadline.cancel()
+                gate.finish(result, continuation: continuation)
+            }
+            deadline.schedule(nanoseconds: timeoutNanoseconds) {
+                connection.cancel()
+                finish(.failure(ConsumeUpstreamForwardError.dispatchedUnavailable))
+            }
+            @Sendable func receiveNext() {
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { data, _, isComplete, error in
+                    if let error {
+                        finish(.failure(error))
+                        return
+                    }
+                    if let data, !data.isEmpty {
+                        state.received.append(data)
+                    }
+                    if let headerRange = state.received.range(of: headerTerminator) {
+                        let bodyStart = headerRange.upperBound
+                        let rawBodyBytes = state.received.count - bodyStart
+                        guard headerRange.lowerBound <= ConsumeLocalLimits.headerBytes,
+                              rawBodyBytes <= maxBodyBytes + 64 * 1024 else {
+                            finish(.failure(ConsumeUpstreamForwardError.dispatchedUnavailable))
+                            return
+                        }
+                        do {
+                            if let response = try parseCompleteHTTPResponseIfAvailable(
+                                state.received,
+                                maxBodyBytes: maxBodyBytes,
+                                allowCloseDelimitedBody: isComplete
+                            ) {
+                                finish(.success(response))
+                                return
+                            }
+                        } catch {
+                            finish(.failure(error))
+                            return
+                        }
+                    } else if state.received.count > ConsumeLocalLimits.headerBytes {
+                        finish(.failure(ConsumeUpstreamForwardError.dispatchedUnavailable))
+                        return
+                    }
+                    if isComplete {
+                        do {
+                            finish(.success(try parseHTTPResponse(state.received, maxBodyBytes: maxBodyBytes)))
+                        } catch {
+                            finish(.failure(error))
+                        }
+                    } else {
+                        receiveNext()
+                    }
+                }
+            }
+            receiveNext()
+        }
+    }
+
+    private static func parseHTTPResponse(_ data: Data, maxBodyBytes: Int) throws -> ConsumeUpstreamResponse {
+        guard let response = try parseCompleteHTTPResponseIfAvailable(
+            data,
+            maxBodyBytes: maxBodyBytes,
+            allowCloseDelimitedBody: true
+        ) else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        return response
+    }
+
+    static func parseCompleteHTTPResponseForTesting(
+        _ data: Data,
+        maxBodyBytes: Int,
+        allowCloseDelimitedBody: Bool
+    ) throws -> ConsumeUpstreamResponse? {
+        try parseCompleteHTTPResponseIfAvailable(
+            data,
+            maxBodyBytes: maxBodyBytes,
+            allowCloseDelimitedBody: allowCloseDelimitedBody
+        )
+    }
+
+    private static func parseCompleteHTTPResponseIfAvailable(
+        _ data: Data,
+        maxBodyBytes: Int,
+        allowCloseDelimitedBody: Bool
+    ) throws -> ConsumeUpstreamResponse? {
+        let headerTerminator = Data([13, 10, 13, 10])
+        guard let headerRange = data.range(of: headerTerminator),
+              let headerText = String(data: data[..<headerRange.lowerBound], encoding: .isoLatin1) else {
+            return nil
+        }
+        let lines = headerText.components(separatedBy: "\r\n")
+        guard let statusLine = lines.first else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        let statusParts = statusLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+        guard statusParts.count >= 2,
+              statusParts[0].hasPrefix("HTTP/"),
+              let statusCode = Int(statusParts[1]),
+              (200...599).contains(statusCode) else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        var headers: [(String, String)] = []
+        var headerBytes = 0
+        for line in lines.dropFirst() {
+            guard !line.isEmpty, let colon = line.firstIndex(of: ":") else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            let name = String(line[..<colon]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard validHTTPHeaderName(name),
+                  validHTTPHeaderValue(value) else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            headerBytes += name.utf8.count + value.utf8.count + 4
+            guard headers.count < ConsumeLocalLimits.headerCount,
+                  headerBytes <= ConsumeLocalLimits.headerBytes else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            headers.append((name, value))
+        }
+        let rawBody = data[headerRange.upperBound...]
+        let body: Data
+        let usesChunkedTransfer = try chunkedTransferEncoding(headers)
+        let declaredContentLength = try contentLength(headers)
+        guard !usesChunkedTransfer || declaredContentLength == nil else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        if usesChunkedTransfer {
+            guard let decoded = try decodeCompleteChunkedBodyIfAvailable(Data(rawBody), maxBodyBytes: maxBodyBytes) else {
+                return nil
+            }
+            body = decoded
+        } else if let contentLength = declaredContentLength {
+            guard contentLength <= maxBodyBytes else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            guard rawBody.count >= contentLength else {
+                return nil
+            }
+            guard rawBody.count == contentLength else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            body = Data(rawBody)
+        } else {
+            guard allowCloseDelimitedBody else {
+                return nil
+            }
+            body = Data(rawBody)
+        }
+        guard body.count <= maxBodyBytes else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        return ConsumeUpstreamResponse(statusCode: statusCode, headers: headers, body: body)
+    }
+
+    private static func validHTTPHeaderName(_ name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        for byte in name.utf8 {
+            switch byte {
+            case 0x21, 0x23...0x27, 0x2a, 0x2b, 0x2d, 0x2e, 0x30...0x39, 0x41...0x5a, 0x5e...0x7a, 0x7c, 0x7e:
+                continue
+            default:
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func validHTTPHeaderValue(_ value: String) -> Bool {
+        for byte in value.utf8 {
+            guard byte == 0x09 || (byte >= 0x20 && byte != 0x7f) else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func chunkedTransferEncoding(_ headers: [(String, String)]) throws -> Bool {
+        let tokens = headers
+            .filter { name, _ in name.caseInsensitiveCompare("transfer-encoding") == .orderedSame }
+            .flatMap { _, value in
+                value.split(separator: ",", omittingEmptySubsequences: false)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            }
+        guard tokens.allSatisfy({ !$0.isEmpty }) else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        guard tokens.isEmpty || tokens == ["chunked"] else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        return !tokens.isEmpty
+    }
+
+    private static func upstreamResponseContentEncodingIsIdentity(_ headers: [(String, String)]) -> Bool {
+        for (name, value) in headers where name.caseInsensitiveCompare("content-encoding") == .orderedSame {
+            let tokens = value
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { !$0.isEmpty }
+            guard !tokens.isEmpty, tokens.allSatisfy({ $0 == "identity" }) else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func contentLength(_ headers: [(String, String)]) throws -> Int? {
+        let values = headers.compactMap { name, value -> String? in
+            guard name.caseInsensitiveCompare("content-length") == .orderedSame else { return nil }
+            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard values.count <= 1 else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        guard let value = values.first else {
+            return nil
+        }
+        guard value.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil,
+              !value.contains(","),
+              let length = Int(value) else {
+            throw ConsumeUpstreamForwardError.dispatchedUnavailable
+        }
+        return length
+    }
+
+    private static func decodeCompleteChunkedBodyIfAvailable(_ data: Data, maxBodyBytes: Int) throws -> Data? {
+        var index = data.startIndex
+        var decoded = Data()
+        while true {
+            guard let lineRange = data[index...].range(of: Data([13, 10])) else {
+                return nil
+            }
+            let line = data[index..<lineRange.lowerBound]
+            guard let lineText = String(data: line, encoding: .ascii) else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            let sizeText = lineText.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+            guard let chunkSize = Int(sizeText.trimmingCharacters(in: .whitespacesAndNewlines), radix: 16),
+                  chunkSize >= 0 else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            index = lineRange.upperBound
+            if chunkSize == 0 {
+                guard data.distance(from: index, to: data.endIndex) >= 2 else {
+                    return nil
+                }
+                guard data[index] == 13,
+                      data[data.index(after: index)] == 10,
+                      data.index(index, offsetBy: 2) == data.endIndex else {
+                    throw ConsumeUpstreamForwardError.dispatchedUnavailable
+                }
+                return decoded
+            }
+            guard chunkSize <= maxBodyBytes - decoded.count else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            let available = data.distance(from: index, to: data.endIndex)
+            guard chunkSize <= available,
+                  available - chunkSize >= 2 else {
+                return nil
+            }
+            decoded.append(data[index..<data.index(index, offsetBy: chunkSize)])
+            guard decoded.count <= maxBodyBytes else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            index = data.index(index, offsetBy: chunkSize)
+            guard data[index] == 13,
+                  data[data.index(after: index)] == 10 else {
+                throw ConsumeUpstreamForwardError.dispatchedUnavailable
+            }
+            index = data.index(index, offsetBy: 2)
+        }
+    }
+
+    private static func httpRequestBytes(host: String, port: Int, bearerToken: String, body: Data) -> Data {
+        let hostHeader = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
+        let authority = port == 443 ? hostHeader : "\(hostHeader):\(port)"
+        var request = Data()
+        request.append(Data("POST /v1/chat/completions HTTP/1.1\r\n".utf8))
+        request.append(Data("Host: \(authority)\r\n".utf8))
+        request.append(Data("Authorization: Bearer \(bearerToken)\r\n".utf8))
+        request.append(Data("Content-Type: application/json\r\n".utf8))
+        request.append(Data("Accept: application/json\r\n".utf8))
+        request.append(Data("Accept-Encoding: identity\r\n".utf8))
+        request.append(Data("Connection: close\r\n".utf8))
+        request.append(Data("Content-Length: \(body.count)\r\n\r\n".utf8))
+        request.append(body)
+        return request
+    }
+}
+
+final class ConsumePricingAdmissionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var estimateExceeded = false
+
+    func isEstimateExceeded() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return estimateExceeded
+    }
+
+    func stopForEstimateExceeded() {
+        lock.lock()
+        estimateExceeded = true
+        lock.unlock()
+    }
+}
+
+private final class ConsumeNIOContextBox: @unchecked Sendable {
+    let context: ChannelHandlerContext
+
+    init(_ context: ChannelHandlerContext) {
+        self.context = context
+    }
+}
+
 struct ConsumeBudgetLedgerSummary: Equatable {
     static let empty = ConsumeBudgetLedgerSummary(
         reserved: .zero,
@@ -621,18 +1299,20 @@ struct ConsumeBudgetLedgerSummary: Equatable {
     let heldReservationCount: Int
 
     func committedExposure() throws -> ConsumeMicroUSD {
-        try settled + held + reserved
+        try settled + held + reserved + estimateExceeded
     }
 }
 
 enum ConsumeBudgetAdmissionResult: Equatable {
     case held(ConsumeMicroUSD)
+    case reserved(reservationID: String, amount: ConsumeMicroUSD)
     case budgetExceeded
     case requestCapExceeded
 }
 
 final class ConsumeBudgetLedger: @unchecked Sendable {
-    static let schemaVersion = "local_consumer_endpoint.ledger.phase3a.v1"
+    static let schemaVersion = "local_consumer_endpoint.ledger.v1"
+    static let phase3ALegacySchemaVersion = "local_consumer_endpoint.ledger.phase3a.v1"
 
     let url: URL
     let lockURL: URL
@@ -814,7 +1494,7 @@ final class ConsumeBudgetLedger: @unchecked Sendable {
             "state": "reserved",
             "run_id": runID,
             "reservation_id": reservationID,
-            "amount_micro_usd": "\(amount.rawValue)",
+            "admission_estimate_micro_usd": "\(amount.rawValue)",
             "unpriced_override": unpricedOverride,
             "no_budget": noBudget,
             "reason": reason,
@@ -837,7 +1517,7 @@ final class ConsumeBudgetLedger: @unchecked Sendable {
             "state": "held",
             "run_id": runID,
             "reservation_id": reservationID,
-            "amount_micro_usd": "\(amount.rawValue)",
+            "admission_estimate_micro_usd": "\(amount.rawValue)",
             "reason": reason,
             "created_at": ConsumeEndpointStatus.iso8601(Date()),
         ])
@@ -875,6 +1555,48 @@ final class ConsumeBudgetLedger: @unchecked Sendable {
         return .held(remaining)
     }
 
+    func previewUnpricedRemaining(
+        budget: ConsumeMicroUSD,
+        maxRequest: ConsumeMicroUSD?
+    ) throws -> ConsumeBudgetAdmissionResult {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        let summary = try summaryUnlocked()
+        let committed = try summary.committedExposure()
+        let remaining = budget - committed
+        guard remaining > .zero else {
+            return .budgetExceeded
+        }
+        if let maxRequest, remaining > maxRequest {
+            return .requestCapExceeded
+        }
+        return .held(remaining)
+    }
+
+    func previewPricedEstimateForForwarding(
+        budget: ConsumeMicroUSD,
+        estimate: ConsumeMicroUSD,
+        maxRequest: ConsumeMicroUSD?
+    ) throws -> ConsumeBudgetAdmissionResult {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        guard estimate > .zero else {
+            return .requestCapExceeded
+        }
+        if let maxRequest, estimate > maxRequest {
+            return .requestCapExceeded
+        }
+        let summary = try summaryUnlocked()
+        let committed = try summary.committedExposure()
+        let remaining = budget - committed
+        guard estimate <= remaining else {
+            return .budgetExceeded
+        }
+        return .held(estimate)
+    }
+
     func reserveAndHoldPricedEstimate(
         runID: String,
         budget: ConsumeMicroUSD,
@@ -910,6 +1632,104 @@ final class ConsumeBudgetLedger: @unchecked Sendable {
         return .held(estimate)
     }
 
+    func reservePricedEstimateForForwarding(
+        runID: String,
+        budget: ConsumeMicroUSD,
+        estimate: ConsumeMicroUSD,
+        maxRequest: ConsumeMicroUSD?
+    ) throws -> ConsumeBudgetAdmissionResult {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        guard estimate > .zero else {
+            return .requestCapExceeded
+        }
+        if let maxRequest, estimate > maxRequest {
+            return .requestCapExceeded
+        }
+        let summary = try summaryUnlocked()
+        let committed = try summary.committedExposure()
+        let remaining = budget - committed
+        guard estimate <= remaining else {
+            return .budgetExceeded
+        }
+        let reservationID = try reserveUnlocked(
+            runID: runID,
+            amount: estimate,
+            reason: "priced_proxy_forwarding"
+        )
+        return .reserved(reservationID: reservationID, amount: estimate)
+    }
+
+    func reserveNoBudgetEstimateForForwarding(
+        runID: String,
+        estimate: ConsumeMicroUSD,
+        maxRequest: ConsumeMicroUSD?
+    ) throws -> ConsumeBudgetAdmissionResult {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        guard estimate > .zero else {
+            return .requestCapExceeded
+        }
+        if let maxRequest, estimate > maxRequest {
+            return .requestCapExceeded
+        }
+        let reservationID = try reserveUnlocked(
+            runID: runID,
+            amount: estimate,
+            reason: "no_budget_proxy_forwarding",
+            noBudget: true
+        )
+        return .reserved(reservationID: reservationID, amount: estimate)
+    }
+
+    func settle(
+        runID: String,
+        reservationID: String,
+        reservedAmount: ConsumeMicroUSD,
+        settledAmount: ConsumeMicroUSD,
+        reason: String
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        try appendRowUnlocked([
+            "schema_version": Self.schemaVersion,
+            "transition": "settled",
+            "state": "settled",
+            "run_id": runID,
+            "reservation_id": reservationID,
+            "admission_estimate_micro_usd": "\(reservedAmount.rawValue)",
+            "settled_exposure_micro_usd": "\(settledAmount.rawValue)",
+            "reason": reason,
+            "created_at": ConsumeEndpointStatus.iso8601(Date()),
+        ])
+    }
+
+    func estimateExceeded(
+        runID: String,
+        reservationID: String,
+        reservedAmount: ConsumeMicroUSD,
+        settledAmount: ConsumeMicroUSD,
+        reason: String
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        try requireHealthyUnlocked()
+        try appendRowUnlocked([
+            "schema_version": Self.schemaVersion,
+            "transition": "estimate_exceeded",
+            "state": "estimate_exceeded",
+            "run_id": runID,
+            "reservation_id": reservationID,
+            "admission_estimate_micro_usd": "\(reservedAmount.rawValue)",
+            "settled_exposure_micro_usd": "\(settledAmount.rawValue)",
+            "reason": reason,
+            "created_at": ConsumeEndpointStatus.iso8601(Date()),
+        ])
+    }
+
     func markHeldReservationsForRestart(excludingRunID: String) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -933,7 +1753,7 @@ final class ConsumeBudgetLedger: @unchecked Sendable {
                 "state": "released",
                 "run_id": state.runID,
                 "reservation_id": state.reservationID,
-                "amount_micro_usd": "\(state.amount.rawValue)",
+                "admission_estimate_micro_usd": "\(state.amount.rawValue)",
                 "reason": "operator_release_held",
                 "created_at": ConsumeEndpointStatus.iso8601(Date()),
             ])
@@ -952,20 +1772,24 @@ final class ConsumeBudgetLedger: @unchecked Sendable {
     private func summaryUnlocked() throws -> ConsumeBudgetLedgerSummary {
         let states = try reservationStatesUnlocked()
         var reserved = ConsumeMicroUSD.zero
-        let settled = ConsumeMicroUSD.zero
+        var settled = ConsumeMicroUSD.zero
         var held = ConsumeMicroUSD.zero
         var released = ConsumeMicroUSD.zero
-        let estimateExceeded = ConsumeMicroUSD.zero
+        var estimateExceeded = ConsumeMicroUSD.zero
         var heldCount = 0
         for state in states.values {
             switch state.state {
             case "reserved":
                 reserved = try reserved + state.amount
+            case "settled":
+                settled = try settled + (state.settledAmount ?? state.amount)
             case "held":
                 held = try held + state.amount
                 heldCount += 1
             case "released":
                 released = try released + state.amount
+            case "estimate_exceeded":
+                estimateExceeded = try estimateExceeded + (state.settledAmount ?? state.amount)
             default:
                 throw markLedgerUnavailable()
             }
@@ -984,6 +1808,7 @@ final class ConsumeBudgetLedger: @unchecked Sendable {
         let runID: String
         let reservationID: String
         let amount: ConsumeMicroUSD
+        let settledAmount: ConsumeMicroUSD?
         let state: String
     }
 
@@ -991,19 +1816,21 @@ final class ConsumeBudgetLedger: @unchecked Sendable {
         let rows = try readRowsUnlocked()
         var states: [String: ReservationState] = [:]
         for row in rows {
-            guard row["schema_version"] as? String == Self.schemaVersion,
+            guard let schemaVersion = row["schema_version"] as? String,
+                  Self.supportedLedgerSchemaVersion(schemaVersion),
                   let transition = row["transition"] as? String,
                   let state = row["state"] as? String,
                   transition == state,
                   let runID = row["run_id"] as? String,
                   let reservationID = row["reservation_id"] as? String,
-                  let amountText = row["amount_micro_usd"] as? String,
+                  let amountText = Self.amountText(from: row, schemaVersion: schemaVersion),
                   let amountRaw = Int64(amountText),
                   amountRaw >= 0,
-                  Self.allowedLedgerState(state),
-                  Self.closedRowSchema(row, state: state) else {
+                  Self.allowedLedgerState(state, schemaVersion: schemaVersion),
+                  Self.closedRowSchema(row, state: state, schemaVersion: schemaVersion) else {
                 throw markLedgerUnavailable()
             }
+            let settledAmount = try Self.settledAmount(from: row, state: state, schemaVersion: schemaVersion)
             let current = states[reservationID]
             guard current == nil || (current?.runID == runID && current?.amount == ConsumeMicroUSD(rawValue: amountRaw)),
                   Self.transitionAllowed(from: current?.state, to: state) else {
@@ -1013,44 +1840,97 @@ final class ConsumeBudgetLedger: @unchecked Sendable {
                 runID: runID,
                 reservationID: reservationID,
                 amount: ConsumeMicroUSD(rawValue: amountRaw),
+                settledAmount: settledAmount,
                 state: state
             )
         }
         return states
     }
 
+    private static func supportedLedgerSchemaVersion(_ schemaVersion: String) -> Bool {
+        schemaVersion == Self.schemaVersion || schemaVersion == Self.phase3ALegacySchemaVersion
+    }
+
+    private static func amountText(from row: [String: Any], schemaVersion: String) -> String? {
+        if schemaVersion == Self.phase3ALegacySchemaVersion {
+            return row["amount_micro_usd"] as? String
+        }
+        return row["admission_estimate_micro_usd"] as? String
+    }
+
+    private static func settledAmount(
+        from row: [String: Any],
+        state: String,
+        schemaVersion: String
+    ) throws -> ConsumeMicroUSD? {
+        guard state == "settled" || state == "estimate_exceeded" else {
+            return nil
+        }
+        guard schemaVersion == Self.schemaVersion else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        guard let amountText = row["settled_exposure_micro_usd"] as? String,
+              let amountRaw = Int64(amountText),
+              amountRaw >= 0 else {
+            throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+        }
+        return ConsumeMicroUSD(rawValue: amountRaw)
+    }
+
     private static func transitionAllowed(from current: String?, to next: String) -> Bool {
         guard let current else { return next == "reserved" }
         switch (current, next) {
         case ("reserved", "held"),
-             ("held", "released"):
+             ("reserved", "settled"),
+             ("reserved", "estimate_exceeded"),
+             ("held", "released"),
+             ("held", "settled"):
             return true
         default:
             return false
         }
     }
 
-    private static func allowedLedgerState(_ state: String) -> Bool {
-        state == "reserved" || state == "held" || state == "released"
+    private static func allowedLedgerState(_ state: String, schemaVersion: String) -> Bool {
+        if schemaVersion == Self.phase3ALegacySchemaVersion {
+            return state == "reserved" || state == "held" || state == "released"
+        }
+        return state == "reserved" || state == "held" || state == "released" || state == "settled" || state == "estimate_exceeded"
     }
 
-    private static func closedRowSchema(_ row: [String: Any], state: String) -> Bool {
+    private static func closedRowSchema(_ row: [String: Any], state: String, schemaVersion: String) -> Bool {
+        let amountKey: String
+        if schemaVersion == Self.phase3ALegacySchemaVersion {
+            amountKey = "amount_micro_usd"
+        } else {
+            amountKey = "admission_estimate_micro_usd"
+        }
         let commonKeys: Set<String> = [
             "schema_version", "transition", "state", "run_id",
-            "reservation_id", "amount_micro_usd", "reason", "created_at",
+            "reservation_id", amountKey, "reason", "created_at",
         ]
-        let allowedKeys = state == "reserved"
-            ? commonKeys.union(["unpriced_override", "no_budget"])
-            : commonKeys
+        let allowedKeys: Set<String>
+        if state == "reserved" {
+            allowedKeys = commonKeys.union(["unpriced_override", "no_budget"])
+        } else if schemaVersion == Self.schemaVersion, state == "settled" || state == "estimate_exceeded" {
+            allowedKeys = commonKeys.union(["settled_exposure_micro_usd"])
+        } else {
+            allowedKeys = commonKeys
+        }
         guard Set(row.keys).isSubset(of: allowedKeys),
               row["schema_version"] is String,
               row["transition"] is String,
               row["state"] is String,
               row["run_id"] is String,
               row["reservation_id"] is String,
-              row["amount_micro_usd"] is String,
+              row[amountKey] is String,
               row["reason"] is String,
               row["created_at"] is String else {
+            return false
+        }
+        if schemaVersion == Self.schemaVersion, state == "settled" || state == "estimate_exceeded" {
+            guard row["settled_exposure_micro_usd"] is String else { return false }
+        } else if row["settled_exposure_micro_usd"] != nil {
             return false
         }
         if let value = row["unpriced_override"], !(value is Bool) { return false }
@@ -1450,6 +2330,7 @@ struct ConsumeEndpointConfig {
               let host = components.host,
               !host.isEmpty,
               isGlobalUpstreamHost(host),
+              (try? validatedGlobalUpstreamEndpoints(host))?.isEmpty == false,
               components.user == nil,
               components.password == nil,
               components.query == nil,
@@ -1462,6 +2343,110 @@ struct ConsumeEndpointConfig {
             normalized += ":\(port)"
         }
         return normalized
+    }
+
+    static func requireGloballyResolvingUpstreamHost(_ host: String) throws {
+        _ = try validatedGlobalUpstreamEndpoints(host)
+    }
+
+    static func validatedGlobalUpstreamEndpoints(_ host: String) throws -> [String] {
+        let normalized = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        guard isGlobalUpstreamHost(normalized) else {
+            throw ConsumeStartupError(code: "local_upstream_url_rejected")
+        }
+        var hints = addrinfo()
+        hints.ai_socktype = SOCK_STREAM
+        hints.ai_protocol = IPPROTO_TCP
+        hints.ai_flags = AI_ADDRCONFIG
+        var result: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(normalized, nil, &hints, &result)
+        guard status == 0, let result else {
+            throw ConsumeStartupError(code: "local_upstream_url_rejected")
+        }
+        defer { freeaddrinfo(result) }
+        var endpoints: [String] = []
+        var cursor: UnsafeMutablePointer<addrinfo>? = result
+        while let current = cursor {
+            guard let bytes = globalAddressBytes(from: current.pointee.ai_addr) else {
+                throw ConsumeStartupError(code: "local_upstream_url_rejected")
+            }
+            switch bytes {
+            case .ipv4(let address):
+                guard isGlobalIPv4(address) else {
+                    throw ConsumeStartupError(code: "local_upstream_url_rejected")
+                }
+            case .ipv6(let address):
+                if address[0..<10].allSatisfy({ $0 == 0 }) && address[10] == 0xff && address[11] == 0xff {
+                    guard isGlobalIPv4(Array(address[12..<16])) else {
+                        throw ConsumeStartupError(code: "local_upstream_url_rejected")
+                    }
+                } else {
+                    guard isGlobalIPv6(address) else {
+                        throw ConsumeStartupError(code: "local_upstream_url_rejected")
+                    }
+                }
+            }
+            guard let endpoint = numericAddressString(from: current.pointee.ai_addr, length: current.pointee.ai_addrlen) else {
+                throw ConsumeStartupError(code: "local_upstream_url_rejected")
+            }
+            if !endpoints.contains(endpoint) {
+                endpoints.append(endpoint)
+            }
+            cursor = current.pointee.ai_next
+        }
+        guard !endpoints.isEmpty else {
+            throw ConsumeStartupError(code: "local_upstream_url_rejected")
+        }
+        return endpoints
+    }
+
+    static func isValidatedGlobalEndpoint(_ endpoint: String) -> Bool {
+        let normalized = endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        if let bytes = ipv4Bytes(normalized) {
+            return isGlobalIPv4(bytes)
+        }
+        if let bytes = ipv6Bytes(normalized) {
+            if bytes[0..<10].allSatisfy({ $0 == 0 }) && bytes[10] == 0xff && bytes[11] == 0xff {
+                return isGlobalIPv4(Array(bytes[12..<16]))
+            }
+            return isGlobalIPv6(bytes)
+        }
+        return false
+    }
+
+    private enum ResolvedAddressBytes {
+        case ipv4([UInt8])
+        case ipv6([UInt8])
+    }
+
+    private static func globalAddressBytes(from sockaddrPointer: UnsafePointer<sockaddr>?) -> ResolvedAddressBytes? {
+        guard let sockaddrPointer else { return nil }
+        switch Int32(sockaddrPointer.pointee.sa_family) {
+        case AF_INET:
+            let address = sockaddrPointer.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr.s_addr }
+            return .ipv4(withUnsafeBytes(of: address) { Array($0) })
+        case AF_INET6:
+            let address = sockaddrPointer.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee.sin6_addr }
+            return .ipv6(withUnsafeBytes(of: address) { Array($0) })
+        default:
+            return nil
+        }
+    }
+
+    private static func numericAddressString(from sockaddrPointer: UnsafePointer<sockaddr>?, length: socklen_t) -> String? {
+        guard let sockaddrPointer else { return nil }
+        var hostBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let status = getnameinfo(
+            sockaddrPointer,
+            length,
+            &hostBuffer,
+            socklen_t(hostBuffer.count),
+            nil,
+            0,
+            NI_NUMERICHOST
+        )
+        guard status == 0 else { return nil }
+        return String(cString: hostBuffer)
     }
 
     private static func isGlobalUpstreamHost(_ host: String) -> Bool {
@@ -1512,6 +2497,14 @@ struct ConsumeEndpointConfig {
             return false
         case 192 where second == 0 || second == 2 || second == 168:
             return false
+        case 192 where second == 31 && bytes[2] == 196:
+            return false
+        case 192 where second == 52 && bytes[2] == 193:
+            return false
+        case 192 where second == 88 && bytes[2] == 99:
+            return false
+        case 192 where second == 175 && bytes[2] == 48:
+            return false
         case 198 where second == 18 || second == 19 || second == 51:
             return false
         case 203 where second == 0 && bytes[2] == 113:
@@ -1525,12 +2518,20 @@ struct ConsumeEndpointConfig {
 
     private static func isGlobalIPv6(_ bytes: [UInt8]) -> Bool {
         guard bytes.count == 16 else { return false }
+        guard (bytes[0] & 0xe0) == 0x20 else { return false }
         if bytes.allSatisfy({ $0 == 0 }) { return false }
         if bytes[0..<15].allSatisfy({ $0 == 0 }) && bytes[15] == 1 { return false }
         if bytes[0] == 0xfc || bytes[0] == 0xfd { return false }
         if bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80 { return false }
+        if bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0xc0 { return false }
         if bytes[0] == 0xff { return false }
+        if bytes[0] == 0x00 && bytes[1] == 0x64 && bytes[2] == 0xff && bytes[3] == 0x9b { return false }
+        if bytes[0] == 0x01 && bytes[1] == 0x00 && bytes[2..<8].allSatisfy({ $0 == 0 }) { return false }
+        if bytes[0] == 0x20 && bytes[1] == 0x01 && (bytes[2] & 0xfe) == 0x00 { return false }
+        if bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x00 && (bytes[3] & 0xf0) == 0x20 { return false }
         if bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8 { return false }
+        if bytes[0] == 0x20 && bytes[1] == 0x02 { return false }
+        if bytes[0] == 0x3f && (bytes[1] & 0xf0) == 0xf0 { return false }
         return true
     }
 
@@ -1725,7 +2726,9 @@ struct ConsumeCredentialLoader {
         }
         for key in ["MACPROVIDER_HTTP2_API_KEY", "MP_API_KEY", "BUYER_TOKEN"] {
             if let value = nonEmpty(environment[key]) {
-                return ConsumeCredential(bytes: Data(value.utf8), sourceClass: .environment, status: .environmentLoaded)
+                let data = Data(value.utf8)
+                try validateCredentialBytes(data, sourceClass: .environment)
+                return ConsumeCredential(bytes: data, sourceClass: .environment, status: .environmentLoaded)
             }
         }
         return ConsumeCredential(bytes: Data(), sourceClass: .missing, status: .missing)
@@ -1821,6 +2824,7 @@ struct ConsumeCredentialLoader {
         guard !data.isEmpty else {
             throw ConsumeCredentialError.readFailed(sourceClass: sourceClass)
         }
+        try validateCredentialBytes(data, sourceClass: sourceClass)
         var credentialBytes = Data()
         credentialBytes.append(data)
         return ConsumeCredential(
@@ -1836,6 +2840,19 @@ struct ConsumeCredentialLoader {
         }
         while let last = data.last, last == 0x20 || last == 0x09 || last == 0x0a || last == 0x0d {
             data.removeLast()
+        }
+    }
+
+    private static func validateCredentialBytes(_ data: Data, sourceClass: ConsumeCredentialSourceClass) throws {
+        guard data.allSatisfy({ byte in byte >= 0x21 && byte <= 0x7e }) else {
+            switch sourceClass {
+            case .explicitFile, .defaultConfigFile:
+                throw ConsumeCredentialError.unsafeFile(sourceClass: sourceClass, reason: "credential_control_character")
+            case .environment:
+                throw ConsumeCredentialError.readFailed(sourceClass: sourceClass)
+            case .missing:
+                throw ConsumeCredentialError.readFailed(sourceClass: sourceClass)
+            }
         }
     }
 
@@ -2190,6 +3207,8 @@ struct ConsumeEndpointRuntime: Sendable {
     let credentialCustody: ConsumeCredentialCustody
     let budget: ConsumeBudgetConfig
     let trustedPricing: ConsumeTrustedPricingStore
+    let upstreamClient: ConsumeUpstreamClient
+    let pricingAdmissionGate: ConsumePricingAdmissionGate
     let now: @Sendable () -> Date
     let requestCounter: ConsumeEndpointRequestCounter
 
@@ -2204,6 +3223,8 @@ struct ConsumeEndpointRuntime: Sendable {
         credentialCustody: ConsumeCredentialCustody? = nil,
         budget: ConsumeBudgetConfig = .unconfigured,
         trustedPricing: ConsumeTrustedPricingState = .notLoaded,
+        upstreamClient: ConsumeUpstreamClient = ConsumePinnedUpstreamClient(),
+        pricingAdmissionGate: ConsumePricingAdmissionGate = ConsumePricingAdmissionGate(),
         now: @escaping @Sendable () -> Date = { Date() },
         requestCounter: ConsumeEndpointRequestCounter = ConsumeEndpointRequestCounter()
     ) {
@@ -2216,6 +3237,8 @@ struct ConsumeEndpointRuntime: Sendable {
         self.credentialCustody = credentialCustody ?? ConsumeCredentialCustody(status: credentialStatus)
         self.budget = budget
         self.trustedPricing = ConsumeTrustedPricingStore(trustedPricing)
+        self.upstreamClient = upstreamClient
+        self.pricingAdmissionGate = pricingAdmissionGate
         self.now = now
         self.requestCounter = requestCounter
     }
@@ -2262,7 +3285,10 @@ struct ConsumeEndpointRuntime: Sendable {
             "last_successful_upstream_contact_at": NSNull(),
             "error_ring": [],
         ]
-        for (key, value) in budget.statusFields(trustedPricing: trustedPricing.revalidated(now: now())) {
+        for (key, value) in budget.statusFields(
+            trustedPricing: trustedPricing.revalidated(now: now()),
+            pricingEstimateExceeded: pricingAdmissionGate.isEstimateExceeded()
+        ) {
             payload[key] = value
         }
         return payload
@@ -2289,19 +3315,38 @@ final class ConsumeTrustedPricingStore: @unchecked Sendable {
 final class ConsumeCredentialCustody: @unchecked Sendable {
     private let lock = NSLock()
     private let status: ConsumeCredentialStatus
+    private var credentialBytes: Data
 
     init(credential: ConsumeCredential) {
         self.status = credential.status
+        self.credentialBytes = credential.bytes
     }
 
     init(status: ConsumeCredentialStatus) {
         self.status = status
+        self.credentialBytes = Data()
+    }
+
+    deinit {
+        credentialBytes.resetBytes(in: 0..<credentialBytes.count)
     }
 
     func currentState() -> ConsumeCredentialState {
         lock.lock()
         defer { lock.unlock() }
         return status.currentState()
+    }
+
+    func upstreamBearerToken() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard status.currentState() == .loaded,
+              let token = String(data: credentialBytes, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            return nil
+        }
+        return token
     }
 }
 
@@ -2617,6 +3662,8 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
     private var connectionIsIncompletePreAuth = false
     private var requestIsActive = false
     private var reservedBodyBytes = 0
+    private var upstreamForwardIsPending = false
+    private var channelInactiveWhileUpstreamPending = false
     private var responseStarted = false
     private var headerDeadlineTask: Scheduled<Void>?
     private var requestDeadlineTask: Scheduled<Void>?
@@ -2683,7 +3730,9 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 return
             }
             handleEnd(head: head, context: context)
-            endRequestIfNeeded()
+            if !upstreamForwardIsPending {
+                endRequestIfNeeded()
+            }
         }
     }
 
@@ -2696,7 +3745,12 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             runtime.endIncompleteConnection()
             connectionIsIncompletePreAuth = false
         }
-        endRequestIfNeeded()
+        if upstreamForwardIsPending {
+            channelInactiveWhileUpstreamPending = true
+        }
+        if !upstreamForwardIsPending {
+            endRequestIfNeeded()
+        }
     }
 
     private func handleHead(_ head: HTTPRequestHead, context: ChannelHandlerContext) {
@@ -2983,7 +4037,43 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         return parsed
     }
 
+    private struct ForwardingPricingSnapshot {
+        let match: ConsumeTrustedRateCardMatch
+        let projection: RateCardProjection
+        let estimate: ConsumePricedExposureEstimate
+        let warningCodes: [String]
+    }
+
+    private func forwardingPricingSnapshot(
+        model: String,
+        request: JSONValue,
+        bodyByteCount: Int
+    ) throws -> ForwardingPricingSnapshot? {
+        let trustedPricing = runtime.trustedPricing.revalidated(now: runtime.now())
+        guard case .available(let rateCard) = trustedPricing,
+              let pricingMatch = trustedPricing.match(model: model),
+              pricingMatch.source != .defaultFallback else {
+            return nil
+        }
+        let estimate = try ConsumePricedExposureEstimator.estimate(
+            bodyByteCount: bodyByteCount,
+            request: request,
+            match: pricingMatch,
+            projection: rateCard.projection
+        )
+        return ForwardingPricingSnapshot(
+            match: pricingMatch,
+            projection: rateCard.projection,
+            estimate: estimate,
+            warningCodes: trustedPricing.warningCodes(match: pricingMatch)
+        )
+    }
+
     private func writeLocalChatAdmissionFailure(model: String, request: JSONValue, bodyByteCount: Int, context: ChannelHandlerContext) {
+        guard request.objectBool("stream") != true else {
+            writeLocalError(context: context, status: .serviceUnavailable, code: "local_pricing_unavailable")
+            return
+        }
         let trustedPricing = runtime.trustedPricing.revalidated(now: runtime.now())
         let pricingMatch = trustedPricing.match(model: model)
         let trustedPricingWarnings = trustedPricing.warningCodes(match: pricingMatch)
@@ -2997,7 +4087,13 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         case .unconfigured:
             writeLocalError(context: context, status: .badRequest, code: "local_budget_required")
         case .noBudget:
-            guard pricingAdmitsCurrentRequest else {
+            guard !runtime.pricingAdmissionGate.isEstimateExceeded() else {
+                writeLocalError(context: context, status: .serviceUnavailable, code: "local_estimate_exceeded")
+                return
+            }
+            guard pricingAdmitsCurrentRequest,
+                  let pricingMatch,
+                  case .available(let rateCard) = trustedPricing else {
                 writeLocalError(
                     context: context,
                     status: .serviceUnavailable,
@@ -3006,13 +4102,118 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 )
                 return
             }
-            writeLocalError(
-                context: context,
-                status: .serviceUnavailable,
-                code: "local_upstream_unavailable",
-                extraHeaders: warningHeaders(runtime.budget.localWarningTokens + trustedPricingWarnings)
-            )
+            let estimate: ConsumePricedExposureEstimate
+            do {
+                estimate = try ConsumePricedExposureEstimator.estimate(
+                    bodyByteCount: bodyByteCount,
+                    request: request,
+                    match: pricingMatch,
+                    projection: rateCard.projection
+                )
+            } catch {
+                writeLocalError(context: context, status: .serviceUnavailable, code: "local_pricing_unavailable")
+                return
+            }
+            if let maxRequest = runtime.budget.maxRequestMicroUSD, estimate.amount > maxRequest {
+                writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                return
+            }
+            let headers = warningHeaders(runtime.budget.localWarningTokens + trustedPricingWarnings)
+            let contextBox = ConsumeNIOContextBox(context)
+            resolveUpstreamEndpoint(context: context, extraHeaders: headers) { [weak self] endpoint in
+                guard let self else { return false }
+                guard !self.channelInactiveWhileUpstreamPending else { return false }
+                guard !self.runtime.pricingAdmissionGate.isEstimateExceeded() else {
+                    self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_estimate_exceeded")
+                    return false
+                }
+                let currentPricing: ForwardingPricingSnapshot
+                do {
+                    guard let snapshot = try self.forwardingPricingSnapshot(
+                        model: model,
+                        request: request,
+                        bodyByteCount: bodyByteCount
+                    ) else {
+                        self.writeLocalError(
+                            context: contextBox.context,
+                            status: .serviceUnavailable,
+                            code: "local_pricing_unavailable",
+                            extraHeaders: self.warningHeaders(self.runtime.budget.localWarningTokens)
+                        )
+                        return false
+                    }
+                    currentPricing = snapshot
+                } catch {
+                    self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_pricing_unavailable")
+                    return false
+                }
+                if let maxRequest = self.runtime.budget.maxRequestMicroUSD, currentPricing.estimate.amount > maxRequest {
+                    self.writeLocalError(context: contextBox.context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                    return false
+                }
+                let currentHeaders = self.warningHeaders(self.runtime.budget.localWarningTokens + currentPricing.warningCodes)
+                guard let bearerToken = self.runtime.credentialCustody.upstreamBearerToken() else {
+                    self.writeLocalError(
+                        context: contextBox.context,
+                        status: .unauthorized,
+                        code: "local_credential_missing",
+                        extraHeaders: currentHeaders
+                    )
+                    return false
+                }
+                guard !self.runtime.pricingAdmissionGate.isEstimateExceeded() else {
+                    self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_estimate_exceeded")
+                    return false
+                }
+                if let ledger = self.runtime.budget.ledger {
+                    do {
+                        switch try ledger.reserveNoBudgetEstimateForForwarding(
+                            runID: self.runtime.launchID,
+                            estimate: currentPricing.estimate.amount,
+                            maxRequest: self.runtime.budget.maxRequestMicroUSD
+                        ) {
+                        case .budgetExceeded:
+                            self.writeLocalError(context: contextBox.context, status: HTTPResponseStatus(statusCode: 402), code: "local_budget_exceeded")
+                        case .requestCapExceeded:
+                            self.writeLocalError(context: contextBox.context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                        case .held:
+                            self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                        case .reserved(let reservationID, let reservedAmount):
+                            self.forwardUpstreamWithLedgerSettlement(
+                                body: self.requestBody,
+                                context: contextBox.context,
+                                endpoint: endpoint,
+                                bearerToken: bearerToken,
+                                ledger: ledger,
+                                reservationID: reservationID,
+                                reservedAmount: reservedAmount,
+                                estimate: currentPricing.estimate,
+                                pricingMatch: currentPricing.match,
+                                projection: currentPricing.projection,
+                                extraHeaders: currentHeaders
+                            )
+                            return true
+                        }
+                    } catch {
+                        self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                    }
+                    return false
+                }
+                self.forwardUpstreamWithoutLedger(
+                    body: self.requestBody,
+                    context: contextBox.context,
+                    endpoint: endpoint,
+                    bearerToken: bearerToken,
+                    extraHeaders: currentHeaders
+                )
+                return true
+            }
+            return
         case .budget(let budget):
+            guard !runtime.pricingAdmissionGate.isEstimateExceeded() else {
+                writeLocalError(context: context, status: .serviceUnavailable, code: "local_estimate_exceeded")
+                return
+            }
             if pricingAdmitsCurrentRequest,
                let pricingMatch,
                case .available(let rateCard) = trustedPricing {
@@ -3031,34 +4232,143 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                     return writeLocalUnpricedBudgetAdmission(budget: budget, context: context)
                 }
+                guard estimate.amount > .zero else {
+                    writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                    return
+                }
+                if let maxRequest = runtime.budget.maxRequestMicroUSD, estimate.amount > maxRequest {
+                    writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                    return
+                }
                 guard let ledger = runtime.budget.ledger else {
                     writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
                     return
                 }
                 do {
-                    switch try ledger.reserveAndHoldPricedEstimate(
-                        runID: runtime.launchID,
+                    switch try ledger.previewPricedEstimateForForwarding(
                         budget: budget,
                         estimate: estimate.amount,
                         maxRequest: runtime.budget.maxRequestMicroUSD
                     ) {
                     case .budgetExceeded:
                         writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_budget_exceeded")
+                        return
                     case .requestCapExceeded:
                         writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                        return
                     case .held:
-                        writeLocalError(
-                            context: context,
-                            status: .serviceUnavailable,
-                            code: "local_upstream_unavailable",
-                            extraHeaders: warningHeaders(runtime.budget.localWarningTokens + trustedPricingWarnings)
-                        )
+                        break
+                    case .reserved:
+                        writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                        return
                     }
-                    return
                 } catch {
                     writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
                     return
                 }
+                let headers = warningHeaders(runtime.budget.localWarningTokens + trustedPricingWarnings)
+                let contextBox = ConsumeNIOContextBox(context)
+                resolveUpstreamEndpoint(context: context, extraHeaders: headers) { [weak self] endpoint in
+                    guard let self else { return false }
+                    guard !self.channelInactiveWhileUpstreamPending else { return false }
+                    guard !self.runtime.pricingAdmissionGate.isEstimateExceeded() else {
+                        self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_estimate_exceeded")
+                        return false
+                    }
+                    let currentPricing: ForwardingPricingSnapshot
+                    do {
+                        guard let snapshot = try self.forwardingPricingSnapshot(
+                            model: model,
+                            request: request,
+                            bodyByteCount: bodyByteCount
+                        ) else {
+                            self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_pricing_unavailable")
+                            return false
+                        }
+                        currentPricing = snapshot
+                    } catch {
+                        self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_pricing_unavailable")
+                        return false
+                    }
+                    guard currentPricing.estimate.amount > .zero else {
+                        self.writeLocalError(context: contextBox.context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                        return false
+                    }
+                    if let maxRequest = self.runtime.budget.maxRequestMicroUSD, currentPricing.estimate.amount > maxRequest {
+                        self.writeLocalError(context: contextBox.context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                        return false
+                    }
+                    let currentHeaders = self.warningHeaders(self.runtime.budget.localWarningTokens + currentPricing.warningCodes)
+                    do {
+                        switch try ledger.previewPricedEstimateForForwarding(
+                            budget: budget,
+                            estimate: currentPricing.estimate.amount,
+                            maxRequest: self.runtime.budget.maxRequestMicroUSD
+                        ) {
+                        case .budgetExceeded:
+                            self.writeLocalError(context: contextBox.context, status: HTTPResponseStatus(statusCode: 402), code: "local_budget_exceeded")
+                            return false
+                        case .requestCapExceeded:
+                            self.writeLocalError(context: contextBox.context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                            return false
+                        case .held:
+                            break
+                        case .reserved:
+                            self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                            return false
+                        }
+                    } catch {
+                        self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                        return false
+                    }
+                    guard let bearerToken = self.runtime.credentialCustody.upstreamBearerToken() else {
+                        self.writeLocalError(context: contextBox.context, status: .unauthorized, code: "local_credential_missing")
+                        return false
+                    }
+                    guard !self.runtime.pricingAdmissionGate.isEstimateExceeded() else {
+                        self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_estimate_exceeded")
+                        return false
+                    }
+                    do {
+                        switch try ledger.reservePricedEstimateForForwarding(
+                            runID: self.runtime.launchID,
+                            budget: budget,
+                            estimate: currentPricing.estimate.amount,
+                            maxRequest: self.runtime.budget.maxRequestMicroUSD
+                        ) {
+                        case .budgetExceeded:
+                            self.writeLocalError(context: contextBox.context, status: HTTPResponseStatus(statusCode: 402), code: "local_budget_exceeded")
+                        case .requestCapExceeded:
+                            self.writeLocalError(context: contextBox.context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                        case .held:
+                            self.writeLocalError(
+                                context: contextBox.context,
+                                status: .serviceUnavailable,
+                                code: "local_upstream_unavailable",
+                                extraHeaders: currentHeaders
+                            )
+                        case .reserved(let reservationID, let reservedAmount):
+                            self.forwardUpstreamWithLedgerSettlement(
+                                body: self.requestBody,
+                                context: contextBox.context,
+                                endpoint: endpoint,
+                                bearerToken: bearerToken,
+                                ledger: ledger,
+                                reservationID: reservationID,
+                                reservedAmount: reservedAmount,
+                                estimate: currentPricing.estimate,
+                                pricingMatch: currentPricing.match,
+                                projection: currentPricing.projection,
+                                extraHeaders: currentHeaders
+                            )
+                            return true
+                        }
+                    } catch {
+                        self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                    }
+                    return false
+                }
+                return
             } else if !runtime.budget.allowUnpriced {
                 writeLocalError(context: context, status: .serviceUnavailable, code: "local_pricing_unavailable")
                 return
@@ -3067,10 +4377,238 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
+    private func forwardUpstreamWithoutLedger(
+        body: Data,
+        context: ChannelHandlerContext,
+        endpoint: String,
+        bearerToken: String,
+        extraHeaders: [(String, String)]
+    ) {
+        let request = ConsumeUpstreamRequest(
+            origin: runtime.upstreamOrigin,
+            endpoint: endpoint,
+            bearerToken: bearerToken,
+            body: body
+        )
+        let contextBox = ConsumeNIOContextBox(context)
+        upstreamForwardIsPending = true
+        runtime.upstreamClient.forwardChatCompletions(request: request, on: context.eventLoop).whenComplete { [weak self] result in
+            guard let self else { return }
+            defer {
+                self.upstreamForwardIsPending = false
+                self.endRequestIfNeeded()
+            }
+            switch result {
+            case .success(let response):
+                self.writeUpstreamResponse(response, context: contextBox.context, extraHeaders: extraHeaders)
+            case .failure(let error):
+                let failure = Self.classifyUpstreamFailure(error)
+                self.writeLocalError(
+                    context: contextBox.context,
+                    status: failure.status,
+                    code: "local_upstream_unavailable",
+                    forwardedUpstream: failure.forwardedUpstream,
+                    extraHeaders: extraHeaders
+                )
+            }
+        }
+    }
+
+    private func forwardUpstreamWithLedgerSettlement(
+        body: Data,
+        context: ChannelHandlerContext,
+        endpoint: String,
+        bearerToken: String,
+        ledger: ConsumeBudgetLedger,
+        reservationID: String,
+        reservedAmount: ConsumeMicroUSD,
+        estimate: ConsumePricedExposureEstimate,
+        pricingMatch: ConsumeTrustedRateCardMatch,
+        projection: RateCardProjection,
+        extraHeaders: [(String, String)]
+    ) {
+        let request = ConsumeUpstreamRequest(
+            origin: runtime.upstreamOrigin,
+            endpoint: endpoint,
+            bearerToken: bearerToken,
+            body: body
+        )
+        let contextBox = ConsumeNIOContextBox(context)
+        upstreamForwardIsPending = true
+        runtime.upstreamClient.forwardChatCompletions(request: request, on: context.eventLoop).whenComplete { [weak self] result in
+            guard let self else { return }
+            defer {
+                self.upstreamForwardIsPending = false
+                self.endRequestIfNeeded()
+            }
+            switch result {
+            case .success(let response):
+                do {
+                    let settlement = try self.settlementAmount(
+                        response: response,
+                        fallbackEstimate: estimate.amount,
+                        pricingMatch: pricingMatch,
+                        projection: projection
+                    )
+                    if settlement.amount > reservedAmount {
+                        try ledger.estimateExceeded(
+                            runID: self.runtime.launchID,
+                            reservationID: reservationID,
+                            reservedAmount: reservedAmount,
+                            settledAmount: settlement.amount,
+                            reason: settlement.reason
+                        )
+                        self.runtime.pricingAdmissionGate.stopForEstimateExceeded()
+                    } else {
+                        try ledger.settle(
+                            runID: self.runtime.launchID,
+                            reservationID: reservationID,
+                            reservedAmount: reservedAmount,
+                            settledAmount: settlement.amount,
+                            reason: settlement.reason
+                        )
+                    }
+                } catch {
+                    self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                    return
+                }
+                self.writeUpstreamResponse(response, context: contextBox.context, extraHeaders: extraHeaders)
+            case .failure(let error):
+                let failure = Self.classifyUpstreamFailure(error)
+                do {
+                    if failure.forwardedUpstream {
+                        try ledger.hold(
+                            runID: self.runtime.launchID,
+                            reservationID: reservationID,
+                            amount: reservedAmount,
+                            reason: "upstream_proxy_failed"
+                        )
+                    } else {
+                        try ledger.settle(
+                            runID: self.runtime.launchID,
+                            reservationID: reservationID,
+                            reservedAmount: reservedAmount,
+                            settledAmount: .zero,
+                            reason: "upstream_pre_dispatch_failed"
+                        )
+                    }
+                } catch {
+                    self.writeLocalError(context: contextBox.context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                    return
+                }
+                self.writeLocalError(
+                    context: contextBox.context,
+                    status: failure.status,
+                    code: "local_upstream_unavailable",
+                    forwardedUpstream: failure.forwardedUpstream,
+                    extraHeaders: extraHeaders
+                )
+            }
+        }
+    }
+
+    private func resolveUpstreamEndpoint(
+        context: ChannelHandlerContext,
+        extraHeaders: [(String, String)],
+        onSuccess: @escaping @Sendable (String) -> Bool
+    ) {
+        let contextBox = ConsumeNIOContextBox(context)
+        upstreamForwardIsPending = true
+        channelInactiveWhileUpstreamPending = false
+        runtime.upstreamClient.resolveChatCompletionsEndpoint(origin: runtime.upstreamOrigin, on: context.eventLoop).whenComplete { [weak self] result in
+            guard let self else { return }
+            self.upstreamForwardIsPending = false
+            switch result {
+            case .success(let endpoint):
+                self.upstreamForwardIsPending = false
+                if !onSuccess(endpoint) {
+                    self.endRequestIfNeeded()
+                }
+            case .failure(let error):
+                defer { self.endRequestIfNeeded() }
+                self.upstreamForwardIsPending = false
+                let failure = Self.classifyUpstreamFailure(error)
+                self.writeLocalError(
+                    context: contextBox.context,
+                    status: failure.status,
+                    code: "local_upstream_unavailable",
+                    forwardedUpstream: failure.forwardedUpstream,
+                    extraHeaders: extraHeaders
+                )
+            }
+        }
+    }
+
+    private static func classifyUpstreamFailure(_ error: Error) -> ConsumeUpstreamFailureClassification {
+        if case ConsumeUpstreamForwardError.preDispatchUnavailable = error {
+            return ConsumeUpstreamFailureClassification(
+                status: .serviceUnavailable,
+                forwardedUpstream: false
+            )
+        }
+        if case ConsumeUpstreamForwardError.dispatchedUnavailable = error {
+            return ConsumeUpstreamFailureClassification(
+                status: HTTPResponseStatus(statusCode: 502),
+                forwardedUpstream: true
+            )
+        }
+        return ConsumeUpstreamFailureClassification(
+            status: .serviceUnavailable,
+            forwardedUpstream: false
+        )
+    }
+
+    private func settlementAmount(
+        response: ConsumeUpstreamResponse,
+        fallbackEstimate: ConsumeMicroUSD,
+        pricingMatch: ConsumeTrustedRateCardMatch,
+        projection: RateCardProjection
+    ) throws -> (amount: ConsumeMicroUSD, reason: String) {
+        guard Self.upstreamResponseContentEncodingIsIdentity(response.headers) else {
+            return (fallbackEstimate, "settled_to_admission_estimate")
+        }
+        guard let text = String(data: response.body, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .object(let usage)? = root["usage"],
+              case .int(let promptTokens)? = usage["prompt_tokens"],
+              case .int(let completionTokens)? = usage["completion_tokens"] else {
+            return (fallbackEstimate, "settled_to_admission_estimate")
+        }
+        guard let amount = try? ConsumePricedExposureEstimator.actualUsageSettlement(
+            promptTokens: Int64(promptTokens),
+            completionTokens: Int64(completionTokens),
+            match: pricingMatch,
+            projection: projection
+        ) else {
+            return (fallbackEstimate, "settled_to_admission_estimate")
+        }
+        return (amount, "settled_to_upstream_usage")
+    }
+
     private func writeLocalUnpricedBudgetAdmission(budget: ConsumeMicroUSD, context: ChannelHandlerContext) {
         do {
             guard let ledger = runtime.budget.ledger else {
                 writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                return
+            }
+            switch try ledger.previewUnpricedRemaining(
+                budget: budget,
+                maxRequest: runtime.budget.maxRequestMicroUSD
+            ) {
+            case .budgetExceeded:
+                writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_budget_exceeded")
+                return
+            case .requestCapExceeded:
+                writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+                return
+            case .held:
+                break
+            case .reserved:
+                writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
+                return
+            }
+            guard runtime.credentialCustody.upstreamBearerToken() != nil else {
+                writeLocalError(context: context, status: .unauthorized, code: "local_credential_missing")
                 return
             }
             switch try ledger.reserveAndHoldUnpricedRemaining(
@@ -3089,6 +4627,8 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                     code: "local_upstream_unavailable",
                     extraHeaders: warningHeaders(runtime.budget.localWarningTokens)
                 )
+            case .reserved:
+                writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
             }
         } catch {
             writeLocalError(context: context, status: .serviceUnavailable, code: "local_budget_ledger_unavailable")
@@ -3191,6 +4731,82 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         )
     }
 
+    private func writeUpstreamResponse(
+        _ response: ConsumeUpstreamResponse,
+        context: ChannelHandlerContext,
+        extraHeaders: [(String, String)]
+    ) {
+        guard Self.upstreamResponseContentEncodingIsIdentity(response.headers) else {
+            writeLocalError(
+                context: context,
+                status: HTTPResponseStatus(statusCode: 502),
+                code: "local_upstream_unavailable",
+                forwardedUpstream: true,
+                extraHeaders: extraHeaders
+            )
+            return
+        }
+        var headers = HTTPHeaders()
+        for (name, value) in response.headers {
+            let normalized = name.lowercased()
+            guard Self.allowedUpstreamResponseHeader(normalized) else {
+                continue
+            }
+            headers.add(name: name, value: value)
+        }
+        headers.replaceOrAdd(name: "content-length", value: "\(response.body.count)")
+        headers.replaceOrAdd(name: "connection", value: "close")
+        for (name, value) in extraHeaders {
+            if name.caseInsensitiveCompare("x-macprovider-warning") == .orderedSame,
+               let existing = headers.first(name: name),
+               !existing.isEmpty {
+                headers.replaceOrAdd(name: name, value: "\(existing),\(value)")
+            } else {
+                headers.replaceOrAdd(name: name, value: value)
+            }
+        }
+        let status = HTTPResponseStatus(statusCode: response.statusCode)
+        let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
+        responseStarted = true
+        context.write(wrapOutboundOut(.head(head)), promise: nil)
+        if !response.body.isEmpty {
+            var buffer = context.channel.allocator.buffer(capacity: response.body.count)
+            buffer.writeBytes(response.body)
+            context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+        }
+        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        context.close(promise: nil)
+    }
+
+    private static func upstreamResponseContentEncodingIsIdentity(_ headers: [(String, String)]) -> Bool {
+        for (name, value) in headers where name.caseInsensitiveCompare("content-encoding") == .orderedSame {
+            let tokens = value
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { !$0.isEmpty }
+            guard !tokens.isEmpty, tokens.allSatisfy({ $0 == "identity" }) else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func allowedUpstreamResponseHeader(_ normalizedName: String) -> Bool {
+        if normalizedName.hasPrefix("x-ratelimit-") { return true }
+        return [
+            "content-type",
+            "cache-control",
+            "retry-after",
+            "x-request-id",
+            "openai-request-id",
+            "x-macprovider-request-id",
+            "x-macprovider-receipt",
+            "x-macprovider-receipt-signature",
+            "x-macprovider-streaming-mode",
+            "x-macprovider-warning",
+        ].contains(normalizedName)
+    }
+
     private func writeJSON(
         context: ChannelHandlerContext,
         status: HTTPResponseStatus,
@@ -3275,6 +4891,14 @@ private extension JSONValue {
             return nil
         }
         return Int64(value)
+    }
+
+    func objectBool(_ key: String) -> Bool? {
+        guard case .object(let object) = self,
+              case .bool(let value)? = object[key] else {
+            return nil
+        }
+        return value
     }
 }
 
