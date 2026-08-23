@@ -2352,6 +2352,7 @@ type ReconstructedPoolState struct {
 	ManifestMinEligibleMembers   uint64
 	ManifestMinBinaryVersion     string
 	ManifestModelAllowlist       []string
+	ManifestSettlementMode       string
 	ManifestRetentionPolicyID    string
 	ManifestSplitExecutionStatus string
 	RootIssuer                   *ReconstructedRootIssuer
@@ -2539,6 +2540,7 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		p.ManifestMinEligibleMembers = core.MinEligibleMembers
 		p.ManifestMinBinaryVersion = core.MinBinaryVersion
 		p.ManifestModelAllowlist = append([]string(nil), core.ModelAllowlist...)
+		p.ManifestSettlementMode = canonicalPoolSettlementMode(core.SettlementMode)
 		p.ManifestRetentionPolicyID = core.RetentionPolicyID
 		p.ManifestSplitExecutionStatus = core.SplitExecutionStatus
 	case EventLifecycleChanged:
@@ -2834,6 +2836,7 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			BuyerAccounts:     buyers,
 			MinBinaryVersion:  policyMinBinaryVersion(p),
 			ModelAllowlist:    append([]string(nil), p.ManifestModelAllowlist...),
+			SettlementMode:    routeablePoolSettlementMode(p.ManifestSettlementMode),
 			Routeable:         routeable,
 			Generation:        p.RouteableSnapshotGeneration(),
 			RouteableUntilUTC: p.CreatorGateExpiresAtUTC,

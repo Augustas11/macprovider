@@ -174,11 +174,12 @@ func TestAdminHandler_MalformedDurableStateRejectsMutationsAndClearsRegistry(t *
 			registry := trustpool.NewRegistry()
 			if err := registry.LoadRouteableSnapshotsAtRevision(99, []trustpool.RouteableSnapshot{
 				{
-					PoolID:        "pool-a",
-					Members:       []string{"stale-provider"},
-					BuyerAccounts: []string{"acct-a"},
-					Routeable:     true,
-					Generation:    99,
+					PoolID:         "pool-a",
+					Members:        []string{"stale-provider"},
+					BuyerAccounts:  []string{"acct-a"},
+					SettlementMode: "observe",
+					Routeable:      true,
+					Generation:     99,
 				},
 			}); err != nil {
 				t.Fatalf("seed stale registry: %v", err)
@@ -345,11 +346,12 @@ func TestAdminHandler_MalformedDurableStateRejectsMetadataMutationsAndClearsRegi
 			}, "op-buyer", http.StatusAccepted)
 			if err := registry.LoadRouteableSnapshotsAtRevision(99, []trustpool.RouteableSnapshot{
 				{
-					PoolID:        root.poolID,
-					Members:       []string{"stale-provider"},
-					BuyerAccounts: []string{"acct-a"},
-					Routeable:     true,
-					Generation:    99,
+					PoolID:         root.poolID,
+					Members:        []string{"stale-provider"},
+					BuyerAccounts:  []string{"acct-a"},
+					SettlementMode: "observe",
+					Routeable:      true,
+					Generation:     99,
 				},
 			}); err != nil {
 				t.Fatalf("seed stale registry: %v", err)

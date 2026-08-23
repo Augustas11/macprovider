@@ -88,6 +88,15 @@ func (s *Server) forwardWithFailover(
 			writeError(w, http.StatusConflict, "pool_state_stale", "Pool membership changed during routing; please retry")
 			return false
 		}
+		if s.poolSettlementModeUnsatisfied(state) {
+			s.releaseQueuedSlotReservation(state)
+			rec.logRow("", http.StatusServiceUnavailable, nil, nil, "Pool requires enforce-mode settlement", "pool_settlement_mode_unsatisfied", state.explicitRetries)
+			if !rec.providerCredited {
+				w.Header().Set(settlementNoPriorDispatchHeader, "1")
+			}
+			writeError(w, http.StatusServiceUnavailable, "pool_settlement_mode_unsatisfied", "Pool requires enforce-mode settlement")
+			return false
+		}
 		// Reset the per-attempt dispatched flag before every attempt so the
 		// item-18 no-charge marker reflects only THIS attempt's dispatch
 		// (providerCredited separately carries billed credit from prior

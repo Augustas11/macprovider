@@ -230,11 +230,12 @@ func TestPoolHeaderForNonRouteablePoolFailsUnavailable(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	trustPools := trustpool.NewRegistry()
 	if err := trustPools.LoadRouteableSnapshot(trustpool.RouteableSnapshot{
-		PoolID:        "pool-paused",
-		Members:       []string{"provider-a"},
-		BuyerAccounts: []string{"acct_gateway"},
-		Routeable:     false,
-		Generation:    7,
+		PoolID:         "pool-paused",
+		Members:        []string{"provider-a"},
+		BuyerAccounts:  []string{"acct_gateway"},
+		SettlementMode: "observe",
+		Routeable:      false,
+		Generation:     7,
 	}); err != nil {
 		t.Fatalf("LoadRouteableSnapshot: %v", err)
 	}
@@ -267,6 +268,7 @@ func TestPoolHeaderForAuthorizedExpiredRouteableSnapshotFailsPolicyStale(t *test
 		PoolID:            "pool-stale",
 		Members:           []string{"provider-a"},
 		BuyerAccounts:     []string{"acct_gateway"},
+		SettlementMode:    "observe",
 		Routeable:         true,
 		Generation:        7,
 		RouteableUntilUTC: time.Now().UTC().Add(30 * time.Millisecond),

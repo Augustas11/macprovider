@@ -71,7 +71,7 @@ func TestReceiptKeyGate_ExcludesFromPinnedRoute(t *testing.T) {
 	s, _ := enforceReceiptServer(t)
 
 	noKey := receiptGateProvider("no-key", nil)
-	_, routeErr := s.validatePinnedProviderForRequest(noKey, "model-a", 100, "Pinned provider not available", nil)
+	_, routeErr := s.validatePinnedProviderForRequest(noKey, "model-a", 100, "Pinned provider not available", nil, false)
 	if routeErr == nil {
 		t.Fatal("pinned empty-receipt-key provider accepted under enforce")
 	}
@@ -80,7 +80,7 @@ func TestReceiptKeyGate_ExcludesFromPinnedRoute(t *testing.T) {
 	}
 
 	withKey := receiptGateProvider("with-key", []byte("some-receipt-pubkey"))
-	if _, routeErr := s.validatePinnedProviderForRequest(withKey, "model-a", 100, "Pinned provider not available", nil); routeErr != nil {
+	if _, routeErr := s.validatePinnedProviderForRequest(withKey, "model-a", 100, "Pinned provider not available", nil, false); routeErr != nil {
 		t.Fatalf("pinned provider with a receipt key rejected: %+v", routeErr)
 	}
 }

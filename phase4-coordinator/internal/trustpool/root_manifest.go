@@ -284,6 +284,9 @@ func validateCandidatePolicyCoreClaims(core poolmanifest.PolicyCore) error {
 	if core.SplitExecutionStatus != "declared_not_executed" {
 		return ErrProhibitedPromiseClaim
 	}
+	if !validPoolSettlementMode(core.SettlementMode) {
+		return errManifestSnapshot
+	}
 	if err := ValidatePromiseClaimsText(core.ModelAllowlist...); err != nil {
 		return err
 	}
@@ -304,6 +307,27 @@ func validateCandidatePolicyCoreClaims(core poolmanifest.PolicyCore) error {
 		return errManifestSnapshot
 	}
 	return nil
+}
+
+func validPoolSettlementMode(mode string) bool {
+	switch canonicalPoolSettlementMode(mode) {
+	case billing.RouteSnapshotModeObserve, billing.RouteSnapshotModeEnforce:
+		return true
+	default:
+		return false
+	}
+}
+
+func canonicalPoolSettlementMode(mode string) string {
+	return strings.TrimSpace(mode)
+}
+
+func routeablePoolSettlementMode(mode string) string {
+	canonical := canonicalPoolSettlementMode(mode)
+	if canonical == "" {
+		return billing.RouteSnapshotModeObserve
+	}
+	return canonical
 }
 
 func taggedCanonicalJSON(tag string, value map[string]any) ([]byte, error) {

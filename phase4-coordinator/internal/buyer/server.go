@@ -5933,6 +5933,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	var poolGen uint64
 	var poolMin string
 	var poolModelAllowlist []string
+	var poolRequiresSettlementEnforce bool
 	poolActive := s.trustPools != nil && req.poolID != ""
 	if poolActive {
 		snap := req.poolSnapshot
@@ -5952,6 +5953,11 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			}
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_unavailable", message: "Pool unavailable"}
 		}
+		settlementEnforce := s.settlementEnforceMode()
+		poolRequiresSettlementEnforce = poolSettlementRequiresEnforce(snap.SettlementMode)
+		if poolRequiresSettlementEnforce && !settlementEnforce {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_settlement_mode_unsatisfied", message: "Pool requires enforce-mode settlement"}
+		}
 		poolMembers = snap.Members
 		poolGen = snap.Generation
 		poolMin = snap.MinBinaryVersion
@@ -5962,6 +5968,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			state.poolGeneration = snap.Generation
 			state.poolMinBinaryVersion = snap.MinBinaryVersion
 			state.poolModelAllowlist = append([]string(nil), snap.ModelAllowlist...)
+			state.poolRequiresSettlementEnforce = poolRequiresSettlementEnforce
 			state.poolGenSet = true
 		}
 	}
@@ -5988,7 +5995,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
 				}
-				provider, routeErr := s.validatePinnedProviderForRequest(p, req.Model, estimatedTokens, "Pinned session not available", class)
+				provider, routeErr := s.validatePinnedProviderForRequest(p, req.Model, estimatedTokens, "Pinned session not available", class, poolRequiresSettlementEnforce)
 				if routeErr != nil {
 					return provider, routeErr
 				}
@@ -6015,7 +6022,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
 				}
-				provider, routeErr := s.validatePinnedProviderForRequest(p, req.Model, estimatedTokens, "Pinned provider not available", class)
+				provider, routeErr := s.validatePinnedProviderForRequest(p, req.Model, estimatedTokens, "Pinned provider not available", class, poolRequiresSettlementEnforce)
 				if routeErr != nil {
 					return provider, routeErr
 				}
@@ -6052,6 +6059,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		checker.poolGeneration = poolGen // local snapshot value; avoids a nil-state deref
 		checker.poolMinBinaryVersion = poolMin
 		checker.poolModelAllowlist = poolModelAllowlist
+		checker.settlementEnforce = checker.settlementEnforce || poolRequiresSettlementEnforce
 	}
 	result := routing.EligibleCandidates(providers, exSet, pool.Provider.SortKey, checker)
 	candidates := result.Eligible
@@ -6834,7 +6842,7 @@ func (s *Server) internalBearerAuthorizedFull(headers http.Header, remoteAddr, p
 	return true
 }
 
-func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string, estimatedTokens int, unavailableMessage string, class *config.ModelClassConfig) (pool.Provider, *routeError) {
+func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string, estimatedTokens int, unavailableMessage string, class *config.ModelClassConfig, poolRequiresSettlementEnforce bool) (pool.Provider, *routeError) {
 	if !s.providerMatchesRequest(p, model, class) {
 		return pool.Provider{}, &routeError{status: http.StatusNotFound, code: "model_not_found", message: "Pinned provider serves different model"}
 	}
@@ -6857,6 +6865,9 @@ func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string,
 	// Observe mode / nil store => settlementEnforceMode()==false => no-op.
 	if s.settlementEnforceMode() && len(p.ReceiptPubkey) == 0 {
 		s.logReceiptKeyExcluded(p)
+		if poolRequiresSettlementEnforce {
+			return pool.Provider{}, poolSettlementModeUnsatisfiedRouteError()
+		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
 	if p.MaxContextTokens < estimatedTokens {
@@ -6930,6 +6941,7 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	lastPreflightErr := (*routeError)(nil)
+	poolSettlementUnsatisfied := false
 	queueWait := time.Duration(0)
 	tried := map[string]struct{}{}
 	queueCandidates := make([]poolQueueCandidate, 0, len(ordered))
@@ -6969,6 +6981,12 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 				queueWait += time.Since(queueSegmentStart)
 				tried[waiter.providerID] = struct{}{}
 				goto nextQueueCandidate
+			case queuedProviderPoolSettlementUnsatisfied:
+				s.slotQueue.leave(waiter)
+				queueWait += time.Since(queueSegmentStart)
+				poolSettlementUnsatisfied = true
+				tried[waiter.providerID] = struct{}{}
+				goto nextQueueCandidate
 			default:
 			}
 			select {
@@ -6986,6 +7004,10 @@ func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model s
 		state.queueWait = queueWait
 		return pool.Provider{}, lastPreflightErr, true
 	}
+	if poolSettlementUnsatisfied {
+		state.queueWait = queueWait
+		return pool.Provider{}, poolSettlementModeUnsatisfiedRouteError(), true
+	}
 	state.queueWait = queueWait
 	return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}, true
 }
@@ -6996,6 +7018,7 @@ const (
 	queuedProviderWait queuedProviderStatus = iota
 	queuedProviderAvailable
 	queuedProviderTerminal
+	queuedProviderPoolSettlementUnsatisfied
 )
 
 func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *config.ModelClassConfig, estimatedTokens int, state *forwardState) (pool.Provider, queuedProviderStatus) {
@@ -7025,6 +7048,9 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		if state != nil && state.poolID != "" && !poolModelAllowed(model, class, state.poolModelAllowlist) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
+		if s.poolSettlementModeUnsatisfied(state) {
+			return pool.Provider{}, queuedProviderPoolSettlementUnsatisfied
+		}
 		if !s.providerMatchesRequest(provider, model, class) || provider.MaxContextTokens < estimatedTokens {
 			return pool.Provider{}, queuedProviderTerminal
 		}
@@ -7042,6 +7068,9 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		// pre-dispatch). Observe / nil store => no-op.
 		if s.settlementEnforceMode() && len(provider.ReceiptPubkey) == 0 {
 			s.logReceiptKeyExcluded(provider)
+			if state != nil && state.poolRequiresSettlementEnforce {
+				return pool.Provider{}, queuedProviderPoolSettlementUnsatisfied
+			}
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if !provider.CapacityEligible() || provider.State != pool.StateReady || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
@@ -7418,6 +7447,18 @@ func (s *Server) poolGenerationStale(state *forwardState) bool {
 	return s.trustPools.Generation(state.poolID) != state.poolGeneration
 }
 
+func (s *Server) poolSettlementModeUnsatisfied(state *forwardState) bool {
+	return state != nil && state.poolRequiresSettlementEnforce && !s.settlementEnforceMode()
+}
+
+func poolSettlementModeUnsatisfiedRouteError() *routeError {
+	return &routeError{
+		status:  http.StatusServiceUnavailable,
+		code:    "pool_settlement_mode_unsatisfied",
+		message: "No pool member satisfies the required settlement mode",
+	}
+}
+
 // ProviderHasSettlementReceiptKey drops providers that can never have a
 // route snapshot recorded under enforce mode (SPEC-022 R-2.4/R-2.5). It
 // mirrors the pre-dispatch guard in route_snapshot.go
@@ -7468,6 +7509,10 @@ func (s *Server) settlementEnforceMode() bool {
 	}
 	settlementCfg := store.SettlementConfig(config.Default().Settlement)
 	return billing.VerifiedModelSettlementMode(settlementCfg) == billing.RouteSnapshotModeEnforce
+}
+
+func poolSettlementRequiresEnforce(mode string) bool {
+	return strings.TrimSpace(mode) == billing.RouteSnapshotModeEnforce
 }
 
 func modelIDEqual(a, b string) bool {

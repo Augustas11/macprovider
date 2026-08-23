@@ -1224,7 +1224,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.26",
+      "version": "0.0.27",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1257,7 +1257,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool control plane is a new authority domain (pool-control-plane). Current merged code contains substantial default-off pool plumbing and SPEC-043 creator-onboarding enablement, including pool_id threading, manifest crypto primitives, route isolation, labeled route snapshots, buyer/public policy and status surfaces, claim-control rejection, an MVP retention-policy registry, local restrictive lifecycle admin controls, paused candidate-pool reactivation through the promotion preflight gate, local route-time model-allowlist enforcement from signed manifest-derived pool snapshots, provider-side positive pool-capability advertisement/gating for pool-selected traffic, signed emergency pause/drain/retire controls, signed provider-bound revoke_immediate controls that durably revoke the target provider, advance the route-generation fence, cancel active uncommitted dispatch attempts for that provider, and live routeability/generation-bound delivery-drain proof for retirement. SPEC-042 remains pending-reconciliation and not-deployed because signed journey evidence, production durable-store evidence, remaining fail-closed predicate coverage, SPEC-042-owned schema/retention promotion, production activation gates, and five-lane audit are still outstanding. Layer 2 administrative trust only; cryptographic privacy is SPEC-041/Layer 3."
+        "rationale": "Pool control plane is a new authority domain (pool-control-plane). Current merged code contains substantial default-off pool plumbing and SPEC-043 creator-onboarding enablement, including pool_id threading, manifest crypto primitives, route isolation, labeled route snapshots, buyer/public policy and status surfaces, claim-control rejection, an MVP retention-policy registry, local restrictive lifecycle admin controls, paused candidate-pool reactivation through the promotion preflight gate, local route-time model-allowlist enforcement from signed manifest-derived pool snapshots, local route/dispatch-time settlement observe-vs-enforce gating from signed manifest-derived pool snapshots, provider-side positive pool-capability advertisement/gating for pool-selected traffic, signed emergency pause/drain/retire controls, signed provider-bound revoke_immediate controls that durably revoke the target provider, advance the route-generation fence, cancel active uncommitted dispatch attempts for that provider, and live routeability/generation-bound delivery-drain proof for retirement. SPEC-042 remains pending-reconciliation and not-deployed because signed journey evidence, production durable-store evidence, remaining production predicate coverage, SPEC-042-owned schema/retention promotion, production activation gates, and five-lane audit are still outstanding. Layer 2 administrative trust only; cryptographic privacy is SPEC-041/Layer 3."
       }
     },
     {
@@ -5360,11 +5360,20 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/route_snapshot.go:func (s *Store) InsertRouteSnapshot",
-        "phase4-coordinator/internal/billing/route_snapshot.go:func (r RouteSnapshot) Value"
+        "phase4-coordinator/internal/billing/route_snapshot.go:func (r RouteSnapshot) Value",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *ReconstructedState) RouteableSnapshots",
+        "phase4-coordinator/internal/trustpool/root_manifest.go:func validateCandidatePolicyCoreClaims",
+        "phase4-coordinator/internal/trustpool/registry.go:type Snapshot",
+        "phase4-coordinator/internal/trustpool/registry.go:type RouteableSnapshot",
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Snapshot"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/route_snapshot_test.go:TestRouteSnapshotPoolID_DigestBinding",
-        "phase4-coordinator/internal/billing/route_snapshot_test.go:TestRouteSnapshotPoolID_RoundTripsThroughSettlementLoader"
+        "phase4-coordinator/internal/billing/route_snapshot_test.go:TestRouteSnapshotPoolID_RoundTripsThroughSettlementLoader",
+        "phase4-coordinator/internal/trustpool/root_manifest_test.go:TestReconstructEvents_RejectsManifestInvalidSettlementMode",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestReconstructEvents_ManifestRaiseOverridesOlderExplicitFloor",
+        "phase4-coordinator/internal/trustpool/registry_test.go:TestModelAllowlistSnapshotsAndGeneration",
+        "phase4-coordinator/internal/trustpool/registry_test.go:TestModelAllowlistRejectsMalformedSnapshots"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
@@ -5374,7 +5383,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Labels-only pool-scoped settlement bound to the route snapshot: pool_id is bound into the canonical route-snapshot digest and persisted (#1072). label_disputed mismatch handling and creator revenue-split (SPEC-005/016 V1) are deferred."
+        "rationale": "Labels-only pool-scoped settlement bound to the route snapshot: pool_id is bound into the canonical route-snapshot digest and persisted (#1072), and manifest-derived settlement mode is closed-vocabulary validated, canonicalized, and carried through durable reconstruction into hot routeable snapshots. label_disputed mismatch handling and creator revenue-split (SPEC-005/016 V1) are deferred."
       }
     },
     {
@@ -5478,6 +5487,7 @@
         "phase4-coordinator/internal/trustpool/registry.go:type Snapshot",
         "phase4-coordinator/internal/buyer/server.go:func (c *eligibilityCtx) ProviderSupportsTrustedPools",
         "phase4-coordinator/internal/buyer/server.go:func poolModelAllowed",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) poolSettlementModeUnsatisfied",
         "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) SetModelAllowlist",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *ReconstructedState) RouteableSnapshots",
         "phase4-coordinator/internal/buyer/forward_with_failover.go:func (s *Server) forwardWithFailover",
@@ -5506,6 +5516,9 @@
         "phase4-coordinator/internal/buyer/spec042_pool_predicate_errors_test.go:TestPoolPredicateErrors_EncryptedLegUnsatisfied",
         "phase4-coordinator/internal/buyer/spec042_pool_predicate_errors_test.go:TestPoolPredicateErrors_AttestationUnsatisfied",
         "phase4-coordinator/internal/buyer/spec042_pool_predicate_errors_test.go:TestPoolPredicateErrors_SettlementModeUnsatisfied",
+        "phase4-coordinator/internal/buyer/spec042_pool_predicate_errors_test.go:TestPoolPredicateErrors_SettlementPolicyRequiresEnforceMode",
+        "phase4-coordinator/internal/buyer/spec042_pool_predicate_errors_test.go:TestPoolPredicateErrors_SettlementPolicyEnforceModeRoutesWithReceiptKey",
+        "phase4-coordinator/internal/buyer/spec042_pool_predicate_errors_test.go:TestPoolPredicateErrors_SettlementPolicyRecheckedBeforeDispatch",
         "phase4-coordinator/internal/buyer/spec042_pool_predicate_errors_test.go:TestPoolPredicateErrors_ProviderCapabilityUnsatisfied",
         "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_PinnedMemberWithoutPoolCapabilityRejected",
         "phase4-coordinator/internal/routing/filter_test.go:TestEligibleCandidates_OrderingPerProviderSequence",
@@ -5538,7 +5551,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Fail-closed error handling now clears routeable trusted-pool snapshots when reconstruction observes malformed durable state at startup, background refresh, admin reads/mutations, buyer policy/status reads, and pool-selected chat admission. Local restrictive lifecycle admin controls now pause/drain/retire through the validated durable append path, refresh routeable snapshots after commit, reject raw active transitions with activation_requires_promotion, and fail closed on invalid lifecycle transitions. Signed emergency controls now pause/drain/retire and provider-bound `revoke_immediate` now appends durable revocation through the signed-control path; both refresh routeable snapshots after commit and keep generic admin events from forging signed-control proof fields. The promotion path can reactivate paused candidate pools only after rerunning local activation preflight, preserving promotion as the only routeability-increasing write path. Ordinary pool-selected routing now emits SPEC-042 closed-vocabulary codes for encrypted-leg absence, attestation unsatisfied, enforce-mode provider settlement-prerequisite failures, signed-manifest-derived model allowlist failures, missing selected-provider `trusted_pool_v1` advertisement, and authorized expired routeable/policy freshness while preserving global Tier-2/settlement behavior. Pinned provider/session routes and slot-queue candidate/poll paths re-check the same allowlist and provider-capability verdicts. Active uncommitted dispatch attempts now return retryable `pool_state_stale` when provider-bound revoke_immediate closes the registry watch/cancels the shared attempt context; the gateway passes through and refunds only when the coordinator also supplies the positive no-prior-dispatch marker, and otherwise settles `pool_state_stale` as `upstream_provider_error` when a provider row may already have been credited or the gateway retry loop has already observed a provider-dispatched attempt. Still pending: signed journey evidence, production activation evidence, policy-level settlement observe-vs-enforce gating, production mixed-version rollout proof, remaining production predicate evidence, and 0 C/H/M launch audit."
+        "rationale": "Fail-closed error handling now clears routeable trusted-pool snapshots when reconstruction observes malformed durable state at startup, background refresh, admin reads/mutations, buyer policy/status reads, and pool-selected chat admission. Local restrictive lifecycle admin controls now pause/drain/retire through the validated durable append path, refresh routeable snapshots after commit, reject raw active transitions with activation_requires_promotion, and fail closed on invalid lifecycle transitions. Signed emergency controls now pause/drain/retire and provider-bound `revoke_immediate` now appends durable revocation through the signed-control path; both refresh routeable snapshots after commit and keep generic admin events from forging signed-control proof fields. The promotion path can reactivate paused candidate pools only after rerunning local activation preflight, preserving promotion as the only routeability-increasing write path. Ordinary pool-selected routing now emits SPEC-042 closed-vocabulary codes for encrypted-leg absence, attestation unsatisfied, enforce-mode provider settlement-prerequisite failures, policy-level settlement observe-vs-enforce failures at route and dispatch time, signed-manifest-derived model allowlist failures, missing selected-provider `trusted_pool_v1` advertisement, and authorized expired routeable/policy freshness while preserving global Tier-2/settlement behavior. Pinned provider/session routes and slot-queue candidate/poll paths re-check the same allowlist and provider-capability verdicts. Active uncommitted dispatch attempts now return retryable `pool_state_stale` when provider-bound revoke_immediate closes the registry watch/cancels the shared attempt context; the gateway passes through and refunds only when the coordinator also supplies the positive no-prior-dispatch marker, and otherwise settles `pool_state_stale` as `upstream_provider_error` when a provider row may already have been credited or the gateway retry loop has already observed a provider-dispatched attempt. Still pending: signed journey evidence, production activation evidence, production mixed-version rollout proof, remaining production predicate evidence, and 0 C/H/M launch audit."
       }
     },
     {

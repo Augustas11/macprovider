@@ -103,7 +103,7 @@ func TestModelVersionFloorExcludesFromPublicRouting(t *testing.T) {
 func TestModelVersionFloorExcludesFromSelfRoutePreflight(t *testing.T) {
 	s := versionFloorServer(t, map[string]string{floorModelID: "1.8.60"})
 	old := versionFloorProvider("old", floorModelID, "1.8.59")
-	_, routeErr := s.validatePinnedProviderForRequest(old, floorModelID, 100, "Pinned provider not available", nil)
+	_, routeErr := s.validatePinnedProviderForRequest(old, floorModelID, 100, "Pinned provider not available", nil, false)
 	if routeErr == nil {
 		t.Fatal("validatePinnedProviderForRequest accepted a below-floor pinned provider")
 	}
@@ -115,7 +115,7 @@ func TestModelVersionFloorExcludesFromSelfRoutePreflight(t *testing.T) {
 	}
 
 	fresh := versionFloorProvider("new", floorModelID, "1.8.65")
-	if _, routeErr := s.validatePinnedProviderForRequest(fresh, floorModelID, 100, "Pinned provider not available", nil); routeErr != nil {
+	if _, routeErr := s.validatePinnedProviderForRequest(fresh, floorModelID, 100, "Pinned provider not available", nil, false); routeErr != nil {
 		t.Fatalf("above-floor pinned provider rejected: %+v", routeErr)
 	}
 }
@@ -159,7 +159,7 @@ func TestModelVersionFloorUnconfiguredIsByteIdentical(t *testing.T) {
 		t.Fatalf("ReasonModelVersionFloor count = %d, want 0", got)
 	}
 	for _, p := range providers {
-		if _, routeErr := s.validatePinnedProviderForRequest(p, floorModelID, 100, "unavailable", nil); routeErr != nil {
+		if _, routeErr := s.validatePinnedProviderForRequest(p, floorModelID, 100, "unavailable", nil, false); routeErr != nil {
 			t.Fatalf("pinned %q rejected with no floors configured: %+v", p.ProviderID, routeErr)
 		}
 	}

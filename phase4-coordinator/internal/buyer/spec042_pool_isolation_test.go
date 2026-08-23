@@ -225,6 +225,7 @@ func TestPoolIsolation_AuthorizedExpiredRouteableSnapshotReturnsPolicyStale(t *t
 		PoolID:            "P",
 		Members:           []string{"member-x"},
 		BuyerAccounts:     []string{"acct-a"},
+		SettlementMode:    "observe",
 		Routeable:         true,
 		Generation:        7,
 		RouteableUntilUTC: time.Now().UTC().Add(30 * time.Millisecond),
@@ -250,6 +251,7 @@ func TestPoolIsolation_CachedRouteableSnapshotExpiryReturnsPolicyStale(t *testin
 		PoolID:            "P",
 		Members:           []string{"member-x"},
 		BuyerAccounts:     []string{"acct-a"},
+		SettlementMode:    "observe",
 		Routeable:         true,
 		Generation:        7,
 		RouteableUntilUTC: time.Now().UTC().Add(30 * time.Millisecond),
@@ -279,6 +281,7 @@ func TestPoolIsolation_RefreshedExpiredRouteableSnapshotReturnsPolicyStale(t *te
 	if err := tp.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
 		PoolID:           "P",
 		BuyerAccounts:    []string{"acct-a"},
+		SettlementMode:   "observe",
 		Routeable:        false,
 		Generation:       8,
 		RouteableExpired: true,
@@ -342,9 +345,10 @@ func TestPoolIsolation_BeginPoolDeliveryRejectsDrainedGeneration(t *testing.T) {
 	}
 	end()
 	if err := tp.LoadRouteableSnapshotsAtRevision(2, []trustpool.RouteableSnapshot{{
-		PoolID:     "P",
-		Routeable:  false,
-		Generation: state.poolGeneration + 1,
+		PoolID:         "P",
+		SettlementMode: "observe",
+		Routeable:      false,
+		Generation:     state.poolGeneration + 1,
 	}}); err != nil {
 		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
 	}
