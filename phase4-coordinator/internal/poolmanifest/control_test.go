@@ -65,6 +65,32 @@ func TestVerifyEmergencyLifecycleControlRootIssuer(t *testing.T) {
 	}
 }
 
+func TestVerifyEmergencyLifecycleControlRevokeImmediateBindsProvider(t *testing.T) {
+	snapshot := fixtureSnapshot(t)
+	control := testEmergencyControl(t, snapshot)
+	control.OperationID = "op-revoke-immediate"
+	control.Action = EmergencyLifecycleRevokeImmediate
+	control.TargetProviderID = "provider-a"
+	_, p1 := seedKey(1)
+	_, p2 := seedKey(2)
+	sigs := signEmergencyControl(t, control, signer{"k1", p1}, signer{"k2", p2})
+	if err := VerifyEmergencyLifecycleControl(control, sigs, snapshot, 1550); err != nil {
+		t.Fatalf("VerifyEmergencyLifecycleControl revoke_immediate: %v", err)
+	}
+
+	missingProvider := control
+	missingProvider.TargetProviderID = ""
+	if err := VerifyEmergencyLifecycleControl(missingProvider, sigs, snapshot, 1550); !errors.Is(err, errEmergencyControlProviderID) {
+		t.Fatalf("missing target provider err=%v, want errEmergencyControlProviderID", err)
+	}
+
+	wrongProvider := control
+	wrongProvider.TargetProviderID = "provider-b"
+	if err := VerifyEmergencyLifecycleControl(wrongProvider, sigs, snapshot, 1550); !errors.Is(err, errBadSignature) {
+		t.Fatalf("wrong target provider err=%v, want errBadSignature", err)
+	}
+}
+
 func TestVerifyEmergencyLifecycleControlRejectsStaleAndBadProofs(t *testing.T) {
 	snapshot := fixtureSnapshot(t)
 	control := testEmergencyControl(t, snapshot)

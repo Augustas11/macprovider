@@ -47,7 +47,7 @@ var (
 	ErrCreatorApprovalGate         = errors.New("trustpool: creator approval gate failed")
 	ErrPublicAnnouncementGate      = errors.New("trustpool: public announcement gate failed")
 	ErrProhibitedPromiseClaim      = errors.New("trustpool: prohibited promise claim")
-	ErrSignedControlProofPath      = errors.New("trustpool: signed control proof requires signed lifecycle path")
+	ErrSignedControlProofPath      = errors.New("trustpool: signed control proof requires signed control path")
 )
 
 type PromotionPreconditionError struct {
@@ -1489,15 +1489,29 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 	return s.appendValidatedEvent(ctx, e, false)
 }
 
-// AppendSignedLifecycleEvent is the only generic durable append path allowed to
+// appendSignedControlEvent is the only generic durable append path allowed to
 // carry signed-control proof bytes. Callers must verify the signed control before
 // calling this method; replay only persists the already-verified proof with the
-// restrictive lifecycle event.
-func (s *Store) AppendSignedLifecycleEvent(ctx context.Context, e DurableEvent) (*ReconstructedState, DurableEvent, bool, error) {
-	if e.EventType != EventLifecycleChanged || e.Lifecycle == LifecycleActive || e.Lifecycle == "" || !hasSignedControlProof(e) {
+// restrictive lifecycle or immediate-revocation event.
+func (s *Store) appendSignedControlEvent(ctx context.Context, e DurableEvent) (*ReconstructedState, DurableEvent, bool, error) {
+	if !signedControlEventAllowed(e) {
 		return nil, DurableEvent{}, false, ErrSignedControlProofPath
 	}
 	return s.appendValidatedEvent(ctx, e, true)
+}
+
+func signedControlEventAllowed(e DurableEvent) bool {
+	if !hasSignedControlProof(e) {
+		return false
+	}
+	switch e.EventType {
+	case EventLifecycleChanged:
+		return e.Lifecycle != "" && e.Lifecycle != LifecycleActive && e.ProviderID == ""
+	case EventMemberRevoked:
+		return e.ProviderID != "" && e.Lifecycle == ""
+	default:
+		return false
+	}
 }
 
 func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowSignedControlProof bool) (*ReconstructedState, DurableEvent, bool, error) {
