@@ -15,7 +15,8 @@
         "SPEC-008",
         "SPEC-042",
         "SPEC-043",
-        "SPEC-044"
+        "SPEC-044",
+        "SPEC-045"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -84,7 +85,8 @@
         "SPEC-041",
         "SPEC-042",
         "SPEC-043",
-        "SPEC-044"
+        "SPEC-044",
+        "SPEC-045"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -103,7 +105,8 @@
         "SPEC-040",
         "SPEC-041",
         "SPEC-042",
-        "SPEC-043"
+        "SPEC-043",
+        "SPEC-045"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -161,7 +164,8 @@
         "SPEC-038",
         "SPEC-039",
         "SPEC-042",
-        "SPEC-044"
+        "SPEC-044",
+        "SPEC-045"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -252,7 +256,8 @@
         "SPEC-040",
         "SPEC-041",
         "SPEC-042",
-        "SPEC-043"
+        "SPEC-043",
+        "SPEC-045"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -290,7 +295,8 @@
       "owner_spec": "SPEC-018",
       "consumers": [
         "SPEC-006",
-        "SPEC-019"
+        "SPEC-019",
+        "SPEC-045"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -302,7 +308,8 @@
       "owner_spec": "SPEC-019",
       "consumers": [
         "SPEC-006",
-        "SPEC-018"
+        "SPEC-018",
+        "SPEC-045"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -366,7 +373,8 @@
         "SPEC-032",
         "SPEC-033",
         "SPEC-038",
-        "SPEC-044"
+        "SPEC-044",
+        "SPEC-045"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -383,7 +391,8 @@
         "SPEC-015",
         "SPEC-037",
         "SPEC-038",
-        "SPEC-039"
+        "SPEC-039",
+        "SPEC-045"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -640,6 +649,15 @@
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
       "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "local-consumer-endpoint",
+      "owner_spec": "SPEC-045",
+      "consumers": [],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/927"
     }
   ]
 }
