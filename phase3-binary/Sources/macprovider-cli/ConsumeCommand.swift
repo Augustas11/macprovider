@@ -55,6 +55,7 @@ struct ConsumeRunCommand: AsyncParsableCommand {
     var environmentForTesting: [String: String]?
     var homeDirectoryForTesting: URL?
     var startupDirectoryForTesting: URL?
+    var skipTrustedPricingLoadForTesting: Bool = false
 
     func run() async throws {
         try await run(stopAfterListeningForTesting: false)
@@ -79,6 +80,12 @@ struct ConsumeRunCommand: AsyncParsableCommand {
                 homeDirectory: homeDirectoryForTesting ?? FileManager.default.homeDirectoryForCurrentUser,
                 startupDirectory: startupDirectoryForTesting ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             )
+            let trustedPricing: ConsumeTrustedPricingState
+            if budgetConfig.mode == .unconfigured || skipTrustedPricingLoadForTesting {
+                trustedPricing = .notLoaded
+            } else {
+                trustedPricing = await ConsumeTrustedPricingLoader().load(from: origin)
+            }
             var credential = try ConsumeCredentialLoader.load(
                 explicitCredentialFile: credentialFile,
                 environment: environmentForTesting ?? ProcessInfo.processInfo.environment,
@@ -110,7 +117,8 @@ struct ConsumeRunCommand: AsyncParsableCommand {
                 modelAllowlist: allowedModels,
                 tokenVerifier: token.verifier,
                 credentialCustody: credentialCustody,
-                budget: budgetConfig
+                budget: budgetConfig,
+                trustedPricing: trustedPricing
             )
             let server = ConsumeLocalServer(
                 bindAddress: normalizedBind,
@@ -405,7 +413,7 @@ struct ConsumeBudgetConfig: @unchecked Sendable {
         )
     }
 
-    func statusFields() -> [String: Any] {
+    func statusFields(trustedPricing: ConsumeTrustedPricingState = .notLoaded) -> [String: Any] {
         let summary: ConsumeBudgetLedgerSummary?
         if let ledger {
             summary = try? ledger.summary()
@@ -447,14 +455,17 @@ struct ConsumeBudgetConfig: @unchecked Sendable {
         let ledgerClass: Any = ledgerPathClass ?? NSNull()
         let ledgerState: Any = ledger == nil ? NSNull() : (ledgerIsHealthy ? "available" : "unavailable")
         let pricingState: String
+        let pricingWarnings: [String]
         if case .unconfigured = mode {
             pricingState = "unavailable"
+            pricingWarnings = []
         } else {
-            pricingState = ledgerIsHealthy ? pricingTrustState : "unavailable"
+            pricingState = ledgerIsHealthy ? pricingTrustState(trustedPricing: trustedPricing) : "unavailable"
+            pricingWarnings = ledgerIsHealthy ? pricingWarningCodes(trustedPricing: trustedPricing) : []
         }
         return [
             "pricing_trust_state": pricingState,
-            "pricing_warning_codes": pricingWarningCodes,
+            "pricing_warning_codes": pricingWarnings,
             "unpriced_override": allowUnpriced,
             "no_budget": noBudget,
             "budget_configured_micro_usd": configured,
@@ -466,13 +477,14 @@ struct ConsumeBudgetConfig: @unchecked Sendable {
         ]
     }
 
-    var pricingTrustState: String {
-        if allowUnpriced { return "unpriced_override" }
+    func pricingTrustState(trustedPricing: ConsumeTrustedPricingState) -> String {
+        if case .available = trustedPricing { return trustedPricing.statusState }
+        if allowUnpriced, case .budget = mode { return "unpriced_override" }
         return "unavailable"
     }
 
-    var pricingWarningCodes: [String] {
-        []
+    func pricingWarningCodes(trustedPricing: ConsumeTrustedPricingState) -> [String] {
+        trustedPricing.warningCodes
     }
 
     var localWarningTokens: [String] {
@@ -2034,6 +2046,8 @@ struct ConsumeEndpointRuntime: Sendable {
     let tokenVerifier: ConsumeLocalTokenVerifier
     let credentialCustody: ConsumeCredentialCustody
     let budget: ConsumeBudgetConfig
+    let trustedPricing: ConsumeTrustedPricingStore
+    let now: @Sendable () -> Date
     let requestCounter: ConsumeEndpointRequestCounter
 
     init(
@@ -2046,6 +2060,8 @@ struct ConsumeEndpointRuntime: Sendable {
         tokenVerifier: ConsumeLocalTokenVerifier,
         credentialCustody: ConsumeCredentialCustody? = nil,
         budget: ConsumeBudgetConfig = .unconfigured,
+        trustedPricing: ConsumeTrustedPricingState = .notLoaded,
+        now: @escaping @Sendable () -> Date = { Date() },
         requestCounter: ConsumeEndpointRequestCounter = ConsumeEndpointRequestCounter()
     ) {
         self.launchID = launchID
@@ -2056,6 +2072,8 @@ struct ConsumeEndpointRuntime: Sendable {
         self.tokenVerifier = tokenVerifier
         self.credentialCustody = credentialCustody ?? ConsumeCredentialCustody(status: credentialStatus)
         self.budget = budget
+        self.trustedPricing = ConsumeTrustedPricingStore(trustedPricing)
+        self.now = now
         self.requestCounter = requestCounter
     }
 
@@ -2101,10 +2119,27 @@ struct ConsumeEndpointRuntime: Sendable {
             "last_successful_upstream_contact_at": NSNull(),
             "error_ring": [],
         ]
-        for (key, value) in budget.statusFields() {
+        for (key, value) in budget.statusFields(trustedPricing: trustedPricing.revalidated(now: now())) {
             payload[key] = value
         }
         return payload
+    }
+}
+
+final class ConsumeTrustedPricingStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var state: ConsumeTrustedPricingState
+
+    init(_ state: ConsumeTrustedPricingState) {
+        self.state = state
+    }
+
+    func revalidated(now: Date) -> ConsumeTrustedPricingState {
+        lock.lock()
+        defer { lock.unlock() }
+        let revalidated = state.revalidated(now: now)
+        state = revalidated
+        return revalidated
     }
 }
 
@@ -2584,7 +2619,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 writeLocalError(context: context, status: .badRequest, code: "local_model_not_allowed")
                 return
             }
-            writeLocalChatAdmissionFailure(context: context)
+            writeLocalChatAdmissionFailure(model: model, context: context)
         }
     }
 
@@ -2800,18 +2835,45 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         return parsed
     }
 
-    private func writeLocalChatAdmissionFailure(context: ChannelHandlerContext) {
+    private func writeLocalChatAdmissionFailure(model: String, context: ChannelHandlerContext) {
+        let trustedPricing = runtime.trustedPricing.revalidated(now: runtime.now())
+        let pricingMatch = trustedPricing.match(model: model)
+        let trustedPricingWarnings = trustedPricing.warningCodes(match: pricingMatch)
+        let pricingAdmitsCurrentRequest: Bool
+        if let pricingMatch {
+            pricingAdmitsCurrentRequest = pricingMatch.source != .defaultFallback
+        } else {
+            pricingAdmitsCurrentRequest = false
+        }
         switch runtime.budget.mode {
         case .unconfigured:
             writeLocalError(context: context, status: .badRequest, code: "local_budget_required")
         case .noBudget:
+            guard pricingAdmitsCurrentRequest else {
+                writeLocalError(
+                    context: context,
+                    status: .serviceUnavailable,
+                    code: "local_pricing_unavailable",
+                    extraHeaders: warningHeaders(runtime.budget.localWarningTokens)
+                )
+                return
+            }
             writeLocalError(
                 context: context,
                 status: .serviceUnavailable,
-                code: "local_pricing_unavailable",
-                extraHeaders: warningHeaders(runtime.budget.localWarningTokens)
+                code: "local_upstream_unavailable",
+                extraHeaders: warningHeaders(runtime.budget.localWarningTokens + trustedPricingWarnings)
             )
         case .budget:
+            if pricingAdmitsCurrentRequest {
+                writeLocalError(
+                    context: context,
+                    status: .serviceUnavailable,
+                    code: "local_upstream_unavailable",
+                    extraHeaders: warningHeaders(runtime.budget.localWarningTokens + trustedPricingWarnings)
+                )
+                return
+            }
             guard runtime.budget.allowUnpriced else {
                 writeLocalError(context: context, status: .serviceUnavailable, code: "local_pricing_unavailable")
                 return

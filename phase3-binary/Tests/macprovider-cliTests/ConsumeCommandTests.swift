@@ -824,6 +824,7 @@ final class ConsumeCommandTests: XCTestCase {
         command.environmentForTesting = [:]
         command.homeDirectoryForTesting = home
         command.startupDirectoryForTesting = home
+        command.skipTrustedPricingLoadForTesting = true
 
         let capture = await captureStatusOutput {
             try await command.run(stopAfterListeningForTesting: true)
@@ -852,6 +853,227 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_model_not_allowed")
     }
 
+    func testPhase3BTrustedPricingAdmitsNoBudgetRequestButStillFailsClosedBeforeForwarding() throws {
+        let token = try ConsumeLocalToken.generate()
+        let trustedPricing = ConsumeTrustedPricingState.available(phase3BTrustedRateCard(generatedAt: "2026-08-01T00:00:00Z"))
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            budget: budget,
+            trustedPricing: trustedPricing,
+            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-10T00:00:00Z")! }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
+        )
+
+        XCTAssertEqual(response.status, .serviceUnavailable)
+        let error = try localError(from: response.body)
+        XCTAssertEqual(error["code"] as? String, "local_upstream_unavailable")
+        XCTAssertFalse(try localForwardedFlag(from: response.body))
+        XCTAssertEqual(response.headers.first(name: "x-macprovider-warning"), "no_budget")
+    }
+
+    func testPhase3BDefaultTierDoesNotAdmitWithoutTrustedModelVisibility() throws {
+        let token = try ConsumeLocalToken.generate()
+        let trustedPricing = ConsumeTrustedPricingState.available(phase3BTrustedRateCard(generatedAt: "2026-08-01T00:00:00Z"))
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            allowedModels: ["missing-but-allowed"],
+            budget: budget,
+            trustedPricing: trustedPricing,
+            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-10T00:00:00Z")! }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"missing-but-allowed","messages":[]}"#.utf8)
+        )
+
+        XCTAssertEqual(response.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_pricing_unavailable")
+        XCTAssertEqual(response.headers.first(name: "x-macprovider-warning"), "no_budget")
+    }
+
+    func testPhase3BUnavailableTrustedPricingKeepsPricingUnavailableFailure() throws {
+        let token = try ConsumeLocalToken.generate()
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            budget: budget,
+            trustedPricing: .unavailable(reason: .invalidSignature)
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
+        )
+
+        XCTAssertEqual(response.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_pricing_unavailable")
+        XCTAssertEqual(response.headers.first(name: "x-macprovider-warning"), "no_budget")
+    }
+
+    func testPhase3BExpiredTrustedPricingIsDemotedAtAdmissionTime() throws {
+        let token = try ConsumeLocalToken.generate()
+        let trustedPricing = ConsumeTrustedPricingState.available(phase3BTrustedRateCard(generatedAt: "2026-08-01T00:00:00Z"))
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            budget: budget,
+            trustedPricing: trustedPricing,
+            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-09-01T00:00:01Z")! }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
+        )
+
+        XCTAssertEqual(response.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_pricing_unavailable")
+        XCTAssertEqual(response.headers.first(name: "x-macprovider-warning"), "no_budget")
+        XCTAssertEqual(runtime.statusPayload()["pricing_trust_state"] as? String, "unavailable")
+    }
+
+    func testPhase3BExpiredTrustedPricingStaysUnavailableAfterClockRollback() throws {
+        let token = try ConsumeLocalToken.generate()
+        let trustedPricing = ConsumeTrustedPricingState.available(phase3BTrustedRateCard(generatedAt: "2026-08-01T00:00:00Z"))
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        var currentDate = ISO8601DateFormatter.autotuneInternet.date(from: "2026-09-01T00:00:01Z")!
+        let runtime = consumeRuntime(
+            token: token,
+            budget: budget,
+            trustedPricing: trustedPricing,
+            now: { currentDate }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let expiredResponse = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
+        )
+        currentDate = ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-10T00:00:00Z")!
+        let rolledBackResponse = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
+        )
+
+        XCTAssertEqual(expiredResponse.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: expiredResponse.body)["code"] as? String, "local_pricing_unavailable")
+        XCTAssertEqual(rolledBackResponse.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: rolledBackResponse.body)["code"] as? String, "local_pricing_unavailable")
+        XCTAssertEqual(runtime.statusPayload()["pricing_trust_state"] as? String, "unavailable")
+    }
+
+    func testPhase3BStaleTrustedPricingIsMarkedAtAdmissionTime() throws {
+        let token = try ConsumeLocalToken.generate()
+        let trustedPricing = ConsumeTrustedPricingState.available(phase3BTrustedRateCard(generatedAt: "2026-08-01T00:00:00Z"))
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            budget: budget,
+            trustedPricing: trustedPricing,
+            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-20T00:00:00Z")! }
+        )
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer \(token.value)")
+
+        let response = try response(
+            from: runtime,
+            head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/chat/completions", headers: headers),
+            body: Data(#"{"model":"llama-test","messages":[]}"#.utf8)
+        )
+
+        XCTAssertEqual(response.status, .serviceUnavailable)
+        XCTAssertEqual(try localError(from: response.body)["code"] as? String, "local_upstream_unavailable")
+        XCTAssertEqual(response.headers.first(name: "x-macprovider-warning"), "no_budget,stale_pricing")
+        XCTAssertEqual(runtime.statusPayload()["pricing_warning_codes"] as? [String], ["stale_pricing"])
+    }
+
+    func testPhase3BStatusReportsTrustedPricingAvailabilityAndWarnings() throws {
+        let token = try ConsumeLocalToken.generate()
+        var trustedRateCard = phase3BTrustedRateCard(generatedAt: "2026-08-01T00:00:00Z")
+        trustedRateCard = ConsumeTrustedRateCard(
+            version: trustedRateCard.version,
+            policyVersion: trustedRateCard.policyVersion,
+            generatedAt: trustedRateCard.generatedAt,
+            signerKeyID: trustedRateCard.signerKeyID,
+            projection: trustedRateCard.projection,
+            stale: true
+        )
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: false,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let runtime = consumeRuntime(
+            token: token,
+            budget: budget,
+            trustedPricing: .available(trustedRateCard)
+        )
+        let status = runtime.statusPayload()
+
+        XCTAssertEqual(status["pricing_trust_state"] as? String, "trusted")
+        XCTAssertEqual(status["pricing_warning_codes"] as? [String], ["stale_pricing"])
+    }
+
     func testPhase3NoBudgetStatusUsesNullBudgetAmounts() throws {
         let token = try ConsumeLocalToken.generate()
         let budget = ConsumeBudgetConfig(
@@ -870,6 +1092,23 @@ final class ConsumeCommandTests: XCTestCase {
         XCTAssertTrue(status["budget_held_micro_usd"] is NSNull)
         XCTAssertTrue(status["budget_remaining_micro_usd"] is NSNull)
         XCTAssertTrue(status["pricing_warning_codes"] as? [String] == [])
+    }
+
+    func testPhase3NoBudgetStatusDoesNotTrustIneffectiveAllowUnpriced() throws {
+        let token = try ConsumeLocalToken.generate()
+        let budget = ConsumeBudgetConfig(
+            mode: .noBudget,
+            maxRequestMicroUSD: nil,
+            allowUnpriced: true,
+            ledger: nil,
+            ledgerPathClass: nil
+        )
+        let runtime = consumeRuntime(token: token, budget: budget)
+        let status = runtime.statusPayload()
+
+        XCTAssertEqual(status["no_budget"] as? Bool, true)
+        XCTAssertEqual(status["unpriced_override"] as? Bool, true)
+        XCTAssertEqual(status["pricing_trust_state"] as? String, "unavailable")
     }
 
     func testPhase3UnconfiguredStatusDoesNotTrustAllowUnpriced() throws {
@@ -1538,6 +1777,8 @@ final class ConsumeCommandTests: XCTestCase {
         credentialStatus: ConsumeCredentialStatus = .missing,
         allowedModels: [String] = ["llama-test"],
         budget: ConsumeBudgetConfig = .unconfigured,
+        trustedPricing: ConsumeTrustedPricingState = .notLoaded,
+        now: @escaping @Sendable () -> Date = { Date() },
         requestCounter: ConsumeEndpointRequestCounter = ConsumeEndpointRequestCounter()
     ) -> ConsumeEndpointRuntime {
         ConsumeEndpointRuntime(
@@ -1549,7 +1790,45 @@ final class ConsumeCommandTests: XCTestCase {
             modelAllowlist: allowedModels,
             tokenVerifier: token.verifier,
             budget: budget,
+            trustedPricing: trustedPricing,
+            now: now,
             requestCounter: requestCounter
+        )
+    }
+
+    private func phase3BTrustedRateCard(generatedAt: String) -> ConsumeTrustedRateCard {
+        let generatedDate = ISO8601DateFormatter.autotuneInternet.date(from: generatedAt)!
+        let rows: [String: RateCardProjection.Row] = [
+            "default": RateCardProjection.Row(
+                promptRatePerMtok: 500_000,
+                promptCacheHitRatePerMtok: 125_000,
+                completionRatePerMtok: 1_000_000,
+                providerShareBPS: 9_000,
+                globalMultiplierPPM: 1_000_000
+            ),
+            "llama-test": RateCardProjection.Row(
+                promptRatePerMtok: 10,
+                promptCacheHitRatePerMtok: 5,
+                completionRatePerMtok: 20,
+                providerShareBPS: 9_000,
+                globalMultiplierPPM: 1_000_000
+            ),
+        ]
+        var projection = RateCardProjection(
+            version: "",
+            policyVersion: "consume-test-policy",
+            generatedAt: generatedDate,
+            usdPerMillionCredits: 1.0,
+            rows: rows
+        )
+        projection.version = projection.projectionHash
+        return ConsumeTrustedRateCard(
+            version: projection.version,
+            policyVersion: projection.policyVersion,
+            generatedAt: generatedDate,
+            signerKeyID: "consume-test-key",
+            projection: projection,
+            stale: false
         )
     }
 
