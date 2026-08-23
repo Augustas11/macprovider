@@ -95,11 +95,12 @@ func TestWatchProviderRevokedClosesOnDurableSnapshotPublish(t *testing.T) {
 	t.Parallel()
 	r := trustpool.NewRegistry()
 	if err := r.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
-		PoolID:        "P",
-		Members:       []string{"x"},
-		BuyerAccounts: []string{"acct-a"},
-		Routeable:     true,
-		Generation:    1,
+		PoolID:         "P",
+		Members:        []string{"x"},
+		BuyerAccounts:  []string{"acct-a"},
+		SettlementMode: "observe",
+		Routeable:      true,
+		Generation:     1,
 	}}); err != nil {
 		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
 	}
@@ -109,11 +110,12 @@ func TestWatchProviderRevokedClosesOnDurableSnapshotPublish(t *testing.T) {
 		t.Fatal("watch reported already revoked before durable revoke publish")
 	}
 	if err := r.LoadRouteableSnapshotsAtRevision(2, []trustpool.RouteableSnapshot{{
-		PoolID:        "P",
-		Revoked:       []string{"x"},
-		BuyerAccounts: []string{"acct-a"},
-		Routeable:     true,
-		Generation:    2,
+		PoolID:         "P",
+		Revoked:        []string{"x"},
+		BuyerAccounts:  []string{"acct-a"},
+		SettlementMode: "observe",
+		Routeable:      true,
+		Generation:     2,
 	}}); err != nil {
 		t.Fatalf("LoadRouteableSnapshotsAtRevision revoke: %v", err)
 	}
@@ -139,10 +141,11 @@ func TestPoolDeliveryDrainTracksActiveDeliveriesAcrossSnapshotReload(t *testing.
 		t.Fatalf("active deliveries=%d want 2", got)
 	}
 	if err := r.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
-		PoolID:     "P",
-		Members:    []string{"x"},
-		Routeable:  true,
-		Generation: 1,
+		PoolID:         "P",
+		Members:        []string{"x"},
+		SettlementMode: "observe",
+		Routeable:      true,
+		Generation:     1,
 	}}); err != nil {
 		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
 	}
@@ -170,10 +173,11 @@ func TestBeginPoolDeliveryAtGenerationRequiresRouteableCurrentGeneration(t *test
 		t.Fatal("delivery begin succeeded for unknown pool")
 	}
 	if err := r.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
-		PoolID:     "P",
-		Members:    []string{"x"},
-		Routeable:  true,
-		Generation: 7,
+		PoolID:         "P",
+		Members:        []string{"x"},
+		SettlementMode: "observe",
+		Routeable:      true,
+		Generation:     7,
 	}}); err != nil {
 		t.Fatalf("LoadRouteableSnapshotsAtRevision active: %v", err)
 	}
@@ -188,10 +192,11 @@ func TestBeginPoolDeliveryAtGenerationRequiresRouteableCurrentGeneration(t *test
 		t.Fatalf("active deliveries=%d want 1", got)
 	}
 	if err := r.LoadRouteableSnapshotsAtRevision(2, []trustpool.RouteableSnapshot{{
-		PoolID:     "P",
-		Members:    []string{"x"},
-		Routeable:  false,
-		Generation: 8,
+		PoolID:         "P",
+		Members:        []string{"x"},
+		SettlementMode: "observe",
+		Routeable:      false,
+		Generation:     8,
 	}}); err != nil {
 		t.Fatalf("LoadRouteableSnapshotsAtRevision draining: %v", err)
 	}
@@ -213,6 +218,7 @@ func TestBeginPoolDeliveryAtGenerationRejectsExpiredRouteableSnapshot(t *testing
 	if err := r.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
 		PoolID:            "P",
 		Members:           []string{"x"},
+		SettlementMode:    "observe",
 		Routeable:         true,
 		Generation:        7,
 		RouteableUntilUTC: time.Now().UTC().Add(30 * time.Millisecond),
@@ -254,6 +260,7 @@ func TestRouteableSnapshotsPreservesRouteableUntilUTC(t *testing.T) {
 			PoolID:            "pool-a",
 			Members:           []string{"provider-a"},
 			BuyerAccounts:     []string{"acct-a"},
+			SettlementMode:    "observe",
 			Routeable:         true,
 			Generation:        9,
 			RouteableUntilUTC: expiresAt,
@@ -301,12 +308,13 @@ func TestModelAllowlistSnapshotsAndGeneration(t *testing.T) {
 	if len(exported) != 1 || len(exported[0].ModelAllowlist) != 2 || exported[0].ModelAllowlist[0] != "model-a" {
 		t.Fatalf("exported routeable snapshots = %+v, want model allowlist", exported)
 	}
+	exported[0].SettlementMode = "enforce"
 	reloaded := trustpool.NewRegistry()
 	if err := reloaded.LoadRouteableSnapshotsAtRevision(1, exported); err != nil {
 		t.Fatalf("reload exported snapshots: %v", err)
 	}
-	if got := reloaded.Snapshot("P").ModelAllowlist; len(got) != 2 || got[0] != "model-a" || got[1] != "model-b" {
-		t.Fatalf("reloaded snapshot allowlist = %+v, want model-a/model-b", got)
+	if got := reloaded.Snapshot("P"); len(got.ModelAllowlist) != 2 || got.ModelAllowlist[0] != "model-a" || got.ModelAllowlist[1] != "model-b" || got.SettlementMode != "enforce" {
+		t.Fatalf("reloaded snapshot = %+v, want model-a/model-b allowlist and enforce settlement mode", got)
 	}
 }
 
@@ -322,6 +330,23 @@ func TestModelAllowlistRejectsMalformedSnapshots(t *testing.T) {
 	}); err == nil {
 		t.Fatal("LoadRouteableSnapshot accepted empty model id")
 	}
+	for _, tc := range []struct {
+		name string
+		mode string
+	}{
+		{name: "unknown", mode: "pool_label_only"},
+		{name: "blank", mode: ""},
+		{name: "whitespace", mode: "   "},
+	} {
+		t.Run("settlement_mode_"+tc.name, func(t *testing.T) {
+			if err := r.LoadRouteableSnapshot(trustpool.RouteableSnapshot{
+				PoolID:         "P",
+				SettlementMode: tc.mode,
+			}); err == nil {
+				t.Fatalf("LoadRouteableSnapshot accepted settlement mode %q", tc.mode)
+			}
+		})
+	}
 }
 
 func TestRefreshRouteableSnapshotsAtRevisionAllowsSameRevisionTimeGateClose(t *testing.T) {
@@ -329,21 +354,23 @@ func TestRefreshRouteableSnapshotsAtRevisionAllowsSameRevisionTimeGateClose(t *t
 	registry := trustpool.NewRegistry()
 	if err := registry.LoadRouteableSnapshotsAtRevision(3, []trustpool.RouteableSnapshot{
 		{
-			PoolID:        "pool-a",
-			Members:       []string{"provider-a"},
-			BuyerAccounts: []string{"acct-a"},
-			Routeable:     true,
-			Generation:    7,
+			PoolID:         "pool-a",
+			Members:        []string{"provider-a"},
+			BuyerAccounts:  []string{"acct-a"},
+			SettlementMode: "observe",
+			Routeable:      true,
+			Generation:     7,
 		},
 	}); err != nil {
 		t.Fatalf("initial load: %v", err)
 	}
 	changed, err := registry.RefreshRouteableSnapshotsAtRevision(3, []trustpool.RouteableSnapshot{
 		{
-			PoolID:        "pool-a",
-			BuyerAccounts: []string{"acct-a"},
-			Routeable:     false,
-			Generation:    8,
+			PoolID:         "pool-a",
+			BuyerAccounts:  []string{"acct-a"},
+			SettlementMode: "observe",
+			Routeable:      false,
+			Generation:     8,
 		},
 	})
 	if err != nil {
@@ -358,10 +385,11 @@ func TestRefreshRouteableSnapshotsAtRevisionAllowsSameRevisionTimeGateClose(t *t
 	}
 	changed, err = registry.RefreshRouteableSnapshotsAtRevision(3, []trustpool.RouteableSnapshot{
 		{
-			PoolID:        "pool-a",
-			BuyerAccounts: []string{"acct-a"},
-			Routeable:     false,
-			Generation:    8,
+			PoolID:         "pool-a",
+			BuyerAccounts:  []string{"acct-a"},
+			SettlementMode: "observe",
+			Routeable:      false,
+			Generation:     8,
 		},
 	})
 	if err != nil {
@@ -380,11 +408,12 @@ func TestRegistryDisableClearsRouteableSnapshotsWithoutAdvancingRevision(t *test
 	registry := trustpool.NewRegistry()
 	if err := registry.LoadRouteableSnapshotsAtRevision(3, []trustpool.RouteableSnapshot{
 		{
-			PoolID:        "pool-a",
-			Members:       []string{"provider-a"},
-			BuyerAccounts: []string{"acct-a"},
-			Routeable:     true,
-			Generation:    7,
+			PoolID:         "pool-a",
+			Members:        []string{"provider-a"},
+			BuyerAccounts:  []string{"acct-a"},
+			SettlementMode: "observe",
+			Routeable:      true,
+			Generation:     7,
 		},
 	}); err != nil {
 		t.Fatalf("initial load: %v", err)
@@ -407,11 +436,12 @@ func TestRegistryDisableClearsRouteableSnapshotsWithoutAdvancingRevision(t *test
 
 	changed, err := registry.RefreshRouteableSnapshotsAtRevision(revision, []trustpool.RouteableSnapshot{
 		{
-			PoolID:        "pool-a",
-			Members:       []string{"provider-a"},
-			BuyerAccounts: []string{"acct-a"},
-			Routeable:     true,
-			Generation:    7,
+			PoolID:         "pool-a",
+			Members:        []string{"provider-a"},
+			BuyerAccounts:  []string{"acct-a"},
+			SettlementMode: "observe",
+			Routeable:      true,
+			Generation:     7,
 		},
 	})
 	if err != nil {

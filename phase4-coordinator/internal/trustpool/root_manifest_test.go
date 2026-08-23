@@ -207,6 +207,35 @@ func TestReconstructEvents_RejectsManifestProhibitedOrInvalidMinBinaryVersion(t 
 	}
 }
 
+func TestReconstructEvents_RejectsManifestInvalidSettlementMode(t *testing.T) {
+	t.Parallel()
+	ts := time.Unix(1800012450, 0).UTC()
+	root := newRootFixture(t)
+	create := ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-a"
+		e.ApprovalRecordID = "approval-v1"
+	})
+	rootEvent := signedRootRegistration(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", root)
+
+	for _, tc := range []struct {
+		name string
+		mode string
+	}{
+		{name: "unknown", mode: "pool_label_only"},
+		{name: "blank", mode: ""},
+		{name: "whitespace", mode: "   "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := signedManifestWithPolicyCoreMutation(t, "op-manifest-invalid-settlement-"+tc.name, ts.Add(2*time.Second), root.poolID, 1, root, func(core *poolmanifest.PolicyCore) {
+				core.SettlementMode = tc.mode
+			})
+			if _, err := trustpool.ReconstructEvents([]trustpool.DurableEvent{create, rootEvent, manifest}); !errors.Is(err, trustpool.ErrMalformedDurableEvent) {
+				t.Fatalf("settlement mode %q error=%v, want ErrMalformedDurableEvent", tc.mode, err)
+			}
+		})
+	}
+}
+
 func TestReconstructEvents_RejectsStandaloneHigherVersionManifestFork(t *testing.T) {
 	t.Parallel()
 	ts := time.Unix(1800012500, 0).UTC()
@@ -482,7 +511,7 @@ func manifestSnapshotWithPolicyCoreMutation(t *testing.T, version uint64, root r
 		MinBinaryVersion:     "1.8.33",
 		MinAttestationTier:   "hardware",
 		RequireEncryptedLeg:  true,
-		SettlementMode:       "pool_label_only",
+		SettlementMode:       "observe",
 		RevenueSplitBps:      0,
 		SplitExecutionStatus: "declared_not_executed",
 		RetentionPolicyID:    "standard",

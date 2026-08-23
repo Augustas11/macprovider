@@ -1373,6 +1373,7 @@ func TestRegistryRouteableUntilExpiresAtRouteTimeAndBumpsGeneration(t *testing.T
 			PoolID:            "pool-a",
 			Members:           []string{"provider-a"},
 			BuyerAccounts:     []string{"acct-a"},
+			SettlementMode:    "observe",
 			Routeable:         true,
 			Generation:        7,
 			RouteableUntilUTC: expiresAt,
@@ -1743,6 +1744,7 @@ func TestReconstructEvents_ManifestRaiseOverridesOlderExplicitFloor(t *testing.T
 	})
 	v2 := signedManifestExtendingWithPolicyCoreMutation(t, "op-manifest-2-high", ts.Add(4*time.Second), v1, root, func(core *poolmanifest.PolicyCore) {
 		core.MinBinaryVersion = "1.8.33"
+		core.SettlementMode = "enforce"
 	})
 	events := []trustpool.DurableEvent{
 		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
@@ -1781,12 +1783,15 @@ func TestReconstructEvents_ManifestRaiseOverridesOlderExplicitFloor(t *testing.T
 	if len(snapshots[0].ModelAllowlist) != 1 || snapshots[0].ModelAllowlist[0] != "model-a" {
 		t.Fatalf("routeable model_allowlist = %+v, want [model-a]", snapshots[0].ModelAllowlist)
 	}
+	if snapshots[0].SettlementMode != "enforce" {
+		t.Fatalf("routeable settlement_mode = %q, want enforce", snapshots[0].SettlementMode)
+	}
 	registry, err := state.BuildRegistry()
 	if err != nil {
 		t.Fatalf("BuildRegistry: %v", err)
 	}
-	if snap := registry.Snapshot(root.poolID); snap.MinBinaryVersion != "1.8.33" || len(snap.ModelAllowlist) != 1 || snap.ModelAllowlist[0] != "model-a" {
-		t.Fatalf("registry snapshot = %+v, want raised floor and model-a allowlist", snap)
+	if snap := registry.Snapshot(root.poolID); snap.MinBinaryVersion != "1.8.33" || len(snap.ModelAllowlist) != 1 || snap.ModelAllowlist[0] != "model-a" || snap.SettlementMode != "enforce" {
+		t.Fatalf("registry snapshot = %+v, want raised floor, model-a allowlist, and enforce settlement mode", snap)
 	}
 	statusDoc, found, err := trustpool.BuildStatusDocument(ctx, store, registry, root.poolID, "acct-a", ts.Add(7*time.Second))
 	if err != nil || !found {
@@ -1867,14 +1872,15 @@ func TestRegistryLoadRouteableSnapshots_AllOrNothingValidation(t *testing.T) {
 	t.Parallel()
 	registry := trustpool.NewRegistry()
 	if err := registry.LoadRouteableSnapshot(trustpool.RouteableSnapshot{
-		PoolID:     "pool-good",
-		Members:    []string{"provider-a"},
-		Generation: 9,
+		PoolID:         "pool-good",
+		Members:        []string{"provider-a"},
+		SettlementMode: "observe",
+		Generation:     9,
 	}); err != nil {
 		t.Fatalf("LoadRouteableSnapshot good: %v", err)
 	}
 	err := registry.LoadRouteableSnapshots([]trustpool.RouteableSnapshot{
-		{PoolID: "pool-new", Members: []string{"provider-b"}, Generation: 1},
+		{PoolID: "pool-new", Members: []string{"provider-b"}, SettlementMode: "observe", Generation: 1},
 		{PoolID: "pool-bad", MinBinaryVersion: "not a version", Generation: 2},
 	})
 	if err == nil {
@@ -1893,12 +1899,12 @@ func TestRegistryLoadRouteableSnapshotsAtRevisionRejectsStalePublish(t *testing.
 	t.Parallel()
 	registry := trustpool.NewRegistry()
 	if err := registry.LoadRouteableSnapshotsAtRevision(2, []trustpool.RouteableSnapshot{
-		{PoolID: "pool-a", BuyerAccounts: []string{"acct-a"}, Routeable: true, Generation: 2},
+		{PoolID: "pool-a", BuyerAccounts: []string{"acct-a"}, SettlementMode: "observe", Routeable: true, Generation: 2},
 	}); err != nil {
 		t.Fatalf("LoadRouteableSnapshotsAtRevision fresh: %v", err)
 	}
 	if err := registry.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{
-		{PoolID: "pool-a", BuyerAccounts: []string{"acct-stale"}, Routeable: true, Generation: 1},
+		{PoolID: "pool-a", BuyerAccounts: []string{"acct-stale"}, SettlementMode: "observe", Routeable: true, Generation: 1},
 	}); err == nil {
 		t.Fatal("stale routeable snapshot publish was accepted")
 	}

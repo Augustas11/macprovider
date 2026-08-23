@@ -55,6 +55,11 @@ type poolState struct {
 	// modelAllowlist is the pool manifest's request-model allowlist. Empty
 	// means no allowlist is configured and the route gate is inert.
 	modelAllowlist []string
+	// settlementMode is the manifest-derived settlement policy. "enforce"
+	// requires the coordinator's effective verified-model settlement mode to be
+	// enforce before pool traffic can route; "observe" is inert for the v0.1
+	// labels-only pool settlement contract.
+	settlementMode string
 	// generation increments on every membership/revocation/floor change so the
 	// routing generation fence (SPEC-042 R005) can detect a snapshot that
 	// is no longer current.
@@ -77,6 +82,7 @@ type Snapshot struct {
 	// "" means no floor — the eligibility gate is inert.
 	MinBinaryVersion  string
 	ModelAllowlist    []string
+	SettlementMode    string
 	Routeable         bool
 	Generation        uint64
 	Revision          uint64
@@ -95,6 +101,7 @@ type RouteableSnapshot struct {
 	BuyerAccounts     []string
 	MinBinaryVersion  string
 	ModelAllowlist    []string
+	SettlementMode    string
 	Routeable         bool
 	Generation        uint64
 	RouteableUntilUTC time.Time
@@ -311,6 +318,9 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 	if s.MinBinaryVersion != "" && !versionfloor.Valid(s.MinBinaryVersion) {
 		return fmt.Errorf("trustpool: invalid pool min binary version %q for pool %q", s.MinBinaryVersion, s.PoolID)
 	}
+	if !validPoolSettlementMode(s.SettlementMode) {
+		return fmt.Errorf("trustpool: routeable snapshot for pool %q has invalid settlement mode %q", s.PoolID, s.SettlementMode)
+	}
 	modelAllowlist, err := normalizeModelAllowlist(s.PoolID, s.ModelAllowlist)
 	if err != nil {
 		return err
@@ -347,6 +357,7 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 		routeable:         s.Routeable,
 		minBinaryVersion:  s.MinBinaryVersion,
 		modelAllowlist:    modelAllowlist,
+		settlementMode:    canonicalPoolSettlementMode(s.SettlementMode),
 		generation:        s.Generation,
 		routeableUntilUTC: s.RouteableUntilUTC.UTC(),
 		routeableExpired:  s.RouteableExpired,
@@ -499,6 +510,9 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 		if s.MinBinaryVersion != "" && !versionfloor.Valid(s.MinBinaryVersion) {
 			return false, fmt.Errorf("trustpool: invalid pool min binary version %q for pool %q", s.MinBinaryVersion, s.PoolID)
 		}
+		if !validPoolSettlementMode(s.SettlementMode) {
+			return false, fmt.Errorf("trustpool: routeable snapshot for pool %q has invalid settlement mode %q", s.PoolID, s.SettlementMode)
+		}
 		modelAllowlist, err := normalizeModelAllowlist(s.PoolID, s.ModelAllowlist)
 		if err != nil {
 			return false, err
@@ -532,6 +546,7 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 			routeable:         s.Routeable,
 			minBinaryVersion:  s.MinBinaryVersion,
 			modelAllowlist:    modelAllowlist,
+			settlementMode:    canonicalPoolSettlementMode(s.SettlementMode),
 			generation:        s.Generation,
 			routeableUntilUTC: s.RouteableUntilUTC.UTC(),
 			routeableExpired:  s.RouteableExpired,
@@ -631,6 +646,7 @@ func poolStatesEqual(a, b *poolState) bool {
 	return a.routeable == b.routeable &&
 		a.minBinaryVersion == b.minBinaryVersion &&
 		stringSlicesEqual(a.modelAllowlist, b.modelAllowlist) &&
+		a.settlementMode == b.settlementMode &&
 		a.generation == b.generation &&
 		a.routeableUntilUTC.Equal(b.routeableUntilUTC) &&
 		a.routeableExpired == b.routeableExpired &&
@@ -730,6 +746,7 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 			BuyerAccounts:     buyers,
 			MinBinaryVersion:  ps.minBinaryVersion,
 			ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
+			SettlementMode:    routeablePoolSettlementMode(ps.settlementMode),
 			Routeable:         ps.routeable,
 			Generation:        ps.generation,
 			RouteableUntilUTC: ps.routeableUntilUTC,
@@ -765,6 +782,7 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		Members:           members,
 		MinBinaryVersion:  ps.minBinaryVersion,
 		ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
+		SettlementMode:    routeablePoolSettlementMode(ps.settlementMode),
 		Routeable:         ps.routeableAt(now),
 		Generation:        ps.generationAt(now),
 		Revision:          r.revision,
@@ -803,6 +821,7 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 		Members:           members,
 		MinBinaryVersion:  ps.minBinaryVersion,
 		ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
+		SettlementMode:    routeablePoolSettlementMode(ps.settlementMode),
 		Routeable:         ps.routeableAt(now),
 		Generation:        ps.generationAt(now),
 		Revision:          r.revision,

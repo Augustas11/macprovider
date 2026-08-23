@@ -54,6 +54,11 @@ type forwardState struct {
 	// captured with the same pool snapshot as membership/generation. Empty
 	// means no allowlist is configured.
 	poolModelAllowlist []string
+	// poolRequiresSettlementEnforce is captured from the selected pool
+	// snapshot. It is re-checked at the dispatch boundary so a coordinator
+	// settlement-mode hot reload cannot downgrade an enforce-required pool
+	// after selection but before provider relay.
+	poolRequiresSettlementEnforce bool
 
 	// routingDone is the wall-clock at which the current provider was
 	// selected. Updated on every advanceToNextProvider so the
