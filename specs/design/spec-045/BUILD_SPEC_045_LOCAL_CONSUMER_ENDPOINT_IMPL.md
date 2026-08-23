@@ -16,7 +16,19 @@ Ship `macprovider-cli consume` as a local development adapter: a macOS loopback-
    - budget flags, model admission ordering, fail-closed unpriced reservations, pinned micro-USD ledger, held reservation recovery, and truthful status.
 4. `BUILD_SPEC_045_PHASE_3_BUDGET_LEDGER.md`
    - trusted pricing, conservative estimate math, chargeable proxy admission, settlement, `estimate_exceeded`, and restart/shutdown behavior.
-5. `BUILD_SPEC_045_PHASE_4_CONFORMANCE_JOURNEY.md`
+5. `BUILD_SPEC_045_PHASE_3D_UPSTREAM_FORWARDING_SETTLEMENT.md`
+   - non-streaming upstream forwarding, pinned dispatch, durable reservation settlement, failure provenance, and Phase 3D transport hardening.
+6. `BUILD_SPEC_045_PHASE_3E_RESOURCE_ACCOUNTING.md`
+   - aggregate response-spool, upstream worker-task, upstream socket/file-descriptor, and streaming-response slot admission.
+7. `BUILD_SPEC_045_PHASE_3F_COMPRESSED_RESPONSE.md`
+   - compressed non-streaming upstream response decode-to-identity, decoded response caps, and settlement from decoded usage.
+8. `BUILD_SPEC_045_PHASE_3G_BUFFERED_SSE_FOUNDATION.md`
+   - bounded buffered SSE upstream response relay, terminal `[DONE]` validation, and settlement from terminal stream usage evidence.
+9. `BUILD_SPEC_045_PHASE_3H_LIVE_SSE_EMISSION.md`
+   - local live SSE emission, event-line/event-frame bounds, idle read deadline refresh, and conservative local-disconnect settlement.
+10. `BUILD_SPEC_045_PHASE_3I_INCREMENTAL_SSE_RELAY.md`
+   - fully incremental upstream socket-to-local SSE relay and upstream cancellation handles.
+11. `BUILD_SPEC_045_PHASE_4_CONFORMANCE_JOURNEY.md`
    - required automated coverage, fake-gateway integration harness, staging/production signed journey, and promotion evidence.
 
 ## Required sequencing
@@ -25,6 +37,12 @@ Ship `macprovider-cli consume` as a local development adapter: a macOS loopback-
 - Phase 2 may land with budgeted chat completions disabled unless Phase 3 has landed.
 - Phase 3A must not forward chargeable requests; it only establishes fail-closed local budget-ledger foundations.
 - Phase 3 must not forward chargeable requests until durable reservation append and conservative pricing admission are implemented.
+- Phase 3D may land without streaming/SSE forwarding, aggregate response-spool/socket admission, compressed non-streaming decode-to-identity, or mutable upstream invalid-credential state; those remain required before Phase 4 can claim conformance.
+- Phase 3E may land without streaming/SSE forwarding, compressed non-streaming decode-to-identity, or mutable upstream invalid-credential state; those remain required before Phase 4 can claim conformance.
+- Phase 3F may land without streaming/SSE forwarding, mutable upstream invalid-credential state, or fake/real conformance journeys; those remain required before Phase 4 can claim conformance.
+- Phase 3G may land without live incremental SSE flushing, disconnect cancellation, mutable upstream invalid-credential state, or fake/real conformance journeys; those remain required before Phase 4 can claim conformance.
+- Phase 3H may land without fully incremental upstream socket relay, mutable upstream invalid-credential state, or fake/real conformance journeys; those remain required before Phase 4 can claim conformance.
+- Phase 3I may land without mutable upstream invalid-credential state or fake/real conformance journeys; those remain required before Phase 4 can claim conformance.
 - Phase 4 must not claim production readiness until Phases 1-3 are implemented and the signed real-gateway journey exists.
 
 ## Non-goals
