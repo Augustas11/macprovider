@@ -459,6 +459,138 @@ func TestAdminHandler_PromoteRetryRefreshesStaleRegistry(t *testing.T) {
 	}
 }
 
+func TestAdminHandler_RestrictiveLifecyclePausesRouteablePool(t *testing.T) {
+	t.Parallel()
+	routeable := newRouteableAdminPool(t)
+	registry := routeable.registry
+	handler := routeable.handler
+	root := routeable.root
+	if snap := registry.Snapshot(root.poolID); !snap.Exists || !snap.Routeable || !snap.Members["provider-a"] || !registry.BuyerAuthorized(root.poolID, "acct-allowed") {
+		t.Fatalf("pre-pause snapshot = %+v buyer_auth=%v, want routeable provider-a/acct-allowed", snap, registry.BuyerAuthorized(root.poolID, "acct-allowed"))
+	}
+
+	rec := postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-pause", trustpool.LifecyclePaused, "maintenance", http.StatusAccepted)
+	var body struct {
+		Pool struct {
+			Lifecycle string `json:"lifecycle"`
+			Routeable bool   `json:"routeable"`
+		} `json:"pool"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode lifecycle response: %v", err)
+	}
+	if body.Pool.Lifecycle != trustpool.LifecyclePaused || body.Pool.Routeable {
+		t.Fatalf("lifecycle response pool=%+v, want paused/non-routeable", body.Pool)
+	}
+	paused := registry.Snapshot(root.poolID)
+	if !paused.Exists || paused.Routeable || len(paused.Members) != 0 || !registry.BuyerAuthorized(root.poolID, "acct-allowed") {
+		t.Fatalf("paused snapshot = %+v buyer_auth=%v, want fail-closed members with buyer allowlist retained", paused, registry.BuyerAuthorized(root.poolID, "acct-allowed"))
+	}
+
+	postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-pause", trustpool.LifecyclePaused, "maintenance", http.StatusAccepted)
+	retry := registry.Snapshot(root.poolID)
+	if retry.Generation != paused.Generation || retry.Routeable || len(retry.Members) != 0 {
+		t.Fatalf("idempotent pause retry snapshot = %+v, want unchanged non-routeable generation %d", retry, paused.Generation)
+	}
+}
+
+func TestAdminHandler_RestrictiveLifecycleDrainsAndRetiresRouteablePool(t *testing.T) {
+	t.Parallel()
+	routeable := newRouteableAdminPool(t)
+	registry := routeable.registry
+	handler := routeable.handler
+	root := routeable.root
+
+	rec := postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-drain", trustpool.LifecycleDraining, "drain", http.StatusAccepted)
+	var body struct {
+		Pool struct {
+			Lifecycle string `json:"lifecycle"`
+			Routeable bool   `json:"routeable"`
+		} `json:"pool"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode drain response: %v", err)
+	}
+	if body.Pool.Lifecycle != trustpool.LifecycleDraining || body.Pool.Routeable {
+		t.Fatalf("drain response pool=%+v, want draining/non-routeable", body.Pool)
+	}
+	draining := registry.Snapshot(root.poolID)
+	if !draining.Exists || draining.Routeable || len(draining.Members) != 0 {
+		t.Fatalf("draining snapshot = %+v, want non-routeable empty members", draining)
+	}
+
+	postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-retire", trustpool.LifecycleRetired, "retire", http.StatusAccepted)
+	retired := registry.Snapshot(root.poolID)
+	if !retired.Exists || retired.Routeable || len(retired.Members) != 0 {
+		t.Fatalf("retired snapshot = %+v, want non-routeable empty members", retired)
+	}
+	postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-retire", trustpool.LifecycleRetired, "retire", http.StatusAccepted)
+	retry := registry.Snapshot(root.poolID)
+	if retry.Generation != retired.Generation || retry.Routeable || len(retry.Members) != 0 {
+		t.Fatalf("idempotent retire retry snapshot = %+v, want unchanged non-routeable generation %d", retry, retired.Generation)
+	}
+}
+
+func TestAdminHandler_RestrictiveLifecycleRetiresRouteablePoolDirectly(t *testing.T) {
+	t.Parallel()
+	routeable := newRouteableAdminPool(t)
+	registry := routeable.registry
+	handler := routeable.handler
+	root := routeable.root
+
+	postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-retire", trustpool.LifecycleRetired, "retire", http.StatusAccepted)
+	retired := registry.Snapshot(root.poolID)
+	if !retired.Exists || retired.Routeable || len(retired.Members) != 0 {
+		t.Fatalf("direct retired snapshot = %+v, want non-routeable empty members", retired)
+	}
+}
+
+func TestAdminHandler_RestrictiveLifecycleRejectsActivationAndInvalidTransition(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	registry := trustpool.NewRegistry()
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    registry,
+		OperatorKey: "operator-secret",
+	})
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:        trustpool.EventPoolCreated,
+		PoolID:           root.poolID,
+		CreatorAccountID: "creator-a",
+		ApprovalRecordID: "approval-v1",
+	}, "op-create", http.StatusAccepted)
+
+	rec := postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-active", trustpool.LifecycleActive, "manual activation", http.StatusConflict)
+	var activeErr struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &activeErr); err != nil {
+		t.Fatalf("decode activation error: %v", err)
+	}
+	if activeErr.Error.Code != "activation_requires_promotion" {
+		t.Fatalf("activation error code=%q, want activation_requires_promotion", activeErr.Error.Code)
+	}
+	rec = postAdminLifecycleWithIDs(t, handler, "operator-secret", root.poolID, "body-active", "header-active", trustpool.LifecycleActive, "manual activation", http.StatusConflict)
+	if err := json.Unmarshal(rec.Body.Bytes(), &activeErr); err != nil {
+		t.Fatalf("decode conflicting activation error: %v", err)
+	}
+	if activeErr.Error.Code != "operation_conflict" {
+		t.Fatalf("conflicting activation error code=%q, want operation_conflict", activeErr.Error.Code)
+	}
+	postAdminLifecycle(t, handler, "operator-secret", root.poolID, "op-pause", trustpool.LifecyclePaused, "prelaunch pause", http.StatusBadRequest)
+	if snap := registry.Snapshot(root.poolID); snap.Exists || snap.Routeable || len(snap.Members) != 0 {
+		t.Fatalf("post-invalid-transition snapshot = %+v, want fail-closed empty registry", snap)
+	}
+}
+
 func TestAdminHandler_RejectsUnsignedManifest(t *testing.T) {
 	t.Parallel()
 	store, err := trustpool.NewStore(openTrustPoolDB(t))
@@ -1182,6 +1314,49 @@ func postAdminPromote(t *testing.T, h http.Handler, operatorKey, poolID, operati
 	assertAdminSchemaVersion(t, rec)
 }
 
+func postAdminLifecycle(t *testing.T, h http.Handler, operatorKey, poolID, operationID, lifecycle, reason string, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{
+		"lifecycle": lifecycle,
+		"reason":    reason,
+	})
+	if err != nil {
+		t.Fatalf("marshal lifecycle request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/pools/"+poolID+"/lifecycle", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+operatorKey)
+	req.Header.Set("Idempotency-Key", operationID)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST lifecycle %s/%s status=%d body=%s, want %d", operationID, lifecycle, rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+	return rec
+}
+
+func postAdminLifecycleWithIDs(t *testing.T, h http.Handler, operatorKey, poolID, bodyOperationID, headerOperationID, lifecycle, reason string, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{
+		"operation_id": bodyOperationID,
+		"lifecycle":    lifecycle,
+		"reason":       reason,
+	})
+	if err != nil {
+		t.Fatalf("marshal lifecycle request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/pools/"+poolID+"/lifecycle", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+operatorKey)
+	req.Header.Set("Idempotency-Key", headerOperationID)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST lifecycle body=%s header=%s %s status=%d body=%s, want %d", bodyOperationID, headerOperationID, lifecycle, rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+	return rec
+}
+
 func assertAdminSchemaVersion(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	var body map[string]any
@@ -1195,4 +1370,47 @@ func assertAdminSchemaVersion(t *testing.T, rec *httptest.ResponseRecorder) {
 
 func testAdminTS(offset int64) time.Time {
 	return time.Unix(1800020000+offset, 0).UTC()
+}
+
+type routeableAdminPool struct {
+	store    *trustpool.Store
+	registry *trustpool.Registry
+	handler  http.Handler
+	root     rootFixture
+}
+
+func newRouteableAdminPool(t *testing.T) routeableAdminPool {
+	t.Helper()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	registry := trustpool.NewRegistry()
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    registry,
+		OperatorKey: "operator-secret",
+	})
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:        trustpool.EventPoolCreated,
+		PoolID:           root.poolID,
+		CreatorAccountID: "creator-a",
+		ApprovalRecordID: "approval-v1",
+	}, "op-create", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", signedRootRegistrationForIssue(t, "op-root", testAdminTS(1), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", testAdminTS(3600)), root), "op-root", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", signedManifest(t, "op-manifest", testAdminTS(2), root.poolID, 1, root), "op-manifest", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberAdmitted,
+		PoolID:     root.poolID,
+		ProviderID: "provider-a",
+	}, "op-member", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:      trustpool.EventBuyerAuthorized,
+		PoolID:         root.poolID,
+		BuyerAccountID: "acct-allowed",
+	}, "op-buyer", http.StatusAccepted)
+	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote", http.StatusAccepted)
+	return routeableAdminPool{store: store, registry: registry, handler: handler, root: root}
 }
