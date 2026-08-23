@@ -144,6 +144,30 @@ TRUSTED_POOL_LAYER2_FORBIDDEN_OVERCLAIM_RE = re.compile(
     r"operator[- ]?blind(ness)?"
     r")\b"
 )
+LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID = "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE = "staging-or-production-local-consumer-endpoint"
+LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID = "redacted-local-consumer-endpoint"
+LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER = (
+    "step-01-capture-local-endpoint",
+    "step-02-openai-sdk-local-client",
+    "step-03-permitted-chat-completion",
+    "step-04-over-budget-denial",
+    "step-05-restart-held-reservation",
+    "step-06-recovery-release-held-reservation",
+    "step-07-redaction-status-logs",
+    "step-08-restore-local-state",
+)
+LOCAL_CONSUMER_ENDPOINT_STEP_IDS = set(LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER)
+LOCAL_CONSUMER_ENDPOINT_EVIDENCE_REQUIREMENT_IDS = {
+    "SPEC-045-R001",
+    "SPEC-045-R002",
+    "SPEC-045-R003",
+    "SPEC-045-R004",
+    "SPEC-045-R005",
+    "SPEC-045-R006",
+    "SPEC-045-R007",
+    "SPEC-045-R008",
+}
 SIGNED_JOURNEY_RESULT_REQUIRED_KEYS = {
     "schema_version",
     "journey_id",
@@ -1262,6 +1286,141 @@ def _validate_trusted_pool_layer2_journey_result(
         )
 
 
+def _validate_local_consumer_endpoint_journey_result(
+    signed: dict[str, Any],
+    requirement_id: str,
+    journeys: list[str],
+    artifacts: list[Any],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    if signed.get("journey_id") != LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID!r}")
+    if LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID not in journeys:
+        result.error(location, f"local-consumer endpoint requirement journeys must include {LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID!r}")
+    if signed.get("execution_mode") != LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE!r}")
+
+    valid_artifacts = [artifact for artifact in artifacts if isinstance(artifact, dict)]
+    if len(valid_artifacts) != 1:
+        result.error(f"{location}.signed.artifacts", "local-consumer endpoint journey-result must contain exactly one redacted evidence artifact")
+    for index, artifact in enumerate(artifacts):
+        if not isinstance(artifact, dict):
+            continue
+        artifact_id = artifact.get("id")
+        source = artifact.get("source")
+        if artifact_id != LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID:
+            result.error(f"{location}.signed.artifacts[{index}].id", f"must equal {LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID!r}")
+        if not isinstance(source, str) or not source.startswith("journeys/evidence/local-consumer-endpoint-") or not source.endswith(".redacted.json"):
+            result.error(
+                f"{location}.signed.artifacts[{index}].source",
+                "must match journeys/evidence/local-consumer-endpoint-*.redacted.json",
+            )
+
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        if "assertion" in step:
+            result.error(
+                f"{location}.signed.steps[{index}].assertion",
+                "local-consumer endpoint signed steps must not contain free-form assertion text",
+            )
+        if step.get("artifacts") != [LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID]:
+            result.error(
+                f"{location}.signed.steps[{index}].artifacts",
+                f"must equal [{LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID!r}]",
+            )
+
+    run_result = signed.get("result")
+    if isinstance(run_result, dict) and "summary" in run_result:
+        result.error(
+            f"{location}.signed.result.summary",
+            "local-consumer endpoint signed result must not contain free-form summary text",
+        )
+
+    observations = signed.get("observations")
+    if _expect_object(observations, f"{location}.signed.observations", result):
+        true_fields = {
+            "bearer_tokens_redacted",
+            "generated_local_token_used_as_api_key",
+            "held_reservation_survived_restart",
+            "local_base_url_configured",
+            "openai_sdk_used",
+            "over_budget_denial_observed",
+            "permitted_chat_completion_observed",
+            "raw_prompt_output_redacted",
+            "recovery_release_observed",
+            "redacted_artifacts_reviewed",
+            "staging_or_production_gateway",
+        }
+        false_fields = {
+            "fake_gateway_used",
+            "local_token_logged",
+            "raw_completion_logged",
+            "raw_prompt_logged",
+            "upstream_credential_logged",
+        }
+        required_obs = true_fields | false_fields
+        _expect_keys(observations, required_obs, required_obs, f"{location}.signed.observations", result)
+        for field_name in sorted(true_fields):
+            if observations.get(field_name) is not True:
+                result.error(f"{location}.signed.observations.{field_name}", "must be true")
+        for field_name in sorted(false_fields):
+            if observations.get(field_name) is not False:
+                result.error(f"{location}.signed.observations.{field_name}", "must be false")
+
+    identity = signed.get("candidate_identity")
+    if _expect_object(identity, f"{location}.signed.candidate_identity", result):
+        fingerprint_fields = {
+            "buyer_credential_fingerprint",
+            "cli_binary_sha256",
+            "ledger_sha256",
+            "local_endpoint_base_url_sha256",
+            "local_token_fingerprint",
+            "log_capture_sha256",
+            "rate_card_sha256",
+            "status_capture_sha256",
+            "upstream_gateway_origin_sha256",
+        }
+        string_fields = {"cli_version", "gateway_kind", "model_id", "sdk_name", "sdk_version"}
+        required_identity = fingerprint_fields | string_fields
+        _expect_keys(identity, required_identity, required_identity, f"{location}.signed.candidate_identity", result)
+        for field_name in sorted(fingerprint_fields):
+            value = identity.get(field_name)
+            if not isinstance(value, str) or not SHA256_HEX_RE.fullmatch(value):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a 64-char hex fingerprint")
+        for field_name in sorted(string_fields):
+            if not isinstance(identity.get(field_name), str) or not identity.get(field_name):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a non-empty string")
+        gateway_kind = identity.get("gateway_kind")
+        if gateway_kind not in {"staging", "production"}:
+            result.error(f"{location}.signed.candidate_identity.gateway_kind", "must equal 'staging' or 'production'")
+
+    signed_requirement_ids = signed.get("requirement_ids")
+    if not isinstance(signed_requirement_ids, list) or requirement_id not in signed_requirement_ids:
+        result.error(f"{location}.signed.requirement_ids", f"must include the requirement being promoted: {requirement_id}")
+    unexpected = [
+        item
+        for item in (signed_requirement_ids or [])
+        if isinstance(item, str) and item not in LOCAL_CONSUMER_ENDPOINT_EVIDENCE_REQUIREMENT_IDS
+    ]
+    if unexpected:
+        result.error(
+            f"{location}.signed.requirement_ids",
+            "local-consumer endpoint journey-result cannot promote " + ", ".join(sorted(unexpected)),
+        )
+    if requirement_id not in LOCAL_CONSUMER_ENDPOINT_EVIDENCE_REQUIREMENT_IDS:
+        result.error(f"{location}.signed.requirement_ids", f"local-consumer endpoint journey-result cannot promote {requirement_id}")
+    _validate_named_journey_steps(steps, LOCAL_CONSUMER_ENDPOINT_STEP_IDS, location, result, "local-consumer endpoint")
+    ordered_step_ids = [step.get("id") for step in steps if isinstance(step, dict) and isinstance(step.get("id"), str)]
+    if ordered_step_ids != list(LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER):
+        result.error(
+            f"{location}.signed.steps",
+            f"local-consumer endpoint physical steps must be ordered as {list(LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER)}",
+        )
+
+
 def _validate_spec016_payout_journey_result(
     root: Path,
     signed: dict[str, Any],
@@ -1717,6 +1876,16 @@ def _validate_signed_journey_result(
         )
     if journey_id == TRUSTED_POOL_LAYER2_JOURNEY_ID:
         _validate_trusted_pool_layer2_journey_result(
+            signed,
+            requirement_id,
+            [item for item in journeys if isinstance(item, str)],
+            artifact_records,
+            steps,
+            location,
+            result,
+        )
+    if journey_id == LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID:
+        _validate_local_consumer_endpoint_journey_result(
             signed,
             requirement_id,
             [item for item in journeys if isinstance(item, str)],
