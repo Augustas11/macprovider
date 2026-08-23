@@ -254,6 +254,34 @@ func TestPoolIsolation_LoopFenceRejectsStaleBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestPoolIsolation_BeginPoolDeliveryRejectsDrainedGeneration(t *testing.T) {
+	s, _, tp := poolIsolationServer(t)
+	tp.AddMember("P", "member-x")
+	state := &forwardState{poolID: "P", poolGeneration: tp.Generation("P"), poolGenSet: true}
+	end, ok := s.beginPoolDelivery(state)
+	if !ok {
+		t.Fatal("fresh routeable pool delivery begin failed")
+	}
+	if got := tp.ActivePoolDeliveries("P"); got != 1 {
+		t.Fatalf("active deliveries=%d want 1", got)
+	}
+	end()
+	if err := tp.LoadRouteableSnapshotsAtRevision(2, []trustpool.RouteableSnapshot{{
+		PoolID:     "P",
+		Routeable:  false,
+		Generation: state.poolGeneration + 1,
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	if end, ok := s.beginPoolDelivery(state); ok {
+		end()
+		t.Fatal("stale selected pool began delivery after draining generation")
+	}
+	if got := tp.ActivePoolDeliveries("P"); got != 0 {
+		t.Fatalf("failed delivery begin left active deliveries=%d want 0", got)
+	}
+}
+
 // T7-active (generation fence, R003/R005/R010): revoke_immediate must also
 // cut an already-dispatched transport attempt for the revoked provider. The
 // shared failover core wraps every transport callback's request context, so

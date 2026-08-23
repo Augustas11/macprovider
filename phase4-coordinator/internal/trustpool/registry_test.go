@@ -124,6 +124,114 @@ func TestWatchProviderRevokedClosesOnDurableSnapshotPublish(t *testing.T) {
 	}
 }
 
+func TestPoolDeliveryDrainTracksActiveDeliveriesAcrossSnapshotReload(t *testing.T) {
+	t.Parallel()
+	r := trustpool.NewRegistry()
+	if !r.PoolDeliveryDrained("P") {
+		t.Fatal("new pool delivery state should be drained")
+	}
+	endFirst := r.BeginPoolDelivery("P")
+	endSecond := r.BeginPoolDelivery("P")
+	if r.PoolDeliveryDrained("P") {
+		t.Fatal("pool should not report drained with active deliveries")
+	}
+	if got := r.ActivePoolDeliveries("P"); got != 2 {
+		t.Fatalf("active deliveries=%d want 2", got)
+	}
+	if err := r.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
+		PoolID:     "P",
+		Members:    []string{"x"},
+		Routeable:  true,
+		Generation: 1,
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	if got := r.ActivePoolDeliveries("P"); got != 2 {
+		t.Fatalf("snapshot reload cleared active deliveries: got %d want 2", got)
+	}
+	endFirst()
+	if r.PoolDeliveryDrained("P") {
+		t.Fatal("pool should remain undrained until every delivery ends")
+	}
+	endSecond()
+	if !r.PoolDeliveryDrained("P") {
+		t.Fatal("pool should report drained after every delivery ends")
+	}
+	endSecond()
+	if got := r.ActivePoolDeliveries("P"); got != 0 {
+		t.Fatalf("idempotent delivery end left active deliveries=%d want 0", got)
+	}
+}
+
+func TestBeginPoolDeliveryAtGenerationRequiresRouteableCurrentGeneration(t *testing.T) {
+	t.Parallel()
+	r := trustpool.NewRegistry()
+	if _, ok := r.BeginPoolDeliveryAtGeneration("P", 1); ok {
+		t.Fatal("delivery begin succeeded for unknown pool")
+	}
+	if err := r.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
+		PoolID:     "P",
+		Members:    []string{"x"},
+		Routeable:  true,
+		Generation: 7,
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision active: %v", err)
+	}
+	if _, ok := r.BeginPoolDeliveryAtGeneration("P", 6); ok {
+		t.Fatal("delivery begin succeeded for stale generation")
+	}
+	end, ok := r.BeginPoolDeliveryAtGeneration("P", 7)
+	if !ok {
+		t.Fatal("delivery begin failed for routeable current generation")
+	}
+	if got := r.ActivePoolDeliveries("P"); got != 1 {
+		t.Fatalf("active deliveries=%d want 1", got)
+	}
+	if err := r.LoadRouteableSnapshotsAtRevision(2, []trustpool.RouteableSnapshot{{
+		PoolID:     "P",
+		Members:    []string{"x"},
+		Routeable:  false,
+		Generation: 8,
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision draining: %v", err)
+	}
+	if _, ok := r.BeginPoolDeliveryAtGeneration("P", 8); ok {
+		t.Fatal("delivery begin succeeded for non-routeable pool")
+	}
+	if got := r.ActivePoolDeliveries("P"); got != 1 {
+		t.Fatalf("failed delivery begin changed active deliveries=%d want 1", got)
+	}
+	end()
+	if !r.PoolDeliveryDrained("P") {
+		t.Fatal("pool should report drained after active delivery ends")
+	}
+}
+
+func TestBeginPoolDeliveryAtGenerationRejectsExpiredRouteableSnapshot(t *testing.T) {
+	t.Parallel()
+	r := trustpool.NewRegistry()
+	if err := r.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
+		PoolID:            "P",
+		Members:           []string{"x"},
+		Routeable:         true,
+		Generation:        7,
+		RouteableUntilUTC: time.Now().UTC().Add(30 * time.Millisecond),
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	time.Sleep(70 * time.Millisecond)
+	if snap := r.Snapshot("P"); !snap.Exists || snap.Routeable || snap.Generation != 8 {
+		t.Fatalf("expired snapshot=%+v, want non-routeable generation 8", snap)
+	}
+	if end, ok := r.BeginPoolDeliveryAtGeneration("P", 7); ok {
+		end()
+		t.Fatal("delivery begin succeeded for expired routeable snapshot")
+	}
+	if got := r.ActivePoolDeliveries("P"); got != 0 {
+		t.Fatalf("expired failed begin left active deliveries=%d want 0", got)
+	}
+}
+
 func TestSnapshot_IsolatedAcrossPools(t *testing.T) {
 	t.Parallel()
 	r := trustpool.NewRegistry()

@@ -84,3 +84,13 @@ func (s *Server) poolAttemptCancelledBeforeCommit(r *http.Request, state *forwar
 	}
 	return s.trustPools.ProviderRevoked(state.poolID, providerID)
 }
+
+func (s *Server) beginPoolDelivery(state *forwardState) (func(), bool) {
+	if state == nil || state.poolID == "" {
+		return func() {}, true
+	}
+	if s == nil || s.trustPools == nil || !state.poolGenSet {
+		return func() {}, false
+	}
+	return s.trustPools.BeginPoolDeliveryAtGeneration(state.poolID, state.poolGeneration)
+}

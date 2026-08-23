@@ -1521,6 +1521,14 @@ func TestReconstructEvents_RejectsInvalidLifecycleTransitions(t *testing.T) {
 			),
 		},
 		{
+			name: "active cannot retire without draining",
+			events: append(prefix(),
+				ev("op-retire-direct", ts.Add(4*time.Second), trustpool.EventLifecycleChanged, root.poolID, func(e *trustpool.DurableEvent) {
+					e.Lifecycle = trustpool.LifecycleRetired
+				}),
+			),
+		},
+		{
 			name: "created cannot pause before activation",
 			events: []trustpool.DurableEvent{
 				ev("op-create", ts, trustpool.EventPoolCreated, "pool-a", func(e *trustpool.DurableEvent) {
