@@ -47,6 +47,7 @@ var (
 	ErrCreatorApprovalGate         = errors.New("trustpool: creator approval gate failed")
 	ErrPublicAnnouncementGate      = errors.New("trustpool: public announcement gate failed")
 	ErrProhibitedPromiseClaim      = errors.New("trustpool: prohibited promise claim")
+	ErrSignedControlProofPath      = errors.New("trustpool: signed control proof requires signed lifecycle path")
 )
 
 type PromotionPreconditionError struct {
@@ -86,6 +87,8 @@ type DurableEvent struct {
 	ManifestCoreDigest string    `json:"manifest_core_digest,omitempty"`
 	ManifestSignature  string    `json:"manifest_signature,omitempty"`
 	ManifestSnapshot   string    `json:"manifest_snapshot,omitempty"`
+	SignedControl      string    `json:"signed_control,omitempty"`
+	ControlSignatures  string    `json:"control_signatures,omitempty"`
 
 	CurrentApprovalVersion             string `json:"current_approval_version,omitempty"`
 	RootIssuerKeyID                    string `json:"root_issuer_key_id,omitempty"`
@@ -1373,6 +1376,9 @@ func (s *Store) appendEventUnchecked(ctx context.Context, e DurableEvent) error 
 	if s == nil || s.db == nil {
 		return ErrStoreClosed
 	}
+	if hasSignedControlProof(e) {
+		return ErrSignedControlProofPath
+	}
 	e.TimestampUTC = e.TimestampUTC.UTC()
 	if err := validateEvent(e); err != nil {
 		return err
@@ -1448,14 +1454,58 @@ func (s *Store) Events(ctx context.Context) ([]DurableEvent, error) {
 	return eventsFromQueryer(ctx, s.db)
 }
 
+func (s *Store) ExistingEvent(ctx context.Context, operationID string) (DurableEvent, bool, error) {
+	if s == nil || s.db == nil {
+		return DurableEvent{}, false, ErrStoreClosed
+	}
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" {
+		return DurableEvent{}, false, nil
+	}
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT payload_json FROM trustpool_events WHERE operation_id = ?`, operationID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DurableEvent{}, false, nil
+	}
+	if err != nil {
+		return DurableEvent{}, false, err
+	}
+	var e DurableEvent
+	if err := json.Unmarshal([]byte(raw), &e); err != nil {
+		return DurableEvent{}, false, fmt.Errorf("%w: operation_id %q payload_json: %v", ErrMalformedDurableEvent, operationID, err)
+	}
+	if e.OperationID != operationID {
+		return DurableEvent{}, false, fmt.Errorf("%w: operation_id column %q != payload %q", ErrMalformedDurableEvent, operationID, e.OperationID)
+	}
+	return e, true, nil
+}
+
 // AppendValidatedEvent appends e only if the full durable history still
 // reconstructs after the append. This is the candidate/restrictive control-plane
 // write primitive for admin/API surfaces: a syntactically valid event must not
 // poison future boot replay with an invalid lifecycle or ordering transition,
 // and raw active lifecycle publication is reserved for a future promotion gate.
 func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*ReconstructedState, DurableEvent, bool, error) {
+	return s.appendValidatedEvent(ctx, e, false)
+}
+
+// AppendSignedLifecycleEvent is the only generic durable append path allowed to
+// carry signed-control proof bytes. Callers must verify the signed control before
+// calling this method; replay only persists the already-verified proof with the
+// restrictive lifecycle event.
+func (s *Store) AppendSignedLifecycleEvent(ctx context.Context, e DurableEvent) (*ReconstructedState, DurableEvent, bool, error) {
+	if e.EventType != EventLifecycleChanged || e.Lifecycle == LifecycleActive || e.Lifecycle == "" || !hasSignedControlProof(e) {
+		return nil, DurableEvent{}, false, ErrSignedControlProofPath
+	}
+	return s.appendValidatedEvent(ctx, e, true)
+}
+
+func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowSignedControlProof bool) (*ReconstructedState, DurableEvent, bool, error) {
 	if s == nil || s.db == nil {
 		return nil, DurableEvent{}, false, ErrStoreClosed
+	}
+	if hasSignedControlProof(e) && !allowSignedControlProof {
+		return nil, DurableEvent{}, false, ErrSignedControlProofPath
 	}
 	if e.EventType == EventLifecycleChanged && strings.TrimSpace(e.Lifecycle) == LifecycleActive {
 		return nil, DurableEvent{}, false, ErrActivationRequiresPromotion
@@ -1592,6 +1642,9 @@ func (s *Store) AppendValidatedEvent(ctx context.Context, e DurableEvent) (*Reco
 func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*ReconstructedState, DurableEvent, bool, error) {
 	if s == nil || s.db == nil {
 		return nil, DurableEvent{}, false, ErrStoreClosed
+	}
+	if hasSignedControlProof(e) {
+		return nil, DurableEvent{}, false, ErrSignedControlProofPath
 	}
 	e.EventType = EventLifecycleChanged
 	e.Lifecycle = LifecycleActive
@@ -2280,6 +2333,7 @@ type ReconstructedPoolState struct {
 	MinBinaryVersion             string
 	ManifestVersion              uint64
 	ManifestCoreDigest           string
+	ManifestSnapshot             string
 	ManifestMinEligibleMembers   uint64
 	ManifestMinBinaryVersion     string
 	ManifestModelAllowlist       []string
@@ -2466,6 +2520,7 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		}
 		p.ManifestVersion = e.ManifestVersion
 		p.ManifestCoreDigest = e.ManifestCoreDigest
+		p.ManifestSnapshot = e.ManifestSnapshot
 		p.ManifestMinEligibleMembers = core.MinEligibleMembers
 		p.ManifestMinBinaryVersion = core.MinBinaryVersion
 		p.ManifestModelAllowlist = append([]string(nil), core.ModelAllowlist...)
@@ -2721,6 +2776,10 @@ func mutationRequiresEnabledCreator(e DurableEvent) bool {
 	}
 }
 
+func hasSignedControlProof(e DurableEvent) bool {
+	return strings.TrimSpace(e.SignedControl) != "" || strings.TrimSpace(e.ControlSignatures) != ""
+}
+
 func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 	if s == nil {
 		return nil
@@ -2886,7 +2945,7 @@ func validateEvent(e DurableEvent) error {
 		if !validLifecycle(e.Lifecycle) {
 			return fmt.Errorf("invalid lifecycle %q", e.Lifecycle)
 		}
-		if err := ValidatePromiseClaimsText(e.Reason); err != nil {
+		if err := ValidatePromiseClaimsText(e.Reason, e.SignedControl, e.ControlSignatures); err != nil {
 			return err
 		}
 	case EventMemberAdmitted, EventMemberRevoked:

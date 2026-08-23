@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 )
 
 const AdminSchemaVersion = "macprovider.trustpool-admin.v1"
@@ -39,12 +41,16 @@ type adminHandler struct {
 }
 
 func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !auth.OperatorOnlyBearerMatches(r.Header, h.deps.OperatorKey) {
-		writeAdminJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "unauthorized"}})
-		return
-	}
 	if h.deps.Store == nil {
 		writeAdminJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"code": "unavailable"}})
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/signed-lifecycle") {
+		h.handleSignedLifecycle(w, r)
+		return
+	}
+	if !auth.OperatorOnlyBearerMatches(r.Header, h.deps.OperatorKey) {
+		writeAdminJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "unauthorized"}})
 		return
 	}
 	switch {
@@ -227,6 +233,28 @@ type restrictiveLifecycleRequest struct {
 	Reason       string    `json:"reason,omitempty"`
 }
 
+type signedLifecycleRequest struct {
+	Control    signedLifecycleControlJSON     `json:"control"`
+	Signatures []signedLifecycleSignatureJSON `json:"signatures"`
+}
+
+type signedLifecycleControlJSON struct {
+	PoolID             string `json:"pool_id"`
+	ManifestVersion    uint64 `json:"manifest_version"`
+	ManifestCoreDigest string `json:"manifest_core_digest"`
+	SignerSetVersion   uint64 `json:"signer_set_version"`
+	OperationID        string `json:"operation_id"`
+	Action             string `json:"action"`
+	Reason             string `json:"reason,omitempty"`
+	IssuedAtUnix       uint64 `json:"issued_at_unix"`
+	ExpiresAtUnix      uint64 `json:"expires_at_unix"`
+}
+
+type signedLifecycleSignatureJSON struct {
+	KeyID     string `json:"key_id"`
+	Signature string `json:"signature"`
+}
+
 func (h *adminHandler) handlePromotePool(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -266,6 +294,148 @@ func (h *adminHandler) handlePromotePool(w http.ResponseWriter, r *http.Request)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	state, committed, _, err := h.deps.Store.PromotePool(r.Context(), e)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	if !h.refreshRegistryIfAhead(w, state) {
+		return
+	}
+	writeAdminJSON(w, http.StatusAccepted, map[string]any{
+		"event": committed,
+		"pool":  adminPoolResponse(state.Pools[committed.PoolID], state.RouteGateCheckedAt),
+	})
+}
+
+func (h *adminHandler) handleSignedLifecycle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := poolIDFromSuffixedAdminPath(r.URL.Path, "/signed-lifecycle")
+	if poolID == "" {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	var body signedLifecycleRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	control, err := parseSignedLifecycleControl(body.Control)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	if control.PoolID != poolID {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "pool_id_mismatch"}})
+		return
+	}
+	if strings.TrimSpace(body.Control.OperationID) == "" {
+		h.writeMutationError(w, ErrSignedControlProofPath)
+		return
+	}
+	operationID, err := resolveOperationID(strings.TrimSpace(control.OperationID), r.Header)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	control.OperationID = operationID
+	body.Control.OperationID = operationID
+	switch control.Action {
+	case LifecyclePaused, LifecycleDraining, LifecycleRetired:
+	case LifecycleActive:
+		h.writeMutationError(w, ErrActivationRequiresPromotion)
+		return
+	default:
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
+		return
+	}
+	if control.IssuedAtUnix > uint64(1<<63-1) {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
+		return
+	}
+	sigs, err := parseSignedLifecycleSignatures(body.Signatures)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	controlProof, sigProof, err := signedLifecycleProofs(body.Control, body.Signatures)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	e := DurableEvent{
+		OperationID:        operationID,
+		TimestampUTC:       time.Unix(int64(control.IssuedAtUnix), 0).UTC(),
+		EventType:          EventLifecycleChanged,
+		PoolID:             poolID,
+		Lifecycle:          control.Action,
+		Reason:             strings.TrimSpace(control.Reason),
+		ManifestVersion:    control.ManifestVersion,
+		ManifestCoreDigest: strings.TrimSpace(body.Control.ManifestCoreDigest),
+		SignedControl:      controlProof,
+		ControlSignatures:  sigProof,
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	existing, ok, err := h.deps.Store.ExistingEvent(r.Context(), operationID)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	if ok {
+		state, err := h.deps.Store.Reconstruct(r.Context())
+		if err != nil {
+			h.writeReconstructError(w, err)
+			return
+		}
+		if !sameDurableEvent(existing, e) {
+			h.writeMutationError(w, ErrConflictingOperationID)
+			return
+		}
+		if !h.refreshRegistryIfAhead(w, state) {
+			return
+		}
+		writeAdminJSON(w, http.StatusAccepted, map[string]any{
+			"event": existing,
+			"pool":  adminPoolResponse(state.Pools[existing.PoolID], state.RouteGateCheckedAt),
+		})
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		h.writeReconstructError(w, err)
+		return
+	}
+	pool := state.Pools[poolID]
+	if pool == nil {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	rawSnapshot, err := canonicalBase64(pool.ManifestSnapshot)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	snapshot, err := poolmanifest.ParseManifestSnapshot(rawSnapshot)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	if err := poolmanifest.VerifyEmergencyLifecycleControl(control, sigs, snapshot, uint64(time.Now().UTC().Unix())); err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	state, committed, _, err := h.deps.Store.AppendSignedLifecycleEvent(r.Context(), e)
 	if err != nil {
 		h.writeMutationError(w, err)
 		return
@@ -757,6 +927,8 @@ func normalizeAdminEvent(r *http.Request, e DurableEvent) (DurableEvent, error) 
 	e.ManifestCoreDigest = strings.TrimSpace(e.ManifestCoreDigest)
 	e.ManifestSignature = strings.TrimSpace(e.ManifestSignature)
 	e.ManifestSnapshot = strings.TrimSpace(e.ManifestSnapshot)
+	e.SignedControl = strings.TrimSpace(e.SignedControl)
+	e.ControlSignatures = strings.TrimSpace(e.ControlSignatures)
 	e.CurrentApprovalVersion = strings.TrimSpace(e.CurrentApprovalVersion)
 	e.RootIssuerKeyID = strings.TrimSpace(e.RootIssuerKeyID)
 	e.RootIssuerPublicKeyDER = strings.TrimSpace(e.RootIssuerPublicKeyDER)
@@ -782,6 +954,83 @@ func poolIDFromSuffixedAdminPath(path, suffix string) string {
 		return ""
 	}
 	return poolID
+}
+
+func parseSignedLifecycleControl(in signedLifecycleControlJSON) (poolmanifest.EmergencyLifecycleControl, error) {
+	digestHex := strings.TrimSpace(in.ManifestCoreDigest)
+	if err := requireLowerHex64(digestHex); err != nil {
+		return poolmanifest.EmergencyLifecycleControl{}, err
+	}
+	digest, err := hex.DecodeString(digestHex)
+	if err != nil {
+		return poolmanifest.EmergencyLifecycleControl{}, err
+	}
+	return poolmanifest.EmergencyLifecycleControl{
+		PoolID:             strings.TrimSpace(in.PoolID),
+		ManifestVersion:    in.ManifestVersion,
+		ManifestCoreDigest: digest,
+		SignerSetVersion:   in.SignerSetVersion,
+		OperationID:        strings.TrimSpace(in.OperationID),
+		Action:             strings.TrimSpace(in.Action),
+		Reason:             strings.TrimSpace(in.Reason),
+		IssuedAtUnix:       in.IssuedAtUnix,
+		ExpiresAtUnix:      in.ExpiresAtUnix,
+	}, nil
+}
+
+func parseSignedLifecycleSignatures(in []signedLifecycleSignatureJSON) ([]poolmanifest.Signature, error) {
+	out := make([]poolmanifest.Signature, 0, len(in))
+	for _, s := range in {
+		sig, err := canonicalBase64(strings.TrimSpace(s.Signature))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, poolmanifest.Signature{
+			KeyID: strings.TrimSpace(s.KeyID),
+			Sig:   sig,
+		})
+	}
+	return out, nil
+}
+
+func signedLifecycleProofs(control signedLifecycleControlJSON, sigs []signedLifecycleSignatureJSON) (string, string, error) {
+	control.PoolID = strings.TrimSpace(control.PoolID)
+	control.ManifestCoreDigest = strings.TrimSpace(control.ManifestCoreDigest)
+	control.OperationID = strings.TrimSpace(control.OperationID)
+	control.Action = strings.TrimSpace(control.Action)
+	control.Reason = strings.TrimSpace(control.Reason)
+	controlBytes, err := json.Marshal(control)
+	if err != nil {
+		return "", "", err
+	}
+	normSigs := make([]signedLifecycleSignatureJSON, 0, len(sigs))
+	for _, s := range sigs {
+		raw, err := canonicalBase64(strings.TrimSpace(s.Signature))
+		if err != nil {
+			return "", "", err
+		}
+		normSigs = append(normSigs, signedLifecycleSignatureJSON{
+			KeyID:     strings.TrimSpace(s.KeyID),
+			Signature: base64.StdEncoding.EncodeToString(raw),
+		})
+	}
+	signatureBytes, err := json.Marshal(normSigs)
+	if err != nil {
+		return "", "", err
+	}
+	return string(controlBytes), string(signatureBytes), nil
+}
+
+func sameDurableEvent(a, b DurableEvent) bool {
+	aa, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	bb, err := json.Marshal(b)
+	if err != nil {
+		return false
+	}
+	return string(aa) == string(bb)
 }
 
 func resolveOperationID(bodyOperationID string, headers http.Header) (string, error) {
