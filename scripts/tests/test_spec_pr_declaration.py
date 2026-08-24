@@ -38,9 +38,12 @@ class SpecPRDeclarationTests(unittest.TestCase):
             codeowners[path] = owners
 
         expected = [
+            ".cursor/rules/**",
             ".github/CODEOWNERS",
             ".github/workflows/spec-index.yml",
+            "AGENTS.md",
             "beta/DECISION_CRITERIA.md",
+            "CLAUDE.md",
             "docs/spec-governance-foundation.md",
             "docs/spec-history/**",
             "schemas/spec-*",
@@ -59,6 +62,19 @@ class SpecPRDeclarationTests(unittest.TestCase):
             validate_body(
                 declaration(contract_change="yes"),
                 changed_paths=["specs/AUTHORITY.json", "scripts/check_spec_governance.py"],
+            ),
+        )
+
+    def test_behavior_change_none_accepts_agent_instruction_paths(self) -> None:
+        self.assertEqual(
+            [],
+            validate_body(
+                declaration(),
+                changed_paths=[
+                    "AGENTS.md",
+                    "CLAUDE.md",
+                    ".cursor/rules/codex-audit-lanes.mdc",
+                ],
             ),
         )
 

@@ -43,9 +43,12 @@ SCHEMA_VERSION = "spec-pr-governance-v1"
 CANONICAL_SPEC_PATH_RE = re.compile(r"^specs/SPEC-\d{3}-[^/]+\.md$")
 CONTRACT_PATHS = {"specs/AUTHORITY.json", "specs/CONFORMANCE.json"}
 GOVERNANCE_ONLY_PATHS = (
+    ".cursor/rules/",
     ".github/CODEOWNERS",
     ".github/workflows/spec-index.yml",
+    "AGENTS.md",
     "beta/DECISION_CRITERIA.md",
+    "CLAUDE.md",
     "docs/spec-governance-foundation.md",
     "docs/spec-history/",
     "schemas/journey-",

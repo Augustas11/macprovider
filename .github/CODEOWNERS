@@ -7,9 +7,12 @@ phase5-gateway/internal/router/** @Augustas11
 phase5-gateway/internal/auth/** @Augustas11
 
 # CI gate controls for the sensitive paths.
+.cursor/rules/** @Augustas11
 .github/CODEOWNERS @Augustas11
 .github/workflows/ci.yml @Augustas11
 .github/workflows/spec-index.yml @Augustas11
+AGENTS.md @Augustas11
+CLAUDE.md @Augustas11
 Makefile @Augustas11
 
 # SPEC governance controls are one review boundary; weakening code and its
