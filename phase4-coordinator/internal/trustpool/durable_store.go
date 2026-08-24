@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/augstar/macprovider-coordinator/internal/providerid"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 )
@@ -62,6 +63,35 @@ func (e PromotionPreconditionError) Error() string {
 	return ErrPromotionPreconditionFailed.Error() + ": " + e.Reason
 }
 
+// ValidatePoolID keeps coordinator-created durable pools on the same selector
+// shape the gateway accepts at dispatch time. SPEC-042-R001 derives pool_id as
+// base64url(SHA256(identity core)[0:16]); length remains relaxed while older
+// opaque IDs exist, but punctuation, slash, whitespace, and non-ASCII are not
+// valid launch IDs.
+func ValidatePoolID(poolID string) error {
+	if poolID == "" {
+		return fmt.Errorf("pool_id is required")
+	}
+	for i := 0; i < len(poolID); i++ {
+		b := poolID[i]
+		if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-' || b == '_' {
+			continue
+		}
+		return fmt.Errorf("pool_id %q must be base64url (A-Za-z0-9-_)", poolID)
+	}
+	return nil
+}
+
+func ValidateCanonicalPoolID(poolID string) error {
+	if err := ValidatePoolID(poolID); err != nil {
+		return err
+	}
+	if len(poolID) != 22 {
+		return fmt.Errorf("pool_id %q must be 22 chars: base64url(SHA256(identity core)[0:16])", poolID)
+	}
+	return nil
+}
+
 func (e PromotionPreconditionError) Is(target error) bool {
 	return target == ErrPromotionPreconditionFailed
 }
@@ -73,23 +103,24 @@ func (e PromotionPreconditionError) Is(target error) bool {
 // the append-only event ledger so suspension can affect routeability without
 // appending a pool event.
 type DurableEvent struct {
-	OperationID        string    `json:"operation_id"`
-	TimestampUTC       time.Time `json:"timestamp_utc"`
-	EventType          string    `json:"event_type"`
-	PoolID             string    `json:"pool_id"`
-	CreatorAccountID   string    `json:"creator_account_id,omitempty"`
-	ApprovalRecordID   string    `json:"approval_record_id,omitempty"`
-	ProviderID         string    `json:"provider_id,omitempty"`
-	BuyerAccountID     string    `json:"buyer_account_id,omitempty"`
-	Lifecycle          string    `json:"lifecycle,omitempty"`
-	Reason             string    `json:"reason,omitempty"`
-	MinBinaryVersion   string    `json:"min_binary_version,omitempty"`
-	ManifestVersion    uint64    `json:"manifest_version,omitempty"`
-	ManifestCoreDigest string    `json:"manifest_core_digest,omitempty"`
-	ManifestSignature  string    `json:"manifest_signature,omitempty"`
-	ManifestSnapshot   string    `json:"manifest_snapshot,omitempty"`
-	SignedControl      string    `json:"signed_control,omitempty"`
-	ControlSignatures  string    `json:"control_signatures,omitempty"`
+	OperationID         string    `json:"operation_id"`
+	TimestampUTC        time.Time `json:"timestamp_utc"`
+	EventType           string    `json:"event_type"`
+	PoolID              string    `json:"pool_id"`
+	CreatorAccountID    string    `json:"creator_account_id,omitempty"`
+	CreatorCredentialID string    `json:"creator_credential_id,omitempty"`
+	ApprovalRecordID    string    `json:"approval_record_id,omitempty"`
+	ProviderID          string    `json:"provider_id,omitempty"`
+	BuyerAccountID      string    `json:"buyer_account_id,omitempty"`
+	Lifecycle           string    `json:"lifecycle,omitempty"`
+	Reason              string    `json:"reason,omitempty"`
+	MinBinaryVersion    string    `json:"min_binary_version,omitempty"`
+	ManifestVersion     uint64    `json:"manifest_version,omitempty"`
+	ManifestCoreDigest  string    `json:"manifest_core_digest,omitempty"`
+	ManifestSignature   string    `json:"manifest_signature,omitempty"`
+	ManifestSnapshot    string    `json:"manifest_snapshot,omitempty"`
+	SignedControl       string    `json:"signed_control,omitempty"`
+	ControlSignatures   string    `json:"control_signatures,omitempty"`
 
 	CurrentApprovalVersion             string `json:"current_approval_version,omitempty"`
 	RootIssuerKeyID                    string `json:"root_issuer_key_id,omitempty"`
@@ -303,12 +334,13 @@ CREATE TABLE IF NOT EXISTS trustpool_events (
 CREATE INDEX IF NOT EXISTS idx_trustpool_events_pool_id ON trustpool_events(pool_id, id);
 CREATE INDEX IF NOT EXISTS idx_trustpool_events_creator ON trustpool_events(creator_account_id, id);
 CREATE INDEX IF NOT EXISTS idx_trustpool_events_event_type ON trustpool_events(event_type, id);
-	CREATE TABLE IF NOT EXISTS trustpool_root_registration_nonces (
-	    nonce TEXT PRIMARY KEY,
-	    operation_id TEXT,
-	    creator_account_id TEXT NOT NULL,
-	    approval_record_id TEXT NOT NULL,
-	    current_approval_version TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS trustpool_root_registration_nonces (
+    nonce TEXT PRIMARY KEY,
+    operation_id TEXT,
+    creator_account_id TEXT NOT NULL,
+    creator_credential_id TEXT,
+    approval_record_id TEXT NOT NULL,
+    current_approval_version TEXT NOT NULL,
     launch_environment TEXT NOT NULL,
     purpose TEXT NOT NULL,
     expires_at_utc TEXT NOT NULL,
@@ -420,6 +452,9 @@ CREATE TABLE IF NOT EXISTS trustpool_creator_approvals (
 		return err
 	}
 	if err := s.ensureColumn(ctx, "trustpool_root_registration_nonces", "operation_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "trustpool_root_registration_nonces", "creator_credential_id", "TEXT"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "trustpool_events", "approval_record_id", "TEXT"); err != nil {
@@ -540,6 +575,7 @@ CREATE INDEX IF NOT EXISTS idx_trustpool_manifest_acceptances_operation ON trust
 type RootRegistrationNonceIssue struct {
 	OperationID            string    `json:"operation_id"`
 	CreatorAccountID       string    `json:"creator_account_id"`
+	CreatorCredentialID    string    `json:"creator_credential_id,omitempty"`
 	ApprovalRecordID       string    `json:"approval_record_id"`
 	CurrentApprovalVersion string    `json:"current_approval_version"`
 	LaunchEnvironment      string    `json:"launch_environment"`
@@ -551,6 +587,7 @@ type RootRegistrationNonceRecord struct {
 	Nonce                  string    `json:"nonce"`
 	OperationID            string    `json:"operation_id"`
 	CreatorAccountID       string    `json:"creator_account_id"`
+	CreatorCredentialID    string    `json:"creator_credential_id,omitempty"`
 	ApprovalRecordID       string    `json:"approval_record_id"`
 	CurrentApprovalVersion string    `json:"current_approval_version"`
 	LaunchEnvironment      string    `json:"launch_environment"`
@@ -1271,6 +1308,7 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 	}
 	issue.OperationID = strings.TrimSpace(issue.OperationID)
 	issue.CreatorAccountID = strings.TrimSpace(issue.CreatorAccountID)
+	issue.CreatorCredentialID = strings.TrimSpace(issue.CreatorCredentialID)
 	issue.ApprovalRecordID = strings.TrimSpace(issue.ApprovalRecordID)
 	issue.CurrentApprovalVersion = strings.TrimSpace(issue.CurrentApprovalVersion)
 	issue.LaunchEnvironment = strings.TrimSpace(issue.LaunchEnvironment)
@@ -1284,24 +1322,7 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 	}
 	now := time.Now().UTC()
 	expires := issue.ExpiresAtUTC.UTC()
-	if !now.Before(expires) {
-		return RootRegistrationNonceRecord{}, ErrRootRegistrationNonce
-	}
-	var nonceBytes [32]byte
-	if _, err := rand.Read(nonceBytes[:]); err != nil {
-		return RootRegistrationNonceRecord{}, err
-	}
-	record := RootRegistrationNonceRecord{
-		Nonce:                  base64.RawURLEncoding.EncodeToString(nonceBytes[:]),
-		OperationID:            issue.OperationID,
-		CreatorAccountID:       issue.CreatorAccountID,
-		ApprovalRecordID:       issue.ApprovalRecordID,
-		CurrentApprovalVersion: issue.CurrentApprovalVersion,
-		LaunchEnvironment:      issue.LaunchEnvironment,
-		Purpose:                issue.Purpose,
-		ExpiresAtUTC:           expires,
-		IssuedAtUTC:            now,
-	}
+	var record RootRegistrationNonceRecord
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		if err := verifyManifestAcceptanceStateFromQueryer(ctx, conn); err != nil {
 			return err
@@ -1317,6 +1338,9 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 			}
 			return ErrConflictingOperationID
 		}
+		if !now.Before(expires) {
+			return ErrRootRegistrationNonce
+		}
 		if used, err := operationIDExists(ctx, conn, issue.OperationID); err != nil {
 			return err
 		} else if used {
@@ -1329,14 +1353,31 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 		if !ok || !approval.ValidFor(issue.ApprovalRecordID, issue.CurrentApprovalVersion, issue.LaunchEnvironment, now) {
 			return ErrCreatorApprovalGate
 		}
+		var nonceBytes [32]byte
+		if _, err := rand.Read(nonceBytes[:]); err != nil {
+			return err
+		}
+		record = RootRegistrationNonceRecord{
+			Nonce:                  base64.RawURLEncoding.EncodeToString(nonceBytes[:]),
+			OperationID:            issue.OperationID,
+			CreatorAccountID:       issue.CreatorAccountID,
+			CreatorCredentialID:    issue.CreatorCredentialID,
+			ApprovalRecordID:       issue.ApprovalRecordID,
+			CurrentApprovalVersion: issue.CurrentApprovalVersion,
+			LaunchEnvironment:      issue.LaunchEnvironment,
+			Purpose:                issue.Purpose,
+			ExpiresAtUTC:           expires,
+			IssuedAtUTC:            now,
+		}
 		_, err = conn.ExecContext(ctx, `
 	INSERT INTO trustpool_root_registration_nonces (
-	    nonce, operation_id, creator_account_id, approval_record_id, current_approval_version,
+	    nonce, operation_id, creator_account_id, creator_credential_id, approval_record_id, current_approval_version,
 	    launch_environment, purpose, expires_at_utc, issued_at_utc
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			record.Nonce,
 			record.OperationID,
 			record.CreatorAccountID,
+			nullString(record.CreatorCredentialID),
 			record.ApprovalRecordID,
 			record.CurrentApprovalVersion,
 			record.LaunchEnvironment,
@@ -1371,15 +1412,17 @@ func rootRegistrationNonceByOperationID(ctx context.Context, q rootNonceQueryer,
 		return RootRegistrationNonceRecord{}, false, nil
 	}
 	var record RootRegistrationNonceRecord
+	var credentialID sql.NullString
 	var expiresRaw, issuedRaw string
 	err := q.QueryRowContext(ctx, `
-SELECT nonce, operation_id, creator_account_id, approval_record_id, current_approval_version,
+SELECT nonce, operation_id, creator_account_id, creator_credential_id, approval_record_id, current_approval_version,
        launch_environment, purpose, expires_at_utc, issued_at_utc
 FROM trustpool_root_registration_nonces
 WHERE operation_id = ?`, strings.TrimSpace(operationID)).Scan(
 		&record.Nonce,
 		&record.OperationID,
 		&record.CreatorAccountID,
+		&credentialID,
 		&record.ApprovalRecordID,
 		&record.CurrentApprovalVersion,
 		&record.LaunchEnvironment,
@@ -1401,6 +1444,9 @@ WHERE operation_id = ?`, strings.TrimSpace(operationID)).Scan(
 	if err != nil {
 		return RootRegistrationNonceRecord{}, false, ErrRootRegistrationNonce
 	}
+	if credentialID.Valid {
+		record.CreatorCredentialID = credentialID.String
+	}
 	record.ExpiresAtUTC = expiresAt.UTC()
 	record.IssuedAtUTC = issuedAt.UTC()
 	return record, true, nil
@@ -1409,6 +1455,7 @@ WHERE operation_id = ?`, strings.TrimSpace(operationID)).Scan(
 func rootRegistrationNonceMatchesIssue(record RootRegistrationNonceRecord, issue RootRegistrationNonceIssue) bool {
 	return record.OperationID == strings.TrimSpace(issue.OperationID) &&
 		record.CreatorAccountID == strings.TrimSpace(issue.CreatorAccountID) &&
+		record.CreatorCredentialID == strings.TrimSpace(issue.CreatorCredentialID) &&
 		record.ApprovalRecordID == strings.TrimSpace(issue.ApprovalRecordID) &&
 		record.CurrentApprovalVersion == strings.TrimSpace(issue.CurrentApprovalVersion) &&
 		record.LaunchEnvironment == strings.TrimSpace(issue.LaunchEnvironment) &&
@@ -1857,10 +1904,10 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 
 func consumeRootRegistrationNonce(ctx context.Context, conn *sql.Conn, e DurableEvent, acceptedAt time.Time) error {
 	var creatorAccountID, approvalRecordID, currentApprovalVersion, launchEnvironment, purpose, expiresRaw string
-	var consumedOperationID sql.NullString
+	var creatorCredentialID, consumedOperationID sql.NullString
 	err := conn.QueryRowContext(ctx, `
 SELECT creator_account_id, approval_record_id, current_approval_version, launch_environment,
-       purpose, expires_at_utc, consumed_operation_id
+       purpose, expires_at_utc, creator_credential_id, consumed_operation_id
 FROM trustpool_root_registration_nonces
 WHERE nonce = ?`, e.RootRegistrationNonce).Scan(
 		&creatorAccountID,
@@ -1869,6 +1916,7 @@ WHERE nonce = ?`, e.RootRegistrationNonce).Scan(
 		&launchEnvironment,
 		&purpose,
 		&expiresRaw,
+		&creatorCredentialID,
 		&consumedOperationID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1882,6 +1930,7 @@ WHERE nonce = ?`, e.RootRegistrationNonce).Scan(
 		return ErrRootRegistrationNonce
 	}
 	if creatorAccountID != e.CreatorAccountID ||
+		(creatorCredentialID.Valid && creatorCredentialID.String != "" && creatorCredentialID.String != e.CreatorCredentialID) ||
 		approvalRecordID != e.ApprovalRecordID ||
 		currentApprovalVersion != e.CurrentApprovalVersion ||
 		launchEnvironment != e.LaunchEnvironment ||
@@ -2925,6 +2974,7 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		sort.Strings(buyers)
 		out = append(out, RouteableSnapshot{
 			PoolID:            p.PoolID,
+			CreatorAccountID:  p.CreatorAccountID,
 			Members:           members,
 			Revoked:           revoked,
 			BuyerAccounts:     buyers,
@@ -2991,8 +3041,8 @@ func validateEvent(e DurableEvent) error {
 	if e.TimestampUTC.IsZero() {
 		return fmt.Errorf("timestamp_utc is required")
 	}
-	if e.PoolID == "" {
-		return fmt.Errorf("pool_id is required")
+	if err := ValidatePoolID(e.PoolID); err != nil {
+		return err
 	}
 	if err := ValidatePromiseClaimsText(e.PoolID); err != nil {
 		return err
@@ -3064,6 +3114,9 @@ func validateEvent(e DurableEvent) error {
 	case EventMemberAdmitted, EventMemberRevoked:
 		if e.ProviderID == "" {
 			return fmt.Errorf("%s requires provider_id", e.EventType)
+		}
+		if err := providerid.Validate(e.ProviderID); err != nil {
+			return err
 		}
 	case EventBuyerAuthorized, EventBuyerAuthorizationRm:
 		if e.BuyerAccountID == "" {

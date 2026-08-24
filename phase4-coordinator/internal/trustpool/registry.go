@@ -27,12 +27,18 @@ import (
 type Registry struct {
 	mu                 sync.RWMutex
 	pools              map[string]*poolState
+	providerCeilings   map[string]map[string]struct{}
+	delegatedCeilings  map[string]map[string]struct{}
+	buyerCeilings      map[string]map[string]struct{}
+	ceilingConfigured  bool
+	ceilingGeneration  uint64
 	revision           uint64
 	revocationWatchers map[string]map[chan struct{}]struct{}
 	activeDeliveries   map[string]uint64
 }
 
 type poolState struct {
+	creatorAccountID string
 	// members is the set of provider identities admitted to the pool
 	// (SPEC-042 R003). revoked is the durable per-pool identity blocklist:
 	// a revoked identity stays out even if re-added to members by mistake,
@@ -96,6 +102,7 @@ type Snapshot struct {
 // routing gate fails closed while preserving the pool's generation fence.
 type RouteableSnapshot struct {
 	PoolID            string
+	CreatorAccountID  string
 	Members           []string
 	Revoked           []string
 	BuyerAccounts     []string
@@ -124,6 +131,49 @@ func (r *Registry) ensure(poolID string) *poolState {
 		r.pools[poolID] = ps
 	}
 	return ps
+}
+
+// InitCreatorAdminCeilings seeds creator-owned allowlists during startup before
+// any request can hold a generation fence. Runtime reloads must use
+// SetCreatorAdminCeilings so tightening the first ceiling invalidates stale
+// pre-reload reservations.
+func (r *Registry) InitCreatorAdminCeilings(providerIDs, delegatedProviderIDs, buyerAccountIDs map[string][]string) {
+	r.setCreatorAdminCeilings(providerIDs, delegatedProviderIDs, buyerAccountIDs, false)
+}
+
+// SetCreatorAdminCeilings installs the current creator-owned allowlists as a
+// live routing ceiling. Durable pool events can grant membership/authorization,
+// but a configured creator ceiling must still include the provider or buyer at
+// route time; removing an id from config therefore cuts stale access without
+// waiting for a compensating durable event.
+func (r *Registry) SetCreatorAdminCeilings(providerIDs, delegatedProviderIDs, buyerAccountIDs map[string][]string) {
+	r.setCreatorAdminCeilings(providerIDs, delegatedProviderIDs, buyerAccountIDs, true)
+}
+
+func (r *Registry) setCreatorAdminCeilings(providerIDs, delegatedProviderIDs, buyerAccountIDs map[string][]string, bumpOnChange bool) {
+	if r == nil {
+		return
+	}
+	nextProviders := normalizeCreatorCeilings(providerIDs)
+	nextDelegatedProviders := normalizeCreatorCeilings(delegatedProviderIDs)
+	nextBuyers := normalizeCreatorCeilings(buyerAccountIDs)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ceilingConfigured {
+		nextProviders = preserveRemovedCreatorCeilingsAsDenyAll(r.providerCeilings, nextProviders)
+		nextDelegatedProviders = preserveRemovedCreatorCeilingsAsDenyAll(r.delegatedCeilings, nextDelegatedProviders)
+		nextBuyers = preserveRemovedCreatorCeilingsAsDenyAll(r.buyerCeilings, nextBuyers)
+	}
+	if creatorCeilingsEqual(r.providerCeilings, nextProviders) && creatorCeilingsEqual(r.delegatedCeilings, nextDelegatedProviders) && creatorCeilingsEqual(r.buyerCeilings, nextBuyers) {
+		return
+	}
+	r.providerCeilings = nextProviders
+	r.delegatedCeilings = nextDelegatedProviders
+	r.buyerCeilings = nextBuyers
+	r.ceilingConfigured = true
+	if bumpOnChange {
+		r.ceilingGeneration++
+	}
 }
 
 // AddPool registers a pool with no members (seed helper).
@@ -351,6 +401,7 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pools[s.PoolID] = &poolState{
+		creatorAccountID:  s.CreatorAccountID,
 		members:           members,
 		revoked:           revoked,
 		buyers:            buyers,
@@ -450,7 +501,7 @@ func (r *Registry) BeginPoolDeliveryAtGeneration(poolID string, generation uint6
 	r.mu.Lock()
 	ps := r.pools[poolID]
 	now := time.Now().UTC()
-	if ps == nil || !ps.routeableAt(now) || ps.generationAt(now) != generation {
+	if ps == nil || !ps.routeableAt(now) || ps.generationAt(now)+r.ceilingGeneration != generation {
 		r.mu.Unlock()
 		return func() {}, false
 	}
@@ -540,6 +591,7 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 			buyers[id] = struct{}{}
 		}
 		next[s.PoolID] = &poolState{
+			creatorAccountID:  s.CreatorAccountID,
 			members:           members,
 			revoked:           revoked,
 			buyers:            buyers,
@@ -644,6 +696,7 @@ func poolStatesEqual(a, b *poolState) bool {
 		return a == b
 	}
 	return a.routeable == b.routeable &&
+		a.creatorAccountID == b.creatorAccountID &&
 		a.minBinaryVersion == b.minBinaryVersion &&
 		stringSlicesEqual(a.modelAllowlist, b.modelAllowlist) &&
 		a.settlementMode == b.settlementMode &&
@@ -726,6 +779,12 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 			if _, revoked := ps.revoked[id]; revoked {
 				continue
 			}
+			if !r.providerAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
+				continue
+			}
+			if !r.providerDelegatedByCreatorCeilingLocked(ps.creatorAccountID, id) {
+				continue
+			}
 			members = append(members, id)
 		}
 		revoked := make([]string, 0, len(ps.revoked))
@@ -734,6 +793,9 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 		}
 		buyers := make([]string, 0, len(ps.buyers))
 		for id := range ps.buyers {
+			if !r.buyerAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
+				continue
+			}
 			buyers = append(buyers, id)
 		}
 		sort.Strings(members)
@@ -741,6 +803,7 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 		sort.Strings(buyers)
 		out = append(out, RouteableSnapshot{
 			PoolID:            poolID,
+			CreatorAccountID:  ps.creatorAccountID,
 			Members:           members,
 			Revoked:           revoked,
 			BuyerAccounts:     buyers,
@@ -754,6 +817,31 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 		})
 	}
 	return out
+}
+
+// BuyerAuthorizations returns a deterministic account -> pool_id projection for
+// gateway-side pool-scope checks. It is intentionally pool-opaque: the gateway
+// gets only credential scope, then the coordinator still enforces routeability,
+// membership, generation, and freshness on dispatch.
+func (r *Registry) BuyerAuthorizations() (map[string][]string, uint64) {
+	if r == nil {
+		return nil, 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	accounts := make(map[string][]string)
+	for poolID, ps := range r.pools {
+		for accountID := range ps.buyers {
+			if !r.buyerAllowedByCreatorCeilingLocked(ps.creatorAccountID, accountID) {
+				continue
+			}
+			accounts[accountID] = append(accounts[accountID], poolID)
+		}
+	}
+	for accountID := range accounts {
+		sort.Strings(accounts[accountID])
+	}
+	return accounts, r.revision + r.ceilingGeneration
 }
 
 // Snapshot returns a consistent read of the pool's non-revoked members, its
@@ -774,6 +862,12 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		if _, revoked := ps.revoked[id]; revoked {
 			continue
 		}
+		if !r.providerAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
+			continue
+		}
+		if !r.providerDelegatedByCreatorCeilingLocked(ps.creatorAccountID, id) {
+			continue
+		}
 		members[id] = true
 	}
 	return Snapshot{
@@ -784,7 +878,7 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
 		SettlementMode:    routeablePoolSettlementMode(ps.settlementMode),
 		Routeable:         ps.routeableAt(now),
-		Generation:        ps.generationAt(now),
+		Generation:        ps.generationAt(now) + r.ceilingGeneration,
 		Revision:          r.revision,
 		RouteableUntilUTC: ps.routeableUntilUTC,
 		RouteableExpired:  routeableExpired,
@@ -812,9 +906,18 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 		if _, revoked := ps.revoked[id]; revoked {
 			continue
 		}
+		if !r.providerAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
+			continue
+		}
+		if !r.providerDelegatedByCreatorCeilingLocked(ps.creatorAccountID, id) {
+			continue
+		}
 		members[id] = true
 	}
 	_, authorized := ps.buyers[buyerAccountID]
+	if authorized && !r.buyerAllowedByCreatorCeilingLocked(ps.creatorAccountID, buyerAccountID) {
+		authorized = false
+	}
 	return Snapshot{
 		PoolID:            poolID,
 		Exists:            true,
@@ -823,7 +926,7 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 		ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
 		SettlementMode:    routeablePoolSettlementMode(ps.settlementMode),
 		Routeable:         ps.routeableAt(now),
-		Generation:        ps.generationAt(now),
+		Generation:        ps.generationAt(now) + r.ceilingGeneration,
 		Revision:          r.revision,
 		RouteableUntilUTC: ps.routeableUntilUTC,
 		RouteableExpired:  routeableExpired,
@@ -844,6 +947,9 @@ func (r *Registry) BuyerAuthorized(poolID, buyerAccountID string) bool {
 		return false
 	}
 	_, ok := ps.buyers[buyerAccountID]
+	if ok && !r.buyerAllowedByCreatorCeilingLocked(ps.creatorAccountID, buyerAccountID) {
+		return false
+	}
 	return ok
 }
 
@@ -852,7 +958,7 @@ func (r *Registry) Generation(poolID string) uint64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if ps := r.pools[poolID]; ps != nil {
-		return ps.generationAt(time.Now().UTC())
+		return ps.generationAt(time.Now().UTC()) + r.ceilingGeneration
 	}
 	return 0
 }
@@ -879,4 +985,79 @@ func (ps *poolState) generationAt(now time.Time) uint64 {
 		return ps.generation + 1
 	}
 	return ps.generation
+}
+
+func normalizeCreatorCeilings(in map[string][]string) map[string]map[string]struct{} {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string]struct{}, len(in))
+	for creatorID, ids := range in {
+		creatorID = strings.TrimSpace(creatorID)
+		if creatorID == "" {
+			continue
+		}
+		set := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			set[id] = struct{}{}
+		}
+		out[creatorID] = set
+	}
+	return out
+}
+
+func creatorCeilingsEqual(a, b map[string]map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for creatorID, aset := range a {
+		bset := b[creatorID]
+		if !stringSetsEqual(aset, bset) {
+			return false
+		}
+	}
+	return true
+}
+
+func preserveRemovedCreatorCeilingsAsDenyAll(previous, next map[string]map[string]struct{}) map[string]map[string]struct{} {
+	if len(previous) == 0 {
+		return next
+	}
+	if next == nil {
+		next = make(map[string]map[string]struct{}, len(previous))
+	}
+	for creatorID := range previous {
+		if _, ok := next[creatorID]; !ok {
+			next[creatorID] = map[string]struct{}{}
+		}
+	}
+	return next
+}
+
+func (r *Registry) providerAllowedByCreatorCeilingLocked(creatorID, providerID string) bool {
+	return allowedByCreatorCeilingLocked(r.providerCeilings, creatorID, providerID)
+}
+
+func (r *Registry) providerDelegatedByCreatorCeilingLocked(creatorID, providerID string) bool {
+	return allowedByCreatorCeilingLocked(r.delegatedCeilings, creatorID, providerID)
+}
+
+func (r *Registry) buyerAllowedByCreatorCeilingLocked(creatorID, buyerAccountID string) bool {
+	return allowedByCreatorCeilingLocked(r.buyerCeilings, creatorID, buyerAccountID)
+}
+
+func allowedByCreatorCeilingLocked(ceilings map[string]map[string]struct{}, creatorID, id string) bool {
+	if len(ceilings) == 0 || creatorID == "" {
+		return true
+	}
+	allowed, configured := ceilings[creatorID]
+	if !configured {
+		return true
+	}
+	_, ok := allowed[id]
+	return ok
 }

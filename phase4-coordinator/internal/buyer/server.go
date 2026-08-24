@@ -1056,6 +1056,14 @@ func (s *Server) handleInternalRouting(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Internal routing metadata requires coordinator authorization")
 		return
 	}
+	pools := map[string]any{
+		"enabled": s.trustPools != nil,
+	}
+	if s.trustPools != nil {
+		accountPools, generation := s.trustPools.BuyerAuthorizations()
+		pools["account_pools"] = accountPools
+		pools["buyer_authorization_generation"] = generation
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"sticky": map[string]any{
@@ -1073,9 +1081,7 @@ func (s *Server) handleInternalRouting(w http.ResponseWriter, r *http.Request) {
 		// pool_id) fails the gateway closed instead of silently routing pool
 		// traffic from the global snapshot. trustPools is the pool-feature
 		// handle (WithPoolMembership): nil = feature off = advertise false.
-		"pools": map[string]any{
-			"enabled": s.trustPools != nil,
-		},
+		"pools": pools,
 		"tier2": s.internalTier2Metadata(),
 	})
 }

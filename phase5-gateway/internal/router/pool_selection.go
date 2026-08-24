@@ -69,10 +69,13 @@ var (
 //   - (poolID, nil)    an authorized, capability-satisfied pool to emit;
 //   - ("", selErr)     a typed rejection.
 //
-// Ordering is load-bearing (see the design doc decision table): the credential
-// authorization check (rows 0-4) is pure and local, so an unauthorized caller
-// is rejected BEFORE any coordinator capability roundtrip (row 5) and its
-// latency cannot reveal whether the named pool exists (SPEC-042-R010).
+// Ordering is load-bearing (see the design doc decision table): static
+// account_pools mode rejects unauthorized callers BEFORE any coordinator
+// capability roundtrip (row 5), so latency cannot reveal whether the named pool
+// exists (SPEC-042-R010). SPEC-043 creator self-service deployments may opt
+// into coordinator_authorizes: the gateway refreshes the coordinator's internal
+// account->pool authorization projection, evaluates the selected pool locally
+// from that projection, and only then emits the internal authority header.
 func (s *Server) resolvePoolSelection(ctx context.Context, headers http.Header, accountID string, poolSelectionAllowed bool) (string, *poolSelectionError) {
 	tp := s.cfg.Features.TrustedPools
 
@@ -122,40 +125,41 @@ func (s *Server) resolvePoolSelection(ctx context.Context, headers http.Header, 
 		return "", errPoolUnavailable
 	}
 
-	// Row 4: credential authorization. Pure map lookup, no coordinator call.
-	// An account absent from the config, or a pool outside its authorized set,
-	// is denied with the generic non-disclosing code. The narrow-only
-	// invariant is structural: the selector can only pick a pool already in
-	// the ceiling, never widen it.
-	if !tp.Authorizes(accountID, selector) {
-		return "", errPoolUnavailable
-	}
-
 	// Defense-in-depth: never emit a header value the coordinator's opaque
 	// sanitizer would drop to empty (which it would then route as GLOBAL — a
 	// silent pool->global spill). Config validation already rejects such ids
 	// when the feature is enabled; this guards programmatically-built configs
 	// that bypass Validate().
-	if !config.PoolIDHeaderSafe(selector) {
+	if !config.PoolIDHeaderSafe(selector) || !config.PoolIDBase64URLShape(selector) || !config.PoolIDCanonicalShape(selector) {
 		return "", errPoolUnavailable
 	}
 
-	// Row 5: positive pool-capability negotiation. Refuse unless the assigned
-	// coordinator advertises pool support; an old coordinator omits the block
-	// (decoding to Enabled=false) and would otherwise route pool traffic from
-	// the global snapshot (SPEC-042-R010). This uses the FRESH fetch, not the
-	// 5s-cached sticky-hint metadata: a stale cached "true" would let pool
-	// dispatch continue for up to the TTL after a coordinator rollback/disable
-	// (trustPools==nil), and the rolled-back coordinator would ignore the
-	// header and route globally — a pool->global spill the positive handshake
-	// exists to prevent. A fresh check per pool-required dispatch shrinks that
-	// window to the in-request TOCTOU that no gateway-side check can remove;
-	// the coordinator's own member-only routing is the second line when it is
-	// pool-aware. Pool traffic is opt-in, so the extra roundtrip is acceptable.
-	if md, ok := s.coordinatorRoutingMetadataFresh(ctx); !ok || !md.Pools.Enabled {
+	// Row 4: credential authorization. Static mode is a pure local config lookup:
+	// an account absent from the config, or a pool outside its authorized set, is
+	// denied with the generic non-disclosing code before any coordinator
+	// capability call. Coordinator-authorized mode refreshes the service-token
+	// protected /internal/routing projection, then performs an equivalent local
+	// map lookup against creator-authored buyer scopes. The request-specific
+	// selector is never sent to the coordinator for authorization lookup.
+	if !tp.CoordinatorAuthorizes {
+		if !tp.Authorizes(accountID, selector) {
+			return "", errPoolUnavailable
+		}
+		if md, ok := s.coordinatorRoutingMetadataFresh(ctx); !ok || !md.Pools.Enabled {
+			return "", errPoolUnavailable
+		}
+		return selector, nil
+	}
+	md, ok := s.coordinatorRoutingMetadataFresh(ctx)
+	if !ok || !md.Pools.Enabled {
+		return "", errPoolUnavailable
+	}
+	if !tp.Authorizes(accountID, selector) && !md.Pools.Authorizes(accountID, selector) {
 		return "", errPoolUnavailable
 	}
 
-	// Row 6: authorized and capability-satisfied.
+	// Row 5: authorized and capability-satisfied. The fresh positive
+	// pool-capability negotiation happened above in both modes; an old coordinator
+	// omits pools.enabled and fails closed before this return.
 	return selector, nil
 }

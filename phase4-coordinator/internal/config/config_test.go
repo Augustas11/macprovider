@@ -672,6 +672,396 @@ func TestTrustedPoolsEnabledRequiresBoundedRefreshInterval(t *testing.T) {
 	}
 }
 
+func TestTrustedPoolsCreatorAdminCredentialsRequireEnabledTrustedPools(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{trustedPoolsCreatorCredentialConfig("creator-a", "creator-a-cred", "creator-token-a")}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "creator_admin_credentials requires trusted_pools.enabled=true") {
+		t.Fatalf("Validate err=%v, want creator admin credential enablement rejection", err)
+	}
+
+	cfg.TrustedPools.Enabled = true
+	cfg.Coordinator.RequireGatewayContext = true
+	cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-a": {"provider-a"}}
+	cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-a"}}
+	cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-a"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("creator admin credentials with trusted pools enabled should validate: %v", err)
+	}
+}
+
+func TestTrustedPoolsCreatorAdminCredentialsRejectInvalidCredential(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(*Config)
+		want  string
+	}{
+		{
+			name: "operator key",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{trustedPoolsCreatorCredentialConfig("creator-a", "creator-a-cred", " operator-key ")}
+			},
+			want: "auth.operator_key",
+		},
+		{
+			name: "gateway service token",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{trustedPoolsCreatorCredentialConfig("creator-a", "creator-a-cred", "gateway-service-token")}
+			},
+			want: "auth.gateway_service_token",
+		},
+		{
+			name: "named operator key",
+			build: func(cfg *Config) {
+				cfg.Auth.OperatorKeys = map[string]string{"alice": "named-operator-secret"}
+				cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{trustedPoolsCreatorCredentialConfig("creator-a", "creator-a-cred", "named-operator-secret")}
+			},
+			want: "auth.operator_keys.alice",
+		},
+		{
+			name: "duplicate creator credential token",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{
+					trustedPoolsCreatorCredentialConfig("creator-a", "creator-a-cred", "shared-creator-token"),
+					trustedPoolsCreatorCredentialConfig("creator-b", "creator-b-cred", "shared-creator-token"),
+				}
+				cfg.TrustedPools.CreatorAdminProviderIDs["creator-b"] = []string{"provider-b"}
+				cfg.TrustedPools.CreatorAdminProviderDelegatedIDs["creator-b"] = []string{"provider-b"}
+				cfg.TrustedPools.CreatorAdminBuyerAccountIDs["creator-b"] = []string{"acct-b"}
+			},
+			want: "must not reuse secret",
+		},
+		{
+			name: "slash creator id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{trustedPoolsCreatorCredentialConfig("creator/a", "creator-a-cred", "creator-token-a")}
+			},
+			want: "invalid creator id",
+		},
+		{
+			name: "non-canonical creator id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{trustedPoolsCreatorCredentialConfig(" creator-a ", "creator-a-cred", "creator-token-a")}
+			},
+			want: "creator_account_id must be canonical",
+		},
+		{
+			name: "slash credential id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{trustedPoolsCreatorCredentialConfig("creator-a", "credential/a", "creator-token-a")}
+			},
+			want: "invalid credential id",
+		},
+		{
+			name: "expires before not before",
+			build: func(cfg *Config) {
+				credential := trustedPoolsCreatorCredentialConfig("creator-a", "creator-a-cred", "creator-token-a")
+				credential.ExpiresAtUTC = "2026-01-01T00:00:00Z"
+				credential.NotBeforeUTC = "2026-01-02T00:00:00Z"
+				cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{credential}
+			},
+			want: "expires_at_utc must be after not_before_utc",
+		},
+		{
+			name: "invalid status",
+			build: func(cfg *Config) {
+				credential := trustedPoolsCreatorCredentialConfig("creator-a", "creator-a-cred", "creator-token-a")
+				credential.Status = "pending"
+				cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{credential}
+			},
+			want: "status must be enabled or disabled",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.TrustedPools.Enabled = true
+			cfg.Coordinator.RequireGatewayContext = true
+			cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{trustedPoolsCreatorCredentialConfig("creator-a", "creator-a-cred", "creator-token-a")}
+			cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-a": {"provider-a"}}
+			cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-a"}}
+			cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-a"}}
+			tc.build(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate err=%v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsWeakTrustedPoolsCreatorAdminCredentialToken(t *testing.T) {
+	yaml := `
+auth:
+  operator_key: 0123456789abcdefABCDEFghijklmnop
+  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA
+coordinator:
+  require_gateway_context: true
+trusted_pools:
+  enabled: true
+  creator_admin_credentials:
+    - creator_account_id: creator-a
+      credential_id: creator-a-cred
+      token: changeme
+      not_before_utc: 2026-01-01T00:00:00Z
+      expires_at_utc: 2027-01-01T00:00:00Z
+      status: enabled
+  creator_admin_provider_ids:
+    creator-a: [provider-a]
+  creator_admin_provider_delegated_ids:
+    creator-a: [provider-a]
+  creator_admin_buyer_account_ids:
+    creator-a: [acct-a]
+`
+	_, err := loadConfigFromYAML(t, yaml)
+	if err == nil || !strings.Contains(err.Error(), "trusted_pools.creator_admin_credentials[0].token") || !strings.Contains(err.Error(), "placeholder_denied") {
+		t.Fatalf("Load error=%v, want weak creator credential token rejection", err)
+	}
+}
+
+func TestTrustedPoolsCreatorAdminProviderIDsValidateCreatorAndProviders(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(*Config)
+		want  string
+	}{
+		{
+			name: "credential without provider allowlist",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{}
+			},
+			want: "must be configured for every trusted_pools.creator_admin_credentials entry",
+		},
+		{
+			name: "disabled trusted pools",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = false
+				cfg.TrustedPools.CreatorAdminCredentials = nil
+				cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-a": {"provider-a"}}
+				cfg.TrustedPools.CreatorAdminBuyerAccountIDs = nil
+			},
+			want: "creator_admin_provider_ids requires trusted_pools.enabled=true",
+		},
+		{
+			name: "missing creator credential",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminCredentials = nil
+				cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-b": {"provider-a"}}
+				cfg.TrustedPools.CreatorAdminBuyerAccountIDs = nil
+			},
+			want: "requires matching trusted_pools.creator_admin_credentials entry",
+		},
+		{
+			name: "non-canonical provider-map creator id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{
+					"creator-a":   {"provider-a"},
+					" creator-a ": {"provider-b"},
+				}
+			},
+			want: "non-canonical creator id",
+		},
+		{
+			name: "invalid provider id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-a": {"bad/provider"}}
+			},
+			want: "invalid provider_id",
+		},
+		{
+			name: "non-canonical provider id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-a": {" provider-a "}}
+			},
+			want: "non-canonical provider_id",
+		},
+		{
+			name: "duplicate provider id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-a": {"provider-a", "provider-a"}}
+			},
+			want: "unique provider ids",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.TrustedPools.Enabled = true
+			cfg.Coordinator.RequireGatewayContext = true
+			cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{trustedPoolsCreatorCredentialConfig("creator-a", "creator-a-cred", "creator-token-a")}
+			cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-a": {"provider-a"}}
+			cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-a"}}
+			cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-a"}}
+			tc.build(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate err=%v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestTrustedPoolsCreatorAdminProviderDelegatedIDsValidateCreatorAndProviders(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(*Config)
+		want  string
+	}{
+		{
+			name: "credential without provider delegation projection",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{}
+			},
+			want: "must be configured for every trusted_pools.creator_admin_credentials entry",
+		},
+		{
+			name: "disabled trusted pools",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = false
+				cfg.TrustedPools.CreatorAdminCredentials = nil
+				cfg.TrustedPools.CreatorAdminProviderIDs = nil
+				cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-a"}}
+				cfg.TrustedPools.CreatorAdminBuyerAccountIDs = nil
+			},
+			want: "creator_admin_provider_delegated_ids requires trusted_pools.enabled=true",
+		},
+		{
+			name: "missing creator credential",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminCredentials = nil
+				cfg.TrustedPools.CreatorAdminProviderIDs = nil
+				cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-b": {"provider-a"}}
+				cfg.TrustedPools.CreatorAdminBuyerAccountIDs = nil
+			},
+			want: "requires matching trusted_pools.creator_admin_credentials entry",
+		},
+		{
+			name: "invalid provider id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"bad/provider"}}
+			},
+			want: "invalid provider_id",
+		},
+		{
+			name: "non-canonical provider id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {" provider-a "}}
+			},
+			want: "non-canonical provider_id",
+		},
+		{
+			name: "duplicate provider id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-a", "provider-a"}}
+			},
+			want: "unique provider ids",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.TrustedPools.Enabled = true
+			cfg.Coordinator.RequireGatewayContext = true
+			cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{trustedPoolsCreatorCredentialConfig("creator-a", "creator-a-cred", "creator-token-a")}
+			cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-a": {"provider-a"}}
+			cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-a"}}
+			cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-a"}}
+			tc.build(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate err=%v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestTrustedPoolsCreatorAdminBuyerAccountIDsValidateCreatorAndBuyers(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(*Config)
+		want  string
+	}{
+		{
+			name: "credential without buyer allowlist",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{}
+			},
+			want: "must be configured for every trusted_pools.creator_admin_credentials entry",
+		},
+		{
+			name: "disabled trusted pools",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = false
+				cfg.TrustedPools.CreatorAdminCredentials = nil
+				cfg.TrustedPools.CreatorAdminProviderIDs = nil
+				cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = nil
+				cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-a"}}
+			},
+			want: "creator_admin_buyer_account_ids requires trusted_pools.enabled=true",
+		},
+		{
+			name: "missing creator credential",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminCredentials = nil
+				cfg.TrustedPools.CreatorAdminProviderIDs = nil
+				cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = nil
+				cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-b": {"acct-a"}}
+			},
+			want: "requires matching trusted_pools.creator_admin_credentials entry",
+		},
+		{
+			name: "non-canonical buyer-map creator id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{
+					"creator-a":   {"acct-a"},
+					" creator-a ": {"acct-b"},
+				}
+			},
+			want: "non-canonical creator id",
+		},
+		{
+			name: "empty buyer account id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {""}}
+			},
+			want: "empty buyer account id",
+		},
+		{
+			name: "duplicate buyer account id",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-a", "acct-a"}}
+			},
+			want: "unique buyer account ids",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.TrustedPools.Enabled = true
+			cfg.Coordinator.RequireGatewayContext = true
+			cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{trustedPoolsCreatorCredentialConfig("creator-a", "creator-a-cred", "creator-token-a")}
+			cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-a": {"provider-a"}}
+			cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-a"}}
+			cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-a"}}
+			tc.build(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate err=%v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func trustedPoolsCreatorCredentialConfig(creatorID, credentialID, token string) TrustedPoolsCreatorAdminCredentialConfig {
+	return TrustedPoolsCreatorAdminCredentialConfig{
+		CreatorAccountID: creatorID,
+		CredentialID:     credentialID,
+		Token:            token,
+		NotBeforeUTC:     "2026-01-01T00:00:00Z",
+		ExpiresAtUTC:     "2027-01-01T00:00:00Z",
+		Status:           "enabled",
+	}
+}
+
 func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	tests := []struct {

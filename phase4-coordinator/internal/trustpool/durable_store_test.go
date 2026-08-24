@@ -249,6 +249,37 @@ func TestDurableStore_PromotePoolRejectsPausedPoolWhenPreflightRegresses(t *test
 	}
 }
 
+func TestDurableStore_RejectsMalformedMemberProviderID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800000610, 0).UTC()
+	root := newRootFixture(t)
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour)), root),
+		signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+	)
+
+	for _, eventType := range []string{trustpool.EventMemberAdmitted, trustpool.EventMemberRevoked} {
+		eventType := eventType
+		t.Run(eventType, func(t *testing.T) {
+			_, _, _, err := store.AppendValidatedEvent(ctx, ev("op-"+eventType, ts.Add(3*time.Second), eventType, root.poolID, func(e *trustpool.DurableEvent) {
+				e.ProviderID = "bad/provider"
+			}))
+			if err == nil || !strings.Contains(err.Error(), `invalid provider_id "bad/provider"`) {
+				t.Fatalf("AppendValidatedEvent err=%v, want invalid provider_id", err)
+			}
+		})
+	}
+}
+
 func TestDurableStore_PersistsManifestAcceptanceProjection(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -982,8 +1013,26 @@ func TestDurableStore_RootRegistrationNonceIssuedConsumedAndServerTimed(t *testi
 		t.Fatalf("unissued nonce err=%v, want ErrRootRegistrationNonce", err)
 	}
 
-	nonce := issueRootNonce(t, store, "creator-a", "approval-v1", ts.Add(time.Hour))
+	nonce, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce",
+		CreatorAccountID:       "creator-a",
+		CreatorCredentialID:    "creator-a-cred",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		Purpose:                trustpool.RootRegistrationPurposeDefault,
+		ExpiresAtUTC:           ts.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("IssueRootRegistrationNonce: %v", err)
+	}
+	mismatchedCredential := signedRootRegistrationForIssue(t, "op-root-credential-mismatch", ts.Add(1500*time.Millisecond), root.poolID, "creator-a", "approval-v1", nonce, root)
+	mismatchedCredential.CreatorCredentialID = "creator-a-cred-v2"
+	if _, _, _, err := store.AppendValidatedEvent(ctx, mismatchedCredential); !errors.Is(err, trustpool.ErrRootRegistrationNonce) {
+		t.Fatalf("credential-mismatched nonce err=%v, want ErrRootRegistrationNonce", err)
+	}
 	accepted := signedRootRegistrationForIssue(t, "op-root", ts.Add(2*time.Second), root.poolID, "creator-a", "approval-v1", nonce, root)
+	accepted.CreatorCredentialID = "creator-a-cred"
 	if _, _, _, err := store.AppendValidatedEvent(ctx, accepted); err != nil {
 		t.Fatalf("AppendValidatedEvent root: %v", err)
 	}
@@ -1032,11 +1081,12 @@ func TestDurableStore_RootRegistrationNonceIssueIsIdempotent(t *testing.T) {
 	issue := trustpool.RootRegistrationNonceIssue{
 		OperationID:            "op-nonce",
 		CreatorAccountID:       "creator-a",
+		CreatorCredentialID:    "creator-a-cred",
 		ApprovalRecordID:       "approval-v1",
 		CurrentApprovalVersion: "approval-version-1",
 		LaunchEnvironment:      "candidate",
 		Purpose:                trustpool.RootRegistrationPurposeDefault,
-		ExpiresAtUTC:           time.Now().Add(time.Hour).UTC().Truncate(time.Nanosecond),
+		ExpiresAtUTC:           time.Now().Add(250 * time.Millisecond).UTC().Truncate(time.Nanosecond),
 	}
 	first, err := store.IssueRootRegistrationNonce(ctx, issue)
 	if err != nil {
@@ -1046,8 +1096,26 @@ func TestDurableStore_RootRegistrationNonceIssueIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueRootRegistrationNonce retry: %v", err)
 	}
-	if second.Nonce != first.Nonce || !second.IssuedAtUTC.Equal(first.IssuedAtUTC) || second.OperationID != "op-nonce" {
+	if second.Nonce != first.Nonce || !second.IssuedAtUTC.Equal(first.IssuedAtUTC) || second.OperationID != "op-nonce" || second.CreatorCredentialID != "creator-a-cred" {
 		t.Fatalf("retry record = %+v, want original %+v", second, first)
+	}
+	time.Sleep(time.Until(issue.ExpiresAtUTC.Add(time.Millisecond)))
+	expiredRetry, err := store.IssueRootRegistrationNonce(ctx, issue)
+	if err != nil {
+		t.Fatalf("IssueRootRegistrationNonce expired retry: %v", err)
+	}
+	if expiredRetry.Nonce != first.Nonce || !expiredRetry.IssuedAtUTC.Equal(first.IssuedAtUTC) {
+		t.Fatalf("expired retry record = %+v, want original %+v", expiredRetry, first)
+	}
+	newExpired := issue
+	newExpired.OperationID = "op-nonce-new-expired"
+	if _, err := store.IssueRootRegistrationNonce(ctx, newExpired); !errors.Is(err, trustpool.ErrRootRegistrationNonce) {
+		t.Fatalf("new expired nonce issue err=%v, want ErrRootRegistrationNonce", err)
+	}
+	conflictingCredential := issue
+	conflictingCredential.CreatorCredentialID = "creator-a-cred-v2"
+	if _, err := store.IssueRootRegistrationNonce(ctx, conflictingCredential); !errors.Is(err, trustpool.ErrConflictingOperationID) {
+		t.Fatalf("conflicting credential nonce issue err=%v, want ErrConflictingOperationID", err)
 	}
 	conflict := issue
 	conflict.LaunchEnvironment = "production"

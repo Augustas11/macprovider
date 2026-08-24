@@ -22,27 +22,100 @@ import (
 const AdminSchemaVersion = "macprovider.trustpool-admin.v1"
 const maxAdminEventBodyBytes = 64 * 1024
 
+var (
+	errCreatorBoundary         = errors.New("trustpool: creator boundary mismatch")
+	errCreatorProviderBoundary = errors.New("trustpool: creator provider boundary mismatch")
+	errCreatorBuyerBoundary    = errors.New("trustpool: creator buyer boundary mismatch")
+	errCreatorInvalidEvent     = errors.New("trustpool: invalid creator event")
+)
+
+const CreatorAdminCredentialStatusEnabled = "enabled"
+
+type CreatorAdminCredential struct {
+	CreatorAccountID string
+	CredentialID     string
+	Token            string
+	NotBeforeUTC     time.Time
+	ExpiresAtUTC     time.Time
+	Status           string
+}
+
+type creatorPrincipal struct {
+	CreatorID    string
+	CredentialID string
+}
+
+type CreatorAdminConfigReloader interface {
+	SetCreatorAdminConfig(credentials []CreatorAdminCredential, providerIDs, providerDelegatedIDs, buyerAccountIDs map[string][]string)
+}
+
 // AdminDeps wires the default-off SPEC-043 operator control surface. The
 // handler accepts durable pool events only after replay-checking the whole
 // history, then refreshes the live registry pointer held by the buyer server.
 type AdminDeps struct {
-	Store       *Store
-	Registry    *Registry
-	OperatorKey string
+	Store                            *Store
+	Registry                         *Registry
+	OperatorKey                      string
+	CreatorAdminCredentials          []CreatorAdminCredential
+	CreatorAdminProviderIDs          map[string][]string
+	CreatorAdminProviderDelegatedIDs map[string][]string
+	CreatorAdminBuyerAccountIDs      map[string][]string
+	CreatorProviderAdmitted          func(providerID string) bool
 }
 
 func NewAdminHandler(deps AdminDeps) http.Handler {
-	return &adminHandler{deps: deps}
+	h := &adminHandler{deps: deps}
+	h.setCreatorAdminConfig(deps.CreatorAdminCredentials, deps.CreatorAdminProviderIDs, deps.CreatorAdminProviderDelegatedIDs, deps.CreatorAdminBuyerAccountIDs, false)
+	return h
 }
 
 type adminHandler struct {
-	deps AdminDeps
-	mu   sync.Mutex
+	deps            AdminDeps
+	mu              sync.Mutex
+	creatorConfigMu sync.RWMutex
+}
+
+func (h *adminHandler) SetCreatorAdminConfig(credentials []CreatorAdminCredential, providerIDs, providerDelegatedIDs, buyerAccountIDs map[string][]string) {
+	h.setCreatorAdminConfig(credentials, providerIDs, providerDelegatedIDs, buyerAccountIDs, true)
+}
+
+func (h *adminHandler) setCreatorAdminConfig(credentials []CreatorAdminCredential, providerIDs, providerDelegatedIDs, buyerAccountIDs map[string][]string, liveReload bool) {
+	if h == nil {
+		return
+	}
+	h.creatorConfigMu.Lock()
+	defer h.creatorConfigMu.Unlock()
+	h.deps.CreatorAdminCredentials = append([]CreatorAdminCredential(nil), credentials...)
+	h.deps.CreatorAdminProviderIDs = cloneStringSliceMap(providerIDs)
+	h.deps.CreatorAdminProviderDelegatedIDs = cloneStringSliceMap(providerDelegatedIDs)
+	h.deps.CreatorAdminBuyerAccountIDs = cloneStringSliceMap(buyerAccountIDs)
+	if h.deps.Registry != nil {
+		if liveReload {
+			h.deps.Registry.SetCreatorAdminCeilings(providerIDs, providerDelegatedIDs, buyerAccountIDs)
+		} else {
+			h.deps.Registry.InitCreatorAdminCeilings(providerIDs, providerDelegatedIDs, buyerAccountIDs)
+		}
+	}
+}
+
+func cloneStringSliceMap(in map[string][]string) map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for key, values := range in {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
 }
 
 func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.deps.Store == nil {
 		writeAdminJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"code": "unavailable"}})
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/creator/trust-pools/") {
+		h.serveCreatorHTTP(w, r)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/signed-lifecycle") {
@@ -83,6 +156,148 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
 	}
+}
+
+func (h *adminHandler) serveCreatorHTTP(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.creatorFromBearer(r)
+	if !ok {
+		writeAdminJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "unauthorized"}})
+		return
+	}
+	switch {
+	case r.URL.Path == "/creator/trust-pools/me":
+		h.handleCreatorMe(w, r, principal.CreatorID)
+	case r.URL.Path == "/creator/trust-pools/events":
+		h.handleCreatorAppendEvent(w, r, principal)
+	case r.URL.Path == "/creator/trust-pools/root-registration-nonces":
+		h.handleCreatorIssueRootRegistrationNonce(w, r, principal)
+	case r.URL.Path == "/creator/trust-pools/pools":
+		h.handleCreatorListPools(w, r, principal.CreatorID)
+	case strings.HasPrefix(r.URL.Path, "/creator/trust-pools/pools/") && creatorOperatorOnlyPoolRoute(r.URL.Path):
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+	case strings.HasPrefix(r.URL.Path, "/creator/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/lifecycle"):
+		h.handleCreatorRestrictiveLifecycle(w, r, principal)
+	case strings.HasPrefix(r.URL.Path, "/creator/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/audit"):
+		h.handleCreatorPoolAudit(w, r, principal.CreatorID)
+	case strings.HasPrefix(r.URL.Path, "/creator/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/health"):
+		h.handleCreatorPoolHealth(w, r, principal.CreatorID)
+	case strings.HasPrefix(r.URL.Path, "/creator/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/distribution"):
+		h.handleCreatorPoolDistribution(w, r, principal.CreatorID)
+	case strings.HasPrefix(r.URL.Path, "/creator/trust-pools/pools/"):
+		h.handleCreatorGetPool(w, r, principal.CreatorID)
+	default:
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+	}
+}
+
+func (h *adminHandler) creatorFromBearer(r *http.Request) (creatorPrincipal, bool) {
+	if h == nil {
+		return creatorPrincipal{}, false
+	}
+	h.creatorConfigMu.RLock()
+	credentials := append([]CreatorAdminCredential(nil), h.deps.CreatorAdminCredentials...)
+	h.creatorConfigMu.RUnlock()
+	if len(credentials) == 0 {
+		return creatorPrincipal{}, false
+	}
+	sort.Slice(credentials, func(i, j int) bool {
+		if credentials[i].CreatorAccountID == credentials[j].CreatorAccountID {
+			return credentials[i].CredentialID < credentials[j].CredentialID
+		}
+		return credentials[i].CreatorAccountID < credentials[j].CreatorAccountID
+	})
+	now := time.Now().UTC()
+	for _, credential := range credentials {
+		if !auth.BearerTokenMatchesHeader(r.Header, credential.Token) {
+			continue
+		}
+		creatorID := strings.TrimSpace(credential.CreatorAccountID)
+		credentialID := strings.TrimSpace(credential.CredentialID)
+		if creatorID == "" || credentialID == "" {
+			return creatorPrincipal{}, false
+		}
+		if strings.TrimSpace(credential.Status) != CreatorAdminCredentialStatusEnabled {
+			return creatorPrincipal{}, false
+		}
+		if credential.NotBeforeUTC.IsZero() || credential.ExpiresAtUTC.IsZero() {
+			return creatorPrincipal{}, false
+		}
+		if now.Before(credential.NotBeforeUTC.UTC()) || !now.Before(credential.ExpiresAtUTC.UTC()) {
+			return creatorPrincipal{}, false
+		}
+		return creatorPrincipal{CreatorID: creatorID, CredentialID: credentialID}, true
+	}
+	return creatorPrincipal{}, false
+}
+
+func (h *adminHandler) creatorProviderAdmitAllowed(creatorID, providerID string) bool {
+	if h == nil || creatorID == "" || providerID == "" {
+		return false
+	}
+	h.creatorConfigMu.RLock()
+	allowedProviderIDs := append([]string(nil), h.deps.CreatorAdminProviderIDs[creatorID]...)
+	h.creatorConfigMu.RUnlock()
+	for _, allowedProviderID := range allowedProviderIDs {
+		if strings.TrimSpace(allowedProviderID) == providerID {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *adminHandler) creatorProviderCurrentlyAdmitted(providerID string) bool {
+	if h == nil || h.deps.CreatorProviderAdmitted == nil || providerID == "" {
+		return false
+	}
+	return h.deps.CreatorProviderAdmitted(providerID)
+}
+
+func (h *adminHandler) creatorProviderDelegated(creatorID, providerID string) bool {
+	if h == nil || creatorID == "" || providerID == "" {
+		return false
+	}
+	h.creatorConfigMu.RLock()
+	delegatedProviderIDs := append([]string(nil), h.deps.CreatorAdminProviderDelegatedIDs[creatorID]...)
+	h.creatorConfigMu.RUnlock()
+	for _, delegatedProviderID := range delegatedProviderIDs {
+		if strings.TrimSpace(delegatedProviderID) == providerID {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *adminHandler) creatorBuyerAccountAllowed(creatorID, buyerAccountID string) bool {
+	if h == nil || creatorID == "" || buyerAccountID == "" {
+		return false
+	}
+	h.creatorConfigMu.RLock()
+	allowedBuyerAccountIDs := append([]string(nil), h.deps.CreatorAdminBuyerAccountIDs[creatorID]...)
+	h.creatorConfigMu.RUnlock()
+	for _, allowedBuyerAccountID := range allowedBuyerAccountIDs {
+		if strings.TrimSpace(allowedBuyerAccountID) == buyerAccountID {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *adminHandler) handleCreatorMe(w http.ResponseWriter, r *http.Request, creatorID string) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	approval, ok, err := h.deps.Store.CreatorApproval(r.Context(), creatorID)
+	if err != nil {
+		h.writeLookupError(w, "creator_lookup_failed", err)
+		return
+	}
+	if !ok {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"creator": approval})
 }
 
 func (h *adminHandler) handleUpsertCreator(w http.ResponseWriter, r *http.Request) {
@@ -213,6 +428,151 @@ func (h *adminHandler) handleAppendEvent(w http.ResponseWriter, r *http.Request)
 	state, committed, _, err := h.deps.Store.AppendValidatedEvent(r.Context(), e)
 	if err != nil {
 		h.writeMutationError(w, err)
+		return
+	}
+	if !h.refreshRegistryIfAhead(w, state) {
+		return
+	}
+	writeAdminJSON(w, http.StatusAccepted, map[string]any{
+		"event": committed,
+		"pool":  adminPoolResponse(state.Pools[committed.PoolID], state.RouteGateCheckedAt),
+	})
+}
+
+func (h *adminHandler) handleCreatorIssueRootRegistrationNonce(w http.ResponseWriter, r *http.Request, principal creatorPrincipal) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	var issue RootRegistrationNonceIssue
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&issue); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	if bodyCreator := strings.TrimSpace(issue.CreatorAccountID); bodyCreator != "" && bodyCreator != principal.CreatorID {
+		writeAdminJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "creator_mismatch"}})
+		return
+	}
+	if bodyCredentialID := strings.TrimSpace(issue.CreatorCredentialID); bodyCredentialID != "" && bodyCredentialID != principal.CredentialID {
+		writeAdminJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "creator_mismatch"}})
+		return
+	}
+	operationID, err := resolveOperationID(strings.TrimSpace(issue.OperationID), r.Header)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	issue.OperationID = operationID
+	issue.CreatorAccountID = principal.CreatorID
+	issue.CreatorCredentialID = principal.CredentialID
+	record, err := h.deps.Store.IssueRootRegistrationNonce(r.Context(), issue)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	writeAdminJSON(w, http.StatusCreated, map[string]any{"root_registration_nonce": record})
+}
+
+func (h *adminHandler) handleCreatorAppendEvent(w http.ResponseWriter, r *http.Request, principal creatorPrincipal) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	var e DurableEvent
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&e); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var err error
+	e, err = normalizeCreatorEvent(r, e, principal)
+	if err != nil {
+		h.writeRequestMutationError(w, err)
+		return
+	}
+	if err := creatorEventAllowed(e); err != nil {
+		h.writeRequestMutationError(w, err)
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	existing, ok, err := h.deps.Store.ExistingEvent(r.Context(), e.OperationID)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		h.writeReconstructError(w, err)
+		return
+	}
+	if ok {
+		if e.TimestampUTC.IsZero() {
+			e.TimestampUTC = existing.TimestampUTC.UTC()
+		}
+		if !creatorOwnsEventPool(state, existing, principal.CreatorID) {
+			writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+			return
+		}
+		if !sameDurableEvent(existing, e) {
+			h.writeRequestMutationError(w, ErrConflictingOperationID)
+			return
+		}
+		if !h.refreshRegistryIfAhead(w, state) {
+			return
+		}
+		writeAdminJSON(w, http.StatusAccepted, map[string]any{
+			"event": existing,
+			"pool":  adminPoolResponse(state.Pools[existing.PoolID], state.RouteGateCheckedAt),
+		})
+		return
+	}
+	if !creatorOwnsEventPool(state, e, principal.CreatorID) {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	if err := creatorEventValidForCurrentState(state, e); err != nil {
+		h.writeRequestMutationError(w, err)
+		return
+	}
+	if !creatorApprovalValidForMutation(state, e, principal.CreatorID, time.Now().UTC()) {
+		h.writeRequestMutationError(w, ErrCreatorApprovalGate)
+		return
+	}
+	if e.EventType == EventMemberAdmitted {
+		if !h.creatorProviderAdmitAllowed(principal.CreatorID, e.ProviderID) || !h.creatorProviderDelegated(principal.CreatorID, e.ProviderID) || !h.creatorProviderCurrentlyAdmitted(e.ProviderID) {
+			h.writeRequestMutationError(w, errCreatorProviderBoundary)
+			return
+		}
+	}
+	if e.EventType == EventBuyerAuthorized || e.EventType == EventBuyerAuthorizationRm {
+		if !h.creatorBuyerAccountAllowed(principal.CreatorID, e.BuyerAccountID) {
+			h.writeRequestMutationError(w, errCreatorBuyerBoundary)
+			return
+		}
+	}
+	if err := h.requireDeliveryDrained(e); err != nil {
+		h.writeRequestMutationError(w, err)
+		return
+	}
+	state, committed, _, err := h.deps.Store.AppendValidatedEvent(r.Context(), e)
+	if err != nil {
+		h.writeRequestMutationError(w, err)
 		return
 	}
 	if !h.refreshRegistryIfAhead(w, state) {
@@ -529,6 +889,116 @@ func (h *adminHandler) handleRestrictiveLifecycle(w http.ResponseWriter, r *http
 	})
 }
 
+func (h *adminHandler) handleCreatorRestrictiveLifecycle(w http.ResponseWriter, r *http.Request, principal creatorPrincipal) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := poolIDFromSuffixedCreatorPath(r.URL.Path, "/lifecycle")
+	if poolID == "" {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	var body restrictiveLifecycleRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	operationID, err := resolveOperationID(strings.TrimSpace(body.OperationID), r.Header)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	lifecycle := strings.TrimSpace(body.Lifecycle)
+	switch lifecycle {
+	case LifecyclePaused, LifecycleDraining, LifecycleRetired:
+	case LifecycleActive:
+		h.writeMutationError(w, ErrActivationRequiresPromotion)
+		return
+	default:
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
+		return
+	}
+	e := DurableEvent{
+		OperationID:         operationID,
+		TimestampUTC:        body.TimestampUTC,
+		EventType:           EventLifecycleChanged,
+		PoolID:              poolID,
+		CreatorCredentialID: principal.CredentialID,
+		Lifecycle:           lifecycle,
+		Reason:              strings.TrimSpace(body.Reason),
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	existing, ok, err := h.deps.Store.ExistingEvent(r.Context(), e.OperationID)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		h.writeReconstructError(w, err)
+		return
+	}
+	if ok {
+		if e.TimestampUTC.IsZero() {
+			e.TimestampUTC = existing.TimestampUTC.UTC()
+		}
+		if !creatorOwnsPool(state, existing.PoolID, principal.CreatorID) {
+			writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+			return
+		}
+		if !sameDurableEvent(existing, e) {
+			h.writeRequestMutationError(w, ErrConflictingOperationID)
+			return
+		}
+		if !h.refreshRegistryIfAhead(w, state) {
+			return
+		}
+		writeAdminJSON(w, http.StatusAccepted, map[string]any{
+			"event": existing,
+			"pool":  adminPoolResponse(state.Pools[existing.PoolID], state.RouteGateCheckedAt),
+		})
+		return
+	}
+	if !creatorOwnsPool(state, poolID, principal.CreatorID) {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	if err := creatorEventValidForCurrentState(state, e); err != nil {
+		h.writeRequestMutationError(w, err)
+		return
+	}
+	if !creatorApprovalValidForMutation(state, e, principal.CreatorID, time.Now().UTC()) {
+		h.writeRequestMutationError(w, ErrCreatorApprovalGate)
+		return
+	}
+	if err := h.requireDeliveryDrained(e); err != nil {
+		h.writeRequestMutationError(w, err)
+		return
+	}
+	state, committed, _, err := h.deps.Store.AppendValidatedEvent(r.Context(), e)
+	if err != nil {
+		h.writeRequestMutationError(w, err)
+		return
+	}
+	if !h.refreshRegistryIfAhead(w, state) {
+		return
+	}
+	writeAdminJSON(w, http.StatusAccepted, map[string]any{
+		"event": committed,
+		"pool":  adminPoolResponse(state.Pools[committed.PoolID], state.RouteGateCheckedAt),
+	})
+}
+
 func (h *adminHandler) handlePublicAnnouncementApproval(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -754,6 +1224,7 @@ type adminRootRegistrationNonceAudit struct {
 	OperationID            string `json:"operation_id,omitempty"`
 	NonceSHA256            string `json:"nonce_sha256"`
 	CreatorAccountID       string `json:"creator_account_id"`
+	CreatorCredentialID    string `json:"creator_credential_id,omitempty"`
 	ApprovalRecordID       string `json:"approval_record_id"`
 	CurrentApprovalVersion string `json:"current_approval_version"`
 	LaunchEnvironment      string `json:"launch_environment"`
@@ -769,7 +1240,7 @@ func (h *adminHandler) rootRegistrationNonceAuditRecords(ctx context.Context, po
 		return nil, nil
 	}
 	rows, err := h.deps.Store.db.QueryContext(ctx, `
-SELECT operation_id, nonce, creator_account_id, approval_record_id, current_approval_version,
+SELECT operation_id, nonce, creator_account_id, creator_credential_id, approval_record_id, current_approval_version,
        launch_environment, purpose, expires_at_utc, issued_at_utc, consumed_operation_id, consumed_at_utc
 FROM trustpool_root_registration_nonces
 WHERE creator_account_id = ? AND approval_record_id = ?
@@ -781,12 +1252,13 @@ ORDER BY issued_at_utc`, pool.CreatorAccountID, pool.ApprovalRecordID)
 	out := make([]adminRootRegistrationNonceAudit, 0)
 	for rows.Next() {
 		var record adminRootRegistrationNonceAudit
-		var operationID, consumedOperationID, consumedAt sql.NullString
+		var operationID, creatorCredentialID, consumedOperationID, consumedAt sql.NullString
 		var nonce string
 		if err := rows.Scan(
 			&operationID,
 			&nonce,
 			&record.CreatorAccountID,
+			&creatorCredentialID,
 			&record.ApprovalRecordID,
 			&record.CurrentApprovalVersion,
 			&record.LaunchEnvironment,
@@ -803,6 +1275,9 @@ ORDER BY issued_at_utc`, pool.CreatorAccountID, pool.ApprovalRecordID)
 		}
 		if operationID.Valid {
 			record.OperationID = operationID.String
+		}
+		if creatorCredentialID.Valid {
+			record.CreatorCredentialID = creatorCredentialID.String
 		}
 		digest := sha256.Sum256([]byte(nonce))
 		record.NonceSHA256 = hex.EncodeToString(digest[:])
@@ -868,11 +1343,179 @@ func (h *adminHandler) handlePoolDistribution(w http.ResponseWriter, r *http.Req
 	writeAdminJSON(w, http.StatusOK, map[string]any{"distribution_package": buildAdminDistributionPackage(pool, state)})
 }
 
+func (h *adminHandler) handleCreatorListPools(w http.ResponseWriter, r *http.Request, creatorID string) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		h.writeReconstructError(w, err)
+		return
+	}
+	ids := make([]string, 0, len(state.Pools))
+	for id, pool := range state.Pools {
+		if pool != nil && pool.CreatorAccountID == creatorID {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	pools := make([]adminPoolState, 0, len(ids))
+	for _, id := range ids {
+		pools = append(pools, adminPoolResponse(state.Pools[id], state.RouteGateCheckedAt))
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"pools": pools})
+}
+
+func (h *adminHandler) handleCreatorGetPool(w http.ResponseWriter, r *http.Request, creatorID string) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/creator/trust-pools/pools/"))
+	if poolID == "" || strings.Contains(poolID, "/") {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		h.writeReconstructError(w, err)
+		return
+	}
+	pool := state.Pools[poolID]
+	if pool == nil || pool.CreatorAccountID != creatorID {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"pool": adminPoolResponse(pool, state.RouteGateCheckedAt)})
+}
+
+func (h *adminHandler) handleCreatorPoolAudit(w http.ResponseWriter, r *http.Request, creatorID string) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := poolIDFromSuffixedCreatorPath(r.URL.Path, "/audit")
+	if poolID == "" {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		h.writeReconstructError(w, err)
+		return
+	}
+	pool := state.Pools[poolID]
+	if pool == nil || pool.CreatorAccountID != creatorID {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	events, err := h.deps.Store.Events(r.Context())
+	if err != nil {
+		h.writeLookupError(w, "audit_lookup_failed", err)
+		return
+	}
+	filtered := make([]DurableEvent, 0)
+	rootRegistrationOps := make(map[string]bool)
+	for _, e := range events {
+		if e.PoolID == poolID {
+			filtered = append(filtered, e)
+			if e.EventType == EventRootIssuerRegistered && e.OperationID != "" {
+				rootRegistrationOps[e.OperationID] = true
+			}
+		}
+	}
+	nonceAudit, err := h.rootRegistrationNonceAuditRecords(r.Context(), pool, rootRegistrationOps)
+	if err != nil {
+		h.writeLookupError(w, "audit_lookup_failed", err)
+		return
+	}
+	var creatorApproval any
+	if approval, ok := state.CreatorApprovals[pool.CreatorAccountID]; ok {
+		creatorApproval = approval
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{
+		"pool_id":                   poolID,
+		"creator_approval":          creatorApproval,
+		"root_registration_nonces":  nonceAudit,
+		"events":                    filtered,
+		"nonce_material_disclosure": "nonce digests are exported here; consumed nonce material may still appear inside root-registration durable events for replay compatibility",
+	})
+}
+
+func (h *adminHandler) handleCreatorPoolHealth(w http.ResponseWriter, r *http.Request, creatorID string) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := poolIDFromSuffixedCreatorPath(r.URL.Path, "/health")
+	if poolID == "" {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		h.writeReconstructError(w, err)
+		return
+	}
+	pool := state.Pools[poolID]
+	if pool == nil || pool.CreatorAccountID != creatorID {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{
+		"pool_id":       poolID,
+		"health_events": adminHealthEvents(pool, state.RouteGateCheckedAt),
+	})
+}
+
+func (h *adminHandler) handleCreatorPoolDistribution(w http.ResponseWriter, r *http.Request, creatorID string) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	poolID := poolIDFromSuffixedCreatorPath(r.URL.Path, "/distribution")
+	if poolID == "" {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		h.writeReconstructError(w, err)
+		return
+	}
+	pool := state.Pools[poolID]
+	if pool == nil || pool.CreatorAccountID != creatorID {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"distribution_package": buildAdminDistributionPackage(pool, state)})
+}
+
 func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
 	h.disableRegistryOnMalformed(err)
+	h.writeMutationErrorResponse(w, err)
+}
+
+func (h *adminHandler) writeRequestMutationError(w http.ResponseWriter, err error) {
+	h.writeMutationErrorResponse(w, err)
+}
+
+func (h *adminHandler) writeMutationErrorResponse(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrConflictingOperationID):
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "operation_conflict"}})
+	case errors.Is(err, errCreatorBoundary):
+		writeAdminJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "creator_mismatch"}})
+	case errors.Is(err, errCreatorProviderBoundary):
+		writeAdminJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "provider_not_authorized"}})
+	case errors.Is(err, errCreatorBuyerBoundary):
+		writeAdminJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "buyer_not_authorized"}})
 	case errors.Is(err, ErrActivationRequiresPromotion):
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "activation_requires_promotion"}})
 	case errors.Is(err, ErrPromotionPreconditionFailed):
@@ -890,6 +1533,8 @@ func (h *adminHandler) writeMutationError(w http.ResponseWriter, err error) {
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "public_announcement_gate_failed"}})
 	case errors.Is(err, ErrDeliveryDrainPending):
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "delivery_drain_pending"}})
+	case errors.Is(err, errCreatorInvalidEvent):
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
 	case errors.Is(err, ErrProhibitedPromiseClaim):
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "prohibited_promise_claim"}})
 	case errors.Is(err, ErrMalformedDurableEvent):
@@ -955,6 +1600,7 @@ func normalizeAdminEvent(r *http.Request, e DurableEvent) (DurableEvent, error) 
 	e.EventType = strings.TrimSpace(e.EventType)
 	e.PoolID = strings.TrimSpace(e.PoolID)
 	e.CreatorAccountID = strings.TrimSpace(e.CreatorAccountID)
+	e.CreatorCredentialID = strings.TrimSpace(e.CreatorCredentialID)
 	e.ApprovalRecordID = strings.TrimSpace(e.ApprovalRecordID)
 	e.ProviderID = strings.TrimSpace(e.ProviderID)
 	e.BuyerAccountID = strings.TrimSpace(e.BuyerAccountID)
@@ -985,8 +1631,171 @@ func normalizeAdminEvent(r *http.Request, e DurableEvent) (DurableEvent, error) 
 	return e, nil
 }
 
+func normalizeCreatorEvent(r *http.Request, e DurableEvent, principal creatorPrincipal) (DurableEvent, error) {
+	bodyCreatorID := strings.TrimSpace(e.CreatorAccountID)
+	bodyCredentialID := strings.TrimSpace(e.CreatorCredentialID)
+	e, err := normalizeAdminEvent(r, e)
+	if err != nil {
+		return DurableEvent{}, err
+	}
+	if bodyCredentialID != "" && bodyCredentialID != principal.CredentialID {
+		return DurableEvent{}, errCreatorBoundary
+	}
+	e.CreatorCredentialID = principal.CredentialID
+	switch e.EventType {
+	case EventPoolCreated, EventRootIssuerRegistered:
+		if bodyCreatorID != "" && bodyCreatorID != principal.CreatorID {
+			return DurableEvent{}, errCreatorBoundary
+		}
+		e.CreatorAccountID = principal.CreatorID
+	default:
+		if bodyCreatorID != "" && bodyCreatorID != principal.CreatorID {
+			return DurableEvent{}, errCreatorBoundary
+		}
+		e.CreatorAccountID = ""
+	}
+	return e, nil
+}
+
+func creatorEventAllowed(e DurableEvent) error {
+	if hasSignedControlProof(e) {
+		return ErrSignedControlProofPath
+	}
+	switch e.EventType {
+	case EventPoolCreated, EventRootIssuerRegistered, EventManifestAccepted, EventMemberAdmitted, EventMemberRevoked, EventBuyerAuthorized, EventBuyerAuthorizationRm:
+		return nil
+	case EventLifecycleChanged:
+		if e.Lifecycle == LifecycleActive {
+			return ErrActivationRequiresPromotion
+		}
+		switch e.Lifecycle {
+		case LifecyclePaused, LifecycleDraining, LifecycleRetired:
+			return nil
+		default:
+			return ErrMalformedDurableEvent
+		}
+	default:
+		return ErrMalformedDurableEvent
+	}
+}
+
+func creatorOperatorOnlyPoolRoute(path string) bool {
+	for _, suffix := range []string{"/promote", "/public-announcement", "/reviewed-distribution-artifact", "/signed-lifecycle"} {
+		if strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func creatorOwnsEventPool(state *ReconstructedState, e DurableEvent, creatorID string) bool {
+	if state == nil {
+		return false
+	}
+	if e.EventType == EventPoolCreated {
+		existing := state.Pools[e.PoolID]
+		return existing == nil || existing.CreatorAccountID == creatorID
+	}
+	return creatorOwnsPool(state, e.PoolID, creatorID)
+}
+
+func creatorOwnsPool(state *ReconstructedState, poolID, creatorID string) bool {
+	if state == nil {
+		return false
+	}
+	pool := state.Pools[poolID]
+	return pool != nil && pool.CreatorAccountID == creatorID
+}
+
+func creatorEventValidForCurrentState(state *ReconstructedState, e DurableEvent) error {
+	if err := ValidateCanonicalPoolID(e.PoolID); err != nil {
+		return errCreatorInvalidEvent
+	}
+	if state == nil {
+		return errCreatorInvalidEvent
+	}
+	pool := state.Pools[e.PoolID]
+	switch e.EventType {
+	case EventPoolCreated:
+		if !creatorPoolCreatedBindsIdentity(e) {
+			return errCreatorInvalidEvent
+		}
+		if pool != nil {
+			return errCreatorInvalidEvent
+		}
+	case EventRootIssuerRegistered:
+		if pool == nil || pool.RootIssuer != nil {
+			return errCreatorInvalidEvent
+		}
+	case EventManifestAccepted:
+		if pool == nil || pool.RootIssuer == nil {
+			return errCreatorInvalidEvent
+		}
+	case EventMemberAdmitted, EventMemberRevoked, EventBuyerAuthorized, EventBuyerAuthorizationRm, EventLifecycleChanged:
+		if pool == nil {
+			return errCreatorInvalidEvent
+		}
+	}
+	return nil
+}
+
+func creatorPoolCreatedBindsIdentity(e DurableEvent) bool {
+	raw, err := canonicalBase64(e.ManifestSnapshot)
+	if err != nil {
+		return false
+	}
+	snapshot, err := poolmanifest.ParseManifestSnapshot(raw)
+	if err != nil {
+		return false
+	}
+	poolID, err := snapshot.IdentityCore.PoolID()
+	if err != nil {
+		return false
+	}
+	return poolID == e.PoolID
+}
+
+func creatorApprovalValidForMutation(state *ReconstructedState, e DurableEvent, creatorID string, now time.Time) bool {
+	if state == nil || state.CreatorApprovals == nil || creatorID == "" {
+		return false
+	}
+	approval, ok := state.CreatorApprovals[creatorID]
+	if !ok {
+		return false
+	}
+	approvalID := e.ApprovalRecordID
+	version := e.CurrentApprovalVersion
+	environment := e.LaunchEnvironment
+	if e.EventType != EventPoolCreated && e.EventType != EventRootIssuerRegistered {
+		pool := state.Pools[e.PoolID]
+		if pool == nil || pool.CreatorAccountID != creatorID {
+			return false
+		}
+		approvalID = pool.ApprovalRecordID
+		if pool.RootIssuer != nil {
+			version = pool.RootIssuer.CurrentApprovalVersion
+			environment = pool.RootIssuer.LaunchEnvironment
+		}
+	}
+	if version == "" {
+		version = approval.CurrentApprovalVersion
+	}
+	if environment == "" {
+		environment = approval.AllowedLaunchEnvironment
+	}
+	return approval.ValidFor(approvalID, version, environment, now)
+}
+
 func poolIDFromSuffixedAdminPath(path, suffix string) string {
-	poolID := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(path, suffix), "/admin/trust-pools/pools/"))
+	return poolIDFromSuffixedPath(path, "/admin/trust-pools/pools/", suffix)
+}
+
+func poolIDFromSuffixedCreatorPath(path, suffix string) string {
+	return poolIDFromSuffixedPath(path, "/creator/trust-pools/pools/", suffix)
+}
+
+func poolIDFromSuffixedPath(path, prefix, suffix string) string {
+	poolID := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(path, suffix), prefix))
 	if poolID == "" || strings.Contains(poolID, "/") {
 		return ""
 	}

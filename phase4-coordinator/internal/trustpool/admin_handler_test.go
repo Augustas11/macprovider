@@ -83,6 +83,34 @@ func TestAdminHandler_AppendsCandidateEventsAndRejectsActivation(t *testing.T) {
 	}, "op-active-after-promote", http.StatusConflict)
 }
 
+func TestAdminHandler_RejectsMalformedMemberProviderID(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    trustpool.NewRegistry(),
+		OperatorKey: "operator-secret",
+	})
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:        trustpool.EventPoolCreated,
+		PoolID:           root.poolID,
+		CreatorAccountID: "creator-a",
+		ApprovalRecordID: "approval-v1",
+	}, "op-create", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", signedRootRegistrationForIssue(t, "op-root", testAdminTS(1), root.poolID, "creator-a", "approval-v1", issueRootNonce(t, store, "creator-a", "approval-v1", testAdminTS(3600)), root), "op-root", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", signedManifest(t, "op-manifest", testAdminTS(2), root.poolID, 1, root), "op-manifest", http.StatusAccepted)
+	postAdminEvent(t, handler, "operator-secret", trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberAdmitted,
+		PoolID:     root.poolID,
+		ProviderID: "bad/provider",
+	}, "op-bad-provider", http.StatusBadRequest)
+}
+
 func TestAdminHandler_MalformedDurableStateClearsRouteableRegistry(t *testing.T) {
 	t.Parallel()
 	db := openTrustPoolDB(t)
@@ -546,7 +574,8 @@ func TestAdminHandler_SignedRevokeImmediateRevokesProviderAndBumpsGeneration(t *
 		t.Fatalf("pre-revoke snapshot = %+v, want routeable provider-a", before)
 	}
 
-	rec := postAdminSignedLifecycleWithTarget(t, routeable.store, handler, "", root, "op-revoke-immediate", poolmanifest.EmergencyLifecycleRevokeImmediate, "provider-a", "provider compromise", false, http.StatusAccepted)
+	revokeBody := signedLifecycleRequestBodyWithTarget(t, routeable.store, root, "op-revoke-immediate", poolmanifest.EmergencyLifecycleRevokeImmediate, "provider-a", "provider compromise", false)
+	rec := postAdminSignedLifecycleBody(t, handler, "", root.poolID, revokeBody, "", http.StatusAccepted)
 	var body struct {
 		Event struct {
 			EventType         string `json:"event_type"`
@@ -576,7 +605,7 @@ func TestAdminHandler_SignedRevokeImmediateRevokesProviderAndBumpsGeneration(t *
 		t.Fatalf("post-revoke snapshot = %+v buyer_auth=%v, want advanced fail-closed snapshot with buyer auth retained", after, registry.BuyerAuthorized(root.poolID, "acct-allowed"))
 	}
 
-	postAdminSignedLifecycleWithTarget(t, routeable.store, handler, "", root, "op-revoke-immediate", poolmanifest.EmergencyLifecycleRevokeImmediate, "provider-a", "provider compromise", false, http.StatusAccepted)
+	postAdminSignedLifecycleBody(t, handler, "", root.poolID, revokeBody, "", http.StatusAccepted)
 	retry := registry.Snapshot(root.poolID)
 	if retry.Generation != after.Generation || retry.Routeable || len(retry.Members) != 0 {
 		t.Fatalf("idempotent signed revoke retry snapshot = %+v, want unchanged generation %d", retry, after.Generation)
@@ -1414,6 +1443,494 @@ func TestAdminHandler_RejectsUnauthorized(t *testing.T) {
 	assertAdminSchemaVersion(t, rec)
 }
 
+func TestAdminHandler_CreatorSurfaceAllowsOwnedCandidateLaunch(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	registry := trustpool.NewRegistry()
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:                            store,
+		Registry:                         registry,
+		OperatorKey:                      "operator-secret",
+		CreatorAdminCredentials:          creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		CreatorAdminProviderIDs:          map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminProviderDelegatedIDs: map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminBuyerAccountIDs:      map[string][]string{"creator-a": {"acct-allowed"}},
+		CreatorProviderAdmitted:          admittedProviderIDs("provider-a"),
+	})
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+
+	postCreatorEvent(t, handler, "creator-token-a", creatorPoolCreatedEvent(t, root, "approval-v1"), "op-create", http.StatusAccepted)
+	existing, ok, err := store.ExistingEvent(t.Context(), "op-create")
+	if err != nil {
+		t.Fatalf("ExistingEvent: %v", err)
+	}
+	if !ok || existing.CreatorCredentialID != "creator-a-cred" {
+		t.Fatalf("stored create credential=%q ok=%v, want creator-a-cred", existing.CreatorCredentialID, ok)
+	}
+	nonce := postCreatorRootRegistrationNonce(t, handler, "creator-token-a", trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		ExpiresAtUTC:           testAdminTS(3600),
+	}, http.StatusCreated)
+	if nonce.CreatorCredentialID != "creator-a-cred" {
+		t.Fatalf("nonce creator credential id = %q, want creator-a-cred", nonce.CreatorCredentialID)
+	}
+	postCreatorEvent(t, handler, "creator-token-a", signedRootRegistrationForIssue(t, "op-root", testAdminTS(1), root.poolID, "creator-a", "approval-v1", nonce, root), "op-root", http.StatusAccepted)
+	postCreatorEvent(t, handler, "creator-token-a", signedManifest(t, "op-manifest", testAdminTS(2), root.poolID, 1, root), "op-manifest", http.StatusAccepted)
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberAdmitted,
+		PoolID:     root.poolID,
+		ProviderID: "provider-a",
+	}, "op-member", http.StatusAccepted)
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:      trustpool.EventBuyerAuthorized,
+		PoolID:         root.poolID,
+		BuyerAccountID: "acct-allowed",
+	}, "op-buyer", http.StatusAccepted)
+
+	state, err := store.Reconstruct(t.Context())
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	pool := state.Pools[root.poolID]
+	if pool == nil || pool.CreatorAccountID != "creator-a" || !pool.Members["provider-a"] || !pool.BuyerAccounts["acct-allowed"] {
+		t.Fatalf("pool state = %+v, want creator-owned member and buyer authorization", pool)
+	}
+	if snap := registry.Snapshot(root.poolID); !snap.Exists || snap.Routeable || snap.Generation != 6 {
+		t.Fatalf("candidate registry snapshot = %+v, want non-routeable generation 6", snap)
+	}
+	if !registry.BuyerAuthorized(root.poolID, "acct-allowed") {
+		t.Fatal("acct-allowed should be authorized on the creator-owned candidate pool")
+	}
+
+	rec := getCreator(t, handler, "creator-token-a", "/creator/trust-pools/pools", http.StatusOK)
+	if !strings.Contains(rec.Body.String(), root.poolID) {
+		t.Fatalf("creator pool list body=%s missing owned pool", rec.Body.String())
+	}
+	getCreator(t, handler, "creator-token-a", "/creator/trust-pools/pools/"+root.poolID, http.StatusOK)
+	getCreator(t, handler, "creator-token-a", "/creator/trust-pools/pools/"+root.poolID+"/health", http.StatusOK)
+	getCreator(t, handler, "creator-token-a", "/creator/trust-pools/pools/"+root.poolID+"/distribution", http.StatusOK)
+	getCreator(t, handler, "creator-token-a", "/creator/trust-pools/pools/"+root.poolID+"/audit", http.StatusOK)
+}
+
+func TestAdminHandler_CreatorSurfaceReloadRevokesCredentialAndCeilings(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:                            store,
+		Registry:                         trustpool.NewRegistry(),
+		OperatorKey:                      "operator-secret",
+		CreatorAdminCredentials:          creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		CreatorAdminProviderIDs:          map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminProviderDelegatedIDs: map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminBuyerAccountIDs:      map[string][]string{"creator-a": {"acct-a"}},
+		CreatorProviderAdmitted:          admittedProviderIDs("provider-a"),
+	})
+	getCreator(t, handler, "creator-token-a", "/creator/trust-pools/pools", http.StatusOK)
+
+	reloader, ok := handler.(trustpool.CreatorAdminConfigReloader)
+	if !ok {
+		t.Fatal("admin handler does not implement creator admin config reloader")
+	}
+	reloader.SetCreatorAdminConfig(nil, nil, nil, nil)
+	getCreator(t, handler, "creator-token-a", "/creator/trust-pools/pools", http.StatusUnauthorized)
+
+	reloader.SetCreatorAdminConfig(
+		creatorCredentials("creator-a", "creator-a-cred-v2", "creator-token-b"),
+		map[string][]string{"creator-a": {"provider-b"}},
+		map[string][]string{"creator-a": {"provider-b"}},
+		map[string][]string{"creator-a": {"acct-b"}},
+	)
+	getCreator(t, handler, "creator-token-a", "/creator/trust-pools/pools", http.StatusUnauthorized)
+	getCreator(t, handler, "creator-token-b", "/creator/trust-pools/pools", http.StatusOK)
+}
+
+func TestAdminHandler_CreatorSurfaceRejectsCrossCreatorAndOperatorOnlyActions(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:                   store,
+		Registry:                trustpool.NewRegistry(),
+		OperatorKey:             "operator-secret",
+		CreatorAdminCredentials: append(creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"), creatorCredentials("creator-b", "creator-b-cred", "creator-token-b")...),
+		CreatorAdminProviderIDs: map[string][]string{
+			"creator-a": {"provider-a"},
+			"creator-b": {"provider-b"},
+		},
+		CreatorAdminProviderDelegatedIDs: map[string][]string{
+			"creator-a": {"provider-a"},
+			"creator-b": {"provider-b"},
+		},
+		CreatorAdminBuyerAccountIDs: map[string][]string{
+			"creator-a": {"acct-a"},
+			"creator-b": {"acct-b"},
+		},
+		CreatorProviderAdmitted: admittedProviderIDs("provider-a", "provider-b"),
+	})
+	rootA := newRootFixture(t)
+	rootB := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-a", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	approveCreator(t, store, "creator-b", "approval-b", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	postCreatorEvent(t, handler, "creator-token-a", creatorPoolCreatedEvent(t, rootA, "approval-a"), "op-create-a", http.StatusAccepted)
+	postCreatorEvent(t, handler, "creator-token-b", creatorPoolCreatedEvent(t, rootB, "approval-b"), "op-create-b", http.StatusAccepted)
+
+	postCreatorEvent(t, handler, "creator-token-a", creatorPoolCreatedEvent(t, rootB, "approval-b"), "op-create-b", http.StatusNotFound)
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberAdmitted,
+		PoolID:     rootB.poolID,
+		ProviderID: "provider-b",
+	}, "op-member-b", http.StatusNotFound)
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberAdmitted,
+		PoolID:     rootA.poolID,
+		ProviderID: "provider-z",
+	}, "op-member-z", http.StatusForbidden)
+	getCreator(t, handler, "creator-token-a", "/creator/trust-pools/pools/"+rootB.poolID, http.StatusNotFound)
+	rec := getCreator(t, handler, "creator-token-a", "/creator/trust-pools/pools", http.StatusOK)
+	if strings.Contains(rec.Body.String(), rootB.poolID) {
+		t.Fatalf("creator-a pool list body=%s included creator-b pool", rec.Body.String())
+	}
+
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:        trustpool.EventPoolCreated,
+		PoolID:           "pool-c",
+		CreatorAccountID: "creator-b",
+		ApprovalRecordID: "approval-a",
+	}, "op-create-mismatch", http.StatusForbidden)
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType: trustpool.EventLifecycleChanged,
+		PoolID:    rootA.poolID,
+		Lifecycle: trustpool.LifecycleActive,
+	}, "op-active", http.StatusConflict)
+	postCreatorLifecycle(t, handler, "creator-token-a", rootA.poolID, "op-active-2", trustpool.LifecycleActive, "creator cannot activate", http.StatusConflict)
+
+	for _, path := range []string{
+		"/creator/trust-pools/creators",
+		"/creator/trust-pools/pools/" + rootA.poolID + "/promote",
+		"/creator/trust-pools/pools/" + rootA.poolID + "/public-announcement",
+		"/creator/trust-pools/pools/" + rootA.poolID + "/reviewed-distribution-artifact",
+		"/creator/trust-pools/pools/" + rootA.poolID + "/signed-lifecycle",
+	} {
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(`{}`)))
+		req.Header.Set("Authorization", "Bearer creator-token-a")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("POST %s status=%d body=%s, want 404", path, rec.Code, rec.Body.String())
+		}
+		assertAdminSchemaVersion(t, rec)
+	}
+}
+
+func TestAdminHandler_CreatorSurfaceIdempotencyAndPolicyGuards(t *testing.T) {
+	t.Parallel()
+	providerIDs := map[string][]string{"creator-a": {"provider-a"}}
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	registry := trustpool.NewRegistry()
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:                            store,
+		Registry:                         registry,
+		OperatorKey:                      "operator-secret",
+		CreatorAdminCredentials:          creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		CreatorAdminProviderIDs:          providerIDs,
+		CreatorAdminProviderDelegatedIDs: map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminBuyerAccountIDs:      map[string][]string{"creator-a": {"acct-allowed"}},
+		CreatorProviderAdmitted:          admittedProviderIDs("provider-a"),
+	})
+	reloader, ok := handler.(trustpool.CreatorAdminConfigReloader)
+	if !ok {
+		t.Fatal("admin handler does not implement creator admin config reloader")
+	}
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+
+	create := creatorPoolCreatedEvent(t, root, "approval-v1")
+	postCreatorEvent(t, handler, "creator-token-a", create, "op-create", http.StatusAccepted)
+	postCreatorEvent(t, handler, "creator-token-a", create, "op-create", http.StatusAccepted)
+
+	nonce := postCreatorRootRegistrationNonce(t, handler, "creator-token-a", trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		ExpiresAtUTC:           testAdminTS(3600),
+	}, http.StatusCreated)
+	postCreatorEvent(t, handler, "creator-token-a", signedRootRegistrationForIssue(t, "op-root", testAdminTS(1), root.poolID, "creator-a", "approval-v1", nonce, root), "op-root", http.StatusAccepted)
+	postCreatorEvent(t, handler, "creator-token-a", signedManifest(t, "op-manifest", testAdminTS(2), root.poolID, 1, root), "op-manifest", http.StatusAccepted)
+
+	admit := trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberAdmitted,
+		PoolID:     root.poolID,
+		ProviderID: "provider-a",
+	}
+	postCreatorEvent(t, handler, "creator-token-a", admit, "op-member", http.StatusAccepted)
+	reloader.SetCreatorAdminConfig(
+		creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		map[string][]string{"creator-a": {}},
+		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {"acct-allowed"}},
+	)
+	postCreatorEvent(t, handler, "creator-token-a", admit, "op-member", http.StatusAccepted)
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberAdmitted,
+		PoolID:     root.poolID,
+		ProviderID: "provider-a",
+	}, "op-member-again", http.StatusForbidden)
+	reloader.SetCreatorAdminConfig(
+		creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {"acct-allowed"}},
+	)
+
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:      trustpool.EventBuyerAuthorized,
+		PoolID:         root.poolID,
+		BuyerAccountID: "acct-allowed",
+	}, "op-buyer", http.StatusAccepted)
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:      trustpool.EventBuyerAuthorized,
+		PoolID:         root.poolID,
+		BuyerAccountID: "acct-other",
+	}, "op-buyer-other", http.StatusForbidden)
+	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote", http.StatusAccepted)
+	activeSnap := registry.Snapshot(root.poolID)
+	if !activeSnap.Routeable || !activeSnap.Members["provider-a"] || !registry.BuyerAuthorized(root.poolID, "acct-allowed") {
+		t.Fatalf("active registry snapshot = %+v buyer_authorized=%v, want routeable provider and buyer", activeSnap, registry.BuyerAuthorized(root.poolID, "acct-allowed"))
+	}
+	activeGeneration := activeSnap.Generation
+	reloader.SetCreatorAdminConfig(
+		creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		map[string][]string{"creator-a": {}},
+		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {"acct-allowed"}},
+	)
+	if snap := registry.Snapshot(root.poolID); snap.Members["provider-a"] || snap.Generation == activeGeneration {
+		t.Fatalf("provider ceiling snapshot = %+v, want provider removed and generation bumped from %d", snap, activeGeneration)
+	}
+	if _, ok := registry.BeginPoolDeliveryAtGeneration(root.poolID, activeGeneration); ok {
+		t.Fatal("BeginPoolDeliveryAtGeneration accepted stale pre-ceiling generation")
+	}
+	reloader.SetCreatorAdminConfig(
+		creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {}},
+	)
+	if registry.BuyerAuthorized(root.poolID, "acct-allowed") {
+		t.Fatal("buyer ceiling removal left stale buyer authorization live")
+	}
+	if _, authorized := registry.AuthorizeAndSnapshot(root.poolID, "acct-allowed"); authorized {
+		t.Fatal("AuthorizeAndSnapshot accepted buyer removed by creator ceiling")
+	}
+	reloader.SetCreatorAdminConfig(nil, nil, nil, nil)
+	if snap := registry.Snapshot(root.poolID); snap.Members["provider-a"] {
+		t.Fatalf("credential removal snapshot = %+v, want provider denied by retained empty ceiling", snap)
+	}
+	if registry.BuyerAuthorized(root.poolID, "acct-allowed") {
+		t.Fatal("credential removal cleared ceiling and left stale buyer authorization live")
+	}
+	reloader.SetCreatorAdminConfig(
+		creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {"acct-allowed"}},
+	)
+	postCreatorLifecycle(t, handler, "creator-token-a", root.poolID, "op-pause", trustpool.LifecyclePaused, "pause for maintenance", http.StatusAccepted)
+	postCreatorLifecycle(t, handler, "creator-token-a", root.poolID, "op-pause", trustpool.LifecyclePaused, "pause for maintenance", http.StatusAccepted)
+
+	approveCreator(t, store, "creator-a", "approval-v2", "approval-version-2", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusSuspended)
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberRevoked,
+		PoolID:     root.poolID,
+		ProviderID: "provider-a",
+	}, "op-revoke-suspended", http.StatusConflict)
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:      trustpool.EventBuyerAuthorizationRm,
+		PoolID:         root.poolID,
+		BuyerAccountID: "acct-allowed",
+	}, "op-buyer-rm-suspended", http.StatusConflict)
+	postCreatorLifecycle(t, handler, "creator-token-a", root.poolID, "op-retire-suspended", trustpool.LifecycleRetired, "retire while suspended", http.StatusConflict)
+
+	state, err := store.Reconstruct(t.Context())
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	pool := state.Pools[root.poolID]
+	if pool == nil || !pool.Members["provider-a"] || !pool.BuyerAccounts["acct-allowed"] || pool.Lifecycle != trustpool.LifecyclePaused {
+		t.Fatalf("pool after guarded mutations = %+v, want provider/buyer retained and paused", pool)
+	}
+}
+
+func TestAdminHandler_CreatorSurfaceRejectsBadEventsWithoutDisablingRegistry(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	registry := trustpool.NewRegistry()
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:                            store,
+		Registry:                         registry,
+		OperatorKey:                      "operator-secret",
+		CreatorAdminCredentials:          creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		CreatorAdminProviderIDs:          map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminProviderDelegatedIDs: map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminBuyerAccountIDs:      map[string][]string{"creator-a": {"acct-allowed"}},
+		CreatorProviderAdmitted:          admittedProviderIDs("provider-a"),
+	})
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	create := creatorPoolCreatedEvent(t, root, "approval-v1")
+	postCreatorEvent(t, handler, "creator-token-a", create, "op-create", http.StatusAccepted)
+	if snap := registry.Snapshot(root.poolID); !snap.Exists {
+		t.Fatalf("registry snapshot before bad event = %+v, want existing pool", snap)
+	}
+
+	postCreatorEvent(t, handler, "creator-token-a", create, "op-duplicate-create", http.StatusBadRequest)
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:        trustpool.EventPoolCreated,
+		PoolID:           "pool.with.dot",
+		ApprovalRecordID: "approval-v1",
+	}, "op-bad-pool-id", http.StatusBadRequest)
+	if snap := registry.Snapshot(root.poolID); !snap.Exists {
+		t.Fatalf("registry snapshot after rejected creator event = %+v, want still present", snap)
+	}
+}
+
+func TestAdminHandler_CreatorSurfaceRejectsAllowlistedUnadmittedProvider(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:                            store,
+		Registry:                         trustpool.NewRegistry(),
+		OperatorKey:                      "operator-secret",
+		CreatorAdminCredentials:          creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		CreatorAdminProviderIDs:          map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminProviderDelegatedIDs: map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminBuyerAccountIDs:      map[string][]string{"creator-a": {"acct-allowed"}},
+		CreatorProviderAdmitted:          admittedProviderIDs(),
+	})
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	postCreatorEvent(t, handler, "creator-token-a", creatorPoolCreatedEvent(t, root, "approval-v1"), "op-create", http.StatusAccepted)
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberAdmitted,
+		PoolID:     root.poolID,
+		ProviderID: "provider-a",
+	}, "op-member-unadmitted", http.StatusForbidden)
+	state, err := store.Reconstruct(t.Context())
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	if pool := state.Pools[root.poolID]; pool == nil || pool.Members["provider-a"] {
+		t.Fatalf("pool after unadmitted provider admit = %+v, want provider not admitted", pool)
+	}
+}
+
+func TestAdminHandler_CreatorSurfaceRejectsUndelegatedProvider(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:                            store,
+		Registry:                         trustpool.NewRegistry(),
+		OperatorKey:                      "operator-secret",
+		CreatorAdminCredentials:          creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		CreatorAdminProviderIDs:          map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminProviderDelegatedIDs: map[string][]string{"creator-a": {}},
+		CreatorAdminBuyerAccountIDs:      map[string][]string{"creator-a": {"acct-allowed"}},
+		CreatorProviderAdmitted:          admittedProviderIDs("provider-a"),
+	})
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	postCreatorEvent(t, handler, "creator-token-a", creatorPoolCreatedEvent(t, root, "approval-v1"), "op-create", http.StatusAccepted)
+	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberAdmitted,
+		PoolID:     root.poolID,
+		ProviderID: "provider-a",
+	}, "op-member-undelegated", http.StatusForbidden)
+	state, err := store.Reconstruct(t.Context())
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	if pool := state.Pools[root.poolID]; pool == nil || pool.Members["provider-a"] {
+		t.Fatalf("pool after undelegated provider admit = %+v, want provider not admitted", pool)
+	}
+}
+
+func TestAdminHandler_CreatorSurfaceRejectsUnauthorized(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:                            store,
+		Registry:                         trustpool.NewRegistry(),
+		OperatorKey:                      "operator-secret",
+		CreatorAdminCredentials:          creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		CreatorAdminProviderIDs:          map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminProviderDelegatedIDs: map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminBuyerAccountIDs:      map[string][]string{"creator-a": {"acct-allowed"}},
+		CreatorProviderAdmitted:          admittedProviderIDs("provider-a"),
+	})
+	req := httptest.NewRequest(http.MethodGet, "/creator/trust-pools/pools", nil)
+	req.Header.Set("Authorization", "Bearer wrong")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d body=%s, want 401", rec.Code, rec.Body.String())
+	}
+	assertAdminSchemaVersion(t, rec)
+}
+
+func TestAdminHandler_CreatorSurfaceRejectsExpiredCredential(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:                            store,
+		Registry:                         trustpool.NewRegistry(),
+		OperatorKey:                      "operator-secret",
+		CreatorAdminCredentials:          expiredCreatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
+		CreatorAdminProviderIDs:          map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminProviderDelegatedIDs: map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminBuyerAccountIDs:      map[string][]string{"creator-a": {"acct-allowed"}},
+		CreatorProviderAdmitted:          admittedProviderIDs("provider-a"),
+	})
+	req := httptest.NewRequest(http.MethodGet, "/creator/trust-pools/pools", nil)
+	req.Header.Set("Authorization", "Bearer creator-token-a")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d body=%s, want 401", rec.Code, rec.Body.String())
+	}
+	assertAdminSchemaVersion(t, rec)
+}
+
 func TestAdminHandler_ReplayChecksBeforeAppend(t *testing.T) {
 	t.Parallel()
 	store, err := trustpool.NewStore(openTrustPoolDB(t))
@@ -1552,6 +2069,126 @@ func postAdminRootRegistrationNonce(t *testing.T, h http.Handler, operatorKey st
 		t.Fatalf("POST root registration nonce status=%d body=%s, want %d", rec.Code, rec.Body.String(), want)
 	}
 	assertAdminSchemaVersion(t, rec)
+}
+
+func postCreatorEvent(t *testing.T, h http.Handler, creatorToken string, e trustpool.DurableEvent, operationID string, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal creator event: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/creator/trust-pools/events", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+creatorToken)
+	req.Header.Set("Idempotency-Key", operationID)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST creator event %s status=%d body=%s, want %d", operationID, rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+	return rec
+}
+
+func postCreatorRootRegistrationNonce(t *testing.T, h http.Handler, creatorToken string, issue trustpool.RootRegistrationNonceIssue, want int) trustpool.RootRegistrationNonceRecord {
+	t.Helper()
+	body, err := json.Marshal(issue)
+	if err != nil {
+		t.Fatalf("marshal creator root registration nonce issue: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/creator/trust-pools/root-registration-nonces", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+creatorToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST creator root registration nonce status=%d body=%s, want %d", rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+	var decoded struct {
+		RootRegistrationNonce trustpool.RootRegistrationNonceRecord `json:"root_registration_nonce"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode creator root registration nonce: %v", err)
+	}
+	return decoded.RootRegistrationNonce
+}
+
+func postCreatorLifecycle(t *testing.T, h http.Handler, creatorToken, poolID, operationID, lifecycle, reason string, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{
+		"lifecycle": lifecycle,
+		"reason":    reason,
+	})
+	if err != nil {
+		t.Fatalf("marshal creator lifecycle request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/creator/trust-pools/pools/"+poolID+"/lifecycle", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+creatorToken)
+	req.Header.Set("Idempotency-Key", operationID)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST creator lifecycle %s/%s status=%d body=%s, want %d", operationID, lifecycle, rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+	return rec
+}
+
+func getCreator(t *testing.T, h http.Handler, creatorToken, path string, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "Bearer "+creatorToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("GET creator %s status=%d body=%s, want %d", path, rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+	return rec
+}
+
+func admittedProviderIDs(ids ...string) func(string) bool {
+	allowed := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		allowed[id] = true
+	}
+	return func(providerID string) bool {
+		return allowed[providerID]
+	}
+}
+
+func creatorCredentials(creatorID, credentialID, token string) []trustpool.CreatorAdminCredential {
+	now := time.Now().UTC()
+	return []trustpool.CreatorAdminCredential{{
+		CreatorAccountID: creatorID,
+		CredentialID:     credentialID,
+		Token:            token,
+		NotBeforeUTC:     now.Add(-time.Hour),
+		ExpiresAtUTC:     now.Add(24 * time.Hour),
+		Status:           trustpool.CreatorAdminCredentialStatusEnabled,
+	}}
+}
+
+func expiredCreatorCredentials(creatorID, credentialID, token string) []trustpool.CreatorAdminCredential {
+	now := time.Now().UTC()
+	return []trustpool.CreatorAdminCredential{{
+		CreatorAccountID: creatorID,
+		CredentialID:     credentialID,
+		Token:            token,
+		NotBeforeUTC:     now.Add(-2 * time.Hour),
+		ExpiresAtUTC:     now.Add(-time.Hour),
+		Status:           trustpool.CreatorAdminCredentialStatusEnabled,
+	}}
+}
+
+func creatorPoolCreatedEvent(t *testing.T, root rootFixture, approvalID string) trustpool.DurableEvent {
+	t.Helper()
+	snapshot, _ := manifestSnapshotWithPolicyCoreMutation(t, 1, root, nil)
+	return trustpool.DurableEvent{
+		EventType:        trustpool.EventPoolCreated,
+		PoolID:           root.poolID,
+		ApprovalRecordID: approvalID,
+		ManifestSnapshot: snapshot,
+	}
 }
 
 func postAdminPublicAnnouncement(t *testing.T, h http.Handler, operatorKey, poolID string, approval trustpool.PublicAnnouncementApproval, want int) *httptest.ResponseRecorder {

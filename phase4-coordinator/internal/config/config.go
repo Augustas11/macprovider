@@ -14,12 +14,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/providerid"
 	"github.com/augstar/macprovider-coordinator/internal/stats/hardwareverify"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 	"gopkg.in/yaml.v3"
 )
 
-var providerIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 var lowerHex64Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 const (
@@ -43,10 +43,7 @@ var compatibilitySetIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}/[A-Za-
 // initial/proof, admission IssueToken, MintAdmissionTokenAndPairOT) MUST
 // funnel through this helper to keep that invariant.
 func ValidateProviderID(s string) error {
-	if !providerIDPattern.MatchString(s) {
-		return fmt.Errorf("invalid provider_id %q", s)
-	}
-	return nil
+	return providerid.Validate(s)
 }
 
 // ValidateCompatibilitySetID applies the signed release-manifest identifier
@@ -1030,15 +1027,28 @@ type StorageConfig struct {
 // with that reconstructed registry; reconstruction failure disables pool support
 // while preserving global routing.
 type TrustedPoolsConfig struct {
-	Enabled              bool                                   `yaml:"enabled"`
-	RefreshIntervalS     int                                    `yaml:"refresh_interval_s"`
-	ProductionActivation TrustedPoolsProductionActivationConfig `yaml:"production_activation"`
+	Enabled                          bool                                       `yaml:"enabled"`
+	RefreshIntervalS                 int                                        `yaml:"refresh_interval_s"`
+	ProductionActivation             TrustedPoolsProductionActivationConfig     `yaml:"production_activation"`
+	CreatorAdminCredentials          []TrustedPoolsCreatorAdminCredentialConfig `yaml:"creator_admin_credentials"`
+	CreatorAdminProviderIDs          map[string][]string                        `yaml:"creator_admin_provider_ids"`
+	CreatorAdminProviderDelegatedIDs map[string][]string                        `yaml:"creator_admin_provider_delegated_ids"`
+	CreatorAdminBuyerAccountIDs      map[string][]string                        `yaml:"creator_admin_buyer_account_ids"`
 }
 
 type TrustedPoolsProductionActivationConfig struct {
 	AllowedLaunchEnvironments []string `yaml:"allowed_launch_environments"`
 	EvidenceSHA256            string   `yaml:"evidence_sha256"`
 	RootCustodyHashes         []string `yaml:"root_custody_hashes"`
+}
+
+type TrustedPoolsCreatorAdminCredentialConfig struct {
+	CreatorAccountID string `yaml:"creator_account_id"`
+	CredentialID     string `yaml:"credential_id"`
+	Token            string `yaml:"token"`
+	NotBeforeUTC     string `yaml:"not_before_utc"`
+	ExpiresAtUTC     string `yaml:"expires_at_utc"`
+	Status           string `yaml:"status"`
 }
 
 type LoggingConfig struct {
@@ -1351,8 +1361,12 @@ func Default() Config {
 			AuditLogRetentionDays:   90,
 		},
 		TrustedPools: TrustedPoolsConfig{
-			Enabled:          false,
-			RefreshIntervalS: 30,
+			Enabled:                          false,
+			RefreshIntervalS:                 30,
+			CreatorAdminCredentials:          []TrustedPoolsCreatorAdminCredentialConfig{},
+			CreatorAdminProviderIDs:          map[string][]string{},
+			CreatorAdminProviderDelegatedIDs: map[string][]string{},
+			CreatorAdminBuyerAccountIDs:      map[string][]string{},
 			ProductionActivation: TrustedPoolsProductionActivationConfig{
 				AllowedLaunchEnvironments: []string{},
 				RootCustodyHashes:         []string{},
@@ -1634,9 +1648,44 @@ func LoadPayoutTuningOnly(basePath, overlayPath string) (PayoutTuningConfig, err
 // the payout runtime consumes config only via its startup snapshot
 // plus the §6.5 tuning-only SIGHUP listener.
 func LoadForSIGHUPReload(path string) (Config, error) {
+	return LoadForSIGHUPReloadWithOverlay(path, "")
+}
+
+func LoadForSIGHUPReloadWithOverlay(basePath, overlayPath string) (Config, error) {
+	doc, err := readConfigDocumentWithoutPayout(basePath, "base")
+	if err != nil {
+		return Config{}, err
+	}
+	cfg := Default()
+	if len(doc.Content) > 0 {
+		if err := doc.Decode(&cfg); err != nil {
+			return Config{}, fmt.Errorf("base config %s: %w", basePath, err)
+		}
+	}
+	if strings.TrimSpace(overlayPath) != "" {
+		overlayDoc, err := readConfigDocumentWithoutPayout(overlayPath, "overlay")
+		if err != nil {
+			return Config{}, err
+		}
+		if len(overlayDoc.Content) > 0 {
+			if err := overlayDoc.Decode(&cfg); err != nil {
+				return Config{}, fmt.Errorf("overlay config %s: %w", overlayPath, err)
+			}
+		}
+	}
+	// Belt-and-braces: the payout namespace stays at defaults regardless
+	// of what either document contained.
+	cfg.Payout = Default().Payout
+	if err := finalizeLoadedConfig(&cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func readConfigDocumentWithoutPayout(path, label string) (yaml.Node, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return Config{}, fmt.Errorf("base config %s: %w", path, err)
+		return yaml.Node{}, fmt.Errorf("%s config %s: %w", label, path, err)
 	}
 	// Merge-audit r2 (convergent code+architect HIGH): strip the payout
 	// subtree BEFORE typed decode. Resetting cfg.Payout after a typed
@@ -1654,7 +1703,7 @@ func LoadForSIGHUPReload(path string) (Config, error) {
 	// other scalar byte-identical to what Load would see.
 	var doc yaml.Node
 	if err := yaml.Unmarshal(b, &doc); err != nil {
-		return Config{}, fmt.Errorf("base config %s: %w", path, err)
+		return yaml.Node{}, fmt.Errorf("%s config %s: %w", label, path, err)
 	}
 	if len(doc.Content) > 0 && doc.Content[0].Kind == yaml.MappingNode {
 		m := doc.Content[0]
@@ -1670,19 +1719,7 @@ func LoadForSIGHUPReload(path string) (Config, error) {
 		}
 		m.Content = kept
 	}
-	cfg := Default()
-	if len(doc.Content) > 0 {
-		if err := doc.Decode(&cfg); err != nil {
-			return Config{}, fmt.Errorf("base config %s: %w", path, err)
-		}
-	}
-	// Belt-and-braces: the payout namespace stays at defaults regardless
-	// of what the document contained.
-	cfg.Payout = Default().Payout
-	if err := finalizeLoadedConfig(&cfg); err != nil {
-		return Config{}, err
-	}
-	return cfg, nil
+	return doc, nil
 }
 
 func unmarshalYAMLFile(path string, cfg *Config) error {
@@ -1705,6 +1742,11 @@ func finalizeLoadedConfig(cfg *Config) error {
 	}
 	for name, key := range cfg.Auth.OperatorKeys {
 		if err := validateOperatorSecretStrength("auth.operator_keys."+name, key); err != nil {
+			return err
+		}
+	}
+	for i, credential := range cfg.TrustedPools.CreatorAdminCredentials {
+		if err := validateOperatorSecretStrength(fmt.Sprintf("trusted_pools.creator_admin_credentials[%d].token", i), credential.Token); err != nil {
 			return err
 		}
 	}
@@ -1739,6 +1781,13 @@ func (c *Config) resolveEnv() error {
 			return err
 		}
 		c.Auth.OperatorKeys[name] = v
+	}
+	for i := range c.TrustedPools.CreatorAdminCredentials {
+		v, err := resolveEnvValue(fmt.Sprintf("trusted_pools.creator_admin_credentials[%d].token", i), c.TrustedPools.CreatorAdminCredentials[i].Token)
+		if err != nil {
+			return err
+		}
+		c.TrustedPools.CreatorAdminCredentials[i].Token = v
 	}
 	for keyID, raw := range c.Referrals.HMACKeys {
 		v, err := resolveEnvValue("referrals.hmac_keys."+keyID, raw)
@@ -2120,6 +2169,18 @@ func (c Config) Validate() error {
 		return fmt.Errorf("trusted_pools.refresh_interval_s must be in [1,60] when trusted_pools.enabled=true")
 	}
 	if err := validateTrustedPoolsProductionActivation(c.TrustedPools); err != nil {
+		return err
+	}
+	if err := validateTrustedPoolsCreatorAdminCredentials(c.TrustedPools, c.Auth); err != nil {
+		return err
+	}
+	if err := validateTrustedPoolsCreatorAdminProviderIDs(c.TrustedPools); err != nil {
+		return err
+	}
+	if err := validateTrustedPoolsCreatorAdminProviderDelegatedIDs(c.TrustedPools); err != nil {
+		return err
+	}
+	if err := validateTrustedPoolsCreatorAdminBuyerAccountIDs(c.TrustedPools); err != nil {
 		return err
 	}
 	if err := c.validateCompatibilitySet(); err != nil {
@@ -2597,6 +2658,240 @@ func validateTrustedPoolsProductionActivation(c TrustedPoolsConfig) error {
 		seenCustody[value] = true
 	}
 	return nil
+}
+
+func validateTrustedPoolsCreatorAdminCredentials(c TrustedPoolsConfig, auth AuthConfig) error {
+	if len(c.CreatorAdminCredentials) == 0 {
+		return nil
+	}
+	if !c.Enabled {
+		return fmt.Errorf("trusted_pools.creator_admin_credentials requires trusted_pools.enabled=true")
+	}
+	reserved := map[string]string{}
+	if token := strings.TrimSpace(auth.OperatorKey); token != "" {
+		reserved[token] = "auth.operator_key"
+	}
+	if token := strings.TrimSpace(auth.GatewayServiceToken); token != "" {
+		reserved[token] = "auth.gateway_service_token"
+	}
+	for name, token := range auth.OperatorKeys {
+		token = strings.TrimSpace(token)
+		if token != "" {
+			reserved[token] = "auth.operator_keys." + name
+		}
+	}
+	seenTokens := make(map[string]string, len(c.CreatorAdminCredentials))
+	seenCredentials := make(map[string]bool, len(c.CreatorAdminCredentials))
+	for i, credential := range c.CreatorAdminCredentials {
+		field := fmt.Sprintf("trusted_pools.creator_admin_credentials[%d]", i)
+		rawCreatorID := credential.CreatorAccountID
+		creatorID := strings.TrimSpace(credential.CreatorAccountID)
+		rawCredentialID := credential.CredentialID
+		credentialID := strings.TrimSpace(credential.CredentialID)
+		token := strings.TrimSpace(credential.Token)
+		status := strings.TrimSpace(credential.Status)
+		if creatorID == "" {
+			return fmt.Errorf("%s.creator_account_id must be non-empty", field)
+		}
+		if rawCreatorID != creatorID {
+			return fmt.Errorf("%s.creator_account_id must be canonical", field)
+		}
+		if strings.Contains(creatorID, "/") {
+			return fmt.Errorf("%s.creator_account_id contains invalid creator id %q", field, creatorID)
+		}
+		if credentialID == "" {
+			return fmt.Errorf("%s.credential_id must be non-empty", field)
+		}
+		if rawCredentialID != credentialID {
+			return fmt.Errorf("%s.credential_id must be canonical", field)
+		}
+		if strings.Contains(credentialID, "/") {
+			return fmt.Errorf("%s.credential_id contains invalid credential id %q", field, credentialID)
+		}
+		key := creatorID + "/" + credentialID
+		if seenCredentials[key] {
+			return fmt.Errorf("%s duplicates creator credential %s", field, key)
+		}
+		seenCredentials[key] = true
+		if token == "" {
+			return fmt.Errorf("%s.token must be non-empty", field)
+		}
+		if reservedField, ok := reserved[token]; ok {
+			return fmt.Errorf("%s.token must differ from %s", field, reservedField)
+		}
+		if previous, ok := seenTokens[token]; ok {
+			return fmt.Errorf("%s.token must not reuse secret from %s", field, previous)
+		}
+		seenTokens[token] = field
+		notBefore, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(credential.NotBeforeUTC))
+		if err != nil {
+			return fmt.Errorf("%s.not_before_utc must be RFC3339: %w", field, err)
+		}
+		expiresAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(credential.ExpiresAtUTC))
+		if err != nil {
+			return fmt.Errorf("%s.expires_at_utc must be RFC3339: %w", field, err)
+		}
+		if !expiresAt.After(notBefore) {
+			return fmt.Errorf("%s.expires_at_utc must be after not_before_utc", field)
+		}
+		switch status {
+		case "enabled", "disabled":
+		default:
+			return fmt.Errorf("%s.status must be enabled or disabled", field)
+		}
+	}
+	return nil
+}
+
+func validateTrustedPoolsCreatorAdminProviderIDs(c TrustedPoolsConfig) error {
+	creatorIDs := trustedPoolsCreatorCredentialIDs(c)
+	if len(c.CreatorAdminProviderIDs) == 0 && len(creatorIDs) == 0 {
+		return nil
+	}
+	if !c.Enabled {
+		return fmt.Errorf("trusted_pools.creator_admin_provider_ids requires trusted_pools.enabled=true")
+	}
+	for creatorID := range creatorIDs {
+		if _, ok := c.CreatorAdminProviderIDs[creatorID]; !ok {
+			return fmt.Errorf("trusted_pools.creator_admin_provider_ids.%s must be configured for every trusted_pools.creator_admin_credentials entry", creatorID)
+		}
+	}
+	for creatorID, providerIDs := range c.CreatorAdminProviderIDs {
+		rawCreatorID := creatorID
+		creatorID = strings.TrimSpace(creatorID)
+		if creatorID == "" {
+			return fmt.Errorf("trusted_pools.creator_admin_provider_ids contains an empty creator id")
+		}
+		if rawCreatorID != creatorID {
+			return fmt.Errorf("trusted_pools.creator_admin_provider_ids contains non-canonical creator id %q", rawCreatorID)
+		}
+		if strings.Contains(creatorID, "/") {
+			return fmt.Errorf("trusted_pools.creator_admin_provider_ids contains invalid creator id %q", creatorID)
+		}
+		if _, ok := creatorIDs[creatorID]; !ok {
+			return fmt.Errorf("trusted_pools.creator_admin_provider_ids.%s requires matching trusted_pools.creator_admin_credentials entry", creatorID)
+		}
+		seen := make(map[string]bool, len(providerIDs))
+		for _, providerID := range providerIDs {
+			rawProviderID := providerID
+			providerID = strings.TrimSpace(providerID)
+			if rawProviderID != providerID {
+				return fmt.Errorf("trusted_pools.creator_admin_provider_ids.%s contains non-canonical provider_id %q", creatorID, rawProviderID)
+			}
+			if err := ValidateProviderID(providerID); err != nil {
+				return fmt.Errorf("trusted_pools.creator_admin_provider_ids.%s contains invalid provider_id %q", creatorID, providerID)
+			}
+			if seen[providerID] {
+				return fmt.Errorf("trusted_pools.creator_admin_provider_ids.%s must contain unique provider ids", creatorID)
+			}
+			seen[providerID] = true
+		}
+	}
+	return nil
+}
+
+func validateTrustedPoolsCreatorAdminProviderDelegatedIDs(c TrustedPoolsConfig) error {
+	creatorIDs := trustedPoolsCreatorCredentialIDs(c)
+	if len(c.CreatorAdminProviderDelegatedIDs) == 0 && len(creatorIDs) == 0 {
+		return nil
+	}
+	if !c.Enabled {
+		return fmt.Errorf("trusted_pools.creator_admin_provider_delegated_ids requires trusted_pools.enabled=true")
+	}
+	for creatorID := range creatorIDs {
+		if _, ok := c.CreatorAdminProviderDelegatedIDs[creatorID]; !ok {
+			return fmt.Errorf("trusted_pools.creator_admin_provider_delegated_ids.%s must be configured for every trusted_pools.creator_admin_credentials entry", creatorID)
+		}
+	}
+	for creatorID, providerIDs := range c.CreatorAdminProviderDelegatedIDs {
+		rawCreatorID := creatorID
+		creatorID = strings.TrimSpace(creatorID)
+		if creatorID == "" {
+			return fmt.Errorf("trusted_pools.creator_admin_provider_delegated_ids contains an empty creator id")
+		}
+		if rawCreatorID != creatorID {
+			return fmt.Errorf("trusted_pools.creator_admin_provider_delegated_ids contains non-canonical creator id %q", rawCreatorID)
+		}
+		if strings.Contains(creatorID, "/") {
+			return fmt.Errorf("trusted_pools.creator_admin_provider_delegated_ids contains invalid creator id %q", creatorID)
+		}
+		if _, ok := creatorIDs[creatorID]; !ok {
+			return fmt.Errorf("trusted_pools.creator_admin_provider_delegated_ids.%s requires matching trusted_pools.creator_admin_credentials entry", creatorID)
+		}
+		seen := make(map[string]bool, len(providerIDs))
+		for _, providerID := range providerIDs {
+			rawProviderID := providerID
+			providerID = strings.TrimSpace(providerID)
+			if rawProviderID != providerID {
+				return fmt.Errorf("trusted_pools.creator_admin_provider_delegated_ids.%s contains non-canonical provider_id %q", creatorID, rawProviderID)
+			}
+			if err := ValidateProviderID(providerID); err != nil {
+				return fmt.Errorf("trusted_pools.creator_admin_provider_delegated_ids.%s contains invalid provider_id %q", creatorID, providerID)
+			}
+			if seen[providerID] {
+				return fmt.Errorf("trusted_pools.creator_admin_provider_delegated_ids.%s must contain unique provider ids", creatorID)
+			}
+			seen[providerID] = true
+		}
+	}
+	return nil
+}
+
+func validateTrustedPoolsCreatorAdminBuyerAccountIDs(c TrustedPoolsConfig) error {
+	creatorIDs := trustedPoolsCreatorCredentialIDs(c)
+	if len(c.CreatorAdminBuyerAccountIDs) == 0 && len(creatorIDs) == 0 {
+		return nil
+	}
+	if !c.Enabled {
+		return fmt.Errorf("trusted_pools.creator_admin_buyer_account_ids requires trusted_pools.enabled=true")
+	}
+	for creatorID := range creatorIDs {
+		if _, ok := c.CreatorAdminBuyerAccountIDs[creatorID]; !ok {
+			return fmt.Errorf("trusted_pools.creator_admin_buyer_account_ids.%s must be configured for every trusted_pools.creator_admin_credentials entry", creatorID)
+		}
+	}
+	for creatorID, buyerAccountIDs := range c.CreatorAdminBuyerAccountIDs {
+		rawCreatorID := creatorID
+		creatorID = strings.TrimSpace(creatorID)
+		if creatorID == "" {
+			return fmt.Errorf("trusted_pools.creator_admin_buyer_account_ids contains an empty creator id")
+		}
+		if rawCreatorID != creatorID {
+			return fmt.Errorf("trusted_pools.creator_admin_buyer_account_ids contains non-canonical creator id %q", rawCreatorID)
+		}
+		if strings.Contains(creatorID, "/") {
+			return fmt.Errorf("trusted_pools.creator_admin_buyer_account_ids contains invalid creator id %q", creatorID)
+		}
+		if _, ok := creatorIDs[creatorID]; !ok {
+			return fmt.Errorf("trusted_pools.creator_admin_buyer_account_ids.%s requires matching trusted_pools.creator_admin_credentials entry", creatorID)
+		}
+		seen := make(map[string]bool, len(buyerAccountIDs))
+		for _, buyerAccountID := range buyerAccountIDs {
+			rawBuyerAccountID := buyerAccountID
+			buyerAccountID = strings.TrimSpace(buyerAccountID)
+			if buyerAccountID == "" {
+				return fmt.Errorf("trusted_pools.creator_admin_buyer_account_ids.%s contains an empty buyer account id", creatorID)
+			}
+			if rawBuyerAccountID != buyerAccountID {
+				return fmt.Errorf("trusted_pools.creator_admin_buyer_account_ids.%s contains non-canonical buyer account id %q", creatorID, rawBuyerAccountID)
+			}
+			if seen[buyerAccountID] {
+				return fmt.Errorf("trusted_pools.creator_admin_buyer_account_ids.%s must contain unique buyer account ids", creatorID)
+			}
+			seen[buyerAccountID] = true
+		}
+	}
+	return nil
+}
+
+func trustedPoolsCreatorCredentialIDs(c TrustedPoolsConfig) map[string]bool {
+	ids := make(map[string]bool, len(c.CreatorAdminCredentials))
+	for _, credential := range c.CreatorAdminCredentials {
+		if id := strings.TrimSpace(credential.CreatorAccountID); id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
 }
 
 func (c Config) validateCompatibilitySet() error {
