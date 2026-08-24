@@ -1,81 +1,41 @@
 #!/usr/bin/env python3
-"""Build a non-promoting Trusted Pool Layer 2 journey-result payload from redacted evidence."""
+"""Build a non-promoting Trusted Pool creator-MVP journey-result payload from redacted evidence."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import subprocess
 import sys
-import tempfile
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from check_spec_governance import (
-    DuplicateJSONKeyError,
     JOURNEY_RESULT_PAYLOAD_SCHEMA,
-    TRUSTED_POOL_LAYER2_EXECUTION_MODE,
-    TRUSTED_POOL_LAYER2_JOURNEY_ID,
-    TRUSTED_POOL_LAYER2_EVIDENCE_REQUIREMENT_IDS,
-    TRUSTED_POOL_LAYER2_STEP_ID_ORDER,
-    ValidationResult,
-    _load_json,
-    _unique_json_object,
+    TRUSTED_POOL_CREATOR_MVP_ARTIFACT_ID,
+    TRUSTED_POOL_CREATOR_MVP_EVIDENCE_REQUIREMENT_IDS,
+    TRUSTED_POOL_CREATOR_MVP_EXECUTION_MODE,
+    TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID,
+    TRUSTED_POOL_CREATOR_MVP_STEP_ID_ORDER,
 )
 
 
-EVIDENCE_SCHEMA = "macprovider.trusted-pool-layer2-evidence.v1"
-JOURNEY_ID = "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
+EVIDENCE_SCHEMA = "macprovider.trusted-pool-creator-mvp-evidence.v1"
+JOURNEY_ID = "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
 REPOSITORY = "Augustas11/macprovider"
-ARTIFACT_ID = "redacted-trusted-pool-layer2"
+ARTIFACT_ID = "redacted-trusted-pool-creator-mvp"
 REQUIREMENT_RE = re.compile(r"^SPEC-[0-9]{3}-R[0-9]{3}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 DATETIME_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
-FORBIDDEN_KEY_FRAGMENTS = (
-    "access_token",
-    "api_key",
-    "authorization",
-    "authorization_header",
-    "bearer_token",
-    "client_secret",
-    "id_token",
-    "password",
-    "private_key",
-    "raw_prompt",
-    "raw_request",
-    "raw_response",
-    "raw_secret",
-    "raw_signature",
-    "raw_token",
-    "refresh_token",
-    "secret_key",
-    "session_token",
-    "wallet_private",
-)
-FORBIDDEN_SECRET_VALUE_PATTERNS = (
-    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
-    re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+(?!redacted\b)[A-Za-z0-9._~+/=-]{8,}"),
-    re.compile(r"(?i)\bbearer\s+(?!redacted\b)[A-Za-z0-9._~+/=-]{20,}"),
-    re.compile(r"\bghp_[A-Za-z0-9_]{20,}\b"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
-    re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"),
-    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bmp_[A-Za-z0-9_-]{16,}\b"),
-)
-FORBIDDEN_OVERCLAIM_PATTERNS = (
-    re.compile(r"(?i)\bprivacy\s+pool(s)?\b"),
-    re.compile(r"(?i)\bunlinkab(le|ility)\b"),
-    re.compile(r"(?i)\bcoordinator[- ]?blind(ness)?\b"),
-    re.compile(r"(?i)\bprovider[- ]?operator[- ]?blind(ness)?\b"),
-    re.compile(r"(?i)\boperator[- ]?blind(ness)?\b"),
-)
+GIT_FILE_MATCH_ERROR = "redacted evidence source bytes must match --evidence-sha"
 SIGNED_REDACTION_FIELDS = (
     "secrets_redacted",
     "operator_identity_redacted",
@@ -84,81 +44,21 @@ SIGNED_REDACTION_FIELDS = (
 
 
 def die(message: str) -> None:
-    print(f"build-trusted-pool-layer2-journey-result: {message}", file=sys.stderr)
+    print(f"build-trusted-pool-creator-mvp-journey-result: {message}", file=sys.stderr)
     raise SystemExit(1)
 
 
-def load_object(path: Path, label: str) -> dict[str, Any]:
-    result = ValidationResult()
-    value = _load_json(path, result)
-    if result.errors:
-        for error in result.errors:
-            print(f"error: {error}", file=sys.stderr)
-        die(f"{label} rejected")
-    if not isinstance(value, dict):
-        die(f"{label} must be a JSON object")
-    return value
+def load_layer2_builder() -> ModuleType:
+    path = Path(__file__).resolve().with_name("build-trusted-pool-layer2-journey-result.py")
+    spec = importlib.util.spec_from_file_location("trusted_pool_layer2_builder", path)
+    if spec is None or spec.loader is None:
+        die("could not load Trusted Pool Layer 2 journey-result builder")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def load_object_bytes(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
-    try:
-        payload = path.read_bytes()
-        value = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_json_object)
-    except DuplicateJSONKeyError as exc:
-        print(f"error: {path}: duplicate JSON object key {exc.args[0]!r}", file=sys.stderr)
-        die(f"{label} rejected")
-    except (UnicodeDecodeError, json.JSONDecodeError, OSError) as exc:
-        print(f"error: {path}: {exc}", file=sys.stderr)
-        die(f"{label} rejected")
-    if not isinstance(value, dict):
-        die(f"{label} must be a JSON object")
-    return value, payload
-
-
-def write_json_atomically(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, indent=2, sort_keys=False) + "\n"
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
-        temporary = Path(handle.name)
-        handle.write(payload)
-    try:
-        if path.exists() and path.is_symlink():
-            die(f"output must not be a symlink: {path}")
-        temporary.replace(path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
-def repository_relative(root: Path, value: str, label: str) -> str:
-    candidate = Path(value)
-    if candidate.is_absolute():
-        die(f"{label} must be repository-relative")
-    normalized = candidate.as_posix()
-    if normalized.startswith("../") or "/../" in normalized or normalized == "..":
-        die(f"{label} must not contain parent traversal")
-    resolved = (root / normalized).resolve(strict=False)
-    try:
-        resolved.relative_to(root)
-    except ValueError:
-        die(f"{label} must stay inside the repository")
-    return normalized
-
-
-def require_evidence_source(root: Path, source: str) -> tuple[str, Path]:
-    normalized = repository_relative(root, source, "redacted evidence source")
-    name = Path(normalized).name
-    if not normalized.startswith("journeys/evidence/trusted-pool-layer2-") or not name.endswith(".redacted.json"):
-        die("redacted evidence source must be journeys/evidence/trusted-pool-layer2-*.redacted.json")
-    path = root / normalized
-    candidate = root
-    for component in Path(normalized).parts:
-        candidate = candidate / component
-        if candidate.is_symlink():
-            die(f"redacted evidence source is absent or unsafe: {normalized}")
-    if not path.is_file() or path.is_symlink():
-        die(f"redacted evidence source is absent or unsafe: {normalized}")
-    return normalized, path
+layer2 = load_layer2_builder()
 
 
 def require_string(value: Any, pattern: re.Pattern[str] | None, location: str) -> str:
@@ -175,14 +75,27 @@ def require_object(value: Any, location: str) -> dict[str, Any]:
     return value
 
 
+def require_evidence_source(root: Path, source: str) -> tuple[str, Path]:
+    normalized = layer2.repository_relative(root, source, "redacted evidence source")
+    name = Path(normalized).name
+    if not normalized.startswith("journeys/evidence/trusted-pool-creator-mvp-") or not name.endswith(".redacted.json"):
+        die("redacted evidence source must be journeys/evidence/trusted-pool-creator-mvp-*.redacted.json")
+    path = root / normalized
+    candidate = root
+    for component in Path(normalized).parts:
+        candidate = candidate / component
+        if candidate.is_symlink():
+            die(f"redacted evidence source is absent or unsafe: {normalized}")
+    if not path.is_file() or path.is_symlink():
+        die(f"redacted evidence source is absent or unsafe: {normalized}")
+    return normalized, path
+
+
 def parse_requirement_ids(raw: str | None, evidence: dict[str, Any]) -> list[str]:
     covered = evidence.get("requirement_ids")
     if not isinstance(covered, list) or not all(isinstance(item, str) for item in covered):
         die("evidence.requirement_ids must be an array of strings")
-    if raw is None:
-        input_ids = list(covered)
-    else:
-        input_ids = [item.strip() for item in raw.split(",") if item.strip()]
+    input_ids = list(covered) if raw is None else [item.strip() for item in raw.split(",") if item.strip()]
     if not input_ids:
         die("requirement_ids must not be empty")
     if len(set(input_ids)) != len(input_ids):
@@ -193,14 +106,14 @@ def parse_requirement_ids(raw: str | None, evidence: dict[str, Any]) -> list[str
     overclaimed = [item for item in input_ids if item not in covered]
     if overclaimed:
         die(f"--requirement-ids must be covered by evidence.requirement_ids: {', '.join(overclaimed)}")
-    forbidden = [item for item in input_ids if item not in TRUSTED_POOL_LAYER2_EVIDENCE_REQUIREMENT_IDS]
+    forbidden = [item for item in input_ids if item not in TRUSTED_POOL_CREATOR_MVP_EVIDENCE_REQUIREMENT_IDS]
     if forbidden:
-        die(f"trusted-pool Layer 2 journey-result cannot promote {', '.join(forbidden)}")
+        die(f"trusted-pool creator MVP journey-result cannot promote {', '.join(forbidden)}")
     return input_ids
 
 
-def load_mapped_trusted_pool_requirements(root: Path) -> set[str]:
-    conformance = load_object(root / "specs" / "CONFORMANCE.json", "spec conformance")
+def load_mapped_creator_requirements(root: Path) -> set[str]:
+    conformance = layer2.load_object(root / "specs" / "CONFORMANCE.json", "spec conformance")
     requirements = conformance.get("requirements")
     if not isinstance(requirements, list):
         die("specs/CONFORMANCE.json requirements must be an array")
@@ -209,31 +122,11 @@ def load_mapped_trusted_pool_requirements(root: Path) -> set[str]:
         if not isinstance(row, dict):
             continue
         journeys = row.get("journeys")
-        if isinstance(journeys, list) and TRUSTED_POOL_LAYER2_JOURNEY_ID in journeys and row.get("state") == "pending":
+        if isinstance(journeys, list) and TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID in journeys and row.get("state") == "pending":
             requirement_id = row.get("requirement_id")
             if isinstance(requirement_id, str):
                 mapped.add(requirement_id)
     return mapped
-
-
-def require_reachable_commit(root: Path, commit: str, label: str) -> None:
-    completed = subprocess.run(["git", "cat-file", "-e", f"{commit}^{{commit}}"], cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    if completed.returncode != 0:
-        die(f"{label} is not a reachable commit")
-
-
-def require_ancestor_commit(root: Path, ancestor: str, descendant: str) -> None:
-    completed = subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, descendant], cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    if completed.returncode != 0:
-        die("--source-sha must be an ancestor of --evidence-sha")
-
-
-def require_git_file_matches(root: Path, commit: str, source: str, expected: bytes) -> None:
-    completed = subprocess.run(["git", "show", f"{commit}:{source}"], cwd=root, capture_output=True, check=False)
-    if completed.returncode != 0:
-        die("redacted evidence source must exist at --evidence-sha")
-    if completed.stdout != expected:
-        die("redacted evidence source bytes must match --evidence-sha")
 
 
 def require_steps(value: Any) -> list[dict[str, Any]]:
@@ -248,67 +141,53 @@ def require_steps(value: Any) -> list[dict[str, Any]]:
         if step.get("status") != "pass":
             die(f"{step_id}.status must equal 'pass'")
         assertion = require_string(step.get("assertion"), None, f"{step_id}.assertion")
-        reject_forbidden_overclaim_text(assertion, f"{step_id}.assertion")
+        layer2.reject_forbidden_overclaim_text(assertion, f"{step_id}.assertion")
         artifacts = step.get("artifacts")
         if artifacts is None:
             artifacts = [ARTIFACT_ID]
         if not isinstance(artifacts, list) or not artifacts or any(item != ARTIFACT_ID for item in artifacts):
             die(f"{step_id}.artifacts must reference {ARTIFACT_ID}")
         by_id[step_id] = {"id": step_id, "status": "pass", "assertion": assertion, "artifacts": [ARTIFACT_ID]}
-    missing = [step_id for step_id in TRUSTED_POOL_LAYER2_STEP_ID_ORDER if step_id not in by_id]
-    extra = [step_id for step_id in by_id if step_id not in TRUSTED_POOL_LAYER2_STEP_ID_ORDER]
+    missing = [step_id for step_id in TRUSTED_POOL_CREATOR_MVP_STEP_ID_ORDER if step_id not in by_id]
+    extra = [step_id for step_id in by_id if step_id not in TRUSTED_POOL_CREATOR_MVP_STEP_ID_ORDER]
     if missing:
-        die(f"missing trusted-pool Layer 2 step(s): {', '.join(missing)}")
+        die(f"missing trusted-pool creator MVP step(s): {', '.join(missing)}")
     if extra:
-        die(f"unknown trusted-pool Layer 2 step(s): {', '.join(extra)}")
-    return [by_id[step_id] for step_id in TRUSTED_POOL_LAYER2_STEP_ID_ORDER]
-
-
-def reject_forbidden_secret_keys(value: Any, location: str = "$") -> None:
-    if isinstance(value, dict):
-        for key, item in value.items():
-            lowered = key.lower()
-            normalized = normalized_key_name(key)
-            if any(fragment in lowered or fragment in normalized for fragment in FORBIDDEN_KEY_FRAGMENTS):
-                if not (lowered.endswith("_redacted") and item is True):
-                    die(f"{location}.{key} uses a forbidden secret-bearing field name")
-            reject_forbidden_secret_keys(item, f"{location}.{key}")
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            reject_forbidden_secret_keys(item, f"{location}[{index}]")
-    elif isinstance(value, str):
-        if any(pattern.search(value) for pattern in FORBIDDEN_SECRET_VALUE_PATTERNS):
-            die(f"{location} contains a forbidden secret-like value")
-
-
-def reject_forbidden_overclaim_text(value: str, location: str) -> None:
-    if any(pattern.search(value) for pattern in FORBIDDEN_OVERCLAIM_PATTERNS):
-        die(f"{location} contains a forbidden privacy or blindness overclaim")
-
-
-def normalized_key_name(key: str) -> str:
-    camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
-    return re.sub(r"[^a-z0-9]+", "_", camel_split.lower()).strip("_")
+        die(f"unknown trusted-pool creator MVP step(s): {', '.join(extra)}")
+    return [by_id[step_id] for step_id in TRUSTED_POOL_CREATOR_MVP_STEP_ID_ORDER]
 
 
 def require_observations(value: Any) -> dict[str, Any]:
     observations = require_object(value, "observations")
     true_fields = {
+        "approved_creator_record_bound",
+        "buyer_authorization_enforced",
+        "candidate_manifest_accepted",
+        "creator_admin_authorized_only",
+        "creator_suspension_root_compromise_freeze_verified",
+        "delegation_revocation_verified",
+        "descendant_signer_rejection_verified",
+        "emergency_pause_exercised",
+        "fail_closed_no_global_fallback",
         "isolated_environment",
+        "no_duplicate_settlement",
+        "no_private_key_upload",
+        "no_raw_prompt_output_artifact",
+        "pool_existence_oracle_within_threshold",
         "raw_prompt_output_redacted",
+        "restart_reconstruction_verified",
+        "root_registration_replay_checked",
+        "settlement_labels_bound",
         "successful_pooled_request",
-        "pool_required_fail_closed",
-        "pool_id_bound_to_route_snapshot",
-        "pool_selection_authorized",
-        "tenant_isolation_fail_closed_after_generation_bump",
     }
     false_fields = {
-        "production_side_effects",
+        "coordinator_blind_claimed",
         "global_fallback_observed",
-        "unauthorized_pool_oracle_observed",
-        "coordinator_plaintext_privacy_claimed",
-        "provider_operator_blindness_claimed",
         "payout_ready_mutated",
+        "privacy_pool_claimed",
+        "production_side_effects",
+        "public_announcement_without_reviewed_artifact_observed",
+        "unrestricted_creator_admin_observed",
     }
     missing = (true_fields | false_fields) - set(observations)
     if missing:
@@ -325,21 +204,69 @@ def require_observations(value: Any) -> dict[str, Any]:
 def require_candidate_identity(value: Any) -> dict[str, Any]:
     identity = require_object(value, "candidate_identity")
     fingerprint_fields = {
-        "manifest_core_digest",
-        "route_snapshot_digest",
-        "gateway_config_sha256",
-        "coordinator_config_sha256",
-        "provider_identity_fingerprint",
         "buyer_credential_fingerprint",
+        "coordinator_config_sha256",
+        "creator_account_fingerprint",
+        "artifact_set_sha256",
+        "effective_config_digest",
+        "feature_flag_digest",
+        "gateway_config_sha256",
+        "governance_file_digest",
+        "manifest_core_digest",
+        "operation_ids_fingerprint",
+        "provider_identity_fingerprint",
+        "readiness_observations_fingerprint",
+        "reviewed_distribution_artifact_digest",
+        "root_issuer_fingerprint",
+        "route_snapshot_digest",
     }
-    string_fields = {"pool_id", "manifest_version", "pool_generation"}
-    missing = (fingerprint_fields | string_fields) - set(identity)
+    integer_fields = {
+        "clock_skew_allowance_seconds",
+        "maximum_ttl_seconds",
+    }
+    string_fields = {
+        "approval_record_id",
+        "approval_record_version",
+        "coordinator_build_id",
+        "creator_agreement_id",
+        "creator_agreement_expires_at",
+        "creator_agreement_grace_ends_at",
+        "creator_agreement_version",
+        "environment_id",
+        "gate_check_id",
+        "gateway_build_id",
+        "lifecycle_state",
+        "manifest_version",
+        "pool_generation",
+        "pool_id",
+        "pricing_schedule_id",
+        "pricing_schedule_version",
+        "provider_build_id",
+        "verifier_challenge",
+        "verifier_command",
+        "verifier_result",
+    }
+    missing = (fingerprint_fields | integer_fields | string_fields) - set(identity)
     if missing:
         die(f"candidate_identity missing keys: {sorted(missing)}")
     for field in sorted(fingerprint_fields):
         require_string(identity.get(field), FINGERPRINT_RE, f"candidate_identity.{field}")
+    for field in sorted(integer_fields):
+        value = identity.get(field)
+        if not isinstance(value, int) or isinstance(value, bool):
+            die(f"candidate_identity.{field} must be an integer")
+    maximum_ttl = identity.get("maximum_ttl_seconds")
+    if isinstance(maximum_ttl, int) and not isinstance(maximum_ttl, bool) and (maximum_ttl <= 0 or maximum_ttl > 86400):
+        die("candidate_identity.maximum_ttl_seconds must be between 1 and 86400")
+    clock_skew = identity.get("clock_skew_allowance_seconds")
+    if isinstance(clock_skew, int) and not isinstance(clock_skew, bool) and (clock_skew < 0 or clock_skew > 300):
+        die("candidate_identity.clock_skew_allowance_seconds must be between 0 and 300")
     for field in sorted(string_fields):
         require_string(identity.get(field), None, f"candidate_identity.{field}")
+    for field in ("creator_agreement_expires_at", "creator_agreement_grace_ends_at"):
+        require_string(identity.get(field), DATETIME_Z_RE, f"candidate_identity.{field}")
+    if identity.get("verifier_result") != "pass":
+        die("candidate_identity.verifier_result must equal 'pass'")
     return deepcopy(identity)
 
 
@@ -356,18 +283,32 @@ def require_signed_redaction(value: Any) -> dict[str, bool]:
     return signed_redaction
 
 
+def require_reachable_commit(root: Path, commit: str, label: str) -> None:
+    completed = subprocess.run(["git", "cat-file", "-e", f"{commit}^{{commit}}"], cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    if completed.returncode != 0:
+        die(f"{label} is not a reachable commit")
+
+
+def require_ancestor_commit(root: Path, ancestor: str, descendant: str) -> None:
+    completed = subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, descendant], cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    if completed.returncode != 0:
+        die("--source-sha must be an ancestor of --evidence-sha")
+
+
 def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str, requirement_ids: str | None) -> dict[str, Any]:
     require_string(source_sha, COMMIT_RE, "--source-sha")
     require_string(evidence_sha, COMMIT_RE, "--evidence-sha")
     source, path = require_evidence_source(root, source)
-    evidence, evidence_bytes = load_object_bytes(path, "Trusted Pool Layer 2 redacted evidence")
-    reject_forbidden_secret_keys(evidence)
+    evidence, evidence_bytes = layer2.load_object_bytes(path, "Trusted Pool creator MVP redacted evidence")
+    layer2.reject_forbidden_secret_keys(evidence)
     if evidence.get("schema_version") != EVIDENCE_SCHEMA:
         die(f"schema_version must equal {EVIDENCE_SCHEMA!r}")
     if evidence.get("journey_id") != JOURNEY_ID:
         die(f"journey_id must equal {JOURNEY_ID!r}")
-    if JOURNEY_ID != TRUSTED_POOL_LAYER2_JOURNEY_ID:
-        die("JOURNEY_ID drifted from TRUSTED_POOL_LAYER2_JOURNEY_ID")
+    if JOURNEY_ID != TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID:
+        die("JOURNEY_ID drifted from TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID")
+    if ARTIFACT_ID != TRUSTED_POOL_CREATOR_MVP_ARTIFACT_ID:
+        die("ARTIFACT_ID drifted from TRUSTED_POOL_CREATOR_MVP_ARTIFACT_ID")
     require_reachable_commit(root, source_sha, "--source-sha")
     require_reachable_commit(root, evidence_sha, "--evidence-sha")
     require_ancestor_commit(root, source_sha, evidence_sha)
@@ -377,13 +318,13 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     evidence_source_sha = require_string(repository.get("commit"), COMMIT_RE, "repository.commit")
     if evidence_source_sha != source_sha:
         die("repository.commit must exactly match --source-sha")
-    require_git_file_matches(root, evidence_sha, source, evidence_bytes)
+    layer2.require_git_file_matches(root, evidence_sha, source, evidence_bytes)
 
     selected_requirements = parse_requirement_ids(requirement_ids, evidence)
-    mapped = load_mapped_trusted_pool_requirements(root)
+    mapped = load_mapped_creator_requirements(root)
     not_mapped = [item for item in selected_requirements if item not in mapped]
     if not_mapped:
-        die(f"requirement_ids must be pending and mapped to {TRUSTED_POOL_LAYER2_JOURNEY_ID}: {', '.join(not_mapped)}")
+        die(f"requirement_ids must be pending and mapped to {TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID}: {', '.join(not_mapped)}")
 
     captured_at = require_string(evidence.get("captured_at"), DATETIME_Z_RE, "captured_at")
     expires_at = require_string(evidence.get("expires_at"), DATE_RE, "expires_at")
@@ -395,13 +336,13 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     environment = deepcopy(require_object(evidence.get("environment"), "environment"))
     for field in ("class", "hardware_profile", "candidate"):
         require_string(environment.get(field), None, f"environment.{field}")
-    if environment.get("class") != TRUSTED_POOL_LAYER2_EXECUTION_MODE:
-        die(f"environment.class must equal {TRUSTED_POOL_LAYER2_EXECUTION_MODE!r}")
+    if environment.get("class") != TRUSTED_POOL_CREATOR_MVP_EXECUTION_MODE:
+        die(f"environment.class must equal {TRUSTED_POOL_CREATOR_MVP_EXECUTION_MODE!r}")
     result = deepcopy(require_object(evidence.get("result"), "result"))
     if result.get("status") != "pass":
         die("result.status must equal 'pass'")
     if "summary" in result:
-        reject_forbidden_overclaim_text(require_string(result.get("summary"), None, "result.summary"), "result.summary")
+        layer2.reject_forbidden_overclaim_text(require_string(result.get("summary"), None, "result.summary"), "result.summary")
     steps = require_steps(evidence.get("steps"))
     redaction = require_signed_redaction(evidence.get("redaction"))
     observations = require_observations(evidence.get("observations"))
@@ -423,7 +364,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
         "steps": steps,
         "redaction": redaction,
         "run_id": run_id,
-        "execution_mode": TRUSTED_POOL_LAYER2_EXECUTION_MODE,
+        "execution_mode": TRUSTED_POOL_CREATOR_MVP_EXECUTION_MODE,
         "observations": observations,
         "candidate_identity": candidate_identity,
     }
@@ -431,7 +372,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("redacted_evidence_source", help="journeys/evidence/trusted-pool-layer2-*.redacted.json")
+    parser.add_argument("redacted_evidence_source", help="journeys/evidence/trusted-pool-creator-mvp-*.redacted.json")
     parser.add_argument("--root", default=".", help="repository root")
     parser.add_argument("--output", required=True, help="unsigned journey-result payload output path")
     parser.add_argument("--source-sha", required=True, help="expected source/build commit captured by the evidence")
@@ -450,8 +391,8 @@ def main(argv: list[str] | None = None) -> int:
         evidence_sha=args.evidence_sha,
         requirement_ids=args.requirement_ids,
     )
-    write_json_atomically(output, payload)
-    print(f"build-trusted-pool-layer2-journey-result: wrote {output}")
+    layer2.write_json_atomically(output, payload)
+    print(f"build-trusted-pool-creator-mvp-journey-result: wrote {output}")
     return 0
 
 
