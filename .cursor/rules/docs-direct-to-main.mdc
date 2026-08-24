@@ -1,39 +1,42 @@
 ---
-description: Docs-only changes commit and push straight to main — never open a PR
+description: Docs-only changes may go direct to clean main when they meet AGENTS.md criteria
 alwaysApply: true
 ---
 
-# Docs-only → direct to `main` (no PR)
+# Docs-only direct-to-main exception
 
-In `Augustas11/macprovider` / macprovider-poc worktrees:
-
-**Do not open a pull request for docs-only work.** Commit on a clean `main` synced to `origin/main`, then push straight to `main`.
+`AGENTS.md` is canonical. Docs-only narrative changes may go direct to `main`
+only when the working tree is clean, local `main` exactly mirrors `origin/main`,
+and the change touches no executable, config, schema, release, catalog,
+rate-card, workflow, or runtime-affecting path.
 
 ## Docs-only means
 
-- Markdown: specs planning/audit prompts, runbooks, beta exploration reports, close-criteria / close-record notes, decision-log append-only entries when they are narrative only
-- Other non-executable documentation artifacts
+- Markdown specs planning/audit prompts, runbooks, beta exploration reports,
+  close-criteria or close-record notes, and narrative-only decision-log entries.
+- Other non-executable documentation artifacts.
 
-## Not docs-only (feature branch + PR required)
+## Not docs-only
 
-- Any executable code (Swift, Go, scripts that run in CI/prod, shell shipped to providers)
-- Money-path / auth paths: `phase4-coordinator/internal/{billing,buyer,auth,requestlog}/`, `phase5-gateway/internal/{router,auth}/`
-- Catalog / rate-card / `coordinator.yaml` / static JSON that affects runtime
-- CI workflow changes, schemas that gate validation, release tooling
+Use a feature branch and PR for:
 
-## Why
+- Any executable code: Swift, Go, CI/prod scripts, or shell shipped to providers.
+- Money-path or auth paths:
+  `phase4-coordinator/internal/{billing,buyer,auth,requestlog}/` and
+  `phase5-gateway/internal/{router,auth}/`.
+- Catalog, rate-card, `coordinator.yaml`, static JSON, CI workflows, schemas,
+  release tooling, or anything that affects runtime behavior.
 
-Docs PRs still schedule the full macOS CI matrix (`macos-15` Swift + SPEC-015), burn scarce runners, and slow real code PRs. Direct-to-main skips that queue waste.
-
-## Ship sequence
+## Ship Sequence
 
 ```bash
 git fetch origin
-git checkout main && git reset --hard origin/main   # only when main is clean of unique work
-# edit docs…
+git checkout main
+git reset --hard origin/main   # only when main is clean of unique work
+# edit docs...
 git add <docs paths>
-git commit -m "…"
+git commit -m "..."
 git push origin main
 ```
 
-Never invent a `docs/…` branch or `gh pr create` for pure documentation.
+When in doubt, use a branch and PR.
