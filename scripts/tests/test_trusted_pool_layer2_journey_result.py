@@ -54,7 +54,7 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
             "pool_required_fail_closed": True,
             "pool_id_bound_to_route_snapshot": True,
             "pool_selection_authorized": True,
-            "tenant_isolation_generation_fenced": True,
+            "tenant_isolation_fail_closed_after_generation_bump": True,
             "production_side_effects": False,
             "global_fallback_observed": False,
             "unauthorized_pool_oracle_observed": False,

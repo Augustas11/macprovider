@@ -295,7 +295,7 @@ def require_observations(value: Any) -> dict[str, Any]:
         "pool_required_fail_closed",
         "pool_id_bound_to_route_snapshot",
         "pool_selection_authorized",
-        "tenant_isolation_generation_fenced",
+        "tenant_isolation_fail_closed_after_generation_bump",
     }
     false_fields = {
         "production_side_effects",

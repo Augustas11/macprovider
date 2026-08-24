@@ -1213,7 +1213,7 @@ def _validate_trusted_pool_layer2_journey_result(
             "pool_required_fail_closed",
             "pool_id_bound_to_route_snapshot",
             "pool_selection_authorized",
-            "tenant_isolation_generation_fenced",
+            "tenant_isolation_fail_closed_after_generation_bump",
         }
         false_fields = {
             "production_side_effects",
