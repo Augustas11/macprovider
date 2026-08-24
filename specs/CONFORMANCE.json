@@ -6426,7 +6426,7 @@
     {
       "requirement_id": "SPEC-045-R001",
       "spec_id": "SPEC-045",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeCommand",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeRunCommand",
@@ -6442,18 +6442,26 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "The local command, bind validation, descriptor, and startup/status redaction now have implementation/test selectors, but production promotion remains pending until signed `JOURNEY-LOCAL-CONSUMER-ENDPOINT` evidence is committed and reconciled."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
+          "source": null,
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        },
+        {
+          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
+          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-045-R002",
       "spec_id": "SPEC-045",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func validatePreAuthBoundsAndFraming",
@@ -6471,18 +6479,26 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "The endpoint subset, parser/resource limits, model allowlist, chat proxy pass-through, and local/fake-gateway compatibility now have implementation/test selectors, but real SDK compatibility still requires signed `JOURNEY-LOCAL-CONSUMER-ENDPOINT` evidence."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
+          "source": null,
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        },
+        {
+          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
+          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-045-R003",
       "spec_id": "SPEC-045",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeLocalTokenVerifier",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeCredentialLoader",
@@ -6499,18 +6515,26 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "Credential source precedence, local-token verification, credential-file hardening, generated upstream headers, and browser-origin rejection now have implementation/test selectors, but signed real-gateway evidence remains pending."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
+          "source": null,
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        },
+        {
+          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
+          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-045-R004",
       "spec_id": "SPEC-045",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeBudgetConfig",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumePricedExposureEstimate",
@@ -6527,18 +6551,26 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "Local model allowlist, trusted pricing, chargeable admission, gross micro-USD arithmetic, stale-pricing warnings, per-request caps, and unpriced override handling now have implementation/test selectors; signed real-gateway journey evidence remains pending."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
+          "source": null,
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        },
+        {
+          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
+          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-045-R005",
       "spec_id": "SPEC-045",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeBudgetLedger",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeBudgetStatusCommand",
@@ -6556,18 +6588,26 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "The budget ledger, path classes, lock handling, micro-USD rows, closed transitions, settlement timing, streaming settlement, held reservations, and recovery commands now have implementation/test selectors; signed restart/recovery journey evidence remains pending."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
+          "source": null,
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        },
+        {
+          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
+          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-045-R006",
       "spec_id": "SPEC-045",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeStatusCommand",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:func statusPayload",
@@ -6584,18 +6624,26 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "Local status, descriptor discovery, no-store caching, pricing warnings, no-budget representation, and redaction behavior now have implementation/test selectors; signed redacted status/log evidence remains pending."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
+          "source": null,
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        },
+        {
+          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
+          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-045-R007",
       "spec_id": "SPEC-045",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func writeLocalError",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func classifyUpstreamFailure",
@@ -6612,18 +6660,26 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "Local error envelopes, upstream preservation, forwarded-upstream provenance, redirect stripping, compressed response failure, and streaming error settlement now have implementation/test selectors; signed real-gateway error/redaction evidence remains pending."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
+          "source": null,
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        },
+        {
+          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
+          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-045-R008",
       "spec_id": "SPEC-045",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumePinnedUpstreamClient",
@@ -6640,13 +6696,21 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "Automated local/fake-gateway coverage and signed-journey promotion tooling now have implementation/test selectors, but staging-or-production signed `JOURNEY-LOCAL-CONSUMER-ENDPOINT` evidence has not been committed and reconciled."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
+          "source": null,
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        },
+        {
+          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
+          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2027-08-24"
+        }
+      ],
+      "gap": null
     }
   ]
 }
