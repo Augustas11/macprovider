@@ -132,25 +132,10 @@ jobs:
           REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
         run: |
           set -euo pipefail
-          python3 - "$REQUIREMENT_IDS" "$ENVELOPE" <<'PY'
-          import subprocess
-          import sys
-
-          requirement_ids = [item for item in sys.argv[1].split(",") if item]
-          envelope = sys.argv[2]
-          for requirement_id in requirement_ids:
-              subprocess.run(
-                  [
-                      "python3",
-                      "scripts/promote-signed-journey-result.py",
-                      "--base-ref",
-                      "origin/main",
-                      requirement_id,
-                      envelope,
-                  ],
-                  check=True,
-              )
-          PY
+          python3 scripts/promote-signed-journey-result.py \
+            --base-ref origin/main \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            "$ENVELOPE"
 
       - name: Verify promoted ledger and committed artifact set
         shell: bash

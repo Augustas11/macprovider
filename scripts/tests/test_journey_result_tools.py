@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import contextlib
 import io
 import json
@@ -237,6 +238,79 @@ class JourneyResultToolsTests(unittest.TestCase):
                 },
                 requirement["evidence"],
             )
+            self.assertEqual([], validate_repository(root, trusted_journey_result_public_key_sha256=trusted_hash).errors)
+
+    def test_promoter_batches_requirements_into_one_ledger_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            private_key = generate_acceptance_key(root)
+            trusted_hash = hashlib.sha256((root / "security" / "acceptance-candidate-signing-public.pem").read_bytes()).hexdigest()
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+            first = conformance["requirements"][0]
+            first["journeys"] = ["JOURNEY-BOOT"]
+            second = copy.deepcopy(first)
+            second["requirement_id"] = "SPEC-001-R002"
+            conformance["requirements"].append(second)
+            conformance_path.write_text(json.dumps(conformance, indent=2) + "\n", encoding="utf-8")
+            payload_path = root / "journey-payload.json"
+            requirement_ids = ["SPEC-001-R001", "SPEC-001-R002"]
+            envelope = signed_journey_envelope(commit, requirement_ids=requirement_ids, signatures=[])
+            payload_path.write_text(json.dumps(envelope["signed"], indent=2) + "\n", encoding="utf-8")
+            evidence_path = root / "journeys" / "evidence" / "signed-result.json"
+            env = os.environ.copy()
+            env["MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM"] = private_key
+            openssl = shutil.which("openssl")
+            if openssl is None:
+                raise unittest.SkipTest("openssl is required")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SIGNER),
+                    "--root",
+                    str(root),
+                    "--input",
+                    str(payload_path),
+                    "--output",
+                    "journeys/evidence/signed-result.json",
+                    "--verified-at",
+                    "2026-01-01T00:00:01Z",
+                    "--openssl-bin",
+                    openssl,
+                ],
+                env=env,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+
+            promoter = load_promoter_module()
+            with contextlib.redirect_stdout(io.StringIO()):
+                promoter.promote_many(
+                    root,
+                    requirement_ids,
+                    "journeys/evidence/signed-result.json",
+                    base_ref="HEAD",
+                    trusted_public_key_sha256=trusted_hash,
+                )
+
+            conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+            rows = {item["requirement_id"]: item for item in conformance["requirements"]}
+            digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+            for requirement_id in requirement_ids:
+                requirement = rows[requirement_id]
+                self.assertEqual("conformant", requirement["state"])
+                self.assertIsNone(requirement["gap"])
+                self.assertIn(
+                    {
+                        "artifact": f"sha256:{digest}",
+                        "source": "journeys/evidence/signed-result.json",
+                        "captured_at": "2026-01-01",
+                        "expires_at": "2027-01-01",
+                    },
+                    requirement["evidence"],
+                )
             self.assertEqual([], validate_repository(root, trusted_journey_result_public_key_sha256=trusted_hash).errors)
 
     def test_promoter_restores_ledger_when_gate_rejects(self) -> None:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import functools
 import hashlib
 import json
 import os
@@ -2930,6 +2931,7 @@ def _extract_python_mapping_fragment(text: str, selector: str) -> str | None:
     return fragments[0]
 
 
+@functools.lru_cache(maxsize=4096)
 def _selector_identifier(selector: str) -> str | None:
     stripped = selector.strip()
     for pattern in (
@@ -3164,6 +3166,7 @@ def _extract_mapping_fragment(text: str, selector: str, relative: str) -> str | 
     return _extract_text_anchor_fragment(text, selector)
 
 
+@functools.lru_cache(maxsize=4096)
 def _mapping_selector_resolves(text: str, selector: str, relative: str) -> str | None:
     return _extract_mapping_fragment(text, selector, relative)
 
@@ -3191,8 +3194,8 @@ def _commit_mapping_selector_matches_current(root: Path, commit: str, mapping: s
         current = current_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return False
-    committed_fragment = _extract_mapping_fragment(committed, selector, relative)
-    current_fragment = _extract_mapping_fragment(current, selector, relative)
+    committed_fragment = _mapping_selector_resolves(committed, selector, relative)
+    current_fragment = _mapping_selector_resolves(current, selector, relative)
     return committed_fragment is not None and committed_fragment == current_fragment
 
 
