@@ -76,6 +76,11 @@ FORBIDDEN_OVERCLAIM_PATTERNS = (
     re.compile(r"(?i)\bprovider[- ]?operator[- ]?blind(ness)?\b"),
     re.compile(r"(?i)\boperator[- ]?blind(ness)?\b"),
 )
+SIGNED_REDACTION_FIELDS = (
+    "secrets_redacted",
+    "operator_identity_redacted",
+    "local_account_names_redacted",
+)
 
 
 def die(message: str) -> None:
@@ -338,6 +343,19 @@ def require_candidate_identity(value: Any) -> dict[str, Any]:
     return deepcopy(identity)
 
 
+def require_signed_redaction(value: Any) -> dict[str, bool]:
+    redaction = require_object(value, "redaction")
+    for field, redacted in sorted(redaction.items()):
+        if field.endswith("_redacted") and redacted is not True:
+            die(f"redaction.{field} must be true")
+    signed_redaction: dict[str, bool] = {}
+    for field in SIGNED_REDACTION_FIELDS:
+        if redaction.get(field) is not True:
+            die(f"redaction.{field} must be true")
+        signed_redaction[field] = True
+    return signed_redaction
+
+
 def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str, requirement_ids: str | None) -> dict[str, Any]:
     require_string(source_sha, COMMIT_RE, "--source-sha")
     require_string(evidence_sha, COMMIT_RE, "--evidence-sha")
@@ -385,10 +403,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     if "summary" in result:
         reject_forbidden_overclaim_text(require_string(result.get("summary"), None, "result.summary"), "result.summary")
     steps = require_steps(evidence.get("steps"))
-    redaction = deepcopy(require_object(evidence.get("redaction"), "redaction"))
-    for field in ("secrets_redacted", "operator_identity_redacted", "local_account_names_redacted"):
-        if redaction.get(field) is not True:
-            die(f"redaction.{field} must be true")
+    redaction = require_signed_redaction(evidence.get("redaction"))
     observations = require_observations(evidence.get("observations"))
     candidate_identity = require_candidate_identity(evidence.get("candidate_identity"))
     artifact_sha = hashlib.sha256(evidence_bytes).hexdigest()
