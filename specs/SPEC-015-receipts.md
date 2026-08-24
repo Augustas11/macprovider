@@ -1064,8 +1064,8 @@ operator. v0.3+ stronger roots are §15 Q1.
 
 The "verifiable inference" tag in the README is the central
 differentiator from operator-trusted inference networks. The bar is
-not academic ZK-verifiable inference (covered in
-`doc/internal/zk-verifiable-inference-design.md` as exploratory) — it
+not academic ZK-verifiable inference (treated as exploratory, not part of the
+current shipped verifier contract) — it
 is the minimum mechanism that lets a buyer prove a specific provider
 served a specific prompt-output pair.
 

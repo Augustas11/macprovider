@@ -38,7 +38,7 @@ build.
    — project context: what Mac Provider is, why Phase 3 exists,
    what Tier 1 vs Tier 2 means
 
-3. /Users/augstar/macprovider-poc/doc/PHASE1_REPORT.md
+3. /Users/augstar/macprovider-poc/docs/legacy/phase1/PHASE1_REPORT.md
    — Phase 1 evidence; every quirk and finding the binary must handle
 
 4. /Users/augstar/macprovider-poc/beta/DECISION_CRITERIA.md
@@ -74,7 +74,7 @@ A.1  Does every entry in beta/DECISION_CRITERIA.md's "Decision log"
      Walk the decision log row-by-row; mark each as covered or uncovered.
 
 A.2  Does the spec address every "Phase 3 binary or coordinator must..."
-     bullet in doc/PHASE1_REPORT.md § "SSE quirks to handle in Phase 3 binary"?
+     bullet in docs/legacy/phase1/PHASE1_REPORT.md § "SSE quirks to handle in Phase 3 binary"?
      There should be at least 5 such items mapped.
 
 A.3  Does the spec address every adversarial workload in

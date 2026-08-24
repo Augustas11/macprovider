@@ -15,8 +15,8 @@ brief to open them. The GATE A decision below is locked in advance.
 | # | PR | Squash | Audit refs | Touches |
 |---|---|---|---|---|
 | M3-3 | [#54](https://github.com/Augustas11/macprovider/pull/54) | `65e6199` | DEPE-4 | `scripts/gather-third-party-notices.sh` (new), `phase3-binary/dist/package.sh` |
-| M3-5 | [#52](https://github.com/Augustas11/macprovider/pull/52) | `925af43` | DEVE-8, DEPE-7 | `git rm logs/` + `git rm results/`, `git mv results/REPORT.md → doc/PHASE1_REPORT.md`, `beta/requirements.txt` (new), `beta/README.md`, `.gitignore`, cross-doc REPORT.md references |
-| M3-6 | [#53](https://github.com/Augustas11/macprovider/pull/53) | `18f76c0` | DOCS-6 | `doc/provider-economics.md` (canonical, relocated out of audits/ during fixup), `phase3-binary/README.md` (appendix pointer) |
+| M3-5 | [#52](https://github.com/Augustas11/macprovider/pull/52) | `925af43` | DEVE-8, DEPE-7 | `git rm logs/` + `git rm results/`, `git mv results/REPORT.md → docs/legacy/phase1/PHASE1_REPORT.md`, `beta/requirements.txt` (new), `beta/README.md`, `.gitignore`, cross-doc REPORT.md references |
+| M3-6 | [#53](https://github.com/Augustas11/macprovider/pull/53) | `18f76c0` | DOCS-6 | `docs/legacy/phase1/provider-economics.md` (canonical, relocated out of audits/ during fixup), `phase3-binary/README.md` (appendix pointer) |
 | M3-9 | [#55](https://github.com/Augustas11/macprovider/pull/55) | `c33ed08` | ARCH-4 | pure file moves inside `phase5-gateway/internal/router/`: new `oauth.go`, `disclosure.go`, `chat_proxy.go`, `admin.go`, `auth_helpers.go`; `server.go` slimmed (and post-fixup boundary-cleaned: `authResult` moved to `auth_helpers.go`, chat helpers migrated to `chat_proxy.go`) |
 
 All four landed via squash-merge; CI was green pre-merge on each branch.
@@ -48,7 +48,7 @@ the PR branches before merge:
   still listed the deleted directories; updated. Two living references to
   `results/REPORT.md` (in `beta/harness.py:15` and
   `phase3-binary/implementation-notes.html:591`) were updated to the new
-  `doc/PHASE1_REPORT.md` path.
+  `docs/legacy/phase1/PHASE1_REPORT.md` path.
 - **M3-6 / PR #53** — the doc claimed `rate_card_excerpt` JSON keys were
   snake_case (`prompt_credits_per_mtok`); actually `RateCardEntry` has only
   yaml tags, so Go's `encoding/json` emits PascalCase (`PromptCreditsPerMtok`).
@@ -57,8 +57,8 @@ the PR branches before merge:
   of magnitude); fixed to match `formula.go`. The architect lens flagged the
   canonical doc as misplaced — `audits/2026-06-10/` is for dated audit
   deliverables, not standing provider reference docs. Moved to
-  `doc/provider-economics.md` (matched the house `doc/` casing established
-  by M3-5's `doc/PHASE1_REPORT.md`). Added the SPEC-005 payout-boundary
+  `docs/legacy/phase1/provider-economics.md` (matched the house `doc/` casing established
+  by M3-5's `docs/legacy/phase1/PHASE1_REPORT.md`). Added the SPEC-005 payout-boundary
   sentence ("v1 accrues credits; actual payout requires SPEC-007 +
   operator decision") to the "When do I get paid?" section. Footer
   commit-hash drift + `provisonal` typo also fixed.
@@ -125,7 +125,7 @@ re-confirmation needed.
 
 Default was applied (canonical doc + short README pointer) and then refined
 during the audit-fixup round: the canonical doc moved out of
-`audits/2026-06-10/` into `doc/provider-economics.md` so it's a long-lived
+`audits/2026-06-10/` into `docs/legacy/phase1/provider-economics.md` so it's a long-lived
 provider reference rather than a dated audit deliverable. The console-page
 alternative is still deferred — needs DOM work the prospective-provider
 audience does not yet require.

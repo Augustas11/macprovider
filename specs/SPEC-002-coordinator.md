@@ -3799,7 +3799,7 @@ problem, STOP and add an open question to
 - `beta/DECISION_CRITERIA.md` — Phase 2 decision log
 - `beta/harness.py` — first buyer implementation
 - `beta/PHASE2_UPGRADED_PLAN.md` — routing mode evolution
-- `doc/PHASE1_REPORT.md` — Phase 1 evidence
+- `docs/legacy/phase1/PHASE1_REPORT.md` — Phase 1 evidence
 
 ---
 
@@ -4915,11 +4915,11 @@ buyer never sees coordinator-managed retry in v1 per FR-B7.)
 | Source | What was taken |
 |---|---|
 | `specs/SPEC-001-phase3-binary.md` v1.1.1 | Full wire protocol (section 6.5), request schema (section 6.2), health states (FR-15), capacity fields (FR-17), handshake fields, preflight reasons, drain lifecycle |
-| `HANDOFF.md` | Project context: pooled Mac network architecture, VPS at 165.22.182.207, Antseed seller integration, Darkbloom differentiation, coordinator design intent |
+| `docs/legacy/phase1/HANDOFF.md` | Project context: pooled Mac network architecture, VPS at 165.22.182.207, Antseed seller integration, Darkbloom differentiation, coordinator design intent |
 | `beta/PHASE2_UPGRADED_PLAN.md` | Routing mode evolution table (mirror -> specialization -> stress), pre-committed decision criteria concept |
 | `beta/DECISION_CRITERIA.md` | Decision log D1 (502/530 routing), D2 (post-wake dip), D4 (capacity-vs-quality routing), D5 (timeline compression), pre-launch baselines |
 | `beta/harness.py` | First buyer behavior: SSE parsing, workload runner, SQLite logging, the HTTP contract the coordinator must serve |
-| `doc/PHASE1_REPORT.md` | Phase 1 evidence: VPS SSH tunnel validation (Step 6.7), tunnel latency data (Step 7), Metal OOM at ~26K tokens, SSE quirks, concurrent serving |
+| `docs/legacy/phase1/PHASE1_REPORT.md` | Phase 1 evidence: VPS SSH tunnel validation (Step 6.7), tunnel latency data (Step 7), Metal OOM at ~26K tokens, SSE quirks, concurrent serving |
 | `phase3-binary/implementation-notes.html` | Scaffold format for implementation-notes.html |
 | OpenAI API reference | Chat completions request/response schema, SSE streaming format, error envelope, models endpoint |
 | WebSocket protocol RFC 6455 | Upgrade handshake, close codes, frame format |

@@ -1,8 +1,10 @@
 # OPS.md — MacProvider production operations
 
 > **Audience:** the on-call operator. This is the canonical operations doc for
-> the live `malibu.tech` stack. Phase-1 runbooks (`RUNBOOK.md`,
-> `CONTINUE_RUNBOOK.md`) are superseded — see banners on those files.
+> the live `malibu.tech` stack. Phase-1 runbooks
+> (`docs/legacy/phase1/RUNBOOK.md` and
+> `docs/legacy/phase1/CONTINUE_RUNBOOK.md`) are superseded and retained only
+> for audit history.
 >
 > **Authoring note (M2-8):** several sections below depend on procedures
 > introduced by M0-5 (version-stamped builds + `.prev` rollback) and M1-6

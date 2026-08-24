@@ -8,5 +8,5 @@ agents. Keep Claude-specific notes here only when they cannot apply to other
 agents.
 
 - Use `/context` if you need to confirm this file and `AGENTS.md` loaded.
-- Prefer path-scoped `.claude/rules/` files for large or subsystem-specific
-  Claude-only guidance instead of expanding this always-loaded file.
+- Keep large or subsystem-specific Claude-only notes local unless they are
+  useful to every agent and belong in `AGENTS.md` or a checked-in runbook.

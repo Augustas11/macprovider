@@ -2,11 +2,11 @@
 
 > **⚠ Phase 2 design superseded.** Read `beta/PHASE2_UPGRADED_PLAN.md` after this doc. It replaces the Phase 2 MVP section below (now 2 providers, two crons, pre-committed decision criteria, stable tunnels, host-side instrumentation). The original beta/ scaffold stays — changes are additive.
 >
-> **⚠ Operations are now in [`OPS.md`](OPS.md)** (added in M2-8 / DOCS-3). Anything in this document about deploys, restart procedure, monitor response, or settlement is historical Phase 1/2 context — use OPS.md for the live stack.
+> **Operations are now in [`OPS.md`](../../../OPS.md)** (added in M2-8 / DOCS-3). Anything in this document about deploys, restart procedure, monitor response, or settlement is historical Phase 1/2 context; use OPS.md for the live stack.
 
 **Status:** Phase 1 PoC complete. Phase 2 buyer-harness scaffold built and smoke-tested locally. Awaiting M4 user before going live.
 **Last session ended:** 2026-05-26
-**Next session entry point:** This document. Read it first, then `beta/README.md` for the harness, then `doc/PHASE1_REPORT.md` for Phase 1 evidence.
+**Next session entry point:** This document. Read it first, then `beta/README.md` for the harness, then `docs/legacy/phase1/PHASE1_REPORT.md` for Phase 1 evidence.
 
 ## What was built this session
 
@@ -68,7 +68,7 @@ A pooled Mac inference network where:
 
 **PASS with concrete caveats → proceed to Phase 2.**
 
-Full report: `doc/PHASE1_REPORT.md` (305 lines). Three sections — original run, continuation run, and the tokenizer-accurate long-context re-run.
+Full report: `docs/legacy/phase1/PHASE1_REPORT.md` (305 lines). Three sections — original run, continuation run, and the tokenizer-accurate long-context re-run.
 
 ### Key findings cheat sheet
 
@@ -322,7 +322,7 @@ This is the single most expensive bug to discover late. Phase 3 spec must includ
 ## What to read in the next session, in order
 
 1. **This file (HANDOFF.md)** — the lay of the land
-2. **`doc/PHASE1_REPORT.md`** — Phase 1 evidence in full detail
+2. **`docs/legacy/phase1/PHASE1_REPORT.md`** — Phase 1 evidence in full detail
 3. **The conversation history** (this assistant's prior session) — strategic context, persona analysis, smart router design, Darkbloom deconstruction. Most decisions live there. Search for keywords: "pooled model", "Type B", "smart router", "Darkbloom paper", "Antseed network state".
 
 Then decide: write the buyer harness, or talk to the M4 user first?
@@ -332,7 +332,7 @@ Then decide: write the buyer harness, or talk to the M4 user first?
 ## Suggested next-session first message
 
 ```
-Read /Users/augstar/macprovider-poc/HANDOFF.md, then /Users/augstar/macprovider-poc/doc/PHASE1_REPORT.md.
+Read /Users/augstar/macprovider-poc/HANDOFF.md, then /Users/augstar/macprovider-poc/docs/legacy/phase1/PHASE1_REPORT.md.
 Today: [pick one]
   (a) Write the Phase 2 buyer harness in beta/. Target the M4 user setup.
   (b) Decide what to ask the M4 user first — get their RAM, availability, model preference.

@@ -132,7 +132,7 @@ Attempted to locate cached models for a dry-run benchmark:
 | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` | snapshots present (30B) |
 
 At bench time, `live.malibu.provider` was **running** (launchctl state=running,
-PID 64586). Per `.cursor/rules/autotune-benchmarks.mdc`, running decode-bench
+PID 64586). Per local benchmark operating notes, running decode-bench
 concurrently with the production 30B model on 32 GB risks GPU/RAM contention
 and MLX crashes.
 
