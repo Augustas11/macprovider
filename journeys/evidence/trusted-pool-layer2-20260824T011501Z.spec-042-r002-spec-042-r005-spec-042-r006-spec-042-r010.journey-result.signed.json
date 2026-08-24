@@ -1,0 +1,124 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEUCIQCPMRV1yI6if64OxXJ4m00L0DVIuY0YV/5Mxq673R/RjwIgUZoNwc8jmftlpcDC+z2cmYxKL/MShptoXx8q7xoMPFY=",
+      "signed_sha256": "02f33d6945cbd0b50dfd0509a4298d7ee40ea723b9f13df16dddea5a98536c12",
+      "verified_at": "2026-08-24T02:30:47Z",
+      "verifier": ".github/workflows/build-signed-trusted-pool-layer2-journey.yml:32683243549:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-TRUSTED-POOL-LAYER2-MVP",
+    "requirement_ids": [
+      "SPEC-042-R002",
+      "SPEC-042-R005",
+      "SPEC-042-R006",
+      "SPEC-042-R010"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "00c3503854f3ab12356d83a36873bc866e196f09"
+    },
+    "captured_at": "2026-08-24T01:15:01Z",
+    "expires_at": "2026-08-31",
+    "operator": {
+      "identity_fingerprint": "18b995e81304e6c3677737f2f3268301ce5a01178e89bb393bed2598f1845a9a",
+      "role": "acceptance-operator"
+    },
+    "environment": {
+      "candidate": "commit:00c3503854f3ab12356d83a36873bc866e196f09",
+      "class": "isolated-candidate-trusted-pool-layer2-mvp",
+      "hardware_profile": "local-redacted"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-trusted-pool-layer2",
+        "sha256": "c862cd405af5e15e24675a2012f9089f5825a9f9173a6759277cd4c85585af1a",
+        "source": "journeys/evidence/trusted-pool-layer2-20260824T011501Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "Trusted Pool Layer 2 isolated candidate route-path evidence passed without production side effects."
+    },
+    "steps": [
+      {
+        "id": "step-01-capture-pool-context",
+        "status": "pass",
+        "assertion": "Captured isolated candidate pool context with gateway account authorization and member snapshot.",
+        "artifacts": [
+          "redacted-trusted-pool-layer2"
+        ]
+      },
+      {
+        "id": "step-02-successful-pooled-request",
+        "status": "pass",
+        "assertion": "Authorized pool request returned 200 through the admitted member only.",
+        "artifacts": [
+          "redacted-trusted-pool-layer2"
+        ]
+      },
+      {
+        "id": "step-03-fail-closed-unsatisfied-pool",
+        "status": "pass",
+        "assertion": "Unsatisfied pool request returned the generic fail-closed pool_no_eligible_member code after a generation bump and before dispatch.",
+        "artifacts": [
+          "redacted-trusted-pool-layer2"
+        ]
+      },
+      {
+        "id": "step-04-settlement-and-logs",
+        "status": "pass",
+        "assertion": "Route snapshot stored the pool id and canonical digest; settlement mode remained observe and no payout-ready mutation ran. Manifest version and core digest are candidate identity fields for this local harness, not route-recorded labels.",
+        "artifacts": [
+          "redacted-trusted-pool-layer2"
+        ]
+      },
+      {
+        "id": "step-05-redaction",
+        "status": "pass",
+        "assertion": "Evidence contains fingerprints only; request, response, bearer token, and local identities are absent.",
+        "artifacts": [
+          "redacted-trusted-pool-layer2"
+        ]
+      }
+    ],
+    "redaction": {
+      "secrets_redacted": true,
+      "operator_identity_redacted": true,
+      "local_account_names_redacted": true
+    },
+    "run_id": "trusted-pool-layer2-20260824T011501Z",
+    "execution_mode": "isolated-candidate-trusted-pool-layer2-mvp",
+    "observations": {
+      "coordinator_plaintext_privacy_claimed": false,
+      "global_fallback_observed": false,
+      "isolated_environment": true,
+      "payout_ready_mutated": false,
+      "pool_id_bound_to_route_snapshot": true,
+      "pool_required_fail_closed": true,
+      "pool_selection_authorized": true,
+      "production_side_effects": false,
+      "provider_operator_blindness_claimed": false,
+      "raw_prompt_output_redacted": true,
+      "successful_pooled_request": true,
+      "tenant_isolation_fail_closed_after_generation_bump": true,
+      "unauthorized_pool_oracle_observed": false
+    },
+    "candidate_identity": {
+      "buyer_credential_fingerprint": "1d8f1a9337a8a7ed8481e333cd22480ca3256a6b46ade516d65ba720b3362a60",
+      "coordinator_config_sha256": "b66aefde7f1b7fdf0c270ad91e7b017d7d2d97b3a91c0f566839b2ad17fa5bf0",
+      "gateway_config_sha256": "313f766f9c26d7edfa70caff374c535d27d511fd57eb598223a45af3167d739e",
+      "manifest_core_digest": "c2127f1b11010c35666d18bde81e8b301602a8f13ad5a7a5a7821b98a654133e",
+      "manifest_version": "7",
+      "pool_generation": "7",
+      "pool_id": "LJbjw-NpCZ1huYj9jg4Kpg",
+      "provider_identity_fingerprint": "6c4efc11d5b899531e96002b5235758737c371a9f144e53155e681dc346e18f1",
+      "route_snapshot_digest": "e0d33e9fbe7de2ee93709a6aadf9d8461dd9fa7348bec55bf732f4429a6d00b1"
+    }
+  }
+}

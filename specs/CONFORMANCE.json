@@ -5258,12 +5258,25 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "artifact": "commit:00c3503854f3ab12356d83a36873bc866e196f09",
+          "source": null,
+          "captured_at": "2026-08-24",
+          "expires_at": "2026-08-31"
+        },
+        {
+          "artifact": "sha256:b27fdc59447a4641ae74f9d72bca76ca741be95ad07e4ef3b8eec189d18e6fcc",
+          "source": "journeys/evidence/trusted-pool-layer2-20260824T011501Z.spec-042-r002-spec-042-r005-spec-042-r006-spec-042-r010.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2026-08-31"
+        }
+      ],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "pool_id authority threading + credential-bound selection authorization: implemented across gateway selection-auth and coordinator routing/record threading (#1069/#1072/#1076). The local Layer 2 journey harness now exercises gateway-context authorization through the real buyer HTTP handler, but conformance promotion (signed journey-result evidence) remains deferred; per-key pool scope + wallet-session selection remain future slices."
+        "rationale": "Signed Layer 2 MVP journey evidence is now committed for pool_id authority threading, credential-bound selection authorization, member-only dispatch, and fail-closed no-member behavior. The row remains pending because per-key pool scope, wallet-session selection, and production launch semantics remain future slices; this evidence-only journey cannot promote full SPEC-042 requirement conformance."
       }
     },
     {
@@ -5348,12 +5361,25 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "artifact": "commit:00c3503854f3ab12356d83a36873bc866e196f09",
+          "source": null,
+          "captured_at": "2026-08-24",
+          "expires_at": "2026-08-31"
+        },
+        {
+          "artifact": "sha256:b27fdc59447a4641ae74f9d72bca76ca741be95ad07e4ef3b8eec189d18e6fcc",
+          "source": "journeys/evidence/trusted-pool-layer2-20260824T011501Z.spec-042-r002-spec-042-r005-spec-042-r006-spec-042-r010.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2026-08-31"
+        }
+      ],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Per-attempt pool-scoped tenant isolation + generation fence: implemented on the ordinary filter and every by-hand dispatch path with a select->dispatch generation fence (#1069), plus event-driven active uncommitted dispatch cancellation when provider-bound revoke_immediate lands after dispatch start. The local Layer 2 journey harness now proves successful member-only dispatch and fail-closed no-member behavior after a generation bump, but conformance promotion (signed journey-result evidence) remains deferred."
+        "rationale": "Signed Layer 2 MVP journey evidence is now committed for per-attempt pool-scoped tenant isolation, successful member-only dispatch, generation-bumped no-member fail-closed behavior, and no global fallback. The row remains pending because broader production rollout evidence and remaining lifecycle carries are outside this evidence-only journey."
       }
     },
     {
@@ -5381,12 +5407,25 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "artifact": "commit:00c3503854f3ab12356d83a36873bc866e196f09",
+          "source": null,
+          "captured_at": "2026-08-24",
+          "expires_at": "2026-08-31"
+        },
+        {
+          "artifact": "sha256:b27fdc59447a4641ae74f9d72bca76ca741be95ad07e4ef3b8eec189d18e6fcc",
+          "source": "journeys/evidence/trusted-pool-layer2-20260824T011501Z.spec-042-r002-spec-042-r005-spec-042-r006-spec-042-r010.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2026-08-31"
+        }
+      ],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Labels-only pool-scoped settlement bound to the route snapshot: pool_id is bound into the canonical route-snapshot digest and persisted (#1072), and manifest-derived settlement mode is closed-vocabulary validated, canonicalized, and carried through durable reconstruction into hot routeable snapshots. The local Layer 2 journey harness now asserts a successful pool request writes pool_id and a canonical digest into settlement_route_snapshots without payout-ready mutation before any payout job. label_disputed mismatch handling and creator revenue-split (SPEC-005/016 V1) are deferred."
+        "rationale": "Signed Layer 2 MVP journey evidence is now committed for labels-only settlement route-snapshot binding, including pool_id and canonical route digest with no payout-ready mutation. The row remains pending because label_disputed mismatch handling and creator revenue-split execution remain deferred."
       }
     },
     {
@@ -5556,12 +5595,25 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
       ],
-      "evidence": [],
+      "evidence": [
+        {
+          "artifact": "commit:00c3503854f3ab12356d83a36873bc866e196f09",
+          "source": null,
+          "captured_at": "2026-08-24",
+          "expires_at": "2026-08-31"
+        },
+        {
+          "artifact": "sha256:b27fdc59447a4641ae74f9d72bca76ca741be95ad07e4ef3b8eec189d18e6fcc",
+          "source": "journeys/evidence/trusted-pool-layer2-20260824T011501Z.spec-042-r002-spec-042-r005-spec-042-r006-spec-042-r010.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2026-08-31"
+        }
+      ],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Fail-closed error handling now clears routeable trusted-pool snapshots when reconstruction observes malformed durable state at startup, background refresh, admin reads/mutations, buyer policy/status reads, and pool-selected chat admission. Local restrictive lifecycle admin controls now pause/drain/retire through the validated durable append path, refresh routeable snapshots after commit, reject raw active transitions with activation_requires_promotion, and fail closed on invalid lifecycle transitions. Signed emergency controls now pause/drain/retire and provider-bound `revoke_immediate` now appends durable revocation through the signed-control path; both refresh routeable snapshots after commit and keep generic admin events from forging signed-control proof fields. The promotion path can reactivate paused candidate pools only after rerunning local activation preflight, preserving promotion as the only routeability-increasing write path. Ordinary pool-selected routing now emits SPEC-042 closed-vocabulary codes for encrypted-leg absence, attestation unsatisfied, enforce-mode provider settlement-prerequisite failures, policy-level settlement observe-vs-enforce failures at route and dispatch time, signed-manifest-derived model allowlist failures, missing selected-provider `trusted_pool_v1` advertisement, and authorized expired routeable/policy freshness while preserving global Tier-2/settlement behavior. Pinned provider/session routes and slot-queue candidate/poll paths re-check the same allowlist and provider-capability verdicts. The local Layer 2 journey harness now exercises a successful pool request and a subsequent no-member generation-bumped request that returns the closed-vocabulary `pool_no_eligible_member` terminal without dispatch or global fallback. Active uncommitted dispatch attempts now return retryable `pool_state_stale` when provider-bound revoke_immediate closes the registry watch/cancels the shared attempt context; the gateway passes through and refunds only when the coordinator also supplies the positive no-prior-dispatch marker, and otherwise settles `pool_state_stale` as `upstream_provider_error` when a provider row may already have been credited or the gateway retry loop has already observed a provider-dispatched attempt. Still pending: signed journey evidence, production activation evidence, production mixed-version rollout proof, remaining production predicate evidence, and 0 C/H/M launch audit. Local production activation now has a default-off coordinator config and store promotion gate: production-labeled pools still fail closed unless trusted_pools.production_activation names an allowed launch environment, a signed-launch evidence digest, and a root-custody disclosure hash matching the reconstructed root issuer."
+        "rationale": "Signed Layer 2 MVP journey evidence is now committed for the narrow request-path launch gates exercised by the isolated candidate journey: successful pool request, closed-vocabulary fail-closed no-member terminal, no dispatch/global fallback for the failed attempt, and no payout-ready mutation. The row remains pending because production activation evidence, production mixed-version rollout proof, remaining production predicate evidence, and 0 C/H/M launch audit are still outside this evidence-only journey."
       }
     },
     {

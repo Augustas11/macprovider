@@ -20,6 +20,13 @@ Mapped evidence targets:
 - `SPEC-042-R006`
 - `SPEC-042-R010`
 
+Signed evidence:
+
+- Redacted artifact: `journeys/evidence/trusted-pool-layer2-20260824T011501Z.redacted.json`
+- Signed envelope: `journeys/evidence/trusted-pool-layer2-20260824T011501Z.spec-042-r002-spec-042-r005-spec-042-r006-spec-042-r010.journey-result.signed.json`
+- Workflow run: [`32683243549`](https://github.com/Augustas11/macprovider/actions/runs/32683243549)
+- Manifest: `journeys/evidence/trusted-pool-layer2-20260824T011501Z.spec-042-r002-spec-042-r005-spec-042-r006-spec-042-r010.evidence-manifest.json`
+
 Not satisfied by this journey:
 
 - `SPEC-042-R001` manifest identity/history/rollback, because durable production wiring remains separate;
