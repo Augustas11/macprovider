@@ -183,7 +183,7 @@ def base_argv(root: Path, commit: str, files: dict[str, Path], output: str) -> l
         "--gateway-kind",
         "production",
         "--model-id",
-        "model-test",
+        "mlx-community/Llama-3.2-3B-Instruct-4bit",
         "--sdk-name",
         "openai-python",
         "--sdk-version",
@@ -233,6 +233,7 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
             self.assertNotIn("summary", evidence["result"])
             self.assertEqual(sorted(LOCAL_CONSUMER_ENDPOINT_EVIDENCE_REQUIREMENT_IDS), evidence["requirement_ids"])
             self.assertEqual("production", evidence["candidate_identity"]["gateway_kind"])
+            self.assertEqual("mlx-community/Llama-3.2-3B-Instruct-4bit", evidence["candidate_identity"]["model_id"])
             self.assertEqual(
                 sorted(["cli_binary", "ledger_capture", "log_capture", "rate_card_capture", "status_capture"]),
                 sorted(evidence["support_artifacts"]),
@@ -734,6 +735,19 @@ class LocalConsumerEndpointEvidenceCaptureTests(unittest.TestCase):
             argv[argv.index("--candidate") + 1] = "Summarize confidential merger plans"
             with self.assertRaises(SystemExit):
                 capture.main(argv)
+            for name, model_id in {
+                "unknown_namespace": "private-org/Llama-3.2-3B-Instruct-4bit",
+                "nested_namespace": "mlx-community/private/Llama-3.2-3B-Instruct-4bit",
+                "urlish_model": "mlx-community/Llama-3.2-3B-Instruct-4bit?token=redacted",
+                "operator_local_model": "mlx-community/augstar-MacBook-Pro",
+                "secret_phrase_model": "mlx-community/secret-production-token-1234567890",
+                "prompt_phrase_model": "mlx-community/Summarize-confidential-merger-plans",
+                "completion_phrase_model": "mlx-community/raw-completion-text",
+            }.items():
+                argv = base_argv(root, commit, files, f"journeys/evidence/local-consumer-endpoint-model-{name}.redacted.json")
+                argv[argv.index("--model-id") + 1] = model_id
+                with self.assertRaises(SystemExit, msg=name):
+                    capture.main(argv)
             argv = base_argv(root, commit, files, "journeys/evidence/local-consumer-endpoint-operator-local.redacted.json")
             argv[argv.index("--operator-role") + 1] = "augstar@MacBook-Pro.local"
             with self.assertRaises(SystemExit):
