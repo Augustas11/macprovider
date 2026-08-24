@@ -10,7 +10,7 @@ This journey proves a reviewed, isolated candidate run of the Trusted Pool Layer
 
 - a request scoped to an authorized pool is accepted and served by an admitted, eligible member;
 - a pool-required request whose pool selection or eligibility is unsatisfied fails closed before global fallback;
-- the route snapshot and settlement/log labels preserve `pool_id` / manifest binding for the successful request;
+- the settlement route snapshot preserves `pool_id` plus a canonical route digest for the successful request, while `manifest_version` and `manifest_core_digest` remain candidate-identity evidence fields in this local harness;
 - the emitted evidence is redacted and explicitly does not claim Privacy Pool, coordinator-blind, or provider-operator-blind properties.
 
 Mapped evidence targets:
@@ -80,7 +80,7 @@ The redacted evidence and signed result MUST set these booleans to `true`:
 - `pool_required_fail_closed`
 - `pool_id_bound_to_route_snapshot`
 - `pool_selection_authorized`
-- `tenant_isolation_generation_fenced`
+- `tenant_isolation_fail_closed_after_generation_bump`
 
 They MUST set these booleans to `false`:
 
@@ -132,5 +132,19 @@ Workflow contract test:
 ```text
 scripts/test-signed-trusted-pool-layer2-journey-workflow.sh
 ```
+
+Local redacted-evidence harness:
+
+```text
+phase4-coordinator/internal/buyer/spec042_trusted_pool_layer2_journey_test.go:TestJourneyTrustedPoolLayer2MVPCandidate
+```
+
+To capture a candidate redacted artifact from a clean worktree:
+
+```sh
+MACPROVIDER_CAPTURE_TRUSTED_POOL_LAYER2=1 go test ./internal/buyer -run TestJourneyTrustedPoolLayer2MVPCandidate -count=1
+```
+
+The local harness drives the real buyer HTTP handler with gateway-authenticated pool selection, an admitted `trusted_pool_v1` member, route-snapshot pool label binding, fail-closed no-member behavior after a generation bump, redaction checks, and zero payout-ready mutation before any payout job. The captured `expires_at` value is date-only (`YYYY-MM-DD`) to match the protected signer contract. It is a local artifact-generation harness only; the artifact still must be reviewed, committed, signed, and validated before it becomes governance evidence.
 
 This workflow exports a short-lived artifact containing only the redacted evidence, the signed journey-result envelope, and an evidence manifest. It does not push, open PRs, merge, publish releases, print signing material, mutate `specs/CONFORMANCE.json`, or promote any requirement to conformant. The generic conformance promoter explicitly rejects `JOURNEY-TRUSTED-POOL-LAYER2-MVP` as evidence-only.
