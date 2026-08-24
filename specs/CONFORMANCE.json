@@ -6347,120 +6347,226 @@
       "requirement_id": "SPEC-045-R001",
       "spec_id": "SPEC-045",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeCommand",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeRunCommand",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeEndpointConfig",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeLocalServer"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testRunCommandStartsThenStopsWithRedactedSetupOutput",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testRunCommandPortCollisionUsesRedactedBindError",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testDescriptorWriteIsUserPrivateAndStatusPayloadIsRedacted",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testActiveDescriptorLockSerializesInstances"
+      ],
+      "journeys": [
+        "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "The macOS plain-HTTP loopback-only `macprovider-cli consume` command, default port/collision behavior, allowlist-based bind validation, and redacted startup/status output have not been implemented or accepted yet."
+        "rationale": "The local command, bind validation, descriptor, and startup/status redaction now have implementation/test selectors, but production promotion remains pending until signed `JOURNEY-LOCAL-CONSUMER-ENDPOINT` evidence is committed and reconciled."
       }
     },
     {
       "requirement_id": "SPEC-045-R002",
       "spec_id": "SPEC-045",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func validatePreAuthBoundsAndFraming",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func validateEndpoint",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func validateLocalBody"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase2RejectsUnsafeTargetsFramingAndBrowserOrigins",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase2NIOHTTPDecoderLimitsMatchLocalPolicy",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase2EnforcesLocalResourceCapsBeforeBuffering",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase2ModelsReturnsOnlyLocalAllowlistEntries",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayNonStreamingSDKPayloadPassesThroughAndSettlesUsage",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayStreamingSDKPayloadEmitsOpenAICompatibleSSE"
+      ],
+      "journeys": [
+        "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "The local OpenAI-compatible endpoint subset, HTTP/1.1 method constraints, path normalization/rejection, default-empty model allowlist, post-auth aggregate resource limits, supported-method/path rejection, model list proxying, chat proxying, tool-calling/structured-output pass-through, and streaming preservation have not been implemented or tested."
+        "rationale": "The endpoint subset, parser/resource limits, model allowlist, chat proxy pass-through, and local/fake-gateway compatibility now have implementation/test selectors, but real SDK compatibility still requires signed `JOURNEY-LOCAL-CONSUMER-ENDPOINT` evidence."
       }
     },
     {
       "requirement_id": "SPEC-045-R003",
       "spec_id": "SPEC-045",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeLocalTokenVerifier",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeCredentialLoader",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:static func httpRequestBytesForTesting",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func httpRequestBytes"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testLocalTokenVerifierAcceptsOnlyOneAcceptedHeader",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testCredentialSourceOrderPrefersExplicitThenEnvFileThenDefaultThenEnvironment",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testCredentialFileRejectsGroupReadableFileAndSymlink",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testCredentialFileRejectsExtendedACLAndRevalidatesDeletion",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized"
+      ],
+      "journeys": [
+        "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "Upstream buyer credential source precedence, named environment variables and file-before-env rationale, credential-source class reporting, user-only credential file validation, local authorization/header stripping including forwarded/proxy/hop-by-hop/browser metadata headers, SDK placeholder guidance, exact-origin browser rejection including Origin:null and multi-value Origin rejection, CORS denial, credential metadata-change reload, credential deletion/rotation handling, and diagnostics redaction have not been implemented or tested."
+        "rationale": "Credential source precedence, local-token verification, credential-file hardening, generated upstream headers, and browser-origin rejection now have implementation/test selectors, but signed real-gateway evidence remains pending."
       }
     },
     {
       "requirement_id": "SPEC-045-R004",
       "spec_id": "SPEC-045",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeBudgetConfig",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumePricedExposureEstimate",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func writeLocalChatAdmissionFailure",
+        "phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift:struct ConsumeTrustedPricingLoader"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3BudgetFlagsParseAndRejectInvalidCombinations",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3BStatusReportsTrustedPricingAvailabilityAndWarnings",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3CPricedEstimateUsesGrossRatesAndRoundsUp",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3CPricedEstimateCapRejectsBeforeLedgerAppend",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3PerRequestCapRejectsBeforeLedgerAppend"
+      ],
+      "journeys": [
+        "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "Local model allowlist, trusted metadata source validation, explicit chargeable-request classification, atomic conservative run-budget admission/reservation against exact gross buyer-exposure arithmetic in micro-USD, per-request max-cost admission, missing-output-bound estimation, stale-pricing status warnings, cache-discount exclusion, and unpriced-request override visibility still need implementation and product acceptance."
+        "rationale": "Local model allowlist, trusted pricing, chargeable admission, gross micro-USD arithmetic, stale-pricing warnings, per-request caps, and unpriced override handling now have implementation/test selectors; signed real-gateway journey evidence remains pending."
       }
     },
     {
       "requirement_id": "SPEC-045-R005",
       "spec_id": "SPEC-045",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeBudgetLedger",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeBudgetStatusCommand",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeBudgetReleaseHeldCommand",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func forwardUpstreamWithLedgerSettlement"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3LedgerPathResolutionClassifiesDefaultAbsoluteAndRelative",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DBudgetedTrustedPricingForwardsAndSettlesToUsageBeforeResponse",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3BudgetedUnpricedRequestIsHeldUntilRelease",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3LedgerRejectsMalformedJSONAndUnsupportedTransitions",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3LedgerRejectsRunIDAndAmountMutation",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GStreamingResponseRelaysAfterDoneAndSettlesUsage"
+      ],
+      "journeys": [
+        "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "The durable default budget ledger path, lock filename, ledger path classes, relative-path resolution, OS-enforced lock handling, redacted self-describing ledger schema with immutable run ids, unique reservation ids, micro-USD amount fields, closed state transitions, settlement policy including SSE terminal usage timing, streaming client-disconnect settlement/deadline, restart held-reservation behavior, and recovery command selectors/no-match failure have not been implemented or tested."
+        "rationale": "The budget ledger, path classes, lock handling, micro-USD rows, closed transitions, settlement timing, streaming settlement, held reservations, and recovery commands now have implementation/test selectors; signed restart/recovery journey evidence remains pending."
       }
     },
     {
       "requirement_id": "SPEC-045-R006",
       "spec_id": "SPEC-045",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeStatusCommand",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:func statusPayload",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeEndpointDescriptor",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeStatusClient"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testStatusCommandNoEndpointUsesRedactedError",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testStatusHandlerRequiresAuthSetsNoStoreAndRedacts",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testDescriptorWriteIsUserPrivateAndStatusPayloadIsRedacted",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3BStatusReportsTrustedPricingAvailabilityAndWarnings",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3NoBudgetStatusUsesNullBudgetAmounts"
+      ],
+      "journeys": [
+        "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "The `GET /v1/status` endpoint, active endpoint descriptor path ownership/symlink/race hardening, process launch id generation, CLI status discovery/output, closed status enums/schema, pricing warning codes, no-store status caching, no-budget representation, bounded redacted error ring by count, total bytes, field bytes, and truncation marker, wall-clock upstream contact timestamp, diagnostic fields, failure classification, and redaction guarantees have not been implemented or tested."
+        "rationale": "Local status, descriptor discovery, no-store caching, pricing warnings, no-budget representation, and redaction behavior now have implementation/test selectors; signed redacted status/log evidence remains pending."
       }
     },
     {
       "requirement_id": "SPEC-045-R007",
       "spec_id": "SPEC-045",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func writeLocalError",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func classifyUpstreamFailure",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func responseForLocalDelivery",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func writeUpstreamResponse"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DBudgetExceededWinsOverMissingCredentialWithoutMutation",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GStreamingUpstreamErrorResponseIsPreservedAndSettlesEstimate",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3FInvalidCompressedUpstreamResponseWithLedgerWriteFailureKeepsForwardedProvenance",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayRedirectStatusIsPreservedWithoutLocationOrSecondDispatch",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GCompressedStreamingResponseFailsBeforeLocalSuccessAndSettlesEstimate"
+      ],
+      "journeys": [
+        "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "Gateway error preservation, local HTTP status-code mapping including deterministic upstream 502/503 split and `local_endpoint_busy`, post-header non-streaming truncation handling, compressed upstream response cap enforcement, `error.macprovider.forwarded_upstream` disclosure, startup-versus-HTTP error separation, and retry constraints have not been implemented or tested."
+        "rationale": "Local error envelopes, upstream preservation, forwarded-upstream provenance, redirect stripping, compressed response failure, and streaming error settlement now have implementation/test selectors; signed real-gateway error/redaction evidence remains pending."
       }
     },
     {
       "requirement_id": "SPEC-045-R008",
       "spec_id": "SPEC-045",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
-      "journeys": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumePinnedUpstreamClient",
+        "scripts/build-local-consumer-endpoint-journey-result.py:def build_payload",
+        ".github/workflows/promote-signed-local-consumer-endpoint-journey.yml:--journey-id JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayNonStreamingSDKPayloadPassesThroughAndSettlesUsage",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayStreamingSDKPayloadEmitsOpenAICompatibleSSE",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayRedirectStatusIsPreservedWithoutLocationOrSecondDispatch",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized",
+        "scripts/tests/test_local_consumer_endpoint_journey_result.py:class LocalConsumerEndpointJourneyResultTests",
+        "scripts/test-signed-local-consumer-endpoint-journey-workflow.sh:required_workflow = ["
+      ],
+      "journeys": [
+        "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/927",
-        "rationale": "Automated proxy, origin-only upstream URL rejection, IPv4-mapped IPv6 upstream rejection, pre-auth HTTP parser/connection bounds, aggregate authenticated resource limits, ambiguous framing rejection, path normalization, bounded JSON parser work, upstream response resource caps including compressed response decoding, budget, exact gross buyer-exposure arithmetic vectors and micro-USD ledger fields, per-request cap including no-budget/unpriced interaction, pricing freshness revalidation, timing-safe local-token verification, credential reload zeroization, TLS peer-auth failure, browser-origin rejection including multi-value Origin cases, descriptor hardening, model allowlist, error mapping, status no-store/error-ring bounds, redaction, restart/recovery, streaming disconnect, ledger state/release/no-match cases, and staging-or-production signed journey evidence for local consumer endpoint mode do not exist yet."
+        "rationale": "Automated local/fake-gateway coverage and signed-journey promotion tooling now have implementation/test selectors, but staging-or-production signed `JOURNEY-LOCAL-CONSUMER-ENDPOINT` evidence has not been committed and reconciled."
       }
     }
   ]

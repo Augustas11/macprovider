@@ -66,10 +66,26 @@ SPEC-045 has automated coverage for its local command, proxy, security boundarie
    - capture redacted logs/status proving no credential, local token, prompt, or completion leakage;
    - sign and store journey result according to existing repo evidence conventions.
 
+7. Add signed-journey admission primitives before any production evidence run:
+   - register `JOURNEY-LOCAL-CONSUMER-ENDPOINT` against `SPEC-045-R001..R008`
+     without changing their pending state;
+   - validate committed redacted evidence sources under
+     `journeys/evidence/local-consumer-endpoint-*.redacted.json`;
+   - require ordered physical steps for local endpoint capture, OpenAI SDK
+     client configuration, permitted chat, over-budget denial, restart-held
+     recovery, redaction review, and local-state restoration;
+   - require staging-or-production gateway observations and reject fake-gateway
+     evidence as promotion proof;
+   - sign only inside the protected acceptance environment and export a
+     short-lived promotion artifact for review.
+
 ## Acceptance tests
 
 - Fake-gateway tests cover all Phase 1-3 acceptance criteria that do not require real gateway behavior.
 - The signed real-gateway journey covers SDK interoperability, admission, budget denial, restart-held recovery, and redaction.
+- Signed-journey primitives reject fake-gateway evidence, unmapped requirement
+  IDs, stale selectors, unordered/missing physical steps, raw secret-like
+  fields, and unredacted prompt/completion/token observations.
 - `specs/CONFORMANCE.json` remains pending until implementation evidence and journey artifacts are actually committed and reconciled.
 - Track automated fake-gateway coverage and pending signed-journey evidence in `BUILD_SPEC_045_PHASE_4_CONFORMANCE_MATRIX.md`.
 

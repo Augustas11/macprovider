@@ -39,8 +39,21 @@ The local `/v1/models` behavior remains local-only by design and is covered by
 
 ## Pending Signed Journey Evidence
 
+Phase 4B adds the promotion primitives for this evidence class:
+
+- `JOURNEY-LOCAL-CONSUMER-ENDPOINT` is mapped to `SPEC-045-R001..R008` in
+  `specs/CONFORMANCE.json` while those rows remain pending;
+- `scripts/build-local-consumer-endpoint-journey-result.py` validates one
+  committed redacted evidence source before signing;
+- `.github/workflows/promote-signed-local-consumer-endpoint-journey.yml`
+  builds a short-lived signed promotion artifact from the protected
+  `production-release` environment;
+- `scripts/tests/test_local_consumer_endpoint_journey_result.py` and
+  `scripts/test-signed-local-consumer-endpoint-journey-workflow.sh` pin the
+  journey shape, workflow boundaries, and fake-gateway rejection.
+
 The following Phase 4 promotion evidence is not produced by the fake-gateway
-harness and remains pending:
+harness or by the Phase 4B signer primitives and remains pending:
 
 - staging or production gateway journey using an OpenAI SDK configured with the
   local endpoint base URL and generated local token as `api_key`;
