@@ -71,10 +71,13 @@ test-dist:
 	bash scripts/test-signed-buyer-paid-path-journey-workflow.sh
 	bash scripts/test-signed-buyer-crash-recovery-journey-workflow.sh
 	bash scripts/test-signed-buyer-enforce-journey-workflow.sh
+	bash scripts/test-signed-local-consumer-endpoint-journey-workflow.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_provider_prebeta_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_buyer_paid_path_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_buyer_crash_recovery_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_buyer_enforce_journey_result
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_local_consumer_endpoint_evidence_capture
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_local_consumer_endpoint_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_journey_result_tools
 	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-acceptance-promotion.sh

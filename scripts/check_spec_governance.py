@@ -22,6 +22,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 
@@ -147,6 +148,70 @@ TRUSTED_POOL_LAYER2_FORBIDDEN_OVERCLAIM_RE = re.compile(
 LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID = "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
 LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE = "staging-or-production-local-consumer-endpoint"
 LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID = "redacted-local-consumer-endpoint"
+LOCAL_CONSUMER_ENDPOINT_ALLOWED_GATEWAY_ORIGINS = {
+    "production": {"https://api.malibu.tech"},
+    "staging": {"https://api-staging.malibu.tech", "https://staging-api.malibu.tech"},
+}
+LOCAL_CONSUMER_ENDPOINT_ALLOWED_GATEWAY_ORIGIN_SHA256 = {
+    gateway_kind: {hashlib.sha256(origin.encode("utf-8")).hexdigest() for origin in origins}
+    for gateway_kind, origins in LOCAL_CONSUMER_ENDPOINT_ALLOWED_GATEWAY_ORIGINS.items()
+}
+LOCAL_CONSUMER_ENDPOINT_EVIDENCE_SCHEMA = "macprovider.local-consumer-endpoint-evidence.v1"
+LOCAL_CONSUMER_ENDPOINT_SUPPORT_ARTIFACT_IDS = (
+    "cli_binary",
+    "ledger_capture",
+    "log_capture",
+    "rate_card_capture",
+    "status_capture",
+)
+LOCAL_CONSUMER_ENDPOINT_SUPPORT_ARTIFACT_ROLES = {
+    "cli_binary": "cli-binary",
+    "ledger_capture": "redacted-ledger-capture",
+    "log_capture": "redacted-log-capture",
+    "rate_card_capture": "redacted-rate-card-capture",
+    "status_capture": "redacted-status-capture",
+}
+LOCAL_CONSUMER_ENDPOINT_SAFE_METADATA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+~-]{0,127}$")
+LOCAL_CONSUMER_ENDPOINT_SAFE_LOCAL_METADATA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+LOCAL_CONSUMER_ENDPOINT_OPERATOR_ROLES = {"release-operator"}
+LOCAL_CONSUMER_ENDPOINT_HARDWARE_PROFILES = {"ci-staging-runner", "local-macos-redacted"}
+LOCAL_CONSUMER_ENDPOINT_CANDIDATE_IDENTITY_VERSION_RE = re.compile(r"^v?[0-9]+[.][0-9]+[.][0-9]+(?:-(?:test|dev[0-9]*|alpha[0-9]*|beta[0-9]*|rc[0-9]*))?$")
+LOCAL_CONSUMER_ENDPOINT_CANDIDATE_IDENTITY_MODEL_ID_RE = re.compile(
+    r"^(?:"
+    r"model-test|"
+    r"gpt-[0-9]+(?:[-.](?:mini|nano|turbo|preview|latest|instruct|realtime|audio|search|chat|transcribe|tts|[0-9]{4}(?:-[0-9]{2}(?:-[0-9]{2})?)?)){0,6}|"
+    r"o[1-9](?:[-.](?:mini|pro|preview|latest|reasoning|[0-9]{4}(?:-[0-9]{2}(?:-[0-9]{2})?)?)){0,6}"
+    r")$"
+)
+LOCAL_CONSUMER_ENDPOINT_CANDIDATE_IDENTITY_SDK_NAMES = {
+    "openai-dotnet",
+    "openai-go",
+    "openai-java",
+    "openai-js",
+    "openai-node",
+    "openai-python",
+    "openai-ruby",
+}
+LOCAL_CONSUMER_ENDPOINT_FORBIDDEN_METADATA_RE = re.compile(
+    r"(?i)("
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|"
+    r"\bauthorization\s*[:=]|"
+    r"\bbearer\s+(?!redacted\b)[A-Za-z0-9._~+/=-]{20,}|"
+    r"\blocal[_-]?token\s*[:=]|"
+    r"\bapi[_-]?key\s*[:=]|"
+    r"\bx-api-key\s*[:=]|"
+    r"\bbuyer[_-]?credential\s*[:=]|"
+    r"\bupstream[_-]?credential\s*[:=]|"
+    r"\braw[_ -]?prompt\s*[:=]|"
+    r"\braw[_ -]?completion\s*[:=]|"
+    r"\bghp_[A-Za-z0-9_]{20,}\b|"
+    r"\bgithub_pat_[A-Za-z0-9_]{20,}\b|"
+    r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b|"
+    r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b|"
+    r"\bAKIA[0-9A-Z]{16}\b|"
+    r"\bmp_[A-Za-z0-9_-]{16,}\b"
+    r")"
+)
 LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER = (
     "step-01-capture-local-endpoint",
     "step-02-openai-sdk-local-client",
@@ -546,6 +611,86 @@ def _source_under_journey_evidence(root: Path, source: str) -> bool:
     except (OSError, ValueError):
         return False
     return True
+
+
+def _validate_direct_local_consumer_evidence_source(root: Path, source: str, location: str, result: ValidationResult) -> Path | None:
+    path = PurePosixPath(source)
+    if path.is_absolute() or "\\" in source or ".." in path.parts:
+        result.error(location, "must be a direct relative local-consumer endpoint evidence path")
+        return None
+    if path.parent.as_posix() != "journeys/evidence":
+        result.error(location, "must be directly under journeys/evidence")
+        return None
+    if not path.name.startswith("local-consumer-endpoint-") or not path.name.endswith(".redacted.json"):
+        result.error(location, "must match journeys/evidence/local-consumer-endpoint-*.redacted.json")
+        return None
+    candidate = root / path
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        result.error(location, "must stay within the repository")
+        return None
+    component_path = root
+    for component in path.parts:
+        component_path = component_path / component
+        if component_path.is_symlink():
+            result.error(location, "must not traverse a symlink")
+            return None
+    return _repository_path(root, source, location, result)
+
+
+def _validate_local_consumer_local_metadata(value: Any, location: str, result: ValidationResult) -> None:
+    if not isinstance(value, str) or not LOCAL_CONSUMER_ENDPOINT_SAFE_LOCAL_METADATA_RE.fullmatch(value):
+        result.error(location, "has invalid local metadata format")
+        return
+    if "@" in value or "/" in value or "\\" in value or "~" in value or value.lower().endswith(".local"):
+        result.error(location, "must not contain operator-local identifiers")
+        return
+    if LOCAL_CONSUMER_ENDPOINT_FORBIDDEN_METADATA_RE.search(value):
+        result.error(location, "must not contain secret-like or transcript-like metadata")
+        return
+    if location.endswith(".operator.role") or location.endswith(".review.reviewer_role"):
+        if value not in LOCAL_CONSUMER_ENDPOINT_OPERATOR_ROLES:
+            result.error(location, f"must equal one of {sorted(LOCAL_CONSUMER_ENDPOINT_OPERATOR_ROLES)}")
+    if location.endswith(".environment.hardware_profile"):
+        if value not in LOCAL_CONSUMER_ENDPOINT_HARDWARE_PROFILES:
+            result.error(location, f"must equal one of {sorted(LOCAL_CONSUMER_ENDPOINT_HARDWARE_PROFILES)}")
+
+
+def _validate_local_consumer_safe_metadata(value: Any, location: str, result: ValidationResult) -> None:
+    if not isinstance(value, str) or not LOCAL_CONSUMER_ENDPOINT_SAFE_METADATA_RE.fullmatch(value):
+        result.error(location, "has invalid metadata format")
+        return
+    if LOCAL_CONSUMER_ENDPOINT_FORBIDDEN_METADATA_RE.search(value):
+        result.error(location, "must not contain secret-like or transcript-like metadata")
+
+
+def _validate_local_consumer_support_artifacts_reviewed(value: Any, location: str, result: ValidationResult) -> None:
+    if not isinstance(value, list):
+        result.error(location, "must be an array")
+        return
+    if any(not isinstance(item, str) for item in value):
+        result.error(location, "must contain only strings")
+        return
+    if len(set(value)) != len(value):
+        result.error(location, "must not contain duplicate artifact ids")
+        return
+    expected = sorted(LOCAL_CONSUMER_ENDPOINT_SUPPORT_ARTIFACT_IDS)
+    if sorted(value) != expected:
+        result.error(location, f"must equal {expected}")
+
+
+def _validate_local_consumer_candidate_identity_metadata(value: Any, location: str, result: ValidationResult, *, field: str) -> None:
+    before = len(result.errors)
+    _validate_local_consumer_safe_metadata(value, location, result)
+    if len(result.errors) != before or not isinstance(value, str):
+        return
+    if field in {"cli_version", "sdk_version"} and LOCAL_CONSUMER_ENDPOINT_CANDIDATE_IDENTITY_VERSION_RE.fullmatch(value) is None:
+        result.error(location, "has invalid version format")
+    elif field == "sdk_name" and value not in LOCAL_CONSUMER_ENDPOINT_CANDIDATE_IDENTITY_SDK_NAMES:
+        result.error(location, "must be a known OpenAI SDK name")
+    elif field == "model_id" and LOCAL_CONSUMER_ENDPOINT_CANDIDATE_IDENTITY_MODEL_ID_RE.fullmatch(value) is None:
+        result.error(location, "has invalid model id format")
 
 
 def _canonical_json_sha256(value: Any) -> str:
@@ -1294,6 +1439,8 @@ def _validate_local_consumer_endpoint_journey_result(
     steps: list[Any],
     location: str,
     result: ValidationResult,
+    *,
+    root: Path | None = None,
 ) -> None:
     if signed.get("journey_id") != LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID:
         result.error(f"{location}.signed.journey_id", f"must equal {LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID!r}")
@@ -1301,6 +1448,23 @@ def _validate_local_consumer_endpoint_journey_result(
         result.error(location, f"local-consumer endpoint requirement journeys must include {LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID!r}")
     if signed.get("execution_mode") != LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE:
         result.error(f"{location}.signed.execution_mode", f"must equal {LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE!r}")
+
+    operator = signed.get("operator")
+    if _expect_object(operator, f"{location}.signed.operator", result):
+        _expect_keys(operator, {"role", "identity_fingerprint"}, {"role", "identity_fingerprint"}, f"{location}.signed.operator", result)
+        _validate_local_consumer_local_metadata(operator.get("role"), f"{location}.signed.operator.role", result)
+        _string(operator.get("identity_fingerprint"), SHA256_HEX_RE, f"{location}.signed.operator.identity_fingerprint", result)
+
+    environment = signed.get("environment")
+    if _expect_object(environment, f"{location}.signed.environment", result):
+        _expect_keys(environment, {"class", "hardware_profile", "candidate"}, {"class", "hardware_profile", "candidate"}, f"{location}.signed.environment", result)
+        if environment.get("class") != LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE:
+            result.error(f"{location}.signed.environment.class", f"must equal {LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE!r}")
+        _validate_local_consumer_local_metadata(environment.get("hardware_profile"), f"{location}.signed.environment.hardware_profile", result)
+        _validate_local_consumer_safe_metadata(environment.get("candidate"), f"{location}.signed.environment.candidate", result)
+        repository = signed.get("repository")
+        if isinstance(repository, dict) and isinstance(repository.get("commit"), str) and environment.get("candidate") != f"commit:{repository['commit']}":
+            result.error(f"{location}.signed.environment.candidate", "must equal commit:<signed.repository.commit>")
 
     valid_artifacts = [artifact for artifact in artifacts if isinstance(artifact, dict)]
     if len(valid_artifacts) != 1:
@@ -1312,11 +1476,20 @@ def _validate_local_consumer_endpoint_journey_result(
         source = artifact.get("source")
         if artifact_id != LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID:
             result.error(f"{location}.signed.artifacts[{index}].id", f"must equal {LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID!r}")
-        if not isinstance(source, str) or not source.startswith("journeys/evidence/local-consumer-endpoint-") or not source.endswith(".redacted.json"):
+        if not isinstance(source, str):
             result.error(
                 f"{location}.signed.artifacts[{index}].source",
                 "must match journeys/evidence/local-consumer-endpoint-*.redacted.json",
             )
+            continue
+        artifact_path = _validate_direct_local_consumer_evidence_source(root, source, f"{location}.signed.artifacts[{index}].source", result) if root is not None else None
+        if root is None and (not source.startswith("journeys/evidence/local-consumer-endpoint-") or not source.endswith(".redacted.json")):
+            result.error(
+                f"{location}.signed.artifacts[{index}].source",
+                "must match journeys/evidence/local-consumer-endpoint-*.redacted.json",
+            )
+        if root is not None and artifact_id == LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID and artifact_path is not None:
+            _validate_local_consumer_endpoint_source(artifact_path, artifact, signed, f"{location}.signed.artifacts[{index}]", result)
 
     for index, step in enumerate(steps):
         if not isinstance(step, dict):
@@ -1383,19 +1556,35 @@ def _validate_local_consumer_endpoint_journey_result(
             "status_capture_sha256",
             "upstream_gateway_origin_sha256",
         }
-        string_fields = {"cli_version", "gateway_kind", "model_id", "sdk_name", "sdk_version"}
+        candidate_metadata_fields = {"cli_version", "model_id", "sdk_name", "sdk_version"}
+        string_fields = candidate_metadata_fields | {"gateway_kind"}
         required_identity = fingerprint_fields | string_fields
         _expect_keys(identity, required_identity, required_identity, f"{location}.signed.candidate_identity", result)
         for field_name in sorted(fingerprint_fields):
             value = identity.get(field_name)
             if not isinstance(value, str) or not SHA256_HEX_RE.fullmatch(value):
                 result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a 64-char hex fingerprint")
-        for field_name in sorted(string_fields):
-            if not isinstance(identity.get(field_name), str) or not identity.get(field_name):
-                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a non-empty string")
+        for field_name in sorted(candidate_metadata_fields):
+            _validate_local_consumer_candidate_identity_metadata(
+                identity.get(field_name),
+                f"{location}.signed.candidate_identity.{field_name}",
+                result,
+                field=field_name,
+            )
+        _validate_local_consumer_safe_metadata(identity.get("gateway_kind"), f"{location}.signed.candidate_identity.gateway_kind", result)
         gateway_kind = identity.get("gateway_kind")
         if gateway_kind not in {"staging", "production"}:
             result.error(f"{location}.signed.candidate_identity.gateway_kind", "must equal 'staging' or 'production'")
+        origin_sha = identity.get("upstream_gateway_origin_sha256")
+        if (
+            gateway_kind in LOCAL_CONSUMER_ENDPOINT_ALLOWED_GATEWAY_ORIGIN_SHA256
+            and isinstance(origin_sha, str)
+            and origin_sha not in LOCAL_CONSUMER_ENDPOINT_ALLOWED_GATEWAY_ORIGIN_SHA256[gateway_kind]
+        ):
+            result.error(
+                f"{location}.signed.candidate_identity.upstream_gateway_origin_sha256",
+                f"must match one of the {gateway_kind} allowlisted origins",
+            )
 
     signed_requirement_ids = signed.get("requirement_ids")
     if not isinstance(signed_requirement_ids, list) or requirement_id not in signed_requirement_ids:
@@ -1419,6 +1608,153 @@ def _validate_local_consumer_endpoint_journey_result(
             f"{location}.signed.steps",
             f"local-consumer endpoint physical steps must be ordered as {list(LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER)}",
         )
+
+
+def _local_consumer_compare_source(source_value: Any, signed_value: Any, location: str, result: ValidationResult) -> None:
+    if source_value != signed_value:
+        result.error(location, "must match local-consumer endpoint signed payload")
+
+
+def _local_consumer_normalized_source_steps(value: Any, location: str, result: ValidationResult) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        result.error(location, "must be an array")
+        return []
+    by_id: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(value):
+        loc = f"{location}[{index}]"
+        if not _expect_object(item, loc, result):
+            continue
+        _expect_keys(item, {"id", "status", "artifacts", "support_artifacts"}, {"id", "status", "artifacts", "support_artifacts"}, loc, result)
+        step_id = _string(item.get("id"), None, f"{loc}.id", result)
+        if not step_id:
+            continue
+        if step_id in by_id:
+            result.error(f"{loc}.id", f"duplicate local-consumer endpoint physical step {step_id!r}")
+        if step_id not in LOCAL_CONSUMER_ENDPOINT_STEP_IDS:
+            result.error(f"{loc}.id", f"unexpected local-consumer endpoint physical step {step_id!r}")
+        if item.get("status") != "pass":
+            result.error(f"{loc}.status", "must equal 'pass'")
+        if item.get("artifacts") != [LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID]:
+            result.error(f"{loc}.artifacts", f"must equal [{LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID!r}]")
+        support = item.get("support_artifacts")
+        if (
+            not isinstance(support, list)
+            or not support
+            or any(not isinstance(support_id, str) or support_id not in LOCAL_CONSUMER_ENDPOINT_SUPPORT_ARTIFACT_IDS for support_id in support)
+        ):
+            result.error(f"{loc}.support_artifacts", "must reference known support artifacts")
+        by_id[step_id] = {"id": step_id, "status": "pass", "artifacts": [LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID]}
+    missing = [step_id for step_id in LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER if step_id not in by_id]
+    if missing:
+        result.error(location, f"missing local-consumer endpoint physical steps: {missing}")
+    return [by_id[step_id] for step_id in LOCAL_CONSUMER_ENDPOINT_STEP_ID_ORDER if step_id in by_id]
+
+
+def _validate_local_consumer_endpoint_source(
+    artifact_path: Path,
+    artifact: dict[str, Any],
+    signed: dict[str, Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    try:
+        source_bytes = artifact_path.read_bytes()
+    except OSError as exc:
+        result.error(f"{location}.source", f"cannot read artifact source: {exc}")
+        return
+    expected_sha = artifact.get("sha256")
+    if isinstance(expected_sha, str) and hashlib.sha256(source_bytes).hexdigest() != expected_sha:
+        result.error(f"{location}.sha256", "does not match artifact source bytes")
+    payload = _load_json(artifact_path, result)
+    if not isinstance(payload, dict):
+        result.error(f"{location}.source", "local-consumer endpoint redacted evidence must be a JSON object")
+        return
+    required = {
+        "schema_version",
+        "journey_id",
+        "requirement_ids",
+        "repository",
+        "captured_at",
+        "expires_at",
+        "operator",
+        "environment",
+        "result",
+        "steps",
+        "redaction",
+        "observations",
+        "candidate_identity",
+        "support_artifacts",
+        "review",
+        "run_id",
+    }
+    _expect_keys(payload, required, required, f"{location}.source", result)
+    if payload.get("schema_version") != LOCAL_CONSUMER_ENDPOINT_EVIDENCE_SCHEMA:
+        result.error(f"{location}.source.schema_version", f"must equal {LOCAL_CONSUMER_ENDPOINT_EVIDENCE_SCHEMA!r}")
+    if payload.get("journey_id") != LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID:
+        result.error(f"{location}.source.journey_id", f"must equal {LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID!r}")
+    source_requirement_ids = _string_list(payload.get("requirement_ids"), f"{location}.source.requirement_ids", result, REQUIREMENT_ID_RE)
+    signed_requirement_ids = _string_list(signed.get("requirement_ids"), f"{location}.signed.requirement_ids", result, REQUIREMENT_ID_RE)
+    overclaimed = [item for item in signed_requirement_ids if item not in source_requirement_ids]
+    if overclaimed:
+        result.error(f"{location}.source.requirement_ids", f"must cover every signed requirement ID: {overclaimed}")
+    for field_name in ("repository", "captured_at", "expires_at", "operator", "environment", "result", "redaction", "observations", "candidate_identity", "run_id"):
+        _local_consumer_compare_source(payload.get(field_name), signed.get(field_name), f"{location}.source.{field_name}", result)
+    source_steps = _local_consumer_normalized_source_steps(payload.get("steps"), f"{location}.source.steps", result)
+    signed_steps = [
+        {"id": step.get("id"), "status": step.get("status"), "artifacts": step.get("artifacts")}
+        for step in signed.get("steps", [])
+        if isinstance(step, dict)
+    ]
+    _local_consumer_compare_source(source_steps, signed_steps, f"{location}.source.steps", result)
+
+    identity = payload.get("candidate_identity")
+    support = payload.get("support_artifacts")
+    if _expect_object(identity, f"{location}.source.candidate_identity", result) and _expect_object(support, f"{location}.source.support_artifacts", result):
+        _expect_keys(
+            support,
+            set(LOCAL_CONSUMER_ENDPOINT_SUPPORT_ARTIFACT_IDS),
+            set(LOCAL_CONSUMER_ENDPOINT_SUPPORT_ARTIFACT_IDS),
+            f"{location}.source.support_artifacts",
+            result,
+        )
+        expected_hashes = {
+            "cli_binary": identity.get("cli_binary_sha256"),
+            "ledger_capture": identity.get("ledger_sha256"),
+            "log_capture": identity.get("log_capture_sha256"),
+            "rate_card_capture": identity.get("rate_card_sha256"),
+            "status_capture": identity.get("status_capture_sha256"),
+        }
+        for support_id in LOCAL_CONSUMER_ENDPOINT_SUPPORT_ARTIFACT_IDS:
+            entry = support.get(support_id)
+            entry_loc = f"{location}.source.support_artifacts.{support_id}"
+            if not _expect_object(entry, entry_loc, result):
+                continue
+            _expect_keys(entry, {"role", "sha256", "bytes"}, {"role", "sha256", "bytes"}, entry_loc, result)
+            if entry.get("role") != LOCAL_CONSUMER_ENDPOINT_SUPPORT_ARTIFACT_ROLES[support_id]:
+                result.error(f"{entry_loc}.role", "has invalid value")
+            if entry.get("sha256") != expected_hashes[support_id]:
+                result.error(f"{entry_loc}.sha256", "must match source candidate_identity")
+            byte_count = entry.get("bytes")
+            if not isinstance(byte_count, int) or isinstance(byte_count, bool) or byte_count <= 0:
+                result.error(f"{entry_loc}.bytes", "must be a positive integer")
+
+    review = payload.get("review")
+    if _expect_object(review, f"{location}.source.review", result):
+        required_review = {"reviewed_at", "reviewer_role", "support_artifacts_reviewed", "real_gateway_basis", "sdk_client_basis", "redaction_basis"}
+        _expect_keys(review, required_review, required_review, f"{location}.source.review", result)
+        _string(review.get("reviewed_at"), DATETIME_Z_RE, f"{location}.source.review.reviewed_at", result)
+        _validate_local_consumer_local_metadata(review.get("reviewer_role"), f"{location}.source.review.reviewer_role", result)
+        _validate_local_consumer_support_artifacts_reviewed(
+            review.get("support_artifacts_reviewed"),
+            f"{location}.source.review.support_artifacts_reviewed",
+            result,
+        )
+        if review.get("real_gateway_basis") != "staging-or-production-gateway":
+            result.error(f"{location}.source.review.real_gateway_basis", "must equal 'staging-or-production-gateway'")
+        if review.get("sdk_client_basis") != "openai-sdk-local-token-api-key":
+            result.error(f"{location}.source.review.sdk_client_basis", "must equal 'openai-sdk-local-token-api-key'")
+        if review.get("redaction_basis") != "redacted-support-artifacts-reviewed":
+            result.error(f"{location}.source.review.redaction_basis", "must equal 'redacted-support-artifacts-reviewed'")
 
 
 def _validate_spec016_payout_journey_result(
@@ -1690,7 +2026,10 @@ def _validate_signed_journey_result(
     operator = signed.get("operator")
     if _expect_object(operator, f"{location}.signed.operator", result):
         _expect_keys(operator, {"role", "identity_fingerprint"}, {"role", "identity_fingerprint"}, f"{location}.signed.operator", result)
-        _string(operator.get("role"), None, f"{location}.signed.operator.role", result)
+        if journey_id == LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID:
+            _validate_local_consumer_local_metadata(operator.get("role"), f"{location}.signed.operator.role", result)
+        else:
+            _string(operator.get("role"), None, f"{location}.signed.operator.role", result)
         _string(operator.get("identity_fingerprint"), SHA256_HEX_RE, f"{location}.signed.operator.identity_fingerprint", result)
 
     environment = signed.get("environment")
@@ -1710,7 +2049,10 @@ def _validate_signed_journey_result(
             result,
         )
         _string(environment.get("class"), None, f"{location}.signed.environment.class", result)
-        _string(environment.get("hardware_profile"), None, f"{location}.signed.environment.hardware_profile", result)
+        if journey_id == LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID:
+            _validate_local_consumer_local_metadata(environment.get("hardware_profile"), f"{location}.signed.environment.hardware_profile", result)
+        else:
+            _string(environment.get("hardware_profile"), None, f"{location}.signed.environment.hardware_profile", result)
         _string(environment.get("candidate"), None, f"{location}.signed.environment.candidate", result)
         if "binary_version" in environment:
             _string(environment.get("binary_version"), None, f"{location}.signed.environment.binary_version", result)
@@ -1893,6 +2235,7 @@ def _validate_signed_journey_result(
             steps,
             location,
             result,
+            root=root,
         )
 
     return len(result.errors) == before

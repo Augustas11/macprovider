@@ -104,6 +104,15 @@ It MUST use:
 }
 ```
 
+The redacted evidence source MUST also include closed `support_artifacts` and
+`review` objects. Each required physical step must bind to one or more named
+support artifacts, and the review block must confirm that the operator reviewed
+the support artifacts, the real staging-or-production gateway basis, the
+OpenAI SDK local-token client basis, and the redaction basis before protected
+signing. The review manifest that feeds capture must pin each reviewed support
+artifact by SHA-256 and byte count; capture must fail if the files have changed
+after review.
+
 The signer workflow converts that artifact into a generic signed
 journey-result envelope only after:
 
@@ -166,6 +175,17 @@ Stable operator, buyer, endpoint, and token identities MUST be represented only
 as redacted fingerprints.
 
 ## Evidence Workflow
+
+Capture:
+
+```text
+scripts/capture-local-consumer-endpoint-evidence.py
+```
+
+Capture requires a separate
+`macprovider.local-consumer-endpoint-capture-review.v1` manifest. The capture
+tool is local-only: it writes the reviewed redacted evidence source and does not
+sign, promote, dispatch workflows, or mutate production state.
 
 Protected manual workflow:
 
