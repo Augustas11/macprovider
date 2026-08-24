@@ -6611,7 +6611,6 @@
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayStreamingSDKPayloadEmitsOpenAICompatibleSSE",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayRedirectStatusIsPreservedWithoutLocationOrSecondDispatch",
         "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized",
-        "scripts/tests/test_local_consumer_endpoint_journey_result.py:class LocalConsumerEndpointJourneyResultTests",
         "scripts/test-signed-local-consumer-endpoint-journey-workflow.sh:required_workflow = ["
       ],
       "journeys": [
