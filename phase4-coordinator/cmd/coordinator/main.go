@@ -923,13 +923,33 @@ func main() {
 	providerMux := http.NewServeMux()
 	providerMux.Handle("/", wsServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
+	var trustPoolAdminReloader trustpool.CreatorAdminConfigReloader
 	if cfg.TrustedPools.Enabled && trustPoolStore != nil && trustPoolRegistry != nil {
-		providerMux.Handle("/admin/trust-pools/", trustpool.NewAdminHandler(trustpool.AdminDeps{
-			Store:       trustPoolStore,
-			Registry:    trustPoolRegistry,
-			OperatorKey: cfg.Auth.OperatorKey,
-		}))
+		creatorAdminCredentials, err := trustPoolCreatorAdminCredentials(cfg.TrustedPools.CreatorAdminCredentials)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("trusted pools creator admin credential config invalid")
+		}
+		trustPoolAdminHandler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+			Store:                            trustPoolStore,
+			Registry:                         trustPoolRegistry,
+			OperatorKey:                      cfg.Auth.OperatorKey,
+			CreatorAdminCredentials:          creatorAdminCredentials,
+			CreatorAdminProviderIDs:          cfg.TrustedPools.CreatorAdminProviderIDs,
+			CreatorAdminProviderDelegatedIDs: cfg.TrustedPools.CreatorAdminProviderDelegatedIDs,
+			CreatorAdminBuyerAccountIDs:      cfg.TrustedPools.CreatorAdminBuyerAccountIDs,
+			CreatorProviderAdmitted: func(providerID string) bool {
+				return creatorProviderServingCapable(registry, providerID)
+			},
+		})
+		if reloader, ok := trustPoolAdminHandler.(trustpool.CreatorAdminConfigReloader); ok {
+			trustPoolAdminReloader = reloader
+		}
+		providerMux.Handle("/admin/trust-pools/", trustPoolAdminHandler)
 		logger.Info().Msg("trusted pools operator admin route mounted at /admin/trust-pools/")
+		providerMux.Handle("/creator/trust-pools/", trustPoolAdminHandler)
+		logger.Info().
+			Int("trusted_pools_creator_admin_credentials", len(creatorAdminCredentials)).
+			Msg("trusted pools creator admin route mounted at /creator/trust-pools/")
 	}
 	// Phase 3: MicroMDM command webhook for DeviceAttestation ingest.
 	// Point MicroMDM `-command-webhook-url` here. Auth is loopback-only
@@ -1248,7 +1268,7 @@ func main() {
 		select {
 		case sig := <-signals:
 			if sig == syscall.SIGHUP {
-				reloadCoordinatorConfig(*configPath, cfg.Tier2, logger, wsServer, buyerServer, autotuneCatalog, autotuneEvidenceStore, billingStore)
+				reloadCoordinatorConfig(*configPath, *configOverlay, cfg.Tier2, logger, wsServer, buyerServer, autotuneCatalog, autotuneEvidenceStore, trustPoolAdminReloader, billingStore)
 				continue
 			}
 			timeout := 30 * time.Second
@@ -2321,6 +2341,41 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
+func trustPoolCreatorAdminCredentials(configured []config.TrustedPoolsCreatorAdminCredentialConfig) ([]trustpool.CreatorAdminCredential, error) {
+	credentials := make([]trustpool.CreatorAdminCredential, 0, len(configured))
+	for i, credential := range configured {
+		notBefore, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(credential.NotBeforeUTC))
+		if err != nil {
+			return nil, fmt.Errorf("trusted_pools.creator_admin_credentials[%d].not_before_utc: %w", i, err)
+		}
+		expiresAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(credential.ExpiresAtUTC))
+		if err != nil {
+			return nil, fmt.Errorf("trusted_pools.creator_admin_credentials[%d].expires_at_utc: %w", i, err)
+		}
+		credentials = append(credentials, trustpool.CreatorAdminCredential{
+			CreatorAccountID: strings.TrimSpace(credential.CreatorAccountID),
+			CredentialID:     strings.TrimSpace(credential.CredentialID),
+			Token:            strings.TrimSpace(credential.Token),
+			NotBeforeUTC:     notBefore.UTC(),
+			ExpiresAtUTC:     expiresAt.UTC(),
+			Status:           strings.TrimSpace(credential.Status),
+		})
+	}
+	return credentials, nil
+}
+
+func creatorProviderServingCapable(registry *pool.Registry, providerID string) bool {
+	if registry == nil || providerID == "" {
+		return false
+	}
+	for _, provider := range registry.Snapshot() {
+		if provider.ProviderID == providerID {
+			return provider.ServingCapable()
+		}
+	}
+	return false
+}
+
 func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsConfig, logger zerolog.Logger) (*trustpool.Store, *trustpool.Registry, bool, error) {
 	store, err := trustpool.NewStore(db, trustpool.WithProductionActivationGate(trustpool.ProductionActivationGate{
 		AllowedLaunchEnvironments: cfg.ProductionActivation.AllowedLaunchEnvironments,
@@ -2602,16 +2657,16 @@ func walletMutationGuardHandler() http.Handler {
 }
 
 func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, billingStores ...*billing.Store) {
-	reloadCoordinatorConfig(configPath, startupTier2, logger, wsServer, buyerServer, autotuneCatalog, nil, billingStores...)
+	reloadCoordinatorConfig(configPath, "", startupTier2, logger, wsServer, buyerServer, autotuneCatalog, nil, nil, billingStores...)
 }
 
-func reloadCoordinatorConfig(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore, billingStores ...*billing.Store) {
+func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore, trustPoolAdminReloader trustpool.CreatorAdminConfigReloader, billingStores ...*billing.Store) {
 	// SPEC-016 v0.1.23 §6.5: the general SIGHUP reload must not parse,
 	// env-resolve, or validate payout.security.*, and a payout.* key
 	// edited on disk must not reject a tier2/billing reload. Payout
 	// tuning has its own dedicated SIGHUP listener
 	// (startPayoutSIGHUPListener); this path never applies payout fields.
-	cfg, err := config.LoadForSIGHUPReload(configPath)
+	cfg, err := config.LoadForSIGHUPReloadWithOverlay(configPath, configOverlay)
 	if err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
@@ -2624,6 +2679,14 @@ func reloadCoordinatorConfig(configPath string, startupTier2 config.Tier2Config,
 	if cfg.ProofOfWeights.RequireAutotuneHelloGate && (autotuneCatalog == nil || autotuneEvidenceStore == nil) {
 		logger.Error().Msg("proof_of_weights config reload rejected: autotune hello gate dependencies are not wired")
 		return
+	}
+	var creatorAdminCredentials []trustpool.CreatorAdminCredential
+	if trustPoolAdminReloader != nil {
+		creatorAdminCredentials, err = trustPoolCreatorAdminCredentials(cfg.TrustedPools.CreatorAdminCredentials)
+		if err != nil {
+			logger.Error().Err(err).Msg("trusted pools creator admin config reload rejected")
+			return
+		}
 	}
 	if tier2StartupFieldsChangedWithLogger(startupTier2, cfg.Tier2, logger) {
 		logger.Error().Msg("tier2 config reload rejected: startup-only tier2 fields require restart")
@@ -2714,6 +2777,15 @@ func reloadCoordinatorConfig(configPath string, startupTier2 config.Tier2Config,
 			Int("sticky_entries_invalidated", invalidated).
 			Str("event", "spec004_fr_sr_5_class_reload").
 			Msg("routing.model_classes reload: shape changed; sticky entries invalidated")
+	}
+	if trustPoolAdminReloader != nil {
+		trustPoolAdminReloader.SetCreatorAdminConfig(creatorAdminCredentials, cfg.TrustedPools.CreatorAdminProviderIDs, cfg.TrustedPools.CreatorAdminProviderDelegatedIDs, cfg.TrustedPools.CreatorAdminBuyerAccountIDs)
+		logger.Info().
+			Int("trusted_pools_creator_admin_credentials", len(creatorAdminCredentials)).
+			Int("trusted_pools_creator_provider_allowlist_creators", len(cfg.TrustedPools.CreatorAdminProviderIDs)).
+			Int("trusted_pools_creator_provider_delegation_creators", len(cfg.TrustedPools.CreatorAdminProviderDelegatedIDs)).
+			Int("trusted_pools_creator_buyer_allowlist_creators", len(cfg.TrustedPools.CreatorAdminBuyerAccountIDs)).
+			Msg("trusted pools creator admin config reloaded")
 	}
 }
 

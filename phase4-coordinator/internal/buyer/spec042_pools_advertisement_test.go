@@ -63,3 +63,58 @@ func TestInternalRoutingAdvertisesPoolCapability(t *testing.T) {
 		}
 	})
 }
+
+func TestInternalRoutingAdvertisesBuyerAuthorizationProjection(t *testing.T) {
+	registry := trustpool.NewRegistry()
+	if err := registry.LoadRouteableSnapshotsAtRevision(7, []trustpool.RouteableSnapshot{{
+		PoolID:         "abcdefghijklmnopqrstuv",
+		BuyerAccounts:  []string{"acct-a", "acct-b"},
+		SettlementMode: "observe",
+		Routeable:      true,
+		Generation:     7,
+	}, {
+		PoolID:         "ABCDEFGHIJKLMNOPQRSTUV",
+		BuyerAccounts:  []string{"acct-a"},
+		SettlementMode: "observe",
+		Routeable:      false,
+		Generation:     8,
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	server := buyer.NewServer(
+		pool.NewRegistry(nil),
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithGatewayServiceToken("operator-key"),
+		buyer.WithPoolMembership(registry),
+	)
+	req := httptest.NewRequest(http.MethodGet, "/internal/routing", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	rr := httptest.NewRecorder()
+	server.InternalHandler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Pools struct {
+			Enabled                      bool                `json:"enabled"`
+			AccountPools                 map[string][]string `json:"account_pools"`
+			BuyerAuthorizationGeneration uint64              `json:"buyer_authorization_generation"`
+		} `json:"pools"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v body=%s", err, rr.Body.String())
+	}
+	if !got.Pools.Enabled {
+		t.Fatal("pools.enabled=false, want true")
+	}
+	if got.Pools.BuyerAuthorizationGeneration != 7 {
+		t.Fatalf("buyer_authorization_generation=%d, want registry revision 7", got.Pools.BuyerAuthorizationGeneration)
+	}
+	if len(got.Pools.AccountPools["acct-a"]) != 2 || got.Pools.AccountPools["acct-a"][0] != "ABCDEFGHIJKLMNOPQRSTUV" || got.Pools.AccountPools["acct-a"][1] != "abcdefghijklmnopqrstuv" {
+		t.Fatalf("acct-a pools=%v, want sorted two-pool projection", got.Pools.AccountPools["acct-a"])
+	}
+	if len(got.Pools.AccountPools["acct-b"]) != 1 || got.Pools.AccountPools["acct-b"][0] != "abcdefghijklmnopqrstuv" {
+		t.Fatalf("acct-b pools=%v, want one-pool projection", got.Pools.AccountPools["acct-b"])
+	}
+}

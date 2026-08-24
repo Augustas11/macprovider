@@ -6037,7 +6037,7 @@
         "phase4-coordinator/internal/trustpool/durable_store.go:func validateEvent",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertReviewedDistributionArtifact",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertPublicAnnouncementApproval",
-        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) writeMutationError",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) writeMutationError(",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleReviewedDistributionArtifact",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handlePublicAnnouncementApproval",
         "phase4-coordinator/internal/trustpool/status.go:func BuildStatusDocumentWithLiveProviders",

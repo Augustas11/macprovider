@@ -277,21 +277,26 @@ type FeaturesConfig struct {
 }
 
 // TrustedPoolsConfig is the SPEC-042 Layer 2 gateway feature. Default-off.
-// AccountPools binds the authorized-pool ceiling to a buyer credential at
+// AccountPools binds a static authorized-pool ceiling to a buyer credential at
 // account granularity (a key belongs to exactly one account, so this is a
 // safe superset-free binding until per-key pool scopes land). A request may
-// select only a pool present in its account's list; an account absent from
-// the map authorizes no pool (fail-closed).
+// select only a pool present in its account's static list unless
+// CoordinatorAuthorizes is enabled. CoordinatorAuthorizes is the explicit
+// SPEC-043 creator self-service mode where the gateway refreshes the
+// coordinator's service-token-protected buyer authorization projection,
+// evaluates that map locally, and the coordinator still enforces durable buyer
+// authorization at dispatch.
 type TrustedPoolsConfig struct {
-	Enabled      bool                `yaml:"enabled"`
-	AccountPools map[string][]string `yaml:"account_pools"`
+	Enabled               bool                `yaml:"enabled"`
+	CoordinatorAuthorizes bool                `yaml:"coordinator_authorizes"`
+	AccountPools          map[string][]string `yaml:"account_pools"`
 }
 
-// Authorizes reports whether accountID is configured to select poolID.
-// Fail-closed: empty inputs and accounts absent from account_pools authorize
-// nothing. This is a pure map lookup with no coordinator interaction, so it
-// runs before any capability roundtrip and cannot become an existence oracle
-// (SPEC-042-R010).
+// Authorizes reports whether static account_pools config allows accountID to
+// select poolID. Fail-closed: empty inputs and accounts absent from
+// account_pools authorize nothing. This is a pure map lookup with no
+// coordinator interaction, so static mode runs before any capability roundtrip
+// and cannot become an existence oracle (SPEC-042-R010).
 func (t TrustedPoolsConfig) Authorizes(accountID, poolID string) bool {
 	if accountID == "" || poolID == "" {
 		return false
@@ -898,12 +903,12 @@ func validateWalletSessionsConfig(c Config) error {
 
 // validateTrustedPoolsConfig enforces SPEC-042 gateway config hygiene. When
 // disabled (default) any account_pools content is inert and not validated.
-// When enabled, every account id and pool id MUST be non-empty and every pool
-// id MUST be safe to carry in the coordinator-bound X-MacProvider-Pool header
-// (1-128 bytes, no C0/DEL/C1 control bytes) — an id the coordinator's opaque
-// header sanitizer would reject decodes to empty there and would be routed as
-// GLOBAL, a silent pool->global spill (SPEC-042-R002 forbids that), so it is
-// rejected at config load instead.
+// When enabled with static account_pools, every account id and pool id MUST be
+// non-empty and every pool id MUST be safe to carry in the coordinator-bound
+// X-MacProvider-Pool header (1-128 bytes, no C0/DEL/C1 control bytes) — an id
+// the coordinator's opaque header sanitizer would reject decodes to empty there
+// and would be routed as GLOBAL, a silent pool->global spill (SPEC-042-R002
+// forbids that), so it is rejected at config load instead.
 func validateTrustedPoolsConfig(c Config) error {
 	tp := c.Features.TrustedPools
 	if !tp.Enabled {
@@ -920,22 +925,19 @@ func validateTrustedPoolsConfig(c Config) error {
 			if !PoolIDHeaderSafe(poolID) {
 				return fmt.Errorf("features.trusted_pools.account_pools[%q] pool id %q is not a valid header value (1-128 bytes, no control characters)", accountID, poolID)
 			}
-			if !poolIDBase64URLShape(poolID) {
-				return fmt.Errorf("features.trusted_pools.account_pools[%q] pool id %q must be base64url (A-Za-z0-9-_); SPEC-042-R001 derives pool_id as base64url(SHA256(...))", accountID, poolID)
+			if !PoolIDBase64URLShape(poolID) || !PoolIDCanonicalShape(poolID) {
+				return fmt.Errorf("features.trusted_pools.account_pools[%q] pool id %q must be 22-char base64url(SHA256(identity core)[0:16])", accountID, poolID)
 			}
 		}
 	}
 	return nil
 }
 
-// poolIDBase64URLShape rejects pool ids outside the base64url alphabet
+// PoolIDBase64URLShape rejects pool ids outside the base64url alphabet
 // (A-Za-z0-9-_). SPEC-042-R001 derives pool_id as base64url(SHA256(identity
 // core)[0:16]); a value with spaces, punctuation, or non-ASCII cannot be a
-// canonical pool_id even though it may be header-safe. Length is NOT pinned to
-// 22 chars yet because the R001 derivation is not implemented and ids are
-// currently opaque operator strings; tighten to the exact decoded length when
-// derivation lands.
-func poolIDBase64URLShape(v string) bool {
+// canonical pool_id even though it may be header-safe.
+func PoolIDBase64URLShape(v string) bool {
 	if v == "" {
 		return false
 	}
@@ -947,6 +949,12 @@ func poolIDBase64URLShape(v string) bool {
 		return false
 	}
 	return true
+}
+
+// PoolIDCanonicalShape pins the encoded length of
+// base64url(SHA256(identity core)[0:16]) without padding.
+func PoolIDCanonicalShape(v string) bool {
+	return len(v) == 22
 }
 
 // PoolIDHeaderSafe mirrors the coordinator's sanitizeOpaqueHeader byte rules

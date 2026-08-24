@@ -212,6 +212,81 @@ func TestBeginPoolDeliveryAtGenerationRequiresRouteableCurrentGeneration(t *test
 	}
 }
 
+func TestCreatorAdminCeilingFirstRuntimeInstallBumpsGeneration(t *testing.T) {
+	t.Parallel()
+	r := trustpool.NewRegistry()
+	if err := r.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
+		PoolID:           "P",
+		CreatorAccountID: "creator-a",
+		Members:          []string{"provider-a"},
+		BuyerAccounts:    []string{"acct-a"},
+		SettlementMode:   "observe",
+		Routeable:        true,
+		Generation:       7,
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	staleGeneration := r.Snapshot("P").Generation
+	if staleGeneration != 7 {
+		t.Fatalf("initial generation=%d, want durable generation 7", staleGeneration)
+	}
+	r.SetCreatorAdminCeilings(
+		map[string][]string{"creator-a": {}},
+		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {"acct-a"}},
+	)
+	snap := r.Snapshot("P")
+	if snap.Members["provider-a"] || snap.Generation <= staleGeneration {
+		t.Fatalf("post-ceiling snapshot=%+v, want provider removed and generation > %d", snap, staleGeneration)
+	}
+	if _, ok := r.BeginPoolDeliveryAtGeneration("P", staleGeneration); ok {
+		t.Fatal("BeginPoolDeliveryAtGeneration accepted generation captured before first runtime ceiling install")
+	}
+}
+
+func TestCreatorAdminDelegationCeilingRevocationBumpsGeneration(t *testing.T) {
+	t.Parallel()
+	r := trustpool.NewRegistry()
+	if err := r.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
+		PoolID:           "P",
+		CreatorAccountID: "creator-a",
+		Members:          []string{"provider-a"},
+		BuyerAccounts:    []string{"acct-a"},
+		SettlementMode:   "observe",
+		Routeable:        true,
+		Generation:       7,
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	r.InitCreatorAdminCeilings(
+		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {"acct-a"}},
+	)
+	staleGeneration := r.Snapshot("P").Generation
+	if staleGeneration != 7 {
+		t.Fatalf("initial generation=%d, want durable generation 7", staleGeneration)
+	}
+
+	r.SetCreatorAdminCeilings(
+		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {}},
+		map[string][]string{"creator-a": {"acct-a"}},
+	)
+
+	snap := r.Snapshot("P")
+	if snap.Members["provider-a"] || snap.Generation <= staleGeneration {
+		t.Fatalf("post-delegation-revocation snapshot=%+v, want provider removed and generation > %d", snap, staleGeneration)
+	}
+	authSnap, authorized := r.AuthorizeAndSnapshot("P", "acct-a")
+	if !authorized || authSnap.Members["provider-a"] || authSnap.Generation <= staleGeneration {
+		t.Fatalf("AuthorizeAndSnapshot=(%+v,%v), want buyer still authorized, provider removed, generation > %d", authSnap, authorized, staleGeneration)
+	}
+	if _, ok := r.BeginPoolDeliveryAtGeneration("P", staleGeneration); ok {
+		t.Fatal("BeginPoolDeliveryAtGeneration accepted generation captured before delegated-provider revocation")
+	}
+}
+
 func TestBeginPoolDeliveryAtGenerationRejectsExpiredRouteableSnapshot(t *testing.T) {
 	t.Parallel()
 	r := trustpool.NewRegistry()

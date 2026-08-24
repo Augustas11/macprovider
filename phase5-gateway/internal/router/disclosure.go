@@ -158,9 +158,7 @@ type coordinatorRoutingMetadata struct {
 	// Pools is the SPEC-042-R010 positive pool-capability advertisement. An
 	// old coordinator omits it entirely, decoding to the zero value
 	// (Enabled=false) so the gateway fails pool dispatch closed.
-	Pools struct {
-		Enabled bool `json:"enabled"`
-	} `json:"pools"`
+	Pools coordinatorPoolsMetadata `json:"pools"`
 	Tier2 struct {
 		Phase     any `json:"phase"`
 		ModelHash struct {
@@ -171,6 +169,24 @@ type coordinatorRoutingMetadata struct {
 		Attestation      coordinatorAttestationMetadata      `json:"attestation"`
 		BehavioralSafety coordinatorBehavioralSafetyMetadata `json:"behavioral_safety"`
 	} `json:"tier2"`
+}
+
+type coordinatorPoolsMetadata struct {
+	Enabled                      bool                `json:"enabled"`
+	AccountPools                 map[string][]string `json:"account_pools"`
+	BuyerAuthorizationGeneration uint64              `json:"buyer_authorization_generation"`
+}
+
+func (m coordinatorPoolsMetadata) Authorizes(accountID, poolID string) bool {
+	if accountID == "" || poolID == "" {
+		return false
+	}
+	for _, p := range m.AccountPools[accountID] {
+		if p == poolID {
+			return true
+		}
+	}
+	return false
 }
 
 type coordinatorEncryptedLegMetadata struct {

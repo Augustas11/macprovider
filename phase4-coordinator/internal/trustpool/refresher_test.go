@@ -20,7 +20,7 @@ func TestRefreshRegistryClosesExpiredCreatorGateAtSameRevision(t *testing.T) {
 	}
 	registry := trustpool.NewRegistry()
 	root := newRootFixture(t)
-	graceEndsAt := time.Now().Add(2 * time.Second).UTC()
+	graceEndsAt := time.Now().Add(30 * time.Second).UTC()
 	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", graceEndsAt, trustpool.CreatorStatusEnabled)
 	events := []trustpool.DurableEvent{
 		ev("op-create", testAdminTS(0), trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
@@ -62,7 +62,7 @@ func TestRefreshRegistryClosesExpiredCreatorGateAtSameRevision(t *testing.T) {
 	}
 	initialGeneration := snap.Generation
 
-	time.Sleep(time.Until(graceEndsAt) + 50*time.Millisecond)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(-time.Second), trustpool.CreatorStatusEnabled)
 	expired, err := trustpool.RefreshRegistry(ctx, store, registry)
 	if err != nil {
 		t.Fatalf("expired RefreshRegistry: %v", err)

@@ -85,6 +85,40 @@ VALUES (?, ?, ?, ?, ?)`,
 	}
 }
 
+func TestCreatorProviderServingCapableRequiresServingAdmission(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID:     "provider-present-only",
+		AssignedID:     "session-self-minted",
+		ModelID:        "model-a",
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+		AuthState:      pool.AuthSelfMinted,
+	}, nil)
+	if creatorProviderServingCapable(registry, "provider-present-only") {
+		t.Fatal("present AuthSelfMinted provider passed creator global-admission gate")
+	}
+
+	registry.Register(&pool.Provider{
+		ProviderID:     "provider-serving",
+		AssignedID:     "session-serving",
+		ModelID:        "model-a",
+		State:          pool.StateBusy,
+		SlotsFree:      0,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+		AuthState:      pool.AuthSelfMintedVerified,
+	}, nil)
+	if !creatorProviderServingCapable(registry, "provider-serving") {
+		t.Fatal("busy but serving-capable provider failed creator global-admission gate")
+	}
+	if creatorProviderServingCapable(registry, "missing-provider") {
+		t.Fatal("missing provider passed creator global-admission gate")
+	}
+}
+
 func TestWithReferralValidationMountsOnlyValidationRoute(t *testing.T) {
 	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	disabled := withReferralValidation(base, nil)
@@ -741,7 +775,7 @@ func TestReloadCoordinatorConfigHotTogglesProofOfWeightsGate(t *testing.T) {
 		"bob":   "bob-secret-0123456789abcdef012345678901",
 	}
 	var logs bytes.Buffer
-	reloadCoordinatorConfig(writeReloadConfig(t, next), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, autotuneCatalog, reloadStubAutotuneEvidence{})
+	reloadCoordinatorConfig(writeReloadConfig(t, next), "", startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, autotuneCatalog, reloadStubAutotuneEvidence{}, nil)
 	provider, ok := registry.Resolve("provider-a", "session-a")
 	if !ok {
 		t.Fatal("provider missing after proof_of_weights enable reload")
@@ -756,7 +790,7 @@ func TestReloadCoordinatorConfigHotTogglesProofOfWeightsGate(t *testing.T) {
 	next.ProofOfWeights.RequireAutotuneHelloGate = false
 	next.ProofOfWeights.TelemetryDrift.Enabled = false
 	logs.Reset()
-	reloadCoordinatorConfig(writeReloadConfig(t, next), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, autotuneCatalog, reloadStubAutotuneEvidence{})
+	reloadCoordinatorConfig(writeReloadConfig(t, next), "", startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, autotuneCatalog, reloadStubAutotuneEvidence{}, nil)
 	provider, ok = registry.Resolve("provider-a", "session-a")
 	if !ok {
 		t.Fatal("provider missing after proof_of_weights disable reload")
@@ -1147,6 +1181,68 @@ func TestReloadTier2LogsMissingAlgorithmInvalidation(t *testing.T) {
 		!strings.Contains(rawLog, `"decision":"exclude"`) {
 		t.Fatalf("reload audit log missing invalid event: %s", rawLog)
 	}
+}
+
+func TestReloadCoordinatorConfigReloadsTrustedPoolsCreatorAdminConfig(t *testing.T) {
+	defer tier2.ResetForTest()
+	startup, _, wsServer, buyerServer := reloadTestServers(config.Default())
+	next := startup
+	next.Coordinator.RequireGatewayContext = true
+	next.TrustedPools.Enabled = true
+	next.TrustedPools.CreatorAdminCredentials = []config.TrustedPoolsCreatorAdminCredentialConfig{{
+		CreatorAccountID: "creator-a",
+		CredentialID:     "creator-a-cred-v2",
+		Token:            "creator-token-v2-0123456789abcdef",
+		NotBeforeUTC:     time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+		ExpiresAtUTC:     time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano),
+		Status:           trustpool.CreatorAdminCredentialStatusEnabled,
+	}}
+	next.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-a": {"provider-b"}}
+	next.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-b"}}
+	next.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-b"}}
+	reloader := &reloadTrustPoolCreatorAdminConfigRecorder{}
+
+	basePath := writeReloadConfig(t, startup)
+	overlayPath := writeReloadConfig(t, next)
+	reloadCoordinatorConfig(basePath, overlayPath, startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil, nil, reloader)
+
+	if len(reloader.credentials) != 1 {
+		t.Fatalf("credentials len=%d, want 1", len(reloader.credentials))
+	}
+	if got := reloader.credentials[0]; got.CreatorAccountID != "creator-a" || got.CredentialID != "creator-a-cred-v2" || got.Token != "creator-token-v2-0123456789abcdef" {
+		t.Fatalf("reloaded credential = %+v", got)
+	}
+	if got := reloader.providerIDs["creator-a"]; len(got) != 1 || got[0] != "provider-b" {
+		t.Fatalf("provider allowlist = %#v, want provider-b", reloader.providerIDs)
+	}
+	if got := reloader.providerDelegatedIDs["creator-a"]; len(got) != 1 || got[0] != "provider-b" {
+		t.Fatalf("provider delegation projection = %#v, want provider-b", reloader.providerDelegatedIDs)
+	}
+	if got := reloader.buyerAccountIDs["creator-a"]; len(got) != 1 || got[0] != "acct-b" {
+		t.Fatalf("buyer allowlist = %#v, want acct-b", reloader.buyerAccountIDs)
+	}
+}
+
+type reloadTrustPoolCreatorAdminConfigRecorder struct {
+	credentials          []trustpool.CreatorAdminCredential
+	providerIDs          map[string][]string
+	providerDelegatedIDs map[string][]string
+	buyerAccountIDs      map[string][]string
+}
+
+func (r *reloadTrustPoolCreatorAdminConfigRecorder) SetCreatorAdminConfig(credentials []trustpool.CreatorAdminCredential, providerIDs, providerDelegatedIDs, buyerAccountIDs map[string][]string) {
+	r.credentials = append([]trustpool.CreatorAdminCredential(nil), credentials...)
+	r.providerIDs = cloneReloadStringSliceMap(providerIDs)
+	r.providerDelegatedIDs = cloneReloadStringSliceMap(providerDelegatedIDs)
+	r.buyerAccountIDs = cloneReloadStringSliceMap(buyerAccountIDs)
+}
+
+func cloneReloadStringSliceMap(in map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(in))
+	for key, values := range in {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
 }
 
 func reloadTestServers(cfg config.Config) (config.Config, *pool.Registry, *providerws.Server, *buyer.Server) {

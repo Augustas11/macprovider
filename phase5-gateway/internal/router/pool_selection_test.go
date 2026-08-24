@@ -13,6 +13,7 @@ import (
 const poolChatOK = `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
 
 const poolChatBody = `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+const testPoolID = "abcdefghijklmnopqrstuv"
 
 // poolCoordCapture records what the fake coordinator saw so a test can assert
 // whether the chat leg was dispatched, whether the capability endpoint was
@@ -27,7 +28,7 @@ type poolCoordCapture struct {
 // newPoolHarness wires a gateway over a fake coordinator. routingBody is the
 // JSON returned by /internal/routing (use "" for an old coordinator that has no
 // /internal/routing — it 404s). The TrustedPools feature is enabled with
-// acct_pool authorized for "poolone" unless mutate overrides it.
+// acct_pool authorized for testPoolID unless mutate overrides it.
 func newPoolHarness(t *testing.T, routingBody string, mutate func(*config.Config)) (http.Handler, *poolCoordCapture, string) {
 	t.Helper()
 	cap := &poolCoordCapture{}
@@ -56,7 +57,7 @@ func newPoolHarness(t *testing.T, routingBody string, mutate func(*config.Config
 		cfg.Coordinator.OperatorURL = "http://operator.test"
 		cfg.Features.TrustedPools = config.TrustedPoolsConfig{
 			Enabled:      true,
-			AccountPools: map[string][]string{"acct_pool": {"poolone"}},
+			AccountPools: map[string][]string{"acct_pool": {testPoolID}},
 		}
 		if mutate != nil {
 			mutate(cfg)
@@ -77,12 +78,83 @@ func selectHeader(pool string) map[string]string {
 // X-MacProvider-Pool set to the selected pool_id (SPEC-042-R002).
 func TestPoolSelection_AuthorizedAndCapable_EmitsHeader(t *testing.T) {
 	h, cap, key := newPoolHarness(t, `{"pools":{"enabled":true}}`, nil)
-	resp := postChat(t, h, key, poolChatBody, selectHeader("poolone"))
+	resp := postChat(t, h, key, poolChatBody, selectHeader(testPoolID))
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	if !cap.sawPool || cap.poolHeader != "poolone" {
-		t.Fatalf("forwarded pool header = %q (seen=%v), want poolone", cap.poolHeader, cap.sawPool)
+	if !cap.sawPool || cap.poolHeader != testPoolID {
+		t.Fatalf("forwarded pool header = %q (seen=%v), want %s", cap.poolHeader, cap.sawPool, testPoolID)
+	}
+}
+
+func TestPoolSelection_CoordinatorAuthorizesRejectsMissingGatewayScope(t *testing.T) {
+	h, cap, key := newPoolHarness(t, `{"pools":{"enabled":true}}`, func(cfg *config.Config) {
+		cfg.Features.TrustedPools.CoordinatorAuthorizes = true
+		cfg.Features.TrustedPools.AccountPools = map[string][]string{"acct_pool": {"pool.one"}}
+	})
+	resp := postChat(t, h, key, poolChatBody, selectHeader(testPoolID))
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503", resp.Code, resp.Body.String())
+	}
+	if cap.sawPool || cap.chatHits != 0 {
+		t.Fatalf("coordinator-authorized missing-scope request forwarded=%v chatHits=%d, want no chat dispatch", cap.sawPool, cap.chatHits)
+	}
+	if cap.routingHits != 1 {
+		t.Fatalf("routingHits=%d, want refreshed coordinator authorization projection", cap.routingHits)
+	}
+}
+
+func TestPoolSelection_CoordinatorAuthorizes_EmitsHeaderWithStaticAccountPool(t *testing.T) {
+	h, cap, key := newPoolHarness(t, `{"pools":{"enabled":true}}`, func(cfg *config.Config) {
+		cfg.Features.TrustedPools.CoordinatorAuthorizes = true
+	})
+	resp := postChat(t, h, key, poolChatBody, selectHeader(testPoolID))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !cap.sawPool || cap.poolHeader != testPoolID {
+		t.Fatalf("forwarded pool header = %q (seen=%v), want %s", cap.poolHeader, cap.sawPool, testPoolID)
+	}
+	if cap.routingHits != 1 {
+		t.Fatalf("routingHits=%d, want fresh capability check before coordinator-authorized pool dispatch", cap.routingHits)
+	}
+}
+
+func TestPoolSelection_CoordinatorAuthorizes_EmitsHeaderWithCoordinatorBuyerScope(t *testing.T) {
+	h, cap, key := newPoolHarness(t, `{"pools":{"enabled":true,"account_pools":{"acct_pool":["abcdefghijklmnopqrstuv"]},"buyer_authorization_generation":7}}`, func(cfg *config.Config) {
+		cfg.Features.TrustedPools.CoordinatorAuthorizes = true
+		cfg.Features.TrustedPools.AccountPools = nil
+	})
+	resp := postChat(t, h, key, poolChatBody, selectHeader(testPoolID))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !cap.sawPool || cap.poolHeader != testPoolID {
+		t.Fatalf("forwarded pool header = %q (seen=%v), want %s", cap.poolHeader, cap.sawPool, testPoolID)
+	}
+	if cap.routingHits != 1 {
+		t.Fatalf("routingHits=%d, want refreshed coordinator authorization projection", cap.routingHits)
+	}
+}
+
+func TestPoolSelection_CoordinatorAuthorizesRejectsNonCanonicalPoolIDBeforeDispatch(t *testing.T) {
+	h, cap, key := newPoolHarness(t, `{"pools":{"enabled":true}}`, func(cfg *config.Config) {
+		cfg.Features.TrustedPools.CoordinatorAuthorizes = true
+		cfg.Features.TrustedPools.AccountPools = nil
+	})
+	resp := postChat(t, h, key, poolChatBody, selectHeader("pool.one"))
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "pool_unavailable")
+	if cap.chatHits != 0 {
+		t.Fatalf("chat dispatched for non-canonical pool id (chatHits=%d)", cap.chatHits)
+	}
+	if cap.sawPool {
+		t.Fatalf("non-canonical pool request emitted pool header %q; want none", cap.poolHeader)
+	}
+	if cap.routingHits != 0 {
+		t.Fatalf("routingHits=%d, want non-canonical pool rejected before metadata refresh", cap.routingHits)
 	}
 }
 
@@ -93,7 +165,7 @@ func TestPoolSelection_AuthorizedAndCapable_EmitsHeader(t *testing.T) {
 func TestPoolSelection_CapabilityCheckedFreshEachRequest(t *testing.T) {
 	h, cap, key := newPoolHarness(t, `{"pools":{"enabled":true}}`, nil)
 	for i := 0; i < 2; i++ {
-		resp := postChat(t, h, key, poolChatBody, selectHeader("poolone"))
+		resp := postChat(t, h, key, poolChatBody, selectHeader(testPoolID))
 		if resp.Code != http.StatusOK {
 			t.Fatalf("request %d status=%d body=%s", i, resp.Code, resp.Body.String())
 		}
@@ -140,7 +212,7 @@ func TestPoolSelection_FeatureOffPoolNamed_FailsClosed(t *testing.T) {
 	h, cap, key := newPoolHarness(t, `{"pools":{"enabled":true}}`, func(cfg *config.Config) {
 		cfg.Features.TrustedPools.Enabled = false
 	})
-	resp := postChat(t, h, key, poolChatBody, selectHeader("poolone"))
+	resp := postChat(t, h, key, poolChatBody, selectHeader(testPoolID))
 	if resp.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s, want 503", resp.Code, resp.Body.String())
 	}
@@ -172,7 +244,7 @@ func TestPoolSelection_Unauthorized_FailsClosedWithoutCapabilityFetch(t *testing
 // (no pool->global spill under version skew). Chat NOT dispatched.
 func TestPoolSelection_CoordinatorDeclinesCapability_FailsClosed(t *testing.T) {
 	h, cap, key := newPoolHarness(t, `{"pools":{"enabled":false}}`, nil)
-	resp := postChat(t, h, key, poolChatBody, selectHeader("poolone"))
+	resp := postChat(t, h, key, poolChatBody, selectHeader(testPoolID))
 	if resp.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s, want 503", resp.Code, resp.Body.String())
 	}
@@ -185,7 +257,7 @@ func TestPoolSelection_CoordinatorDeclinesCapability_FailsClosed(t *testing.T) {
 // Old coordinator that omits the pools advertisement entirely -> fail closed.
 func TestPoolSelection_OldCoordinatorNoAdvertisement_FailsClosed(t *testing.T) {
 	h, cap, key := newPoolHarness(t, `{"sticky":{"enabled":false,"ttl_seconds":1800}}`, nil)
-	resp := postChat(t, h, key, poolChatBody, selectHeader("poolone"))
+	resp := postChat(t, h, key, poolChatBody, selectHeader(testPoolID))
 	if resp.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s, want 503", resp.Code, resp.Body.String())
 	}
@@ -203,7 +275,7 @@ func TestPoolSelection_ConflictingSources_Invalid(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(poolChatBody))
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Add("X-MacProvider-Pool-Select", "poolone")
+	req.Header.Add("X-MacProvider-Pool-Select", testPoolID)
 	req.Header.Add("X-MacProvider-Pool-Select", "poolother")
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -231,14 +303,14 @@ func TestPoolSelection_IdlessDedupeSeparatesPoolFromGlobal(t *testing.T) {
 		t.Fatalf("global status=%d body=%s", r1.Code, r1.Body.String())
 	}
 	// Second: identical body, now pool-selected, within the dedupe window.
-	r2 := postChat(t, h, key, poolChatBody, selectHeader("poolone"))
+	r2 := postChat(t, h, key, poolChatBody, selectHeader(testPoolID))
 	if r2.Code != http.StatusOK {
 		t.Fatalf("pool status=%d body=%s", r2.Code, r2.Body.String())
 	}
 	if cap.chatHits != 2 {
 		t.Fatalf("chatHits=%d, want 2 — the pool request replayed the global attempt via id-less dedupe", cap.chatHits)
 	}
-	if !cap.sawPool || cap.poolHeader != "poolone" {
+	if !cap.sawPool || cap.poolHeader != testPoolID {
 		t.Fatalf("pool request did not dispatch with X-MacProvider-Pool (dedupe replay masked it): seen=%v hdr=%q", cap.sawPool, cap.poolHeader)
 	}
 }
@@ -273,14 +345,14 @@ func TestPoolSelection_DemoCannotSelectPool(t *testing.T) {
 		// Even with the demo account explicitly authorized, row-0 must reject.
 		cfg.Features.TrustedPools = config.TrustedPoolsConfig{
 			Enabled:      true,
-			AccountPools: map[string][]string{"demo:1.2.3.4": {"poolone"}},
+			AccountPools: map[string][]string{"demo:1.2.3.4": {testPoolID}},
 		}
 	}, WithHTTPClient(client))
 	demo := issueDemoToken(t, h, "1.2.3.4")
 	resp := postChat(t, h, "", poolChatBody, map[string]string{
 		"X-Demo-Token":              demo,
 		"X-Real-IP":                 "1.2.3.4",
-		"X-MacProvider-Pool-Select": "poolone",
+		"X-MacProvider-Pool-Select": testPoolID,
 	})
 	if resp.Code != http.StatusServiceUnavailable {
 		t.Fatalf("demo pool selection status=%d body=%s, want 503", resp.Code, resp.Body.String())
@@ -336,7 +408,7 @@ func TestPoolSelection_WalletSessionCannotSelectPool(t *testing.T) {
 		cfg.Auth.WalletSessions.MetadataRequestsPerMinute = 100
 		cfg.Features.TrustedPools = config.TrustedPoolsConfig{
 			Enabled:      true,
-			AccountPools: map[string][]string{accountID: {"poolone"}},
+			AccountPools: map[string][]string{accountID: {testPoolID}},
 		}
 	}, WithHTTPClient(client))
 	apiKey := createAccountAndKey(t, store, cfg, accountID)
@@ -346,7 +418,7 @@ func TestPoolSelection_WalletSessionCannotSelectPool(t *testing.T) {
 		"018f7b7b-7c35-4cf0-8d4e-3f0ab1c2f929", []byte(poolChatBody))
 	// The selector header is NOT part of the wallet signed profile — appending
 	// it after signing is exactly the attack the row-0 gate blocks.
-	req.Header.Set("X-MacProvider-Pool-Select", "poolone")
+	req.Header.Set("X-MacProvider-Pool-Select", testPoolID)
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
 
