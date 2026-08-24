@@ -1,0 +1,227 @@
+{
+  "schema_version": "macprovider.local-consumer-endpoint-evidence.v1",
+  "journey_id": "JOURNEY-LOCAL-CONSUMER-ENDPOINT",
+  "requirement_ids": [
+    "SPEC-045-R001",
+    "SPEC-045-R002",
+    "SPEC-045-R003",
+    "SPEC-045-R004",
+    "SPEC-045-R005",
+    "SPEC-045-R006",
+    "SPEC-045-R007",
+    "SPEC-045-R008"
+  ],
+  "repository": {
+    "name": "Augustas11/macprovider",
+    "commit": "dc63ecec59593235593b3de003e567e007ddcdc8"
+  },
+  "captured_at": "2026-08-24T06:13:13Z",
+  "expires_at": "2027-08-24",
+  "operator": {
+    "role": "release-operator",
+    "identity_fingerprint": "2e5a2503810a6b75d51919075dd43175eafdc4ea5dacf20c604a8668d5d79b60"
+  },
+  "environment": {
+    "class": "staging-or-production-local-consumer-endpoint",
+    "hardware_profile": "local-macos-redacted",
+    "candidate": "commit:dc63ecec59593235593b3de003e567e007ddcdc8"
+  },
+  "result": {
+    "status": "pass"
+  },
+  "steps": [
+    {
+      "id": "step-01-capture-local-endpoint",
+      "status": "pass",
+      "artifacts": [
+        "redacted-local-consumer-endpoint"
+      ],
+      "support_artifacts": [
+        "cli_binary",
+        "ledger_capture",
+        "log_capture",
+        "rate_card_capture",
+        "status_capture"
+      ]
+    },
+    {
+      "id": "step-02-openai-sdk-local-client",
+      "status": "pass",
+      "artifacts": [
+        "redacted-local-consumer-endpoint"
+      ],
+      "support_artifacts": [
+        "cli_binary",
+        "ledger_capture",
+        "log_capture",
+        "rate_card_capture",
+        "status_capture"
+      ]
+    },
+    {
+      "id": "step-03-permitted-chat-completion",
+      "status": "pass",
+      "artifacts": [
+        "redacted-local-consumer-endpoint"
+      ],
+      "support_artifacts": [
+        "cli_binary",
+        "ledger_capture",
+        "log_capture",
+        "rate_card_capture",
+        "status_capture"
+      ]
+    },
+    {
+      "id": "step-04-over-budget-denial",
+      "status": "pass",
+      "artifacts": [
+        "redacted-local-consumer-endpoint"
+      ],
+      "support_artifacts": [
+        "cli_binary",
+        "ledger_capture",
+        "log_capture",
+        "rate_card_capture",
+        "status_capture"
+      ]
+    },
+    {
+      "id": "step-05-restart-held-reservation",
+      "status": "pass",
+      "artifacts": [
+        "redacted-local-consumer-endpoint"
+      ],
+      "support_artifacts": [
+        "cli_binary",
+        "ledger_capture",
+        "log_capture",
+        "rate_card_capture",
+        "status_capture"
+      ]
+    },
+    {
+      "id": "step-06-recovery-release-held-reservation",
+      "status": "pass",
+      "artifacts": [
+        "redacted-local-consumer-endpoint"
+      ],
+      "support_artifacts": [
+        "cli_binary",
+        "ledger_capture",
+        "log_capture",
+        "rate_card_capture",
+        "status_capture"
+      ]
+    },
+    {
+      "id": "step-07-redaction-status-logs",
+      "status": "pass",
+      "artifacts": [
+        "redacted-local-consumer-endpoint"
+      ],
+      "support_artifacts": [
+        "cli_binary",
+        "ledger_capture",
+        "log_capture",
+        "rate_card_capture",
+        "status_capture"
+      ]
+    },
+    {
+      "id": "step-08-restore-local-state",
+      "status": "pass",
+      "artifacts": [
+        "redacted-local-consumer-endpoint"
+      ],
+      "support_artifacts": [
+        "cli_binary",
+        "ledger_capture",
+        "log_capture",
+        "rate_card_capture",
+        "status_capture"
+      ]
+    }
+  ],
+  "redaction": {
+    "local_account_names_redacted": true,
+    "operator_identity_redacted": true,
+    "secrets_redacted": true
+  },
+  "observations": {
+    "bearer_tokens_redacted": true,
+    "generated_local_token_used_as_api_key": true,
+    "held_reservation_survived_restart": true,
+    "local_base_url_configured": true,
+    "openai_sdk_used": true,
+    "over_budget_denial_observed": true,
+    "permitted_chat_completion_observed": true,
+    "raw_prompt_output_redacted": true,
+    "recovery_release_observed": true,
+    "redacted_artifacts_reviewed": true,
+    "staging_or_production_gateway": true,
+    "fake_gateway_used": false,
+    "local_token_logged": false,
+    "raw_completion_logged": false,
+    "raw_prompt_logged": false,
+    "upstream_credential_logged": false
+  },
+  "candidate_identity": {
+    "buyer_credential_fingerprint": "c7b9bf95d1388c019fe79d12fcfaa7a999adf833d467d5036b7c1baad9872733",
+    "cli_binary_sha256": "3959f11814b3a1fa2ae9fbf5717a1be497bdcdc535ae9376176bef7e4a1b7e14",
+    "cli_version": "1.8.104",
+    "gateway_kind": "production",
+    "ledger_sha256": "1cc54d17e294ce5c26aaf87dcf074a69ef0189ab53344c80ab6173baed65efa1",
+    "local_endpoint_base_url_sha256": "9d7a1b946b33f681ceeadb541d350a5b806dec27a91c1f4f964edf0fcb338cfa",
+    "local_token_fingerprint": "10c381ea3055b68eec3bc7971c5775b7aed8ed9a5e617b2c2d00a8432dd0c159",
+    "log_capture_sha256": "9d11ebf3ec36b42e08158b621b42184847db0d638e2a5b9eaf233d1ab34a2d4b",
+    "model_id": "mlx-community/Qwen3-8B-4bit",
+    "rate_card_sha256": "dff447006f51a81ba233d45d383a3e0d377e007f48f488404308415a6b4692c5",
+    "sdk_name": "openai-python",
+    "sdk_version": "3.3.1",
+    "status_capture_sha256": "cf7d215a13730b7ead2e014e7d2112be4181eae8bdddbe4dfff08db68db81d31",
+    "upstream_gateway_origin_sha256": "05ec143545d842afe0609f2659c59812840dcfeba47e869dea17ff2121686dbe"
+  },
+  "support_artifacts": {
+    "cli_binary": {
+      "role": "cli-binary",
+      "sha256": "3959f11814b3a1fa2ae9fbf5717a1be497bdcdc535ae9376176bef7e4a1b7e14",
+      "bytes": 59629952
+    },
+    "ledger_capture": {
+      "role": "redacted-ledger-capture",
+      "sha256": "1cc54d17e294ce5c26aaf87dcf074a69ef0189ab53344c80ab6173baed65efa1",
+      "bytes": 3198
+    },
+    "log_capture": {
+      "role": "redacted-log-capture",
+      "sha256": "9d11ebf3ec36b42e08158b621b42184847db0d638e2a5b9eaf233d1ab34a2d4b",
+      "bytes": 196
+    },
+    "rate_card_capture": {
+      "role": "redacted-rate-card-capture",
+      "sha256": "dff447006f51a81ba233d45d383a3e0d377e007f48f488404308415a6b4692c5",
+      "bytes": 382
+    },
+    "status_capture": {
+      "role": "redacted-status-capture",
+      "sha256": "cf7d215a13730b7ead2e014e7d2112be4181eae8bdddbe4dfff08db68db81d31",
+      "bytes": 1272
+    }
+  },
+  "review": {
+    "reviewed_at": "2026-08-24T06:12:04Z",
+    "reviewer_role": "release-operator",
+    "support_artifacts_reviewed": [
+      "cli_binary",
+      "ledger_capture",
+      "log_capture",
+      "rate_card_capture",
+      "status_capture"
+    ],
+    "real_gateway_basis": "staging-or-production-gateway",
+    "sdk_client_basis": "openai-sdk-local-token-api-key",
+    "redaction_basis": "redacted-support-artifacts-reviewed"
+  },
+  "run_id": "local-consumer-endpoint-20260824T060103Z"
+}

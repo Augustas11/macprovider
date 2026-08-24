@@ -83,7 +83,7 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
             "local_endpoint_base_url_sha256": FINGERPRINT,
             "local_token_fingerprint": FINGERPRINT,
             "log_capture_sha256": FINGERPRINT,
-            "model_id": "model-test",
+            "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
             "rate_card_sha256": FINGERPRINT,
             "sdk_name": "openai-python",
             "sdk_version": "2.0.0",
@@ -339,6 +339,35 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
                     root=root,
                 )
                 self.assertTrue(any(field in error and ("secret-like" in error or "commit:<signed.repository.commit>" in error) for error in result.errors), field)
+
+    def test_governance_rejects_malformed_mlx_model_ids_when_source_matches_signed(self) -> None:
+        for name, model_id in {
+            "unknown_namespace": "private-org/Llama-3.2-3B-Instruct-4bit",
+            "nested_namespace": "mlx-community/private/Llama-3.2-3B-Instruct-4bit",
+            "urlish_model": "mlx-community/Llama-3.2-3B-Instruct-4bit?token=redacted",
+            "operator_local_model": "mlx-community/augstar-MacBook-Pro",
+            "secret_phrase_model": "mlx-community/secret-production-token-1234567890",
+            "prompt_phrase_model": "mlx-community/Summarize-confidential-merger-plans",
+            "completion_phrase_model": "mlx-community/raw-completion-text",
+        }.items():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                signed = complete_signed_payload()
+                signed["candidate_identity"]["model_id"] = model_id
+                source = "journeys/evidence/local-consumer-endpoint-staging.redacted.json"
+                write_redacted_source(root, signed, source)
+                result = ValidationResult()
+                _validate_local_consumer_endpoint_journey_result(
+                    signed,
+                    "SPEC-045-R008",
+                    [LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID],
+                    signed["artifacts"],
+                    signed["steps"],
+                    "evidence[0]",
+                    result,
+                    root=root,
+                )
+                self.assertTrue(any("candidate_identity.model_id" in error for error in result.errors), name)
 
     def test_governance_rejects_operator_local_candidate_identity_metadata_when_source_matches_signed(self) -> None:
         cases = {
@@ -736,6 +765,22 @@ class LocalConsumerEndpointJourneyResultTests(unittest.TestCase):
         identity["upstream_gateway_origin_sha256"] = NON_ALLOWLISTED_GATEWAY_ORIGIN_SHA256
         with self.assertRaises(SystemExit):
             builder.require_candidate_identity(identity)
+
+    def test_builder_rejects_malformed_mlx_model_ids(self) -> None:
+        builder = load_builder()
+        for name, model_id in {
+            "unknown_namespace": "private-org/Llama-3.2-3B-Instruct-4bit",
+            "nested_namespace": "mlx-community/private/Llama-3.2-3B-Instruct-4bit",
+            "urlish_model": "mlx-community/Llama-3.2-3B-Instruct-4bit?token=redacted",
+            "operator_local_model": "mlx-community/augstar-MacBook-Pro",
+            "secret_phrase_model": "mlx-community/secret-production-token-1234567890",
+            "prompt_phrase_model": "mlx-community/Summarize-confidential-merger-plans",
+            "completion_phrase_model": "mlx-community/raw-completion-text",
+        }.items():
+            identity = valid_signed()["candidate_identity"]
+            identity["model_id"] = model_id
+            with self.assertRaises(SystemExit, msg=name):
+                builder.require_candidate_identity(identity)
 
     def test_builder_rejects_operator_local_candidate_identity_metadata(self) -> None:
         builder = load_builder()

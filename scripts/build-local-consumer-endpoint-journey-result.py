@@ -48,6 +48,7 @@ CANDIDATE_IDENTITY_VERSION_RE = re.compile(r"^v?[0-9]+[.][0-9]+[.][0-9]+(?:-(?:t
 CANDIDATE_IDENTITY_MODEL_ID_RE = re.compile(
     r"^(?:"
     r"model-test|"
+    r"mlx-community/(?:Llama-3[.]2-3B-Instruct-4bit|Qwen3-8B-4bit)|"
     r"gpt-[0-9]+(?:[-.](?:mini|nano|turbo|preview|latest|instruct|realtime|audio|search|chat|transcribe|tts|[0-9]{4}(?:-[0-9]{2}(?:-[0-9]{2})?)?)){0,6}|"
     r"o[1-9](?:[-.](?:mini|pro|preview|latest|reasoning|[0-9]{4}(?:-[0-9]{2}(?:-[0-9]{2})?)?)){0,6}"
     r")$"
