@@ -52,8 +52,23 @@ Phase 4B adds the promotion primitives for this evidence class:
   `scripts/test-signed-local-consumer-endpoint-journey-workflow.sh` pin the
   journey shape, workflow boundaries, and fake-gateway rejection.
 
+Phase 4C adds the local redacted evidence capture primitive:
+
+- `scripts/capture-local-consumer-endpoint-evidence.py` emits one closed
+  `macprovider.local-consumer-endpoint-evidence.v1` source under
+  `journeys/evidence/local-consumer-endpoint-*.redacted.json`;
+- `scripts/tests/test_local_consumer_endpoint_evidence_capture.py` verifies the
+  generated source is accepted by the Phase 4B builder once committed, and that
+  missing review/support bindings, fake-gateway, wrong-path, wrong-requirement,
+  secret-like metadata, non-UTF-8 text, symlink, and transcript-bearing
+  captures fail closed;
+- `scripts/build-local-consumer-endpoint-journey-result.py` now requires the
+  committed redacted evidence source to include closed support-artifact hashes
+  plus an explicit review block before it can build the unsigned signer payload.
+
 The following Phase 4 promotion evidence is not produced by the fake-gateway
-harness or by the Phase 4B signer primitives and remains pending:
+harness or by the Phase 4B/4C signer and capture primitives and remains
+pending:
 
 - staging or production gateway journey using an OpenAI SDK configured with the
   local endpoint base URL and generated local token as `api_key`;
