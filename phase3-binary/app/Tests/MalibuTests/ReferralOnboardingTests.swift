@@ -196,15 +196,15 @@ final class ReferralOnboardingTests: XCTestCase {
             try CLIInstallRunner.resolvedPinnedVersion(
                 pinnedVersion: nil,
                 repairExistingInstall: true,
-                bundledVersion: "1.8.104"
+                bundledVersion: "1.8.105"
             ),
-            "1.8.104"
+            "1.8.105"
         )
         XCTAssertNil(
             try CLIInstallRunner.resolvedPinnedVersion(
                 pinnedVersion: nil,
                 repairExistingInstall: false,
-                bundledVersion: "1.8.104"
+                bundledVersion: "1.8.105"
             )
         )
         let repairEnvironment = try CLIInstallRunner.installerEnvironment(
@@ -213,13 +213,13 @@ final class ReferralOnboardingTests: XCTestCase {
             pinnedVersion: try CLIInstallRunner.resolvedPinnedVersion(
                 pinnedVersion: nil,
                 repairExistingInstall: true,
-                bundledVersion: "1.8.104"
+                bundledVersion: "1.8.105"
             ),
             repairExistingInstall: true,
             bundledCLIPath: URL(fileURLWithPath: "/Applications/Malibu.app/Contents/MacOS/macprovider-cli"),
             bundledAppPath: URL(fileURLWithPath: "/Applications/Malibu.app")
         )
-        XCTAssertEqual(repairEnvironment["MACPROVIDER_VERSION"], "v1.8.104")
+        XCTAssertEqual(repairEnvironment["MACPROVIDER_VERSION"], "v1.8.105")
         XCTAssertEqual(repairEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"], "1")
         XCTAssertEqual(
             repairEnvironment["MACPROVIDER_BUNDLED_CLI"],
