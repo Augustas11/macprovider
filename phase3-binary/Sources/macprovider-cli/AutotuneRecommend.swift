@@ -167,6 +167,27 @@ struct AutotuneRecommendHardware: Equatable {
 }
 
 extension AutotuneRecommendHardware {
+    var recommendedMaxContext: Int {
+        ProviderCapacity.defaultContextTokens(forPhysicalMemoryGB: memoryGB)
+    }
+
+    func recommendedMaxContext(
+        modelID: String,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        catalogMinRAMGB: Int
+    ) -> Int {
+        let hardwareCap = recommendedMaxContext
+        let modelCap = AutotuneModelContextCap.safeMaxContextTokens(
+            hardwareMemoryGB: memoryGB,
+            catalogMinRAMGB: catalogMinRAMGB,
+            modelID: modelID,
+            verifiedConfigJSONData: verifiedConfigJSONData,
+            verifiedConfigSHA256: verifiedConfigSHA256
+        )
+        return min(hardwareCap, modelCap)
+    }
+
     var recommendedMaxBatch: Int {
         let normalizedChip = chip.lowercased()
         if normalizedChip.contains("ultra") {
@@ -182,6 +203,232 @@ extension AutotuneRecommendHardware {
             return 2
         }
         return 1
+    }
+}
+
+enum AutotuneModelContextCap {
+    static let failClosedMaxContext = 4_000
+
+    private static let minimumAcceptedContext = 4_000
+    private static let maximumAcceptedContext = 1_000_000
+    private static let bytesPerKVElement = 2
+    private static let memorySafetyFractionNumerator = 3
+    private static let memorySafetyFractionDenominator = 4
+    private static let bytesPerGB: UInt64 = 1_073_741_824
+
+    private static let configFieldPaths: [[String]] = [
+        ["max_position_embeddings"],
+        ["max_sequence_length"],
+        ["max_seq_len"],
+        ["seq_length"],
+        ["n_ctx"],
+        ["context_length"],
+        ["text_config", "max_position_embeddings"],
+        ["text_config", "max_sequence_length"],
+        ["text_config", "max_seq_len"],
+        ["text_config", "seq_length"],
+        ["text_config", "n_ctx"],
+        ["text_config", "context_length"]
+    ]
+
+    static func declaredMaxContextTokens(modelID: String, verifiedConfigJSONData: Data?) -> Int? {
+        if let verifiedConfigJSONData,
+           let value = declaredMaxContextTokens(configData: verifiedConfigJSONData)
+        {
+            return value
+        }
+        return knownDeclaredMaxContextTokens(modelID: modelID)
+    }
+
+    static func safeMaxContextTokens(
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int,
+        modelID: String,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?
+    ) -> Int {
+        let architecturalCap = declaredMaxContextTokens(
+            modelID: modelID,
+            verifiedConfigJSONData: verifiedConfigJSONData
+        ) ?? failClosedMaxContext
+        guard let verifiedConfigJSONData,
+              let verifiedConfigSHA256,
+              Data(SHA256.hash(data: verifiedConfigJSONData)).hexLower == verifiedConfigSHA256,
+              let memoryCap = memorySafeContextTokens(
+                configData: verifiedConfigJSONData,
+                hardwareMemoryGB: hardwareMemoryGB,
+                catalogMinRAMGB: catalogMinRAMGB
+              )
+        else {
+            return min(architecturalCap, failClosedMaxContext)
+        }
+        return min(architecturalCap, memoryCap)
+    }
+
+    static func declaredMaxContextTokens(configData: Data) -> Int? {
+        guard let root = strictConfigRoot(configData) else {
+            return nil
+        }
+
+        for path in configFieldPaths {
+            if let value = intValue(in: root, path: path), let saneValue = saneContext(value) {
+                return saneValue
+            }
+        }
+        return nil
+    }
+
+    static func memorySafeContextTokens(configData: Data, hardwareMemoryGB: Int, catalogMinRAMGB: Int) -> Int? {
+        guard let root = strictConfigRoot(configData),
+              let bytesPerToken = kvCacheBytesPerToken(in: root)
+        else {
+            return nil
+        }
+
+        let reservedGB = max(catalogMinRAMGB, 1) + AutotuneRecommendEngine.safetyMarginGB
+        let spareGB = max(0, hardwareMemoryGB - reservedGB)
+        let usableKVBytes = UInt64(spareGB) * bytesPerGB * UInt64(memorySafetyFractionNumerator)
+            / UInt64(memorySafetyFractionDenominator)
+        let additionalTokens = Int(min(
+            UInt64(maximumAcceptedContext - failClosedMaxContext),
+            usableKVBytes / UInt64(bytesPerToken)
+        ))
+        return saneContext(failClosedMaxContext + additionalTokens)
+    }
+
+    private static func strictConfigRoot(_ configData: Data) -> [String: Any]? {
+        guard (try? AutotuneStrictJSON.rejectDuplicateKeys(configData)) != nil,
+              let root = try? JSONSerialization.jsonObject(with: configData) as? [String: Any]
+        else {
+            return nil
+        }
+        return root
+    }
+
+    private static func intValue(in object: [String: Any], path: [String]) -> Int? {
+        var current: Any = object
+        for key in path {
+            guard let dictionary = current as? [String: Any],
+                  let next = dictionary[key]
+            else {
+                return nil
+            }
+            current = next
+        }
+        if type(of: current) == Bool.self {
+            return nil
+        }
+        if let number = current as? NSNumber,
+           CFGetTypeID(number) == CFBooleanGetTypeID() {
+            return nil
+        }
+        if let value = current as? Int {
+            return value
+        }
+        if let value = current as? Double,
+           value.isFinite,
+           value.rounded(.towardZero) == value,
+           let exact = Int(exactly: value) {
+            return exact
+        }
+        if let value = current as? String {
+            return Int(value)
+        }
+        return nil
+    }
+
+    private static func kvCacheBytesPerToken(in root: [String: Any]) -> Int? {
+        guard let layers = firstInt(in: root, paths: [
+            ["num_hidden_layers"],
+            ["n_layer"],
+            ["num_layers"],
+            ["text_config", "num_hidden_layers"],
+            ["text_config", "n_layer"],
+            ["text_config", "num_layers"]
+        ]),
+            let hiddenSize = firstInt(in: root, paths: [
+                ["hidden_size"],
+                ["n_embd"],
+                ["d_model"],
+                ["text_config", "hidden_size"],
+                ["text_config", "n_embd"],
+                ["text_config", "d_model"]
+            ]),
+            let attentionHeads = firstInt(in: root, paths: [
+                ["num_attention_heads"],
+                ["n_head"],
+                ["text_config", "num_attention_heads"],
+                ["text_config", "n_head"]
+            ])
+        else {
+            return nil
+        }
+        let kvHeads = firstInt(in: root, paths: [
+            ["num_key_value_heads"],
+            ["n_kv_head"],
+            ["text_config", "num_key_value_heads"],
+            ["text_config", "n_kv_head"]
+        ]) ?? attentionHeads
+        let headDim = firstInt(in: root, paths: [
+            ["head_dim"],
+            ["text_config", "head_dim"]
+        ]) ?? (hiddenSize / attentionHeads)
+
+        guard layers > 0, hiddenSize > 0, attentionHeads > 0, kvHeads > 0, headDim > 0,
+              hiddenSize % attentionHeads == 0
+        else {
+            return nil
+        }
+        guard let bytes = checkedProduct([
+            UInt64(layers),
+            UInt64(kvHeads),
+            UInt64(headDim),
+            2,
+            UInt64(bytesPerKVElement)
+        ])
+        else {
+            return nil
+        }
+        guard bytes > 0, bytes <= UInt64(Int.max) else {
+            return nil
+        }
+        return Int(bytes)
+    }
+
+    private static func checkedProduct(_ values: [UInt64]) -> UInt64? {
+        var product: UInt64 = 1
+        for value in values {
+            let multiplied = product.multipliedReportingOverflow(by: value)
+            guard multiplied.overflow == false else {
+                return nil
+            }
+            product = multiplied.partialValue
+        }
+        return product
+    }
+
+    private static func firstInt(in root: [String: Any], paths: [[String]]) -> Int? {
+        for path in paths {
+            if let value = intValue(in: root, path: path), value > 0 {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func saneContext(_ value: Int) -> Int? {
+        guard value >= minimumAcceptedContext, value <= maximumAcceptedContext else {
+            return nil
+        }
+        return value
+    }
+
+    private static func knownDeclaredMaxContextTokens(modelID: String) -> Int? {
+        let normalized = modelID.lowercased()
+        if normalized.contains("qwen2.5-coder-32b") {
+            return 32_768
+        }
+        return nil
     }
 }
 
@@ -1645,6 +1892,8 @@ struct CandidateBenchmark: Equatable {
     var thermalThrottleDetected: Bool
     var artifactSHA256: String
     var modelArtifactPath: String
+    var modelConfigJSONData: Data? = nil
+    var modelConfigSHA256: String? = nil
     var benchmarkID: String?
     var generatedAt: Date
     var candidateCatalogSHA256: String
@@ -2748,6 +2997,8 @@ struct RecommendationFreshnessChecker {
 struct VerifiedModelArtifact {
     var modelArgument: String
     var sha256: String
+    var configJSONData: Data?
+    var configSHA256: String?
 }
 
 /// macOS kernel memory-pressure verdict, read in-process from
@@ -3226,13 +3477,18 @@ struct CachedModelArtifactResolver {
         else {
             throw AutotuneRecommendError.invalidArtifact("missing pinned snapshot \(row.modelID)@\(revision)")
         }
-        let actual = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
-        guard actual == expected else {
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: snapshot)
+        guard inspection.sha256 == expected else {
             throw AutotuneRecommendError.invalidArtifact(
-                "hash mismatch \(row.modelID)@\(revision) expected=\(expected) actual=\(actual)"
+                "hash mismatch \(row.modelID)@\(revision) expected=\(expected) actual=\(inspection.sha256)"
             )
         }
-        return VerifiedModelArtifact(modelArgument: snapshot.path, sha256: actual)
+        return VerifiedModelArtifact(
+            modelArgument: snapshot.path,
+            sha256: inspection.sha256,
+            configJSONData: inspection.configJSONData,
+            configSHA256: inspection.configSHA256
+        )
     }
 
     func snapshotURL(modelID: String, revision: String) -> URL {
@@ -3566,6 +3822,8 @@ struct AutotuneRecommendationBenchmarker {
                         thermalThrottleDetected: safety.thermalThrottleDetected,
                         artifactSHA256: artifact.sha256,
                         modelArtifactPath: artifact.modelArgument,
+                        modelConfigJSONData: artifact.configJSONData,
+                        modelConfigSHA256: artifact.configSHA256,
                         benchmarkID: "spec-023-\(modelKey)-\(Int(generatedAt.timeIntervalSince1970))",
                         generatedAt: generatedAt,
                         candidateCatalogSHA256: request.candidateCatalogSHA256,
@@ -3701,7 +3959,17 @@ struct AutotuneRecommendationBenchmarker {
 }
 
 enum ModelArtifactVerifier {
+    struct CanonicalArtifactInspection {
+        var sha256: String
+        var configJSONData: Data?
+        var configSHA256: String?
+    }
+
     static func canonicalArtifactHash(directory: URL) throws -> String {
+        try inspectCanonicalArtifact(directory: directory).sha256
+    }
+
+    static func inspectCanonicalArtifact(directory: URL) throws -> CanonicalArtifactInspection {
         let fm = FileManager.default
         var root = stat()
         guard lstat(directory.path, &root) == 0,
@@ -3714,6 +3982,8 @@ enum ModelArtifactVerifier {
         }
         let basePath = directory.resolvingSymlinksInPath().path
         var entries: [(path: String, size: UInt64, sha: String)] = []
+        var configJSONData: Data?
+        var configSHA256: String?
         for case let url as URL in enumerator {
             let path = url.resolvingSymlinksInPath().path
             guard path.hasPrefix(basePath + "/") else {
@@ -3740,12 +4010,21 @@ enum ModelArtifactVerifier {
                 throw AutotuneRecommendError.invalidArtifact("hardlink \(rel)")
             }
             let data = try Data(contentsOf: url)
-            entries.append((rel, UInt64(data.count), Data(SHA256.hash(data: data)).hexLower))
+            let fileSHA256 = Data(SHA256.hash(data: data)).hexLower
+            if rel == "config.json" {
+                configJSONData = data
+                configSHA256 = fileSHA256
+            }
+            entries.append((rel, UInt64(data.count), fileSHA256))
         }
         let manifest = entries.sorted { $0.path < $1.path }
             .map { "\($0.path)\n\($0.size)\n\($0.sha)\n" }
             .joined()
-        return Data(SHA256.hash(data: Data(manifest.utf8))).hexLower
+        return CanonicalArtifactInspection(
+            sha256: Data(SHA256.hash(data: Data(manifest.utf8))).hexLower,
+            configJSONData: configJSONData,
+            configSHA256: configSHA256
+        )
     }
 }
 
