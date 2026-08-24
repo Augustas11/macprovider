@@ -342,6 +342,51 @@ class TrustedPoolLayer2JourneyResultTests(unittest.TestCase):
             with self.assertRaises(SystemExit, msg=text):
                 builder.reject_forbidden_overclaim_text(text, "text")
 
+    def test_builder_normalizes_rich_source_redaction_for_signed_payload(self) -> None:
+        builder = load_builder()
+        rich_redaction = {
+            "secrets_redacted": True,
+            "operator_identity_redacted": True,
+            "local_account_names_redacted": True,
+            "artifact_id": "redacted-trusted-pool-layer2",
+            "bearer_tokens_redacted": True,
+            "buyer_credential_redacted": True,
+            "local_endpoint_redacted": True,
+            "provider_identity_redacted": True,
+            "raw_prompt_output_redacted": True,
+            "redaction_reviewed_by_human": True,
+        }
+        self.assertEqual(
+            {
+                "secrets_redacted": True,
+                "operator_identity_redacted": True,
+                "local_account_names_redacted": True,
+            },
+            builder.require_signed_redaction(rich_redaction),
+        )
+
+    def test_builder_rejects_missing_required_signed_redaction(self) -> None:
+        builder = load_builder()
+        redaction = {
+            "secrets_redacted": True,
+            "operator_identity_redacted": True,
+            "local_account_names_redacted": False,
+            "artifact_id": "redacted-trusted-pool-layer2",
+        }
+        with self.assertRaises(SystemExit):
+            builder.require_signed_redaction(redaction)
+
+    def test_builder_rejects_false_rich_source_redaction_flag(self) -> None:
+        builder = load_builder()
+        redaction = {
+            "secrets_redacted": True,
+            "operator_identity_redacted": True,
+            "local_account_names_redacted": True,
+            "buyer_credential_redacted": False,
+        }
+        with self.assertRaises(SystemExit):
+            builder.require_signed_redaction(redaction)
+
 
 if __name__ == "__main__":
     unittest.main()
