@@ -438,6 +438,32 @@ class JourneyResultToolsTests(unittest.TestCase):
             self.assertIn("JOURNEY-TRUSTED-POOL-LAYER2-MVP is evidence-only", stderr.getvalue())
             self.assertEqual(original, conformance_path.read_text(encoding="utf-8"))
 
+    def test_promoter_rejects_trusted_pool_creator_mvp_evidence_only_without_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            generate_acceptance_key(root)
+            evidence_path = root / "journeys" / "evidence" / "trusted-pool-creator-mvp-alpha.signed.json"
+            envelope = signed_journey_envelope(commit)
+            envelope["signed"]["journey_id"] = "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+            evidence_path.write_text(json.dumps(envelope, indent=2) + "\n", encoding="utf-8")
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            original = conformance_path.read_text(encoding="utf-8")
+
+            promoter = load_promoter_module()
+            stderr = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+                promoter.promote(
+                    root,
+                    "SPEC-001-R001",
+                    "journeys/evidence/trusted-pool-creator-mvp-alpha.signed.json",
+                    base_ref="HEAD",
+                )
+
+            self.assertIn("JOURNEY-TRUSTED-POOL-CREATOR-MVP is evidence-only", stderr.getvalue())
+            self.assertEqual(original, conformance_path.read_text(encoding="utf-8"))
+
     def test_promoter_does_not_trust_path_hijacked_openssl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

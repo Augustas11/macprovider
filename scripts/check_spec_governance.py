@@ -146,6 +146,30 @@ TRUSTED_POOL_LAYER2_FORBIDDEN_OVERCLAIM_RE = re.compile(
     r"operator[- ]?blind(ness)?"
     r")\b"
 )
+TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID = "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+TRUSTED_POOL_CREATOR_MVP_EXECUTION_MODE = "isolated-candidate-trusted-pool-creator-mvp"
+TRUSTED_POOL_CREATOR_MVP_ARTIFACT_ID = "redacted-trusted-pool-creator-mvp"
+TRUSTED_POOL_CREATOR_MVP_STEP_ID_ORDER = (
+    "step-01-creator-approval",
+    "step-01b-admin-surface-properties",
+    "step-02-root-issuer-registration",
+    "step-03-manifest-create-accepted",
+    "step-04-negative-manifest-cases",
+    "step-05-provider-membership",
+    "step-06-buyer-authorization",
+    "step-07-promise-surfaces",
+    "step-08-activation-gate",
+    "step-09-successful-pooled-request",
+    "step-10-settlement-and-logs",
+    "step-11-fail-closed-routing",
+    "step-12-restart-reconstruction",
+    "step-13-emergency-pause-and-rollback",
+    "step-14-redaction-and-artifacts",
+)
+TRUSTED_POOL_CREATOR_MVP_STEP_IDS = set(TRUSTED_POOL_CREATOR_MVP_STEP_ID_ORDER)
+TRUSTED_POOL_CREATOR_MVP_EVIDENCE_REQUIREMENT_IDS = {
+    f"SPEC-043-R{index:03d}" for index in range(1, 13)
+}
 LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID = "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
 LOCAL_CONSUMER_ENDPOINT_EXECUTION_MODE = "staging-or-production-local-consumer-endpoint"
 LOCAL_CONSUMER_ENDPOINT_ARTIFACT_ID = "redacted-local-consumer-endpoint"
@@ -1433,6 +1457,205 @@ def _validate_trusted_pool_layer2_journey_result(
         )
 
 
+def _validate_trusted_pool_creator_mvp_journey_result(
+    signed: dict[str, Any],
+    requirement_id: str,
+    journeys: list[str],
+    artifacts: list[Any],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    if signed.get("journey_id") != TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID!r}")
+    if TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID not in journeys:
+        result.error(location, f"trusted-pool creator MVP requirement journeys must include {TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID!r}")
+    if signed.get("execution_mode") != TRUSTED_POOL_CREATOR_MVP_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {TRUSTED_POOL_CREATOR_MVP_EXECUTION_MODE!r}")
+
+    run_result = signed.get("result")
+    if isinstance(run_result, dict):
+        _validate_trusted_pool_layer2_no_overclaim_text(
+            run_result.get("summary"),
+            f"{location}.signed.result.summary",
+            result,
+        )
+
+    valid_artifacts = [artifact for artifact in artifacts if isinstance(artifact, dict)]
+    if len(valid_artifacts) != 1:
+        result.error(f"{location}.signed.artifacts", "trusted-pool creator MVP journey-result must contain exactly one redacted evidence artifact")
+    for index, artifact in enumerate(artifacts):
+        if not isinstance(artifact, dict):
+            continue
+        artifact_id = artifact.get("id")
+        source = artifact.get("source")
+        if artifact_id != TRUSTED_POOL_CREATOR_MVP_ARTIFACT_ID:
+            result.error(f"{location}.signed.artifacts[{index}].id", f"must equal {TRUSTED_POOL_CREATOR_MVP_ARTIFACT_ID!r}")
+        if not isinstance(source, str) or not source.startswith("journeys/evidence/trusted-pool-creator-mvp-") or not source.endswith(".redacted.json"):
+            result.error(
+                f"{location}.signed.artifacts[{index}].source",
+                "must match journeys/evidence/trusted-pool-creator-mvp-*.redacted.json",
+            )
+
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        _validate_trusted_pool_layer2_no_overclaim_text(
+            step.get("assertion"),
+            f"{location}.signed.steps[{index}].assertion",
+            result,
+        )
+        if step.get("artifacts") != [TRUSTED_POOL_CREATOR_MVP_ARTIFACT_ID]:
+            result.error(
+                f"{location}.signed.steps[{index}].artifacts",
+                f"must equal [{TRUSTED_POOL_CREATOR_MVP_ARTIFACT_ID!r}]",
+            )
+
+    observations = signed.get("observations")
+    if _expect_object(observations, f"{location}.signed.observations", result):
+        true_fields = {
+            "approved_creator_record_bound",
+            "buyer_authorization_enforced",
+            "candidate_manifest_accepted",
+            "creator_admin_authorized_only",
+            "creator_suspension_root_compromise_freeze_verified",
+            "delegation_revocation_verified",
+            "descendant_signer_rejection_verified",
+            "emergency_pause_exercised",
+            "fail_closed_no_global_fallback",
+            "isolated_environment",
+            "no_duplicate_settlement",
+            "no_private_key_upload",
+            "no_raw_prompt_output_artifact",
+            "pool_existence_oracle_within_threshold",
+            "raw_prompt_output_redacted",
+            "restart_reconstruction_verified",
+            "root_registration_replay_checked",
+            "settlement_labels_bound",
+            "successful_pooled_request",
+        }
+        false_fields = {
+            "coordinator_blind_claimed",
+            "global_fallback_observed",
+            "payout_ready_mutated",
+            "privacy_pool_claimed",
+            "production_side_effects",
+            "public_announcement_without_reviewed_artifact_observed",
+            "unrestricted_creator_admin_observed",
+        }
+        required_obs = true_fields | false_fields
+        _expect_keys(
+            observations,
+            required_obs,
+            required_obs,
+            f"{location}.signed.observations",
+            result,
+        )
+        for field_name in sorted(required_obs):
+            if field_name not in observations:
+                result.error(f"{location}.signed.observations.{field_name}", "is required")
+        for field_name in sorted(true_fields):
+            if observations.get(field_name) is not True:
+                result.error(f"{location}.signed.observations.{field_name}", "must be true")
+        for field_name in sorted(false_fields):
+            if observations.get(field_name) is not False:
+                result.error(f"{location}.signed.observations.{field_name}", "must be false")
+
+    identity = signed.get("candidate_identity")
+    if _expect_object(identity, f"{location}.signed.candidate_identity", result):
+        fingerprint_fields = {
+            "buyer_credential_fingerprint",
+            "coordinator_config_sha256",
+            "creator_account_fingerprint",
+            "effective_config_digest",
+            "artifact_set_sha256",
+            "feature_flag_digest",
+            "gateway_config_sha256",
+            "governance_file_digest",
+            "manifest_core_digest",
+            "operation_ids_fingerprint",
+            "provider_identity_fingerprint",
+            "readiness_observations_fingerprint",
+            "reviewed_distribution_artifact_digest",
+            "root_issuer_fingerprint",
+            "route_snapshot_digest",
+        }
+        integer_fields = {
+            "clock_skew_allowance_seconds",
+            "maximum_ttl_seconds",
+        }
+        string_fields = {
+            "approval_record_id",
+            "approval_record_version",
+            "coordinator_build_id",
+            "creator_agreement_id",
+            "creator_agreement_expires_at",
+            "creator_agreement_grace_ends_at",
+            "creator_agreement_version",
+            "environment_id",
+            "gate_check_id",
+            "gateway_build_id",
+            "lifecycle_state",
+            "manifest_version",
+            "pool_generation",
+            "pool_id",
+            "pricing_schedule_id",
+            "pricing_schedule_version",
+            "provider_build_id",
+            "verifier_challenge",
+            "verifier_command",
+            "verifier_result",
+        }
+        required_identity = fingerprint_fields | integer_fields | string_fields
+        _expect_keys(identity, required_identity, required_identity, f"{location}.signed.candidate_identity", result)
+        for field_name in sorted(fingerprint_fields):
+            value = identity.get(field_name)
+            if not isinstance(value, str) or not SHA256_HEX_RE.fullmatch(value):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a 64-char hex fingerprint")
+        for field_name in sorted(integer_fields):
+            value = identity.get(field_name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be an integer")
+        max_ttl = identity.get("maximum_ttl_seconds")
+        if isinstance(max_ttl, int) and not isinstance(max_ttl, bool) and (max_ttl <= 0 or max_ttl > 86400):
+            result.error(f"{location}.signed.candidate_identity.maximum_ttl_seconds", "must be between 1 and 86400")
+        clock_skew = identity.get("clock_skew_allowance_seconds")
+        if isinstance(clock_skew, int) and not isinstance(clock_skew, bool) and (clock_skew < 0 or clock_skew > 300):
+            result.error(f"{location}.signed.candidate_identity.clock_skew_allowance_seconds", "must be between 0 and 300")
+        for field_name in sorted(string_fields):
+            if not isinstance(identity.get(field_name), str) or not identity.get(field_name):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a non-empty string")
+        for field_name in ("creator_agreement_expires_at", "creator_agreement_grace_ends_at"):
+            value = identity.get(field_name)
+            if isinstance(value, str) and not DATETIME_Z_RE.fullmatch(value):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a UTC timestamp")
+        if identity.get("verifier_result") != "pass":
+            result.error(f"{location}.signed.candidate_identity.verifier_result", "must equal 'pass'")
+
+    signed_requirement_ids = signed.get("requirement_ids")
+    if not isinstance(signed_requirement_ids, list) or requirement_id not in signed_requirement_ids:
+        result.error(f"{location}.signed.requirement_ids", f"must include the requirement being promoted: {requirement_id}")
+    unexpected = [
+        item
+        for item in (signed_requirement_ids or [])
+        if isinstance(item, str) and item not in TRUSTED_POOL_CREATOR_MVP_EVIDENCE_REQUIREMENT_IDS
+    ]
+    if unexpected:
+        result.error(
+            f"{location}.signed.requirement_ids",
+            "trusted-pool creator MVP journey-result cannot promote " + ", ".join(sorted(unexpected)),
+        )
+    if requirement_id not in TRUSTED_POOL_CREATOR_MVP_EVIDENCE_REQUIREMENT_IDS:
+        result.error(f"{location}.signed.requirement_ids", f"trusted-pool creator MVP journey-result cannot promote {requirement_id}")
+    _validate_named_journey_steps(steps, TRUSTED_POOL_CREATOR_MVP_STEP_IDS, location, result, "trusted-pool creator MVP")
+    ordered_step_ids = [step.get("id") for step in steps if isinstance(step, dict) and isinstance(step.get("id"), str)]
+    if ordered_step_ids != list(TRUSTED_POOL_CREATOR_MVP_STEP_ID_ORDER):
+        result.error(
+            f"{location}.signed.steps",
+            f"trusted-pool creator MVP physical steps must be ordered as {list(TRUSTED_POOL_CREATOR_MVP_STEP_ID_ORDER)}",
+        )
+
+
 def _validate_local_consumer_endpoint_journey_result(
     signed: dict[str, Any],
     requirement_id: str,
@@ -2228,6 +2451,16 @@ def _validate_signed_journey_result(
             location,
             result,
         )
+    if journey_id == TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID:
+        _validate_trusted_pool_creator_mvp_journey_result(
+            signed,
+            requirement_id,
+            [item for item in journeys if isinstance(item, str)],
+            artifact_records,
+            steps,
+            location,
+            result,
+        )
     if journey_id == LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID:
         _validate_local_consumer_endpoint_journey_result(
             signed,
@@ -2283,6 +2516,11 @@ def _signed_journey_result_satisfies(
             if _signed_journey_result_journey_id(root, source) == TRUSTED_POOL_LAYER2_JOURNEY_ID:
                 candidate_errors.append(
                     f"{location}.evidence[{index}].source: trusted-pool Layer 2 journey-result is evidence-only and cannot satisfy conformant requirements"
+                )
+                continue
+            if _signed_journey_result_journey_id(root, source) == TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID:
+                candidate_errors.append(
+                    f"{location}.evidence[{index}].source: trusted-pool creator MVP journey-result is evidence-only and cannot satisfy conformant requirements"
                 )
                 continue
             candidate_result = ValidationResult()
