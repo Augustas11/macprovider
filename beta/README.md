@@ -181,7 +181,7 @@ open reports/$(date -u +%F).html
 
 ### SSE quirks the harness already handles
 
-Phase 1 (`../doc/PHASE1_REPORT.md`) found `mlx_lm.server` isn't strictly
+Phase 1 (`../docs/legacy/phase1/PHASE1_REPORT.md`) found `mlx_lm.server` isn't strictly
 OpenAI-compatible. The harness already handles:
 
 1. `: keepalive N/M` comment lines in the SSE stream — skipped.
@@ -193,7 +193,7 @@ The fourth Phase 1 finding — context-length pre-flight — is **not**
 implemented here because the M4 contributor is cooperative and the harness
 won't intentionally OOM their Mac. Track this for Phase 3.
 
-### Pending decisions (from HANDOFF.md)
+### Pending decisions (from legacy Phase 1 handoff)
 
 Before running for real, agree with the M4 user on:
 

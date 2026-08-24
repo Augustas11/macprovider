@@ -1386,7 +1386,7 @@ audit cycle completes.
 | `specs/SPEC-002-coordinator.md` v1.1.1 | Admission tiers (§ 7.5), hello_ack tier field, routing weight |
 | `specs/SPEC-003-open-onboarding.md` v0.1 | Source for all Part C and Part D content (redistributed) |
 | `beta/DECISION_CRITERIA.md` | Decision log Entry 18 (rationale for SPEC-003) |
-| `HANDOFF.md` | Project context, roadmap, VPS details |
+| `docs/legacy/phase1/HANDOFF.md` | Project context, roadmap, VPS details |
 | OpenAI API reference | SSE streaming format referenced in integration narrative |
 
 **Clean-room note:** No d-inference source files were read during spec

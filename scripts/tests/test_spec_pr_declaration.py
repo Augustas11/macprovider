@@ -38,7 +38,6 @@ class SpecPRDeclarationTests(unittest.TestCase):
             codeowners[path] = owners
 
         expected = [
-            ".cursor/rules/**",
             ".github/CODEOWNERS",
             ".github/workflows/spec-index.yml",
             "AGENTS.md",
@@ -73,7 +72,6 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 changed_paths=[
                     "AGENTS.md",
                     "CLAUDE.md",
-                    ".cursor/rules/codex-audit-lanes.mdc",
                 ],
             ),
         )

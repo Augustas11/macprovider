@@ -1,1 +1,1 @@
-Moved to `doc/provider-economics.md`.
+Moved to `docs/legacy/phase1/provider-economics.md`.

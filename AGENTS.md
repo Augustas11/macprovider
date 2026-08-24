@@ -26,8 +26,9 @@ governed by `specs/AUTHORITY.json`, `specs/CONFORMANCE.json`, and the matching
 - `test/integration/` - cross-service coordinator/gateway integration harness.
 - `scripts/` - release, governance, catalog, journey, and CI helper scripts.
 - `specs/` - normative specs and generated governance indexes.
-- `docs/` and `ops/` - runbooks, operations notes, and deployment helpers.
-- `audits/` and `scratchpad/` - evidence and temporary analysis artifacts.
+- `docs/` and `ops/` - documentation, runbooks, operations notes, and
+  deployment helpers.
+- `audits/` - durable audit evidence and historical review artifacts.
 
 ## Setup And Build
 
@@ -193,6 +194,9 @@ Runbook: `docs/runbooks/provider-cli-release-verification.md`.
   source.
 - Never commit secrets, API keys, `.env` files, private keys, payout keys, or
   operator-only credentials.
+- Keep local scratch files, editor state, and orchestration logs out of the
+  tracked tree; use ignored local paths such as `scratchpad/`, `.claude/`,
+  `.cursor/`, `.omc/`, or `.omx/` when a tool needs them.
 - Current versions of record live in line 3 of each `specs/SPEC-NNN-*.md` and
   the `binaryVersion` constant in
   `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift`; do not

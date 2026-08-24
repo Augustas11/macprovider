@@ -20,8 +20,8 @@
 | **Transport** | Provider-initiated WSS to coordinator; Go `runWriter` single-writer relay (`phase4-coordinator/internal/ws/relay.go:160-172`). Optional HTTP forward to provider `:8080` (`phase4-coordinator/internal/buyer/server.go:1679-1696`). No libp2p sidecar in-repo. | Length-prefixed JSON+blob frames (`phase0/wire.py:131-161`, `shard/transport.py:94-105`). libp2p Go sidecar tunnels TCP (`sidecar/main.go:1-18`, `shard/transport.py:1-10`). |
 | **Placement** | Per-provider model match + context + tier2 + quota; sort by throughput objective + sticky (`phase4-coordinator/internal/routing/filter.go:110-129`, `phase4-coordinator/internal/buyer/server.go:5084-5209`). `unified_memory_gb` is inventory/verification, not routing (`phase4-coordinator/internal/onboarding/store_pg.go:270-287`). | VRAM-fit contiguous blocks, fat-node-first, min-latency Hamiltonian ring (`shard/scheduler.py:67-91`, `shard/topology.py:27-34`). Coordinator placed in-region (`docs/NETWORK.md:40-44`). |
 | **Trust / pay** | Per-provider **whole-request** receipts (SPEC-015): model hash, prompt hash, output prefix (`phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:26-52`). Coordinator-trusted settlement path. | Per-**stage** signed receipts chaining `in_root`/`out_root` per activation chunk (`shard/receipt.py:54-82`, `docs/INTEGRATION.md:120-125`). Coverage tiling `[0:layer_count)` (`shard/receipt.py:119-145`). |
-| **Throughput model** | One Mac runs full decode; ~14 tok/s sustained on M1 8GB (`doc/PHASE1_REPORT.md` stress tests, **inference** from HANDOFF). | Pipeline + spec-decode + depth pipelining; ~30–40 tok/s on 3–6 GPU rings over WAN (`shard/README.md:29-31`, `shard/README.md:141-147`). |
-| **Memory ceiling** | Model must fit one Mac: 8GB Air hard Metal OOM ~26K ctx (`doc/PHASE1_REPORT.md:224-249`, `HANDOFF.md:307-316`). `ModelFit` uses weight+headroom heuristic (`phase3-binary/Sources/MacProviderCore/ModelFit.swift:11-21`). | Model split across nodes; each holds `load_stage` slice only (`phase0/pipeline.py:81-126`). |
+| **Throughput model** | One Mac runs full decode; ~14 tok/s sustained on M1 8GB (`docs/legacy/phase1/PHASE1_REPORT.md` stress tests, **inference** from HANDOFF). | Pipeline + spec-decode + depth pipelining; ~30–40 tok/s on 3–6 GPU rings over WAN (`shard/README.md:29-31`, `shard/README.md:141-147`). |
+| **Memory ceiling** | Model must fit one Mac: 8GB Air hard Metal OOM ~26K ctx (`docs/legacy/phase1/PHASE1_REPORT.md:224-249`, `HANDOFF.md:307-316`). `ModelFit` uses weight+headroom heuristic (`phase3-binary/Sources/MacProviderCore/ModelFit.swift:11-21`). | Model split across nodes; each holds `load_stage` slice only (`phase0/pipeline.py:81-126`). |
 
 ---
 
@@ -275,7 +275,7 @@ MacProvider: **whole-request** receipt binds model hash, prompt, output (`phase3
 
 ## 8. References (in-repo)
 
-**MacProvider:** `CLAUDE.md`, `AGENTS.md`, `HANDOFF.md`, `doc/PHASE1_REPORT.md`, `specs/SPEC-001-phase3-binary.md`, `specs/SPEC-010-model-catalog.md`, `phase3-binary/`, `phase4-coordinator/`, `phase5-gateway/`.
+**MacProvider:** `CLAUDE.md`, `AGENTS.md`, `HANDOFF.md`, `docs/legacy/phase1/PHASE1_REPORT.md`, `specs/SPEC-001-phase3-binary.md`, `specs/SPEC-010-model-catalog.md`, `phase3-binary/`, `phase4-coordinator/`, `phase5-gateway/`.
 
 **shard (clone `182e93b`):** `README.md`, `STATE.md`, `docs/NETWORK.md`, `docs/INTEGRATION.md`, `docs/MODEL_RUNTIME.md`, `docs/paper/main.typ`, `phase0/m25_pipe.py` (incl. `_KeepWarm` PR #28), `phase0/m25_scatter_pipe.py`, `phase0/pipeline.py`, `phase0/specpipe.py`, `phase0/wire.py`, `shard/node.py`, `shard/transport.py`, `shard/scheduler.py`, `shard/topology.py`, `shard/receipt.py`, `shard/challenge.py`, `sidecar/main.go`, `tests/test_cwnd_keepwarm.py`.
 

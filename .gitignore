@@ -7,6 +7,8 @@ __pycache__/
 # IDE / editor
 .idea/
 .vscode/
+.cursor/
+.claude/
 *.swp
 *.swo
 *~
@@ -14,6 +16,10 @@ __pycache__/
 # OMC / OMX state (Claude Code orchestration)
 .omc/
 .omx/
+
+# Local scratch and handoff artifacts
+scratchpad/
+scratchpad-*.log
 
 # macOS
 .DS_Store
@@ -81,9 +87,7 @@ test/e2e/aead-rekey-oneshot/artifacts/
 test/e2e/thermal-soak/out/
 test/e2e/thermal-soak/*.ndjson
 
-# Local #615 audit artifacts (reports/diffs; keep out of PRs)
+# Local audit artifacts (reports/diffs; keep out of PRs)
 scratchpad/615-audit/
 audits/2026-08-19/gateway-pool-auth-fulldiff.patch
-scratchpad-*.log
 audits/2026-08-19/manifest-encoding-fulldiff.patch
-scratchpad-*.log

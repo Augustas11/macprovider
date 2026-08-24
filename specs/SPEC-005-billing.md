@@ -3109,7 +3109,7 @@ Defaults are 24h startup and 7d nightly. Operator should confirm the operational
 
 ### OQ-4: Provider docs wording
 
-_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed. `doc/provider-economics.md:137-140` explicitly names this OQ ("v1 payout boundary (SPEC-005 AC-DOCS-HONESTY / OQ-4). v1 accrues credits and emits payout-ready rows; the actual payout rail (USDC settlement) requires SPEC-007 and an operator decision.") `phase3-binary/README.md` links readers to that doc for the full reference. The wording will need a fresh refresh once SPEC-016 USDC pipeline lands and changes the answer to "automatically paid" — but that's a v0.4 docs update, not this OQ._
+_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed. `docs/legacy/phase1/provider-economics.md:137-140` explicitly names this OQ ("v1 payout boundary (SPEC-005 AC-DOCS-HONESTY / OQ-4). v1 accrues credits and emits payout-ready rows; the actual payout rail (USDC settlement) requires SPEC-007 and an operator decision.") `phase3-binary/README.md` links readers to that doc for the full reference. The wording will need a fresh refresh once SPEC-016 USDC pipeline lands and changes the answer to "automatically paid" — but that's a v0.4 docs update, not this OQ._
 
 Provider-facing copy should say v1 accrues credits and payout requires SPEC-007/operator decision.
 

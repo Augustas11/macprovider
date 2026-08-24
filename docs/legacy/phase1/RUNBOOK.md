@@ -2,7 +2,7 @@
 > Phase 1 PoC runbook from 2026-05; the live `malibu.tech` stack has
 > moved past it. For current production operations (deploy, restart,
 > settlement, monitor response, incident response) see
-> [`OPS.md`](OPS.md). Kept here for historical reference and audit
+> [`OPS.md`](../../../OPS.md). Kept here for historical reference and audit
 > traceability.
 
 # Phase 1 Runbook — Mac Provider PoC
@@ -1084,7 +1084,7 @@ echo "Port 8080: $(lsof -nP -iTCP:8080 -sTCP:LISTEN 2>/dev/null | wc -l | tr -d 
 
 ## Step 11 — Write the report
 
-Write `doc/PHASE1_REPORT.md` with the following structure. Be honest. Include
+Write `docs/legacy/phase1/PHASE1_REPORT.md` with the following structure. Be honest. Include
 failures and quirks.
 
 ```markdown
@@ -1210,7 +1210,7 @@ expand scope.
 
 You are done when:
 1. All steps 0–10 executed.
-2. `doc/PHASE1_REPORT.md` exists with a headline result.
+2. `docs/legacy/phase1/PHASE1_REPORT.md` exists with a headline result.
 3. No production system was modified.
 4. All PoC processes are stopped.
 

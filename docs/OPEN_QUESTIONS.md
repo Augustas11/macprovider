@@ -63,7 +63,7 @@ same commit. PR review for any new SPEC version SHOULD diff this file.
     (`config.go:112`) with `> 0`/`<= 128 MiB` validation; the buyer
     server enforces it with `io.LimitReader` + `413` at
     `server.go:1121-1133`.
-  - **SPEC-005/OQ-4**: `open` → `closed`. `doc/provider-economics.md:137-140`
+  - **SPEC-005/OQ-4**: `open` → `closed`. `docs/legacy/phase1/provider-economics.md:137-140`
     addresses this OQ by name. A separate v0.4 docs refresh will be
     needed once SPEC-016 USDC pipeline lands.
   - **Pattern reinforced**: when a SPEC body says "we should do X" or
@@ -108,7 +108,7 @@ same commit. PR review for any new SPEC version SHOULD diff this file.
 | SPEC-005/OQ-1 | deferred | implementer | [#168](https://github.com/Augustas11/macprovider/issues/168) | SPEC-002 needs a monotonic `attempt_n` column. Fallback (`request_log.id ASC` + quarantine for ambiguous rows) is production-safe per v0.3. Tracked in issue [#168](https://github.com/Augustas11/macprovider/issues/168) for the next coordinator patch cycle; not blocking. |
 | SPEC-005/OQ-2 | closed | — | — | Round-half-to-even rounding rule. **2026-06-26 triage:** Closed as implicitly confirmed — code shipped 2026-05, running in production ~7 months without operator pushback. The "operator to confirm before v0.2 production gate" predates the actual production gate that has now been crossed. |
 | SPEC-005/OQ-3 | closed | — | — | Recovery windows (24h startup, 7d nightly). **2026-06-26 triage:** Closed as implicitly confirmed — same reasoning as OQ-2; defaults shipped and have not surfaced as wrong. |
-| SPEC-005/OQ-4 | closed | — | — | Provider docs wording re: credits accrual + payout deferral. **2026-06-26 triage (corrected later same day):** CLOSED. `doc/provider-economics.md:137-140` already addresses this by name: "v1 payout boundary (SPEC-005 AC-DOCS-HONESTY / OQ-4). v1 accrues credits and emits payout-ready rows; the actual payout rail (USDC settlement) requires SPEC-007 and an operator decision." `phase3-binary/README.md` links readers to that doc. A separate v0.4 docs refresh will be needed once SPEC-016 USDC pipeline lands and the answer becomes "automatically paid" — but that's a SPEC-016 follow-up, not this OQ. |
+| SPEC-005/OQ-4 | closed | — | — | Provider docs wording re: credits accrual + payout deferral. **2026-06-26 triage (corrected later same day):** CLOSED. `docs/legacy/phase1/provider-economics.md:137-140` already addresses this by name: "v1 payout boundary (SPEC-005 AC-DOCS-HONESTY / OQ-4). v1 accrues credits and emits payout-ready rows; the actual payout rail (USDC settlement) requires SPEC-007 and an operator decision." `phase3-binary/README.md` links readers to that doc. A separate v0.4 docs refresh will be needed once SPEC-016 USDC pipeline lands and the answer becomes "automatically paid" — but that's a SPEC-016 follow-up, not this OQ. |
 | SPEC-005/OQ-5 | deferred | implementer | [#169](https://github.com/Augustas11/macprovider/issues/169) | Manual quarantine resolution admin actions (force-credit / force-void). Money-path admin surface; v0.3 exposes quarantine state but not the resolution surface. Tracked in issue [#169](https://github.com/Augustas11/macprovider/issues/169), flagged "needed before scale" — not blocking pre-launch but blocks the long-tail recovery path before the first non-employee provider hits a quarantined row. |
 
 ## SPEC-006 — Buyer API Gateway (v0.9, locked)

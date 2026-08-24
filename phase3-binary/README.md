@@ -69,6 +69,7 @@ Quick reference for Mac owners running `macprovider-cli`:
 - **Reaping:** coordinator closes idle WebSocket connections after 90 s of no inbound frames (heartbeat or inference chunk); default `pool.heartbeat_miss_threshold_s = 90`.
 - **Pinning:** promotional tier is operator-discretionary; no automatic promotion path exists today.
 
-See `doc/provider-economics.md` for the full reference with
-source citations, the complete credit formula, worked example, earnings
-endpoint response shape, and lifecycle detail.
+See
+[`docs/legacy/phase1/provider-economics.md`](../docs/legacy/phase1/provider-economics.md)
+for the full reference with source citations, the complete credit formula,
+worked example, earnings endpoint response shape, and lifecycle detail.

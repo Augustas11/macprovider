@@ -3298,7 +3298,7 @@ PERMITTED references:
 - Apple MLX documentation
 - OpenAI API reference (https://platform.openai.com/docs/api-reference)
 - HuggingFace tokenizer_config.json schema
-- This repository: Phase 1 doc/PHASE1_REPORT.md, Phase 2 DECISION_CRITERIA.md,
+- This repository: Phase 1 docs/legacy/phase1/PHASE1_REPORT.md, Phase 2 DECISION_CRITERIA.md,
   harness.py, workloads_adversarial.py
 
 Patent analysis is separate from license. Darkbloom holds patents around
@@ -3325,7 +3325,7 @@ it by reading their source.
 
 ### 7.4. Internal sources
 
-- Phase 1 evidence: `doc/PHASE1_REPORT.md`
+- Phase 1 evidence: `docs/legacy/phase1/PHASE1_REPORT.md`
 - Phase 2 decision log: `beta/DECISION_CRITERIA.md`
 - Phase 2 adversarial workloads: `beta/workloads_adversarial.py`
 - Phase 2 stop-token derivation: `beta/stop_tokens.py`
@@ -4040,8 +4040,8 @@ Expected v1.3 implementation modifications to existing files:
 
 | Source | What was taken |
 |---|---|
-| `HANDOFF.md` | Full project context, Phase 1 findings, strategic decisions, differentiation |
-| `doc/PHASE1_REPORT.md` | Phase 1 evidence: OOM at ~26K, SSE quirks, latency data, concurrency data |
+| `docs/legacy/phase1/HANDOFF.md` | Full project context, Phase 1 findings, strategic decisions, differentiation |
+| `docs/legacy/phase1/PHASE1_REPORT.md` | Phase 1 evidence: OOM at ~26K, SSE quirks, latency data, concurrency data |
 | `beta/PHASE2_UPGRADED_PLAN.md` | Phase 2 design upgrades: adversarial crons, corpus sampling, companion telemetry |
 | `beta/DECISION_CRITERIA.md` | Decision log entries D1-D5: 502/530 routing, post-wake dip, stop-token status, throughput inversion, timeline compression |
 | `beta/harness.py` | SSE parsing approach, per-model leak detection pattern, adversarial workload runner interface |
