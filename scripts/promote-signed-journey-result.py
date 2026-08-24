@@ -131,20 +131,7 @@ def upsert_evidence(existing: list[Any], record: dict[str, Any]) -> list[Any]:
     ] + [record]
 
 
-def promote(
-    root: Path,
-    requirement_id: str,
-    evidence_source: str,
-    *,
-    base_ref: str,
-    trusted_public_key_sha256: str = JOURNEY_RESULT_PUBLIC_KEY_SHA256,
-    openssl_bin: str | None = None,
-) -> None:
-    try:
-        trusted_openssl = resolve_trusted_openssl(openssl_bin)
-    except ValueError as exc:
-        die(str(exc))
-    evidence_source = require_relative_evidence_source(evidence_source)
+def load_conformance(root: Path) -> dict[str, Any]:
     conformance_path = root / "specs" / "CONFORMANCE.json"
     load_result = ValidationResult()
     conformance = _load_json(conformance_path, load_result)
@@ -157,12 +144,27 @@ def promote(
     requirements = conformance.get("requirements")
     if not isinstance(requirements, list):
         die("specs/CONFORMANCE.json requirements must be an array")
+    return conformance
 
+
+def promote_requirement_in_memory(
+    root: Path,
+    conformance: dict[str, Any],
+    requirement_id: str,
+    evidence_source: str,
+    *,
+    commit: str,
+    captured_at: str,
+    expires_at: str,
+    journey_id: str,
+    trusted_public_key_sha256: str,
+    trusted_openssl: str,
+) -> str:
+    requirements = conformance.get("requirements")
     matches = [item for item in requirements if isinstance(item, dict) and item.get("requirement_id") == requirement_id]
     if len(matches) != 1:
         die(f"requirement must exist exactly once: {requirement_id}")
     requirement = matches[0]
-    commit, captured_at, expires_at, journey_id = require_signed_metadata(root, evidence_source)
     if journey_id == TRUSTED_POOL_LAYER2_JOURNEY_ID:
         die(f"{TRUSTED_POOL_LAYER2_JOURNEY_ID} is evidence-only and cannot promote full SPEC-042 requirement rows")
     require_valid_signed_result(root, requirement, evidence_source, commit, trusted_public_key_sha256, trusted_openssl)
@@ -197,6 +199,43 @@ def promote(
 
     requirement.clear()
     requirement.update(updated)
+    return digest
+
+
+def promote_many(
+    root: Path,
+    requirement_ids: list[str],
+    evidence_source: str,
+    *,
+    base_ref: str,
+    trusted_public_key_sha256: str = JOURNEY_RESULT_PUBLIC_KEY_SHA256,
+    openssl_bin: str | None = None,
+) -> None:
+    if not requirement_ids:
+        die("at least one requirement ID is required")
+    try:
+        trusted_openssl = resolve_trusted_openssl(openssl_bin)
+    except ValueError as exc:
+        die(str(exc))
+    evidence_source = require_relative_evidence_source(evidence_source)
+    conformance_path = root / "specs" / "CONFORMANCE.json"
+    conformance = load_conformance(root)
+    commit, captured_at, expires_at, journey_id = require_signed_metadata(root, evidence_source)
+    promoted: list[tuple[str, str]] = []
+    for requirement_id in requirement_ids:
+        digest = promote_requirement_in_memory(
+            root,
+            conformance,
+            requirement_id,
+            evidence_source,
+            commit=commit,
+            captured_at=captured_at,
+            expires_at=expires_at,
+            journey_id=journey_id,
+            trusted_public_key_sha256=trusted_public_key_sha256,
+            trusted_openssl=trusted_openssl,
+        )
+        promoted.append((requirement_id, digest))
     result = validate_repository(root, base_ref, trusted_public_key_sha256, conformance_override=conformance, openssl_bin=trusted_openssl)
     if result.errors:
         for error in result.errors:
@@ -204,19 +243,50 @@ def promote(
         die("ledger promotion rejected")
 
     write_json_atomically(conformance_path, conformance)
-    print(f"promote-signed-journey-result: promoted {requirement_id} with sha256:{digest}")
+    for requirement_id, digest in promoted:
+        print(f"promote-signed-journey-result: promoted {requirement_id} with sha256:{digest}")
+
+
+def promote(
+    root: Path,
+    requirement_id: str,
+    evidence_source: str,
+    *,
+    base_ref: str,
+    trusted_public_key_sha256: str = JOURNEY_RESULT_PUBLIC_KEY_SHA256,
+    openssl_bin: str | None = None,
+) -> None:
+    promote_many(
+        root,
+        [requirement_id],
+        evidence_source,
+        base_ref=base_ref,
+        trusted_public_key_sha256=trusted_public_key_sha256,
+        openssl_bin=openssl_bin,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("requirement_id")
-    parser.add_argument("evidence_source", help="signed journey-result path under journeys/evidence/")
+    parser.add_argument("--requirement-ids", default=None, help="comma-separated requirement IDs to promote in one validation pass")
+    parser.add_argument("requirement_id_or_evidence_source")
+    parser.add_argument("evidence_source", nargs="?", help="signed journey-result path under journeys/evidence/")
     parser.add_argument("--root", default=".", help="repository root")
     parser.add_argument("--base-ref", required=True, help="trusted base ref for governance validation")
     parser.add_argument("--openssl-bin", default=None, help="absolute path to trusted OpenSSL")
     args = parser.parse_args(argv)
 
-    promote(Path(args.root).resolve(), args.requirement_id, args.evidence_source, base_ref=args.base_ref, openssl_bin=args.openssl_bin)
+    if args.requirement_ids is None:
+        if args.evidence_source is None:
+            parser.error("evidence_source is required")
+        requirement_ids = [args.requirement_id_or_evidence_source]
+        evidence_source = args.evidence_source
+    else:
+        if args.evidence_source is not None:
+            parser.error("--requirement-ids expects a single evidence_source positional")
+        requirement_ids = [item for item in args.requirement_ids.split(",") if item]
+        evidence_source = args.requirement_id_or_evidence_source
+    promote_many(Path(args.root).resolve(), requirement_ids, evidence_source, base_ref=args.base_ref, openssl_bin=args.openssl_bin)
     return 0
 
 

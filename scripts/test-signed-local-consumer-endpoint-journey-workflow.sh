@@ -51,6 +51,7 @@ required_workflow = [
     "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}",
     "scripts/sign-journey-result.py",
     "scripts/promote-signed-journey-result.py",
+    '--requirement-ids "$REQUIREMENT_IDS"',
     "scripts/check_spec_governance.py --base-ref origin/main",
     "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     "retention-days: 1",
@@ -111,12 +112,16 @@ if len(step_by_name) != len(step_names):
 preflight_name = "Preflight selector freshness before signing"
 posture_name = "Verify protected environment and repository posture"
 sign_name = "Sign journey-result payload"
-for required_step_name in (preflight_name, posture_name, sign_name):
+promote_name = "Promote only after signed validation"
+for required_step_name in (preflight_name, posture_name, sign_name, promote_name):
     if required_step_name not in step_by_name:
         raise SystemExit(f"workflow step is missing: {required_step_name}")
 preflight_step = "\n".join(step_by_name[preflight_name]["lines"])
 posture_step = "\n".join(step_by_name[posture_name]["lines"])
 sign_step = "\n".join(step_by_name[sign_name]["lines"])
+promote_step = "\n".join(step_by_name[promote_name]["lines"])
+if "for requirement_id in requirement_ids:" in promote_step:
+    raise SystemExit("workflow must batch requirement promotion into one governance validation pass")
 if step_names.index(preflight_name) > step_names.index(sign_name):
     raise SystemExit("preflight step must execute before the signing step")
 if "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM" in preflight_step:
