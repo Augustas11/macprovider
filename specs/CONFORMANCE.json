@@ -1224,7 +1224,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.29",
+      "version": "0.0.30",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1247,17 +1247,24 @@
         "SPEC-040",
         "SPEC-041"
       ],
-      "implementation_status": "pending-reconciliation",
+      "implementation_status": "partial",
       "production_status": "not-deployed",
-      "last_reconciled_commit": null,
-      "last_reconciled_at": null,
-      "evidence": [],
+      "last_reconciled_commit": "2a27f5679bf6eb5ebec6371e75870be8fc9ada1b",
+      "last_reconciled_at": "2026-08-24",
+      "evidence": [
+        {
+          "artifact": "sha256:b27fdc59447a4641ae74f9d72bca76ca741be95ad07e4ef3b8eec189d18e6fcc",
+          "source": "journeys/evidence/trusted-pool-layer2-20260824T011501Z.spec-042-r002-spec-042-r005-spec-042-r006-spec-042-r010.journey-result.signed.json",
+          "captured_at": "2026-08-24",
+          "expires_at": "2026-08-31"
+        }
+      ],
       "requirement_id_migration": "complete",
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool control plane is a new authority domain (pool-control-plane). Current merged code contains substantial default-off pool plumbing and SPEC-043 creator-onboarding enablement, including pool_id threading, manifest crypto primitives, route isolation, labeled route snapshots, buyer/public policy and status surfaces, claim-control rejection, an MVP retention-policy registry, local restrictive lifecycle admin controls, paused candidate-pool reactivation through the promotion preflight gate, local route-time model-allowlist enforcement from signed manifest-derived pool snapshots, local route/dispatch-time settlement observe-vs-enforce gating from signed manifest-derived pool snapshots, default-off production activation config/store promotion gating, provider-side positive pool-capability advertisement/gating for pool-selected traffic, signed emergency pause/drain/retire controls, signed provider-bound revoke_immediate controls that durably revoke the target provider, advance the route-generation fence, cancel active uncommitted dispatch attempts for that provider, live routeability/generation-bound delivery-drain proof for retirement, and a local buyer-server journey harness for R002/R005/R006/R010 redacted evidence generation. SPEC-042 remains pending-reconciliation and not-deployed because signed journey evidence, production durable-store evidence, remaining production predicate coverage, SPEC-042-owned schema/retention promotion, production activation evidence/rollout proof, and five-lane audit are still outstanding. Layer 2 administrative trust only; cryptographic privacy is SPEC-041/Layer 3."
+        "rationale": "Pool control plane is a new authority domain (pool-control-plane). Current merged code contains substantial default-off pool plumbing and SPEC-043 creator-onboarding enablement, including pool_id threading, manifest crypto primitives, route isolation, labeled route snapshots, buyer/public policy and status surfaces, claim-control rejection, an MVP retention-policy registry, local restrictive lifecycle admin controls, paused candidate-pool reactivation through the promotion preflight gate, local route-time model-allowlist enforcement from signed manifest-derived pool snapshots, local route/dispatch-time settlement observe-vs-enforce gating from signed manifest-derived pool snapshots, default-off production activation config/store promotion gating, provider-side positive pool-capability advertisement/gating for pool-selected traffic, signed emergency pause/drain/retire controls, signed provider-bound revoke_immediate controls that durably revoke the target provider, advance the route-generation fence, cancel active uncommitted dispatch attempts for that provider, live routeability/generation-bound delivery-drain proof for retirement, and a local buyer-server journey harness plus committed signed evidence for R002/R005/R006/R010 redacted evidence generation. SPEC-042 is partial and not-deployed; signed Layer 2 journey evidence is evidence-only and does not promote full requirement rows. Remaining blockers are production durable-store evidence, remaining production predicate coverage, SPEC-042-owned schema/retention promotion, production activation evidence/rollout proof, and five-lane audit. Layer 2 administrative trust only; cryptographic privacy is SPEC-041/Layer 3."
       }
     },
     {
@@ -1287,15 +1294,15 @@
       ],
       "implementation_status": "partial",
       "production_status": "not-deployed",
-      "last_reconciled_commit": null,
-      "last_reconciled_at": null,
+      "last_reconciled_commit": "2a27f5679bf6eb5ebec6371e75870be8fc9ada1b",
+      "last_reconciled_at": "2026-08-24",
       "evidence": [],
       "requirement_id_migration": "complete",
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces with resolved MVP retention-policy registry fields, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current and the document fresh_until_utc is still valid, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites including registered retention-policy ids, lifecycle fail-closed tests including unresolved retention policies, operator-only admin API mutations for public-announcement/reviewed-artifact records, and an environment-key-only CLI for nonce issuance, reviewed-artifact/public-announcement mutations, and pool health/audit/distribution exports. Raw operator admin events cannot activate a routeable pool; requirements remain pending until authenticated creator self-service/administration, signed journey, rollback-resistant promotion authorization/evidence, custody-class production gates, full production activation gates, and production rollout proof are implemented."
+        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces with resolved MVP retention-policy registry fields, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current and the document fresh_until_utc is still valid, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites including registered retention-policy ids, lifecycle fail-closed tests including unresolved retention policies, operator-only admin API mutations for public-announcement/reviewed-artifact records, an environment-key-only CLI for nonce issuance, reviewed-artifact/public-announcement mutations, and pool health/audit/distribution exports, and a bounded bearer-token creator administration surface for admitted creators to inspect their own approval/pools and perform allowlisted candidate operations. Raw operator admin events cannot activate a routeable pool; requirements remain pending until the creator-admin surface has signed journey evidence, production reviewed-artifact lifecycle ownership, rollback-resistant production promotion authorization/evidence, custody-class production gates, full production activation gates, and production rollout proof."
       }
     },
     {
@@ -5770,7 +5777,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Creator root issuer registration: SPEC-042 identity-core primitives, creator-gated nonce issuance, one-time nonce consumption, durable replay rejection of duplicate root-registration nonce use, durable root registration replay, fingerprint reuse rejection, proof-of-possession verification, and suspension invalidation of pending root nonces are implemented locally. Still pending: creator-authenticated session binding, root retirement, custody-disclosure mutation, independent compromise-reporting channel, immutable lineage/tombstones, and production promotion evidence."
+        "rationale": "Creator root issuer registration: SPEC-042 identity-core primitives, creator-gated nonce issuance, one-time nonce consumption, durable replay rejection of duplicate root-registration nonce use, durable root registration replay, fingerprint reuse rejection, proof-of-possession verification, suspension invalidation of pending root nonces, and bounded bearer-token creator routes for creator-owned nonce/event submission are implemented locally. Still pending: signed creator-MVP journey evidence, root retirement, custody-disclosure mutation, independent compromise-reporting channel, immutable lineage/tombstones, and production promotion evidence."
       }
     },
     {
@@ -5795,7 +5802,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool creation request: manifest verification primitives and durable created-state initialization exist through the operator-mediated event path, and pool creation is gated on a matching enabled creator approval. Operator-approved public announcement is implemented as a separate approval record and derived replay visibility state bound to the current manifest digest and creator approval binding. Still pending: creator-authenticated external creation request handler, signed SPEC-042 identity core acceptance, intended buyer disclosure validation, and signed journey evidence."
+        "rationale": "Pool creation request: manifest verification primitives and durable created-state initialization exist through the operator-mediated event path and the bounded bearer-token creator event path, and pool creation is gated on a matching enabled creator approval. Operator-approved public announcement is implemented as a separate approval record and derived replay visibility state bound to the current manifest digest and creator approval binding. Still pending: signed creator-MVP journey evidence, full SPEC-042 identity-core acceptance proof for production launch, intended buyer disclosure validation, and production promotion evidence."
       }
     },
     {
@@ -5884,6 +5891,16 @@
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handlePoolDistribution",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleReviewedDistributionArtifact",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handlePublicAnnouncementApproval",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) serveCreatorHTTP",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleCreatorMe",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleCreatorAppendEvent",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleCreatorIssueRootRegistrationNonce",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleCreatorListPools",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleCreatorRestrictiveLifecycle",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleCreatorGetPool",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleCreatorPoolAudit",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleCreatorPoolHealth",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleCreatorPoolDistribution",
         "phase4-coordinator/cmd/coordinator-cli/trust_pool_admin.go:func trustPoolAdmin(args []string, getenv func(string) string, stdin io.Reader, stdout io.Writer) error",
         "phase4-coordinator/cmd/coordinator-cli/trust_pool_admin.go:func trustPoolAdminReviewDistributionArtifact",
         "phase4-coordinator/cmd/coordinator-cli/trust_pool_admin.go:func trustPoolAdminApprovePublicAnnouncement",
@@ -5905,7 +5922,14 @@
         "phase4-coordinator/cmd/coordinator-cli/trust_pool_admin_test.go:TestTrustPoolAdminCLIReviewedArtifactAndPublicAnnouncement",
         "phase4-coordinator/cmd/coordinator-cli/trust_pool_admin_test.go:TestTrustPoolAdminCLIRejectsInlineOperatorKey",
         "phase4-coordinator/cmd/coordinator-cli/trust_pool_admin_test.go:TestTrustPoolAdminCLIRejectsCleartextNonLoopbackAdminURL",
-        "phase4-coordinator/cmd/coordinator-cli/trust_pool_admin_test.go:TestTrustPoolAdminCLIUnsupportedSignerRotationIsExplicit"
+        "phase4-coordinator/cmd/coordinator-cli/trust_pool_admin_test.go:TestTrustPoolAdminCLIUnsupportedSignerRotationIsExplicit",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorSurfaceRejectsCrossCreatorAndOperatorOnlyActions",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorSurfaceIdempotencyAndPolicyGuards",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorSurfaceRejectsBadEventsWithoutDisablingRegistry",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorSurfaceRejectsAllowlistedUnadmittedProvider",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorSurfaceRejectsUndelegatedProvider",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorSurfaceRejectsUnauthorized",
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorSurfaceRejectsExpiredCredential"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -5915,7 +5939,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Creator administration surface: a default-off operator-only API now appends replay-checked durable pool-control events for candidate/restrictive state, exposes an operator-only promotion endpoint for the local candidate activation gate, upserts/reads creator approval records, issues idempotent root-registration nonces, records reviewed distribution artifacts as operation-id-bound durable state, records operation-id-bound, digest-bound, stored-reviewed-artifact-bound, non-candidate-launch-bound, and creator-state-bound public-announcement approvals, returns schema-versioned no-store envelopes, rejects conflicting operation-id sources and cross-mutation operation-id reuse, rejects raw active lifecycle transitions, maps creator/promotion/public-announcement gate failures to closed error codes, refreshes live state after accepted event, promotion, or approval mutations, exposes operator-only admin API mutations for reviewed-artifact/public-announcement records, wraps those mutations in the existing environment-key-only CLI with URL-bound pool id and idempotency header forwarding, and exports per-pool health, audit, reviewed-artifact history, public-announcement approval/history, and candidate-marked distribution packages through the existing environment-key-only CLI wrapper. Still pending: creator-authenticated CLI/API, signer rotation, rollback-resistant production promotion authorization, production reviewed-artifact lifecycle, and policy-aware authorization beyond raw MVP events."
+        "rationale": "Creator administration surface: a default-off operator-only API now appends replay-checked durable pool-control events for candidate/restrictive state, exposes an operator-only promotion endpoint for the local candidate activation gate, upserts/reads creator approval records, issues idempotent root-registration nonces, records reviewed distribution artifacts as operation-id-bound durable state, records operation-id-bound, digest-bound, stored-reviewed-artifact-bound, non-candidate-launch-bound, and creator-state-bound public-announcement approvals, returns schema-versioned no-store envelopes, rejects conflicting operation-id sources and cross-mutation operation-id reuse, rejects raw active lifecycle transitions, maps creator/promotion/public-announcement gate failures to closed error codes, refreshes live state after accepted event, promotion, or approval mutations, exposes operator-only admin API mutations for reviewed-artifact/public-announcement records, wraps those mutations in the existing environment-key-only CLI with URL-bound pool id and idempotency header forwarding, and exports per-pool health, audit, reviewed-artifact history, public-announcement approval/history, and candidate-marked distribution packages through the existing environment-key-only CLI wrapper. The bounded bearer-token creator API now lets admitted creators inspect their own approval/pool state, list own events, issue root-registration nonces, create candidate pools, perform allowlisted candidate/restrictive mutations, and export owned pool health/audit/distribution while hiding or forbidding operator-only promotion, reviewed-artifact/public-announcement, signed-lifecycle, and cross-creator actions. Still pending: signed creator-MVP journey evidence, signer rotation, rollback-resistant production promotion authorization, production reviewed-artifact lifecycle, full production launch authorization, and policy-aware authorization beyond raw MVP events."
       }
     },
     {
