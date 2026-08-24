@@ -1189,6 +1189,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                     thermalThrottleDetected: false,
                     artifactSHA256: artifact.sha256,
                     modelArtifactPath: artifact.modelArgument,
+                    modelConfigJSONData: artifact.configJSONData,
+                    modelConfigSHA256: artifact.configSHA256,
                     benchmarkID: "installed-only-\(modelKey)",
                     generatedAt: request.generatedAt,
                     candidateCatalogSHA256: catalogSHA,
@@ -1316,7 +1318,12 @@ struct AutotuneCommand: AsyncParsableCommand {
             knobs: WinningKnobs(
                 kvBits: nil,
                 maxBatch: hardware.recommendedMaxBatch,
-                maxContext: Self.spec023RecommendationProbeContext
+                maxContext: hardware.recommendedMaxContext(
+                    modelID: selectedRow.modelID,
+                    verifiedConfigJSONData: selectedBenchmark.modelConfigJSONData,
+                    verifiedConfigSHA256: selectedBenchmark.modelConfigSHA256,
+                    catalogMinRAMGB: selectedRow.minRAMGB
+                )
             ),
             tpsMedian: selected.tokensPerSecond,
             ttftP95MS: 0,

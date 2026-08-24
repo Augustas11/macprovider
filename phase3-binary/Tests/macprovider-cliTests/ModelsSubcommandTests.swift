@@ -309,6 +309,50 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertTrue(post.contains("coordinator_endpoint: https://coordinator.example\n"))
     }
 
+    func testAdoptRecommendationContextAuthorityRejectsInflatedContext() throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: fixture.artifact)
+        let artifact = VerifiedModelArtifact(
+            modelArgument: fixture.artifact.path,
+            sha256: fixture.artifactSHA256,
+            configJSONData: inspection.configJSONData,
+            configSHA256: inspection.configSHA256
+        )
+        let row = CandidateCatalog.Row(
+            modelID: fixture.targetModelID,
+            modelRevision: String(repeating: "1", count: 40),
+            modelSHA256: fixture.artifactSHA256,
+            minRAMGB: 1,
+            minBandwidthTier: .c,
+            benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 1, max4KTTFTMS: 1_000),
+            runtimeStatus: "recommendable",
+            notes: nil
+        )
+        let valid = Self.parsedAdoption(
+            fixture: fixture,
+            maxContext: 32_768,
+            hardwareMemoryGB: 64
+        )
+        XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+            recommendation: valid,
+            row: row,
+            artifact: artifact
+        ))
+
+        let inflated = Self.parsedAdoption(
+            fixture: fixture,
+            maxContext: 200_000,
+            hardwareMemoryGB: 64
+        )
+        XCTAssertThrowsError(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+            recommendation: inflated,
+            row: row,
+            artifact: artifact
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("context authority"))
+        }
+    }
+
     func testAdoptRecommendationRollsBackOwnedConfigWhenSwitchFails() async throws {
         let socketPath = try makeSocketPath()
         let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
@@ -364,6 +408,59 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertEqual(terminal.type, "failed")
         XCTAssertEqual(terminal.reason, "invalid_recommendation")
         XCTAssertTrue(try String(contentsOf: fixture.config).contains("model: old-model\n"))
+    }
+
+    func testAdoptRecommendationRejectsDuplicateKeysWithoutMutation() async throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        let duplicate = try String(contentsOf: fixture.recommendation).replacingOccurrences(
+            of: #""warnings": [],"#,
+            with: #""warnings": ["blocking"], "warnings": [],"#
+        )
+        try Data(duplicate.utf8).write(to: fixture.recommendation)
+        let command = try ModelsAdoptRecommendationCommand.parse([
+            "--json",
+            "--config", fixture.config.path,
+            "--recommendation-json", fixture.recommendation.path,
+            "--ctl-socket-path", try makeSocketPath().path,
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        let terminal = try XCTUnwrap(decodeAdoptionEvents(capture.stdout).last)
+        XCTAssertEqual(terminal.type, "failed")
+        XCTAssertEqual(terminal.reason, "invalid_recommendation")
+        XCTAssertTrue(try String(contentsOf: fixture.config).contains("model: old-model\n"))
+    }
+
+    func testAdoptRecommendationRejectsBooleanMaxConcurrencyWithoutMutation() async throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        try mutateRecommendationFixture(fixture) {
+            $0.replacingOccurrences(of: #""max_concurrency_override": 1"#, with: #""max_concurrency_override": true"#)
+        }
+
+        try await assertAdoptionRejectsInvalidRecommendation(fixture)
+    }
+
+    func testAdoptRecommendationRejectsBooleanKVBitsWithoutMutation() async throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        try mutateRecommendationFixture(fixture) {
+            $0.replacingOccurrences(
+                of: #""max_concurrency_override": 1"#,
+                with: #""kv_bits": true, "max_concurrency_override": 1"#
+            )
+        }
+
+        try await assertAdoptionRejectsInvalidRecommendation(fixture)
+    }
+
+    func testAdoptRecommendationRejectsBooleanMaxContextWithoutMutation() async throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        try mutateRecommendationFixture(fixture) {
+            $0.replacingOccurrences(of: #""max_context_override": 4000"#, with: #""max_context_override": true"#)
+        }
+
+        try await assertAdoptionRejectsInvalidRecommendation(fixture)
     }
 
     func testAdoptRecommendationRejectsStaleRecommendationWithoutMutation() async throws {
@@ -827,6 +924,72 @@ final class ModelsSubcommandTests: XCTestCase {
             return try JSONDecoder().decode(ModelAdoptionEventWire.self, from: data)
         }
     }
+
+    private func mutateRecommendationFixture(
+        _ fixture: AdoptionFixture,
+        _ mutate: (String) -> String
+    ) throws {
+        let original = try String(contentsOf: fixture.recommendation)
+        try Data(mutate(original).utf8).write(to: fixture.recommendation)
+    }
+
+    private func assertAdoptionRejectsInvalidRecommendation(
+        _ fixture: AdoptionFixture,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let command = try ModelsAdoptRecommendationCommand.parse([
+            "--json",
+            "--config", fixture.config.path,
+            "--recommendation-json", fixture.recommendation.path,
+            "--ctl-socket-path", try makeSocketPath().path,
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2), file: file, line: line)
+        let terminal = try XCTUnwrap(decodeAdoptionEvents(capture.stdout).last, file: file, line: line)
+        XCTAssertEqual(terminal.type, "failed", file: file, line: line)
+        XCTAssertEqual(terminal.reason, "invalid_recommendation", file: file, line: line)
+        XCTAssertTrue(try String(contentsOf: fixture.config).contains("model: old-model\n"), file: file, line: line)
+    }
+
+    private static func parsedAdoption(
+        fixture: AdoptionFixture,
+        maxContext: Int,
+        hardwareMemoryGB: Int
+    ) -> ParsedRecommendationAdoption {
+        ParsedRecommendationAdoption(
+            targetModelID: fixture.targetModelID,
+            core: RecommendationCore(
+                model: fixture.targetModelID,
+                targetContext: maxContext,
+                knobs: WinningKnobs(kvBits: nil, maxBatch: 1, maxContext: maxContext),
+                tpsMedian: 0,
+                ttftP95MS: 0,
+                replicates: 0,
+                modelArtifactPath: fixture.artifact.path,
+                modelArtifactSHA256: fixture.artifactSHA256,
+                modelCatalogKey: "test-key",
+                modelCatalogModelID: fixture.targetModelID,
+                modelCatalogRevision: String(repeating: "1", count: 40),
+                modelCatalogSHA256: fixture.artifactSHA256,
+                modelCatalogVersion: "test-catalog",
+                modelCatalogHash: String(repeating: "2", count: 64)
+            ),
+            donorMode: false,
+            draftModel: nil,
+            draftModelArtifactSHA256: nil,
+            warnings: [],
+            recommendationSHA256: String(repeating: "3", count: 64),
+            rateCardVersion: "test-catalog",
+            demandRankVersion: "test-catalog",
+            candidateCatalogVersion: "test-catalog",
+            hardwareChip: "Apple M4 Max",
+            hardwareMemoryGB: hardwareMemoryGB,
+            hardwareBinaryVersion: "1.8.90"
+        )
+    }
 }
 
 private enum ModelsSubcommandTestError: Error {
@@ -860,6 +1023,15 @@ private struct AdoptionFixture {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         artifact = dir.appendingPathComponent("artifact", isDirectory: true)
         try FileManager.default.createDirectory(at: artifact, withIntermediateDirectories: true)
+        try Data("""
+        {
+          "max_position_embeddings": 32768,
+          "hidden_size": 128,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 1,
+          "num_hidden_layers": 1
+        }
+        """.utf8).write(to: artifact.appendingPathComponent("config.json"))
         try Data("weights".utf8).write(to: artifact.appendingPathComponent("model.safetensors"))
         artifactSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: artifact)
         targetModelID = target

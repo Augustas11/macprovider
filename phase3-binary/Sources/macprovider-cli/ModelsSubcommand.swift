@@ -805,7 +805,7 @@ private func loadModelsConfig(
     )
 }
 
-private struct ParsedRecommendationAdoption {
+struct ParsedRecommendationAdoption {
     let targetModelID: String
     let core: RecommendationCore
     let donorMode: Bool
@@ -829,6 +829,7 @@ extension ModelsAdoptRecommendationCommand {
         } else {
             data = try Data(contentsOf: URL(fileURLWithPath: ConfigLoader.expandTilde(pathOrStdin)))
         }
+        try AutotuneStrictJSON.rejectDuplicateKeys(data)
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               root["schema_version"] as? String == "autotune_recommend.v1",
               let generatedAt = root["generated_at"] as? String,
@@ -842,7 +843,7 @@ extension ModelsAdoptRecommendationCommand {
               let candidateCatalogVersion = inputs["candidate_catalog_version"] as? String,
               let hardware = root["hardware"] as? [String: Any],
               let hardwareChip = hardware["chip"] as? String,
-              let hardwareMemoryGB = hardware["memory_gb"] as? Int,
+              let hardwareMemoryGB = strictRecommendationInt(hardware["memory_gb"]),
               let hardwareBinaryVersion = hardware["binary_version"] as? String,
               let serveConfig = root["serve_config"] as? [String: Any],
               let warnings = root["warnings"] as? [String],
@@ -887,9 +888,9 @@ extension ModelsAdoptRecommendationCommand {
               !catalogVersion.isEmpty,
               let catalogHash = serveConfig["model_catalog_hash"] as? String,
               isLowerHex(catalogHash, count: 64),
-              let maxContext = serveConfig["max_context_override"] as? Int,
+              let maxContext = strictRecommendationInt(serveConfig["max_context_override"]),
               maxContext > 0,
-              let maxBatch = serveConfig["max_concurrency_override"] as? Int,
+              let maxBatch = strictRecommendationInt(serveConfig["max_concurrency_override"]),
               maxBatch > 0,
               let donorMode = serveConfig["donor_mode"] as? Bool
         else {
@@ -899,7 +900,8 @@ extension ModelsAdoptRecommendationCommand {
             .allSatisfy(isSafeConfigString) else {
             throw ValidationError("serve_config contains unsafe strings")
         }
-        if let value = serveConfig["kv_bits"], !(value is NSNull), !(value is Int) {
+        if let value = serveConfig["kv_bits"], !(value is NSNull),
+           strictRecommendationInt(value) == nil {
             throw ValidationError("serve_config.kv_bits is invalid")
         }
         for key in ["draft_model", "draft_model_artifact_sha256"] {
@@ -907,7 +909,7 @@ extension ModelsAdoptRecommendationCommand {
                 throw ValidationError("serve_config.\(key) is invalid")
             }
         }
-        let kvBits = serveConfig["kv_bits"] as? Int
+        let kvBits = strictRecommendationInt(serveConfig["kv_bits"])
         let core = RecommendationCore(
             model: recommendedModel,
             targetContext: maxContext,
@@ -939,6 +941,27 @@ extension ModelsAdoptRecommendationCommand {
             hardwareMemoryGB: hardwareMemoryGB,
             hardwareBinaryVersion: hardwareBinaryVersion
         )
+    }
+
+    private static func strictRecommendationInt(_ value: Any?) -> Int? {
+        guard let value, !(value is NSNull) else { return nil }
+        if type(of: value) == Bool.self {
+            return nil
+        }
+        if let number = value as? NSNumber,
+           CFGetTypeID(number) == CFBooleanGetTypeID() {
+            return nil
+        }
+        if let intValue = value as? Int {
+            return intValue
+        }
+        if let doubleValue = value as? Double,
+           doubleValue.isFinite,
+           doubleValue.rounded(.towardZero) == doubleValue,
+           let exact = Int(exactly: doubleValue) {
+            return exact
+        }
+        return nil
     }
 
     private static func isSafeConfigString(_ value: String) -> Bool {
@@ -984,6 +1007,33 @@ extension ModelsAdoptRecommendationCommand {
                 == URL(fileURLWithPath: recommendation.core.modelArtifactPath ?? "").standardizedFileURL,
               artifact.sha256 == recommendation.core.modelArtifactSHA256 else {
             throw ValidationError("recommendation artifact authority does not match the signed snapshot")
+        }
+        try validateSignedContextAuthority(recommendation: recommendation, row: row, artifact: artifact)
+    }
+
+    static func validateSignedContextAuthority(
+        recommendation: ParsedRecommendationAdoption,
+        row: CandidateCatalog.Row,
+        artifact: VerifiedModelArtifact
+    ) throws {
+        let hardware = AutotuneRecommendHardware(
+            machine: nil,
+            chip: recommendation.hardwareChip,
+            memoryGB: recommendation.hardwareMemoryGB,
+            bandwidthTier: BandwidthTier.derive(chip: recommendation.hardwareChip),
+            osVersion: "",
+            binaryVersion: recommendation.hardwareBinaryVersion,
+            diversificationID: "",
+            hardwareIdentityHash: ""
+        )
+        let expectedMaxContext = hardware.recommendedMaxContext(
+            modelID: row.modelID,
+            verifiedConfigJSONData: artifact.configJSONData,
+            verifiedConfigSHA256: artifact.configSHA256,
+            catalogMinRAMGB: row.minRAMGB
+        )
+        guard recommendation.core.knobs.maxContext == expectedMaxContext else {
+            throw ValidationError("recommendation context authority does not match the verified model config")
         }
     }
 
