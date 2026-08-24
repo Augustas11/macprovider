@@ -1,0 +1,119 @@
+{
+  "candidate_identity": {
+    "buyer_credential_fingerprint": "1d8f1a9337a8a7ed8481e333cd22480ca3256a6b46ade516d65ba720b3362a60",
+    "coordinator_config_sha256": "b66aefde7f1b7fdf0c270ad91e7b017d7d2d97b3a91c0f566839b2ad17fa5bf0",
+    "gateway_config_sha256": "313f766f9c26d7edfa70caff374c535d27d511fd57eb598223a45af3167d739e",
+    "manifest_core_digest": "c2127f1b11010c35666d18bde81e8b301602a8f13ad5a7a5a7821b98a654133e",
+    "manifest_version": "7",
+    "pool_generation": "7",
+    "pool_id": "LJbjw-NpCZ1huYj9jg4Kpg",
+    "provider_identity_fingerprint": "6c4efc11d5b899531e96002b5235758737c371a9f144e53155e681dc346e18f1",
+    "route_snapshot_digest": "e0d33e9fbe7de2ee93709a6aadf9d8461dd9fa7348bec55bf732f4429a6d00b1"
+  },
+  "captured_at": "2026-08-24T01:15:01Z",
+  "environment": {
+    "candidate": "commit:00c3503854f3ab12356d83a36873bc866e196f09",
+    "class": "isolated-candidate-trusted-pool-layer2-mvp",
+    "hardware_profile": "local-redacted"
+  },
+  "expires_at": "2026-08-31",
+  "harness": {
+    "evidence_scope": "local route-path proof only; route snapshot proves pool_id label/digest, not production manifest-label rollout",
+    "execution_mode": "isolated-candidate-trusted-pool-layer2-mvp",
+    "gateway_context_required": true,
+    "id": "phase4-coordinator/internal/buyer:TestJourneyTrustedPoolLayer2MVPCandidate",
+    "isolated_sqlite": true,
+    "production_side_effects": false,
+    "real_buyer_server": true
+  },
+  "journey_id": "JOURNEY-TRUSTED-POOL-LAYER2-MVP",
+  "observations": {
+    "coordinator_plaintext_privacy_claimed": false,
+    "global_fallback_observed": false,
+    "isolated_environment": true,
+    "payout_ready_mutated": false,
+    "pool_id_bound_to_route_snapshot": true,
+    "pool_required_fail_closed": true,
+    "pool_selection_authorized": true,
+    "production_side_effects": false,
+    "provider_operator_blindness_claimed": false,
+    "raw_prompt_output_redacted": true,
+    "successful_pooled_request": true,
+    "tenant_isolation_fail_closed_after_generation_bump": true,
+    "unauthorized_pool_oracle_observed": false
+  },
+  "operator": {
+    "identity_fingerprint": "18b995e81304e6c3677737f2f3268301ce5a01178e89bb393bed2598f1845a9a",
+    "role": "acceptance-operator"
+  },
+  "redaction": {
+    "artifact_id": "redacted-trusted-pool-layer2",
+    "bearer_tokens_redacted": true,
+    "buyer_credential_redacted": true,
+    "local_account_names_redacted": true,
+    "local_endpoint_redacted": true,
+    "operator_identity_redacted": true,
+    "provider_identity_redacted": true,
+    "raw_prompt_output_redacted": true,
+    "redaction_reviewed_by_human": false,
+    "secrets_redacted": true
+  },
+  "repository": {
+    "commit": "00c3503854f3ab12356d83a36873bc866e196f09",
+    "name": "Augustas11/macprovider"
+  },
+  "requirement_ids": [
+    "SPEC-042-R002",
+    "SPEC-042-R005",
+    "SPEC-042-R006",
+    "SPEC-042-R010"
+  ],
+  "result": {
+    "status": "pass",
+    "summary": "Trusted Pool Layer 2 isolated candidate route-path evidence passed without production side effects."
+  },
+  "run_id": "trusted-pool-layer2-20260824T011501Z",
+  "schema_version": "macprovider.trusted-pool-layer2-evidence.v1",
+  "steps": [
+    {
+      "artifacts": [
+        "redacted-trusted-pool-layer2"
+      ],
+      "assertion": "Captured isolated candidate pool context with gateway account authorization and member snapshot.",
+      "id": "step-01-capture-pool-context",
+      "status": "pass"
+    },
+    {
+      "artifacts": [
+        "redacted-trusted-pool-layer2"
+      ],
+      "assertion": "Authorized pool request returned 200 through the admitted member only.",
+      "id": "step-02-successful-pooled-request",
+      "status": "pass"
+    },
+    {
+      "artifacts": [
+        "redacted-trusted-pool-layer2"
+      ],
+      "assertion": "Unsatisfied pool request returned the generic fail-closed pool_no_eligible_member code after a generation bump and before dispatch.",
+      "id": "step-03-fail-closed-unsatisfied-pool",
+      "status": "pass"
+    },
+    {
+      "artifacts": [
+        "redacted-trusted-pool-layer2"
+      ],
+      "assertion": "Route snapshot stored the pool id and canonical digest; settlement mode remained observe and no payout-ready mutation ran. Manifest version and core digest are candidate identity fields for this local harness, not route-recorded labels.",
+      "id": "step-04-settlement-and-logs",
+      "status": "pass"
+    },
+    {
+      "artifacts": [
+        "redacted-trusted-pool-layer2"
+      ],
+      "assertion": "Evidence contains fingerprints only; request, response, bearer token, and local identities are absent.",
+      "id": "step-05-redaction",
+      "status": "pass"
+    }
+  ]
+}
