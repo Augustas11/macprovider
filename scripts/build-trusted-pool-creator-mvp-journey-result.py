@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -164,16 +164,12 @@ def require_observations(value: Any) -> dict[str, Any]:
         "buyer_authorization_enforced",
         "candidate_manifest_accepted",
         "creator_admin_authorized_only",
-        "creator_suspension_root_compromise_freeze_verified",
-        "delegation_revocation_verified",
-        "descendant_signer_rejection_verified",
         "emergency_pause_exercised",
         "fail_closed_no_global_fallback",
         "isolated_environment",
         "no_duplicate_settlement",
         "no_private_key_upload",
         "no_raw_prompt_output_artifact",
-        "pool_existence_oracle_within_threshold",
         "raw_prompt_output_redacted",
         "restart_reconstruction_verified",
         "root_registration_replay_checked",
@@ -182,8 +178,12 @@ def require_observations(value: Any) -> dict[str, Any]:
     }
     false_fields = {
         "coordinator_blind_claimed",
+        "creator_suspension_root_compromise_freeze_verified",
+        "delegation_revocation_verified",
+        "descendant_signer_rejection_verified",
         "global_fallback_observed",
         "payout_ready_mutated",
+        "pool_existence_oracle_within_threshold",
         "privacy_pool_claimed",
         "production_side_effects",
         "public_announcement_without_reviewed_artifact_observed",
@@ -192,6 +192,9 @@ def require_observations(value: Any) -> dict[str, Any]:
     missing = (true_fields | false_fields) - set(observations)
     if missing:
         die(f"observations missing keys: {sorted(missing)}")
+    extra = set(observations) - (true_fields | false_fields)
+    if extra:
+        die(f"observations has unknown keys: {sorted(extra)}")
     for field in sorted(true_fields):
         if observations.get(field) is not True:
             die(f"observations.{field} must be true")
@@ -270,6 +273,27 @@ def require_candidate_identity(value: Any) -> dict[str, Any]:
     return deepcopy(identity)
 
 
+def reject_creator_mvp_secret_keys(evidence: dict[str, Any]) -> None:
+    # Required observation field names may contain fragments such as
+    # "authorization"; scan the rest of the artifact and observation values.
+    sanitized = deepcopy(evidence)
+    observations = sanitized.pop("observations", None)
+    layer2.reject_forbidden_secret_keys(sanitized)
+    if not isinstance(observations, dict):
+        return
+    for key, item in observations.items():
+        if isinstance(item, str):
+            layer2.reject_forbidden_secret_keys({"_": item}, f"$.observations.{key}")
+        elif isinstance(item, (dict, list)):
+            layer2.reject_forbidden_secret_keys(item, f"$.observations.{key}")
+
+
+def require_same_utc_day_expiry(captured_at: str, expires_at: str) -> None:
+    captured_dt = datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    if date.fromisoformat(expires_at) != captured_dt.date():
+        die("expires_at must equal the UTC calendar date of captured_at")
+
+
 def require_signed_redaction(value: Any) -> dict[str, bool]:
     redaction = require_object(value, "redaction")
     for field, redacted in sorted(redaction.items()):
@@ -300,7 +324,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     require_string(evidence_sha, COMMIT_RE, "--evidence-sha")
     source, path = require_evidence_source(root, source)
     evidence, evidence_bytes = layer2.load_object_bytes(path, "Trusted Pool creator MVP redacted evidence")
-    layer2.reject_forbidden_secret_keys(evidence)
+    reject_creator_mvp_secret_keys(evidence)
     if evidence.get("schema_version") != EVIDENCE_SCHEMA:
         die(f"schema_version must equal {EVIDENCE_SCHEMA!r}")
     if evidence.get("journey_id") != JOURNEY_ID:
@@ -330,6 +354,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     expires_at = require_string(evidence.get("expires_at"), DATE_RE, "expires_at")
     if date.fromisoformat(expires_at) < date.today():
         die("expires_at must not be in the past")
+    require_same_utc_day_expiry(captured_at, expires_at)
     operator = deepcopy(require_object(evidence.get("operator"), "operator"))
     require_string(operator.get("role"), None, "operator.role")
     require_string(operator.get("identity_fingerprint"), FINGERPRINT_RE, "operator.identity_fingerprint")

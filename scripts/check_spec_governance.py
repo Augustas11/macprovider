@@ -1481,6 +1481,13 @@ def _validate_trusted_pool_creator_mvp_journey_result(
         result.error(location, f"trusted-pool creator MVP requirement journeys must include {TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID!r}")
     if signed.get("execution_mode") != TRUSTED_POOL_CREATOR_MVP_EXECUTION_MODE:
         result.error(f"{location}.signed.execution_mode", f"must equal {TRUSTED_POOL_CREATOR_MVP_EXECUTION_MODE!r}")
+    captured_at = _datetime_z(signed.get("captured_at"), f"{location}.signed.captured_at", result)
+    expires_at = _date(signed.get("expires_at"), f"{location}.signed.expires_at", result)
+    if captured_at is not None and expires_at is not None and expires_at != captured_at.date():
+        result.error(
+            f"{location}.signed.expires_at",
+            "must equal the UTC calendar date of captured_at",
+        )
 
     run_result = signed.get("result")
     if isinstance(run_result, dict):
@@ -1527,16 +1534,12 @@ def _validate_trusted_pool_creator_mvp_journey_result(
             "buyer_authorization_enforced",
             "candidate_manifest_accepted",
             "creator_admin_authorized_only",
-            "creator_suspension_root_compromise_freeze_verified",
-            "delegation_revocation_verified",
-            "descendant_signer_rejection_verified",
             "emergency_pause_exercised",
             "fail_closed_no_global_fallback",
             "isolated_environment",
             "no_duplicate_settlement",
             "no_private_key_upload",
             "no_raw_prompt_output_artifact",
-            "pool_existence_oracle_within_threshold",
             "raw_prompt_output_redacted",
             "restart_reconstruction_verified",
             "root_registration_replay_checked",
@@ -1545,8 +1548,12 @@ def _validate_trusted_pool_creator_mvp_journey_result(
         }
         false_fields = {
             "coordinator_blind_claimed",
+            "creator_suspension_root_compromise_freeze_verified",
+            "delegation_revocation_verified",
+            "descendant_signer_rejection_verified",
             "global_fallback_observed",
             "payout_ready_mutated",
+            "pool_existence_oracle_within_threshold",
             "privacy_pool_claimed",
             "production_side_effects",
             "public_announcement_without_reviewed_artifact_observed",

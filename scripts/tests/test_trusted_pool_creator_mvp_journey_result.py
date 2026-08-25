@@ -47,21 +47,23 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
         "journey_id": TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID,
         "execution_mode": "isolated-candidate-trusted-pool-creator-mvp",
         "requirement_ids": ids,
+        "captured_at": "2026-08-25T05:54:25Z",
+        "expires_at": "2026-08-25",
         "observations": {
             "approved_creator_record_bound": True,
             "buyer_authorization_enforced": True,
             "candidate_manifest_accepted": True,
             "creator_admin_authorized_only": True,
-            "creator_suspension_root_compromise_freeze_verified": True,
-            "delegation_revocation_verified": True,
-            "descendant_signer_rejection_verified": True,
+            "creator_suspension_root_compromise_freeze_verified": False,
+            "delegation_revocation_verified": False,
+            "descendant_signer_rejection_verified": False,
             "emergency_pause_exercised": True,
             "fail_closed_no_global_fallback": True,
             "isolated_environment": True,
             "no_duplicate_settlement": True,
             "no_private_key_upload": True,
             "no_raw_prompt_output_artifact": True,
-            "pool_existence_oracle_within_threshold": True,
+            "pool_existence_oracle_within_threshold": False,
             "raw_prompt_output_redacted": True,
             "restart_reconstruction_verified": True,
             "root_registration_replay_checked": True,
@@ -146,6 +148,21 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
                 result,
             )
             self.assertEqual([], result.errors, requirement_id)
+
+    def test_rejects_expires_at_after_captured_utc_date(self) -> None:
+        result = ValidationResult()
+        signed = valid_signed()
+        signed["expires_at"] = "2026-08-26"
+        _validate_trusted_pool_creator_mvp_journey_result(
+            signed,
+            "SPEC-043-R012",
+            [TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID],
+            signed["artifacts"],
+            signed["steps"],
+            "evidence[0]",
+            result,
+        )
+        self.assertTrue(any("captured_at" in error for error in result.errors))
 
     def test_rejects_broad_or_unmapped_requirement(self) -> None:
         result = ValidationResult()
@@ -353,8 +370,30 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
         observations["coordinator_blind_claimed"] = True
         with self.assertRaises(SystemExit):
             builder.require_observations(observations)
+        freeze = dict(valid_signed()["observations"])
+        freeze["creator_suspension_root_compromise_freeze_verified"] = True
+        with self.assertRaises(SystemExit):
+            builder.require_observations(freeze)
+        oracle = dict(valid_signed()["observations"])
+        oracle["pool_existence_oracle_within_threshold"] = True
+        with self.assertRaises(SystemExit):
+            builder.require_observations(oracle)
+        builder.require_same_utc_day_expiry("2026-08-25T05:54:25Z", "2026-08-25")
+        with self.assertRaises(SystemExit):
+            builder.require_same_utc_day_expiry("2026-08-25T05:54:25Z", "2026-08-26")
+        extra = dict(valid_signed()["observations"])
+        extra["authorization_header"] = "sk-proj-" + ("a" * 48)
+        with self.assertRaises(SystemExit):
+            builder.require_observations(extra)
         with self.assertRaises(SystemExit):
             builder.layer2.reject_forbidden_secret_keys({"notes": "sk-proj-" + ("a" * 48)})
+        builder.reject_creator_mvp_secret_keys({"observations": valid_signed()["observations"], "notes": "ok"})
+        with self.assertRaises(SystemExit):
+            builder.reject_creator_mvp_secret_keys({"authorization_header": "secret", "observations": valid_signed()["observations"]})
+        leaked = dict(valid_signed()["observations"])
+        leaked["notes"] = "sk-proj-" + ("a" * 48)
+        with self.assertRaises(SystemExit):
+            builder.reject_creator_mvp_secret_keys({"observations": leaked, "notes": "ok"})
 
     def test_builder_normalizes_rich_source_redaction_for_signed_payload(self) -> None:
         builder = load_builder()

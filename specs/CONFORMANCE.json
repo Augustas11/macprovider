@@ -5739,7 +5739,8 @@
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_CreatorApprovalControlsRouteability",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestRegistryRouteableUntilExpiresAtRouteTimeAndBumpsGeneration",
         "phase4-coordinator/internal/trustpool/refresher_test.go:TestRefreshRegistryClosesExpiredCreatorGateAtSameRevision",
-        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry"
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorApprovalEndpointRefreshesRegistry",
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -5767,7 +5768,8 @@
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_RootRegistrationNonceIssuedConsumedAndServerTimed",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ReconstructRejectsDuplicateRootRegistrationNonce",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_CreatorApprovalGatesNonceAndExpansiveMutations",
-        "phase4-coordinator/internal/trustpool/root_manifest_test.go:TestRootIssuerPublicKeyFingerprintIgnoresKeyID"
+        "phase4-coordinator/internal/trustpool/root_manifest_test.go:TestRootIssuerPublicKeyFingerprintIgnoresKeyID",
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -5792,7 +5794,8 @@
       ],
       "tests": [
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_CreatorApprovalGatesNonceAndExpansiveMutations",
-        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_AppendsCandidateEventsAndRejectsActivation"
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_AppendsCandidateEventsAndRejectsActivation",
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -5861,7 +5864,8 @@
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_PublicAnnouncementApprovalIsDigestBound",
         "phase4-coordinator/internal/buyer/server_internal_test.go:TestPublicTrustPoolDocumentFreshFailsClosed",
         "phase4-coordinator/internal/config/config_test.go:TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate",
-        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PromotePoolProductionRequiresActivationEvidence"
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PromotePoolProductionRequiresActivationEvidence",
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -5929,7 +5933,8 @@
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorSurfaceRejectsAllowlistedUnadmittedProvider",
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorSurfaceRejectsUndelegatedProvider",
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorSurfaceRejectsUnauthorized",
-        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorSurfaceRejectsExpiredCredential"
+        "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_CreatorSurfaceRejectsExpiredCredential",
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -5955,7 +5960,8 @@
       ],
       "tests": [
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ReconstructsRouteableRegistryAcrossRestart",
-        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PausedPoolReplaysButFailsClosedForRouting"
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PausedPoolReplaysButFailsClosedForRouting",
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -5984,7 +5990,8 @@
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ReconstructsRouteableRegistryAcrossRestart",
         "phase4-coordinator/internal/trustpool/admin_handler_test.go:TestAdminHandler_AppendsCandidateEventsAndRejectsActivation",
         "phase4-coordinator/internal/buyer/server_test.go:TestPoolHeaderRequiresAuthorizedBuyerAccount",
-        "phase4-coordinator/internal/buyer/server_test.go:TestPoolHeaderForNonRouteablePoolFailsUnavailable"
+        "phase4-coordinator/internal/buyer/server_test.go:TestPoolHeaderForNonRouteablePoolFailsUnavailable",
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -6037,7 +6044,8 @@
         "phase4-coordinator/internal/trustpool/refresher_test.go:TestRefreshRegistryClosesExpiredCreatorGateAtSameRevision",
         "phase4-coordinator/cmd/coordinator/main_test.go:TestLoadTrustedPoolsDisablesPoolSupportOnReconstructionFailure",
         "phase4-coordinator/internal/buyer/spec042_pools_advertisement_test.go:TestInternalRoutingAdvertisesPoolCapability",
-        "phase4-coordinator/internal/buyer/server_internal_test.go:TestPublicTrustPoolDocumentFreshFailsClosed"
+        "phase4-coordinator/internal/buyer/server_internal_test.go:TestPublicTrustPoolDocumentFreshFailsClosed",
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -6099,7 +6107,8 @@
         "phase4-coordinator/internal/trustpool/policy_test.go:TestBuildPublicPolicyDocumentIgnoresLegacyUnboundPublicAnnouncementRows",
         "phase4-coordinator/internal/buyer/server_test.go:TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus",
         "phase4-coordinator/internal/buyer/server_test.go:TestTrustPoolPublicPolicyStatusAreRateLimitedBeforeLookup",
-        "phase4-coordinator/internal/buyer/server_internal_test.go:TestPublicTrustPoolDocumentFreshFailsClosed"
+        "phase4-coordinator/internal/buyer/server_internal_test.go:TestPublicTrustPoolDocumentFreshFailsClosed",
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -6119,7 +6128,9 @@
       "implementation": [
         "phase4-coordinator/internal/billing/route_snapshot.go:type RouteSnapshot"
       ],
-      "tests": [],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
+      ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
@@ -6166,7 +6177,8 @@
         "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_HTTPBodyReadCancelledOnImmediateRevoke",
         "phase4-coordinator/internal/trustpool/registry_test.go:TestWatchProviderRevokedClosesOnRevoke",
         "phase4-coordinator/internal/trustpool/registry_test.go:TestWatchProviderRevokedClosesOnDurableSnapshotPublish",
-        "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_HTTPStreamingPreCommitCancelledOnImmediateRevoke"
+        "phase4-coordinator/internal/buyer/spec042_pool_isolation_test.go:TestPoolIsolation_HTTPStreamingPreCommitCancelledOnImmediateRevoke",
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -6189,7 +6201,8 @@
         "scripts/pool_promotion_transition.py:consume_pool_promotion_transition"
       ],
       "tests": [
-        "scripts/tests/test_pool_promotion_transition.py:class PoolPromotionTransitionTests"
+        "scripts/tests/test_pool_promotion_transition.py:class PoolPromotionTransitionTests",
+        "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
@@ -6199,7 +6212,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1160",
-        "rationale": "Launch evidence and rollback: a protected manual builder/workflow/validator path exists for non-promoting signed JOURNEY-TRUSTED-POOL-CREATOR-MVP candidate evidence, and a closed PoolPromotionTransitionV1 schema plus append-only spec043-promotion-ledger now persist run-id high-watermarks, consumed authorization ids, per-pool transition epochs, and launch-key tombstones outside coordinator snapshots. The committed production-release keyring is empty/fail-closed. No committed signed create-to-route-to-settle-to-pause journey or registered production-release approver key exists yet, so SPEC-043-R012 remains pending."
+        "rationale": "Launch evidence and rollback: a protected manual builder/workflow/validator path exists for non-promoting signed JOURNEY-TRUSTED-POOL-CREATOR-MVP candidate evidence, and a closed PoolPromotionTransitionV1 schema plus append-only spec043-promotion-ledger now persist run-id high-watermarks, consumed authorization ids, per-pool transition epochs, and launch-key tombstones outside coordinator snapshots. The committed production-release keyring is empty/fail-closed. A local isolated candidate harness now exists, but no committed signed create-to-route-to-settle-to-pause journey or registered production-release approver key exists yet, so SPEC-043-R012 remains pending."
       }
     },
     {
