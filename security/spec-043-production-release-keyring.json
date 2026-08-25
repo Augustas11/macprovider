@@ -1,0 +1,7 @@
+{
+  "schema_version": "spec-043-launch-keyring-v1",
+  "purpose": "production-release-approver",
+  "allowed_environment_classes": ["production"],
+  "keys": [],
+  "note": "SPEC-043 R012 production-release approver keys are registered here. An empty keys array is fail-closed: no PoolPromotionTransitionV1 can verify until a key is added. Revocations and emergency-disable tombstones also live in journeys/ledgers/spec-043-promotion-auth.jsonl so git rollback of this file cannot re-trust a ledger-tombstoned key."
+}

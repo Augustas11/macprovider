@@ -31,6 +31,7 @@ AUTHORITY_SCHEMA_PATH = "../schemas/spec-authority-v1.schema.json"
 CONFORMANCE_SCHEMA_PATH = "../schemas/spec-conformance-v1.schema.json"
 JOURNEY_RESULT_SCHEMA_ID = "https://github.com/Augustas11/macprovider/schemas/journey-result-v1.schema.json"
 JOURNEY_RESULT_ENVELOPE_SCHEMA = "macprovider.journey-result-envelope.v1"
+POOL_PROMOTION_TRANSITION_ENVELOPE_SCHEMA = "macprovider.pool-promotion-transition-envelope.v1"
 JOURNEY_RESULT_PAYLOAD_SCHEMA = "macprovider.journey-result.v1"
 JOURNEY_RESULT_SIGNING_ALGORITHM = "ecdsa-p256-sha256"
 JOURNEY_RESULT_SIGNING_KEY_ID = "macprovider-acceptance-p256-v1"
@@ -742,6 +743,14 @@ def _looks_like_signed_journey_result(root: Path, source: str) -> bool:
         return False
     probe = _load_json(path, ValidationResult())
     return isinstance(probe, dict) and probe.get("schema_version") == JOURNEY_RESULT_ENVELOPE_SCHEMA
+
+
+def _looks_like_pool_promotion_transition(root: Path, source: str) -> bool:
+    path = _repository_path(root, source, source, ValidationResult())
+    if path is None:
+        return False
+    probe = _load_json(path, ValidationResult())
+    return isinstance(probe, dict) and probe.get("schema_version") == POOL_PROMOTION_TRANSITION_ENVELOPE_SCHEMA
 
 
 def _signed_journey_result_journey_id(root: Path, source: str) -> str | None:
@@ -2510,6 +2519,12 @@ def _signed_journey_result_satisfies(
             and isinstance(source, str)
             and _source_under_journey_evidence(root, source)
         ):
+            if _looks_like_pool_promotion_transition(root, source):
+                saw_candidate = True
+                candidate_errors.append(
+                    f"{location}.evidence[{index}].source: PoolPromotionTransitionV1 is a sibling production-promotion artifact and cannot satisfy conformant requirements"
+                )
+                continue
             if not _looks_like_signed_journey_result(root, source):
                 continue
             saw_candidate = True

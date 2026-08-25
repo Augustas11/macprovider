@@ -1302,7 +1302,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces with resolved MVP retention-policy registry fields, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current and the document fresh_until_utc is still valid, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites including registered retention-policy ids, lifecycle fail-closed tests including unresolved retention policies, operator-only admin API mutations for public-announcement/reviewed-artifact records, an environment-key-only CLI for nonce issuance, reviewed-artifact/public-announcement mutations, and pool health/audit/distribution exports, a bounded bearer-token creator administration surface for admitted creators to inspect their own approval/pools and perform allowlisted candidate operations, and a protected manual signer path plus governance validator for non-promoting JOURNEY-TRUSTED-POOL-CREATOR-MVP evidence artifacts. Raw operator admin events cannot activate a routeable pool; requirements remain pending until committed signed creator-MVP journey evidence, production reviewed-artifact lifecycle ownership, rollback-resistant production promotion authorization/evidence, custody-class production gates, full production activation gates, and production rollout proof exist."
+        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces with resolved MVP retention-policy registry fields, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current and the document fresh_until_utc is still valid, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites including registered retention-policy ids, lifecycle fail-closed tests including unresolved retention policies, operator-only admin API mutations for public-announcement/reviewed-artifact records, an environment-key-only CLI for nonce issuance, reviewed-artifact/public-announcement mutations, and pool health/audit/distribution exports, a bounded bearer-token creator administration surface for admitted creators to inspect their own approval/pools and perform allowlisted candidate operations, a protected manual signer path plus governance validator for non-promoting JOURNEY-TRUSTED-POOL-CREATOR-MVP evidence artifacts, and a closed PoolPromotionTransitionV1 production-promotion artifact plus append-only spec043-promotion-ledger that remains fail-closed until a production-release approver key is registered. Raw operator admin events cannot activate a routeable pool; requirements remain pending until committed signed creator-MVP journey evidence, a registered production-release approver key, production reviewed-artifact lifecycle ownership, custody-class production gates, full production activation gates, and production rollout proof exist."
       }
     },
     {
@@ -6183,8 +6183,14 @@
       "requirement_id": "SPEC-043-R012",
       "spec_id": "SPEC-043",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "scripts/pool_promotion_transition.py:SPEC043_PROMOTION_LEDGER",
+        "scripts/pool_promotion_transition.py:validate_pool_promotion_transition",
+        "scripts/pool_promotion_transition.py:consume_pool_promotion_transition"
+      ],
+      "tests": [
+        "scripts/tests/test_pool_promotion_transition.py:class PoolPromotionTransitionTests"
+      ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
@@ -6192,8 +6198,8 @@
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Launch evidence and rollback: a protected manual builder/workflow/validator path now exists for non-promoting signed JOURNEY-TRUSTED-POOL-CREATOR-MVP candidate evidence, with source/evidence commit binding, selector freshness preflight, closed step/observation/identity fields, redaction checks, and explicit promotion blocking. No committed signed create-to-route-to-settle-to-pause journey, rollback-resistant run-id/authorization ledger, or production-promotion artifact exists yet."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1160",
+        "rationale": "Launch evidence and rollback: a protected manual builder/workflow/validator path exists for non-promoting signed JOURNEY-TRUSTED-POOL-CREATOR-MVP candidate evidence, and a closed PoolPromotionTransitionV1 schema plus append-only spec043-promotion-ledger now persist run-id high-watermarks, consumed authorization ids, per-pool transition epochs, and launch-key tombstones outside coordinator snapshots. The committed production-release keyring is empty/fail-closed. No committed signed create-to-route-to-settle-to-pause journey or registered production-release approver key exists yet, so SPEC-043-R012 remains pending."
       }
     },
     {
