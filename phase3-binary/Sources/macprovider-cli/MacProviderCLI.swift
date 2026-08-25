@@ -2974,7 +2974,8 @@ struct UpdateCommand: AsyncParsableCommand {
         try Self.validateHeadlessUpdateMode(
             config: resolvedConfig,
             checkOnly: check,
-            hasAcceptanceOptions: hasAcceptanceOptions
+            hasAcceptanceOptions: hasAcceptanceOptions,
+            home: FileManager.default.homeDirectoryForCurrentUser
         )
 
         // #616/#610: converge PATH, then hand off to the canonical install binary
@@ -3029,14 +3030,63 @@ struct UpdateCommand: AsyncParsableCommand {
     static func validateHeadlessUpdateMode(
         config: AppConfig?,
         checkOnly: Bool,
-        hasAcceptanceOptions: Bool
+        hasAcceptanceOptions: Bool,
+        home: URL,
+        manifestLoader: (() throws -> UninstallCommand.ManifestLoadResult)? = nil,
+        validateSystemArtifactsAbsent: (([String], @escaping ([String]) throws -> Int32) throws -> Void)? = nil,
+        fileExists: @escaping (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        runLaunchctl: (([String]) throws -> Int32)? = nil
     ) throws {
-        guard config?.credentialStore == .protectedFile else { return }
-        guard checkOnly, !hasAcceptanceOptions else {
-            throw ValidationError(
-                "headless_fleet does not support mutating macprovider-cli update yet; use the signed headless installer acceptance bundle"
-            )
+        if checkOnly, !hasAcceptanceOptions { return }
+        let rejectMessage = "headless_fleet does not support mutating macprovider-cli update yet; use the signed headless installer acceptance bundle"
+        if config?.credentialStore == .protectedFile {
+            throw ValidationError(rejectMessage)
         }
+        let loadManifest = manifestLoader ?? {
+            try UninstallCommand.loadManifest(home: home)
+        }
+        do {
+            switch try loadManifest() {
+            case .loaded(let manifest):
+                if manifest.installProfile == "headless_fleet" || manifest.launchdDomain == "system" {
+                    throw ValidationError(rejectMessage)
+                }
+            case .missing:
+                let validator = validateSystemArtifactsAbsent ?? { systemPlists, run in
+                    try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
+                        systemPlists: systemPlists,
+                        fileExists: fileExists,
+                        run: run
+                    )
+                }
+                try validator(UninstallCommand.managedSystemLaunchDaemonPlists, runLaunchctl ?? Self.launchctlStatus)
+            }
+        } catch let error as ValidationError {
+            throw error
+        } catch UninstallCommand.UninstallError.unsupportedHeadlessInstallProfile {
+            throw ValidationError(rejectMessage)
+        } catch UninstallCommand.UninstallError.headlessProfileIndeterminateWithoutManifest {
+            throw ValidationError(
+                "cannot determine install profile for mutating update because system launchd state is indeterminate; fix or remove the headless system LaunchDaemon first"
+            )
+        } catch UninstallCommand.UninstallError.invalidInstallManifest {
+            throw ValidationError(
+                "cannot determine install profile for mutating update; fix macprovider install manifest or use the signed headless installer acceptance bundle"
+            )
+        } catch {
+            throw error
+        }
+    }
+
+    private static func launchctlStatus(arguments: [String]) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus
     }
 }
 

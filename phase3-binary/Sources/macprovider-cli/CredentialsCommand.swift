@@ -13,6 +13,8 @@ struct CredentialsCommand: ParsableCommand {
             CredentialsVerifyCommand.self,
             CredentialsStatusCommand.self,
             CredentialsRepairCommand.self,
+            CredentialsConfigTokenStatusCommand.self,
+            CredentialsScrubConfigTokenCommand.self,
             CredentialsRotateAdmissionIdentityCommand.self,
             CredentialsRecoverAdmissionIdentityCommand.self,
             CredentialsAdmissionIdentityRecoveryStatusCommand.self,
@@ -291,6 +293,69 @@ struct CredentialsStatusCommand: ParsableCommand {
         guard !normalized.isEmpty, normalized == actual else {
             throw ValidationError("credential operation provider_id does not match the expected provider identity")
         }
+    }
+}
+
+struct CredentialsConfigTokenStatusCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "config-token-status",
+        abstract: "Report whether config semantically contains a provider token.",
+        shouldDisplay: false
+    )
+
+    @Option(help: "YAML config path to inspect.")
+    var config: String
+
+    func run() throws {
+        let loaded = try CredentialsImportCommand.loadConfig(configPath: config)
+        guard loaded.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            throw CredentialsVerifyCommand.missingCredentialExitCode
+        }
+        let payload: [String: Any] = [
+            "config_provider_token": "present",
+            "status": "ok",
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            print("config_provider_token=present")
+            return
+        }
+        print(String(decoding: data, as: UTF8.self))
+    }
+}
+
+struct CredentialsScrubConfigTokenCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "scrub-config-token",
+        abstract: "Remove the exact semantically loaded provider token from config.",
+        shouldDisplay: false
+    )
+
+    @Option(help: "YAML config path to scrub.")
+    var config: String
+
+    func run() throws {
+        let loaded = try CredentialsImportCommand.loadConfig(configPath: config)
+        guard let expected = loaded.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !expected.isEmpty else {
+            throw CredentialsVerifyCommand.missingCredentialExitCode
+        }
+        guard try ProviderTokenPersist.remove(expectedToken: expected, configPath: config) else {
+            throw ValidationError("provider credential was imported but could not be scrubbed from config")
+        }
+        let scrubbed = try CredentialsImportCommand.loadConfig(configPath: config)
+        guard scrubbed.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else {
+            throw ValidationError("provider credential was imported but remains in config")
+        }
+        let payload: [String: Any] = [
+            "config_provider_token": "absent",
+            "operation": "scrub_config_token",
+            "status": "ok",
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            print("config_provider_token=absent")
+            return
+        }
+        print(String(decoding: data, as: UTF8.self))
     }
 }
 

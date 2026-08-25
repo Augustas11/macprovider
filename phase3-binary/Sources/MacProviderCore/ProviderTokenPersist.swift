@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Yams
 
 /// Atomic compatibility-token mutation for the provider YAML config.
 ///
@@ -176,19 +177,14 @@ public enum ProviderTokenPersist {
             }
 
             let expected = expectedToken.trimmingCharacters(in: .whitespacesAndNewlines)
-            let values = existingText
-                .split(separator: "\n", omittingEmptySubsequences: false)
-                .compactMap { line -> String? in
-                    guard line.hasPrefix("provider_token:") else { return nil }
-                    return line.dropFirst("provider_token:".count)
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-                }
-            guard !expected.isEmpty, !values.isEmpty, values.allSatisfy({ $0 == expected }) else {
+            let entries = topLevelProviderTokenEntries(in: existingText)
+            guard !expected.isEmpty,
+                  !entries.isEmpty,
+                  entries.allSatisfy({ $0.value == expected }) else {
                 return false
             }
 
-            try replaceAtomically(removingProviderTokenLines(in: existingText), resolved: resolved, parent: parent)
+            try replaceAtomically(removingProviderTokenEntries(in: existingText, entries: entries), resolved: resolved, parent: parent)
             return true
         }
     }
@@ -314,11 +310,150 @@ public enum ProviderTokenPersist {
     }
 
     public static func removingProviderTokenLines(in existing: String) -> String {
-        existing
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !$0.hasPrefix("provider_token:") }
-            .map(String.init)
+        removingProviderTokenEntries(
+            in: existing,
+            entries: topLevelProviderTokenEntries(in: existing)
+        )
+    }
+
+    private struct ProviderTokenEntry {
+        let range: Range<Int>
+        let value: String?
+    }
+
+    private static func topLevelProviderTokenEntries(in existing: String) -> [ProviderTokenEntry] {
+        let lines = existing.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var entries: [ProviderTokenEntry] = []
+        var index = 0
+        while index < lines.count {
+            guard let rest = providerTokenValueSource(fromTopLevelLine: lines[index]) else {
+                index += 1
+                continue
+            }
+            let start = index
+            index += 1
+            if rest.trimmingCharacters(in: .whitespaces).hasPrefix("|")
+                || rest.trimmingCharacters(in: .whitespaces).hasPrefix(">") {
+                while index < lines.count {
+                    let candidate = lines[index]
+                    if candidate.trimmingCharacters(in: .whitespaces).isEmpty {
+                        index += 1
+                        continue
+                    }
+                    guard candidate.first?.isWhitespace == true else { break }
+                    index += 1
+                }
+            }
+            let snippet = (["provider_token:\(rest)"] + Array(lines[start + 1..<index])).joined(separator: "\n")
+            let raw = try? Yams.load(yaml: snippet)
+            let value = (raw as? [String: Any])?["provider_token"] as? String
+            entries.append(ProviderTokenEntry(range: start..<index, value: value?.trimmingCharacters(in: .whitespacesAndNewlines)))
+        }
+        return entries
+    }
+
+    private static func removingProviderTokenEntries(
+        in existing: String,
+        entries: [ProviderTokenEntry]
+    ) -> String {
+        guard !entries.isEmpty else { return existing }
+        let lines = existing.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var removed = Set<Int>()
+        for entry in entries {
+            for index in entry.range {
+                removed.insert(index)
+            }
+        }
+        return lines.enumerated()
+            .filter { !removed.contains($0.offset) }
+            .map(\.element)
             .joined(separator: "\n")
+    }
+
+    private static func providerTokenValueSource(fromTopLevelLine line: String) -> String? {
+        guard let first = line.first, !first.isWhitespace, first != "#" else { return nil }
+        let characters = Array(line)
+        var index = 0
+        let key: String
+        if characters[index] == "'" {
+            index += 1
+            var decoded = ""
+            while index < characters.count {
+                let character = characters[index]
+                index += 1
+                if character == "'" {
+                    if index < characters.count, characters[index] == "'" {
+                        decoded.append("'")
+                        index += 1
+                        continue
+                    }
+                    break
+                }
+                decoded.append(character)
+            }
+            key = decoded
+        } else if characters[index] == "\"" {
+            index += 1
+            var decoded = ""
+            while index < characters.count {
+                let character = characters[index]
+                index += 1
+                if character == "\"" { break }
+                if character == "\\", index < characters.count {
+                    let escaped = characters[index]
+                    index += 1
+                    if let scalar = yamlDoubleQuotedEscape(escaped, characters: characters, index: &index) {
+                        decoded.unicodeScalars.append(scalar)
+                    } else {
+                        decoded.append(escaped)
+                    }
+                    continue
+                }
+                decoded.append(character)
+            }
+            key = decoded
+        } else {
+            let start = index
+            while index < characters.count, characters[index] != ":", !characters[index].isWhitespace {
+                index += 1
+            }
+            key = String(characters[start..<index])
+        }
+        guard key == "provider_token" else { return nil }
+        while index < characters.count, characters[index].isWhitespace {
+            index += 1
+        }
+        guard index < characters.count, characters[index] == ":" else { return nil }
+        return String(characters[(index + 1)...])
+    }
+
+    private static func yamlDoubleQuotedEscape(
+        _ escaped: Character,
+        characters: [Character],
+        index: inout Int
+    ) -> UnicodeScalar? {
+        let width: Int
+        switch escaped {
+        case "x": width = 2
+        case "u": width = 4
+        case "U": width = 8
+        case "0": return UnicodeScalar(0)
+        case "a": return UnicodeScalar(0x07)
+        case "b": return UnicodeScalar(0x08)
+        case "t", "\t": return UnicodeScalar(0x09)
+        case "n": return UnicodeScalar(0x0A)
+        case "v": return UnicodeScalar(0x0B)
+        case "f": return UnicodeScalar(0x0C)
+        case "r": return UnicodeScalar(0x0D)
+        case "e": return UnicodeScalar(0x1B)
+        case "_": return UnicodeScalar(0xA0)
+        default: return escaped.unicodeScalars.first
+        }
+        guard index + width <= characters.count else { return nil }
+        let hex = String(characters[index..<index + width])
+        index += width
+        guard let value = UInt32(hex, radix: 16) else { return nil }
+        return UnicodeScalar(value)
     }
 
     /// Pure helper exposed for testing — given existing config text and

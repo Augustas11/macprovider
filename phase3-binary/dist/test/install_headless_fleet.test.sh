@@ -18,7 +18,9 @@ names = [
     "snapshot_headless_launchdaemon_plist",
     "publish_root_file_from_base64",
     "verify_published_launchd_payload",
+    "run_macprovider_cli_with_amfi_retry",
     "validate_provider_token_environment",
+    "validate_launchd_mode",
     "version_at_least",
     "validate_macprovider_version_tag",
     "validate_headless_release_tag",
@@ -124,6 +126,106 @@ cat > "$TMP/bin/plutil" <<'EOF'
 set -euo pipefail
 [ "${1:-}" = "-lint" ] && [ -f "${2:-}" ]
 EOF
+
+cat > "$TMP/bin/macprovider-cli" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+command="${1:-}"
+subcommand="${2:-}"
+shift 2
+config=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --config)
+      config="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+[ "$command" = "credentials" ] || exit 64
+[ -n "$config" ] || exit 64
+case "$subcommand" in
+  config-token-status)
+    python3 - "$config" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+patterns = [
+    re.compile(r"^provider_token[ \t]*:"),
+    re.compile(r"^'provider_token'[ \t]*:"),
+    re.compile(r'^"provider_token"[ \t]*:'),
+    re.compile(r'^"provider\\u005ftoken"[ \t]*:'),
+]
+try:
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if any(pattern.match(line) for pattern in patterns):
+                raise SystemExit(0)
+except FileNotFoundError:
+    pass
+raise SystemExit(3)
+PY
+    ;;
+  scrub-config-token)
+    python3 - "$config" <<'PY'
+import os
+import re
+import sys
+import tempfile
+
+path = sys.argv[1]
+patterns = [
+    re.compile(r"^provider_token[ \t]*:(?P<rest>.*)$"),
+    re.compile(r"^'provider_token'[ \t]*:(?P<rest>.*)$"),
+    re.compile(r'^"provider_token"[ \t]*:(?P<rest>.*)$'),
+    re.compile(r'^"provider\\u005ftoken"[ \t]*:(?P<rest>.*)$'),
+]
+with open(path, encoding="utf-8") as handle:
+    lines = handle.read().splitlines()
+scrubbed = []
+index = 0
+while index < len(lines):
+    line = lines[index]
+    match = next((pattern.match(line) for pattern in patterns if pattern.match(line)), None)
+    if not match:
+        scrubbed.append(line)
+        index += 1
+        continue
+    rest = match.group("rest").strip()
+    index += 1
+    if rest.startswith("|") or rest.startswith(">"):
+        while index < len(lines):
+            candidate = lines[index]
+            if candidate.strip() == "":
+                index += 1
+                continue
+            if not candidate.startswith((" ", "\t")):
+                break
+            index += 1
+directory = os.path.dirname(path)
+fd, temporary = tempfile.mkstemp(prefix=".config-tokenless-", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        output.write("\n".join(scrubbed))
+        output.write("\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+EOF
 chmod 0755 "$TMP/bin/"*
 
 HOME="$TMP/home" PATH="$TMP/bin:$PATH" MOCK_BIN="$TMP/bin" LAUNCHD_LOG="$TMP/launchctl.log" \
@@ -159,7 +261,9 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   validate_headless_release_tag v1.8.105
 
   SUDO_BIN="$MOCK_BIN/sudo"
+  ROOT_PYTHON3_BIN="$(command -v python3)"
   LAUNCHCTL_BIN="$MOCK_BIN/launchctl"
+  MACPROVIDER_CLI_EXECUTABLE="$MOCK_BIN/macprovider-cli"
   HEADLESS=1
   HEADLESS_USER="$(id -un)"
   HEADLESS_RECOVERY_TRUST_PATH="$SYSTEM_DIR/install-recovery.sha256"
@@ -194,6 +298,16 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   INSTALL_TX_HAD_PLIST=0 INSTALL_TX_HAD_WATCHDOG_PLIST=0
   LAUNCHD_INSTALLED=0 WATCHDOG_INSTALLED=0
 
+  validate_launchd_mode
+  if (NO_LAUNCHD=1 validate_launchd_mode); then
+    echo "headless mode unexpectedly accepted MACPROVIDER_NO_LAUNCHD=1" >&2
+    exit 1
+  fi
+  if (NO_WATCHDOG=1 validate_launchd_mode); then
+    echo "headless mode unexpectedly accepted MACPROVIDER_NO_WATCHDOG=1" >&2
+    exit 1
+  fi
+
   mkdir -p "$INSTALL_TX_BACKUP"
   printf "state=fixture\n" > "$INSTALL_TX_BACKUP/state.sh"
   printf "#!/usr/bin/env bash\nexit 0\n" > "$INSTALL_TX_BACKUP/recover.sh"
@@ -223,6 +337,11 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   scrub_config_provider_token
   [ -z "$(read_config_provider_token_line || true)" ]
   ! grep -Fq "quoted-secret" "$CONFIG_PATH"
+  printf "%s\n" '"provider\u005ftoken": "escaped-secret"' >> "$CONFIG_PATH"
+  [ -n "$(read_config_provider_token_line || true)" ]
+  scrub_config_provider_token
+  [ -z "$(read_config_provider_token_line || true)" ]
+  ! grep -Fq "escaped-secret" "$CONFIG_PATH"
   printf "provider_token: |-\n  block-secret\nmodel: model\n" >> "$CONFIG_PATH"
   scrub_config_provider_token
   [ -z "$(read_config_provider_token_line || true)" ]

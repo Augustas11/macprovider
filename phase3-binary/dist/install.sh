@@ -184,6 +184,10 @@ validate_launchd_mode() {
     1) ;;
     *) die 7 "MACPROVIDER_HEADLESS must be 0 or 1" ;;
   esac
+  [ "$NO_LAUNCHD" != "1" ] \
+    || die 7 "headless mode requires system LaunchDaemon installation; MACPROVIDER_NO_LAUNCHD=1 is not supported"
+  [ "$NO_WATCHDOG" != "1" ] \
+    || die 7 "headless mode requires the system watchdog LaunchDaemon; MACPROVIDER_NO_WATCHDOG=1 is not supported"
   if [ "$UID" -eq 0 ]; then
     detected_user="$HEADLESS_USER"
     [ -n "$detected_user" ] || detected_user="${SUDO_USER:-}"
@@ -323,7 +327,7 @@ require_launchd_service_absent() {
 }
 
 launchctl_service() {
-  if [ "$HEADLESS" = "1" ]; then
+  if [ "${HEADLESS:-0}" = "1" ]; then
     "${SUDO_BIN:-/usr/bin/sudo}" -n "${LAUNCHCTL_BIN:-/bin/launchctl}" "$@"
   else
     launchctl "$@"
@@ -490,7 +494,7 @@ publish_launchd_plist() {
   bootstrap_path="$2"
   expected_label="${3:-}"
   expected_program="${4:-}"
-  if [ "$HEADLESS" = "1" ]; then
+  if [ "${HEADLESS:-0}" = "1" ]; then
     validate_headless_launchdaemon_plist "$source_path" "$bootstrap_path" \
       "$expected_label" "$expected_program" || return 70
     plist_payload_b64="$(snapshot_headless_launchdaemon_plist "$source_path" "$bootstrap_path" \
@@ -871,7 +875,7 @@ PY
 run_macprovider_cli_with_amfi_retry() {
   local rc=0
   local cli_path="$MACPROVIDER_CLI_EXECUTABLE"
-  if [ "$HEADLESS" = "1" ]; then
+  if [ "${HEADLESS:-0}" = "1" ]; then
     MACPROVIDER_PROTECTED_CREDENTIAL_ROOT="$CONFIG_DIR/protected-credentials" \
       "$cli_path" "$@" || rc=$?
   else
@@ -883,7 +887,7 @@ run_macprovider_cli_with_amfi_retry() {
   log "macprovider-cli was SIGKILL'd on first invocation (rc=$rc); likely a transient AMFI code-signature race after pkg install. Retrying once after 2s." >&2
   sleep 2
   rc=0
-  if [ "$HEADLESS" = "1" ]; then
+  if [ "${HEADLESS:-0}" = "1" ]; then
     MACPROVIDER_PROTECTED_CREDENTIAL_ROOT="$CONFIG_DIR/protected-credentials" \
       "$cli_path" "$@" || rc=$?
   else
@@ -904,7 +908,7 @@ run_macprovider_cli_with_amfi_retry() {
     return "$rc"
   fi
   rc=0
-  if [ "$HEADLESS" = "1" ]; then
+  if [ "${HEADLESS:-0}" = "1" ]; then
     MACPROVIDER_PROTECTED_CREDENTIAL_ROOT="$CONFIG_DIR/protected-credentials" \
       "$cli_path" "$@" || rc=$?
   else
@@ -9088,8 +9092,8 @@ enable_fresh_referral_receipts() {
   existing_model="$(read_config_model || true)"
   credential_store_value=""
   auto_update_enabled_value=""
-  [ "$HEADLESS" = "1" ] && credential_store_value="protected_file"
-  [ "$HEADLESS" = "1" ] && auto_update_enabled_value="false"
+  [ "${HEADLESS:-0}" = "1" ] && credential_store_value="protected_file"
+  [ "${HEADLESS:-0}" = "1" ] && auto_update_enabled_value="false"
   semantic_merge_config \
     "$CONFIG_PATH" \
     "$existing_model" \
@@ -9130,8 +9134,8 @@ write_config() {
   mv "$provider_id_temp" "$PROVIDER_ID_PATH"
   credential_store_value=""
   auto_update_enabled_value=""
-  [ "$HEADLESS" = "1" ] && credential_store_value="protected_file"
-  [ "$HEADLESS" = "1" ] && auto_update_enabled_value="false"
+  [ "${HEADLESS:-0}" = "1" ] && credential_store_value="protected_file"
+  [ "${HEADLESS:-0}" = "1" ] && auto_update_enabled_value="false"
   semantic_merge_config "$CONFIG_PATH" "$model" "$provider_id" "$coordinator_url" "$PORT" "" "$credential_store_value" "$auto_update_enabled_value"
   chmod 600 "$CONFIG_PATH" "$PROVIDER_ID_PATH" 2>/dev/null || true
 }
@@ -9151,75 +9155,14 @@ read_config_model() {
 
 read_config_provider_token_line() {
   [ -f "$CONFIG_PATH" ] || return 1
-  python3 - "$CONFIG_PATH" <<'PY'
-import re
-import sys
-
-pattern = re.compile(r'^[ \t]*(?:"provider_token"|'"'"'provider_token'"'"'|provider_token)[ \t]*:')
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    for line in handle:
-        if pattern.match(line):
-            print(line.rstrip("\n"))
-            raise SystemExit(0)
-raise SystemExit(1)
-PY
+  run_macprovider_cli_with_amfi_retry credentials config-token-status --config "$CONFIG_PATH" >/dev/null \
+    || return 1
+  printf "provider_token: <redacted>\n"
 }
 
 scrub_config_provider_token() {
   [ -f "$CONFIG_PATH" ] || return 0
-  python3 - "$CONFIG_PATH" <<'PY'
-import os
-import re
-import sys
-import tempfile
-
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as handle:
-    lines = handle.read().splitlines()
-key_pattern = re.compile(r'^(?P<indent>[ \t]*)(?:"provider_token"|'"'"'provider_token'"'"'|provider_token)[ \t]*:(?P<rest>.*)$')
-scrubbed = []
-index = 0
-while index < len(lines):
-    line = lines[index]
-    match = key_pattern.match(line)
-    if not match:
-        scrubbed.append(line)
-        index += 1
-        continue
-    key_indent = len(match.group("indent").expandtabs(8))
-    rest = match.group("rest").strip()
-    index += 1
-    if rest.startswith("|") or rest.startswith(">"):
-        while index < len(lines):
-            candidate = lines[index]
-            if candidate.strip() == "":
-                index += 1
-                continue
-            indent = len(candidate[: len(candidate) - len(candidate.lstrip(" \t"))].expandtabs(8))
-            if indent <= key_indent:
-                break
-            index += 1
-directory = os.path.dirname(path)
-fd, temporary = tempfile.mkstemp(prefix=".config-tokenless-", dir=directory)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as output:
-        output.write("\n".join(scrubbed))
-        output.write("\n")
-        output.flush()
-        os.fsync(output.fileno())
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-    dir_fd = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
-finally:
-    try:
-        os.unlink(temporary)
-    except FileNotFoundError:
-        pass
-PY
+  run_macprovider_cli_with_amfi_retry credentials scrub-config-token --config "$CONFIG_PATH" >/dev/null
 }
 
 read_config_provider_id() {

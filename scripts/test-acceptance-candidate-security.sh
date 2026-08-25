@@ -43,6 +43,21 @@ if "go-version-file: candidate/phase4-coordinator/go.mod" not in build:
 if re.search(r'(?m)^\s*go-version\s*:', build):
     raise SystemExit("candidate Pearl build must not hardcode a Go version")
 for value in (
+    "Seal the Tier-2 verifier toolchain",
+    'source_root="$(go env GOROOT)"',
+    "sudo test ! -e /private/var/macprovider-go-verifier",
+    "sudo install -d -o root -g wheel -m 0755 /private/var/macprovider-go-verifier",
+    'sudo cp -a "$source_root/." /private/var/macprovider-go-verifier/',
+    "sudo chown -R root:wheel /private/var/macprovider-go-verifier",
+    "sudo chmod -R go-w /private/var/macprovider-go-verifier",
+    "sudo test -x /private/var/macprovider-go-verifier/bin/go",
+    "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1",
+):
+    if value not in build:
+        raise SystemExit(f"candidate build does not seal the Tier-2 Go verifier: {value}")
+if build.find("Seal the Tier-2 verifier toolchain") > build.find("Build candidate CLI compatibility set"):
+    raise SystemExit("Tier-2 Go verifier is sealed after package.sh needs it")
+for value in (
     "Verify candidate Pearl Go module parity",
     "candidate/phase4-coordinator/go.mod",
     "candidate/phase5-gateway/go.mod",
@@ -62,6 +77,22 @@ if "ref: ${{ github.sha }}" not in protected:
     raise SystemExit("protected signer is not pinned to the main workflow commit")
 if "Checkout candidate as untrusted build data" in protected or "bash candidate/" in protected:
     raise SystemExit("candidate code is checked out or executed in the protected signer")
+for value in (
+    "Setup Go for protected Tier-2 verifier",
+    "go-version-file: phase4-coordinator/go.mod",
+    "Seal the protected Tier-2 verifier toolchain",
+    'source_root="$(go env GOROOT)"',
+    "sudo test ! -e /private/var/macprovider-go-verifier",
+    "sudo install -d -o root -g wheel -m 0755 /private/var/macprovider-go-verifier",
+    'sudo cp -a "$source_root/." /private/var/macprovider-go-verifier/',
+    "sudo chown -R root:wheel /private/var/macprovider-go-verifier",
+    "sudo chmod -R go-w /private/var/macprovider-go-verifier",
+    "sudo test -x /private/var/macprovider-go-verifier/bin/go",
+):
+    if value not in protected:
+        raise SystemExit(f"protected signer does not seal the Tier-2 Go verifier: {value}")
+if protected.find("Seal the protected Tier-2 verifier toolchain") > protected.find("Sign, notarize, and bind"):
+    raise SystemExit("protected Tier-2 Go verifier is sealed after signer script execution")
 if protected.find("verify-acceptance-remote-state.sh") > protected.find("Sign, notarize, and bind"):
     raise SystemExit("candidate ref/tag drift gate is late")
 if protected.count("verify-acceptance-remote-state.sh") != 2:
@@ -109,6 +140,17 @@ for secret in (
         raise SystemExit(f"protected signer secret contract is incomplete: {secret}")
 if "--private-key \"$release_private_key\"" not in signer or "--public-key \"$release_public_key\"" not in signer:
     raise SystemExit("inner compatibility manifest is not main-owned and production-key verified")
+for value in (
+    "CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1",
+    'python3 "$root/scripts/catalog-release.py" verify-directory',
+    '--directory "$cli_work/catalog-release"',
+):
+    if value not in signer:
+        raise SystemExit(f"protected signer does not reverify Tier-2 catalog release: {value}")
+if signer.find("validate-provider-payload --directory") > signer.find("catalog-release.py"):
+    raise SystemExit("protected Tier-2 verification must run after provider payload extraction/shape validation")
+if signer.find("catalog-release.py") > signer.find('python3 "$compatibility" sign'):
+    raise SystemExit("protected Tier-2 verification must run before compatibility signing")
 if (
     "pearl-release.json.sig" not in signer
     or 'pearl_signing_key="$private_key"' not in signer

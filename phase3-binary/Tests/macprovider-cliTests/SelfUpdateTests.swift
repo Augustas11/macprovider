@@ -28,22 +28,93 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertNoThrow(try UpdateCommand.validateHeadlessUpdateMode(
             config: config,
             checkOnly: true,
-            hasAcceptanceOptions: false
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp")
         ))
         XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
             config: config,
             checkOnly: false,
-            hasAcceptanceOptions: false
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp")
         ))
         XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
             config: config,
             checkOnly: true,
-            hasAcceptanceOptions: true
+            hasAcceptanceOptions: true,
+            home: URL(fileURLWithPath: "/tmp")
         ))
         XCTAssertNoThrow(try UpdateCommand.validateHeadlessUpdateMode(
             config: nil,
             checkOnly: true,
-            hasAcceptanceOptions: false
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp")
+        ))
+    }
+
+    func testHeadlessUpdateRejectsDurableManifestAndSystemEvidence() throws {
+        var config = AppConfig.defaults(configPath: "/tmp/config.yaml")
+        config.credentialStore = .keychain
+        let headlessManifest = updateTestManifest(
+            installProfile: "headless_fleet",
+            launchdDomain: "system"
+        )
+        XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp"),
+            manifestLoader: { .loaded(headlessManifest) }
+        ))
+        let systemDomainManifest = updateTestManifest(
+            installProfile: "consumer_user",
+            launchdDomain: "system"
+        )
+        XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp"),
+            manifestLoader: { .loaded(systemDomainManifest) }
+        ))
+        XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp"),
+            manifestLoader: { .missing },
+            fileExists: { $0.hasSuffix("live.malibu.provider.plist") },
+            runLaunchctl: { _ in 113 }
+        ))
+        XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp"),
+            manifestLoader: { .missing },
+            fileExists: { _ in false },
+            runLaunchctl: { arguments in
+                arguments == ["print", "system/live.malibu.provider"] ? 0 : 113
+            }
+        ))
+        XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp"),
+            manifestLoader: { .missing },
+            fileExists: { _ in false },
+            runLaunchctl: { arguments in
+                arguments == ["print", "system/live.malibu.provider"] ? 64 : 113
+            }
+        ))
+        XCTAssertNoThrow(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp"),
+            manifestLoader: { .missing },
+            fileExists: { _ in false },
+            runLaunchctl: { _ in 113 }
         ))
     }
 
@@ -1528,4 +1599,24 @@ private func withEnvironmentVariable(_ name: String, value: String, body: () -> 
         }
     }
     body()
+}
+
+private func updateTestManifest(
+    installProfile: String?,
+    launchdDomain: String?
+) -> UninstallCommand.InstallManifest {
+    UninstallCommand.InstallManifest(
+        installPrefix: "/tmp/macprovider",
+        launchdLabels: ["live.malibu.provider", "live.malibu.provider-watchdog"],
+        dataDirs: ["/tmp/macprovider"],
+        version: "1.8.106",
+        binaryPath: "/tmp/macprovider/macprovider-cli",
+        symlinkPath: "/tmp/bin/macprovider-cli",
+        launchdPlists: [
+            "/Library/LaunchDaemons/live.malibu.provider.plist",
+            "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist",
+        ],
+        installProfile: installProfile,
+        launchdDomain: launchdDomain
+    )
 }
