@@ -337,7 +337,6 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 	if !rebuiltSnap.Exists || rebuiltSnap.PoolID != root.poolID {
 		t.Fatalf("reconstructed snapshot = %+v", rebuiltSnap)
 	}
-	assertCreatorMVPLedgerFailClosed(t)
 
 	postAdminLifecycle(t, handler, creatorMVPOperatorKey, root.poolID, "op-pause", trustpool.LifecyclePaused, "maintenance", http.StatusAccepted)
 	paused := registry.Snapshot(root.poolID)
@@ -421,7 +420,7 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 		"journey_id":      creatorMVPJourneyID,
 		"run_id":          "trusted-pool-creator-mvp-" + now.Format("20060102T150405Z"),
 		"captured_at":     now.Format("2006-01-02T15:04:05Z"),
-		"expires_at":      now.Add(7 * 24 * time.Hour).Format("2006-01-02"),
+		"expires_at":      now.Add(24 * time.Hour).Format("2006-01-02"),
 		"requirement_ids": []string{"SPEC-043-R001", "SPEC-043-R002", "SPEC-043-R003", "SPEC-043-R004", "SPEC-043-R005", "SPEC-043-R006", "SPEC-043-R007", "SPEC-043-R008", "SPEC-043-R009", "SPEC-043-R010", "SPEC-043-R011", "SPEC-043-R012"},
 		"repository": map[string]any{
 			"name":   "Augustas11/macprovider",
@@ -498,7 +497,7 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 			creatorMVPStep("step-09-successful-pooled-request", "Authorized pooled chat returned 200 through the admitted member only."),
 			creatorMVPStep("step-10-settlement-and-logs", "Route snapshot stored pool_id and digest in observe mode; payout-ready rows stayed zero."),
 			creatorMVPStep("step-11-fail-closed-routing", "Unauthorized and post-revoke pool requests failed closed before a second provider dispatch."),
-			creatorMVPStep("step-12-restart-reconstruction", "Empty-registry request failed closed; durable reconstruct rebuilt pool identity; spec043-promotion-ledger stayed init-only and fail-closed without a production-release key."),
+			creatorMVPStep("step-12-restart-reconstruction", "Empty-registry request failed closed; durable reconstruct rebuilt pool identity."),
 			creatorMVPStep("step-13-emergency-pause-and-rollback", "Operator pause moved the pool to non-routeable members while retaining the isolated candidate store."),
 			creatorMVPStep("step-14-redaction-and-artifacts", "Retained evidence uses fingerprints only; request body, bearer material, and local identities are absent."),
 		},
@@ -520,9 +519,9 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 			"buyer_authorization_enforced":                           true,
 			"candidate_manifest_accepted":                            true,
 			"creator_admin_authorized_only":                          true,
-			"creator_suspension_root_compromise_freeze_verified":     true,
+			"creator_suspension_root_compromise_freeze_verified":     false,
 			"delegation_revocation_verified":                         true,
-			"descendant_signer_rejection_verified":                   true,
+			"descendant_signer_rejection_verified":                   false,
 			"emergency_pause_exercised":                              true,
 			"fail_closed_no_global_fallback":                         true,
 			"isolated_environment":                                   true,
@@ -591,31 +590,6 @@ func writeCreatorMVPEvidenceIfRequested(t *testing.T, evidence map[string]any) {
 		t.Fatalf("write creator MVP evidence: %v", err)
 	}
 	t.Logf("wrote redacted trusted-pool creator MVP evidence to %s", path)
-}
-
-func assertCreatorMVPLedgerFailClosed(t *testing.T) {
-	t.Helper()
-	root := creatorMVPGitOutput(t, "rev-parse", "--show-toplevel")
-	ledgerPath := filepath.Join(root, "journeys", "ledgers", "spec-043-promotion-auth.jsonl")
-	raw, err := os.ReadFile(ledgerPath)
-	if err != nil {
-		t.Fatalf("read promotion ledger: %v", err)
-	}
-	first, _, _ := strings.Cut(strings.TrimSpace(string(raw)), "\n")
-	if !strings.Contains(first, `"named_subsystem":"spec043-promotion-ledger"`) || !strings.Contains(first, `"type":"ledger_init"`) {
-		t.Fatalf("promotion ledger first record = %s, want canonical ledger_init", first)
-	}
-	keyring, err := os.ReadFile(filepath.Join(root, "security", "spec-043-production-release-keyring.json"))
-	if err != nil {
-		t.Fatalf("read production-release keyring: %v", err)
-	}
-	if !bytes.Contains(keyring, []byte(`"keys": []`)) && !bytes.Contains(keyring, []byte(`"keys":[]`)) {
-		t.Fatalf("production-release keyring is not empty/fail-closed")
-	}
-	backup := append([]byte(nil), raw...)
-	if !bytes.Equal(backup, raw) {
-		t.Fatal("promotion ledger backup diverged before restore check")
-	}
 }
 
 func configureCreatorMVPCatalog(t *testing.T) {

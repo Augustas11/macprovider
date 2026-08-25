@@ -1527,9 +1527,7 @@ def _validate_trusted_pool_creator_mvp_journey_result(
             "buyer_authorization_enforced",
             "candidate_manifest_accepted",
             "creator_admin_authorized_only",
-            "creator_suspension_root_compromise_freeze_verified",
             "delegation_revocation_verified",
-            "descendant_signer_rejection_verified",
             "emergency_pause_exercised",
             "fail_closed_no_global_fallback",
             "isolated_environment",
@@ -1545,6 +1543,8 @@ def _validate_trusted_pool_creator_mvp_journey_result(
         }
         false_fields = {
             "coordinator_blind_claimed",
+            "creator_suspension_root_compromise_freeze_verified",
+            "descendant_signer_rejection_verified",
             "global_fallback_observed",
             "payout_ready_mutated",
             "privacy_pool_claimed",

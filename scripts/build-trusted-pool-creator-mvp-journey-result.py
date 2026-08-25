@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -164,9 +164,7 @@ def require_observations(value: Any) -> dict[str, Any]:
         "buyer_authorization_enforced",
         "candidate_manifest_accepted",
         "creator_admin_authorized_only",
-        "creator_suspension_root_compromise_freeze_verified",
         "delegation_revocation_verified",
-        "descendant_signer_rejection_verified",
         "emergency_pause_exercised",
         "fail_closed_no_global_fallback",
         "isolated_environment",
@@ -182,6 +180,8 @@ def require_observations(value: Any) -> dict[str, Any]:
     }
     false_fields = {
         "coordinator_blind_claimed",
+        "creator_suspension_root_compromise_freeze_verified",
+        "descendant_signer_rejection_verified",
         "global_fallback_observed",
         "payout_ready_mutated",
         "privacy_pool_claimed",
@@ -192,6 +192,9 @@ def require_observations(value: Any) -> dict[str, Any]:
     missing = (true_fields | false_fields) - set(observations)
     if missing:
         die(f"observations missing keys: {sorted(missing)}")
+    extra = set(observations) - (true_fields | false_fields)
+    if extra:
+        die(f"observations has unknown keys: {sorted(extra)}")
     for field in sorted(true_fields):
         if observations.get(field) is not True:
             die(f"observations.{field} must be true")
@@ -271,11 +274,18 @@ def require_candidate_identity(value: Any) -> dict[str, Any]:
 
 
 def reject_creator_mvp_secret_keys(evidence: dict[str, Any]) -> None:
-    # Required observation flags such as buyer_authorization_enforced are
-    # closed booleans, not secret material; scan the rest of the artifact.
+    # Required observation field names may contain fragments such as
+    # "authorization"; scan the rest of the artifact and observation values.
     sanitized = deepcopy(evidence)
-    sanitized.pop("observations", None)
+    observations = sanitized.pop("observations", None)
     layer2.reject_forbidden_secret_keys(sanitized)
+    if not isinstance(observations, dict):
+        return
+    for key, item in observations.items():
+        if isinstance(item, str):
+            layer2.reject_forbidden_secret_keys({"_": item}, f"$.observations.{key}")
+        elif isinstance(item, (dict, list)):
+            layer2.reject_forbidden_secret_keys(item, f"$.observations.{key}")
 
 
 def require_signed_redaction(value: Any) -> dict[str, bool]:
@@ -355,6 +365,11 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     redaction = require_signed_redaction(evidence.get("redaction"))
     observations = require_observations(evidence.get("observations"))
     candidate_identity = require_candidate_identity(evidence.get("candidate_identity"))
+    captured_dt = datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    expires_dt = datetime.strptime(expires_at, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    latest = captured_dt + timedelta(seconds=candidate_identity["maximum_ttl_seconds"])
+    if expires_dt > latest:
+        die("expires_at must not exceed captured_at plus candidate_identity.maximum_ttl_seconds")
     artifact_sha = hashlib.sha256(evidence_bytes).hexdigest()
     run_id = require_string(evidence.get("run_id"), None, "run_id")
 

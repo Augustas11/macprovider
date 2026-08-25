@@ -52,9 +52,9 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
             "buyer_authorization_enforced": True,
             "candidate_manifest_accepted": True,
             "creator_admin_authorized_only": True,
-            "creator_suspension_root_compromise_freeze_verified": True,
+            "creator_suspension_root_compromise_freeze_verified": False,
             "delegation_revocation_verified": True,
-            "descendant_signer_rejection_verified": True,
+            "descendant_signer_rejection_verified": False,
             "emergency_pause_exercised": True,
             "fail_closed_no_global_fallback": True,
             "isolated_environment": True,
@@ -353,11 +353,23 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
         observations["coordinator_blind_claimed"] = True
         with self.assertRaises(SystemExit):
             builder.require_observations(observations)
+        freeze = dict(valid_signed()["observations"])
+        freeze["creator_suspension_root_compromise_freeze_verified"] = True
+        with self.assertRaises(SystemExit):
+            builder.require_observations(freeze)
+        extra = dict(valid_signed()["observations"])
+        extra["authorization_header"] = "sk-proj-" + ("a" * 48)
+        with self.assertRaises(SystemExit):
+            builder.require_observations(extra)
         with self.assertRaises(SystemExit):
             builder.layer2.reject_forbidden_secret_keys({"notes": "sk-proj-" + ("a" * 48)})
         builder.reject_creator_mvp_secret_keys({"observations": valid_signed()["observations"], "notes": "ok"})
         with self.assertRaises(SystemExit):
             builder.reject_creator_mvp_secret_keys({"authorization_header": "secret", "observations": valid_signed()["observations"]})
+        leaked = dict(valid_signed()["observations"])
+        leaked["notes"] = "sk-proj-" + ("a" * 48)
+        with self.assertRaises(SystemExit):
+            builder.reject_creator_mvp_secret_keys({"observations": leaked, "notes": "ok"})
 
     def test_builder_normalizes_rich_source_redaction_for_signed_payload(self) -> None:
         builder = load_builder()
