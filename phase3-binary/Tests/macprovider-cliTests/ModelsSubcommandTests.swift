@@ -309,6 +309,21 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertTrue(post.contains("coordinator_endpoint: https://coordinator.example\n"))
     }
 
+    func testLoadRecommendationAcceptsCatalogKeyTargetWithCatalogModelID() throws {
+        let fixture = try AdoptionFixture(
+            current: "old-model",
+            target: "qwen3-8b",
+            catalogModelID: "mlx-community/Qwen3-8B-4bit"
+        )
+
+        let parsed = try ModelsAdoptRecommendationCommand.loadRecommendation(pathOrStdin: fixture.recommendation.path)
+
+        XCTAssertEqual(parsed.targetModelID, "qwen3-8b")
+        XCTAssertEqual(parsed.core.model, "qwen3-8b")
+        XCTAssertEqual(parsed.core.modelCatalogKey, "qwen3-8b")
+        XCTAssertEqual(parsed.core.modelCatalogModelID, "mlx-community/Qwen3-8B-4bit")
+    }
+
     func testAdoptRecommendationContextAuthorityRejectsInflatedContext() throws {
         let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
         let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: fixture.artifact)
@@ -350,6 +365,48 @@ final class ModelsSubcommandTests: XCTestCase {
             artifact: artifact
         )) { error in
             XCTAssertTrue(String(describing: error).contains("context authority"))
+        }
+    }
+
+    func testAdoptRecommendationSignedCatalogBindingAcceptsAliasModelID() throws {
+        let fixture = try AdoptionFixture(
+            current: "old-model",
+            target: "qwen3-8b",
+            catalogModelID: "mlx-community/Qwen3-8B-4bit"
+        )
+        let row = fixture.catalogRow(modelID: fixture.catalogModelID)
+        let recommendation = Self.parsedAdoption(
+            fixture: fixture,
+            maxContext: 32_768,
+            hardwareMemoryGB: 64
+        )
+
+        XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedCatalogBinding(
+            recommendation: recommendation,
+            catalogKey: fixture.targetModelID,
+            row: row
+        ))
+    }
+
+    func testAdoptRecommendationSignedCatalogBindingRejectsMismatchedModelID() throws {
+        let fixture = try AdoptionFixture(
+            current: "old-model",
+            target: "qwen3-8b",
+            catalogModelID: "mlx-community/Qwen3-8B-4bit"
+        )
+        let row = fixture.catalogRow(modelID: "mlx-community/Other-8B-4bit")
+        let recommendation = Self.parsedAdoption(
+            fixture: fixture,
+            maxContext: 32_768,
+            hardwareMemoryGB: 64
+        )
+
+        XCTAssertThrowsError(try ModelsAdoptRecommendationCommand.validateSignedCatalogBinding(
+            recommendation: recommendation,
+            catalogKey: fixture.targetModelID,
+            row: row
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("current signed catalog inputs"))
         }
     }
 
@@ -458,6 +515,27 @@ final class ModelsSubcommandTests: XCTestCase {
         let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
         try mutateRecommendationFixture(fixture) {
             $0.replacingOccurrences(of: #""max_context_override": 4000"#, with: #""max_context_override": true"#)
+        }
+
+        try await assertAdoptionRejectsInvalidRecommendation(fixture)
+    }
+
+    func testAdoptRecommendationRejectsMismatchedCatalogKeyWithoutMutation() async throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "qwen3-8b")
+        try mutateRecommendationFixture(fixture) {
+            $0.replacingOccurrences(of: #""model_catalog_key": "qwen3-8b""#, with: #""model_catalog_key": "other-key""#)
+        }
+
+        try await assertAdoptionRejectsInvalidRecommendation(fixture)
+    }
+
+    func testAdoptRecommendationRejectsEmptyCatalogModelIDWithoutMutation() async throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "qwen3-8b")
+        try mutateRecommendationFixture(fixture) {
+            $0.replacingOccurrences(
+                of: #""model_catalog_model_id": "qwen3-8b""#,
+                with: #""model_catalog_model_id": """#
+            )
         }
 
         try await assertAdoptionRejectsInvalidRecommendation(fixture)
@@ -970,8 +1048,8 @@ final class ModelsSubcommandTests: XCTestCase {
                 replicates: 0,
                 modelArtifactPath: fixture.artifact.path,
                 modelArtifactSHA256: fixture.artifactSHA256,
-                modelCatalogKey: "test-key",
-                modelCatalogModelID: fixture.targetModelID,
+                modelCatalogKey: fixture.targetModelID,
+                modelCatalogModelID: fixture.catalogModelID,
                 modelCatalogRevision: String(repeating: "1", count: 40),
                 modelCatalogSHA256: fixture.artifactSHA256,
                 modelCatalogVersion: "test-catalog",
@@ -1005,6 +1083,7 @@ private struct AdoptionFixture {
     let artifact: URL
     let artifactSHA256: String
     let targetModelID: String
+    let catalogModelID: String
 
     var targetAuthority: (modelID: String, authority: ModelRuntimeTargetAuthority) {
         (
@@ -1017,7 +1096,20 @@ private struct AdoptionFixture {
         )
     }
 
-    init(current: String, target: String) throws {
+    func catalogRow(modelID: String? = nil) -> CandidateCatalog.Row {
+        CandidateCatalog.Row(
+            modelID: modelID ?? catalogModelID,
+            modelRevision: String(repeating: "1", count: 40),
+            modelSHA256: artifactSHA256,
+            minRAMGB: 1,
+            minBandwidthTier: .c,
+            benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 1, max4KTTFTMS: 1_000),
+            runtimeStatus: "recommendable",
+            notes: nil
+        )
+    }
+
+    init(current: String, target: String, catalogModelID: String? = nil) throws {
         dir = URL(fileURLWithPath: "/tmp")
             .appendingPathComponent("mpm-adopt-\(getpid())-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -1034,7 +1126,9 @@ private struct AdoptionFixture {
         """.utf8).write(to: artifact.appendingPathComponent("config.json"))
         try Data("weights".utf8).write(to: artifact.appendingPathComponent("model.safetensors"))
         artifactSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: artifact)
+        let resolvedCatalogModelID = catalogModelID ?? target
         targetModelID = target
+        self.catalogModelID = resolvedCatalogModelID
         config = dir.appendingPathComponent("config.yaml")
         try Data("""
         model: \(current)
@@ -1069,8 +1163,8 @@ private struct AdoptionFixture {
             "model": "\(target)",
             "model_artifact_path": "\(artifact.path)",
             "model_artifact_sha256": "\(artifactSHA256)",
-            "model_catalog_key": "test-key",
-            "model_catalog_model_id": "\(target)",
+            "model_catalog_key": "\(target)",
+            "model_catalog_model_id": "\(resolvedCatalogModelID)",
             "model_catalog_revision": "\(String(repeating: "1", count: 40))",
             "model_catalog_sha256": "\(artifactSHA256)",
             "model_catalog_version": "test-catalog",
