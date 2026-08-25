@@ -1302,6 +1302,38 @@ func TestDurableStore_RootCompromiseFreeze(t *testing.T) {
 	if pool == nil || pool.CreatorGateReason != trustpool.RootCompromiseFreezeReason {
 		t.Fatalf("frozen pool = %+v", pool)
 	}
+	approveCreator(t, store, "creator-b", "approval-b", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	other := newRootFixture(t)
+	otherCreate := ev("op-create-b", ts.Add(1500*time.Millisecond), trustpool.EventPoolCreated, other.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-b"
+		e.ApprovalRecordID = "approval-b"
+	})
+	if _, _, _, err := store.AppendValidatedEvent(ctx, otherCreate); err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	otherNonce, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce-b",
+		CreatorAccountID:       "creator-b",
+		ApprovalRecordID:       "approval-b",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		Purpose:                trustpool.RootRegistrationPurposeDefault,
+		ExpiresAtUTC:           time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("unrelated creator nonce after freeze: %v", err)
+	}
+	if _, _, _, err := store.AppendValidatedEvent(ctx, signedRootRegistrationForIssue(t, "op-root-b", ts.Add(1600*time.Millisecond), other.poolID, "creator-b", "approval-b", otherNonce, other)); err != nil {
+		t.Fatalf("unrelated root after freeze: %v", err)
+	}
+	otherState, err := store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("reconstruct other: %v", err)
+	}
+	otherPool := otherState.Pools[other.poolID]
+	if otherPool == nil || otherPool.CreatorGateReason == trustpool.RootCompromiseFreezeReason {
+		t.Fatalf("unrelated pool frozen by shared key ids: %+v", otherPool)
+	}
 	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
 	if _, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
 		OperationID:            "op-nonce-after-freeze",

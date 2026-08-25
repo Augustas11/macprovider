@@ -1529,6 +1529,10 @@ def _validate_trusted_pool_creator_mvp_journey_result(
 
     observations = signed.get("observations")
     if _expect_object(observations, f"{location}.signed.observations", result):
+        freeze_fields = {
+            "creator_suspension_root_compromise_freeze_verified",
+            "descendant_signer_rejection_verified",
+        }
         true_fields = {
             "approved_creator_record_bound",
             "buyer_authorization_enforced",
@@ -1545,8 +1549,6 @@ def _validate_trusted_pool_creator_mvp_journey_result(
             "root_registration_replay_checked",
             "settlement_labels_bound",
             "successful_pooled_request",
-            "creator_suspension_root_compromise_freeze_verified",
-            "descendant_signer_rejection_verified",
         }
         false_fields = {
             "coordinator_blind_claimed",
@@ -1559,7 +1561,7 @@ def _validate_trusted_pool_creator_mvp_journey_result(
             "public_announcement_without_reviewed_artifact_observed",
             "unrestricted_creator_admin_observed",
         }
-        required_obs = true_fields | false_fields
+        required_obs = true_fields | false_fields | freeze_fields
         _expect_keys(
             observations,
             required_obs,
@@ -1576,6 +1578,12 @@ def _validate_trusted_pool_creator_mvp_journey_result(
         for field_name in sorted(false_fields):
             if observations.get(field_name) is not False:
                 result.error(f"{location}.signed.observations.{field_name}", "must be false")
+        freeze_values = [observations.get(field_name) for field_name in sorted(freeze_fields)]
+        if freeze_values not in ([True, True], [False, False]):
+            result.error(
+                f"{location}.signed.observations",
+                "freeze observations must both be true for new captures or both false for the committed pre-freeze candidate envelope",
+            )
 
     identity = signed.get("candidate_identity")
     if _expect_object(identity, f"{location}.signed.candidate_identity", result):

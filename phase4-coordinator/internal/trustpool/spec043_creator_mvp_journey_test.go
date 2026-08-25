@@ -347,6 +347,7 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 	suspended = validCreatorApproval("creator-a", "approval-v1", "approval-version-1", "candidate", graceEnds, trustpool.CreatorStatusSuspended)
 	postAdminCreator(t, handler, creatorMVPOperatorKey, suspended, http.StatusAccepted)
 	postCreatorRootCompromise(t, handler, creatorMVPCreatorToken, root.poolID, root.fingerprint, "op-freeze", http.StatusAccepted)
+	postAdminRootCompromise(t, handler, creatorMVPOperatorKey, root.poolID, root.fingerprint, "op-freeze-admin", http.StatusAccepted)
 	staleFreeze, err := json.Marshal(map[string]any{
 		"operation_id":                       "op-freeze-backdated",
 		"pool_id":                            root.poolID,

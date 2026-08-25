@@ -2478,7 +2478,12 @@ type ReconstructedState struct {
 	Revision            uint64
 	rootNonces          map[string]string
 	frozenFingerprints  map[string]struct{}
-	frozenDescendantIDs map[string]struct{}
+	frozenDescendantIDs map[frozenLineageKey]struct{}
+}
+
+type frozenLineageKey struct {
+	Fingerprint string
+	KeyID       string
 }
 
 type ReconstructedPoolState struct {
@@ -2541,7 +2546,7 @@ func reconstructEventsWithApprovalsAndPublicAnnouncements(events []DurableEvent,
 		Pools:               make(map[string]*ReconstructedPoolState),
 		rootNonces:          make(map[string]string),
 		frozenFingerprints:  make(map[string]struct{}),
-		frozenDescendantIDs: make(map[string]struct{}),
+		frozenDescendantIDs: make(map[frozenLineageKey]struct{}),
 	}
 	if approvals != nil {
 		state.CreatorApprovals = make(map[string]CreatorApproval, len(approvals))
@@ -2757,22 +2762,22 @@ func (s *ReconstructedState) freezeRootLineage(fingerprint, descendantKeyID, roo
 		s.frozenFingerprints = make(map[string]struct{})
 	}
 	if s.frozenDescendantIDs == nil {
-		s.frozenDescendantIDs = make(map[string]struct{})
+		s.frozenDescendantIDs = make(map[frozenLineageKey]struct{})
 	}
 	if fingerprint != "" {
 		s.frozenFingerprints[fingerprint] = struct{}{}
-	}
-	if descendantKeyID != "" {
-		s.frozenDescendantIDs[descendantKeyID] = struct{}{}
-	}
-	if rootKeyID != "" {
-		s.frozenDescendantIDs[rootKeyID] = struct{}{}
+		if descendantKeyID != "" {
+			s.frozenDescendantIDs[frozenLineageKey{Fingerprint: fingerprint, KeyID: descendantKeyID}] = struct{}{}
+		}
+		if rootKeyID != "" {
+			s.frozenDescendantIDs[frozenLineageKey{Fingerprint: fingerprint, KeyID: rootKeyID}] = struct{}{}
+		}
 	}
 	for _, p := range s.Pools {
 		if p == nil || p.RootIssuer == nil {
 			continue
 		}
-		if p.RootIssuer.PublicKeyFingerprint != fingerprint && p.RootIssuer.ManifestAuthorityRootKeyID != descendantKeyID && p.RootIssuer.KeyID != rootKeyID {
+		if p.RootIssuer.PublicKeyFingerprint != fingerprint {
 			continue
 		}
 		p.CreatorGateReason = RootCompromiseFreezeReason
@@ -2794,15 +2799,15 @@ func (s *ReconstructedState) rootLineageFrozen(fingerprint, descendantKeyID, roo
 		if _, ok := s.frozenFingerprints[fingerprint]; ok {
 			return true
 		}
-	}
-	if descendantKeyID != "" {
-		if _, ok := s.frozenDescendantIDs[descendantKeyID]; ok {
-			return true
+		if descendantKeyID != "" {
+			if _, ok := s.frozenDescendantIDs[frozenLineageKey{Fingerprint: fingerprint, KeyID: descendantKeyID}]; ok {
+				return true
+			}
 		}
-	}
-	if rootKeyID != "" {
-		if _, ok := s.frozenDescendantIDs[rootKeyID]; ok {
-			return true
+		if rootKeyID != "" {
+			if _, ok := s.frozenDescendantIDs[frozenLineageKey{Fingerprint: fingerprint, KeyID: rootKeyID}]; ok {
+				return true
+			}
 		}
 	}
 	return false
