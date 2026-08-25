@@ -54,9 +54,9 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
             "buyer_authorization_enforced": True,
             "candidate_manifest_accepted": True,
             "creator_admin_authorized_only": True,
-            "creator_suspension_root_compromise_freeze_verified": False,
+            "creator_suspension_root_compromise_freeze_verified": True,
             "delegation_revocation_verified": False,
-            "descendant_signer_rejection_verified": False,
+            "descendant_signer_rejection_verified": True,
             "emergency_pause_exercised": True,
             "fail_closed_no_global_fallback": True,
             "isolated_environment": True,
@@ -212,6 +212,37 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
         )
         self.assertTrue(any("global_fallback_observed" in error for error in result.errors))
         self.assertTrue(any("public_announcement_without_reviewed_artifact_observed" in error for error in result.errors))
+
+    def test_accepts_legacy_pre_freeze_observations(self) -> None:
+        result = ValidationResult()
+        signed = valid_signed(requirement_ids=["SPEC-043-R012"])
+        signed["observations"]["creator_suspension_root_compromise_freeze_verified"] = False
+        signed["observations"]["descendant_signer_rejection_verified"] = False
+        _validate_trusted_pool_creator_mvp_journey_result(
+            signed,
+            "SPEC-043-R012",
+            [TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID],
+            signed["artifacts"],
+            signed["steps"],
+            "evidence[0]",
+            result,
+        )
+        self.assertEqual(result.errors, [])
+
+    def test_rejects_mixed_freeze_observations(self) -> None:
+        result = ValidationResult()
+        signed = valid_signed(requirement_ids=["SPEC-043-R012"])
+        signed["observations"]["descendant_signer_rejection_verified"] = False
+        _validate_trusted_pool_creator_mvp_journey_result(
+            signed,
+            "SPEC-043-R012",
+            [TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID],
+            signed["artifacts"],
+            signed["steps"],
+            "evidence[0]",
+            result,
+        )
+        self.assertTrue(any("freeze observations" in error for error in result.errors))
 
     def test_rejects_missing_identity_field(self) -> None:
         result = ValidationResult()
@@ -371,7 +402,7 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             builder.require_observations(observations)
         freeze = dict(valid_signed()["observations"])
-        freeze["creator_suspension_root_compromise_freeze_verified"] = True
+        freeze["creator_suspension_root_compromise_freeze_verified"] = False
         with self.assertRaises(SystemExit):
             builder.require_observations(freeze)
         oracle = dict(valid_signed()["observations"])

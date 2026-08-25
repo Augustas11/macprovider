@@ -133,6 +133,8 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleUpsertCreator(w, r)
 	case r.URL.Path == "/admin/trust-pools/root-registration-nonces":
 		h.handleIssueRootRegistrationNonce(w, r)
+	case r.URL.Path == "/admin/trust-pools/emergency/root-compromise":
+		h.handleAdminRootCompromise(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/creators/"):
 		h.handleGetCreator(w, r)
 	case r.URL.Path == "/admin/trust-pools/pools":
@@ -171,6 +173,8 @@ func (h *adminHandler) serveCreatorHTTP(w http.ResponseWriter, r *http.Request) 
 		h.handleCreatorAppendEvent(w, r, principal)
 	case r.URL.Path == "/creator/trust-pools/root-registration-nonces":
 		h.handleCreatorIssueRootRegistrationNonce(w, r, principal)
+	case r.URL.Path == "/creator/trust-pools/emergency/root-compromise":
+		h.handleCreatorRootCompromise(w, r, principal)
 	case r.URL.Path == "/creator/trust-pools/pools":
 		h.handleCreatorListPools(w, r, principal.CreatorID)
 	case strings.HasPrefix(r.URL.Path, "/creator/trust-pools/pools/") && creatorOperatorOnlyPoolRoute(r.URL.Path):
@@ -415,6 +419,10 @@ func (h *adminHandler) handleAppendEvent(w http.ResponseWriter, r *http.Request)
 		h.writeMutationError(w, err)
 		return
 	}
+	if e.EventType == EventRootCompromiseFrozen {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
+		return
+	}
 	if e.EventType == EventLifecycleChanged && e.Lifecycle == LifecycleActive {
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "activation_requires_promotion"}})
 		return
@@ -479,6 +487,123 @@ func (h *adminHandler) handleCreatorIssueRootRegistrationNonce(w http.ResponseWr
 		return
 	}
 	writeAdminJSON(w, http.StatusCreated, map[string]any{"root_registration_nonce": record})
+}
+
+type rootCompromiseReport struct {
+	OperationID                    string `json:"operation_id"`
+	PoolID                         string `json:"pool_id"`
+	RootIssuerPublicKeyFingerprint string `json:"root_issuer_public_key_fingerprint"`
+}
+
+func (h *adminHandler) handleCreatorRootCompromise(w http.ResponseWriter, r *http.Request, principal creatorPrincipal) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	var body rootCompromiseReport
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	operationID, err := resolveOperationID(strings.TrimSpace(body.OperationID), r.Header)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	e := DurableEvent{
+		OperationID:                    operationID,
+		EventType:                      EventRootCompromiseFrozen,
+		PoolID:                         strings.TrimSpace(body.PoolID),
+		CreatorAccountID:               principal.CreatorID,
+		CreatorCredentialID:            principal.CredentialID,
+		RootIssuerPublicKeyFingerprint: strings.TrimSpace(body.RootIssuerPublicKeyFingerprint),
+		Reason:                         RootCompromiseFreezeReason,
+	}
+	h.appendRootCompromise(w, r, e, principal.CreatorID, true)
+}
+
+func (h *adminHandler) handleAdminRootCompromise(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAdminJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	var body rootCompromiseReport
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAdminEventBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_json"}})
+		return
+	}
+	operationID, err := resolveOperationID(strings.TrimSpace(body.OperationID), r.Header)
+	if err != nil {
+		h.writeMutationError(w, err)
+		return
+	}
+	e := DurableEvent{
+		OperationID:                    operationID,
+		EventType:                      EventRootCompromiseFrozen,
+		PoolID:                         strings.TrimSpace(body.PoolID),
+		RootIssuerPublicKeyFingerprint: strings.TrimSpace(body.RootIssuerPublicKeyFingerprint),
+		Reason:                         RootCompromiseFreezeReason,
+	}
+	h.appendRootCompromise(w, r, e, "", false)
+}
+
+func (h *adminHandler) appendRootCompromise(w http.ResponseWriter, r *http.Request, e DurableEvent, creatorID string, requireCreatorOwner bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state, err := h.deps.Store.Reconstruct(r.Context())
+	if err != nil {
+		h.writeReconstructError(w, err)
+		return
+	}
+	pool := state.Pools[e.PoolID]
+	if pool == nil || pool.RootIssuer == nil {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	if requireCreatorOwner && pool.CreatorAccountID != creatorID {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	if e.CreatorAccountID == "" {
+		e.CreatorAccountID = pool.CreatorAccountID
+	}
+	if e.ApprovalRecordID == "" {
+		e.ApprovalRecordID = pool.ApprovalRecordID
+	}
+	if e.RootIssuerPublicKeyFingerprint == "" {
+		e.RootIssuerPublicKeyFingerprint = pool.RootIssuer.PublicKeyFingerprint
+	} else if e.RootIssuerPublicKeyFingerprint != pool.RootIssuer.PublicKeyFingerprint {
+		h.writeRequestMutationError(w, ErrMalformedDurableEvent)
+		return
+	}
+	state, committed, _, err := h.deps.Store.AppendValidatedEvent(r.Context(), e)
+	if err != nil {
+		h.writeRequestMutationError(w, err)
+		return
+	}
+	if !h.refreshRegistryIfAhead(w, state) {
+		return
+	}
+	writeAdminJSON(w, http.StatusAccepted, map[string]any{
+		"event": committed,
+		"pool":  adminPoolResponse(state.Pools[committed.PoolID], state.RouteGateCheckedAt),
+	})
 }
 
 func (h *adminHandler) handleCreatorAppendEvent(w http.ResponseWriter, r *http.Request, principal creatorPrincipal) {
@@ -546,11 +671,15 @@ func (h *adminHandler) handleCreatorAppendEvent(w http.ResponseWriter, r *http.R
 		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
 		return
 	}
+	if e.EventType != EventRootCompromiseFrozen && state.eventTouchesFrozenLineage(e) {
+		h.writeRequestMutationError(w, ErrRootCompromiseFreeze)
+		return
+	}
 	if err := creatorEventValidForCurrentState(state, e); err != nil {
 		h.writeRequestMutationError(w, err)
 		return
 	}
-	if !creatorApprovalValidForMutation(state, e, principal.CreatorID, time.Now().UTC()) {
+	if e.EventType != EventRootCompromiseFrozen && !creatorApprovalValidForMutation(state, e, principal.CreatorID, time.Now().UTC()) {
 		h.writeRequestMutationError(w, ErrCreatorApprovalGate)
 		return
 	}
@@ -1527,6 +1656,8 @@ func (h *adminHandler) writeMutationErrorResponse(w http.ResponseWriter, err err
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "promotion_precondition_failed", "reason": reason}})
 	case errors.Is(err, ErrRootRegistrationNonce):
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_root_registration_nonce"}})
+	case errors.Is(err, ErrRootCompromiseFreeze):
+		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "root_compromise_freeze"}})
 	case errors.Is(err, ErrCreatorApprovalGate):
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "creator_approval_gate_failed"}})
 	case errors.Is(err, ErrPublicAnnouncementGate):
@@ -1725,6 +1856,13 @@ func creatorEventValidForCurrentState(state *ReconstructedState, e DurableEvent)
 		}
 	case EventRootIssuerRegistered:
 		if pool == nil || pool.RootIssuer != nil {
+			return errCreatorInvalidEvent
+		}
+	case EventRootCompromiseFrozen:
+		if pool == nil || pool.RootIssuer == nil {
+			return errCreatorInvalidEvent
+		}
+		if e.RootIssuerPublicKeyFingerprint != pool.RootIssuer.PublicKeyFingerprint {
 			return errCreatorInvalidEvent
 		}
 	case EventManifestAccepted:

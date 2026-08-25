@@ -2089,6 +2089,28 @@ func postCreatorEvent(t *testing.T, h http.Handler, creatorToken string, e trust
 	return rec
 }
 
+func postAdminRootCompromise(t *testing.T, h http.Handler, operatorKey, poolID, fingerprint, operationID string, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{
+		"operation_id":                       operationID,
+		"pool_id":                            poolID,
+		"root_issuer_public_key_fingerprint": fingerprint,
+	})
+	if err != nil {
+		t.Fatalf("marshal admin root compromise: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/trust-pools/emergency/root-compromise", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+operatorKey)
+	req.Header.Set("Idempotency-Key", operationID)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST admin root compromise status=%d body=%s, want %d", rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+	return rec
+}
+
 func postCreatorRootRegistrationNonce(t *testing.T, h http.Handler, creatorToken string, issue trustpool.RootRegistrationNonceIssue, want int) trustpool.RootRegistrationNonceRecord {
 	t.Helper()
 	body, err := json.Marshal(issue)
@@ -2110,6 +2132,28 @@ func postCreatorRootRegistrationNonce(t *testing.T, h http.Handler, creatorToken
 		t.Fatalf("decode creator root registration nonce: %v", err)
 	}
 	return decoded.RootRegistrationNonce
+}
+
+func postCreatorRootCompromise(t *testing.T, h http.Handler, creatorToken, poolID, fingerprint, operationID string, want int) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{
+		"operation_id":                       operationID,
+		"pool_id":                            poolID,
+		"root_issuer_public_key_fingerprint": fingerprint,
+	})
+	if err != nil {
+		t.Fatalf("marshal root compromise: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/creator/trust-pools/emergency/root-compromise", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+creatorToken)
+	req.Header.Set("Idempotency-Key", operationID)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("POST creator root compromise status=%d body=%s, want %d", rec.Code, rec.Body.String(), want)
+	}
+	assertAdminSchemaVersion(t, rec)
+	return rec
 }
 
 func postCreatorLifecycle(t *testing.T, h http.Handler, creatorToken, poolID, operationID, lifecycle, reason string, want int) *httptest.ResponseRecorder {
