@@ -68,6 +68,21 @@ A separate promotion-verification report MUST record the sibling promotion artif
 
 The Gate B validator is `scripts/validate-pool-promotion-transition.py`. It consumes only a sibling `PoolPromotionTransitionV1` into `journeys/ledgers/spec-043-promotion-auth.jsonl` and never promotes SPEC-043 conformance rows. Candidate envelopes remain evidence-only.
 
+The local isolated candidate harness is:
+
+```text
+phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate
+```
+
+Capture a redacted artifact from a clean worktree:
+
+```bash
+cd phase4-coordinator
+MACPROVIDER_CAPTURE_TRUSTED_POOL_CREATOR_MVP=1 go test ./internal/trustpool -run TestJourneyTrustedPoolCreatorMVPCandidate -count=1
+```
+
+Commit the redacted file under `journeys/evidence/trusted-pool-creator-mvp-*.redacted.json`, merge to `main`, then dispatch `.github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml` from reviewed `main`. Do not promote SPEC-043 from this harness alone.
+
 ## Pass criteria
 
 SPEC-043 requirements may be proposed for promotion only when every physical step passes against the named candidate, the signed journey result verifies, all required artifacts are retained and redacted, and the governance release gate accepts the evidence as fresh.
