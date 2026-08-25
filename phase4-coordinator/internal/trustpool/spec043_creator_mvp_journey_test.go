@@ -364,6 +364,20 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 	if staleRec.Code != http.StatusBadRequest {
 		t.Fatalf("backdated freeze status=%d body=%s, want 400", staleRec.Code, staleRec.Body.String())
 	}
+	postCreatorEvent(t, handler, creatorMVPCreatorToken, trustpool.DurableEvent{
+		EventType:                      trustpool.EventRootCompromiseFrozen,
+		PoolID:                         root.poolID,
+		RootIssuerPublicKeyFingerprint: root.fingerprint,
+		Reason:                         trustpool.RootCompromiseFreezeReason,
+		TimestampUTC:                   time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+	}, "op-freeze-generic", http.StatusBadRequest)
+	postAdminEvent(t, handler, creatorMVPOperatorKey, trustpool.DurableEvent{
+		EventType:                      trustpool.EventRootCompromiseFrozen,
+		PoolID:                         root.poolID,
+		RootIssuerPublicKeyFingerprint: root.fingerprint,
+		Reason:                         trustpool.RootCompromiseFreezeReason,
+		TimestampUTC:                   time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+	}, "op-freeze-admin-generic", http.StatusBadRequest)
 	postCreatorRootRegistrationNonce(t, handler, creatorMVPCreatorToken, trustpool.RootRegistrationNonceIssue{
 		OperationID:            "op-nonce-frozen",
 		ApprovalRecordID:       "approval-v1",

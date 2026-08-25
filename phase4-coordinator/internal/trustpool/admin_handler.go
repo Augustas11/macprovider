@@ -419,6 +419,10 @@ func (h *adminHandler) handleAppendEvent(w http.ResponseWriter, r *http.Request)
 		h.writeMutationError(w, err)
 		return
 	}
+	if e.EventType == EventRootCompromiseFrozen {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
+		return
+	}
 	if e.EventType == EventLifecycleChanged && e.Lifecycle == LifecycleActive {
 		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "activation_requires_promotion"}})
 		return
@@ -1767,7 +1771,7 @@ func normalizeCreatorEvent(r *http.Request, e DurableEvent, principal creatorPri
 	}
 	e.CreatorCredentialID = principal.CredentialID
 	switch e.EventType {
-	case EventPoolCreated, EventRootIssuerRegistered, EventRootCompromiseFrozen:
+	case EventPoolCreated, EventRootIssuerRegistered:
 		if bodyCreatorID != "" && bodyCreatorID != principal.CreatorID {
 			return DurableEvent{}, errCreatorBoundary
 		}
@@ -1786,7 +1790,7 @@ func creatorEventAllowed(e DurableEvent) error {
 		return ErrSignedControlProofPath
 	}
 	switch e.EventType {
-	case EventPoolCreated, EventRootIssuerRegistered, EventManifestAccepted, EventMemberAdmitted, EventMemberRevoked, EventBuyerAuthorized, EventBuyerAuthorizationRm, EventRootCompromiseFrozen:
+	case EventPoolCreated, EventRootIssuerRegistered, EventManifestAccepted, EventMemberAdmitted, EventMemberRevoked, EventBuyerAuthorized, EventBuyerAuthorizationRm:
 		return nil
 	case EventLifecycleChanged:
 		if e.Lifecycle == LifecycleActive {
