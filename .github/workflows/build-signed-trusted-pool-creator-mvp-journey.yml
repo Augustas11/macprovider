@@ -204,7 +204,7 @@ jobs:
       - name: Upload signed evidence artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: signed-trusted-pool-creator-mvp-journey-evidence-${{ steps.request.outputs.source_sha }}-${{ steps.request.outputs.requirement_slug }}
+          name: signed-trusted-pool-creator-mvp-journey-evidence-${{ steps.request.outputs.short_sha }}
           path: ${{ runner.temp }}/signed-trusted-pool-creator-mvp-journey-evidence/
           if-no-files-found: error
           include-hidden-files: false

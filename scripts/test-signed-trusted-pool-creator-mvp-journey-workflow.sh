@@ -55,13 +55,19 @@ required_workflow = [
     "scripts/check_spec_governance.py --base-ref origin/main",
     "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     "retention-days: 1",
-    "signed-trusted-pool-creator-mvp-journey-evidence-${{ steps.request.outputs.source_sha }}-${{ steps.request.outputs.requirement_slug }}",
+    "signed-trusted-pool-creator-mvp-journey-evidence-${{ steps.request.outputs.short_sha }}",
     "macprovider.signed-trusted-pool-creator-mvp-journey-evidence.v1",
     "JOURNEY-TRUSTED-POOL-CREATOR-MVP",
 ]
 for value in required_workflow:
     if value not in workflow:
         raise SystemExit(f"workflow contract is missing: {value}")
+
+upload_name = "signed-trusted-pool-creator-mvp-journey-evidence-" + ("a" * 12)
+if len(upload_name) > 256:
+    raise SystemExit("GitHub Actions artifact names must stay within 256 characters")
+if "steps.request.outputs.requirement_slug }}" in workflow.split("name: signed-trusted-pool-creator-mvp-journey-evidence-", 1)[-1].split("\n", 1)[0]:
+    raise SystemExit("GitHub Actions artifact name must not include the full SPEC-043 requirement slug")
 
 if "\n  push:" in workflow or "\n  pull_request:" in workflow:
     raise SystemExit("workflow must be manual dispatch only")
