@@ -824,7 +824,7 @@ struct ParsedRecommendationAdoption {
 }
 
 extension ModelsAdoptRecommendationCommand {
-    fileprivate static func loadRecommendation(pathOrStdin: String) throws -> ParsedRecommendationAdoption {
+    static func loadRecommendation(pathOrStdin: String) throws -> ParsedRecommendationAdoption {
         let data: Data
         if pathOrStdin == "-" {
             data = FileHandle.standardInput.readDataToEndOfFile()
@@ -879,9 +879,9 @@ extension ModelsAdoptRecommendationCommand {
               let artifactSHA = serveConfig["model_artifact_sha256"] as? String,
               isLowerHex(artifactSHA, count: 64),
               let catalogKey = serveConfig["model_catalog_key"] as? String,
-              !catalogKey.isEmpty,
+              catalogKey == recommendedModel,
               let catalogModelID = serveConfig["model_catalog_model_id"] as? String,
-              catalogModelID == recommendedModel,
+              !catalogModelID.isEmpty,
               let catalogRevision = serveConfig["model_catalog_revision"] as? String,
               !catalogRevision.isEmpty,
               let catalogSHA = serveConfig["model_catalog_sha256"] as? String,
@@ -991,14 +991,10 @@ extension ModelsAdoptRecommendationCommand {
               recommendation.core.modelCatalogVersion == inputs.candidate.value.version,
               recommendation.core.modelCatalogHash == AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.candidate.selectedBytes),
               let catalogKey = recommendation.core.modelCatalogKey,
-              let row = inputs.candidate.value.rows[catalogKey],
-              row.runtimeStatus == "recommendable",
-              row.modelID == recommendation.targetModelID,
-              row.modelRevision == recommendation.core.modelCatalogRevision,
-              row.modelSHA256 == recommendation.core.modelCatalogSHA256,
-              row.modelSHA256 == recommendation.core.modelArtifactSHA256 else {
+              let row = inputs.candidate.value.rows[catalogKey] else {
             throw ValidationError("recommendation is not bound to the current signed catalog inputs")
         }
+        try validateSignedCatalogBinding(recommendation: recommendation, catalogKey: catalogKey, row: row)
         let currentHardware = MachineFingerprinter().sample()
         guard recommendation.hardwareChip == currentHardware.chip,
               recommendation.hardwareMemoryGB == currentHardware.ramGB,
@@ -1023,6 +1019,22 @@ extension ModelsAdoptRecommendationCommand {
             }
         }
         try validateSignedContextAuthority(recommendation: recommendation, row: row, artifact: artifact)
+    }
+
+    static func validateSignedCatalogBinding(
+        recommendation: ParsedRecommendationAdoption,
+        catalogKey: String,
+        row: CandidateCatalog.Row
+    ) throws {
+        guard let catalogModelID = recommendation.core.modelCatalogModelID,
+              catalogKey == recommendation.targetModelID,
+              row.runtimeStatus == "recommendable",
+              row.modelID == catalogModelID,
+              row.modelRevision == recommendation.core.modelCatalogRevision,
+              row.modelSHA256 == recommendation.core.modelCatalogSHA256,
+              row.modelSHA256 == recommendation.core.modelArtifactSHA256 else {
+            throw ValidationError("recommendation is not bound to the current signed catalog inputs")
+        }
     }
 
     static func validateSignedContextAuthority(
