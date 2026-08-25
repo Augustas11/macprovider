@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
@@ -2460,13 +2461,71 @@ final class AutotuneRecommendTests: XCTestCase {
         )
 
         let verified = try CachedModelArtifactResolver(hubRoot: hub).verifiedExistingArtifact(for: row)
+        let durable = try CachedModelArtifactResolver(hubRoot: hub).durableStore.artifactURL(
+            modelID: row.modelID,
+            revision: revision,
+            sha256: expected
+        )
 
         XCTAssertEqual(verified.sha256, expected)
-        XCTAssertEqual(verified.modelArgument, snapshot.path)
+        XCTAssertEqual(verified.modelArgument, durable.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: durable.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: snapshot.path))
+
+        try FileManager.default.removeItem(at: snapshot)
+        let afterCacheDelete = try CachedModelArtifactResolver(hubRoot: hub).verifiedExistingArtifact(for: row)
+        XCTAssertEqual(afterCacheDelete.modelArgument, durable.path)
 
         var mismatch = row
         mismatch.modelSHA256 = String(repeating: "0", count: 64)
         XCTAssertThrowsError(try CachedModelArtifactResolver(hubRoot: hub).verifiedExistingArtifact(for: mismatch))
+    }
+
+    func testResolverForConfigOverlaysYAMLRootAndAdoptsThere() throws {
+        let hub = try tempDir()
+        let customRoot = try tempDir()
+        let revision = String(repeating: "a", count: 40)
+        let snapshot = hub
+            .appendingPathComponent("models--namespace--model", isDirectory: true)
+            .appendingPathComponent("snapshots", isDirectory: true)
+            .appendingPathComponent(revision, isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        let expected = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        let row = CandidateCatalog.Row(
+            modelID: "namespace/model",
+            modelRevision: revision,
+            modelSHA256: expected,
+            minRAMGB: 1,
+            minBandwidthTier: .c,
+            benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 1, max4KTTFTMS: 1_000),
+            runtimeStatus: "recommendable",
+            notes: nil
+        )
+        var config = AppConfig.defaults()
+        config.modelArtifactRoot = customRoot.path
+        var resolver = CachedModelArtifactResolver.forConfig(config)
+        resolver.hubRoot = hub
+        let verified = try resolver.verifiedExistingArtifact(for: row)
+        let expectedDurable = try DurableModelArtifactStore(root: customRoot).artifactURL(
+            modelID: row.modelID,
+            revision: revision,
+            sha256: expected
+        )
+        XCTAssertEqual(verified.modelArgument, expectedDurable.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: expectedDurable.path))
+        let defaultResolver = CachedModelArtifactResolver(hubRoot: hub)
+        XCTAssertNotEqual(
+            defaultResolver.durableRoot.standardizedFileURL.path,
+            customRoot.standardizedFileURL.path
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: defaultResolver.durableRoot
+                    .appendingPathComponent("namespace--model", isDirectory: true)
+                    .path
+            )
+        )
     }
 
     func testPrefetchVerifiesOnlyExplicitSignedArtifactWithoutStartingBenchmarkRuntime() async throws {
@@ -2497,7 +2556,12 @@ final class AutotuneRecommendTests: XCTestCase {
 
         XCTAssertEqual(outcome.matchedModelIDs, [row.modelID])
         XCTAssertEqual(outcome.prefetchedModelIDs, [row.modelID])
-        XCTAssertEqual(outcome.artifacts.map(\.path), [snapshot.path])
+        let durable = try resolver.durableStore.artifactURL(
+            modelID: row.modelID,
+            revision: revision,
+            sha256: try XCTUnwrap(request.candidateCatalog.rows[modelKey]?.modelSHA256)
+        )
+        XCTAssertEqual(outcome.artifacts.map(\.path), [durable.path])
         XCTAssertTrue(outcome.diagnostics.isEmpty)
     }
 
@@ -2714,7 +2778,11 @@ final class AutotuneRecommendTests: XCTestCase {
         let verified = try await CachedModelArtifactResolver(hubRoot: hub, downloader: downloader)
             .verifiedArtifact(for: row)
 
-        XCTAssertEqual(verified.modelArgument, snapshot.path)
+        XCTAssertEqual(verified.modelArgument, try resolver.durableStore.artifactURL(
+            modelID: row.modelID,
+            revision: revision,
+            sha256: expected
+        ).path)
         XCTAssertEqual(verified.sha256, expected)
         XCTAssertEqual(try String(contentsOf: snapshot.appendingPathComponent("weights.bin")), "fresh")
     }
@@ -2796,7 +2864,12 @@ final class AutotuneRecommendTests: XCTestCase {
         try FileManager.default.createDirectory(at: goodSnapshot, withIntermediateDirectories: true)
         try Data("weights".utf8).write(to: goodSnapshot.appendingPathComponent("weights.bin"))
         request.candidateCatalog.rows[goodKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: goodSnapshot)
-        let goodArtifactPath = goodSnapshot.path
+        let goodArtifactPath = try durableArtifactPath(
+            hubRoot: hub,
+            modelID: goodRow.modelID,
+            revision: goodRevision,
+            sha256: try XCTUnwrap(request.candidateCatalog.rows[goodKey]?.modelSHA256)
+        )
 
         let prober = RecordingStage1Prober(results: [
             goodArtifactPath: .feasible(medianTPS: 88, p95TTFTMS: 900)
@@ -2857,7 +2930,12 @@ final class AutotuneRecommendTests: XCTestCase {
         try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
         try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
         request.candidateCatalog.rows[goodKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
-        let artifactPath = snapshot.path
+        let artifactPath = try durableArtifactPath(
+            hubRoot: hub,
+            modelID: goodRow.modelID,
+            revision: revision,
+            sha256: try XCTUnwrap(request.candidateCatalog.rows[goodKey]?.modelSHA256)
+        )
 
         let prober = RecordingStage1Prober(results: [
             artifactPath: .feasible(medianTPS: 88, p95TTFTMS: 900)
@@ -2933,8 +3011,14 @@ final class AutotuneRecommendTests: XCTestCase {
         try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
         request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
         request.benchmarks = [:]
+        let durablePath = try durableArtifactPath(
+            hubRoot: hub,
+            modelID: row.modelID,
+            revision: revision,
+            sha256: try XCTUnwrap(request.candidateCatalog.rows[modelKey]?.modelSHA256)
+        )
         let prober = RecordingStage1Prober(results: [
-            snapshot.path: .feasible(medianTPS: 12, p95TTFTMS: 900),
+            durablePath: .feasible(medianTPS: 12, p95TTFTMS: 900),
         ])
         let benchmarker = AutotuneRecommendationBenchmarker(
             artifactResolver: resolver,
@@ -2952,7 +3036,7 @@ final class AutotuneRecommendTests: XCTestCase {
         )
 
         XCTAssertNotNil(outcomes.benchmarks[modelKey])
-        XCTAssertEqual(prober.probedModels, [snapshot.path])
+        XCTAssertEqual(prober.probedModels, [durablePath])
     }
 
     func testProbeSafetyAssessmentFailsClosedOnUnavailableTelemetry() {
@@ -3697,8 +3781,14 @@ final class AutotuneRecommendTests: XCTestCase {
         try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
         request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
         request.benchmarks = [:]
+        let durablePath = try durableArtifactPath(
+            hubRoot: hub,
+            modelID: row.modelID,
+            revision: revision,
+            sha256: try XCTUnwrap(request.candidateCatalog.rows[modelKey]?.modelSHA256)
+        )
         let prober = RecordingStage1Prober(results: [
-            snapshot.path: .infeasible(reason: "probe request failed: The request timed out.", nErr: 3),
+            durablePath: .infeasible(reason: "probe request failed: The request timed out.", nErr: 3),
         ])
         let benchmarker = AutotuneRecommendationBenchmarker(
             artifactResolver: resolver,
@@ -3734,11 +3824,17 @@ final class AutotuneRecommendTests: XCTestCase {
         try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
         request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
         request.benchmarks = [:]
+        let durablePath = try durableArtifactPath(
+            hubRoot: hub,
+            modelID: row.modelID,
+            revision: revision,
+            sha256: try XCTUnwrap(request.candidateCatalog.rows[modelKey]?.modelSHA256)
+        )
         let benchmarker = AutotuneRecommendationBenchmarker(
             artifactResolver: resolver,
             runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
             prober: RecordingStage1Prober(results: [
-                snapshot.path: .feasible(medianTPS: 0, p95TTFTMS: .infinity),
+                durablePath: .feasible(medianTPS: 0, p95TTFTMS: .infinity),
             ]),
             safetySampler: StaticProbeSafetySampler()
         )
@@ -3768,11 +3864,17 @@ final class AutotuneRecommendTests: XCTestCase {
         try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
         request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
         request.benchmarks = [:]
+        let durablePath = try durableArtifactPath(
+            hubRoot: hub,
+            modelID: row.modelID,
+            revision: revision,
+            sha256: try XCTUnwrap(request.candidateCatalog.rows[modelKey]?.modelSHA256)
+        )
         let benchmarker = AutotuneRecommendationBenchmarker(
             artifactResolver: resolver,
             runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
             prober: RecordingStage1Prober(results: [
-                snapshot.path: .feasible(medianTPS: 42, p95TTFTMS: .infinity),
+                durablePath: .feasible(medianTPS: 42, p95TTFTMS: .infinity),
             ]),
             safetySampler: StaticProbeSafetySampler()
         )
@@ -3805,19 +3907,26 @@ final class AutotuneRecommendTests: XCTestCase {
         let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
         request.candidateCatalog.rows[modelKey]?.modelSHA256 = artifactSHA
         request.benchmarks = [:]
+        _ = try resolver.verifiedExistingArtifact(for: try XCTUnwrap(request.candidateCatalog.rows[modelKey]))
+        let durablePath = try durableArtifactPath(
+            hubRoot: hub,
+            modelID: row.modelID,
+            revision: revision,
+            sha256: artifactSHA
+        )
         let prefetched = PrefetchedModelArtifact(
             modelKey: modelKey,
             modelID: row.modelID,
             modelRevision: revision,
             candidateRowIdentity: try XCTUnwrap(request.candidateCatalog.rowIdentity(for: modelKey)),
-            path: snapshot.path,
+            path: durablePath,
             sha256: artifactSHA
         )
         let benchmarker = AutotuneRecommendationBenchmarker(
             artifactResolver: resolver,
             runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
             prober: RecordingStage1Prober(results: [
-                snapshot.path: .feasible(medianTPS: .nan, p95TTFTMS: 900),
+                durablePath: .feasible(medianTPS: .nan, p95TTFTMS: 900),
             ]),
             safetySampler: StaticProbeSafetySampler()
         )
@@ -3854,12 +3963,19 @@ final class AutotuneRecommendTests: XCTestCase {
         let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
         request.candidateCatalog.rows[modelKey]?.modelSHA256 = artifactSHA
         request.benchmarks = [:]
+        _ = try resolver.verifiedExistingArtifact(for: try XCTUnwrap(request.candidateCatalog.rows[modelKey]))
+        let durablePath = try durableArtifactPath(
+            hubRoot: hub,
+            modelID: row.modelID,
+            revision: revision,
+            sha256: artifactSHA
+        )
         let prefetched = PrefetchedModelArtifact(
             modelKey: modelKey,
             modelID: row.modelID,
             modelRevision: revision,
             candidateRowIdentity: try XCTUnwrap(request.candidateCatalog.rowIdentity(for: modelKey)),
-            path: snapshot.path,
+            path: durablePath,
             sha256: artifactSHA
         )
         let readinessFailure = "provider readiness timeout before Stage 1 probe: Could not connect to the server"
@@ -3867,7 +3983,7 @@ final class AutotuneRecommendTests: XCTestCase {
             artifactResolver: resolver,
             runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
             prober: RecordingStage1Prober(results: [
-                snapshot.path: .infeasible(reason: readinessFailure, nErr: 1),
+                durablePath: .infeasible(reason: readinessFailure, nErr: 1),
             ]),
             safetySampler: StaticProbeSafetySampler()
         )
@@ -4508,6 +4624,19 @@ final class AutotuneRecommendTests: XCTestCase {
         return object["key_id"] as? String == keyID &&
             object["alg"] as? String == "ed25519" &&
             Data(base64Encoded: object["signature"] as? String ?? "") != nil
+    }
+
+    private func durableArtifactPath(
+        hubRoot: URL,
+        modelID: String,
+        revision: String,
+        sha256: String
+    ) throws -> String {
+        try CachedModelArtifactResolver(hubRoot: hubRoot).durableStore.artifactURL(
+            modelID: modelID,
+            revision: revision,
+            sha256: sha256
+        ).path
     }
 
     private func tempDir() throws -> URL {

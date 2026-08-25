@@ -69,7 +69,8 @@ struct ModelsListCommand: AsyncParsableCommand {
                     supportedModels: models,
                     source: "control_socket",
                     warmSwapAvailable: true,
-                    authorizedModelIDs: Set(authorizedModelIDs.map(modelIDKey))
+                    authorizedModelIDs: Set(authorizedModelIDs.map(modelIDKey)),
+                    artifactResolver: CachedModelArtifactResolver.forConfig(resolved)
                 )
             } else {
                 printModelsTable(currentModelID: status.currentModelID, supportedModels: models)
@@ -81,7 +82,8 @@ struct ModelsListCommand: AsyncParsableCommand {
                     currentModelID: nil,
                     supportedModels: models,
                     source: "config_fallback",
-                    warmSwapAvailable: false
+                    warmSwapAvailable: false,
+                    artifactResolver: CachedModelArtifactResolver.forConfig(resolved)
                 )
             } else {
                 print("serve not running; warm-swap disabled")
@@ -422,7 +424,7 @@ struct ModelsAdoptRecommendationCommand: AsyncParsableCommand {
             try fail("blocked_warning", exitCode: 2)
         }
         do {
-            try await Self.validateSignedAuthority(recommendation)
+            try await Self.validateSignedAuthority(recommendation, configPath: config)
         } catch {
             try fail("signed_authority_invalid", exitCode: 2)
         }
@@ -968,7 +970,10 @@ extension ModelsAdoptRecommendationCommand {
         !value.isEmpty && value.utf8.allSatisfy { $0 >= 0x20 && $0 != 0x7F }
     }
 
-    fileprivate static func validateSignedAuthority(_ recommendation: ParsedRecommendationAdoption) async throws {
+    fileprivate static func validateSignedAuthority(
+        _ recommendation: ParsedRecommendationAdoption,
+        configPath: String? = nil
+    ) async throws {
         #if DEBUG
         if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
             || ProcessInfo.processInfo.processName.lowercased().contains("xctest") {
@@ -1002,11 +1007,20 @@ extension ModelsAdoptRecommendationCommand {
               BandwidthTier.derive(chip: currentHardware.chip).satisfies(minimum: row.minBandwidthTier) else {
             throw ValidationError("recommendation hardware or binary identity is stale")
         }
-        let artifact = try CachedModelArtifactResolver().verifiedExistingArtifact(for: row)
-        guard URL(fileURLWithPath: artifact.modelArgument).standardizedFileURL
-                == URL(fileURLWithPath: recommendation.core.modelArtifactPath ?? "").standardizedFileURL,
-              artifact.sha256 == recommendation.core.modelArtifactSHA256 else {
+        let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: configPath))
+        let artifact = try CachedModelArtifactResolver.forConfig(resolvedConfig).verifiedExistingArtifact(for: row)
+        guard artifact.sha256 == recommendation.core.modelArtifactSHA256 else {
             throw ValidationError("recommendation artifact authority does not match the signed snapshot")
+        }
+        if let recordedPath = recommendation.core.modelArtifactPath {
+            let recorded = URL(fileURLWithPath: recordedPath).standardizedFileURL
+            let loaded = URL(fileURLWithPath: artifact.modelArgument).standardizedFileURL
+            if recorded != loaded, FileManager.default.fileExists(atPath: recorded.path) {
+                let recordedHash = try ModelArtifactVerifier.canonicalArtifactHash(directory: recorded)
+                guard recordedHash == artifact.sha256 else {
+                    throw ValidationError("recommendation artifact authority does not match the signed snapshot")
+                }
+            }
         }
         try validateSignedContextAuthority(recommendation: recommendation, row: row, artifact: artifact)
     }
@@ -1596,7 +1610,8 @@ private func emitJSONList(
     supportedModels: [String],
     source: String,
     warmSwapAvailable: Bool,
-    authorizedModelIDs: Set<String>? = nil
+    authorizedModelIDs: Set<String>? = nil,
+    artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
 ) async throws {
     do {
         let document = try await makeModelsListWire(
@@ -1604,7 +1619,8 @@ private func emitJSONList(
             supportedModels: supportedModels,
             source: source,
             warmSwapAvailable: warmSwapAvailable,
-            authorizedModelIDs: authorizedModelIDs
+            authorizedModelIDs: authorizedModelIDs,
+            artifactResolver: artifactResolver
         )
         try ModelSwitchingWireCodec.printJSON(document)
     } catch {
@@ -1622,7 +1638,8 @@ private func makeModelsListWire(
     supportedModels: [String],
     source: String,
     warmSwapAvailable: Bool,
-    authorizedModelIDs: Set<String>? = nil
+    authorizedModelIDs: Set<String>? = nil,
+    artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
 ) async throws -> ModelsListWire {
     var effectiveModels = supportedModels
     if let currentModelID {
@@ -1651,7 +1668,7 @@ private func makeModelsListWire(
             // not make Malibu advertise a target the runtime cannot switch to.
             weightsPresent = warmSwapAvailable && authorizedModelIDs.contains(modelIDKey(modelID))
         } else {
-            weightsPresent = exactLocalArtifactPresent(modelID: modelID)
+            weightsPresent = exactLocalArtifactPresent(modelID: modelID, artifactResolver: artifactResolver)
         }
         rows.append(ModelsListWire.Row(
             modelID: modelID,
@@ -1673,7 +1690,10 @@ private func makeModelsListWire(
     )
 }
 
-private func exactLocalArtifactPresent(modelID: String) -> Bool {
+private func exactLocalArtifactPresent(
+    modelID: String,
+    artifactResolver: CachedModelArtifactResolver
+) -> Bool {
     // A plain directory is insufficient evidence: the runtime requires the
     // signed catalog revision and canonical artifact hash. Unknown rows stay
     // false so Malibu cannot promote an idle partial/stale cache to Ready.
@@ -1687,5 +1707,5 @@ private func exactLocalArtifactPresent(modelID: String) -> Bool {
           row.modelSHA256 != nil else {
         return false
     }
-    return (try? CachedModelArtifactResolver().verifiedExistingArtifact(for: row)) != nil
+    return (try? artifactResolver.verifiedExistingArtifact(for: row)) != nil
 }

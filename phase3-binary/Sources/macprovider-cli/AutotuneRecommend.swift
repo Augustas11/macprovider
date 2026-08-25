@@ -3357,7 +3357,39 @@ final class HFAssetRedirectGuard: NSObject, URLSessionTaskDelegate {
 
 struct CachedModelArtifactResolver {
     var hubRoot: URL = defaultHubRoot
+    var durableRoot: URL
     var downloader: HuggingFaceSnapshotDownloader = HuggingFaceSnapshotDownloader()
+
+    var durableStore: DurableModelArtifactStore {
+        DurableModelArtifactStore(root: durableRoot)
+    }
+
+    init(
+        hubRoot: URL = defaultHubRoot,
+        durableRoot: URL? = nil,
+        downloader: HuggingFaceSnapshotDownloader = HuggingFaceSnapshotDownloader()
+    ) {
+        self.hubRoot = hubRoot
+        self.downloader = downloader
+        if let durableRoot {
+            self.durableRoot = durableRoot.standardizedFileURL
+        } else if hubRoot.standardizedFileURL.path == Self.defaultHubRoot.standardizedFileURL.path {
+            self.durableRoot = DurableModelArtifactStore.defaultRoot
+        } else {
+            self.durableRoot = hubRoot
+                .appendingPathComponent("macprovider-durable-models", isDirectory: true)
+                .standardizedFileURL
+        }
+    }
+
+    /// Overlay `model_artifact_root` from yaml/env the same way serve preflight does.
+    static func forConfig(_ config: AppConfig?) -> CachedModelArtifactResolver {
+        var resolver = CachedModelArtifactResolver()
+        if let root = config?.modelArtifactRoot, root.hasPrefix("/") {
+            resolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
+        }
+        return resolver
+    }
 
     static var defaultHubRoot: URL {
         if let hfHome = ProcessInfo.processInfo.environment["HF_HOME"], !hfHome.isEmpty {
@@ -3455,13 +3487,31 @@ struct CachedModelArtifactResolver {
     }
 
     func verifiedExistingArtifact(for row: CandidateCatalog.Row) throws -> VerifiedModelArtifact {
-        guard let revision = row.modelRevision else {
+        guard let revision = row.modelRevision, let expected = row.modelSHA256 else {
             throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
         }
-        return try verifiedExistingArtifact(
-            for: row,
-            at: snapshotURL(modelID: row.modelID, revision: revision)
+        let durable = try durableStore.artifactURL(
+            modelID: row.modelID,
+            revision: revision,
+            sha256: expected
         )
+        var durableStat = stat()
+        if lstat(durable.path, &durableStat) == 0, (durableStat.st_mode & S_IFMT) == S_IFDIR {
+            _ = try durableStore.validatedContainedDirectory(durable.path)
+            do {
+                return try verifiedExistingArtifact(for: row, at: durable)
+            } catch let error as AutotuneRecommendError {
+                guard case .invalidArtifact = error else { throw error }
+                // Stale durable bytes for a republished catalog hash: fall
+                // through to Hugging Face staging and overwrite on adopt.
+            }
+        }
+        let staging = snapshotURL(modelID: row.modelID, revision: revision)
+        var st = stat()
+        if lstat(staging.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR {
+            return try verifiedExistingArtifact(for: row, at: staging)
+        }
+        return try verifiedExistingArtifact(for: row, at: durable)
     }
 
     func verifiedExistingArtifact(
@@ -3483,11 +3533,26 @@ struct CachedModelArtifactResolver {
                 "hash mismatch \(row.modelID)@\(revision) expected=\(expected) actual=\(inspection.sha256)"
             )
         }
+        if durableStore.contains(snapshot.path) {
+            return VerifiedModelArtifact(
+                modelArgument: URL(fileURLWithPath: snapshot.path).standardizedFileURL.path,
+                sha256: inspection.sha256,
+                configJSONData: inspection.configJSONData,
+                configSHA256: inspection.configSHA256
+            )
+        }
+        let durable = try durableStore.adoptVerifiedStaging(
+            staging: snapshot,
+            modelID: row.modelID,
+            revision: revision,
+            sha256: inspection.sha256
+        )
+        let durableInspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: durable)
         return VerifiedModelArtifact(
-            modelArgument: snapshot.path,
-            sha256: inspection.sha256,
-            configJSONData: inspection.configJSONData,
-            configSHA256: inspection.configSHA256
+            modelArgument: durable.path,
+            sha256: durableInspection.sha256,
+            configJSONData: durableInspection.configJSONData,
+            configSHA256: durableInspection.configSHA256
         )
     }
 

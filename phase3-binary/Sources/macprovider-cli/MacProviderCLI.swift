@@ -727,11 +727,16 @@ struct ServeCommand: AsyncParsableCommand {
     }
 
     static func runModelArtifactPreflight(
-        _ resolved: AppConfig,
+        _ resolved: inout AppConfig,
         joiningCoordinator: Bool = true,
         staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
-        artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
+        artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
+        persistConfigMigration: Bool = false
     ) async throws -> CatalogRuntimeTrust? {
+        var artifactResolver = artifactResolver
+        if let root = resolved.modelArtifactRoot, root.hasPrefix("/") {
+            artifactResolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
+        }
         guard let expected = resolved.modelArtifactSHA256 else {
             if resolved.modelArtifactPath != nil {
                 FileHandle.standardError.write(Data("model_artifact_path requires model_artifact_sha256 for a verified local snapshot\n".utf8))
@@ -756,40 +761,139 @@ struct ServeCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data("model_artifact_sha256 requires model_artifact_path to be a verified local snapshot path\n".utf8))
             throw ExitCode(2)
         }
+        let configuredPath = URL(fileURLWithPath: artifactPath).standardizedFileURL.path
+        let loadPath: String
+        let persistFrom: String?
         let actual: String
         do {
-            actual = try ModelArtifactVerifier.canonicalArtifactHash(directory: URL(fileURLWithPath: artifactPath))
+            let resolvedLoad = try resolveVerifiedLoadPath(
+                configuredPath: configuredPath,
+                expectedSHA256: expected,
+                resolved: resolved,
+                artifactResolver: artifactResolver
+            )
+            loadPath = resolvedLoad.path
+            persistFrom = resolvedLoad.persistFrom
+            actual = try ModelArtifactVerifier.canonicalArtifactHash(directory: URL(fileURLWithPath: loadPath))
             guard actual == expected else {
-                FileHandle.standardError.write(Data("model artifact hash mismatch for \(artifactPath)\n".utf8))
+                FileHandle.standardError.write(Data("model artifact hash mismatch for \(loadPath)\n".utf8))
                 throw ExitCode(2)
             }
         } catch let exit as ExitCode {
             throw exit
         } catch {
-            FileHandle.standardError.write(Data("model artifact verification failed for \(artifactPath): \(error)\n".utf8))
+            FileHandle.standardError.write(Data("model artifact verification failed for \(configuredPath): \(error)\n".utf8))
             throw ExitCode(2)
         }
+        resolved.modelArtifactPath = loadPath
         if resolved.donorMode || joiningCoordinator {
             return try await runModelCatalogPreflight(
-                resolved,
-                modelPath: artifactPath,
+                &resolved,
+                modelPath: loadPath,
                 actualArtifactSHA256: actual,
                 requireRecommendable: !resolved.donorMode,
                 staticInputs: staticInputs,
-                artifactResolver: artifactResolver
+                artifactResolver: artifactResolver,
+                persistConfigMigration: persistConfigMigration,
+                persistFrom: persistFrom
             )
         }
         return nil
     }
 
+    private static func isExistingDirectory(_ path: String) -> Bool {
+        var info = stat()
+        return lstat(path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFDIR
+    }
+
+    private static func requireContainedDurablePathIfOwned(
+        _ path: String,
+        artifactResolver: CachedModelArtifactResolver
+    ) throws {
+        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+        let root = artifactResolver.durableRoot.standardizedFileURL.path
+        guard standardized == root || standardized.hasPrefix(root + "/") else {
+            return
+        }
+        do {
+            _ = try artifactResolver.durableStore.validatedContainedDirectory(path)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "[error] Configured durable model artifact failed containment: \(error.localizedDescription)\n".utf8
+            ))
+            throw ExitCode(2)
+        }
+    }
+
+    private static func resolveVerifiedLoadPath(
+        configuredPath: String,
+        expectedSHA256: String,
+        resolved: AppConfig,
+        artifactResolver: CachedModelArtifactResolver
+    ) throws -> (path: String, persistFrom: String?) {
+        if isExistingDirectory(configuredPath) {
+            try requireContainedDurablePathIfOwned(configuredPath, artifactResolver: artifactResolver)
+            let actual = try ModelArtifactVerifier.canonicalArtifactHash(
+                directory: URL(fileURLWithPath: configuredPath)
+            )
+            guard actual == expectedSHA256 else {
+                FileHandle.standardError.write(Data("model artifact hash mismatch for \(configuredPath)\n".utf8))
+                throw ExitCode(2)
+            }
+            return (configuredPath, nil)
+        }
+        guard let modelID = resolved.modelCatalogModelID, !modelID.isEmpty,
+              let revision = resolved.modelCatalogRevision, !revision.isEmpty
+        else {
+            FileHandle.standardError.write(
+                Data("model artifact verification failed for \(configuredPath): missing pinned snapshot\n".utf8)
+            )
+            throw ExitCode(2)
+        }
+        let durablePath: String
+        do {
+            durablePath = try artifactResolver.durableStore.artifactURL(
+                modelID: modelID,
+                revision: revision,
+                sha256: expectedSHA256
+            ).standardizedFileURL.path
+        } catch {
+            FileHandle.standardError.write(Data("model durable artifact path is invalid: \(error)\n".utf8))
+            throw ExitCode(2)
+        }
+        guard isExistingDirectory(durablePath) else {
+            FileHandle.standardError.write(
+                Data("model artifact verification failed for \(configuredPath): missing pinned snapshot\n".utf8)
+            )
+            throw ExitCode(2)
+        }
+        try requireContainedDurablePathIfOwned(durablePath, artifactResolver: artifactResolver)
+        let actual = try ModelArtifactVerifier.canonicalArtifactHash(
+            directory: URL(fileURLWithPath: durablePath)
+        )
+        guard actual == expectedSHA256 else {
+            FileHandle.standardError.write(Data("model artifact hash mismatch for \(durablePath)\n".utf8))
+            throw ExitCode(2)
+        }
+        if DurableModelArtifactStore.isHuggingFaceCachePath(configuredPath) {
+            FileHandle.standardError.write(
+                Data("\(DurableModelArtifactStore.cacheBackedWarning)\n".utf8)
+            )
+        }
+        return (durablePath, configuredPath)
+    }
+
     private static func runModelCatalogPreflight(
-        _ resolved: AppConfig,
+        _ resolved: inout AppConfig,
         modelPath: String,
         actualArtifactSHA256: String,
         requireRecommendable: Bool,
         staticInputs: AutotuneStaticInputs,
-        artifactResolver: CachedModelArtifactResolver
+        artifactResolver: CachedModelArtifactResolver,
+        persistConfigMigration: Bool,
+        persistFrom: String?
     ) async throws -> CatalogRuntimeTrust {
+        let actual = actualArtifactSHA256
         guard let key = resolved.modelCatalogKey,
               let modelID = resolved.modelCatalogModelID,
               let revision = resolved.modelCatalogRevision,
@@ -842,8 +946,92 @@ struct ServeCommand: AsyncParsableCommand {
             .standardizedFileURL
             .path
         let configuredSnapshot = URL(fileURLWithPath: modelPath).standardizedFileURL.path
-        guard configuredSnapshot == expectedSnapshot else {
-            FileHandle.standardError.write(Data("model must be the catalog-pinned Hugging Face snapshot path\n".utf8))
+        let durableURL: URL
+        do {
+            durableURL = try artifactResolver.durableStore.artifactURL(
+                modelID: modelID,
+                revision: revision,
+                sha256: actual
+            )
+        } catch {
+            FileHandle.standardError.write(Data("model durable artifact path is invalid: \(error)\n".utf8))
+            throw ExitCode(2)
+        }
+        let durablePath = durableURL.standardizedFileURL.path
+        var pendingPersistFrom = persistFrom
+        if configuredSnapshot == durablePath {
+            try requireContainedDurablePathIfOwned(configuredSnapshot, artifactResolver: artifactResolver)
+            resolved.modelArtifactPath = durablePath
+        } else if configuredSnapshot == expectedSnapshot {
+            FileHandle.standardError.write(
+                Data("\(DurableModelArtifactStore.cacheBackedWarning)\n".utf8)
+            )
+            do {
+                let adopted = try artifactResolver.durableStore.adoptVerifiedStaging(
+                    staging: URL(fileURLWithPath: configuredSnapshot),
+                    modelID: modelID,
+                    revision: revision,
+                    sha256: actual
+                )
+                guard adopted.standardizedFileURL.path == durablePath else {
+                    FileHandle.standardError.write(Data("durable artifact migration landed outside the expected store path\n".utf8))
+                    throw ExitCode(2)
+                }
+                resolved.modelArtifactPath = durablePath
+                pendingPersistFrom = configuredSnapshot
+            } catch let exit as ExitCode {
+                throw exit
+            } catch {
+                FileHandle.standardError.write(
+                    Data("cache-backed model artifact could not be migrated to the durable store: \(error)\n".utf8)
+                )
+                throw ExitCode(2)
+            }
+        } else if artifactResolver.durableStore.contains(configuredSnapshot) {
+            let durableHash: String
+            do {
+                durableHash = try ModelArtifactVerifier.canonicalArtifactHash(
+                    directory: URL(fileURLWithPath: configuredSnapshot)
+                )
+            } catch {
+                FileHandle.standardError.write(Data("model artifact verification failed for \(configuredSnapshot): \(error)\n".utf8))
+                throw ExitCode(2)
+            }
+            guard durableHash == actual else {
+                FileHandle.standardError.write(Data("model artifact hash mismatch for \(configuredSnapshot)\n".utf8))
+                throw ExitCode(2)
+            }
+            if configuredSnapshot != durablePath {
+                do {
+                    let adopted = try artifactResolver.durableStore.adoptVerifiedStaging(
+                        staging: URL(fileURLWithPath: configuredSnapshot),
+                        modelID: modelID,
+                        revision: revision,
+                        sha256: actual
+                    )
+                    guard adopted.standardizedFileURL.path == durablePath else {
+                        FileHandle.standardError.write(Data("durable artifact migration landed outside the expected store path\n".utf8))
+                        throw ExitCode(2)
+                    }
+                } catch {
+                    FileHandle.standardError.write(
+                        Data("non-canonical durable artifact could not be moved to the catalog identity path: \(error)\n".utf8)
+                    )
+                    throw ExitCode(2)
+                }
+                pendingPersistFrom = configuredSnapshot
+            }
+            resolved.modelArtifactPath = durablePath
+        } else if DurableModelArtifactStore.isHuggingFaceCachePath(configuredSnapshot) {
+            FileHandle.standardError.write(
+                Data(
+                    "model_artifact_missing_from_cache: \(configuredSnapshot) is a Hugging Face cache path that is not the catalog-pinned snapshot; re-run autotune --recommend --apply\n"
+                        .utf8
+                )
+            )
+            throw ExitCode(2)
+        } else {
+            FileHandle.standardError.write(Data("model must be a durable provider artifact or the catalog-pinned Hugging Face snapshot path\n".utf8))
             throw ExitCode(2)
         }
 
@@ -899,6 +1087,17 @@ struct ServeCommand: AsyncParsableCommand {
         } else {
             state = "live_verified"
         }
+        if persistConfigMigration,
+           let from = pendingPersistFrom,
+           let to = resolved.modelArtifactPath,
+           from != to
+        {
+            try persistMigratedArtifactPath(
+                configPath: resolved.configPath,
+                from: from,
+                to: to
+            )
+        }
         return CatalogRuntimeTrust(
             state: state,
             releaseID: catalog.value.version,
@@ -909,6 +1108,107 @@ struct ServeCommand: AsyncParsableCommand {
             rowIdentity: catalog.value.rowIdentity(for: key),
             modelSHA256: row.modelSHA256
         )
+    }
+
+    static func persistMigratedArtifactPath(configPath: String, from oldPath: String, to newPath: String) throws {
+        let expanded: String
+        if configPath.hasPrefix("~/") {
+            expanded = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(String(configPath.dropFirst(2))).path
+        } else {
+            expanded = configPath
+        }
+        guard expanded.hasPrefix("/"), FileManager.default.fileExists(atPath: expanded) else {
+            return
+        }
+        try ProviderConfigMutationLock.withExclusiveLock(configPath: expanded) {
+            try persistMigratedArtifactPathLocked(
+                expanded: expanded,
+                from: oldPath,
+                to: newPath
+            )
+        }
+    }
+
+    private static func persistMigratedArtifactPathLocked(
+        expanded: String,
+        from oldPath: String,
+        to newPath: String
+    ) throws {
+        guard FileManager.default.fileExists(atPath: expanded) else {
+            return
+        }
+        var info = stat()
+        guard lstat(expanded, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+            return
+        }
+        let original = try String(contentsOfFile: expanded, encoding: .utf8)
+        let oldLiterals = Set([oldPath, yamlPathLiteral(oldPath)])
+        let replacement = "model_artifact_path: \(yamlPathLiteral(newPath))"
+        var replaced = false
+        let updated = original.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+            guard !replaced else { return String(line) }
+            let raw = String(line)
+            guard raw.first?.isWhitespace != true else { return raw }
+            let candidate = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
+            for literal in oldLiterals where candidate == "model_artifact_path: \(literal)" {
+                replaced = true
+                return replacement
+            }
+            return raw
+        }.joined(separator: "\n")
+        guard replaced, updated != original else {
+            return
+        }
+        let backup = expanded + ".pre-durable-artifact.bak"
+        var bakInfo = stat()
+        if lstat(backup, &bakInfo) == 0 {
+            guard (bakInfo.st_mode & S_IFMT) == S_IFREG else {
+                return
+            }
+            try FileManager.default.removeItem(atPath: backup)
+        }
+        let backupMode = mode_t((info.st_mode & 0o777) & ~0o077)
+        try writeExclusiveRegularFile(
+            path: backup,
+            contents: original,
+            mode: backupMode == 0 ? 0o600 : backupMode
+        )
+        try updated.write(toFile: expanded, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: info.st_mode & 0o777)],
+            ofItemAtPath: expanded
+        )
+    }
+
+    private static func writeExclusiveRegularFile(path: String, contents: String, mode: mode_t) throws {
+        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode)
+        guard fd >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(fd) }
+        _ = fchmod(fd, mode)
+        let bytes = Array(contents.utf8)
+        let written = bytes.withUnsafeBytes { raw in
+            write(fd, raw.baseAddress, raw.count)
+        }
+        guard written == bytes.count else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    private static func yamlPathLiteral(_ value: String) -> String {
+        let plain = value.utf8.allSatisfy { byte in
+            (0x61...0x7A).contains(byte)
+                || (0x41...0x5A).contains(byte)
+                || (0x30...0x39).contains(byte)
+                || [0x2D, 0x5F, 0x2E, 0x2F].contains(byte)
+        }
+        guard !value.isEmpty, plain else {
+            let data = try? JSONEncoder().encode(value)
+            return data.map { String(decoding: $0, as: UTF8.self) } ?? "\"\""
+        }
+        return value
     }
 
     static func makeCoordinatorClient(
@@ -1348,8 +1648,13 @@ struct ServeCommand: AsyncParsableCommand {
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }
+        var targetResolver = CachedModelArtifactResolver()
+        if let root = resolved.modelArtifactRoot, root.hasPrefix("/") {
+            targetResolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
+        }
         let targetAuthorities = Self.localRuntimeTargetAuthorities(
-            supportedModels: resolved.supportedModels
+            supportedModels: resolved.supportedModels,
+            artifactResolver: targetResolver
         )
         let authorizedSwitchModelIDs = Self.localRuntimeTargetModelIDs(
             supportedModels: resolved.supportedModels,
@@ -2385,10 +2690,11 @@ struct ServeCommand: AsyncParsableCommand {
             let catalogTrust: CatalogRuntimeTrust?
             do {
                 catalogTrust = try await Self.runModelArtifactPreflight(
-                    resolved,
+                    &resolved,
                     joiningCoordinator: joiningCoordinator,
                     staticInputs: staticInputs,
-                    artifactResolver: artifactResolver
+                    artifactResolver: artifactResolver,
+                    persistConfigMigration: true
                 )
             } catch where joiningCoordinator || resolved.donorMode {
                 throw ServeCatalogPreflightError(underlying: error)
@@ -2555,10 +2861,10 @@ struct SelfTestCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
-        let resolved = try ConfigLoader.load(
+        var resolved = try ConfigLoader.load(
             cli: CLIOverrides(model: model, configPath: config)
         )
-        _ = try await ServeCommand.runModelArtifactPreflight(resolved, joiningCoordinator: false)
+        _ = try await ServeCommand.runModelArtifactPreflight(&resolved, joiningCoordinator: false)
         let runtime = try await ModelRuntime(
             modelID: resolved.model,
             modelLoadPath: Self.modelLoadPath(for: resolved),

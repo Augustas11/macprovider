@@ -17,18 +17,26 @@ enum PreWarmResult: Equatable {
 
 struct HuggingFaceCacheChecker {
     private let cacheRoot: URL
+    private let durableRoot: URL
     private let fileManager: FileManager
 
     init(
         cacheRoot: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".cache/huggingface/hub", isDirectory: true),
+        durableRoot: URL = DurableModelArtifactStore.defaultRoot,
         fileManager: FileManager = .default
     ) {
         self.cacheRoot = cacheRoot
+        self.durableRoot = durableRoot
         self.fileManager = fileManager
     }
 
     func isModelCached(modelID: String) -> Bool {
+        if DurableModelArtifactStore(root: durableRoot, fileManager: fileManager)
+            .isModelMaterialized(modelID: modelID)
+        {
+            return true
+        }
         guard let repoDirectory = repositoryDirectory(for: modelID) else {
             return false
         }
