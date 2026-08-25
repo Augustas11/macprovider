@@ -232,7 +232,7 @@ func TestCreatorAdminCeilingFirstRuntimeInstallBumpsGeneration(t *testing.T) {
 	}
 	r.SetCreatorAdminCeilings(
 		map[string][]string{"creator-a": {}},
-		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {}},
 		map[string][]string{"creator-a": {"acct-a"}},
 	)
 	snap := r.Snapshot("P")
@@ -259,7 +259,7 @@ func TestCreatorAdminDelegationCeilingRevocationBumpsGeneration(t *testing.T) {
 		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
 	}
 	r.InitCreatorAdminCeilings(
-		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {}},
 		map[string][]string{"creator-a": {"provider-a"}},
 		map[string][]string{"creator-a": {"acct-a"}},
 	)
@@ -269,7 +269,7 @@ func TestCreatorAdminDelegationCeilingRevocationBumpsGeneration(t *testing.T) {
 	}
 
 	r.SetCreatorAdminCeilings(
-		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {}},
 		map[string][]string{"creator-a": {}},
 		map[string][]string{"creator-a": {"acct-a"}},
 	)

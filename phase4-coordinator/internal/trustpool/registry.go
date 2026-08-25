@@ -779,10 +779,7 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 			if _, revoked := ps.revoked[id]; revoked {
 				continue
 			}
-			if !r.providerAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
-				continue
-			}
-			if !r.providerDelegatedByCreatorCeilingLocked(ps.creatorAccountID, id) {
+			if !r.providerMembershipAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
 				continue
 			}
 			members = append(members, id)
@@ -862,10 +859,7 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		if _, revoked := ps.revoked[id]; revoked {
 			continue
 		}
-		if !r.providerAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
-			continue
-		}
-		if !r.providerDelegatedByCreatorCeilingLocked(ps.creatorAccountID, id) {
+		if !r.providerMembershipAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
 			continue
 		}
 		members[id] = true
@@ -906,10 +900,7 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 		if _, revoked := ps.revoked[id]; revoked {
 			continue
 		}
-		if !r.providerAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
-			continue
-		}
-		if !r.providerDelegatedByCreatorCeilingLocked(ps.creatorAccountID, id) {
+		if !r.providerMembershipAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
 			continue
 		}
 		members[id] = true
@@ -1036,6 +1027,29 @@ func preserveRemovedCreatorCeilingsAsDenyAll(previous, next map[string]map[strin
 		}
 	}
 	return next
+}
+
+func (r *Registry) providerMembershipAllowedByCreatorCeilingLocked(creatorID, providerID string) bool {
+	if providerID == "" {
+		return false
+	}
+	if creatorID == "" {
+		return true
+	}
+	ownedAllowed := allowedByCreatorCeilingLocked(r.providerCeilings, creatorID, providerID)
+	delegatedAllowed := allowedByCreatorCeilingLocked(r.delegatedCeilings, creatorID, providerID)
+	_, ownedConfigured := r.providerCeilings[creatorID]
+	_, delegatedConfigured := r.delegatedCeilings[creatorID]
+	if !ownedConfigured && !delegatedConfigured {
+		return true
+	}
+	if ownedConfigured && ownedAllowed {
+		return true
+	}
+	if delegatedConfigured && delegatedAllowed {
+		return true
+	}
+	return false
 }
 
 func (r *Registry) providerAllowedByCreatorCeilingLocked(creatorID, providerID string) bool {

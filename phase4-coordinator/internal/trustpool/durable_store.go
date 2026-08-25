@@ -27,8 +27,10 @@ const (
 	EventMemberRevoked        = "member_revoked"
 	EventBuyerAuthorized      = "buyer_authorized"
 	EventBuyerAuthorizationRm = "buyer_authorization_removed"
-	EventMinBinaryVersionSet  = "min_binary_version_set"
-	EventRootCompromiseFrozen = "root_compromise_frozen"
+	EventMinBinaryVersionSet    = "min_binary_version_set"
+	EventRootCompromiseFrozen   = "root_compromise_frozen"
+	EventDelegationGranted      = "delegation_granted"
+	EventDelegationRevoked      = "delegation_revoked"
 
 	LifecycleCreated  = "created"
 	LifecycleActive   = "active"
@@ -141,6 +143,19 @@ type DurableEvent struct {
 	RootRegistrationNonceExpiry        string `json:"nonce_expiry,omitempty"`
 	RootRegistrationPurpose            string `json:"purpose,omitempty"`
 	RootRegistrationEnvironment        string `json:"environment,omitempty"`
+
+	DelegationID                              string `json:"delegation_id,omitempty"`
+	DelegationOperationID                   string `json:"delegation_operation_id,omitempty"`
+	ProviderOwnerKeyID                      string `json:"provider_owner_key_id,omitempty"`
+	ProviderOwnerKeyVersion                 string `json:"provider_owner_key_version,omitempty"`
+	ProviderOwnerPublicKey                  string `json:"provider_owner_public_key,omitempty"`
+	DelegationIssuedAt                      string `json:"delegation_issued_at,omitempty"`
+	DelegationExpiresAt                     string `json:"delegation_expires_at,omitempty"`
+	DelegationRevokedAt                     string `json:"delegation_revoked_at,omitempty"`
+	EnvironmentNetworkID                    string `json:"environment_network_id,omitempty"`
+	CoordinatorAudience                     string `json:"coordinator_audience,omitempty"`
+	ProviderPoolDelegationSignature         string `json:"provider_pool_delegation_signature,omitempty"`
+	ProviderPoolDelegationRevocationSignature string `json:"provider_pool_delegation_revocation_signature,omitempty"`
 }
 
 // Store persists DurableEvent rows in the coordinator SQLite DB.
@@ -2488,9 +2503,12 @@ type ReconstructedState struct {
 	ReviewedArtifacts   map[string]ReviewedDistributionArtifact
 	RouteGateCheckedAt  time.Time
 	Revision            uint64
-	rootNonces          map[string]string
-	frozenFingerprints  map[string]struct{}
-	frozenDescendantIDs map[frozenLineageKey]struct{}
+	rootNonces                     map[string]string
+	frozenFingerprints             map[string]struct{}
+	frozenDescendantIDs            map[frozenLineageKey]struct{}
+	delegations                    map[delegationLedgerKey]delegationRecord
+	consumedDelegationOperationIDs map[string]struct{}
+	activeProviderDelegations      map[poolProviderKey]string
 }
 
 type frozenLineageKey struct {
@@ -2516,6 +2534,7 @@ type ReconstructedPoolState struct {
 	ManifestSplitExecutionStatus string
 	RootIssuer                   *ReconstructedRootIssuer
 	Members                      map[string]bool
+	MemberDelegationIDs          map[string]string
 	Revoked                      map[string]bool
 	BuyerAccounts                map[string]bool
 	Generation                   uint64
@@ -2720,8 +2739,60 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		p.Lifecycle = e.Lifecycle
 		p.LifecycleReason = e.Reason
 	case EventMemberAdmitted:
+		if e.DelegationID != "" {
+			rec, ok := s.delegationRecordFor(p.PoolID, e.DelegationID)
+			if !ok || rec.Revoked || rec.ProviderID != e.ProviderID {
+				return nil, fmt.Errorf("%w: event %d member_admitted delegation %q unavailable for pool %q", ErrProviderDelegation, index, e.DelegationID, e.PoolID)
+			}
+			if !e.TimestampUTC.Before(rec.ExpiresAt) {
+				return nil, fmt.Errorf("%w: event %d member_admitted delegation expired for pool %q", ErrProviderDelegation, index, e.PoolID)
+			}
+			if rec.ManifestCoreDigest != p.ManifestCoreDigest {
+				return nil, fmt.Errorf("%w: event %d member_admitted delegation manifest mismatch for pool %q", ErrProviderDelegation, index, e.PoolID)
+			}
+			if p.MemberDelegationIDs == nil {
+				p.MemberDelegationIDs = make(map[string]string)
+			}
+			p.MemberDelegationIDs[e.ProviderID] = e.DelegationID
+		}
 		if !p.Revoked[e.ProviderID] {
 			p.Members[e.ProviderID] = true
+		}
+	case EventDelegationGranted:
+		s.ensureDelegationMaps()
+		if _, consumed := s.consumedDelegationOperationIDs[e.DelegationOperationID]; consumed {
+			return nil, fmt.Errorf("%w: event %d delegation operation_id %q replayed", ErrProviderDelegation, index, e.DelegationOperationID)
+		}
+		rec, err := validateDelegationGrantEvent(e, p, e.TimestampUTC.UTC())
+		if err != nil {
+			return nil, fmt.Errorf("%w: event %d delegation_granted invalid: %v", ErrProviderDelegation, index, err)
+		}
+		key := delegationLedgerKey{PoolID: p.PoolID, DelegationID: rec.DelegationID}
+		if existing, ok := s.delegations[key]; ok && !existing.Revoked {
+			return nil, fmt.Errorf("%w: event %d duplicate active delegation_id %q for pool %q", ErrProviderDelegation, index, rec.DelegationID, e.PoolID)
+		}
+		s.consumedDelegationOperationIDs[rec.DelegationOperationID] = struct{}{}
+		s.delegations[key] = rec
+		s.activeProviderDelegations[poolProviderKey{PoolID: p.PoolID, ProviderID: rec.ProviderID}] = rec.DelegationID
+	case EventDelegationRevoked:
+		s.ensureDelegationMaps()
+		if _, consumed := s.consumedDelegationOperationIDs[e.DelegationOperationID]; consumed {
+			return nil, fmt.Errorf("%w: event %d delegation revocation operation_id %q replayed", ErrProviderDelegation, index, e.DelegationOperationID)
+		}
+		rec, ok := s.delegationRecordFor(p.PoolID, e.DelegationID)
+		if !ok {
+			return nil, fmt.Errorf("%w: event %d delegation_revoked unknown delegation_id %q for pool %q", ErrProviderDelegation, index, e.DelegationID, e.PoolID)
+		}
+		if err := validateDelegationRevocationEvent(e, rec, e.TimestampUTC.UTC()); err != nil {
+			return nil, fmt.Errorf("%w: event %d delegation_revoked invalid: %v", ErrProviderDelegation, index, err)
+		}
+		s.consumedDelegationOperationIDs[e.DelegationOperationID] = struct{}{}
+		rec.Revoked = true
+		s.delegations[delegationLedgerKey{PoolID: p.PoolID, DelegationID: rec.DelegationID}] = rec
+		delete(s.activeProviderDelegations, poolProviderKey{PoolID: p.PoolID, ProviderID: rec.ProviderID})
+		if p.MemberDelegationIDs != nil && p.MemberDelegationIDs[e.ProviderID] == e.DelegationID {
+			delete(p.Members, e.ProviderID)
+			delete(p.MemberDelegationIDs, e.ProviderID)
 		}
 	case EventMemberRevoked:
 		delete(p.Members, e.ProviderID)
@@ -3108,7 +3179,7 @@ func nonRevokedMemberCountFromMaps(members, revoked map[string]bool) int {
 
 func mutationRequiresEnabledCreator(e DurableEvent) bool {
 	switch e.EventType {
-	case EventPoolCreated, EventRootIssuerRegistered, EventManifestAccepted, EventMemberAdmitted, EventBuyerAuthorized:
+	case EventPoolCreated, EventRootIssuerRegistered, EventManifestAccepted, EventMemberAdmitted, EventDelegationGranted, EventBuyerAuthorized:
 		return true
 	case EventLifecycleChanged:
 		return e.Lifecycle == LifecycleActive
@@ -3138,10 +3209,18 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		routeable, routeabilityReason := poolRouteability(p)
 		members := make([]string, 0, len(p.Members))
 		if routeable {
+			at := s.RouteGateCheckedAt
+			if at.IsZero() {
+				at = time.Now().UTC()
+			}
 			for id := range p.Members {
-				if !p.Revoked[id] {
-					members = append(members, id)
+				if p.Revoked[id] {
+					continue
 				}
+				if !s.delegationEligible(p, id, at) {
+					continue
+				}
+				members = append(members, id)
 			}
 		}
 		revoked := make([]string, 0, len(p.Revoked))
@@ -3209,9 +3288,10 @@ func (s *ReconstructedState) ensurePool(poolID string) *ReconstructedPoolState {
 	p = &ReconstructedPoolState{
 		PoolID:        poolID,
 		Lifecycle:     LifecycleCreated,
-		Members:       make(map[string]bool),
-		Revoked:       make(map[string]bool),
-		BuyerAccounts: make(map[string]bool),
+		Members:               make(map[string]bool),
+		MemberDelegationIDs:   make(map[string]string),
+		Revoked:               make(map[string]bool),
+		BuyerAccounts:         make(map[string]bool),
 	}
 	s.Pools[poolID] = p
 	return p
@@ -3300,6 +3380,31 @@ func validateEvent(e DurableEvent) error {
 		}
 		if err := providerid.Validate(e.ProviderID); err != nil {
 			return err
+		}
+	case EventDelegationGranted:
+		if e.ProviderID == "" || e.DelegationID == "" || e.DelegationOperationID == "" {
+			return fmt.Errorf("delegation_granted requires provider_id, delegation_id, and delegation_operation_id")
+		}
+		if err := providerid.Validate(e.ProviderID); err != nil {
+			return err
+		}
+		if e.CreatorAccountID == "" || e.ManifestCoreDigest == "" || e.ProviderOwnerKeyID == "" ||
+			e.ProviderOwnerKeyVersion == "" || e.ProviderOwnerPublicKey == "" || e.DelegationIssuedAt == "" ||
+			e.DelegationExpiresAt == "" || e.EnvironmentNetworkID == "" || e.CoordinatorAudience == "" ||
+			e.ProviderPoolDelegationSignature == "" {
+			return fmt.Errorf("delegation_granted requires signed delegation fields")
+		}
+	case EventDelegationRevoked:
+		if e.ProviderID == "" || e.DelegationID == "" || e.DelegationOperationID == "" {
+			return fmt.Errorf("delegation_revoked requires provider_id, delegation_id, and delegation_operation_id")
+		}
+		if err := providerid.Validate(e.ProviderID); err != nil {
+			return err
+		}
+		if e.CreatorAccountID == "" || e.ManifestCoreDigest == "" || e.ProviderOwnerKeyID == "" ||
+			e.ProviderOwnerKeyVersion == "" || e.DelegationRevokedAt == "" || e.EnvironmentNetworkID == "" ||
+			e.CoordinatorAudience == "" || e.ProviderPoolDelegationRevocationSignature == "" {
+			return fmt.Errorf("delegation_revoked requires signed revocation fields")
 		}
 	case EventBuyerAuthorized, EventBuyerAuthorizationRm:
 		if e.BuyerAccountID == "" {

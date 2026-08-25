@@ -684,7 +684,19 @@ func (h *adminHandler) handleCreatorAppendEvent(w http.ResponseWriter, r *http.R
 		return
 	}
 	if e.EventType == EventMemberAdmitted {
-		if !h.creatorProviderAdmitAllowed(principal.CreatorID, e.ProviderID) || !h.creatorProviderDelegated(principal.CreatorID, e.ProviderID) || !h.creatorProviderCurrentlyAdmitted(e.ProviderID) {
+		owned := h.creatorProviderAdmitAllowed(principal.CreatorID, e.ProviderID)
+		delegated := h.creatorProviderDelegated(principal.CreatorID, e.ProviderID)
+		if (!owned && !delegated) || !h.creatorProviderCurrentlyAdmitted(e.ProviderID) {
+			h.writeRequestMutationError(w, errCreatorProviderBoundary)
+			return
+		}
+		if delegated && !owned && strings.TrimSpace(e.DelegationID) == "" {
+			h.writeRequestMutationError(w, ErrProviderDelegation)
+			return
+		}
+	}
+	if e.EventType == EventDelegationGranted || e.EventType == EventDelegationRevoked {
+		if !h.creatorProviderDelegated(principal.CreatorID, e.ProviderID) || !h.creatorProviderCurrentlyAdmitted(e.ProviderID) {
 			h.writeRequestMutationError(w, errCreatorProviderBoundary)
 			return
 		}
@@ -1668,6 +1680,8 @@ func (h *adminHandler) writeMutationErrorResponse(w http.ResponseWriter, err err
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
 	case errors.Is(err, ErrProhibitedPromiseClaim):
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "prohibited_promise_claim"}})
+	case errors.Is(err, ErrProviderDelegation):
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "provider_delegation_invalid"}})
 	case errors.Is(err, ErrMalformedDurableEvent):
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
 	default:
@@ -1779,6 +1793,11 @@ func normalizeCreatorEvent(r *http.Request, e DurableEvent, principal creatorPri
 			return DurableEvent{}, errCreatorBoundary
 		}
 		e.CreatorAccountID = principal.CreatorID
+	case EventDelegationGranted, EventDelegationRevoked:
+		if bodyCreatorID != "" && bodyCreatorID != principal.CreatorID {
+			return DurableEvent{}, errCreatorBoundary
+		}
+		e.CreatorAccountID = principal.CreatorID
 	default:
 		if bodyCreatorID != "" && bodyCreatorID != principal.CreatorID {
 			return DurableEvent{}, errCreatorBoundary
@@ -1793,7 +1812,7 @@ func creatorEventAllowed(e DurableEvent) error {
 		return ErrSignedControlProofPath
 	}
 	switch e.EventType {
-	case EventPoolCreated, EventRootIssuerRegistered, EventManifestAccepted, EventMemberAdmitted, EventMemberRevoked, EventBuyerAuthorized, EventBuyerAuthorizationRm:
+	case EventPoolCreated, EventRootIssuerRegistered, EventManifestAccepted, EventMemberAdmitted, EventMemberRevoked, EventDelegationGranted, EventDelegationRevoked, EventBuyerAuthorized, EventBuyerAuthorizationRm:
 		return nil
 	case EventLifecycleChanged:
 		if e.Lifecycle == LifecycleActive {
@@ -1869,9 +1888,14 @@ func creatorEventValidForCurrentState(state *ReconstructedState, e DurableEvent)
 		if pool == nil || pool.RootIssuer == nil {
 			return errCreatorInvalidEvent
 		}
-	case EventMemberAdmitted, EventMemberRevoked, EventBuyerAuthorized, EventBuyerAuthorizationRm, EventLifecycleChanged:
+	case EventMemberAdmitted, EventMemberRevoked, EventDelegationGranted, EventDelegationRevoked, EventBuyerAuthorized, EventBuyerAuthorizationRm, EventLifecycleChanged:
 		if pool == nil {
 			return errCreatorInvalidEvent
+		}
+		if e.EventType == EventDelegationGranted || e.EventType == EventDelegationRevoked {
+			if pool.ManifestVersion == 0 || pool.ManifestCoreDigest == "" {
+				return errCreatorInvalidEvent
+			}
 		}
 	}
 	return nil

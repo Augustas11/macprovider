@@ -1689,7 +1689,7 @@ func TestAdminHandler_CreatorSurfaceIdempotencyAndPolicyGuards(t *testing.T) {
 	postCreatorEvent(t, handler, "creator-token-a", trustpool.DurableEvent{
 		EventType:  trustpool.EventMemberAdmitted,
 		PoolID:     root.poolID,
-		ProviderID: "provider-a",
+		ProviderID: "provider-b",
 	}, "op-member-again", http.StatusForbidden)
 	reloader.SetCreatorAdminConfig(
 		creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
@@ -1717,7 +1717,7 @@ func TestAdminHandler_CreatorSurfaceIdempotencyAndPolicyGuards(t *testing.T) {
 	reloader.SetCreatorAdminConfig(
 		creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
 		map[string][]string{"creator-a": {}},
-		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {}},
 		map[string][]string{"creator-a": {"acct-allowed"}},
 	)
 	if snap := registry.Snapshot(root.poolID); snap.Members["provider-a"] || snap.Generation == activeGeneration {
@@ -1857,7 +1857,7 @@ func TestAdminHandler_CreatorSurfaceRejectsUndelegatedProvider(t *testing.T) {
 		Registry:                         trustpool.NewRegistry(),
 		OperatorKey:                      "operator-secret",
 		CreatorAdminCredentials:          creatorCredentials("creator-a", "creator-a-cred", "creator-token-a"),
-		CreatorAdminProviderIDs:          map[string][]string{"creator-a": {"provider-a"}},
+		CreatorAdminProviderIDs:          map[string][]string{"creator-a": {}},
 		CreatorAdminProviderDelegatedIDs: map[string][]string{"creator-a": {}},
 		CreatorAdminBuyerAccountIDs:      map[string][]string{"creator-a": {"acct-allowed"}},
 		CreatorProviderAdmitted:          admittedProviderIDs("provider-a"),
