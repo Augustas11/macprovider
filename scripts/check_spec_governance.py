@@ -1545,12 +1545,12 @@ def _validate_trusted_pool_creator_mvp_journey_result(
             "root_registration_replay_checked",
             "settlement_labels_bound",
             "successful_pooled_request",
+            "creator_suspension_root_compromise_freeze_verified",
+            "descendant_signer_rejection_verified",
         }
         false_fields = {
             "coordinator_blind_claimed",
-            "creator_suspension_root_compromise_freeze_verified",
             "delegation_revocation_verified",
-            "descendant_signer_rejection_verified",
             "global_fallback_observed",
             "payout_ready_mutated",
             "pool_existence_oracle_within_threshold",

@@ -5762,12 +5762,14 @@
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) IssueRootRegistrationNonce",
         "phase4-coordinator/internal/trustpool/durable_store.go:func consumeRootRegistrationNonce",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) AppendValidatedEvent",
+        "phase4-coordinator/internal/trustpool/durable_store.go:EventRootCompromiseFrozen",
         "phase4-coordinator/internal/trustpool/root_manifest.go:func VerifyRootIssuerRegistrationEvent"
       ],
       "tests": [
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_RootRegistrationNonceIssuedConsumedAndServerTimed",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ReconstructRejectsDuplicateRootRegistrationNonce",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_CreatorApprovalGatesNonceAndExpansiveMutations",
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_RootCompromiseFreeze",
         "phase4-coordinator/internal/trustpool/root_manifest_test.go:TestRootIssuerPublicKeyFingerprintIgnoresKeyID",
         "phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate"
       ],
@@ -5779,7 +5781,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Creator root issuer registration: SPEC-042 identity-core primitives, creator-gated nonce issuance, one-time nonce consumption, durable replay rejection of duplicate root-registration nonce use, durable root registration replay, fingerprint reuse rejection, proof-of-possession verification, suspension invalidation of pending root nonces, and bounded bearer-token creator routes for creator-owned nonce/event submission are implemented locally. A protected builder/workflow/validator path now exists for non-promoting signed creator-MVP candidate evidence. A signed isolated-candidate creator-MVP envelope is now committed and remains evidence-only. Still pending: CONFORMANCE promotion of that envelope, root retirement, custody-disclosure mutation, independent compromise-reporting channel, immutable lineage/tombstones, and production promotion evidence."
+        "rationale": "Creator root issuer registration: SPEC-042 identity-core primitives, creator-gated nonce issuance, one-time nonce consumption, durable replay rejection of duplicate root-registration nonce use, durable root registration replay, fingerprint reuse rejection, proof-of-possession verification, suspension invalidation of pending root nonces, and bounded bearer-token creator routes for creator-owned nonce/event submission are implemented locally. A protected builder/workflow/validator path now exists for non-promoting signed creator-MVP candidate evidence. A signed isolated-candidate creator-MVP envelope is now committed and remains evidence-only. Still pending: CONFORMANCE promotion of that envelope, root retirement, custody-disclosure mutation, immutable lineage tombstones beyond candidate freeze, and production promotion evidence."
       }
     },
     {
@@ -6212,7 +6214,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1160",
-        "rationale": "Launch evidence and rollback: a protected manual builder/workflow/validator path exists for non-promoting signed JOURNEY-TRUSTED-POOL-CREATOR-MVP candidate evidence, and a closed PoolPromotionTransitionV1 schema plus append-only spec043-promotion-ledger now persist run-id high-watermarks, consumed authorization ids, per-pool transition epochs, and launch-key tombstones outside coordinator snapshots. The committed production-release keyring is empty/fail-closed. A local isolated candidate harness and a committed signed create-to-route-to-settle-to-pause candidate envelope now exist; `docs/runbooks/trusted-pool-creator-launch.md` records Gate C operator pause/revoke policy and the remaining live-readiness blockers. The envelope is not listed in CONFORMANCE `evidence[]` and no registered production-release approver key exists, so SPEC-043-R012 remains pending."
+        "rationale": "Launch evidence and rollback: a protected manual builder/workflow/validator path exists for non-promoting signed JOURNEY-TRUSTED-POOL-CREATOR-MVP candidate evidence, and a closed PoolPromotionTransitionV1 schema plus append-only spec043-promotion-ledger now persist run-id high-watermarks, consumed authorization ids, per-pool transition epochs, and launch-key tombstones outside coordinator snapshots. The committed production-release keyring is empty/fail-closed. A local isolated candidate harness and a committed signed create-to-route-to-settle-to-pause candidate envelope now exist; `docs/runbooks/trusted-pool-creator-launch.md` records Gate C operator pause/revoke policy. Durable root-compromise freeze and descendant-signer rejection exist in the isolated candidate path; `ProviderPoolDelegationV1` revocation, pool-existence timing-oracle proof, CONFORMANCE `evidence[]`, and a registered production-release approver key do not, so SPEC-043-R012 remains pending."
       }
     },
     {

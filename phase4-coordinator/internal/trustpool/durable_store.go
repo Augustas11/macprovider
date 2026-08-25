@@ -28,6 +28,7 @@ const (
 	EventBuyerAuthorized      = "buyer_authorized"
 	EventBuyerAuthorizationRm = "buyer_authorization_removed"
 	EventMinBinaryVersionSet  = "min_binary_version_set"
+	EventRootCompromiseFrozen = "root_compromise_frozen"
 
 	LifecycleCreated  = "created"
 	LifecycleActive   = "active"
@@ -36,6 +37,7 @@ const (
 	LifecycleRetired  = "retired"
 
 	promotionLaunchEnvironmentCandidate = "candidate"
+	RootCompromiseFreezeReason          = "root_compromise_freeze"
 )
 
 var (
@@ -50,6 +52,7 @@ var (
 	ErrProhibitedPromiseClaim      = errors.New("trustpool: prohibited promise claim")
 	ErrSignedControlProofPath      = errors.New("trustpool: signed control proof requires signed control path")
 	ErrDeliveryDrainPending        = errors.New("trustpool: delivery drain pending")
+	ErrRootCompromiseFreeze        = errors.New("trustpool: root compromise freeze")
 )
 
 type PromotionPreconditionError struct {
@@ -1346,6 +1349,21 @@ func (s *Store) IssueRootRegistrationNonce(ctx context.Context, issue RootRegist
 		} else if used {
 			return ErrConflictingOperationID
 		}
+		events, err := eventsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		approvals, err := creatorApprovalsFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		state, err := reconstructEventsWithApprovals(events, approvals, now)
+		if err != nil {
+			return err
+		}
+		if state.creatorHasFrozenRoot(issue.CreatorAccountID) {
+			return ErrRootCompromiseFreeze
+		}
 		approval, ok, err := creatorApprovalFromQueryer(ctx, conn, issue.CreatorAccountID)
 		if err != nil {
 			return err
@@ -2459,6 +2477,8 @@ type ReconstructedState struct {
 	RouteGateCheckedAt  time.Time
 	Revision            uint64
 	rootNonces          map[string]string
+	frozenFingerprints  map[string]struct{}
+	frozenDescendantIDs map[string]struct{}
 }
 
 type ReconstructedPoolState struct {
@@ -2517,7 +2537,12 @@ func reconstructEventsWithApprovals(events []DurableEvent, approvals map[string]
 }
 
 func reconstructEventsWithApprovalsAndPublicAnnouncements(events []DurableEvent, approvals map[string]CreatorApproval, publicAnnouncements map[string]PublicAnnouncementApproval, reviewedArtifacts map[string]ReviewedDistributionArtifact, gateAt time.Time) (*ReconstructedState, error) {
-	state := &ReconstructedState{Pools: make(map[string]*ReconstructedPoolState), rootNonces: make(map[string]string)}
+	state := &ReconstructedState{
+		Pools:               make(map[string]*ReconstructedPoolState),
+		rootNonces:          make(map[string]string),
+		frozenFingerprints:  make(map[string]struct{}),
+		frozenDescendantIDs: make(map[string]struct{}),
+	}
 	if approvals != nil {
 		state.CreatorApprovals = make(map[string]CreatorApproval, len(approvals))
 		for k, v := range approvals {
@@ -2591,6 +2616,9 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 	}
 	switch e.EventType {
 	case EventRootIssuerRegistered:
+		if s.rootLineageFrozen(e.RootIssuerPublicKeyFingerprint, e.ManifestAuthorityRootKeyID, e.RootIssuerKeyID) {
+			return nil, fmt.Errorf("%w: event %d root registration uses a frozen issuer lineage for pool %q", ErrRootCompromiseFreeze, index, e.PoolID)
+		}
 		if p.RootIssuer != nil {
 			return nil, fmt.Errorf("%w: event %d duplicate root_issuer_registered for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
 		}
@@ -2697,10 +2725,126 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 			}
 		}
 		p.MinBinaryVersion = e.MinBinaryVersion
+	case EventRootCompromiseFrozen:
+		if p.RootIssuer == nil {
+			return nil, fmt.Errorf("%w: event %d root_compromise_frozen before root_issuer_registered for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
+		}
+		if e.RootIssuerPublicKeyFingerprint != p.RootIssuer.PublicKeyFingerprint {
+			return nil, fmt.Errorf("%w: event %d root_compromise_frozen fingerprint mismatch for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
+		}
+		if e.CreatorAccountID != "" && e.CreatorAccountID != p.CreatorAccountID {
+			return nil, fmt.Errorf("%w: event %d root_compromise_frozen creator mismatch for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
+		}
+		if e.Reason != RootCompromiseFreezeReason {
+			return nil, fmt.Errorf("%w: event %d root_compromise_frozen reason %q", ErrMalformedDurableEvent, index, e.Reason)
+		}
+		if _, ok := s.frozenFingerprints[p.RootIssuer.PublicKeyFingerprint]; ok {
+			return p, nil
+		}
+		s.freezeRootLineage(p.RootIssuer.PublicKeyFingerprint, p.RootIssuer.ManifestAuthorityRootKeyID, p.RootIssuer.KeyID)
+		return p, nil
 	default:
 		return nil, fmt.Errorf("trustpool: unknown event type %q", e.EventType)
 	}
 	return p, nil
+}
+
+func (s *ReconstructedState) freezeRootLineage(fingerprint, descendantKeyID, rootKeyID string) {
+	if s == nil {
+		return
+	}
+	if s.frozenFingerprints == nil {
+		s.frozenFingerprints = make(map[string]struct{})
+	}
+	if s.frozenDescendantIDs == nil {
+		s.frozenDescendantIDs = make(map[string]struct{})
+	}
+	if fingerprint != "" {
+		s.frozenFingerprints[fingerprint] = struct{}{}
+	}
+	if descendantKeyID != "" {
+		s.frozenDescendantIDs[descendantKeyID] = struct{}{}
+	}
+	if rootKeyID != "" {
+		s.frozenDescendantIDs[rootKeyID] = struct{}{}
+	}
+	for _, p := range s.Pools {
+		if p == nil || p.RootIssuer == nil {
+			continue
+		}
+		if p.RootIssuer.PublicKeyFingerprint != fingerprint && p.RootIssuer.ManifestAuthorityRootKeyID != descendantKeyID && p.RootIssuer.KeyID != rootKeyID {
+			continue
+		}
+		p.CreatorGateReason = RootCompromiseFreezeReason
+		if p.Lifecycle == LifecycleActive {
+			p.Lifecycle = LifecyclePaused
+			p.LifecycleReason = RootCompromiseFreezeReason
+		} else if p.LifecycleReason == "" {
+			p.LifecycleReason = RootCompromiseFreezeReason
+		}
+		p.RouteableGeneration = p.Generation + 1
+	}
+}
+
+func (s *ReconstructedState) rootLineageFrozen(fingerprint, descendantKeyID, rootKeyID string) bool {
+	if s == nil {
+		return false
+	}
+	if fingerprint != "" {
+		if _, ok := s.frozenFingerprints[fingerprint]; ok {
+			return true
+		}
+	}
+	if descendantKeyID != "" {
+		if _, ok := s.frozenDescendantIDs[descendantKeyID]; ok {
+			return true
+		}
+	}
+	if rootKeyID != "" {
+		if _, ok := s.frozenDescendantIDs[rootKeyID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *ReconstructedState) eventTouchesFrozenLineage(e DurableEvent) bool {
+	if s == nil {
+		return false
+	}
+	if s.rootLineageFrozen(e.RootIssuerPublicKeyFingerprint, e.ManifestAuthorityRootKeyID, e.RootIssuerKeyID) {
+		return true
+	}
+	p := s.Pools[e.PoolID]
+	if p == nil || p.RootIssuer == nil {
+		if e.CreatorAccountID != "" {
+			for _, pool := range s.Pools {
+				if pool == nil || pool.CreatorAccountID != e.CreatorAccountID || pool.RootIssuer == nil {
+					continue
+				}
+				if s.rootLineageFrozen(pool.RootIssuer.PublicKeyFingerprint, pool.RootIssuer.ManifestAuthorityRootKeyID, pool.RootIssuer.KeyID) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return s.rootLineageFrozen(p.RootIssuer.PublicKeyFingerprint, p.RootIssuer.ManifestAuthorityRootKeyID, p.RootIssuer.KeyID)
+}
+
+func (s *ReconstructedState) creatorHasFrozenRoot(creatorID string) bool {
+	if s == nil || creatorID == "" {
+		return false
+	}
+	for _, p := range s.Pools {
+		if p == nil || p.CreatorAccountID != creatorID || p.RootIssuer == nil {
+			continue
+		}
+		if s.rootLineageFrozen(p.RootIssuer.PublicKeyFingerprint, p.RootIssuer.ManifestAuthorityRootKeyID, p.RootIssuer.KeyID) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *ReconstructedState) rootFingerprintOwner(fingerprint string) (string, bool) {
@@ -2742,6 +2886,22 @@ func (s *ReconstructedState) applyCreatorRouteGates() {
 			continue
 		}
 		p.CreatorGateExpiresAtUTC = approval.CreatorAgreementGraceEndsAtUTC
+	}
+	for _, p := range s.Pools {
+		if p == nil || p.RootIssuer == nil {
+			continue
+		}
+		if !s.rootLineageFrozen(p.RootIssuer.PublicKeyFingerprint, p.RootIssuer.ManifestAuthorityRootKeyID, p.RootIssuer.KeyID) {
+			continue
+		}
+		p.CreatorGateReason = RootCompromiseFreezeReason
+		if p.Lifecycle == LifecycleActive {
+			p.Lifecycle = LifecyclePaused
+			p.LifecycleReason = RootCompromiseFreezeReason
+		}
+		if p.RouteableGeneration <= p.Generation {
+			p.RouteableGeneration = p.Generation + 1
+		}
 	}
 }
 
@@ -2808,6 +2968,12 @@ func publicAnnouncementLaunchAllowed(p *ReconstructedPoolState) bool {
 
 func (s *ReconstructedState) validateMutationCreatorGate(e DurableEvent, now time.Time) error {
 	if s == nil || s.CreatorApprovals == nil {
+		return nil
+	}
+	if e.EventType != EventRootCompromiseFrozen && s.eventTouchesFrozenLineage(e) {
+		return ErrRootCompromiseFreeze
+	}
+	if e.EventType == EventRootCompromiseFrozen {
 		return nil
 	}
 	creatorID := e.CreatorAccountID
@@ -3125,6 +3291,13 @@ func validateEvent(e DurableEvent) error {
 	case EventMinBinaryVersionSet:
 		if e.MinBinaryVersion != "" && !versionfloor.Valid(e.MinBinaryVersion) {
 			return fmt.Errorf("invalid min_binary_version %q", e.MinBinaryVersion)
+		}
+	case EventRootCompromiseFrozen:
+		if err := requireLowerHex64(e.RootIssuerPublicKeyFingerprint); err != nil {
+			return err
+		}
+		if e.Reason != RootCompromiseFreezeReason {
+			return fmt.Errorf("root_compromise_frozen requires reason %q", RootCompromiseFreezeReason)
 		}
 	default:
 		return fmt.Errorf("unknown event type %q", e.EventType)

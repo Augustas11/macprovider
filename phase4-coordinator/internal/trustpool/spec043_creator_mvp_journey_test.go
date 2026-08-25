@@ -344,6 +344,21 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 		t.Fatalf("paused snapshot = %+v, want fail-closed members", paused)
 	}
 
+	suspended = validCreatorApproval("creator-a", "approval-v1", "approval-version-1", "candidate", graceEnds, trustpool.CreatorStatusSuspended)
+	postAdminCreator(t, handler, creatorMVPOperatorKey, suspended, http.StatusAccepted)
+	postCreatorRootCompromise(t, handler, creatorMVPCreatorToken, root.poolID, root.fingerprint, "op-freeze", http.StatusAccepted)
+	postCreatorRootRegistrationNonce(t, handler, creatorMVPCreatorToken, trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce-frozen",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		ExpiresAtUTC:           testAdminTS(3600),
+	}, http.StatusConflict)
+	postAdminCreator(t, handler, creatorMVPOperatorKey, approval, http.StatusAccepted)
+	descendant := signedManifestWithPolicyCoreMutation(t, "op-descendant-manifest", testAdminTS(9), root.poolID, 2, root, isolatedCreatorMVPPolicy)
+	descendant.RootIssuerKeyID = root.authorityRoot.KeyID
+	postCreatorEvent(t, handler, creatorMVPCreatorToken, descendant, "op-descendant-manifest", http.StatusConflict)
+
 	evidence := creatorMVPEvidence(t, creatorMVPEvidenceInput{
 		PoolID:                      root.poolID,
 		ManifestVersion:             strconv.FormatUint(manifest.ManifestVersion, 10),
@@ -369,7 +384,7 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 		BuyerAccountID:              creatorMVPBuyerAccount,
 		ProviderID:                  creatorMVPProviderID,
 		CreatorAccountID:            "creator-a",
-		OperationIDs:                "op-create,op-root,op-manifest,op-member,op-buyer,op-promote,op-pause",
+		OperationIDs:                "op-create,op-root,op-manifest,op-member,op-buyer,op-promote,op-pause,op-freeze",
 	})
 	assertCreatorMVPEvidenceRedacted(t, evidence, chatBody, creatorMVPOperatorKey, creatorMVPCreatorToken, creatorMVPBuyerAccount, creatorMVPProviderID, provider.URL)
 	writeCreatorMVPEvidenceIfRequested(t, evidence)
@@ -498,7 +513,7 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 			creatorMVPStep("step-10-settlement-and-logs", "Route snapshot stored pool_id and digest in observe mode; payout-ready rows stayed zero."),
 			creatorMVPStep("step-11-fail-closed-routing", "Unauthorized and post-revoke pool requests failed closed before a second provider dispatch."),
 			creatorMVPStep("step-12-restart-reconstruction", "Empty-registry request failed closed; durable reconstruct rebuilt pool identity."),
-			creatorMVPStep("step-13-emergency-pause-and-rollback", "Operator pause moved the pool to non-routeable members while retaining the isolated candidate store."),
+			creatorMVPStep("step-13-emergency-pause-and-rollback", "Operator pause moved the pool to non-routeable members; creator freeze while suspended rejected later nonce and descendant-signer mutations."),
 			creatorMVPStep("step-14-redaction-and-artifacts", "Retained evidence uses fingerprints only; request body, bearer material, and local identities are absent."),
 		},
 		"redaction": map[string]any{
@@ -519,9 +534,9 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 			"buyer_authorization_enforced":                           true,
 			"candidate_manifest_accepted":                            true,
 			"creator_admin_authorized_only":                          true,
-			"creator_suspension_root_compromise_freeze_verified":     false,
+			"creator_suspension_root_compromise_freeze_verified":     true,
 			"delegation_revocation_verified":                         false,
-			"descendant_signer_rejection_verified":                   false,
+			"descendant_signer_rejection_verified":                   true,
 			"emergency_pause_exercised":                              true,
 			"fail_closed_no_global_fallback":                         true,
 			"isolated_environment":                                   true,

@@ -1256,6 +1256,71 @@ func TestDurableStore_CreatorApprovalGatesNonceAndExpansiveMutations(t *testing.
 	}
 }
 
+func TestDurableStore_RootCompromiseFreeze(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := time.Unix(1800003550, 0).UTC()
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	root := newRootFixture(t)
+	create := ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-a"
+		e.ApprovalRecordID = "approval-v1"
+	})
+	if _, _, _, err := store.AppendValidatedEvent(ctx, create); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	nonce, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce",
+		CreatorAccountID:       "creator-a",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		Purpose:                trustpool.RootRegistrationPurposeDefault,
+		ExpiresAtUTC:           time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("nonce: %v", err)
+	}
+	if _, _, _, err := store.AppendValidatedEvent(ctx, signedRootRegistrationForIssue(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", nonce, root)); err != nil {
+		t.Fatalf("root: %v", err)
+	}
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusSuspended)
+	freeze := ev("op-freeze", ts.Add(2*time.Second), trustpool.EventRootCompromiseFrozen, root.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-a"
+		e.RootIssuerPublicKeyFingerprint = root.fingerprint
+		e.Reason = trustpool.RootCompromiseFreezeReason
+	})
+	state, _, _, err := store.AppendValidatedEvent(ctx, freeze)
+	if err != nil {
+		t.Fatalf("freeze while suspended: %v", err)
+	}
+	pool := state.Pools[root.poolID]
+	if pool == nil || pool.CreatorGateReason != trustpool.RootCompromiseFreezeReason {
+		t.Fatalf("frozen pool = %+v", pool)
+	}
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	if _, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
+		OperationID:            "op-nonce-after-freeze",
+		CreatorAccountID:       "creator-a",
+		ApprovalRecordID:       "approval-v1",
+		CurrentApprovalVersion: "approval-version-1",
+		LaunchEnvironment:      "candidate",
+		Purpose:                trustpool.RootRegistrationPurposeDefault,
+		ExpiresAtUTC:           time.Now().Add(time.Hour),
+	}); !errors.Is(err, trustpool.ErrRootCompromiseFreeze) {
+		t.Fatalf("nonce after freeze err=%v, want ErrRootCompromiseFreeze", err)
+	}
+	descendant := signedManifestWithPolicyCoreMutation(t, "op-descendant", ts.Add(3*time.Second), root.poolID, 1, root, nil)
+	descendant.RootIssuerKeyID = root.authorityRoot.KeyID
+	if _, _, _, err := store.AppendValidatedEvent(ctx, descendant); !errors.Is(err, trustpool.ErrRootCompromiseFreeze) {
+		t.Fatalf("descendant manifest err=%v, want ErrRootCompromiseFreeze", err)
+	}
+}
+
 func TestDurableStore_CreatorApprovalRequiresR001Fields(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

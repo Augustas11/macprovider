@@ -45,8 +45,8 @@ the path:
 
 | Observation | Missing product path |
 |---|---|
-| `creator_suspension_root_compromise_freeze_verified` | Authenticated emergency root-compromise intake that still works while the creator is suspended, plus automatic provisional freeze (`root_compromise_freeze`) |
-| `descendant_signer_rejection_verified` | Terminal retirement of the compromised root lineage and reject of descendant operational signers after freeze |
+| `creator_suspension_root_compromise_freeze_verified` | Isolated candidate: creator emergency `POST /creator/trust-pools/emergency/root-compromise` works while the creator is suspended; nonce issuance and later mutations fail with `root_compromise_freeze` |
+| `descendant_signer_rejection_verified` | Isolated candidate: after freeze, a mutation presenting the delegated manifest-authority key id is rejected with `root_compromise_freeze` |
 | `delegation_revocation_verified` | Canonical `ProviderPoolDelegationV1` admit/revoke (member_revoked is not delegation proof) |
 | `pool_existence_oracle_within_threshold` | Gateway/coordinator timing-floor proof that unknown vs unauthorized vs disabled pool rejects are statistically indistinguishable at the SPEC-043-R007 bounds |
 
@@ -94,14 +94,17 @@ Do not treat a green local test as production promotion.
 3. If a provider must leave immediately: `revoke-provider`, then confirm no
    further pooled dispatch to that identity.
 4. If the creator account is untrusted: `upsert-creator` with suspended status
-   so nonce issuance and expansive mutations fail closed.
+   so nonce issuance and expansive mutations fail closed. Report root compromise
+   with `POST /creator/trust-pools/emergency/root-compromise` or
+   `POST /admin/trust-pools/emergency/root-compromise`; that freeze still works
+   while the creator is suspended and keeps descendant signers from mutating.
 5. Global (non-pool) traffic must remain unaffected. Do not “fix” a pool
    outage by clearing `X-MacProvider-Pool-Select` or routing pool buyers to
    the global pool.
 
-Root-compromise freeze, descendant-signer kill, and legal-hold suppression
-windows are **not** on this CLI yet. If a root key is believed compromised,
-pause every owned pool and keep the creator suspended until those paths exist.
+Root-compromise freeze and descendant-signer rejection are proven in the
+isolated candidate harness. `ProviderPoolDelegationV1` revocation and the
+pool-existence timing oracle are **not** on this CLI yet.
 
 ## Settlement
 
@@ -112,7 +115,7 @@ part of this MVP.
 
 ## Next gates
 
-- Remaining Gate C: implement the four blocked paths above, then recapture and
-  re-sign the candidate journey on reviewed `main`.
+- Remaining Gate C: `ProviderPoolDelegationV1` revocation and pool-existence
+  timing-oracle proof, then recapture and re-sign the candidate journey.
 - Gate D: sibling `PoolPromotionTransitionV1`, non-empty production-release
   keyring, promoter allowlist, CONFORMANCE `evidence[]` only through that flow.
