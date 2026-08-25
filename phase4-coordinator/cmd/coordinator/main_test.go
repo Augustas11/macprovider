@@ -1200,6 +1200,9 @@ func TestReloadCoordinatorConfigReloadsTrustedPoolsCreatorAdminConfig(t *testing
 	next.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-a": {"provider-b"}}
 	next.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-b"}}
 	next.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-b"}}
+	next.TrustedPools.ProviderOwnerPublicKeys = map[string]string{
+		"provider-b": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	}
 	reloader := &reloadTrustPoolCreatorAdminConfigRecorder{}
 
 	basePath := writeReloadConfig(t, startup)

@@ -2,7 +2,6 @@ package trustpool
 
 import (
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -14,7 +13,7 @@ import (
 )
 
 const (
-	ProviderPoolDelegationSchemaVersion             = "provider-pool-delegation-v1"
+	ProviderPoolDelegationSchemaVersion           = "provider-pool-delegation-v1"
 	ProviderPoolDelegationRevocationSchemaVersion = "provider-pool-delegation-revocation-v1"
 	ProviderPoolDelegationRevocationSemantics     = "owner_revocable"
 
@@ -23,7 +22,7 @@ const (
 )
 
 var (
-	ErrProviderDelegation = errors.New("trustpool: provider pool delegation invalid")
+	ErrProviderDelegation  = errors.New("trustpool: provider pool delegation invalid")
 	errDelegationSignature = errors.New("trustpool: provider pool delegation signature verification failed")
 )
 
@@ -38,20 +37,20 @@ type poolProviderKey struct {
 }
 
 type delegationRecord struct {
-	PoolID                 string
-	CreatorAccountID       string
-	ProviderID             string
-	DelegationID           string
-	DelegationOperationID  string
-	ManifestCoreDigest     string
-	EnvironmentNetworkID   string
-	CoordinatorAudience    string
-	ProviderOwnerKeyID     string
+	PoolID                  string
+	CreatorAccountID        string
+	ProviderID              string
+	DelegationID            string
+	DelegationOperationID   string
+	ManifestCoreDigest      string
+	EnvironmentNetworkID    string
+	CoordinatorAudience     string
+	ProviderOwnerKeyID      string
 	ProviderOwnerKeyVersion string
-	ProviderOwnerPublicKey []byte
-	IssuedAt               time.Time
-	ExpiresAt              time.Time
-	Revoked                bool
+	ProviderOwnerPublicKey  []byte
+	IssuedAt                time.Time
+	ExpiresAt               time.Time
+	Revoked                 bool
 }
 
 func CoordinatorAudienceForEnvironment(environment string) string {
@@ -79,21 +78,21 @@ func delegationSignedFieldsFromEvent(e DurableEvent) (map[string]any, error) {
 		return nil, ErrProviderDelegation
 	}
 	return map[string]any{
-		"schema_version":              ProviderPoolDelegationSchemaVersion,
-		"creator_account_id":          e.CreatorAccountID,
-		"pool_id":                     e.PoolID,
-		"provider_identity":           e.ProviderID,
-		"delegation_id":               e.DelegationID,
-		"operation_id":                e.DelegationOperationID,
-		"manifest_core_digest":        e.ManifestCoreDigest,
-		"environment_network_id":      e.EnvironmentNetworkID,
-		"coordinator_audience":        e.CoordinatorAudience,
-		"provider_owner_key_id":       e.ProviderOwnerKeyID,
-		"provider_owner_key_version":  e.ProviderOwnerKeyVersion,
-		"provider_owner_public_key":   e.ProviderOwnerPublicKey,
-		"issued_at":                   e.DelegationIssuedAt,
-		"expires_at":                  e.DelegationExpiresAt,
-		"revocation_semantics":        ProviderPoolDelegationRevocationSemantics,
+		"schema_version":             ProviderPoolDelegationSchemaVersion,
+		"creator_account_id":         e.CreatorAccountID,
+		"pool_id":                    e.PoolID,
+		"provider_identity":          e.ProviderID,
+		"delegation_id":              e.DelegationID,
+		"operation_id":               e.DelegationOperationID,
+		"manifest_core_digest":       e.ManifestCoreDigest,
+		"environment_network_id":     e.EnvironmentNetworkID,
+		"coordinator_audience":       e.CoordinatorAudience,
+		"provider_owner_key_id":      e.ProviderOwnerKeyID,
+		"provider_owner_key_version": e.ProviderOwnerKeyVersion,
+		"provider_owner_public_key":  e.ProviderOwnerPublicKey,
+		"issued_at":                  e.DelegationIssuedAt,
+		"expires_at":                 e.DelegationExpiresAt,
+		"revocation_semantics":       ProviderPoolDelegationRevocationSemantics,
 	}, nil
 }
 
@@ -104,17 +103,17 @@ func delegationRevocationSignedFieldsFromEvent(e DurableEvent, rec delegationRec
 	return map[string]any{
 		"schema_version":             ProviderPoolDelegationRevocationSchemaVersion,
 		"creator_account_id":         e.CreatorAccountID,
-		"pool_id":                      e.PoolID,
-		"provider_identity":            e.ProviderID,
-		"delegation_id":                e.DelegationID,
-		"operation_id":                 e.DelegationOperationID,
-		"manifest_core_digest":         e.ManifestCoreDigest,
-		"environment_network_id":       e.EnvironmentNetworkID,
-		"coordinator_audience":         e.CoordinatorAudience,
-		"provider_owner_key_id":        e.ProviderOwnerKeyID,
-		"provider_owner_key_version":   e.ProviderOwnerKeyVersion,
-		"revoked_at":                   e.DelegationRevokedAt,
-		"revocation_semantics":         ProviderPoolDelegationRevocationSemantics,
+		"pool_id":                    e.PoolID,
+		"provider_identity":          e.ProviderID,
+		"delegation_id":              e.DelegationID,
+		"operation_id":               e.DelegationOperationID,
+		"manifest_core_digest":       e.ManifestCoreDigest,
+		"environment_network_id":     e.EnvironmentNetworkID,
+		"coordinator_audience":       e.CoordinatorAudience,
+		"provider_owner_key_id":      e.ProviderOwnerKeyID,
+		"provider_owner_key_version": e.ProviderOwnerKeyVersion,
+		"revoked_at":                 e.DelegationRevokedAt,
+		"revocation_semantics":       ProviderPoolDelegationRevocationSemantics,
 	}, nil
 }
 
@@ -282,6 +281,10 @@ func (s *ReconstructedState) delegationEligible(p *ReconstructedPoolState, provi
 	if !bound || delegationID == "" {
 		return true
 	}
+	activeID, ok := s.activeProviderDelegations[poolProviderKey{PoolID: p.PoolID, ProviderID: providerID}]
+	if !ok || activeID != delegationID {
+		return false
+	}
 	rec, ok := s.delegationRecordFor(p.PoolID, delegationID)
 	if !ok || rec.Revoked {
 		return false
@@ -304,8 +307,6 @@ func SignProviderPoolDelegation(privateKey ed25519.PrivateKey, signed map[string
 		return "", err
 	}
 	sig := ed25519.Sign(privateKey, msg)
-	sum := sha256.Sum256(msg)
-	_ = sum
 	return base64.StdEncoding.EncodeToString(sig), nil
 }
 
@@ -327,4 +328,39 @@ func providerOwnerPublicKeyBase64(publicKey ed25519.PublicKey) string {
 
 func providerDelegationManifestDigestHex(digest []byte) string {
 	return hex.EncodeToString(digest)
+}
+
+// ParseProviderOwnerPublicKeys decodes configured provider_id -> base64 Ed25519
+// public keys for SPEC-003 owner binding on ProviderPoolDelegationV1 events.
+func ParseProviderOwnerPublicKeys(raw map[string]string) (map[string][]byte, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make(map[string][]byte, len(raw))
+	for providerID, encoded := range raw {
+		providerID = strings.TrimSpace(providerID)
+		if providerID == "" {
+			return nil, fmt.Errorf("trustpool: provider owner public keys contain empty provider id")
+		}
+		pub, err := canonicalBase64(strings.TrimSpace(encoded))
+		if err != nil || len(pub) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("trustpool: invalid provider owner public key for %q", providerID)
+		}
+		out[providerID] = append([]byte(nil), pub...)
+	}
+	return out, nil
+}
+
+// ProviderOwnerPublicKeyLookup returns an AdminDeps resolver backed by parsed keys.
+func ProviderOwnerPublicKeyLookup(keys map[string][]byte) func(providerID string) ([]byte, bool) {
+	if len(keys) == 0 {
+		return nil
+	}
+	return func(providerID string) ([]byte, bool) {
+		key, ok := keys[providerID]
+		if !ok || len(key) != ed25519.PublicKeySize {
+			return nil, false
+		}
+		return append([]byte(nil), key...), true
+	}
 }

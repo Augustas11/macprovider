@@ -13,7 +13,14 @@ import (
 func TestProviderPoolDelegationGrantAndRevokeReplay(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	_, ownerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	ownerPub := ownerPriv.Public().(ed25519.PublicKey)
+	store, err := trustpool.NewStore(openTrustPoolDB(t), trustpool.WithProviderOwnerPublicKeys(map[string][]byte{
+		"provider-b": ownerPub,
+	}))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -36,10 +43,6 @@ func TestProviderPoolDelegationGrantAndRevokeReplay(t *testing.T) {
 	}
 
 	manifestDigest := events[len(events)-1].ManifestCoreDigest
-	_, ownerPriv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
 	grant := creatorMVPDelegationGrantedEvent(t, ownerPriv, root.poolID, "creator-a", manifestDigest, "candidate", "provider-b", "del-b-1", "deleg-op-grant")
 	grant.OperationID = "op-delegation-grant"
 	grant.TimestampUTC = ts.Add(3 * time.Second)

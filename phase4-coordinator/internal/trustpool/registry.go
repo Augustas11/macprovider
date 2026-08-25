@@ -44,9 +44,10 @@ type poolState struct {
 	// a revoked identity stays out even if re-added to members by mistake,
 	// which is the "identity-forever blocklist" the admission-manager TTL
 	// path explicitly is not.
-	members map[string]struct{}
-	revoked map[string]struct{}
-	buyers  map[string]struct{}
+	members                 map[string]struct{}
+	revoked                 map[string]struct{}
+	buyers                  map[string]struct{}
+	memberDelegationExpires map[string]time.Time
 	// routeable is true only for pools whose durable lifecycle is active.
 	// Unknown, created, paused, draining, and retired pools fail as
 	// pool_unavailable before candidate filtering.
@@ -101,18 +102,19 @@ type Snapshot struct {
 // routeable RIGHT NOW; non-active pools should pass an empty member set so the
 // routing gate fails closed while preserving the pool's generation fence.
 type RouteableSnapshot struct {
-	PoolID            string
-	CreatorAccountID  string
-	Members           []string
-	Revoked           []string
-	BuyerAccounts     []string
-	MinBinaryVersion  string
-	ModelAllowlist    []string
-	SettlementMode    string
-	Routeable         bool
-	Generation        uint64
-	RouteableUntilUTC time.Time
-	RouteableExpired  bool
+	PoolID                    string
+	CreatorAccountID          string
+	Members                   []string
+	MemberDelegationExpiryUTC map[string]time.Time
+	Revoked                   []string
+	BuyerAccounts             []string
+	MinBinaryVersion          string
+	ModelAllowlist            []string
+	SettlementMode            string
+	Routeable                 bool
+	Generation                uint64
+	RouteableUntilUTC         time.Time
+	RouteableExpired          bool
 }
 
 // NewRegistry returns an empty registry.
@@ -501,7 +503,7 @@ func (r *Registry) BeginPoolDeliveryAtGeneration(poolID string, generation uint6
 	r.mu.Lock()
 	ps := r.pools[poolID]
 	now := time.Now().UTC()
-	if ps == nil || !ps.routeableAt(now) || ps.generationAt(now)+r.ceilingGeneration != generation {
+	if ps == nil || !ps.routeableAt(now) || r.effectiveGenerationLocked(ps, now) != generation {
 		r.mu.Unlock()
 		return func() {}, false
 	}
@@ -590,18 +592,26 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 			}
 			buyers[id] = struct{}{}
 		}
+		memberDelegationExpires := make(map[string]time.Time, len(s.MemberDelegationExpiryUTC))
+		for memberID, expiry := range s.MemberDelegationExpiryUTC {
+			if memberID == "" || expiry.IsZero() {
+				continue
+			}
+			memberDelegationExpires[memberID] = expiry.UTC()
+		}
 		next[s.PoolID] = &poolState{
-			creatorAccountID:  s.CreatorAccountID,
-			members:           members,
-			revoked:           revoked,
-			buyers:            buyers,
-			routeable:         s.Routeable,
-			minBinaryVersion:  s.MinBinaryVersion,
-			modelAllowlist:    modelAllowlist,
-			settlementMode:    canonicalPoolSettlementMode(s.SettlementMode),
-			generation:        s.Generation,
-			routeableUntilUTC: s.RouteableUntilUTC.UTC(),
-			routeableExpired:  s.RouteableExpired,
+			creatorAccountID:        s.CreatorAccountID,
+			members:                 members,
+			revoked:                 revoked,
+			buyers:                  buyers,
+			memberDelegationExpires: memberDelegationExpires,
+			routeable:               s.Routeable,
+			minBinaryVersion:        s.MinBinaryVersion,
+			modelAllowlist:          modelAllowlist,
+			settlementMode:          canonicalPoolSettlementMode(s.SettlementMode),
+			generation:              s.Generation,
+			routeableUntilUTC:       s.RouteableUntilUTC.UTC(),
+			routeableExpired:        s.RouteableExpired,
 		}
 	}
 
@@ -705,7 +715,21 @@ func poolStatesEqual(a, b *poolState) bool {
 		a.routeableExpired == b.routeableExpired &&
 		stringSetsEqual(a.members, b.members) &&
 		stringSetsEqual(a.revoked, b.revoked) &&
-		stringSetsEqual(a.buyers, b.buyers)
+		stringSetsEqual(a.buyers, b.buyers) &&
+		timeMapsEqual(a.memberDelegationExpires, b.memberDelegationExpires)
+}
+
+func timeMapsEqual(a, b map[string]time.Time) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || !av.Equal(bv) {
+			return false
+		}
+	}
+	return true
 }
 
 func stringSetsEqual(a, b map[string]struct{}) bool {
@@ -854,16 +878,7 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 	}
 	now := time.Now().UTC()
 	routeableExpired := ps.routeableExpired || ps.routeableExpiredAt(now)
-	members := make(map[string]bool, len(ps.members))
-	for id := range ps.members {
-		if _, revoked := ps.revoked[id]; revoked {
-			continue
-		}
-		if !r.providerMembershipAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
-			continue
-		}
-		members[id] = true
-	}
+	members, _ := r.routeMembersLocked(ps, now)
 	return Snapshot{
 		PoolID:            poolID,
 		Exists:            true,
@@ -872,7 +887,7 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
 		SettlementMode:    routeablePoolSettlementMode(ps.settlementMode),
 		Routeable:         ps.routeableAt(now),
-		Generation:        ps.generationAt(now) + r.ceilingGeneration,
+		Generation:        r.effectiveGenerationLocked(ps, now),
 		Revision:          r.revision,
 		RouteableUntilUTC: ps.routeableUntilUTC,
 		RouteableExpired:  routeableExpired,
@@ -895,16 +910,7 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 	}
 	now := time.Now().UTC()
 	routeableExpired := ps.routeableExpired || ps.routeableExpiredAt(now)
-	members := make(map[string]bool, len(ps.members))
-	for id := range ps.members {
-		if _, revoked := ps.revoked[id]; revoked {
-			continue
-		}
-		if !r.providerMembershipAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
-			continue
-		}
-		members[id] = true
-	}
+	members, _ := r.routeMembersLocked(ps, now)
 	_, authorized := ps.buyers[buyerAccountID]
 	if authorized && !r.buyerAllowedByCreatorCeilingLocked(ps.creatorAccountID, buyerAccountID) {
 		authorized = false
@@ -917,7 +923,7 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 		ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
 		SettlementMode:    routeablePoolSettlementMode(ps.settlementMode),
 		Routeable:         ps.routeableAt(now),
-		Generation:        ps.generationAt(now) + r.ceilingGeneration,
+		Generation:        r.effectiveGenerationLocked(ps, now),
 		Revision:          r.revision,
 		RouteableUntilUTC: ps.routeableUntilUTC,
 		RouteableExpired:  routeableExpired,
@@ -949,7 +955,7 @@ func (r *Registry) Generation(poolID string) uint64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if ps := r.pools[poolID]; ps != nil {
-		return ps.generationAt(time.Now().UTC()) + r.ceilingGeneration
+		return r.effectiveGenerationLocked(ps, time.Now().UTC())
 	}
 	return 0
 }
@@ -1027,6 +1033,34 @@ func preserveRemovedCreatorCeilingsAsDenyAll(previous, next map[string]map[strin
 		}
 	}
 	return next
+}
+
+func (r *Registry) effectiveGenerationLocked(ps *poolState, now time.Time) uint64 {
+	generation := ps.generationAt(now) + r.ceilingGeneration
+	_, delegationExpired := r.routeMembersLocked(ps, now)
+	if delegationExpired {
+		generation++
+	}
+	return generation
+}
+
+func (r *Registry) routeMembersLocked(ps *poolState, now time.Time) (map[string]bool, bool) {
+	members := make(map[string]bool, len(ps.members))
+	delegationExpired := false
+	for id := range ps.members {
+		if _, revoked := ps.revoked[id]; revoked {
+			continue
+		}
+		if !r.providerMembershipAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
+			continue
+		}
+		if expiry, ok := ps.memberDelegationExpires[id]; ok && !expiry.IsZero() && !now.Before(expiry.UTC()) {
+			delegationExpired = true
+			continue
+		}
+		members[id] = true
+	}
+	return members, delegationExpired
 }
 
 func (r *Registry) providerMembershipAllowedByCreatorCeilingLocked(creatorID, providerID string) bool {

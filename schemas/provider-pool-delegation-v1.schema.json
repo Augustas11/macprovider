@@ -13,7 +13,12 @@
       "maxItems": 1,
       "items": {"$ref": "#/$defs/signature"}
     },
-    "signed": {"$ref": "#/$defs/delegation_signed"}
+    "signed": {
+      "oneOf": [
+        {"$ref": "#/$defs/delegation_signed"},
+        {"$ref": "#/$defs/revocation_signed"}
+      ]
+    }
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},

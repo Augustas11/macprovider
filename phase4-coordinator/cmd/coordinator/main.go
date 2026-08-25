@@ -929,6 +929,10 @@ func main() {
 		if err != nil {
 			logger.Fatal().Err(err).Msg("trusted pools creator admin credential config invalid")
 		}
+		providerOwnerKeys, err := trustpool.ParseProviderOwnerPublicKeys(cfg.TrustedPools.ProviderOwnerPublicKeys)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("trusted pools provider owner public keys invalid")
+		}
 		trustPoolAdminHandler := trustpool.NewAdminHandler(trustpool.AdminDeps{
 			Store:                            trustPoolStore,
 			Registry:                         trustPoolRegistry,
@@ -940,6 +944,7 @@ func main() {
 			CreatorProviderAdmitted: func(providerID string) bool {
 				return creatorProviderServingCapable(registry, providerID)
 			},
+			ProviderOwnerPublicKeyForProvider: trustpool.ProviderOwnerPublicKeyLookup(providerOwnerKeys),
 		})
 		if reloader, ok := trustPoolAdminHandler.(trustpool.CreatorAdminConfigReloader); ok {
 			trustPoolAdminReloader = reloader
@@ -2377,11 +2382,21 @@ func creatorProviderServingCapable(registry *pool.Registry, providerID string) b
 }
 
 func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsConfig, logger zerolog.Logger) (*trustpool.Store, *trustpool.Registry, bool, error) {
-	store, err := trustpool.NewStore(db, trustpool.WithProductionActivationGate(trustpool.ProductionActivationGate{
-		AllowedLaunchEnvironments: cfg.ProductionActivation.AllowedLaunchEnvironments,
-		RootCustodyHashes:         cfg.ProductionActivation.RootCustodyHashes,
-		EvidenceSHA256:            cfg.ProductionActivation.EvidenceSHA256,
-	}))
+	providerOwnerKeys, err := trustpool.ParseProviderOwnerPublicKeys(cfg.ProviderOwnerPublicKeys)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("trusted pools provider owner public keys: %w", err)
+	}
+	storeOpts := []trustpool.StoreOption{
+		trustpool.WithProductionActivationGate(trustpool.ProductionActivationGate{
+			AllowedLaunchEnvironments: cfg.ProductionActivation.AllowedLaunchEnvironments,
+			RootCustodyHashes:         cfg.ProductionActivation.RootCustodyHashes,
+			EvidenceSHA256:            cfg.ProductionActivation.EvidenceSHA256,
+		}),
+	}
+	if len(providerOwnerKeys) > 0 {
+		storeOpts = append(storeOpts, trustpool.WithProviderOwnerPublicKeys(providerOwnerKeys))
+	}
+	store, err := trustpool.NewStore(db, storeOpts...)
 	if err != nil {
 		if errors.Is(err, trustpool.ErrMalformedDurableEvent) {
 			logger.Error().Err(err).Msg("trusted pools durable migration failed; pool support disabled")

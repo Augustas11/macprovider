@@ -2,6 +2,7 @@ package trustpool
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -53,14 +54,15 @@ type CreatorAdminConfigReloader interface {
 // handler accepts durable pool events only after replay-checking the whole
 // history, then refreshes the live registry pointer held by the buyer server.
 type AdminDeps struct {
-	Store                            *Store
-	Registry                         *Registry
-	OperatorKey                      string
-	CreatorAdminCredentials          []CreatorAdminCredential
-	CreatorAdminProviderIDs          map[string][]string
-	CreatorAdminProviderDelegatedIDs map[string][]string
-	CreatorAdminBuyerAccountIDs      map[string][]string
-	CreatorProviderAdmitted          func(providerID string) bool
+	Store                             *Store
+	Registry                          *Registry
+	OperatorKey                       string
+	CreatorAdminCredentials           []CreatorAdminCredential
+	CreatorAdminProviderIDs           map[string][]string
+	CreatorAdminProviderDelegatedIDs  map[string][]string
+	CreatorAdminBuyerAccountIDs       map[string][]string
+	CreatorProviderAdmitted           func(providerID string) bool
+	ProviderOwnerPublicKeyForProvider func(providerID string) ([]byte, bool)
 }
 
 func NewAdminHandler(deps AdminDeps) http.Handler {
@@ -232,6 +234,37 @@ func (h *adminHandler) creatorFromBearer(r *http.Request) (creatorPrincipal, boo
 		return creatorPrincipal{CreatorID: creatorID, CredentialID: credentialID}, true
 	}
 	return creatorPrincipal{}, false
+}
+
+func (h *adminHandler) validateProviderOwnerPublicKeyBinding(state *ReconstructedState, e DurableEvent) error {
+	if h == nil || h.deps.ProviderOwnerPublicKeyForProvider == nil {
+		return ErrProviderDelegation
+	}
+	registered, ok := h.deps.ProviderOwnerPublicKeyForProvider(e.ProviderID)
+	if !ok || len(registered) != ed25519.PublicKeySize {
+		return ErrProviderDelegation
+	}
+	switch e.EventType {
+	case EventDelegationGranted:
+		submitted, err := canonicalBase64(e.ProviderOwnerPublicKey)
+		if err != nil || len(submitted) != ed25519.PublicKeySize {
+			return ErrProviderDelegation
+		}
+		if string(submitted) != string(registered) {
+			return ErrProviderDelegation
+		}
+	case EventDelegationRevoked:
+		rec, ok := state.delegationRecordFor(e.PoolID, e.DelegationID)
+		if !ok || rec.Revoked {
+			return ErrProviderDelegation
+		}
+		if string(rec.ProviderOwnerPublicKey) != string(registered) {
+			return ErrProviderDelegation
+		}
+	default:
+		return ErrProviderDelegation
+	}
+	return nil
 }
 
 func (h *adminHandler) creatorProviderAdmitAllowed(creatorID, providerID string) bool {
@@ -698,6 +731,10 @@ func (h *adminHandler) handleCreatorAppendEvent(w http.ResponseWriter, r *http.R
 	if e.EventType == EventDelegationGranted || e.EventType == EventDelegationRevoked {
 		if !h.creatorProviderDelegated(principal.CreatorID, e.ProviderID) || !h.creatorProviderCurrentlyAdmitted(e.ProviderID) {
 			h.writeRequestMutationError(w, errCreatorProviderBoundary)
+			return
+		}
+		if err := h.validateProviderOwnerPublicKeyBinding(state, e); err != nil {
+			h.writeRequestMutationError(w, err)
 			return
 		}
 	}
