@@ -13,7 +13,10 @@ final class ProviderPreWarmerTests: XCTestCase {
             filename: "model.safetensors"
         )
 
-        let checker = HuggingFaceCacheChecker(cacheRoot: cacheRoot)
+        let checker = HuggingFaceCacheChecker(
+            cacheRoot: cacheRoot,
+            durableRoot: cacheRoot.appendingPathComponent("empty-durable", isDirectory: true)
+        )
         XCTAssertTrue(checker.isModelCached(modelID: "mlx-community/Llama-3.2-1B-Instruct-4bit"))
         XCTAssertFalse(checker.isModelCached(modelID: "mlx-community/OtherModel-4bit"))
     }
@@ -25,8 +28,30 @@ final class ProviderPreWarmerTests: XCTestCase {
             .appendingPathComponent("snapshots/empty-revision", isDirectory: true)
         try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
 
-        let checker = HuggingFaceCacheChecker(cacheRoot: cacheRoot)
+        let checker = HuggingFaceCacheChecker(
+            cacheRoot: cacheRoot,
+            durableRoot: cacheRoot.appendingPathComponent("empty-durable", isDirectory: true)
+        )
         XCTAssertFalse(checker.isModelCached(modelID: "mlx-community/EmptyModel"))
+    }
+
+    func testHuggingFaceCacheCheckerTreatsDurableStoreAsCached() throws {
+        let cacheRoot = try temporaryDirectory(name: "hf-durable-only")
+        let durableRoot = try temporaryDirectory(name: "durable-only")
+        let revision = String(repeating: "a", count: 40)
+        let weights = try temporaryDirectory(name: "durable-weights")
+        try Data("durable".utf8).write(to: weights.appendingPathComponent("weights.bin"))
+        let sha = try ModelArtifactVerifier.canonicalArtifactHash(directory: weights)
+        _ = try DurableModelArtifactStore(root: durableRoot).adoptVerifiedStaging(
+            staging: weights,
+            modelID: "mlx-community/DurableOnly-4bit",
+            revision: revision,
+            sha256: sha
+        )
+
+        let checker = HuggingFaceCacheChecker(cacheRoot: cacheRoot, durableRoot: durableRoot)
+        XCTAssertTrue(checker.isModelCached(modelID: "mlx-community/DurableOnly-4bit"))
+        XCTAssertFalse(checker.isModelCached(modelID: "mlx-community/OtherModel-4bit"))
     }
 
     func testPreWarmerHappyPathReturnsAlreadyCachedAndStopsProvider() async throws {

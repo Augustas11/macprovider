@@ -1,4 +1,5 @@
 import ArgumentParser
+import Darwin
 import Foundation
 import MacProviderCore
 import XCTest
@@ -870,7 +871,7 @@ final class ServeCommandTests: XCTestCase {
         config.modelArtifactPath = snapshot.path
         config.modelArtifactSHA256 = expected
 
-        try await ServeCommand.runModelArtifactPreflight(config, joiningCoordinator: false)
+        try await ServeCommand.runModelArtifactPreflight(&config, joiningCoordinator: false)
     }
 
     func testSelfTestUsesVerifiedArtifactPathForRuntimeLoad() {
@@ -890,7 +891,7 @@ final class ServeCommandTests: XCTestCase {
         config.modelArtifactSHA256 = expected
 
         do {
-            try await ServeCommand.runModelArtifactPreflight(config, joiningCoordinator: true)
+            try await ServeCommand.runModelArtifactPreflight(&config, joiningCoordinator: true)
             XCTFail("coordinator-joining paid mode must require catalog provenance")
         } catch {
             // expected
@@ -902,7 +903,7 @@ final class ServeCommandTests: XCTestCase {
         config.model = "test-public-model"
 
         do {
-            try await ServeCommand.runModelArtifactPreflight(config, joiningCoordinator: true)
+            try await ServeCommand.runModelArtifactPreflight(&config, joiningCoordinator: true)
             XCTFail("coordinator-joining paid mode must require a verified artifact hash")
         } catch {
             // expected
@@ -915,7 +916,7 @@ final class ServeCommandTests: XCTestCase {
         config.model = "/tmp/arbitrary-model"
 
         do {
-            try await ServeCommand.runModelArtifactPreflight(config)
+            try await ServeCommand.runModelArtifactPreflight(&config)
             XCTFail("donor mode must require an artifact hash")
         } catch {
             // expected
@@ -932,7 +933,7 @@ final class ServeCommandTests: XCTestCase {
         config.modelArtifactSHA256 = expected
 
         do {
-            try await ServeCommand.runModelArtifactPreflight(config)
+            try await ServeCommand.runModelArtifactPreflight(&config)
             XCTFail("donor mode must require catalog provenance")
         } catch {
             // expected
@@ -1019,7 +1020,7 @@ final class ServeCommandTests: XCTestCase {
         config.modelCatalogHash = String(repeating: "a", count: 64)
 
         try await ServeCommand.runModelArtifactPreflight(
-            config,
+            &config,
             joiningCoordinator: true,
             staticInputs: staticInputs,
             artifactResolver: resolver
@@ -1098,6 +1099,211 @@ final class ServeCommandTests: XCTestCase {
         }
     }
 
+    func testCoordinatorJoinMigratesCacheBackedSnapshotToDurableStore() async throws {
+        let fixture = try await makeCatalogBoundFixture()
+        var config = fixture.config
+        try await ServeCommand.runModelArtifactPreflight(
+            &config,
+            joiningCoordinator: true,
+            staticInputs: fixture.staticInputs,
+            artifactResolver: fixture.resolver
+        )
+        XCTAssertEqual(config.modelArtifactPath, fixture.durablePath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.durablePath))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.snapshot.path))
+    }
+
+    func testCoordinatorJoinServesDurableStoreAfterHuggingFaceCacheDeleted() async throws {
+        let fixture = try await makeCatalogBoundFixture()
+        var config = fixture.config
+        try await ServeCommand.runModelArtifactPreflight(
+            &config,
+            joiningCoordinator: true,
+            staticInputs: fixture.staticInputs,
+            artifactResolver: fixture.resolver
+        )
+        try FileManager.default.removeItem(at: fixture.snapshot)
+        config.modelArtifactPath = fixture.snapshot.path
+        try await ServeCommand.runModelArtifactPreflight(
+            &config,
+            joiningCoordinator: true,
+            staticInputs: fixture.staticInputs,
+            artifactResolver: fixture.resolver
+        )
+        XCTAssertEqual(config.modelArtifactPath, fixture.durablePath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.durablePath))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.snapshot.path))
+    }
+
+    func testCoordinatorJoinPersistsMigratedDurablePathWithoutTouchingHomeConfig() async throws {
+        let fixture = try await makeCatalogBoundFixture()
+        let yaml = try tempDir().appendingPathComponent("config.yaml")
+        try """
+        model: \(fixture.config.model ?? "")
+        model_artifact_path: \(fixture.snapshot.path)
+        model_artifact_sha256: \(fixture.config.modelArtifactSHA256 ?? "")
+        """.write(to: yaml, atomically: true, encoding: .utf8)
+        var config = fixture.config
+        config.configPath = yaml.path
+        try await ServeCommand.runModelArtifactPreflight(
+            &config,
+            joiningCoordinator: true,
+            staticInputs: fixture.staticInputs,
+            artifactResolver: fixture.resolver,
+            persistConfigMigration: true
+        )
+        let post = try String(contentsOf: yaml, encoding: .utf8)
+        XCTAssertTrue(post.contains(fixture.durablePath), post)
+        XCTAssertFalse(post.contains("model_artifact_path: \(fixture.snapshot.path)\n"), post)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: yaml.path + ".pre-durable-artifact.bak"))
+        XCTAssertEqual(config.modelArtifactPath, fixture.durablePath)
+    }
+
+    func testCoordinatorJoinRewritesNonCanonicalDurablePathToCatalogIdentity() async throws {
+        let fixture = try await makeCatalogBoundFixture()
+        var config = fixture.config
+        try await ServeCommand.runModelArtifactPreflight(
+            &config,
+            joiningCoordinator: true,
+            staticInputs: fixture.staticInputs,
+            artifactResolver: fixture.resolver
+        )
+        let alias = fixture.resolver.durableRoot
+            .appendingPathComponent("wrong--identity", isDirectory: true)
+            .appendingPathComponent(String(repeating: "1", count: 40), isDirectory: true)
+            .appendingPathComponent(try XCTUnwrap(config.modelArtifactSHA256), isDirectory: true)
+        try FileManager.default.createDirectory(at: alias.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: fixture.durablePath), to: alias)
+        config.modelArtifactPath = alias.path
+        try await ServeCommand.runModelArtifactPreflight(
+            &config,
+            joiningCoordinator: true,
+            staticInputs: fixture.staticInputs,
+            artifactResolver: fixture.resolver
+        )
+        XCTAssertEqual(config.modelArtifactPath, fixture.durablePath)
+    }
+
+    func testCoordinatorJoinRejectsExactDurableIdentityReachedThroughSymlinkAncestor() async throws {
+        let fixture = try await makeCatalogBoundFixture()
+        var config = fixture.config
+        try await ServeCommand.runModelArtifactPreflight(
+            &config,
+            joiningCoordinator: true,
+            staticInputs: fixture.staticInputs,
+            artifactResolver: fixture.resolver
+        )
+        let identity = URL(fileURLWithPath: fixture.durablePath)
+        let modelDir = identity.deletingLastPathComponent().deletingLastPathComponent()
+        let outside = try tempDir()
+        let escaped = outside.appendingPathComponent(modelDir.lastPathComponent, isDirectory: true)
+        try FileManager.default.moveItem(at: modelDir, to: escaped)
+        try FileManager.default.createSymbolicLink(at: modelDir, withDestinationURL: escaped)
+        config.modelArtifactPath = fixture.durablePath
+        do {
+            try await ServeCommand.runModelArtifactPreflight(
+                &config,
+                joiningCoordinator: true,
+                staticInputs: fixture.staticInputs,
+                artifactResolver: fixture.resolver
+            )
+            XCTFail("symlink-escaped durable identity path must fail closed")
+        } catch is ExitCode {
+            // expected
+        }
+    }
+
+    func testCoordinatorJoinPersistIgnoresIndentedNestedArtifactPath() async throws {
+        let fixture = try await makeCatalogBoundFixture()
+        let yaml = try tempDir().appendingPathComponent("config.yaml")
+        try """
+        model: \(fixture.config.model ?? "")
+        model_artifact_path: \(fixture.snapshot.path)
+        model_artifact_sha256: \(fixture.config.modelArtifactSHA256 ?? "")
+        nested:
+          model_artifact_path: \(fixture.snapshot.path)
+        """.write(to: yaml, atomically: true, encoding: .utf8)
+        var config = fixture.config
+        config.configPath = yaml.path
+        try await ServeCommand.runModelArtifactPreflight(
+            &config,
+            joiningCoordinator: true,
+            staticInputs: fixture.staticInputs,
+            artifactResolver: fixture.resolver,
+            persistConfigMigration: true
+        )
+        let post = try String(contentsOf: yaml, encoding: .utf8)
+        XCTAssertTrue(post.contains("model_artifact_path: \(fixture.durablePath)"), post)
+        XCTAssertTrue(post.contains("  model_artifact_path: \(fixture.snapshot.path)"), post)
+        XCTAssertEqual(config.modelArtifactPath, fixture.durablePath)
+    }
+
+    func testPersistMigratedArtifactPathBackupIsOwnerOnly() throws {
+        let yaml = try tempDir().appendingPathComponent("config.yaml")
+        try """
+        model_artifact_path: /old/snapshot
+        provider_token: secret-token
+        """.write(to: yaml, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: yaml.path)
+        try ServeCommand.persistMigratedArtifactPath(
+            configPath: yaml.path,
+            from: "/old/snapshot",
+            to: "/new/durable"
+        )
+        let backup = yaml.path + ".pre-durable-artifact.bak"
+        let backupMode = try FileManager.default.attributesOfItem(atPath: backup)[.posixPermissions] as? NSNumber
+        XCTAssertEqual((backupMode?.intValue ?? 0) & 0o077, 0)
+        let configMode = try FileManager.default.attributesOfItem(atPath: yaml.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual((configMode?.intValue ?? 0) & 0o777, 0o600)
+        XCTAssertTrue(try String(contentsOf: yaml, encoding: .utf8).contains("model_artifact_path: /new/durable"))
+        XCTAssertTrue(try String(contentsOf: URL(fileURLWithPath: backup), encoding: .utf8).contains("model_artifact_path: /old/snapshot"))
+    }
+
+    func testPersistMigratedArtifactPathWaitsForSharedProviderConfigMutationLock() throws {
+        let yaml = try tempDir().appendingPathComponent("config.yaml")
+        try "model_artifact_path: /old/snapshot\n".write(to: yaml, atomically: true, encoding: .utf8)
+        let lockURL = yaml.deletingLastPathComponent().appendingPathComponent(".config.yaml.lock")
+        let lockFD = open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
+        XCTAssertGreaterThanOrEqual(lockFD, 0)
+        guard lockFD >= 0 else { return }
+        XCTAssertEqual(flock(lockFD, LOCK_EX), 0)
+
+        let started = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            started.signal()
+            try? ServeCommand.persistMigratedArtifactPath(
+                configPath: yaml.path,
+                from: "/old/snapshot",
+                to: "/new/durable"
+            )
+            finished.signal()
+        }
+
+        XCTAssertEqual(started.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(
+            finished.wait(timeout: .now() + 0.15),
+            .timedOut,
+            "artifact-path persist must wait for the shared provider config mutation lock"
+        )
+        XCTAssertEqual(flock(lockFD, LOCK_UN), 0)
+        _ = close(lockFD)
+        XCTAssertEqual(finished.wait(timeout: .now() + 5), .success)
+        XCTAssertTrue(try String(contentsOf: yaml, encoding: .utf8).contains("model_artifact_path: /new/durable"))
+    }
+
+    func testPersistMigratedArtifactPathSkipsWhenTopLevelPathAlreadyChanged() throws {
+        let yaml = try tempDir().appendingPathComponent("config.yaml")
+        try "model_artifact_path: /other/snapshot\n".write(to: yaml, atomically: true, encoding: .utf8)
+        try ServeCommand.persistMigratedArtifactPath(
+            configPath: yaml.path,
+            from: "/old/snapshot",
+            to: "/new/durable"
+        )
+        XCTAssertEqual(try String(contentsOf: yaml, encoding: .utf8), "model_artifact_path: /other/snapshot\n")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: yaml.path + ".pre-durable-artifact.bak"))
+    }
+
     private func assertCatalogBoundSnapshotPreflight(runtimeStatus: String, donorMode: Bool) async throws {
         try await assertCatalogBoundSnapshotPreflight(
             runtimeStatus: runtimeStatus,
@@ -1172,10 +1378,82 @@ final class ServeCommandTests: XCTestCase {
         config.modelCatalogHash = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalogBytes)
 
         try await ServeCommand.runModelArtifactPreflight(
-            config,
+            &config,
             joiningCoordinator: true,
             staticInputs: staticInputs,
             artifactResolver: resolver
+        )
+    }
+
+    private struct CatalogBoundFixture {
+        var config: AppConfig
+        var resolver: CachedModelArtifactResolver
+        var snapshot: URL
+        var durablePath: String
+        var staticInputs: AutotuneStaticInputs
+    }
+
+    private func makeCatalogBoundFixture() async throws -> CatalogBoundFixture {
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let key = "test-model"
+        let modelID = "test/model"
+        let revision = String(repeating: "1", count: 40)
+        let snapshot = resolver.snapshotURL(modelID: modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+        try Data("{}".utf8).write(to: snapshot.appendingPathComponent("config.json"))
+        let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        let catalogJSON = """
+        {"version":"test-catalog","generated_at":"2026-07-29T08:45:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"legacy_unverified","notes":"test fixture"}},"runtime_status":"recommendable"}}}
+        """
+        let rateCardJSON = Self.validRateCardJSON(keys: [key])
+        let demandRankJSON = Self.validDemandRankJSON(keys: [key], version: "test-catalog")
+        let catalogBytes = Data(catalogJSON.utf8)
+        let rateCardBytes = Data(rateCardJSON.utf8)
+        let demandRankBytes = Data(demandRankJSON.utf8)
+        let staticInputs = AutotuneStaticInputs(
+            fetch: { url in
+                switch url.path {
+                case "/v1/rate-card":
+                    return rateCardBytes
+                case "/v1/autotune-candidates":
+                    return catalogBytes
+                case "/v1/demand-rank":
+                    return demandRankBytes
+                default:
+                    break
+                }
+                if url.path.hasSuffix(".sig") {
+                    let signature = Data(repeating: 0, count: 64).base64EncodedString()
+                    return Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
+                }
+                return catalogBytes
+            },
+            verifySignature: { _, _ in true },
+            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-07-29T08:45:00Z")! }
+        )
+        var config = AppConfig.defaults()
+        config.model = key
+        config.modelArtifactPath = snapshot.path
+        config.modelArtifactSHA256 = artifactSHA
+        config.modelCatalogKey = key
+        config.modelCatalogModelID = modelID
+        config.modelCatalogRevision = revision
+        config.modelCatalogSHA256 = artifactSHA
+        config.modelCatalogVersion = "test-catalog"
+        config.modelCatalogHash = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalogBytes)
+        let durablePath = try resolver.durableStore.artifactURL(
+            modelID: modelID,
+            revision: revision,
+            sha256: artifactSHA
+        ).path
+        return CatalogBoundFixture(
+            config: config,
+            resolver: resolver,
+            snapshot: snapshot,
+            durablePath: durablePath,
+            staticInputs: staticInputs
         )
     }
 
@@ -1240,7 +1518,7 @@ final class ServeCommandTests: XCTestCase {
         config.modelArtifactSHA256 = String(repeating: "b", count: 64)
 
         do {
-            try await ServeCommand.runModelArtifactPreflight(config)
+            try await ServeCommand.runModelArtifactPreflight(&config)
             XCTFail("artifact mismatch must fail")
         } catch {
             // expected
@@ -1253,7 +1531,7 @@ final class ServeCommandTests: XCTestCase {
         config.modelArtifactSHA256 = String(repeating: "a", count: 64)
 
         do {
-            try await ServeCommand.runModelArtifactPreflight(config)
+            try await ServeCommand.runModelArtifactPreflight(&config)
             XCTFail("artifact hash must require a local path")
         } catch {
             // expected
@@ -1267,7 +1545,7 @@ final class ServeCommandTests: XCTestCase {
         config.modelArtifactPath = snapshot.path
 
         do {
-            try await ServeCommand.runModelArtifactPreflight(config, joiningCoordinator: false)
+            try await ServeCommand.runModelArtifactPreflight(&config, joiningCoordinator: false)
             XCTFail("artifact path must require a verification hash")
         } catch {
             // expected

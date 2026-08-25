@@ -909,6 +909,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             buyerTTFTCeilingMS: buyerTTFTCeilingMS
         )
         let outcomes = try await AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver.forConfig(resolvedConfig),
             runnerFactory: { try CandidateProviderRunner() }
         ).benchmarks(
             request: request,
@@ -1100,16 +1101,18 @@ struct AutotuneCommand: AsyncParsableCommand {
                 buyerTTFTCeilingMS: buyerTTFTCeilingMS
             )
             let outcomes: BenchmarkOutcomes
+            let artifactResolver = CachedModelArtifactResolver.forConfig(resolvedConfig)
             if installedOnly {
                 outcomes = try Self.installedOnlyBenchmarkOutcomes(
                     request: request,
                     candidateModelIDs: candidateModelFilter,
                     catalogSHA: catalogSHA,
-                    artifactResolver: CachedModelArtifactResolver()
+                    artifactResolver: artifactResolver
                 )
             } else {
                 try emitEvent("progress", phase: "benchmarking")
                 outcomes = try await AutotuneRecommendationBenchmarker(
+                    artifactResolver: artifactResolver,
                     runnerFactory: { try CandidateProviderRunner() }
                 ).benchmarks(
                     request: request,
@@ -1258,7 +1261,9 @@ struct AutotuneCommand: AsyncParsableCommand {
         guard let requestedModelIDs = try recommendCandidateModelFilter(), !requestedModelIDs.isEmpty else {
             throw ValidationError("--prefetch requires an explicit --candidate-models allowlist")
         }
-        let outcome = try await AutotuneRecommendationBenchmarker().prefetchArtifacts(
+        let outcome = try await AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver.forConfig(resolvedConfig)
+        ).prefetchArtifacts(
             candidateCatalog: catalog.value,
             hardware: hardware,
             candidateModelIDs: requestedModelIDs

@@ -307,6 +307,9 @@ final class UninstallCommandTests: XCTestCase {
         try Data("lease".utf8).write(to: lifecycle.appendingPathComponent("lease-v1.json"))
         try Data("manifest".utf8).write(to: root.appendingPathComponent("install_manifest.json"))
         try Data("hidden".utf8).write(to: root.appendingPathComponent(".residue"))
+        let models = root.appendingPathComponent("models", isDirectory: true)
+        try FileManager.default.createDirectory(at: models, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: models.appendingPathComponent("weights.bin"))
 
         var warnings: [String] = []
         UninstallCommand.cleanupApplicationSupportPreservingLifecycleState(

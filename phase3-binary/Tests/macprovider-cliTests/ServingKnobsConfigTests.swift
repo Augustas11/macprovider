@@ -28,6 +28,25 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertFalse(config.enableReceipts)
         XCTAssertFalse(config.pagedKV.enabled)
         XCTAssertFalse(config.pagedKV.effectiveEnabled)
+        XCTAssertNil(config.modelArtifactRoot)
+    }
+
+    func testModelArtifactRootYAMLAndEnvironment() throws {
+        let yaml = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "model_artifact_root: /tmp/macprovider-models\n" }
+        )
+        XCTAssertEqual(yaml.modelArtifactRoot, "/tmp/macprovider-models")
+
+        let env = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_MODEL_ARTIFACT_ROOT": "/tmp/env-models"],
+            fileExists: { _ in true },
+            readFile: { _ in "model_artifact_root: /tmp/macprovider-models\n" }
+        )
+        XCTAssertEqual(env.modelArtifactRoot, "/tmp/env-models")
     }
 
     func testEnableReceiptsCLIOverridesEnvironmentOverridesYAML() throws {

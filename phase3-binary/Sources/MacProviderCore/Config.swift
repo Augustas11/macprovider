@@ -37,6 +37,7 @@ public struct AppConfig: Equatable, Sendable {
     public var modelCatalogSHA256: String?
     public var modelCatalogVersion: String?
     public var modelCatalogHash: String?
+    public var modelArtifactRoot: String?
     public var coordinatorURL: String?
     public var providerID: String?
     public var endpointURL: String?
@@ -145,6 +146,7 @@ public struct AppConfig: Equatable, Sendable {
             modelCatalogSHA256: nil,
             modelCatalogVersion: nil,
             modelCatalogHash: nil,
+            modelArtifactRoot: nil,
             coordinatorURL: nil,
             providerID: nil,
             endpointURL: nil,
@@ -443,6 +445,7 @@ public enum ConfigLoader {
         try assign(&config.modelCatalogSHA256, from: dict, key: "model_catalog_sha256", expected: "string")
         try assign(&config.modelCatalogVersion, from: dict, key: "model_catalog_version", expected: "string")
         try assign(&config.modelCatalogHash, from: dict, key: "model_catalog_hash", expected: "string")
+        try assign(&config.modelArtifactRoot, from: dict, key: "model_artifact_root", expected: "string")
         try assign(&config.coordinatorURL, from: dict, key: "coordinator_url", expected: "string")
         try assign(&config.providerID, from: dict, key: "provider_id", expected: "string")
         try assign(&config.endpointURL, from: dict, key: "endpoint_url", expected: "string")
@@ -517,6 +520,7 @@ public enum ConfigLoader {
         try assign(&config.autoUpdateEnabled, from: environment, env: "MACPROVIDER_AUTO_UPDATE_ENABLED", expected: "boolean")
         try assign(&config.autoupdateEnabled, from: environment, env: "MACPROVIDER_AUTOUPDATE", expected: "boolean")
         try assign(&config.autoUpdateAcceptProvisional, from: environment, env: "MACPROVIDER_AUTO_UPDATE_ACCEPT_PROVISIONAL", expected: "boolean")
+        try assign(&config.modelArtifactRoot, from: environment, env: "MACPROVIDER_MODEL_ARTIFACT_ROOT", expected: "string")
         try assign(&config.logLevel, from: environment, env: "MACPROVIDER_LOG_LEVEL", expected: "valid log level")
         try assign(&config.logFormat, from: environment, env: "MACPROVIDER_LOG_FORMAT", expected: "json or text")
         try assign(&config.logFile, from: environment, env: "MACPROVIDER_LOG_FILE", expected: "string")
