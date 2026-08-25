@@ -16,6 +16,8 @@ Signed candidate evidence (Gate A; evidence-only, not in CONFORMANCE `evidence[]
 - Workflow run: [`32830660903`](https://github.com/Augustas11/macprovider/actions/runs/32830660903)
 - Manifest: `journeys/evidence/trusted-pool-creator-mvp-20260825T072753Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.evidence-manifest.json`
 
+Live-readiness runbook (Gate C; does not promote SPEC-043): `docs/runbooks/trusted-pool-creator-launch.md`
+
 ## Purpose
 
 This journey defines the signed evidence required before MacProvider may announce an approved external creator's single-operator Trusted Pool as live.
