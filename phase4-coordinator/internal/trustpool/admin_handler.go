@@ -486,10 +486,9 @@ func (h *adminHandler) handleCreatorIssueRootRegistrationNonce(w http.ResponseWr
 }
 
 type rootCompromiseReport struct {
-	OperationID                    string    `json:"operation_id"`
-	PoolID                         string    `json:"pool_id"`
-	RootIssuerPublicKeyFingerprint string    `json:"root_issuer_public_key_fingerprint"`
-	TimestampUTC                   time.Time `json:"timestamp_utc"`
+	OperationID                    string `json:"operation_id"`
+	PoolID                         string `json:"pool_id"`
+	RootIssuerPublicKeyFingerprint string `json:"root_issuer_public_key_fingerprint"`
 }
 
 func (h *adminHandler) handleCreatorRootCompromise(w http.ResponseWriter, r *http.Request, principal creatorPrincipal) {
@@ -517,7 +516,6 @@ func (h *adminHandler) handleCreatorRootCompromise(w http.ResponseWriter, r *htt
 	}
 	e := DurableEvent{
 		OperationID:                    operationID,
-		TimestampUTC:                   body.TimestampUTC,
 		EventType:                      EventRootCompromiseFrozen,
 		PoolID:                         strings.TrimSpace(body.PoolID),
 		CreatorAccountID:               principal.CreatorID,
@@ -553,7 +551,6 @@ func (h *adminHandler) handleAdminRootCompromise(w http.ResponseWriter, r *http.
 	}
 	e := DurableEvent{
 		OperationID:                    operationID,
-		TimestampUTC:                   body.TimestampUTC,
 		EventType:                      EventRootCompromiseFrozen,
 		PoolID:                         strings.TrimSpace(body.PoolID),
 		RootIssuerPublicKeyFingerprint: strings.TrimSpace(body.RootIssuerPublicKeyFingerprint),

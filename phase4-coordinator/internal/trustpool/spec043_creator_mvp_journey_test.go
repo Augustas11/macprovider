@@ -347,6 +347,23 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 	suspended = validCreatorApproval("creator-a", "approval-v1", "approval-version-1", "candidate", graceEnds, trustpool.CreatorStatusSuspended)
 	postAdminCreator(t, handler, creatorMVPOperatorKey, suspended, http.StatusAccepted)
 	postCreatorRootCompromise(t, handler, creatorMVPCreatorToken, root.poolID, root.fingerprint, "op-freeze", http.StatusAccepted)
+	staleFreeze, err := json.Marshal(map[string]any{
+		"operation_id":                       "op-freeze-backdated",
+		"pool_id":                            root.poolID,
+		"root_issuer_public_key_fingerprint": root.fingerprint,
+		"timestamp_utc":                      "2020-01-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal backdated freeze: %v", err)
+	}
+	staleReq := httptest.NewRequest(http.MethodPost, "/creator/trust-pools/emergency/root-compromise", bytes.NewReader(staleFreeze))
+	staleReq.Header.Set("Authorization", "Bearer "+creatorMVPCreatorToken)
+	staleReq.Header.Set("Idempotency-Key", "op-freeze-backdated")
+	staleRec := httptest.NewRecorder()
+	handler.ServeHTTP(staleRec, staleReq)
+	if staleRec.Code != http.StatusBadRequest {
+		t.Fatalf("backdated freeze status=%d body=%s, want 400", staleRec.Code, staleRec.Body.String())
+	}
 	postCreatorRootRegistrationNonce(t, handler, creatorMVPCreatorToken, trustpool.RootRegistrationNonceIssue{
 		OperationID:            "op-nonce-frozen",
 		ApprovalRecordID:       "approval-v1",
