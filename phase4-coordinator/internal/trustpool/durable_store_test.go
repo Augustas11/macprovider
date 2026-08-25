@@ -1351,6 +1351,18 @@ func TestDurableStore_RootCompromiseFreeze(t *testing.T) {
 	if _, _, _, err := store.AppendValidatedEvent(ctx, descendant); !errors.Is(err, trustpool.ErrRootCompromiseFreeze) {
 		t.Fatalf("descendant manifest err=%v, want ErrRootCompromiseFreeze", err)
 	}
+	dup := ev("op-freeze-again", ts.Add(4*time.Second), trustpool.EventRootCompromiseFrozen, root.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-a"
+		e.RootIssuerPublicKeyFingerprint = root.fingerprint
+		e.Reason = trustpool.RootCompromiseFreezeReason
+	})
+	_, committedDup, appliedDup, err := store.AppendValidatedEvent(ctx, dup)
+	if err != nil {
+		t.Fatalf("duplicate freeze: %v", err)
+	}
+	if appliedDup || committedDup.OperationID != "op-freeze" {
+		t.Fatalf("duplicate freeze applied=%v op=%s, want replay of op-freeze", appliedDup, committedDup.OperationID)
+	}
 }
 
 func TestDurableStore_CreatorApprovalRequiresR001Fields(t *testing.T) {

@@ -1708,6 +1708,18 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 			applied = false
 			return err
 		}
+		if e.EventType == EventRootCompromiseFrozen {
+			fingerprint := strings.TrimSpace(e.RootIssuerPublicKeyFingerprint)
+			for _, existing := range events {
+				if existing.EventType != EventRootCompromiseFrozen || existing.RootIssuerPublicKeyFingerprint != fingerprint {
+					continue
+				}
+				reconstructed, err = reconstructEventsWithApprovals(events, approvals, time.Now().UTC())
+				committed = existing
+				applied = false
+				return err
+			}
+		}
 		if !timestampProvided {
 			e.TimestampUTC = time.Now().UTC()
 		}
