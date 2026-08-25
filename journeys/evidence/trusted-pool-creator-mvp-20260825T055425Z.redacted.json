@@ -2,49 +2,49 @@
   "candidate_identity": {
     "approval_record_id": "approval-v1",
     "approval_record_version": "approval-version-1",
-    "artifact_set_sha256": "20bfcece1b48c833dabb3fca28700823a3a83f2b7c2fde33ed5198a1f46fa691",
+    "artifact_set_sha256": "5716df2513c72e33810dfaace0bf75e26a51809cbfb91062d420a8f319361966",
     "buyer_credential_fingerprint": "0aa273ef825cd294d7ced17bc338b99f2bdfb6b29d19f670daf4a7afc1c270e2",
     "clock_skew_allowance_seconds": 60,
     "coordinator_build_id": "coordinator-isolated-candidate",
-    "coordinator_config_sha256": "87662c1a99442c4d253e680edcde8df5d24132ec521bb5ee0e3ae3eac67ba54d",
+    "coordinator_config_sha256": "907eabe26ad2791168b92ed8e61f7f9b69bd9b36d0e28d36a8a0a90dddb17aea",
     "creator_account_fingerprint": "a248864d43410ea95465395a22d4466eba9e8a403a44e521711dd8ac4826d697",
-    "creator_agreement_expires_at": "2026-08-26T04:16:35Z",
-    "creator_agreement_grace_ends_at": "2026-08-26T05:16:35Z",
+    "creator_agreement_expires_at": "2026-08-26T04:54:25Z",
+    "creator_agreement_grace_ends_at": "2026-08-26T05:54:25Z",
     "creator_agreement_id": "agreement-approval-v1",
     "creator_agreement_version": "v1",
-    "effective_config_digest": "3e178cb3c7ccdc364f53010792b14e3f92f0de85b3ef24e3d0c23cf45b4f7a19",
+    "effective_config_digest": "cf76f020549026b921c6ccf1be52ab07b7261117c86d8c072d12ef15e027e734",
     "environment_id": "candidate-trusted-pool-creator-mvp",
     "feature_flag_digest": "b88b88f6b48e8647ac2c4f337836cbaedff25803ddac3fe84d7674b59322c2da",
     "gate_check_id": "candidate-promote:op-promote",
     "gateway_build_id": "gateway-isolated-candidate",
-    "gateway_config_sha256": "a7fc5b0aa1aaf5a4705bd84cbb6bfacf84902e00e57e06bf93a1a85295973a76",
+    "gateway_config_sha256": "37fb4e9e2d4ed8b0fe00a0bef23098d6a628d460d5dac74b2e0776a8b6306d4e",
     "governance_file_digest": "621e091a60b182d9b089afaa3941a568eb175a01c1ba1cbaab63daa8c54718ce",
     "lifecycle_state": "paused",
-    "manifest_core_digest": "d5f8877c6b30f34a5b21343638e86dfc37e8a81c7de1fdca6b7e901136ddd19e",
+    "manifest_core_digest": "a1239cc3be66dcdff38dad9968bb0853d4947a682d2a8276dafe5098db088636",
     "manifest_version": "1",
     "maximum_ttl_seconds": 86400,
     "operation_ids_fingerprint": "07546a8bb5918f6f1d791cd6b2b23425f7a862455cc3fd035920cbbb3c518086",
     "pool_generation": "12",
-    "pool_id": "J431q6xWFd-zK8zIiMb3lA",
+    "pool_id": "LdP9HTvhvXFt0Yf0wTjwqw",
     "pricing_schedule_id": "pricing-approval-v1",
     "pricing_schedule_version": "v1",
     "provider_build_id": "provider-isolated-candidate",
     "provider_identity_fingerprint": "271819043bd61c691eec37b5de0e2fd423c7c669377c089d4cefe3c4836d1daa",
-    "readiness_observations_fingerprint": "5cf64363fce27a547bdfdfec70b9bc9e2b3eab00ad8665855bee6ad3eef16cd4",
+    "readiness_observations_fingerprint": "c6e9d92c3b7c1ae18165ccf69b67bd9e2bed264fd53dbee23ff8db111242b055",
     "reviewed_distribution_artifact_digest": "a569a745d4dfba05fe6857a4a2bdbd2b9b3e4a9cba4d77445c73eb0e5d9d89a3",
-    "root_issuer_fingerprint": "4165de66073ed3a181575dccad94d0b0fd36bbe0e8e704c1def5ecf3d567cdc3",
-    "route_snapshot_digest": "5f268c9baa4fea2443b68719b571e5824d885a4a45da6883c97fd9644cb3db83",
+    "root_issuer_fingerprint": "eeec55c12a00358fa624b69c8776510d55a76a9450b61be52c58cce97267f720",
+    "route_snapshot_digest": "508583cc21ca3b3c90a2806e9ef3d5d92996d2abe2fe45c7d695d0ae7dae45af",
     "verifier_challenge": "isolated-candidate-trusted-pool-creator-mvp",
     "verifier_command": "phase4-coordinator/internal/trustpool:TestJourneyTrustedPoolCreatorMVPCandidate",
     "verifier_result": "pass"
   },
-  "captured_at": "2026-08-25T05:16:35Z",
+  "captured_at": "2026-08-25T05:54:25Z",
   "environment": {
-    "candidate": "commit:7fa757c09ec782fda64d7e3967cc759ea1d7b500",
+    "candidate": "commit:fbeaae3645bb01d5f603051b74415f91070ef1c8",
     "class": "isolated-candidate-trusted-pool-creator-mvp",
     "hardware_profile": "local-redacted"
   },
-  "expires_at": "2026-09-01",
+  "expires_at": "2026-08-26",
   "harness": {
     "evidence_scope": "isolated candidate create-to-route-to-settle-to-pause proof only; production timing-floor, live creator launch, and production-release key registration remain outside this harness",
     "execution_mode": "isolated-candidate-trusted-pool-creator-mvp",
@@ -62,9 +62,9 @@
     "candidate_manifest_accepted": true,
     "coordinator_blind_claimed": false,
     "creator_admin_authorized_only": true,
-    "creator_suspension_root_compromise_freeze_verified": true,
+    "creator_suspension_root_compromise_freeze_verified": false,
     "delegation_revocation_verified": true,
-    "descendant_signer_rejection_verified": true,
+    "descendant_signer_rejection_verified": false,
     "emergency_pause_exercised": true,
     "fail_closed_no_global_fallback": true,
     "global_fallback_observed": false,
@@ -102,7 +102,7 @@
     "secrets_redacted": true
   },
   "repository": {
-    "commit": "7fa757c09ec782fda64d7e3967cc759ea1d7b500",
+    "commit": "fbeaae3645bb01d5f603051b74415f91070ef1c8",
     "name": "Augustas11/macprovider"
   },
   "requirement_ids": [
@@ -123,7 +123,7 @@
     "status": "pass",
     "summary": "Trusted Pool creator MVP isolated candidate create-to-route-to-settle-to-pause evidence passed without production side effects."
   },
-  "run_id": "trusted-pool-creator-mvp-20260825T051635Z",
+  "run_id": "trusted-pool-creator-mvp-20260825T055425Z",
   "schema_version": "macprovider.trusted-pool-creator-mvp-evidence.v1",
   "steps": [
     {
@@ -226,7 +226,7 @@
       "artifacts": [
         "redacted-trusted-pool-creator-mvp"
       ],
-      "assertion": "Empty-registry request failed closed; durable reconstruct rebuilt pool identity; spec043-promotion-ledger stayed init-only and fail-closed without a production-release key.",
+      "assertion": "Empty-registry request failed closed; durable reconstruct rebuilt pool identity.",
       "id": "step-12-restart-reconstruction",
       "status": "pass"
     },
