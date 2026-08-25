@@ -588,6 +588,9 @@ func (h *adminHandler) appendRootCompromise(w http.ResponseWriter, r *http.Reque
 	}
 	if e.RootIssuerPublicKeyFingerprint == "" {
 		e.RootIssuerPublicKeyFingerprint = pool.RootIssuer.PublicKeyFingerprint
+	} else if e.RootIssuerPublicKeyFingerprint != pool.RootIssuer.PublicKeyFingerprint {
+		h.writeRequestMutationError(w, ErrMalformedDurableEvent)
+		return
 	}
 	state, committed, _, err := h.deps.Store.AppendValidatedEvent(r.Context(), e)
 	if err != nil {

@@ -1334,6 +1334,14 @@ func TestDurableStore_RootCompromiseFreeze(t *testing.T) {
 	if otherPool == nil || otherPool.CreatorGateReason == trustpool.RootCompromiseFreezeReason {
 		t.Fatalf("unrelated pool frozen by shared key ids: %+v", otherPool)
 	}
+	cross := ev("op-freeze-cross", ts.Add(1700*time.Millisecond), trustpool.EventRootCompromiseFrozen, other.poolID, func(e *trustpool.DurableEvent) {
+		e.CreatorAccountID = "creator-b"
+		e.RootIssuerPublicKeyFingerprint = root.fingerprint
+		e.Reason = trustpool.RootCompromiseFreezeReason
+	})
+	if _, _, _, err := store.AppendValidatedEvent(ctx, cross); !errors.Is(err, trustpool.ErrMalformedDurableEvent) {
+		t.Fatalf("cross-pool freeze fingerprint err=%v, want ErrMalformedDurableEvent", err)
+	}
 	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "candidate", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
 	if _, err := store.IssueRootRegistrationNonce(ctx, trustpool.RootRegistrationNonceIssue{
 		OperationID:            "op-nonce-after-freeze",

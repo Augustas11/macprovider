@@ -1711,7 +1711,7 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 		if e.EventType == EventRootCompromiseFrozen {
 			fingerprint := strings.TrimSpace(e.RootIssuerPublicKeyFingerprint)
 			for _, existing := range events {
-				if existing.EventType != EventRootCompromiseFrozen || existing.RootIssuerPublicKeyFingerprint != fingerprint {
+				if existing.EventType != EventRootCompromiseFrozen || existing.RootIssuerPublicKeyFingerprint != fingerprint || existing.PoolID != e.PoolID {
 					continue
 				}
 				reconstructed, err = reconstructEventsWithApprovals(events, approvals, time.Now().UTC())
