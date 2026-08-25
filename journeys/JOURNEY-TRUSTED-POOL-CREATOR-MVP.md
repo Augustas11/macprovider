@@ -66,6 +66,8 @@ The run must produce three separate artifacts with non-overlapping digest bounda
 
 A separate promotion-verification report MUST record the sibling promotion artifact digest/reference, promotion verification result, evidence that the governance tool persisted the strictly increasing run_id, consumed authorization ids, per-pool transition epochs, launch-key revocations, and emergency-disable tombstones in append-only rollback-resistant storage across restarts, rollback, backup restore, and migration, atomic authorization-id consumption, gateway/coordinator enforcement of monotonic transition epoch during rollback, and rejection of stale, future-dated, replayed, already-consumed, substituted, revoked-key, wrong-scope, or untrusted signer chains.
 
+The Gate B validator is `scripts/validate-pool-promotion-transition.py`. It consumes only a sibling `PoolPromotionTransitionV1` into `journeys/ledgers/spec-043-promotion-auth.jsonl` and never promotes SPEC-043 conformance rows. Candidate envelopes remain evidence-only.
+
 ## Pass criteria
 
 SPEC-043 requirements may be proposed for promotion only when every physical step passes against the named candidate, the signed journey result verifies, all required artifacts are retained and redacted, and the governance release gate accepts the evidence as fresh.

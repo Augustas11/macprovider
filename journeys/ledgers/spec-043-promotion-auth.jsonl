@@ -1,0 +1,1 @@
+{"type":"ledger_init","schema_version":"spec-043-promotion-auth-ledger-v1","named_subsystem":"spec043-promotion-ledger","store_type":"append-only-jsonl","deployment_target":"repository-governance-ledger","backup_restore_policy":"independent-of-coordinator-snapshots","availability_sla":"best-effort-until-production-key-registration"}
