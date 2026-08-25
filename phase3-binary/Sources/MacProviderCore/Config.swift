@@ -22,6 +22,11 @@ public enum ContinuousBatchingMode: String, Sendable {
     case on
 }
 
+public enum ProviderCredentialStoreKind: String, Sendable {
+    case keychain
+    case protectedFile = "protected_file"
+}
+
 public struct AppConfig: Equatable, Sendable {
     public var port: Int
     public var model: String?
@@ -98,6 +103,7 @@ public struct AppConfig: Equatable, Sendable {
     // chmod 0600 the config file containing this value; the binary
     // never logs the token (URL is redacted, headers are not logged).
     public var providerToken: String?
+    public var credentialStore: ProviderCredentialStoreKind
 
     // Optional origin metadata retained for diagnostics and control-socket
     // compatibility. It never transfers lifecycle, credential, identity, or
@@ -181,6 +187,7 @@ public struct AppConfig: Equatable, Sendable {
             idlePrewarmPrompt: "warm",
             idlePrewarmRunOnBattery: false,
             providerToken: nil,
+            credentialStore: .keychain,
             managedBy: nil,
             streamInterval: 1,
             prefillStepSize: 512,
@@ -215,6 +222,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var switchStatePath: String?
     public var providerToken: String?
     public var providerTokenFile: String?
+    public var credentialStore: String?
     // See AppConfig.managedBy; this is origin metadata, not an authority flag.
     public var managedBy: String?
     // SPEC-013 autoresearch serving knobs. nil ⇒ defer to env / YAML /
@@ -260,6 +268,7 @@ public struct CLIOverrides: Equatable, Sendable {
         switchStatePath: String? = nil,
         providerToken: String? = nil,
         providerTokenFile: String? = nil,
+        credentialStore: String? = nil,
         managedBy: String? = nil,
         kvBits: Int? = nil,
         maxContext: Int? = nil,
@@ -299,6 +308,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.switchStatePath = switchStatePath
         self.providerToken = providerToken
         self.providerTokenFile = providerTokenFile
+        self.credentialStore = credentialStore
         self.managedBy = managedBy
         self.kvBits = kvBits
         self.maxContext = maxContext
@@ -483,6 +493,17 @@ public enum ConfigLoader {
             try assign(&config.idlePrewarmRunOnBattery, from: nested, key: "run_on_battery", expected: "boolean")
         }
         try assign(&config.providerToken, from: dict, key: "provider_token", expected: "string")
+        if dict["credential_store"] != nil {
+            guard let raw = rawNode?["credential_store"]?.scalar?.string,
+                  let kind = ProviderCredentialStoreKind(rawValue: raw.lowercased()) else {
+                throw ConfigError.invalidValue(
+                    key: "credential_store",
+                    value: String(describing: dict["credential_store"]),
+                    expected: "keychain or protected_file"
+                )
+            }
+            config.credentialStore = kind
+        }
         try assign(&config.managedBy, from: dict, key: "managed_by", expected: "string")
         try assign(&config.streamInterval, from: dict, key: "stream_interval", expected: "integer >= 1")
         try assign(&config.prefillStepSize, from: dict, key: "prefill_step_size", expected: "integer >= 1")
@@ -547,6 +568,16 @@ public enum ConfigLoader {
         try assign(&config.idlePrewarmPrompt, from: environment, env: "MACPROVIDER_IDLE_PREWARM_PROMPT", expected: "string")
         try assign(&config.idlePrewarmRunOnBattery, from: environment, env: "MACPROVIDER_IDLE_PREWARM_ON_BATTERY", expected: "boolean")
         try assign(&config.providerToken, from: environment, env: "MACPROVIDER_PROVIDER_TOKEN", expected: "string")
+        if let raw = environment["MACPROVIDER_CREDENTIAL_STORE"] {
+            guard let kind = ProviderCredentialStoreKind(rawValue: raw.lowercased()) else {
+                throw ConfigError.invalidValue(
+                    key: "MACPROVIDER_CREDENTIAL_STORE",
+                    value: raw,
+                    expected: "keychain or protected_file"
+                )
+            }
+            config.credentialStore = kind
+        }
         try assign(&config.managedBy, from: environment, env: "MACPROVIDER_MANAGED_BY", expected: "string")
         try assign(&config.streamInterval, from: environment, env: "MACPROVIDER_STREAM_INTERVAL", expected: "integer >= 1")
         try assign(&config.prefillStepSize, from: environment, env: "MACPROVIDER_PREFILL_STEP_SIZE", expected: "integer >= 1")
@@ -661,6 +692,16 @@ public enum ConfigLoader {
         }
         if let providerTokenFile = cli.providerTokenFile {
             config.providerToken = try readProviderTokenFile(providerTokenFile)
+        }
+        if let raw = cli.credentialStore {
+            guard let kind = ProviderCredentialStoreKind(rawValue: raw.lowercased()) else {
+                throw ConfigError.invalidValue(
+                    key: "--credential-store",
+                    value: raw,
+                    expected: "keychain or protected_file"
+                )
+            }
+            config.credentialStore = kind
         }
         if let managedBy = cli.managedBy {
             config.managedBy = managedBy

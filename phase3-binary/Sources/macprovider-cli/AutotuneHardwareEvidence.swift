@@ -62,20 +62,23 @@ struct AutotuneHardwareEvidenceSubmitter {
     func submit(snapshot: AutotuneHardwareEvidenceSnapshot) async -> AutotuneHardwareEvidenceSubmission {
         guard var config else { return .skipped("config unavailable") }
         // First-install bootstrap deliberately leaves YAML tokenless. Resolve
-        // CLI Keychain custody here so both initial and freshness submissions
+        // configured CLI custody here so both initial and freshness submissions
         // use the same restart-safe credential boundary as `serve`.
         let credentialStatus: ProviderCredentialStatus
+        let resolvedCredentialStore: any ProviderCredentialStoring = config.credentialStore == .protectedFile
+            ? ProviderCredentialStoreFactory.providerStore(for: config)
+            : credentialStore
+        let credentialSource = ProviderCredentialStoreFactory.credentialSource(for: config)
         do {
             credentialStatus = try ProviderCredentialResolver.resolve(
                 config: &config,
-                store: credentialStore
+                store: resolvedCredentialStore,
+                authoritativeSource: credentialSource
             )
         } catch {
             return .failed("provider credential resolution failed")
         }
-        guard credentialStatus.source == .cliKeychain,
-              credentialStatus.state == .ready,
-              credentialStatus.restartSafe else {
+        guard credentialStatus.hasRestartSafeCredentialCustody else {
             return .failed(Self.credentialUnavailableReason(credentialStatus))
         }
         guard let providerID = trimmedNonEmpty(config.providerID) else { return .skipped("provider_id missing") }

@@ -37,6 +37,7 @@ EMERGENCY_ROLLBACK=0
 LIFECYCLE_INSTALL_OPERATION_ID="install:test"
 provider_id="mac"
 model="qwen3-coder-30b-a3b-instruct"
+log() { :; }
 
 set +e
 record_lifecycle_state rollback_in_progress install_admission_failed
@@ -56,7 +57,31 @@ set -e
 }
 rm -f "$INSTALLED_LOG"
 
+cat > "$TMP/hung-cli" <<'EOF'
+#!/usr/bin/env bash
+trap "" TERM
+while :; do sleep 1; done
+EOF
+chmod +x "$TMP/hung-cli"
+BINARY_PATH="$TMP/hung-cli"
+LIFECYCLE_STAGED_CLI_TRUSTED=0
+start_seconds="$(date +%s)"
+set +e
+record_lifecycle_state rollback_in_progress install_admission_failed
+hung_rc=$?
+set -e
+elapsed_seconds="$(( $(date +%s) - start_seconds ))"
+[ "$hung_rc" -eq 1 ] || {
+  printf 'hung lifecycle CLI returned unexpected status %s\n' "$hung_rc" >&2
+  exit 1
+}
+[ "$elapsed_seconds" -lt 10 ] || {
+  printf 'hung lifecycle CLI was not bounded; elapsed %s seconds\n' "$elapsed_seconds" >&2
+  exit 1
+}
+
 LIFECYCLE_STAGED_CLI_TRUSTED=1
+BINARY_PATH="$TMP/installed-cli"
 record_lifecycle_state rollback_in_progress install_admission_failed
 
 [ ! -e "$INSTALLED_LOG" ] || {

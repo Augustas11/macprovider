@@ -31,6 +31,7 @@ unset MACPROVIDER_BUNDLED_APP
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
 MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
+MACPROVIDER_MIN_HEADLESS_VERSION="v1.8.106"
 COORDINATOR_URL_DEFAULT="wss://coordinator.malibu.tech/ws/provider"
 COORDINATOR_BASE_DEFAULT="https://coordinator.malibu.tech"
 INSTALL_DIR="${MACPROVIDER_INSTALL_DIR:-$HOME/macprovider}"
@@ -47,7 +48,24 @@ PROVIDER_MUTATION_ROOT="$HOME/.local/share/macprovider/autoupdate"
 PROVIDER_MUTATION_LOCK_PATH="$PROVIDER_MUTATION_ROOT/update.lock"
 PROVIDER_MUTATION_PENDING_PATH="$PROVIDER_MUTATION_ROOT/pending.json"
 INSTALL_RECOVERY_LABEL="live.malibu.provider-install-recovery"
-INSTALL_RECOVERY_PLIST_PATH="$HOME/Library/LaunchAgents/${INSTALL_RECOVERY_LABEL}.plist"
+HEADLESS="${MACPROVIDER_HEADLESS:-0}"
+HEADLESS_USER="${MACPROVIDER_HEADLESS_USER:-}"
+if [ "$HEADLESS" = "1" ]; then
+  LAUNCHD_DOMAIN="system"
+  LAUNCHD_MANAGED_DIR="$CONFIG_DIR/launchd"
+  LAUNCHD_BOOTSTRAP_DIR="/Library/LaunchDaemons"
+else
+  LAUNCHD_DOMAIN="gui/$UID"
+  LAUNCHD_MANAGED_DIR="$HOME/Library/LaunchAgents"
+  LAUNCHD_BOOTSTRAP_DIR="$LAUNCHD_MANAGED_DIR"
+fi
+INSTALL_RECOVERY_PLIST_PATH="$LAUNCHD_MANAGED_DIR/${INSTALL_RECOVERY_LABEL}.plist"
+HEADLESS_RECOVERY_TRUST_PATH="/Library/Application Support/macprovider/install-recovery.sha256"
+SUDO_BIN="/usr/bin/sudo"
+LAUNCHCTL_BIN="/bin/launchctl"
+ROOT_PYTHON3_BIN="/usr/bin/python3"
+SYSTEM_LAUNCHD_DIR="/Library/LaunchDaemons"
+LOCAL_USER_HOME_ROOT="/Users"
 LIVE_CONFIG_PATH="$CONFIG_PATH"
 LIVE_PROVIDER_ID_PATH="$PROVIDER_ID_PATH"
 MANIFEST_DIR="$HOME/Library/Application Support/macprovider"
@@ -70,8 +88,10 @@ LIFECYCLE_LEASE_LOCK_PATH="$MANIFEST_DIR/lifecycle/.lease.json.lock"
 EXISTING_INSTALL_WAS_PRESENT=0
 PROVIDER_LABEL="live.malibu.provider"
 LEGACY_PROVIDER_LABEL="live.streamvc.macprovider"
-PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider.plist"
-LEGACY_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
+PLIST_PATH="$LAUNCHD_MANAGED_DIR/live.malibu.provider.plist"
+PLIST_BOOTSTRAP_PATH="$LAUNCHD_BOOTSTRAP_DIR/live.malibu.provider.plist"
+LEGACY_PLIST_PATH="$LAUNCHD_MANAGED_DIR/live.streamvc.macprovider.plist"
+LEGACY_PLIST_BOOTSTRAP_PATH="$LAUNCHD_BOOTSTRAP_DIR/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
 # Issue #191: ship the macprovider-watchdog LaunchAgent alongside
 # the main provider so every operator gets the silent-disconnect
@@ -82,9 +102,11 @@ WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
 # Installed without a .sh suffix so macOS Login Items shows a readable
 # background-item name instead of "watchdog.sh".
 WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
-WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+WATCHDOG_PLIST_PATH="$LAUNCHD_MANAGED_DIR/live.malibu.provider-watchdog.plist"
+WATCHDOG_PLIST_BOOTSTRAP_PATH="$LAUNCHD_BOOTSTRAP_DIR/live.malibu.provider-watchdog.plist"
 WATCHDOG_LABEL="live.malibu.provider-watchdog"
-LEGACY_WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+LEGACY_WATCHDOG_PLIST_PATH="$LAUNCHD_MANAGED_DIR/live.streamvc.macprovider-watchdog.plist"
+LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH="$LAUNCHD_BOOTSTRAP_DIR/live.streamvc.macprovider-watchdog.plist"
 LEGACY_WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
 NO_WATCHDOG="${MACPROVIDER_NO_WATCHDOG:-0}"
 DRY_RUN=0
@@ -149,6 +171,391 @@ die() {
   exit "$code"
 }
 
+validate_provider_token_environment() {
+  if [ -n "${MACPROVIDER_PROVIDER_TOKEN:-}" ]; then
+    unset MACPROVIDER_PROVIDER_TOKEN
+    die 7 "MACPROVIDER_PROVIDER_TOKEN is not accepted by the installer; use tokenless bootstrap so credentials are minted directly into protected custody"
+  fi
+}
+
+validate_launchd_mode() {
+  case "$HEADLESS" in
+    0) return 0 ;;
+    1) ;;
+    *) die 7 "MACPROVIDER_HEADLESS must be 0 or 1" ;;
+  esac
+  if [ "$UID" -eq 0 ]; then
+    detected_user="$HEADLESS_USER"
+    [ -n "$detected_user" ] || detected_user="${SUDO_USER:-}"
+    case "$detected_user" in
+      ''|root|*[!A-Za-z0-9._-]*)
+        die 7 "headless mode could not safely determine a non-root fleet user; set MACPROVIDER_HEADLESS_USER and invoke the installer as that account"
+        ;;
+      *)
+        die 7 "headless mode detected fleet user '$detected_user', but must run as that account so protected data remains user-owned; rerun without sudo"
+        ;;
+    esac
+  fi
+  invoking_user="$(id -un)" \
+    || die 7 "could not determine the invoking fleet user"
+  [ -n "$HEADLESS_USER" ] || HEADLESS_USER="$invoking_user"
+  case "$HEADLESS_USER" in
+    ''|root|*[!A-Za-z0-9._-]*) die 7 "MACPROVIDER_HEADLESS_USER must name a non-root local account" ;;
+  esac
+  [ "$HEADLESS_USER" = "$invoking_user" ] \
+    || die 7 "headless protected data must be installed by its owner; SSH as '$HEADLESS_USER' and rerun"
+  id "$HEADLESS_USER" >/dev/null 2>&1 \
+    || die 7 "MACPROVIDER_HEADLESS_USER does not identify a local account: $HEADLESS_USER"
+  [ -x "$SUDO_BIN" ] \
+    || die 7 "headless mode requires sudo for system launchd installation"
+  [ -x "$ROOT_PYTHON3_BIN" ] \
+    || die 7 "headless mode requires the trusted system interpreter at $ROOT_PYTHON3_BIN"
+  "$SUDO_BIN" -n true >/dev/null 2>&1 \
+    || die 7 "headless mode requires non-interactive sudo for system launchd installation and recovery"
+}
+
+validate_headless_install_topology() {
+  if [ "$HEADLESS" != "1" ]; then
+    for system_plist in \
+      "${SYSTEM_LAUNCHD_DIR:-/Library/LaunchDaemons}/live.malibu.provider.plist" \
+      "${SYSTEM_LAUNCHD_DIR:-/Library/LaunchDaemons}/live.streamvc.macprovider.plist" \
+      "${SYSTEM_LAUNCHD_DIR:-/Library/LaunchDaemons}/live.malibu.provider-watchdog.plist" \
+      "${SYSTEM_LAUNCHD_DIR:-/Library/LaunchDaemons}/live.streamvc.macprovider-watchdog.plist"; do
+      [ ! -e "$system_plist" ] \
+        || die 7 "consumer mode will not replace an existing headless LaunchDaemon install; remove or migrate $system_plist before retrying"
+    done
+    for system_target in \
+      "system/live.malibu.provider" \
+      "system/live.streamvc.macprovider" \
+      "system/live.malibu.provider-watchdog" \
+      "system/live.streamvc.macprovider-watchdog"; do
+      require_launchd_service_absent "$system_target" \
+        "consumer mode will not replace a loaded headless LaunchDaemon service"
+    done
+    return 0
+  fi
+  for consumer_plist in \
+    "$HOME/Library/LaunchAgents/live.malibu.provider.plist" \
+    "$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist" \
+    "$HOME/Library/LaunchAgents/live.malibu.provider-watchdog.plist" \
+    "$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" \
+    "${LOCAL_USER_HOME_ROOT:-/Users}"/*/Library/LaunchAgents/live.malibu.provider.plist \
+    "${LOCAL_USER_HOME_ROOT:-/Users}"/*/Library/LaunchAgents/live.streamvc.macprovider.plist \
+    "${LOCAL_USER_HOME_ROOT:-/Users}"/*/Library/LaunchAgents/live.malibu.provider-watchdog.plist \
+    "${LOCAL_USER_HOME_ROOT:-/Users}"/*/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist; do
+    if [ -e "$consumer_plist" ]; then
+      die 7 "headless mode will not replace an existing consumer LaunchAgent install; remove or migrate $consumer_plist before retrying"
+    fi
+  done
+  for gui_target in \
+    "gui/$UID/live.malibu.provider" \
+    "gui/$UID/live.streamvc.macprovider" \
+    "gui/$UID/live.malibu.provider-watchdog" \
+    "gui/$UID/live.streamvc.macprovider-watchdog"; do
+    require_launchd_service_absent "$gui_target" \
+      "headless mode will not replace a loaded consumer LaunchAgent service"
+  done
+  for user_home in "${LOCAL_USER_HOME_ROOT:-/Users}"/*; do
+    [ -d "$user_home" ] || continue
+    user_uid="$(path_owner_uid "$user_home" || true)"
+    case "$user_uid" in
+      ''|0|"$UID") continue ;;
+    esac
+    for gui_target in \
+      "gui/$user_uid/live.malibu.provider" \
+      "gui/$user_uid/live.streamvc.macprovider" \
+      "gui/$user_uid/live.malibu.provider-watchdog" \
+      "gui/$user_uid/live.streamvc.macprovider-watchdog"; do
+      require_launchd_service_absent "$gui_target" \
+        "headless mode will not replace another user's loaded consumer LaunchAgent service"
+    done
+  done
+}
+
+path_owner_uid() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+print(os.stat(sys.argv[1], follow_symlinks=False).st_uid)
+PY
+}
+
+launchd_print_loaded() {
+  target="$1"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$target" "${LAUNCHCTL_BIN:-/bin/launchctl}" <<'PY'
+import subprocess
+import sys
+
+target, launchctl = sys.argv[1:]
+try:
+    result = subprocess.run(
+        [launchctl, "print", target],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=2,
+        check=False,
+    )
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit(70)
+if result.returncode == 0:
+    raise SystemExit(0)
+if result.returncode in {1, 3, 113}:
+    raise SystemExit(1)
+raise SystemExit(70)
+PY
+  else
+    "${LAUNCHCTL_BIN:-/bin/launchctl}" print "$target" >/dev/null 2>&1
+  fi
+}
+
+require_launchd_service_absent() {
+  target="$1"
+  message="$2"
+  if launchd_print_loaded "$target"; then
+    die 7 "$message: $target"
+  else
+    status="$?"
+  fi
+  [ "$status" -eq 1 ] \
+    || die 7 "could not determine launchd service state for $target"
+}
+
+launchctl_service() {
+  if [ "$HEADLESS" = "1" ]; then
+    "${SUDO_BIN:-/usr/bin/sudo}" -n "${LAUNCHCTL_BIN:-/bin/launchctl}" "$@"
+  else
+    launchctl "$@"
+  fi
+}
+
+validate_headless_launchdaemon_plist() {
+  plist_path="$1"
+  bootstrap_path="$2"
+  expected_label="$3"
+  expected_program="$4"
+  [ "$HEADLESS" = "1" ] || return 0
+  python3 - "$plist_path" "$bootstrap_path" "$HEADLESS_USER" \
+    "$expected_label" "$expected_program" "$CONFIG_PATH" \
+    "${LAUNCHD_BOOTSTRAP_DIR:-/Library/LaunchDaemons}" <<'PY'
+import os
+import plistlib
+import sys
+
+path, bootstrap, user, label, program, config, bootstrap_dir = sys.argv[1:]
+if bootstrap != f"{bootstrap_dir}/{label}.plist":
+    raise SystemExit("unexpected LaunchDaemon target")
+with open(path, "rb") as handle:
+    payload = plistlib.load(handle)
+arguments = payload.get("ProgramArguments")
+environment = payload.get("EnvironmentVariables")
+if payload.get("Label") != label or payload.get("UserName") != user:
+    raise SystemExit("unexpected LaunchDaemon identity")
+if not isinstance(arguments, list) or not arguments or arguments[0] != program:
+    raise SystemExit("unexpected LaunchDaemon program")
+if label == "live.malibu.provider":
+    if arguments != [program, "serve", "--config", config]:
+        raise SystemExit("unexpected provider LaunchDaemon arguments")
+    if payload.get("KeepAlive") is not True:
+        raise SystemExit("unexpected provider LaunchDaemon KeepAlive")
+elif label == "live.malibu.provider-watchdog" and arguments != [program]:
+    raise SystemExit("unexpected watchdog LaunchDaemon arguments")
+if not isinstance(environment, dict):
+    raise SystemExit("missing LaunchDaemon environment")
+if environment.get("MACPROVIDER_HEADLESS") != "1":
+    raise SystemExit("missing headless mode")
+if environment.get("MACPROVIDER_HEADLESS_USER") != user:
+    raise SystemExit("unexpected headless user")
+if environment.get("MACPROVIDER_LAUNCHD_DOMAIN") != "system":
+    raise SystemExit("unexpected launchd domain")
+if environment.get("MACPROVIDER_PROTECTED_CREDENTIAL_ROOT") != os.path.join(os.path.dirname(config), "protected-credentials"):
+    raise SystemExit("unexpected protected credential root")
+if label == "live.malibu.provider-watchdog" and environment.get("MACPROVIDER_LAUNCHCTL") != "/bin/launchctl":
+    raise SystemExit("unexpected watchdog launchctl path")
+PY
+}
+
+snapshot_headless_launchdaemon_plist() {
+  plist_path="$1"
+  bootstrap_path="$2"
+  expected_label="$3"
+  expected_program="$4"
+  [ "$HEADLESS" = "1" ] || return 0
+  python3 - "$plist_path" "$bootstrap_path" "$HEADLESS_USER" \
+    "$expected_label" "$expected_program" "$CONFIG_PATH" \
+    "${LAUNCHD_BOOTSTRAP_DIR:-/Library/LaunchDaemons}" <<'PY'
+import base64
+import os
+import plistlib
+import stat
+import sys
+
+path, bootstrap, user, label, program, config, bootstrap_dir = sys.argv[1:]
+if bootstrap != f"{bootstrap_dir}/{label}.plist":
+    raise SystemExit("unexpected LaunchDaemon target")
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit("unsafe LaunchDaemon source")
+    data = os.read(fd, 1048577)
+    if len(data) > 1048576:
+        raise SystemExit("LaunchDaemon source too large")
+finally:
+    os.close(fd)
+payload = plistlib.loads(data)
+arguments = payload.get("ProgramArguments")
+environment = payload.get("EnvironmentVariables")
+if payload.get("Label") != label or payload.get("UserName") != user:
+    raise SystemExit("unexpected LaunchDaemon identity")
+if not isinstance(arguments, list) or not arguments or arguments[0] != program:
+    raise SystemExit("unexpected LaunchDaemon program")
+if label == "live.malibu.provider":
+    if arguments != [program, "serve", "--config", config]:
+        raise SystemExit("unexpected provider LaunchDaemon arguments")
+    if payload.get("KeepAlive") is not True:
+        raise SystemExit("unexpected provider LaunchDaemon KeepAlive")
+elif label == "live.malibu.provider-watchdog" and arguments != [program]:
+    raise SystemExit("unexpected watchdog LaunchDaemon arguments")
+if not isinstance(environment, dict):
+    raise SystemExit("missing LaunchDaemon environment")
+if environment.get("MACPROVIDER_HEADLESS") != "1":
+    raise SystemExit("missing headless mode")
+if environment.get("MACPROVIDER_HEADLESS_USER") != user:
+    raise SystemExit("unexpected headless user")
+if environment.get("MACPROVIDER_LAUNCHD_DOMAIN") != "system":
+    raise SystemExit("unexpected launchd domain")
+if environment.get("MACPROVIDER_PROTECTED_CREDENTIAL_ROOT") != os.path.join(os.path.dirname(config), "protected-credentials"):
+    raise SystemExit("unexpected protected credential root")
+if label == "live.malibu.provider-watchdog" and environment.get("MACPROVIDER_LAUNCHCTL") != "/bin/launchctl":
+    raise SystemExit("unexpected watchdog launchctl path")
+sys.stdout.write(base64.b64encode(data).decode("ascii"))
+PY
+}
+
+publish_root_file_from_base64() {
+  target_path="$1"
+  mode="$2"
+  payload_b64="$3"
+  MACPROVIDER_ROOT_FILE_B64="$payload_b64" \
+    "${SUDO_BIN:-/usr/bin/sudo}" -n "${ROOT_PYTHON3_BIN:-/usr/bin/python3}" - "$target_path" "$mode" <<'PY'
+import base64
+import os
+import sys
+import uuid
+
+target = sys.argv[1]
+mode = int(sys.argv[2], 8)
+payload = base64.b64decode(os.environ["MACPROVIDER_ROOT_FILE_B64"], validate=True)
+directory = os.path.dirname(target)
+temporary = os.path.join(directory, f".{os.path.basename(target)}.{uuid.uuid4()}.tmp")
+fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+try:
+    os.write(fd, payload)
+    os.fchmod(fd, mode)
+    if os.geteuid() == 0:
+        os.fchown(fd, 0, 0)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+os.replace(temporary, target)
+dir_fd = os.open(directory, os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+PY
+}
+
+verify_published_launchd_payload() {
+  bootstrap_path="$1"
+  expected_b64="$2"
+  [ "$HEADLESS" = "1" ] || return 0
+  published_b64="$("${SUDO_BIN:-/usr/bin/sudo}" -n "${ROOT_PYTHON3_BIN:-/usr/bin/python3}" - "$bootstrap_path" <<'PY'
+import base64
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as handle:
+    sys.stdout.write(base64.b64encode(handle.read()).decode("ascii"))
+PY
+)" || return 70
+  [ "$published_b64" = "$expected_b64" ]
+}
+
+publish_launchd_plist() {
+  source_path="$1"
+  bootstrap_path="$2"
+  expected_label="${3:-}"
+  expected_program="${4:-}"
+  if [ "$HEADLESS" = "1" ]; then
+    validate_headless_launchdaemon_plist "$source_path" "$bootstrap_path" \
+      "$expected_label" "$expected_program" || return 70
+    plist_payload_b64="$(snapshot_headless_launchdaemon_plist "$source_path" "$bootstrap_path" \
+      "$expected_label" "$expected_program")" || return 70
+    publish_root_file_from_base64 "$bootstrap_path" 0644 "$plist_payload_b64" || return 70
+    if ! verify_published_launchd_payload "$bootstrap_path" "$plist_payload_b64" \
+      || ! validate_headless_launchdaemon_plist "$bootstrap_path" "$bootstrap_path" \
+        "$expected_label" "$expected_program"; then
+      "${SUDO_BIN:-/usr/bin/sudo}" -n /bin/rm -f "$bootstrap_path" >/dev/null 2>&1 || true
+      return 70
+    fi
+  elif [ "$source_path" != "$bootstrap_path" ]; then
+    cp "$source_path" "$bootstrap_path"
+  fi
+}
+
+publish_headless_recovery_trust() {
+  recovery_dir="$1"
+  [ "$HEADLESS" = "1" ] || return 0
+  trust_staging="$CONFIG_DIR/.install-recovery-trust.$$"
+  {
+    printf '%s\n' "$recovery_dir"
+    shasum -a 256 "$recovery_dir/state.sh" | awk '{print $1}'
+    shasum -a 256 "$recovery_dir/recover.sh" | awk '{print $1}'
+  } | write_atomic_install_file "$trust_staging" 0600 || return 70
+  "${SUDO_BIN:-/usr/bin/sudo}" -n /bin/mkdir -p "$(dirname "$HEADLESS_RECOVERY_TRUST_PATH")" || return 70
+  trust_payload_b64="$(python3 - "$trust_staging" <<'PY'
+import base64
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    sys.stdout.write(base64.b64encode(handle.read()).decode("ascii"))
+PY
+)" || return 70
+  publish_root_file_from_base64 "$HEADLESS_RECOVERY_TRUST_PATH" 0600 "$trust_payload_b64" || return 70
+  rm -f "$trust_staging" || return 70
+  verify_headless_recovery_trust "$recovery_dir" || return 70
+}
+
+verify_headless_recovery_trust() {
+  recovery_dir="$1"
+  [ "$HEADLESS" = "1" ] || return 0
+  trust_payload="$("${SUDO_BIN:-/usr/bin/sudo}" -n /bin/cat "$HEADLESS_RECOVERY_TRUST_PATH" 2>/dev/null)" || return 70
+  expected_dir="$(printf '%s\n' "$trust_payload" | sed -n '1p')"
+  expected_state_sha="$(printf '%s\n' "$trust_payload" | sed -n '2p')"
+  expected_recover_sha="$(printf '%s\n' "$trust_payload" | sed -n '3p')"
+  [ "$(printf '%s\n' "$trust_payload" | awk 'END { print NR }')" -eq 3 ] || return 70
+  [ "$expected_dir" = "$recovery_dir" ] || return 70
+  [ "$expected_state_sha" = "$(shasum -a 256 "$recovery_dir/state.sh" | awk '{print $1}')" ] || return 70
+  [ "$expected_recover_sha" = "$(shasum -a 256 "$recovery_dir/recover.sh" | awk '{print $1}')" ] || return 70
+}
+
+retire_headless_recovery_trust() {
+  [ "$HEADLESS" = "1" ] || return 0
+  "${SUDO_BIN:-/usr/bin/sudo}" -n /bin/rm -f "$HEADLESS_RECOVERY_TRUST_PATH"
+}
+
+verify_published_launchd_plist() {
+  source_path="$1"
+  bootstrap_path="$2"
+  [ "$HEADLESS" = "1" ] || return 0
+  "${SUDO_BIN:-/usr/bin/sudo}" -n /usr/bin/test -f "$bootstrap_path" \
+    && "${SUDO_BIN:-/usr/bin/sudo}" -n /usr/bin/cmp -s "$source_path" "$bootstrap_path"
+}
+
 record_lifecycle_state() {
   local lifecycle_state="$1"
   local lifecycle_reason="$2"
@@ -168,13 +575,40 @@ record_lifecycle_state() {
   )
   [ -z "${provider_id:-}" ] || lifecycle_args+=(--provider-id "$provider_id")
   [ -z "${model:-}" ] || lifecycle_args+=(--model-id "$model")
-  if "$lifecycle_cli" "${lifecycle_args[@]}" >/dev/null; then
+  local lifecycle_rc=0
+  if command -v python3 >/dev/null 2>&1; then
+    if python3 - "$lifecycle_cli" "${lifecycle_args[@]}" >/dev/null <<'PY'
+import subprocess
+import sys
+
+command = [sys.argv[1], *sys.argv[2:]]
+try:
+    result = subprocess.run(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+        check=False,
+    )
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit(124)
+raise SystemExit(result.returncode)
+PY
+    then
+      return 0
+    else
+      lifecycle_rc=$?
+    fi
+  elif "$lifecycle_cli" "${lifecycle_args[@]}" >/dev/null; then
     return 0
+  else
+    lifecycle_rc=$?
   fi
   if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ]; then
     log "Emergency target predates the lifecycle-state contract; rollback remains protected by the install transaction."
     return 0
   fi
+  [ "$lifecycle_rc" -ne 124 ] || log "Lifecycle-state writer timed out; rollback remains protected by the install transaction."
   return 1
 }
 
@@ -437,14 +871,24 @@ PY
 run_macprovider_cli_with_amfi_retry() {
   local rc=0
   local cli_path="$MACPROVIDER_CLI_EXECUTABLE"
-  "$cli_path" "$@" || rc=$?
+  if [ "$HEADLESS" = "1" ]; then
+    MACPROVIDER_PROTECTED_CREDENTIAL_ROOT="$CONFIG_DIR/protected-credentials" \
+      "$cli_path" "$@" || rc=$?
+  else
+    "$cli_path" "$@" || rc=$?
+  fi
   if [ "$rc" -ne 137 ]; then
     return "$rc"
   fi
   log "macprovider-cli was SIGKILL'd on first invocation (rc=$rc); likely a transient AMFI code-signature race after pkg install. Retrying once after 2s." >&2
   sleep 2
   rc=0
-  "$cli_path" "$@" || rc=$?
+  if [ "$HEADLESS" = "1" ]; then
+    MACPROVIDER_PROTECTED_CREDENTIAL_ROOT="$CONFIG_DIR/protected-credentials" \
+      "$cli_path" "$@" || rc=$?
+  else
+    "$cli_path" "$@" || rc=$?
+  fi
   if [ "$rc" -ne 137 ]; then
     return "$rc"
   fi
@@ -460,7 +904,12 @@ run_macprovider_cli_with_amfi_retry() {
     return "$rc"
   fi
   rc=0
-  "$cli_path" "$@" || rc=$?
+  if [ "$HEADLESS" = "1" ]; then
+    MACPROVIDER_PROTECTED_CREDENTIAL_ROOT="$CONFIG_DIR/protected-credentials" \
+      "$cli_path" "$@" || rc=$?
+  else
+    "$cli_path" "$@" || rc=$?
+  fi
   if [ "$rc" -eq 137 ]; then
     log "macprovider-cli was SIGKILL'd after the inode refresh; this is likely a genuine signature failure rather than the AMFI cache." >&2
   fi
@@ -509,6 +958,11 @@ Environment overrides:
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
   MACPROVIDER_RELEASE_FORMAT     auto, pkg, or tar (default: auto)
   MACPROVIDER_NO_PROMPT=1        use defaults without interactive prompts
+  MACPROVIDER_HEADLESS=1         explicit SSH-only fleet mode; installs the
+                                 provider and watchdog in launchd's system domain
+  MACPROVIDER_HEADLESS_USER      named non-root account that owns protected
+                                 provider data and runs both LaunchDaemons;
+                                 defaults to the invoking non-root account
   MACPROVIDER_NO_LAUNCHD=1       expert/debug only: skip BOTH the provider
                                  launchd service and its companion watchdog
   MACPROVIDER_NO_WATCHDOG=1      expert/debug only: install the provider
@@ -946,6 +1400,8 @@ PY
   while IFS= read -r orphan; do
     [ -n "$orphan" ] || continue
     log "Recovering interrupted install transaction before starting a new install: $orphan"
+    verify_headless_recovery_trust "$orphan" \
+      || die 70 "interrupted headless install recovery did not match its root-owned trust receipt"
     recovery_rc=0
     bash "$orphan/recover.sh" || recovery_rc=$?
     if [ "$recovery_rc" -eq 75 ]; then
@@ -961,6 +1417,8 @@ PY
     rm -rf "$orphan" || die 70 "recovered orphan transaction could not be retired: $orphan"
     fsync_directory_path "$CONFIG_DIR" \
       || die 70 "recovered orphan transaction retirement was not durable: $orphan"
+    retire_headless_recovery_trust \
+      || die 70 "recovered orphan transaction trust receipt could not be retired"
   done <<EOF
 $orphan_list
 EOF
@@ -1648,7 +2106,8 @@ stage_install_tx_plist() {
   expected_label="$3"
   expected_program="$4"
   alternate_program="$5"
-  python3 - "$source_path" "$copied_path" "$expected_label" "$expected_program" "$alternate_program" <<'PY'
+  expected_user="${6:-}"
+  python3 - "$source_path" "$copied_path" "$expected_label" "$expected_program" "$alternate_program" "$expected_user" <<'PY'
 import os
 import plistlib
 import stat
@@ -1657,7 +2116,7 @@ import sys
 import ctypes
 import errno
 
-source_path, copied_path, expected_label, expected_program, alternate_program = sys.argv[1:]
+source_path, copied_path, expected_label, expected_program, alternate_program, expected_user = sys.argv[1:]
 uid = os.getuid()
 max_bytes = 1024 * 1024
 nofollow = getattr(os, "O_NOFOLLOW", 0)
@@ -1755,6 +2214,8 @@ try:
         fail("invalid_plist")
     if not isinstance(plist, dict) or plist.get("Label") != expected_label:
         fail("unexpected_label")
+    if expected_user and plist.get("UserName") != expected_user:
+        fail("unexpected_user")
     program = plist.get("Program")
     if "Program" in plist and (not isinstance(program, str) or not program):
         fail("invalid_program")
@@ -2125,6 +2586,13 @@ write_install_recovery_artifacts() {
   recovery_dir="$1"
   state_path="$recovery_dir/state.sh"
   recovery_script="$recovery_dir/recover.sh"
+  : "${LAUNCHD_DOMAIN:=gui/$UID}"
+  : "${HEADLESS:=0}"
+  : "${HEADLESS_USER:=}"
+  : "${PLIST_BOOTSTRAP_PATH:=$PLIST_PATH}"
+  : "${LEGACY_PLIST_BOOTSTRAP_PATH:=$LEGACY_PLIST_PATH}"
+  : "${WATCHDOG_PLIST_BOOTSTRAP_PATH:=$WATCHDOG_PLIST_PATH}"
+  : "${LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH:=$LEGACY_WATCHDOG_PLIST_PATH}"
 
   {
     printf 'REC_INSTALL_DIR=%q\n' "$INSTALL_DIR"
@@ -2134,8 +2602,10 @@ write_install_recovery_artifacts() {
     printf 'REC_RECOMMENDATION_PATH=%q\n' "$RECOMMENDATION_PATH"
     printf 'REC_PROVIDER_LABEL=%q\n' "$PROVIDER_LABEL"
     printf 'REC_PLIST_PATH=%q\n' "$PLIST_PATH"
+    printf 'REC_PLIST_BOOTSTRAP_PATH=%q\n' "$PLIST_BOOTSTRAP_PATH"
     printf 'REC_WATCHDOG_DIR=%q\n' "$WATCHDOG_DIR"
     printf 'REC_WATCHDOG_PLIST_PATH=%q\n' "$WATCHDOG_PLIST_PATH"
+    printf 'REC_WATCHDOG_PLIST_BOOTSTRAP_PATH=%q\n' "$WATCHDOG_PLIST_BOOTSTRAP_PATH"
     printf 'REC_WATCHDOG_LABEL=%q\n' "$WATCHDOG_LABEL"
     printf 'REC_MANIFEST_PATH=%q\n' "$MANIFEST_PATH"
     printf 'REC_LIFECYCLE_STATE_PATH=%q\n' "$LIFECYCLE_STATE_PATH"
@@ -2146,11 +2616,14 @@ write_install_recovery_artifacts() {
     printf 'REC_LOG_DIR=%q\n' "$LOG_DIR"
     printf 'REC_INSTALL_RECOVERY_LABEL=%q\n' "$INSTALL_RECOVERY_LABEL"
     printf 'REC_INSTALL_RECOVERY_PLIST_PATH=%q\n' "$INSTALL_RECOVERY_PLIST_PATH"
+    printf 'REC_LAUNCHD_DOMAIN=%q\n' "$LAUNCHD_DOMAIN"
+    printf 'REC_HEADLESS=%q\n' "$HEADLESS"
+    printf 'REC_HEADLESS_USER=%q\n' "$HEADLESS_USER"
     printf 'REC_INSTALL_LOCK_PATH=%q\n' "$INSTALL_LOCK_PATH"
     printf 'REC_INSTALL_LOCK_TOKEN=%q\n' "$INSTALL_LOCK_TOKEN"
     printf 'REC_INSTALLER_PID=%q\n' "$$"
     printf 'REC_INSTALLER_PROCESS_START=%q\n' "$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    printf 'REC_INSTALLER_BOOT_SESSION=%q\n' "$(sysctl -n kern.bootsessionuuid 2>/dev/null || true)"
+    printf 'REC_INSTALLER_BOOT_SESSION=%q\n' "$(/usr/sbin/sysctl -n kern.bootsessionuuid 2>/dev/null || true)"
     printf 'REC_MANUAL_READY_TIMEOUT_SECONDS=%q\n' "15"
     printf 'REC_UID=%q\n' "$UID"
     printf 'REC_HAD_INSTALL_DIR=%q\n' "$INSTALL_TX_HAD_INSTALL_DIR"
@@ -2169,11 +2642,13 @@ write_install_recovery_artifacts() {
     printf 'REC_LEGACY_SERVICE_WAS_ACTIVE=%q\n' "$INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE"
     printf 'REC_LEGACY_PROVIDER_LABEL=%q\n' "$LEGACY_PROVIDER_LABEL"
     printf 'REC_LEGACY_PLIST_PATH=%q\n' "$LEGACY_PLIST_PATH"
+    printf 'REC_LEGACY_PLIST_BOOTSTRAP_PATH=%q\n' "$LEGACY_PLIST_BOOTSTRAP_PATH"
     printf 'REC_SERVICE_WAS_DISABLED=%q\n' "$INSTALL_TX_SERVICE_WAS_DISABLED"
     printf 'REC_WATCHDOG_WAS_ACTIVE=%q\n' "$INSTALL_TX_WATCHDOG_WAS_ACTIVE"
     printf 'REC_LEGACY_WATCHDOG_WAS_ACTIVE=%q\n' "$INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE"
     printf 'REC_LEGACY_WATCHDOG_LABEL=%q\n' "$LEGACY_WATCHDOG_LABEL"
     printf 'REC_LEGACY_WATCHDOG_PLIST_PATH=%q\n' "$LEGACY_WATCHDOG_PLIST_PATH"
+    printf 'REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH=%q\n' "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH"
     printf 'REC_WATCHDOG_WAS_DISABLED=%q\n' "$INSTALL_TX_WATCHDOG_WAS_DISABLED"
     printf 'REC_BINARY_KIND=%q\n' "$INSTALL_TX_BINARY_KIND"
     printf 'REC_REFERRAL_REPLACE_INCUMBENT=%q\n' "$REFERRAL_REPLACE_INCUMBENT"
@@ -2268,6 +2743,189 @@ REC_LEGACY_WATCHDOG_LABEL="${REC_LEGACY_WATCHDOG_LABEL:-live.streamvc.macprovide
 REC_LEGACY_WATCHDOG_PLIST_PATH="${REC_LEGACY_WATCHDOG_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist}"
 REC_LEGACY_WATCHDOG_WAS_ACTIVE="${REC_LEGACY_WATCHDOG_WAS_ACTIVE:-0}"
 REC_HAD_LEGACY_WATCHDOG_PLIST="${REC_HAD_LEGACY_WATCHDOG_PLIST:-0}"
+REC_LAUNCHD_DOMAIN="${REC_LAUNCHD_DOMAIN:-gui/$REC_UID}"
+REC_HEADLESS="${REC_HEADLESS:-0}"
+REC_PLIST_BOOTSTRAP_PATH="${REC_PLIST_BOOTSTRAP_PATH:-$REC_PLIST_PATH}"
+REC_LEGACY_PLIST_BOOTSTRAP_PATH="${REC_LEGACY_PLIST_BOOTSTRAP_PATH:-$REC_LEGACY_PLIST_PATH}"
+REC_WATCHDOG_PLIST_BOOTSTRAP_PATH="${REC_WATCHDOG_PLIST_BOOTSTRAP_PATH:-$REC_WATCHDOG_PLIST_PATH}"
+REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH="${REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH:-$REC_LEGACY_WATCHDOG_PLIST_PATH}"
+
+validate_headless_recovery_targets() {
+  [ "$REC_HEADLESS" = "1" ] || return 0
+  current_user="$(id -un)" || return 70
+  managed_dir="$(dirname "$REC_CONFIG_PATH")/launchd"
+  [ "$REC_LAUNCHD_DOMAIN" = "system" ] || return 70
+  [ "$REC_HEADLESS_USER" = "$current_user" ] || return 70
+  [ "$REC_PROVIDER_LABEL" = "live.malibu.provider" ] || return 70
+  [ "$REC_LEGACY_PROVIDER_LABEL" = "live.streamvc.macprovider" ] || return 70
+  [ "$REC_WATCHDOG_LABEL" = "live.malibu.provider-watchdog" ] || return 70
+  [ "$REC_LEGACY_WATCHDOG_LABEL" = "live.streamvc.macprovider-watchdog" ] || return 70
+  [ "$REC_PLIST_PATH" = "$managed_dir/live.malibu.provider.plist" ] || return 70
+  [ "$REC_LEGACY_PLIST_PATH" = "$managed_dir/live.streamvc.macprovider.plist" ] || return 70
+  [ "$REC_WATCHDOG_PLIST_PATH" = "$managed_dir/live.malibu.provider-watchdog.plist" ] || return 70
+  [ "$REC_LEGACY_WATCHDOG_PLIST_PATH" = "$managed_dir/live.streamvc.macprovider-watchdog.plist" ] || return 70
+  [ "$REC_PLIST_BOOTSTRAP_PATH" = "/Library/LaunchDaemons/live.malibu.provider.plist" ] || return 70
+  [ "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" = "/Library/LaunchDaemons/live.streamvc.macprovider.plist" ] || return 70
+  [ "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" = "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist" ] || return 70
+  [ "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" = "/Library/LaunchDaemons/live.streamvc.macprovider-watchdog.plist" ] || return 70
+}
+validate_headless_recovery_targets || {
+  printf '[macprovider-recovery] Headless recovery state contains an unsafe privileged launchd target.\n' >&2
+  exit 70
+}
+
+recovery_launchctl() {
+  if [ "$REC_HEADLESS" = "1" ]; then
+    /usr/bin/sudo -n /bin/launchctl "$@"
+  else
+    launchctl "$@"
+  fi
+}
+
+validate_recovery_launchdaemon_plist() {
+  managed_path="$1"
+  bootstrap_path="$2"
+  python3 - "$managed_path" "$bootstrap_path" "$REC_HEADLESS_USER" \
+    "$REC_INSTALL_DIR/macprovider-cli" "$REC_WATCHDOG_DIR/macprovider-health-monitor" \
+    "$REC_CONFIG_PATH" <<'PY'
+import os
+import plistlib
+import sys
+
+path, bootstrap_path, user, provider_program, watchdog_program, config_path = sys.argv[1:]
+allowed = {
+    "/Library/LaunchDaemons/live.malibu.provider.plist": ("live.malibu.provider", provider_program),
+    "/Library/LaunchDaemons/live.streamvc.macprovider.plist": ("live.streamvc.macprovider", provider_program),
+    "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist": ("live.malibu.provider-watchdog", watchdog_program),
+    "/Library/LaunchDaemons/live.streamvc.macprovider-watchdog.plist": ("live.streamvc.macprovider-watchdog", watchdog_program),
+}
+expected = allowed.get(bootstrap_path)
+if expected is None:
+    raise SystemExit("unexpected LaunchDaemon target")
+with open(path, "rb") as handle:
+    payload = plistlib.load(handle)
+arguments = payload.get("ProgramArguments")
+environment = payload.get("EnvironmentVariables")
+if payload.get("Label") != expected[0] or payload.get("UserName") != user:
+    raise SystemExit("unexpected LaunchDaemon identity")
+if not isinstance(arguments, list) or not arguments or arguments[0] != expected[1]:
+    raise SystemExit("unexpected LaunchDaemon program")
+if not isinstance(environment, dict):
+    raise SystemExit("missing LaunchDaemon environment")
+if environment.get("MACPROVIDER_HEADLESS") != "1" or environment.get("MACPROVIDER_LAUNCHD_DOMAIN") != "system":
+    raise SystemExit("missing headless LaunchDaemon binding")
+if environment.get("MACPROVIDER_HEADLESS_USER") != user:
+    raise SystemExit("unexpected LaunchDaemon fleet user")
+if environment.get("MACPROVIDER_PROTECTED_CREDENTIAL_ROOT") != os.path.join(os.path.dirname(config_path), "protected-credentials"):
+    raise SystemExit("unexpected protected credential root")
+if expected[0] == "live.malibu.provider" and environment.get("MACPROVIDER_CONFIG") != config_path:
+    raise SystemExit("unexpected provider config path")
+if expected[0] == "live.malibu.provider-watchdog" and environment.get("MACPROVIDER_CONFIG_PATH") != config_path:
+    raise SystemExit("unexpected watchdog config path")
+PY
+}
+
+snapshot_recovery_launchdaemon_plist() {
+  managed_path="$1"
+  bootstrap_path="$2"
+  python3 - "$managed_path" "$bootstrap_path" "$REC_HEADLESS_USER" \
+    "$REC_INSTALL_DIR/macprovider-cli" "$REC_WATCHDOG_DIR/macprovider-health-monitor" \
+    "$REC_CONFIG_PATH" <<'PY'
+import base64
+import os
+import plistlib
+import stat
+import sys
+
+path, bootstrap_path, user, provider_program, watchdog_program, config_path = sys.argv[1:]
+allowed = {
+    "/Library/LaunchDaemons/live.malibu.provider.plist": ("live.malibu.provider", provider_program),
+    "/Library/LaunchDaemons/live.streamvc.macprovider.plist": ("live.streamvc.macprovider", provider_program),
+    "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist": ("live.malibu.provider-watchdog", watchdog_program),
+    "/Library/LaunchDaemons/live.streamvc.macprovider-watchdog.plist": ("live.streamvc.macprovider-watchdog", watchdog_program),
+}
+expected = allowed.get(bootstrap_path)
+if expected is None:
+    raise SystemExit("unexpected LaunchDaemon target")
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit("unsafe LaunchDaemon source")
+    data = os.read(fd, 1048577)
+    if len(data) > 1048576:
+        raise SystemExit("LaunchDaemon source too large")
+finally:
+    os.close(fd)
+payload = plistlib.loads(data)
+arguments = payload.get("ProgramArguments")
+environment = payload.get("EnvironmentVariables")
+if payload.get("Label") != expected[0] or payload.get("UserName") != user:
+    raise SystemExit("unexpected LaunchDaemon identity")
+if not isinstance(arguments, list) or not arguments or arguments[0] != expected[1]:
+    raise SystemExit("unexpected LaunchDaemon program")
+if not isinstance(environment, dict):
+    raise SystemExit("missing LaunchDaemon environment")
+if environment.get("MACPROVIDER_HEADLESS") != "1" or environment.get("MACPROVIDER_LAUNCHD_DOMAIN") != "system":
+    raise SystemExit("missing headless LaunchDaemon binding")
+if environment.get("MACPROVIDER_HEADLESS_USER") != user:
+    raise SystemExit("unexpected LaunchDaemon fleet user")
+if environment.get("MACPROVIDER_PROTECTED_CREDENTIAL_ROOT") != os.path.join(os.path.dirname(config_path), "protected-credentials"):
+    raise SystemExit("unexpected protected credential root")
+if expected[0] == "live.malibu.provider" and environment.get("MACPROVIDER_CONFIG") != config_path:
+    raise SystemExit("unexpected provider config path")
+if expected[0] == "live.malibu.provider-watchdog" and environment.get("MACPROVIDER_CONFIG_PATH") != config_path:
+    raise SystemExit("unexpected watchdog config path")
+sys.stdout.write(base64.b64encode(data).decode("ascii"))
+PY
+}
+
+recovery_publish_root_file_from_base64() {
+  target_path="$1"
+  mode="$2"
+  payload_b64="$3"
+  MACPROVIDER_ROOT_FILE_B64="$payload_b64" /usr/bin/sudo -n /usr/bin/python3 - "$target_path" "$mode" <<'PY'
+import base64
+import os
+import sys
+import uuid
+
+target = sys.argv[1]
+mode = int(sys.argv[2], 8)
+payload = base64.b64decode(os.environ["MACPROVIDER_ROOT_FILE_B64"], validate=True)
+directory = os.path.dirname(target)
+temporary = os.path.join(directory, f".{os.path.basename(target)}.{uuid.uuid4()}.tmp")
+fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+try:
+    os.write(fd, payload)
+    os.fchmod(fd, mode)
+    if os.geteuid() == 0:
+        os.fchown(fd, 0, 0)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+os.replace(temporary, target)
+dir_fd = os.open(directory, os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+PY
+}
+
+sync_recovery_launchd_plist() {
+  managed_path="$1"
+  bootstrap_path="$2"
+  had_previous="$3"
+  [ "$REC_HEADLESS" = "1" ] || return 0
+  if [ "$had_previous" -eq 1 ]; then
+    validate_recovery_launchdaemon_plist "$managed_path" "$bootstrap_path" || return 70
+    plist_payload_b64="$(snapshot_recovery_launchdaemon_plist "$managed_path" "$bootstrap_path")" || return 70
+    recovery_publish_root_file_from_base64 "$bootstrap_path" 0644 "$plist_payload_b64"
+  else
+    /usr/bin/sudo -n /bin/rm -f "$bootstrap_path"
+  fi
+}
 
 recovery_log() { printf '[macprovider-recovery] %s\n' "$*" >&2; }
 acquire_recovery_claim() {
@@ -4818,14 +5476,14 @@ recovery_failed() {
   exit 70
 }
 service_loaded() {
-  launchctl print "gui/$REC_UID/$1" >/dev/null 2>&1
+  recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$1" >/dev/null 2>&1
 }
 service_identity_matches() {
   service_label="$1"
   expected_path="$2"
   expected_program="$3"
   alternate_program="$4"
-  service_details="$(launchctl print "gui/$REC_UID/$service_label" 2>/dev/null | head -c 65537)" || return 1
+  service_details="$(recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$service_label" 2>/dev/null | head -c 65537)" || return 1
   [ "${#service_details}" -le 65536 ] || return 1
   program_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*program = / { count++ } END { print count + 0 }')"
   path_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*path = / { count++ } END { print count + 0 }')"
@@ -4847,7 +5505,7 @@ stop_loaded_service() {
   fi
   service_identity_matches "$service_label" "$expected_path" "$expected_program" "$alternate_program" \
     || recovery_failed "$failure_message has an unexpected launchd identity"
-  launchctl bootout "gui/$REC_UID/$service_label" >/dev/null 2>&1 \
+  recovery_launchctl bootout "$REC_LAUNCHD_DOMAIN/$service_label" >/dev/null 2>&1 \
     || recovery_failed "$failure_message could not be stopped"
 }
 
@@ -4857,62 +5515,62 @@ stop_loaded_service() {
 # guard service without booting out or replacing the healthy incumbent.
 if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-started" ]; then
   if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
-    if ! launchctl print "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1; then
+    if ! recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$REC_PROVIDER_LABEL" >/dev/null 2>&1; then
       [ "$REC_HAD_PLIST" -eq 1 ] \
         || recovery_failed "the prior provider service disappeared before cutover and no launchd plist was preserved"
       paths_match "$RECOVERY_DIR/provider.plist" "$REC_PLIST_PATH" file \
         || recovery_failed "the pre-cutover provider plist changed after the recovery snapshot"
-      launchctl bootstrap "gui/$REC_UID" "$REC_PLIST_PATH" >/dev/null 2>&1 \
+      recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 \
         || recovery_failed "could not restore the unexpectedly inactive pre-cutover provider service"
-      launchctl kickstart -k "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1 \
+      recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_PROVIDER_LABEL" >/dev/null 2>&1 \
         || recovery_failed "could not start the unexpectedly inactive pre-cutover provider service"
     fi
-    service_identity_matches "$REC_PROVIDER_LABEL" "$REC_PLIST_PATH" \
+    service_identity_matches "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
       "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
       || recovery_failed "pre-cutover provider service has an unexpected identity"
   fi
   if [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
-    if ! launchctl print "gui/$REC_UID/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1; then
+    if ! recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1; then
       [ "$REC_HAD_LEGACY_PLIST" -eq 1 ] \
         || recovery_failed "the prior legacy provider service disappeared before cutover and no launchd plist was preserved"
       paths_match "$RECOVERY_DIR/legacy-provider.plist" "$REC_LEGACY_PLIST_PATH" file \
         || recovery_failed "the pre-cutover legacy provider plist changed after the recovery snapshot"
-      launchctl bootstrap "gui/$REC_UID" "$REC_LEGACY_PLIST_PATH" >/dev/null 2>&1 \
+      recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 \
         || recovery_failed "could not restore the unexpectedly inactive pre-cutover legacy provider service"
-      launchctl kickstart -k "gui/$REC_UID/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1 \
+      recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1 \
         || recovery_failed "could not start the unexpectedly inactive pre-cutover legacy provider service"
     fi
-    service_identity_matches "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_PATH" \
+    service_identity_matches "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" \
       "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
       || recovery_failed "pre-cutover legacy provider service has an unexpected identity"
   fi
   if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
-    if ! launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1; then
+    if ! recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$REC_WATCHDOG_LABEL" >/dev/null 2>&1; then
       [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ] \
         || recovery_failed "the prior watchdog was active but no launchd plist was preserved"
       paths_match "$RECOVERY_DIR/watchdog.plist" "$REC_WATCHDOG_PLIST_PATH" file \
         || recovery_failed "the pre-cutover watchdog plist changed after the recovery snapshot"
-      launchctl bootstrap "gui/$REC_UID" "$REC_WATCHDOG_PLIST_PATH" >/dev/null 2>&1 \
+      recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 \
         || recovery_failed "could not restore the pre-cutover watchdog service"
     fi
-    launchctl kickstart -k "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 \
+    recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 \
       || recovery_failed "could not start the pre-cutover watchdog service"
-    service_identity_matches "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_PATH" \
+    service_identity_matches "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
       "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
       || recovery_failed "pre-cutover watchdog service has an unexpected identity"
   fi
   if [ "$REC_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
-    if ! launchctl print "gui/$REC_UID/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1; then
+    if ! recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1; then
       [ "$REC_HAD_LEGACY_WATCHDOG_PLIST" -eq 1 ] \
         || recovery_failed "the prior legacy watchdog was active but no launchd plist was preserved"
       paths_match "$RECOVERY_DIR/legacy-watchdog.plist" "$REC_LEGACY_WATCHDOG_PLIST_PATH" file \
         || recovery_failed "the pre-cutover legacy watchdog plist changed after the recovery snapshot"
-      launchctl bootstrap "gui/$REC_UID" "$REC_LEGACY_WATCHDOG_PLIST_PATH" >/dev/null 2>&1 \
+      recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 \
         || recovery_failed "could not restore the pre-cutover legacy watchdog service"
     fi
-    launchctl kickstart -k "gui/$REC_UID/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1 \
+    recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1 \
       || recovery_failed "could not start the pre-cutover legacy watchdog service"
-    service_identity_matches "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_PATH" \
+    service_identity_matches "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
       "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
       || recovery_failed "pre-cutover legacy watchdog service has an unexpected identity"
   fi
@@ -5157,17 +5815,17 @@ chmod 700 "$RECOVERY_DIR/failed-current" "$FAILED_CURRENT_DIR" || recovery_faile
 if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_PLIST" -eq 1 ] || recovery_failed "the prior provider service was active but no recoverable plist was preserved"
   if [ -f "$RECOVERY_DIR/provider-service-created" ] && [ ! -L "$RECOVERY_DIR/provider-service-created" ]; then
-    stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_PATH" \
+    stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
       "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
       "the transaction provider service"
   else
-    stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_PATH" \
+    stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
       "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
       "the incumbent provider service"
   fi
 else
   if [ -f "$RECOVERY_DIR/provider-service-created" ] && [ ! -L "$RECOVERY_DIR/provider-service-created" ]; then
-    stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_PATH" \
+    stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
       "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
       "the transaction provider service"
   fi
@@ -5175,18 +5833,18 @@ else
 fi
 if [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_LEGACY_PLIST" -eq 1 ] || recovery_failed "the prior legacy provider service was active but no recoverable plist was preserved"
-  stop_loaded_service "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_PATH" \
+  stop_loaded_service "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" \
     "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
     "the incumbent legacy provider service"
 fi
 if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "the prior watchdog was active but no recoverable plist was preserved"
-  stop_loaded_service "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_PATH" \
+  stop_loaded_service "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
     "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
     "the transaction watchdog service"
 else
   if [ -f "$RECOVERY_DIR/watchdog-service-created" ] && [ ! -L "$RECOVERY_DIR/watchdog-service-created" ]; then
-    stop_loaded_service "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_PATH" \
+    stop_loaded_service "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
       "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
       "the transaction watchdog service"
   fi
@@ -5194,7 +5852,7 @@ else
 fi
 if [ "$REC_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_LEGACY_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "the prior legacy watchdog was active but no recoverable plist was preserved"
-  stop_loaded_service "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_PATH" \
+  stop_loaded_service "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
     "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
     "the incumbent legacy watchdog service"
 fi
@@ -5246,6 +5904,10 @@ swap_restore legacy-provider.plist "$REC_LEGACY_PLIST_PATH" "$LEGACY_PLIST_CANDI
 swap_restore watchdog-dir "$REC_WATCHDOG_DIR" "$WATCHDOG_DIR_CANDIDATE" "$REC_HAD_WATCHDOG_DIR" || recovery_failed "could not restore the previous watchdog directory"
 swap_restore watchdog.plist "$REC_WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_CANDIDATE" "$REC_HAD_WATCHDOG_PLIST" || recovery_failed "could not restore the previous watchdog plist"
 swap_restore legacy-watchdog.plist "$REC_LEGACY_WATCHDOG_PLIST_PATH" "$LEGACY_WATCHDOG_PLIST_CANDIDATE" "$REC_HAD_LEGACY_WATCHDOG_PLIST" || recovery_failed "could not restore the previous legacy watchdog plist"
+sync_recovery_launchd_plist "$REC_PLIST_PATH" "$REC_PLIST_BOOTSTRAP_PATH" "$REC_HAD_PLIST" || recovery_failed "could not republish the previous provider LaunchDaemon plist"
+sync_recovery_launchd_plist "$REC_LEGACY_PLIST_PATH" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" "$REC_HAD_LEGACY_PLIST" || recovery_failed "could not republish the previous legacy provider LaunchDaemon plist"
+sync_recovery_launchd_plist "$REC_WATCHDOG_PLIST_PATH" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" "$REC_HAD_WATCHDOG_PLIST" || recovery_failed "could not republish the previous watchdog LaunchDaemon plist"
+sync_recovery_launchd_plist "$REC_LEGACY_WATCHDOG_PLIST_PATH" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" "$REC_HAD_LEGACY_WATCHDOG_PLIST" || recovery_failed "could not republish the previous legacy watchdog LaunchDaemon plist"
 swap_restore install-manifest.json "$REC_MANIFEST_PATH" "$MANIFEST_CANDIDATE" "$REC_HAD_MANIFEST" || recovery_failed "could not restore the previous install manifest"
 # The lifecycle-state file is restored last so the transactional intermediate
 # state (rollback_in_progress) authored before recovery began stays observable
@@ -5263,57 +5925,57 @@ restore_lifecycle_state || recovery_failed "could not restore the previous lifec
 reconcile_lifecycle_lease || recovery_failed "could not reconcile the lifecycle lease after rollback"
 
 if [ "$REC_SERVICE_WAS_DISABLED" -eq 1 ]; then
-  launchctl disable "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not restore the disabled provider service state"
+  recovery_launchctl disable "$REC_LAUNCHD_DOMAIN/$REC_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not restore the disabled provider service state"
 else
-  launchctl enable "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not restore the enabled provider service state"
+  recovery_launchctl enable "$REC_LAUNCHD_DOMAIN/$REC_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not restore the enabled provider service state"
 fi
 if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_PLIST" -eq 1 ] || recovery_failed "previous service was active but no previous plist was preserved"
-  launchctl bootstrap "gui/$REC_UID" "$REC_PLIST_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous provider service"
-  launchctl kickstart -k "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous provider service"
-  service_identity_matches "$REC_PROVIDER_LABEL" "$REC_PLIST_PATH" \
+  recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous provider service"
+  recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous provider service"
+  service_identity_matches "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
     "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
     || recovery_failed "previous provider service has an unexpected identity"
 elif [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_LEGACY_PLIST" -eq 1 ] || recovery_failed "previous legacy service was active but no previous plist was preserved"
-  launchctl bootstrap "gui/$REC_UID" "$REC_LEGACY_PLIST_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous legacy provider service"
-  launchctl kickstart -k "gui/$REC_UID/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous legacy provider service"
-  service_identity_matches "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_PATH" \
+  recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous legacy provider service"
+  recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous legacy provider service"
+  service_identity_matches "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" \
     "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
     || recovery_failed "previous legacy provider service has an unexpected identity"
 else
-  if launchctl print "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1; then
+  if recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$REC_PROVIDER_LABEL" >/dev/null 2>&1; then
     recovery_failed "provider service is active even though it was inactive before the failed install"
   fi
-  if launchctl print "gui/$REC_UID/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1; then
+  if recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1; then
     recovery_failed "legacy provider service is active even though it was inactive before the failed install"
   fi
 fi
 
 if [ "$REC_WATCHDOG_WAS_DISABLED" -eq 1 ]; then
-  launchctl disable "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not restore the disabled watchdog service state"
+  recovery_launchctl disable "$REC_LAUNCHD_DOMAIN/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not restore the disabled watchdog service state"
 else
-  launchctl enable "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not restore the enabled watchdog service state"
+  recovery_launchctl enable "$REC_LAUNCHD_DOMAIN/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not restore the enabled watchdog service state"
 fi
 if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "previous watchdog was active but no previous plist was preserved"
-  launchctl bootstrap "gui/$REC_UID" "$REC_WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous watchdog service"
-  launchctl kickstart -k "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous watchdog service"
-  service_identity_matches "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_PATH" \
+  recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous watchdog service"
+  recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous watchdog service"
+  service_identity_matches "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
     "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
     || recovery_failed "previous watchdog service has an unexpected identity"
 elif [ "$REC_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_LEGACY_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "previous legacy watchdog was active but no previous plist was preserved"
-  launchctl bootstrap "gui/$REC_UID" "$REC_LEGACY_WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous legacy watchdog service"
-  launchctl kickstart -k "gui/$REC_UID/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous legacy watchdog service"
-  service_identity_matches "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_PATH" \
+  recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous legacy watchdog service"
+  recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous legacy watchdog service"
+  service_identity_matches "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
     "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
     || recovery_failed "previous legacy watchdog service has an unexpected identity"
 else
-  if launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1; then
+  if recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$REC_WATCHDOG_LABEL" >/dev/null 2>&1; then
     recovery_failed "watchdog service is active even though it was inactive before the failed install"
   fi
-  if launchctl print "gui/$REC_UID/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1; then
+  if recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1; then
     recovery_failed "legacy watchdog service is active even though it was inactive before the failed install"
   fi
 fi
@@ -5529,7 +6191,7 @@ process_start() {
 }
 
 while [ -d "$RECOVERY_DIR" ] \
-  && [ "$(sysctl -n kern.bootsessionuuid 2>/dev/null || true)" = "$REC_INSTALLER_BOOT_SESSION" ] \
+  && [ "$(/usr/sbin/sysctl -n kern.bootsessionuuid 2>/dev/null || true)" = "$REC_INSTALLER_BOOT_SESSION" ] \
   && [ "$(process_start "$REC_INSTALLER_PID")" = "$REC_INSTALLER_PROCESS_START" ]; do
   sleep 1
 done
@@ -5630,13 +6292,22 @@ PY
 }
 
 disarm_install_recovery_agent() {
-  launchctl bootout "gui/$UID/$INSTALL_RECOVERY_LABEL" >/dev/null 2>&1 || true
+  if [ "$HEADLESS" = "1" ]; then
+    retire_headless_recovery_trust
+    return
+  fi
+  launchctl_service bootout "$LAUNCHD_DOMAIN/$INSTALL_RECOVERY_LABEL" >/dev/null 2>&1 || true
   rm -f "$INSTALL_RECOVERY_PLIST_PATH" || return 70
   fsync_directory_path "$(dirname "$INSTALL_RECOVERY_PLIST_PATH")" || return 70
 }
 
 arm_install_recovery_agent() {
   [ -n "$INSTALL_TX_BACKUP" ] && [ -x "$INSTALL_TX_BACKUP/observe.sh" ] || return 70
+  if [ "$HEADLESS" = "1" ]; then
+    publish_headless_recovery_trust "$INSTALL_TX_BACKUP" || return 70
+    log "Headless mode: durable interrupted-install recovery is deferred until the next installer invocation."
+    return 0
+  fi
   mkdir -p "$(dirname "$INSTALL_RECOVERY_PLIST_PATH")" || return 70
   disarm_install_recovery_agent || return 70
   python3 - "$INSTALL_RECOVERY_LABEL" "$INSTALL_TX_BACKUP/observe.sh" \
@@ -5657,13 +6328,13 @@ payload = {
 }
 sys.stdout.buffer.write(plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=True))
 PY
-  launchctl bootstrap "gui/$UID" "$INSTALL_RECOVERY_PLIST_PATH" >/dev/null 2>&1 || return 70
-  launchctl kickstart -k "gui/$UID/$INSTALL_RECOVERY_LABEL" >/dev/null 2>&1 || return 70
+  launchctl_service bootstrap "$LAUNCHD_DOMAIN" "$INSTALL_RECOVERY_PLIST_PATH" >/dev/null 2>&1 || return 70
+  launchctl_service kickstart -k "$LAUNCHD_DOMAIN/$INSTALL_RECOVERY_LABEL" >/dev/null 2>&1 || return 70
 }
 
 launchd_label_is_disabled() {
   label="$1"
-  disabled_state="$(launchctl print-disabled "gui/$UID" 2>/dev/null || true)"
+  disabled_state="$(launchctl_service print-disabled "$LAUNCHD_DOMAIN" 2>/dev/null || true)"
   case "$disabled_state" in
     *'"'"$label"'" => true'*) return 0 ;;
     *) return 1 ;;
@@ -5909,8 +6580,10 @@ begin_install_transaction() {
     INSTALL_TX_HAD_RECOMMENDATION=1
   fi
   if [ -f "$PLIST_PATH" ]; then
+    verify_published_launchd_plist "$PLIST_PATH" "$PLIST_BOOTSTRAP_PATH" \
+      || die 70 "managed provider plist does not match the published LaunchDaemon plist; current install was not changed"
     stage_install_tx_plist "$PLIST_PATH" "$recovery_staging/provider.plist" \
-      "$PROVIDER_LABEL" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
+      "$PROVIDER_LABEL" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" "${HEADLESS_USER:-}" \
       || die 70 "could not stage and verify the previous launchd plist; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_PLIST=1
   fi
@@ -5920,8 +6593,10 @@ begin_install_transaction() {
     INSTALL_TX_HAD_WATCHDOG_DIR=1
   fi
   if [ -f "$WATCHDOG_PLIST_PATH" ]; then
+    verify_published_launchd_plist "$WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_BOOTSTRAP_PATH" \
+      || die 70 "managed watchdog plist does not match the published LaunchDaemon plist; current install was not changed"
     stage_install_tx_plist "$WATCHDOG_PLIST_PATH" "$recovery_staging/watchdog.plist" \
-      "$WATCHDOG_LABEL" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
+      "$WATCHDOG_LABEL" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" "${HEADLESS_USER:-}" \
       || die 70 "could not stage and verify the previous watchdog plist; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_WATCHDOG_PLIST=1
   fi
@@ -5947,10 +6622,10 @@ begin_install_transaction() {
   if [ "$INSTALL_TX_HAD_INSTALL_DIR" -eq 1 ] || [ "$INSTALL_TX_HAD_BINARY_PATH" -eq 1 ] || [ "$INSTALL_TX_HAD_MANIFEST" -eq 1 ]; then
     EXISTING_INSTALL_WAS_PRESENT=1
   fi
-  if launchctl print "gui/$UID/$PROVIDER_LABEL" >/dev/null 2>&1; then
+  if launchctl_service print "$LAUNCHD_DOMAIN/$PROVIDER_LABEL" >/dev/null 2>&1; then
     INSTALL_TX_SERVICE_WAS_ACTIVE=1
   fi
-  if launchctl print "gui/$UID/$LEGACY_PROVIDER_LABEL" >/dev/null 2>&1; then
+  if launchctl_service print "$LAUNCHD_DOMAIN/$LEGACY_PROVIDER_LABEL" >/dev/null 2>&1; then
     INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE=1
   fi
   if [ "$INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
@@ -5960,18 +6635,20 @@ begin_install_transaction() {
           || die 70 "loaded legacy provider has no recoverable launchd plist and partial recovery data could not be removed"
         die 70 "loaded legacy provider has no recoverable launchd plist; current install was not changed"
       }
+    verify_published_launchd_plist "$LEGACY_PLIST_PATH" "$LEGACY_PLIST_BOOTSTRAP_PATH" \
+      || die 70 "managed legacy provider plist does not match the published LaunchDaemon plist; current install was not changed"
     stage_install_tx_plist "$LEGACY_PLIST_PATH" "$recovery_staging/legacy-provider.plist" \
-      "$LEGACY_PROVIDER_LABEL" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
+      "$LEGACY_PROVIDER_LABEL" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" "${HEADLESS_USER:-}" \
       || die 70 "could not stage and verify the previous legacy launchd plist; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_LEGACY_PLIST=1
   fi
   if launchd_label_is_disabled "$PROVIDER_LABEL"; then
     INSTALL_TX_SERVICE_WAS_DISABLED=1
   fi
-  if launchctl print "gui/$UID/$WATCHDOG_LABEL" >/dev/null 2>&1; then
+  if launchctl_service print "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; then
     INSTALL_TX_WATCHDOG_WAS_ACTIVE=1
   fi
-  if launchctl print "gui/$UID/$LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1; then
+  if launchctl_service print "$LAUNCHD_DOMAIN/$LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1; then
     INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE=1
   fi
   if [ "$INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
@@ -5981,8 +6658,10 @@ begin_install_transaction() {
           || die 70 "loaded legacy watchdog has no recoverable launchd plist and partial recovery data could not be removed"
         die 70 "loaded legacy watchdog has no recoverable launchd plist; current install was not changed"
       }
+    verify_published_launchd_plist "$LEGACY_WATCHDOG_PLIST_PATH" "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
+      || die 70 "managed legacy watchdog plist does not match the published LaunchDaemon plist; current install was not changed"
     stage_install_tx_plist "$LEGACY_WATCHDOG_PLIST_PATH" "$recovery_staging/legacy-watchdog.plist" \
-      "$LEGACY_WATCHDOG_LABEL" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
+      "$LEGACY_WATCHDOG_LABEL" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" "${HEADLESS_USER:-}" \
       || die 70 "could not stage and verify the previous legacy watchdog plist; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_LEGACY_WATCHDOG_PLIST=1
   fi
@@ -6030,7 +6709,7 @@ begin_install_transaction() {
       || die 70 "could not suspend the existing watchdog for the protected install transaction"
   fi
   if [ "$INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
-    reclaim_legacy_launchd_service "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_PATH" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
+    reclaim_legacy_launchd_service "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
       || die 70 "could not suspend the existing legacy watchdog for the protected install transaction"
   fi
 }
@@ -6123,6 +6802,8 @@ PY
 discard_install_transaction_before_cutover() {
   [ "$CUTOVER_STARTED" -eq 0 ] || return 1
   log "Discarding staged install files without stopping or replacing the active provider."
+  verify_headless_recovery_trust "$INSTALL_TX_BACKUP" \
+    || die 70 "headless pre-cutover recovery did not match its root-owned trust receipt"
   if ! bash "$INSTALL_TX_BACKUP/recover.sh"; then
     log "ERROR: pre-cutover cleanup failed; recovery data was preserved at $INSTALL_TX_BACKUP"
     return 70
@@ -6158,6 +6839,8 @@ rollback_install_transaction() {
       return 70
     fi
   fi
+  verify_headless_recovery_trust "$INSTALL_TX_BACKUP" \
+    || die 70 "headless rollback recovery did not match its root-owned trust receipt"
   if ! bash "$INSTALL_TX_BACKUP/recover.sh"; then
     log "ERROR: automatic rollback failed; recovery data was preserved at $INSTALL_TX_BACKUP"
     log "Run exactly: bash '$INSTALL_TX_BACKUP/recover.sh'"
@@ -6677,7 +7360,7 @@ ensure_port_free() {
     fi
     reclaim_launchd_service "$PROVIDER_LABEL" \
       || die 5 "could not reclaim existing provider launchd service"
-    reclaim_legacy_launchd_service "$LEGACY_PROVIDER_LABEL" "$LEGACY_PLIST_PATH" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
+    reclaim_legacy_launchd_service "$LEGACY_PROVIDER_LABEL" "$LEGACY_PLIST_BOOTSTRAP_PATH" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
       || die 5 "could not reclaim legacy provider launchd service"
     sleep 2
     if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
@@ -6712,7 +7395,7 @@ ensure_port_free() {
 # this installer; otherwise an unrelated job cannot be stopped accidentally.
 reclaim_launchd_service() {
   local label="$1"
-  local service_target="gui/$UID/$label"
+  local service_target="$LAUNCHD_DOMAIN/$label"
   local expected_program
   local legacy_program
   local expected_plist
@@ -6721,13 +7404,13 @@ reclaim_launchd_service() {
     "$PROVIDER_LABEL")
       expected_program="$INSTALL_DIR/macprovider-cli"
       legacy_program="$BINARY_PATH"
-      expected_plist="$PLIST_PATH"
+      expected_plist="$PLIST_BOOTSTRAP_PATH"
       had_plist="${INSTALL_TX_HAD_PLIST:-0}"
       ;;
     "$WATCHDOG_LABEL")
       expected_program="$WATCHDOG_PATH"
       legacy_program="$WATCHDOG_DIR/watchdog.sh"
-      expected_plist="$WATCHDOG_PLIST_PATH"
+      expected_plist="$WATCHDOG_PLIST_BOOTSTRAP_PATH"
       had_plist="${INSTALL_TX_HAD_WATCHDOG_PLIST:-0}"
       ;;
     *)
@@ -6736,7 +7419,7 @@ reclaim_launchd_service() {
       ;;
   esac
   local service_details
-  if ! service_details="$(launchctl print "$service_target" 2>/dev/null | head -c 65537)"; then
+  if ! service_details="$(launchctl_service print "$service_target" 2>/dev/null | head -c 65537)"; then
     if [ -n "$service_details" ]; then
       log "Refusing to reclaim $label because its launchd identity exceeded the inspection limit."
       return 1
@@ -6779,7 +7462,7 @@ reclaim_launchd_service() {
     return 1
   fi
   log "Reclaiming existing $label launchd service before replacing its plist."
-  launchctl bootout "$service_target" >/dev/null 2>&1
+  launchctl_service bootout "$service_target" >/dev/null 2>&1
 }
 
 reclaim_legacy_launchd_service() {
@@ -6787,9 +7470,9 @@ reclaim_legacy_launchd_service() {
   local expected_plist="$2"
   local expected_program="$3"
   local legacy_program="$4"
-  local service_target="gui/$UID/$label"
+  local service_target="$LAUNCHD_DOMAIN/$label"
   local service_details
-  if ! service_details="$(launchctl print "$service_target" 2>/dev/null | head -c 65537)"; then
+  if ! service_details="$(launchctl_service print "$service_target" 2>/dev/null | head -c 65537)"; then
     return 0
   fi
   [ -n "$service_details" ] || return 1
@@ -6815,7 +7498,7 @@ reclaim_legacy_launchd_service() {
     return 1
   fi
   log "Reclaiming legacy $label launchd service before installing Malibu labels."
-  launchctl bootout "$service_target" >/dev/null 2>&1
+  launchctl_service bootout "$service_target" >/dev/null 2>&1
 }
 
 prompt_yes_no() {
@@ -7569,6 +8252,34 @@ validate_macprovider_version_tag() {
   fi
 }
 
+validate_headless_release_tag() {
+  local tag="$1"
+  [ "$HEADLESS" = "1" ] || return 0
+  validate_macprovider_version_tag "$tag"
+  if ! version_at_least "$tag" "$MACPROVIDER_MIN_HEADLESS_VERSION"; then
+    die 7 "headless mode requires macprovider-cli $MACPROVIDER_MIN_HEADLESS_VERSION or newer; $tag does not support SSH-only protected-file fleet installation"
+  fi
+}
+
+validate_headless_acceptance_source() {
+  [ "$HEADLESS" = "1" ] || return 0
+  [ -z "${BUNDLED_APP:-}" ] \
+    || die 7 "MACPROVIDER_BUNDLED_APP is not accepted in headless mode; use a signed acceptance asset bundle"
+  missing_fields=""
+  for field in \
+    MACPROVIDER_ACCEPTANCE_ASSET_DIR \
+    MACPROVIDER_VERSION \
+    MACPROVIDER_ACCEPTANCE_COMMIT \
+    MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT \
+    MACPROVIDER_ACCEPTANCE_RUN_ID \
+    MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT; do
+    eval "field_value=\${$field:-}"
+    [ -n "$field_value" ] || missing_fields="${missing_fields}${missing_fields:+, }$field"
+  done
+  [ -z "$missing_fields" ] \
+    || die 7 "headless mode requires a signed acceptance asset bundle and exact provenance pins; missing: $missing_fields"
+}
+
 resolve_release_tag() {
   case "${EMERGENCY_ROLLBACK:-0}" in
     0|1) ;;
@@ -8299,14 +9010,16 @@ semantic_merge_config() {
   coordinator_url_value="$4"
   port_value="$5"
   enable_receipts_value="${6:-}"
-  python3 - "$config_path" "$model_value" "$provider_id_value" "$coordinator_url_value" "$port_value" "$enable_receipts_value" <<'PY'
+  credential_store_value="${7:-}"
+  auto_update_enabled_value="${8:-}"
+  python3 - "$config_path" "$model_value" "$provider_id_value" "$coordinator_url_value" "$port_value" "$enable_receipts_value" "$credential_store_value" "$auto_update_enabled_value" <<'PY'
 import json
 import os
 import re
 import sys
 import tempfile
 
-path, model, provider_id, coordinator_url, port, enable_receipts = sys.argv[1:]
+path, model, provider_id, coordinator_url, port, enable_receipts, credential_store, auto_update_enabled = sys.argv[1:]
 owned = {
     "coordinator_url": json.dumps(coordinator_url),
     "provider_id": json.dumps(provider_id),
@@ -8318,6 +9031,14 @@ if enable_receipts:
     if enable_receipts != "true":
         raise SystemExit("enable_receipts installer override must be true or empty")
     owned["enable_receipts"] = "true"
+if credential_store:
+    if credential_store not in ("keychain", "protected_file"):
+        raise SystemExit("credential_store installer override must be keychain, protected_file, or empty")
+    owned["credential_store"] = credential_store
+if auto_update_enabled:
+    if auto_update_enabled not in ("true", "false"):
+        raise SystemExit("auto_update_enabled installer override must be true, false, or empty")
+    owned["auto_update_enabled"] = auto_update_enabled
 try:
     with open(path, "r", encoding="utf-8") as handle:
         lines = handle.read().splitlines()
@@ -8338,7 +9059,7 @@ for line in lines:
     merged.append(f"{key}: {owned[key]}")
     seen.add(key)
 
-for key in ("model", "coordinator_url", "provider_id", "port", "enable_receipts"):
+for key in ("model", "coordinator_url", "provider_id", "port", "enable_receipts", "credential_store", "auto_update_enabled"):
     if key not in owned:
         continue
     if key not in seen:
@@ -8365,13 +9086,33 @@ PY
 enable_fresh_referral_receipts() {
   [ "$FRESH_REFERRAL_BOOTSTRAP" -eq 1 ] || return 0
   existing_model="$(read_config_model || true)"
+  credential_store_value=""
+  auto_update_enabled_value=""
+  [ "$HEADLESS" = "1" ] && credential_store_value="protected_file"
+  [ "$HEADLESS" = "1" ] && auto_update_enabled_value="false"
   semantic_merge_config \
     "$CONFIG_PATH" \
     "$existing_model" \
     "$provider_id" \
     "$coordinator_url" \
     "$PORT" \
-    "true"
+    "true" \
+    "$credential_store_value" \
+    "$auto_update_enabled_value"
+}
+
+enforce_headless_config_overrides() {
+  [ "$HEADLESS" = "1" ] || return 0
+  existing_model="$(read_config_model || true)"
+  semantic_merge_config \
+    "$CONFIG_PATH" \
+    "$existing_model" \
+    "$provider_id" \
+    "$coordinator_url" \
+    "$PORT" \
+    "" \
+    "protected_file" \
+    "false"
 }
 
 write_config() {
@@ -8387,7 +9128,11 @@ write_config() {
   printf "%s\n" "$provider_id" > "$provider_id_temp"
   chmod 600 "$provider_id_temp" 2>/dev/null || true
   mv "$provider_id_temp" "$PROVIDER_ID_PATH"
-  semantic_merge_config "$CONFIG_PATH" "$model" "$provider_id" "$coordinator_url" "$PORT"
+  credential_store_value=""
+  auto_update_enabled_value=""
+  [ "$HEADLESS" = "1" ] && credential_store_value="protected_file"
+  [ "$HEADLESS" = "1" ] && auto_update_enabled_value="false"
+  semantic_merge_config "$CONFIG_PATH" "$model" "$provider_id" "$coordinator_url" "$PORT" "" "$credential_store_value" "$auto_update_enabled_value"
   chmod 600 "$CONFIG_PATH" "$PROVIDER_ID_PATH" 2>/dev/null || true
 }
 
@@ -8406,12 +9151,75 @@ read_config_model() {
 
 read_config_provider_token_line() {
   [ -f "$CONFIG_PATH" ] || return 1
-  awk '
-    /^provider_token[[:space:]]*:/ {
-      print
-      exit
-    }
-  ' "$CONFIG_PATH"
+  python3 - "$CONFIG_PATH" <<'PY'
+import re
+import sys
+
+pattern = re.compile(r'^[ \t]*(?:"provider_token"|'"'"'provider_token'"'"'|provider_token)[ \t]*:')
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    for line in handle:
+        if pattern.match(line):
+            print(line.rstrip("\n"))
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+scrub_config_provider_token() {
+  [ -f "$CONFIG_PATH" ] || return 0
+  python3 - "$CONFIG_PATH" <<'PY'
+import os
+import re
+import sys
+import tempfile
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as handle:
+    lines = handle.read().splitlines()
+key_pattern = re.compile(r'^(?P<indent>[ \t]*)(?:"provider_token"|'"'"'provider_token'"'"'|provider_token)[ \t]*:(?P<rest>.*)$')
+scrubbed = []
+index = 0
+while index < len(lines):
+    line = lines[index]
+    match = key_pattern.match(line)
+    if not match:
+        scrubbed.append(line)
+        index += 1
+        continue
+    key_indent = len(match.group("indent").expandtabs(8))
+    rest = match.group("rest").strip()
+    index += 1
+    if rest.startswith("|") or rest.startswith(">"):
+        while index < len(lines):
+            candidate = lines[index]
+            if candidate.strip() == "":
+                index += 1
+                continue
+            indent = len(candidate[: len(candidate) - len(candidate.lstrip(" \t"))].expandtabs(8))
+            if indent <= key_indent:
+                break
+            index += 1
+directory = os.path.dirname(path)
+fd, temporary = tempfile.mkstemp(prefix=".config-tokenless-", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        output.write("\n".join(scrubbed))
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    dir_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
 }
 
 read_config_provider_id() {
@@ -8516,9 +9324,15 @@ ensure_provider_credentials() {
   credential_already_present=0
   if [ -n "$(read_config_provider_token_line || true)" ]; then
     run_macprovider_cli_with_amfi_retry credentials import --config "$CONFIG_PATH" \
-      || die 6 "provider credential migration into CLI Keychain failed"
+      || die 6 "provider credential migration into CLI credential custody failed"
     run_macprovider_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
       || die 6 "provider credential migration verification failed"
+    if [ "$HEADLESS" = "1" ]; then
+      scrub_config_provider_token \
+        || die 6 "provider credential was imported but could not be scrubbed from headless config"
+      [ -z "$(read_config_provider_token_line || true)" ] \
+        || die 6 "provider credential was imported but remains in headless config"
+    fi
     [ -n "${REFERRAL_CODE_SOURCE_FILE:-}" ] || return 0
     credential_already_present=1
   else
@@ -8772,6 +9586,7 @@ use_fresh_recommendation_if_available() {
   fi
 
   if run_macprovider_cli_with_amfi_retry autotune --recommend --freshness-check --no-submit-hardware-evidence --config "$CONFIG_PATH" >/dev/null; then
+    enforce_headless_config_overrides
     ensure_provider_credentials
     submit_required_hardware_evidence
     recommended_model="$(read_config_model || true)"
@@ -9055,31 +9870,38 @@ install_plist() {
     log "Skipping launchd service install (MACPROVIDER_NO_LAUNCHD=1 expert/debug override)."
     return
   fi
-  log "Installing as a background launchd service."
+  if [ "$HEADLESS" = "1" ]; then
+    log "Installing as a headless LaunchDaemon for fleet user $HEADLESS_USER."
+  else
+    log "Installing as a background launchd service."
+  fi
 
   run mkdir -p "$(dirname "$PLIST_PATH")" "$LOG_DIR"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "Would render launchd plist to $PLIST_PATH"
-    log "Would enable launchd service: launchctl enable gui/$UID/$PROVIDER_LABEL"
-    log "Would bootstrap with: launchctl bootstrap gui/$UID $PLIST_PATH"
+    log "Would enable launchd service: launchctl enable $LAUNCHD_DOMAIN/$PROVIDER_LABEL"
+    log "Would bootstrap with: launchctl bootstrap $LAUNCHD_DOMAIN $PLIST_BOOTSTRAP_PATH"
     return
   fi
 
   reclaim_launchd_service "$PROVIDER_LABEL" \
     || die 5 "could not reclaim existing provider launchd service"
-  reclaim_legacy_launchd_service "$LEGACY_PROVIDER_LABEL" "$LEGACY_PLIST_PATH" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
+  reclaim_legacy_launchd_service "$LEGACY_PROVIDER_LABEL" "$LEGACY_PLIST_BOOTSTRAP_PATH" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
     || die 5 "could not reclaim legacy provider launchd service"
   render_plist "$model" "$provider_id" "$coordinator_url" \
     | write_atomic_install_file "$PLIST_PATH" \
     || die 5 "could not publish rendered launchd plist safely"
 
   plutil -lint "$PLIST_PATH" >/dev/null || die 5 "rendered launchd plist is invalid"
-  launchctl enable "gui/$UID/$PROVIDER_LABEL" || die 5 "failed to enable launchd service"
   if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ] && [ -n "${INSTALL_TX_BACKUP:-}" ]; then
     write_install_tx_marker "$INSTALL_TX_BACKUP/provider-service-created" \
       || die 70 "could not durably record the provider launchd mutation"
   fi
-  launchctl bootstrap "gui/$UID" "$PLIST_PATH" || die 5 "failed to load launchd service"
+  publish_launchd_plist "$PLIST_PATH" "$PLIST_BOOTSTRAP_PATH" \
+    "$PROVIDER_LABEL" "$INSTALL_DIR/macprovider-cli" \
+    || die 5 "failed to publish launchd service plist"
+  launchctl_service enable "$LAUNCHD_DOMAIN/$PROVIDER_LABEL" || die 5 "failed to enable launchd service"
+  launchctl_service bootstrap "$LAUNCHD_DOMAIN" "$PLIST_BOOTSTRAP_PATH" || die 5 "failed to load launchd service"
   LAUNCHD_INSTALLED=1
 }
 
@@ -9087,10 +9909,25 @@ render_plist() {
   user_home="$(xml_escape "$HOME")"
   install_prefix="$(xml_escape "$INSTALL_DIR")"
   config_path="$(xml_escape "$CONFIG_PATH")"
+  protected_credential_root="$(xml_escape "$CONFIG_DIR/protected-credentials")"
   # F-603-V7-4: launchd must invoke the real binary path, not the
   # ~/.local/bin symlink, so Swift Bundle resolution finds adjacent bundles.
   binary_path="$(xml_escape "$INSTALL_DIR/macprovider-cli")"
   log_dir="$(xml_escape "$LOG_DIR")"
+  credential_store="keychain"
+  launchd_user_entry=""
+  keepalive_entry="  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>"
+  if [ "$HEADLESS" = "1" ]; then
+    credential_store="protected_file"
+    launchd_user_entry="  <key>UserName</key>
+  <string>$(xml_escape "$HEADLESS_USER")</string>"
+    keepalive_entry="  <key>KeepAlive</key>
+  <true/>"
+  fi
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -9099,6 +9936,7 @@ render_plist() {
 <dict>
   <key>Label</key>
   <string>live.malibu.provider</string>
+$launchd_user_entry
   <key>ProgramArguments</key>
   <array>
     <string>$binary_path</string>
@@ -9108,11 +9946,7 @@ render_plist() {
   </array>
   <key>RunAtLoad</key>
   <true/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
+$keepalive_entry
   <key>StandardOutPath</key>
   <string>$log_dir/macprovider.out.log</string>
   <key>StandardErrorPath</key>
@@ -9127,6 +9961,16 @@ render_plist() {
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$user_home/.local/bin</string>
     <key>MACPROVIDER_CONFIG</key>
     <string>$config_path</string>
+    <key>MACPROVIDER_CREDENTIAL_STORE</key>
+    <string>$credential_store</string>
+    <key>MACPROVIDER_PROTECTED_CREDENTIAL_ROOT</key>
+    <string>$protected_credential_root</string>
+    <key>MACPROVIDER_HEADLESS</key>
+    <string>$HEADLESS</string>
+    <key>MACPROVIDER_HEADLESS_USER</key>
+    <string>$(xml_escape "$HEADLESS_USER")</string>
+    <key>MACPROVIDER_LAUNCHD_DOMAIN</key>
+    <string>$LAUNCHD_DOMAIN</string>
   </dict>
   <key>ThrottleInterval</key>
   <integer>10</integer>
@@ -9242,6 +10086,21 @@ read_config_port() {
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { printf "[%s] %s\n" "$(ts)" "$*" >> "$LOG_PATH"; }
+LAUNCHD_DOMAIN="${MACPROVIDER_LAUNCHD_DOMAIN:-gui/$(id -u)}"
+
+launchctl_run() {
+  launchctl_bin="${MACPROVIDER_LAUNCHCTL:-launchctl}"
+  if [ "$LAUNCHD_DOMAIN" = "system" ]; then
+    launchctl_bin="/bin/launchctl"
+    /usr/bin/sudo -n "$launchctl_bin" "$@"
+  else
+    "$launchctl_bin" "$@"
+  fi
+}
+
+launchd_service_target() {
+  printf "%s/%s" "$LAUNCHD_DOMAIN" "$LABEL"
+}
 
 resolve_coordinator_ip() {
   # First try dscacheutil (no network call if already cached);
@@ -9271,9 +10130,8 @@ has_established_conn() {
 }
 
 provider_process_pid() {
-  launchctl_bin="${MACPROVIDER_LAUNCHCTL:-launchctl}"
-  service_target="gui/$(id -u)/$LABEL"
-  if ! service_output="$("$launchctl_bin" print "$service_target" 2>/dev/null)"; then
+  service_target="$(launchd_service_target)"
+  if ! service_output="$(launchctl_run print "$service_target" 2>/dev/null)"; then
     return 1
   fi
   candidates="$(printf "%s\n" "$service_output" | awk 'NF == 3 && $1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ { print $3 }')"
@@ -9390,9 +10248,8 @@ provider_restart_cooldown_active() {
 
 kickstart_provider() {
   reason="$1"
-  launchctl_bin="${MACPROVIDER_LAUNCHCTL:-launchctl}"
-  service_target="gui/$(id -u)/$LABEL"
-  if "$launchctl_bin" kickstart -k "$service_target" >/dev/null 2>&1; then
+  service_target="$(launchd_service_target)"
+  if launchctl_run kickstart -k "$service_target" >/dev/null 2>&1; then
     if ! now_epoch > "$LAST_KICK_FILE"; then
       log "provider restart cooldown write failed for $LABEL reason=${reason}"
     fi
@@ -9411,6 +10268,8 @@ autoupdate_recovery_tick() {
   AUTUPDATE_STATE_ROOT="${MACPROVIDER_AUTOUPDATE_STATE_ROOT:-$HOME/.local/share/macprovider/autoupdate}" \
   MACPROVIDER_BINARY_PATH="$BINARY_PATH" \
   MACPROVIDER_LABEL="$LABEL" \
+  MACPROVIDER_LAUNCHD_DOMAIN="$LAUNCHD_DOMAIN" \
+  MACPROVIDER_PROVIDER_PLIST_PATH="${MACPROVIDER_PROVIDER_PLIST_PATH:-$HOME/Library/LaunchAgents/live.malibu.provider.plist}" \
   LOG_PATH="$LOG_PATH" \
   python3 <<'PY'
 import datetime
@@ -9438,6 +10297,8 @@ lifecycle_root = os.path.expanduser("~/Library/Application Support/macprovider/l
 lifecycle_lock_path = os.path.join(lifecycle_root, ".lease.json.lock")
 uid = os.getuid()
 provider_user = pwd.getpwuid(uid).pw_name
+launchd_domain = os.environ.get("MACPROVIDER_LAUNCHD_DOMAIN") or f"gui/{uid}"
+provider_plist_path = os.environ.get("MACPROVIDER_PROVIDER_PLIST_PATH") or os.path.expanduser("~/Library/LaunchAgents/live.malibu.provider.plist")
 reload_helper_label = "live.malibu.provider-compatibility-reload"
 legacy_reload_helper_label = re.compile(
     rf"^{re.escape(reload_helper_label)}\."
@@ -9454,6 +10315,16 @@ def ts():
 def log(message):
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(f"[{ts()}] autoupdate {message}\n")
+
+def launchctl_command(*arguments):
+    binary = "/bin/launchctl" if launchd_domain == "system" else os.environ.get("MACPROVIDER_LAUNCHCTL", "launchctl")
+    command = [binary, *arguments]
+    if launchd_domain == "system":
+        return ["/usr/bin/sudo", "-n", *command]
+    return command
+
+def launchd_service_target(service_label=label):
+    return f"{launchd_domain}/{service_label}"
 
 def event(outcome, phase, failure_class, reason, marker=None):
     payload = {
@@ -9474,7 +10345,7 @@ def event(outcome, phase, failure_class, reason, marker=None):
 def fence_reload_helpers():
     try:
         listed = subprocess.run(
-            ["launchctl", "list"],
+            launchctl_command("list"),
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -9495,11 +10366,10 @@ def fence_reload_helpers():
             labels.add(candidate)
     labels.add(reload_helper_label)
     ordered_labels = [reload_helper_label] + sorted(labels - {reload_helper_label})
-    domain = f"gui/{uid}"
     for helper_label in ordered_labels:
         try:
             subprocess.run(
-                ["launchctl", "bootout", f"{domain}/{helper_label}"],
+                launchctl_command("bootout", launchd_service_target(helper_label)),
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -9513,7 +10383,7 @@ def fence_reload_helpers():
         for attempt in range(reload_helper_removal_max_checks):
             try:
                 inspected = subprocess.run(
-                    ["launchctl", "print", f"{domain}/{helper_label}"],
+                    launchctl_command("print", launchd_service_target(helper_label)),
                     check=False,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -9538,6 +10408,8 @@ def fence_reload_helpers():
                 time.sleep(0.1)
         if not absent:
             raise ReloadHelperFenceError(f"reload_helper_removal_timeout:{helper_label}")
+    if launchd_domain == "system":
+        return
     launch_agents = os.path.expanduser("~/Library/LaunchAgents")
     for helper_label in ordered_labels:
         helper_plist = os.path.join(launch_agents, f"{helper_label}.plist")
@@ -9816,7 +10688,7 @@ def known_binary_dir():
     configured = os.environ.get("MACPROVIDER_BINARY_DIR", "")
     if configured:
         return os.path.realpath(configured)
-    plist_path = os.path.expanduser("~/Library/LaunchAgents/live.malibu.provider.plist")
+    plist_path = provider_plist_path
     try:
         result = subprocess.run(
             ["/usr/libexec/PlistBuddy", "-c", "Print ProgramArguments:0", plist_path],
@@ -10032,10 +10904,9 @@ def inspect_lifecycle_lease():
     return {"kind": kind, "owner_pid": owner_pid}
 
 def launchd_provider_pid():
-    launchctl = os.environ.get("MACPROVIDER_LAUNCHCTL", "launchctl")
     try:
         result = subprocess.run(
-            [launchctl, "print", f"gui/{uid}/{label}"],
+            launchctl_command("print", launchd_service_target()),
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -10193,11 +11064,13 @@ def owned_release_resource(name):
 
 def external_local_members():
     home = os.path.expanduser("~")
-    return [
-        ("launchd", os.path.join(home, "Library/LaunchAgents/live.malibu.provider.plist"), "provider.plist"),
+    members = [
         ("watchdog_script", os.path.join(home, ".local/share/macprovider-watchdog/macprovider-health-monitor"), "watchdog.sh"),
-        ("watchdog_plist", os.path.join(home, "Library/LaunchAgents/live.malibu.provider-watchdog.plist"), "watchdog.plist"),
     ]
+    if launchd_domain != "system":
+        members.insert(0, ("launchd", os.path.join(home, "Library/LaunchAgents/live.malibu.provider.plist"), "provider.plist"))
+        members.append(("watchdog_plist", os.path.join(home, "Library/LaunchAgents/live.malibu.provider-watchdog.plist"), "watchdog.plist"))
+    return members
 
 def validate_external_local_backup(backup_directory):
     reject_path(backup_directory)
@@ -10458,7 +11331,7 @@ def restore(marker, failure_class):
     record_watchdog_recovery(marker, failure_class)
     try:
         bootstrap = subprocess.run(
-            ["launchctl", "bootstrap", f"gui/{uid}", os.path.expanduser("~/Library/LaunchAgents/live.malibu.provider.plist")],
+            launchctl_command("bootstrap", launchd_domain, provider_plist_path),
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -10466,7 +11339,7 @@ def restore(marker, failure_class):
         )
         if bootstrap.returncode != 0:
             loaded = subprocess.run(
-                ["launchctl", "print", f"gui/{uid}/{label}"],
+                launchctl_command("print", launchd_service_target()),
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -10475,7 +11348,7 @@ def restore(marker, failure_class):
             if loaded.returncode != 0:
                 raise RuntimeError(f"bootstrap_failed:{bootstrap.returncode}")
         kickstart = subprocess.run(
-            ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
+            launchctl_command("kickstart", "-k", launchd_service_target()),
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -10524,7 +11397,7 @@ def keep_previous_readiness_recovery_live(marker):
         return
     try:
         subprocess.run(
-            ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
+            launchctl_command("kickstart", "-k", launchd_service_target()),
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -10543,7 +11416,7 @@ def keep_previous_readiness_recovery_live(marker):
 
 def classify_post_start_failure(marker):
     try:
-        printed = subprocess.run(["launchctl", "print", f"gui/{uid}/{label}"], check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5).stdout.lower()
+        printed = subprocess.run(launchctl_command("print", launchd_service_target()), check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5).stdout.lower()
         if "last exit status" in printed and not re.search(r"last exit status\s*=\s*0", printed):
             return "post_start_crash"
         if "pid =" not in printed:
@@ -10644,8 +11517,18 @@ finally:
 PY
 }
 
+autoupdate_recovery_supported() {
+  [ "${MACPROVIDER_HEADLESS:-0}" != "1" ] || return 1
+  [ "${MACPROVIDER_LAUNCHD_DOMAIN:-}" != "system" ] || return 1
+  return 0
+}
+
 main() {
-  autoupdate_recovery_tick
+  if autoupdate_recovery_supported; then
+    autoupdate_recovery_tick
+  else
+    log "autoupdate recovery skipped: unsupported_install_topology profile=headless_fleet"
+  fi
   pid="$(read_provider_id || true)"
   if [ -z "$pid" ]; then
     # Provider not yet installed / configured. Stay silent; if the
@@ -10724,7 +11607,19 @@ render_watchdog_plist() {
   log_dir="$(xml_escape "$LOG_DIR")"
   config_path="$(xml_escape "$CONFIG_PATH")"
   binary_path="$(xml_escape "$INSTALL_DIR/macprovider-cli")"
+  protected_credential_root="$(xml_escape "$CONFIG_DIR/protected-credentials")"
   coord_host="$(xml_escape "$(printf "%s" "$1" | sed -E 's#^wss?://##; s#/.*##')")"
+  credential_store="keychain"
+  launchd_user_entry=""
+  watchdog_search_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  launchctl_environment_entry=""
+  if [ "$HEADLESS" = "1" ]; then
+    credential_store="protected_file"
+    launchctl_environment_entry="    <key>MACPROVIDER_LAUNCHCTL</key>
+    <string>/bin/launchctl</string>"
+    launchd_user_entry="  <key>UserName</key>
+  <string>$(xml_escape "$HEADLESS_USER")</string>"
+  fi
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -10733,6 +11628,7 @@ render_watchdog_plist() {
 <dict>
   <key>Label</key>
   <string>$WATCHDOG_LABEL</string>
+$launchd_user_entry
   <key>ProgramArguments</key>
   <array>
     <string>$watchdog_path</string>
@@ -10753,17 +11649,30 @@ render_watchdog_plist() {
     <!-- Issue #191 R4 architect HIGH: include /usr/sbin and /sbin
          so the watchdog finds sysctl + netstat under launchd's
          minimal PATH. -->
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>$watchdog_search_path</string>
     <key>MACPROVIDER_WATCHDOG_LABEL</key>
     <string>live.malibu.provider</string>
     <key>MACPROVIDER_CONFIG_PATH</key>
     <string>$config_path</string>
     <key>MACPROVIDER_BINARY_PATH</key>
     <string>$binary_path</string>
+    <key>MACPROVIDER_PROVIDER_PLIST_PATH</key>
+    <string>$(xml_escape "$PLIST_BOOTSTRAP_PATH")</string>
+    <key>MACPROVIDER_CREDENTIAL_STORE</key>
+    <string>$credential_store</string>
+    <key>MACPROVIDER_PROTECTED_CREDENTIAL_ROOT</key>
+    <string>$protected_credential_root</string>
     <key>MACPROVIDER_COORDINATOR_HOST</key>
     <string>$coord_host</string>
     <key>MACPROVIDER_LOG_DIR</key>
     <string>$log_dir</string>
+    <key>MACPROVIDER_HEADLESS</key>
+    <string>$HEADLESS</string>
+    <key>MACPROVIDER_HEADLESS_USER</key>
+    <string>$(xml_escape "$HEADLESS_USER")</string>
+    <key>MACPROVIDER_LAUNCHD_DOMAIN</key>
+    <string>$LAUNCHD_DOMAIN</string>
+$launchctl_environment_entry
   </dict>
   <key>ProcessType</key>
   <string>Background</string>
@@ -10791,11 +11700,15 @@ install_watchdog() {
   if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ]; then
     assert_install_lock_ownership
   fi
-  log "Installing watchdog LaunchAgent (operator-visibility safety net for iss-189-class wedges)."
+  if [ "$HEADLESS" = "1" ]; then
+    log "Installing watchdog LaunchDaemon for fleet user $HEADLESS_USER."
+  else
+    log "Installing watchdog LaunchAgent (operator-visibility safety net for iss-189-class wedges)."
+  fi
   mkdir -p "$WATCHDOG_DIR" "$LOG_DIR" "$(dirname "$WATCHDOG_PLIST_PATH")"
   reclaim_launchd_service "$WATCHDOG_LABEL" \
     || die 5 "could not reclaim existing watchdog launchd service"
-  reclaim_legacy_launchd_service "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_PATH" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
+  reclaim_legacy_launchd_service "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
     || die 5 "could not reclaim legacy watchdog launchd service"
   legacy_watchdog="$WATCHDOG_DIR/watchdog.sh"
   if [ -f "$legacy_watchdog" ] && [ "$legacy_watchdog" != "$WATCHDOG_PATH" ]; then
@@ -10807,13 +11720,16 @@ install_watchdog() {
     || die 5 "could not publish rendered watchdog plist safely"
   plutil -lint "$WATCHDOG_PLIST_PATH" >/dev/null \
     || die 5 "rendered watchdog plist is invalid"
-  launchctl enable "gui/$UID/$WATCHDOG_LABEL" \
-    || die 5 "failed to enable watchdog launchd service"
   if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ] && [ -n "${INSTALL_TX_BACKUP:-}" ]; then
     write_install_tx_marker "$INSTALL_TX_BACKUP/watchdog-service-created" \
       || die 70 "could not durably record the watchdog launchd mutation"
   fi
-  launchctl bootstrap "gui/$UID" "$WATCHDOG_PLIST_PATH" \
+  publish_launchd_plist "$WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_BOOTSTRAP_PATH" \
+    "$WATCHDOG_LABEL" "$WATCHDOG_PATH" \
+    || die 5 "failed to publish watchdog launchd plist"
+  launchctl_service enable "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" \
+    || die 5 "failed to enable watchdog launchd service"
+  launchctl_service bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_BOOTSTRAP_PATH" \
     || die 5 "failed to load watchdog launchd service"
   WATCHDOG_INSTALLED=1
   log "Watchdog installed. Logs at $LOG_DIR/watchdog.log."
@@ -10839,6 +11755,11 @@ write_install_manifest() {
   fi
   write_atomic_install_file "$MANIFEST_PATH" 0600 <<EOF
 {
+  "install_profile": $(json_escape "$([ "$HEADLESS" = "1" ] && printf headless_fleet || printf consumer_user)"),
+  "launchd_domain": $(json_escape "$LAUNCHD_DOMAIN"),
+  "headless_user": $(json_escape "$HEADLESS_USER"),
+  "provider_config_root": $(json_escape "$CONFIG_DIR"),
+  "provider_state_root": $(json_escape "$HOME/.local/share/macprovider"),
   "install_prefix": $(json_escape "$INSTALL_DIR"),
   "binary_path": $(json_escape "$INSTALL_DIR/macprovider-cli"),
   "symlink_path": $(json_escape "$BINARY_PATH"),
@@ -11203,7 +12124,7 @@ print_pid() {
     printf "%s\n" "$MANUAL_PID"
     return
   fi
-  launchctl print "gui/$(id -u)/live.malibu.provider" 2>/dev/null \
+  launchctl_service print "$LAUNCHD_DOMAIN/$PROVIDER_LABEL" 2>/dev/null \
     | awk 'NF == 3 && $1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ { print $3 }'
 }
 
@@ -11586,25 +12507,51 @@ verify_emergency_config_activation() {
 config_without_provider_token_sha256() {
   python3 - "$1" <<'PY'
 import hashlib
+import re
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    text = handle.read()
-tokenless = "\n".join(
-    line for line in text.split("\n") if not line.startswith("provider_token:")
-)
+    lines = handle.read().splitlines()
+key_pattern = re.compile(r'^(?P<indent>[ \t]*)(?:"provider_token"|'"'"'provider_token'"'"'|provider_token)[ \t]*:(?P<rest>.*)$')
+scrubbed = []
+index = 0
+while index < len(lines):
+    line = lines[index]
+    match = key_pattern.match(line)
+    if not match:
+        scrubbed.append(line)
+        index += 1
+        continue
+    key_indent = len(match.group("indent").expandtabs(8))
+    rest = match.group("rest").strip()
+    index += 1
+    if rest.startswith("|") or rest.startswith(">"):
+        while index < len(lines):
+            candidate = lines[index]
+            if candidate.strip() == "":
+                index += 1
+                continue
+            indent = len(candidate[: len(candidate) - len(candidate.lstrip(" \t"))].expandtabs(8))
+            if indent <= key_indent:
+                break
+            index += 1
+tokenless = "\n".join(scrubbed) + "\n"
 print(hashlib.sha256(tokenless.encode("utf-8")).hexdigest())
 PY
 }
 
 main() {
   detect_platform
+  validate_provider_token_environment
+  validate_launchd_mode
+  validate_headless_acceptance_source
   validate_port_value "$PORT"
   for tool in curl tar shasum grep sed awk date hostname mktemp openssl find python3 lsof cmp diff readlink ps; do
     require_tool "$tool"
   done
   validate_install_dir
   acquire_install_lock
+  validate_headless_install_topology
   recover_orphaned_install_transactions
   prepare_fresh_referral_code
 
@@ -11633,6 +12580,7 @@ main() {
   fi
 
   tag="$(resolve_release_tag)"
+  validate_headless_release_tag "$tag"
   # The install lock is already held here, so this check closes the race between
   # Malibu's observed snapshot and the version actually present at mutation time.
   validate_non_emergency_pinned_target "$tag"

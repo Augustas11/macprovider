@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import MacProviderCore
 import Security
 import XCTest
 @testable import macprovider_cli
@@ -18,6 +19,32 @@ final class SelfUpdateTests: XCTestCase {
 
             XCTAssertEqual(update.resolvedReleasesAPIURLForTest(), SelfUpdate.defaultReleasesAPIURL)
         }
+    }
+
+    func testHeadlessUpdateAllowsCheckOnlyButRejectsMutatingUpdate() throws {
+        var config = AppConfig.defaults(configPath: "/tmp/config.yaml")
+        config.credentialStore = .protectedFile
+
+        XCTAssertNoThrow(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: true,
+            hasAcceptanceOptions: false
+        ))
+        XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false
+        ))
+        XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: true,
+            hasAcceptanceOptions: true
+        ))
+        XCTAssertNoThrow(try UpdateCommand.validateHeadlessUpdateMode(
+            config: nil,
+            checkOnly: true,
+            hasAcceptanceOptions: false
+        ))
     }
 
     func testReleaseAPIURLRejectsUntrustedExplicitOverrideBeforeFetching() async throws {

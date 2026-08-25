@@ -38,6 +38,22 @@ final class BootstrapAuthCommandTests: XCTestCase {
         ))
     }
 
+    func testProtectedFileIdentityMaterialBootstrapCreatesReceiptAndAdmissionKeys() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ProtectedFileReceiptKeyStore(rootDirectory: directory)
+        let providerID = "mp-0123456789abcdef0123456789abcdef"
+
+        let bootstrap = try BootstrapAuthCommand.ensureProtectedFileIdentityMaterial(
+            providerID: providerID,
+            store: store
+        )
+
+        XCTAssertEqual(try store.loadCurrent(providerId: providerID)?.rawRepresentation, bootstrap.rawRepresentation)
+        XCTAssertEqual(try store.loadBootstrapIdentity(providerId: providerID)?.rawRepresentation, bootstrap.rawRepresentation)
+        XCTAssertEqual(try store.loadAdmissionIdentity(providerId: providerID)?.rawRepresentation, bootstrap.rawRepresentation)
+    }
+
     func testReferralCodeFileRequiresOwnerOnlyRegularBoundedFile() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

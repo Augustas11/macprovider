@@ -1498,8 +1498,18 @@ finally:
 PY
 }
 
+autoupdate_recovery_supported() {
+  [ "${MACPROVIDER_HEADLESS:-0}" != "1" ] || return 1
+  [ "${MACPROVIDER_LAUNCHD_DOMAIN:-}" != "system" ] || return 1
+  return 0
+}
+
 main() {
-  autoupdate_recovery_tick
+  if autoupdate_recovery_supported; then
+    autoupdate_recovery_tick
+  else
+    log "autoupdate recovery skipped: unsupported_install_topology profile=headless_fleet"
+  fi
   pid="$(read_provider_id || true)"
   if [ -z "$pid" ]; then
     # Provider not yet installed / configured. Stay silent; if the
