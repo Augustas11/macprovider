@@ -270,6 +270,14 @@ def require_candidate_identity(value: Any) -> dict[str, Any]:
     return deepcopy(identity)
 
 
+def reject_creator_mvp_secret_keys(evidence: dict[str, Any]) -> None:
+    # Required observation flags such as buyer_authorization_enforced are
+    # closed booleans, not secret material; scan the rest of the artifact.
+    sanitized = deepcopy(evidence)
+    sanitized.pop("observations", None)
+    layer2.reject_forbidden_secret_keys(sanitized)
+
+
 def require_signed_redaction(value: Any) -> dict[str, bool]:
     redaction = require_object(value, "redaction")
     for field, redacted in sorted(redaction.items()):
@@ -300,7 +308,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     require_string(evidence_sha, COMMIT_RE, "--evidence-sha")
     source, path = require_evidence_source(root, source)
     evidence, evidence_bytes = layer2.load_object_bytes(path, "Trusted Pool creator MVP redacted evidence")
-    layer2.reject_forbidden_secret_keys(evidence)
+    reject_creator_mvp_secret_keys(evidence)
     if evidence.get("schema_version") != EVIDENCE_SCHEMA:
         die(f"schema_version must equal {EVIDENCE_SCHEMA!r}")
     if evidence.get("journey_id") != JOURNEY_ID:

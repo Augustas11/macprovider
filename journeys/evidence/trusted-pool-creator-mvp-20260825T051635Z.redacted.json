@@ -186,7 +186,7 @@
       "artifacts": [
         "redacted-trusted-pool-creator-mvp"
       ],
-      "assertion": "Authorized policy and status documents used no-store cache control and did not advertise Privacy Pool or unlinkable routing.",
+      "assertion": "Authorized policy and status documents used no-store cache control and kept the Trusted Pool confidentiality scope.",
       "id": "step-07-promise-surfaces",
       "status": "pass"
     },

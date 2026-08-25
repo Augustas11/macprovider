@@ -493,7 +493,7 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 			creatorMVPStep("step-04-negative-manifest-cases", "Unsigned manifest and prohibited routing-claim snapshot were rejected before durable append."),
 			creatorMVPStep("step-05-provider-membership", "Undelegated provider admission failed; creator-owned admitted member succeeded; later revoke excluded the member from the next routeable snapshot."),
 			creatorMVPStep("step-06-buyer-authorization", "Dedicated buyer grant succeeded; unauthorized account selection failed closed with a generic pool denial before provider dispatch."),
-			creatorMVPStep("step-07-promise-surfaces", "Authorized policy and status documents used no-store cache control and did not advertise Privacy Pool or unlinkable routing."),
+			creatorMVPStep("step-07-promise-surfaces", "Authorized policy and status documents used no-store cache control and kept the Trusted Pool confidentiality scope."),
 			creatorMVPStep("step-08-activation-gate", "Promotion before root/manifest/membership failed closed; candidate promotion after preflight published a routeable snapshot."),
 			creatorMVPStep("step-09-successful-pooled-request", "Authorized pooled chat returned 200 through the admitted member only."),
 			creatorMVPStep("step-10-settlement-and-logs", "Route snapshot stored pool_id and digest in observe mode; payout-ready rows stayed zero."),

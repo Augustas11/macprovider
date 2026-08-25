@@ -355,6 +355,9 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
             builder.require_observations(observations)
         with self.assertRaises(SystemExit):
             builder.layer2.reject_forbidden_secret_keys({"notes": "sk-proj-" + ("a" * 48)})
+        builder.reject_creator_mvp_secret_keys({"observations": valid_signed()["observations"], "notes": "ok"})
+        with self.assertRaises(SystemExit):
+            builder.reject_creator_mvp_secret_keys({"authorization_header": "secret", "observations": valid_signed()["observations"]})
 
     def test_builder_normalizes_rich_source_redaction_for_signed_payload(self) -> None:
         builder = load_builder()
