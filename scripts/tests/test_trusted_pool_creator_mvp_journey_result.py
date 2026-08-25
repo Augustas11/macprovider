@@ -47,13 +47,15 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
         "journey_id": TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID,
         "execution_mode": "isolated-candidate-trusted-pool-creator-mvp",
         "requirement_ids": ids,
+        "captured_at": "2026-08-25T05:54:25Z",
+        "expires_at": "2026-08-25",
         "observations": {
             "approved_creator_record_bound": True,
             "buyer_authorization_enforced": True,
             "candidate_manifest_accepted": True,
             "creator_admin_authorized_only": True,
             "creator_suspension_root_compromise_freeze_verified": False,
-            "delegation_revocation_verified": True,
+            "delegation_revocation_verified": False,
             "descendant_signer_rejection_verified": False,
             "emergency_pause_exercised": True,
             "fail_closed_no_global_fallback": True,
@@ -61,7 +63,7 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
             "no_duplicate_settlement": True,
             "no_private_key_upload": True,
             "no_raw_prompt_output_artifact": True,
-            "pool_existence_oracle_within_threshold": True,
+            "pool_existence_oracle_within_threshold": False,
             "raw_prompt_output_redacted": True,
             "restart_reconstruction_verified": True,
             "root_registration_replay_checked": True,
@@ -146,6 +148,21 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
                 result,
             )
             self.assertEqual([], result.errors, requirement_id)
+
+    def test_rejects_expires_at_after_captured_utc_date(self) -> None:
+        result = ValidationResult()
+        signed = valid_signed()
+        signed["expires_at"] = "2026-08-26"
+        _validate_trusted_pool_creator_mvp_journey_result(
+            signed,
+            "SPEC-043-R012",
+            [TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID],
+            signed["artifacts"],
+            signed["steps"],
+            "evidence[0]",
+            result,
+        )
+        self.assertTrue(any("captured_at" in error for error in result.errors))
 
     def test_rejects_broad_or_unmapped_requirement(self) -> None:
         result = ValidationResult()
@@ -357,6 +374,13 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
         freeze["creator_suspension_root_compromise_freeze_verified"] = True
         with self.assertRaises(SystemExit):
             builder.require_observations(freeze)
+        oracle = dict(valid_signed()["observations"])
+        oracle["pool_existence_oracle_within_threshold"] = True
+        with self.assertRaises(SystemExit):
+            builder.require_observations(oracle)
+        builder.require_same_utc_day_expiry("2026-08-25T05:54:25Z", "2026-08-25")
+        with self.assertRaises(SystemExit):
+            builder.require_same_utc_day_expiry("2026-08-25T05:54:25Z", "2026-08-26")
         extra = dict(valid_signed()["observations"])
         extra["authorization_header"] = "sk-proj-" + ("a" * 48)
         with self.assertRaises(SystemExit):

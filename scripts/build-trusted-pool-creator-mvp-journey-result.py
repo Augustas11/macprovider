@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 from copy import deepcopy
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -164,14 +164,12 @@ def require_observations(value: Any) -> dict[str, Any]:
         "buyer_authorization_enforced",
         "candidate_manifest_accepted",
         "creator_admin_authorized_only",
-        "delegation_revocation_verified",
         "emergency_pause_exercised",
         "fail_closed_no_global_fallback",
         "isolated_environment",
         "no_duplicate_settlement",
         "no_private_key_upload",
         "no_raw_prompt_output_artifact",
-        "pool_existence_oracle_within_threshold",
         "raw_prompt_output_redacted",
         "restart_reconstruction_verified",
         "root_registration_replay_checked",
@@ -181,9 +179,11 @@ def require_observations(value: Any) -> dict[str, Any]:
     false_fields = {
         "coordinator_blind_claimed",
         "creator_suspension_root_compromise_freeze_verified",
+        "delegation_revocation_verified",
         "descendant_signer_rejection_verified",
         "global_fallback_observed",
         "payout_ready_mutated",
+        "pool_existence_oracle_within_threshold",
         "privacy_pool_claimed",
         "production_side_effects",
         "public_announcement_without_reviewed_artifact_observed",
@@ -288,6 +288,12 @@ def reject_creator_mvp_secret_keys(evidence: dict[str, Any]) -> None:
             layer2.reject_forbidden_secret_keys(item, f"$.observations.{key}")
 
 
+def require_same_utc_day_expiry(captured_at: str, expires_at: str) -> None:
+    captured_dt = datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    if date.fromisoformat(expires_at) != captured_dt.date():
+        die("expires_at must equal the UTC calendar date of captured_at")
+
+
 def require_signed_redaction(value: Any) -> dict[str, bool]:
     redaction = require_object(value, "redaction")
     for field, redacted in sorted(redaction.items()):
@@ -348,6 +354,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     expires_at = require_string(evidence.get("expires_at"), DATE_RE, "expires_at")
     if date.fromisoformat(expires_at) < date.today():
         die("expires_at must not be in the past")
+    require_same_utc_day_expiry(captured_at, expires_at)
     operator = deepcopy(require_object(evidence.get("operator"), "operator"))
     require_string(operator.get("role"), None, "operator.role")
     require_string(operator.get("identity_fingerprint"), FINGERPRINT_RE, "operator.identity_fingerprint")
@@ -365,11 +372,6 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     redaction = require_signed_redaction(evidence.get("redaction"))
     observations = require_observations(evidence.get("observations"))
     candidate_identity = require_candidate_identity(evidence.get("candidate_identity"))
-    captured_dt = datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    expires_dt = datetime.strptime(expires_at, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    latest = captured_dt + timedelta(seconds=candidate_identity["maximum_ttl_seconds"])
-    if expires_dt > latest:
-        die("expires_at must not exceed captured_at plus candidate_identity.maximum_ttl_seconds")
     artifact_sha = hashlib.sha256(evidence_bytes).hexdigest()
     run_id = require_string(evidence.get("run_id"), None, "run_id")
 
