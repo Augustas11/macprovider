@@ -63,7 +63,7 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
             "no_duplicate_settlement": True,
             "no_private_key_upload": True,
             "no_raw_prompt_output_artifact": True,
-            "pool_existence_oracle_within_threshold": False,
+            "pool_existence_oracle_within_threshold": True,
             "raw_prompt_output_redacted": True,
             "restart_reconstruction_verified": True,
             "root_registration_replay_checked": True,
@@ -410,7 +410,7 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             builder.require_observations(delegation)
         oracle = dict(valid_signed()["observations"])
-        oracle["pool_existence_oracle_within_threshold"] = True
+        oracle["pool_existence_oracle_within_threshold"] = False
         with self.assertRaises(SystemExit):
             builder.require_observations(oracle)
         builder.require_same_utc_day_expiry("2026-08-25T05:54:25Z", "2026-08-25")

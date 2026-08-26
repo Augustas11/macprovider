@@ -1536,6 +1536,9 @@ def _validate_trusted_pool_creator_mvp_journey_result(
         delegation_fields = {
             "delegation_revocation_verified",
         }
+        oracle_fields = {
+            "pool_existence_oracle_within_threshold",
+        }
         true_fields = {
             "approved_creator_record_bound",
             "buyer_authorization_enforced",
@@ -1557,13 +1560,12 @@ def _validate_trusted_pool_creator_mvp_journey_result(
             "coordinator_blind_claimed",
             "global_fallback_observed",
             "payout_ready_mutated",
-            "pool_existence_oracle_within_threshold",
             "privacy_pool_claimed",
             "production_side_effects",
             "public_announcement_without_reviewed_artifact_observed",
             "unrestricted_creator_admin_observed",
         }
-        required_obs = true_fields | false_fields | freeze_fields | delegation_fields
+        required_obs = true_fields | false_fields | freeze_fields | delegation_fields | oracle_fields
         _expect_keys(
             observations,
             required_obs,
@@ -1589,6 +1591,9 @@ def _validate_trusted_pool_creator_mvp_journey_result(
         delegation_value = observations.get("delegation_revocation_verified")
         if delegation_value not in (True, False):
             result.error(f"{location}.signed.observations.delegation_revocation_verified", "must be true or false")
+        oracle_value = observations.get("pool_existence_oracle_within_threshold")
+        if oracle_value not in (True, False):
+            result.error(f"{location}.signed.observations.pool_existence_oracle_within_threshold", "must be true or false")
 
     identity = signed.get("candidate_identity")
     if _expect_object(identity, f"{location}.signed.candidate_identity", result):

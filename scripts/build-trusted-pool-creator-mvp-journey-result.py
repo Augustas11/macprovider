@@ -178,12 +178,12 @@ def require_observations(value: Any) -> dict[str, Any]:
         "creator_suspension_root_compromise_freeze_verified",
         "delegation_revocation_verified",
         "descendant_signer_rejection_verified",
+        "pool_existence_oracle_within_threshold",
     }
     false_fields = {
         "coordinator_blind_claimed",
         "global_fallback_observed",
         "payout_ready_mutated",
-        "pool_existence_oracle_within_threshold",
         "privacy_pool_claimed",
         "production_side_effects",
         "public_announcement_without_reviewed_artifact_observed",

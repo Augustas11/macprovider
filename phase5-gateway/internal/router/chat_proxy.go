@@ -282,6 +282,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	poolSelectionAllowed := !authn.Demo && authn.WalletSession == nil
 	poolID, poolErr := s.resolvePoolSelection(upCtx, r.Header, subject.AccountID, poolSelectionAllowed)
 	if poolErr != nil {
+		s.enforcePoolRejectionTimingFloor(start)
 		writeError(w, poolErr.status, poolErr.typ, poolErr.code, poolErr.message)
 		return
 	}

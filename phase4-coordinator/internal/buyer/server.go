@@ -198,24 +198,27 @@ type Server struct {
 	// closed so pool-selected traffic cannot downgrade to global routing.
 	trustPools           *trustpool.Registry
 	trustPoolStatusStore *trustpool.Store
-	log                  zerolog.Logger
-	createdAt            int64
-	preflight            PreflightFunc
-	preflightThreshold   int
-	preflightTimeout     time.Duration
-	recoveryBackoff      time.Duration
-	recoveryMaxRetries   int
-	recoveryProbe        bool
-	breakerThreshold     int
-	breakerWindow        time.Duration
-	relay                RelayFunc
-	settlementRelay      SettlementRelayFunc
-	admission            *providerws.AdmissionManager
-	requestTimeout       time.Duration
-	failoverEnabled      bool
-	failoverTimeout      time.Duration
-	tiebreakRandomize    bool
-	tiebreakEpsilon      float64
+	// poolRejectionTimingFloor is the SPEC-043-R007 active minimum for
+	// pool_unavailable rejection paths. Zero defaults to 50 ms.
+	poolRejectionTimingFloor time.Duration
+	log                      zerolog.Logger
+	createdAt                int64
+	preflight                PreflightFunc
+	preflightThreshold       int
+	preflightTimeout         time.Duration
+	recoveryBackoff          time.Duration
+	recoveryMaxRetries       int
+	recoveryProbe            bool
+	breakerThreshold         int
+	breakerWindow            time.Duration
+	relay                    RelayFunc
+	settlementRelay          SettlementRelayFunc
+	admission                *providerws.AdmissionManager
+	requestTimeout           time.Duration
+	failoverEnabled          bool
+	failoverTimeout          time.Duration
+	tiebreakRandomize        bool
+	tiebreakEpsilon          float64
 	// routingMu guards modelClasses, which is hot-swapped on SIGHUP
 	// when routing.model_classes shape changes (issue #266 T1).
 	// Pre-SIGHUP readers (handleModels iteration at modelEntry build;
@@ -500,6 +503,14 @@ func WithTrustPoolStatusStore(store *trustpool.Store) Option {
 	}
 }
 
+// WithPoolRejectionTimingFloor sets the SPEC-043-R007 active pool_unavailable
+// timing floor. Values <= 0 keep the normative 50 ms default.
+func WithPoolRejectionTimingFloor(floor time.Duration) Option {
+	return func(s *Server) {
+		s.poolRejectionTimingFloor = floor
+	}
+}
+
 // WithModelVersionFloors installs the #768 per-model minimum-binary-version
 // map. Unset (or empty) keeps routing byte-identical to pre-#768 behavior.
 func WithModelVersionFloors(floors map[string]string) Option {
@@ -716,39 +727,40 @@ func (s *Server) recommendationRateCardState() (config.RewardsConfig, float64) {
 
 func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Time, opts ...Option) *Server {
 	s := &Server{
-		pool:                   registry,
-		log:                    logger,
-		createdAt:              startedAt.Unix(),
-		preflightThreshold:     4096,
-		preflightTimeout:       5 * time.Second,
-		recoveryBackoff:        30 * time.Second,
-		recoveryMaxRetries:     3,
-		recoveryProbe:          true,
-		breakerThreshold:       2,
-		breakerWindow:          120 * time.Second,
-		requestTimeout:         300 * time.Second,
-		failoverEnabled:        true,
-		failoverTimeout:        5 * time.Second,
-		retryPerAttemptTimeout: 60 * time.Second,
-		stickyTTL:              30 * time.Minute,
-		stickyMaxEntries:       10000,
-		modelClasses:           map[string]config.ModelClassConfig{},
-		provisionalWeight:      0.3,
-		maxChatBodyBytes:       config.Default().Limits.MaxChatRequestBodyBytes,
-		poolCheckLast:          map[string]time.Time{},
-		poolReadinessSources:   map[string]receiptKeysBucket{},
-		poolReadinessLimiters:  map[string]receiptKeysBucket{},
-		poolCheckMaxEntries:    4096,
-		poolCheckTTL:           time.Minute,
-		receiptKeysLimiters:    map[string]receiptKeysBucket{},
-		receiptKeysMaxEntries:  4096,
-		receiptKeysTTL:         5 * time.Minute,
-		publicTrustPoolWork:    make(chan struct{}, 4),
-		streamingDowngrade:     newStreamingDowngradeStore(),
-		streamingTiming:        newStreamingTimingCollector(),
-		slotQueue:              newSlotQueue(slotQueueDefaultMaxPending),
-		slotQueueDeadline:      slotQueueDefaultDeadline,
-		slotQueuePollInterval:  slotQueueDefaultPollInterval,
+		pool:                     registry,
+		log:                      logger,
+		createdAt:                startedAt.Unix(),
+		preflightThreshold:       4096,
+		preflightTimeout:         5 * time.Second,
+		recoveryBackoff:          30 * time.Second,
+		recoveryMaxRetries:       3,
+		recoveryProbe:            true,
+		breakerThreshold:         2,
+		breakerWindow:            120 * time.Second,
+		requestTimeout:           300 * time.Second,
+		failoverEnabled:          true,
+		failoverTimeout:          5 * time.Second,
+		retryPerAttemptTimeout:   60 * time.Second,
+		stickyTTL:                30 * time.Minute,
+		stickyMaxEntries:         10000,
+		modelClasses:             map[string]config.ModelClassConfig{},
+		provisionalWeight:        0.3,
+		maxChatBodyBytes:         config.Default().Limits.MaxChatRequestBodyBytes,
+		poolCheckLast:            map[string]time.Time{},
+		poolReadinessSources:     map[string]receiptKeysBucket{},
+		poolReadinessLimiters:    map[string]receiptKeysBucket{},
+		poolCheckMaxEntries:      4096,
+		poolCheckTTL:             time.Minute,
+		receiptKeysLimiters:      map[string]receiptKeysBucket{},
+		receiptKeysMaxEntries:    4096,
+		receiptKeysTTL:           5 * time.Minute,
+		publicTrustPoolWork:      make(chan struct{}, 4),
+		streamingDowngrade:       newStreamingDowngradeStore(),
+		streamingTiming:          newStreamingTimingCollector(),
+		slotQueue:                newSlotQueue(slotQueueDefaultMaxPending),
+		slotQueueDeadline:        slotQueueDefaultDeadline,
+		slotQueuePollInterval:    slotQueueDefaultPollInterval,
+		poolRejectionTimingFloor: 50 * time.Millisecond,
 		// Default trusted-proxy set mirrors config.Default()'s
 		// loopback-only posture so callers that construct via NewServer
 		// without WithTrustedProxies keep the production nginx-on-
@@ -2231,30 +2243,30 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	poolHeader := sanitizeAccountID(rawPoolHeader)
 	if rawPoolHeader != "" && poolHeader == "" {
 		rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
-		writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
+		s.writePoolUnavailable(w, startedAt)
 		return
 	}
 	if rawPoolHeader != "" && !hasAuthenticatedAccount {
 		rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
-		writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
+		s.writePoolUnavailable(w, startedAt)
 		return
 	}
 	if rawPoolHeader != "" && s.trustPools == nil {
 		rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
-		writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
+		s.writePoolUnavailable(w, startedAt)
 		return
 	}
 	if rawPoolHeader != "" {
 		if err := s.verifyTrustPoolDurableStateForRouting(r.Context()); err != nil {
 			s.log.Warn().Err(err).Str("pool_id", poolHeader).Msg("trusted pool routing durable verification failed")
 			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
-			writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
+			s.writePoolUnavailable(w, startedAt)
 			return
 		}
 		snap, authorized := s.trustPools.AuthorizeAndSnapshot(poolHeader, accountID)
 		if !authorized || !snap.Exists {
 			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
-			writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
+			s.writePoolUnavailable(w, startedAt)
 			return
 		}
 		if !snap.Routeable {
@@ -2264,7 +2276,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
-			writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
+			s.writePoolUnavailable(w, startedAt)
 			return
 		}
 		req.poolID = poolHeader
@@ -8561,6 +8573,26 @@ func nullUsageProviderErrorCode(body []byte) string {
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeErrorTyped(w, status, errorType(status), code, message)
+}
+
+func (s *Server) poolRejectionTimingFloorOrDefault() time.Duration {
+	if s == nil || s.poolRejectionTimingFloor <= 0 {
+		return 50 * time.Millisecond
+	}
+	return s.poolRejectionTimingFloor
+}
+
+// writePoolUnavailable emits the generic SPEC-042/043 pool_unavailable rejection
+// after enforcing the active timing floor so rejection classes cannot be
+// distinguished by response-commitment latency (SPEC-043-R007).
+func (s *Server) writePoolUnavailable(w http.ResponseWriter, startedAt time.Time) {
+	if !startedAt.IsZero() {
+		remaining := s.poolRejectionTimingFloorOrDefault() - time.Since(startedAt)
+		if remaining > 0 {
+			time.Sleep(remaining)
+		}
+	}
+	writeError(w, http.StatusServiceUnavailable, "pool_unavailable", "Pool unavailable")
 }
 
 func writeErrorWithParam(w http.ResponseWriter, status int, code, message, param string) {
