@@ -672,6 +672,27 @@ func TestTrustedPoolsEnabledRequiresBoundedRefreshInterval(t *testing.T) {
 	}
 }
 
+func TestTrustedPoolsRejectionTimingFloorBounds(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.TrustedPools.RejectionTimingFloorMS = 40
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "trusted_pools.rejection_timing_floor_ms") {
+		t.Fatalf("sub-50 floor validation err=%v", err)
+	}
+
+	cfg = validTestConfig()
+	cfg.TrustedPools.RejectionTimingFloorMS = 50
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("floor 50 should validate: %v", err)
+	}
+	if got := cfg.TrustedPools.RejectionTimingFloor(); got != 50*time.Millisecond {
+		t.Fatalf("floor=%s, want 50ms", got)
+	}
+	cfg.TrustedPools.RejectionTimingFloorMS = 0
+	if got := cfg.TrustedPools.RejectionTimingFloor(); got != 50*time.Millisecond {
+		t.Fatalf("default floor=%s, want 50ms", got)
+	}
+}
+
 func TestTrustedPoolsCreatorAdminCredentialsRequireEnabledTrustedPools(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.TrustedPools.CreatorAdminCredentials = []TrustedPoolsCreatorAdminCredentialConfig{trustedPoolsCreatorCredentialConfig("creator-a", "creator-a-cred", "creator-token-a")}

@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 const (
 	testPoolA = "abcdefghijklmnopqrstuv"
@@ -140,6 +143,41 @@ func TestValidateTrustedPoolsConfig(t *testing.T) {
 		}})
 		if err := validateTrustedPoolsConfig(cfg); err == nil {
 			t.Fatal("short non-derived pool id accepted")
+		}
+	})
+
+	t.Run("enabled rejects floor below 50ms", func(t *testing.T) {
+		cfg := base(TrustedPoolsConfig{
+			Enabled:                true,
+			RejectionTimingFloorMS: 40,
+			AccountPools:           map[string][]string{"acct_a": {testPoolA}},
+		})
+		if err := validateTrustedPoolsConfig(cfg); err == nil {
+			t.Fatal("floor < 50 accepted")
+		}
+	})
+
+	t.Run("disabled rejects floor below 50ms", func(t *testing.T) {
+		cfg := base(TrustedPoolsConfig{
+			Enabled:                false,
+			RejectionTimingFloorMS: 40,
+		})
+		if err := validateTrustedPoolsConfig(cfg); err == nil {
+			t.Fatal("disabled floor < 50 accepted")
+		}
+	})
+
+	t.Run("enabled accepts floor of 50ms", func(t *testing.T) {
+		cfg := base(TrustedPoolsConfig{
+			Enabled:                true,
+			RejectionTimingFloorMS: 50,
+			AccountPools:           map[string][]string{"acct_a": {testPoolA}},
+		})
+		if err := validateTrustedPoolsConfig(cfg); err != nil {
+			t.Fatalf("floor 50 rejected: %v", err)
+		}
+		if got := cfg.Features.TrustedPools.RejectionTimingFloor(); got != 50*time.Millisecond {
+			t.Fatalf("floor=%s, want 50ms", got)
 		}
 	})
 }

@@ -48,7 +48,7 @@ actually exercises the path (or recapture after merge proves them):
 | `creator_suspension_root_compromise_freeze_verified` | Proven in harness on new captures; committed envelope still false |
 | `descendant_signer_rejection_verified` | Proven in harness on new captures; committed envelope still false |
 | `delegation_revocation_verified` | Proven in harness on new captures via canonical `ProviderPoolDelegationV1` grant/revoke (`member_revoked` is not delegation proof); committed envelope still false |
-| `pool_existence_oracle_within_threshold` | **Still missing** — gateway/coordinator timing-floor proof at SPEC-043-R007 bounds |
+| `pool_existence_oracle_within_threshold` | Proven in harness on new captures via buyer/gateway rejection timing floor + unknown/unauthorized/disabled distribution test (wallet covered at gateway); committed envelope still false |
 
 Also still missing for Gate D:
 
@@ -102,10 +102,10 @@ Do not treat a green local test as production promotion.
    outage by clearing `X-MacProvider-Pool-Select` or routing pool buyers to
    the global pool.
 
-Root-compromise freeze, descendant-signer rejection, and
-`ProviderPoolDelegationV1` revocation are proven in the isolated candidate
-harness on new captures. The pool-existence timing oracle is **not** on this
-CLI yet.
+Root-compromise freeze, descendant-signer rejection,
+`ProviderPoolDelegationV1` revocation, and the pool-existence timing oracle
+(SPEC-043-R007 floor + distribution bounds) are proven in the isolated
+candidate harness on new captures.
 
 ## Settlement
 
@@ -116,7 +116,7 @@ part of this MVP.
 
 ## Next gates
 
-- Remaining Gate C: pool-existence timing-oracle proof, then recapture and
-  re-sign the candidate journey.
+- Remaining Gate C: recapture and re-sign the candidate journey now that
+  pool-existence timing-oracle proof is in the harness.
 - Gate D: sibling `PoolPromotionTransitionV1`, non-empty production-release
   keyring, promoter allowlist, CONFORMANCE `evidence[]` only through that flow.

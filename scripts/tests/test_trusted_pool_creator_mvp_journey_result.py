@@ -63,7 +63,7 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
             "no_duplicate_settlement": True,
             "no_private_key_upload": True,
             "no_raw_prompt_output_artifact": True,
-            "pool_existence_oracle_within_threshold": False,
+            "pool_existence_oracle_within_threshold": True,
             "raw_prompt_output_redacted": True,
             "restart_reconstruction_verified": True,
             "root_registration_replay_checked": True,
@@ -76,6 +76,16 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
             "production_side_effects": False,
             "public_announcement_without_reviewed_artifact_observed": False,
             "unrestricted_creator_admin_observed": False,
+        },
+        "pool_rejection_timing": {
+            "floor_ms": 50,
+            "method": "active_sleep_to_floor",
+            "sample_count_per_class": 16,
+            "classes_covered": ["unknown", "unauthorized", "disabled"],
+            "p95_delta_ms": 1.5,
+            "p99_delta_ms": 2.0,
+            "mann_whitney_p_value": 0.42,
+            "statistical_test": "two-sided Mann-Whitney U with normal approximation; fail if p < 0.01",
         },
         "candidate_identity": {
             "approval_record_id": "approval-alpha",
@@ -410,7 +420,7 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             builder.require_observations(delegation)
         oracle = dict(valid_signed()["observations"])
-        oracle["pool_existence_oracle_within_threshold"] = True
+        oracle["pool_existence_oracle_within_threshold"] = False
         with self.assertRaises(SystemExit):
             builder.require_observations(oracle)
         builder.require_same_utc_day_expiry("2026-08-25T05:54:25Z", "2026-08-25")

@@ -90,7 +90,7 @@ cd phase4-coordinator
 MACPROVIDER_CAPTURE_TRUSTED_POOL_CREATOR_MVP=1 go test ./internal/trustpool -run TestJourneyTrustedPoolCreatorMVPCandidate -count=1
 ```
 
-Commit the redacted file under `journeys/evidence/trusted-pool-creator-mvp-*.redacted.json`, merge to `main`, recapture so `repository.commit` is an ancestor of `origin/main`, then dispatch `.github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml` from reviewed `main`. Do not promote SPEC-043 from this harness alone. The isolated candidate artifact records `delegation_revocation_verified` and `pool_existence_oracle_within_threshold` as false until those paths are exercised; freeze and descendant-signer rejection are now proven in the harness and must stay true on later signed runs. After a squash-merge, recapture before dispatching the signer.
+Commit the redacted file under `journeys/evidence/trusted-pool-creator-mvp-*.redacted.json`, merge to `main`, recapture so `repository.commit` is an ancestor of `origin/main`, then dispatch `.github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml` from reviewed `main`. Do not promote SPEC-043 from this harness alone. The isolated candidate artifact may still record `delegation_revocation_verified` and `pool_existence_oracle_within_threshold` as false on the committed pre-proof envelope; new harness captures must keep both true along with freeze and descendant-signer rejection. After a squash-merge, recapture before dispatching the signer.
 
 ## Pass criteria
 

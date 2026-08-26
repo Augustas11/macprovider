@@ -178,12 +178,12 @@ def require_observations(value: Any) -> dict[str, Any]:
         "creator_suspension_root_compromise_freeze_verified",
         "delegation_revocation_verified",
         "descendant_signer_rejection_verified",
+        "pool_existence_oracle_within_threshold",
     }
     false_fields = {
         "coordinator_blind_claimed",
         "global_fallback_observed",
         "payout_ready_mutated",
-        "pool_existence_oracle_within_threshold",
         "privacy_pool_claimed",
         "production_side_effects",
         "public_announcement_without_reviewed_artifact_observed",
@@ -288,6 +288,49 @@ def reject_creator_mvp_secret_keys(evidence: dict[str, Any]) -> None:
             layer2.reject_forbidden_secret_keys(item, f"$.observations.{key}")
 
 
+def require_pool_rejection_timing(value: Any) -> dict[str, Any]:
+    timing = require_object(value, "pool_rejection_timing")
+    required = {
+        "floor_ms",
+        "method",
+        "sample_count_per_class",
+        "classes_covered",
+        "p95_delta_ms",
+        "p99_delta_ms",
+        "mann_whitney_p_value",
+        "statistical_test",
+    }
+    missing = required - set(timing)
+    if missing:
+        die(f"pool_rejection_timing missing keys: {sorted(missing)}")
+    floor_ms = timing.get("floor_ms")
+    if not isinstance(floor_ms, int) or isinstance(floor_ms, bool) or floor_ms < 50:
+        die("pool_rejection_timing.floor_ms must be an integer >= 50")
+    sample_count = timing.get("sample_count_per_class")
+    if not isinstance(sample_count, int) or isinstance(sample_count, bool) or sample_count < 8:
+        die("pool_rejection_timing.sample_count_per_class must be an integer >= 8")
+    require_string(timing.get("method"), None, "pool_rejection_timing.method")
+    require_string(timing.get("statistical_test"), None, "pool_rejection_timing.statistical_test")
+    classes = timing.get("classes_covered")
+    if not isinstance(classes, list) or not classes or any(not isinstance(item, str) or not item for item in classes):
+        die("pool_rejection_timing.classes_covered must be a non-empty list of strings")
+    required_classes = {"unknown", "unauthorized", "disabled"}
+    missing_classes = required_classes - set(classes)
+    if missing_classes:
+        die(f"pool_rejection_timing.classes_covered missing {sorted(missing_classes)}")
+    for field_name in ("p95_delta_ms", "p99_delta_ms", "mann_whitney_p_value"):
+        value = timing.get(field_name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            die(f"pool_rejection_timing.{field_name} must be a number")
+    if timing.get("p95_delta_ms") > 15:
+        die("pool_rejection_timing.p95_delta_ms must be <= 15")
+    if timing.get("p99_delta_ms") > 25:
+        die("pool_rejection_timing.p99_delta_ms must be <= 25")
+    if timing.get("mann_whitney_p_value") < 0.01:
+        die("pool_rejection_timing.mann_whitney_p_value must be >= 0.01")
+    return deepcopy(timing)
+
+
 def require_same_utc_day_expiry(captured_at: str, expires_at: str) -> None:
     captured_dt = datetime.strptime(captured_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     if date.fromisoformat(expires_at) != captured_dt.date():
@@ -372,6 +415,8 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     redaction = require_signed_redaction(evidence.get("redaction"))
     observations = require_observations(evidence.get("observations"))
     candidate_identity = require_candidate_identity(evidence.get("candidate_identity"))
+    harness = require_object(evidence.get("harness"), "harness")
+    pool_rejection_timing = require_pool_rejection_timing(harness.get("pool_rejection_timing"))
     artifact_sha = hashlib.sha256(evidence_bytes).hexdigest()
     run_id = require_string(evidence.get("run_id"), None, "run_id")
 
@@ -392,6 +437,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
         "execution_mode": TRUSTED_POOL_CREATOR_MVP_EXECUTION_MODE,
         "observations": observations,
         "candidate_identity": candidate_identity,
+        "pool_rejection_timing": pool_rejection_timing,
     }
 
 

@@ -10,11 +10,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -387,6 +389,7 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 	if paused.Routeable || len(paused.Members) != 0 {
 		t.Fatalf("paused snapshot = %+v, want fail-closed members", paused)
 	}
+	oracle := assertCreatorMVPPoolExistenceOracle(t, server, chatBody, root.poolID)
 
 	suspended = validCreatorApproval("creator-a", "approval-v1", "approval-version-1", "candidate", graceEnds, trustpool.CreatorStatusSuspended)
 	postAdminCreator(t, handler, creatorMVPOperatorKey, suspended, http.StatusAccepted)
@@ -461,6 +464,7 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 		ProviderID:                  creatorMVPProviderID,
 		CreatorAccountID:            "creator-a",
 		OperationIDs:                "op-create,op-root,op-manifest,op-member,op-buyer,op-promote,op-pause,op-freeze",
+		PoolExistenceOracle:         oracle,
 	})
 	assertCreatorMVPEvidenceRedacted(t, evidence, chatBody, creatorMVPOperatorKey, creatorMVPCreatorToken, creatorMVPBuyerAccount, creatorMVPProviderID, provider.URL)
 	writeCreatorMVPEvidenceIfRequested(t, evidence)
@@ -499,6 +503,7 @@ type creatorMVPEvidenceInput struct {
 	ProviderID                  string
 	CreatorAccountID            string
 	OperationIDs                string
+	PoolExistenceOracle         creatorMVPPoolExistenceOracle
 }
 
 func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any {
@@ -534,7 +539,8 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 			"real_buyer_server":        true,
 			"gateway_context_required": true,
 			"production_side_effects":  false,
-			"evidence_scope":           "isolated candidate create-to-route-to-settle-to-pause proof only; production timing-floor, live creator launch, and production-release key registration remain outside this harness",
+			"evidence_scope":           "isolated candidate create-to-route-to-settle-to-pause proof including SPEC-043-R007 rejection-timing oracle; production timing-floor remeasure, live creator launch, and production-release key registration remain outside this harness",
+			"pool_rejection_timing":    in.PoolExistenceOracle.Evidence(),
 		},
 		"candidate_identity": map[string]any{
 			"approval_record_id":                    in.ApprovalRecordID,
@@ -582,7 +588,7 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 			creatorMVPStep("step-03-manifest-create-accepted", "Signed candidate manifest accepted after pool create; pool stayed non-routeable until promotion."),
 			creatorMVPStep("step-04-negative-manifest-cases", "Unsigned manifest and prohibited routing-claim snapshot were rejected before durable append."),
 			creatorMVPStep("step-05-provider-membership", "Undelegated provider admission failed; delegated provider required ProviderPoolDelegationV1; owner delegation_revoked removed the delegated member while owned member kept routing."),
-			creatorMVPStep("step-06-buyer-authorization", "Dedicated buyer grant succeeded; unauthorized account selection failed closed with a generic pool denial before provider dispatch."),
+			creatorMVPStep("step-06-buyer-authorization", "Dedicated buyer grant succeeded; unauthorized, unknown, and disabled pool selections failed closed with generic pool_unavailable under the active timing floor within SPEC-043-R007 p95/p99 oracle bounds."),
 			creatorMVPStep("step-07-promise-surfaces", "Authorized policy and status documents used no-store cache control and kept the Trusted Pool confidentiality scope."),
 			creatorMVPStep("step-08-activation-gate", "Promotion before root/manifest/membership failed closed; candidate promotion after preflight published a routeable snapshot."),
 			creatorMVPStep("step-09-successful-pooled-request", "Authorized pooled chat returned 200 through the admitted member only."),
@@ -619,7 +625,7 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 			"no_duplicate_settlement":                                true,
 			"no_private_key_upload":                                  true,
 			"no_raw_prompt_output_artifact":                          true,
-			"pool_existence_oracle_within_threshold":                 false,
+			"pool_existence_oracle_within_threshold":                 true,
 			"raw_prompt_output_redacted":                             true,
 			"restart_reconstruction_verified":                        true,
 			"root_registration_replay_checked":                       true,
@@ -809,6 +815,233 @@ func setCreatorMVPSettlementObserve(store *billing.Store) {
 	cfg := config.Default().Settlement
 	cfg.VerifiedModelSettlementMode = billing.RouteSnapshotModeObserve
 	store.SetSettlementConfig(cfg)
+}
+
+type creatorMVPPoolExistenceOracle struct {
+	FloorMS             int
+	Method              string
+	SampleCountPerClass int
+	ClassesCovered      []string
+	UnknownP50MS        float64
+	UnauthorizedP50MS   float64
+	DisabledP50MS       float64
+	P95DeltaMS          float64
+	P99DeltaMS          float64
+	MannWhitneyPValue   float64
+}
+
+func (o creatorMVPPoolExistenceOracle) Evidence() map[string]any {
+	return map[string]any{
+		"floor_ms":               o.FloorMS,
+		"method":                 o.Method,
+		"sample_count_per_class": o.SampleCountPerClass,
+		"classes_covered":        o.ClassesCovered,
+		"unknown_p50_ms":         o.UnknownP50MS,
+		"unauthorized_p50_ms":    o.UnauthorizedP50MS,
+		"disabled_p50_ms":        o.DisabledP50MS,
+		"p95_delta_ms":           o.P95DeltaMS,
+		"p99_delta_ms":           o.P99DeltaMS,
+		"mann_whitney_p_value":   o.MannWhitneyPValue,
+		"statistical_test":       "two-sided Mann-Whitney U with normal approximation; fail if p < 0.01",
+		"intentional_gaps":       []string{"pool_policy_stale remains a distinct error code", "wallet_session rejection covered by gateway unit distribution test"},
+	}
+}
+
+// assertCreatorMVPPoolExistenceOracle proves SPEC-043-R007: unknown vs
+// unauthorized vs disabled (paused/non-routeable) pool_unavailable rejection
+// latency honors the active floor and stays inside the journey distribution
+// bounds (p95 delta <= 15ms, p99 delta <= 25ms, Mann-Whitney p >= 0.01).
+// Call after the pool is paused so the disabled class is measurable.
+func assertCreatorMVPPoolExistenceOracle(t *testing.T, server *buyer.Server, body []byte, poolID string) creatorMVPPoolExistenceOracle {
+	t.Helper()
+	const (
+		floor   = 50 * time.Millisecond
+		samples = 16
+	)
+	unknownPoolID := "zzzzzzzzzzzzzzzzzzzzzz"
+	if len(unknownPoolID) != 22 {
+		t.Fatalf("unknown pool id length=%d, want 22", len(unknownPoolID))
+	}
+	measure := func(accountID, selectPool string) time.Duration {
+		t.Helper()
+		start := time.Now()
+		resp := postCreatorMVPChat(t, server, body, creatorMVPHeaders(accountID, selectPool))
+		elapsed := time.Since(start)
+		if resp.Code != http.StatusServiceUnavailable && resp.Code != http.StatusNotFound {
+			t.Fatalf("pool rejection status=%d body=%s, want 503/404", resp.Code, resp.Body.String())
+		}
+		code := creatorMVPErrorCode(t, resp.Body.String())
+		if code != "pool_unavailable" && !strings.Contains(resp.Body.String(), "pool_unavailable") {
+			t.Fatalf("pool rejection body=%s, want pool_unavailable", resp.Body.String())
+		}
+		if got := resp.Header().Get("Retry-After"); got != "" {
+			t.Fatalf("Retry-After=%q, want absent for pool_unavailable", got)
+		}
+		var env struct {
+			Error struct {
+				Retryable bool `json:"retryable"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &env); err == nil && env.Error.Retryable {
+			t.Fatalf("pool_unavailable retryable=true body=%s, want false", resp.Body.String())
+		}
+		if elapsed+5*time.Millisecond < floor {
+			t.Fatalf("elapsed=%s below floor=%s account=%s pool=%s", elapsed, floor, accountID, selectPool)
+		}
+		return elapsed
+	}
+	unknown := make([]time.Duration, 0, samples)
+	unauthorized := make([]time.Duration, 0, samples)
+	disabled := make([]time.Duration, 0, samples)
+	for i := 0; i < samples; i++ {
+		unknown = append(unknown, measure(creatorMVPBuyerAccount, unknownPoolID))
+		unauthorized = append(unauthorized, measure("acct-other", poolID))
+		disabled = append(disabled, measure(creatorMVPBuyerAccount, poolID))
+	}
+	maxP95 := absCreatorMVPDuration(percentileCreatorMVPDuration(unknown, 0.95) - percentileCreatorMVPDuration(unauthorized, 0.95))
+	maxP99 := absCreatorMVPDuration(percentileCreatorMVPDuration(unknown, 0.99) - percentileCreatorMVPDuration(unauthorized, 0.99))
+	pairs := [][2][]time.Duration{
+		{unknown, unauthorized},
+		{unknown, disabled},
+		{unauthorized, disabled},
+	}
+	minP := 1.0
+	for _, pair := range pairs {
+		p95 := absCreatorMVPDuration(percentileCreatorMVPDuration(pair[0], 0.95) - percentileCreatorMVPDuration(pair[1], 0.95))
+		p99 := absCreatorMVPDuration(percentileCreatorMVPDuration(pair[0], 0.99) - percentileCreatorMVPDuration(pair[1], 0.99))
+		if p95 > maxP95 {
+			maxP95 = p95
+		}
+		if p99 > maxP99 {
+			maxP99 = p99
+		}
+		pValue := mannWhitneyCreatorMVPPValue(pair[0], pair[1])
+		if pValue < minP {
+			minP = pValue
+		}
+		if p95 > 15*time.Millisecond {
+			t.Fatalf("p95 delta=%s exceeds 15ms pair=%v/%v", p95, pair[0], pair[1])
+		}
+		if p99 > 25*time.Millisecond {
+			t.Fatalf("p99 delta=%s exceeds 25ms pair=%v/%v", p99, pair[0], pair[1])
+		}
+		if pValue < 0.01 {
+			t.Fatalf("mann-whitney p=%g < 0.01 distinguishes pair=%v/%v", pValue, pair[0], pair[1])
+		}
+	}
+	return creatorMVPPoolExistenceOracle{
+		FloorMS:             int(floor / time.Millisecond),
+		Method:              "active_sleep_to_floor",
+		SampleCountPerClass: samples,
+		ClassesCovered:      []string{"unknown", "unauthorized", "disabled"},
+		UnknownP50MS:        float64(percentileCreatorMVPDuration(unknown, 0.50)) / float64(time.Millisecond),
+		UnauthorizedP50MS:   float64(percentileCreatorMVPDuration(unauthorized, 0.50)) / float64(time.Millisecond),
+		DisabledP50MS:       float64(percentileCreatorMVPDuration(disabled, 0.50)) / float64(time.Millisecond),
+		P95DeltaMS:          float64(maxP95) / float64(time.Millisecond),
+		P99DeltaMS:          float64(maxP99) / float64(time.Millisecond),
+		MannWhitneyPValue:   minP,
+	}
+}
+
+func percentileCreatorMVPDuration(values []time.Duration, p float64) time.Duration {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]time.Duration(nil), values...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	idx := int(float64(len(sorted)-1) * p)
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
+func absCreatorMVPDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
+}
+
+// mannWhitneyCreatorMVPPValue returns a two-sided Mann-Whitney U p-value using
+// the normal approximation with tie correction for SPEC-043-R007.
+func mannWhitneyCreatorMVPPValue(a, b []time.Duration) float64 {
+	n1 := float64(len(a))
+	n2 := float64(len(b))
+	if n1 == 0 || n2 == 0 {
+		return 1
+	}
+	combined := make([]float64, 0, len(a)+len(b))
+	labels := make([]int, 0, len(a)+len(b))
+	for _, v := range a {
+		combined = append(combined, float64(v))
+		labels = append(labels, 0)
+	}
+	for _, v := range b {
+		combined = append(combined, float64(v))
+		labels = append(labels, 1)
+	}
+	order := make([]int, len(combined))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool { return combined[order[i]] < combined[order[j]] })
+	ranks := make([]float64, len(combined))
+	for i := 0; i < len(order); {
+		j := i + 1
+		for j < len(order) && combined[order[j]] == combined[order[i]] {
+			j++
+		}
+		avg := float64(i+1+j) / 2.0
+		for k := i; k < j; k++ {
+			ranks[order[k]] = avg
+		}
+		i = j
+	}
+	var r1 float64
+	for i, label := range labels {
+		if label == 0 {
+			r1 += ranks[i]
+		}
+	}
+	u1 := r1 - n1*(n1+1)/2
+	u2 := n1*n2 - u1
+	u := u1
+	if u2 < u {
+		u = u2
+	}
+	mu := n1 * n2 / 2
+	tieTerm := 0.0
+	sortedVals := append([]float64(nil), combined...)
+	sort.Float64s(sortedVals)
+	for i := 0; i < len(sortedVals); {
+		j := i + 1
+		for j < len(sortedVals) && sortedVals[j] == sortedVals[i] {
+			j++
+		}
+		tieCount := float64(j - i)
+		if tieCount > 1 {
+			tieTerm += tieCount*tieCount*tieCount - tieCount
+		}
+		i = j
+	}
+	n := n1 + n2
+	sigma2 := n1 * n2 / 12 * ((n + 1) - tieTerm/(n*(n-1)))
+	if sigma2 <= 0 {
+		return 1
+	}
+	z := (math.Abs(u-mu) - 0.5) / math.Sqrt(sigma2)
+	p := math.Erfc(z / math.Sqrt2)
+	if p > 1 {
+		return 1
+	}
+	if p < 0 {
+		return 0
+	}
+	return p
 }
 
 func postCreatorMVPChat(t *testing.T, server *buyer.Server, body []byte, headers http.Header) *httptest.ResponseRecorder {

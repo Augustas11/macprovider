@@ -893,6 +893,7 @@ func main() {
 				buyerOpts,
 				buyer.WithPoolMembership(trustPoolRegistry),
 				buyer.WithTrustPoolStatusStore(trustPoolStore),
+				buyer.WithPoolRejectionTimingFloor(cfg.TrustedPools.RejectionTimingFloor()),
 			)
 			trustpool.StartRefreshLoop(
 				shutdownCtx,
