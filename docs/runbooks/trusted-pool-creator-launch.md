@@ -39,18 +39,18 @@ rows stay zero.
 
 ## Blocked before any live announcement
 
-These journey observations are **true** on the Gate C signed envelope from
-workflow [`32926445757`](https://github.com/Augustas11/macprovider/actions/runs/32926445757)
-(`journeys/evidence/trusted-pool-creator-mvp-20260826T022522Z.*`). They remain
+These journey observations are **true** on the integer-`run_id` signed envelope from
+workflow [`32936678404`](https://github.com/Augustas11/macprovider/actions/runs/32936678404)
+(`journeys/evidence/trusted-pool-creator-mvp-20260826T054329Z.*`). They remain
 evidence-only: CONFORMANCE `evidence[]` is empty. Do not announce a live
 creator until Gate D exists.
 
 | Observation | Status |
 |---|---|
-| `creator_suspension_root_compromise_freeze_verified` | True on signed Gate C envelope |
-| `descendant_signer_rejection_verified` | True on signed Gate C envelope |
-| `delegation_revocation_verified` | True on signed Gate C envelope via canonical `ProviderPoolDelegationV1` grant/revoke (`member_revoked` is not delegation proof) |
-| `pool_existence_oracle_within_threshold` | True on signed Gate C envelope via buyer/gateway rejection timing floor + unknown/unauthorized/disabled distribution test (wallet covered at gateway) |
+| `creator_suspension_root_compromise_freeze_verified` | True on signed integer-`run_id` envelope |
+| `descendant_signer_rejection_verified` | True on signed integer-`run_id` envelope |
+| `delegation_revocation_verified` | True on signed integer-`run_id` envelope via canonical `ProviderPoolDelegationV1` grant/revoke (`member_revoked` is not delegation proof) |
+| `pool_existence_oracle_within_threshold` | True on signed integer-`run_id` envelope via buyer/gateway rejection timing floor + unknown/unauthorized/disabled distribution test (wallet covered at gateway) |
 
 Also still missing for Gate D:
 
@@ -118,14 +118,14 @@ part of this MVP.
 
 ## Next gates
 
-- Gate C signed candidate envelope is committed (workflow
-  [`32926445757`](https://github.com/Augustas11/macprovider/actions/runs/32926445757)).
-  It remains evidence-only: CONFORMANCE `evidence[]` is empty. Its
-  capture-string `run_id` is not Gate D consumable.
-- Unsigned recapture `journeys/evidence/trusted-pool-creator-mvp-20260826T054329Z.redacted.json`
-  has integer `run_id` `1` on `036e9930023f96ee7b66300347c885fc2fc30485`, with
-  freeze, descendant-signer, delegation, and pool-existence oracle observations
-  true. Re-sign that file from reviewed `main` (`expires_at` is `2026-08-26`).
-- Gate D still needs the signed integer-`run_id` envelope, sibling
-  `PoolPromotionTransitionV1`, non-empty production-release keyring, promoter
-  allowlist, and CONFORMANCE `evidence[]` only through that flow.
+- Integer-`run_id` signed candidate envelope is committed (workflow
+  [`32936678404`](https://github.com/Augustas11/macprovider/actions/runs/32936678404),
+  `run_id` `1` on `036e9930023f96ee7b66300347c885fc2fc30485`). Freeze,
+  descendant-signer, delegation, and pool-existence oracle observations are
+  true. It remains evidence-only: CONFORMANCE `evidence[]` is empty.
+- Historical Gate C envelope (workflow
+  [`32926445757`](https://github.com/Augustas11/macprovider/actions/runs/32926445757))
+  still has a capture-string `run_id`.
+- Gate D still needs a sibling `PoolPromotionTransitionV1`, non-empty
+  production-release keyring, promoter allowlist, and CONFORMANCE `evidence[]`
+  only through that flow.

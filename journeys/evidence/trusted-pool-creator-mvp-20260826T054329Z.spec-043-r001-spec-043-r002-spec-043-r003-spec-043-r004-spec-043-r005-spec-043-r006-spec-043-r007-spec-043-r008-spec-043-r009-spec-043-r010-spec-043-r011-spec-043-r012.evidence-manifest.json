@@ -1,0 +1,27 @@
+{
+  "schema_version": "macprovider.signed-trusted-pool-creator-mvp-journey-evidence.v1",
+  "source_sha": "036e9930023f96ee7b66300347c885fc2fc30485",
+  "evidence_sha": "c869e113c467e517ca16b761b4484d087e9a808e",
+  "requirement_ids": [
+    "SPEC-043-R001",
+    "SPEC-043-R002",
+    "SPEC-043-R003",
+    "SPEC-043-R004",
+    "SPEC-043-R005",
+    "SPEC-043-R006",
+    "SPEC-043-R007",
+    "SPEC-043-R008",
+    "SPEC-043-R009",
+    "SPEC-043-R010",
+    "SPEC-043-R011",
+    "SPEC-043-R012"
+  ],
+  "requirement_slug": "spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012",
+  "journey_id": "JOURNEY-TRUSTED-POOL-CREATOR-MVP",
+  "redacted_artifact": "journeys/evidence/trusted-pool-creator-mvp-20260826T054329Z.redacted.json",
+  "redacted_sha256": "fe2b00f8fc91f161f6f6b0a22087f7687de55e4d3419242ca64b50c93aa711b8",
+  "signed_envelope": "journeys/evidence/trusted-pool-creator-mvp-20260826T054329Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+  "signed_envelope_sha256": "6b17e8aa50a2265dfcc6533c203870d137cd687a3cb6910fc4c594452f734427",
+  "workflow_run_id": "32936678404",
+  "workflow_run_attempt": "1"
+}
