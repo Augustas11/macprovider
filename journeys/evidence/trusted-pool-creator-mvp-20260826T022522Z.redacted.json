@@ -2,55 +2,76 @@
   "candidate_identity": {
     "approval_record_id": "approval-v1",
     "approval_record_version": "approval-version-1",
-    "artifact_set_sha256": "1632d42f2c857eb7564c49f285190c25d4067fdef8a1a4b119d97a1538abcb86",
+    "artifact_set_sha256": "27ed67c096568165e7f41c0062ee58a8eb5277829b48ab8fb0752909ebfe803a",
     "buyer_credential_fingerprint": "0aa273ef825cd294d7ced17bc338b99f2bdfb6b29d19f670daf4a7afc1c270e2",
     "clock_skew_allowance_seconds": 60,
     "coordinator_build_id": "coordinator-isolated-candidate",
-    "coordinator_config_sha256": "555a5292ab41613e7440fad984112723bd5d2e9e5615d0ca7ca6e5ecf3465f39",
+    "coordinator_config_sha256": "36cb15cf79e77740207ade68035b89bc860be4483fcd0c87f9669e64a9fcb99a",
     "creator_account_fingerprint": "a248864d43410ea95465395a22d4466eba9e8a403a44e521711dd8ac4826d697",
-    "creator_agreement_expires_at": "2026-08-26T06:27:53Z",
-    "creator_agreement_grace_ends_at": "2026-08-26T07:27:53Z",
+    "creator_agreement_expires_at": "2026-08-27T01:25:19Z",
+    "creator_agreement_grace_ends_at": "2026-08-27T02:25:19Z",
     "creator_agreement_id": "agreement-approval-v1",
     "creator_agreement_version": "v1",
-    "effective_config_digest": "10f28bce7065493c68d353a734519ad16f708efc4b8df0415e0c0f2520d406f7",
+    "effective_config_digest": "18b1ca95c018619d468c7ecdf914aea956c699e4db08a366ee3c571ea1691cc7",
     "environment_id": "candidate-trusted-pool-creator-mvp",
     "feature_flag_digest": "b88b88f6b48e8647ac2c4f337836cbaedff25803ddac3fe84d7674b59322c2da",
     "gate_check_id": "candidate-promote:op-promote",
     "gateway_build_id": "gateway-isolated-candidate",
-    "gateway_config_sha256": "12b307380f4f85bf0f233cf7c388d7f39eebf5d558efe1ac60ea37adc52fd1d7",
+    "gateway_config_sha256": "729d8cf594e145da00c0c7623ab7ce36977beb083469fefe25bf39f708da0a7f",
     "governance_file_digest": "621e091a60b182d9b089afaa3941a568eb175a01c1ba1cbaab63daa8c54718ce",
     "lifecycle_state": "paused",
-    "manifest_core_digest": "4dfb02a9228df2cafbf90b245cb97e0995b1b813ae395be3514629230e5a2af8",
+    "manifest_core_digest": "a24bf42f2231d311df97d45a466b24f33c626dae58b6a88253f43775a4fa6e90",
     "manifest_version": "1",
     "maximum_ttl_seconds": 86400,
-    "operation_ids_fingerprint": "07546a8bb5918f6f1d791cd6b2b23425f7a862455cc3fd035920cbbb3c518086",
-    "pool_generation": "12",
-    "pool_id": "8GcQWoGIKqdYkTwlh8MnYg",
+    "operation_ids_fingerprint": "f744a96077351f094b290a0c7ac4f7f6bd10d5453f84bd5e9facf980ff269780",
+    "pool_generation": "15",
+    "pool_id": "fT3YfUyEohpgr9Fig1A7Lw",
     "pricing_schedule_id": "pricing-approval-v1",
     "pricing_schedule_version": "v1",
     "provider_build_id": "provider-isolated-candidate",
     "provider_identity_fingerprint": "271819043bd61c691eec37b5de0e2fd423c7c669377c089d4cefe3c4836d1daa",
-    "readiness_observations_fingerprint": "09bbd617b8666c6f3755f9c0e430411477cf0190bdc1d5e814965026eadd82c4",
+    "readiness_observations_fingerprint": "73ed1badf3583c6c555e7f7a31d5993798c571a5ea94ac2155f7ccad22cd013f",
     "reviewed_distribution_artifact_digest": "a569a745d4dfba05fe6857a4a2bdbd2b9b3e4a9cba4d77445c73eb0e5d9d89a3",
-    "root_issuer_fingerprint": "cabd3c82a3819f8d5ceed6e0de565f0b1434b95bb8d46dd4e33749c957cf9db0",
-    "route_snapshot_digest": "45887d6a8e19e7a89ef08b04b31ae2bef60fc4b527708574a0784f44df096f46",
+    "root_issuer_fingerprint": "926a1cb463b3fd22fcf8cc821111092a13c413c1b47ca7575246f86d0f081e88",
+    "route_snapshot_digest": "b63c8f14f42c366ef1666101903702ae9775bb85a44ca0be804f06789c973678",
     "verifier_challenge": "isolated-candidate-trusted-pool-creator-mvp",
     "verifier_command": "phase4-coordinator/internal/trustpool:TestJourneyTrustedPoolCreatorMVPCandidate",
     "verifier_result": "pass"
   },
-  "captured_at": "2026-08-25T07:27:53Z",
+  "captured_at": "2026-08-26T02:25:22Z",
   "environment": {
-    "candidate": "commit:02d2efbdd1458098699ea922d771d222d8dfa60d",
+    "candidate": "commit:2ef8924dae854b7f62465e48ab2483a180aea217",
     "class": "isolated-candidate-trusted-pool-creator-mvp",
     "hardware_profile": "local-redacted"
   },
-  "expires_at": "2026-08-25",
+  "expires_at": "2026-08-26",
   "harness": {
-    "evidence_scope": "isolated candidate create-to-route-to-settle-to-pause proof only; production timing-floor, live creator launch, and production-release key registration remain outside this harness",
+    "evidence_scope": "isolated candidate create-to-route-to-settle-to-pause proof including SPEC-043-R007 rejection-timing oracle; production timing-floor remeasure, live creator launch, and production-release key registration remain outside this harness",
     "execution_mode": "isolated-candidate-trusted-pool-creator-mvp",
     "gateway_context_required": true,
     "id": "phase4-coordinator/internal/trustpool:TestJourneyTrustedPoolCreatorMVPCandidate",
     "isolated_sqlite": true,
+    "pool_rejection_timing": {
+      "classes_covered": [
+        "unknown",
+        "unauthorized",
+        "disabled"
+      ],
+      "disabled_p50_ms": 51.178334,
+      "floor_ms": 50,
+      "intentional_gaps": [
+        "pool_policy_stale remains a distinct error code",
+        "wallet_session rejection covered by gateway unit distribution test"
+      ],
+      "mann_whitney_p_value": 0.024929680525107797,
+      "method": "active_sleep_to_floor",
+      "p95_delta_ms": 12.986709,
+      "p99_delta_ms": 12.986709,
+      "sample_count_per_class": 16,
+      "statistical_test": "two-sided Mann-Whitney U with normal approximation; fail if p \u003c 0.01",
+      "unauthorized_p50_ms": 50.857875,
+      "unknown_p50_ms": 51.258584
+    },
     "production_side_effects": false,
     "real_admin_handler": true,
     "real_buyer_server": true
@@ -62,9 +83,9 @@
     "candidate_manifest_accepted": true,
     "coordinator_blind_claimed": false,
     "creator_admin_authorized_only": true,
-    "creator_suspension_root_compromise_freeze_verified": false,
-    "delegation_revocation_verified": false,
-    "descendant_signer_rejection_verified": false,
+    "creator_suspension_root_compromise_freeze_verified": true,
+    "delegation_revocation_verified": true,
+    "descendant_signer_rejection_verified": true,
     "emergency_pause_exercised": true,
     "fail_closed_no_global_fallback": true,
     "global_fallback_observed": false,
@@ -73,7 +94,7 @@
     "no_private_key_upload": true,
     "no_raw_prompt_output_artifact": true,
     "payout_ready_mutated": false,
-    "pool_existence_oracle_within_threshold": false,
+    "pool_existence_oracle_within_threshold": true,
     "privacy_pool_claimed": false,
     "production_side_effects": false,
     "public_announcement_without_reviewed_artifact_observed": false,
@@ -102,7 +123,7 @@
     "secrets_redacted": true
   },
   "repository": {
-    "commit": "02d2efbdd1458098699ea922d771d222d8dfa60d",
+    "commit": "2ef8924dae854b7f62465e48ab2483a180aea217",
     "name": "Augustas11/macprovider"
   },
   "requirement_ids": [
@@ -123,7 +144,7 @@
     "status": "pass",
     "summary": "Trusted Pool creator MVP isolated candidate create-to-route-to-settle-to-pause evidence passed without production side effects."
   },
-  "run_id": "trusted-pool-creator-mvp-20260825T072753Z",
+  "run_id": "trusted-pool-creator-mvp-20260826T022522Z",
   "schema_version": "macprovider.trusted-pool-creator-mvp-evidence.v1",
   "steps": [
     {
@@ -170,7 +191,7 @@
       "artifacts": [
         "redacted-trusted-pool-creator-mvp"
       ],
-      "assertion": "Undelegated provider admission failed; creator-owned admitted member succeeded; later revoke excluded the member from the next routeable snapshot.",
+      "assertion": "Undelegated provider admission failed; delegated provider required ProviderPoolDelegationV1; owner delegation_revoked removed the delegated member while owned member kept routing.",
       "id": "step-05-provider-membership",
       "status": "pass"
     },
@@ -178,7 +199,7 @@
       "artifacts": [
         "redacted-trusted-pool-creator-mvp"
       ],
-      "assertion": "Dedicated buyer grant succeeded; unauthorized account selection failed closed with a generic pool denial before provider dispatch.",
+      "assertion": "Dedicated buyer grant succeeded; unauthorized, unknown, and disabled pool selections failed closed with generic pool_unavailable under the active timing floor within SPEC-043-R007 p95/p99 oracle bounds.",
       "id": "step-06-buyer-authorization",
       "status": "pass"
     },
@@ -234,7 +255,7 @@
       "artifacts": [
         "redacted-trusted-pool-creator-mvp"
       ],
-      "assertion": "Operator pause moved the pool to non-routeable members while retaining the isolated candidate store.",
+      "assertion": "Operator pause moved the pool to non-routeable members; creator freeze while suspended rejected later nonce and descendant-signer mutations.",
       "id": "step-13-emergency-pause-and-rollback",
       "status": "pass"
     },

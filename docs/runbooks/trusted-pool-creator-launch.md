@@ -39,16 +39,18 @@ rows stay zero.
 
 ## Blocked before any live announcement
 
-These journey observations are still **false** on the committed candidate
-envelope unless noted. Do not flip them in the signer until the harness
-actually exercises the path (or recapture after merge proves them):
+These journey observations are now **true** on new isolated captures, including
+`journeys/evidence/trusted-pool-creator-mvp-20260826T022522Z.redacted.json`.
+The committed signed envelope still records them false until the protected
+signer is re-run from reviewed `main`. Do not announce a live creator until
+that re-sign plus Gate D exist.
 
 | Observation | Status |
 |---|---|
-| `creator_suspension_root_compromise_freeze_verified` | Proven in harness on new captures; committed envelope still false |
-| `descendant_signer_rejection_verified` | Proven in harness on new captures; committed envelope still false |
-| `delegation_revocation_verified` | Proven in harness on new captures via canonical `ProviderPoolDelegationV1` grant/revoke (`member_revoked` is not delegation proof); committed envelope still false |
-| `pool_existence_oracle_within_threshold` | Proven in harness on new captures via buyer/gateway rejection timing floor + unknown/unauthorized/disabled distribution test (wallet covered at gateway); committed envelope still false |
+| `creator_suspension_root_compromise_freeze_verified` | True on new captures; signed envelope still false |
+| `descendant_signer_rejection_verified` | True on new captures; signed envelope still false |
+| `delegation_revocation_verified` | True on new captures via canonical `ProviderPoolDelegationV1` grant/revoke (`member_revoked` is not delegation proof); signed envelope still false |
+| `pool_existence_oracle_within_threshold` | True on new captures via buyer/gateway rejection timing floor + unknown/unauthorized/disabled distribution test (wallet covered at gateway); signed envelope still false |
 
 Also still missing for Gate D:
 
@@ -116,7 +118,7 @@ part of this MVP.
 
 ## Next gates
 
-- Remaining Gate C: recapture and re-sign the candidate journey now that
-  pool-existence timing-oracle proof is in the harness.
+- Remaining Gate C: re-sign the candidate journey from reviewed `main` against
+  the recaptured freeze/delegation/oracle-true artifact.
 - Gate D: sibling `PoolPromotionTransitionV1`, non-empty production-release
   keyring, promoter allowlist, CONFORMANCE `evidence[]` only through that flow.
