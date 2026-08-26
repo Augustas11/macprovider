@@ -9,7 +9,14 @@ Issue: https://github.com/Augustas11/macprovider/issues/1053
 Evidence owner: https://github.com/Augustas11/macprovider/issues/1053
 Execution mode: isolated-candidate-trusted-pool-creator-mvp
 
-Signed candidate evidence (Gate C; evidence-only, not in CONFORMANCE `evidence[]`):
+Unsigned integer-`run_id` recapture (awaiting protected signer; evidence-only, not in CONFORMANCE `evidence[]`):
+
+- Redacted artifact: `journeys/evidence/trusted-pool-creator-mvp-20260826T054329Z.redacted.json`
+- `repository.commit`: `036e9930023f96ee7b66300347c885fc2fc30485` (then `origin/main`)
+- `run_id`: `1` (promotion-ledger high-water + 1)
+- Freeze, descendant-signer rejection, `delegation_revocation_verified`, and `pool_existence_oracle_within_threshold` are true
+
+Signed Gate C envelope (capture-string `run_id`; evidence-only):
 
 - Redacted artifact: `journeys/evidence/trusted-pool-creator-mvp-20260826T022522Z.redacted.json`
 - Signed envelope: `journeys/evidence/trusted-pool-creator-mvp-20260826T022522Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json`
@@ -18,7 +25,7 @@ Signed candidate evidence (Gate C; evidence-only, not in CONFORMANCE `evidence[]
 
 Historical Gate A envelope (pre-proof flags false) remains committed at `journeys/evidence/trusted-pool-creator-mvp-20260825T072753Z.*`.
 
-The Gate C envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is the historical capture string `trusted-pool-creator-mvp-20260826T022522Z`. New harness captures emit a positive integer `run_id` (ledger high-water + 1). Recapture and re-sign before Gate D consume; do not promote SPEC-043 from this harness alone.
+The Gate C envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is the historical capture string `trusted-pool-creator-mvp-20260826T022522Z`. The unsigned recapture emits positive integer `run_id` `1`. Re-sign that recapture from reviewed `main` before Gate D consume; do not promote SPEC-043 from this harness alone.
 
 Live-readiness runbook (Gate C; does not promote SPEC-043): `docs/runbooks/trusted-pool-creator-launch.md`
 
@@ -94,7 +101,7 @@ cd phase4-coordinator
 MACPROVIDER_CAPTURE_TRUSTED_POOL_CREATOR_MVP=1 go test ./internal/trustpool -run TestJourneyTrustedPoolCreatorMVPCandidate -count=1
 ```
 
-Commit the redacted file under `journeys/evidence/trusted-pool-creator-mvp-*.redacted.json`, merge to `main`, recapture so `repository.commit` is an ancestor of `origin/main`, then dispatch `.github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml` from reviewed `main`. Do not promote SPEC-043 from this harness alone. New harness captures must keep freeze, descendant-signer rejection, `delegation_revocation_verified`, and `pool_existence_oracle_within_threshold` true, and must emit a positive integer `run_id` (ledger high-water + 1). The Gate C signed envelope from workflow `32926445757` records those flags true but still has a capture-string `run_id`. After a squash-merge, recapture before dispatching the signer.
+Commit the redacted file under `journeys/evidence/trusted-pool-creator-mvp-*.redacted.json`, merge to `main`, then dispatch `.github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml` from reviewed `main` with `source_sha` equal to the capture `repository.commit`. Recapture first if that commit is not an ancestor of `origin/main`, or if `expires_at` is no longer the current UTC calendar day. Do not promote SPEC-043 from this harness alone. New harness captures must keep freeze, descendant-signer rejection, `delegation_revocation_verified`, and `pool_existence_oracle_within_threshold` true, and must emit a positive integer `run_id` (ledger high-water + 1). The unsigned recapture `trusted-pool-creator-mvp-20260826T054329Z.redacted.json` meets those rules with `run_id` `1` on `036e9930023f96ee7b66300347c885fc2fc30485`. The Gate C signed envelope from workflow `32926445757` still has a capture-string `run_id`.
 
 ## Pass criteria
 

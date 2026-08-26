@@ -120,10 +120,12 @@ part of this MVP.
 
 - Gate C signed candidate envelope is committed (workflow
   [`32926445757`](https://github.com/Augustas11/macprovider/actions/runs/32926445757)).
-  It remains evidence-only: CONFORMANCE `evidence[]` is empty.
-- New isolated captures emit a positive integer `run_id` (promotion-ledger
-  high-water + 1). The committed Gate C envelope still has the historical
-  capture-string `run_id`, so it is not Gate D consumable.
-- Gate D: recapture/re-sign with integer `run_id`, sibling
+  It remains evidence-only: CONFORMANCE `evidence[]` is empty. Its
+  capture-string `run_id` is not Gate D consumable.
+- Unsigned recapture `journeys/evidence/trusted-pool-creator-mvp-20260826T054329Z.redacted.json`
+  has integer `run_id` `1` on `036e9930023f96ee7b66300347c885fc2fc30485`, with
+  freeze, descendant-signer, delegation, and pool-existence oracle observations
+  true. Re-sign that file from reviewed `main` (`expires_at` is `2026-08-26`).
+- Gate D still needs the signed integer-`run_id` envelope, sibling
   `PoolPromotionTransitionV1`, non-empty production-release keyring, promoter
-  allowlist, CONFORMANCE `evidence[]` only through that flow.
+  allowlist, and CONFORMANCE `evidence[]` only through that flow.
