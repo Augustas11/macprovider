@@ -28,7 +28,7 @@ Historical Gate C envelope (capture-string `run_id`; evidence-only):
 
 Historical Gate A envelope (pre-proof flags false) remains committed at `journeys/evidence/trusted-pool-creator-mvp-20260825T072753Z.*`.
 
-The integer-`run_id` envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is JSON integer `1`. `scripts/promote-signed-journey-result.py` requires `--promotion-transition` for this journey and consumes that sibling into `journeys/ledgers/spec-043-promotion-auth.jsonl` before rewriting CONFORMANCE. Without a matching `consumed_authorization`, governance keeps the envelope evidence-only. Do not promote SPEC-043 from this harness alone; Gate D still needs a registered production-release approver key, a sibling artifact signed by that key, and CONFORMANCE `evidence[]` only through that flow. The Gate C envelope's capture-string `run_id` remains historical.
+The integer-`run_id` envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is JSON integer `1`. `scripts/promote-signed-journey-result.py` requires `--promotion-transition` for this journey and consumes that sibling into `journeys/ledgers/spec-043-promotion-auth.jsonl` before rewriting CONFORMANCE. Without a matching `consumed_authorization`, governance keeps the envelope evidence-only. The production-release public key is registered; dispatch `.github/workflows/build-signed-pool-promotion-transition.yml` from reviewed `main` to sign a sibling. That workflow does not rewrite CONFORMANCE. Do not promote SPEC-043 from this harness alone. The Gate C envelope's capture-string `run_id` remains historical.
 
 Live-readiness runbook (Gate C; does not promote SPEC-043): `docs/runbooks/trusted-pool-creator-launch.md`
 

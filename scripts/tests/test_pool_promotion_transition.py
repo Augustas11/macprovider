@@ -4,11 +4,14 @@ import base64
 import contextlib
 import copy
 import hashlib
+import importlib.util
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,19 +37,44 @@ from scripts.pool_promotion_transition import (
     LEDGER_SCHEMA_VERSION,
     POOL_PROMOTION_TRANSITION_PAYLOAD_SCHEMA,
     PRODUCTION_RELEASE_KEY_ID,
+    PUBLIC_KEY_PATH,
+    build_pool_promotion_transition_payload,
     consume_pool_promotion_transition,
     journey_result_digest,
+    preflight_production_release_keyring,
+    register_production_release_public_key,
     sign_pool_promotion_transition,
     validate_pool_promotion_transition,
     _consumed_authorization_record,
+    public_keys_match,
 )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI = REPO_ROOT / "scripts" / "validate-pool-promotion-transition.py"
+BUILDER = REPO_ROOT / "scripts" / "build-pool-promotion-transition.py"
+SIGNER = REPO_ROOT / "scripts" / "sign-pool-promotion-transition.py"
 NOW = datetime(2026, 8, 25, 12, 0, 0, tzinfo=timezone.utc)
 NOW_TEXT = "2026-08-25T12:00:00Z"
 DIGEST = "ab" * 32
+
+
+def load_script_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def rewrap_public_pem(pem: str, width: int = 48) -> str:
+    lines = [line.strip() for line in pem.splitlines() if line.strip() and "-----" not in line]
+    wrapped = base64.b64encode(base64.b64decode("".join(lines), validate=True)).decode("ascii")
+    return (
+        "-----BEGIN PUBLIC KEY-----\n"
+        + "\n".join(wrapped[index : index + width] for index in range(0, len(wrapped), width))
+        + "\n-----END PUBLIC KEY-----\n"
+    )
 
 
 def generate_p256_key(openssl_bin: str, directory: Path, stem: str) -> tuple[str, str]:
@@ -1141,6 +1169,434 @@ class PoolPromotionTransitionTests(unittest.TestCase):
                 trusted_journey_result_public_key_sha256=fixture["candidate_key_sha256"],
             )
             self.assertTrue(any("keyId" in error for error in result.errors))
+
+
+def identity_payload(**overrides: object) -> dict:
+    identity = {
+        "pool_id": "pool_creator_mvp_001",
+        "environment_id": "candidate-trusted-pool-creator-mvp",
+        "coordinator_build_id": "coordinator-test",
+        "gateway_build_id": "gateway-test",
+        "provider_build_id": "provider-test",
+        "approval_record_id": "approval-1",
+        "creator_agreement_id": "agreement-1",
+        "creator_agreement_expires_at": "2026-12-01T00:00:00Z",
+        "creator_agreement_grace_ends_at": "2026-12-08T00:00:00Z",
+        "pricing_schedule_id": "pricing-1",
+        "gate_check_id": "gate-check-1",
+        "verifier_challenge": "challenge-1",
+        "effective_config_digest": DIGEST,
+        "feature_flag_digest": DIGEST,
+        "governance_file_digest": DIGEST,
+        "reviewed_distribution_artifact_digest": DIGEST,
+        "root_issuer_fingerprint": DIGEST,
+        "route_snapshot_digest": DIGEST,
+        "pool_generation": "15",
+    }
+    identity.update(overrides)
+    return identity
+
+
+def write_empty_keyring_root(root: Path) -> None:
+    security = root / "security"
+    security.mkdir(parents=True, exist_ok=True)
+    keyring = {
+        "schema_version": "spec-043-launch-keyring-v1",
+        "purpose": "production-release-approver",
+        "allowed_environment_classes": ["production"],
+        "keys": [],
+    }
+    (root / KEYRING_PATH).write_text(json.dumps(keyring, indent=2) + "\n", encoding="utf-8")
+    ledger = root / LEDGER_PATH
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(ledger_init_line(), encoding="utf-8")
+
+
+class ProductionReleaseKeyAndBuilderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        try:
+            self.openssl_bin = resolve_trusted_openssl()
+        except ValueError as exc:
+            raise unittest.SkipTest(str(exc)) from exc
+
+    def test_empty_keyring_preflight_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_empty_keyring_root(root)
+            result = preflight_production_release_keyring(root, openssl_bin=self.openssl_bin)
+            self.assertTrue(any("fail-closed" in error for error in result.errors))
+
+    def test_register_writes_public_key_and_preflight_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_empty_keyring_root(root)
+            _, public_pem = generate_p256_key(self.openssl_bin, root, "operator-public")
+            result = register_production_release_public_key(
+                root,
+                public_pem,
+                issuer="macprovider-ops",
+                valid_from="2026-01-01T00:00:00Z",
+                valid_until="2027-01-01T00:00:00Z",
+                openssl_bin=self.openssl_bin,
+            )
+            self.assertEqual([], result.errors)
+            self.assertTrue((root / PUBLIC_KEY_PATH).is_file())
+            keyring = json.loads((root / KEYRING_PATH).read_text(encoding="utf-8"))
+            self.assertEqual(1, len(keyring["keys"]))
+            self.assertEqual(PRODUCTION_RELEASE_KEY_ID, keyring["keys"][0]["key_id"])
+            preflight = preflight_production_release_keyring(root, openssl_bin=self.openssl_bin, now=NOW)
+            self.assertEqual([], preflight.errors)
+
+    def test_register_rejects_private_key_material(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_empty_keyring_root(root)
+            private_pem, _ = generate_p256_key(self.openssl_bin, root, "operator-private")
+            result = register_production_release_public_key(
+                root,
+                private_pem,
+                issuer="macprovider-ops",
+                valid_from="2026-01-01T00:00:00Z",
+                valid_until="2027-01-01T00:00:00Z",
+                openssl_bin=self.openssl_bin,
+            )
+            self.assertTrue(any("private key material" in error for error in result.errors))
+            self.assertFalse((root / PUBLIC_KEY_PATH).exists())
+            keyring = json.loads((root / KEYRING_PATH).read_text(encoding="utf-8"))
+            self.assertEqual([], keyring["keys"])
+
+    def test_register_refuses_second_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_empty_keyring_root(root)
+            _, first = generate_p256_key(self.openssl_bin, root, "first")
+            _, second = generate_p256_key(self.openssl_bin, root, "second")
+            first_result = register_production_release_public_key(
+                root,
+                first,
+                issuer="macprovider-ops",
+                valid_from="2026-01-01T00:00:00Z",
+                valid_until="2027-01-01T00:00:00Z",
+                openssl_bin=self.openssl_bin,
+            )
+            self.assertEqual([], first_result.errors)
+            second_result = register_production_release_public_key(
+                root,
+                second,
+                issuer="macprovider-ops",
+                valid_from="2026-01-01T00:00:00Z",
+                valid_until="2027-01-01T00:00:00Z",
+                openssl_bin=self.openssl_bin,
+            )
+            self.assertTrue(any("already has a registered" in error for error in second_result.errors))
+
+    def test_register_rejects_non_p256_256_bit_curve(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_empty_keyring_root(root)
+            private_key = root / "secp256k1.pem"
+            public_key = root / "secp256k1.pub.pem"
+            generated = subprocess.run(
+                [
+                    self.openssl_bin,
+                    "genpkey",
+                    "-algorithm",
+                    "EC",
+                    "-pkeyopt",
+                    "ec_paramgen_curve:secp256k1",
+                    "-out",
+                    str(private_key),
+                ],
+                capture_output=True,
+                check=False,
+            )
+            if generated.returncode != 0:
+                self.skipTest("trusted OpenSSL cannot generate secp256k1")
+            subprocess.run(
+                [self.openssl_bin, "pkey", "-in", str(private_key), "-pubout", "-out", str(public_key)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            result = register_production_release_public_key(
+                root,
+                public_key.read_text(encoding="utf-8"),
+                issuer="macprovider-ops",
+                valid_from="2026-01-01T00:00:00Z",
+                valid_until="2027-01-01T00:00:00Z",
+                openssl_bin=self.openssl_bin,
+            )
+            self.assertTrue(any("ECDSA P-256" in error for error in result.errors))
+            self.assertFalse((root / PUBLIC_KEY_PATH).exists())
+            keyring = json.loads((root / KEYRING_PATH).read_text(encoding="utf-8"))
+            self.assertEqual([], keyring["keys"])
+
+    def test_register_rejects_acceptance_candidate_public_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_empty_keyring_root(root)
+            acceptance_pem = (REPO_ROOT / JOURNEY_RESULT_PUBLIC_KEY_PATH).read_text(encoding="utf-8")
+            result = register_production_release_public_key(
+                root,
+                acceptance_pem,
+                issuer="macprovider-ops",
+                valid_from="2026-01-01T00:00:00Z",
+                valid_until="2027-01-01T00:00:00Z",
+                openssl_bin=self.openssl_bin,
+            )
+            self.assertTrue(any("must not reuse the acceptance candidate signing key" in error for error in result.errors))
+            self.assertFalse((root / PUBLIC_KEY_PATH).exists())
+            keyring = json.loads((root / KEYRING_PATH).read_text(encoding="utf-8"))
+            self.assertEqual([], keyring["keys"])
+
+    def test_register_rejects_reencoded_acceptance_candidate_public_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_empty_keyring_root(root)
+            acceptance_pem = (REPO_ROOT / JOURNEY_RESULT_PUBLIC_KEY_PATH).read_text(encoding="utf-8")
+            reencoded = rewrap_public_pem(acceptance_pem)
+            self.assertNotEqual(acceptance_pem, reencoded)
+            result = register_production_release_public_key(
+                root,
+                reencoded,
+                issuer="macprovider-ops",
+                valid_from="2026-01-01T00:00:00Z",
+                valid_until="2027-01-01T00:00:00Z",
+                openssl_bin=self.openssl_bin,
+            )
+            self.assertTrue(any("must not reuse the acceptance candidate signing key" in error for error in result.errors))
+            self.assertFalse((root / PUBLIC_KEY_PATH).exists())
+
+    def test_register_rejects_local_acceptance_fixture_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_empty_keyring_root(root)
+            _, acceptance_public = generate_p256_key(self.openssl_bin, root, "local-acceptance")
+            (root / JOURNEY_RESULT_PUBLIC_KEY_PATH).write_text(acceptance_public, encoding="utf-8")
+            result = register_production_release_public_key(
+                root,
+                acceptance_public,
+                issuer="macprovider-ops",
+                valid_from="2026-01-01T00:00:00Z",
+                valid_until="2027-01-01T00:00:00Z",
+                openssl_bin=self.openssl_bin,
+            )
+            self.assertTrue(any("must not reuse the acceptance candidate signing key" in error for error in result.errors))
+            self.assertFalse((root / PUBLIC_KEY_PATH).exists())
+
+    def test_builder_binds_candidate_digest_and_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = write_promotion_root(root, self.openssl_bin)
+            candidate = sign_candidate_envelope(
+                candidate_payload(candidate_identity=identity_payload()),
+                private_key_pem=fixture["acceptance_private"],
+                public_key_pem=fixture["acceptance_public"],
+                openssl_bin=self.openssl_bin,
+            )
+            payload, result = build_pool_promotion_transition_payload(
+                root,
+                candidate,
+                live_activation_target="production-trusted-pool-creator-mvp",
+                schema_migration_hash=DIGEST,
+                approval_record_version=1,
+                creator_agreement_version=1,
+                pricing_schedule_version=1,
+                authorization_id="authz-builder-1",
+                authorized_actor="ops-approver",
+                credential_id="cred-1",
+                authorized_at="2026-08-25T11:00:00Z",
+                expiry="2026-08-26T10:00:00Z",
+            )
+            self.assertEqual([], result.errors)
+            assert payload is not None
+            self.assertEqual(journey_result_digest(candidate), payload["journey_result_digest"])
+            self.assertEqual(1, payload["run_id"])
+            self.assertEqual(15, payload["pool_generation"])
+            self.assertEqual(1, payload["transition_epoch"])
+            self.assertEqual("production-trusted-pool-creator-mvp", payload["environment_id"])
+            self.assertEqual("candidate-trusted-pool-creator-mvp", payload["candidate_environment_id"])
+
+    def test_builder_rejects_live_target_equal_to_candidate_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = write_promotion_root(root, self.openssl_bin)
+            candidate = sign_candidate_envelope(
+                candidate_payload(candidate_identity=identity_payload()),
+                private_key_pem=fixture["acceptance_private"],
+                public_key_pem=fixture["acceptance_public"],
+                openssl_bin=self.openssl_bin,
+            )
+            payload, result = build_pool_promotion_transition_payload(
+                root,
+                candidate,
+                live_activation_target="candidate-trusted-pool-creator-mvp",
+                schema_migration_hash=DIGEST,
+                approval_record_version=1,
+                creator_agreement_version=1,
+                pricing_schedule_version=1,
+                authorization_id="authz-builder-2",
+                authorized_actor="ops-approver",
+                credential_id="cred-1",
+                authorized_at="2026-08-25T11:00:00Z",
+                expiry="2026-08-26T10:00:00Z",
+            )
+            self.assertIsNone(payload)
+            self.assertTrue(any("distinct from the isolated candidate" in error for error in result.errors))
+
+    def test_builder_does_not_mutate_conformance_or_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = write_promotion_root(root, self.openssl_bin)
+            conformance = root / "specs" / "CONFORMANCE.json"
+            conformance.parent.mkdir(parents=True, exist_ok=True)
+            conformance.write_text("{}\n", encoding="utf-8")
+            before_ledger = (root / LEDGER_PATH).read_text(encoding="utf-8")
+            candidate = sign_candidate_envelope(
+                candidate_payload(candidate_identity=identity_payload()),
+                private_key_pem=fixture["acceptance_private"],
+                public_key_pem=fixture["acceptance_public"],
+                openssl_bin=self.openssl_bin,
+            )
+            build_pool_promotion_transition_payload(
+                root,
+                candidate,
+                live_activation_target="production-trusted-pool-creator-mvp",
+                schema_migration_hash=DIGEST,
+                approval_record_version=1,
+                creator_agreement_version=1,
+                pricing_schedule_version=1,
+                authorization_id="authz-builder-3",
+                authorized_actor="ops-approver",
+                credential_id="cred-1",
+                authorized_at="2026-08-25T11:00:00Z",
+                expiry="2026-08-26T10:00:00Z",
+            )
+            self.assertEqual("{}\n", conformance.read_text(encoding="utf-8"))
+            self.assertEqual(before_ledger, (root / LEDGER_PATH).read_text(encoding="utf-8"))
+
+    def test_builder_allows_runner_temp_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner_temp = Path(directory) / "runner-temp"
+            runner_temp.mkdir()
+            fixture = write_promotion_root(root, self.openssl_bin)
+            candidate = sign_candidate_envelope(
+                candidate_payload(candidate_identity=identity_payload()),
+                private_key_pem=fixture["acceptance_private"],
+                public_key_pem=fixture["acceptance_public"],
+                openssl_bin=self.openssl_bin,
+            )
+            candidate_path = root / "journeys" / "evidence" / "trusted-pool-creator-mvp-test.journey-result.signed.json"
+            candidate_path.write_text(json.dumps(candidate) + "\n", encoding="utf-8")
+            output_path = runner_temp / "payload.unsigned.json"
+            builder = load_script_module(BUILDER, "build_pool_promotion_transition")
+            env = {**os.environ, "RUNNER_TEMP": str(runner_temp)}
+            with mock.patch.dict(os.environ, env, clear=False):
+                status = builder.main(
+                    [
+                        "--root",
+                        str(root),
+                        "--candidate",
+                        str(candidate_path),
+                        "--output",
+                        str(output_path),
+                        "--live-activation-target",
+                        "production-trusted-pool-creator-mvp",
+                        "--schema-migration-hash",
+                        DIGEST,
+                        "--approval-record-version",
+                        "1",
+                        "--creator-agreement-version",
+                        "1",
+                        "--pricing-schedule-version",
+                        "1",
+                        "--authorization-id",
+                        "authz-builder-temp",
+                        "--authorized-actor",
+                        "ops-approver",
+                        "--credential-id",
+                        "cred-1",
+                        "--authorized-at",
+                        "2026-08-25T11:00:00Z",
+                        "--expiry",
+                        "2026-08-26T10:00:00Z",
+                    ]
+                )
+            self.assertEqual(0, status)
+            self.assertTrue(output_path.is_file())
+
+    def test_builder_rejects_conformance_output_even_with_force(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_empty_keyring_root(root)
+            builder = load_script_module(BUILDER, "build_pool_promotion_transition_forbidden")
+            with self.assertRaises(SystemExit) as raised:
+                builder.main(
+                    [
+                        "--root",
+                        str(root),
+                        "--candidate",
+                        "missing.json",
+                        "--output",
+                        "specs/CONFORMANCE.json",
+                        "--live-activation-target",
+                        "production-trusted-pool-creator-mvp",
+                        "--schema-migration-hash",
+                        DIGEST,
+                        "--approval-record-version",
+                        "1",
+                        "--creator-agreement-version",
+                        "1",
+                        "--pricing-schedule-version",
+                        "1",
+                        "--authorization-id",
+                        "authz-builder-forbidden",
+                        "--authorized-actor",
+                        "ops-approver",
+                        "--credential-id",
+                        "cred-1",
+                        "--force",
+                    ]
+                )
+            self.assertEqual(1, raised.exception.code)
+
+    def test_sign_accepts_rewrapped_registered_public_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_empty_keyring_root(root)
+            private_pem, public_pem = generate_p256_key(self.openssl_bin, root, "operator")
+            rewrapped = rewrap_public_pem(public_pem)
+            self.assertNotEqual(public_pem, rewrapped)
+            self.assertTrue(public_keys_match(public_pem, rewrapped))
+            result = register_production_release_public_key(
+                root,
+                rewrapped,
+                issuer="macprovider-ops",
+                valid_from="2026-01-01T00:00:00Z",
+                valid_until="2027-01-01T00:00:00Z",
+                openssl_bin=self.openssl_bin,
+            )
+            self.assertEqual([], result.errors)
+            evidence = root / "journeys" / "evidence"
+            evidence.mkdir(parents=True, exist_ok=True)
+            unsigned = root / "unsigned.json"
+            unsigned.write_text("{}\n", encoding="utf-8")
+            signer = load_script_module(SIGNER, "sign_pool_promotion_transition_cli")
+            env = {**os.environ, "MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM": private_pem}
+            with mock.patch.dict(os.environ, env, clear=False):
+                status = signer.main(
+                    [
+                        "--root",
+                        str(root),
+                        "--input",
+                        str(unsigned),
+                        "--output",
+                        "journeys/evidence/out.pool-promotion-transition.signed.json",
+                    ]
+                )
+            self.assertEqual(0, status)
+            self.assertTrue((evidence / "out.pool-promotion-transition.signed.json").is_file())
 
 
 if __name__ == "__main__":

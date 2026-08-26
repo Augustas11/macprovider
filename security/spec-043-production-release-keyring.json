@@ -1,7 +1,21 @@
 {
   "schema_version": "spec-043-launch-keyring-v1",
   "purpose": "production-release-approver",
-  "allowed_environment_classes": ["production"],
-  "keys": [],
+  "allowed_environment_classes": [
+    "production"
+  ],
+  "keys": [
+    {
+      "key_id": "macprovider-spec043-production-release-p256-v1",
+      "purpose": "production-release-approver",
+      "issuer": "macprovider-ops",
+      "valid_from": "2026-08-26T00:00:00Z",
+      "valid_until": "2027-08-26T00:00:00Z",
+      "allowed_environment_classes": [
+        "production"
+      ],
+      "public_key_path": "security/spec-043-production-release-p256-v1.pem"
+    }
+  ],
   "note": "SPEC-043 R012 production-release approver keys are registered here. An empty keys array is fail-closed: no PoolPromotionTransitionV1 can verify until a key is added. Revocations and emergency-disable tombstones also live in journeys/ledgers/spec-043-promotion-auth.jsonl so git rollback of this file cannot re-trust a ledger-tombstoned key."
 }

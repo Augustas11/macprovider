@@ -1,0 +1,221 @@
+name: Build signed SPEC-043 PoolPromotionTransitionV1 artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      signed_candidate_path:
+        description: "journeys/evidence/*.journey-result.signed.json"
+        required: true
+        type: string
+      live_activation_target:
+        description: "Production activation target, distinct from the candidate environment"
+        required: true
+        type: string
+      schema_migration_hash:
+        description: "Lowercase SHA-256 schema/migration hash bound into the sibling"
+        required: true
+        type: string
+      approval_record_version:
+        description: "Positive integer approval record version"
+        required: true
+        type: string
+      creator_agreement_version:
+        description: "Positive integer Creator Agreement version"
+        required: true
+        type: string
+      pricing_schedule_version:
+        description: "Positive integer pricing schedule version"
+        required: true
+        type: string
+      authorization_id:
+        description: "Fresh production authorization id"
+        required: true
+        type: string
+      authorized_actor:
+        description: "MacProvider production-release approver identity"
+        required: true
+        type: string
+      credential_id:
+        description: "Approver credential id"
+        required: true
+        type: string
+      promotion_confirmed:
+        description: "Confirm a PoolPromotionTransitionV1 sibling should be signed without CONFORMANCE promotion"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-pool-promotion-transition-${{ github.event.inputs.signed_candidate_path }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, sign, and export PoolPromotionTransitionV1 without promotion
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact main source and fail-closed keyring
+        id: request
+        shell: bash
+        env:
+          CANDIDATE_INPUT: ${{ github.event.inputs.signed_candidate_path }}
+          LIVE_TARGET_INPUT: ${{ github.event.inputs.live_activation_target }}
+          SCHEMA_HASH_INPUT: ${{ github.event.inputs.schema_migration_hash }}
+          APPROVAL_VERSION_INPUT: ${{ github.event.inputs.approval_record_version }}
+          AGREEMENT_VERSION_INPUT: ${{ github.event.inputs.creator_agreement_version }}
+          PRICING_VERSION_INPUT: ${{ github.event.inputs.pricing_schedule_version }}
+          AUTHORIZATION_ID_INPUT: ${{ github.event.inputs.authorization_id }}
+          AUTHORIZED_ACTOR_INPUT: ${{ github.event.inputs.authorized_actor }}
+          CREDENTIAL_ID_INPUT: ${{ github.event.inputs.credential_id }}
+          PROMOTION_CONFIRMED_INPUT: ${{ github.event.inputs.promotion_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$PROMOTION_CONFIRMED_INPUT" == true ]] || { echo "::error::promotion confirmation is required" >&2; exit 1; }
+          [[ "$CANDIDATE_INPUT" =~ ^journeys/evidence/trusted-pool-creator-mvp-[A-Za-z0-9_.:-]+\.journey-result\.signed\.json$ ]] || { echo "::error::invalid signed candidate path" >&2; exit 1; }
+          [[ -f "$CANDIDATE_INPUT" && ! -L "$CANDIDATE_INPUT" ]] || { echo "::error::signed candidate is absent or unsafe" >&2; exit 1; }
+          [[ "$LIVE_TARGET_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid live activation target" >&2; exit 1; }
+          [[ "$SCHEMA_HASH_INPUT" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::invalid schema migration hash" >&2; exit 1; }
+          [[ "$APPROVAL_VERSION_INPUT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid approval record version" >&2; exit 1; }
+          [[ "$AGREEMENT_VERSION_INPUT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid creator agreement version" >&2; exit 1; }
+          [[ "$PRICING_VERSION_INPUT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid pricing schedule version" >&2; exit 1; }
+          [[ "$AUTHORIZATION_ID_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid authorization id" >&2; exit 1; }
+          [[ "$AUTHORIZED_ACTOR_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:@-]*$ ]] || { echo "::error::invalid authorized actor" >&2; exit 1; }
+          [[ "$CREDENTIAL_ID_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid credential id" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          python3 scripts/register-spec043-production-release-key.py --check
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          stem="$(basename "$CANDIDATE_INPUT" .journey-result.signed.json)"
+          payload="$RUNNER_TEMP/${stem}.pool-promotion-transition.unsigned.json"
+          envelope="journeys/evidence/${stem}.pool-promotion-transition.signed.json"
+          printf 'candidate=%s\n' "$CANDIDATE_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
+          printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
+          printf 'short_sha=%s\n' "${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned PoolPromotionTransitionV1 payload
+        shell: bash
+        env:
+          CANDIDATE: ${{ steps.request.outputs.candidate }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          LIVE_TARGET: ${{ github.event.inputs.live_activation_target }}
+          SCHEMA_HASH: ${{ github.event.inputs.schema_migration_hash }}
+          APPROVAL_VERSION: ${{ github.event.inputs.approval_record_version }}
+          AGREEMENT_VERSION: ${{ github.event.inputs.creator_agreement_version }}
+          PRICING_VERSION: ${{ github.event.inputs.pricing_schedule_version }}
+          AUTHORIZATION_ID: ${{ github.event.inputs.authorization_id }}
+          AUTHORIZED_ACTOR: ${{ github.event.inputs.authorized_actor }}
+          CREDENTIAL_ID: ${{ github.event.inputs.credential_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/build-pool-promotion-transition.py \
+            --candidate "$CANDIDATE" \
+            --output "$PAYLOAD" \
+            --live-activation-target "$LIVE_TARGET" \
+            --schema-migration-hash "$SCHEMA_HASH" \
+            --approval-record-version "$APPROVAL_VERSION" \
+            --creator-agreement-version "$AGREEMENT_VERSION" \
+            --pricing-schedule-version "$PRICING_VERSION" \
+            --authorization-id "$AUTHORIZATION_ID" \
+            --authorized-actor "$AUTHORIZED_ACTOR" \
+            --credential-id "$CREDENTIAL_ID"
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign PoolPromotionTransitionV1 payload
+        shell: bash
+        env:
+          MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sign-pool-promotion-transition.py \
+            --input "$PAYLOAD" \
+            --output "$ENVELOPE" \
+            --verifier ".github/workflows/build-signed-pool-promotion-transition.yml:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+
+      - name: Validate signed sibling without ledger consume or conformance promotion
+        shell: bash
+        env:
+          CANDIDATE: ${{ steps.request.outputs.candidate }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-pool-promotion-transition.py \
+            --transition "$ENVELOPE" \
+            --candidate "$CANDIDATE"
+          python3 -m json.tool "$ENVELOPE" >/dev/null
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          git diff --check
+          python3 - "$ENVELOPE" <<'PY'
+          import pathlib
+          import sys
+
+          envelope = pathlib.Path(sys.argv[1])
+          if envelope.name.endswith(".unsigned.json"):
+              raise SystemExit("signed output path is still unsigned")
+          for path in pathlib.Path("journeys/evidence").glob("*pool-promotion-transition.unsigned.json"):
+              raise SystemExit(f"non-committed intermediate remains: {path}")
+          PY
+
+      - name: Export signed promotion-transition artifact
+        shell: bash
+        env:
+          CANDIDATE: ${{ steps.request.outputs.candidate }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-pool-promotion-transition"
+          mkdir -p "$export_dir/journeys/evidence"
+          cp "$CANDIDATE" "$export_dir/$CANDIDATE"
+          cp "$ENVELOPE" "$export_dir/$ENVELOPE"
+          python3 - "$export_dir/evidence-manifest.json" "$CANDIDATE" "$ENVELOPE" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          output, candidate, envelope = sys.argv[1:]
+          root = pathlib.Path(".")
+          manifest = {
+              "schema_version": "macprovider.signed-pool-promotion-transition.v1",
+              "source_sha": os.environ["GITHUB_SHA"],
+              "journey_id": "JOURNEY-TRUSTED-POOL-CREATOR-MVP",
+              "signed_candidate": candidate,
+              "signed_candidate_sha256": hashlib.sha256((root / candidate).read_bytes()).hexdigest(),
+              "signed_transition": envelope,
+              "signed_transition_sha256": hashlib.sha256((root / envelope).read_bytes()).hexdigest(),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(output).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload signed promotion-transition artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: signed-pool-promotion-transition-${{ steps.request.outputs.short_sha }}
+          path: ${{ runner.temp }}/signed-pool-promotion-transition/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1

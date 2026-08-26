@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -29,6 +30,7 @@ try:
         DATETIME_Z_RE,
         JOURNEY_RESULT_ENVELOPE_SCHEMA,
         JOURNEY_RESULT_PAYLOAD_SCHEMA,
+        JOURNEY_RESULT_PUBLIC_KEY_PATH,
         JOURNEY_RESULT_PUBLIC_KEY_SHA256,
         JOURNEY_RESULT_SIGNING_ALGORITHM,
         JOURNEY_RESULT_SIGNING_KEY_ID,
@@ -51,6 +53,7 @@ except ImportError:  # pragma: no cover - package import used by unittest
         DATETIME_Z_RE,
         JOURNEY_RESULT_ENVELOPE_SCHEMA,
         JOURNEY_RESULT_PAYLOAD_SCHEMA,
+        JOURNEY_RESULT_PUBLIC_KEY_PATH,
         JOURNEY_RESULT_PUBLIC_KEY_SHA256,
         JOURNEY_RESULT_SIGNING_ALGORITHM,
         JOURNEY_RESULT_SIGNING_KEY_ID,
@@ -76,6 +79,16 @@ PRODUCTION_RELEASE_KEY_ID = "macprovider-spec043-production-release-p256-v1"
 PRODUCTION_RELEASE_PURPOSE = "production-release-approver"
 PRODUCTION_ENVIRONMENT_CLASS = "production"
 KEYRING_PATH = Path("security/spec-043-production-release-keyring.json")
+PUBLIC_KEY_PATH = Path("security/spec-043-production-release-p256-v1.pem")
+ACCEPTANCE_PUBLIC_KEY_SPKI_SHA256 = "4076b29f8cabff9bed536b59166dd6a9576d611b491ae2ad08dd267096659c6a"
+KEYRING_SCHEMA_VERSION = "spec-043-launch-keyring-v1"
+PRIVATE_PEM_MARKERS = (
+    "BEGIN PRIVATE KEY",
+    "BEGIN EC PRIVATE KEY",
+    "BEGIN ENCRYPTED PRIVATE KEY",
+    "BEGIN RSA PRIVATE KEY",
+    "BEGIN OPENSSH PRIVATE KEY",
+)
 LEDGER_PATH = Path("journeys/ledgers/spec-043-promotion-auth.jsonl")
 SPEC043_PROMOTION_LEDGER = {
     "named_subsystem": "spec043-promotion-ledger",
@@ -330,8 +343,8 @@ def _load_keyring(root: Path, result: ValidationResult) -> dict[str, Any] | None
     if not isinstance(keyring, dict):
         result.error(str(KEYRING_PATH), "must be a JSON object")
         return None
-    if keyring.get("schema_version") != "spec-043-launch-keyring-v1":
-        result.error(str(KEYRING_PATH), "schema_version must equal 'spec-043-launch-keyring-v1'")
+    if keyring.get("schema_version") != KEYRING_SCHEMA_VERSION:
+        result.error(str(KEYRING_PATH), f"schema_version must equal {KEYRING_SCHEMA_VERSION!r}")
     keys = keyring.get("keys")
     if not isinstance(keys, list):
         result.error(f"{KEYRING_PATH}.keys", "must be an array")
@@ -776,6 +789,380 @@ def sign_pool_promotion_transition(
     }
 
 
+P256_NAMED_CURVE_OID = bytes.fromhex("06082a8648ce3d030107")
+P256_UNCOMPRESSED_GENERATOR = bytes.fromhex(
+    "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
+    "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+)
+
+
+def _pem_contains_private_material(pem: str) -> bool:
+    return any(marker in pem for marker in PRIVATE_PEM_MARKERS)
+
+
+def _positive_int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 1:
+        return value
+    if isinstance(value, str) and value.isdigit() and int(value) >= 1:
+        return int(value)
+    return None
+
+
+def _public_key_der(pem: str, location: str, result: ValidationResult) -> bytes | None:
+    lines = [line.strip() for line in pem.splitlines() if line.strip() and "-----" not in line]
+    if not lines:
+        result.error(location, "must be an unencrypted SubjectPublicKeyInfo PEM")
+        return None
+    try:
+        return base64.b64decode("".join(lines), validate=True)
+    except ValueError as exc:
+        result.error(location, f"invalid PEM base64: {exc}")
+        return None
+
+
+def _public_key_spki_sha256(pem: str, location: str, result: ValidationResult) -> str | None:
+    der = _public_key_der(pem, location, result)
+    if der is None:
+        return None
+    return hashlib.sha256(der).hexdigest()
+
+
+def public_key_reuses_acceptance_candidate(
+    root: Path,
+    pem: str,
+    location: str,
+    result: ValidationResult,
+) -> bool:
+    pem_sha256 = hashlib.sha256(pem.encode("utf-8")).hexdigest()
+    if pem_sha256 == JOURNEY_RESULT_PUBLIC_KEY_SHA256:
+        result.error(location, "must not reuse the acceptance candidate signing key")
+        return True
+    spki_sha256 = _public_key_spki_sha256(pem, location, result)
+    if spki_sha256 is None:
+        return True
+    if spki_sha256 == ACCEPTANCE_PUBLIC_KEY_SPKI_SHA256:
+        result.error(location, "must not reuse the acceptance candidate signing key")
+        return True
+    local_acceptance = root / JOURNEY_RESULT_PUBLIC_KEY_PATH
+    if local_acceptance.is_file() and not local_acceptance.is_symlink():
+        try:
+            local_pem = local_acceptance.read_text(encoding="utf-8")
+        except OSError as exc:
+            result.error(JOURNEY_RESULT_PUBLIC_KEY_PATH, f"cannot read: {exc}")
+            return True
+        local_spki = _public_key_spki_sha256(local_pem, JOURNEY_RESULT_PUBLIC_KEY_PATH, result)
+        if local_spki is None:
+            return True
+        if local_spki == spki_sha256:
+            result.error(location, "must not reuse the acceptance candidate signing key")
+            return True
+    return False
+
+
+def public_keys_match(left_pem: str, right_pem: str) -> bool:
+    left = _public_key_der(left_pem, "left", ValidationResult())
+    right = _public_key_der(right_pem, "right", ValidationResult())
+    return left is not None and left == right
+
+
+def verify_p256_public_pem(
+    pem: str,
+    openssl_bin: str,
+    location: str,
+    result: ValidationResult,
+) -> bool:
+    if _pem_contains_private_material(pem):
+        result.error(location, "must be a public key; private key material is forbidden")
+        return False
+    if "BEGIN PUBLIC KEY" not in pem:
+        result.error(location, "must be an unencrypted SubjectPublicKeyInfo PEM")
+        return False
+    der = _public_key_der(pem, location, result)
+    if der is None:
+        return False
+    if P256_NAMED_CURVE_OID not in der and P256_UNCOMPRESSED_GENERATOR not in der:
+        result.error(location, "must be an ECDSA P-256 public key")
+        return False
+    with tempfile.TemporaryDirectory(prefix="spec043-public-key.") as directory:
+        path = Path(directory) / "public.pem"
+        path.write_text(pem, encoding="utf-8")
+        completed = subprocess.run(
+            [openssl_bin, "pkey", "-pubin", "-in", str(path), "-text", "-noout"],
+            capture_output=True,
+            check=False,
+            env={"PATH": "/usr/bin:/bin"},
+            timeout=20,
+        )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).decode("utf-8", errors="replace").strip()
+        result.error(location, detail or "openssl rejected the public key PEM")
+        return False
+    text = (completed.stdout + completed.stderr).decode("utf-8", errors="replace")
+    if "Private-Key:" in text:
+        result.error(location, "must be a public key; private key material is forbidden")
+        return False
+    return True
+
+
+def preflight_production_release_keyring(
+    root: Path,
+    *,
+    openssl_bin: str | None = None,
+    now: datetime | None = None,
+) -> ValidationResult:
+    result = ValidationResult()
+    now = now or datetime.now(timezone.utc)
+    try:
+        trusted_openssl = resolve_trusted_openssl(openssl_bin)
+    except ValueError as exc:
+        result.error("openssl", str(exc))
+        return result
+    keyring = _load_keyring(root, result)
+    if not isinstance(keyring, dict):
+        return result
+    keys = keyring.get("keys")
+    if not isinstance(keys, list) or not keys:
+        result.error(str(KEYRING_PATH), "is fail-closed: no production-release approver key is registered")
+        return result
+    entry = _match_keyring_key(root, keyring, PRODUCTION_RELEASE_KEY_ID, now, "keyring", result)
+    if entry is None:
+        return result
+    public_key = entry.get("_public_key_path")
+    if not isinstance(public_key, Path):
+        return result
+    try:
+        pem = public_key.read_text(encoding="utf-8")
+    except OSError as exc:
+        result.error(str(PUBLIC_KEY_PATH), f"cannot read: {exc}")
+        return result
+    if not verify_p256_public_pem(pem, trusted_openssl, str(PUBLIC_KEY_PATH), result):
+        return result
+    public_key_reuses_acceptance_candidate(root, pem, str(PUBLIC_KEY_PATH), result)
+    return result
+
+
+def register_production_release_public_key(
+    root: Path,
+    public_key_pem: str,
+    *,
+    issuer: str,
+    valid_from: str,
+    valid_until: str,
+    openssl_bin: str | None = None,
+) -> ValidationResult:
+    result = ValidationResult()
+    try:
+        trusted_openssl = resolve_trusted_openssl(openssl_bin)
+    except ValueError as exc:
+        result.error("openssl", str(exc))
+        return result
+    if not issuer:
+        result.error("issuer", "must be a non-empty string")
+    valid_from_dt = _parse_utc(valid_from, "valid_from", result)
+    valid_until_dt = _parse_utc(valid_until, "valid_until", result)
+    if valid_from_dt is not None and valid_until_dt is not None and valid_until_dt <= valid_from_dt:
+        result.error("valid_until", "must be after valid_from")
+    if not verify_p256_public_pem(public_key_pem, trusted_openssl, "public_key", result):
+        return result
+    if public_key_reuses_acceptance_candidate(root, public_key_pem, "public_key", result):
+        return result
+    keyring = _load_keyring(root, result)
+    if not isinstance(keyring, dict):
+        return result
+    keys = keyring.get("keys")
+    if not isinstance(keys, list):
+        return result
+    if keys:
+        result.error(str(KEYRING_PATH), "already has a registered production-release approver key")
+        return result
+    public_key_path = root / PUBLIC_KEY_PATH
+    if public_key_path.exists() or public_key_path.is_symlink():
+        result.error(str(PUBLIC_KEY_PATH), "already exists; refuse to overwrite a launch public key")
+        return result
+    if result.errors:
+        return result
+    public_key_path.parent.mkdir(parents=True, exist_ok=True)
+    public_key_path.write_text(public_key_pem if public_key_pem.endswith("\n") else public_key_pem + "\n", encoding="utf-8")
+    keyring["keys"] = [
+        {
+            "key_id": PRODUCTION_RELEASE_KEY_ID,
+            "purpose": PRODUCTION_RELEASE_PURPOSE,
+            "issuer": issuer,
+            "valid_from": valid_from,
+            "valid_until": valid_until,
+            "allowed_environment_classes": [PRODUCTION_ENVIRONMENT_CLASS],
+            "public_key_path": PUBLIC_KEY_PATH.as_posix(),
+        }
+    ]
+    (root / KEYRING_PATH).write_text(json.dumps(keyring, indent=2) + "\n", encoding="utf-8")
+    return result
+
+
+IDENTITY_STRING_FIELDS = {
+    "pool_id": "pool_id",
+    "environment_id": "candidate_environment_id",
+    "coordinator_build_id": "coordinator_build_id",
+    "gateway_build_id": "gateway_build_id",
+    "provider_build_id": "provider_build_id",
+    "approval_record_id": "approval_record_id",
+    "creator_agreement_id": "creator_agreement_id",
+    "creator_agreement_expires_at": "creator_agreement_expires_at",
+    "creator_agreement_grace_ends_at": "creator_agreement_grace_ends_at",
+    "pricing_schedule_id": "pricing_schedule_id",
+    "gate_check_id": "gate_check_id",
+    "verifier_challenge": "verifier_challenge",
+}
+IDENTITY_DIGEST_FIELDS = {
+    "effective_config_digest": "effective_config_digest",
+    "feature_flag_digest": "feature_flag_digest",
+    "governance_file_digest": "governance_file_digest",
+    "reviewed_distribution_artifact_digest": "reviewed_distribution_artifact_digest",
+    "root_issuer_fingerprint": "root_issuer_fingerprint",
+    "route_snapshot_digest": "routeable_snapshot_digest",
+}
+
+
+def next_transition_epoch(root: Path, pool_id: str, result: ValidationResult) -> int | None:
+    records = _load_ledger_records(root, result)
+    if result.errors:
+        return None
+    if not records or records[0] != CANONICAL_LEDGER_INIT:
+        result.error(str(LEDGER_PATH), "must start with a canonical ledger_init record")
+        return None
+    state = _ledger_state(records)
+    current = state["pool_epochs"].get(pool_id, 0)
+    if not isinstance(current, int) or isinstance(current, bool) or current < 0:
+        result.error(str(LEDGER_PATH), "pool transition epoch high-water is invalid")
+        return None
+    return current + 1
+
+
+def build_pool_promotion_transition_payload(
+    root: Path,
+    candidate: dict[str, Any],
+    *,
+    live_activation_target: str,
+    schema_migration_hash: str,
+    approval_record_version: int,
+    creator_agreement_version: int,
+    pricing_schedule_version: int,
+    authorization_id: str,
+    authorized_actor: str,
+    credential_id: str,
+    authorized_at: str,
+    expiry: str,
+    transition_epoch: int | None = None,
+) -> tuple[dict[str, Any] | None, ValidationResult]:
+    result = ValidationResult()
+    if not _expect_object(candidate, "candidate", result):
+        return None, result
+    signed = candidate.get("signed")
+    if not _expect_object(signed, "candidate.signed", result):
+        return None, result
+    identity = signed.get("candidate_identity")
+    if not _expect_object(identity, "candidate.signed.candidate_identity", result):
+        return None, result
+    forbidden = candidate_forbidden_fields(candidate)
+    for field in forbidden:
+        result.error("candidate", f"contains production-promotion field {field}")
+    run_id = signed.get("run_id")
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
+        result.error("candidate.signed.run_id", "must be a positive integer")
+        return None, result
+    if not live_activation_target:
+        result.error("live_activation_target", "must be a non-empty string")
+    if not isinstance(schema_migration_hash, str) or not SHA256_HEX_RE.fullmatch(schema_migration_hash):
+        result.error("schema_migration_hash", "must be a lowercase SHA-256 hex digest")
+    for name, value in (
+        ("approval_record_version", approval_record_version),
+        ("creator_agreement_version", creator_agreement_version),
+        ("pricing_schedule_version", pricing_schedule_version),
+    ):
+        if _positive_int_value(value) is None:
+            result.error(name, "must be a positive integer")
+    for name, value in (
+        ("authorization_id", authorization_id),
+        ("authorized_actor", authorized_actor),
+        ("credential_id", credential_id),
+    ):
+        if not isinstance(value, str) or not value:
+            result.error(name, "must be a non-empty string")
+    authorized_at_dt = _parse_utc(authorized_at, "authorized_at", result)
+    expiry_dt = _parse_utc(expiry, "expiry", result)
+    if authorized_at_dt is not None and expiry_dt is not None:
+        if expiry_dt <= authorized_at_dt:
+            result.error("expiry", "must be after authorized_at")
+        elif expiry_dt - authorized_at_dt > MAX_AUTHORIZATION_TTL:
+            result.error("expiry", "promotion-authorization TTL must not exceed 24 hours")
+
+    payload: dict[str, Any] = {
+        "schema_version": POOL_PROMOTION_TRANSITION_PAYLOAD_SCHEMA,
+        "journey_id": TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID,
+        "run_id": run_id,
+        "journey_result_digest": journey_result_digest(candidate),
+        "live_activation_target": live_activation_target,
+        "environment_id": live_activation_target,
+        "environment_class": PRODUCTION_ENVIRONMENT_CLASS,
+        "schema_migration_hash": schema_migration_hash,
+        "approval_record_version": approval_record_version,
+        "creator_agreement_version": creator_agreement_version,
+        "pricing_schedule_version": pricing_schedule_version,
+        "authorization_id": authorization_id,
+        "authorized_actor": authorized_actor,
+        "credential_id": credential_id,
+        "rbac_role": RBAC_ROLE,
+        "authorized_at": authorized_at,
+        "expiry": expiry,
+        "target_lifecycle_transition": TARGET_LIFECYCLE_TRANSITION,
+    }
+    for source, destination in IDENTITY_STRING_FIELDS.items():
+        value = identity.get(source)
+        if not isinstance(value, str) or not value:
+            result.error(f"candidate.signed.candidate_identity.{source}", "must be a non-empty string")
+            continue
+        payload[destination] = value
+    for source, destination in IDENTITY_DIGEST_FIELDS.items():
+        value = identity.get(source)
+        if not isinstance(value, str) or not SHA256_HEX_RE.fullmatch(value):
+            result.error(f"candidate.signed.candidate_identity.{source}", "must be a lowercase SHA-256 hex digest")
+            continue
+        payload[destination] = value
+    pool_generation = _positive_int_value(identity.get("pool_generation"))
+    if pool_generation is None:
+        result.error("candidate.signed.candidate_identity.pool_generation", "must be a positive integer")
+    else:
+        payload["pool_generation"] = pool_generation
+    candidate_environment_id = payload.get("candidate_environment_id")
+    if (
+        isinstance(candidate_environment_id, str)
+        and candidate_environment_id
+        and candidate_environment_id == live_activation_target
+    ):
+        result.error("live_activation_target", "must be distinct from the isolated candidate environment")
+    pool_id = payload.get("pool_id")
+    if transition_epoch is None:
+        if isinstance(pool_id, str) and pool_id:
+            transition_epoch = next_transition_epoch(root, pool_id, result)
+    elif _positive_int_value(transition_epoch) is None:
+        result.error("transition_epoch", "must be a positive integer")
+        transition_epoch = None
+    if transition_epoch is not None:
+        payload["transition_epoch"] = transition_epoch
+    if result.errors:
+        return None, result
+    missing = SIGNED_REQUIRED - payload.keys()
+    if missing:
+        result.error("pool-promotion-transition.signed", f"builder omitted required fields: {sorted(missing)}")
+        return None, result
+    extra = payload.keys() - SIGNED_REQUIRED
+    if extra:
+        result.error("pool-promotion-transition.signed", f"builder emitted unknown fields: {sorted(extra)}")
+        return None, result
+    return payload, result
+
+
 def _match_keyring_key(
     root: Path,
     keyring: dict[str, Any],
@@ -964,7 +1351,19 @@ def validate_pool_promotion_transition(
     if isinstance(keyring, dict) and key_id != JOURNEY_RESULT_SIGNING_KEY_ID:
         entry = _match_keyring_key(root, keyring, key_id, now, f"{location}.signatures[0]", result)
         if entry is not None:
-            _verify_signature(signed, signature, entry["_public_key_path"], trusted_openssl, f"{location}.signatures[0]", result)
+            public_key_path = entry["_public_key_path"]
+            try:
+                registered_pem = public_key_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                result.error(str(PUBLIC_KEY_PATH), f"cannot read: {exc}")
+            else:
+                public_key_reuses_acceptance_candidate(
+                    root,
+                    registered_pem,
+                    str(PUBLIC_KEY_PATH),
+                    result,
+                )
+            _verify_signature(signed, signature, public_key_path, trusted_openssl, f"{location}.signatures[0]", result)
 
     run_id = parsed.get("run_id")
     journey_id = signed.get("journey_id")
