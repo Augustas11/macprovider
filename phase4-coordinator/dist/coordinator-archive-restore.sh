@@ -54,9 +54,38 @@ default_audit_db_path_for() {
   fi
 }
 
+canonical_path() {
+  local path="$1"
+  local dir base
+  dir=$(dirname "$path")
+  base=$(basename "$path")
+  if [ -d "$dir" ]; then
+    ( cd "$dir" && printf '%s/%s\n' "$(pwd -P)" "$base" )
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+refuse_restore_target() {
+  local label="$1"
+  local target="$2"
+  local live="$3"
+  local target_canon live_canon
+  [ -L "$target" ] && refuse "$label restore target is a symlink; restore to a regular non-live path"
+  [ -e "${target}-wal" ] && refuse "$label restore target has existing SQLite WAL sidecar ${target}-wal; restore to an empty non-live path"
+  [ -e "${target}-shm" ] && refuse "$label restore target has existing SQLite SHM sidecar ${target}-shm; restore to an empty non-live path"
+  target_canon=$(canonical_path "$target")
+  live_canon=$(canonical_path "$live")
+  if [ "$target_canon" = "$live_canon" ]; then
+    refuse "$label restore target resolves to the configured live coordinator DB path; live restore is not implemented"
+  fi
+}
+
+LIVE_AUDIT_DB_PATH="${COORDINATOR_AUDIT_DB_PATH:-$(default_audit_db_path_for "$COORDINATOR_DB_PATH")}"
 if [ -z "$COORDINATOR_AUDIT_DB_PATH" ]; then
   COORDINATOR_AUDIT_DB_PATH=$(default_audit_db_path_for "$TARGET_PATH")
 fi
+refuse_restore_target "primary" "$TARGET_PATH" "$COORDINATOR_DB_PATH"
 
 need_tool sqlite3
 need_tool gzip
@@ -133,6 +162,7 @@ PRIMARY_TMP="$TMP_DIR/coordinator.db"
 AUDIT_TMP="$TMP_DIR/coordinator-audit.db"
 restore_archive_to_temp "$ARCHIVE_PATH" "$PRIMARY_TMP"
 if [ -n "$AUDIT_ARCHIVE_PATH" ]; then
+  refuse_restore_target "audit" "$COORDINATOR_AUDIT_DB_PATH" "$LIVE_AUDIT_DB_PATH"
   restore_archive_to_temp "$AUDIT_ARCHIVE_PATH" "$AUDIT_TMP"
 fi
 

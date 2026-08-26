@@ -241,6 +241,17 @@ set -e
 [ "$paired_live_rc" = "4" ] || fail "paired live restore should refuse with exit 4"
 grep -q "live restore is not implemented in Phase 3" "$TMP/restore-live-paired.err" || fail "paired live restore refusal text missing"
 
+live_marker_before=$(sqlite3 "$DB" "SELECT COUNT(*) FROM settlement_receipt_verdicts;")
+set +e
+COORDINATOR_DB_PATH="$DB" \
+  COORDINATOR_AUDIT_DB_PATH="$AUDIT_DB" \
+  "$RESTORE" "$archive_path" "$DB" >"$TMP/restore-positional-live.out" 2>"$TMP/restore-positional-live.err"
+positional_live_rc=$?
+set -e
+[ "$positional_live_rc" = "4" ] || fail "positional live restore target should refuse with exit 4"
+grep -q "primary restore target resolves to the configured live coordinator DB path" "$TMP/restore-positional-live.err" || fail "positional live restore refusal text missing"
+[ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM settlement_receipt_verdicts;")" = "$live_marker_before" ] || fail "positional live restore mutated live DB"
+
 audit_archive_path=$(find "$ARCHIVE_DIR" -type f -name 'coordinator-audit-*.db.gz' | head -1)
 set +e
 "$RESTORE" "$audit_archive_path" "$TMP/audit-as-primary.db" >"$TMP/audit-as-primary.out" 2>"$TMP/audit-as-primary.err"
