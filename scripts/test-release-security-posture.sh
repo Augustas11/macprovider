@@ -517,8 +517,17 @@ if catalog_release.count(f'"{SEALED_GO_EXECUTABLE}"') != 2:
     )
 if "/usr/local/lib/macprovider-go-verifier" in catalog_release:
     raise SystemExit("catalog verifier must not trust the Homebrew-writable /usr/local ancestry")
-if ci_workflow.count(CI_GO_SEAL_STEP) != 2:
-    raise SystemExit("both Linux CI verifier seals must use the exact /private/var root-owned copy")
+# `make test-dist` (the only CI consumer of the sealed catalog verifier) runs
+# solely in the dist-tooling job, so exactly one seal step must exist and it
+# must live in the same job that runs the suite.
+if ci_workflow.count("run: make test-dist") != 1:
+    raise SystemExit("make test-dist must run in exactly one CI job (dist-tooling)")
+if ci_workflow.count(CI_GO_SEAL_STEP) != 1:
+    raise SystemExit("the Linux CI verifier seal must use the exact /private/var root-owned copy exactly once")
+seal_index = ci_workflow.find(CI_GO_SEAL_STEP)
+test_dist_index = ci_workflow.find("run: make test-dist")
+if not 0 <= seal_index < test_dist_index:
+    raise SystemExit("the Linux CI verifier seal must precede the make test-dist step it protects")
 if "/usr/local/lib/macprovider-go-verifier" in ci_workflow:
     raise SystemExit("Linux CI must not retain a divergent /usr/local sealed Go path")
 for requirement in (

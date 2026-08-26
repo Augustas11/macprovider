@@ -68,6 +68,10 @@ jobs:
     name: phase4-coordinator (go vet + test)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # `make test-dist` runs ONLY in the dedicated `dist-tooling` job, which
+    # also owns the sealed Tier-2 verifier toolchain and full-history checkout
+    # that suite needs; duplicating it here doubled a 5+ minute suite (and its
+    # flake exposure) on every run.
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -75,7 +79,6 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
-          fetch-depth: 0
 
       - name: Set up Go
         # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
@@ -84,26 +87,11 @@ jobs:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: phase4-coordinator/go.sum
 
-      - name: Seal the Tier-2 verifier toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          source_root="$(go env GOROOT)"
-          sudo test ! -e /private/var/macprovider-go-verifier
-          sudo install -d -o root -g root -m 0755 /private/var/macprovider-go-verifier
-          sudo cp -a "$source_root/." /private/var/macprovider-go-verifier/
-          sudo chown -R root:root /private/var/macprovider-go-verifier
-          sudo chmod -R go-w /private/var/macprovider-go-verifier
-          sudo test -x /private/var/macprovider-go-verifier/bin/go
-
       - name: make vet-coordinator
         run: make vet-coordinator
 
       - name: make test-coordinator
         run: make test-coordinator
-
-      - name: make test-dist
-        run: make test-dist
 
   gateway:
     name: phase5-gateway (go vet + test)

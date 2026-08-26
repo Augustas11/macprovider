@@ -12,9 +12,15 @@ awk '/^render_plist\(\)/ { inside=1 } inside { print } inside && /^}/ { exit }' 
 
 HOME="$TMP/home"
 INSTALL_DIR="/opt/mp"
-CONFIG_PATH="$HOME/.config/macprovider/config.yaml"
+CONFIG_DIR="$HOME/.config/macprovider"
+CONFIG_PATH="$CONFIG_DIR/config.yaml"
 LOG_DIR="$HOME/Library/Logs/macprovider"
 PORT=18080
+# render_plist branches on the headless-fleet install mode; this test covers
+# the default GUI (keychain credential-store) rendering.
+HEADLESS=0
+HEADLESS_USER=""
+LAUNCHD_DOMAIN="gui/$UID"
 mkdir -p "$HOME"
 
 # shellcheck source=/dev/null
