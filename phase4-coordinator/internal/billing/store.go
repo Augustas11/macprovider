@@ -23,6 +23,7 @@ type SettlementConfig = config.SettlementConfig
 type Store struct {
 	db           *sql.DB
 	now          func() time.Time
+	sqliteMetric SQLiteMetrics
 	settlementMu sync.RWMutex
 	settlement   SettlementConfig
 	// SPEC-005 v0.4 §13.2 — billing.quarantine_resolution_force_void_enabled
@@ -39,6 +40,12 @@ type Store struct {
 	forceCreditHoldSeconds atomic.Int64
 }
 
+type SQLiteMetrics interface {
+	ObserveSQLiteConnectionWait(component, outcome string, duration time.Duration)
+	ObserveSQLiteTransactionDuration(component, outcome string, duration time.Duration)
+	ObserveSQLiteWriteDuration(component, operation, outcome string, duration time.Duration)
+}
+
 const defaultForceCreditSettlementHoldSeconds int64 = 24 * 60 * 60
 
 func NewStore(db *sql.DB) (*Store, error) {
@@ -51,6 +58,13 @@ func NewStore(db *sql.DB) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+func (s *Store) SetSQLiteMetrics(metrics SQLiteMetrics) {
+	if s == nil {
+		return
+	}
+	s.sqliteMetric = metrics
 }
 
 func (s *Store) migrate(ctx context.Context) error {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 )
@@ -215,7 +216,16 @@ func (s *Store) InsertRouteSnapshot(ctx context.Context, snapshot RouteSnapshot)
 	if err != nil {
 		return "", err
 	}
-	_, err = s.db.ExecContext(ctx, `
+	connWaitStarted := time.Now()
+	conn, err := s.db.Conn(ctx)
+	s.observeSQLiteConnectionWait("route_snapshot", err, time.Since(connWaitStarted))
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	started := time.Now()
+	_, err = conn.ExecContext(ctx, `
 INSERT INTO settlement_route_snapshots (
     account_scope, request_id, attempt_n, provider_id,
     provider_session_id, provider_generation_id, pool_id, paid_entrypoint,
@@ -254,10 +264,33 @@ INSERT INTO settlement_route_snapshots (
 		digest, string(rendered),
 		string(canonical),
 	)
+	s.observeSQLiteWrite("route_snapshot", "route_snapshot_insert", err, time.Since(started))
 	if err != nil {
 		return "", err
 	}
 	return digest, nil
+}
+
+func (s *Store) observeSQLiteConnectionWait(component string, err error, duration time.Duration) {
+	if s == nil || s.sqliteMetric == nil {
+		return
+	}
+	outcome := "success"
+	if err != nil {
+		outcome = "error"
+	}
+	s.sqliteMetric.ObserveSQLiteConnectionWait(component, outcome, duration)
+}
+
+func (s *Store) observeSQLiteWrite(component, operation string, err error, duration time.Duration) {
+	if s == nil || s.sqliteMetric == nil {
+		return
+	}
+	outcome := "success"
+	if err != nil {
+		outcome = "error"
+	}
+	s.sqliteMetric.ObserveSQLiteWriteDuration(component, operation, outcome, duration)
 }
 
 func nullableString(v *string) any {

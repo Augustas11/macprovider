@@ -37,6 +37,38 @@ func TestDeviceBindingStoreExclusiveClaim(t *testing.T) {
 	}
 }
 
+func TestOpenMDAStoreWithManualWALCheckpointDisablesAutocheckpoint(t *testing.T) {
+	store, err := OpenMDAStoreWithManualWALCheckpoint(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var got int
+	if err := store.db.QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&got); err != nil {
+		t.Fatalf("PRAGMA wal_autocheckpoint: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("wal_autocheckpoint=%d want 0", got)
+	}
+}
+
+func TestOpenMDAStoreKeepsSQLiteAutocheckpointOwnerDefault(t *testing.T) {
+	store, err := OpenMDAStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var got int
+	if err := store.db.QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&got); err != nil {
+		t.Fatalf("PRAGMA wal_autocheckpoint: %v", err)
+	}
+	if got == 0 {
+		t.Fatal("MDA store disabled wal_autocheckpoint without an explicit checkpoint owner")
+	}
+}
+
 func TestClaimDeviceRejectsEnrolledUnboundForTokenPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(listDevicesResponse{
@@ -364,7 +396,7 @@ func TestDurableMDAProofSurvivesNewService(t *testing.T) {
 		cfg: cfg, mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
 		pool: reg1, log: zerolog.Nop(), now: func() time.Time { return now },
 		bindings: NewDeviceBindingStore(),
-		ledger: make(map[string]enqueueLedgerEntry),
+		ledger:   make(map[string]enqueueLedgerEntry),
 	}
 	svc1.SetMDAStore(store)
 	_ = svc1.bindings.Claim("p-dur", "C02DURABLE1")
@@ -384,7 +416,7 @@ func TestDurableMDAProofSurvivesNewService(t *testing.T) {
 		cfg: cfg, mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
 		pool: reg2, log: zerolog.Nop(), now: func() time.Time { return now },
 		bindings: NewDeviceBindingStore(),
-		ledger: make(map[string]enqueueLedgerEntry),
+		ledger:   make(map[string]enqueueLedgerEntry),
 	}
 	svc2.SetMDAStore(store)
 	if !svc2.AttachCachedMDAProof("p-dur", "s2") {
@@ -406,7 +438,7 @@ func TestDurableMDAProofSurvivesNewService(t *testing.T) {
 		cfg: cfg, mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
 		pool: reg3, log: zerolog.Nop(), now: func() time.Time { return later },
 		bindings: NewDeviceBindingStore(),
-		ledger: make(map[string]enqueueLedgerEntry),
+		ledger:   make(map[string]enqueueLedgerEntry),
 	}
 	svc3.SetMDAStore(store)
 	if svc3.AttachCachedMDAProof("p-dur", "s3") {
@@ -532,7 +564,7 @@ func TestDurableDeviceBindingSurvivesNewService(t *testing.T) {
 
 	svc2 := &LiveMDAService{
 		client: client2, pool: reg, bindings: NewDeviceBindingStore(), log: zerolog.Nop(),
-		now: func() time.Time { return now },
+		now:     func() time.Time { return now },
 		pending: make(map[string]pendingMDARequest), ledger: make(map[string]enqueueLedgerEntry),
 		mdmCfg: config.Tier2MDMConfig{MDARefreshIntervalHours: 168},
 	}
@@ -601,7 +633,7 @@ func TestDurablePendingSurvivesNewServiceWebhook(t *testing.T) {
 	svc2.SetMDAStore(store)
 
 	body, _ := json.Marshal(map[string]interface{}{
-		"udid": "UDID-PEND",
+		"udid":         "UDID-PEND",
 		"command_uuid": "cmd-durable-1",
 		"payload": map[string]interface{}{
 			"DeviceAttestation": []interface{}{
@@ -1016,4 +1048,3 @@ func TestClaimDeviceClearsHardwareOnSerialRebind(t *testing.T) {
 		t.Fatal("R7-M1: stale A webhook must not SetMDAProof")
 	}
 }
-

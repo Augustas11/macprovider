@@ -8,9 +8,9 @@ import (
 // WithPragmas builds a modernc.org/sqlite DSN with the project's standard
 // pragma set (busy_timeout, foreign_keys, WAL, synchronous=FULL).
 //
-// ARCH-5: this helper is byte-identical to phase5-gateway/internal/storage/
-// sqlite/dsn.go::sqliteDSN. The duplication is intentional — coordinator and
-// gateway are deployed as independent Go modules, and introducing a shared
+// ARCH-5: this helper deliberately mirrors the gateway SQLite DSN shape while
+// remaining coordinator-owned. The duplication is intentional — coordinator
+// and gateway are deployed as independent Go modules, and introducing a shared
 // library would re-couple them on every DSN tweak. See audits/2026-06-10/
 // REPO_AUDIT.md (ARCH-5) for the conscious-debt reasoning.
 //
@@ -38,6 +38,19 @@ func WithPragmas(path string) string {
 		separator = "&"
 	}
 	return path + separator + values.Encode()
+}
+
+// WithManualWALCheckpointPragmas disables SQLite's autocheckpoint for a DB
+// handle whose owner starts an explicit off-hot-path checkpoint loop.
+func WithManualWALCheckpointPragmas(path string) string {
+	base := WithPragmas(path)
+	values := url.Values{}
+	values.Add("_pragma", "wal_autocheckpoint(0)")
+	separator := "?"
+	if strings.Contains(base, "?") {
+		separator = "&"
+	}
+	return base + separator + values.Encode()
 }
 
 // ReadOnlyDSN builds a strictly read-only modernc.org/sqlite DSN.

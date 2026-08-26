@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/referralapi"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/rewards"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
 	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
 	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
@@ -193,18 +195,26 @@ func main() {
 	metricsHandle := statsmetrics.New(metricsRegistry)
 	registry := pool.NewRegistry(cfg.Providers)
 	startedAt := time.Now().UTC()
-	tokenStore, err := auth.OpenStore(cfg.Storage.DBPath)
+	tokenStore, err := auth.OpenStoreWithManualWALCheckpoint(cfg.Storage.DBPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "storage: %v\n", err)
 		os.Exit(1)
 	}
 	defer tokenStore.Close()
-	reqLogStore, err := requestlog.OpenStore(cfg.Storage.DBPath)
+	reqLogStore, err := requestlog.OpenStoreWithManualWALCheckpoint(cfg.Storage.DBPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "requestlog: %v\n", err)
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
+	moneyCheckpointDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(cfg.Storage.DBPath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "money sqlite checkpoint: %v\n", err)
+		os.Exit(1)
+	}
+	moneyCheckpointDB.SetMaxOpenConns(1)
+	moneyCheckpointDB.SetMaxIdleConns(1)
+	defer moneyCheckpointDB.Close()
 	payoutReadDB, closePayoutReadDB, err := configuredPayoutReadDB(cfg, reqLogStore)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "payout read db: %v\n", err)
@@ -226,7 +236,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "canary sanction storage: %v\n", err)
 		os.Exit(1)
 	}
-	auditStore, err := audit.OpenStore(cfg.Storage.DBPath)
+	auditStore, err := audit.OpenStoreWithManualWALCheckpoint(cfg.Storage.DBPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "audit log storage: %v\n", err)
 		os.Exit(1)
@@ -252,6 +262,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "billing: %v\n", err)
 		os.Exit(1)
 	}
+	billingStore.SetSQLiteMetrics(metricsHandle)
 	// R4 fix (CODE-M2): set the route-layer flag atomic BEFORE the
 	// startup snapshot so the snapshot's canonical hash captures the
 	// initial flag state (SPEC-005 v0.4 §11.6.4 / §13.2). The
@@ -340,6 +351,8 @@ func main() {
 	}()
 	shutdownCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
+	moneySQLiteActivity := newMoneySQLiteActivity(time.Now())
+	startMoneySQLiteWALCheckpointer(shutdownCtx, moneyCheckpointDB, metricsHandle, logger, moneySQLiteActivity)
 	// SPEC-017 v0.1.8 Step 2 — rollup runner. Reads OLTP source
 	// tables via `statsPools.Rollup`, writes the seven
 	// stats_* + stats_components_health + stats_rewards_populated
@@ -831,7 +844,7 @@ func main() {
 	} else if liveMDA != nil {
 		liveMDAService = liveMDA
 		liveMDAService.SetTokenValidator(tokenStore)
-		if mdaStore, err := mdm.OpenMDAStore(cfg.Storage.DBPath); err != nil {
+		if mdaStore, err := mdm.OpenMDAStoreWithManualWALCheckpoint(cfg.Storage.DBPath); err != nil {
 			logger.Error().Err(err).Msg("live MDA durable store open failed; continuing with in-memory only")
 		} else {
 			liveMDAService.SetMDAStore(mdaStore)
@@ -1242,18 +1255,17 @@ func main() {
 			Msg("provider referral status endpoint mounted; mutation routes remain feature-gated")
 	}
 	buyerHandler = withReferralAdvocacy(buyerHandler, referralStatus, referralChallenge, referralVerify)
+	buyerHandler = withMoneySQLiteActivity(buyerHandler, moneySQLiteActivity)
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerHandler)
 	errs := make(chan error, 2)
 
-	if err := billingStore.StartStartupScan(context.Background(), cfg.Settlement, time.Now().UTC()); err != nil {
-		logger.Warn().Err(err).Msg("billing startup scan failed")
-	}
+	startSettlementStartupScan(context.Background(), billingStore, cfg.Settlement, time.Now().UTC(), logger)
 	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
-	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, logger)
-	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, logger)
+	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, cfg.Storage.RequestLogPruneOnStartup, logger)
+	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
 	startProviderConnectionEventPruner(shutdownCtx, connectionEventStore, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
 	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
@@ -1393,6 +1405,101 @@ type requestLogPruner interface {
 	PruneBefore(context.Context, time.Time) (int64, error)
 }
 
+type settlementStartupScanner interface {
+	StartStartupScan(context.Context, config.SettlementConfig, time.Time) error
+}
+
+const (
+	moneySQLiteCheckpointIdleInterval = 30 * time.Second
+	moneySQLiteCheckpointTimeout      = time.Second
+)
+
+type moneySQLiteActivity struct {
+	lastUnixNano atomic.Int64
+}
+
+func newMoneySQLiteActivity(now time.Time) *moneySQLiteActivity {
+	a := &moneySQLiteActivity{}
+	a.Mark(now)
+	return a
+}
+
+func (a *moneySQLiteActivity) Mark(now time.Time) {
+	if a == nil {
+		return
+	}
+	a.lastUnixNano.Store(now.UnixNano())
+}
+
+func (a *moneySQLiteActivity) IdleFor(now time.Time) time.Duration {
+	if a == nil {
+		return 0
+	}
+	last := a.lastUnixNano.Load()
+	if last <= 0 {
+		return 0
+	}
+	return now.Sub(time.Unix(0, last))
+}
+
+func withMoneySQLiteActivity(next http.Handler, activity *moneySQLiteActivity) http.Handler {
+	if next == nil || activity == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		activity.Mark(time.Now())
+		next.ServeHTTP(w, r)
+	})
+}
+
+type moneySQLiteIdleTracker interface {
+	IdleFor(time.Time) time.Duration
+}
+
+func startMoneySQLiteWALCheckpointer(ctx context.Context, db *sql.DB, observer sqliteutil.WALObserver, logger zerolog.Logger, idle moneySQLiteIdleTracker) {
+	startMoneySQLiteWALCheckpointerWithConfig(ctx, db, observer, logger, idle, moneySQLiteCheckpointIdleInterval, moneySQLiteCheckpointTimeout)
+}
+
+func startMoneySQLiteWALCheckpointerWithConfig(ctx context.Context, db *sql.DB, observer sqliteutil.WALObserver, logger zerolog.Logger, idle moneySQLiteIdleTracker, idleInterval, checkpointTimeout time.Duration) {
+	if db == nil {
+		return
+	}
+	if idleInterval <= 0 || checkpointTimeout <= 0 {
+		return
+	}
+	run := func() {
+		checkpointCtx, cancel := context.WithTimeout(ctx, checkpointTimeout)
+		defer cancel()
+		if err := sqliteutil.RunWALCheckpoint(checkpointCtx, db, "wal_checkpoint", observer); err != nil {
+			logger.Warn().Err(err).Msg("money sqlite WAL checkpoint failed")
+		}
+	}
+	go func() {
+		ticker := time.NewTicker(idleInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if idle != nil && idle.IdleFor(time.Now()) < idleInterval {
+					continue
+				}
+				run()
+			}
+		}
+	}()
+}
+
+func startSettlementStartupScan(ctx context.Context, scanner settlementStartupScanner, settlement config.SettlementConfig, now time.Time, logger zerolog.Logger) {
+	if scanner == nil {
+		return
+	}
+	if err := scanner.StartStartupScan(ctx, settlement, now); err != nil {
+		logger.Warn().Err(err).Msg("billing startup scan failed")
+	}
+}
+
 // mustParseTrustedProxies parses cfg.Proxy.TrustedProxies into the
 // netip.Prefix slice the buyer Server's rate-limit keying expects.
 // Validate() at config.Load already rejected malformed CIDRs and
@@ -1430,7 +1537,7 @@ func setupCanarySanctionStore(ctx context.Context, cfg config.Config, db *sql.DB
 	return store, nil
 }
 
-func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, logger zerolog.Logger) {
+func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, pruneOnStartup bool, logger zerolog.Logger) {
 	if store == nil || retentionDays <= 0 {
 		return
 	}
@@ -1445,7 +1552,11 @@ func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner,
 			logger.Info().Int64("deleted_rows", deleted).Time("cutoff", cutoff).Msg("request_log retention pruned rows")
 		}
 	}
-	prune()
+	if pruneOnStartup {
+		prune()
+	} else {
+		logger.Info().Int("retention_days", retentionDays).Msg("request_log startup retention prune skipped; scheduled pruner armed")
+	}
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
@@ -1678,7 +1789,7 @@ func startSocialVerificationPromotionReconciler(
 	}()
 }
 
-func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, logger zerolog.Logger) {
+func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, pruneOnStartup bool, logger zerolog.Logger) {
 	if store == nil || retentionDays <= 0 {
 		return
 	}
@@ -1693,7 +1804,11 @@ func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, r
 			logger.Info().Int64("deleted_rows", deleted).Time("cutoff", cutoff).Msg("audit_log retention pruned rows")
 		}
 	}
-	prune()
+	if pruneOnStartup {
+		prune()
+	} else {
+		logger.Info().Int("retention_days", retentionDays).Msg("audit_log startup retention prune skipped; scheduled pruner armed")
+	}
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()

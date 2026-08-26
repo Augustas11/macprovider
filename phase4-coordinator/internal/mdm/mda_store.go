@@ -64,6 +64,14 @@ type MDAStore struct {
 
 // OpenMDAStore opens (or creates) MDA tables on the coordinator storage DB.
 func OpenMDAStore(path string) (*MDAStore, error) {
+	return openMDAStore(path, false)
+}
+
+func OpenMDAStoreWithManualWALCheckpoint(path string) (*MDAStore, error) {
+	return openMDAStore(path, true)
+}
+
+func openMDAStore(path string, manualWALCheckpoint bool) (*MDAStore, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, fmt.Errorf("mda store: db path is required")
@@ -73,7 +81,11 @@ func OpenMDAStore(path string) (*MDAStore, error) {
 			return nil, err
 		}
 	}
-	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(path))
+	dsn := sqliteutil.WithPragmas(path)
+	if manualWALCheckpoint {
+		dsn = sqliteutil.WithManualWALCheckpointPragmas(path)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
