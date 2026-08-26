@@ -1489,6 +1489,9 @@ def _validate_trusted_pool_creator_mvp_journey_result(
             f"{location}.signed.expires_at",
             "must equal the UTC calendar date of captured_at",
         )
+    run_id = signed.get("run_id")
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
+        result.error(f"{location}.signed.run_id", "must be a positive integer")
 
     run_result = signed.get("result")
     if isinstance(run_result, dict):

@@ -18,7 +18,7 @@ Signed candidate evidence (Gate C; evidence-only, not in CONFORMANCE `evidence[]
 
 Historical Gate A envelope (pre-proof flags false) remains committed at `journeys/evidence/trusted-pool-creator-mvp-20260825T072753Z.*`.
 
-The Gate C envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is the capture string `trusted-pool-creator-mvp-20260826T022522Z`, so `scripts/validate-pool-promotion-transition.py` cannot consume it until Gate D recaptures with an integer run id or the promoter maps capture ids separately.
+The Gate C envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is the historical capture string `trusted-pool-creator-mvp-20260826T022522Z`. New harness captures emit a positive integer `run_id` (ledger high-water + 1). Recapture and re-sign before Gate D consume; do not promote SPEC-043 from this harness alone.
 
 Live-readiness runbook (Gate C; does not promote SPEC-043): `docs/runbooks/trusted-pool-creator-launch.md`
 
@@ -94,7 +94,7 @@ cd phase4-coordinator
 MACPROVIDER_CAPTURE_TRUSTED_POOL_CREATOR_MVP=1 go test ./internal/trustpool -run TestJourneyTrustedPoolCreatorMVPCandidate -count=1
 ```
 
-Commit the redacted file under `journeys/evidence/trusted-pool-creator-mvp-*.redacted.json`, merge to `main`, recapture so `repository.commit` is an ancestor of `origin/main`, then dispatch `.github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml` from reviewed `main`. Do not promote SPEC-043 from this harness alone. New harness captures must keep freeze, descendant-signer rejection, `delegation_revocation_verified`, and `pool_existence_oracle_within_threshold` true. The Gate C signed envelope from workflow `32926445757` records those flags true. After a squash-merge, recapture before dispatching the signer.
+Commit the redacted file under `journeys/evidence/trusted-pool-creator-mvp-*.redacted.json`, merge to `main`, recapture so `repository.commit` is an ancestor of `origin/main`, then dispatch `.github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml` from reviewed `main`. Do not promote SPEC-043 from this harness alone. New harness captures must keep freeze, descendant-signer rejection, `delegation_revocation_verified`, and `pool_existence_oracle_within_threshold` true, and must emit a positive integer `run_id` (ledger high-water + 1). The Gate C signed envelope from workflow `32926445757` records those flags true but still has a capture-string `run_id`. After a squash-merge, recapture before dispatching the signer.
 
 ## Pass criteria
 

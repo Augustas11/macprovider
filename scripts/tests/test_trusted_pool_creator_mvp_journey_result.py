@@ -49,6 +49,7 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
         "requirement_ids": ids,
         "captured_at": "2026-08-25T05:54:25Z",
         "expires_at": "2026-08-25",
+        "run_id": 1,
         "observations": {
             "approved_creator_record_bound": True,
             "buyer_authorization_enforced": True,
@@ -359,6 +360,37 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
         )
         self.assertTrue(any("physical steps must be ordered" in error for error in result.errors))
 
+    def test_rejects_non_integer_run_id(self) -> None:
+        result = ValidationResult()
+        signed = valid_signed()
+        signed["run_id"] = "trusted-pool-creator-mvp-20260826T022522Z"
+        _validate_trusted_pool_creator_mvp_journey_result(
+            signed,
+            "SPEC-043-R012",
+            [TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID],
+            signed["artifacts"],
+            signed["steps"],
+            "evidence[0]",
+            result,
+        )
+        self.assertTrue(any("run_id" in error and "positive integer" in error for error in result.errors))
+
+    def test_rejects_non_positive_run_id(self) -> None:
+        for value in (0, -1, True):
+            result = ValidationResult()
+            signed = valid_signed()
+            signed["run_id"] = value
+            _validate_trusted_pool_creator_mvp_journey_result(
+                signed,
+                "SPEC-043-R012",
+                [TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID],
+                signed["artifacts"],
+                signed["steps"],
+                "evidence[0]",
+                result,
+            )
+            self.assertTrue(any("run_id" in error and "positive integer" in error for error in result.errors), value)
+
     def test_evidence_only_journey_cannot_satisfy_conformant_requirement(self) -> None:
         envelope = {"schema_version": "macprovider.journey-result-envelope.v1", "signatures": [], "signed": valid_signed()}
         with tempfile.TemporaryDirectory() as directory:
@@ -473,6 +505,13 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
         }
         with self.assertRaises(SystemExit):
             builder.require_signed_redaction(redaction)
+
+    def test_builder_requires_positive_integer_run_id(self) -> None:
+        builder = load_builder()
+        self.assertEqual(1, builder.require_positive_int(1, "run_id"))
+        for value in ("trusted-pool-creator-mvp-20260826T022522Z", 0, -1, True, 1.5, None):
+            with self.assertRaises(SystemExit):
+                builder.require_positive_int(value, "run_id")
 
 
 if __name__ == "__main__":

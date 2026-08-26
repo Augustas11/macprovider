@@ -121,11 +121,9 @@ part of this MVP.
 - Gate C signed candidate envelope is committed (workflow
   [`32926445757`](https://github.com/Augustas11/macprovider/actions/runs/32926445757)).
   It remains evidence-only: CONFORMANCE `evidence[]` is empty.
-- That envelope copies the capture-string `run_id`
-  `trusted-pool-creator-mvp-20260826T022522Z`.
-  `scripts/validate-pool-promotion-transition.py` requires a positive integer
-  `candidate.signed.run_id`, so this exact envelope is not Gate D consumable
-  without recapture or a promoter contract change.
-- Gate D: integer-run-id recapture or promoter mapping, sibling
+- New isolated captures emit a positive integer `run_id` (promotion-ledger
+  high-water + 1). The committed Gate C envelope still has the historical
+  capture-string `run_id`, so it is not Gate D consumable.
+- Gate D: recapture/re-sign with integer `run_id`, sibling
   `PoolPromotionTransitionV1`, non-empty production-release keyring, promoter
   allowlist, CONFORMANCE `evidence[]` only through that flow.
