@@ -367,6 +367,7 @@ release_assets=(
   "$output_dir/gateway-linux-amd64"
   "$output_dir/compatibility-set.json"
   "$output_dir/release.json"
+  "$output_dir/tier2-catalog.json"
   "$output_dir/trusted-keys.json"
   "$output_dir/autotune-candidates.json"
   "$output_dir/autotune-candidates.json.sig"
