@@ -1,6 +1,6 @@
 # JOURNEY-TRUSTED-POOL-CREATOR-MVP
 
-Status: draft journey contract; Gate C signed isolated-candidate envelope committed; no SPEC-043 promotion
+Status: draft journey contract; integer-run_id signed isolated-candidate envelope committed; no SPEC-043 promotion
 Owner: Trusted Pool creator onboarding
 Specs: SPEC-043, SPEC-042
 Requirements: SPEC-043-R001, SPEC-043-R002, SPEC-043-R003, SPEC-043-R004, SPEC-043-R005, SPEC-043-R006, SPEC-043-R007, SPEC-043-R008, SPEC-043-R009, SPEC-043-R010, SPEC-043-R011, SPEC-043-R012
@@ -9,14 +9,17 @@ Issue: https://github.com/Augustas11/macprovider/issues/1053
 Evidence owner: https://github.com/Augustas11/macprovider/issues/1053
 Execution mode: isolated-candidate-trusted-pool-creator-mvp
 
-Unsigned integer-`run_id` recapture (awaiting protected signer; evidence-only, not in CONFORMANCE `evidence[]`):
+Signed integer-`run_id` envelope (evidence-only, not in CONFORMANCE `evidence[]`):
 
 - Redacted artifact: `journeys/evidence/trusted-pool-creator-mvp-20260826T054329Z.redacted.json`
-- `repository.commit`: `036e9930023f96ee7b66300347c885fc2fc30485` (then `origin/main`)
+- Signed envelope: `journeys/evidence/trusted-pool-creator-mvp-20260826T054329Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json`
+- Workflow run: [`32936678404`](https://github.com/Augustas11/macprovider/actions/runs/32936678404)
+- Manifest: `journeys/evidence/trusted-pool-creator-mvp-20260826T054329Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.evidence-manifest.json`
+- `repository.commit`: `036e9930023f96ee7b66300347c885fc2fc30485`
 - `run_id`: `1` (promotion-ledger high-water + 1)
 - Freeze, descendant-signer rejection, `delegation_revocation_verified`, and `pool_existence_oracle_within_threshold` are true
 
-Signed Gate C envelope (capture-string `run_id`; evidence-only):
+Historical Gate C envelope (capture-string `run_id`; evidence-only):
 
 - Redacted artifact: `journeys/evidence/trusted-pool-creator-mvp-20260826T022522Z.redacted.json`
 - Signed envelope: `journeys/evidence/trusted-pool-creator-mvp-20260826T022522Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json`
@@ -25,7 +28,7 @@ Signed Gate C envelope (capture-string `run_id`; evidence-only):
 
 Historical Gate A envelope (pre-proof flags false) remains committed at `journeys/evidence/trusted-pool-creator-mvp-20260825T072753Z.*`.
 
-The Gate C envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is the historical capture string `trusted-pool-creator-mvp-20260826T022522Z`. The unsigned recapture emits positive integer `run_id` `1`. Re-sign that recapture from reviewed `main` before Gate D consume; do not promote SPEC-043 from this harness alone.
+The integer-`run_id` envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is JSON integer `1`. Do not promote SPEC-043 from this harness alone; Gate D still needs a sibling production-promotion artifact, a registered production-release approver key, and CONFORMANCE `evidence[]` only through that flow. The Gate C envelope's capture-string `run_id` remains historical.
 
 Live-readiness runbook (Gate C; does not promote SPEC-043): `docs/runbooks/trusted-pool-creator-launch.md`
 
@@ -101,7 +104,7 @@ cd phase4-coordinator
 MACPROVIDER_CAPTURE_TRUSTED_POOL_CREATOR_MVP=1 go test ./internal/trustpool -run TestJourneyTrustedPoolCreatorMVPCandidate -count=1
 ```
 
-Commit the redacted file under `journeys/evidence/trusted-pool-creator-mvp-*.redacted.json`, merge to `main`, then dispatch `.github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml` from reviewed `main` with `source_sha` equal to the capture `repository.commit`. Recapture first if that commit is not an ancestor of `origin/main`, or if `expires_at` is no longer the current UTC calendar day. Do not promote SPEC-043 from this harness alone. New harness captures must keep freeze, descendant-signer rejection, `delegation_revocation_verified`, and `pool_existence_oracle_within_threshold` true, and must emit a positive integer `run_id` (ledger high-water + 1). The unsigned recapture `trusted-pool-creator-mvp-20260826T054329Z.redacted.json` meets those rules with `run_id` `1` on `036e9930023f96ee7b66300347c885fc2fc30485`. The Gate C signed envelope from workflow `32926445757` still has a capture-string `run_id`.
+Commit the redacted file under `journeys/evidence/trusted-pool-creator-mvp-*.redacted.json`, merge to `main`, then dispatch `.github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml` from reviewed `main` with `source_sha` equal to the capture `repository.commit`. Recapture first if that commit is not an ancestor of `origin/main`, or if `expires_at` is no longer the current UTC calendar day. Do not promote SPEC-043 from this harness alone. New harness captures must keep freeze, descendant-signer rejection, `delegation_revocation_verified`, and `pool_existence_oracle_within_threshold` true, and must emit a positive integer `run_id` (ledger high-water + 1). The signed envelope from workflow `32936678404` meets those rules with integer `run_id` `1` on `036e9930023f96ee7b66300347c885fc2fc30485`. The Gate C signed envelope from workflow `32926445757` still has a capture-string `run_id`.
 
 ## Pass criteria
 

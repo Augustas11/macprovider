@@ -1,0 +1,274 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEUCIHiHTU3/dVCfHRwaJrwHJ6t7eyYKPw1gWa/XKUewdlpmAiEAoQ5T/VdhFYAYpiWZIlJQt+1US3nvGtr+g2zys9/Yfvw=",
+      "signed_sha256": "c95c15cbeef8eeb3fcdea9105679705bcd7376f8aa861a10201edaf1c510223b",
+      "verified_at": "2026-08-26T06:06:50Z",
+      "verifier": ".github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml:32936678404:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-TRUSTED-POOL-CREATOR-MVP",
+    "requirement_ids": [
+      "SPEC-043-R001",
+      "SPEC-043-R002",
+      "SPEC-043-R003",
+      "SPEC-043-R004",
+      "SPEC-043-R005",
+      "SPEC-043-R006",
+      "SPEC-043-R007",
+      "SPEC-043-R008",
+      "SPEC-043-R009",
+      "SPEC-043-R010",
+      "SPEC-043-R011",
+      "SPEC-043-R012"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "036e9930023f96ee7b66300347c885fc2fc30485"
+    },
+    "captured_at": "2026-08-26T05:43:29Z",
+    "expires_at": "2026-08-26",
+    "operator": {
+      "identity_fingerprint": "d6f3e78f33721283ef41872e7fa75d164585da1cad9ab2cd09a156628190342f",
+      "role": "acceptance-operator"
+    },
+    "environment": {
+      "candidate": "commit:036e9930023f96ee7b66300347c885fc2fc30485",
+      "class": "isolated-candidate-trusted-pool-creator-mvp",
+      "hardware_profile": "local-redacted"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-trusted-pool-creator-mvp",
+        "sha256": "fe2b00f8fc91f161f6f6b0a22087f7687de55e4d3419242ca64b50c93aa711b8",
+        "source": "journeys/evidence/trusted-pool-creator-mvp-20260826T054329Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "Trusted Pool creator MVP isolated candidate create-to-route-to-settle-to-pause evidence passed without production side effects."
+    },
+    "steps": [
+      {
+        "id": "step-01-creator-approval",
+        "status": "pass",
+        "assertion": "Approved creator record bound required Agreement and pricing fields; suspension rejected nonce issuance; re-enable restored the candidate path.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-01b-admin-surface-properties",
+        "status": "pass",
+        "assertion": "Admin and creator responses carried schema_version; identical create operation_id was idempotent; creator credentials could not reach promotion.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-02-root-issuer-registration",
+        "status": "pass",
+        "assertion": "Creator-issued nonce plus proof-of-possession root registration accepted; nonce replay failed closed.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-03-manifest-create-accepted",
+        "status": "pass",
+        "assertion": "Signed candidate manifest accepted after pool create; pool stayed non-routeable until promotion.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-04-negative-manifest-cases",
+        "status": "pass",
+        "assertion": "Unsigned manifest and prohibited routing-claim snapshot were rejected before durable append.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-05-provider-membership",
+        "status": "pass",
+        "assertion": "Undelegated provider admission failed; delegated provider required ProviderPoolDelegationV1; owner delegation_revoked removed the delegated member while owned member kept routing.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-06-buyer-authorization",
+        "status": "pass",
+        "assertion": "Dedicated buyer grant succeeded; unauthorized, unknown, and disabled pool selections failed closed with generic pool_unavailable under the active timing floor within SPEC-043-R007 p95/p99 oracle bounds.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-07-promise-surfaces",
+        "status": "pass",
+        "assertion": "Authorized policy and status documents used no-store cache control and kept the Trusted Pool confidentiality scope.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-08-activation-gate",
+        "status": "pass",
+        "assertion": "Promotion before root/manifest/membership failed closed; candidate promotion after preflight published a routeable snapshot.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-09-successful-pooled-request",
+        "status": "pass",
+        "assertion": "Authorized pooled chat returned 200 through the admitted member only.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-10-settlement-and-logs",
+        "status": "pass",
+        "assertion": "Route snapshot stored pool_id and digest in observe mode; payout-ready rows stayed zero.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-11-fail-closed-routing",
+        "status": "pass",
+        "assertion": "Unauthorized and post-revoke pool requests failed closed before a second provider dispatch.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-12-restart-reconstruction",
+        "status": "pass",
+        "assertion": "Empty-registry request failed closed; durable reconstruct rebuilt pool identity.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-13-emergency-pause-and-rollback",
+        "status": "pass",
+        "assertion": "Operator pause moved the pool to non-routeable members; creator freeze while suspended rejected later nonce and descendant-signer mutations.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      },
+      {
+        "id": "step-14-redaction-and-artifacts",
+        "status": "pass",
+        "assertion": "Retained evidence uses fingerprints only; request body, bearer material, and local identities are absent.",
+        "artifacts": [
+          "redacted-trusted-pool-creator-mvp"
+        ]
+      }
+    ],
+    "redaction": {
+      "secrets_redacted": true,
+      "operator_identity_redacted": true,
+      "local_account_names_redacted": true
+    },
+    "run_id": 1,
+    "execution_mode": "isolated-candidate-trusted-pool-creator-mvp",
+    "observations": {
+      "approved_creator_record_bound": true,
+      "buyer_authorization_enforced": true,
+      "candidate_manifest_accepted": true,
+      "coordinator_blind_claimed": false,
+      "creator_admin_authorized_only": true,
+      "creator_suspension_root_compromise_freeze_verified": true,
+      "delegation_revocation_verified": true,
+      "descendant_signer_rejection_verified": true,
+      "emergency_pause_exercised": true,
+      "fail_closed_no_global_fallback": true,
+      "global_fallback_observed": false,
+      "isolated_environment": true,
+      "no_duplicate_settlement": true,
+      "no_private_key_upload": true,
+      "no_raw_prompt_output_artifact": true,
+      "payout_ready_mutated": false,
+      "pool_existence_oracle_within_threshold": true,
+      "privacy_pool_claimed": false,
+      "production_side_effects": false,
+      "public_announcement_without_reviewed_artifact_observed": false,
+      "raw_prompt_output_redacted": true,
+      "restart_reconstruction_verified": true,
+      "root_registration_replay_checked": true,
+      "settlement_labels_bound": true,
+      "successful_pooled_request": true,
+      "unrestricted_creator_admin_observed": false
+    },
+    "candidate_identity": {
+      "approval_record_id": "approval-v1",
+      "approval_record_version": "approval-version-1",
+      "artifact_set_sha256": "c8606ab564d2a865381eebff7a8c2612f6bf093fcf18564ebe8b3bd0e28a61fb",
+      "buyer_credential_fingerprint": "0aa273ef825cd294d7ced17bc338b99f2bdfb6b29d19f670daf4a7afc1c270e2",
+      "clock_skew_allowance_seconds": 60,
+      "coordinator_build_id": "coordinator-isolated-candidate",
+      "coordinator_config_sha256": "4b340f6df9e759f87d4671f302038d99192493e1d26ddcd821b64a4f51619fce",
+      "creator_account_fingerprint": "a248864d43410ea95465395a22d4466eba9e8a403a44e521711dd8ac4826d697",
+      "creator_agreement_expires_at": "2026-08-27T04:43:26Z",
+      "creator_agreement_grace_ends_at": "2026-08-27T05:43:26Z",
+      "creator_agreement_id": "agreement-approval-v1",
+      "creator_agreement_version": "v1",
+      "effective_config_digest": "e6fbfa273387cf217f553a5d893e2ea60794f5ed253adf912b92604bc2924d37",
+      "environment_id": "candidate-trusted-pool-creator-mvp",
+      "feature_flag_digest": "b88b88f6b48e8647ac2c4f337836cbaedff25803ddac3fe84d7674b59322c2da",
+      "gate_check_id": "candidate-promote:op-promote",
+      "gateway_build_id": "gateway-isolated-candidate",
+      "gateway_config_sha256": "62070f153b3915bdf34d79b6397a6c4c505ee3d365ec903d02be0e672cb29ea4",
+      "governance_file_digest": "621e091a60b182d9b089afaa3941a568eb175a01c1ba1cbaab63daa8c54718ce",
+      "lifecycle_state": "paused",
+      "manifest_core_digest": "2c3768e9c092c355601791a84e38e9f04bcdb4cd111fcfb3e810d533a5d63eb7",
+      "manifest_version": "1",
+      "maximum_ttl_seconds": 86400,
+      "operation_ids_fingerprint": "f744a96077351f094b290a0c7ac4f7f6bd10d5453f84bd5e9facf980ff269780",
+      "pool_generation": "15",
+      "pool_id": "9UmCwML-0S9inAlMMHuCcg",
+      "pricing_schedule_id": "pricing-approval-v1",
+      "pricing_schedule_version": "v1",
+      "provider_build_id": "provider-isolated-candidate",
+      "provider_identity_fingerprint": "271819043bd61c691eec37b5de0e2fd423c7c669377c089d4cefe3c4836d1daa",
+      "readiness_observations_fingerprint": "72f4cb9b4ab8277c919f55d9a96fccaa74f1b63406a832c9910c54a1c22922e1",
+      "reviewed_distribution_artifact_digest": "a569a745d4dfba05fe6857a4a2bdbd2b9b3e4a9cba4d77445c73eb0e5d9d89a3",
+      "root_issuer_fingerprint": "a6ea04bee8f6681fdd7864b9aebe477281ebb09323aaf49d9ce198eae03d8798",
+      "route_snapshot_digest": "a12b37b5ca65e7ab98ca7bff5fb8f86c7407401bbd371dae8f751e2b05271be1",
+      "verifier_challenge": "isolated-candidate-trusted-pool-creator-mvp",
+      "verifier_command": "phase4-coordinator/internal/trustpool:TestJourneyTrustedPoolCreatorMVPCandidate",
+      "verifier_result": "pass"
+    },
+    "pool_rejection_timing": {
+      "classes_covered": [
+        "unknown",
+        "unauthorized",
+        "disabled"
+      ],
+      "disabled_p50_ms": 51.16825,
+      "floor_ms": 50,
+      "intentional_gaps": [
+        "pool_policy_stale remains a distinct error code",
+        "wallet_session rejection covered by gateway unit distribution test"
+      ],
+      "mann_whitney_p_value": 0.3558099957673745,
+      "method": "active_sleep_to_floor",
+      "p95_delta_ms": 3.615625,
+      "p99_delta_ms": 3.615625,
+      "sample_count_per_class": 16,
+      "statistical_test": "two-sided Mann-Whitney U with normal approximation; fail if p < 0.01",
+      "unauthorized_p50_ms": 51.213292,
+      "unknown_p50_ms": 51.181583
+    }
+  }
+}
