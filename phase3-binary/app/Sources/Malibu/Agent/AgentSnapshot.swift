@@ -715,7 +715,7 @@ enum AgentSnapshotPresenter {
         }
         let tier = s.trustTier.rawValue.capitalized
         if hasDemotionCooldown(s) {
-            return "Trust: \(tier) · requalification cooldown active"
+            return "Trust: \(tier) · Trust review in progress"
         }
         if s.trustTier == .trusted {
             return "Trust: Trusted"
@@ -728,7 +728,7 @@ enum AgentSnapshotPresenter {
 
     private static func trustCriteriaAction(_ s: AgentSnapshot) -> String? {
         if hasDemotionCooldown(s) {
-            return "Re-qualify for Trusted to clear the cooldown."
+            return "Keep Malibu online; withdrawals unlock automatically when Trusted."
         }
         guard let met = s.trustCriteriaMet,
               let required = s.trustCriteriaRequired,
@@ -1624,7 +1624,7 @@ enum AgentSnapshotPresenter {
         } else if holdReasons.contains("per_wallet_daily_cap") {
             nextAction = "The wallet cap resets at the next UTC day."
         } else if holdReasons.contains("demotion_cooldown") {
-            nextAction = "Re-qualify for Trusted to clear the cooldown."
+            nextAction = "Keep Malibu online; withdrawals unlock automatically when Trusted."
         } else {
             nextAction = "Review the hold reason above before withdrawing."
         }
@@ -1635,7 +1635,7 @@ enum AgentSnapshotPresenter {
         guard s.malibuProjectionFresh else { return "MALIBU trust telemetry not published yet" }
         let tier = s.trustTier.rawValue.capitalized
         if hasDemotionCooldown(s) {
-            return "\(tier) — requalification cooldown active"
+            return "\(tier) — Trust review in progress"
         }
         if s.trustTier == .trusted {
             return "Trusted"
@@ -1954,7 +1954,7 @@ enum AgentSnapshotPresenter {
         case "per_wallet_daily_cap":
             return "the wallet's daily limit has been reached"
         case "demotion_cooldown":
-            return "a Trust cooldown is active"
+            return "Trust verification is in progress"
         default:
             return "payout eligibility is still being verified"
         }
@@ -2034,7 +2034,7 @@ enum AgentSnapshotPresenter {
         case "held_provisional_trust_tier":
             return "MALIBU is locked until Trusted"
         case "held_demotion_cooldown":
-            return "MALIBU is locked during Trust requalification"
+            return "MALIBU is locked until Trusted"
         case "withdrawable_balance_available":
             return "MALIBU is available to withdraw"
         case "withdrawable_no_balance":
@@ -2085,7 +2085,7 @@ enum AgentSnapshotPresenter {
         case "held_provisional_trust_tier":
             return "Trust verification is incomplete"
         case "held_demotion_cooldown":
-            return "Trust requalification is in progress"
+            return "Trust verification is in progress"
         case "missing_wallet_binding":
             return "wallet binding is missing"
         case "insufficient_verified_receipts":
@@ -2115,7 +2115,7 @@ enum AgentSnapshotPresenter {
         case "held_provisional_trust_tier":
             return "Complete the remaining trust criteria to unlock withdrawals."
         case "held_demotion_cooldown":
-            return "Re-qualify for Trusted to clear the cooldown."
+            return "Keep Malibu online; withdrawals unlock automatically when Trusted."
         case "missing_wallet_binding":
             return "Add a payout wallet."
         case "insufficient_verified_receipts":
