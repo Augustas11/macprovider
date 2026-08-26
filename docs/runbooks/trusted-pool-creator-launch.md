@@ -54,7 +54,6 @@ creator until Gate D exists.
 
 Also still missing for Gate D:
 
-- registered production-release approver key (committed keyring is empty)
 - signed sibling `PoolPromotionTransitionV1` for the integer-`run_id` envelope
 - CONFORMANCE `evidence[]` only through promoter consume of that sibling
 - production on-call readiness record, reviewed-artifact lifecycle ownership,
@@ -118,23 +117,24 @@ part of this MVP.
 
 ## Production-release key (operator-owned)
 
-Do not invent a launch key in this repository. Generate P-256 material offline,
-keep the private key out of the worktree, and register only the public half:
+The registered public key is `security/spec-043-production-release-p256-v1.pem`.
+The private half lives only in the GitHub `production-release` environment
+secret `MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM`. Do not copy
+that private key into a worktree, log, issue, artifact, or commit.
+
+To provision a first key on a still-empty keyring:
 
 ```bash
-python3 scripts/register-spec043-production-release-key.py \
-  --public-key /path/to/spec043-production-release.pub.pem \
-  --issuer macprovider-ops \
-  --valid-from 2026-08-26T00:00:00Z \
-  --valid-until 2027-08-26T00:00:00Z
+bash scripts/provision-spec043-production-release-key.sh Augustas11/macprovider
 ```
 
-Store the private key in the GitHub `production-release` environment secret
-`MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM`. Then dispatch
-`.github/workflows/build-signed-pool-promotion-transition.yml` from reviewed
-`main`. The workflow fails closed while `security/spec-043-production-release-keyring.json`
-has `keys: []`. Signing a sibling does not consume the ledger or fill
-CONFORMANCE `evidence[]`.
+That command generates P-256 material in a mode-0700 temporary directory, pipes
+the private key into the environment secret, and registers only the public
+half. Re-running it fails closed once the public key or keyring entry exists.
+
+Dispatch `.github/workflows/build-signed-pool-promotion-transition.yml` from
+reviewed `main` to sign a sibling. Signing a sibling does not consume the
+ledger or fill CONFORMANCE `evidence[]`.
 
 ## Next gates
 
@@ -150,14 +150,12 @@ CONFORMANCE `evidence[]`.
   `PoolPromotionTransitionV1` before rewriting CONFORMANCE, and governance
   keeps creator-MVP evidence-only until a matching `consumed_authorization`
   exists.
-- Operator key registration and sibling signing path: register only an
-  operator-supplied P-256 public key with
-  `scripts/register-spec043-production-release-key.py`, then dispatch
+- Operator key registration: `security/spec-043-production-release-p256-v1.pem`
+  is registered. Dispatch
   `.github/workflows/build-signed-pool-promotion-transition.yml` from reviewed
-  `main`. That workflow fails closed while the committed keyring is empty, uses
-  `MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM`, and does not
+  `main` to sign a sibling. That workflow uses
+  `MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM` and does not
   consume the ledger or rewrite CONFORMANCE.
-- Gate D still needs a registered production-release approver key (do not
-  invent one), a sibling artifact signed by that key, CONFORMANCE `evidence[]`
-  only through the promoter consume flow, on-call readiness, reviewed-artifact
-  lifecycle ownership, and production timing-floor remeasure.
+- Gate D still needs a sibling artifact signed by that key, CONFORMANCE
+  `evidence[]` only through the promoter consume flow, on-call readiness,
+  reviewed-artifact lifecycle ownership, and production timing-floor remeasure.
