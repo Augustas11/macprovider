@@ -1770,7 +1770,7 @@ main() {
     armed_boot="$(cat "$ARMED_FILE" 2>/dev/null || true)"
   fi
   if [ "$armed_boot" != "$boot_id" ]; then
-    log "arming watchdog (boot=${boot_id}): first observed local provider health for provider_id=${pid}"
+    log "arming watchdog (boot=${boot_id}): first observed local provider health"
     printf "%s" "$boot_id" > "$ARMED_FILE"
   fi
   coord_ip="$(resolve_coordinator_ip)"
@@ -1782,7 +1782,7 @@ main() {
     # Healthy. Stay silent so the log file does not bloat.
     exit 0
   fi
-  log "warning: provider process $provider_pid is locally healthy, but no ESTABLISHED TCP to ${coord_ip}:${COORDINATOR_PORT} for provider_id=${pid}"
+  log "warning: provider process $provider_pid is locally healthy, but no ESTABLISHED TCP to ${coord_ip}:${COORDINATOR_PORT}"
   # No ESTABLISHED connection. Coordinator TCP state is advisory only:
   # the health verdict is the installed provider process plus local
   # /v1/health. Do not kick solely because another process can or
