@@ -249,8 +249,48 @@ COORDINATOR_DB_PATH="$DB" \
 positional_live_rc=$?
 set -e
 [ "$positional_live_rc" = "4" ] || fail "positional live restore target should refuse with exit 4"
-grep -q "primary restore target resolves to the configured live coordinator DB path" "$TMP/restore-positional-live.err" || fail "positional live restore refusal text missing"
+grep -q "primary restore target is the same file as the configured live coordinator DB path" "$TMP/restore-positional-live.err" || fail "positional live restore refusal text missing"
 [ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM settlement_receipt_verdicts;")" = "$live_marker_before" ] || fail "positional live restore mutated live DB"
+
+LIVE_REAL="$TMP/live-real.db"
+LIVE_LINK="$TMP/live-link.db"
+printf 'live-marker' >"$LIVE_REAL"
+ln -s "$LIVE_REAL" "$LIVE_LINK"
+set +e
+COORDINATOR_DB_PATH="$LIVE_LINK" \
+  COORDINATOR_AUDIT_DB_PATH="$AUDIT_DB" \
+  "$RESTORE" "$archive_path" "$LIVE_REAL" >"$TMP/restore-symlink-live.out" 2>"$TMP/restore-symlink-live.err"
+symlink_live_rc=$?
+set -e
+[ "$symlink_live_rc" = "4" ] || fail "symlinked live restore target should refuse with exit 4"
+grep -q "primary restore target is the same file as the configured live coordinator DB path" "$TMP/restore-symlink-live.err" || fail "symlinked live restore refusal text missing"
+[ "$(cat "$LIVE_REAL")" = "live-marker" ] || fail "symlinked live restore mutated live DB"
+
+HARDLINK_LIVE="$TMP/hardlink-live.db"
+HARDLINK_TARGET="$TMP/hardlink-target.db"
+printf 'hardlink-live-marker' >"$HARDLINK_LIVE"
+ln "$HARDLINK_LIVE" "$HARDLINK_TARGET"
+set +e
+COORDINATOR_DB_PATH="$HARDLINK_LIVE" \
+  COORDINATOR_AUDIT_DB_PATH="$AUDIT_DB" \
+  "$RESTORE" "$archive_path" "$HARDLINK_TARGET" >"$TMP/restore-hardlink-live.out" 2>"$TMP/restore-hardlink-live.err"
+hardlink_live_rc=$?
+set -e
+[ "$hardlink_live_rc" = "4" ] || fail "hardlinked live restore target should refuse with exit 4"
+grep -q "primary restore target is the same file as the configured live coordinator DB path" "$TMP/restore-hardlink-live.err" || fail "hardlinked live restore refusal text missing"
+[ "$(cat "$HARDLINK_LIVE")" = "hardlink-live-marker" ] || fail "hardlinked live restore mutated live DB"
+
+SIDECAR_RESTORE_DIR="$TMP/sidecar-restore-target"
+mkdir -p "$SIDECAR_RESTORE_DIR"
+sidecar_target="$SIDECAR_RESTORE_DIR/restored.db"
+ln -s "$TMP/missing-wal-target" "${sidecar_target}-wal"
+set +e
+"$RESTORE" "$archive_path" "$sidecar_target" >"$TMP/restore-sidecar-symlink.out" 2>"$TMP/restore-sidecar-symlink.err"
+sidecar_symlink_rc=$?
+set -e
+[ "$sidecar_symlink_rc" = "4" ] || fail "dangling WAL sidecar symlink should refuse with exit 4"
+grep -q "existing SQLite WAL sidecar" "$TMP/restore-sidecar-symlink.err" || fail "dangling WAL sidecar refusal text missing"
+[ ! -f "$sidecar_target" ] || fail "sidecar symlink refusal created restore target"
 
 audit_archive_path=$(find "$ARCHIVE_DIR" -type f -name 'coordinator-audit-*.db.gz' | head -1)
 set +e

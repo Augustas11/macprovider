@@ -66,16 +66,36 @@ canonical_path() {
   fi
 }
 
+resolved_path() {
+  local path="$1"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    if command -v realpath >/dev/null 2>&1; then
+      realpath "$path"
+      return
+    fi
+    python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$path"
+    return
+  fi
+  canonical_path "$path"
+}
+
 refuse_restore_target() {
   local label="$1"
   local target="$2"
   local live="$3"
   local target_canon live_canon
   [ -L "$target" ] && refuse "$label restore target is a symlink; restore to a regular non-live path"
-  [ -e "${target}-wal" ] && refuse "$label restore target has existing SQLite WAL sidecar ${target}-wal; restore to an empty non-live path"
-  [ -e "${target}-shm" ] && refuse "$label restore target has existing SQLite SHM sidecar ${target}-shm; restore to an empty non-live path"
-  target_canon=$(canonical_path "$target")
-  live_canon=$(canonical_path "$live")
+  if [ -e "$target" ] && [ -e "$live" ] && [ "$target" -ef "$live" ]; then
+    refuse "$label restore target is the same file as the configured live coordinator DB path; live restore is not implemented"
+  fi
+  if [ -e "${target}-wal" ] || [ -L "${target}-wal" ]; then
+    refuse "$label restore target has existing SQLite WAL sidecar ${target}-wal; restore to an empty non-live path"
+  fi
+  if [ -e "${target}-shm" ] || [ -L "${target}-shm" ]; then
+    refuse "$label restore target has existing SQLite SHM sidecar ${target}-shm; restore to an empty non-live path"
+  fi
+  target_canon=$(resolved_path "$target")
+  live_canon=$(resolved_path "$live")
   if [ "$target_canon" = "$live_canon" ]; then
     refuse "$label restore target resolves to the configured live coordinator DB path; live restore is not implemented"
   fi
