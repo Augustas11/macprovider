@@ -768,6 +768,30 @@ def _signed_journey_result_journey_id(root: Path, source: str) -> str | None:
     return journey_id if isinstance(journey_id, str) else None
 
 
+def _creator_mvp_consumed_authorization(
+    root: Path,
+    source: str,
+    trusted_public_key_sha256: str,
+    openssl_bin: str,
+) -> bool:
+    path = _repository_path(root, source, source, ValidationResult())
+    if path is None:
+        return False
+    envelope = _load_json(path, ValidationResult())
+    if not isinstance(envelope, dict):
+        return False
+    try:
+        from pool_promotion_transition import creator_mvp_consumed_authorization
+    except ImportError:  # pragma: no cover
+        from scripts.pool_promotion_transition import creator_mvp_consumed_authorization
+    return creator_mvp_consumed_authorization(
+        root,
+        envelope,
+        openssl_bin=openssl_bin,
+        trusted_journey_result_public_key_sha256=trusted_public_key_sha256,
+    )
+
+
 def _verify_journey_result_signature(
     root: Path,
     signed: dict[str, Any],
@@ -2613,10 +2637,11 @@ def _signed_journey_result_satisfies(
                 )
                 continue
             if _signed_journey_result_journey_id(root, source) == TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID:
-                candidate_errors.append(
-                    f"{location}.evidence[{index}].source: trusted-pool creator MVP journey-result is evidence-only and cannot satisfy conformant requirements"
-                )
-                continue
+                if not _creator_mvp_consumed_authorization(root, source, trusted_public_key_sha256, openssl_bin):
+                    candidate_errors.append(
+                        f"{location}.evidence[{index}].source: trusted-pool creator MVP journey-result is evidence-only and cannot satisfy conformant requirements"
+                    )
+                    continue
             candidate_result = ValidationResult()
             if _validate_signed_journey_result(
                 root,

@@ -28,7 +28,7 @@ Historical Gate C envelope (capture-string `run_id`; evidence-only):
 
 Historical Gate A envelope (pre-proof flags false) remains committed at `journeys/evidence/trusted-pool-creator-mvp-20260825T072753Z.*`.
 
-The integer-`run_id` envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is JSON integer `1`. Do not promote SPEC-043 from this harness alone; Gate D still needs a sibling production-promotion artifact, a registered production-release approver key, and CONFORMANCE `evidence[]` only through that flow. The Gate C envelope's capture-string `run_id` remains historical.
+The integer-`run_id` envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is JSON integer `1`. `scripts/promote-signed-journey-result.py` requires `--promotion-transition` for this journey and consumes that sibling into `journeys/ledgers/spec-043-promotion-auth.jsonl` before rewriting CONFORMANCE. Without a matching `consumed_authorization`, governance keeps the envelope evidence-only. Do not promote SPEC-043 from this harness alone; Gate D still needs a registered production-release approver key, a sibling artifact signed by that key, and CONFORMANCE `evidence[]` only through that flow. The Gate C envelope's capture-string `run_id` remains historical.
 
 Live-readiness runbook (Gate C; does not promote SPEC-043): `docs/runbooks/trusted-pool-creator-launch.md`
 
@@ -89,7 +89,7 @@ The run must produce three separate artifacts with non-overlapping digest bounda
 
 A separate promotion-verification report MUST record the sibling promotion artifact digest/reference, promotion verification result, evidence that the governance tool persisted the strictly increasing run_id, consumed authorization ids, per-pool transition epochs, launch-key revocations, and emergency-disable tombstones in append-only rollback-resistant storage across restarts, rollback, backup restore, and migration, atomic authorization-id consumption, gateway/coordinator enforcement of monotonic transition epoch during rollback, and rejection of stale, future-dated, replayed, already-consumed, substituted, revoked-key, wrong-scope, or untrusted signer chains.
 
-The Gate B validator is `scripts/validate-pool-promotion-transition.py`. It consumes only a sibling `PoolPromotionTransitionV1` into `journeys/ledgers/spec-043-promotion-auth.jsonl` and never promotes SPEC-043 conformance rows. Candidate envelopes remain evidence-only.
+The Gate B validator is `scripts/validate-pool-promotion-transition.py`. It consumes only a sibling `PoolPromotionTransitionV1` into `journeys/ledgers/spec-043-promotion-auth.jsonl` and never promotes SPEC-043 conformance rows. The promoter is the only path that both consumes a sibling and rewrites CONFORMANCE, and only after `--promotion-transition`. Candidate envelopes remain evidence-only until that consume succeeds.
 
 The local isolated candidate harness is:
 

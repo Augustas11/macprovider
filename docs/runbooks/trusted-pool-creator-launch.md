@@ -126,6 +126,10 @@ part of this MVP.
 - Historical Gate C envelope (workflow
   [`32926445757`](https://github.com/Augustas11/macprovider/actions/runs/32926445757))
   still has a capture-string `run_id`.
-- Gate D still needs a sibling `PoolPromotionTransitionV1`, non-empty
-  production-release keyring, promoter allowlist, and CONFORMANCE `evidence[]`
-  only through that flow.
+- Promoter wiring is in place: `--promotion-transition` consumes a sibling
+  `PoolPromotionTransitionV1` before rewriting CONFORMANCE, and governance
+  keeps creator-MVP evidence-only until a matching `consumed_authorization`
+  exists. Gate D still needs a registered production-release approver key, a
+  sibling artifact signed by that key, CONFORMANCE `evidence[]` only through
+  that flow, on-call readiness, reviewed-artifact lifecycle ownership, and
+  production timing-floor remeasure.
