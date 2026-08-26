@@ -104,8 +104,12 @@ WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
 WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
 if [ "$HEADLESS" = "1" ]; then
   WATCHDOG_BOOTSTRAP_PATH="/Library/Application Support/macprovider/macprovider-health-monitor"
+  HEADLESS_WATCHDOG_LOG_DIR="/Library/Logs/macprovider"
+  HEADLESS_WATCHDOG_STATE_DIR="/Library/Application Support/macprovider/watchdog-state"
 else
   WATCHDOG_BOOTSTRAP_PATH="$WATCHDOG_PATH"
+  HEADLESS_WATCHDOG_LOG_DIR=""
+  HEADLESS_WATCHDOG_STATE_DIR=""
 fi
 WATCHDOG_PLIST_PATH="$LAUNCHD_MANAGED_DIR/live.malibu.provider-watchdog.plist"
 WATCHDOG_PLIST_BOOTSTRAP_PATH="$LAUNCHD_BOOTSTRAP_DIR/live.malibu.provider-watchdog.plist"
@@ -347,12 +351,14 @@ validate_headless_launchdaemon_plist() {
   [ "$HEADLESS" = "1" ] || return 0
   python3 - "$plist_path" "$bootstrap_path" "$HEADLESS_USER" \
     "$expected_label" "$expected_program" "$CONFIG_PATH" \
-    "${LAUNCHD_BOOTSTRAP_DIR:-/Library/LaunchDaemons}" <<'PY'
+    "${LAUNCHD_BOOTSTRAP_DIR:-/Library/LaunchDaemons}" \
+    "${HEADLESS_WATCHDOG_LOG_DIR:-/Library/Logs/macprovider}" \
+    "${HEADLESS_WATCHDOG_STATE_DIR:-/Library/Application Support/macprovider/watchdog-state}" <<'PY'
 import os
 import plistlib
 import sys
 
-path, bootstrap, user, label, program, config, bootstrap_dir = sys.argv[1:]
+path, bootstrap, user, label, program, config, bootstrap_dir, watchdog_log_dir, watchdog_state_dir = sys.argv[1:]
 if bootstrap != f"{bootstrap_dir}/{label}.plist":
     raise SystemExit("unexpected LaunchDaemon target")
 with open(path, "rb") as handle:
@@ -387,6 +393,10 @@ if environment.get("MACPROVIDER_PROTECTED_CREDENTIAL_ROOT") != os.path.join(os.p
     raise SystemExit("unexpected protected credential root")
 if label == "live.malibu.provider-watchdog" and environment.get("MACPROVIDER_LAUNCHCTL") != "/bin/launchctl":
     raise SystemExit("unexpected watchdog launchctl path")
+if label == "live.malibu.provider-watchdog" and environment.get("MACPROVIDER_LOG_DIR") != watchdog_log_dir:
+    raise SystemExit("unexpected watchdog log dir")
+if label == "live.malibu.provider-watchdog" and environment.get("MACPROVIDER_WATCHDOG_STATE_DIR") != watchdog_state_dir:
+    raise SystemExit("unexpected watchdog state dir")
 PY
 }
 
@@ -471,7 +481,12 @@ directory = os.path.dirname(target)
 temporary = os.path.join(directory, f".{os.path.basename(target)}.{uuid.uuid4()}.tmp")
 fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
 try:
-    os.write(fd, payload)
+    written = 0
+    while written < len(payload):
+        progress = os.write(fd, payload[written:])
+        if progress <= 0:
+            raise RuntimeError("short write while publishing root file")
+        written += progress
     os.fchmod(fd, mode)
     if os.geteuid() == 0:
         os.fchown(fd, 0, 0)
@@ -1033,6 +1048,7 @@ assert_install_lock_ownership() {
     "$PROVIDER_MUTATION_LOCK_PATH" "$$" "$INSTALL_LOCK_TOKEN" "$INSTALL_LOCK_HOLDER_PID" <<'PY' \
     || die 70 "installer lock ownership was lost; refusing protected install mutation"
 import fcntl
+import ctypes
 import json
 import os
 import stat
@@ -2242,7 +2258,7 @@ try:
     if expected_user:
         user_name = plist.get("UserName")
         if expected_label.endswith("-watchdog"):
-            if user_name is not None and user_name != expected_user:
+            if user_name is not None:
                 fail("unexpected_user")
         elif user_name != expected_user:
             fail("unexpected_user")
@@ -2334,6 +2350,7 @@ stage_lifecycle_snapshot() {
   python3 - "$state_path" "$lock_path" "$destination_path" "$meta_path" <<'PY'
 import errno
 import fcntl
+import ctypes
 import json
 import os
 import stat
@@ -2844,8 +2861,8 @@ if payload.get("Label") != expected[0]:
 if not isinstance(arguments, list) or not arguments or arguments[0] != expected[1]:
     raise SystemExit("unexpected LaunchDaemon program")
 if expected[0].endswith("-watchdog"):
-    if "UserName" in payload and payload.get("UserName") != user:
-        raise SystemExit("unexpected watchdog LaunchDaemon user")
+    if "UserName" in payload:
+        raise SystemExit("watchdog LaunchDaemon must remain root-owned")
 else:
     if payload.get("UserName") != user:
         raise SystemExit("unexpected provider LaunchDaemon user")
@@ -2904,8 +2921,8 @@ if payload.get("Label") != expected[0]:
 if not isinstance(arguments, list) or not arguments or arguments[0] != expected[1]:
     raise SystemExit("unexpected LaunchDaemon program")
 if expected[0].endswith("-watchdog"):
-    if "UserName" in payload and payload.get("UserName") != user:
-        raise SystemExit("unexpected watchdog LaunchDaemon user")
+    if "UserName" in payload:
+        raise SystemExit("watchdog LaunchDaemon must remain root-owned")
 else:
     if payload.get("UserName") != user:
         raise SystemExit("unexpected provider LaunchDaemon user")
@@ -2942,7 +2959,12 @@ directory = os.path.dirname(target)
 temporary = os.path.join(directory, f".{os.path.basename(target)}.{uuid.uuid4()}.tmp")
 fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
 try:
-    os.write(fd, payload)
+    written = 0
+    while written < len(payload):
+        progress = os.write(fd, payload[written:])
+        if progress <= 0:
+            raise RuntimeError("short write while publishing root file")
+        written += progress
     os.fchmod(fd, mode)
     if os.geteuid() == 0:
         os.fchown(fd, 0, 0)
@@ -9997,6 +10019,8 @@ set -euo pipefail
 LABEL="${MACPROVIDER_WATCHDOG_LABEL:-live.malibu.provider}"
 CONFIG_PATH="${MACPROVIDER_CONFIG_PATH:-$HOME/.config/macprovider/config.yaml}"
 BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
+LIFECYCLE_LEASE_PATH="${MACPROVIDER_LIFECYCLE_LEASE_PATH:-$HOME/Library/Application Support/macprovider/lifecycle/lease.json}"
+LIFECYCLE_LEASE_OWNER_UID="${MACPROVIDER_LIFECYCLE_LEASE_OWNER_UID:-$(id -u)}"
 COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.malibu.tech}"
 COORDINATOR_PORT="${MACPROVIDER_COORDINATOR_PORT:-443}"
 LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
@@ -10210,19 +10234,229 @@ PY
 
 valid_lifecycle_lease() {
   provider_pid="$1"
-  [ -x "$BINARY_PATH" ] || return 1
-  if "$BINARY_PATH" lifecycle-lease status --expected-kind startup --expected-pid "$provider_pid" >/dev/null 2>&1; then
+  if valid_lifecycle_lease_record startup "$provider_pid"; then
     return 0
   fi
-  "$BINARY_PATH" lifecycle-lease status --expected-kind maintenance >/dev/null 2>&1
+  valid_lifecycle_lease_record maintenance ""
 }
 
 valid_unbound_lifecycle_lease() {
-  [ -x "$BINARY_PATH" ] || return 1
-  if "$BINARY_PATH" lifecycle-lease status --expected-kind startup >/dev/null 2>&1; then
+  if valid_lifecycle_lease_record startup ""; then
     return 0
   fi
-  "$BINARY_PATH" lifecycle-lease status --expected-kind maintenance >/dev/null 2>&1
+  valid_lifecycle_lease_record maintenance ""
+}
+
+valid_lifecycle_lease_record() {
+  expected_kind="$1"
+  expected_pid="${2:-}"
+  boot_id="$(current_boot_id || true)"
+  [ -n "$boot_id" ] || return 1
+  /usr/bin/python3 - \
+    "$LIFECYCLE_LEASE_PATH" \
+    "$LIFECYCLE_LEASE_OWNER_UID" \
+    "$boot_id" \
+    "$expected_kind" \
+    "$expected_pid" \
+    "$BINARY_PATH" <<'PY'
+import ctypes
+import json
+import os
+import stat
+import sys
+import time
+
+def current_monotonic_ns():
+    if hasattr(time, "clock_gettime_ns") and hasattr(time, "CLOCK_MONOTONIC_RAW"):
+        return time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+    sys.exit(1)
+
+class ProcBsdInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("pbi_e_tdev", ctypes.c_uint32),
+        ("pbi_e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+def live_process_identity(pid):
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+        proc_pidinfo = libproc.proc_pidinfo
+        proc_pidinfo.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        proc_pidinfo.restype = ctypes.c_int
+        info = ProcBsdInfo()
+        count = proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
+        path_buffer = ctypes.create_string_buffer(4096)
+        proc_pidpath = libproc.proc_pidpath
+        proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        proc_pidpath.restype = ctypes.c_int
+        path_count = proc_pidpath(pid, path_buffer, ctypes.sizeof(path_buffer))
+    except Exception:
+        return None
+    if count != ctypes.sizeof(info) or path_count <= 0:
+        return None
+    start = int(info.pbi_start_tvsec) * 1_000_000 + int(info.pbi_start_tvusec)
+    if start <= 0:
+        return None
+    executable_path = path_buffer.value.decode("utf-8", "surrogateescape")
+    if not executable_path.startswith("/"):
+        return None
+    return {
+        "start_us": start,
+        "uid": int(info.pbi_uid),
+        "ruid": int(info.pbi_ruid),
+        "executable_path": os.path.realpath(executable_path),
+    }
+
+path, owner_uid_text, boot_id, expected_kind, expected_pid_text, binary_path = sys.argv[1:]
+try:
+    owner_uid = int(owner_uid_text)
+except ValueError:
+    sys.exit(1)
+try:
+    expected_pid = int(expected_pid_text) if expected_pid_text else None
+except ValueError:
+    sys.exit(1)
+
+try:
+    st = os.lstat(path)
+    if (
+        not stat.S_ISREG(st.st_mode)
+        or stat.S_ISLNK(st.st_mode)
+        or st.st_uid != owner_uid
+        or st.st_nlink != 1
+        or stat.S_IMODE(st.st_mode) != 0o600
+        or st.st_size <= 0
+        or st.st_size > 16 * 1024
+    ):
+        sys.exit(1)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+except OSError:
+    sys.exit(1)
+
+try:
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != owner_uid
+        or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino)
+        or opened.st_size != st.st_size
+    ):
+        sys.exit(1)
+    data = os.read(fd, 16 * 1024 + 1)
+finally:
+    os.close(fd)
+
+if len(data) != st.st_size or len(data) > 16 * 1024:
+    sys.exit(1)
+try:
+    record = json.loads(data.decode("utf-8"))
+except Exception:
+    sys.exit(1)
+if not isinstance(record, dict):
+    sys.exit(1)
+
+kind = record.get("kind")
+if kind != expected_kind or kind not in {"startup", "maintenance"}:
+    sys.exit(1)
+owner = record.get("owner")
+if not isinstance(owner, dict):
+    sys.exit(1)
+owner_pid = owner.get("pid")
+owner_start = owner.get("process_start_us")
+owner_boot = owner.get("boot_session")
+if (
+    record.get("version") != 1
+    or not isinstance(owner_pid, int)
+    or isinstance(owner_pid, bool)
+    or owner_pid <= 0
+    or not isinstance(owner_start, int)
+    or isinstance(owner_start, bool)
+    or owner_start <= 0
+    or not isinstance(owner_boot, str)
+    or not owner_boot
+    or len(owner_boot.encode("utf-8")) > 256
+    or owner_boot != boot_id
+):
+    sys.exit(1)
+if expected_pid is not None and owner_pid != expected_pid:
+    sys.exit(1)
+try:
+    os.kill(owner_pid, 0)
+except OSError:
+    sys.exit(1)
+identity = live_process_identity(owner_pid)
+if (
+    identity is None
+    or identity.get("start_us") != owner_start
+    or identity.get("uid") != owner_uid
+    or identity.get("ruid") != owner_uid
+    or identity.get("executable_path") != os.path.realpath(binary_path)
+):
+    sys.exit(1)
+
+maximum_ms = 30 * 60 * 1000 if kind == "startup" else 20 * 60 * 1000
+fields = (
+    "issued_wall_ms",
+    "expires_wall_ms",
+    "issued_monotonic_ns",
+    "expires_monotonic_ns",
+)
+values = {}
+for field in fields:
+    value = record.get(field)
+    if not isinstance(value, int) or isinstance(value, bool):
+        sys.exit(1)
+    values[field] = value
+wall_duration = values["expires_wall_ms"] - values["issued_wall_ms"]
+monotonic_duration = values["expires_monotonic_ns"] - values["issued_monotonic_ns"]
+if (
+    values["issued_wall_ms"] <= 0
+    or values["issued_monotonic_ns"] < 0
+    or wall_duration <= 0
+    or wall_duration > maximum_ms
+    or monotonic_duration != wall_duration * 1_000_000
+):
+    sys.exit(1)
+now_wall_ms = int(time.time() * 1000)
+now_monotonic_ns = current_monotonic_ns()
+if (
+    now_wall_ms < values["issued_wall_ms"]
+    or now_monotonic_ns < values["issued_monotonic_ns"]
+    or now_wall_ms >= values["expires_wall_ms"]
+    or now_monotonic_ns >= values["expires_monotonic_ns"]
+):
+    sys.exit(1)
+sys.exit(0)
+PY
 }
 
 provider_restart_cooldown_active() {
@@ -11592,7 +11826,14 @@ WATCHDOG_EOF
 render_watchdog_plist() {
   watchdog_path="$(xml_escape "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}")"
   user_home="$(xml_escape "$HOME")"
-  log_dir="$(xml_escape "$LOG_DIR")"
+  watchdog_log_dir="$LOG_DIR"
+  watchdog_state_environment_entry=""
+  if [ "$HEADLESS" = "1" ]; then
+    watchdog_log_dir="${HEADLESS_WATCHDOG_LOG_DIR:-/Library/Logs/macprovider}"
+    watchdog_state_environment_entry="    <key>MACPROVIDER_WATCHDOG_STATE_DIR</key>
+    <string>$(xml_escape "${HEADLESS_WATCHDOG_STATE_DIR:-/Library/Application Support/macprovider/watchdog-state}")</string>"
+  fi
+  log_dir="$(xml_escape "$watchdog_log_dir")"
   config_path="$(xml_escape "$CONFIG_PATH")"
   binary_path="$(xml_escape "$INSTALL_DIR/macprovider-cli")"
   protected_credential_root="$(xml_escape "$CONFIG_DIR/protected-credentials")"
@@ -11600,10 +11841,16 @@ render_watchdog_plist() {
   credential_store="keychain"
   watchdog_search_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   launchctl_environment_entry=""
+  lifecycle_lease_environment_entry=""
   if [ "$HEADLESS" = "1" ]; then
     credential_store="protected_file"
+    watchdog_search_path="/usr/bin:/bin:/usr/sbin:/sbin"
     launchctl_environment_entry="    <key>MACPROVIDER_LAUNCHCTL</key>
     <string>/bin/launchctl</string>"
+    lifecycle_lease_environment_entry="    <key>MACPROVIDER_LIFECYCLE_LEASE_PATH</key>
+    <string>$(xml_escape "$LIFECYCLE_LEASE_PATH")</string>
+    <key>MACPROVIDER_LIFECYCLE_LEASE_OWNER_UID</key>
+    <string>$(id -u)</string>"
   fi
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -11646,10 +11893,12 @@ render_watchdog_plist() {
     <string>$credential_store</string>
     <key>MACPROVIDER_PROTECTED_CREDENTIAL_ROOT</key>
     <string>$protected_credential_root</string>
+${lifecycle_lease_environment_entry}
     <key>MACPROVIDER_COORDINATOR_HOST</key>
     <string>$coord_host</string>
     <key>MACPROVIDER_LOG_DIR</key>
     <string>$log_dir</string>
+$watchdog_state_environment_entry
     <key>MACPROVIDER_HEADLESS</key>
     <string>$HEADLESS</string>
     <key>MACPROVIDER_HEADLESS_USER</key>
@@ -11689,7 +11938,21 @@ install_watchdog() {
   else
     log "Installing watchdog LaunchAgent (operator-visibility safety net for iss-189-class wedges)."
   fi
-  mkdir -p "$WATCHDOG_DIR" "$LOG_DIR" "$(dirname "$WATCHDOG_PLIST_PATH")"
+  mkdir -p "$WATCHDOG_DIR" "$(dirname "$WATCHDOG_PLIST_PATH")"
+  if [ "$HEADLESS" = "1" ]; then
+    "${SUDO_BIN:-/usr/bin/sudo}" -n /bin/mkdir -p \
+      "${HEADLESS_WATCHDOG_LOG_DIR:-/Library/Logs/macprovider}" \
+      "${HEADLESS_WATCHDOG_STATE_DIR:-/Library/Application Support/macprovider/watchdog-state}" \
+      "$(dirname "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}")" \
+      || die 5 "could not create root watchdog directories"
+    "${SUDO_BIN:-/usr/bin/sudo}" -n /bin/chmod 0755 \
+      "${HEADLESS_WATCHDOG_LOG_DIR:-/Library/Logs/macprovider}" \
+      "${HEADLESS_WATCHDOG_STATE_DIR:-/Library/Application Support/macprovider/watchdog-state}" \
+      "$(dirname "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}")" \
+      || die 5 "could not protect root watchdog directories"
+  else
+    mkdir -p "$LOG_DIR"
+  fi
   reclaim_launchd_service "$WATCHDOG_LABEL" \
     || die 5 "could not reclaim existing watchdog launchd service"
   reclaim_legacy_launchd_service "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
@@ -11700,8 +11963,6 @@ install_watchdog() {
   fi
   write_watchdog_script
   if [ "$HEADLESS" = "1" ]; then
-    "${SUDO_BIN:-/usr/bin/sudo}" -n /bin/mkdir -p "$(dirname "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}")" \
-      || die 5 "could not create root watchdog directory"
     watchdog_payload_b64="$(python3 - "$WATCHDOG_PATH" <<'PY'
 import base64
 import sys
@@ -11712,6 +11973,8 @@ PY
 )" || die 5 "could not snapshot rendered watchdog script"
     publish_root_file_from_base64 "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" 0755 "$watchdog_payload_b64" \
       || die 5 "could not publish root-owned watchdog script"
+    verify_published_launchd_payload "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$watchdog_payload_b64" \
+      || die 5 "published root-owned watchdog script does not match rendered script"
   fi
   render_watchdog_plist "$coordinator_url" \
     | write_atomic_install_file "$WATCHDOG_PLIST_PATH" \

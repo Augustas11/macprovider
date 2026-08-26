@@ -276,12 +276,15 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
   MANIFEST_DIR="$CONFIG_DIR"
   MANIFEST_PATH="$CONFIG_DIR/install_manifest.json"
+  LIFECYCLE_LEASE_PATH="$MANIFEST_DIR/lifecycle/lease.json"
   INSTALL_DIR="$HOME/macprovider"
   BINARY_PATH="$HOME/.local/bin/macprovider-cli"
   LOG_DIR="$HOME/Library/Logs/macprovider"
   WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
   WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
   WATCHDOG_BOOTSTRAP_PATH="$SYSTEM_DIR/Application Support/macprovider/macprovider-health-monitor"
+  HEADLESS_WATCHDOG_LOG_DIR="$SYSTEM_DIR/Logs/macprovider"
+  HEADLESS_WATCHDOG_STATE_DIR="$SYSTEM_DIR/Application Support/macprovider/watchdog-state"
   PLIST_PATH="$CONFIG_DIR/launchd/live.malibu.provider.plist"
   PLIST_BOOTSTRAP_PATH="$SYSTEM_DIR/live.malibu.provider.plist"
   LEGACY_PLIST_PATH="$CONFIG_DIR/launchd/live.streamvc.macprovider.plist"
@@ -357,6 +360,8 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   [ "$LAUNCHD_INSTALLED" -eq 1 ] && [ "$WATCHDOG_INSTALLED" -eq 1 ]
   [ -O "$WATCHDOG_DIR" ] && [ -O "$WATCHDOG_PATH" ]
   [ -f "$WATCHDOG_BOOTSTRAP_PATH" ]
+  [ -d "$HEADLESS_WATCHDOG_LOG_DIR" ]
+  [ -d "$HEADLESS_WATCHDOG_STATE_DIR" ]
   cmp -s "$WATCHDOG_PATH" "$WATCHDOG_BOOTSTRAP_PATH"
   [ -O "$PLIST_PATH" ] && [ -O "$WATCHDOG_PLIST_PATH" ]
   cmp -s "$PLIST_PATH" "$PLIST_BOOTSTRAP_PATH"
@@ -381,7 +386,21 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   grep -Fxq "bootstrap system $WATCHDOG_PLIST_BOOTSTRAP_PATH" "$LAUNCHD_LOG"
   grep -Fq "<key>MACPROVIDER_LAUNCHCTL</key>" "$WATCHDOG_PLIST_PATH"
   grep -Fq "<string>/bin/launchctl</string>" "$WATCHDOG_PLIST_PATH"
+  grep -Fq "<key>PATH</key>" "$WATCHDOG_PLIST_PATH"
+  grep -Fq "<string>/usr/bin:/bin:/usr/sbin:/sbin</string>" "$WATCHDOG_PLIST_PATH"
+  ! grep -Fq "/opt/homebrew/bin" "$WATCHDOG_PLIST_PATH"
+  ! grep -Fq "/usr/local/bin" "$WATCHDOG_PLIST_PATH"
   grep -Fq "<string>$WATCHDOG_BOOTSTRAP_PATH</string>" "$WATCHDOG_PLIST_PATH"
+  grep -Fq "<key>MACPROVIDER_LOG_DIR</key>" "$WATCHDOG_PLIST_PATH"
+  grep -Fq "<string>$HEADLESS_WATCHDOG_LOG_DIR</string>" "$WATCHDOG_PLIST_PATH"
+  grep -Fq "<key>MACPROVIDER_WATCHDOG_STATE_DIR</key>" "$WATCHDOG_PLIST_PATH"
+  grep -Fq "<string>$HEADLESS_WATCHDOG_STATE_DIR</string>" "$WATCHDOG_PLIST_PATH"
+  grep -Fq "<key>MACPROVIDER_LIFECYCLE_LEASE_PATH</key>" "$WATCHDOG_PLIST_PATH"
+  grep -Fq "<string>$LIFECYCLE_LEASE_PATH</string>" "$WATCHDOG_PLIST_PATH"
+  grep -Fq "<key>MACPROVIDER_LIFECYCLE_LEASE_OWNER_UID</key>" "$WATCHDOG_PLIST_PATH"
+  grep -Fq "<string>$(id -u)</string>" "$WATCHDOG_PLIST_PATH"
+  grep -Fq "valid_lifecycle_lease_record startup" "$WATCHDOG_PATH"
+  ! grep -Fq "lifecycle-lease status --expected-kind" "$WATCHDOG_PATH"
   ! grep -Fq "/usr/bin/sudo -n" "$WATCHDOG_PATH"
   REC_HEADLESS_USER="$HEADLESS_USER"
   REC_INSTALL_DIR="$INSTALL_DIR"
@@ -389,6 +408,49 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   REC_CONFIG_PATH="$CONFIG_PATH"
   validate_recovery_launchdaemon_plist \
     "$PLIST_PATH" "/Library/LaunchDaemons/live.malibu.provider.plist"
+  recovery_watchdog_plist="$CONFIG_DIR/launchd/recovery-watchdog.plist"
+  python3 - "$recovery_watchdog_plist" "$CONFIG_PATH" "$CONFIG_DIR/protected-credentials" <<PY
+import plistlib
+import sys
+
+path, config_path, credential_root = sys.argv[1:]
+payload = {
+    "Label": "live.malibu.provider-watchdog",
+    "ProgramArguments": ["/Library/Application Support/macprovider/macprovider-health-monitor"],
+    "EnvironmentVariables": {
+        "MACPROVIDER_CONFIG_PATH": config_path,
+        "MACPROVIDER_HEADLESS": "1",
+        "MACPROVIDER_HEADLESS_USER": "$(id -un)",
+        "MACPROVIDER_LAUNCHD_DOMAIN": "system",
+        "MACPROVIDER_PROTECTED_CREDENTIAL_ROOT": credential_root,
+    },
+}
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle)
+PY
+  validate_recovery_launchdaemon_plist \
+    "$recovery_watchdog_plist" "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist"
+  snapshot_recovery_launchdaemon_plist \
+    "$recovery_watchdog_plist" "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist" >/dev/null
+  python3 - "$recovery_watchdog_plist" "$HEADLESS_USER" <<PY
+import plistlib
+import sys
+
+path, user = sys.argv[1:]
+with open(path, "rb") as handle:
+    payload = plistlib.load(handle)
+payload["UserName"] = user
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle)
+PY
+  if (validate_recovery_launchdaemon_plist "$recovery_watchdog_plist" "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist"); then
+    echo "headless recovery unexpectedly accepted a non-root watchdog LaunchDaemon" >&2
+    exit 1
+  fi
+  if (snapshot_recovery_launchdaemon_plist "$recovery_watchdog_plist" "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist" >/dev/null); then
+    echo "headless recovery snapshot unexpectedly accepted a non-root watchdog LaunchDaemon" >&2
+    exit 1
+  fi
   write_install_manifest "1.2.3"
   grep -Fq "\"install_profile\": \"headless_fleet\"" "$MANIFEST_PATH"
   grep -Fq "\"launchd_domain\": \"system\"" "$MANIFEST_PATH"

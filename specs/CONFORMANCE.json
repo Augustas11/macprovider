@@ -741,7 +741,7 @@
     {
       "spec_id": "SPEC-026",
       "title": "Browserless Provider Onboarding (one-click Launch Provider)",
-      "version": "v0.27",
+      "version": "v0.28",
       "path": "specs/SPEC-026-browserless-provider-onboarding.md",
       "status": "draft",
       "owner": "@Augustas11",

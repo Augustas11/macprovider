@@ -35,6 +35,9 @@ names = {
     "acquire_install_lock",
     "recover_orphaned_install_transactions",
     "fsync_directory_path",
+    "publish_headless_recovery_trust",
+    "verify_headless_recovery_trust",
+    "retire_headless_recovery_trust",
 }
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 index = 0
@@ -67,6 +70,7 @@ run_lock_shell() {
     INSTALL_LOCK_TOKEN=""
     INSTALL_LOCK_HOLDER_PID=""
     DRY_RUN=0
+    HEADLESS=0
     log() { :; }
     die() { code="$1"; shift; printf "%s\n" "$*" >&2; exit "$code"; }
     source "$FUNCTION_PATH"

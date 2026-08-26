@@ -14,6 +14,8 @@ set -euo pipefail
 LABEL="${MACPROVIDER_WATCHDOG_LABEL:-live.malibu.provider}"
 CONFIG_PATH="${MACPROVIDER_CONFIG_PATH:-$HOME/.config/macprovider/config.yaml}"
 BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
+LIFECYCLE_LEASE_PATH="${MACPROVIDER_LIFECYCLE_LEASE_PATH:-$HOME/Library/Application Support/macprovider/lifecycle/lease.json}"
+LIFECYCLE_LEASE_OWNER_UID="${MACPROVIDER_LIFECYCLE_LEASE_OWNER_UID:-$(id -u)}"
 COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.malibu.tech}"
 COORDINATOR_PORT="${MACPROVIDER_COORDINATOR_PORT:-443}"
 LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
@@ -215,19 +217,229 @@ PY
 
 valid_lifecycle_lease() {
   provider_pid="$1"
-  [ -x "$BINARY_PATH" ] || return 1
-  if "$BINARY_PATH" lifecycle-lease status --expected-kind startup --expected-pid "$provider_pid" >/dev/null 2>&1; then
+  if valid_lifecycle_lease_record startup "$provider_pid"; then
     return 0
   fi
-  "$BINARY_PATH" lifecycle-lease status --expected-kind maintenance >/dev/null 2>&1
+  valid_lifecycle_lease_record maintenance ""
 }
 
 valid_unbound_lifecycle_lease() {
-  [ -x "$BINARY_PATH" ] || return 1
-  if "$BINARY_PATH" lifecycle-lease status --expected-kind startup >/dev/null 2>&1; then
+  if valid_lifecycle_lease_record startup ""; then
     return 0
   fi
-  "$BINARY_PATH" lifecycle-lease status --expected-kind maintenance >/dev/null 2>&1
+  valid_lifecycle_lease_record maintenance ""
+}
+
+valid_lifecycle_lease_record() {
+  expected_kind="$1"
+  expected_pid="${2:-}"
+  boot_id="$(current_boot_id || true)"
+  [ -n "$boot_id" ] || return 1
+  /usr/bin/python3 - \
+    "$LIFECYCLE_LEASE_PATH" \
+    "$LIFECYCLE_LEASE_OWNER_UID" \
+    "$boot_id" \
+    "$expected_kind" \
+    "$expected_pid" \
+    "$BINARY_PATH" <<'PY'
+import ctypes
+import json
+import os
+import stat
+import sys
+import time
+
+def current_monotonic_ns():
+    if hasattr(time, "clock_gettime_ns") and hasattr(time, "CLOCK_MONOTONIC_RAW"):
+        return time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+    sys.exit(1)
+
+class ProcBsdInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("pbi_e_tdev", ctypes.c_uint32),
+        ("pbi_e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+def live_process_identity(pid):
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+        proc_pidinfo = libproc.proc_pidinfo
+        proc_pidinfo.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        proc_pidinfo.restype = ctypes.c_int
+        info = ProcBsdInfo()
+        count = proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
+        path_buffer = ctypes.create_string_buffer(4096)
+        proc_pidpath = libproc.proc_pidpath
+        proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        proc_pidpath.restype = ctypes.c_int
+        path_count = proc_pidpath(pid, path_buffer, ctypes.sizeof(path_buffer))
+    except Exception:
+        return None
+    if count != ctypes.sizeof(info) or path_count <= 0:
+        return None
+    start = int(info.pbi_start_tvsec) * 1_000_000 + int(info.pbi_start_tvusec)
+    if start <= 0:
+        return None
+    executable_path = path_buffer.value.decode("utf-8", "surrogateescape")
+    if not executable_path.startswith("/"):
+        return None
+    return {
+        "start_us": start,
+        "uid": int(info.pbi_uid),
+        "ruid": int(info.pbi_ruid),
+        "executable_path": os.path.realpath(executable_path),
+    }
+
+path, owner_uid_text, boot_id, expected_kind, expected_pid_text, binary_path = sys.argv[1:]
+try:
+    owner_uid = int(owner_uid_text)
+except ValueError:
+    sys.exit(1)
+try:
+    expected_pid = int(expected_pid_text) if expected_pid_text else None
+except ValueError:
+    sys.exit(1)
+
+try:
+    st = os.lstat(path)
+    if (
+        not stat.S_ISREG(st.st_mode)
+        or stat.S_ISLNK(st.st_mode)
+        or st.st_uid != owner_uid
+        or st.st_nlink != 1
+        or stat.S_IMODE(st.st_mode) != 0o600
+        or st.st_size <= 0
+        or st.st_size > 16 * 1024
+    ):
+        sys.exit(1)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+except OSError:
+    sys.exit(1)
+
+try:
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != owner_uid
+        or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino)
+        or opened.st_size != st.st_size
+    ):
+        sys.exit(1)
+    data = os.read(fd, 16 * 1024 + 1)
+finally:
+    os.close(fd)
+
+if len(data) != st.st_size or len(data) > 16 * 1024:
+    sys.exit(1)
+try:
+    record = json.loads(data.decode("utf-8"))
+except Exception:
+    sys.exit(1)
+if not isinstance(record, dict):
+    sys.exit(1)
+
+kind = record.get("kind")
+if kind != expected_kind or kind not in {"startup", "maintenance"}:
+    sys.exit(1)
+owner = record.get("owner")
+if not isinstance(owner, dict):
+    sys.exit(1)
+owner_pid = owner.get("pid")
+owner_start = owner.get("process_start_us")
+owner_boot = owner.get("boot_session")
+if (
+    record.get("version") != 1
+    or not isinstance(owner_pid, int)
+    or isinstance(owner_pid, bool)
+    or owner_pid <= 0
+    or not isinstance(owner_start, int)
+    or isinstance(owner_start, bool)
+    or owner_start <= 0
+    or not isinstance(owner_boot, str)
+    or not owner_boot
+    or len(owner_boot.encode("utf-8")) > 256
+    or owner_boot != boot_id
+):
+    sys.exit(1)
+if expected_pid is not None and owner_pid != expected_pid:
+    sys.exit(1)
+try:
+    os.kill(owner_pid, 0)
+except OSError:
+    sys.exit(1)
+identity = live_process_identity(owner_pid)
+if (
+    identity is None
+    or identity.get("start_us") != owner_start
+    or identity.get("uid") != owner_uid
+    or identity.get("ruid") != owner_uid
+    or identity.get("executable_path") != os.path.realpath(binary_path)
+):
+    sys.exit(1)
+
+maximum_ms = 30 * 60 * 1000 if kind == "startup" else 20 * 60 * 1000
+fields = (
+    "issued_wall_ms",
+    "expires_wall_ms",
+    "issued_monotonic_ns",
+    "expires_monotonic_ns",
+)
+values = {}
+for field in fields:
+    value = record.get(field)
+    if not isinstance(value, int) or isinstance(value, bool):
+        sys.exit(1)
+    values[field] = value
+wall_duration = values["expires_wall_ms"] - values["issued_wall_ms"]
+monotonic_duration = values["expires_monotonic_ns"] - values["issued_monotonic_ns"]
+if (
+    values["issued_wall_ms"] <= 0
+    or values["issued_monotonic_ns"] < 0
+    or wall_duration <= 0
+    or wall_duration > maximum_ms
+    or monotonic_duration != wall_duration * 1_000_000
+):
+    sys.exit(1)
+now_wall_ms = int(time.time() * 1000)
+now_monotonic_ns = current_monotonic_ns()
+if (
+    now_wall_ms < values["issued_wall_ms"]
+    or now_monotonic_ns < values["issued_monotonic_ns"]
+    or now_wall_ms >= values["expires_wall_ms"]
+    or now_monotonic_ns >= values["expires_monotonic_ns"]
+):
+    sys.exit(1)
+sys.exit(0)
+PY
 }
 
 provider_restart_cooldown_active() {

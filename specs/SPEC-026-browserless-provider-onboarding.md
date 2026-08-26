@@ -1,6 +1,15 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.27 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.28 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.28 (2026-08-26, headless root watchdog custody boundary).**
+`headless_fleet` keeps provider execution and all provider credentials bound to
+the selected non-root fleet account, but the companion watchdog is explicitly a
+root system-domain observer so it can inspect and kickstart
+`system/live.malibu.provider` without depending on a transient SSH sudo
+credential. The watchdog MUST NOT hold provider credentials and MUST keep its
+own log/state writes under system-owned support roots, not inside the fleet
+user's home.
 
 **Change log v0.27 (2026-08-25, SSH-only headless fleet mode).** The existing
 `macprovider-cli` gains an explicit `headless_fleet` install profile for Macs
@@ -1159,14 +1168,23 @@ ordinary installation.
 `system/live.malibu.provider` and
 `system/live.malibu.provider-watchdog`, and record `launchd_domain:"system"` in
 the install manifest. Both plists MUST be regular root-owned files, mode `0644`,
-not symlinks, and MUST name the selected non-root fleet account in `UserName`.
-The provider job MUST use `RunAtLoad:true` and
+and not symlinks. The provider plist MUST name the selected non-root fleet
+account in `UserName`; the watchdog plist MUST NOT name `UserName`, because it
+runs as root to address the `system/<label>` provider service without relying on
+SSH-session sudo freshness. The provider job MUST use `RunAtLoad:true` and
 `KeepAlive:true`; it MUST start at boot before any GUI login and MUST not depend
 on a user bootstrap namespace, `SMAppService`, an Aqua session, or an unlocked
 login Keychain. It may use that fleet account's home-backed config and state
 roots. The watchdog MUST target the same system-domain provider identity for
 health observation and explicit operator recovery, but SPEC-020 v0.1.12 does not
-make it a headless autoupdate rollback authority.
+make it a headless autoupdate rollback authority. The watchdog MUST receive the
+fleet user's provider config path and protected credential root only as
+read-only environment inputs; it MUST NOT receive provider token bytes, Keychain
+credentials, admission private key material, or receipt private key material.
+Its own writable log and liveness state roots MUST be system-owned paths such as
+`/Library/Logs/macprovider` and
+`/Library/Application Support/macprovider/watchdog-state`, never the fleet
+user's home-backed log/state directories.
 
 Install, repair, restart, and status commands for this profile MUST address the
 exact `system/<label>` services. They MUST treat timeout or an unknown
@@ -3261,7 +3279,9 @@ criteria in §5.2 by 25%.
   `headless_fleet`, complete bootstrap over SSH, disconnect SSH, and observe the
   provider reach `network_state:"buyer_serving"`. No App bundle, App login item,
   GUI prompt, user LaunchAgent, browser, or login Keychain is required or
-  created; config and state may live under the selected fleet user's home.
+  created; provider config and provider-owned state may live under the selected
+  fleet user's home, while the root watchdog's own log/state files live under
+  system-owned support roots.
 - **AC-026-18 — reboot and routine restart.** From a buyer-serving headless
   provider, a full reboot with no GUI login causes
   `system/live.malibu.provider` to start, load the same bearer and receipt/
@@ -3281,6 +3301,13 @@ criteria in §5.2 by 25%.
   matching label never satisfies a system-domain loaded/running check. Existing
   Malibu onboarding continues to use the same per-user config, CLI Keychain
   services, provider/watchdog LaunchAgents, and `SMAppService` login item.
+- **AC-026-20a — root watchdog containment.** Headless acceptance proves the
+  provider LaunchDaemon names the selected fleet account in `UserName`, the
+  watchdog LaunchDaemon omits `UserName`, its `ProgramArguments` point at the
+  root-owned watchdog executable under `/Library/Application Support/macprovider`,
+  its `MACPROVIDER_LOG_DIR` and `MACPROVIDER_WATCHDOG_STATE_DIR` point at
+  system-owned roots, and no provider credential values are present in the
+  watchdog plist or environment.
 - **AC-026-21 — status and recovery.** Golden JSON tests cover both credential
   sources (`keychain` and `protected_file`), migration-pending states, and
   manual recovery. They prove backend mismatches fail closed and that JSON and
