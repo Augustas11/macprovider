@@ -70,6 +70,7 @@ EOF
     CONFIG_PATH="$CASE_ROOT/config/config.yaml"
     DRY_RUN=0
     SKIP_PROVIDER_START=0
+    HEADLESS=0
     model="seed"
     REFERRAL_CODE_SOURCE_FILE=""
     case "$CASE_MODE" in
@@ -102,6 +103,10 @@ EOF
             [ "$CASE_MODE" = "existing-referral-import" ] || return 12
             : > "$CASE_ROOT/credential"
             return 0
+          fi
+          if [ "$2" = "config-token-status" ]; then
+            grep -F "provider_token:" "$CONFIG_PATH" >/dev/null
+            return $?
           fi
           [ "$2" = "verify" ] || return 12
           [ "$CASE_MODE" != "store-unavailable" ] || return 17

@@ -155,6 +155,9 @@ app="$app_work/Malibu.app"
 [[ -d "$app/Contents/MacOS" && -d "$app/Contents/Resources" ]] || die "Malibu.app structure is invalid"
 
 python3 "$metadata" validate-provider-payload --directory "$cli_work"
+CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \
+  python3 "$root/scripts/catalog-release.py" verify-directory \
+    --directory "$cli_work/catalog-release"
 python3 "$compatibility" validate \
   --input "$cli_work/compatibility-set.json" \
   --payload-directory "$cli_work" \

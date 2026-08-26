@@ -1,6 +1,26 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.26 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.28 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.28 (2026-08-26, headless root watchdog custody boundary).**
+`headless_fleet` keeps provider execution and all provider credentials bound to
+the selected non-root fleet account, but the companion watchdog is explicitly a
+root system-domain observer so it can inspect and kickstart
+`system/live.malibu.provider` without depending on a transient SSH sudo
+credential. The watchdog MUST NOT hold provider credentials and MUST keep its
+own log/state writes under system-owned support roots, not inside the fleet
+user's home.
+
+**Change log v0.27 (2026-08-25, SSH-only headless fleet mode).** The existing
+`macprovider-cli` gains an explicit `headless_fleet` install profile for Macs
+administered only through SSH. It runs in the launchd system domain without an
+Aqua login session, keeps the provider bearer and receipt/admission private keys
+in a protected-file store owned by the selected non-root fleet user, and exposes
+redacted credential/backend readiness through the existing local status
+surfaces. The profile is mutually exclusive with the existing per-user App/CLI
+installation. The consumer `Malibu.app` path remains the unchanged
+`consumer_user` profile with Keychain custody, LaunchAgents, and the App login
+item.
 
 **Change log v0.26 (2026-07-18, required early referral intake).** A fresh
 private-prebeta install obtains its referral before release discovery,
@@ -1118,6 +1138,126 @@ and without entering a wallet address unless they want to.
   promises "One line in your terminal. … Your Mac picks up jobs
   whenever it's idle and online." This spec makes the App track
   deliver on that promise without the terminal step.
+
+### 2.1 SSH-only headless fleet profile
+
+The existing `macprovider-cli` MUST support two explicit, mutually exclusive
+macOS installation profiles:
+
+| `install_profile` | Runtime domain | Secret custody | Intended operator |
+|---|---|---|---|
+| `consumer_user` | `gui/<uid>` LaunchAgents plus the Malibu App login item | Existing CLI Keychain services described in §3 and SPEC-025 §7 | A signed-in consumer using Malibu or the per-user CLI |
+| `headless_fleet` | `system` LaunchDaemons; no App or login item | Protected regular files under the selected fleet user's private config root | An administrator operating the existing CLI over SSH as a named non-root fleet user |
+
+The default remains `consumer_user`. Selecting `headless_fleet` MUST require an
+explicit noninteractive installer or CLI option such as `MACPROVIDER_HEADLESS=1`;
+environment inference, absence of a GUI session, and execution under `sudo` MUST
+NOT silently select it. The installer MUST bind the profile to a named non-root
+fleet account (`MACPROVIDER_HEADLESS_USER` or the invoking non-root SSH account)
+and MUST fail closed rather than install root-owned provider credentials. A
+provider service already installed in the other profile is a profile conflict;
+migration between profiles is a separate explicit transaction. Copying
+credential bytes between stores or adopting a running principal is not part of
+ordinary installation.
+
+#### 2.1.1 System-domain lifecycle
+
+`headless_fleet` MUST install the canonical provider and rollback observer as
+`/Library/LaunchDaemons/live.malibu.provider.plist` and
+`/Library/LaunchDaemons/live.malibu.provider-watchdog.plist`, bootstrap them as
+`system/live.malibu.provider` and
+`system/live.malibu.provider-watchdog`, and record `launchd_domain:"system"` in
+the install manifest. Both plists MUST be regular root-owned files, mode `0644`,
+and not symlinks. The provider plist MUST name the selected non-root fleet
+account in `UserName`; the watchdog plist MUST NOT name `UserName`, because it
+runs as root to address the `system/<label>` provider service without relying on
+SSH-session sudo freshness. The provider job MUST use `RunAtLoad:true` and
+`KeepAlive:true`; it MUST start at boot before any GUI login and MUST not depend
+on a user bootstrap namespace, `SMAppService`, an Aqua session, or an unlocked
+login Keychain. It may use that fleet account's home-backed config and state
+roots. The watchdog MUST target the same system-domain provider identity for
+health observation and explicit operator recovery, but SPEC-020 v0.1.12 does not
+make it a headless autoupdate rollback authority. The watchdog MUST receive the
+fleet user's provider config path and protected credential root only as
+read-only environment inputs; it MUST NOT receive provider token bytes, Keychain
+credentials, admission private key material, or receipt private key material.
+Its own writable log and liveness state roots MUST be system-owned paths such as
+`/Library/Logs/macprovider` and
+`/Library/Application Support/macprovider/watchdog-state`, never the fleet
+user's home-backed log/state directories.
+
+Install, repair, restart, and status commands for this profile MUST address the
+exact `system/<label>` services. They MUST treat timeout or an unknown
+`launchctl print` result as indeterminate and fail closed; a user-domain job
+with the same label is never evidence that the system service is loaded.
+Headless uninstall is reserved until the CLI implements system-domain stop and
+absence proof; until then, any manifest or local evidence for
+`install_profile:"headless_fleet"` or `launchd_domain:"system"` MUST fail
+closed instead of falling back to the consumer uninstall path.
+Routine provider exits are recovered by the provider LaunchDaemon's `KeepAlive`.
+System-domain update and rollback semantics remain reserved by SPEC-020 R-4.13
+until a future implementation and acceptance journey land.
+
+#### 2.1.2 Protected-file credential custody
+
+The default headless credential root is
+`$FLEET_HOME/.config/macprovider/protected-credentials`, where `$FLEET_HOME`
+is the selected non-root fleet user's home. It and every ancestor created by the
+installer MUST be a local-filesystem directory owned by that fleet user,
+mode `0700`, with no group/world write, non-owner write ACL, symlink, or
+unexpected mount transition. The following logical private items MUST be stored
+as separate regular files owned by that account and mode `0600`:
+
+- `provider-token.v1`: the provider bearer;
+- `receipt-key.current` and optional bounded `receipt-key.previous`;
+- `admission-identity.current`, optional `admission-identity.pending`, and
+  optional bounded `admission-identity.previous`.
+
+The bearer file is physically named `provider-token.v1` under the provider's
+protected bearer namespace. Receipt and admission identity files MAY use a
+provider-scoped, deterministic digest of the corresponding CLI Keychain service
+name as their physical basename, provided the implementation keeps the logical
+item mapping stable, non-secret, and covered by the same mode/owner/durability
+rules.
+
+These items replace only the corresponding CLI Keychain items while
+`install_profile == "headless_fleet"`; provider ID binding, key generations,
+rotation authorization, previous-key grace, receipt signing, and admission
+proof semantics remain unchanged. Secret bytes MUST NOT appear in the plist,
+environment, argv, install manifest, status, logs, crash reports, or shell
+history. If an existing config YAML contains a top-level `provider_token` as
+migration input, headless bootstrap MUST import and fresh-process-verify it into
+protected-file custody, then scrub that line before enabling LaunchDaemons.
+Each read MUST reject symlinks, non-regular files, unexpected
+hard links, wrong owner or mode, and metadata changes between validation and
+open. Creation and rotation MUST use same-directory exclusive temporary files,
+mode `0600` before writing, durable file and parent-directory sync, then atomic
+rename. A partial write, failed sync, ownership failure, or failed post-write
+fresh-process verification MUST leave the previous complete credential set
+authoritative and report a typed failure; it MUST NOT delete or truncate the
+last usable bearer or key generation.
+
+Bootstrap MUST durably store the receipt/admission identity before contacting
+the coordinator and MUST fresh-process-verify the bearer in protected-file
+custody before enabling the LaunchDaemons. On restart or reboot, and before
+coordinator admission or receipt-bearing buyer serving, the CLI MUST load all
+required private items. A missing, unreadable, malformed, owner/mode-invalid, or
+generation-inconsistent item MUST stop admission and buyer serving, preserve
+every remaining item, and surface redacted blocked status; it MUST NOT mint a
+replacement principal for an established protected-file provider, fall back to
+tokenless admission, or silently switch to Keychain.
+
+#### 2.1.3 Headless status contract
+
+Headless mode MUST reuse the existing redacted credential status contract. A
+headless provider reports `credential.source:"protected_file"` once the bearer
+is held only in protected-file custody, `restart_safe:true` after a fresh
+process proves that source, and the existing `migration_pending` /
+`recovery_action` fields for blocked or repairable states. Status MUST NOT
+return credential paths, home directories, hostnames, hardware identifiers,
+bearer material, private/public key bytes, or unbounded filesystem errors.
+Future profile-specific service/process fields may be added only as redacted,
+non-secret extensions; they are not required for v0.27 conformance.
 
 ## 3. Identity model — CLI-owned generation-CAS admission identity
 
@@ -3134,6 +3274,45 @@ criteria in §5.2 by 25%.
     the row's `token_hash`) AND cooldown-clock permits →
     coordinator revokes the prior row (`revoked_at = NOW()`)
     and mints a fresh token; response carries the new bearer.
+- **AC-026-17 — SSH-only install.** On a freshly provisioned Apple Silicon Mac
+  with no interactive user logged in, an administrator can select
+  `headless_fleet`, complete bootstrap over SSH, disconnect SSH, and observe the
+  provider reach `network_state:"buyer_serving"`. No App bundle, App login item,
+  GUI prompt, user LaunchAgent, browser, or login Keychain is required or
+  created; provider config and provider-owned state may live under the selected
+  fleet user's home, while the root watchdog's own log/state files live under
+  system-owned support roots.
+- **AC-026-18 — reboot and routine restart.** From a buyer-serving headless
+  provider, a full reboot with no GUI login causes
+  `system/live.malibu.provider` to start, load the same bearer and receipt/
+  admission identities, preserve `provider_id`, and return to buyer serving.
+  Killing the CLI process exercises LaunchDaemon `KeepAlive` and reaches the
+  same result without invoking the watchdog as the routine supervisor.
+- **AC-026-19 — custody fail closed.** For each required protected credential,
+  tests cover missing file, symlink, directory substitution, wrong owner, mode
+  broader than `0600`, unexpected hard link, malformed bytes, interrupted
+  atomic replacement, and admission-generation mismatch. Every case blocks
+  coordinator admission and buyer serving, emits only the typed redacted status
+  in §2.1.3, preserves the last complete credential generation, and neither
+  self-mints a replacement identity nor falls back to Keychain/tokenless auth.
+- **AC-026-20 — profile isolation.** Installation fails before credential or
+  launchd mutation when a live or installed `consumer_user` provider conflicts
+  with requested `headless_fleet`, and vice versa. A user-domain service with a
+  matching label never satisfies a system-domain loaded/running check. Existing
+  Malibu onboarding continues to use the same per-user config, CLI Keychain
+  services, provider/watchdog LaunchAgents, and `SMAppService` login item.
+- **AC-026-20a — root watchdog containment.** Headless acceptance proves the
+  provider LaunchDaemon names the selected fleet account in `UserName`, the
+  watchdog LaunchDaemon omits `UserName`, its `ProgramArguments` point at the
+  root-owned watchdog executable under `/Library/Application Support/macprovider`,
+  its `MACPROVIDER_LOG_DIR` and `MACPROVIDER_WATCHDOG_STATE_DIR` point at
+  system-owned roots, and no provider credential values are present in the
+  watchdog plist or environment.
+- **AC-026-21 — status and recovery.** Golden JSON tests cover both credential
+  sources (`keychain` and `protected_file`), migration-pending states, and
+  manual recovery. They prove backend mismatches fail closed and that JSON and
+  human-readable status contain no credential values or paths, home directories,
+  hostnames, hardware identifiers, key bytes, or raw errors.
 
 ## 13. Open questions
 

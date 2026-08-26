@@ -409,6 +409,30 @@ final class ServeCommandTests: XCTestCase {
         XCTAssertEqual(config.providerToken, "file-token")
     }
 
+    func testConfigLoaderReadsCredentialStoreFromYAMLEnvironmentAndCLI() throws {
+        let dir = try tempDir()
+        let configURL = dir.appendingPathComponent("config.yaml")
+        try "credential_store: keychain\n".write(to: configURL, atomically: true, encoding: .utf8)
+
+        let fromYAML = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: configURL.path),
+            environment: [:]
+        )
+        XCTAssertEqual(fromYAML.credentialStore, .keychain)
+
+        let fromEnvironment = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: configURL.path),
+            environment: ["MACPROVIDER_CREDENTIAL_STORE": "protected_file"]
+        )
+        XCTAssertEqual(fromEnvironment.credentialStore, .protectedFile)
+
+        let fromCLI = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: configURL.path, credentialStore: "keychain"),
+            environment: ["MACPROVIDER_CREDENTIAL_STORE": "protected_file"]
+        )
+        XCTAssertEqual(fromCLI.credentialStore, .keychain)
+    }
+
     func testConfigLoaderRejectsWorldReadableProviderTokenFile() throws {
         let dir = try tempDir()
         let tokenFile = dir.appendingPathComponent("token")
@@ -848,6 +872,44 @@ final class ServeCommandTests: XCTestCase {
 
         XCTAssertNotNil(try store.loadCurrent(providerId: "provider-a"))
         XCTAssertNotNil(builder)
+    }
+
+    func testProtectedFileReceiptRuntimeFailsClosedWhenCurrentKeyIsMissing() throws {
+        var config = AppConfig.defaults()
+        config.enableReceipts = true
+        config.providerID = "provider-a"
+        config.credentialStore = .protectedFile
+        let store = InMemoryReceiptKeyStore()
+
+        XCTAssertThrowsError(try ServeCommand.makeReceiptRuntime(config: config, keyStore: store)) { error in
+            XCTAssertEqual(error as? ReceiptKeyStoreError, .missingCurrentKey(providerId: "provider-a"))
+        }
+    }
+
+    func testProtectedFileAdmissionIdentityServeFailsClosedWhenCurrentKeyIsMissing() throws {
+        var config = AppConfig.defaults()
+        config.providerID = "provider-a"
+        config.credentialStore = .protectedFile
+
+        XCTAssertThrowsError(try ServeCommand.validateProtectedFileAdmissionIdentityForServe(
+            config: config,
+            providerID: "provider-a",
+            recoveryMarker: nil
+        )) { error in
+            XCTAssertEqual(error as? ReceiptKeyStoreError, .missingAdmissionIdentity(providerId: "provider-a"))
+        }
+
+        XCTAssertNoThrow(try ServeCommand.validateProtectedFileAdmissionIdentityForServe(
+            config: config,
+            providerID: "provider-a",
+            recoveryMarker: Data([1, 2, 3])
+        ))
+        config.credentialStore = .keychain
+        XCTAssertNoThrow(try ServeCommand.validateProtectedFileAdmissionIdentityForServe(
+            config: config,
+            providerID: "provider-a",
+            recoveryMarker: nil
+        ))
     }
 
     func testReceiptRuntimePublishesCurrentKeyPublicBytes() throws {

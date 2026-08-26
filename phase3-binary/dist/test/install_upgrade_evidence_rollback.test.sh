@@ -53,9 +53,14 @@ names = {
     "transaction_directory_or_absent", "transaction_binary_or_absent",
     "validate_transaction_path_kinds", "validate_transaction_filesystems", "install_tx_path_matches",
     "stage_install_tx_symlink", "stage_install_tx_path", "stage_install_tx_plist",
-    "stage_lifecycle_snapshot",
+    "stage_lifecycle_snapshot", "record_lifecycle_state",
     "secure_private_directory", "write_atomic_install_file", "write_install_tx_marker",
     "fsync_directory_path",
+    "launchctl_service", "validate_headless_launchdaemon_plist", "snapshot_headless_launchdaemon_plist",
+    "publish_root_file_from_base64", "verify_published_launchd_payload",
+    "publish_launchd_plist", "verify_published_launchd_plist",
+    "publish_headless_recovery_trust", "verify_headless_recovery_trust",
+    "retire_headless_recovery_trust",
     "write_install_recovery_artifacts", "begin_install_transaction",
     "mark_install_cutover_started", "discard_install_transaction_before_cutover",
     "rollback_install_transaction", "commit_install_transaction",
@@ -89,6 +94,13 @@ printf '%s\n' 'LEGACY_PLIST_PATH="${LEGACY_PLIST_PATH:-$HOME/Library/LaunchAgent
 printf '%s\n' 'WATCHDOG_LABEL="${WATCHDOG_LABEL:-live.malibu.provider-watchdog}"' >> "$TMP/functions.sh"
 printf '%s\n' 'LEGACY_WATCHDOG_LABEL="${LEGACY_WATCHDOG_LABEL:-live.streamvc.macprovider-watchdog}"' >> "$TMP/functions.sh"
 printf '%s\n' 'LEGACY_WATCHDOG_PLIST_PATH="${LEGACY_WATCHDOG_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist}"' >> "$TMP/functions.sh"
+printf '%s\n' 'HEADLESS="${HEADLESS:-0}"' >> "$TMP/functions.sh"
+printf '%s\n' 'HEADLESS_USER="${HEADLESS_USER:-}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-gui/$UID}"' >> "$TMP/functions.sh"
+printf '%s\n' 'PLIST_BOOTSTRAP_PATH="${PLIST_BOOTSTRAP_PATH:-${PLIST_PATH:-}}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_PLIST_BOOTSTRAP_PATH="${LEGACY_PLIST_BOOTSTRAP_PATH:-${LEGACY_PLIST_PATH:-}}"' >> "$TMP/functions.sh"
+printf '%s\n' 'WATCHDOG_PLIST_BOOTSTRAP_PATH="${WATCHDOG_PLIST_BOOTSTRAP_PATH:-${WATCHDOG_PLIST_PATH:-}}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH="${LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH:-${LEGACY_WATCHDOG_PLIST_PATH:-}}"' >> "$TMP/functions.sh"
 
 # Emit a FULL-schema lifecycle-state record matching the real store's
 # JSONEncoder(.sortedKeys) output (compact, alphabetically sorted keys). This is

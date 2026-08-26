@@ -1,4 +1,5 @@
 import ArgumentParser
+import Darwin
 import LocalAuthentication
 import MacProviderCore
 import Security
@@ -6,6 +7,161 @@ import XCTest
 @testable import macprovider_cli
 
 final class ProviderCredentialStoreTests: XCTestCase {
+    func testProtectedFileCredentialSurvivesFreshStoreAndReportsProtectedSource() throws {
+        let root = temporaryCredentialRoot("provider-restart")
+        defer { removeTemporaryRoot(root) }
+        let firstStore = ProtectedFileProviderCredentialStore(rootDirectory: root)
+
+        try firstStore.importIfAbsentOrMatches(providerID: "provider-a", token: "fleet-token")
+
+        let freshStore = ProtectedFileProviderCredentialStore(rootDirectory: root)
+        XCTAssertEqual(try freshStore.load(providerID: "provider-a"), "fleet-token")
+        var config = AppConfig.defaults(configPath: root.deletingLastPathComponent().appendingPathComponent("config.yaml").path)
+        config.providerID = "provider-a"
+        let status = try ProviderCredentialResolver.resolve(
+            config: &config,
+            store: freshStore,
+            authoritativeSource: .protectedFile
+        )
+        XCTAssertEqual(status.source, .protectedFile)
+        XCTAssertEqual(status.state, .ready)
+        XCTAssertTrue(status.restartSafe)
+    }
+
+    func testProtectedFileCredentialPreservesImportAndReplaceSemantics() throws {
+        let root = temporaryCredentialRoot("provider-semantics")
+        defer { removeTemporaryRoot(root) }
+        let store = ProtectedFileProviderCredentialStore(rootDirectory: root)
+
+        try store.importIfAbsentOrMatches(providerID: "provider-a", token: "first-token")
+        XCTAssertNoThrow(try store.importIfAbsentOrMatches(providerID: "provider-a", token: "first-token"))
+        XCTAssertThrowsError(
+            try store.importIfAbsentOrMatches(providerID: "provider-a", token: "conflicting-token")
+        ) { error in
+            XCTAssertEqual(error as? ProviderCredentialStoreError, .conflict(providerID: "provider-a"))
+        }
+
+        try store.replace(providerID: "provider-a", token: "rotated-token")
+        XCTAssertEqual(try store.load(providerID: "provider-a"), "rotated-token")
+    }
+
+    func testProtectedFileCredentialUsesOwnerOnlyDirectoriesAndFile() throws {
+        let root = temporaryCredentialRoot("provider-permissions")
+        defer { removeTemporaryRoot(root) }
+        let store = ProtectedFileProviderCredentialStore(rootDirectory: root)
+        try store.replace(providerID: "provider-a", token: "fleet-token")
+
+        let tokenURL = store.tokenURL(providerID: "provider-a")
+        XCTAssertEqual(tokenURL.lastPathComponent, "provider-token.v1")
+        try assertPOSIXMode(root, type: S_IFDIR, mode: 0o700)
+        try assertPOSIXMode(root.appendingPathComponent("provider-bearers"), type: S_IFDIR, mode: 0o700)
+        try assertPOSIXMode(tokenURL.deletingLastPathComponent(), type: S_IFDIR, mode: 0o700)
+        try assertPOSIXMode(tokenURL, type: S_IFREG, mode: 0o600, expectedLinkCount: 1)
+        try assertNoExtendedACL(tokenURL)
+
+        let entries = try FileManager.default.contentsOfDirectory(atPath: tokenURL.deletingLastPathComponent().path)
+        XCTAssertFalse(entries.contains(where: { $0.contains(".tmp-") }))
+    }
+
+    func testProtectedFileCredentialRejectsSymlinkAndHardLinkCustody() throws {
+        let root = temporaryCredentialRoot("provider-links")
+        defer { removeTemporaryRoot(root) }
+        let store = ProtectedFileProviderCredentialStore(rootDirectory: root)
+        try store.replace(providerID: "provider-a", token: "fleet-token")
+        let tokenURL = store.tokenURL(providerID: "provider-a")
+        let hardLink = tokenURL.deletingLastPathComponent().appendingPathComponent("token-hardlink")
+        try FileManager.default.linkItem(at: tokenURL, to: hardLink)
+
+        XCTAssertThrowsError(try store.load(providerID: "provider-a")) { error in
+            guard case ProtectedFileCredentialCustodyError.unsafe(_, let reason) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(reason, "hard link")
+        }
+
+        try FileManager.default.removeItem(at: hardLink)
+        try FileManager.default.removeItem(at: tokenURL)
+        let target = root.deletingLastPathComponent().appendingPathComponent("outside-token")
+        try Data("outside-token".utf8).write(to: target)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+        try FileManager.default.createSymbolicLink(at: tokenURL, withDestinationURL: target)
+
+        XCTAssertThrowsError(try store.load(providerID: "provider-a")) { error in
+            guard case ProtectedFileCredentialCustodyError.unsafe(_, let reason) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(reason, "symlink")
+        }
+    }
+
+    func testProtectedFileCredentialRejectsSymlinkAncestor() throws {
+        let base = temporaryCredentialRoot("provider-symlink-ancestor").deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let real = base.appendingPathComponent("real", isDirectory: true)
+        let link = base.appendingPathComponent("link", isDirectory: true)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        let root = link.appendingPathComponent("protected-credentials", isDirectory: true)
+        let store = ProtectedFileProviderCredentialStore(rootDirectory: root)
+
+        XCTAssertThrowsError(try store.replace(providerID: "provider-a", token: "fleet-token")) { error in
+            guard case ProtectedFileCredentialCustodyError.unsafe(_, let reason) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(reason, "ancestor is a symlink")
+        }
+    }
+
+    func testCredentialStoreFactoryKeepsKeychainDefaultAndSelectsProtectedFileExplicitly() {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider/config.yaml")
+        XCTAssertEqual(ProviderCredentialStoreFactory.credentialSource(for: config), .cliKeychain)
+        XCTAssertTrue(ProviderCredentialStoreFactory.providerStore(for: config) is KeychainProviderCredentialStore)
+
+        config.credentialStore = .protectedFile
+        XCTAssertEqual(ProviderCredentialStoreFactory.credentialSource(for: config), .protectedFile)
+        XCTAssertTrue(ProviderCredentialStoreFactory.providerStore(for: config) is ProtectedFileProviderCredentialStore)
+    }
+
+    func testProtectedFileFailureDoesNotFallBackToLayeredCredential() throws {
+        let store = InMemoryProviderCredentialStore(loadError: TestCredentialStoreError.unavailable)
+        var config = AppConfig.defaults(configPath: "/tmp/config.yaml")
+        config.providerID = "provider-a"
+        config.providerToken = "layered-token"
+
+        let status = try ProviderCredentialResolver.resolve(
+            config: &config,
+            store: store,
+            authoritativeSource: .protectedFile
+        )
+
+        XCTAssertNil(config.providerToken)
+        XCTAssertEqual(status.source, .protectedFile)
+        XCTAssertEqual(status.state, .unavailable)
+        XCTAssertFalse(status.restartSafe)
+        XCTAssertEqual(status.recoveryAction, .retry)
+    }
+
+    func testProtectedFileResolverDoesNotRebuildMissingCredentialFromLayeredConfig() throws {
+        let store = InMemoryProviderCredentialStore()
+        var config = AppConfig.defaults(configPath: "/tmp/config.yaml")
+        config.providerID = "provider-a"
+        config.providerToken = "layered-token"
+        config.credentialStore = .protectedFile
+
+        let status = try ProviderCredentialResolver.resolve(
+            config: &config,
+            store: store,
+            authoritativeSource: .protectedFile
+        )
+
+        XCTAssertNil(config.providerToken)
+        XCTAssertNil(try store.load(providerID: "provider-a"))
+        XCTAssertEqual(status.source, .protectedFile)
+        XCTAssertEqual(status.state, .missing)
+        XCTAssertFalse(status.restartSafe)
+        XCTAssertEqual(status.recoveryAction, .restoreOrReenroll)
+    }
+
     func testResolverPrefersExistingCLIKeychainCredentialOverStaleConfig() throws {
         let store = InMemoryProviderCredentialStore(values: ["provider-a": "fresh-token"])
         var config = AppConfig.defaults(configPath: "/tmp/config.yaml")
@@ -542,6 +698,103 @@ final class ProviderCredentialStoreTests: XCTestCase {
         XCTAssertEqual(fetchedPort.value, 9_999)
     }
 
+    func testCredentialRestartProofUsesProtectedFileSourceAndSystemDomain() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("provider-protected-restart-proof-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let config = directory.appendingPathComponent("config.yaml")
+        try "provider_id: provider-a\nport: 9999\ncredential_store: protected_file\n".write(
+            to: config,
+            atomically: true,
+            encoding: .utf8
+        )
+        let proof = try makeCredentialRestartProof(
+            observedAt: Date(),
+            migrationPending: false,
+            source: "protected_file"
+        )
+
+        let loaded = try CredentialsImportCommand.loadConfig(configPath: config.path)
+        XCTAssertEqual(CredentialRestartProver.launchdDomain(for: loaded, environment: [:]), "system")
+        XCTAssertEqual(
+            CredentialRestartProver.launchdDomain(
+                for: loaded,
+                environment: ["MACPROVIDER_LAUNCHD_DOMAIN": "gui/501"]
+            ),
+            "system"
+        )
+
+        let result = try await CredentialRestartProver.restartAndProve(
+            configPath: config.path,
+            expectedProviderID: "provider-a",
+            previousServiceInstance: "instance-old",
+            timeout: 1,
+            pollInterval: 0.01,
+            restart: {},
+            fetchStatus: { _ in proof },
+            launchdPID: { 4_321 },
+            listenerOwnerPID: { $0 == 9_999 ? 4_321 : nil },
+            bootSession: { "boot-a" }
+        )
+
+        XCTAssertEqual(result.status.source, .protectedFile)
+        XCTAssertTrue(result.status.restartSafe)
+    }
+
+    func testProtectedFileCredentialStatusPreservesSourceWhenMissing() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("provider-protected-status-missing-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let config = directory.appendingPathComponent("config.yaml")
+        try "provider_id: provider-a\ncredential_store: protected_file\n".write(
+            to: config,
+            atomically: true,
+            encoding: .utf8
+        )
+        let loaded = try CredentialsImportCommand.loadConfig(configPath: config.path)
+
+        let result = try CredentialsStatusCommand.inspect(
+            configPath: config.path,
+            store: ProtectedFileProviderCredentialStore(
+                rootDirectory: directory.appendingPathComponent("protected")
+            ),
+            authoritativeSource: .protectedFile
+        )
+
+        XCTAssertEqual(loaded.credentialStore, .protectedFile)
+        XCTAssertEqual(result.status.source, ProviderCredentialStatus.Source.protectedFile)
+        XCTAssertEqual(result.status.state, ProviderCredentialStatus.State.missing)
+    }
+
+    func testProtectedFileRootCanBePinnedOutsideStagedConfigDirectory() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("provider-protected-root-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let stagedConfig = directory.appendingPathComponent("staging/config.yaml")
+        try FileManager.default.createDirectory(
+            at: stagedConfig.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "provider_id: provider-a\ncredential_store: protected_file\n".write(
+            to: stagedConfig,
+            atomically: true,
+            encoding: .utf8
+        )
+        let liveRoot = directory.appendingPathComponent("live/protected-credentials")
+        setenv("MACPROVIDER_PROTECTED_CREDENTIAL_ROOT", liveRoot.path, 1)
+        defer { unsetenv("MACPROVIDER_PROTECTED_CREDENTIAL_ROOT") }
+
+        let config = try CredentialsImportCommand.loadConfig(configPath: stagedConfig.path)
+
+        XCTAssertEqual(
+            ProviderCredentialStoreFactory.protectedFileRoot(for: config).standardizedFileURL,
+            liveRoot.standardizedFileURL
+        )
+    }
+
     func testKeychainQueriesAreNonInteractiveAndNeverContainPlaintextMetadata() {
         let base = KeychainProviderCredentialStore.baseQuery(providerID: "provider-a")
         XCTAssertEqual(base[kSecAttrService as String] as? String, KeychainProviderCredentialStore.service)
@@ -561,7 +814,8 @@ final class ProviderCredentialStoreTests: XCTestCase {
 
     private func makeCredentialRestartProof(
         observedAt: Date,
-        migrationPending: Bool
+        migrationPending: Bool,
+        source: String = "cli_keychain"
     ) throws -> Data {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -593,12 +847,62 @@ final class ProviderCredentialStoreTests: XCTestCase {
                 "role": "serve",
             ],
             "credential": [
-                "source": "cli_keychain",
+                "source": source,
                 "state": "ready",
                 "restart_safe": true,
                 "migration_pending": migrationPending,
             ],
         ])
+    }
+
+    private func temporaryCredentialRoot(_ label: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(label)-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("protected-credentials", isDirectory: true)
+    }
+
+    private func removeTemporaryRoot(_ root: URL) {
+        let parent = root.deletingLastPathComponent()
+        guard FileManager.default.fileExists(atPath: parent.path) else { return }
+        try? FileManager.default.removeItem(at: parent)
+    }
+
+    private func assertPOSIXMode(
+        _ url: URL,
+        type: mode_t,
+        mode: mode_t,
+        expectedLinkCount: UInt16? = nil,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        var info = stat()
+        XCTAssertEqual(lstat(url.path, &info), 0, file: file, line: line)
+        XCTAssertEqual(info.st_mode & S_IFMT, type, file: file, line: line)
+        XCTAssertEqual(info.st_mode & 0o777, mode, file: file, line: line)
+        XCTAssertEqual(info.st_uid, geteuid(), file: file, line: line)
+        if let expectedLinkCount {
+            XCTAssertEqual(info.st_nlink, expectedLinkCount, file: file, line: line)
+        }
+    }
+
+    private func assertNoExtendedACL(
+        _ url: URL,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let fd = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        XCTAssertGreaterThanOrEqual(fd, 0, file: file, line: line)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        errno = 0
+        guard let acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED) else {
+            XCTAssertTrue(errno == 0 || errno == ENOENT, file: file, line: line)
+            return
+        }
+        defer { _ = acl_free(UnsafeMutableRawPointer(acl)) }
+        var entry: acl_entry_t?
+        XCTAssertEqual(acl_get_entry(acl, ACL_FIRST_ENTRY.rawValue, &entry), 0, file: file, line: line)
+        XCTAssertNil(entry, file: file, line: line)
     }
 }
 

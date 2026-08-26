@@ -76,6 +76,37 @@ final class ProviderTokenPersistTests: XCTestCase {
         )
     }
 
+    func testRemoveHandlesQuotedEscapedYAMLProviderTokenKey() throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: tempDir) }
+        let configPath = tempDir + "/config.yaml"
+        try """
+        "provider\\u005ftoken": "secret-token"
+        model: m
+        # provider_token: comment-only
+        auth:
+          provider_token: nested-token
+        """.write(toFile: configPath, atomically: true, encoding: .utf8)
+
+        XCTAssertTrue(try ProviderTokenPersist.remove(expectedToken: "secret-token", configPath: configPath))
+        let onDisk = try String(contentsOfFile: configPath, encoding: .utf8)
+        XCTAssertFalse(onDisk.contains("secret-token"))
+        XCTAssertTrue(onDisk.contains("model: m"))
+        XCTAssertTrue(onDisk.contains("# provider_token: comment-only"))
+        XCTAssertTrue(onDisk.contains("  provider_token: nested-token"))
+    }
+
+    func testRemoveRefusesEscapedYAMLKeyWhenExpectedTokenDiffers() throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: tempDir) }
+        let configPath = tempDir + "/config.yaml"
+        let original = "\"provider\\u005ftoken\": \"secret-token\"\nmodel: m\n"
+        try original.write(toFile: configPath, atomically: true, encoding: .utf8)
+
+        XCTAssertFalse(try ProviderTokenPersist.remove(expectedToken: "other-token", configPath: configPath))
+        XCTAssertEqual(try String(contentsOfFile: configPath, encoding: .utf8), original)
+    }
+
     func testRemoveThroughSymlinkMutatesCanonicalConfigWithoutReplacingAlias() throws {
         let tempDir = try makeTempDir()
         defer { try? FileManager.default.removeItem(atPath: tempDir) }
@@ -331,6 +362,27 @@ final class ProviderTokenPersistTests: XCTestCase {
         XCTAssertTrue(result.contains("# provider_token: historical-note do not change"),
                       "comment with provider_token text must be preserved: \(result)")
         XCTAssertTrue(result.contains("provider_token: " + String(repeating: "9", count: 64)))
+    }
+
+    func testRemovingProviderTokenLinesHandlesQuotedEscapedAndBlockKeys() {
+        let existing = """
+        provider_token: literal-secret
+        'provider_token': single-quoted-secret
+        "provider\\u005ftoken": "escaped-secret"
+        "provider_token": |-
+          block-secret
+        model: m
+        auth:
+          provider_token: nested-secret
+        """
+
+        let result = ProviderTokenPersist.removingProviderTokenLines(in: existing)
+        XCTAssertFalse(result.contains("literal-secret"))
+        XCTAssertFalse(result.contains("single-quoted-secret"))
+        XCTAssertFalse(result.contains("escaped-secret"))
+        XCTAssertFalse(result.contains("block-secret"))
+        XCTAssertTrue(result.contains("model: m"))
+        XCTAssertTrue(result.contains("  provider_token: nested-secret"))
     }
 
     private func makeTempDir() throws -> String {

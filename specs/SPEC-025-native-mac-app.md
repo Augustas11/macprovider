@@ -1,6 +1,16 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.22 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.23 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.23 (2026-08-25, headless fleet boundary).** SPEC-026 v0.27
+defines a separate SSH-only `headless_fleet` profile for the existing CLI, with
+system LaunchDaemons and protected-file credential custody. This spec keeps the
+consumer Malibu path intact: `consumer_user` remains the default, uses the
+existing per-user CLI Keychain stores and LaunchAgents, and registers Malibu
+itself through `SMAppService`. Malibu MUST neither attach to nor import from a
+system-domain headless provider. A bounded profile-conflict UI for detected
+opposite-profile evidence remains a follow-up app task and is not automatic
+migration authority.
 
 **Change log v0.22 (2026-07-25, landing page download authority).** §10 pins the
 public **Download for Mac** button to the immutable versioned GitHub release asset
@@ -262,8 +272,17 @@ SPEC-026 §6/§7 + the Malibu sources as source of truth pending this v0.2 revis
   **adopts and monitors** it; it does **not** launch it. (Reconciled v0.2 — v0.1
   called this the "CLI child" spawned by the wrapper; that spawn path is gone,
   §5.)
+- **Consumer user profile** — `install_profile:"consumer_user"`, the unchanged
+  App/CLI track defined by this spec: per-user config, CLI Keychain custody,
+  provider/watchdog LaunchAgents in `gui/<uid>`, and Malibu's separate
+  `SMAppService` login item.
+- **Headless fleet profile** — `install_profile:"headless_fleet"`, the
+  SSH-operated system-domain CLI profile defined by SPEC-026 §2.1. It has no
+  Malibu process, App login item, user LaunchAgent, or Keychain dependency.
 
-Both tracks must coexist and produce identical on-chain behavior.
+The consumer App and per-user CLI tracks must coexist and produce identical
+on-chain behavior. A headless system-domain installation is mutually exclusive
+with those tracks on the same Mac under SPEC-026 §2.1.
 
 ## 1. Goal
 
@@ -291,7 +310,9 @@ Ship a **click-and-forget provider experience** for non-developer Mac users. Rep
 - Mac App Store distribution (sandbox conflicts with `mlx-swift` + long-running WS daemon).
 - Windows / Linux / Intel Mac.
 - In-app wallet UX beyond linking an address issued by portal.
-- Fleet management across multiple Macs from one app.
+- Fleet dashboard, orchestration, or remote management across multiple Macs
+  from Malibu. The SSH-only per-host CLI installation profile in SPEC-026 §2.1
+  is in scope there and does not add fleet-management UI to this App.
 
 ## 2. What already exists (grounding)
 
@@ -857,6 +878,26 @@ try SMAppService.mainApp.register()   // the APP login item, not the CLI daemon
 - Because the App track installs the same launchd CLI as the CLI track, coexistence
   is by the shared `config.yaml` + `.installed-by-app` marker (§7), not by "only one
   track installs a daemon."
+
+### 8.1 System-domain headless profile is not an App runtime
+
+SPEC-026 §2.1 defines `headless_fleet` as a separate installation profile, not
+a fourth App-track launchd mechanism. Malibu MUST create, discover, import,
+monitor, update, repair, or uninstall only `consumer_user` state. Its launchd
+evidence checks MUST resolve the exact `gui/<uid>/live.malibu.provider` service
+and per-user manifest; a loaded `system/live.malibu.provider`, a plist under
+`/Library/LaunchDaemons`, or protected files under a fleet user's
+`.config/macprovider/protected-credentials` root MUST NOT satisfy App
+configuration or custody gates.
+
+If Malibu detects headless system-domain installation evidence, it SHOULD report
+a bounded profile-conflict state. Whether or not that UI is present, it MUST
+offer no automatic takeover, import, or credential migration. Removal or
+explicit migration is an administrator CLI transaction outside Malibu. These
+rules do not alter any consumer path in §7-§8: provider bearer and
+receipt/admission private keys remain in the existing CLI Keychain services, the
+provider and watchdog remain LaunchAgents, and Malibu remains a separate
+`SMAppService` login item.
 
 ## 9. Compatibility-set trust and discovery
 

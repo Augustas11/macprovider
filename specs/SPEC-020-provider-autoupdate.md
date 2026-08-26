@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.11
+Version: v0.1.12
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -28,6 +28,11 @@ release is permanently immutable.
 v0.1.11 adds the protected recurring renewal signer and the anonymous v1.8.55
 bridge proof required before treating discovery as continuously renewable under
 immutable releases (Partial #658 until the physical journey closes).
+v0.1.12 names SPEC-026's SSH-only `headless_fleet` profile as an explicit
+autoupdate boundary. The existing `consumer_user` LaunchAgent and Keychain track
+is unchanged; system-domain headless autoupdate/rollback remains a future
+extension until this spec adds a corresponding implementation and acceptance
+journey.
 
 ## Goal
 
@@ -72,6 +77,26 @@ missing/disabled watchdog, or unsupported install topology are outside the
 latest-assumption population. Future features that depend on latest-provider
 behavior MUST exclude old binaries via the existing `required_binary_version`
 admission gate or an equivalent explicit gate.
+
+### macOS execution profiles and path notation
+
+SPEC-020 v0.1.12 applies to the `consumer_user` profile defined by SPEC-026
+§2.1 and records the `headless_fleet` profile as an unsupported autoupdate
+topology in this release:
+
+| Profile | `$PROVIDER_CONFIG_ROOT` | `$PROVIDER_STATE_ROOT` | Canonical provider service |
+|---|---|---|---|
+| `consumer_user` | `$HOME/.config/macprovider` | `$HOME/.local/share/macprovider` | `gui/<uid>/live.malibu.provider` LaunchAgent |
+| `headless_fleet` | `$FLEET_HOME/.config/macprovider` | `$FLEET_HOME/.local/share/macprovider` | `system/live.malibu.provider` LaunchDaemon |
+
+The literal `$HOME/.config/macprovider` and
+`$HOME/.local/share/macprovider` paths in the requirements below specify the
+selected `consumer_user` profile owner. A provider installed as
+`headless_fleet` MUST NOT be updated by the v0.1.12 consumer LaunchAgent
+autoupdate path, because that path cannot safely prove or recover a system-domain
+service. It MUST fail closed as `unsupported_install_topology` or require a
+separately specified operator update flow. A user-domain helper MUST NOT bootout,
+bootstrap, prove absence of, or authorize rollback for a system-domain provider.
 
 ## Cross-spec amendment and trust state
 
@@ -615,6 +640,11 @@ MUST include:
 | `discovery_head_sequence` | integer; required for automatic-discovery writers; accepted unsigned monotonic release sequence |
 | `discovery_head_sha256` | string; required with discovery sequence; lowercase 64-hex signed discovery-head digest |
 | `update_authority_mode` | string; required for v0.1.8 writers; `coordinator_recommendation` or `signed_release` |
+| `install_profile` | string; optional future binding when written; `consumer_user` or `headless_fleet` |
+| `launchd_domain` | string; optional future binding when written; `gui/<uid>` or `system`, and MUST match `install_profile` |
+| `service_label` | string; optional future binding when written; exact canonical provider label without a domain prefix |
+| `provider_config_root` | string; optional future binding when written; exact absolute selected-profile config root |
+| `provider_state_root` | string; optional future binding when written; exact absolute selected-profile state root |
 
 **`marker_deadline` semantics.** Writer: the autoupdate process at marker-write
 time. Basis: `marker_write_time + post_start_window + 5 min safety margin`.
@@ -752,7 +782,8 @@ release's signed compatibility-set ID/digest and CLI component version against
 the preserved rollback record, then evaluate it against
 `effective_minimum_safe_binary_version` and
 `effective_revoked_binary_versions` before restoration. If the prior release is
-allowed, the monitor restores the complete payload and restarts the LaunchAgent.
+allowed, the monitor restores the complete payload and restarts the canonical
+launchd provider service in the selected profile.
 If the prior release is revoked or below the effective minimum, the monitor
 MUST NOT restore or restart it; it MUST stop the failed target, retain the
 validated recovery material and pending marker, emit
@@ -775,6 +806,10 @@ provider session and the provider MUST emit a structured rollback failure event.
 The next provider process start MAY re-enable autoupdate unless disabled by
 configuration or cooldown state. A `rollback_target_disallowed` stop remains
 fenced across restart until emergency recovery supplies an allowed signed set.
+
+R-4.13. Reserved for future headless system-domain update and rollback
+semantics. Until that version lands, `headless_fleet` is outside the autoupdate
+convergence population and MUST NOT be driven by the consumer-user reload helper.
 
 ### R-5. Opt-out
 
@@ -1274,6 +1309,11 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.12 (2026-08-25): Named SPEC-026's SSH-only `headless_fleet` mode as an
+  explicit unsupported autoupdate topology for this version. The existing
+  per-user LaunchAgent topology is retained as `consumer_user`; system-domain
+  update, one-shot reload, watchdog rollback, and reboot recovery remain future
+  work.
 - v0.1.11 (2026-07-21): Adds the protected `renew-release-discovery-head.yml`
   recurring signer and the anonymous v1.8.55 bridge verifier. Renewal appends a
   greater sequence-bound transport for the unchanged latest stable target;

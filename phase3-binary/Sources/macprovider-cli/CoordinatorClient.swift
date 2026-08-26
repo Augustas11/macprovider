@@ -146,7 +146,7 @@ actor CoordinatorClient {
     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
     typealias ReloadHelperFence = @Sendable () throws -> Void
 
-    static let binaryVersion = "1.8.105"
+    static let binaryVersion = "1.8.106"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -199,6 +199,7 @@ actor CoordinatorClient {
     // without taking another dependency on the loader.
     private let configPath: String
     private let providerCredentialStore: any ProviderCredentialStoring
+    private let providerCredentialSource: ProviderCredentialStatus.Source
     private let credentialStatusRuntime: ProviderCredentialStatusRuntime
     private let admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime
     private let sleepAssertionFactory: @Sendable () -> ProviderSleepAssertion?
@@ -397,6 +398,7 @@ actor CoordinatorClient {
         receiptIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey] = [],
         persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)? = nil,
         providerCredentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
+        providerCredentialSource: ProviderCredentialStatus.Source = .cliKeychain,
         credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
         admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
         lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
@@ -457,6 +459,7 @@ actor CoordinatorClient {
         }
         self.configPath = config.configPath
         self.providerCredentialStore = providerCredentialStore
+        self.providerCredentialSource = providerCredentialSource
         self.credentialStatusRuntime = credentialStatusRuntime
         self.admissionIdentityStatusRuntime = admissionIdentityStatusRuntime
         self.lifecycleStateStore = lifecycleStateStore
@@ -541,7 +544,11 @@ actor CoordinatorClient {
     }
 
     func start() async {
-        await runStartupAutoupdateRecovery()
+        if appConfig.credentialStore != .protectedFile,
+           appConfig.autoUpdateEnabled != false,
+           appConfig.autoupdateEnabled != false {
+            await runStartupAutoupdateRecovery()
+        }
         startReconnectTask()
         if warmSwapEnabled, swapHeartbeatTask == nil {
             swapHeartbeatTask = Task { [weak self] in
@@ -1161,6 +1168,7 @@ actor CoordinatorClient {
             credentialBootstrap: true,
             bootstrapReceiptSigningKey: receiptKey,
             providerCredentialStore: providerCredentialStore,
+            providerCredentialSource: providerCredentialSource,
             credentialStatusRuntime: credentialStatusRuntime,
             watchdogExitHook: watchdogExitHook
         ) else {
@@ -2517,8 +2525,8 @@ actor CoordinatorClient {
         inBandAEADRekeyEnabled = encryptedLeg["in_band_aead_rekey_v1"] as? Bool == true
     }
 
-    /// Persist-before-adopt for newly assigned credentials. CLI Keychain is
-    /// the only durable destination; a failed commit leaves the in-memory
+    /// Persist-before-adopt for newly assigned credentials. The configured CLI
+    /// custody backend is the only durable destination; a failed commit leaves the in-memory
     /// credential unchanged and fails this admission attempt.
     private func adoptAssignedProviderTokenIfPresent(_ payload: [String: Any]) async throws -> Bool {
         guard let assigned = payload["assigned_provider_token"] as? String else {
@@ -2543,9 +2551,17 @@ actor CoordinatorClient {
 
         switch result {
         case .success:
-            Self.emitTokenPersistEvent(event: "provider_token_keychain_persisted", path: path, error: nil)
+            Self.emitTokenPersistEvent(
+                event: "provider_token_\(providerCredentialSource.rawValue)_persisted",
+                path: path,
+                error: nil
+            )
         case .failure(let error):
-            Self.emitTokenPersistEvent(event: "provider_token_keychain_persist_failed", path: path, error: error)
+            Self.emitTokenPersistEvent(
+                event: "provider_token_\(providerCredentialSource.rawValue)_persist_failed",
+                path: path,
+                error: error
+            )
             throw CoordinatorAuthError.invalidMessage("assigned provider credential could not be committed")
         }
 
@@ -2555,7 +2571,7 @@ actor CoordinatorClient {
 
         self.providerToken = trimmed
         await credentialStatusRuntime.update(
-            ProviderCredentialStatus(source: .cliKeychain, state: .ready, restartSafe: true)
+            ProviderCredentialStatus(source: providerCredentialSource, state: .ready, restartSafe: true)
         )
         return true
     }
@@ -2949,7 +2965,7 @@ actor CoordinatorClient {
                     generation: generation,
                     keyRole: keyRole,
                     localState: "ready",
-                    localSource: "cli_keychain",
+                    localSource: providerCredentialSource.rawValue,
                     localPublicKeySHA256: activeDigest,
                     recoveryAction: "none",
                     replaceLocalKeyState: true
@@ -2997,7 +3013,7 @@ actor CoordinatorClient {
                 generation: generation,
                 keyRole: keyRole,
                 localState: "ready",
-                localSource: "cli_keychain",
+                localSource: providerCredentialSource.rawValue,
                 localPublicKeySHA256: activeDigest,
                 previousPublicKeySHA256: stillValid ? previousDigest : nil,
                 previousValidUntil: previousValidUntilText,
@@ -3291,7 +3307,7 @@ actor CoordinatorClient {
     /// credential is never deleted.
     private func finalizeLegacyCredentialSourceAfterAdmission() async {
         let status = await credentialStatusRuntime.snapshot()
-        guard status.source == .cliKeychain,
+        guard status.source == providerCredentialSource,
               status.migrationPending,
               let expected = providerToken,
               !expected.isEmpty else {
@@ -3317,7 +3333,7 @@ actor CoordinatorClient {
         switch result {
         case .success(true):
             await credentialStatusRuntime.update(
-                ProviderCredentialStatus(source: .cliKeychain, state: .ready, restartSafe: true)
+                ProviderCredentialStatus(source: providerCredentialSource, state: .ready, restartSafe: true)
             )
             Self.emitTokenPersistEvent(
                 event: "provider_token_legacy_source_removed_after_admission",

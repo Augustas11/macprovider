@@ -1,4 +1,5 @@
 import ArgumentParser
+import CryptoKit
 import Foundation
 import MacProviderCore
 
@@ -42,14 +43,19 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
               !providerID.isEmpty else {
             throw ValidationError("provider_id is required before credential bootstrap")
         }
-        let providerCredentialStore = KeychainProviderCredentialStore()
+        let providerCredentialStore = ProviderCredentialStoreFactory.providerStore(for: resolved)
+        let providerCredentialSource = ProviderCredentialStoreFactory.credentialSource(for: resolved)
         let referralInput = try referralCodeFile.map { try ReferralCodeFile.read(path: $0) }
-        let receiptKeyStore = KeychainReceiptKeyStore()
+        let receiptKeyStore = ProviderCredentialStoreFactory.receiptKeyStore(for: resolved)
         if let configToken = resolved.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
            !configToken.isEmpty {
             try providerCredentialStore.importIfAbsentOrMatches(
                 providerID: providerID,
                 token: configToken
+            )
+            _ = try Self.ensureProtectedFileIdentityMaterial(
+                providerID: providerID,
+                store: receiptKeyStore
             )
             if let referralInput {
                 try Self.reconcilePersistedReferral(
@@ -68,6 +74,10 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
             return
         }
         if try Self.storedCredentialPresent(providerID: providerID, store: providerCredentialStore) {
+            _ = try Self.ensureProtectedFileIdentityMaterial(
+                providerID: providerID,
+                store: receiptKeyStore
+            )
             if let referralInput {
                 try Self.reconcilePersistedReferral(
                     providerID: providerID,
@@ -107,11 +117,7 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
         // challenge under this exact same Keychain key and can replace only
         // its own unused bootstrap token, including after its initial TTL
         // while the coordinator's recovery-retention window remains open.
-        let currentReceiptKey = try receiptKeyStore.loadOrGenerate(providerId: providerID)
-        let receiptKey = try receiptKeyStore.loadOrStoreBootstrapIdentity(
-            providerId: providerID,
-            candidate: currentReceiptKey
-        )
+        let receiptKey = try Self.ensureProtectedFileIdentityMaterial(providerID: providerID, store: receiptKeyStore)
         let receiptPublicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
         let referralJournal = try referralInput.map { _ in
             try Self.referralJournal(
@@ -137,7 +143,8 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
             credentialBootstrap: true,
             bootstrapReceiptSigningKey: receiptKey,
             bootstrapReferralCode: referralInput?.code,
-            providerCredentialStore: providerCredentialStore
+            providerCredentialStore: providerCredentialStore,
+            providerCredentialSource: providerCredentialSource
         ) else {
             throw ValidationError("credential bootstrap requires a secure wss coordinator_url")
         }
@@ -191,6 +198,22 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
         hasToken(try? store.load(providerID: providerID))
     }
 
+    @discardableResult
+    static func ensureProtectedFileIdentityMaterial(
+        providerID: String,
+        store: any ProviderIdentityKeyStoring
+    ) throws -> Curve25519.Signing.PrivateKey {
+        let currentReceiptKey = try store.loadOrGenerate(providerId: providerID)
+        _ = try store.loadOrStoreAdmissionIdentity(
+            providerId: providerID,
+            candidate: currentReceiptKey
+        )
+        return try store.loadOrStoreBootstrapIdentity(
+            providerId: providerID,
+            candidate: currentReceiptKey
+        )
+    }
+
     static func storedCredentialPresent(
         providerID: String,
         store: any ProviderCredentialStoring
@@ -218,7 +241,7 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
 
     private static func persistedBootstrapReceiptPublicKey(
         providerID: String,
-        store: KeychainReceiptKeyStore
+        store: any ProviderIdentityKeyStoring
     ) throws -> String {
         guard let receiptKey = try store.loadBootstrapIdentity(providerId: providerID) else {
             throw ReferralBootstrapFailure(kind: .conflict)

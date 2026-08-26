@@ -25,17 +25,18 @@ line_number() {
   awk -v pattern="$pattern" 'index($0, pattern) { print NR; exit }' "$INSTALL_SH"
 }
 
-require_line 'launchctl bootout "$service_target"' "label-target launchd bootout"
+require_line 'LAUNCHD_DOMAIN="gui/$UID"' "default consumer GUI launchd domain"
+require_line 'launchctl_service bootout "$service_target"' "label-target launchd bootout"
 require_line 'reclaim_launchd_service "$PROVIDER_LABEL"' "provider launchd reclaim before replacement"
-require_line 'launchctl enable "gui/$UID/$PROVIDER_LABEL"' "launchd enable before bootstrap"
-require_line 'launchctl bootstrap "gui/$UID" "$PLIST_PATH"' "launchd bootstrap"
-require_line 'Would enable launchd service: launchctl enable gui/$UID/$PROVIDER_LABEL' "dry-run enable hint"
+require_line 'launchctl_service enable "$LAUNCHD_DOMAIN/$PROVIDER_LABEL"' "launchd enable before bootstrap"
+require_line 'launchctl_service bootstrap "$LAUNCHD_DOMAIN" "$PLIST_BOOTSTRAP_PATH"' "launchd bootstrap"
+require_line 'Would enable launchd service: launchctl enable $LAUNCHD_DOMAIN/$PROVIDER_LABEL' "dry-run enable hint"
 require_line 'Installing as a background launchd service.' "automatic launchd install message"
 require_line 'MACPROVIDER_NO_LAUNCHD=1 expert/debug override' "explicit no-launchd escape hatch"
 require_line 'holding_executable="$(lsof -a -p "$holding_pid" -d txt -Fn' "listener executable identity lookup"
 require_line 'if [ "$INSTALL_TX_SERVICE_WAS_ACTIVE" -eq 0 ] && [ "$INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE" -eq 0 ]; then' \
   "legacy launchd upgrades skip manual-process capture"
-require_line 'launchctl print "gui/$UID/$LEGACY_PROVIDER_LABEL"' "legacy LaunchAgent snapshot"
+require_line 'launchctl_service print "$LAUNCHD_DOMAIN/$LEGACY_PROVIDER_LABEL"' "legacy launchd service snapshot"
 require_line 'could not bootstrap the previous legacy provider service' "legacy LaunchAgent rollback restore"
 require_line 'could not bootstrap the previous legacy watchdog service' "legacy watchdog rollback restore"
 require_line '<key>MACPROVIDER_CONFIG</key>' "launchd absolute config env key"
@@ -115,8 +116,8 @@ line_number_after() {
 }
 
 reclaim_line="$(line_number_after "$install_plist_line" 'reclaim_launchd_service "$PROVIDER_LABEL"')"
-enable_line="$(line_number_after "$install_plist_line" 'launchctl enable "gui/$UID/$PROVIDER_LABEL"')"
-bootstrap_line="$(line_number_after "$install_plist_line" 'launchctl bootstrap "gui/$UID" "$PLIST_PATH"')"
+enable_line="$(line_number_after "$install_plist_line" 'launchctl_service enable "$LAUNCHD_DOMAIN/$PROVIDER_LABEL"')"
+bootstrap_line="$(line_number_after "$install_plist_line" 'launchctl_service bootstrap "$LAUNCHD_DOMAIN" "$PLIST_BOOTSTRAP_PATH"')"
 
 [ -n "$reclaim_line" ] || die "could not locate provider reclaim line"
 [ -n "$enable_line" ] || die "could not locate enable line"

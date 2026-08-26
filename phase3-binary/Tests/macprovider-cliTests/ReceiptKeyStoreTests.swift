@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import LocalAuthentication
 import Security
@@ -6,6 +7,98 @@ import XCTest
 @testable import macprovider_cli
 
 final class ReceiptKeyStoreTests: XCTestCase {
+    func testProtectedFileReceiptAndAdmissionKeysSurviveFreshStore() throws {
+        let root = temporaryReceiptRoot("receipt-restart")
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let firstStore = ProtectedFileReceiptKeyStore(rootDirectory: root)
+        let receipt = try firstStore.loadOrGenerate(providerId: "provider-a")
+        let admission = try firstStore.loadOrStoreAdmissionIdentity(
+            providerId: "provider-a",
+            candidate: Curve25519.Signing.PrivateKey()
+        )
+
+        let freshStore = ProtectedFileReceiptKeyStore(rootDirectory: root)
+        XCTAssertEqual(try freshStore.loadCurrent(providerId: "provider-a")?.rawRepresentation, receipt.rawRepresentation)
+        XCTAssertEqual(
+            try freshStore.loadAdmissionIdentity(providerId: "provider-a")?.rawRepresentation,
+            admission.rawRepresentation
+        )
+    }
+
+    func testProtectedFileAdmissionRotationStagesAndCommitsNamedCandidate() throws {
+        let root = temporaryReceiptRoot("receipt-rotation")
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let store = ProtectedFileReceiptKeyStore(rootDirectory: root)
+        let original = try store.loadOrStoreAdmissionIdentity(
+            providerId: "provider-a",
+            candidate: Curve25519.Signing.PrivateKey()
+        )
+        let pending = try store.beginAdmissionIdentityRotation(providerId: "provider-a")
+        let deadline = Date().addingTimeInterval(60)
+
+        let committed = try store.commitAdmissionIdentityRotation(
+            providerId: "provider-a",
+            expectedPublicKey: pending.publicKey.rawRepresentation,
+            previousValidUntil: deadline
+        )
+
+        XCTAssertEqual(committed.rawRepresentation, pending.rawRepresentation)
+        XCTAssertEqual(try store.loadAdmissionIdentity(providerId: "provider-a")?.rawRepresentation, pending.rawRepresentation)
+        XCTAssertEqual(try store.loadPreviousAdmissionIdentity(providerId: "provider-a")?.rawRepresentation, original.rawRepresentation)
+        XCTAssertNil(try store.loadPendingAdmissionIdentity(providerId: "provider-a"))
+    }
+
+    func testProtectedFileAdmissionRecoveryPersistsCandidateBeforeAdoptionCallback() throws {
+        let root = temporaryReceiptRoot("receipt-persist-before-adopt")
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let store = ProtectedFileReceiptKeyStore(rootDirectory: root)
+        enum SimulatedInterruption: Error { case beforeAdopt }
+        var persistedPublicKey: Data?
+
+        XCTAssertThrowsError(try store.beginAdmissionIdentityRecovery(
+            providerId: "provider-a",
+            allowExistingCurrent: false,
+            afterPendingPersisted: { candidate in
+                persistedPublicKey = candidate.publicKey.rawRepresentation
+                throw SimulatedInterruption.beforeAdopt
+            }
+        )) { error in
+            XCTAssertTrue(error is SimulatedInterruption)
+        }
+
+        let freshStore = ProtectedFileReceiptKeyStore(rootDirectory: root)
+        let pending = try XCTUnwrap(freshStore.loadPendingAdmissionIdentity(providerId: "provider-a"))
+        XCTAssertEqual(pending.publicKey.rawRepresentation, persistedPublicKey)
+        XCTAssertNil(try freshStore.loadAdmissionIdentityRecoveryMarker(providerId: "provider-a"))
+    }
+
+    func testProtectedFileReceiptCustodyUsesExactModesAndRejectsHardLinks() throws {
+        let root = temporaryReceiptRoot("receipt-permissions")
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let store = ProtectedFileReceiptKeyStore(rootDirectory: root)
+        _ = try store.loadOrGenerate(providerId: "provider-a")
+        let keyURL = store.protectedFileURL(
+            providerId: "provider-a",
+            service: KeychainReceiptKeyStore.currentService
+        )
+
+        try assertReceiptPOSIXMode(root, type: S_IFDIR, mode: 0o700)
+        try assertReceiptPOSIXMode(root.appendingPathComponent("identity-keys"), type: S_IFDIR, mode: 0o700)
+        try assertReceiptPOSIXMode(keyURL.deletingLastPathComponent(), type: S_IFDIR, mode: 0o700)
+        try assertReceiptPOSIXMode(keyURL, type: S_IFREG, mode: 0o600, expectedLinkCount: 1)
+        try assertReceiptNoExtendedACL(keyURL)
+
+        let hardLink = keyURL.deletingLastPathComponent().appendingPathComponent("receipt-hardlink")
+        try FileManager.default.linkItem(at: keyURL, to: hardLink)
+        XCTAssertThrowsError(try store.loadCurrent(providerId: "provider-a")) { error in
+            guard case ReceiptKeyStoreError.keychainReadFailed(let providerID, let status) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(providerID, "provider-a")
+            XCTAssertEqual(status, errSecIO)
+        }
+    }
+
     func testFirstLaunchGeneratesAndSecondLaunchLoadsSamePrivateKey() throws {
         let store = InMemoryReceiptKeyStore()
 
@@ -436,6 +529,50 @@ final class ReceiptKeyStoreTests: XCTestCase {
         XCTAssertEqual(query[kSecAttrSynchronizable as String] as? Bool, false)
         XCTAssertEqual(query[kSecValueData as String] as? Data, key.rawRepresentation)
         XCTAssertEqual(key.rawRepresentation.count, 32)
+    }
+
+    private func temporaryReceiptRoot(_ label: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(label)-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("protected-credentials", isDirectory: true)
+    }
+
+    private func assertReceiptPOSIXMode(
+        _ url: URL,
+        type: mode_t,
+        mode: mode_t,
+        expectedLinkCount: UInt16? = nil,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        var info = stat()
+        XCTAssertEqual(lstat(url.path, &info), 0, file: file, line: line)
+        XCTAssertEqual(info.st_mode & S_IFMT, type, file: file, line: line)
+        XCTAssertEqual(info.st_mode & 0o777, mode, file: file, line: line)
+        XCTAssertEqual(info.st_uid, geteuid(), file: file, line: line)
+        if let expectedLinkCount {
+            XCTAssertEqual(info.st_nlink, expectedLinkCount, file: file, line: line)
+        }
+    }
+
+    private func assertReceiptNoExtendedACL(
+        _ url: URL,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let fd = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        XCTAssertGreaterThanOrEqual(fd, 0, file: file, line: line)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        errno = 0
+        guard let acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED) else {
+            XCTAssertTrue(errno == 0 || errno == ENOENT, file: file, line: line)
+            return
+        }
+        defer { _ = acl_free(UnsafeMutableRawPointer(acl)) }
+        var entry: acl_entry_t?
+        XCTAssertEqual(acl_get_entry(acl, ACL_FIRST_ENTRY.rawValue, &entry), 0, file: file, line: line)
+        XCTAssertNil(entry, file: file, line: line)
     }
 }
 

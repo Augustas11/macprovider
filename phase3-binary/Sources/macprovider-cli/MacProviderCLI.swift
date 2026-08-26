@@ -273,6 +273,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Read provider authentication token from a 0600 file. Overrides MACPROVIDER_PROVIDER_TOKEN and config key provider_token without exposing the token in process arguments.")
     var tokenFile: String?
 
+    @Option(help: "Provider credential store: keychain or protected_file. Defaults to keychain. Overrides MACPROVIDER_CREDENTIAL_STORE and config key credential_store.")
+    var credentialStore: String?
+
     @Option(help: "Records the installation origin for diagnostics. This never transfers lifecycle, credential, identity, or update authority away from the launchd-managed CLI. Overrides MACPROVIDER_MANAGED_BY and config key managed_by.")
     var managedBy: String?
 
@@ -1326,28 +1329,6 @@ struct ServeCommand: AsyncParsableCommand {
     }
 
     func run() async throws {
-        // #616/#610: repair a stale PATH regular-file entrypoint to install
-        // authority, then re-exec into that canonical binary when this process
-        // was launched from a non-canonical path. PATH repair alone does not
-        // replace the already-running stale inode; identity must freeze on the
-        // binary that matches the signed set's provider_cli member.
-        let serveMarkerStore = AutoUpdateMarkerStore()
-        if !autotuneCandidate,
-           let canonical = try serveMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
-           let launched = Bundle.main.executableURL?.standardizedFileURL,
-           launched.path != canonical.standardizedFileURL.path {
-            try execCanonicalInstall(canonical)
-        }
-
-        // v1.8.53 can leave its one-shot reload helper alive long enough to
-        // restart the newly installed target repeatedly. The target fences that
-        // helper before configuration/model work, but only while two durable
-        // authorities agree that this exact executable is the intended
-        // self-update child. Ordinary launches never touch reload jobs.
-        let startupReloadFenceAuthorized = autotuneCandidate
-            ? false
-            : try Self.fenceAuthorizedSelfUpdateReloadJobsAtStartup()
-
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
                 port: port,
@@ -1372,6 +1353,7 @@ struct ServeCommand: AsyncParsableCommand {
                 switchStatePath: switchStatePath,
                 providerToken: providerToken,
                 providerTokenFile: tokenFile,
+                credentialStore: credentialStore,
                 managedBy: managedBy,
                 kvBits: kvBits,
                 maxContext: maxContext,
@@ -1392,6 +1374,31 @@ struct ServeCommand: AsyncParsableCommand {
                 pagedKV: pagedKVCLIOverrides
             )
         )
+
+        // #616/#610: repair a stale PATH regular-file entrypoint to install
+        // authority, then re-exec into that canonical binary when this process
+        // was launched from a non-canonical path. PATH repair alone does not
+        // replace the already-running stale inode; identity must freeze on the
+        // binary that matches the signed set's provider_cli member.
+        let serveMarkerStore = AutoUpdateMarkerStore()
+        if !autotuneCandidate,
+           resolved.credentialStore != .protectedFile,
+           let canonical = try serveMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
+           let launched = Bundle.main.executableURL?.standardizedFileURL,
+           launched.path != canonical.standardizedFileURL.path {
+            try execCanonicalInstall(canonical)
+        }
+
+        // v1.8.53 can leave its one-shot reload helper alive long enough to
+        // restart the newly installed target repeatedly. The target fences that
+        // helper before configuration/model work, but only while two durable
+        // authorities agree that this exact executable is the intended
+        // self-update child. Ordinary launches never touch reload jobs.
+        let startupReloadFenceAuthorized = autotuneCandidate
+            ? false
+            : resolved.credentialStore == .protectedFile
+                ? false
+                : try Self.fenceAuthorizedSelfUpdateReloadJobsAtStartup()
 
         // Reject invalid invocation-only model catalogs before startup writes
         // lifecycle state or touches credential custody. The complete startup
@@ -1453,7 +1460,9 @@ struct ServeCommand: AsyncParsableCommand {
         // A compatibility-set updater can durably hand its maintenance lease to
         // one exact launchd child. Carry that operation ID through the full
         // startup transition chain; ordinary starts get a fresh serve ID.
-        let startupHandoffOperationID = Self.startupHandoffOperationID(in: lifecycleLeaseStore)
+        let startupHandoffOperationID = resolved.credentialStore == .protectedFile
+            ? nil
+            : Self.startupHandoffOperationID(in: lifecycleLeaseStore)
         let lifecycleOperationID = startupHandoffOperationID
             ?? "serve:\(UUID().uuidString.lowercased())"
         let startupReason: String
@@ -1483,7 +1492,8 @@ struct ServeCommand: AsyncParsableCommand {
         // downstream.
         unsetenv("MACPROVIDER_PROVIDER_TOKEN")
 
-        let credentialStore = KeychainProviderCredentialStore()
+        let credentialStore = ProviderCredentialStoreFactory.providerStore(for: resolved)
+        let credentialSource = ProviderCredentialStoreFactory.credentialSource(for: resolved)
         let credentialStatus: ProviderCredentialStatus
         if autotuneCandidate {
             _ = try lifecycleStateStore.transition(
@@ -1498,7 +1508,7 @@ struct ServeCommand: AsyncParsableCommand {
         } else {
             _ = try lifecycleStateStore.transition(
                 to: .importingCredentials,
-                reasonCode: "resolving_cli_keychain_custody",
+                reasonCode: "resolving_\(credentialSource.rawValue)_custody",
                 writer: .serve,
                 providerID: resolved.providerID,
                 modelID: resolved.model,
@@ -1506,7 +1516,8 @@ struct ServeCommand: AsyncParsableCommand {
             )
             credentialStatus = try ProviderCredentialResolver.resolve(
                 config: &resolved,
-                store: credentialStore
+                store: credentialStore,
+                authoritativeSource: credentialSource
             )
         }
         if !autotuneCandidate {
@@ -1567,6 +1578,7 @@ struct ServeCommand: AsyncParsableCommand {
         )
         let startupPreflight: Self.ServeStartupPreflightResult
         let startupProviderID = resolved.providerID
+        let allowStartupHandoff = resolved.credentialStore != .protectedFile
         var acquiredStartupLease: ProviderLifecycleLeaseRecord?
         do {
             startupPreflight = try await Self.runServeStartupPreflights(
@@ -1585,6 +1597,7 @@ struct ServeCommand: AsyncParsableCommand {
                         operationID: lifecycleOperationID,
                         providerID: startupProviderID,
                         duration: 30 * 60,
+                        allowStartupHandoff: allowStartupHandoff,
                         allowAdoptedHandoffRecovery: startupReloadFenceAuthorized
                     )
                 }
@@ -1793,7 +1806,7 @@ struct ServeCommand: AsyncParsableCommand {
             await providerStatus.setState(.unavailable, reason: "operator_pause_restored")
         }
         await modelRuntime.setProviderStatus(providerStatus)
-        let receiptKeyStore = KeychainReceiptKeyStore()
+        let receiptKeyStore = ProviderCredentialStoreFactory.receiptKeyStore(for: resolved)
         let admissionIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey]
         let persistAdmissionIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)?
         let providerAdmissionNextPublicKey: String?
@@ -1894,6 +1907,11 @@ struct ServeCommand: AsyncParsableCommand {
                         "admission identity recovery marker does not match the staged candidate; run credentials repair"
                     )
                 }
+                try Self.validateProtectedFileAdmissionIdentityForServe(
+                    config: resolved,
+                    providerID: providerID,
+                    recoveryMarker: recoveryMarker
+                )
                 appendCandidate(pendingRecovery)
                 appendCandidate(try receiptKeyStore.loadPreviousAdmissionIdentity(providerId: providerID))
                 appendCandidate(try receiptKeyStore.loadCurrent(providerId: providerID))
@@ -1966,7 +1984,9 @@ struct ServeCommand: AsyncParsableCommand {
                 return formatter.string(from: state.validUntil)
             }
             return ProviderAdmissionIdentityStatusContext(
-                source: providerAdmissionRecovery ? "cli_keychain_pending" : (admissionIdentityWasPersisted ? "cli_keychain" : "local_recovery_candidate"),
+                source: providerAdmissionRecovery
+                    ? "\(credentialSource.rawValue)_pending"
+                    : (admissionIdentityWasPersisted ? credentialSource.rawValue : "local_recovery_candidate"),
                 state: providerAdmissionRecovery
                     ? "recovery_pending"
                     : (admissionIdentityWasPersisted
@@ -2042,6 +2062,7 @@ struct ServeCommand: AsyncParsableCommand {
                 receiptIdentitySigningKeyCandidates: admissionIdentitySigningKeyCandidates,
                 persistReceiptIdentitySigningKey: persistAdmissionIdentitySigningKey,
                 providerCredentialStore: credentialStore,
+                providerCredentialSource: credentialSource,
                 credentialStatusRuntime: credentialStatusRuntime,
                 admissionIdentityStatusRuntime: admissionIdentityStatusRuntime,
                 lifecycleStateStore: lifecycleStateStore,
@@ -2584,8 +2605,16 @@ struct ServeCommand: AsyncParsableCommand {
         operationID: String,
         providerID: String?,
         duration: TimeInterval,
+        allowStartupHandoff: Bool = true,
         allowAdoptedHandoffRecovery: Bool = false
     ) throws -> ProviderLifecycleLeaseRecord {
+        guard allowStartupHandoff else {
+            return try store.acquire(
+                kind: .startup,
+                operationID: operationID,
+                duration: duration
+            )
+        }
         let trimmedProviderID = providerID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let adoptionProviderID: String
@@ -2771,11 +2800,28 @@ struct ServeCommand: AsyncParsableCommand {
             return (nil, nil)
         }
         let cachingStore = CachedReceiptKeyStore(keyStore)
-        let privateKey = try cachingStore.loadOrGenerate(providerId: providerID)
+        let privateKey: Curve25519.Signing.PrivateKey
+        if config.credentialStore == .protectedFile {
+            guard let existing = try cachingStore.loadCurrent(providerId: providerID) else {
+                throw ReceiptKeyStoreError.missingCurrentKey(providerId: providerID)
+            }
+            privateKey = existing
+        } else {
+            privateKey = try cachingStore.loadOrGenerate(providerId: providerID)
+        }
         return (
             ReceiptBuilder(keyStore: cachingStore),
             Data(privateKey.publicKey.rawRepresentation).base64EncodedString()
         )
+    }
+
+    static func validateProtectedFileAdmissionIdentityForServe(
+        config: AppConfig,
+        providerID: String,
+        recoveryMarker: Data?
+    ) throws {
+        guard config.credentialStore == .protectedFile, recoveryMarker == nil else { return }
+        throw ReceiptKeyStoreError.missingAdmissionIdentity(providerId: providerID)
     }
 }
 
@@ -2912,24 +2958,42 @@ struct UpdateCommand: AsyncParsableCommand {
     var acceptanceRunAttempt: Int?
 
     func run() async throws {
+        let hasAcceptanceOptions = acceptanceDirectory != nil || acceptanceTag != nil || acceptanceCommit != nil
+            || acceptanceRunID != nil || acceptanceControlCommit != nil || acceptanceRunAttempt != nil
+        let resolvedConfig: AppConfig?
+        do {
+            resolvedConfig = try ConfigLoader.load(cli: CLIOverrides())
+        } catch {
+            guard check, !hasAcceptanceOptions else {
+                throw ValidationError(
+                    "cannot determine install profile for mutating update; fix macprovider config or use the signed headless installer acceptance bundle"
+                )
+            }
+            resolvedConfig = nil
+        }
+        try Self.validateHeadlessUpdateMode(
+            config: resolvedConfig,
+            checkOnly: check,
+            hasAcceptanceOptions: hasAcceptanceOptions,
+            home: FileManager.default.homeDirectoryForCurrentUser
+        )
+
         // #616/#610: converge PATH, then hand off to the canonical install binary
         // when this process was launched from a divergent PATH copy so update
         // runs with sibling compatibility-set.json and matching provider_cli.
         let updateMarkerStore = AutoUpdateMarkerStore()
-        if let canonical = try updateMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
+        if resolvedConfig?.credentialStore != .protectedFile,
+           let canonical = try updateMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
            let launched = Bundle.main.executableURL?.standardizedFileURL,
            launched.path != canonical.standardizedFileURL.path {
             try execCanonicalInstall(canonical)
         }
-        let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides())
         let updater = SelfUpdate(
             currentVersion: CoordinatorClient.binaryVersion,
             releasesAPIURL: releasesAPIURL,
             providerID: resolvedConfig?.providerID
         )
-        if acceptanceDirectory != nil || acceptanceTag != nil || acceptanceCommit != nil
-            || acceptanceRunID != nil || acceptanceControlCommit != nil || acceptanceRunAttempt != nil
-        {
+        if hasAcceptanceOptions {
             guard !check, releasesAPIURL == nil,
                   let acceptanceDirectory,
                   let acceptanceTag,
@@ -2961,6 +3025,69 @@ struct UpdateCommand: AsyncParsableCommand {
 
             """.utf8))
         }
+    }
+
+    static func validateHeadlessUpdateMode(
+        config: AppConfig?,
+        checkOnly: Bool,
+        hasAcceptanceOptions: Bool,
+        home: URL,
+        manifestLoader: (() throws -> UninstallCommand.ManifestLoadResult)? = nil,
+        validateSystemArtifactsAbsent: (([String], @escaping ([String]) throws -> Int32) throws -> Void)? = nil,
+        fileExists: @escaping (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        runLaunchctl: (([String]) throws -> Int32)? = nil
+    ) throws {
+        if checkOnly, !hasAcceptanceOptions { return }
+        let rejectMessage = "headless_fleet does not support mutating macprovider-cli update yet; use the signed headless installer acceptance bundle"
+        if config?.credentialStore == .protectedFile {
+            throw ValidationError(rejectMessage)
+        }
+        let loadManifest = manifestLoader ?? {
+            try UninstallCommand.loadManifest(home: home)
+        }
+        do {
+            switch try loadManifest() {
+            case .loaded(let manifest):
+                if manifest.installProfile == "headless_fleet" || manifest.launchdDomain == "system" {
+                    throw ValidationError(rejectMessage)
+                }
+            case .missing:
+                break
+            }
+            let validator = validateSystemArtifactsAbsent ?? { systemPlists, run in
+                try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
+                    systemPlists: systemPlists,
+                    fileExists: fileExists,
+                    run: run
+                )
+            }
+            try validator(UninstallCommand.managedSystemLaunchDaemonPlists, runLaunchctl ?? Self.launchctlStatus)
+        } catch let error as ValidationError {
+            throw error
+        } catch UninstallCommand.UninstallError.unsupportedHeadlessInstallProfile {
+            throw ValidationError(rejectMessage)
+        } catch UninstallCommand.UninstallError.headlessProfileIndeterminateWithoutManifest {
+            throw ValidationError(
+                "cannot determine install profile for mutating update because system launchd state is indeterminate; fix or remove the headless system LaunchDaemon first"
+            )
+        } catch UninstallCommand.UninstallError.invalidInstallManifest {
+            throw ValidationError(
+                "cannot determine install profile for mutating update; fix macprovider install manifest or use the signed headless installer acceptance bundle"
+            )
+        } catch {
+            throw error
+        }
+    }
+
+    private static func launchctlStatus(arguments: [String]) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus
     }
 }
 

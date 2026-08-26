@@ -12,6 +12,12 @@ import sys
 names = [
     "xml_escape",
     "write_atomic_install_file",
+    "launchctl_service",
+    "validate_headless_launchdaemon_plist",
+    "snapshot_headless_launchdaemon_plist",
+    "publish_root_file_from_base64",
+    "verify_published_launchd_payload",
+    "publish_launchd_plist",
     "reclaim_launchd_service",
     "reclaim_legacy_launchd_service",
     "render_plist",
@@ -42,6 +48,13 @@ printf '%s\n' 'LEGACY_PLIST_PATH="${LEGACY_PLIST_PATH:-$HOME/Library/LaunchAgent
 printf '%s\n' 'WATCHDOG_LABEL="${WATCHDOG_LABEL:-live.malibu.provider-watchdog}"' >> "$TMP/functions.sh"
 printf '%s\n' 'LEGACY_WATCHDOG_LABEL="${LEGACY_WATCHDOG_LABEL:-live.streamvc.macprovider-watchdog}"' >> "$TMP/functions.sh"
 printf '%s\n' 'LEGACY_WATCHDOG_PLIST_PATH="${LEGACY_WATCHDOG_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist}"' >> "$TMP/functions.sh"
+printf '%s\n' 'HEADLESS="${HEADLESS:-0}"' >> "$TMP/functions.sh"
+printf '%s\n' 'HEADLESS_USER="${HEADLESS_USER:-}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-gui/$UID}"' >> "$TMP/functions.sh"
+printf '%s\n' 'PLIST_BOOTSTRAP_PATH="${PLIST_BOOTSTRAP_PATH:-${PLIST_PATH:-}}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_PLIST_BOOTSTRAP_PATH="${LEGACY_PLIST_BOOTSTRAP_PATH:-${LEGACY_PLIST_PATH:-}}"' >> "$TMP/functions.sh"
+printf '%s\n' 'WATCHDOG_PLIST_BOOTSTRAP_PATH="${WATCHDOG_PLIST_BOOTSTRAP_PATH:-${WATCHDOG_PLIST_PATH:-}}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH="${LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH:-${LEGACY_WATCHDOG_PLIST_PATH:-}}"' >> "$TMP/functions.sh"
 
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/plutil" <<'EOF'
@@ -111,6 +124,8 @@ run_reclaim() {
     BINARY_PATH="$TMP/home/.local/bin/macprovider-cli" \
     WATCHDOG_DIR="$TMP/home/.local/share/macprovider-watchdog" \
     WATCHDOG_PATH="$TMP/home/.local/share/macprovider-watchdog/macprovider-health-monitor" \
+    CONFIG_DIR="$TMP/home/.config/macprovider" \
+    CONFIG_PATH="$TMP/home/.config/macprovider/config.yaml" \
     PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider.plist" \
     WATCHDOG_PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist" \
     PROVIDER_PROGRAM="$TMP/home/.local/bin/macprovider-cli" \
@@ -184,14 +199,20 @@ HOME="$TMP/home" \
     assert_install_lock_ownership() { :; }
     write_watchdog_script() { printf "watchdog\n" > "$WATCHDOG_PATH"; }
     source "$FUNCTION_PATH"
+    SUDO_BIN="$(command -v sudo)"
+    LAUNCHCTL_BIN="$(command -v launchctl)"
+    INSTALL_BIN="$(command -v install)"
     INSTALL_DIR="$HOME/macprovider"
     BINARY_PATH="$HOME/.local/bin/macprovider-cli"
     WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
     WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
+    CONFIG_DIR="$HOME/.config/macprovider"
     CONFIG_PATH="$HOME/.config/macprovider/config.yaml"
     LOG_DIR="$HOME/Library/Logs/macprovider"
     PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider.plist"
+    PLIST_BOOTSTRAP_PATH="$PLIST_PATH"
     WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
+    WATCHDOG_PLIST_BOOTSTRAP_PATH="$WATCHDOG_PLIST_PATH"
     PROVIDER_LABEL="live.malibu.provider"
     WATCHDOG_LABEL="live.malibu.provider-watchdog"
     DRY_RUN=0
@@ -244,7 +265,7 @@ set -e
 grep -F 'reclaim_launchd_service "$PROVIDER_LABEL"' "$INSTALL_SH" >/dev/null
 grep -F 'reclaim_launchd_service "$WATCHDOG_LABEL"' "$INSTALL_SH" >/dev/null
 grep -F 'service_identity_matches' "$INSTALL_SH" >/dev/null
-grep -F 'launchctl bootout "gui/$REC_UID/$service_label"' "$INSTALL_SH" >/dev/null
+grep -F 'recovery_launchctl bootout "$REC_LAUNCHD_DOMAIN/$service_label"' "$INSTALL_SH" >/dev/null
 if grep -F 'launchctl bootout "gui/$REC_UID" "$REC_PLIST_PATH"' "$INSTALL_SH" >/dev/null; then
   echo "recovery still uses path-based provider bootout" >&2
   exit 1
@@ -257,6 +278,7 @@ import sys
 names = [
     "validate_port_value",
     "ensure_port_free",
+    "launchctl_service",
     "reclaim_launchd_service",
     "reclaim_legacy_launchd_service",
 ]
@@ -280,6 +302,10 @@ PY
 printf '%s\n' 'PROVIDER_LABEL="${PROVIDER_LABEL:-live.malibu.provider}"' >> "$TMP/port-functions.sh"
 printf '%s\n' 'LEGACY_PROVIDER_LABEL="${LEGACY_PROVIDER_LABEL:-live.streamvc.macprovider}"' >> "$TMP/port-functions.sh"
 printf '%s\n' 'LEGACY_PLIST_PATH="${LEGACY_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist}"' >> "$TMP/port-functions.sh"
+printf '%s\n' 'HEADLESS="${HEADLESS:-0}"' >> "$TMP/port-functions.sh"
+printf '%s\n' 'LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-gui/$UID}"' >> "$TMP/port-functions.sh"
+printf '%s\n' 'PLIST_BOOTSTRAP_PATH="${PLIST_BOOTSTRAP_PATH:-${PLIST_PATH:-}}"' >> "$TMP/port-functions.sh"
+printf '%s\n' 'LEGACY_PLIST_BOOTSTRAP_PATH="${LEGACY_PLIST_BOOTSTRAP_PATH:-${LEGACY_PLIST_PATH:-}}"' >> "$TMP/port-functions.sh"
 
 mkdir -p "$TMP/port-bin"
 cat > "$TMP/port-bin/lsof" <<'EOF'

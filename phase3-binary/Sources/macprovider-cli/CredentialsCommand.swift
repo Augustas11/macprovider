@@ -13,6 +13,8 @@ struct CredentialsCommand: ParsableCommand {
             CredentialsVerifyCommand.self,
             CredentialsStatusCommand.self,
             CredentialsRepairCommand.self,
+            CredentialsConfigTokenStatusCommand.self,
+            CredentialsScrubConfigTokenCommand.self,
             CredentialsRotateAdmissionIdentityCommand.self,
             CredentialsRecoverAdmissionIdentityCommand.self,
             CredentialsAdmissionIdentityRecoveryStatusCommand.self,
@@ -29,7 +31,7 @@ struct CredentialCommandResult: Equatable {
     func jsonObject(operation: String) -> [String: Any] {
         [
             "contract_version": Self.contractVersion,
-            "credential_store": KeychainProviderCredentialStore.service,
+            "credential_store": status.source.rawValue,
             "operation": operation,
             "provider_id": providerID,
             "source": status.source.rawValue,
@@ -61,11 +63,16 @@ struct CredentialsImportCommand: ParsableCommand {
     var config: String
 
     func run() throws {
+        let loaded = try Self.loadConfig(configPath: config)
         let providerID = try Self.importCredential(
             configPath: config,
-            store: KeychainProviderCredentialStore()
+            store: ProviderCredentialStoreFactory.providerStore(for: loaded)
         )
-        Self.printResult(operation: "import", providerID: providerID)
+        Self.printResult(
+            operation: "import",
+            providerID: providerID,
+            source: ProviderCredentialStoreFactory.credentialSource(for: loaded)
+        )
     }
 
     static func importCredential(
@@ -81,6 +88,12 @@ struct CredentialsImportCommand: ParsableCommand {
         try store.importIfAbsentOrMatches(providerID: providerID, token: token)
         guard try store.load(providerID: providerID) == token else {
             throw ProviderCredentialStoreError.verificationFailed(providerID: providerID)
+        }
+        if loaded.credentialStore == .protectedFile {
+            _ = try BootstrapAuthCommand.ensureProtectedFileIdentityMaterial(
+                providerID: providerID,
+                store: ProviderCredentialStoreFactory.receiptKeyStore(for: loaded)
+            )
         }
         return providerID
     }
@@ -100,9 +113,13 @@ struct CredentialsImportCommand: ParsableCommand {
         return providerID
     }
 
-    fileprivate static func printResult(operation: String, providerID: String) {
+    fileprivate static func printResult(
+        operation: String,
+        providerID: String,
+        source: ProviderCredentialStatus.Source
+    ) {
         let payload: [String: Any] = [
-            "credential_store": KeychainProviderCredentialStore.service,
+            "credential_store": source.rawValue,
             "operation": operation,
             "provider_id": providerID,
             "restart_safe": true,
@@ -132,12 +149,17 @@ struct CredentialsVerifyCommand: ParsableCommand {
     var config: String
 
     func run() throws {
+        let loaded = try CredentialsImportCommand.loadConfig(configPath: config)
         do {
             let providerID = try Self.verifyCredential(
                 configPath: config,
-                store: KeychainProviderCredentialStore()
+                store: ProviderCredentialStoreFactory.providerStore(for: loaded)
             )
-            CredentialsImportCommand.printResult(operation: "verify", providerID: providerID)
+            CredentialsImportCommand.printResult(
+                operation: "verify",
+                providerID: providerID,
+                source: ProviderCredentialStoreFactory.credentialSource(for: loaded)
+            )
         } catch ProviderCredentialStoreError.missing(let providerID) {
             let message = "provider credential Keychain item is missing for \(providerID)\n"
             FileHandle.standardError.write(Data(message.utf8))
@@ -182,10 +204,12 @@ struct CredentialsStatusCommand: ParsableCommand {
     var expectedProviderID: String?
 
     func run() throws {
+        let loaded = try CredentialsImportCommand.loadConfig(configPath: config)
         try Self.inspect(
             configPath: config,
             expectedProviderID: expectedProviderID,
-            store: KeychainProviderCredentialStore()
+            store: ProviderCredentialStoreFactory.providerStore(for: loaded),
+            authoritativeSource: ProviderCredentialStoreFactory.credentialSource(for: loaded)
         )
             .printJSON(operation: "status")
     }
@@ -193,7 +217,8 @@ struct CredentialsStatusCommand: ParsableCommand {
     static func inspect(
         configPath: String,
         expectedProviderID: String? = nil,
-        store: any ProviderCredentialStoring
+        store: any ProviderCredentialStoring,
+        authoritativeSource: ProviderCredentialStatus.Source = .cliKeychain
     ) throws -> CredentialCommandResult {
         do {
             return try CredentialsRepairCommand.withProtectedSource(configPath: configPath) { loaded in
@@ -201,7 +226,8 @@ struct CredentialsStatusCommand: ParsableCommand {
                     loaded: loaded,
                     expectedProviderID: expectedProviderID,
                     protectedFallback: true,
-                    store: store
+                    store: store,
+                    authoritativeSource: authoritativeSource
                 )
             }
         } catch is CredentialsRepairCommand.ProtectedSourceError {
@@ -210,7 +236,8 @@ struct CredentialsStatusCommand: ParsableCommand {
                 loaded: loaded,
                 expectedProviderID: expectedProviderID,
                 protectedFallback: false,
-                store: store
+                store: store,
+                authoritativeSource: authoritativeSource
             )
         }
     }
@@ -219,7 +246,8 @@ struct CredentialsStatusCommand: ParsableCommand {
         loaded: AppConfig,
         expectedProviderID: String? = nil,
         protectedFallback: Bool,
-        store: any ProviderCredentialStoring
+        store: any ProviderCredentialStoring,
+        authoritativeSource: ProviderCredentialStatus.Source = .cliKeychain
     ) throws -> CredentialCommandResult {
         let providerID = try CredentialsImportCommand.requiredProviderID(loaded)
         try validateExpectedProviderID(expectedProviderID, actual: providerID)
@@ -230,7 +258,7 @@ struct CredentialsStatusCommand: ParsableCommand {
             if let stored = try store.load(providerID: providerID) {
                 let conflict = fallbackAvailable && fallback != stored
                 status = ProviderCredentialStatus(
-                    source: .cliKeychain,
+                    source: authoritativeSource,
                     state: conflict ? .conflict : .ready,
                     restartSafe: true,
                     migrationPending: fallback == stored,
@@ -240,7 +268,9 @@ struct CredentialsStatusCommand: ParsableCommand {
                 )
             } else {
                 status = ProviderCredentialStatus(
-                    source: fallbackAvailable ? .configFallback : .none,
+                    source: fallbackAvailable
+                        ? .configFallback
+                        : (authoritativeSource == .protectedFile ? .protectedFile : .none),
                     state: .missing,
                     restartSafe: false,
                     migrationPending: false,
@@ -248,7 +278,11 @@ struct CredentialsStatusCommand: ParsableCommand {
                 )
             }
         } catch {
-            status = ProviderCredentialStatus.failure(error, fallbackAvailable: fallbackAvailable)
+            status = ProviderCredentialStatus.failure(
+                error,
+                fallbackAvailable: fallbackAvailable,
+                authoritativeSource: authoritativeSource == .protectedFile ? .protectedFile : nil
+            )
         }
         return CredentialCommandResult(providerID: providerID, status: status)
     }
@@ -259,6 +293,69 @@ struct CredentialsStatusCommand: ParsableCommand {
         guard !normalized.isEmpty, normalized == actual else {
             throw ValidationError("credential operation provider_id does not match the expected provider identity")
         }
+    }
+}
+
+struct CredentialsConfigTokenStatusCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "config-token-status",
+        abstract: "Report whether config semantically contains a provider token.",
+        shouldDisplay: false
+    )
+
+    @Option(help: "YAML config path to inspect.")
+    var config: String
+
+    func run() throws {
+        let loaded = try CredentialsImportCommand.loadConfig(configPath: config)
+        guard loaded.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            throw CredentialsVerifyCommand.missingCredentialExitCode
+        }
+        let payload: [String: Any] = [
+            "config_provider_token": "present",
+            "status": "ok",
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            print("config_provider_token=present")
+            return
+        }
+        print(String(decoding: data, as: UTF8.self))
+    }
+}
+
+struct CredentialsScrubConfigTokenCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "scrub-config-token",
+        abstract: "Remove the exact semantically loaded provider token from config.",
+        shouldDisplay: false
+    )
+
+    @Option(help: "YAML config path to scrub.")
+    var config: String
+
+    func run() throws {
+        let loaded = try CredentialsImportCommand.loadConfig(configPath: config)
+        guard let expected = loaded.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !expected.isEmpty else {
+            throw CredentialsVerifyCommand.missingCredentialExitCode
+        }
+        guard try ProviderTokenPersist.remove(expectedToken: expected, configPath: config) else {
+            throw ValidationError("provider credential was imported but could not be scrubbed from config")
+        }
+        let scrubbed = try CredentialsImportCommand.loadConfig(configPath: config)
+        guard scrubbed.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else {
+            throw ValidationError("provider credential was imported but remains in config")
+        }
+        let payload: [String: Any] = [
+            "config_provider_token": "absent",
+            "operation": "scrub_config_token",
+            "status": "ok",
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            print("config_provider_token=absent")
+            return
+        }
+        print(String(decoding: data, as: UTF8.self))
     }
 }
 
@@ -344,7 +441,12 @@ struct CredentialsRepairCommand: AsyncParsableCommand {
             let staged = try Self.repair(
                 configPath: config,
                 expectedProviderID: expectedProviderID,
-                store: KeychainProviderCredentialStore()
+                store: ProviderCredentialStoreFactory.providerStore(
+                    for: CredentialsImportCommand.loadConfig(configPath: config)
+                ),
+                authoritativeSource: ProviderCredentialStoreFactory.credentialSource(
+                    for: CredentialsImportCommand.loadConfig(configPath: config)
+                )
             )
             let result: CredentialCommandResult
             if proveRestart {
@@ -363,7 +465,12 @@ struct CredentialsRepairCommand: AsyncParsableCommand {
         } catch let error as RepairError {
             if let result = try? CredentialsStatusCommand.inspect(
                 configPath: config,
-                store: KeychainProviderCredentialStore()
+                store: ProviderCredentialStoreFactory.providerStore(
+                    for: CredentialsImportCommand.loadConfig(configPath: config)
+                ),
+                authoritativeSource: ProviderCredentialStoreFactory.credentialSource(
+                    for: CredentialsImportCommand.loadConfig(configPath: config)
+                )
             ) {
                 result.printJSON(operation: "repair_refused")
             }
@@ -375,7 +482,8 @@ struct CredentialsRepairCommand: AsyncParsableCommand {
     static func repair(
         configPath: String,
         expectedProviderID: String? = nil,
-        store: any ProviderCredentialStoring
+        store: any ProviderCredentialStoring,
+        authoritativeSource: ProviderCredentialStatus.Source = .cliKeychain
     ) throws -> CredentialCommandResult {
         try withProtectedSource(configPath: configPath) { loaded in
             let providerID = try CredentialsImportCommand.requiredProviderID(loaded)
@@ -388,7 +496,8 @@ struct CredentialsRepairCommand: AsyncParsableCommand {
                 loaded: loaded,
                 expectedProviderID: expectedProviderID,
                 protectedFallback: true,
-                store: store
+                store: store,
+                authoritativeSource: authoritativeSource
             )
             switch before.status.state {
             case .ready:
@@ -407,7 +516,7 @@ struct CredentialsRepairCommand: AsyncParsableCommand {
             return CredentialCommandResult(
                 providerID: providerID,
                 status: ProviderCredentialStatus(
-                    source: .cliKeychain,
+                    source: authoritativeSource,
                     state: .ready,
                     restartSafe: true,
                     migrationPending: true
@@ -551,13 +660,14 @@ enum CredentialRestartProver {
         previousServiceInstance: String?,
         timeout: TimeInterval = 20 * 60,
         pollInterval: TimeInterval = 2,
-        restart: () throws -> Void = restartLaunchdProvider,
+        restart: (() throws -> Void)? = nil,
         fetchStatus: ((Int) async -> Data?)? = nil,
-        launchdPID: () -> Int? = currentLaunchdPID,
+        launchdPID: (() -> Int?)? = nil,
         listenerOwnerPID: (Int) -> Int? = currentListenerOwnerPID,
         bootSession: () -> String? = currentBootSessionUUID
     ) async throws -> CredentialCommandResult {
         let config = try CredentialsImportCommand.loadConfig(configPath: configPath)
+        let expectedSource = ProviderCredentialStoreFactory.credentialSource(for: config)
         let providerID = try CredentialsImportCommand.requiredProviderID(config)
         try CredentialsStatusCommand.validateExpectedProviderID(expectedProviderID, actual: providerID)
         let port = config.port
@@ -566,12 +676,13 @@ enum CredentialRestartProver {
         }
 
         let restartRequestedAt = Date()
-        try restart()
+        try (restart ?? { try restartLaunchdProvider(config: config) })()
         let statusFetcher = fetchStatus ?? fetchLocalStatus
+        let launchdPIDProbe = launchdPID ?? { currentLaunchdPID(config: config) }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             try Task.checkCancellation()
-            let exactLaunchdPID = launchdPID()
+            let exactLaunchdPID = launchdPIDProbe()
             if let exactLaunchdPID,
                listenerOwnerPID(port) == exactLaunchdPID,
                let data = await statusFetcher(port),
@@ -582,7 +693,8 @@ enum CredentialRestartProver {
                    launchdPID: exactLaunchdPID,
                    now: Date(),
                    restartRequestedAt: restartRequestedAt,
-                   currentBootSession: bootSession()
+                   currentBootSession: bootSession(),
+                   expectedSource: expectedSource
                ) {
                 return result
             }
@@ -602,7 +714,8 @@ enum CredentialRestartProver {
         launchdPID: Int?,
         now: Date,
         restartRequestedAt: Date,
-        currentBootSession: String?
+        currentBootSession: String?,
+        expectedSource: ProviderCredentialStatus.Source = .cliKeychain
     ) -> CredentialCommandResult? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let contract = object["local_status_contract"] as? [String: Any],
@@ -642,7 +755,7 @@ enum CredentialRestartProver {
               let bootSession = service["boot_session"] as? String,
               bootSession.lowercased() == currentBootSession?.lowercased(),
               let credential = object["credential"] as? [String: Any],
-              credential["source"] as? String == ProviderCredentialStatus.Source.cliKeychain.rawValue,
+              credential["source"] as? String == expectedSource.rawValue,
               credential["state"] as? String == ProviderCredentialStatus.State.ready.rawValue,
               credential["restart_safe"] as? Bool == true,
               credential["migration_pending"] as? Bool == false else {
@@ -651,7 +764,7 @@ enum CredentialRestartProver {
         return CredentialCommandResult(
             providerID: expectedProviderID,
             status: ProviderCredentialStatus(
-                source: .cliKeychain,
+                source: expectedSource,
                 state: .ready,
                 restartSafe: true,
                 migrationPending: false,
@@ -660,10 +773,30 @@ enum CredentialRestartProver {
         )
     }
 
-    private static func restartLaunchdProvider() throws {
+    static func launchdDomain(
+        for config: AppConfig,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
+        if config.credentialStore == .protectedFile {
+            return "system"
+        }
+        if let raw = environment["MACPROVIDER_LAUNCHD_DOMAIN"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty {
+            return raw
+        }
+        return "gui/\(getuid())"
+    }
+
+    private static func restartLaunchdProvider(config: AppConfig) throws {
+        let domain = launchdDomain(for: config)
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["kickstart", "-k", "gui/\(getuid())/\(launchdLabel)"]
+        if domain == "system" {
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+            process.arguments = ["-n", "/bin/launchctl", "kickstart", "-k", "\(domain)/\(launchdLabel)"]
+        } else {
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = ["kickstart", "-k", "\(domain)/\(launchdLabel)"]
+        }
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
@@ -674,10 +807,20 @@ enum CredentialRestartProver {
     }
 
     static func currentLaunchdPID() -> Int? {
+        currentLaunchdPID(config: AppConfig.defaults(configPath: ""))
+    }
+
+    static func currentLaunchdPID(config: AppConfig) -> Int? {
+        let domain = launchdDomain(for: config)
         let process = Process()
         let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["print", "gui/\(getuid())/\(launchdLabel)"]
+        if domain == "system" {
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+            process.arguments = ["-n", "/bin/launchctl", "print", "\(domain)/\(launchdLabel)"]
+        } else {
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = ["print", "\(domain)/\(launchdLabel)"]
+        }
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         do {

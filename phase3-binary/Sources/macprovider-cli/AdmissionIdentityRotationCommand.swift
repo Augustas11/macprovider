@@ -74,6 +74,7 @@ struct CredentialsRecoverAdmissionIdentityCommand: AsyncParsableCommand {
         let loadedConfig = try CredentialsImportCommand.loadConfig(configPath: config)
         let providerID = try CredentialsImportCommand.requiredProviderID(loadedConfig)
         try CredentialsStatusCommand.validateExpectedProviderID(expectedProviderID, actual: providerID)
+        let keyStore = ProviderCredentialStoreFactory.receiptKeyStore(for: loadedConfig)
         if activate {
             let record = try journalStore.loadRequired(
                 configPath: config,
@@ -81,7 +82,6 @@ struct CredentialsRecoverAdmissionIdentityCommand: AsyncParsableCommand {
                 now: now,
                 allowExpired: true
             )
-            let keyStore = KeychainReceiptKeyStore()
             if let current = try keyStore.loadAdmissionIdentity(providerId: providerID),
                try keyStore.loadPendingAdmissionIdentity(providerId: providerID) == nil,
                Self.sha256(current.publicKey.rawRepresentation) == record.candidatePublicKeySHA256 {
@@ -126,7 +126,7 @@ struct CredentialsRecoverAdmissionIdentityCommand: AsyncParsableCommand {
         _ = try await AdmissionIdentityRotationCommandRunner.stageRecovery(
             configPath: config,
             expectedProviderID: expectedProviderID,
-            store: KeychainReceiptKeyStore(),
+            store: keyStore,
             now: { now },
             afterPendingPersisted: { staged in
                 _ = try journalStore.persistOrReuse(
@@ -191,7 +191,7 @@ struct CredentialsAdmissionIdentityRecoveryStatusCommand: ParsableCommand {
         guard record.providerID == providerID else {
             throw AdmissionIdentityRecoveryJournalError.providerMismatch
         }
-        let keyStore = KeychainReceiptKeyStore()
+        let keyStore = ProviderCredentialStoreFactory.receiptKeyStore(for: loadedConfig)
         let pendingDigest = try keyStore.loadPendingAdmissionIdentity(providerId: providerID)
             .map { Self.sha256($0.publicKey.rawRepresentation) }
         let currentDigest = try keyStore.loadAdmissionIdentity(providerId: providerID)
@@ -234,11 +234,12 @@ struct CredentialsRotateAdmissionIdentityCommand: AsyncParsableCommand {
     var previousServiceInstance: String?
 
     func run() async throws {
+        let loadedConfig = try CredentialsImportCommand.loadConfig(configPath: config)
         let result = try await AdmissionIdentityRotationCommandRunner.rotate(
             configPath: config,
             expectedProviderID: expectedProviderID,
             previousServiceInstance: previousServiceInstance,
-            store: KeychainReceiptKeyStore(),
+            store: ProviderCredentialStoreFactory.receiptKeyStore(for: loadedConfig),
             leaseStore: ProviderLifecycleLeaseStore()
         )
         try result.printJSON()

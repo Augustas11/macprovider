@@ -1155,7 +1155,7 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
     }
 
     private func installManifestBinaryURL() -> URL? {
-        guard let manifest = UninstallCommand.loadManifest(home: homeDirectory),
+        guard case .loaded(let manifest) = try? UninstallCommand.loadManifest(home: homeDirectory),
               let binaryPath = manifest.binaryPath,
               isCanonicalAbsolutePath(binaryPath)
         else { return nil }

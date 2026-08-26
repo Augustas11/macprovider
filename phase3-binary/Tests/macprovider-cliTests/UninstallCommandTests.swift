@@ -250,11 +250,109 @@ final class UninstallCommandTests: XCTestCase {
         }
         """.write(to: manifest, atomically: true, encoding: .utf8)
 
-        let loaded = UninstallCommand.loadManifest(home: root)
-        XCTAssertEqual(loaded?.installPrefix, "\(root.path)/custom")
-        XCTAssertEqual(loaded?.launchdLabels, ["live.malibu.provider", "live.malibu.provider-watchdog"])
-        XCTAssertEqual(loaded?.dataDirs, ["\(root.path)/custom", "\(root.path)/Library/Logs/macprovider"])
-        XCTAssertEqual(loaded?.symlinkPath, "\(root.path)/.local/bin/macprovider-cli")
+        let result = try UninstallCommand.loadManifest(home: root)
+        guard case .loaded(let loaded) = result else {
+            return XCTFail("manifest was not loaded")
+        }
+        XCTAssertEqual(loaded.installPrefix, "\(root.path)/custom")
+        XCTAssertEqual(loaded.launchdLabels, ["live.malibu.provider", "live.malibu.provider-watchdog"])
+        XCTAssertEqual(loaded.dataDirs, ["\(root.path)/custom", "\(root.path)/Library/Logs/macprovider"])
+        XCTAssertEqual(loaded.symlinkPath, "\(root.path)/.local/bin/macprovider-cli")
+        XCTAssertNil(loaded.installProfile)
+        XCTAssertNil(loaded.launchdDomain)
+    }
+
+    func testLoadManifestFailsClosedOnMalformedManifest() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("macprovider-uninstall-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manifest = UninstallCommand.artifactPaths(home: root).manifest
+        try FileManager.default.createDirectory(at: manifest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "{not-json".write(to: manifest, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try UninstallCommand.loadManifest(home: root)) { error in
+            guard case .invalidInstallManifest = error as? UninstallCommand.UninstallError else {
+                return XCTFail("unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testHeadlessManifestUninstallFailsClosed() throws {
+        let manifest = UninstallCommand.InstallManifest(
+            installPrefix: "/Users/fleet/macprovider",
+            launchdLabels: ["live.malibu.provider", "live.malibu.provider-watchdog"],
+            dataDirs: ["/Users/fleet/macprovider"],
+            version: "v1.8.106",
+            binaryPath: "/Users/fleet/macprovider/macprovider-cli",
+            symlinkPath: "/Users/fleet/.local/bin/macprovider-cli",
+            launchdPlists: [
+                "/Users/fleet/.config/macprovider/launchd/live.malibu.provider.plist",
+                "/Users/fleet/.config/macprovider/launchd/live.malibu.provider-watchdog.plist",
+            ],
+            installProfile: "headless_fleet",
+            launchdDomain: "system"
+        )
+
+        XCTAssertThrowsError(try UninstallCommand.validateUninstallProfile(manifest)) { error in
+            XCTAssertEqual(error as? UninstallCommand.UninstallError, .unsupportedHeadlessInstallProfile)
+        }
+    }
+
+    func testLoadedConsumerManifestStillFailsClosedWhenSystemArtifactsExist() throws {
+        XCTAssertThrowsError(try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
+            systemPlists: ["/Library/LaunchDaemons/live.malibu.provider.plist"],
+            fileExists: { $0 == "/Library/LaunchDaemons/live.malibu.provider.plist" }
+        ) { _ in 113 }) { error in
+            XCTAssertEqual(error as? UninstallCommand.UninstallError, .unsupportedHeadlessInstallProfile)
+        }
+    }
+
+    func testMissingManifestFailsClosedWhenSystemServiceIsLoaded() throws {
+        XCTAssertThrowsError(try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
+            systemPlists: [],
+            fileExists: { _ in false }
+        ) { arguments in
+            arguments == ["print", "system/live.malibu.provider"] ? 0 : 113
+        }) { error in
+            XCTAssertEqual(error as? UninstallCommand.UninstallError, .unsupportedHeadlessInstallProfile)
+        }
+    }
+
+    func testMissingManifestFailsClosedWhenSystemServiceStateIsUnknown() throws {
+        XCTAssertThrowsError(try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
+            systemPlists: [],
+            fileExists: { _ in false }
+        ) { _ in 64 }) { error in
+            guard case .headlessProfileIndeterminateWithoutManifest(let label, let status) = error as? UninstallCommand.UninstallError else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(label, "live.malibu.provider-watchdog")
+            XCTAssertEqual(status, 64)
+        }
+    }
+
+    func testMissingManifestFailsClosedWhenSystemLaunchDaemonPlistExists() throws {
+        XCTAssertThrowsError(try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
+            systemPlists: ["/Library/LaunchDaemons/live.malibu.provider.plist"],
+            fileExists: { $0 == "/Library/LaunchDaemons/live.malibu.provider.plist" }
+        ) { _ in 113 }) { error in
+            XCTAssertEqual(error as? UninstallCommand.UninstallError, .unsupportedHeadlessInstallProfile)
+        }
+    }
+
+    func testMissingManifestAllowsLegacyWhenSystemServicesAreAbsent() throws {
+        XCTAssertNoThrow(try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
+            systemPlists: [],
+            fileExists: { _ in false }
+        ) { _ in 113 })
+        XCTAssertNoThrow(try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
+            systemPlists: [],
+            fileExists: { _ in false }
+        ) { _ in 1 })
+        XCTAssertNoThrow(try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
+            systemPlists: [],
+            fileExists: { _ in false }
+        ) { _ in 3 })
     }
 
     func testLegacyManifestCoversProviderAndWatchdogArtifacts() {
@@ -286,7 +384,9 @@ final class UninstallCommandTests: XCTestCase {
             version: "v1.8.10",
             binaryPath: "/opt/macprovider/macprovider-cli",
             symlinkPath: "/Users/tester/.local/bin/macprovider-cli",
-            launchdPlists: ["/Users/tester/Library/LaunchAgents/live.malibu.provider.plist"]
+            launchdPlists: ["/Users/tester/Library/LaunchAgents/live.malibu.provider.plist"],
+            installProfile: nil,
+            launchdDomain: nil
         )
         let allowed = try UninstallCommand.allowedRemovalPaths(home: home, manifest: manifest)
 

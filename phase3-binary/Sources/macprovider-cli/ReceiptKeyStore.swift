@@ -28,6 +28,32 @@ protocol AdmissionIdentityRecoveryKeyStoring: AdmissionIdentityRotationKeyStorin
     ) throws -> Curve25519.Signing.PrivateKey
 }
 
+protocol ProviderIdentityKeyStoring: ReceiptKeyStoring, AdmissionIdentityRecoveryKeyStoring {
+    func loadBootstrapIdentity(providerId: String) throws -> Curve25519.Signing.PrivateKey?
+    func loadOrStoreBootstrapIdentity(
+        providerId: String,
+        candidate: Curve25519.Signing.PrivateKey
+    ) throws -> Curve25519.Signing.PrivateKey
+    func loadOrStoreAdmissionIdentity(
+        providerId: String,
+        candidate: Curve25519.Signing.PrivateKey
+    ) throws -> Curve25519.Signing.PrivateKey
+    func loadPrevious(providerId: String) throws -> Curve25519.Signing.PrivateKey?
+    func loadPreviousAdmissionIdentity(providerId: String) throws -> Curve25519.Signing.PrivateKey?
+    func loadPreviousAdmissionIdentityState(providerId: String) throws -> AdmissionIdentityPreviousKeyState?
+    func loadAdmissionIdentityRecoveryMarker(providerId: String) throws -> Data?
+    func commitAdmissionIdentityRotation(
+        providerId: String,
+        expectedPublicKey: Data,
+        previousValidUntil: Date?
+    ) throws -> Curve25519.Signing.PrivateKey
+    func commitAdmissionIdentityRecovery(
+        providerId: String,
+        expectedPublicKey: Data
+    ) throws -> Curve25519.Signing.PrivateKey
+    func cancelAdmissionIdentityRotation(providerId: String) throws
+}
+
 extension AdmissionIdentityRecoveryKeyStoring {
     func beginAdmissionIdentityRecovery(
         providerId: String,
@@ -60,7 +86,7 @@ enum ReceiptKeyStoreError: Error, Equatable {
     case admissionIdentityRecoveryInProgress(providerId: String)
 }
 
-struct KeychainReceiptKeyStore: ReceiptKeyStoring, AdmissionIdentityRecoveryKeyStoring {
+struct KeychainReceiptKeyStore: ProviderIdentityKeyStoring {
     static let currentService = "com.malibu.provider.receipt-key"
     static let previousService = "com.malibu.provider.receipt-key.prev"
     // Keep the existing service name so upgraded providers retain the same
@@ -680,5 +706,447 @@ struct KeychainReceiptKeyStore: ReceiptKeyStoring, AdmissionIdentityRecoveryKeyS
                 kSecAttrLabel as String: "MacProvider receipt and admission identity key",
                 kSecValueData as String: privateKey.rawRepresentation,
             ]) { _, new in new }
+    }
+}
+
+private struct ProtectedFileIdentitySecretStore: Sendable {
+    private let custody: ProtectedFileCredentialCustody
+
+    init(rootDirectory: URL) {
+        custody = ProtectedFileCredentialCustody(rootDirectory: rootDirectory)
+    }
+
+    func load(providerID: String, service: String) throws -> Data? {
+        try custody.withLockedProviderDirectory(namespace: .identityKeys, providerID: providerID) { directory in
+            try directory.read(name: fileName(service))?.data
+        }
+    }
+
+    func add(providerID: String, service: String, data: Data) throws -> Bool {
+        try custody.withLockedProviderDirectory(namespace: .identityKeys, providerID: providerID) { directory in
+            do {
+                try directory.add(name: fileName(service), data: data)
+                return true
+            } catch ProtectedFileCredentialCustodyError.duplicate {
+                return false
+            }
+        }
+    }
+
+    func replace(providerID: String, service: String, data: Data) throws {
+        try custody.withLockedProviderDirectory(namespace: .identityKeys, providerID: providerID) { directory in
+            try directory.replace(name: fileName(service), data: data)
+        }
+    }
+
+    func deleteIfPresent(providerID: String, service: String) throws {
+        try custody.withLockedProviderDirectory(namespace: .identityKeys, providerID: providerID) { directory in
+            try directory.deleteIfPresent(name: fileName(service))
+        }
+    }
+
+    func modificationDate(providerID: String, service: String) throws -> Date? {
+        try custody.withLockedProviderDirectory(namespace: .identityKeys, providerID: providerID) { directory in
+            try directory.read(name: fileName(service))?.modifiedAt
+        }
+    }
+
+    func secretURL(providerID: String, service: String) -> URL {
+        custody.providerDirectoryURL(namespace: .identityKeys, providerID: providerID)
+            .appendingPathComponent(fileName(service))
+    }
+
+    private func fileName(_ service: String) -> String {
+        SHA256.hash(data: Data(service.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+}
+
+struct ProtectedFileReceiptKeyStore: ProviderIdentityKeyStoring {
+    private static let mutationLock = NSLock()
+    private let store: ProtectedFileIdentitySecretStore
+    private let now: @Sendable () -> Date
+
+    init(rootDirectory: URL, now: @escaping @Sendable () -> Date = { Date() }) {
+        self.store = ProtectedFileIdentitySecretStore(rootDirectory: rootDirectory)
+        self.now = now
+    }
+
+    func loadOrGenerate(providerId: String) throws -> Curve25519.Signing.PrivateKey {
+        try cleanupExpiredPrevious(providerId: providerId)
+        if let existing = try loadCurrent(providerId: providerId) {
+            return existing
+        }
+        let generated = Curve25519.Signing.PrivateKey()
+        do {
+            try storeNew(providerId: providerId, privateKey: generated)
+            return generated
+        } catch ReceiptKeyStoreError.duplicateCurrentKey {
+            guard let winner = try loadCurrent(providerId: providerId) else {
+                throw ReceiptKeyStoreError.missingCurrentKey(providerId: providerId)
+            }
+            return winner
+        }
+    }
+
+    func loadCurrent(providerId: String) throws -> Curve25519.Signing.PrivateKey? {
+        try loadKey(providerId: providerId, service: KeychainReceiptKeyStore.currentService)
+    }
+
+    func loadBootstrapIdentity(providerId: String) throws -> Curve25519.Signing.PrivateKey? {
+        try loadKey(providerId: providerId, service: KeychainReceiptKeyStore.bootstrapIdentityService)
+    }
+
+    func loadAdmissionIdentity(providerId: String) throws -> Curve25519.Signing.PrivateKey? {
+        try loadKey(providerId: providerId, service: KeychainReceiptKeyStore.admissionIdentityService)
+    }
+
+    func loadPendingAdmissionIdentity(providerId: String) throws -> Curve25519.Signing.PrivateKey? {
+        try loadKey(providerId: providerId, service: KeychainReceiptKeyStore.pendingAdmissionIdentityService)
+    }
+
+    func loadPreviousAdmissionIdentity(providerId: String) throws -> Curve25519.Signing.PrivateKey? {
+        try loadPreviousAdmissionIdentityState(providerId: providerId)?.privateKey
+    }
+
+    func loadPreviousAdmissionIdentityState(providerId: String) throws -> AdmissionIdentityPreviousKeyState? {
+        let privateKey = try loadKey(providerId: providerId, service: KeychainReceiptKeyStore.previousAdmissionIdentityService)
+        let validUntilData = try loadData(
+            providerId: providerId,
+            service: KeychainReceiptKeyStore.previousAdmissionIdentityValidUntilService
+        )
+        guard let privateKey, let validUntilData,
+              let validUntilText = String(data: validUntilData, encoding: .utf8),
+              let validUntil = Self.parsePreviousAdmissionIdentityDeadline(validUntilText),
+              validUntil > now() else {
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.previousAdmissionIdentityService)
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.previousAdmissionIdentityValidUntilService)
+            return nil
+        }
+        return AdmissionIdentityPreviousKeyState(privateKey: privateKey, validUntil: validUntil)
+    }
+
+    func loadPrevious(providerId: String) throws -> Curve25519.Signing.PrivateKey? {
+        try loadKey(providerId: providerId, service: KeychainReceiptKeyStore.previousService)
+    }
+
+    func loadOrStoreBootstrapIdentity(
+        providerId: String,
+        candidate: Curve25519.Signing.PrivateKey
+    ) throws -> Curve25519.Signing.PrivateKey {
+        try Self.withMutationLock {
+            if let existing = try loadBootstrapIdentity(providerId: providerId) {
+                return existing
+            }
+            if try addKeyIfAbsent(
+                providerId: providerId,
+                service: KeychainReceiptKeyStore.bootstrapIdentityService,
+                privateKey: candidate
+            ) {
+                return candidate
+            }
+            guard let winner = try loadBootstrapIdentity(providerId: providerId) else {
+                throw ReceiptKeyStoreError.missingCurrentKey(providerId: providerId)
+            }
+            return winner
+        }
+    }
+
+    func loadOrStoreAdmissionIdentity(
+        providerId: String,
+        candidate: Curve25519.Signing.PrivateKey
+    ) throws -> Curve25519.Signing.PrivateKey {
+        try loadOrStoreBootstrapIdentity(providerId: providerId, candidate: candidate)
+    }
+
+    func beginAdmissionIdentityRotation(providerId: String) throws -> Curve25519.Signing.PrivateKey {
+        try Self.withMutationLock {
+            if try loadAdmissionIdentityRecoveryMarker(providerId: providerId) != nil {
+                throw ReceiptKeyStoreError.admissionIdentityRecoveryInProgress(providerId: providerId)
+            }
+            guard try loadAdmissionIdentity(providerId: providerId) != nil else {
+                throw ReceiptKeyStoreError.missingAdmissionIdentity(providerId: providerId)
+            }
+            if let pending = try loadPendingAdmissionIdentity(providerId: providerId) {
+                return pending
+            }
+            let candidate = Curve25519.Signing.PrivateKey()
+            if try addKeyIfAbsent(
+                providerId: providerId,
+                service: KeychainReceiptKeyStore.pendingAdmissionIdentityService,
+                privateKey: candidate
+            ) {
+                return candidate
+            }
+            guard let winner = try loadPendingAdmissionIdentity(providerId: providerId) else {
+                throw ReceiptKeyStoreError.missingAdmissionIdentity(providerId: providerId)
+            }
+            return winner
+        }
+    }
+
+    func beginAdmissionIdentityRecovery(
+        providerId: String,
+        allowExistingCurrent: Bool = false
+    ) throws -> Curve25519.Signing.PrivateKey {
+        try beginAdmissionIdentityRecovery(
+            providerId: providerId,
+            allowExistingCurrent: allowExistingCurrent,
+            afterPendingPersisted: { _ in }
+        )
+    }
+
+    func beginAdmissionIdentityRecovery(
+        providerId: String,
+        allowExistingCurrent: Bool,
+        afterPendingPersisted: (Curve25519.Signing.PrivateKey) throws -> Void
+    ) throws -> Curve25519.Signing.PrivateKey {
+        try Self.withMutationLock {
+            if try loadAdmissionIdentity(providerId: providerId) != nil && !allowExistingCurrent {
+                throw ReceiptKeyStoreError.admissionIdentityRecoveryNotRequired(providerId: providerId)
+            }
+            if let pending = try loadPendingAdmissionIdentity(providerId: providerId) {
+                try afterPendingPersisted(pending)
+                try replaceData(
+                    providerId: providerId,
+                    service: KeychainReceiptKeyStore.admissionIdentityRecoveryMarkerService,
+                    data: pending.publicKey.rawRepresentation
+                )
+                return pending
+            }
+            let candidate = Curve25519.Signing.PrivateKey()
+            if try addKeyIfAbsent(
+                providerId: providerId,
+                service: KeychainReceiptKeyStore.pendingAdmissionIdentityService,
+                privateKey: candidate
+            ) {
+                try afterPendingPersisted(candidate)
+                try replaceData(
+                    providerId: providerId,
+                    service: KeychainReceiptKeyStore.admissionIdentityRecoveryMarkerService,
+                    data: candidate.publicKey.rawRepresentation
+                )
+                return candidate
+            }
+            guard let winner = try loadPendingAdmissionIdentity(providerId: providerId) else {
+                throw ReceiptKeyStoreError.missingAdmissionIdentity(providerId: providerId)
+            }
+            try afterPendingPersisted(winner)
+            try replaceData(
+                providerId: providerId,
+                service: KeychainReceiptKeyStore.admissionIdentityRecoveryMarkerService,
+                data: winner.publicKey.rawRepresentation
+            )
+            return winner
+        }
+    }
+
+    func isAdmissionIdentityRecoveryPending(providerId: String, candidatePublicKey: Data) throws -> Bool {
+        try loadAdmissionIdentityRecoveryMarker(providerId: providerId) == candidatePublicKey
+    }
+
+    func loadAdmissionIdentityRecoveryMarker(providerId: String) throws -> Data? {
+        try loadData(providerId: providerId, service: KeychainReceiptKeyStore.admissionIdentityRecoveryMarkerService)
+    }
+
+    func commitAdmissionIdentityRotation(
+        providerId: String,
+        expectedPublicKey: Data,
+        previousValidUntil: Date?
+    ) throws -> Curve25519.Signing.PrivateKey {
+        try Self.withMutationLock {
+            if let current = try loadAdmissionIdentity(providerId: providerId),
+               current.publicKey.rawRepresentation == expectedPublicKey {
+                try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.pendingAdmissionIdentityService)
+                try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.admissionIdentityRecoveryMarkerService)
+                return current
+            }
+            guard let current = try loadAdmissionIdentity(providerId: providerId) else {
+                throw ReceiptKeyStoreError.missingAdmissionIdentity(providerId: providerId)
+            }
+            guard let pending = try loadPendingAdmissionIdentity(providerId: providerId),
+                  pending.publicKey.rawRepresentation == expectedPublicKey else {
+                throw ReceiptKeyStoreError.admissionIdentityCandidateMismatch(providerId: providerId)
+            }
+
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.previousAdmissionIdentityService)
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.previousAdmissionIdentityValidUntilService)
+            if let previousValidUntil, previousValidUntil > now() {
+                try addKey(
+                    providerId: providerId,
+                    service: KeychainReceiptKeyStore.previousAdmissionIdentityService,
+                    privateKey: current
+                )
+                try replaceData(
+                    providerId: providerId,
+                    service: KeychainReceiptKeyStore.previousAdmissionIdentityValidUntilService,
+                    data: Data(Self.formatPreviousAdmissionIdentityDeadline(previousValidUntil).utf8)
+                )
+            }
+            try replaceKey(
+                providerId: providerId,
+                service: KeychainReceiptKeyStore.admissionIdentityService,
+                privateKey: pending
+            )
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.pendingAdmissionIdentityService)
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.admissionIdentityRecoveryMarkerService)
+            return pending
+        }
+    }
+
+    func commitAdmissionIdentityRecovery(providerId: String, expectedPublicKey: Data) throws -> Curve25519.Signing.PrivateKey {
+        try Self.withMutationLock {
+            if let current = try loadAdmissionIdentity(providerId: providerId),
+               current.publicKey.rawRepresentation == expectedPublicKey {
+                try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.pendingAdmissionIdentityService)
+                try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.previousAdmissionIdentityService)
+                try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.previousAdmissionIdentityValidUntilService)
+                try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.admissionIdentityRecoveryMarkerService)
+                return current
+            }
+            guard let pending = try loadPendingAdmissionIdentity(providerId: providerId),
+                  pending.publicKey.rawRepresentation == expectedPublicKey else {
+                throw ReceiptKeyStoreError.admissionIdentityCandidateMismatch(providerId: providerId)
+            }
+            try replaceKey(
+                providerId: providerId,
+                service: KeychainReceiptKeyStore.admissionIdentityService,
+                privateKey: pending
+            )
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.previousAdmissionIdentityService)
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.previousAdmissionIdentityValidUntilService)
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.pendingAdmissionIdentityService)
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.admissionIdentityRecoveryMarkerService)
+            return pending
+        }
+    }
+
+    func cancelAdmissionIdentityRotation(providerId: String) throws {
+        try Self.withMutationLock {
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.pendingAdmissionIdentityService)
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.admissionIdentityRecoveryMarkerService)
+        }
+    }
+
+    func storeNew(providerId: String, privateKey: Curve25519.Signing.PrivateKey) throws {
+        if try !addKeyIfAbsent(providerId: providerId, service: KeychainReceiptKeyStore.currentService, privateKey: privateKey) {
+            throw ReceiptKeyStoreError.duplicateCurrentKey(providerId: providerId)
+        }
+    }
+
+    func swapToCurrent(providerId: String, newKey: Curve25519.Signing.PrivateKey) throws {
+        try Self.withMutationLock {
+            guard let current = try loadCurrent(providerId: providerId) else {
+                throw ReceiptKeyStoreError.missingCurrentKey(providerId: providerId)
+            }
+            try replaceKey(providerId: providerId, service: KeychainReceiptKeyStore.currentService, privateKey: newKey)
+            try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.previousService)
+            try addKey(providerId: providerId, service: KeychainReceiptKeyStore.previousService, privateKey: current)
+        }
+    }
+
+    func protectedFileURL(providerId: String, service: String) -> URL {
+        store.secretURL(providerID: providerId, service: service)
+    }
+
+    private func cleanupExpiredPrevious(providerId: String) throws {
+        guard let modified = try store.modificationDate(
+            providerID: providerId,
+            service: KeychainReceiptKeyStore.previousService
+        ),
+              now().timeIntervalSince(modified) > KeychainReceiptKeyStore.previousRetention else {
+            return
+        }
+        try deleteIfPresent(providerId: providerId, service: KeychainReceiptKeyStore.previousService)
+    }
+
+    private func loadKey(providerId: String, service: String) throws -> Curve25519.Signing.PrivateKey? {
+        guard let data = try loadData(providerId: providerId, service: service) else { return nil }
+        guard data.count == 32 else {
+            throw ReceiptKeyStoreError.invalidPrivateKeyData(providerId: providerId, byteCount: data.count)
+        }
+        return try Curve25519.Signing.PrivateKey(rawRepresentation: data)
+    }
+
+    private func loadData(providerId: String, service: String) throws -> Data? {
+        do {
+            return try store.load(providerID: providerId, service: service)
+        } catch {
+            throw ReceiptKeyStoreError.keychainReadFailed(providerId: providerId, status: errSecIO)
+        }
+    }
+
+    private func addKeyIfAbsent(
+        providerId: String,
+        service: String,
+        privateKey: Curve25519.Signing.PrivateKey
+    ) throws -> Bool {
+        try addDataIfAbsent(providerId: providerId, service: service, data: privateKey.rawRepresentation)
+    }
+
+    private func addKey(
+        providerId: String,
+        service: String,
+        privateKey: Curve25519.Signing.PrivateKey
+    ) throws {
+        if try !addKeyIfAbsent(providerId: providerId, service: service, privateKey: privateKey) {
+            throw ReceiptKeyStoreError.keychainWriteFailed(providerId: providerId, status: errSecDuplicateItem)
+        }
+    }
+
+    private func addDataIfAbsent(providerId: String, service: String, data: Data) throws -> Bool {
+        do {
+            return try store.add(providerID: providerId, service: service, data: data)
+        } catch {
+            throw ReceiptKeyStoreError.keychainWriteFailed(providerId: providerId, status: errSecIO)
+        }
+    }
+
+    private func replaceKey(
+        providerId: String,
+        service: String,
+        privateKey: Curve25519.Signing.PrivateKey
+    ) throws {
+        try replaceData(providerId: providerId, service: service, data: privateKey.rawRepresentation)
+    }
+
+    private func replaceData(providerId: String, service: String, data: Data) throws {
+        do {
+            try store.replace(providerID: providerId, service: service, data: data)
+        } catch {
+            throw ReceiptKeyStoreError.keychainWriteFailed(providerId: providerId, status: errSecIO)
+        }
+    }
+
+    private func deleteIfPresent(providerId: String, service: String) throws {
+        do {
+            try store.deleteIfPresent(providerID: providerId, service: service)
+        } catch {
+            throw ReceiptKeyStoreError.keychainDeleteFailed(providerId: providerId, status: errSecIO)
+        }
+    }
+
+    private static func withMutationLock<T>(_ operation: () throws -> T) throws -> T {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        return try operation()
+    }
+
+    private static func formatPreviousAdmissionIdentityDeadline(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    private static func parsePreviousAdmissionIdentityDeadline(_ text: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: text) {
+            return date
+        }
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return wholeSeconds.date(from: text)
     }
 }

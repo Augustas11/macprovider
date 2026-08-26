@@ -28,13 +28,22 @@ struct UninstallCommand: AsyncParsableCommand {
         } else {
             priorLifecycle = nil
         }
+        let validateSystemArtifactsAbsent = {
+            try Self.validateNoHeadlessSystemArtifactsPresent { arguments in
+                try runProcess("/bin/launchctl", arguments: arguments)
+            }
+        }
         let manifest: InstallManifest
-        if let loaded = Self.loadManifest(home: home) {
+        switch try Self.loadManifest(home: home) {
+        case .loaded(let loaded):
             manifest = loaded
-        } else {
+            try validateSystemArtifactsAbsent()
+        case .missing:
+            try validateSystemArtifactsAbsent()
             warnings.append("install manifest missing; using legacy uninstall locations")
             manifest = Self.legacyManifest(home: home)
         }
+        try Self.validateUninstallProfile(manifest)
 
         try Self.stopLaunchdServices(labels: manifest.launchdLabels, uid: getuid()) { arguments in
             try runProcess("/bin/launchctl", arguments: arguments)
@@ -151,6 +160,9 @@ struct UninstallCommand: AsyncParsableCommand {
         case serviceStillLoaded(String)
         case serviceAbsenceVerificationFailed(String, Int32)
         case unexpectedServiceLabel(String)
+        case unsupportedHeadlessInstallProfile
+        case headlessProfileIndeterminateWithoutManifest(String, Int32)
+        case invalidInstallManifest(String)
 
         var description: String {
             switch self {
@@ -160,6 +172,12 @@ struct UninstallCommand: AsyncParsableCommand {
                 return "refusing to remove provider artifacts because launchd service absence could not be verified: \(label) (launchctl print exited \(status))"
             case .unexpectedServiceLabel(let label):
                 return "refusing to use an unrecognized launchd service label from the install manifest: \(label)"
+            case .unsupportedHeadlessInstallProfile:
+                return "headless_fleet uninstall is not supported until system-domain service stop and absence proof are implemented"
+            case .headlessProfileIndeterminateWithoutManifest(let label, let status):
+                return "refusing legacy uninstall because system-domain service absence could not be verified without an install manifest: \(label) (launchctl print exited \(status))"
+            case .invalidInstallManifest(let reason):
+                return "refusing uninstall because install manifest is invalid: \(reason)"
             }
         }
     }
@@ -200,6 +218,33 @@ struct UninstallCommand: AsyncParsableCommand {
         }
     }
 
+    static let managedSystemLaunchDaemonPlists = [
+        "/Library/LaunchDaemons/live.malibu.provider.plist",
+        "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist",
+        "/Library/LaunchDaemons/live.streamvc.macprovider.plist",
+        "/Library/LaunchDaemons/live.streamvc.macprovider-watchdog.plist",
+    ]
+
+    static func validateNoHeadlessSystemArtifactsPresent(
+        systemPlists: [String] = managedSystemLaunchDaemonPlists,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        run: ([String]) throws -> Int32
+    ) throws {
+        for plist in systemPlists where fileExists(plist) {
+            throw UninstallError.unsupportedHeadlessInstallProfile
+        }
+        for label in managedLaunchdStopOrder {
+            let target = "system/\(label)"
+            let status = try run(["print", target])
+            guard status != 0 else {
+                throw UninstallError.unsupportedHeadlessInstallProfile
+            }
+            guard isLaunchdAbsentStatus(status) else {
+                throw UninstallError.headlessProfileIndeterminateWithoutManifest(label, status)
+            }
+        }
+    }
+
     private static func verifyServiceAbsent(
         label: String,
         uid: uid_t,
@@ -210,9 +255,13 @@ struct UninstallCommand: AsyncParsableCommand {
         guard printStatus != 0 else {
             throw UninstallError.serviceStillLoaded(label)
         }
-        guard printStatus == 113 else {
+        guard isLaunchdAbsentStatus(printStatus) else {
             throw UninstallError.serviceAbsenceVerificationFailed(label, printStatus)
         }
+    }
+
+    static func isLaunchdAbsentStatus(_ status: Int32) -> Bool {
+        status == 1 || status == 3 || status == 113
     }
 
     static func artifactPaths(home: URL) -> ArtifactPaths {
@@ -237,6 +286,8 @@ struct UninstallCommand: AsyncParsableCommand {
         let binaryPath: String?
         let symlinkPath: String?
         let launchdPlists: [String]
+        let installProfile: String?
+        let launchdDomain: String?
 
         enum CodingKeys: String, CodingKey {
             case installPrefix = "install_prefix"
@@ -246,15 +297,32 @@ struct UninstallCommand: AsyncParsableCommand {
             case binaryPath = "binary_path"
             case symlinkPath = "symlink_path"
             case launchdPlists = "launchd_plists"
+            case installProfile = "install_profile"
+            case launchdDomain = "launchd_domain"
         }
     }
 
-    static func loadManifest(home: URL, fileManager: FileManager = .default) -> InstallManifest? {
+    static func validateUninstallProfile(_ manifest: InstallManifest) throws {
+        guard manifest.installProfile != "headless_fleet",
+              manifest.launchdDomain != "system" else {
+            throw UninstallError.unsupportedHeadlessInstallProfile
+        }
+    }
+
+    enum ManifestLoadResult: Equatable {
+        case missing
+        case loaded(InstallManifest)
+    }
+
+    static func loadManifest(home: URL, fileManager: FileManager = .default) throws -> ManifestLoadResult {
         let url = artifactPaths(home: home).manifest
-        guard fileManager.fileExists(atPath: url.path),
-              let data = try? Data(contentsOf: url)
-        else { return nil }
-        return try? JSONDecoder().decode(InstallManifest.self, from: data)
+        guard fileManager.fileExists(atPath: url.path) else { return .missing }
+        do {
+            let data = try Data(contentsOf: url)
+            return .loaded(try JSONDecoder().decode(InstallManifest.self, from: data))
+        } catch {
+            throw UninstallError.invalidInstallManifest(String(describing: error))
+        }
     }
 
     static func legacyManifest(home: URL) -> InstallManifest {
@@ -275,7 +343,9 @@ struct UninstallCommand: AsyncParsableCommand {
                 paths.watchdogPlist.path,
                 home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist").path,
                 home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist").path,
-            ]
+            ],
+            installProfile: nil,
+            launchdDomain: nil
         )
     }
 
