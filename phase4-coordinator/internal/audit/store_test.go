@@ -3,12 +3,22 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
+
+func TestDefaultDBPathReturnsSiblingAuditDB(t *testing.T) {
+	if got, want := DefaultDBPath(filepath.Join("var", "lib", "macprovider", "coordinator.db")), filepath.Join("var", "lib", "macprovider", "coordinator-audit.db"); got != want {
+		t.Fatalf("DefaultDBPath=%q want %q", got, want)
+	}
+	if got := DefaultDBPath("coordinator.db"); got != "coordinator-audit.db" {
+		t.Fatalf("DefaultDBPath local=%q want coordinator-audit.db", got)
+	}
+}
 
 func TestOpenStoreCreatesAuditLogSchema(t *testing.T) {
 	store := openTestStore(t)
@@ -49,6 +59,19 @@ WHERE type IN ('table', 'index') AND name IN (
 	}
 }
 
+func TestOpenStoreKeepsSQLiteAutocheckpointOwnerDefault(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	var got int
+	if err := store.DB().QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&got); err != nil {
+		t.Fatalf("PRAGMA wal_autocheckpoint: %v", err)
+	}
+	if got == 0 {
+		t.Fatal("audit store disabled wal_autocheckpoint without an explicit checkpoint owner")
+	}
+}
+
 func TestInsertAndReadBack(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
@@ -68,6 +91,84 @@ FROM audit_log`).Scan(&gotTS, &gotEventType, &gotProviderID, &gotPayload); err !
 	}
 	if gotTS != ts.Format(time.RFC3339Nano) || gotEventType != "custom_event" || gotProviderID != "provider-a" || gotPayload != payload {
 		t.Fatalf("row = (%q, %q, %q, %q)", gotTS, gotEventType, gotProviderID, gotPayload)
+	}
+}
+
+func TestInsertSettlementReceiptOutboxIsIdempotent(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	ts := time.Date(2026, 6, 7, 14, 23, 9, 123000000, time.UTC)
+
+	inserted, err := store.InsertSettlementReceiptOutbox(ctx, ts, "settlement_receipt_verdict", "provider-a", `{"event":"one"}`, 42)
+	if err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	if !inserted {
+		t.Fatal("first insert inserted=false want true")
+	}
+	inserted, err = store.InsertSettlementReceiptOutbox(ctx, ts.Add(time.Hour), "settlement_receipt_verdict", "provider-a", `{"event":"two"}`, 42)
+	if err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+	if inserted {
+		t.Fatal("second insert inserted=true want false")
+	}
+
+	var count int
+	var gotTS, gotPayload string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*), MIN(ts_utc), MIN(payload_json)
+FROM audit_log
+WHERE settlement_receipt_audit_outbox_id = 42`).Scan(&count, &gotTS, &gotPayload); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || gotTS != ts.Format(time.RFC3339Nano) || gotPayload != `{"event":"one"}` {
+		t.Fatalf("row count/ts/payload = %d/%s/%s", count, gotTS, gotPayload)
+	}
+}
+
+func TestOpenStoreMigratesLegacyAuditLogForSettlementReceiptOutboxID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    provider_id TEXT,
+    payload_json TEXT NOT NULL
+);
+INSERT INTO audit_log(ts_utc, event_type, provider_id, payload_json)
+VALUES('2026-06-07T14:23:09Z', 'legacy', 'provider-a', '{}');`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore legacy schema: %v", err)
+	}
+	defer store.Close()
+
+	if ok, err := store.columnExists(context.Background(), "audit_log", "settlement_receipt_audit_outbox_id"); err != nil || !ok {
+		t.Fatalf("settlement_receipt_audit_outbox_id exists=%v err=%v", ok, err)
+	}
+	var indexCount int
+	if err := store.DB().QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM sqlite_schema
+WHERE type='index' AND name='idx_audit_log_settlement_receipt_outbox'`).Scan(&indexCount); err != nil {
+		t.Fatal(err)
+	}
+	if indexCount != 1 {
+		t.Fatalf("unique outbox index count=%d want 1", indexCount)
 	}
 }
 

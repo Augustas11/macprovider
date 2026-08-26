@@ -57,15 +57,109 @@ func TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit(t *testing
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready`); got != 0 {
 		t.Fatalf("ledger_payout_ready rows=%d want 0", got)
 	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_audit_outbox WHERE drained_at_utc IS NULL`); got != 2 {
+		t.Fatalf("pending audit outbox rows=%d want 2 before background drain", got)
+	}
+	var firstOutboxID int64
+	var firstOutboxCreatedAt string
+	if err := store.db.QueryRow(`
+SELECT id, created_at_utc
+FROM settlement_receipt_audit_outbox
+WHERE event_type='settlement_receipt_verdict'
+ORDER BY id ASC
+LIMIT 1`).Scan(&firstOutboxID, &firstOutboxCreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	drainSettlementReceiptAuditOutboxToBillingAuditLog(t, store, 2)
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='settlement_receipt_ingested'`); got != 1 {
 		t.Fatalf("ingested audit rows=%d want 1", got)
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='settlement_receipt_verdict'`); got != 1 {
 		t.Fatalf("verdict audit rows=%d want 1", got)
 	}
+	var auditTS string
+	if err := store.db.QueryRow(`
+SELECT ts_utc
+FROM audit_log
+WHERE settlement_receipt_audit_outbox_id = ?`, firstOutboxID).Scan(&auditTS); err != nil {
+		t.Fatal(err)
+	}
+	if auditTS != firstOutboxCreatedAt {
+		t.Fatalf("audit ts_utc=%s want outbox created_at_utc %s", auditTS, firstOutboxCreatedAt)
+	}
 	assertSettlementReceiptVerdictAuditContract(t, store.db, state)
 	assertSettlementReceiptAuditRedacted(t, store.db, input.Header, fixtures.ProviderReceiptPubkeyB64)
 	assertSettlementReceiptVerdictSchemaRedacted(t, store.db)
+}
+
+func TestSettlementReceiptAuditOutboxSurvivesPostCommitDrainFailure(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithNegativeVariant(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	_, store := newRequestAndBillingStores(t)
+	seedSettlementReceiptEvidence(t, store, input)
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
+
+	state, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: SettlementReceiptIdentity{
+			AccountScope: input.AccountScope,
+			RequestID:    input.RequestID,
+			AttemptN:     input.AttemptN,
+			ProviderID:   input.ProviderID,
+		},
+		Header:                input.Header,
+		ProviderReceiptPubkey: pubkey,
+		receiptReceivedUnixMS: input.ReceiptReceivedUnixMS,
+	})
+	if err != nil {
+		t.Fatalf("post-commit audit drain failure must not fail receipt ingestion: %v", err)
+	}
+	if state.SettlementOutcome != SettlementOutcomeVerified || state.ReceiptResult != SettlementReceiptResultValid || !state.Closed {
+		t.Fatalf("state=%#v, want committed terminal verified state", state)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE settlement_outcome='verified' AND closed=1`); got != 1 {
+		t.Fatalf("verified verdict rows=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_audit_outbox WHERE drained_at_utc IS NULL`); got != 2 {
+		t.Fatalf("pending outbox rows=%d want 2", got)
+	}
+
+	drainSettlementReceiptAuditOutboxToBillingAuditLog(t, store, 2)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_audit_outbox WHERE drained_at_utc IS NULL`); got != 0 {
+		t.Fatalf("pending outbox rows after drain=%d want 0", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='settlement_receipt_ingested'`); got != 1 {
+		t.Fatalf("ingested audit rows=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='settlement_receipt_verdict'`); got != 1 {
+		t.Fatalf("verdict audit rows=%d want 1", got)
+	}
+	if _, err := store.db.Exec(`UPDATE settlement_receipt_audit_outbox SET drained_at_utc = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	drained, err := store.DrainSettlementReceiptAuditOutbox(context.Background(), settlementReceiptTestAuditSink{db: store.db}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drained != 2 {
+		t.Fatalf("retry drain rows=%d want 2 marked after idempotent sink replay", drained)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='settlement_receipt_ingested'`); got != 1 {
+		t.Fatalf("ingested audit rows after replay=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='settlement_receipt_verdict'`); got != 1 {
+		t.Fatalf("verdict audit rows after replay=%d want 1", got)
+	}
+	drained, err = store.DrainSettlementReceiptAuditOutbox(context.Background(), settlementReceiptTestAuditSink{db: store.db}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drained != 0 {
+		t.Fatalf("second drain rows=%d want 0", drained)
+	}
+	assertSettlementReceiptVerdictAuditContract(t, store.db, state)
+	assertSettlementReceiptAuditRedacted(t, store.db, input.Header, fixtures.ProviderReceiptPubkeyB64)
 }
 
 func TestSyncVerifiedReceiptLedgerCreditUpdatesPromptSplitColumns(t *testing.T) {
@@ -214,10 +308,11 @@ func TestSettlementReceiptPendingCanCloseWithValidReceiptBeforeDeadline(t *testi
 		ProviderID:   input.ProviderID,
 	}
 	deadline := input.TerminalStateTSUnixMS + input.RouteSnapshot.PendingDeadlineSeconds*1000
-	if _, err := store.RecordMissingSettlementReceipt(context.Background(), SettlementReceiptMissingInput{
+	pending, err := store.RecordMissingSettlementReceipt(context.Background(), SettlementReceiptMissingInput{
 		SettlementReceiptIdentity: id,
 		NowUnixMS:                 deadline - 100,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	verified, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
@@ -234,6 +329,46 @@ func TestSettlementReceiptPendingCanCloseWithValidReceiptBeforeDeadline(t *testi
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE settlement_outcome='verified' AND idempotency_status='terminal_after_pending'`); got != 1 {
 		t.Fatalf("terminal_after_pending rows=%d want 1", got)
+	}
+	mutatedPromptHash := strings.Repeat("f", 64)
+	if _, err := store.db.Exec(`
+UPDATE settlement_receipt_verdicts
+   SET route_snapshot_policy_version = 'mutated-policy',
+       paid_entrypoint = 'mutated-entrypoint',
+       model_id = 'mutated-model',
+       prompt_hash = ?
+ WHERE account_scope_hash = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		mutatedPromptHash, redactedAccountScopeHash(id.AccountScope), id.RequestID, id.AttemptN, id.ProviderID); err != nil {
+		t.Fatal(err)
+	}
+	drainSettlementReceiptAuditOutboxToBillingAuditLog(t, store, 3)
+	payloads := settlementReceiptVerdictPayloads(t, store.db)
+	if len(payloads) != 2 {
+		t.Fatalf("settlement_receipt_verdict audit payloads=%d want 2", len(payloads))
+	}
+	if got := payloads[0]["settlement_outcome"]; got != SettlementOutcomePending {
+		t.Fatalf("first verdict settlement_outcome=%v want pending", got)
+	}
+	if got := payloads[0]["idempotency_status"]; got != settlementReceiptIDPending {
+		t.Fatalf("first verdict idempotency_status=%v want pending", got)
+	}
+	if got := payloads[0]["route_snapshot_policy_version"]; got != pending.RouteSnapshotPolicyVersion {
+		t.Fatalf("first verdict route_snapshot_policy_version=%v want %s", got, pending.RouteSnapshotPolicyVersion)
+	}
+	if got := payloads[0]["paid_entrypoint"]; got != pending.PaidEntrypoint {
+		t.Fatalf("first verdict paid_entrypoint=%v want %s", got, pending.PaidEntrypoint)
+	}
+	if got := payloads[0]["model_id"]; got != pending.ModelID {
+		t.Fatalf("first verdict model_id=%v want %s", got, pending.ModelID)
+	}
+	if got := payloads[0]["prompt_hash"]; got != pending.PromptHash {
+		t.Fatalf("first verdict prompt_hash=%v want %s", got, pending.PromptHash)
+	}
+	if got := payloads[1]["settlement_outcome"]; got != SettlementOutcomeVerified {
+		t.Fatalf("second verdict settlement_outcome=%v want verified", got)
+	}
+	if got := payloads[1]["idempotency_status"]; got != settlementReceiptIDTerminalAfterPending {
+		t.Fatalf("second verdict idempotency_status=%v want terminal_after_pending", got)
 	}
 }
 
@@ -561,6 +696,7 @@ func TestSettlementReceiptResubmissionCannotChangeClosedOutcome(t *testing.T) {
 	if second.SettlementOutcome != SettlementOutcomeVerified || second.Reason != "verified_settlement" || second.IdempotencyStatus != settlementReceiptIDTerminalNoop {
 		t.Fatalf("second state=%#v, want original verified terminal no-op", second)
 	}
+	drainSettlementReceiptAuditOutboxToBillingAuditLog(t, store, 3)
 	payload := latestSettlementReceiptVerdictPayload(t, store.db)
 	if payload["idempotency_status"] != settlementReceiptIDTerminalNoop ||
 		payload["settlement_outcome"] != SettlementOutcomeVerified ||
@@ -651,6 +787,7 @@ WHERE account_scope_hash = ? AND request_id = ? AND attempt_n = ? AND provider_i
 		t.Fatalf("persisted hashes model=%s output=%s usage=%s, want coordinator evidence %s/%s/%s",
 			modelHash, outputHash, usageDigest, input.RouteSnapshot.ProviderReportedModelHash, input.OutputHash, wantUsageHash)
 	}
+	drainSettlementReceiptAuditOutboxToBillingAuditLog(t, store, 2)
 	payload := latestSettlementReceiptVerdictPayload(t, store.db)
 	for key, want := range map[string]string{
 		"model_hash":                   input.RouteSnapshot.ProviderReportedModelHash,
@@ -749,11 +886,46 @@ CREATE TABLE IF NOT EXISTS audit_log (
     ts_utc TEXT NOT NULL,
     event_type TEXT NOT NULL,
     provider_id TEXT,
+    settlement_receipt_audit_outbox_id INTEGER NULL,
     payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_event_type ON audit_log(event_type);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_log_settlement_receipt_outbox
+    ON audit_log(settlement_receipt_audit_outbox_id)
+    WHERE settlement_receipt_audit_outbox_id IS NOT NULL;
 `); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type settlementReceiptTestAuditSink struct {
+	db *sql.DB
+}
+
+func (s settlementReceiptTestAuditSink) InsertSettlementReceiptOutbox(ctx context.Context, ts time.Time, eventType, providerID, payloadJSON string, outboxID int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO audit_log (ts_utc, event_type, provider_id, settlement_receipt_audit_outbox_id, payload_json)
+VALUES (?, ?, ?, ?, ?)`,
+		ts.UTC().Format(time.RFC3339Nano), eventType, providerID, outboxID, payloadJSON)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func drainSettlementReceiptAuditOutboxToBillingAuditLog(t *testing.T, store *Store, want int) {
+	t.Helper()
+	createSettlementReceiptAuditLog(t, store.db)
+	drained, err := store.DrainSettlementReceiptAuditOutbox(context.Background(), settlementReceiptTestAuditSink{db: store.db}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drained != want {
+		t.Fatalf("drained rows=%d want %d", drained, want)
 	}
 }
 
@@ -911,6 +1083,35 @@ LIMIT 1`).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	return payload
+}
+
+func settlementReceiptVerdictPayloads(t *testing.T, db *sql.DB) []map[string]any {
+	t.Helper()
+	rows, err := db.Query(`
+SELECT payload_json
+FROM audit_log
+WHERE event_type='settlement_receipt_verdict'
+ORDER BY id ASC`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var payloads []map[string]any
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+			t.Fatal(err)
+		}
+		payloads = append(payloads, payload)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return payloads
 }
 
 func assertSettlementReceiptVerdictAuditContract(t *testing.T, db *sql.DB, state SettlementReceiptState) {

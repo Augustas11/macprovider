@@ -18,6 +18,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -155,6 +156,144 @@ func TestAppTrackReferralMintReconcilerRunsAfterEnforcementRollback(t *testing.T
 	case <-called:
 	case <-time.After(time.Second):
 		t.Fatal("referral mint reconciler did not run with enforcement disabled")
+	}
+}
+
+func TestSettlementStartupScanRespectsJobEnabled(t *testing.T) {
+	ctx := context.Background()
+	scanner := &startupScanStub{called: make(chan config.SettlementConfig, 1)}
+	settlement := config.Default().Settlement
+	settlement.JobEnabled = false
+
+	var logs bytes.Buffer
+	startSettlementStartupScan(ctx, scanner, settlement, time.Unix(100, 0).UTC(), zerolog.New(&logs))
+
+	select {
+	case <-scanner.called:
+		t.Fatal("startup scan ran while settlement.job_enabled=false")
+	default:
+	}
+	if !strings.Contains(logs.String(), "startup scan skipped") {
+		t.Fatalf("logs missing quiesce skip message: %s", logs.String())
+	}
+
+	settlement.JobEnabled = true
+	startSettlementStartupScan(ctx, scanner, settlement, time.Unix(200, 0).UTC(), zerolog.Nop())
+	select {
+	case got := <-scanner.called:
+		if !got.JobEnabled {
+			t.Fatal("startup scan received disabled settlement config")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup scan did not run when settlement.job_enabled=true")
+	}
+}
+
+func TestRetentionPrunersCanDeferStartupDelete(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	requestPruner := &retentionPrunerStub{called: make(chan time.Time, 1)}
+	startRequestLogRetentionPruner(ctx, requestPruner, 90, false, zerolog.Nop())
+	assertNoImmediatePrune(t, requestPruner.called, "request_log")
+
+	auditPruner := &retentionPrunerStub{called: make(chan time.Time, 1)}
+	startAuditLogRetentionPruner(ctx, auditPruner, 90, false, zerolog.Nop())
+	assertNoImmediatePrune(t, auditPruner.called, "audit_log")
+}
+
+func TestRetentionPrunersDefaultToStartupDelete(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	requestPruner := &retentionPrunerStub{called: make(chan time.Time, 1)}
+	startRequestLogRetentionPruner(ctx, requestPruner, 90, true, zerolog.Nop())
+	assertImmediatePrune(t, requestPruner.called, "request_log")
+
+	auditPruner := &retentionPrunerStub{called: make(chan time.Time, 1)}
+	startAuditLogRetentionPruner(ctx, auditPruner, 90, true, zerolog.Nop())
+	assertImmediatePrune(t, auditPruner.called, "audit_log")
+}
+
+func TestSettlementReceiptAuditOutboxDrainerRunsOnStartup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	drainer := &settlementReceiptAuditOutboxDrainerStub{called: make(chan int, 1), drained: 2}
+	sink := settlementReceiptAuditSinkStub{}
+	var logs bytes.Buffer
+	startSettlementReceiptAuditOutboxDrainer(ctx, drainer, sink, zerolog.New(&logs))
+
+	select {
+	case got := <-drainer.called:
+		if got != 100 {
+			t.Fatalf("drain limit=%d want 100", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("settlement receipt audit outbox drainer did not run on startup")
+	}
+	if drainer.sink == nil {
+		t.Fatal("drainer did not receive audit sink")
+	}
+	if !strings.Contains(logs.String(), "settlement receipt audit outbox drained rows") {
+		t.Fatalf("logs missing drained message: %s", logs.String())
+	}
+}
+
+type startupScanStub struct {
+	called chan config.SettlementConfig
+}
+
+func (s *startupScanStub) StartStartupScan(_ context.Context, settlement config.SettlementConfig, _ time.Time) error {
+	s.called <- settlement
+	return nil
+}
+
+type retentionPrunerStub struct {
+	called chan time.Time
+}
+
+func (s *retentionPrunerStub) PruneBefore(_ context.Context, cutoff time.Time) (int64, error) {
+	s.called <- cutoff
+	return 1, nil
+}
+
+type settlementReceiptAuditOutboxDrainerStub struct {
+	called  chan int
+	sink    billing.SettlementReceiptAuditSink
+	drained int
+}
+
+func (s *settlementReceiptAuditOutboxDrainerStub) DrainSettlementReceiptAuditOutbox(_ context.Context, sink billing.SettlementReceiptAuditSink, limit int) (int, error) {
+	s.sink = sink
+	s.called <- limit
+	return s.drained, nil
+}
+
+type settlementReceiptAuditSinkStub struct{}
+
+func (settlementReceiptAuditSinkStub) InsertSettlementReceiptOutbox(context.Context, time.Time, string, string, string, int64) (bool, error) {
+	return true, nil
+}
+
+func assertNoImmediatePrune(t *testing.T, called <-chan time.Time, name string) {
+	t.Helper()
+	select {
+	case <-called:
+		t.Fatalf("%s pruner ran immediately despite startup deferral", name)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func assertImmediatePrune(t *testing.T, called <-chan time.Time, name string) {
+	t.Helper()
+	select {
+	case cutoff := <-called:
+		if cutoff.IsZero() {
+			t.Fatalf("%s pruner received zero cutoff", name)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("%s pruner did not run immediately with startup prune enabled", name)
 	}
 }
 

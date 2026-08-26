@@ -50,6 +50,8 @@
 package metrics
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -73,6 +75,10 @@ type Metrics struct {
 	CredentialBootstrapTotal     *prometheus.CounterVec
 	ReferralEventTotal           *prometheus.CounterVec
 	ProviderConnectionEventTotal *prometheus.CounterVec
+	MoneySQLiteConnectionWait    *prometheus.HistogramVec
+	MoneySQLiteTransaction       *prometheus.HistogramVec
+	MoneySQLiteWrite             *prometheus.HistogramVec
+	MoneySQLiteWALCheckpoint     *prometheus.GaugeVec
 	// CapacityOverClaimTotal is the issue-#764 over-claim tripwire. It is
 	// PERMANENT by construction: a prometheus counter never decreases and is
 	// never reset for the process lifetime, and the coordinator increments it
@@ -191,6 +197,37 @@ func New(reg prometheus.Registerer) *Metrics {
 				Help: "Count of durable provider connection lifecycle events by closed-set kind, outcome, and failure_reason.",
 			},
 			[]string{"kind", "outcome", "failure_reason"},
+		),
+		MoneySQLiteConnectionWait: f.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "money_sqlite_connection_wait_seconds",
+				Help:    "sql.DB connection wait time for coordinator money-path SQLite operations.",
+				Buckets: prometheus.ExponentialBuckets(0.0005, 2, 16),
+			},
+			[]string{"component", "outcome"},
+		),
+		MoneySQLiteTransaction: f.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "money_sqlite_transaction_duration_seconds",
+				Help:    "BEGIN IMMEDIATE to COMMIT/ROLLBACK duration for coordinator money-path SQLite transactions.",
+				Buckets: prometheus.ExponentialBuckets(0.001, 2, 16),
+			},
+			[]string{"component", "outcome"},
+		),
+		MoneySQLiteWrite: f.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "money_sqlite_write_duration_seconds",
+				Help:    "Duration of single-statement coordinator money-path SQLite writes that do not use the shared transaction helper.",
+				Buckets: prometheus.ExponentialBuckets(0.001, 2, 16),
+			},
+			[]string{"component", "operation", "outcome"},
+		),
+		MoneySQLiteWALCheckpoint: f.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "money_sqlite_wal_checkpoint_pages",
+				Help: "Latest off-hot-path SQLite WAL checkpoint page counts by component, page class, and outcome.",
+			},
+			[]string{"component", "page_class", "outcome"},
 		),
 	}
 }
@@ -318,4 +355,68 @@ func (m *Metrics) IncProviderConnectionEvent(kind, outcome, failureReason string
 		failureReason = "other"
 	}
 	m.ProviderConnectionEventTotal.WithLabelValues(kind, outcome, failureReason).Inc()
+}
+
+func (m *Metrics) ObserveSQLiteConnectionWait(component, outcome string, duration time.Duration) {
+	if m == nil || m.MoneySQLiteConnectionWait == nil || !allowMoneySQLiteComponent(component) || !allowMoneySQLiteOutcome(outcome) {
+		return
+	}
+	m.MoneySQLiteConnectionWait.WithLabelValues(component, outcome).Observe(duration.Seconds())
+}
+
+func (m *Metrics) ObserveSQLiteTransactionDuration(component, outcome string, duration time.Duration) {
+	if m == nil || m.MoneySQLiteTransaction == nil || !allowMoneySQLiteComponent(component) || !allowMoneySQLiteOutcome(outcome) {
+		return
+	}
+	m.MoneySQLiteTransaction.WithLabelValues(component, outcome).Observe(duration.Seconds())
+}
+
+func (m *Metrics) ObserveSQLiteWriteDuration(component, operation, outcome string, duration time.Duration) {
+	if m == nil || m.MoneySQLiteWrite == nil || !allowMoneySQLiteComponent(component) || !allowMoneySQLiteOperation(operation) || !allowMoneySQLiteOutcome(outcome) {
+		return
+	}
+	m.MoneySQLiteWrite.WithLabelValues(component, operation, outcome).Observe(duration.Seconds())
+}
+
+func (m *Metrics) ObserveSQLiteWALCheckpoint(component, pageClass, outcome string, pages int64) {
+	if m == nil || m.MoneySQLiteWALCheckpoint == nil || !allowMoneySQLiteComponent(component) || !allowMoneySQLitePageClass(pageClass) || !allowMoneySQLiteOutcome(outcome) {
+		return
+	}
+	m.MoneySQLiteWALCheckpoint.WithLabelValues(component, pageClass, outcome).Set(float64(pages))
+}
+
+func allowMoneySQLiteComponent(component string) bool {
+	switch component {
+	case "billing_hot_path", "request_log_identity", "billing_reload_config", "route_snapshot", "wal_checkpoint":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowMoneySQLiteOperation(operation string) bool {
+	switch operation {
+	case "route_snapshot_insert":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowMoneySQLiteOutcome(outcome string) bool {
+	switch outcome {
+	case "success", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowMoneySQLitePageClass(pageClass string) bool {
+	switch pageClass {
+	case "busy", "log", "checkpointed":
+		return true
+	default:
+		return false
+	}
 }

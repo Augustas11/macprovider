@@ -5,9 +5,32 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+type observedEvent struct {
+	kind      string
+	component string
+	outcome   string
+}
+
+type testObserver struct {
+	events []observedEvent
+}
+
+func (o *testObserver) ObserveSQLiteConnectionWait(component, outcome string, _ time.Duration) {
+	o.events = append(o.events, observedEvent{kind: "conn", component: component, outcome: outcome})
+}
+
+func (o *testObserver) ObserveSQLiteTransactionDuration(component, outcome string, _ time.Duration) {
+	o.events = append(o.events, observedEvent{kind: "tx", component: component, outcome: outcome})
+}
+
+func (o *testObserver) ObserveSQLiteWALCheckpoint(component, pageClass, outcome string, _ int64) {
+	o.events = append(o.events, observedEvent{kind: "wal:" + pageClass, component: component, outcome: outcome})
+}
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -112,4 +135,62 @@ func TestTransactBeginError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Transact returned nil on closed db, want error")
 	}
+}
+
+func TestTransactObservedEmitsConnectionWaitAndTransactionOutcome(t *testing.T) {
+	db := openTestDB(t)
+	observer := &testObserver{}
+
+	err := TransactObserved(context.Background(), db, "billing_hot_path", observer, func(ctx context.Context, conn *sql.Conn) error {
+		_, err := conn.ExecContext(ctx, `INSERT INTO t (v) VALUES ('a')`)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("TransactObserved success path returned err: %v", err)
+	}
+
+	sentinel := errors.New("callback rejected")
+	err = TransactObserved(context.Background(), db, "billing_hot_path", observer, func(context.Context, *sql.Conn) error {
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("TransactObserved returned %v, want sentinel", err)
+	}
+
+	assertObserved(t, observer.events, observedEvent{kind: "conn", component: "billing_hot_path", outcome: "success"})
+	assertObserved(t, observer.events, observedEvent{kind: "tx", component: "billing_hot_path", outcome: "success"})
+	assertObserved(t, observer.events, observedEvent{kind: "tx", component: "billing_hot_path", outcome: "error"})
+}
+
+func TestRunWALCheckpointEmitsPageClasses(t *testing.T) {
+	db, err := sql.Open("sqlite", WithPragmas(t.TempDir()+"/checkpoint.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO t (v) VALUES ('a')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	observer := &testObserver{}
+	if err := RunWALCheckpoint(context.Background(), db, "wal_checkpoint", observer); err != nil {
+		t.Fatalf("RunWALCheckpoint returned err: %v", err)
+	}
+
+	assertObserved(t, observer.events, observedEvent{kind: "wal:busy", component: "wal_checkpoint", outcome: "success"})
+	assertObserved(t, observer.events, observedEvent{kind: "wal:log", component: "wal_checkpoint", outcome: "success"})
+	assertObserved(t, observer.events, observedEvent{kind: "wal:checkpointed", component: "wal_checkpoint", outcome: "success"})
+}
+
+func assertObserved(t *testing.T, events []observedEvent, want observedEvent) {
+	t.Helper()
+	for _, got := range events {
+		if got == want {
+			return
+		}
+	}
+	t.Fatalf("missing observation %+v in %+v", want, events)
 }

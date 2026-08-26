@@ -445,7 +445,7 @@ VALUES ('idem-legacy', 'hash-a', 'req-legacy', ?)`,
 	}
 }
 
-func TestOpenStoreAppliesSQLitePragmasViaDSN(t *testing.T) {
+func TestOpenStoreAppliesManualCheckpointSQLitePragmasViaDSN(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -455,6 +455,7 @@ func TestOpenStoreAppliesSQLitePragmasViaDSN(t *testing.T) {
 	}{
 		{query: `PRAGMA busy_timeout`, want: 5000},
 		{query: `PRAGMA foreign_keys`, want: 1},
+		{query: `PRAGMA wal_autocheckpoint`, want: 0},
 	} {
 		var got int
 		if err := store.db.QueryRowContext(ctx, tc.query).Scan(&got); err != nil {

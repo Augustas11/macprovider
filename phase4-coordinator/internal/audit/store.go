@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -18,6 +19,16 @@ var errStoreClosed = errors.New("audit store is closed")
 
 type Store struct {
 	db *sql.DB
+}
+
+// DefaultDBPath returns the sibling audit DB path next to the primary
+// coordinator money DB.
+func DefaultDBPath(storageDBPath string) string {
+	dir := filepath.Dir(strings.TrimSpace(storageDBPath))
+	if dir == "" || dir == "." {
+		return "coordinator-audit.db"
+	}
+	return filepath.Join(dir, "coordinator-audit.db")
 }
 
 func OpenStore(dbPath string) (*Store, error) {
@@ -89,12 +100,31 @@ CREATE TABLE IF NOT EXISTS audit_log (
     ts_utc TEXT NOT NULL,
     event_type TEXT NOT NULL,
     provider_id TEXT,
+    settlement_receipt_audit_outbox_id INTEGER NULL,
     payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_ts_utc ON audit_log(ts_utc);
 CREATE INDEX IF NOT EXISTS idx_audit_log_provider_id ON audit_log(provider_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_event_type ON audit_log(event_type);
 `)
+	if err != nil {
+		return err
+	}
+	exists, err := s.columnExists(ctx, "audit_log", "settlement_receipt_audit_outbox_id")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE audit_log ADD COLUMN settlement_receipt_audit_outbox_id INTEGER NULL`); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_log_settlement_receipt_outbox
+    ON audit_log(settlement_receipt_audit_outbox_id)
+    WHERE settlement_receipt_audit_outbox_id IS NOT NULL`); err != nil {
+		return err
+	}
 	return err
 }
 
@@ -119,6 +149,66 @@ INSERT INTO audit_log (
 		payloadJSON,
 	)
 	return err
+}
+
+func (s *Store) InsertSettlementReceiptOutbox(ctx context.Context, ts time.Time, eventType, providerID, payloadJSON string, outboxID int64) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, errStoreClosed
+	}
+	if outboxID <= 0 {
+		return false, fmt.Errorf("settlement receipt audit outbox id is required")
+	}
+	var provider sql.NullString
+	if providerID != "" {
+		provider = sql.NullString{String: providerID, Valid: true}
+	}
+	res, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO audit_log (
+    ts_utc,
+    event_type,
+    provider_id,
+    settlement_receipt_audit_outbox_id,
+    payload_json
+) VALUES (?, ?, ?, ?, ?)`,
+		ts.UTC().Format(time.RFC3339Nano),
+		eventType,
+		provider,
+		outboxID,
+		payloadJSON,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *Store) columnExists(ctx context.Context, table, column string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // pruneBatchSize bounds a single retention DELETE to keep the write lock

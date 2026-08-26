@@ -135,7 +135,7 @@ func OpenStore(dbPath string) (*Store, error) {
 			return nil, err
 		}
 	}
-	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(dbPath))
+	db, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
 	if err != nil {
 		return nil, err
 	}

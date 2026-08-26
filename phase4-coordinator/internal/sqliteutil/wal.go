@@ -1,0 +1,32 @@
+package sqliteutil
+
+import (
+	"context"
+	"database/sql"
+)
+
+// WALObserver receives closed-set WAL checkpoint page observations.
+type WALObserver interface {
+	ObserveSQLiteWALCheckpoint(component, pageClass, outcome string, pages int64)
+}
+
+// RunWALCheckpoint runs a bounded PASSIVE checkpoint on the supplied SQLite
+// handle and observes the busy/log/checkpointed page counts. Callers should
+// provide an off-hot-path *sql.DB so disabling wal_autocheckpoint does not
+// move checkpoint work onto request or billing pools.
+func RunWALCheckpoint(ctx context.Context, db *sql.DB, component string, observer WALObserver) error {
+	var busy, logPages, checkpointedPages int64
+	err := db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`).Scan(&busy, &logPages, &checkpointedPages)
+	outcome := sqliteOutcome(err)
+	observeWALCheckpoint(observer, component, "busy", outcome, busy)
+	observeWALCheckpoint(observer, component, "log", outcome, logPages)
+	observeWALCheckpoint(observer, component, "checkpointed", outcome, checkpointedPages)
+	return err
+}
+
+func observeWALCheckpoint(observer WALObserver, component, pageClass, outcome string, pages int64) {
+	if observer == nil || component == "" {
+		return
+	}
+	observer.ObserveSQLiteWALCheckpoint(component, pageClass, outcome, pages)
+}

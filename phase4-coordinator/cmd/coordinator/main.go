@@ -37,6 +37,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/referralapi"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/rewards"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
 	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
 	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
@@ -205,6 +206,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
+	moneyCheckpointDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(cfg.Storage.DBPath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "money sqlite checkpoint: %v\n", err)
+		os.Exit(1)
+	}
+	moneyCheckpointDB.SetMaxOpenConns(1)
+	moneyCheckpointDB.SetMaxIdleConns(1)
+	defer moneyCheckpointDB.Close()
 	payoutReadDB, closePayoutReadDB, err := configuredPayoutReadDB(cfg, reqLogStore)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "payout read db: %v\n", err)
@@ -232,6 +241,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer auditStore.Close()
+	settlementReceiptAuditStore, err := audit.OpenStore(audit.DefaultDBPath(cfg.Storage.DBPath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "settlement receipt audit storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer settlementReceiptAuditStore.Close()
 	admissionStore, err := providerws.NewSQLiteAdmissionStore(reqLogStore.DB())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "admission storage: %v\n", err)
@@ -247,7 +262,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "provider connection events reconcile: %v\n", err)
 		os.Exit(1)
 	}
-	billingStore, err := billing.NewStore(reqLogStore.DB())
+	billingStore, err := billing.NewStore(reqLogStore.DB(), billing.WithSQLiteMetrics(metricsHandle))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "billing: %v\n", err)
 		os.Exit(1)
@@ -340,6 +355,7 @@ func main() {
 	}()
 	shutdownCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
+	startMoneySQLiteWALCheckpointer(shutdownCtx, moneyCheckpointDB, metricsHandle, logger)
 	// SPEC-017 v0.1.8 Step 2 — rollup runner. Reads OLTP source
 	// tables via `statsPools.Rollup`, writes the seven
 	// stats_* + stats_components_health + stats_rewards_populated
@@ -1247,13 +1263,13 @@ func main() {
 	buyerHTTP := newHTTPServer(buyerAddr, buyerHandler)
 	errs := make(chan error, 2)
 
-	if err := billingStore.StartStartupScan(context.Background(), cfg.Settlement, time.Now().UTC()); err != nil {
-		logger.Warn().Err(err).Msg("billing startup scan failed")
-	}
+	startSettlementStartupScan(context.Background(), billingStore, cfg.Settlement, time.Now().UTC(), logger)
 	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
-	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, logger)
-	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, logger)
+	startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, logger)
+	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, cfg.Storage.RequestLogPruneOnStartup, logger)
+	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
+	startAuditLogRetentionPruner(shutdownCtx, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
 	startProviderConnectionEventPruner(shutdownCtx, connectionEventStore, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
 	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
@@ -1393,6 +1409,93 @@ type requestLogPruner interface {
 	PruneBefore(context.Context, time.Time) (int64, error)
 }
 
+type settlementStartupScanner interface {
+	StartStartupScan(context.Context, config.SettlementConfig, time.Time) error
+}
+
+type settlementReceiptAuditOutboxDrainer interface {
+	DrainSettlementReceiptAuditOutbox(context.Context, billing.SettlementReceiptAuditSink, int) (int, error)
+}
+
+func startMoneySQLiteWALCheckpointer(ctx context.Context, db *sql.DB, observer sqliteutil.WALObserver, logger zerolog.Logger) {
+	if db == nil {
+		return
+	}
+	const (
+		checkpointInterval = 30 * time.Second
+		checkpointTimeout  = time.Second
+	)
+	run := func() {
+		checkpointCtx, cancel := context.WithTimeout(ctx, checkpointTimeout)
+		defer cancel()
+		if err := sqliteutil.RunWALCheckpoint(checkpointCtx, db, "wal_checkpoint", observer); err != nil {
+			logger.Warn().Err(err).Msg("money sqlite WAL checkpoint failed")
+		}
+	}
+	go func() {
+		run()
+		ticker := time.NewTicker(checkpointInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				run()
+			}
+		}
+	}()
+}
+
+func startSettlementStartupScan(ctx context.Context, scanner settlementStartupScanner, settlement config.SettlementConfig, now time.Time, logger zerolog.Logger) {
+	if scanner == nil {
+		return
+	}
+	if !settlement.JobEnabled {
+		logger.Info().Msg("billing startup scan skipped because settlement job is disabled")
+		return
+	}
+	if err := scanner.StartStartupScan(ctx, settlement, now); err != nil {
+		logger.Warn().Err(err).Msg("billing startup scan failed")
+	}
+}
+
+func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlementReceiptAuditOutboxDrainer, sink billing.SettlementReceiptAuditSink, logger zerolog.Logger) {
+	if store == nil || sink == nil {
+		return
+	}
+	const (
+		batchLimit    = 100
+		drainInterval = 30 * time.Second
+		drainTimeout  = 5 * time.Second
+	)
+	drain := func() {
+		drainCtx, cancel := context.WithTimeout(ctx, drainTimeout)
+		defer cancel()
+		drained, err := store.DrainSettlementReceiptAuditOutbox(drainCtx, sink, batchLimit)
+		if err != nil {
+			logger.Warn().Err(err).Msg("settlement receipt audit outbox drain failed")
+			return
+		}
+		if drained > 0 {
+			logger.Info().Int("drained_rows", drained).Msg("settlement receipt audit outbox drained rows")
+		}
+	}
+	drain()
+	go func() {
+		ticker := time.NewTicker(drainInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				drain()
+			}
+		}
+	}()
+}
+
 // mustParseTrustedProxies parses cfg.Proxy.TrustedProxies into the
 // netip.Prefix slice the buyer Server's rate-limit keying expects.
 // Validate() at config.Load already rejected malformed CIDRs and
@@ -1430,7 +1533,7 @@ func setupCanarySanctionStore(ctx context.Context, cfg config.Config, db *sql.DB
 	return store, nil
 }
 
-func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, logger zerolog.Logger) {
+func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, pruneOnStartup bool, logger zerolog.Logger) {
 	if store == nil || retentionDays <= 0 {
 		return
 	}
@@ -1445,7 +1548,11 @@ func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner,
 			logger.Info().Int64("deleted_rows", deleted).Time("cutoff", cutoff).Msg("request_log retention pruned rows")
 		}
 	}
-	prune()
+	if pruneOnStartup {
+		prune()
+	} else {
+		logger.Info().Int("retention_days", retentionDays).Msg("request_log startup retention prune skipped; scheduled pruner armed")
+	}
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
@@ -1678,7 +1785,7 @@ func startSocialVerificationPromotionReconciler(
 	}()
 }
 
-func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, logger zerolog.Logger) {
+func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, pruneOnStartup bool, logger zerolog.Logger) {
 	if store == nil || retentionDays <= 0 {
 		return
 	}
@@ -1693,7 +1800,11 @@ func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, r
 			logger.Info().Int64("deleted_rows", deleted).Time("cutoff", cutoff).Msg("audit_log retention pruned rows")
 		}
 	}
-	prune()
+	if pruneOnStartup {
+		prune()
+	} else {
+		logger.Info().Int("retention_days", retentionDays).Msg("audit_log startup retention prune skipped; scheduled pruner armed")
+	}
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()

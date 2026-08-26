@@ -560,8 +560,23 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	if cfg.Storage.RequestLogRetentionDays != 90 {
 		t.Fatalf("request log retention default=%d want 90", cfg.Storage.RequestLogRetentionDays)
 	}
+	if !cfg.Storage.RequestLogPruneOnStartup {
+		t.Fatal("request_log_prune_on_startup default=false want true")
+	}
 	if cfg.Storage.AuditLogRetentionDays != 90 {
 		t.Fatalf("audit log retention default=%d want 90", cfg.Storage.AuditLogRetentionDays)
+	}
+	if !cfg.Storage.AuditLogPruneOnStartup {
+		t.Fatal("audit_log_prune_on_startup default=false want true")
+	}
+
+	var storage StorageConfig
+	storage = Default().Storage
+	if err := yaml.Unmarshal([]byte("request_log_prune_on_startup: false\naudit_log_prune_on_startup: false\n"), &storage); err != nil {
+		t.Fatalf("unmarshal storage startup prune knobs: %v", err)
+	}
+	if storage.RequestLogPruneOnStartup || storage.AuditLogPruneOnStartup {
+		t.Fatalf("explicit storage startup prune false not honored: %+v", storage)
 	}
 
 	cfg.Rewards.ProviderShare = 1.01

@@ -17,7 +17,9 @@ package metrics
 import (
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -47,6 +49,18 @@ var (
 		"minted": true, "recovered": true, "rejected_v1": true,
 		"rejected_identity": true, "rejected_used": true, "rejected_expired": true,
 		"rejected_rate": true, "rejected_outstanding": true, "store_error": true,
+	}
+	allowMoneySQLiteComponentLabel = map[string]bool{
+		"billing_hot_path": true, "request_log_identity": true,
+		"billing_reload_config": true, "route_snapshot": true,
+		"wal_checkpoint": true,
+	}
+	allowMoneySQLiteOutcomeLabel   = map[string]bool{"success": true, "error": true}
+	allowMoneySQLiteOperationLabel = map[string]bool{
+		"route_snapshot_insert": true,
+	}
+	allowMoneySQLitePageClassLabel = map[string]bool{
+		"busy": true, "log": true, "checkpointed": true,
 	}
 	allowReferralOutcome = map[string]bool{
 		"disabled": true, "busy": true, "rate_limited": true,
@@ -99,6 +113,14 @@ func TestLabelHygiene(t *testing.T) {
 	}
 	m.IncReferralEvent("validate", "raw-attacker-value")
 	m.IncReferralEvent("raw-attacker-value", "valid")
+	m.ObserveSQLiteConnectionWait("billing_hot_path", "success", time.Millisecond)
+	m.ObserveSQLiteConnectionWait("raw-attacker-value", "success", time.Millisecond)
+	m.ObserveSQLiteConnectionWait("billing_hot_path", "raw-attacker-value", time.Millisecond)
+	m.ObserveSQLiteTransactionDuration("request_log_identity", "error", time.Millisecond)
+	m.ObserveSQLiteWriteDuration("route_snapshot", "route_snapshot_insert", "success", time.Millisecond)
+	m.ObserveSQLiteWriteDuration("route_snapshot", "raw-attacker-value", "success", time.Millisecond)
+	m.ObserveSQLiteWALCheckpoint("wal_checkpoint", "log", "success", 7)
+	m.ObserveSQLiteWALCheckpoint("wal_checkpoint", "raw-attacker-value", "success", 7)
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -131,8 +153,8 @@ func TestLabelHygiene(t *testing.T) {
 						t.Errorf("metric %s endpoint=%q not in allowed set", mf.GetName(), val)
 					}
 				case "component":
-					if !allowComp[val] {
-						t.Errorf("metric %s component=%q not in §9.5 allowed set", mf.GetName(), val)
+					if !allowComp[val] && !allowMoneySQLiteComponentLabel[val] {
+						t.Errorf("metric %s component=%q not in allowed set", mf.GetName(), val)
 					}
 				case "partner_key_id":
 					// Must parse as a non-negative integer.
@@ -171,8 +193,20 @@ func TestLabelHygiene(t *testing.T) {
 						if !allowReferralOutcome[val] {
 							t.Errorf("metric %s outcome=%q not in referral allowed set", mf.GetName(), val)
 						}
+					} else if strings.HasPrefix(mf.GetName(), "money_sqlite_") {
+						if !allowMoneySQLiteOutcomeLabel[val] {
+							t.Errorf("metric %s outcome=%q not in money SQLite allowed set", mf.GetName(), val)
+						}
 					} else if !allowCredentialBootstrapOutcome[val] {
 						t.Errorf("metric %s outcome=%q not in allowed set", mf.GetName(), val)
+					}
+				case "operation":
+					if !allowMoneySQLiteOperationLabel[val] {
+						t.Errorf("metric %s operation=%q not in allowed set", mf.GetName(), val)
+					}
+				case "page_class":
+					if !allowMoneySQLitePageClassLabel[val] {
+						t.Errorf("metric %s page_class=%q not in allowed set", mf.GetName(), val)
 					}
 				}
 			}

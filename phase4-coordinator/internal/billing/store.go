@@ -23,6 +23,7 @@ type SettlementConfig = config.SettlementConfig
 type Store struct {
 	db           *sql.DB
 	now          func() time.Time
+	sqliteMetric sqliteMetrics
 	settlementMu sync.RWMutex
 	settlement   SettlementConfig
 	// SPEC-005 v0.4 §13.2 — billing.quarantine_resolution_force_void_enabled
@@ -39,13 +40,32 @@ type Store struct {
 	forceCreditHoldSeconds atomic.Int64
 }
 
+type sqliteMetrics interface {
+	ObserveSQLiteConnectionWait(component, outcome string, duration time.Duration)
+	ObserveSQLiteTransactionDuration(component, outcome string, duration time.Duration)
+	ObserveSQLiteWriteDuration(component, operation, outcome string, duration time.Duration)
+}
+
+type StoreOption func(*Store)
+
+func WithSQLiteMetrics(metrics sqliteMetrics) StoreOption {
+	return func(s *Store) {
+		s.sqliteMetric = metrics
+	}
+}
+
 const defaultForceCreditSettlementHoldSeconds int64 = 24 * 60 * 60
 
-func NewStore(db *sql.DB) (*Store, error) {
+func NewStore(db *sql.DB, opts ...StoreOption) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("db is required")
 	}
 	s := &Store{db: db, now: time.Now}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
 	s.forceCreditHoldSeconds.Store(defaultForceCreditSettlementHoldSeconds)
 	if err := s.migrate(context.Background()); err != nil {
 		return nil, err
@@ -353,6 +373,57 @@ CREATE INDEX IF NOT EXISTS idx_srv_provider_recent ON settlement_receipt_verdict
 CREATE INDEX IF NOT EXISTS idx_srv_provider_failed_recent ON settlement_receipt_verdicts(provider_id, received_at_unix_ms DESC, id DESC)
     WHERE closed=1 AND settlement_outcome='quarantined';
 
+CREATE TABLE IF NOT EXISTS settlement_receipt_audit_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    settlement_receipt_verdict_id INTEGER NOT NULL REFERENCES settlement_receipt_verdicts(id),
+    event_type TEXT NOT NULL CHECK(event_type IN ('settlement_receipt_ingested','settlement_receipt_verdict')),
+    account_scope_hash TEXT NOT NULL CHECK(length(account_scope_hash) = 64 AND account_scope_hash NOT GLOB '*[^0-9a-f]*'),
+    request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL CHECK(attempt_n >= 0),
+    provider_id TEXT NOT NULL,
+    attempted_received_at_unix_ms INTEGER NOT NULL CHECK(attempted_received_at_unix_ms > 0),
+    idempotency_status TEXT NOT NULL CHECK(idempotency_status IN ('pending','pending_updated','first_terminal','terminal_after_pending','terminal_noop')),
+    receipt_present INTEGER NOT NULL DEFAULT 0 CHECK(receipt_present IN (0,1)),
+    receipt_version TEXT NULL,
+    receipt_result TEXT NOT NULL DEFAULT 'inconclusive' CHECK(receipt_result IN ('valid','invalid','inconclusive')),
+    settlement_outcome TEXT NOT NULL DEFAULT 'pending' CHECK(settlement_outcome IN ('pending','verified','quarantined','zero_settled')),
+    reason TEXT NOT NULL DEFAULT '',
+    closed INTEGER NOT NULL DEFAULT 0 CHECK(closed IN (0,1)),
+    terminal_state TEXT NOT NULL DEFAULT '',
+    terminal_state_ts_unix_ms INTEGER NOT NULL DEFAULT 0,
+    pending_deadline_unix_ms INTEGER NOT NULL DEFAULT 0,
+    received_at_unix_ms INTEGER NOT NULL DEFAULT 1 CHECK(received_at_unix_ms > 0),
+    route_snapshot_digest TEXT NOT NULL DEFAULT '',
+    route_snapshot_policy_version TEXT NOT NULL DEFAULT '',
+    route_snapshot_mode TEXT NOT NULL DEFAULT '',
+    paid_entrypoint TEXT NOT NULL DEFAULT '',
+    provider_session_id TEXT NULL,
+    provider_generation_id TEXT NULL,
+    spec008_hash_status TEXT NOT NULL DEFAULT '',
+    provider_reported_model_hash TEXT NOT NULL DEFAULT '',
+    provider_receipt_key_fingerprint TEXT NOT NULL DEFAULT '',
+    catalog_id TEXT NOT NULL DEFAULT '',
+    catalog_body_digest TEXT NOT NULL DEFAULT '',
+    expected_catalog_model_hash TEXT NOT NULL DEFAULT '',
+    model_id TEXT NOT NULL DEFAULT '',
+    model_hash TEXT NOT NULL DEFAULT '',
+    receipt_profile TEXT NOT NULL DEFAULT '',
+    buyer_debit_outcome TEXT NOT NULL DEFAULT '',
+    provider_settlement_outcome TEXT NOT NULL DEFAULT '',
+    payout_exclusion_outcome TEXT NOT NULL DEFAULT '',
+    prompt_hash TEXT NOT NULL DEFAULT '',
+    output_hash TEXT NULL CHECK(output_hash IS NULL OR (length(output_hash) = 64 AND output_hash NOT GLOB '*[^0-9a-f]*')),
+    usage_digest TEXT NULL CHECK(usage_digest IS NULL OR (length(usage_digest) = 64 AND usage_digest NOT GLOB '*[^0-9a-f]*')),
+    receipt_tuple_canonical_sha256 TEXT NULL CHECK(receipt_tuple_canonical_sha256 IS NULL OR (length(receipt_tuple_canonical_sha256) = 64 AND receipt_tuple_canonical_sha256 NOT GLOB '*[^0-9a-f]*')),
+    checks_json TEXT NOT NULL DEFAULT '{}',
+    created_at_utc TEXT NOT NULL,
+    drained_at_utc TEXT NULL,
+    audit_log_id INTEGER NULL
+);
+CREATE INDEX IF NOT EXISTS idx_srao_pending ON settlement_receipt_audit_outbox(drained_at_utc, id)
+    WHERE drained_at_utc IS NULL;
+CREATE INDEX IF NOT EXISTS idx_srao_verdict ON settlement_receipt_audit_outbox(settlement_receipt_verdict_id, id);
+
 -- SPEC-005 v0.5 (issue #253) — MIG-005-011
 -- ledger_quarantine_resolutions records operator-issued quarantine
 -- decisions. v0.5 widens the enum to force-credit and keeps history:
@@ -391,6 +462,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 	if err := s.ensureSettlementRouteSnapshotComputeIntegrityColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureSettlementReceiptAuditOutboxSnapshotColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.normalizeBillingTimeTextColumns(ctx); err != nil {
 		return err
 	}
@@ -418,6 +492,60 @@ func (s *Store) ensureSettlementRouteSnapshotComputeIntegrityColumns(ctx context
 	}
 	for _, col := range add {
 		exists, err := s.columnExists(ctx, "settlement_route_snapshots", col.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, col.sql); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureSettlementReceiptAuditOutboxSnapshotColumns(ctx context.Context) error {
+	add := []struct {
+		name string
+		sql  string
+	}{
+		{"receipt_present", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN receipt_present INTEGER NOT NULL DEFAULT 0 CHECK(receipt_present IN (0,1))`},
+		{"receipt_version", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN receipt_version TEXT NULL`},
+		{"receipt_result", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN receipt_result TEXT NOT NULL DEFAULT 'inconclusive' CHECK(receipt_result IN ('valid','invalid','inconclusive'))`},
+		{"settlement_outcome", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN settlement_outcome TEXT NOT NULL DEFAULT 'pending' CHECK(settlement_outcome IN ('pending','verified','quarantined','zero_settled'))`},
+		{"reason", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN reason TEXT NOT NULL DEFAULT ''`},
+		{"closed", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN closed INTEGER NOT NULL DEFAULT 0 CHECK(closed IN (0,1))`},
+		{"terminal_state", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN terminal_state TEXT NOT NULL DEFAULT ''`},
+		{"terminal_state_ts_unix_ms", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN terminal_state_ts_unix_ms INTEGER NOT NULL DEFAULT 0`},
+		{"pending_deadline_unix_ms", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN pending_deadline_unix_ms INTEGER NOT NULL DEFAULT 0`},
+		{"received_at_unix_ms", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN received_at_unix_ms INTEGER NOT NULL DEFAULT 1 CHECK(received_at_unix_ms > 0)`},
+		{"route_snapshot_digest", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN route_snapshot_digest TEXT NOT NULL DEFAULT ''`},
+		{"route_snapshot_policy_version", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN route_snapshot_policy_version TEXT NOT NULL DEFAULT ''`},
+		{"route_snapshot_mode", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN route_snapshot_mode TEXT NOT NULL DEFAULT ''`},
+		{"paid_entrypoint", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN paid_entrypoint TEXT NOT NULL DEFAULT ''`},
+		{"provider_session_id", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN provider_session_id TEXT NULL`},
+		{"provider_generation_id", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN provider_generation_id TEXT NULL`},
+		{"spec008_hash_status", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN spec008_hash_status TEXT NOT NULL DEFAULT ''`},
+		{"provider_reported_model_hash", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN provider_reported_model_hash TEXT NOT NULL DEFAULT ''`},
+		{"provider_receipt_key_fingerprint", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN provider_receipt_key_fingerprint TEXT NOT NULL DEFAULT ''`},
+		{"catalog_id", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN catalog_id TEXT NOT NULL DEFAULT ''`},
+		{"catalog_body_digest", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN catalog_body_digest TEXT NOT NULL DEFAULT ''`},
+		{"expected_catalog_model_hash", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN expected_catalog_model_hash TEXT NOT NULL DEFAULT ''`},
+		{"model_id", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN model_id TEXT NOT NULL DEFAULT ''`},
+		{"model_hash", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN model_hash TEXT NOT NULL DEFAULT ''`},
+		{"receipt_profile", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN receipt_profile TEXT NOT NULL DEFAULT ''`},
+		{"buyer_debit_outcome", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN buyer_debit_outcome TEXT NOT NULL DEFAULT ''`},
+		{"provider_settlement_outcome", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN provider_settlement_outcome TEXT NOT NULL DEFAULT ''`},
+		{"payout_exclusion_outcome", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN payout_exclusion_outcome TEXT NOT NULL DEFAULT ''`},
+		{"prompt_hash", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN prompt_hash TEXT NOT NULL DEFAULT ''`},
+		{"output_hash", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN output_hash TEXT NULL CHECK(output_hash IS NULL OR (length(output_hash) = 64 AND output_hash NOT GLOB '*[^0-9a-f]*'))`},
+		{"usage_digest", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN usage_digest TEXT NULL CHECK(usage_digest IS NULL OR (length(usage_digest) = 64 AND usage_digest NOT GLOB '*[^0-9a-f]*'))`},
+		{"receipt_tuple_canonical_sha256", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN receipt_tuple_canonical_sha256 TEXT NULL CHECK(receipt_tuple_canonical_sha256 IS NULL OR (length(receipt_tuple_canonical_sha256) = 64 AND receipt_tuple_canonical_sha256 NOT GLOB '*[^0-9a-f]*'))`},
+		{"checks_json", `ALTER TABLE settlement_receipt_audit_outbox ADD COLUMN checks_json TEXT NOT NULL DEFAULT '{}'`},
+	}
+	for _, col := range add {
+		exists, err := s.columnExists(ctx, "settlement_receipt_audit_outbox", col.name)
 		if err != nil {
 			return err
 		}

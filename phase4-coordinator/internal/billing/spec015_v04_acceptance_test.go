@@ -522,6 +522,7 @@ func assertReceiptStateRedactionAndDeadline(t *testing.T, input SettlementVerify
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready`); got != 0 {
 		t.Fatalf("ledger_payout_ready rows=%d want 0 before SPEC-022", got)
 	}
+	drainSettlementReceiptAuditOutboxToBillingAuditLog(t, store, 2)
 	assertSettlementReceiptAuditRedacted(t, store.db, input.Header, pubkeyB64)
 	assertSettlementReceiptVerdictSchemaRedacted(t, store.db)
 }
