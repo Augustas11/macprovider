@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Promote a requirement only when its signed journey-result validates."""
+"""Promote a requirement only when its signed journey-result validates.
+
+JOURNEY-TRUSTED-POOL-CREATOR-MVP stays evidence-only until a sibling
+PoolPromotionTransitionV1 is consumed into the SPEC-043 promotion ledger.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ import os
 import sys
 import tempfile
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +29,11 @@ from check_spec_governance import (
     _validate_signed_journey_result,
     resolve_trusted_openssl,
     validate_repository,
+)
+from pool_promotion_transition import (
+    consume_pool_promotion_transition,
+    load_json_object as load_promotion_json_object,
+    validate_pool_promotion_transition,
 )
 
 
@@ -168,8 +178,6 @@ def promote_requirement_in_memory(
     requirement = matches[0]
     if journey_id == TRUSTED_POOL_LAYER2_JOURNEY_ID:
         die(f"{TRUSTED_POOL_LAYER2_JOURNEY_ID} is evidence-only and cannot promote full SPEC-042 requirement rows")
-    if journey_id == TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID:
-        die(f"{TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID} is evidence-only and cannot promote full SPEC-043 requirement rows")
     require_valid_signed_result(root, requirement, evidence_source, commit, trusted_public_key_sha256, trusted_openssl)
     evidence_path = root / evidence_source
     digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
@@ -205,6 +213,53 @@ def promote_requirement_in_memory(
     return digest
 
 
+def consume_creator_mvp_transition(
+    root: Path,
+    evidence_source: str,
+    promotion_transition: str,
+    *,
+    trusted_public_key_sha256: str,
+    trusted_openssl: str,
+    now: datetime | None,
+    consume: bool = True,
+) -> None:
+    transition_source = require_relative_evidence_source(promotion_transition)
+    if not transition_source.startswith("journeys/evidence/") or not transition_source.endswith(".json"):
+        die("promotion transition source must be under journeys/evidence/")
+    load_result = ValidationResult()
+    envelope = load_promotion_json_object(root / transition_source, "PoolPromotionTransitionV1", load_result)
+    candidate = load_promotion_json_object(root / evidence_source, "signed candidate journey-result", load_result)
+    if load_result.errors or envelope is None or candidate is None:
+        for error in load_result.errors:
+            print(f"error: {error}", file=sys.stderr)
+        die("PoolPromotionTransitionV1 rejected")
+    if consume:
+        outcome = consume_pool_promotion_transition(
+            root,
+            envelope,
+            candidate,
+            now=now,
+            openssl_bin=trusted_openssl,
+            trusted_journey_result_public_key_sha256=trusted_public_key_sha256,
+            transition_source=transition_source,
+        )
+        fail_message = "PoolPromotionTransitionV1 must be consumed before SPEC-043 promotion"
+    else:
+        outcome = validate_pool_promotion_transition(
+            root,
+            envelope,
+            candidate,
+            now=now,
+            openssl_bin=trusted_openssl,
+            trusted_journey_result_public_key_sha256=trusted_public_key_sha256,
+        )
+        fail_message = "PoolPromotionTransitionV1 rejected"
+    if outcome.errors:
+        for error in outcome.errors:
+            print(f"error: {error}", file=sys.stderr)
+        die(fail_message)
+
+
 def promote_many(
     root: Path,
     requirement_ids: list[str],
@@ -213,6 +268,8 @@ def promote_many(
     base_ref: str,
     trusted_public_key_sha256: str = JOURNEY_RESULT_PUBLIC_KEY_SHA256,
     openssl_bin: str | None = None,
+    promotion_transition: str | None = None,
+    now: datetime | None = None,
 ) -> None:
     if not requirement_ids:
         die("at least one requirement ID is required")
@@ -224,6 +281,20 @@ def promote_many(
     conformance_path = root / "specs" / "CONFORMANCE.json"
     conformance = load_conformance(root)
     commit, captured_at, expires_at, journey_id = require_signed_metadata(root, evidence_source)
+    if journey_id == TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID and not promotion_transition:
+        die(f"{TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID} is evidence-only and cannot promote full SPEC-043 requirement rows")
+    if journey_id != TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID and promotion_transition:
+        die("--promotion-transition is only valid for JOURNEY-TRUSTED-POOL-CREATOR-MVP")
+    if journey_id == TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID:
+        consume_creator_mvp_transition(
+            root,
+            evidence_source,
+            promotion_transition or "",
+            trusted_public_key_sha256=trusted_public_key_sha256,
+            trusted_openssl=trusted_openssl,
+            now=now,
+            consume=False,
+        )
     promoted: list[tuple[str, str]] = []
     for requirement_id in requirement_ids:
         digest = promote_requirement_in_memory(
@@ -239,12 +310,21 @@ def promote_many(
             trusted_openssl=trusted_openssl,
         )
         promoted.append((requirement_id, digest))
+    if journey_id == TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID:
+        consume_creator_mvp_transition(
+            root,
+            evidence_source,
+            promotion_transition or "",
+            trusted_public_key_sha256=trusted_public_key_sha256,
+            trusted_openssl=trusted_openssl,
+            now=now,
+            consume=True,
+        )
     result = validate_repository(root, base_ref, trusted_public_key_sha256, conformance_override=conformance, openssl_bin=trusted_openssl)
     if result.errors:
         for error in result.errors:
             print(f"error: {error}", file=sys.stderr)
         die("ledger promotion rejected")
-
     write_json_atomically(conformance_path, conformance)
     for requirement_id, digest in promoted:
         print(f"promote-signed-journey-result: promoted {requirement_id} with sha256:{digest}")
@@ -258,6 +338,8 @@ def promote(
     base_ref: str,
     trusted_public_key_sha256: str = JOURNEY_RESULT_PUBLIC_KEY_SHA256,
     openssl_bin: str | None = None,
+    promotion_transition: str | None = None,
+    now: datetime | None = None,
 ) -> None:
     promote_many(
         root,
@@ -266,6 +348,8 @@ def promote(
         base_ref=base_ref,
         trusted_public_key_sha256=trusted_public_key_sha256,
         openssl_bin=openssl_bin,
+        promotion_transition=promotion_transition,
+        now=now,
     )
 
 
@@ -277,6 +361,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", default=".", help="repository root")
     parser.add_argument("--base-ref", required=True, help="trusted base ref for governance validation")
     parser.add_argument("--openssl-bin", default=None, help="absolute path to trusted OpenSSL")
+    parser.add_argument(
+        "--promotion-transition",
+        default=None,
+        help="sibling PoolPromotionTransitionV1 path under journeys/evidence/; required for JOURNEY-TRUSTED-POOL-CREATOR-MVP",
+    )
+    parser.add_argument("--now", default=None, help="UTC now override for promotion-authorization expiry, like 2026-08-25T12:00:00Z")
     args = parser.parse_args(argv)
 
     if args.requirement_ids is None:
@@ -289,7 +379,21 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--requirement-ids expects a single evidence_source positional")
         requirement_ids = [item for item in args.requirement_ids.split(",") if item]
         evidence_source = args.requirement_id_or_evidence_source
-    promote_many(Path(args.root).resolve(), requirement_ids, evidence_source, base_ref=args.base_ref, openssl_bin=args.openssl_bin)
+    now = None
+    if args.now:
+        try:
+            now = datetime.strptime(args.now, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            die("--now must be UTC like 2026-08-25T12:00:00Z")
+    promote_many(
+        Path(args.root).resolve(),
+        requirement_ids,
+        evidence_source,
+        base_ref=args.base_ref,
+        openssl_bin=args.openssl_bin,
+        promotion_transition=args.promotion_transition,
+        now=now,
+    )
     return 0
 
 

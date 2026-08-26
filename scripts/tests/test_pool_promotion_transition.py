@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import copy
 import hashlib
+import io
 import json
 import subprocess
 import tempfile
@@ -23,6 +25,8 @@ from scripts.check_spec_governance import (
     _signed_journey_result_satisfies,
     resolve_trusted_openssl,
 )
+from scripts.tests.test_journey_result_tools import load_promoter_module
+from scripts.tests.test_spec_governance import base_repository, write_repository
 from scripts.pool_promotion_transition import (
     KEYRING_PATH,
     LEDGER_PATH,
@@ -34,6 +38,7 @@ from scripts.pool_promotion_transition import (
     journey_result_digest,
     sign_pool_promotion_transition,
     validate_pool_promotion_transition,
+    _consumed_authorization_record,
 )
 
 
@@ -235,6 +240,10 @@ def write_promotion_root(root: Path, openssl_bin: str, *, register_key: bool = T
         openssl_bin=openssl_bin,
         verified_at="2026-08-25T11:00:00Z",
     )
+    evidence_dir = root / "journeys" / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    transition_source = "journeys/evidence/pool-promotion-transition.json"
+    (root / transition_source).write_text(json.dumps(envelope) + "\n", encoding="utf-8")
     return {
         "private_pem": production_private,
         "public_pem": production_public,
@@ -244,6 +253,75 @@ def write_promotion_root(root: Path, openssl_bin: str, *, register_key: bool = T
         "candidate": candidate,
         "envelope": envelope,
         "digest": digest,
+        "transition_source": transition_source,
+    }
+
+
+def signed_promoter_pair(fixture: dict, commit: str, openssl_bin: str) -> tuple[dict, dict]:
+    candidate = sign_candidate_envelope(
+        candidate_payload(
+            repository={"name": "Augustas11/macprovider", "commit": commit},
+            captured_at="2026-08-25T11:00:00Z",
+            expires_at="2026-08-25",
+        ),
+        private_key_pem=fixture["acceptance_private"],
+        public_key_pem=fixture["acceptance_public"],
+        openssl_bin=openssl_bin,
+    )
+    envelope = sign_pool_promotion_transition(
+        signed_payload(journey_result_digest(candidate)),
+        private_key_pem=fixture["private_pem"],
+        public_key_pem=fixture["public_pem"],
+        key_id=PRODUCTION_RELEASE_KEY_ID,
+        openssl_bin=openssl_bin,
+        verified_at="2026-08-25T11:00:00Z",
+    )
+    return candidate, envelope
+
+
+def write_promoter_artifacts(root: Path, candidate: dict, envelope: dict) -> tuple[str, str]:
+    evidence_dir = root / "journeys" / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    candidate_source = "journeys/evidence/trusted-pool-creator-mvp-alpha.signed.json"
+    transition_source = "journeys/evidence/pool-promotion-transition.json"
+    (root / candidate_source).write_text(json.dumps(candidate, indent=2) + "\n", encoding="utf-8")
+    (root / transition_source).write_text(json.dumps(envelope, indent=2) + "\n", encoding="utf-8")
+    return candidate_source, transition_source
+
+
+def forged_consumed_record(digest: str, **overrides: object) -> dict:
+    record = {
+        "type": "consumed_authorization",
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "named_subsystem": "spec043-promotion-ledger",
+        "journey_id": "JOURNEY-TRUSTED-POOL-CREATOR-MVP",
+        "run_id": 1,
+        "authorization_id": "forged-authz",
+        "pool_id": "pool_forged",
+        "transition_epoch": 1,
+        "key_id": PRODUCTION_RELEASE_KEY_ID,
+        "journey_result_digest": digest,
+        "recorded_at": NOW_TEXT,
+        "promotion_transition_source": "journeys/evidence/pool-promotion-transition.json",
+        "promotion_transition_digest": DIGEST,
+    }
+    record.update(overrides)
+    return record
+
+
+def creator_mvp_requirement(root: Path, source: str) -> dict:
+    digest = hashlib.sha256((root / source).read_bytes()).hexdigest()
+    return {
+        "requirement_id": "SPEC-043-R012",
+        "journeys": ["JOURNEY-TRUSTED-POOL-CREATOR-MVP"],
+        "evidence": [
+            {
+                "artifact": f"sha256:{digest}",
+                "source": source,
+                "captured_at": "2026-08-25",
+                "expires_at": "2026-08-25",
+            }
+        ],
     }
 
 
@@ -561,13 +639,291 @@ class PoolPromotionTransitionTests(unittest.TestCase):
             self.assertFalse(satisfied)
             self.assertTrue(any("sibling production-promotion artifact" in error for error in result.errors))
 
+    def test_governance_keeps_creator_mvp_evidence_only_until_ledger_consume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = write_promotion_root(root, self.openssl_bin)
+            source = "journeys/evidence/trusted-pool-creator-mvp-alpha.signed.json"
+            evidence_path = root / source
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(json.dumps(fixture["candidate"]) + "\n", encoding="utf-8")
+            digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+            requirement = {
+                "requirement_id": "SPEC-043-R012",
+                "journeys": ["JOURNEY-TRUSTED-POOL-CREATOR-MVP"],
+                "evidence": [
+                    {
+                        "artifact": f"sha256:{digest}",
+                        "source": source,
+                        "captured_at": "2026-08-25",
+                        "expires_at": "2026-08-25",
+                    }
+                ],
+            }
+            before = ValidationResult()
+            self.assertFalse(
+                _signed_journey_result_satisfies(
+                    root,
+                    requirement,
+                    "SPEC-043-R012",
+                    before,
+                    fixture["candidate_key_sha256"],
+                    self.openssl_bin,
+                )
+            )
+            self.assertTrue(any("evidence-only and cannot satisfy conformant requirements" in error for error in before.errors))
+
+            consumed = consume_pool_promotion_transition(
+                root,
+                fixture["envelope"],
+                fixture["candidate"],
+                now=NOW,
+                openssl_bin=self.openssl_bin,
+                trusted_journey_result_public_key_sha256=fixture["candidate_key_sha256"],
+            )
+            self.assertEqual([], consumed.errors)
+            after = ValidationResult()
+            _signed_journey_result_satisfies(
+                root,
+                requirement,
+                "SPEC-043-R012",
+                after,
+                fixture["candidate_key_sha256"],
+                self.openssl_bin,
+            )
+            self.assertFalse(any("evidence-only and cannot satisfy conformant requirements" in error for error in after.errors))
+
+    def test_governance_rejects_forged_consumed_authorization_when_keyring_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = write_promotion_root(root, self.openssl_bin, register_key=False)
+            source = "journeys/evidence/trusted-pool-creator-mvp-alpha.signed.json"
+            evidence_path = root / source
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(json.dumps(fixture["candidate"]) + "\n", encoding="utf-8")
+            digest = journey_result_digest(fixture["candidate"])
+            (root / LEDGER_PATH).write_text(
+                ledger_init_line() + json.dumps(forged_consumed_record(digest)) + "\n",
+                encoding="utf-8",
+            )
+            result = ValidationResult()
+            self.assertFalse(
+                _signed_journey_result_satisfies(
+                    root,
+                    creator_mvp_requirement(root, source),
+                    "SPEC-043-R012",
+                    result,
+                    fixture["candidate_key_sha256"],
+                    self.openssl_bin,
+                )
+            )
+            self.assertTrue(any("evidence-only and cannot satisfy conformant requirements" in error for error in result.errors))
+
+    def test_governance_rejects_partial_forged_consumed_authorization_with_registered_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = write_promotion_root(root, self.openssl_bin, register_key=True)
+            source = "journeys/evidence/trusted-pool-creator-mvp-alpha.signed.json"
+            evidence_path = root / source
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(json.dumps(fixture["candidate"]) + "\n", encoding="utf-8")
+            digest = journey_result_digest(fixture["candidate"])
+            (root / LEDGER_PATH).write_text(
+                ledger_init_line()
+                + json.dumps(
+                    {
+                        "type": "consumed_authorization",
+                        "journey_id": "JOURNEY-TRUSTED-POOL-CREATOR-MVP",
+                        "run_id": 1,
+                        "journey_result_digest": digest,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = ValidationResult()
+            self.assertFalse(
+                _signed_journey_result_satisfies(
+                    root,
+                    creator_mvp_requirement(root, source),
+                    "SPEC-043-R012",
+                    result,
+                    fixture["candidate_key_sha256"],
+                    self.openssl_bin,
+                )
+            )
+            self.assertTrue(any("evidence-only and cannot satisfy conformant requirements" in error for error in result.errors))
+
+    def test_governance_rejects_full_shape_forged_consumed_authorization_with_registered_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = write_promotion_root(root, self.openssl_bin, register_key=True)
+            source = "journeys/evidence/trusted-pool-creator-mvp-alpha.signed.json"
+            evidence_path = root / source
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(json.dumps(fixture["candidate"]) + "\n", encoding="utf-8")
+            digest = journey_result_digest(fixture["candidate"])
+            fake_source = "journeys/evidence/forged-transition.json"
+            (root / fake_source).write_text("{}\n", encoding="utf-8")
+            (root / LEDGER_PATH).write_text(
+                ledger_init_line()
+                + json.dumps(
+                    forged_consumed_record(
+                        digest,
+                        promotion_transition_source=fake_source,
+                        promotion_transition_digest=DIGEST,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = ValidationResult()
+            self.assertFalse(
+                _signed_journey_result_satisfies(
+                    root,
+                    creator_mvp_requirement(root, source),
+                    "SPEC-043-R012",
+                    result,
+                    fixture["candidate_key_sha256"],
+                    self.openssl_bin,
+                )
+            )
+            self.assertTrue(any("evidence-only and cannot satisfy conformant requirements" in error for error in result.errors))
+
+    def test_governance_rejects_signed_invalid_transition_as_consumed_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = write_promotion_root(root, self.openssl_bin, register_key=True)
+            source = "journeys/evidence/trusted-pool-creator-mvp-alpha.signed.json"
+            evidence_path = root / source
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(json.dumps(fixture["candidate"]) + "\n", encoding="utf-8")
+            invalid = sign_pool_promotion_transition(
+                signed_payload(fixture["digest"], rbac_role="read-only-observer"),
+                private_key_pem=fixture["private_pem"],
+                public_key_pem=fixture["public_pem"],
+                key_id=PRODUCTION_RELEASE_KEY_ID,
+                openssl_bin=self.openssl_bin,
+                verified_at="2026-08-25T11:00:00Z",
+            )
+            transition_source = "journeys/evidence/invalid-pool-promotion-transition.json"
+            (root / transition_source).write_text(json.dumps(invalid) + "\n", encoding="utf-8")
+            record = _consumed_authorization_record(
+                invalid,
+                transition_source=transition_source,
+                recorded_at=NOW_TEXT,
+            )
+            self.assertIsNotNone(record)
+            (root / LEDGER_PATH).write_text(ledger_init_line() + json.dumps(record) + "\n", encoding="utf-8")
+            result = ValidationResult()
+            self.assertFalse(
+                _signed_journey_result_satisfies(
+                    root,
+                    creator_mvp_requirement(root, source),
+                    "SPEC-043-R012",
+                    result,
+                    fixture["candidate_key_sha256"],
+                    self.openssl_bin,
+                )
+            )
+            self.assertTrue(any("evidence-only and cannot satisfy conformant requirements" in error for error in result.errors))
+
+    def test_governance_rejects_duplicate_consumed_authorization_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = write_promotion_root(root, self.openssl_bin, register_key=True)
+            source = "journeys/evidence/trusted-pool-creator-mvp-alpha.signed.json"
+            evidence_path = root / source
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text(json.dumps(fixture["candidate"]) + "\n", encoding="utf-8")
+            consumed = consume_pool_promotion_transition(
+                root,
+                fixture["envelope"],
+                fixture["candidate"],
+                now=NOW,
+                openssl_bin=self.openssl_bin,
+                trusted_journey_result_public_key_sha256=fixture["candidate_key_sha256"],
+            )
+            self.assertEqual([], consumed.errors)
+            ledger = (root / LEDGER_PATH).read_text(encoding="utf-8")
+            consumed_lines = [line for line in ledger.splitlines() if '"type":"consumed_authorization"' in line]
+            self.assertEqual(1, len(consumed_lines))
+            (root / LEDGER_PATH).write_text(ledger.rstrip("\n") + "\n" + consumed_lines[0] + "\n", encoding="utf-8")
+            result = ValidationResult()
+            self.assertFalse(
+                _signed_journey_result_satisfies(
+                    root,
+                    creator_mvp_requirement(root, source),
+                    "SPEC-043-R012",
+                    result,
+                    fixture["candidate_key_sha256"],
+                    self.openssl_bin,
+                )
+            )
+            self.assertTrue(any("evidence-only and cannot satisfy conformant requirements" in error for error in result.errors))
+
+    def test_promoter_rejects_creator_mvp_when_keyring_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            fixture = write_promotion_root(root, self.openssl_bin, register_key=False)
+            candidate, envelope = signed_promoter_pair(fixture, commit, self.openssl_bin)
+            candidate_source, transition_source = write_promoter_artifacts(root, candidate, envelope)
+            original_conformance = (root / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8")
+            original_ledger = (root / LEDGER_PATH).read_text(encoding="utf-8")
+            promoter = load_promoter_module()
+            stderr = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+                promoter.promote(
+                    root,
+                    "SPEC-001-R001",
+                    candidate_source,
+                    base_ref="HEAD",
+                    trusted_public_key_sha256=fixture["candidate_key_sha256"],
+                    openssl_bin=self.openssl_bin,
+                    promotion_transition=transition_source,
+                    now=NOW,
+                )
+            self.assertIn("is fail-closed: no production-release approver key is registered", stderr.getvalue())
+            self.assertEqual(original_conformance, (root / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
+            self.assertEqual(original_ledger, (root / LEDGER_PATH).read_text(encoding="utf-8"))
+            self.assertNotIn("consumed_authorization", original_ledger)
+            self.assertNotIn("consumed_authorization", (root / LEDGER_PATH).read_text(encoding="utf-8"))
+
+    def test_promoter_does_not_consume_when_signed_result_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            fixture = write_promotion_root(root, self.openssl_bin, register_key=True)
+            candidate, envelope = signed_promoter_pair(fixture, commit, self.openssl_bin)
+            candidate_source, transition_source = write_promoter_artifacts(root, candidate, envelope)
+            original_conformance = (root / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8")
+            original_ledger = (root / LEDGER_PATH).read_text(encoding="utf-8")
+            promoter = load_promoter_module()
+            stderr = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+                promoter.promote(
+                    root,
+                    "SPEC-001-R001",
+                    candidate_source,
+                    base_ref="HEAD",
+                    trusted_public_key_sha256=fixture["candidate_key_sha256"],
+                    openssl_bin=self.openssl_bin,
+                    promotion_transition=transition_source,
+                    now=NOW,
+                )
+            self.assertIn("signed journey-result rejected", stderr.getvalue())
+            self.assertEqual(original_conformance, (root / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
+            self.assertEqual(original_ledger, (root / LEDGER_PATH).read_text(encoding="utf-8"))
+            self.assertNotIn("consumed_authorization", (root / LEDGER_PATH).read_text(encoding="utf-8"))
+
     def test_cli_consume_accepts_valid_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fixture = write_promotion_root(root, self.openssl_bin)
-            transition_path = root / "transition.json"
             candidate_path = root / "candidate.json"
-            transition_path.write_text(json.dumps(fixture["envelope"]) + "\n", encoding="utf-8")
             candidate_path.write_text(json.dumps(fixture["candidate"]) + "\n", encoding="utf-8")
             completed = subprocess.run(
                 [
@@ -576,7 +932,7 @@ class PoolPromotionTransitionTests(unittest.TestCase):
                     "--root",
                     str(root),
                     "--transition",
-                    str(transition_path),
+                    fixture["transition_source"],
                     "--candidate",
                     str(candidate_path),
                     "--consume",

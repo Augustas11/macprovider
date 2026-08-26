@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """SPEC-043 PoolPromotionTransitionV1 validator and rollback-resistant ledger.
 
-Candidate JOURNEY-TRUSTED-POOL-CREATOR-MVP envelopes remain evidence-only.
+Candidate JOURNEY-TRUSTED-POOL-CREATOR-MVP envelopes remain evidence-only until
+`scripts/promote-signed-journey-result.py` consumes a sibling PoolPromotionTransitionV1.
 This module never mutates specs/CONFORMANCE.json. A valid production-promotion
 artifact may be verified and consumed into journeys/ledgers/spec-043-promotion-auth.jsonl
 without promoting any SPEC-043 row.
@@ -105,6 +106,21 @@ RESERVED_CANDIDATE_VALUES = frozenset(
 )
 LEDGER_REVOCATION_TYPE = "key_revocation"
 LEDGER_EMERGENCY_DISABLE_TYPE = "emergency_disable"
+CONSUMED_AUTHORIZATION_REQUIRED = {
+    "type",
+    "schema_version",
+    "named_subsystem",
+    "journey_id",
+    "run_id",
+    "authorization_id",
+    "pool_id",
+    "transition_epoch",
+    "key_id",
+    "journey_result_digest",
+    "recorded_at",
+    "promotion_transition_source",
+    "promotion_transition_digest",
+}
 MAX_AUTHORIZATION_TTL = timedelta(hours=24)
 DEFAULT_CLOCK_SKEW = timedelta(seconds=300)
 RBAC_ROLE = "production-release-approver"
@@ -356,13 +372,14 @@ def _load_ledger_records(root: Path, result: ValidationResult) -> list[dict[str,
     return records
 
 
-def _ledger_state(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _ledger_state(records: list[dict[str, Any]], *, as_of_index: int | None = None) -> dict[str, Any]:
     run_high_water: dict[str, int] = {}
     consumed_authorization_ids: set[str] = set()
     pool_epochs: dict[str, int] = {}
     revoked_keys: set[str] = set()
     emergency_disabled_keys: set[str] = set()
-    for record in records:
+    iterable = records if as_of_index is None else records[:as_of_index]
+    for record in iterable:
         record_type = record.get("type")
         if record_type == LEDGER_CONSUMED_TYPE:
             journey_id = record.get("journey_id")
@@ -391,6 +408,190 @@ def _ledger_state(records: list[dict[str, Any]]) -> dict[str, Any]:
         "revoked_keys": revoked_keys,
         "emergency_disabled_keys": emergency_disabled_keys,
     }
+
+
+def _consumed_authorization_record_valid(record: dict[str, Any]) -> bool:
+    if set(record) != CONSUMED_AUTHORIZATION_REQUIRED:
+        return False
+    if record.get("type") != LEDGER_CONSUMED_TYPE:
+        return False
+    if record.get("schema_version") != LEDGER_SCHEMA_VERSION:
+        return False
+    if record.get("named_subsystem") != SPEC043_PROMOTION_LEDGER["named_subsystem"]:
+        return False
+    for field in ("journey_id", "authorization_id", "pool_id", "key_id"):
+        value = record.get(field)
+        if not isinstance(value, str) or not value:
+            return False
+    if record.get("key_id") == JOURNEY_RESULT_SIGNING_KEY_ID:
+        return False
+    run_id = record.get("run_id")
+    epoch = record.get("transition_epoch")
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
+        return False
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+        return False
+    digest = record.get("journey_result_digest")
+    if not isinstance(digest, str) or not SHA256_HEX_RE.fullmatch(digest):
+        return False
+    transition_digest = record.get("promotion_transition_digest")
+    if not isinstance(transition_digest, str) or not SHA256_HEX_RE.fullmatch(transition_digest):
+        return False
+    source = record.get("promotion_transition_source")
+    if not isinstance(source, str) or not source.startswith("journeys/evidence/") or not source.endswith(".json"):
+        return False
+    if Path(source).is_absolute() or ".." in Path(source).parts:
+        return False
+    recorded_at = record.get("recorded_at")
+    return isinstance(recorded_at, str) and bool(DATETIME_Z_RE.fullmatch(recorded_at))
+
+
+def _consumed_authorization_record(
+    envelope: dict[str, Any],
+    *,
+    transition_source: str,
+    recorded_at: str,
+) -> dict[str, Any] | None:
+    signed = envelope.get("signed")
+    signatures = envelope.get("signatures")
+    if not isinstance(signed, dict):
+        return None
+    if not isinstance(signatures, list) or len(signatures) != 1 or not isinstance(signatures[0], dict):
+        return None
+    signature = signatures[0]
+    required_signed = ("journey_id", "run_id", "authorization_id", "pool_id", "transition_epoch", "journey_result_digest")
+    if any(field not in signed for field in required_signed) or "key_id" not in signature:
+        return None
+    return {
+        "type": LEDGER_CONSUMED_TYPE,
+        "schema_version": LEDGER_SCHEMA_VERSION,
+        "named_subsystem": SPEC043_PROMOTION_LEDGER["named_subsystem"],
+        "journey_id": signed["journey_id"],
+        "run_id": signed["run_id"],
+        "authorization_id": signed["authorization_id"],
+        "pool_id": signed["pool_id"],
+        "transition_epoch": signed["transition_epoch"],
+        "key_id": signature["key_id"],
+        "journey_result_digest": signed["journey_result_digest"],
+        "recorded_at": recorded_at,
+        "promotion_transition_source": transition_source,
+        "promotion_transition_digest": _canonical_json_sha256(envelope),
+    }
+
+
+def _require_transition_source(
+    root: Path,
+    transition_source: str,
+    envelope: dict[str, Any],
+    result: ValidationResult,
+) -> str | None:
+    relative = Path(transition_source)
+    if relative.is_absolute() or ".." in relative.parts:
+        result.error("promotion_transition_source", "must be a repository-relative path under journeys/evidence/")
+        return None
+    normalized = relative.as_posix()
+    if not normalized.startswith("journeys/evidence/") or not normalized.endswith(".json"):
+        result.error("promotion_transition_source", "must be a JSON file under journeys/evidence/")
+        return None
+    path = _safe_repo_file(root, Path(normalized), "promotion_transition_source", result)
+    if path is None:
+        return None
+    loaded = load_json_object(path, "promotion_transition_source", result)
+    if loaded is None:
+        return None
+    if _canonical_json_sha256(loaded) != _canonical_json_sha256(envelope):
+        result.error("promotion_transition_source", "must match the canonical PoolPromotionTransitionV1 envelope")
+        return None
+    return normalized
+
+
+def _consumed_record_bound_to_signed_transition(
+    root: Path,
+    record: dict[str, Any],
+    candidate: dict[str, Any],
+    openssl_bin: str,
+    trusted_journey_result_public_key_sha256: str,
+    ignore_index: int,
+) -> bool:
+    load_result = ValidationResult()
+    path = _safe_repo_file(root, Path(record["promotion_transition_source"]), "promotion_transition_source", load_result)
+    if path is None:
+        return False
+    envelope = load_json_object(path, "promotion_transition_source", load_result)
+    if envelope is None or load_result.errors:
+        return False
+    if _canonical_json_sha256(envelope) != record["promotion_transition_digest"]:
+        return False
+    projected = _consumed_authorization_record(
+        envelope,
+        transition_source=record["promotion_transition_source"],
+        recorded_at=record["recorded_at"],
+    )
+    if projected is None or projected != record:
+        return False
+    recorded_at = _parse_utc(record.get("recorded_at"), "consumed_authorization.recorded_at", ValidationResult())
+    if recorded_at is None:
+        return False
+    result = validate_pool_promotion_transition(
+        root,
+        envelope,
+        candidate,
+        now=recorded_at,
+        openssl_bin=openssl_bin,
+        trusted_journey_result_public_key_sha256=trusted_journey_result_public_key_sha256,
+        ignore_index=ignore_index,
+    )
+    return not result.errors
+
+
+def creator_mvp_consumed_authorization(
+    root: Path,
+    candidate: dict[str, Any],
+    *,
+    openssl_bin: str | None = None,
+    trusted_journey_result_public_key_sha256: str = JOURNEY_RESULT_PUBLIC_KEY_SHA256,
+) -> bool:
+    signed = candidate.get("signed")
+    if not isinstance(signed, dict):
+        return False
+    journey_id = signed.get("journey_id")
+    run_id = signed.get("run_id")
+    if not isinstance(journey_id, str) or isinstance(run_id, bool) or not isinstance(run_id, int):
+        return False
+    digest = journey_result_digest(candidate)
+    result = ValidationResult()
+    records = _load_ledger_records(root, result)
+    if result.errors or not records or records[0] != CANONICAL_LEDGER_INIT:
+        return False
+    try:
+        trusted_openssl = resolve_trusted_openssl(openssl_bin)
+    except ValueError:
+        return False
+    matched = False
+    for index, record in enumerate(records):
+        if index == 0:
+            continue
+        if record.get("type") != LEDGER_CONSUMED_TYPE:
+            continue
+        if not _consumed_authorization_record_valid(record):
+            return False
+        if (
+            record.get("journey_id") != journey_id
+            or record.get("run_id") != run_id
+            or record.get("journey_result_digest") != digest
+        ):
+            continue
+        if not _consumed_record_bound_to_signed_transition(
+            root,
+            record,
+            candidate,
+            trusted_openssl,
+            trusted_journey_result_public_key_sha256,
+            index,
+        ):
+            return False
+        matched = True
+    return matched
 
 
 def _append_ledger_record_locked(handle: Any, record: dict[str, Any], ledger_dir: Path) -> None:
@@ -632,6 +833,7 @@ def validate_pool_promotion_transition(
     trusted_journey_result_public_key_sha256: str = JOURNEY_RESULT_PUBLIC_KEY_SHA256,
     location: str = "pool-promotion-transition",
     result: ValidationResult | None = None,
+    ignore_index: int | None = None,
 ) -> ValidationResult:
     result = result or ValidationResult()
     now = now or datetime.now(timezone.utc)
@@ -754,7 +956,7 @@ def validate_pool_promotion_transition(
     records = _load_ledger_records(root, result)
     if not records or records[0] != CANONICAL_LEDGER_INIT:
         result.error(str(LEDGER_PATH), "must start with a canonical ledger_init record")
-    state = _ledger_state(records)
+    state = _ledger_state(records, as_of_index=ignore_index)
     if key_id in state["revoked_keys"]:
         result.error(f"{location}.signatures[0].key_id", "is revoked in the append-only promotion ledger")
     if key_id in state["emergency_disabled_keys"]:
@@ -794,6 +996,7 @@ def consume_pool_promotion_transition(
     openssl_bin: str | None = None,
     trusted_journey_result_public_key_sha256: str = JOURNEY_RESULT_PUBLIC_KEY_SHA256,
     recorded_at: str | None = None,
+    transition_source: str = "journeys/evidence/pool-promotion-transition.json",
 ) -> ValidationResult:
     result = ValidationResult()
     with _exclusive_ledger(root, result) as handle:
@@ -809,24 +1012,17 @@ def consume_pool_promotion_transition(
         )
         if result.errors:
             return result
-        signed = envelope["signed"]
-        signature = envelope["signatures"][0]
+        source = _require_transition_source(root, transition_source, envelope, result)
+        if source is None or result.errors:
+            return result
         stamp = recorded_at or (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        record = _consumed_authorization_record(envelope, transition_source=source, recorded_at=stamp)
+        if record is None:
+            result.error("pool-promotion-transition", "cannot project a consumed_authorization ledger record")
+            return result
         _append_ledger_record_locked(
             handle,
-            {
-                "type": LEDGER_CONSUMED_TYPE,
-                "schema_version": LEDGER_SCHEMA_VERSION,
-                "named_subsystem": SPEC043_PROMOTION_LEDGER["named_subsystem"],
-                "journey_id": signed["journey_id"],
-                "run_id": signed["run_id"],
-                "authorization_id": signed["authorization_id"],
-                "pool_id": signed["pool_id"],
-                "transition_epoch": signed["transition_epoch"],
-                "key_id": signature["key_id"],
-                "journey_result_digest": signed["journey_result_digest"],
-                "recorded_at": stamp,
-            },
+            record,
             (root / LEDGER_PATH).parent,
         )
         return result
@@ -880,6 +1076,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {error}", file=sys.stderr)
         return 1
     if args.consume:
+        try:
+            transition_source = str(transition_path.resolve().relative_to(root))
+        except ValueError:
+            print("error: --transition must be inside the repository root to consume", file=sys.stderr)
+            return 1
         outcome = consume_pool_promotion_transition(
             root,
             envelope,
@@ -887,6 +1088,7 @@ def main(argv: list[str] | None = None) -> int:
             now=now,
             openssl_bin=args.openssl_bin,
             trusted_journey_result_public_key_sha256=args.trusted_journey_result_public_key_sha256,
+            transition_source=transition_source,
         )
     else:
         outcome = validate_pool_promotion_transition(

@@ -313,7 +313,7 @@ class JourneyResultToolsTests(unittest.TestCase):
                 )
             self.assertEqual([], validate_repository(root, trusted_journey_result_public_key_sha256=trusted_hash).errors)
 
-    def test_promoter_restores_ledger_when_gate_rejects(self) -> None:
+    def test_promoter_does_not_rewrite_conformance_when_gate_rejects(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             write_repository(root, base_repository())
@@ -463,6 +463,32 @@ class JourneyResultToolsTests(unittest.TestCase):
 
             self.assertIn("JOURNEY-TRUSTED-POOL-CREATOR-MVP is evidence-only", stderr.getvalue())
             self.assertEqual(original, conformance_path.read_text(encoding="utf-8"))
+
+    def test_promoter_rejects_unexpected_promotion_transition_for_other_journeys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            generate_acceptance_key(root)
+            evidence_path = root / "journeys" / "evidence" / "signed-result.json"
+            evidence_path.write_text(json.dumps(signed_journey_envelope(commit), indent=2) + "\n", encoding="utf-8")
+            transition = root / "journeys" / "evidence" / "pool-promotion-transition.json"
+            transition.write_text("{}\n", encoding="utf-8")
+            original = (root / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8")
+
+            promoter = load_promoter_module()
+            stderr = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+                promoter.promote(
+                    root,
+                    "SPEC-001-R001",
+                    "journeys/evidence/signed-result.json",
+                    base_ref="HEAD",
+                    promotion_transition="journeys/evidence/pool-promotion-transition.json",
+                )
+
+            self.assertIn("only valid for JOURNEY-TRUSTED-POOL-CREATOR-MVP", stderr.getvalue())
+            self.assertEqual(original, (root / "specs" / "CONFORMANCE.json").read_text(encoding="utf-8"))
 
     def test_promoter_does_not_trust_path_hijacked_openssl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
