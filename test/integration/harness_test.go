@@ -289,6 +289,10 @@ type scenarioOpts struct {
 	// pendingDeadlineSeconds overrides settlement.pending_deadline_seconds.
 	// Zero keeps the coordinator default (300).
 	pendingDeadlineSeconds int
+	// settlementJobEnabled opts journeys that exercise startup recovery into
+	// the settlement job. Most integration scenarios keep it disabled so they
+	// do not run background money movement while testing request paths.
+	settlementJobEnabled bool
 }
 
 type settlementCatalogFixture struct {
@@ -402,7 +406,7 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		s.settlementCatalogID = settlementCatalog.catalogID
 		s.settlementCatalogKeyID = settlementCatalog.catalogKeyID
 	}
-	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode, opts.pendingDeadlineSeconds)
+	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode, opts.pendingDeadlineSeconds, opts.settlementJobEnabled)
 
 	gwServiceTok := s.serviceToken
 	if opts.gatewayServiceToken != nil {
@@ -488,7 +492,7 @@ func randHex(t *testing.T, n int) string {
 // the audit fixture: we want a clean room for testing the GATEWAY ↔
 // COORDINATOR boundary, not the provider auth gate which has its own
 // dedicated tests in phase4-coordinator/internal/ws).
-func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool, pendingDeadlineSeconds int) {
+func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool, pendingDeadlineSeconds int, settlementJobEnabled bool) {
 	s.t.Helper()
 	tier2Cfg := map[string]any{
 		"observe_enabled":                    false,
@@ -601,7 +605,7 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			"recovery_grace_seconds":         30,
 			"pending_deadline_seconds":       pendingDeadlineOrDefault(pendingDeadlineSeconds),
 			"verified_model_settlement_mode": verifiedModelSettlementMode(settlementEnforceMode),
-			"job_enabled":                    false,
+			"job_enabled":                    settlementJobEnabled,
 		},
 		"endpoints": map[string]any{
 			"provider_earnings": map[string]any{

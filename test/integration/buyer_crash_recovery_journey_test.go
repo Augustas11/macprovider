@@ -26,10 +26,10 @@ type buyerCrashRecoveryStep struct {
 }
 
 func TestJourneyBuyerCrashRecoveryIsolatedCandidate(t *testing.T) {
-	s := newScenario(t, scenarioOpts{seedAccount: true})
+	s := newScenario(t, scenarioOpts{seedAccount: true, settlementJobEnabled: true})
 	startMode, startJob := readCoordinatorSettlement(t, s.coordYAML)
-	if startMode != "observe" || startJob {
-		t.Fatalf("starting settlement mode=%q job_enabled=%v want observe/false", startMode, startJob)
+	if startMode != "observe" || !startJob {
+		t.Fatalf("starting settlement mode=%q job_enabled=%v want observe/true", startMode, startJob)
 	}
 	if got := s.payoutReadyCount(); got != 0 {
 		t.Fatalf("payout-ready rows before journey=%d want 0", got)
@@ -46,7 +46,7 @@ func TestJourneyBuyerCrashRecoveryIsolatedCandidate(t *testing.T) {
 			Details:   details,
 		})
 	}
-	pass("step-01-capture-config", "isolated candidate captured in observe mode with settlement job disabled", map[string]any{
+	pass("step-01-capture-config", "isolated candidate captured in observe mode with settlement startup recovery enabled", map[string]any{
 		"settlement_mode": startMode,
 		"job_enabled":     startJob,
 		"isolated_sqlite": true,
@@ -112,10 +112,10 @@ func TestJourneyBuyerCrashRecoveryIsolatedCandidate(t *testing.T) {
 		t.Fatalf("payout-ready rows after journey=%d want 0", got)
 	}
 	endMode, endJob := readCoordinatorSettlement(t, s.coordYAML)
-	if endMode != startMode || endJob != startJob || endMode != "observe" || endJob {
+	if endMode != startMode || endJob != startJob || endMode != "observe" || !endJob {
 		t.Fatalf("settlement config drifted: start=%s/%v end=%s/%v", startMode, startJob, endMode, endJob)
 	}
-	pass("step-08-no-payout", "settlement job stayed disabled and no payout-ready rows were created", map[string]any{
+	pass("step-08-no-payout", "settlement startup recovery stayed enabled and no payout-ready rows were created", map[string]any{
 		"payout_ready_count": 0,
 		"job_enabled":        endJob,
 		"settlement_mode":    endMode,

@@ -254,9 +254,10 @@ func waitForMissingReceiptDeadlineQuarantine(t *testing.T, s *scenario, wantCoun
 
 func (s *scenario) readSettlementVerdictAudits() []string {
 	s.t.Helper()
-	db, err := sql.Open("sqlite", s.coordinatorDB)
+	auditDB := filepath.Join(filepath.Dir(s.coordinatorDB), "coordinator-audit.db")
+	db, err := sql.Open("sqlite", auditDB)
 	if err != nil {
-		s.t.Fatalf("open coord db: %v", err)
+		s.t.Fatalf("open coordinator audit db: %v", err)
 	}
 	defer db.Close()
 	rows, err := db.Query(`SELECT payload_json FROM audit_log WHERE event_type = 'settlement_receipt_verdict' ORDER BY id ASC`)
