@@ -12449,17 +12449,35 @@ validate_acceptance_upgrade_target() {
       || die 7 "could not create installed compatibility preflight error capture"
     if installed_preflight="$("$installed_binary" release-payload-preflight 2>"$installed_preflight_error_file")"; then
       rm -f "$installed_preflight_error_file"
-      installed_version="$(python3 - "$installed_preflight" <<'PY'
+      installed_version="$(python3 - "$installed_preflight" "$GITHUB_REPO" <<'PY'
 import json
 import re
 import sys
 
-value = json.loads(sys.argv[1])
+def reject_duplicate_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate key: {key}")
+        value[key] = item
+    return value
+
+value = json.loads(sys.argv[1], object_pairs_hook=reject_duplicate_keys)
 version = value.get("version")
+compatibility_set_id = value.get("compatibility_set_id")
+identity_match = None
+if isinstance(compatibility_set_id, str):
+    identity_match = re.fullmatch(
+        re.escape(sys.argv[2])
+        + r":v([0-9]+\.[0-9]+\.[0-9]+)@[0-9a-f]{40}",
+        compatibility_set_id,
+    )
 if set(value) != {"compatibility_set_id", "status", "version"} \
         or value.get("status") != "valid" \
         or not isinstance(version, str) \
-        or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) \
+        or identity_match is None \
+        or identity_match.group(1) != version:
     raise SystemExit(1)
 print(version)
 PY
@@ -12477,8 +12495,10 @@ PY
       # common comparison below still requires the signed candidate to be
       # strictly newer, and staged candidate signature/identity validation is
       # unchanged and occurs before any live cutover.
-      [ "$target" = "v1.8.108" ] \
-        || die 7 "legacy headless smoke compatibility fallback is limited to acceptance target v1.8.108"
+      if [ "$target" != "v1.8.108" ]; then
+        rm -f "$installed_preflight_error_file"
+        die 7 "legacy headless smoke compatibility fallback is limited to acceptance target v1.8.108"
+      fi
       python3 - "$installed_preflight_error_file" "$installed_preflight_status" <<'PY' \
         || {
 import sys

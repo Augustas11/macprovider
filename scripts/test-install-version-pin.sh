@@ -713,6 +713,36 @@ rc=0
 ( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
 report "case21b-malformed-successful-preflight-rejected" 7 "$rc"
 
+cat > "$REAL_INSTALLED_BINARY" <<'SCRIPT'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    printf '1.8.40\n'
+    ;;
+  release-payload-preflight)
+    printf '%s\n' "$MOCK_SUCCESSFUL_PREFLIGHT_JSON"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+SCRIPT
+chmod +x "$REAL_INSTALLED_BINARY"
+MOCK_SUCCESSFUL_PREFLIGHT_JSON='{"compatibility_set_id":null,"status":"valid","version":"1.8.40"}'
+export MOCK_SUCCESSFUL_PREFLIGHT_JSON
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b-null-preflight-identity-rejected" 7 "$rc"
+MOCK_SUCCESSFUL_PREFLIGHT_JSON='{"compatibility_set_id":"Augustas11/macprovider:v1.8.40@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"invalid","status":"valid","version":"1.8.40"}'
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b-duplicate-preflight-key-rejected" 7 "$rc"
+MOCK_SUCCESSFUL_PREFLIGHT_JSON='{"compatibility_set_id":"Augustas11/macprovider:v1.8.39@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"valid","version":"1.8.40"}'
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b-mismatched-preflight-identity-version-rejected" 7 "$rc"
+unset MOCK_SUCCESSFUL_PREFLIGHT_JSON
+
 ################################################################
 # Case 21b2 — a legacy headless smoke incumbent whose compatibility
 # preflight fails may fall back to its bounded semantic version, but
