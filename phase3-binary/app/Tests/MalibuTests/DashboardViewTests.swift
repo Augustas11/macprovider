@@ -314,9 +314,9 @@ final class DashboardViewTests: XCTestCase {
         provisional.trustCriteriaMet = 2
         provisional.trustCriteriaRequired = 2
         let cooldownHealth = AgentSnapshotPresenter.miningHealth(provisional)
-        XCTAssertEqual(cooldownHealth.trustSummary, "Trust: Provisional · requalification cooldown active")
-        XCTAssertEqual(cooldownHealth.nextAction, "Re-qualify for Trusted to clear the cooldown.")
-        XCTAssertEqual(AgentSnapshotPresenter.trustLine(provisional), "Provisional — requalification cooldown active")
+        XCTAssertEqual(cooldownHealth.trustSummary, "Trust: Provisional · Trust review in progress")
+        XCTAssertEqual(cooldownHealth.nextAction, "Keep Malibu online; withdrawals unlock automatically when Trusted.")
+        XCTAssertEqual(AgentSnapshotPresenter.trustLine(provisional), "Provisional — Trust review in progress")
 
         var trustedWithHistoricalHold = provisional
         trustedWithHistoricalHold.trustTier = .trusted

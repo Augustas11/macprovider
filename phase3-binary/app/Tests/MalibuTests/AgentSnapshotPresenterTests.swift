@@ -1154,6 +1154,18 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             AgentSnapshotPresenter.malibuHoldLine(snapshot),
             "MALIBU status: provider daily limit reached Next: The provider cap resets at the next UTC day."
         )
+
+        snapshot.trustTier = .provisional
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_demotion_cooldown",
+            reasons: ["held_demotion_cooldown"]
+        )
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuHoldLine(snapshot),
+            "MALIBU status: Trust verification is in progress Next: Keep Malibu online; withdrawals unlock automatically when Trusted."
+        )
     }
 
     func testRewardEligibilityV1OverridesLegacyMalibuPresentation() {
