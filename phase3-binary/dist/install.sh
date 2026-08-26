@@ -102,6 +102,11 @@ WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
 # Installed without a .sh suffix so macOS Login Items shows a readable
 # background-item name instead of "watchdog.sh".
 WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
+if [ "$HEADLESS" = "1" ]; then
+  WATCHDOG_BOOTSTRAP_PATH="/Library/Application Support/macprovider/macprovider-health-monitor"
+else
+  WATCHDOG_BOOTSTRAP_PATH="$WATCHDOG_PATH"
+fi
 WATCHDOG_PLIST_PATH="$LAUNCHD_MANAGED_DIR/live.malibu.provider-watchdog.plist"
 WATCHDOG_PLIST_BOOTSTRAP_PATH="$LAUNCHD_BOOTSTRAP_DIR/live.malibu.provider-watchdog.plist"
 WATCHDOG_LABEL="live.malibu.provider-watchdog"
@@ -354,17 +359,22 @@ with open(path, "rb") as handle:
     payload = plistlib.load(handle)
 arguments = payload.get("ProgramArguments")
 environment = payload.get("EnvironmentVariables")
-if payload.get("Label") != label or payload.get("UserName") != user:
+if payload.get("Label") != label:
     raise SystemExit("unexpected LaunchDaemon identity")
 if not isinstance(arguments, list) or not arguments or arguments[0] != program:
     raise SystemExit("unexpected LaunchDaemon program")
 if label == "live.malibu.provider":
+    if payload.get("UserName") != user:
+        raise SystemExit("unexpected provider LaunchDaemon user")
     if arguments != [program, "serve", "--config", config]:
         raise SystemExit("unexpected provider LaunchDaemon arguments")
     if payload.get("KeepAlive") is not True:
         raise SystemExit("unexpected provider LaunchDaemon KeepAlive")
-elif label == "live.malibu.provider-watchdog" and arguments != [program]:
-    raise SystemExit("unexpected watchdog LaunchDaemon arguments")
+elif label == "live.malibu.provider-watchdog":
+    if "UserName" in payload:
+        raise SystemExit("watchdog LaunchDaemon must remain root-owned")
+    if arguments != [program]:
+        raise SystemExit("unexpected watchdog LaunchDaemon arguments")
 if not isinstance(environment, dict):
     raise SystemExit("missing LaunchDaemon environment")
 if environment.get("MACPROVIDER_HEADLESS") != "1":
@@ -411,17 +421,22 @@ finally:
 payload = plistlib.loads(data)
 arguments = payload.get("ProgramArguments")
 environment = payload.get("EnvironmentVariables")
-if payload.get("Label") != label or payload.get("UserName") != user:
+if payload.get("Label") != label:
     raise SystemExit("unexpected LaunchDaemon identity")
 if not isinstance(arguments, list) or not arguments or arguments[0] != program:
     raise SystemExit("unexpected LaunchDaemon program")
 if label == "live.malibu.provider":
+    if payload.get("UserName") != user:
+        raise SystemExit("unexpected provider LaunchDaemon user")
     if arguments != [program, "serve", "--config", config]:
         raise SystemExit("unexpected provider LaunchDaemon arguments")
     if payload.get("KeepAlive") is not True:
         raise SystemExit("unexpected provider LaunchDaemon KeepAlive")
-elif label == "live.malibu.provider-watchdog" and arguments != [program]:
-    raise SystemExit("unexpected watchdog LaunchDaemon arguments")
+elif label == "live.malibu.provider-watchdog":
+    if "UserName" in payload:
+        raise SystemExit("watchdog LaunchDaemon must remain root-owned")
+    if arguments != [program]:
+        raise SystemExit("unexpected watchdog LaunchDaemon arguments")
 if not isinstance(environment, dict):
     raise SystemExit("missing LaunchDaemon environment")
 if environment.get("MACPROVIDER_HEADLESS") != "1":
@@ -2110,8 +2125,14 @@ stage_install_tx_plist() {
   expected_label="$3"
   expected_program="$4"
   alternate_program="$5"
-  expected_user="${6:-}"
-  python3 - "$source_path" "$copied_path" "$expected_label" "$expected_program" "$alternate_program" "$expected_user" <<'PY'
+  if [ "$#" -ge 7 ]; then
+    alternate_program_2="$6"
+    expected_user="$7"
+  else
+    alternate_program_2=""
+    expected_user="${6:-}"
+  fi
+  python3 - "$source_path" "$copied_path" "$expected_label" "$expected_program" "$alternate_program" "$alternate_program_2" "$expected_user" <<'PY'
 import os
 import plistlib
 import stat
@@ -2120,7 +2141,7 @@ import sys
 import ctypes
 import errno
 
-source_path, copied_path, expected_label, expected_program, alternate_program, expected_user = sys.argv[1:]
+source_path, copied_path, expected_label, expected_program, alternate_program, alternate_program_2, expected_user = sys.argv[1:]
 uid = os.getuid()
 max_bytes = 1024 * 1024
 nofollow = getattr(os, "O_NOFOLLOW", 0)
@@ -2218,8 +2239,13 @@ try:
         fail("invalid_plist")
     if not isinstance(plist, dict) or plist.get("Label") != expected_label:
         fail("unexpected_label")
-    if expected_user and plist.get("UserName") != expected_user:
-        fail("unexpected_user")
+    if expected_user:
+        user_name = plist.get("UserName")
+        if expected_label.endswith("-watchdog"):
+            if user_name is not None and user_name != expected_user:
+                fail("unexpected_user")
+        elif user_name != expected_user:
+            fail("unexpected_user")
     program = plist.get("Program")
     if "Program" in plist and (not isinstance(program, str) or not program):
         fail("invalid_program")
@@ -2234,7 +2260,10 @@ try:
     if program is None and arguments is None:
         fail("missing_program_identity")
     effective_program = program if program is not None else arguments[0]
-    if effective_program not in (expected_program, alternate_program):
+    allowed_programs = [expected_program, alternate_program]
+    if alternate_program_2:
+        allowed_programs.append(alternate_program_2)
+    if effective_program not in allowed_programs:
         fail("unexpected_program")
 
     previous_umask = os.umask(0o077)
@@ -2790,7 +2819,7 @@ validate_recovery_launchdaemon_plist() {
   managed_path="$1"
   bootstrap_path="$2"
   python3 - "$managed_path" "$bootstrap_path" "$REC_HEADLESS_USER" \
-    "$REC_INSTALL_DIR/macprovider-cli" "$REC_WATCHDOG_DIR/macprovider-health-monitor" \
+    "$REC_INSTALL_DIR/macprovider-cli" "/Library/Application Support/macprovider/macprovider-health-monitor" \
     "$REC_CONFIG_PATH" <<'PY'
 import os
 import plistlib
@@ -2810,10 +2839,16 @@ with open(path, "rb") as handle:
     payload = plistlib.load(handle)
 arguments = payload.get("ProgramArguments")
 environment = payload.get("EnvironmentVariables")
-if payload.get("Label") != expected[0] or payload.get("UserName") != user:
+if payload.get("Label") != expected[0]:
     raise SystemExit("unexpected LaunchDaemon identity")
 if not isinstance(arguments, list) or not arguments or arguments[0] != expected[1]:
     raise SystemExit("unexpected LaunchDaemon program")
+if expected[0].endswith("-watchdog"):
+    if "UserName" in payload and payload.get("UserName") != user:
+        raise SystemExit("unexpected watchdog LaunchDaemon user")
+else:
+    if payload.get("UserName") != user:
+        raise SystemExit("unexpected provider LaunchDaemon user")
 if not isinstance(environment, dict):
     raise SystemExit("missing LaunchDaemon environment")
 if environment.get("MACPROVIDER_HEADLESS") != "1" or environment.get("MACPROVIDER_LAUNCHD_DOMAIN") != "system":
@@ -2833,7 +2868,7 @@ snapshot_recovery_launchdaemon_plist() {
   managed_path="$1"
   bootstrap_path="$2"
   python3 - "$managed_path" "$bootstrap_path" "$REC_HEADLESS_USER" \
-    "$REC_INSTALL_DIR/macprovider-cli" "$REC_WATCHDOG_DIR/macprovider-health-monitor" \
+    "$REC_INSTALL_DIR/macprovider-cli" "/Library/Application Support/macprovider/macprovider-health-monitor" \
     "$REC_CONFIG_PATH" <<'PY'
 import base64
 import os
@@ -2864,10 +2899,16 @@ finally:
 payload = plistlib.loads(data)
 arguments = payload.get("ProgramArguments")
 environment = payload.get("EnvironmentVariables")
-if payload.get("Label") != expected[0] or payload.get("UserName") != user:
+if payload.get("Label") != expected[0]:
     raise SystemExit("unexpected LaunchDaemon identity")
 if not isinstance(arguments, list) or not arguments or arguments[0] != expected[1]:
     raise SystemExit("unexpected LaunchDaemon program")
+if expected[0].endswith("-watchdog"):
+    if "UserName" in payload and payload.get("UserName") != user:
+        raise SystemExit("unexpected watchdog LaunchDaemon user")
+else:
+    if payload.get("UserName") != user:
+        raise SystemExit("unexpected provider LaunchDaemon user")
 if not isinstance(environment, dict):
     raise SystemExit("missing LaunchDaemon environment")
 if environment.get("MACPROVIDER_HEADLESS") != "1" or environment.get("MACPROVIDER_LAUNCHD_DOMAIN") != "system":
@@ -5487,6 +5528,7 @@ service_identity_matches() {
   expected_path="$2"
   expected_program="$3"
   alternate_program="$4"
+  alternate_program_2="${5:-}"
   service_details="$(recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$service_label" 2>/dev/null | head -c 65537)" || return 1
   [ "${#service_details}" -le 65536 ] || return 1
   program_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*program = / { count++ } END { print count + 0 }')"
@@ -5496,18 +5538,26 @@ service_identity_matches() {
   service_program="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*program = //p')"
   service_path="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*path = //p')"
   [ "$service_path" = "$expected_path" ] || return 1
-  [ "$service_program" = "$expected_program" ] || [ "$service_program" = "$alternate_program" ]
+  [ "$service_program" = "$expected_program" ] \
+    || [ "$service_program" = "$alternate_program" ] \
+    || { [ -n "$alternate_program_2" ] && [ "$service_program" = "$alternate_program_2" ]; }
 }
 stop_loaded_service() {
   service_label="$1"
   expected_path="$2"
   expected_program="$3"
   alternate_program="$4"
-  failure_message="$5"
+  if [ "$#" -ge 6 ]; then
+    alternate_program_2="$5"
+    failure_message="$6"
+  else
+    alternate_program_2=""
+    failure_message="$5"
+  fi
   if ! service_loaded "$service_label"; then
     return 0
   fi
-  service_identity_matches "$service_label" "$expected_path" "$expected_program" "$alternate_program" \
+  service_identity_matches "$service_label" "$expected_path" "$expected_program" "$alternate_program" "$alternate_program_2" \
     || recovery_failed "$failure_message has an unexpected launchd identity"
   recovery_launchctl bootout "$REC_LAUNCHD_DOMAIN/$service_label" >/dev/null 2>&1 \
     || recovery_failed "$failure_message could not be stopped"
@@ -5560,7 +5610,7 @@ if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-sta
     recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 \
       || recovery_failed "could not start the pre-cutover watchdog service"
     service_identity_matches "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
-      "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+      "/Library/Application Support/macprovider/macprovider-health-monitor" "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
       || recovery_failed "pre-cutover watchdog service has an unexpected identity"
   fi
   if [ "$REC_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
@@ -5575,7 +5625,7 @@ if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-sta
     recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1 \
       || recovery_failed "could not start the pre-cutover legacy watchdog service"
     service_identity_matches "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
-      "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+      "/Library/Application Support/macprovider/macprovider-health-monitor" "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
       || recovery_failed "pre-cutover legacy watchdog service has an unexpected identity"
   fi
   recovery_log "Cutover never started; incumbent provider files and process were left untouched."
@@ -5844,12 +5894,12 @@ fi
 if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "the prior watchdog was active but no recoverable plist was preserved"
   stop_loaded_service "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
-    "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+    "/Library/Application Support/macprovider/macprovider-health-monitor" "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
     "the transaction watchdog service"
 else
   if [ -f "$RECOVERY_DIR/watchdog-service-created" ] && [ ! -L "$RECOVERY_DIR/watchdog-service-created" ]; then
     stop_loaded_service "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
-      "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+      "/Library/Application Support/macprovider/macprovider-health-monitor" "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
       "the transaction watchdog service"
   fi
   service_loaded "$REC_WATCHDOG_LABEL" && recovery_failed "watchdog service is active even though it was inactive before the failed install"
@@ -5857,7 +5907,7 @@ fi
 if [ "$REC_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_LEGACY_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "the prior legacy watchdog was active but no recoverable plist was preserved"
   stop_loaded_service "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
-    "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+    "/Library/Application Support/macprovider/macprovider-health-monitor" "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
     "the incumbent legacy watchdog service"
 fi
 # INSTALL_DIR intentionally permits unrelated support files. Stop all owners
@@ -5966,14 +6016,14 @@ if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous watchdog service"
   recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous watchdog service"
   service_identity_matches "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
-    "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+    "/Library/Application Support/macprovider/macprovider-health-monitor" "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
     || recovery_failed "previous watchdog service has an unexpected identity"
 elif [ "$REC_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_LEGACY_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "previous legacy watchdog was active but no previous plist was preserved"
   recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous legacy watchdog service"
   recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous legacy watchdog service"
   service_identity_matches "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
-    "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+    "/Library/Application Support/macprovider/macprovider-health-monitor" "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
     || recovery_failed "previous legacy watchdog service has an unexpected identity"
 else
   if recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$REC_WATCHDOG_LABEL" >/dev/null 2>&1; then
@@ -6600,7 +6650,7 @@ begin_install_transaction() {
     verify_published_launchd_plist "$WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_BOOTSTRAP_PATH" \
       || die 70 "managed watchdog plist does not match the published LaunchDaemon plist; current install was not changed"
     stage_install_tx_plist "$WATCHDOG_PLIST_PATH" "$recovery_staging/watchdog.plist" \
-      "$WATCHDOG_LABEL" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" "${HEADLESS_USER:-}" \
+      "$WATCHDOG_LABEL" "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" "${HEADLESS_USER:-}" \
       || die 70 "could not stage and verify the previous watchdog plist; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_WATCHDOG_PLIST=1
   fi
@@ -6665,7 +6715,7 @@ begin_install_transaction() {
     verify_published_launchd_plist "$LEGACY_WATCHDOG_PLIST_PATH" "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
       || die 70 "managed legacy watchdog plist does not match the published LaunchDaemon plist; current install was not changed"
     stage_install_tx_plist "$LEGACY_WATCHDOG_PLIST_PATH" "$recovery_staging/legacy-watchdog.plist" \
-      "$LEGACY_WATCHDOG_LABEL" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" "${HEADLESS_USER:-}" \
+      "$LEGACY_WATCHDOG_LABEL" "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" "${HEADLESS_USER:-}" \
       || die 70 "could not stage and verify the previous legacy watchdog plist; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_LEGACY_WATCHDOG_PLIST=1
   fi
@@ -7412,7 +7462,7 @@ reclaim_launchd_service() {
       had_plist="${INSTALL_TX_HAD_PLIST:-0}"
       ;;
     "$WATCHDOG_LABEL")
-      expected_program="$WATCHDOG_PATH"
+      expected_program="${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}"
       legacy_program="$WATCHDOG_DIR/watchdog.sh"
       expected_plist="$WATCHDOG_PLIST_BOOTSTRAP_PATH"
       had_plist="${INSTALL_TX_HAD_WATCHDOG_PLIST:-0}"
@@ -10035,10 +10085,8 @@ launchctl_run() {
   launchctl_bin="${MACPROVIDER_LAUNCHCTL:-launchctl}"
   if [ "$LAUNCHD_DOMAIN" = "system" ]; then
     launchctl_bin="/bin/launchctl"
-    /usr/bin/sudo -n "$launchctl_bin" "$@"
-  else
-    "$launchctl_bin" "$@"
   fi
+  "$launchctl_bin" "$@"
 }
 
 launchd_service_target() {
@@ -10261,10 +10309,7 @@ def log(message):
 
 def launchctl_command(*arguments):
     binary = "/bin/launchctl" if launchd_domain == "system" else os.environ.get("MACPROVIDER_LAUNCHCTL", "launchctl")
-    command = [binary, *arguments]
-    if launchd_domain == "system":
-        return ["/usr/bin/sudo", "-n", *command]
-    return command
+    return [binary, *arguments]
 
 def launchd_service_target(service_label=label):
     return f"{launchd_domain}/{service_label}"
@@ -11545,7 +11590,7 @@ WATCHDOG_EOF
 }
 
 render_watchdog_plist() {
-  watchdog_path="$(xml_escape "$WATCHDOG_PATH")"
+  watchdog_path="$(xml_escape "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}")"
   user_home="$(xml_escape "$HOME")"
   log_dir="$(xml_escape "$LOG_DIR")"
   config_path="$(xml_escape "$CONFIG_PATH")"
@@ -11553,15 +11598,12 @@ render_watchdog_plist() {
   protected_credential_root="$(xml_escape "$CONFIG_DIR/protected-credentials")"
   coord_host="$(xml_escape "$(printf "%s" "$1" | sed -E 's#^wss?://##; s#/.*##')")"
   credential_store="keychain"
-  launchd_user_entry=""
   watchdog_search_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   launchctl_environment_entry=""
   if [ "$HEADLESS" = "1" ]; then
     credential_store="protected_file"
     launchctl_environment_entry="    <key>MACPROVIDER_LAUNCHCTL</key>
     <string>/bin/launchctl</string>"
-    launchd_user_entry="  <key>UserName</key>
-  <string>$(xml_escape "$HEADLESS_USER")</string>"
   fi
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -11571,7 +11613,6 @@ render_watchdog_plist() {
 <dict>
   <key>Label</key>
   <string>$WATCHDOG_LABEL</string>
-$launchd_user_entry
   <key>ProgramArguments</key>
   <array>
     <string>$watchdog_path</string>
@@ -11658,6 +11699,20 @@ install_watchdog() {
     rm -f "$legacy_watchdog"
   fi
   write_watchdog_script
+  if [ "$HEADLESS" = "1" ]; then
+    "${SUDO_BIN:-/usr/bin/sudo}" -n /bin/mkdir -p "$(dirname "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}")" \
+      || die 5 "could not create root watchdog directory"
+    watchdog_payload_b64="$(python3 - "$WATCHDOG_PATH" <<'PY'
+import base64
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    sys.stdout.write(base64.b64encode(handle.read()).decode("ascii"))
+PY
+)" || die 5 "could not snapshot rendered watchdog script"
+    publish_root_file_from_base64 "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" 0755 "$watchdog_payload_b64" \
+      || die 5 "could not publish root-owned watchdog script"
+  fi
   render_watchdog_plist "$coordinator_url" \
     | write_atomic_install_file "$WATCHDOG_PLIST_PATH" \
     || die 5 "could not publish rendered watchdog plist safely"
@@ -11668,7 +11723,7 @@ install_watchdog() {
       || die 70 "could not durably record the watchdog launchd mutation"
   fi
   publish_launchd_plist "$WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_BOOTSTRAP_PATH" \
-    "$WATCHDOG_LABEL" "$WATCHDOG_PATH" \
+    "$WATCHDOG_LABEL" "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" \
     || die 5 "failed to publish watchdog launchd plist"
   launchctl_service enable "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" \
     || die 5 "failed to enable watchdog launchd service"

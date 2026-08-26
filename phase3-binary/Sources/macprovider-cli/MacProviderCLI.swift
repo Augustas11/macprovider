@@ -3052,15 +3052,16 @@ struct UpdateCommand: AsyncParsableCommand {
                     throw ValidationError(rejectMessage)
                 }
             case .missing:
-                let validator = validateSystemArtifactsAbsent ?? { systemPlists, run in
-                    try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
-                        systemPlists: systemPlists,
-                        fileExists: fileExists,
-                        run: run
-                    )
-                }
-                try validator(UninstallCommand.managedSystemLaunchDaemonPlists, runLaunchctl ?? Self.launchctlStatus)
+                break
             }
+            let validator = validateSystemArtifactsAbsent ?? { systemPlists, run in
+                try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
+                    systemPlists: systemPlists,
+                    fileExists: fileExists,
+                    run: run
+                )
+            }
+            try validator(UninstallCommand.managedSystemLaunchDaemonPlists, runLaunchctl ?? Self.launchctlStatus)
         } catch let error as ValidationError {
             throw error
         } catch UninstallCommand.UninstallError.unsupportedHeadlessInstallProfile {

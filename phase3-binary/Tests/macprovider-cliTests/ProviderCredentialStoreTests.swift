@@ -141,6 +141,27 @@ final class ProviderCredentialStoreTests: XCTestCase {
         XCTAssertEqual(status.recoveryAction, .retry)
     }
 
+    func testProtectedFileResolverDoesNotRebuildMissingCredentialFromLayeredConfig() throws {
+        let store = InMemoryProviderCredentialStore()
+        var config = AppConfig.defaults(configPath: "/tmp/config.yaml")
+        config.providerID = "provider-a"
+        config.providerToken = "layered-token"
+        config.credentialStore = .protectedFile
+
+        let status = try ProviderCredentialResolver.resolve(
+            config: &config,
+            store: store,
+            authoritativeSource: .protectedFile
+        )
+
+        XCTAssertNil(config.providerToken)
+        XCTAssertNil(try store.load(providerID: "provider-a"))
+        XCTAssertEqual(status.source, .protectedFile)
+        XCTAssertEqual(status.state, .missing)
+        XCTAssertFalse(status.restartSafe)
+        XCTAssertEqual(status.recoveryAction, .restoreOrReenroll)
+    }
+
     func testResolverPrefersExistingCLIKeychainCredentialOverStaleConfig() throws {
         let store = InMemoryProviderCredentialStore(values: ["provider-a": "fresh-token"])
         var config = AppConfig.defaults(configPath: "/tmp/config.yaml")

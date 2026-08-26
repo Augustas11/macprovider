@@ -1262,7 +1262,16 @@ enum ProviderCredentialResolver {
             }
             guard let fallback, !fallback.isEmpty else {
                 return ProviderCredentialStatus(
-                    source: .none,
+                    source: authoritativeSource == .protectedFile ? .protectedFile : .none,
+                    state: .missing,
+                    restartSafe: false,
+                    recoveryAction: .restoreOrReenroll
+                )
+            }
+            if authoritativeSource == .protectedFile {
+                config.providerToken = nil
+                return ProviderCredentialStatus(
+                    source: .protectedFile,
                     state: .missing,
                     restartSafe: false,
                     recoveryAction: .restoreOrReenroll

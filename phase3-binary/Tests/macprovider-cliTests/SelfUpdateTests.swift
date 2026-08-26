@@ -76,6 +76,19 @@ final class SelfUpdateTests: XCTestCase {
             home: URL(fileURLWithPath: "/tmp"),
             manifestLoader: { .loaded(systemDomainManifest) }
         ))
+        let consumerManifest = updateTestManifest(
+            installProfile: "consumer_user",
+            launchdDomain: "gui"
+        )
+        XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
+            config: config,
+            checkOnly: false,
+            hasAcceptanceOptions: false,
+            home: URL(fileURLWithPath: "/tmp"),
+            manifestLoader: { .loaded(consumerManifest) },
+            fileExists: { $0.hasSuffix("live.malibu.provider.plist") },
+            runLaunchctl: { _ in 113 }
+        ))
         XCTAssertThrowsError(try UpdateCommand.validateHeadlessUpdateMode(
             config: config,
             checkOnly: false,

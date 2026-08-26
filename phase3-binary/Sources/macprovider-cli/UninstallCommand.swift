@@ -28,14 +28,18 @@ struct UninstallCommand: AsyncParsableCommand {
         } else {
             priorLifecycle = nil
         }
+        let validateSystemArtifactsAbsent = {
+            try Self.validateNoHeadlessSystemArtifactsPresent { arguments in
+                try runProcess("/bin/launchctl", arguments: arguments)
+            }
+        }
         let manifest: InstallManifest
         switch try Self.loadManifest(home: home) {
         case .loaded(let loaded):
             manifest = loaded
+            try validateSystemArtifactsAbsent()
         case .missing:
-            try Self.validateNoHeadlessSystemArtifactsPresent { arguments in
-                try runProcess("/bin/launchctl", arguments: arguments)
-            }
+            try validateSystemArtifactsAbsent()
             warnings.append("install manifest missing; using legacy uninstall locations")
             manifest = Self.legacyManifest(home: home)
         }

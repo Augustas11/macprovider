@@ -64,10 +64,8 @@ replace_once(
     '  launchctl_bin="${MACPROVIDER_LAUNCHCTL:-launchctl}"\n'
     '  if [ "$LAUNCHD_DOMAIN" = "system" ]; then\n'
     '    launchctl_bin="/bin/launchctl"\n'
-    '    /usr/bin/sudo -n "$launchctl_bin" "$@"\n'
-    '  else\n'
-    '    "$launchctl_bin" "$@"\n'
     '  fi\n'
+    '  "$launchctl_bin" "$@"\n'
     '}\n\n'
     'launchd_service_target() {\n'
     '  printf "%s/%s" "$LAUNCHD_DOMAIN" "$LABEL"\n'
@@ -101,10 +99,7 @@ replace_once(
 replace_once(
     'def launchctl_command(*arguments):\n'
     '    binary = "/bin/launchctl" if launchd_domain == "system" else os.environ.get("MACPROVIDER_LAUNCHCTL", "launchctl")\n'
-    '    command = [binary, *arguments]\n'
-    '    if launchd_domain == "system":\n'
-    '        return ["/usr/bin/sudo", "-n", *command]\n'
-    '    return command\n\n'
+    '    return [binary, *arguments]\n\n'
     'def launchd_service_target(service_label=label):\n'
     '    return f"{launchd_domain}/{service_label}"\n\n',
     '',

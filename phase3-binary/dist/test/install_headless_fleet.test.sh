@@ -281,6 +281,7 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   LOG_DIR="$HOME/Library/Logs/macprovider"
   WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
   WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
+  WATCHDOG_BOOTSTRAP_PATH="$SYSTEM_DIR/Application Support/macprovider/macprovider-health-monitor"
   PLIST_PATH="$CONFIG_DIR/launchd/live.malibu.provider.plist"
   PLIST_BOOTSTRAP_PATH="$SYSTEM_DIR/live.malibu.provider.plist"
   LEGACY_PLIST_PATH="$CONFIG_DIR/launchd/live.streamvc.macprovider.plist"
@@ -355,13 +356,13 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   install_watchdog "wss://coordinator.example/ws/provider"
   [ "$LAUNCHD_INSTALLED" -eq 1 ] && [ "$WATCHDOG_INSTALLED" -eq 1 ]
   [ -O "$WATCHDOG_DIR" ] && [ -O "$WATCHDOG_PATH" ]
+  [ -f "$WATCHDOG_BOOTSTRAP_PATH" ]
+  cmp -s "$WATCHDOG_PATH" "$WATCHDOG_BOOTSTRAP_PATH"
   [ -O "$PLIST_PATH" ] && [ -O "$WATCHDOG_PLIST_PATH" ]
   cmp -s "$PLIST_PATH" "$PLIST_BOOTSTRAP_PATH"
   cmp -s "$WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_BOOTSTRAP_PATH"
 
   for plist in "$PLIST_PATH" "$WATCHDOG_PLIST_PATH"; do
-    grep -Fq "<key>UserName</key>" "$plist"
-    grep -Fq "<string>$HEADLESS_USER</string>" "$plist"
     grep -Fq "<key>MACPROVIDER_HEADLESS</key>" "$plist"
     grep -Fq "<string>1</string>" "$plist"
     grep -Fq "<key>MACPROVIDER_CREDENTIAL_STORE</key>" "$plist"
@@ -371,12 +372,17 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
     grep -Fq "<key>MACPROVIDER_LAUNCHD_DOMAIN</key>" "$plist"
     grep -Fq "<string>system</string>" "$plist"
   done
+  grep -Fq "<key>UserName</key>" "$PLIST_PATH"
+  grep -Fq "<string>$HEADLESS_USER</string>" "$PLIST_PATH"
+  ! grep -Fq "<key>UserName</key>" "$WATCHDOG_PLIST_PATH"
   grep -Fxq "enable system/live.malibu.provider" "$LAUNCHD_LOG"
   grep -Fxq "bootstrap system $PLIST_BOOTSTRAP_PATH" "$LAUNCHD_LOG"
   grep -Fxq "enable system/live.malibu.provider-watchdog" "$LAUNCHD_LOG"
   grep -Fxq "bootstrap system $WATCHDOG_PLIST_BOOTSTRAP_PATH" "$LAUNCHD_LOG"
   grep -Fq "<key>MACPROVIDER_LAUNCHCTL</key>" "$WATCHDOG_PLIST_PATH"
   grep -Fq "<string>/bin/launchctl</string>" "$WATCHDOG_PLIST_PATH"
+  grep -Fq "<string>$WATCHDOG_BOOTSTRAP_PATH</string>" "$WATCHDOG_PLIST_PATH"
+  ! grep -Fq "/usr/bin/sudo -n" "$WATCHDOG_PATH"
   REC_HEADLESS_USER="$HEADLESS_USER"
   REC_INSTALL_DIR="$INSTALL_DIR"
   REC_WATCHDOG_DIR="$WATCHDOG_DIR"

@@ -298,6 +298,15 @@ final class UninstallCommandTests: XCTestCase {
         }
     }
 
+    func testLoadedConsumerManifestStillFailsClosedWhenSystemArtifactsExist() throws {
+        XCTAssertThrowsError(try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
+            systemPlists: ["/Library/LaunchDaemons/live.malibu.provider.plist"],
+            fileExists: { $0 == "/Library/LaunchDaemons/live.malibu.provider.plist" }
+        ) { _ in 113 }) { error in
+            XCTAssertEqual(error as? UninstallCommand.UninstallError, .unsupportedHeadlessInstallProfile)
+        }
+    }
+
     func testMissingManifestFailsClosedWhenSystemServiceIsLoaded() throws {
         XCTAssertThrowsError(try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
             systemPlists: [],
