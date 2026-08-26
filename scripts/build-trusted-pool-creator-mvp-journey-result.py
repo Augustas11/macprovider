@@ -69,6 +69,12 @@ def require_string(value: Any, pattern: re.Pattern[str] | None, location: str) -
     return value
 
 
+def require_positive_int(value: Any, location: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        die(f"{location} must be a positive integer")
+    return value
+
+
 def require_object(value: Any, location: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         die(f"{location} must be an object")
@@ -418,7 +424,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     harness = require_object(evidence.get("harness"), "harness")
     pool_rejection_timing = require_pool_rejection_timing(harness.get("pool_rejection_timing"))
     artifact_sha = hashlib.sha256(evidence_bytes).hexdigest()
-    run_id = require_string(evidence.get("run_id"), None, "run_id")
+    run_id = require_positive_int(evidence.get("run_id"), "run_id")
 
     return {
         "schema_version": JOURNEY_RESULT_PAYLOAD_SCHEMA,

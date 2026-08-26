@@ -506,6 +506,19 @@ type creatorMVPEvidenceInput struct {
 	PoolExistenceOracle         creatorMVPPoolExistenceOracle
 }
 
+func TestCreatorMVPNextRunIDFollowsPromotionLedger(t *testing.T) {
+	if got := creatorMVPNextRunID(t); got < 1 {
+		t.Fatalf("creatorMVPNextRunID() = %d, want >= 1", got)
+	}
+	ledger := filepath.Join(t.TempDir(), "spec-043-promotion-auth.jsonl")
+	if err := os.WriteFile(ledger, []byte("{\"type\":\"ledger_init\"}\n{\"type\":\"consumed_authorization\",\"journey_id\":\"JOURNEY-TRUSTED-POOL-CREATOR-MVP\",\"run_id\":7}\n{\"type\":\"consumed_authorization\",\"journey_id\":\"JOURNEY-OTHER\",\"run_id\":99}\n"), 0o600); err != nil {
+		t.Fatalf("write fixture ledger: %v", err)
+	}
+	if got := creatorMVPNextRunIDFromLedger(t, ledger); got != 8 {
+		t.Fatalf("creatorMVPNextRunIDFromLedger() = %d, want 8", got)
+	}
+}
+
 func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any {
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -514,7 +527,7 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 	return map[string]any{
 		"schema_version":  creatorMVPEvidenceSchema,
 		"journey_id":      creatorMVPJourneyID,
-		"run_id":          "trusted-pool-creator-mvp-" + now.Format("20060102T150405Z"),
+		"run_id":          creatorMVPNextRunID(t),
 		"captured_at":     now.Format("2006-01-02T15:04:05Z"),
 		"expires_at":      now.UTC().Format("2006-01-02"),
 		"requirement_ids": []string{"SPEC-043-R001", "SPEC-043-R002", "SPEC-043-R003", "SPEC-043-R004", "SPEC-043-R005", "SPEC-043-R006", "SPEC-043-R007", "SPEC-043-R008", "SPEC-043-R009", "SPEC-043-R010", "SPEC-043-R011", "SPEC-043-R012"},
@@ -1147,6 +1160,39 @@ func creatorMVPGitOutput(t *testing.T, args ...string) string {
 		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func creatorMVPNextRunID(t *testing.T) int {
+	t.Helper()
+	root := creatorMVPGitOutput(t, "rev-parse", "--show-toplevel")
+	return creatorMVPNextRunIDFromLedger(t, filepath.Join(root, "journeys", "ledgers", "spec-043-promotion-auth.jsonl"))
+}
+
+func creatorMVPNextRunIDFromLedger(t *testing.T, ledger string) int {
+	t.Helper()
+	data, err := os.ReadFile(ledger)
+	if err != nil {
+		t.Fatalf("read SPEC-043 promotion ledger: %v", err)
+	}
+	highWater := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec struct {
+			Type      string `json:"type"`
+			JourneyID string `json:"journey_id"`
+			RunID     int    `json:"run_id"`
+		}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("decode SPEC-043 promotion ledger: %v", err)
+		}
+		if rec.Type == "consumed_authorization" && rec.JourneyID == creatorMVPJourneyID && rec.RunID > highWater {
+			highWater = rec.RunID
+		}
+	}
+	return highWater + 1
 }
 
 func creatorMVPDelegationGrantedEvent(t *testing.T, owner ed25519.PrivateKey, poolID, creatorID, manifestDigest, environment, providerID, delegationID, delegationOperationID string) trustpool.DurableEvent {
