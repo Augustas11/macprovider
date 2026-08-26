@@ -693,6 +693,97 @@ report "case21b-newer-set-release-accepted" 0 "$rc"
 rc=0
 ( validate_acceptance_upgrade_target v1.8.41 ) >/dev/null 2>&1 || rc=$?
 report "case21b-equal-set-release-rejected" 7 "$rc"
+
+cat > "$REAL_INSTALLED_BINARY" <<'SCRIPT'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    printf '1.8.40\n'
+    ;;
+  release-payload-preflight)
+    printf '{"status":"valid","version":"1.8.40"}\n'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+SCRIPT
+chmod +x "$REAL_INSTALLED_BINARY"
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b-malformed-successful-preflight-rejected" 7 "$rc"
+
+################################################################
+# Case 21b2 — a legacy headless smoke incumbent whose compatibility
+# preflight fails may fall back to its bounded semantic version, but
+# only a strictly newer signed acceptance candidate is accepted.
+################################################################
+cat > "$REAL_INSTALLED_BINARY" <<'SCRIPT'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    printf '%s\n' "${MOCK_LEGACY_VERSION:-1.8.40}"
+    ;;
+  release-payload-preflight)
+    if [ "${MOCK_LEGACY_PREFLIGHT_VARIANT:-exact}" = "altered" ]; then
+      printf "Error: Unknown option '--config'\n" >&2
+      printf 'Usage: macprovider-cli credentials <subcommand>\n' >&2
+    else
+      printf "Error: Unknown option '--config'\n" >&2
+      printf 'Usage: macprovider-cli credentials <subcommand>\n' >&2
+      printf "  See 'macprovider-cli credentials --help' for more information.\n" >&2
+    fi
+    exit "${MOCK_LEGACY_PREFLIGHT_EXIT:-2}"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+SCRIPT
+chmod +x "$REAL_INSTALLED_BINARY"
+MOCK_LEGACY_VERSION="1.8.105"
+export MOCK_LEGACY_VERSION
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b2-legacy-smoke-older-version-accepted" 0 "$rc"
+MOCK_LEGACY_VERSION="1.8.104"
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b2-unrelated-older-incumbent-rejected" 7 "$rc"
+MOCK_LEGACY_VERSION="1.8.105"
+rc=0
+( validate_acceptance_upgrade_target v1.8.109 ) >/dev/null 2>&1 || rc=$?
+report "case21b2-later-acceptance-target-rejected" 7 "$rc"
+MOCK_LEGACY_VERSION="1.8.108"
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b2-legacy-smoke-equal-version-rejected" 7 "$rc"
+MOCK_LEGACY_VERSION="1.8.109"
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b2-legacy-smoke-newer-version-rejected" 7 "$rc"
+MOCK_LEGACY_VERSION="not-a-version"
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b2-legacy-smoke-malformed-version-rejected" 7 "$rc"
+MOCK_LEGACY_VERSION="1.8."$'\n'"105"
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b2-legacy-smoke-multiline-version-rejected" 7 "$rc"
+MOCK_LEGACY_VERSION="1.8.105"
+MOCK_LEGACY_PREFLIGHT_EXIT="99"
+export MOCK_LEGACY_PREFLIGHT_EXIT
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b2-arbitrary-preflight-failure-rejected" 7 "$rc"
+unset MOCK_LEGACY_PREFLIGHT_EXIT
+MOCK_LEGACY_PREFLIGHT_VARIANT="altered"
+export MOCK_LEGACY_PREFLIGHT_VARIANT
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b2-altered-preflight-error-rejected" 7 "$rc"
+unset MOCK_LEGACY_PREFLIGHT_VARIANT
+unset MOCK_LEGACY_VERSION
 rm -f "$INSTALL_DIR/compatibility-set.json"
 
 ################################################################

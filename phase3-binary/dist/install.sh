@@ -31,7 +31,7 @@ unset MACPROVIDER_BUNDLED_APP
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
 MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
-MACPROVIDER_MIN_HEADLESS_VERSION="v1.8.107"
+MACPROVIDER_MIN_HEADLESS_VERSION="v1.8.108"
 COORDINATOR_URL_DEFAULT="wss://coordinator.malibu.tech/ws/provider"
 COORDINATOR_BASE_DEFAULT="https://coordinator.malibu.tech"
 INSTALL_DIR="${MACPROVIDER_INSTALL_DIR:-$HOME/macprovider}"
@@ -12409,6 +12409,32 @@ installed_provider_binary_path() {
   fi
 }
 
+installed_provider_binary_version() {
+  local installed_binary="$1"
+  local version_file installed_version
+  version_file="$(mktemp "${TMPDIR:-/tmp}/macprovider-installed-version.XXXXXX")" \
+    || return 1
+  if ! "$installed_binary" --version >"$version_file" 2>/dev/null; then
+    rm -f "$version_file"
+    return 1
+  fi
+  installed_version="$(python3 - "$version_file" <<'PY'
+import re
+import sys
+
+data = open(sys.argv[1], "rb").read()
+if not re.fullmatch(rb"v?[0-9]+\.[0-9]+\.[0-9]+(?:\r?\n)?", data):
+    raise SystemExit(1)
+print(data.decode("ascii").rstrip("\r\n"))
+PY
+  )" || {
+    rm -f "$version_file"
+    return 1
+  }
+  rm -f "$version_file"
+  printf '%s\n' "$installed_version"
+}
+
 validate_acceptance_upgrade_target() {
   target="$1"
   [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] || return 0
@@ -12419,9 +12445,11 @@ validate_acceptance_upgrade_target() {
   [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] && return 0
   installed_manifest="$INSTALL_DIR/compatibility-set.json"
   if [ -f "$installed_manifest" ]; then
-    installed_preflight="$("$installed_binary" release-payload-preflight 2>/dev/null)" \
-      || die 7 "installed compatibility set failed preflight before acceptance upgrade"
-    installed_version="$(python3 - "$installed_preflight" <<'PY'
+    installed_preflight_error_file="$(mktemp "${TMPDIR:-/tmp}/macprovider-installed-preflight.XXXXXX")" \
+      || die 7 "could not create installed compatibility preflight error capture"
+    if installed_preflight="$("$installed_binary" release-payload-preflight 2>"$installed_preflight_error_file")"; then
+      rm -f "$installed_preflight_error_file"
+      installed_version="$(python3 - "$installed_preflight" <<'PY'
 import json
 import re
 import sys
@@ -12435,10 +12463,51 @@ if set(value) != {"compatibility_set_id", "status", "version"} \
     raise SystemExit(1)
 print(version)
 PY
-    )" || die 7 "installed compatibility set returned invalid preflight identity"
-    installed_tag="v$installed_version"
+      )" || die 7 "installed compatibility set returned invalid preflight identity"
+      installed_tag="v$installed_version"
+    else
+      installed_preflight_status="$?"
+      # Some pre-release headless smoke CLIs expose release-payload-preflight
+      # but fail inside that command because their legacy credentials parser
+      # rejects the modern --config argument. Acceptance upgrades may recover
+      # only from that exact exit/status shape and only for the one-shot
+      # v1.8.105 -> v1.8.108 acceptance bridge tracked by issue #1201. Remove
+      # this branch after that signed acceptance release has drained the smoke
+      # fleet. The
+      # common comparison below still requires the signed candidate to be
+      # strictly newer, and staged candidate signature/identity validation is
+      # unchanged and occurs before any live cutover.
+      [ "$target" = "v1.8.108" ] \
+        || die 7 "legacy headless smoke compatibility fallback is limited to acceptance target v1.8.108"
+      python3 - "$installed_preflight_error_file" "$installed_preflight_status" <<'PY' \
+        || {
+import sys
+
+expected = (
+    b"Error: Unknown option '--config'\n"
+    b"Usage: macprovider-cli credentials <subcommand>\n"
+    b"  See 'macprovider-cli credentials --help' for more information.\n"
+)
+if sys.argv[2] != "2" or open(sys.argv[1], "rb").read() != expected:
+    raise SystemExit(1)
+PY
+        rm -f "$installed_preflight_error_file"
+        die 7 "installed compatibility preflight failed outside the legacy headless smoke signature"
+      }
+      rm -f "$installed_preflight_error_file"
+      installed_version="$(installed_provider_binary_version "$installed_binary")" \
+        || die 7 "installed provider CLI version fallback failed before acceptance upgrade"
+      case "$installed_version" in
+        v*) installed_tag="$installed_version" ;;
+        *) installed_tag="v$installed_version" ;;
+      esac
+      [ "$installed_tag" = "v1.8.105" ] \
+        || die 7 "legacy headless smoke compatibility fallback requires incumbent v1.8.105"
+      log "Installed compatibility preflight failed; using bounded legacy incumbent version check for acceptance upgrade."
+    fi
   else
-    installed_version="$("$installed_binary" --version 2>/dev/null | tr -d '\r\n')"
+    installed_version="$(installed_provider_binary_version "$installed_binary")" \
+      || die 7 "installed provider CLI returned an invalid version"
     case "$installed_version" in
       v*) installed_tag="$installed_version" ;;
       *) installed_tag="v$installed_version" ;;
