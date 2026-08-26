@@ -241,22 +241,22 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   source "$FUNCTION_PATH"
 
   MACPROVIDER_MIN_SUPPORTED_VERSION=v1.7.11
-  MACPROVIDER_MIN_HEADLESS_VERSION=v1.8.106
+  MACPROVIDER_MIN_HEADLESS_VERSION=v1.8.107
   HEADLESS=1
   if (validate_headless_release_tag v1.8.105); then
     echo "headless mode unexpectedly accepted a pre-headless release tag" >&2
     exit 1
   fi
-  validate_headless_release_tag v1.8.106
+  validate_headless_release_tag v1.8.107
   if (validate_headless_acceptance_source); then
     echo "headless mode unexpectedly accepted missing acceptance provenance" >&2
     exit 1
   fi
-  if (BUNDLED_APP=/Applications/Malibu.app MACPROVIDER_ACCEPTANCE_ASSET_DIR=/tmp/a MACPROVIDER_VERSION=v1.8.106 MACPROVIDER_ACCEPTANCE_COMMIT=0123456789012345678901234567890123456789 MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT=abcdefabcdefabcdefabcdefabcdefabcdefabcd MACPROVIDER_ACCEPTANCE_RUN_ID=1 MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT=1 validate_headless_acceptance_source); then
+  if (BUNDLED_APP=/Applications/Malibu.app MACPROVIDER_ACCEPTANCE_ASSET_DIR=/tmp/a MACPROVIDER_VERSION=v1.8.107 MACPROVIDER_ACCEPTANCE_COMMIT=0123456789012345678901234567890123456789 MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT=abcdefabcdefabcdefabcdefabcdefabcdefabcd MACPROVIDER_ACCEPTANCE_RUN_ID=1 MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT=1 validate_headless_acceptance_source); then
     echo "headless mode unexpectedly accepted MACPROVIDER_BUNDLED_APP" >&2
     exit 1
   fi
-  MACPROVIDER_ACCEPTANCE_ASSET_DIR=/tmp/a MACPROVIDER_VERSION=v1.8.106 MACPROVIDER_ACCEPTANCE_COMMIT=0123456789012345678901234567890123456789 MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT=abcdefabcdefabcdefabcdefabcdefabcdefabcd MACPROVIDER_ACCEPTANCE_RUN_ID=1 MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT=1 validate_headless_acceptance_source
+  MACPROVIDER_ACCEPTANCE_ASSET_DIR=/tmp/a MACPROVIDER_VERSION=v1.8.107 MACPROVIDER_ACCEPTANCE_COMMIT=0123456789012345678901234567890123456789 MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT=abcdefabcdefabcdefabcdefabcdefabcdefabcd MACPROVIDER_ACCEPTANCE_RUN_ID=1 MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT=1 validate_headless_acceptance_source
   HEADLESS=0
   validate_headless_release_tag v1.8.105
 
@@ -472,6 +472,7 @@ PY
   fi
   rm -f "$other_consumer_plist"
   validate_headless_install_topology
+  LAUNCHD_PRINT_STATUS=125 validate_headless_install_topology
   if (LAUNCHD_PRINT_STATUS=64 validate_headless_install_topology); then
     echo "headless topology unexpectedly accepted an indeterminate launchctl print result" >&2
     exit 1
@@ -484,6 +485,10 @@ PY
     exit 1
   fi
   rm -f "$system_plist"
+  if (HEADLESS=0 LAUNCHD_PRINT_STATUS=125 validate_headless_install_topology); then
+    echo "consumer mode unexpectedly accepted indeterminate system launchctl print status 125" >&2
+    exit 1
+  fi
 
   rm -rf "$INSTALL_TX_BACKUP"
   orphan="$CONFIG_DIR/install-recovery-interrupted"
