@@ -20,11 +20,11 @@ the private key into a worktree, log, issue, artifact, or commit.
 
 SPEC-043 production-release approver keys are separate. Register only an
 operator-supplied P-256 public key with
-`scripts/register-spec043-production-release-key.py`. The committed keyring at
-`spec-043-production-release-keyring.json` stays empty/fail-closed until that
-happens. Never generate a SPEC-043 launch key in this repository, and never
-reuse `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM` or
-`security/acceptance-candidate-signing-public.pem` to sign
+`scripts/register-spec043-production-release-key.py`, or provision the first
+key with `scripts/provision-spec043-production-release-key.sh`. The committed
+public key is `spec-043-production-release-p256-v1.pem`. Never copy the private
+key into a worktree, and never reuse `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM`
+or `security/acceptance-candidate-signing-public.pem` to sign
 `PoolPromotionTransitionV1`.
 
 The production release key still signs the inner compatibility manifest so an

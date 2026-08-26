@@ -176,8 +176,22 @@ if "public_keys_match" not in signer:
     raise SystemExit("sibling signer must compare registered and derived keys by SPKI identity")
 if "must not reuse the acceptance candidate signing key" not in library:
     raise SystemExit("production-release registration must reject the acceptance candidate public key")
-if keyring.get("keys") != []:
-    raise SystemExit("committed production-release keyring must stay empty in this slice")
+keys = keyring.get("keys")
+if not isinstance(keys, list) or len(keys) != 1:
+    raise SystemExit("committed production-release keyring must contain exactly one registered key")
+if keys[0].get("key_id") != "macprovider-spec043-production-release-p256-v1":
+    raise SystemExit("registered production-release key_id is wrong")
+if keys[0].get("public_key_path") != "security/spec-043-production-release-p256-v1.pem":
+    raise SystemExit("registered production-release public_key_path is wrong")
+public_key = pathlib.Path(sys.argv[5]).resolve().parent.parent / "security" / "spec-043-production-release-p256-v1.pem"
+if not public_key.is_file() or public_key.is_symlink():
+    raise SystemExit("registered production-release public key is absent or unsafe")
+public_pem = public_key.read_text(encoding="utf-8")
+if "BEGIN PRIVATE KEY" in public_pem or "BEGIN PUBLIC KEY" not in public_pem:
+    raise SystemExit("committed production-release key must be a public PEM")
+acceptance = (public_key.parent / "acceptance-candidate-signing-public.pem").read_text(encoding="utf-8")
+if public_pem == acceptance:
+    raise SystemExit("production-release public key must not reuse the acceptance candidate key")
 
 print("[test-signed-pool-promotion-transition-workflow] ok: protected sibling signer stays fail-closed without CONFORMANCE promotion")
 PY
