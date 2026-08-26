@@ -185,9 +185,10 @@ release_asset_block = signer.split("release_assets=(", 1)[1].split("\n)", 1)[0]
 for value in (
     '"$output_dir/macprovider-release-discovery.json"',
     '"$output_dir/macprovider-release-discovery.json.sig"',
+    '"$output_dir/tier2-catalog.json"',
 ):
     if value not in release_asset_block:
-        raise SystemExit(f"release-discovery asset is omitted from the signed checksum selector: {value}")
+        raise SystemExit(f"indexed acceptance asset is omitted from the signed checksum selector: {value}")
 if 'tar -czf "$provider_asset" -C "$cli_work" .' in signer:
     raise SystemExit("acceptance signer can emit an ambiguous provider archive root")
 for value in (
