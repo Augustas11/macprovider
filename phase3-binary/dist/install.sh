@@ -31,7 +31,7 @@ unset MACPROVIDER_BUNDLED_APP
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
 MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
-MACPROVIDER_MIN_HEADLESS_VERSION="v1.8.106"
+MACPROVIDER_MIN_HEADLESS_VERSION="v1.8.107"
 COORDINATOR_URL_DEFAULT="wss://coordinator.malibu.tech/ws/provider"
 COORDINATOR_BASE_DEFAULT="https://coordinator.malibu.tech"
 INSTALL_DIR="${MACPROVIDER_INSTALL_DIR:-$HOME/macprovider}"
@@ -315,6 +315,11 @@ except (OSError, subprocess.TimeoutExpired):
 if result.returncode == 0:
     raise SystemExit(0)
 if result.returncode in {1, 3, 113}:
+    raise SystemExit(1)
+if result.returncode == 125 and target.startswith("gui/"):
+    # On SSH-only Macs with no Aqua login session, launchd can report the
+    # per-user GUI domain itself as unavailable. For a GUI LaunchAgent conflict
+    # probe in headless mode, that is absence, not an indeterminate system state.
     raise SystemExit(1)
 raise SystemExit(70)
 PY
