@@ -241,22 +241,22 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   source "$FUNCTION_PATH"
 
   MACPROVIDER_MIN_SUPPORTED_VERSION=v1.7.11
-  MACPROVIDER_MIN_HEADLESS_VERSION=v1.8.107
+  MACPROVIDER_MIN_HEADLESS_VERSION=v1.8.108
   HEADLESS=1
   if (validate_headless_release_tag v1.8.105); then
     echo "headless mode unexpectedly accepted a pre-headless release tag" >&2
     exit 1
   fi
-  validate_headless_release_tag v1.8.107
+  validate_headless_release_tag v1.8.108
   if (validate_headless_acceptance_source); then
     echo "headless mode unexpectedly accepted missing acceptance provenance" >&2
     exit 1
   fi
-  if (BUNDLED_APP=/Applications/Malibu.app MACPROVIDER_ACCEPTANCE_ASSET_DIR=/tmp/a MACPROVIDER_VERSION=v1.8.107 MACPROVIDER_ACCEPTANCE_COMMIT=0123456789012345678901234567890123456789 MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT=abcdefabcdefabcdefabcdefabcdefabcdefabcd MACPROVIDER_ACCEPTANCE_RUN_ID=1 MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT=1 validate_headless_acceptance_source); then
+  if (BUNDLED_APP=/Applications/Malibu.app MACPROVIDER_ACCEPTANCE_ASSET_DIR=/tmp/a MACPROVIDER_VERSION=v1.8.108 MACPROVIDER_ACCEPTANCE_COMMIT=0123456789012345678901234567890123456789 MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT=abcdefabcdefabcdefabcdefabcdefabcdefabcd MACPROVIDER_ACCEPTANCE_RUN_ID=1 MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT=1 validate_headless_acceptance_source); then
     echo "headless mode unexpectedly accepted MACPROVIDER_BUNDLED_APP" >&2
     exit 1
   fi
-  MACPROVIDER_ACCEPTANCE_ASSET_DIR=/tmp/a MACPROVIDER_VERSION=v1.8.107 MACPROVIDER_ACCEPTANCE_COMMIT=0123456789012345678901234567890123456789 MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT=abcdefabcdefabcdefabcdefabcdefabcdefabcd MACPROVIDER_ACCEPTANCE_RUN_ID=1 MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT=1 validate_headless_acceptance_source
+  MACPROVIDER_ACCEPTANCE_ASSET_DIR=/tmp/a MACPROVIDER_VERSION=v1.8.108 MACPROVIDER_ACCEPTANCE_COMMIT=0123456789012345678901234567890123456789 MACPROVIDER_ACCEPTANCE_CONTROL_COMMIT=abcdefabcdefabcdefabcdefabcdefabcdefabcd MACPROVIDER_ACCEPTANCE_RUN_ID=1 MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT=1 validate_headless_acceptance_source
   HEADLESS=0
   validate_headless_release_tag v1.8.105
 
