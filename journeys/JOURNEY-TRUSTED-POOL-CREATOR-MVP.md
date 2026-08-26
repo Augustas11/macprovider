@@ -1,6 +1,6 @@
 # JOURNEY-TRUSTED-POOL-CREATOR-MVP
 
-Status: draft journey contract; signed isolated-candidate envelope committed; no SPEC-043 promotion
+Status: draft journey contract; Gate C signed isolated-candidate envelope committed; no SPEC-043 promotion
 Owner: Trusted Pool creator onboarding
 Specs: SPEC-043, SPEC-042
 Requirements: SPEC-043-R001, SPEC-043-R002, SPEC-043-R003, SPEC-043-R004, SPEC-043-R005, SPEC-043-R006, SPEC-043-R007, SPEC-043-R008, SPEC-043-R009, SPEC-043-R010, SPEC-043-R011, SPEC-043-R012
@@ -9,12 +9,16 @@ Issue: https://github.com/Augustas11/macprovider/issues/1053
 Evidence owner: https://github.com/Augustas11/macprovider/issues/1053
 Execution mode: isolated-candidate-trusted-pool-creator-mvp
 
-Signed candidate evidence (Gate A; evidence-only, not in CONFORMANCE `evidence[]`):
+Signed candidate evidence (Gate C; evidence-only, not in CONFORMANCE `evidence[]`):
 
-- Redacted artifact: `journeys/evidence/trusted-pool-creator-mvp-20260825T072753Z.redacted.json`
-- Signed envelope: `journeys/evidence/trusted-pool-creator-mvp-20260825T072753Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json`
-- Workflow run: [`32830660903`](https://github.com/Augustas11/macprovider/actions/runs/32830660903)
-- Manifest: `journeys/evidence/trusted-pool-creator-mvp-20260825T072753Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.evidence-manifest.json`
+- Redacted artifact: `journeys/evidence/trusted-pool-creator-mvp-20260826T022522Z.redacted.json`
+- Signed envelope: `journeys/evidence/trusted-pool-creator-mvp-20260826T022522Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json`
+- Workflow run: [`32926445757`](https://github.com/Augustas11/macprovider/actions/runs/32926445757)
+- Manifest: `journeys/evidence/trusted-pool-creator-mvp-20260826T022522Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.evidence-manifest.json`
+
+Historical Gate A envelope (pre-proof flags false) remains committed at `journeys/evidence/trusted-pool-creator-mvp-20260825T072753Z.*`.
+
+The Gate C envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is the capture string `trusted-pool-creator-mvp-20260826T022522Z`, so `scripts/validate-pool-promotion-transition.py` cannot consume it until Gate D recaptures with an integer run id or the promoter maps capture ids separately.
 
 Live-readiness runbook (Gate C; does not promote SPEC-043): `docs/runbooks/trusted-pool-creator-launch.md`
 
@@ -90,7 +94,7 @@ cd phase4-coordinator
 MACPROVIDER_CAPTURE_TRUSTED_POOL_CREATOR_MVP=1 go test ./internal/trustpool -run TestJourneyTrustedPoolCreatorMVPCandidate -count=1
 ```
 
-Commit the redacted file under `journeys/evidence/trusted-pool-creator-mvp-*.redacted.json`, merge to `main`, recapture so `repository.commit` is an ancestor of `origin/main`, then dispatch `.github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml` from reviewed `main`. Do not promote SPEC-043 from this harness alone. New harness captures must keep freeze, descendant-signer rejection, `delegation_revocation_verified`, and `pool_existence_oracle_within_threshold` true. The committed pre-proof signed envelope may still record those flags false until the protected signer is re-run. After a squash-merge, recapture before dispatching the signer.
+Commit the redacted file under `journeys/evidence/trusted-pool-creator-mvp-*.redacted.json`, merge to `main`, recapture so `repository.commit` is an ancestor of `origin/main`, then dispatch `.github/workflows/build-signed-trusted-pool-creator-mvp-journey.yml` from reviewed `main`. Do not promote SPEC-043 from this harness alone. New harness captures must keep freeze, descendant-signer rejection, `delegation_revocation_verified`, and `pool_existence_oracle_within_threshold` true. The Gate C signed envelope from workflow `32926445757` records those flags true. After a squash-merge, recapture before dispatching the signer.
 
 ## Pass criteria
 
