@@ -445,8 +445,24 @@ VALUES ('idem-legacy', 'hash-a', 'req-legacy', ?)`,
 	}
 }
 
-func TestOpenStoreAppliesSQLitePragmasViaDSN(t *testing.T) {
+func TestOpenStoreKeepsSQLiteAutocheckpointOwnerDefault(t *testing.T) {
 	store := openTestStore(t)
+	defer store.Close()
+
+	var got int
+	if err := store.db.QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&got); err != nil {
+		t.Fatalf("PRAGMA wal_autocheckpoint: %v", err)
+	}
+	if got == 0 {
+		t.Fatal("request log store disabled wal_autocheckpoint without an explicit checkpoint owner")
+	}
+}
+
+func TestOpenStoreWithManualWALCheckpointAppliesSQLitePragmasViaDSN(t *testing.T) {
+	store, err := OpenStoreWithManualWALCheckpoint(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer store.Close()
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -455,6 +471,7 @@ func TestOpenStoreAppliesSQLitePragmasViaDSN(t *testing.T) {
 	}{
 		{query: `PRAGMA busy_timeout`, want: 5000},
 		{query: `PRAGMA foreign_keys`, want: 1},
+		{query: `PRAGMA wal_autocheckpoint`, want: 0},
 	} {
 		var got int
 		if err := store.db.QueryRowContext(ctx, tc.query).Scan(&got); err != nil {

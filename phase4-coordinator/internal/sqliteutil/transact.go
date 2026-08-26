@@ -3,7 +3,16 @@ package sqliteutil
 import (
 	"context"
 	"database/sql"
+	"time"
 )
+
+// Observer receives closed-set SQLite timing observations from money-path
+// stores. Implementations must keep labels bounded; component values are
+// call-site constants, and outcome is "success" or "error".
+type Observer interface {
+	ObserveSQLiteConnectionWait(component, outcome string, duration time.Duration)
+	ObserveSQLiteTransactionDuration(component, outcome string, duration time.Duration)
+}
 
 // Transact reserves a single *sql.Conn from db, issues BEGIN IMMEDIATE to
 // take the SQLite write lock deterministically, invokes fn with the
@@ -34,11 +43,29 @@ import (
 // see phase4-coordinator/internal/sqliteutil/transact_test.go for the
 // invariant coverage.
 func Transact(ctx context.Context, db *sql.DB, fn func(context.Context, *sql.Conn) error) (err error) {
+	return TransactObserved(ctx, db, "", nil, fn)
+}
+
+// TransactObserved is Transact with optional timing observation for the
+// sql.DB connection wait and full BEGIN IMMEDIATE..COMMIT/ROLLBACK duration.
+func TransactObserved(ctx context.Context, db *sql.DB, component string, observer Observer, fn func(context.Context, *sql.Conn) error) (err error) {
+	connWaitStarted := time.Now()
 	conn, cerr := db.Conn(ctx)
+	observeConnectionWait(observer, component, cerr, time.Since(connWaitStarted))
 	if cerr != nil {
 		return cerr
 	}
 	defer conn.Close()
+
+	txStarted := time.Now()
+	txErr := true
+	defer func() {
+		if err == nil && !txErr {
+			observeTransactionDuration(observer, component, nil, time.Since(txStarted))
+			return
+		}
+		observeTransactionDuration(observer, component, err, time.Since(txStarted))
+	}()
 
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return err
@@ -58,5 +85,27 @@ func Transact(ctx context.Context, db *sql.DB, fn func(context.Context, *sql.Con
 		return err
 	}
 	committed = true
+	txErr = false
 	return nil
+}
+
+func observeConnectionWait(observer Observer, component string, err error, duration time.Duration) {
+	if observer == nil || component == "" {
+		return
+	}
+	observer.ObserveSQLiteConnectionWait(component, sqliteOutcome(err), duration)
+}
+
+func observeTransactionDuration(observer Observer, component string, err error, duration time.Duration) {
+	if observer == nil || component == "" {
+		return
+	}
+	observer.ObserveSQLiteTransactionDuration(component, sqliteOutcome(err), duration)
+}
+
+func sqliteOutcome(err error) string {
+	if err != nil {
+		return "error"
+	}
+	return "success"
 }

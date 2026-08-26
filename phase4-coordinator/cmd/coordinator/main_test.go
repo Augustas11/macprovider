@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"net"
@@ -22,6 +23,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	"github.com/augstar/macprovider-coordinator/internal/trustpool"
@@ -155,6 +157,196 @@ func TestAppTrackReferralMintReconcilerRunsAfterEnforcementRollback(t *testing.T
 	case <-called:
 	case <-time.After(time.Second):
 		t.Fatal("referral mint reconciler did not run with enforcement disabled")
+	}
+}
+
+func TestSettlementStartupScanRunsRecoveryWhenSettlementJobDisabled(t *testing.T) {
+	ctx := context.Background()
+	scanner := &startupScanStub{called: make(chan config.SettlementConfig, 1)}
+	settlement := config.Default().Settlement
+	settlement.JobEnabled = false
+
+	select {
+	case <-scanner.called:
+		t.Fatal("startup scan stub channel should start empty")
+	default:
+	}
+	startSettlementStartupScan(ctx, scanner, settlement, time.Unix(100, 0).UTC(), zerolog.Nop())
+	select {
+	case got := <-scanner.called:
+		if got.JobEnabled {
+			t.Fatal("startup recovery should receive disabled settlement config without enabling settlement jobs")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup recovery did not run when settlement.job_enabled=false")
+	}
+}
+
+func TestRetentionPrunersCanDeferStartupDelete(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	requestPruner := &retentionPrunerStub{called: make(chan time.Time, 1)}
+	startRequestLogRetentionPruner(ctx, requestPruner, 90, false, zerolog.Nop())
+	assertNoImmediatePrune(t, requestPruner.called, "request_log")
+
+	auditPruner := &retentionPrunerStub{called: make(chan time.Time, 1)}
+	startAuditLogRetentionPruner(ctx, auditPruner, 90, false, zerolog.Nop())
+	assertNoImmediatePrune(t, auditPruner.called, "audit_log")
+}
+
+func TestRetentionPrunersDefaultToStartupDelete(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	requestPruner := &retentionPrunerStub{called: make(chan time.Time, 1)}
+	startRequestLogRetentionPruner(ctx, requestPruner, 90, true, zerolog.Nop())
+	assertImmediatePrune(t, requestPruner.called, "request_log")
+
+	auditPruner := &retentionPrunerStub{called: make(chan time.Time, 1)}
+	startAuditLogRetentionPruner(ctx, auditPruner, 90, true, zerolog.Nop())
+	assertImmediatePrune(t, auditPruner.called, "audit_log")
+}
+
+func TestMoneySQLiteWALCheckpointerWaitsForIdle(t *testing.T) {
+	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(filepath.Join(t.TempDir(), "checkpoint.db")))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO t (v) VALUES ('a')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	observer := &walObserverStub{called: make(chan string, 3)}
+	startMoneySQLiteWALCheckpointerWithConfig(ctx, db, observer, zerolog.Nop(), fixedIdleTracker{idleFor: 0}, 10*time.Millisecond, time.Second)
+
+	select {
+	case pageClass := <-observer.called:
+		t.Fatalf("checkpoint ran while buyer activity was not idle: %s", pageClass)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestMoneySQLiteWALCheckpointerRunsAfterIdle(t *testing.T) {
+	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(filepath.Join(t.TempDir(), "checkpoint.db")))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO t (v) VALUES ('a')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	observer := &walObserverStub{called: make(chan string, 3), durations: make(chan struct{}, 1)}
+	startMoneySQLiteWALCheckpointerWithConfig(ctx, db, observer, zerolog.Nop(), fixedIdleTracker{idleFor: time.Hour}, 10*time.Millisecond, time.Second)
+
+	seen := map[string]bool{}
+	deadline := time.After(time.Second)
+	for len(seen) < 3 {
+		select {
+		case pageClass := <-observer.called:
+			seen[pageClass] = true
+		case <-deadline:
+			t.Fatalf("checkpoint observations=%v, want busy/log/checkpointed", seen)
+		}
+	}
+	for _, pageClass := range []string{"busy", "log", "checkpointed"} {
+		if !seen[pageClass] {
+			t.Fatalf("missing checkpoint page class %q in %v", pageClass, seen)
+		}
+	}
+	select {
+	case <-observer.durations:
+	case <-time.After(time.Second):
+		t.Fatal("missing checkpoint duration observation")
+	}
+}
+
+func TestMoneySQLiteActivityMiddlewareMarksRequests(t *testing.T) {
+	activity := newMoneySQLiteActivity(time.Unix(100, 0))
+	handler := withMoneySQLiteActivity(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), activity)
+	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	if idle := activity.IdleFor(time.Now().Add(100 * time.Millisecond)); idle > time.Second {
+		t.Fatalf("activity idle=%s, want recent request mark", idle)
+	}
+}
+
+type startupScanStub struct {
+	called chan config.SettlementConfig
+}
+
+func (s *startupScanStub) StartStartupScan(_ context.Context, settlement config.SettlementConfig, _ time.Time) error {
+	s.called <- settlement
+	return nil
+}
+
+type retentionPrunerStub struct {
+	called chan time.Time
+}
+
+func (s *retentionPrunerStub) PruneBefore(_ context.Context, cutoff time.Time) (int64, error) {
+	s.called <- cutoff
+	return 1, nil
+}
+
+type walObserverStub struct {
+	called    chan string
+	durations chan struct{}
+}
+
+func (s *walObserverStub) ObserveSQLiteWALCheckpoint(component, pageClass, outcome string, _ int64) {
+	if component == "wal_checkpoint" && outcome == "success" {
+		s.called <- pageClass
+	}
+}
+
+func (s *walObserverStub) ObserveSQLiteWALCheckpointDuration(component, outcome string, _ time.Duration) {
+	if component == "wal_checkpoint" && outcome == "success" && s.durations != nil {
+		select {
+		case s.durations <- struct{}{}:
+		default:
+		}
+	}
+}
+
+type fixedIdleTracker struct {
+	idleFor time.Duration
+}
+
+func (t fixedIdleTracker) IdleFor(time.Time) time.Duration {
+	return t.idleFor
+}
+
+func assertNoImmediatePrune(t *testing.T, called <-chan time.Time, name string) {
+	t.Helper()
+	select {
+	case <-called:
+		t.Fatalf("%s pruner ran immediately despite startup deferral", name)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func assertImmediatePrune(t *testing.T, called <-chan time.Time, name string) {
+	t.Helper()
+	select {
+	case cutoff := <-called:
+		if cutoff.IsZero() {
+			t.Fatalf("%s pruner received zero cutoff", name)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("%s pruner did not run immediately with startup prune enabled", name)
 	}
 }
 

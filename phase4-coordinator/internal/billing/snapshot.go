@@ -157,7 +157,7 @@ func (s *Store) ReloadBillingConfigV05(ctx context.Context, cfg RewardsConfig, f
 	}
 
 	var snapshotID int64
-	if err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+	if err := sqliteutil.TransactObserved(ctx, s.db, "billing_reload_config", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
 		res, err := conn.ExecContext(ctx, `
 INSERT INTO ledger_config_snapshots (
     effective_at_utc, config_hash, provider_share_bps, global_multiplier_ppm,

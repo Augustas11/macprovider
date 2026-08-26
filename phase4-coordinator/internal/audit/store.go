@@ -21,6 +21,16 @@ type Store struct {
 }
 
 func OpenStore(dbPath string) (*Store, error) {
+	return openStore(dbPath, false)
+}
+
+// OpenStoreWithManualWALCheckpoint opens an audit store for a SQLite DB whose
+// physical file has an explicit external WAL checkpoint owner.
+func OpenStoreWithManualWALCheckpoint(dbPath string) (*Store, error) {
+	return openStore(dbPath, true)
+}
+
+func openStore(dbPath string, manualWALCheckpoint bool) (*Store, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("db path is required")
 	}
@@ -29,7 +39,11 @@ func OpenStore(dbPath string) (*Store, error) {
 			return nil, err
 		}
 	}
-	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(dbPath))
+	dsn := sqliteutil.WithPragmas(dbPath)
+	if manualWALCheckpoint {
+		dsn = sqliteutil.WithManualWALCheckpointPragmas(dbPath)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}

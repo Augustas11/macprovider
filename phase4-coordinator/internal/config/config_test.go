@@ -640,6 +640,24 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	}
 }
 
+func TestStorageStartupPruneDefaultsAndUnmarshal(t *testing.T) {
+	cfg := Default()
+	if !cfg.Storage.RequestLogPruneOnStartup {
+		t.Fatal("request_log_prune_on_startup default=false want true")
+	}
+	if !cfg.Storage.AuditLogPruneOnStartup {
+		t.Fatal("audit_log_prune_on_startup default=false want true")
+	}
+
+	storage := Default().Storage
+	if err := yaml.Unmarshal([]byte("request_log_prune_on_startup: false\naudit_log_prune_on_startup: false\n"), &storage); err != nil {
+		t.Fatalf("unmarshal storage startup prune knobs: %v", err)
+	}
+	if storage.RequestLogPruneOnStartup || storage.AuditLogPruneOnStartup {
+		t.Fatalf("explicit storage startup prune false not honored: %+v", storage)
+	}
+}
+
 func TestTrustedPoolsEnabledRequiresGatewayContext(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.TrustedPools.Enabled = true

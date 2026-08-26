@@ -250,6 +250,14 @@ func GatewayInternalBearerMatches(headers http.Header, serviceToken string) Inte
 }
 
 func OpenStore(path string) (*Store, error) {
+	return openStore(path, false)
+}
+
+func OpenStoreWithManualWALCheckpoint(path string) (*Store, error) {
+	return openStore(path, true)
+}
+
+func openStore(path string, manualWALCheckpoint bool) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("db path is required")
 	}
@@ -258,7 +266,11 @@ func OpenStore(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(path))
+	dsn := sqliteutil.WithPragmas(path)
+	if manualWALCheckpoint {
+		dsn = sqliteutil.WithManualWALCheckpointPragmas(path)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
