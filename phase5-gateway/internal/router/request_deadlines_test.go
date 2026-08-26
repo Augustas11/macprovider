@@ -331,6 +331,7 @@ func TestStructuredTimeoutDuringRetryBackoff(t *testing.T) {
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 		cfg.Retry503.Enabled = true
+		cfg.Retry503.RetryNoProviderAvailable = true
 		cfg.Retry503.MaxAttempts = 3
 		// Backoff (3s) straddles the 1s admission budget: the phase expires
 		// while the retry loop sleeps, exercising the stale-resp return path.
