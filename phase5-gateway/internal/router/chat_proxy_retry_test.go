@@ -433,6 +433,30 @@ func TestGatewayCoord503RetryDisabledKeepsSingleDispatch(t *testing.T) {
 	assertRetryLogCounts(t, logs.String(), 0, 0, 0)
 }
 
+func TestGatewayCoord503NoProviderRetryDefaultOffKeepsSingleDispatch(t *testing.T) {
+	logs := captureRetryLogs(t)
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+	})}
+	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
+		cfg.Retry503.RetryNoProviderAvailable = false
+	})
+	fullKey := createAccountAndKey(t, store, cfg, "acct_retry_no_provider_default_off")
+
+	resp := postChat(t, h, fullKey, chatBody(false), nil)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("coordinator calls=%d want 1", calls)
+	}
+	assertErrorCode(t, resp.Body.String(), "no_provider_available")
+	assertRetryLogCounts(t, logs.String(), 0, 0, 0)
+}
+
 func TestGatewayCoord503RetryAttemptsRespectRequestRateLimit(t *testing.T) {
 	var calls int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -666,6 +690,24 @@ func TestGatewayRetry503ConfigValidationViaLoad(t *testing.T) {
 	}
 }
 
+func TestGatewayRetry503ConfigLoadPinsNoProviderRetryDefaultAndOverride(t *testing.T) {
+	withoutKey, err := config.Load(writeRetryConfig(t, "enabled: true\n  max_attempts: 3\n  backoff_base_ms: 100\n  backoff_max_ms: 500"))
+	if err != nil {
+		t.Fatalf("Load without retry_no_provider_available: %v", err)
+	}
+	if withoutKey.Retry503.RetryNoProviderAvailable {
+		t.Fatal("Load without retry_no_provider_available defaulted true, want false")
+	}
+
+	withKey, err := config.Load(writeRetryConfig(t, "enabled: true\n  retry_no_provider_available: true\n  max_attempts: 3\n  backoff_base_ms: 100\n  backoff_max_ms: 500"))
+	if err != nil {
+		t.Fatalf("Load with retry_no_provider_available: %v", err)
+	}
+	if !withKey.Retry503.RetryNoProviderAvailable {
+		t.Fatal("Load retry_no_provider_available=true decoded false")
+	}
+}
+
 // TestGatewayRetriedProvider502ThenRouteSnapshotFailedDoesNotRefund pins the
 // item-18 security fix (verified-realizable NEW-to-diff undercharge). When the
 // gateway retries a provider-dispatched provider_failed 502 (which the
@@ -794,6 +836,7 @@ func newRetryHarness(t *testing.T, client *http.Client, mutate func(*config.Conf
 	t.Helper()
 	return newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Retry503.RetryNoProviderAvailable = true
 		cfg.Retry503.BackoffBaseMs = 10
 		cfg.Retry503.BackoffMaxMs = 10
 		if mutate != nil {
