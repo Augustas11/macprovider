@@ -55,7 +55,7 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
             "candidate_manifest_accepted": True,
             "creator_admin_authorized_only": True,
             "creator_suspension_root_compromise_freeze_verified": True,
-            "delegation_revocation_verified": False,
+            "delegation_revocation_verified": True,
             "descendant_signer_rejection_verified": True,
             "emergency_pause_exercised": True,
             "fail_closed_no_global_fallback": True,
@@ -405,6 +405,10 @@ class TrustedPoolCreatorMVPJourneyResultTests(unittest.TestCase):
         freeze["creator_suspension_root_compromise_freeze_verified"] = False
         with self.assertRaises(SystemExit):
             builder.require_observations(freeze)
+        delegation = dict(valid_signed()["observations"])
+        delegation["delegation_revocation_verified"] = False
+        with self.assertRaises(SystemExit):
+            builder.require_observations(delegation)
         oracle = dict(valid_signed()["observations"])
         oracle["pool_existence_oracle_within_threshold"] = True
         with self.assertRaises(SystemExit):

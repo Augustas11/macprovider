@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -35,15 +36,17 @@ import (
 )
 
 const (
-	creatorMVPJourneyID        = "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
-	creatorMVPEvidenceSchema   = "macprovider.trusted-pool-creator-mvp-evidence.v1"
-	creatorMVPEnvironmentClass = "isolated-candidate-trusted-pool-creator-mvp"
-	creatorMVPArtifactID       = "redacted-trusted-pool-creator-mvp"
-	creatorMVPModelHash        = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	creatorMVPOperatorKey      = "operator-secret"
-	creatorMVPCreatorToken     = "creator-token-a"
-	creatorMVPBuyerAccount     = "acct-allowed"
-	creatorMVPProviderID       = "provider-a"
+	creatorMVPJourneyID           = "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
+	creatorMVPEvidenceSchema      = "macprovider.trusted-pool-creator-mvp-evidence.v1"
+	creatorMVPEnvironmentClass    = "isolated-candidate-trusted-pool-creator-mvp"
+	creatorMVPArtifactID          = "redacted-trusted-pool-creator-mvp"
+	creatorMVPModelHash           = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	creatorMVPOperatorKey         = "operator-secret"
+	creatorMVPCreatorToken        = "creator-token-a"
+	creatorMVPBuyerAccount        = "acct-allowed"
+	creatorMVPProviderID          = "provider-a"
+	creatorMVPDelegatedProviderID = "provider-b"
+	creatorMVPDelegationID        = "del-provider-b-1"
 )
 
 func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
@@ -57,7 +60,14 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	store, err := trustpool.NewStore(db)
+	_, providerBOwner, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey provider-b owner: %v", err)
+	}
+	providerBOwnerPub := providerBOwner.Public().(ed25519.PublicKey)
+	store, err := trustpool.NewStore(db, trustpool.WithProviderOwnerPublicKeys(map[string][]byte{
+		creatorMVPDelegatedProviderID: providerBOwnerPub,
+	}))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
@@ -68,9 +78,15 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 		OperatorKey:                      creatorMVPOperatorKey,
 		CreatorAdminCredentials:          creatorCredentials("creator-a", "creator-a-cred", creatorMVPCreatorToken),
 		CreatorAdminProviderIDs:          map[string][]string{"creator-a": {creatorMVPProviderID}},
-		CreatorAdminProviderDelegatedIDs: map[string][]string{"creator-a": {creatorMVPProviderID}},
+		CreatorAdminProviderDelegatedIDs: map[string][]string{"creator-a": {creatorMVPDelegatedProviderID}},
 		CreatorAdminBuyerAccountIDs:      map[string][]string{"creator-a": {creatorMVPBuyerAccount}},
-		CreatorProviderAdmitted:          admittedProviderIDs(creatorMVPProviderID),
+		CreatorProviderAdmitted:          admittedProviderIDs(creatorMVPProviderID, creatorMVPDelegatedProviderID),
+		ProviderOwnerPublicKeyForProvider: func(providerID string) ([]byte, bool) {
+			if providerID == creatorMVPDelegatedProviderID {
+				return append([]byte(nil), providerBOwnerPub...), true
+			}
+			return nil, false
+		},
 	})
 	root := newRootFixture(t)
 	graceEnds := time.Now().UTC().Add(24 * time.Hour)
@@ -154,6 +170,9 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 	manifest := signedManifestWithPolicyCoreMutation(t, "op-manifest", testAdminTS(3), root.poolID, 1, root, isolatedCreatorMVPPolicy)
 	postCreatorEvent(t, handler, creatorMVPCreatorToken, manifest, "op-manifest", http.StatusAccepted)
 
+	delegationGrant := creatorMVPDelegationGrantedEvent(t, providerBOwner, root.poolID, "creator-a", manifest.ManifestCoreDigest, "candidate", creatorMVPDelegatedProviderID, creatorMVPDelegationID, "deleg-op-grant-1")
+	postCreatorEvent(t, handler, creatorMVPCreatorToken, delegationGrant, "op-delegation-grant", http.StatusAccepted)
+
 	postCreatorEvent(t, handler, creatorMVPCreatorToken, trustpool.DurableEvent{
 		EventType:  trustpool.EventMemberAdmitted,
 		PoolID:     root.poolID,
@@ -162,8 +181,19 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 	postCreatorEvent(t, handler, creatorMVPCreatorToken, trustpool.DurableEvent{
 		EventType:  trustpool.EventMemberAdmitted,
 		PoolID:     root.poolID,
+		ProviderID: creatorMVPDelegatedProviderID,
+	}, "op-member-no-delegation-proof", http.StatusBadRequest)
+	postCreatorEvent(t, handler, creatorMVPCreatorToken, trustpool.DurableEvent{
+		EventType:  trustpool.EventMemberAdmitted,
+		PoolID:     root.poolID,
 		ProviderID: creatorMVPProviderID,
 	}, "op-member", http.StatusAccepted)
+	postCreatorEvent(t, handler, creatorMVPCreatorToken, trustpool.DurableEvent{
+		EventType:    trustpool.EventMemberAdmitted,
+		PoolID:       root.poolID,
+		ProviderID:   creatorMVPDelegatedProviderID,
+		DelegationID: creatorMVPDelegationID,
+	}, "op-member-delegated", http.StatusAccepted)
 	postCreatorEvent(t, handler, creatorMVPCreatorToken, trustpool.DurableEvent{
 		EventType:      trustpool.EventBuyerAuthorized,
 		PoolID:         root.poolID,
@@ -183,8 +213,8 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 
 	postAdminPromote(t, handler, creatorMVPOperatorKey, root.poolID, "op-promote", http.StatusAccepted)
 	active := registry.Snapshot(root.poolID)
-	if !active.Exists || !active.Routeable || !active.Members[creatorMVPProviderID] {
-		t.Fatalf("promoted snapshot = %+v, want routeable member", active)
+	if !active.Exists || !active.Routeable || !active.Members[creatorMVPProviderID] || !active.Members[creatorMVPDelegatedProviderID] {
+		t.Fatalf("promoted snapshot = %+v, want routeable owned and delegated members", active)
 	}
 
 	reqLog, billingPath := openCreatorMVPRequestLog(t)
@@ -292,6 +322,20 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 		t.Fatalf("payout-ready rows=%d, want 0", got)
 	}
 
+	delegationRevoke := creatorMVPDelegationRevokedEvent(t, providerBOwner, root.poolID, "creator-a", manifest.ManifestCoreDigest, "candidate", creatorMVPDelegatedProviderID, creatorMVPDelegationID, "deleg-op-revoke-1")
+	postCreatorEvent(t, handler, creatorMVPCreatorToken, delegationRevoke, "op-delegation-revoke", http.StatusAccepted)
+	afterDelegationRevoke := registry.Snapshot(root.poolID)
+	if afterDelegationRevoke.Members[creatorMVPDelegatedProviderID] || afterDelegationRevoke.Generation <= active.Generation {
+		t.Fatalf("post-delegation-revoke snapshot=%+v, want delegated provider removed and generation > %d", afterDelegationRevoke, active.Generation)
+	}
+	stillRoutable := postCreatorMVPChat(t, server, chatBody, creatorMVPHeaders(creatorMVPBuyerAccount, root.poolID))
+	if stillRoutable.Code != http.StatusOK {
+		t.Fatalf("owned-member request after delegation revoke status=%d body=%s", stillRoutable.Code, stillRoutable.Body.String())
+	}
+	if providerCalls.Load() != 2 {
+		t.Fatalf("provider calls after delegation revoke=%d, want 2", providerCalls.Load())
+	}
+
 	postCreatorEvent(t, handler, creatorMVPCreatorToken, trustpool.DurableEvent{
 		EventType:  trustpool.EventMemberRevoked,
 		PoolID:     root.poolID,
@@ -301,8 +345,8 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 	if failClosed.Code == http.StatusOK {
 		t.Fatalf("revoked-member request succeeded: %s", failClosed.Body.String())
 	}
-	if providerCalls.Load() != 1 {
-		t.Fatalf("provider calls after revoke=%d, want 1", providerCalls.Load())
+	if providerCalls.Load() != 2 {
+		t.Fatalf("provider calls after revoke=%d, want 2", providerCalls.Load())
 	}
 	postCreatorEvent(t, handler, creatorMVPCreatorToken, trustpool.DurableEvent{
 		EventType:  trustpool.EventMemberAdmitted,
@@ -537,7 +581,7 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 			creatorMVPStep("step-02-root-issuer-registration", "Creator-issued nonce plus proof-of-possession root registration accepted; nonce replay failed closed."),
 			creatorMVPStep("step-03-manifest-create-accepted", "Signed candidate manifest accepted after pool create; pool stayed non-routeable until promotion."),
 			creatorMVPStep("step-04-negative-manifest-cases", "Unsigned manifest and prohibited routing-claim snapshot were rejected before durable append."),
-			creatorMVPStep("step-05-provider-membership", "Undelegated provider admission failed; creator-owned admitted member succeeded; later revoke excluded the member from the next routeable snapshot."),
+			creatorMVPStep("step-05-provider-membership", "Undelegated provider admission failed; delegated provider required ProviderPoolDelegationV1; owner delegation_revoked removed the delegated member while owned member kept routing."),
 			creatorMVPStep("step-06-buyer-authorization", "Dedicated buyer grant succeeded; unauthorized account selection failed closed with a generic pool denial before provider dispatch."),
 			creatorMVPStep("step-07-promise-surfaces", "Authorized policy and status documents used no-store cache control and kept the Trusted Pool confidentiality scope."),
 			creatorMVPStep("step-08-activation-gate", "Promotion before root/manifest/membership failed closed; candidate promotion after preflight published a routeable snapshot."),
@@ -567,7 +611,7 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 			"candidate_manifest_accepted":                            true,
 			"creator_admin_authorized_only":                          true,
 			"creator_suspension_root_compromise_freeze_verified":     true,
-			"delegation_revocation_verified":                         false,
+			"delegation_revocation_verified":                         true,
 			"descendant_signer_rejection_verified":                   true,
 			"emergency_pause_exercised":                              true,
 			"fail_closed_no_global_fallback":                         true,
@@ -870,6 +914,89 @@ func creatorMVPGitOutput(t *testing.T, args ...string) string {
 		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func creatorMVPDelegationGrantedEvent(t *testing.T, owner ed25519.PrivateKey, poolID, creatorID, manifestDigest, environment, providerID, delegationID, delegationOperationID string) trustpool.DurableEvent {
+	t.Helper()
+	issuedAt := testAdminTS(10)
+	expiresAt := testAdminTS(3600 * 24)
+	signed := map[string]any{
+		"schema_version":             trustpool.ProviderPoolDelegationSchemaVersion,
+		"creator_account_id":         creatorID,
+		"pool_id":                    poolID,
+		"provider_identity":          providerID,
+		"delegation_id":              delegationID,
+		"operation_id":               delegationOperationID,
+		"manifest_core_digest":       manifestDigest,
+		"environment_network_id":     environment,
+		"coordinator_audience":       trustpool.CoordinatorAudienceForEnvironment(environment),
+		"provider_owner_key_id":      providerID + "-owner-1",
+		"provider_owner_key_version": "1",
+		"provider_owner_public_key":  base64.StdEncoding.EncodeToString(owner.Public().(ed25519.PublicKey)),
+		"issued_at":                  issuedAt.Format("2006-01-02T15:04:05Z"),
+		"expires_at":                 expiresAt.Format("2006-01-02T15:04:05Z"),
+		"revocation_semantics":       trustpool.ProviderPoolDelegationRevocationSemantics,
+	}
+	sig, err := trustpool.SignProviderPoolDelegation(owner, signed)
+	if err != nil {
+		t.Fatalf("SignProviderPoolDelegation: %v", err)
+	}
+	return trustpool.DurableEvent{
+		EventType:                       trustpool.EventDelegationGranted,
+		PoolID:                          poolID,
+		CreatorAccountID:                creatorID,
+		ProviderID:                      providerID,
+		DelegationID:                    delegationID,
+		DelegationOperationID:           delegationOperationID,
+		ManifestCoreDigest:              manifestDigest,
+		EnvironmentNetworkID:            environment,
+		CoordinatorAudience:             trustpool.CoordinatorAudienceForEnvironment(environment),
+		ProviderOwnerKeyID:              providerID + "-owner-1",
+		ProviderOwnerKeyVersion:         "1",
+		ProviderOwnerPublicKey:          signed["provider_owner_public_key"].(string),
+		DelegationIssuedAt:              signed["issued_at"].(string),
+		DelegationExpiresAt:             signed["expires_at"].(string),
+		ProviderPoolDelegationSignature: sig,
+	}
+}
+
+func creatorMVPDelegationRevokedEvent(t *testing.T, owner ed25519.PrivateKey, poolID, creatorID, manifestDigest, environment, providerID, delegationID, delegationOperationID string) trustpool.DurableEvent {
+	t.Helper()
+	revokedAt := testAdminTS(20)
+	signed := map[string]any{
+		"schema_version":             trustpool.ProviderPoolDelegationRevocationSchemaVersion,
+		"creator_account_id":         creatorID,
+		"pool_id":                    poolID,
+		"provider_identity":          providerID,
+		"delegation_id":              delegationID,
+		"operation_id":               delegationOperationID,
+		"manifest_core_digest":       manifestDigest,
+		"environment_network_id":     environment,
+		"coordinator_audience":       trustpool.CoordinatorAudienceForEnvironment(environment),
+		"provider_owner_key_id":      providerID + "-owner-1",
+		"provider_owner_key_version": "1",
+		"revoked_at":                 revokedAt.Format("2006-01-02T15:04:05Z"),
+		"revocation_semantics":       trustpool.ProviderPoolDelegationRevocationSemantics,
+	}
+	sig, err := trustpool.SignProviderPoolDelegationRevocation(owner, signed)
+	if err != nil {
+		t.Fatalf("SignProviderPoolDelegationRevocation: %v", err)
+	}
+	return trustpool.DurableEvent{
+		EventType:               trustpool.EventDelegationRevoked,
+		PoolID:                  poolID,
+		CreatorAccountID:        creatorID,
+		ProviderID:              providerID,
+		DelegationID:            delegationID,
+		DelegationOperationID:   delegationOperationID,
+		ManifestCoreDigest:      manifestDigest,
+		EnvironmentNetworkID:    environment,
+		CoordinatorAudience:     trustpool.CoordinatorAudienceForEnvironment(environment),
+		ProviderOwnerKeyID:      providerID + "-owner-1",
+		ProviderOwnerKeyVersion: "1",
+		DelegationRevokedAt:     signed["revoked_at"].(string),
+		ProviderPoolDelegationRevocationSignature: sig,
+	}
 }
 
 func sha256Hex(value string) string {

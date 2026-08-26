@@ -232,7 +232,7 @@ func TestCreatorAdminCeilingFirstRuntimeInstallBumpsGeneration(t *testing.T) {
 	}
 	r.SetCreatorAdminCeilings(
 		map[string][]string{"creator-a": {}},
-		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {}},
 		map[string][]string{"creator-a": {"acct-a"}},
 	)
 	snap := r.Snapshot("P")
@@ -259,7 +259,7 @@ func TestCreatorAdminDelegationCeilingRevocationBumpsGeneration(t *testing.T) {
 		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
 	}
 	r.InitCreatorAdminCeilings(
-		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {}},
 		map[string][]string{"creator-a": {"provider-a"}},
 		map[string][]string{"creator-a": {"acct-a"}},
 	)
@@ -269,7 +269,7 @@ func TestCreatorAdminDelegationCeilingRevocationBumpsGeneration(t *testing.T) {
 	}
 
 	r.SetCreatorAdminCeilings(
-		map[string][]string{"creator-a": {"provider-a"}},
+		map[string][]string{"creator-a": {}},
 		map[string][]string{"creator-a": {}},
 		map[string][]string{"creator-a": {"acct-a"}},
 	)
@@ -527,6 +527,63 @@ func TestRegistryDisableClearsRouteableSnapshotsWithoutAdvancingRevision(t *test
 	}
 	if snap := registry.Snapshot("pool-a"); !snap.Exists || !snap.Routeable || !snap.Members["provider-a"] || !registry.BuyerAuthorized("pool-a", "acct-a") {
 		t.Fatalf("reloaded snapshot = %+v buyer_auth=%v, want restored routeable provider-a/acct-a", snap, registry.BuyerAuthorized("pool-a", "acct-a"))
+	}
+}
+
+func TestSnapshotFiltersExpiredDelegatedMemberAndBumpsGeneration(t *testing.T) {
+	t.Parallel()
+	r := trustpool.NewRegistry()
+	expired := time.Now().UTC().Add(-time.Minute)
+	active := time.Now().UTC().Add(time.Hour)
+	if err := r.LoadRouteableSnapshotsAtRevision(1, []trustpool.RouteableSnapshot{{
+		PoolID:           "P",
+		CreatorAccountID: "creator-a",
+		Members:          []string{"provider-owned", "provider-delegated"},
+		MemberDelegationExpiryUTC: map[string]time.Time{
+			"provider-delegated": expired,
+		},
+		BuyerAccounts:  []string{"acct-a"},
+		SettlementMode: "observe",
+		Routeable:      true,
+		Generation:     7,
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	r.InitCreatorAdminCeilings(
+		map[string][]string{"creator-a": {"provider-owned"}},
+		map[string][]string{"creator-a": {"provider-delegated"}},
+		map[string][]string{"creator-a": {"acct-a"}},
+	)
+	snap := r.Snapshot("P")
+	if snap.Members["provider-delegated"] {
+		t.Fatalf("expired delegated member still routeable: %+v", snap)
+	}
+	if !snap.Members["provider-owned"] {
+		t.Fatalf("owned member removed: %+v", snap)
+	}
+	if snap.Generation != 8 {
+		t.Fatalf("generation=%d, want 8 (durable 7 plus delegation-expiry bump)", snap.Generation)
+	}
+	if _, ok := r.BeginPoolDeliveryAtGeneration("P", 7); ok {
+		t.Fatal("delivery begin accepted generation captured before delegated-member expiry filter")
+	}
+	if err := r.LoadRouteableSnapshotsAtRevision(2, []trustpool.RouteableSnapshot{{
+		PoolID:           "P",
+		CreatorAccountID: "creator-a",
+		Members:          []string{"provider-owned", "provider-delegated"},
+		MemberDelegationExpiryUTC: map[string]time.Time{
+			"provider-delegated": active,
+		},
+		BuyerAccounts:  []string{"acct-a"},
+		SettlementMode: "observe",
+		Routeable:      true,
+		Generation:     8,
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision active delegation: %v", err)
+	}
+	snap = r.Snapshot("P")
+	if !snap.Members["provider-delegated"] {
+		t.Fatalf("active delegated member missing: %+v", snap)
 	}
 }
 

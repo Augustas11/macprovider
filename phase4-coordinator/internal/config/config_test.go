@@ -684,6 +684,7 @@ func TestTrustedPoolsCreatorAdminCredentialsRequireEnabledTrustedPools(t *testin
 	cfg.TrustedPools.CreatorAdminProviderIDs = map[string][]string{"creator-a": {"provider-a"}}
 	cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-a"}}
 	cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-a"}}
+	ensureTrustedPoolsProviderOwnerKeys(&cfg)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("creator admin credentials with trusted pools enabled should validate: %v", err)
 	}
@@ -782,6 +783,7 @@ func TestTrustedPoolsCreatorAdminCredentialsRejectInvalidCredential(t *testing.T
 			cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-a"}}
 			cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-a"}}
 			tc.build(&cfg)
+			ensureTrustedPoolsProviderOwnerKeys(&cfg)
 			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Validate err=%v, want substring %q", err, tc.want)
 			}
@@ -811,6 +813,8 @@ trusted_pools:
     creator-a: [provider-a]
   creator_admin_buyer_account_ids:
     creator-a: [acct-a]
+  provider_owner_public_keys:
+    provider-a: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 `
 	_, err := loadConfigFromYAML(t, yaml)
 	if err == nil || !strings.Contains(err.Error(), "trusted_pools.creator_admin_credentials[0].token") || !strings.Contains(err.Error(), "placeholder_denied") {
@@ -893,6 +897,7 @@ func TestTrustedPoolsCreatorAdminProviderIDsValidateCreatorAndProviders(t *testi
 			cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-a"}}
 			cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-a"}}
 			tc.build(&cfg)
+			ensureTrustedPoolsProviderOwnerKeys(&cfg)
 			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Validate err=%v, want substring %q", err, tc.want)
 			}
@@ -967,6 +972,7 @@ func TestTrustedPoolsCreatorAdminProviderDelegatedIDsValidateCreatorAndProviders
 			cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-a"}}
 			cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-a"}}
 			tc.build(&cfg)
+			ensureTrustedPoolsProviderOwnerKeys(&cfg)
 			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Validate err=%v, want substring %q", err, tc.want)
 			}
@@ -1044,6 +1050,7 @@ func TestTrustedPoolsCreatorAdminBuyerAccountIDsValidateCreatorAndBuyers(t *test
 			cfg.TrustedPools.CreatorAdminProviderDelegatedIDs = map[string][]string{"creator-a": {"provider-a"}}
 			cfg.TrustedPools.CreatorAdminBuyerAccountIDs = map[string][]string{"creator-a": {"acct-a"}}
 			tc.build(&cfg)
+			ensureTrustedPoolsProviderOwnerKeys(&cfg)
 			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Validate err=%v, want substring %q", err, tc.want)
 			}
@@ -1059,6 +1066,25 @@ func trustedPoolsCreatorCredentialConfig(creatorID, credentialID, token string) 
 		NotBeforeUTC:     "2026-01-01T00:00:00Z",
 		ExpiresAtUTC:     "2027-01-01T00:00:00Z",
 		Status:           "enabled",
+	}
+}
+
+const testProviderOwnerPublicKeyB64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+func ensureTrustedPoolsProviderOwnerKeys(cfg *Config) {
+	if cfg.TrustedPools.ProviderOwnerPublicKeys == nil {
+		cfg.TrustedPools.ProviderOwnerPublicKeys = map[string]string{}
+	}
+	for _, providerIDs := range cfg.TrustedPools.CreatorAdminProviderDelegatedIDs {
+		for _, providerID := range providerIDs {
+			providerID = strings.TrimSpace(providerID)
+			if providerID == "" {
+				continue
+			}
+			if _, ok := cfg.TrustedPools.ProviderOwnerPublicKeys[providerID]; !ok {
+				cfg.TrustedPools.ProviderOwnerPublicKeys[providerID] = testProviderOwnerPublicKeyB64
+			}
+		}
 	}
 }
 
@@ -1115,6 +1141,7 @@ func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing
 			cfg := validTestConfig()
 			cfg.TrustedPools.RefreshIntervalS = 30
 			tc.build(&cfg)
+			ensureTrustedPoolsProviderOwnerKeys(&cfg)
 			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Validate err=%v, want substring %q", err, tc.want)
 			}

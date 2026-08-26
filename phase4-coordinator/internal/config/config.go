@@ -1034,6 +1034,7 @@ type TrustedPoolsConfig struct {
 	CreatorAdminProviderIDs          map[string][]string                        `yaml:"creator_admin_provider_ids"`
 	CreatorAdminProviderDelegatedIDs map[string][]string                        `yaml:"creator_admin_provider_delegated_ids"`
 	CreatorAdminBuyerAccountIDs      map[string][]string                        `yaml:"creator_admin_buyer_account_ids"`
+	ProviderOwnerPublicKeys          map[string]string                          `yaml:"provider_owner_public_keys"`
 }
 
 type TrustedPoolsProductionActivationConfig struct {
@@ -1367,6 +1368,7 @@ func Default() Config {
 			CreatorAdminProviderIDs:          map[string][]string{},
 			CreatorAdminProviderDelegatedIDs: map[string][]string{},
 			CreatorAdminBuyerAccountIDs:      map[string][]string{},
+			ProviderOwnerPublicKeys:          map[string]string{},
 			ProductionActivation: TrustedPoolsProductionActivationConfig{
 				AllowedLaunchEnvironments: []string{},
 				RootCustodyHashes:         []string{},
@@ -2183,6 +2185,9 @@ func (c Config) Validate() error {
 	if err := validateTrustedPoolsCreatorAdminBuyerAccountIDs(c.TrustedPools); err != nil {
 		return err
 	}
+	if err := validateTrustedPoolsProviderOwnerPublicKeys(c.TrustedPools); err != nil {
+		return err
+	}
 	if err := c.validateCompatibilitySet(); err != nil {
 		return err
 	}
@@ -2835,6 +2840,82 @@ func validateTrustedPoolsCreatorAdminProviderDelegatedIDs(c TrustedPoolsConfig) 
 		}
 	}
 	return nil
+}
+
+func validateTrustedPoolsProviderOwnerPublicKeys(c TrustedPoolsConfig) error {
+	if !c.Enabled {
+		return nil
+	}
+	delegated := trustedPoolsDelegatedProviderIDs(c)
+	if len(delegated) == 0 {
+		return nil
+	}
+	if len(c.ProviderOwnerPublicKeys) == 0 {
+		return fmt.Errorf("trusted_pools.provider_owner_public_keys must be configured when creator_admin_provider_delegated_ids is non-empty")
+	}
+	keys, err := trustedPoolsProviderOwnerPublicKeys(c.ProviderOwnerPublicKeys)
+	if err != nil {
+		return err
+	}
+	for providerID := range delegated {
+		if _, ok := keys[providerID]; !ok {
+			return fmt.Errorf("trusted_pools.provider_owner_public_keys.%s must be configured for every delegated provider id", providerID)
+		}
+	}
+	return nil
+}
+
+func trustedPoolsDelegatedProviderIDs(c TrustedPoolsConfig) map[string]bool {
+	out := make(map[string]bool)
+	for _, providerIDs := range c.CreatorAdminProviderDelegatedIDs {
+		for _, providerID := range providerIDs {
+			providerID = strings.TrimSpace(providerID)
+			if providerID != "" {
+				out[providerID] = true
+			}
+		}
+	}
+	return out
+}
+
+func trustedPoolsProviderOwnerPublicKeys(raw map[string]string) (map[string][]byte, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make(map[string][]byte, len(raw))
+	for providerID, encoded := range raw {
+		rawProviderID := providerID
+		providerID = strings.TrimSpace(providerID)
+		if providerID == "" {
+			return nil, fmt.Errorf("trusted_pools.provider_owner_public_keys contains an empty provider id")
+		}
+		if rawProviderID != providerID {
+			return nil, fmt.Errorf("trusted_pools.provider_owner_public_keys contains non-canonical provider id %q", rawProviderID)
+		}
+		if err := ValidateProviderID(providerID); err != nil {
+			return nil, fmt.Errorf("trusted_pools.provider_owner_public_keys contains invalid provider id %q", providerID)
+		}
+		pub, err := decodeProviderOwnerPublicKey(strings.TrimSpace(encoded))
+		if err != nil {
+			return nil, fmt.Errorf("trusted_pools.provider_owner_public_keys.%s: %v", providerID, err)
+		}
+		out[providerID] = pub
+	}
+	return out, nil
+}
+
+func decodeProviderOwnerPublicKey(encoded string) ([]byte, error) {
+	if encoded == "" {
+		return nil, fmt.Errorf("provider owner public key is required")
+	}
+	pub, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base64 provider owner public key")
+	}
+	if len(pub) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("provider owner public key must be %d bytes", ed25519.PublicKeySize)
+	}
+	return pub, nil
 }
 
 func validateTrustedPoolsCreatorAdminBuyerAccountIDs(c TrustedPoolsConfig) error {

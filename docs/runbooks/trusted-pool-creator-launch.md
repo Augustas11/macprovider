@@ -40,15 +40,15 @@ rows stay zero.
 ## Blocked before any live announcement
 
 These journey observations are still **false** on the committed candidate
-envelope. Do not flip them in the signer until the harness actually exercises
-the path:
+envelope unless noted. Do not flip them in the signer until the harness
+actually exercises the path (or recapture after merge proves them):
 
-| Observation | Missing product path |
+| Observation | Status |
 |---|---|
-| `creator_suspension_root_compromise_freeze_verified` | Isolated candidate: creator emergency `POST /creator/trust-pools/emergency/root-compromise` works while the creator is suspended; nonce issuance and later mutations fail with `root_compromise_freeze` |
-| `descendant_signer_rejection_verified` | Isolated candidate: after freeze, a mutation presenting the delegated manifest-authority key id is rejected with `root_compromise_freeze` |
-| `delegation_revocation_verified` | Canonical `ProviderPoolDelegationV1` admit/revoke (member_revoked is not delegation proof) |
-| `pool_existence_oracle_within_threshold` | Gateway/coordinator timing-floor proof that unknown vs unauthorized vs disabled pool rejects are statistically indistinguishable at the SPEC-043-R007 bounds |
+| `creator_suspension_root_compromise_freeze_verified` | Proven in harness on new captures; committed envelope still false |
+| `descendant_signer_rejection_verified` | Proven in harness on new captures; committed envelope still false |
+| `delegation_revocation_verified` | Proven in harness on new captures via canonical `ProviderPoolDelegationV1` grant/revoke (`member_revoked` is not delegation proof); committed envelope still false |
+| `pool_existence_oracle_within_threshold` | **Still missing** — gateway/coordinator timing-floor proof at SPEC-043-R007 bounds |
 
 Also still missing for Gate D:
 
@@ -102,9 +102,10 @@ Do not treat a green local test as production promotion.
    outage by clearing `X-MacProvider-Pool-Select` or routing pool buyers to
    the global pool.
 
-Root-compromise freeze and descendant-signer rejection are proven in the
-isolated candidate harness. `ProviderPoolDelegationV1` revocation and the
-pool-existence timing oracle are **not** on this CLI yet.
+Root-compromise freeze, descendant-signer rejection, and
+`ProviderPoolDelegationV1` revocation are proven in the isolated candidate
+harness on new captures. The pool-existence timing oracle is **not** on this
+CLI yet.
 
 ## Settlement
 
@@ -115,7 +116,7 @@ part of this MVP.
 
 ## Next gates
 
-- Remaining Gate C: `ProviderPoolDelegationV1` revocation and pool-existence
-  timing-oracle proof, then recapture and re-sign the candidate journey.
+- Remaining Gate C: pool-existence timing-oracle proof, then recapture and
+  re-sign the candidate journey.
 - Gate D: sibling `PoolPromotionTransitionV1`, non-empty production-release
   keyring, promoter allowlist, CONFORMANCE `evidence[]` only through that flow.
