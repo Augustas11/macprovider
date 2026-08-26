@@ -12495,6 +12495,10 @@ PY
       # common comparison below still requires the signed candidate to be
       # strictly newer, and staged candidate signature/identity validation is
       # unchanged and occurs before any live cutover.
+      if [ "${HEADLESS:-0}" != "1" ]; then
+        rm -f "$installed_preflight_error_file"
+        die 7 "legacy headless smoke compatibility fallback requires headless mode"
+      fi
       if [ "$target" != "v1.8.108" ]; then
         rm -f "$installed_preflight_error_file"
         die 7 "legacy headless smoke compatibility fallback is limited to acceptance target v1.8.108"
@@ -12552,7 +12556,11 @@ validate_acceptance_provider_component_target() {
     *) provider_target_tag="v$provider_target" ;;
   esac
   validate_macprovider_version_tag "$provider_target_tag"
-  installed_version="$("$installed_binary" --version 2>/dev/null | tr -d '\r\n')" \
+  if [ "${HEADLESS:-0}" = "1" ] \
+      && ! version_at_least "$provider_target_tag" "$MACPROVIDER_MIN_HEADLESS_VERSION"; then
+    die 7 "headless mode requires macprovider-cli $MACPROVIDER_MIN_HEADLESS_VERSION or newer; acceptance provider component $provider_target_tag does not support SSH-only protected-file fleet installation"
+  fi
+  installed_version="$(installed_provider_binary_version "$installed_binary")" \
     || die 7 "installed provider CLI version preflight failed before acceptance upgrade"
   case "$installed_version" in
     v*) installed_tag="$installed_version" ;;
@@ -12568,7 +12576,7 @@ validate_acceptance_provider_component_target() {
 validate_staged_acceptance_provider_component() {
   local provider_target="$1"
   local staged_provider_version
-  staged_provider_version="$("$staging_dir/macprovider-cli" --version 2>/dev/null | tr -d '\r\n')" \
+  staged_provider_version="$(installed_provider_binary_version "$staging_dir/macprovider-cli")" \
     || die 5 "staged acceptance provider CLI version preflight failed"
   case "$staged_provider_version" in
     v*) staged_provider_version="${staged_provider_version#v}" ;;
