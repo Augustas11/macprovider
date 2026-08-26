@@ -4160,7 +4160,7 @@
     {
       "requirement_id": "SPEC-015-R001",
       "spec_id": "SPEC-015",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:buildSettlement",
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
@@ -4189,7 +4189,12 @@
           "expires_at": "2026-09-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1197",
+        "rationale": "Issue #1197 moves settlement receipt audit payload writes out of the hot coordinator transaction. Previous signed buyer-paid-path evidence remains historical, but mapped selector fragments changed and require a fresh protected signed buyer-paid-path promotion from main after this implementation lands."
+      }
     },
     {
       "requirement_id": "SPEC-015-R002",
@@ -4368,7 +4373,7 @@
     {
       "requirement_id": "SPEC-022-R004",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
         "phase4-coordinator/internal/billing/settlement_verifier.go:VerifySettlementReceipt"
@@ -4395,7 +4400,12 @@
           "expires_at": "2026-09-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1197",
+        "rationale": "Issue #1197 changes the settlement receipt ingestion hot path while preserving verified receipt semantics. Previous signed buyer-paid-path evidence remains historical, but mapped selector fragments changed and require a fresh protected signed buyer-paid-path promotion from main after this implementation lands."
+      }
     },
     {
       "requirement_id": "SPEC-022-R005",
@@ -4592,7 +4602,7 @@
     {
       "requirement_id": "SPEC-022-R011",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipts.go:insertSettlementReceiptVerdictAuditConn"
       ],
@@ -4617,7 +4627,12 @@
           "expires_at": "2026-09-17"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1197",
+        "rationale": "Issue #1197 moves settlement audit payload persistence to an outbox drain. Previous signed buyer-enforce evidence remains historical, but mapped selector fragments changed and require a fresh protected signed buyer-enforce promotion from main after this implementation lands."
+      }
     },
     {
       "requirement_id": "SPEC-016-R001",

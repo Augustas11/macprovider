@@ -4916,6 +4916,7 @@ class PearlUpdaterTests(unittest.TestCase):
             (
                 Path("/srv/macprovider/gateway.sqlite"),
                 Path("/srv/macprovider/coordinator.sqlite"),
+                Path("/srv/macprovider/coordinator-audit.db"),
                 Path("/srv/macprovider/stats.sqlite"),
                 Path("/srv/macprovider/payout.sqlite"),
             ),
@@ -4957,7 +4958,11 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.assertEqual(
             self.updater.databases,
-            (Path("/srv/macprovider/gateway.sqlite"), coordinator_database),
+            (
+                Path("/srv/macprovider/gateway.sqlite"),
+                coordinator_database,
+                Path("/srv/macprovider/coordinator-audit.db"),
+            ),
         )
         self.assertEqual(self.updater.gateway_db, Path("/srv/macprovider/gateway.sqlite"))
         self.assertEqual(
@@ -4996,6 +5001,28 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(self.updater.databases, captured_paths)
         self.assertEqual(self.updater.runtime_config_hashes, captured_hashes)
 
+    def test_gateway_cannot_share_derived_coordinator_audit_database(self):
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        coordinator = install / "coordinator.yaml"
+        gateway = install / "gateway.yaml"
+        stats_fragment = self.root / "stats.service"
+        stats_dropin = self.root / "gate.conf"
+        coordinator.write_text("storage:\n  db_path: /srv/macprovider/coordinator.sqlite\n")
+        gateway.write_text("storage:\n  db_path: /srv/macprovider/coordinator-audit.db\n")
+        stats_fragment.write_text("[Service]\nExecStart=/bin/true\n")
+        stats_dropin.write_text(updater_module.TRANSACTION_GATE_DROPIN_TEXT)
+        self.updater.gateway_db = None
+        self.updater.databases = ()
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(coordinator, None, {})
+        self.updater.gateway_config_path = mock.Mock(return_value=gateway)
+        self.updater.stats_mirror_runtime = mock.Mock(
+            return_value=((stats_fragment, stats_dropin), Path("/srv/macprovider/stats.sqlite"))
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "distinct absolute"):
+            self.updater.capture_database_paths()
+
     def test_capture_database_paths_accepts_journal_restored_state(self):
         gateway = Path("/srv/macprovider/gateway.sqlite")
         coordinator = Path("/srv/macprovider/coordinator.sqlite")
@@ -5008,7 +5035,10 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.capture_database_paths()
 
         self.assertEqual(self.updater.gateway_db, gateway)
-        self.assertEqual(self.updater.databases, (gateway, coordinator))
+        self.assertEqual(
+            self.updater.databases,
+            (gateway, coordinator, Path("/srv/macprovider/coordinator-audit.db")),
+        )
         self.assertEqual(self.updater.runtime_config_hashes, {config: config_hash})
 
     def test_stats_mirror_cannot_share_gateway_database(self):

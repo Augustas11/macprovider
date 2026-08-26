@@ -11,6 +11,15 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
 
+func TestDefaultDBPathReturnsSiblingAuditDB(t *testing.T) {
+	if got, want := DefaultDBPath(filepath.Join("var", "lib", "macprovider", "coordinator.db")), filepath.Join("var", "lib", "macprovider", "coordinator-audit.db"); got != want {
+		t.Fatalf("DefaultDBPath=%q want %q", got, want)
+	}
+	if got := DefaultDBPath("coordinator.db"); got != "coordinator-audit.db" {
+		t.Fatalf("DefaultDBPath local=%q want coordinator-audit.db", got)
+	}
+}
+
 func TestOpenStoreCreatesAuditLogSchema(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
@@ -47,6 +56,15 @@ WHERE type IN ('table', 'index') AND name IN (
 		if !seen[name] {
 			t.Fatalf("missing schema object %q; got %#v", name, seen)
 		}
+	}
+}
+
+func TestOpenStoreDoesNotMigrateSettlementReceiptOutboxID(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	if ok, err := store.columnExists(context.Background(), "audit_log", "settlement_receipt_audit_outbox_id"); err != nil || ok {
+		t.Fatalf("settlement receipt outbox column exists=%v err=%v, want absent for legacy audit store", ok, err)
 	}
 }
 
@@ -98,6 +116,163 @@ FROM audit_log`).Scan(&gotTS, &gotEventType, &gotProviderID, &gotPayload); err !
 	}
 	if gotTS != ts.Format(time.RFC3339Nano) || gotEventType != "custom_event" || gotProviderID != "provider-a" || gotPayload != payload {
 		t.Fatalf("row = (%q, %q, %q, %q)", gotTS, gotEventType, gotProviderID, gotPayload)
+	}
+}
+
+func TestInsertSettlementReceiptOutboxIsIdempotent(t *testing.T) {
+	store := openSettlementReceiptTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	ts := time.Date(2026, 6, 7, 14, 23, 9, 123000000, time.UTC)
+	payload := `{"event":"one"}`
+
+	inserted, err := store.InsertSettlementReceiptOutbox(ctx, ts, "settlement_receipt_verdict", "provider-a", payload, 42)
+	if err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	if !inserted {
+		t.Fatal("first insert inserted=false want true")
+	}
+	inserted, err = store.InsertSettlementReceiptOutbox(ctx, ts, "settlement_receipt_verdict", "provider-a", payload, 42)
+	if err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+	if inserted {
+		t.Fatal("second insert inserted=true want false")
+	}
+
+	var count int
+	var gotTS, gotPayload string
+	if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*), MIN(ts_utc), MIN(payload_json)
+FROM audit_log
+WHERE settlement_receipt_audit_outbox_id = 42`).Scan(&count, &gotTS, &gotPayload); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || gotTS != ts.Format(time.RFC3339Nano) || gotPayload != `{"event":"one"}` {
+		t.Fatalf("row count/ts/payload = %d/%s/%s", count, gotTS, gotPayload)
+	}
+}
+
+func TestInsertSettlementReceiptOutboxRefusesMismatchedDuplicate(t *testing.T) {
+	tests := []struct {
+		name      string
+		ts        time.Time
+		eventType string
+		provider  string
+		payload   string
+	}{
+		{
+			name:      "timestamp",
+			ts:        time.Date(2026, 6, 7, 15, 23, 9, 123000000, time.UTC),
+			eventType: "settlement_receipt_verdict",
+			provider:  "provider-a",
+			payload:   `{"event":"one"}`,
+		},
+		{
+			name:      "event type",
+			ts:        time.Date(2026, 6, 7, 14, 23, 9, 123000000, time.UTC),
+			eventType: "settlement_receipt_replayed",
+			provider:  "provider-a",
+			payload:   `{"event":"one"}`,
+		},
+		{
+			name:      "provider",
+			ts:        time.Date(2026, 6, 7, 14, 23, 9, 123000000, time.UTC),
+			eventType: "settlement_receipt_verdict",
+			provider:  "provider-b",
+			payload:   `{"event":"one"}`,
+		},
+		{
+			name:      "payload",
+			ts:        time.Date(2026, 6, 7, 14, 23, 9, 123000000, time.UTC),
+			eventType: "settlement_receipt_verdict",
+			provider:  "provider-a",
+			payload:   `{"event":"two"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := openSettlementReceiptTestStore(t)
+			defer store.Close()
+			ctx := context.Background()
+			originalTS := time.Date(2026, 6, 7, 14, 23, 9, 123000000, time.UTC)
+			originalPayload := `{"event":"one"}`
+
+			inserted, err := store.InsertSettlementReceiptOutbox(ctx, originalTS, "settlement_receipt_verdict", "provider-a", originalPayload, 42)
+			if err != nil {
+				t.Fatalf("first insert: %v", err)
+			}
+			if !inserted {
+				t.Fatal("first insert inserted=false want true")
+			}
+
+			inserted, err = store.InsertSettlementReceiptOutbox(ctx, tt.ts, tt.eventType, tt.provider, tt.payload, 42)
+			if err == nil {
+				t.Fatal("mismatched duplicate err=nil want error")
+			}
+			if inserted {
+				t.Fatal("mismatched duplicate inserted=true want false")
+			}
+			assertErrorContains(t, err, "already exists with different audit event")
+
+			var count int
+			var gotTS, gotEventType, gotProvider, gotPayload string
+			if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*), MIN(ts_utc), MIN(event_type), MIN(provider_id), MIN(payload_json)
+FROM audit_log
+WHERE settlement_receipt_audit_outbox_id = 42`).Scan(&count, &gotTS, &gotEventType, &gotProvider, &gotPayload); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 || gotTS != originalTS.Format(time.RFC3339Nano) || gotEventType != "settlement_receipt_verdict" || gotProvider != "provider-a" || gotPayload != originalPayload {
+				t.Fatalf("row count/ts/event/provider/payload = %d/%s/%s/%s/%s", count, gotTS, gotEventType, gotProvider, gotPayload)
+			}
+		})
+	}
+}
+
+func TestOpenStoreMigratesLegacyAuditLogForSettlementReceiptOutboxID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    provider_id TEXT,
+    payload_json TEXT NOT NULL
+);
+INSERT INTO audit_log(ts_utc, event_type, provider_id, payload_json)
+VALUES('2026-06-07T14:23:09Z', 'legacy', 'provider-a', '{}');`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenSettlementReceiptStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore legacy schema: %v", err)
+	}
+	defer store.Close()
+
+	if ok, err := store.columnExists(context.Background(), "audit_log", "settlement_receipt_audit_outbox_id"); err != nil || !ok {
+		t.Fatalf("settlement_receipt_audit_outbox_id exists=%v err=%v", ok, err)
+	}
+	var indexCount int
+	if err := store.DB().QueryRowContext(context.Background(), `
+SELECT COUNT(*)
+FROM sqlite_schema
+WHERE type='index' AND name='idx_audit_log_settlement_receipt_outbox'`).Scan(&indexCount); err != nil {
+		t.Fatal(err)
+	}
+	if indexCount != 1 {
+		t.Fatalf("unique outbox index count=%d want 1", indexCount)
 	}
 }
 
@@ -350,6 +525,15 @@ func openTestStore(t *testing.T) *Store {
 	store, err := OpenStore(t.TempDir() + "/coordinator.db")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
+	}
+	return store
+}
+
+func openSettlementReceiptTestStore(t *testing.T) *Store {
+	t.Helper()
+	store, err := OpenSettlementReceiptStore(t.TempDir() + "/coordinator-audit.db")
+	if err != nil {
+		t.Fatalf("open settlement receipt store: %v", err)
 	}
 	return store
 }

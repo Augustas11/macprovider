@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 var (
@@ -61,6 +62,10 @@ var (
 	}
 	allowMoneySQLitePageClassLabel = map[string]bool{
 		"busy": true, "log": true, "checkpointed": true,
+	}
+	allowSettlementReceiptAuditOutboxOutcome   = map[string]bool{"success": true, "error": true}
+	allowSettlementReceiptAuditOutboxOperation = map[string]bool{
+		"drained": true, "pruned": true,
 	}
 	allowReferralOutcome = map[string]bool{
 		"disabled": true, "busy": true, "rate_limited": true,
@@ -124,6 +129,16 @@ func TestLabelHygiene(t *testing.T) {
 	m.ObserveSQLiteWALCheckpointDuration("wal_checkpoint", "success", time.Millisecond)
 	m.ObserveSQLiteWALCheckpointDuration("raw-attacker-value", "success", time.Millisecond)
 	m.ObserveSQLiteWALCheckpointDuration("wal_checkpoint", "raw-attacker-value", time.Millisecond)
+	m.SetSettlementReceiptAuditOutboxPendingRows(12)
+	m.SetSettlementReceiptAuditOutboxOldestPendingAge(3 * time.Second)
+	for outcome := range allowSettlementReceiptAuditOutboxOutcome {
+		m.IncSettlementReceiptAuditOutboxDrain(outcome)
+	}
+	m.IncSettlementReceiptAuditOutboxDrain("raw-attacker-value")
+	for operation := range allowSettlementReceiptAuditOutboxOperation {
+		m.AddSettlementReceiptAuditOutboxRows(operation, 2)
+	}
+	m.AddSettlementReceiptAuditOutboxRows("raw-attacker-value", 2)
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -200,12 +215,20 @@ func TestLabelHygiene(t *testing.T) {
 						if !allowMoneySQLiteOutcomeLabel[val] {
 							t.Errorf("metric %s outcome=%q not in money SQLite allowed set", mf.GetName(), val)
 						}
+					} else if mf.GetName() == "settlement_receipt_audit_outbox_drain_total" {
+						if !allowSettlementReceiptAuditOutboxOutcome[val] {
+							t.Errorf("metric %s outcome=%q not in settlement receipt audit outbox allowed set", mf.GetName(), val)
+						}
 					} else if !allowCredentialBootstrapOutcome[val] {
 						t.Errorf("metric %s outcome=%q not in allowed set", mf.GetName(), val)
 					}
 				case "operation":
-					if !allowMoneySQLiteOperationLabel[val] {
-						t.Errorf("metric %s operation=%q not in allowed set", mf.GetName(), val)
+					if mf.GetName() == "settlement_receipt_audit_outbox_rows_total" {
+						if !allowSettlementReceiptAuditOutboxOperation[val] {
+							t.Errorf("metric %s operation=%q not in settlement receipt audit outbox allowed set", mf.GetName(), val)
+						}
+					} else if !allowMoneySQLiteOperationLabel[val] {
+						t.Errorf("metric %s operation=%q not in money SQLite allowed set", mf.GetName(), val)
 					}
 				case "page_class":
 					if !allowMoneySQLitePageClassLabel[val] {
@@ -214,6 +237,41 @@ func TestLabelHygiene(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestSettlementReceiptAuditOutboxHelpers(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+
+	m.SetSettlementReceiptAuditOutboxPendingRows(-1)
+	m.SetSettlementReceiptAuditOutboxOldestPendingAge(-time.Second)
+	m.IncSettlementReceiptAuditOutboxDrain("success")
+	m.IncSettlementReceiptAuditOutboxDrain("error")
+	m.IncSettlementReceiptAuditOutboxDrain("raw-attacker-value")
+	m.AddSettlementReceiptAuditOutboxRows("drained", 3)
+	m.AddSettlementReceiptAuditOutboxRows("pruned", 4)
+	m.AddSettlementReceiptAuditOutboxRows("drained", 0)
+	m.AddSettlementReceiptAuditOutboxRows("pruned", -1)
+	m.AddSettlementReceiptAuditOutboxRows("raw-attacker-value", 5)
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+
+	assertMetricValue(t, families, "settlement_receipt_audit_outbox_pending_rows", nil, 0)
+	assertMetricValue(t, families, "settlement_receipt_audit_outbox_oldest_pending_age_seconds", nil, 0)
+	assertMetricValue(t, families, "settlement_receipt_audit_outbox_drain_total", map[string]string{"outcome": "success"}, 1)
+	assertMetricValue(t, families, "settlement_receipt_audit_outbox_drain_total", map[string]string{"outcome": "error"}, 1)
+	assertMetricValue(t, families, "settlement_receipt_audit_outbox_rows_total", map[string]string{"operation": "drained"}, 3)
+	assertMetricValue(t, families, "settlement_receipt_audit_outbox_rows_total", map[string]string{"operation": "pruned"}, 4)
+
+	if metricExists(families, "settlement_receipt_audit_outbox_drain_total", map[string]string{"outcome": "raw-attacker-value"}) {
+		t.Fatal("invalid settlement receipt audit outbox drain outcome created a metric series")
+	}
+	if metricExists(families, "settlement_receipt_audit_outbox_rows_total", map[string]string{"operation": "raw-attacker-value"}) {
+		t.Fatal("invalid settlement receipt audit outbox rows operation created a metric series")
 	}
 }
 
@@ -244,4 +302,65 @@ func containsCaseFold(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+func assertMetricValue(t *testing.T, families []*dto.MetricFamily, name string, labels map[string]string, want float64) {
+	t.Helper()
+	for _, mf := range families {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, mt := range mf.GetMetric() {
+			if !metricLabelsMatch(mt, labels) {
+				continue
+			}
+			var got float64
+			switch {
+			case mt.GetGauge() != nil:
+				got = mt.GetGauge().GetValue()
+			case mt.GetCounter() != nil:
+				got = mt.GetCounter().GetValue()
+			default:
+				t.Fatalf("metric %s has unsupported type", name)
+			}
+			if got != want {
+				t.Fatalf("metric %s%v = %v, want %v", name, labels, got, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("metric %s%v not found", name, labels)
+}
+
+func metricExists(families []*dto.MetricFamily, name string, labels map[string]string) bool {
+	for _, mf := range families {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, mt := range mf.GetMetric() {
+			if metricLabelsMatch(mt, labels) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func metricLabelsMatch(metric *dto.Metric, labels map[string]string) bool {
+	if len(labels) == 0 {
+		return len(metric.GetLabel()) == 0
+	}
+	for wantName, wantValue := range labels {
+		found := false
+		for _, lp := range metric.GetLabel() {
+			if lp.GetName() == wantName && lp.GetValue() == wantValue {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }

@@ -8,6 +8,10 @@
 //	stats_rollup_errors_total{component}                       — Counter
 //	stats_rate_limit_exceeded_total{tier,endpoint}             — Counter
 //	stats_idle_prewarm_event_total{event,reason}                — Counter
+//	settlement_receipt_audit_outbox_pending_rows                — Gauge
+//	settlement_receipt_audit_outbox_oldest_pending_age_seconds  — Gauge
+//	settlement_receipt_audit_outbox_drain_total{outcome}        — Counter
+//	settlement_receipt_audit_outbox_rows_total{operation}       — Counter
 //
 // Label hygiene (SECURITY M5 — Step 4.C SECURITY lane category A):
 //
@@ -45,6 +49,12 @@
 //     idle-prewarm protocol allowlist. Non-skip events use
 //     reason="none" so the label set stays closed and low-cardinality.
 //
+//   - `settlement_receipt_audit_outbox_drain_total{outcome}` uses closed
+//     outcome values "success" / "error".
+//
+//   - `settlement_receipt_audit_outbox_rows_total{operation}` uses closed
+//     operation values "drained" / "pruned".
+//
 // No label takes an operator- or attacker-controllable string directly.
 // A `Reset` method exists for test isolation.
 package metrics
@@ -61,25 +71,29 @@ import (
 // case; production code passes prometheus.DefaultRegisterer (or
 // a coordinator-owned named registry).
 type Metrics struct {
-	RequestTotal                 *prometheus.CounterVec
-	PartnerKeyRequestTotal       *prometheus.CounterVec
-	RollupLagSeconds             *prometheus.GaugeVec
-	RollupErrorsTotal            *prometheus.CounterVec
-	RollupPanicTotal             *prometheus.CounterVec
-	RateLimitExceededTotal       *prometheus.CounterVec
-	RegisterRateLimitHits        *prometheus.CounterVec
-	RegisterSource               *prometheus.CounterVec
-	RegisterHardwareErrors       prometheus.Counter
-	IdlePrewarmEventTotal        *prometheus.CounterVec
-	ModelHashMismatchTotal       prometheus.Counter
-	CredentialBootstrapTotal     *prometheus.CounterVec
-	ReferralEventTotal           *prometheus.CounterVec
-	ProviderConnectionEventTotal *prometheus.CounterVec
-	MoneySQLiteConnectionWait    *prometheus.HistogramVec
-	MoneySQLiteTransaction       *prometheus.HistogramVec
-	MoneySQLiteWrite             *prometheus.HistogramVec
-	MoneySQLiteWALCheckpoint     *prometheus.GaugeVec
-	MoneySQLiteWALCheckpointTime *prometheus.HistogramVec
+	RequestTotal                                        *prometheus.CounterVec
+	PartnerKeyRequestTotal                              *prometheus.CounterVec
+	RollupLagSeconds                                    *prometheus.GaugeVec
+	RollupErrorsTotal                                   *prometheus.CounterVec
+	RollupPanicTotal                                    *prometheus.CounterVec
+	RateLimitExceededTotal                              *prometheus.CounterVec
+	RegisterRateLimitHits                               *prometheus.CounterVec
+	RegisterSource                                      *prometheus.CounterVec
+	RegisterHardwareErrors                              prometheus.Counter
+	IdlePrewarmEventTotal                               *prometheus.CounterVec
+	ModelHashMismatchTotal                              prometheus.Counter
+	CredentialBootstrapTotal                            *prometheus.CounterVec
+	ReferralEventTotal                                  *prometheus.CounterVec
+	ProviderConnectionEventTotal                        *prometheus.CounterVec
+	MoneySQLiteConnectionWait                           *prometheus.HistogramVec
+	MoneySQLiteTransaction                              *prometheus.HistogramVec
+	MoneySQLiteWrite                                    *prometheus.HistogramVec
+	MoneySQLiteWALCheckpoint                            *prometheus.GaugeVec
+	MoneySQLiteWALCheckpointTime                        *prometheus.HistogramVec
+	SettlementReceiptAuditOutboxPendingRows             prometheus.Gauge
+	SettlementReceiptAuditOutboxOldestPendingAgeSeconds prometheus.Gauge
+	SettlementReceiptAuditOutboxDrainTotal              *prometheus.CounterVec
+	SettlementReceiptAuditOutboxRowsTotal               *prometheus.CounterVec
 	// CapacityOverClaimTotal is the issue-#764 over-claim tripwire. It is
 	// PERMANENT by construction: a prometheus counter never decreases and is
 	// never reset for the process lifetime, and the coordinator increments it
@@ -237,6 +251,32 @@ func New(reg prometheus.Registerer) *Metrics {
 				Buckets: prometheus.ExponentialBuckets(0.001, 2, 16),
 			},
 			[]string{"component", "outcome"},
+		),
+		SettlementReceiptAuditOutboxPendingRows: f.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "settlement_receipt_audit_outbox_pending_rows",
+				Help: "Latest count of undrained settlement receipt audit outbox rows.",
+			},
+		),
+		SettlementReceiptAuditOutboxOldestPendingAgeSeconds: f.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "settlement_receipt_audit_outbox_oldest_pending_age_seconds",
+				Help: "Age in seconds of the oldest undrained settlement receipt audit outbox row, or zero when none are pending.",
+			},
+		),
+		SettlementReceiptAuditOutboxDrainTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "settlement_receipt_audit_outbox_drain_total",
+				Help: "Count of settlement receipt audit outbox drain attempts by closed-set outcome.",
+			},
+			[]string{"outcome"},
+		),
+		SettlementReceiptAuditOutboxRowsTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "settlement_receipt_audit_outbox_rows_total",
+				Help: "Count of settlement receipt audit outbox rows processed by closed-set operation.",
+			},
+			[]string{"operation"},
 		),
 	}
 }
@@ -401,6 +441,45 @@ func (m *Metrics) ObserveSQLiteWALCheckpointDuration(component, outcome string, 
 	m.MoneySQLiteWALCheckpointTime.WithLabelValues(component, outcome).Observe(duration.Seconds())
 }
 
+func (m *Metrics) SetSettlementReceiptAuditOutboxPendingRows(rows int64) {
+	if m == nil || m.SettlementReceiptAuditOutboxPendingRows == nil {
+		return
+	}
+	if rows < 0 {
+		rows = 0
+	}
+	m.SettlementReceiptAuditOutboxPendingRows.Set(float64(rows))
+}
+
+func (m *Metrics) SetSettlementReceiptAuditOutboxOldestPendingAge(age time.Duration) {
+	if m == nil || m.SettlementReceiptAuditOutboxOldestPendingAgeSeconds == nil {
+		return
+	}
+	if age < 0 {
+		age = 0
+	}
+	m.SettlementReceiptAuditOutboxOldestPendingAgeSeconds.Set(age.Seconds())
+}
+
+func (m *Metrics) ObserveSettlementReceiptAuditOutbox(pendingRows int64, oldestPendingAge time.Duration) {
+	m.SetSettlementReceiptAuditOutboxPendingRows(pendingRows)
+	m.SetSettlementReceiptAuditOutboxOldestPendingAge(oldestPendingAge)
+}
+
+func (m *Metrics) IncSettlementReceiptAuditOutboxDrain(outcome string) {
+	if m == nil || m.SettlementReceiptAuditOutboxDrainTotal == nil || !allowSettlementReceiptAuditOutboxDrainOutcome(outcome) {
+		return
+	}
+	m.SettlementReceiptAuditOutboxDrainTotal.WithLabelValues(outcome).Inc()
+}
+
+func (m *Metrics) AddSettlementReceiptAuditOutboxRows(operation string, rows int64) {
+	if m == nil || m.SettlementReceiptAuditOutboxRowsTotal == nil || !allowSettlementReceiptAuditOutboxRowsOperation(operation) || rows <= 0 {
+		return
+	}
+	m.SettlementReceiptAuditOutboxRowsTotal.WithLabelValues(operation).Add(float64(rows))
+}
+
 func allowMoneySQLiteComponent(component string) bool {
 	switch component {
 	case "billing_hot_path", "request_log_identity", "billing_reload_config", "route_snapshot", "wal_checkpoint":
@@ -431,6 +510,24 @@ func allowMoneySQLiteOutcome(outcome string) bool {
 func allowMoneySQLitePageClass(pageClass string) bool {
 	switch pageClass {
 	case "busy", "log", "checkpointed":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowSettlementReceiptAuditOutboxDrainOutcome(outcome string) bool {
+	switch outcome {
+	case "success", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowSettlementReceiptAuditOutboxRowsOperation(operation string) bool {
+	switch operation {
+	case "drained", "pruned":
 		return true
 	default:
 		return false

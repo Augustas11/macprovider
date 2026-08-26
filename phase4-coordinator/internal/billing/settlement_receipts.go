@@ -237,7 +237,7 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 			if err := hydrateSettlementReceiptRouteAuditFieldsConn(ctx, conn, &existing); err != nil {
 				return err
 			}
-			if err := insertSettlementReceiptVerdictAuditConn(ctx, conn, existing, nil, receivedAtUnixMS); err != nil {
+			if err := insertSettlementReceiptVerdictAuditConn(ctx, conn, existing, receivedAtUnixMS); err != nil {
 				return err
 			}
 			outcome = existing
@@ -264,6 +264,10 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 		} else if err := insertSettlementReceiptStateConn(ctx, conn, persisted); err != nil {
 			return err
 		}
+		verdictID, err := settlementReceiptVerdictIDConn(ctx, conn, id)
+		if err != nil {
+			return err
+		}
 		if reason, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, state.RequestID, state.AttemptN, state.ProviderID); err != nil {
 			return err
 		} else if reason != "" {
@@ -276,11 +280,12 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 			}
 		}
 		if receiptPresent {
-			if err := insertSettlementReceiptIngestedAuditConn(ctx, conn, state); err != nil {
+			_, err := enqueueSettlementReceiptAuditOutboxConn(ctx, conn, verdictID, settlementReceiptEventIngested, state, receivedAtUnixMS)
+			if err != nil {
 				return err
 			}
 		}
-		if err := insertSettlementReceiptVerdictAuditConn(ctx, conn, state, &result.Checks, receivedAtUnixMS); err != nil {
+		if err := insertSettlementReceiptVerdictAuditConn(ctx, conn, state, receivedAtUnixMS); err != nil {
 			return err
 		}
 		outcome = state
@@ -1041,33 +1046,316 @@ WHERE account_scope_hash = ? AND request_id = ? AND attempt_n = ? AND provider_i
 	return state, true, nil
 }
 
-func insertSettlementReceiptIngestedAuditConn(ctx context.Context, conn *sql.Conn, state SettlementReceiptState) error {
-	payload, err := settlementReceiptAuditPayload(state, nil, false, 0)
+func settlementReceiptVerdictIDConn(ctx context.Context, conn *sql.Conn, id SettlementReceiptIdentity) (int64, error) {
+	var verdictID int64
+	if err := conn.QueryRowContext(ctx, `
+SELECT id
+FROM settlement_receipt_verdicts
+WHERE account_scope_hash = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		redactedAccountScopeHash(id.AccountScope), id.RequestID, id.AttemptN, id.ProviderID,
+	).Scan(&verdictID); err != nil {
+		return 0, err
+	}
+	return verdictID, nil
+}
+
+func enqueueSettlementReceiptAuditOutboxConn(ctx context.Context, conn *sql.Conn, verdictID int64, eventType string, state SettlementReceiptState, attemptedReceivedAtUnixMS int64) (int64, error) {
+	if attemptedReceivedAtUnixMS == 0 {
+		attemptedReceivedAtUnixMS = state.ReceivedAtUnixMS
+	}
+	checksJSON, err := json.Marshal(state.Checks)
+	if err != nil {
+		return 0, err
+	}
+	result, err := conn.ExecContext(ctx, `
+INSERT INTO settlement_receipt_audit_outbox (
+    settlement_receipt_verdict_id, event_type, account_scope_hash,
+    request_id, attempt_n, provider_id, attempted_received_at_unix_ms,
+    idempotency_status, receipt_present, receipt_version, receipt_result,
+    settlement_outcome, reason, closed, terminal_state,
+    terminal_state_ts_unix_ms, pending_deadline_unix_ms, received_at_unix_ms,
+    route_snapshot_digest, route_snapshot_policy_version, route_snapshot_mode,
+    paid_entrypoint, provider_session_id, provider_generation_id,
+    spec008_hash_status, provider_reported_model_hash, provider_receipt_key_fingerprint,
+    catalog_id, catalog_body_digest, expected_catalog_model_hash,
+    model_id, model_hash, receipt_profile, buyer_debit_outcome,
+    provider_settlement_outcome, payout_exclusion_outcome, prompt_hash, output_hash,
+    usage_digest, receipt_tuple_canonical_sha256, checks_json, created_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		verdictID, eventType, redactedAccountScopeHash(state.AccountScope),
+		state.RequestID, state.AttemptN, state.ProviderID, attemptedReceivedAtUnixMS,
+		state.IdempotencyStatus, boolInt(state.ReceiptPresent), nullString(state.ReceiptVersion),
+		state.ReceiptResult, state.SettlementOutcome, state.Reason, boolInt(state.Closed),
+		state.TerminalState, state.TerminalStateTSUnixMS, state.PendingDeadlineUnixMS,
+		state.ReceivedAtUnixMS, state.RouteSnapshotDigest, state.RouteSnapshotPolicyVersion,
+		state.RouteSnapshotMode, state.PaidEntrypoint, nullString(state.ProviderSessionID),
+		nullString(state.ProviderGenerationID), state.Spec008HashStatus,
+		state.ProviderReportedModelHash, state.ProviderReceiptKeyFingerprint,
+		state.CatalogID, state.CatalogBodyDigest, state.ExpectedCatalogModelHash,
+		state.ModelID, state.ModelHash, state.ReceiptProfile, state.BuyerDebitOutcome,
+		state.ProviderSettlementOutcome, state.PayoutExclusionOutcome, state.PromptHash,
+		nullString(state.OutputHash), nullString(state.UsageDigest),
+		nullString(state.ReceiptTupleCanonicalSHA256), string(checksJSON),
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+// SettlementReceiptAuditSink is the external audit writer used by the
+// settlement receipt audit outbox. The money DB stores compact outbox rows;
+// the sink owns the fat audit payload destination.
+type SettlementReceiptAuditSink interface {
+	InsertSettlementReceiptOutbox(context.Context, time.Time, string, string, string, int64) (bool, error)
+}
+
+// SettlementReceiptAuditOutboxStats is the low-cardinality health surface for
+// the compact money-DB audit outbox.
+type SettlementReceiptAuditOutboxStats struct {
+	PendingRows             int64
+	OldestPendingCreatedAt  time.Time
+	HasOldestPendingCreated bool
+}
+
+func insertSettlementReceiptVerdictAuditConn(ctx context.Context, conn *sql.Conn, state SettlementReceiptState, attemptedReceivedAtUnixMS int64) error {
+	verdictID, err := settlementReceiptVerdictIDConn(ctx, conn, state.SettlementReceiptIdentity)
 	if err != nil {
 		return err
 	}
-	_, err = conn.ExecContext(ctx, `
-INSERT INTO audit_log (ts_utc, event_type, provider_id, payload_json)
-VALUES (?, ?, ?, ?)`,
-		time.Now().UTC().Format(time.RFC3339Nano), settlementReceiptEventIngested, state.ProviderID, payload)
+	_, err = enqueueSettlementReceiptAuditOutboxConn(ctx, conn, verdictID, settlementReceiptEventVerdict, state, attemptedReceivedAtUnixMS)
 	return err
 }
 
-func insertSettlementReceiptVerdictAuditConn(ctx context.Context, conn *sql.Conn, state SettlementReceiptState, checks *SettlementVerificationChecks, attemptedReceivedAtUnixMS int64) error {
-	payload, err := settlementReceiptAuditPayload(state, checks, true, attemptedReceivedAtUnixMS)
-	if err != nil {
-		return err
+// DrainSettlementReceiptAuditOutbox drains pending settlement receipt audit
+// events after the hot receipt transaction commits. It is safe to call at
+// startup or from a background loop.
+func (s *Store) DrainSettlementReceiptAuditOutbox(ctx context.Context, sink SettlementReceiptAuditSink, limit int) (int, error) {
+	if sink == nil {
+		return 0, fmt.Errorf("settlement receipt audit sink is required")
 	}
-	_, err = conn.ExecContext(ctx, `
-INSERT INTO audit_log (ts_utc, event_type, provider_id, payload_json)
-VALUES (?, ?, ?, ?)`,
-		time.Now().UTC().Format(time.RFC3339Nano), settlementReceiptEventVerdict, state.ProviderID, payload)
-	return err
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id
+FROM settlement_receipt_audit_outbox
+WHERE drained_at_utc IS NULL
+ORDER BY id
+LIMIT ?`, limit)
+	if err != nil {
+		return 0, err
+	}
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	return s.drainSettlementReceiptAuditOutboxIDs(ctx, sink, ids)
+}
+
+func (s *Store) SettlementReceiptAuditOutboxStats(ctx context.Context) (SettlementReceiptAuditOutboxStats, error) {
+	var stats SettlementReceiptAuditOutboxStats
+	var oldest sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*), MIN(created_at_utc)
+FROM settlement_receipt_audit_outbox
+WHERE drained_at_utc IS NULL`).Scan(&stats.PendingRows, &oldest)
+	if err != nil {
+		return stats, err
+	}
+	if oldest.Valid && oldest.String != "" {
+		createdAt, err := time.Parse(time.RFC3339Nano, oldest.String)
+		if err != nil {
+			return stats, fmt.Errorf("parse settlement receipt audit outbox oldest pending created_at_utc: %w", err)
+		}
+		stats.OldestPendingCreatedAt = createdAt
+		stats.HasOldestPendingCreated = true
+	}
+	return stats, nil
+}
+
+func (s *Store) drainSettlementReceiptAuditOutboxIDs(ctx context.Context, sink SettlementReceiptAuditSink, ids []int64) (int, error) {
+	drained := 0
+	var firstErr error
+	for _, id := range ids {
+		ok, err := s.drainSettlementReceiptAuditOutboxID(ctx, sink, id)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if ok {
+			drained++
+		}
+	}
+	return drained, firstErr
+}
+
+func (s *Store) PruneSettlementReceiptAuditOutbox(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	res, err := s.db.ExecContext(ctx, `
+DELETE FROM settlement_receipt_audit_outbox
+ WHERE id IN (
+       SELECT id
+         FROM settlement_receipt_audit_outbox
+        WHERE drained_at_utc IS NOT NULL
+          AND julianday(drained_at_utc) < julianday(?)
+     ORDER BY id
+        LIMIT ?
+ )`,
+		cutoff.UTC().Format(time.RFC3339Nano), limit)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) drainSettlementReceiptAuditOutboxID(ctx context.Context, sink SettlementReceiptAuditSink, outboxID int64) (bool, error) {
+	eventType, accountScopeHash, state, attemptedReceivedAtUnixMS, eventTime, found, err := s.loadSettlementReceiptAuditOutbox(ctx, outboxID)
+	if err != nil || !found {
+		return false, err
+	}
+	verdict := eventType == settlementReceiptEventVerdict
+	var checks *SettlementVerificationChecks
+	if verdict {
+		checks = &state.Checks
+	}
+	payload, err := settlementReceiptAuditPayloadForAccountHash(accountScopeHash, state, checks, verdict, attemptedReceivedAtUnixMS, outboxID)
+	if err != nil {
+		return false, err
+	}
+	if _, err := sink.InsertSettlementReceiptOutbox(ctx, eventTime, eventType, state.ProviderID, payload, outboxID); err != nil {
+		return false, err
+	}
+	return s.markSettlementReceiptAuditOutboxDrained(ctx, outboxID)
+}
+
+func (s *Store) loadSettlementReceiptAuditOutbox(ctx context.Context, outboxID int64) (string, string, SettlementReceiptState, int64, time.Time, bool, error) {
+	var eventType, accountScopeHash string
+	var state SettlementReceiptState
+	var attemptedReceivedAtUnixMS int64
+	var eventTime time.Time
+	found := false
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var err error
+		eventType, accountScopeHash, state, attemptedReceivedAtUnixMS, eventTime, found, err = loadSettlementReceiptAuditOutboxConn(ctx, conn, outboxID)
+		return err
+	})
+	return eventType, accountScopeHash, state, attemptedReceivedAtUnixMS, eventTime, found, err
+}
+
+func (s *Store) markSettlementReceiptAuditOutboxDrained(ctx context.Context, outboxID int64) (bool, error) {
+	drained := false
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		res, err := conn.ExecContext(ctx, `
+UPDATE settlement_receipt_audit_outbox
+   SET drained_at_utc = ?
+ WHERE id = ? AND drained_at_utc IS NULL`,
+			time.Now().UTC().Format(time.RFC3339Nano), outboxID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		drained = n > 0
+		return nil
+	})
+	return drained, err
+}
+
+func loadSettlementReceiptAuditOutboxConn(ctx context.Context, conn *sql.Conn, outboxID int64) (string, string, SettlementReceiptState, int64, time.Time, bool, error) {
+	var state SettlementReceiptState
+	var eventType, accountScopeHash, checksJSON, createdAtUTC string
+	var attemptedReceivedAtUnixMS int64
+	var receiptPresent, closed int
+	var receiptVersion, outputHash, usageDigest, tupleDigest, providerSession, providerGeneration sql.NullString
+	err := conn.QueryRowContext(ctx, `
+SELECT event_type, account_scope_hash, attempted_received_at_unix_ms,
+       request_id, attempt_n, provider_id, idempotency_status,
+       receipt_present, receipt_version, receipt_result, settlement_outcome,
+       reason, closed, terminal_state, terminal_state_ts_unix_ms,
+       pending_deadline_unix_ms, received_at_unix_ms, route_snapshot_digest,
+       route_snapshot_policy_version, route_snapshot_mode, paid_entrypoint,
+       provider_session_id, provider_generation_id, spec008_hash_status,
+       provider_reported_model_hash, provider_receipt_key_fingerprint,
+       catalog_id, catalog_body_digest, expected_catalog_model_hash,
+       model_id, model_hash, receipt_profile, buyer_debit_outcome,
+       provider_settlement_outcome, payout_exclusion_outcome, prompt_hash,
+       output_hash, usage_digest, receipt_tuple_canonical_sha256, checks_json,
+       created_at_utc
+  FROM settlement_receipt_audit_outbox o
+ WHERE o.id = ? AND o.drained_at_utc IS NULL`, outboxID).Scan(
+		&eventType, &accountScopeHash, &attemptedReceivedAtUnixMS,
+		&state.RequestID, &state.AttemptN, &state.ProviderID, &state.IdempotencyStatus,
+		&receiptPresent,
+		&receiptVersion, &state.ReceiptResult, &state.SettlementOutcome,
+		&state.Reason, &closed, &state.TerminalState,
+		&state.TerminalStateTSUnixMS, &state.PendingDeadlineUnixMS,
+		&state.ReceivedAtUnixMS, &state.RouteSnapshotDigest,
+		&state.RouteSnapshotPolicyVersion, &state.RouteSnapshotMode,
+		&state.PaidEntrypoint, &providerSession, &providerGeneration,
+		&state.Spec008HashStatus,
+		&state.ProviderReportedModelHash, &state.ProviderReceiptKeyFingerprint,
+		&state.CatalogID, &state.CatalogBodyDigest,
+		&state.ExpectedCatalogModelHash, &state.ModelID, &state.ModelHash,
+		&state.ReceiptProfile, &state.BuyerDebitOutcome,
+		&state.ProviderSettlementOutcome, &state.PayoutExclusionOutcome,
+		&state.PromptHash, &outputHash, &usageDigest,
+		&tupleDigest, &checksJSON, &createdAtUTC,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", SettlementReceiptState{}, 0, time.Time{}, false, nil
+		}
+		return "", "", SettlementReceiptState{}, 0, time.Time{}, false, err
+	}
+	eventTime, err := time.Parse(time.RFC3339Nano, createdAtUTC)
+	if err != nil {
+		return "", "", SettlementReceiptState{}, 0, time.Time{}, false, fmt.Errorf("parse settlement receipt audit outbox created_at_utc: %w", err)
+	}
+	state.ReceiptPresent = receiptPresent == 1
+	state.Closed = closed == 1
+	state.ReceiptVersion = receiptVersion.String
+	state.OutputHash = outputHash.String
+	state.UsageDigest = usageDigest.String
+	state.ReceiptTupleCanonicalSHA256 = tupleDigest.String
+	if providerSession.Valid {
+		state.ProviderSessionID = providerSession.String
+	}
+	if providerGeneration.Valid {
+		state.ProviderGenerationID = providerGeneration.String
+	}
+	if err := json.Unmarshal([]byte(checksJSON), &state.Checks); err != nil {
+		return "", "", SettlementReceiptState{}, 0, time.Time{}, false, fmt.Errorf("decode settlement receipt checks: %w", err)
+	}
+	return eventType, accountScopeHash, state, attemptedReceivedAtUnixMS, eventTime, true, nil
 }
 
 func settlementReceiptAuditPayload(state SettlementReceiptState, checks *SettlementVerificationChecks, verdict bool, attemptedReceivedAtUnixMS int64) (string, error) {
+	return settlementReceiptAuditPayloadForAccountHash(redactedAccountScopeHash(state.AccountScope), state, checks, verdict, attemptedReceivedAtUnixMS, 0)
+}
+
+func settlementReceiptAuditPayloadForAccountHash(accountScopeHash string, state SettlementReceiptState, checks *SettlementVerificationChecks, verdict bool, attemptedReceivedAtUnixMS int64, outboxID int64) (string, error) {
 	payload := map[string]any{
-		"account_scope_hash":               redactedAccountScopeHash(state.AccountScope),
+		"account_scope_hash":               accountScopeHash,
 		"request_id":                       state.RequestID,
 		"attempt_id":                       settlementReceiptAttemptID(state),
 		"attempt_n":                        state.AttemptN,
@@ -1091,6 +1379,9 @@ func settlementReceiptAuditPayload(state SettlementReceiptState, checks *Settlem
 		"output_hash":                      state.OutputHash,
 		"usage_digest":                     state.UsageDigest,
 		"received_at_unix_ms":              state.ReceivedAtUnixMS,
+	}
+	if outboxID > 0 {
+		payload["settlement_receipt_audit_outbox_id"] = outboxID
 	}
 	if state.ProviderSessionID != "" {
 		payload["provider_session_id"] = state.ProviderSessionID

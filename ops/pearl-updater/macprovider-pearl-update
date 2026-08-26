@@ -2220,6 +2220,10 @@ class Updater:
             raise UpdateError(f"{description} must be a normalized absolute path")
         return path
 
+    @staticmethod
+    def _coordinator_audit_database_path(coordinator_database: Path) -> Path:
+        return coordinator_database.parent / "coordinator-audit.db"
+
     def capture_database_paths(self) -> None:
         if self.gateway_db is not None:
             paths = (
@@ -2227,6 +2231,10 @@ class Updater:
                 if self.databases and self.databases[0] == self.gateway_db
                 else (self.gateway_db, *self.databases)
             )
+            if len(paths) >= 2:
+                coordinator_audit_database = self._coordinator_audit_database_path(paths[1])
+                if coordinator_audit_database not in paths:
+                    paths = (paths[0], paths[1], coordinator_audit_database, *paths[2:])
             config_hashes = dict(self.runtime_config_hashes)
         else:
             runtime = self.coordinator_runtime_state or self.coordinator_runtime()
@@ -2250,11 +2258,12 @@ class Updater:
             stats_unit_inputs, stats_database = self.stats_mirror_runtime()
             gateway_database = self._database_path(gateway, "gateway storage.db_path")
             coordinator_database = self._database_path(storage, "coordinator storage.db_path")
+            coordinator_audit_database = self._coordinator_audit_database_path(coordinator_database)
             if gateway_database == coordinator_database:
                 raise UpdateError("gateway and coordinator database paths must be distinct")
             if stats_database == gateway_database:
                 raise UpdateError("stats billing mirror cannot read the gateway database")
-            resolved = [gateway_database, coordinator_database]
+            resolved = [gateway_database, coordinator_database, coordinator_audit_database]
             if stats_database != coordinator_database:
                 resolved.append(stats_database)
             payout = effective.get(("malibu_emission", "sqlite_payout_db_path"))
