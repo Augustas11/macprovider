@@ -144,11 +144,17 @@ timeouts:
   streaming_idle_ms: 10000
 
 retry_503:
-  # Retries coordinator 503 no_provider_available AND transient 502 provider
-  # transport failures (provider_disconnected / provider_error / provider_failed).
+  # Shared retry loop for transient coordinator admission failures. Keep this
+  # enabled so transient 502 provider transport failures
+  # (provider_disconnected / provider_error / provider_failed) can recover.
   # Does NOT retry null-usage provider errors, tier-2 policy rejects, or
   # post-inference structured-output 502s (malformed_json_response, etc.).
   enabled: true
+  # Capacity-empty coordinator 503s (no_provider_available or an empty 503)
+  # are excluded by default to avoid multiplying requests while the provider
+  # pool is genuinely empty. Enable only when operators want the gateway to
+  # smooth short, momentary capacity races.
+  retry_no_provider_available: false
   max_attempts: 3
   backoff_base_ms: 100
   backoff_max_ms: 500
