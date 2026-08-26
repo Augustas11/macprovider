@@ -286,6 +286,7 @@ SIGNED_JOURNEY_RESULT_ALLOWED_KEYS = SIGNED_JOURNEY_RESULT_REQUIRED_KEYS | {
     "eip712",
     "candidate",
     "candidate_identity",
+    "pool_rejection_timing",
     "signer",
 }
 
@@ -1594,6 +1595,56 @@ def _validate_trusted_pool_creator_mvp_journey_result(
         oracle_value = observations.get("pool_existence_oracle_within_threshold")
         if oracle_value not in (True, False):
             result.error(f"{location}.signed.observations.pool_existence_oracle_within_threshold", "must be true or false")
+        if oracle_value is True:
+            timing = signed.get("pool_rejection_timing")
+            if _expect_object(timing, f"{location}.signed.pool_rejection_timing", result):
+                for field_name in (
+                    "floor_ms",
+                    "method",
+                    "sample_count_per_class",
+                    "p95_delta_ms",
+                    "p99_delta_ms",
+                    "mann_whitney_p_value",
+                    "statistical_test",
+                ):
+                    if field_name not in timing:
+                        result.error(f"{location}.signed.pool_rejection_timing.{field_name}", "is required when pool_existence_oracle_within_threshold is true")
+                classes = timing.get("classes_covered")
+                if not isinstance(classes, list) or not classes:
+                    result.error(f"{location}.signed.pool_rejection_timing.classes_covered", "must be a non-empty list when oracle is true")
+                else:
+                    required_classes = {"unknown", "unauthorized", "disabled"}
+                    missing_classes = required_classes - {item for item in classes if isinstance(item, str)}
+                    if missing_classes:
+                        result.error(
+                            f"{location}.signed.pool_rejection_timing.classes_covered",
+                            f"must include {sorted(required_classes)} (missing {sorted(missing_classes)})",
+                        )
+                floor_ms = timing.get("floor_ms")
+                if not isinstance(floor_ms, int) or isinstance(floor_ms, bool) or floor_ms < 50:
+                    result.error(f"{location}.signed.pool_rejection_timing.floor_ms", "must be an integer >= 50")
+                sample_count = timing.get("sample_count_per_class")
+                if not isinstance(sample_count, int) or isinstance(sample_count, bool) or sample_count < 8:
+                    result.error(f"{location}.signed.pool_rejection_timing.sample_count_per_class", "must be an integer >= 8")
+                for field_name in ("p95_delta_ms", "p99_delta_ms", "mann_whitney_p_value"):
+                    value = timing.get(field_name)
+                    if not isinstance(value, (int, float)) or isinstance(value, bool):
+                        result.error(f"{location}.signed.pool_rejection_timing.{field_name}", "must be a number")
+                if isinstance(timing.get("p95_delta_ms"), (int, float)) and timing.get("p95_delta_ms") > 15:
+                    result.error(f"{location}.signed.pool_rejection_timing.p95_delta_ms", "must be <= 15")
+                if isinstance(timing.get("p99_delta_ms"), (int, float)) and timing.get("p99_delta_ms") > 25:
+                    result.error(f"{location}.signed.pool_rejection_timing.p99_delta_ms", "must be <= 25")
+                if isinstance(timing.get("mann_whitney_p_value"), (int, float)) and timing.get("mann_whitney_p_value") < 0.01:
+                    result.error(f"{location}.signed.pool_rejection_timing.mann_whitney_p_value", "must be >= 0.01")
+                if not isinstance(timing.get("method"), str) or not timing.get("method"):
+                    result.error(f"{location}.signed.pool_rejection_timing.method", "must be a non-empty string")
+                if not isinstance(timing.get("statistical_test"), str) or not timing.get("statistical_test"):
+                    result.error(f"{location}.signed.pool_rejection_timing.statistical_test", "must be a non-empty string")
+        elif "pool_rejection_timing" in signed and signed.get("pool_rejection_timing") is not None:
+            result.error(
+                f"{location}.signed.pool_rejection_timing",
+                "must be omitted when pool_existence_oracle_within_threshold is false",
+            )
 
     identity = signed.get("candidate_identity")
     if _expect_object(identity, f"{location}.signed.candidate_identity", result):

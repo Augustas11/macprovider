@@ -77,6 +77,16 @@ def valid_signed(*, requirement_ids=None, extra_requirement=None, **overrides):
             "public_announcement_without_reviewed_artifact_observed": False,
             "unrestricted_creator_admin_observed": False,
         },
+        "pool_rejection_timing": {
+            "floor_ms": 50,
+            "method": "active_sleep_to_floor",
+            "sample_count_per_class": 16,
+            "classes_covered": ["unknown", "unauthorized", "disabled"],
+            "p95_delta_ms": 1.5,
+            "p99_delta_ms": 2.0,
+            "mann_whitney_p_value": 0.42,
+            "statistical_test": "two-sided Mann-Whitney U with normal approximation; fail if p < 0.01",
+        },
         "candidate_identity": {
             "approval_record_id": "approval-alpha",
             "approval_record_version": "2",

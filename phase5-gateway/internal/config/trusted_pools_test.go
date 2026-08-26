@@ -157,6 +157,16 @@ func TestValidateTrustedPoolsConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("disabled rejects floor below 50ms", func(t *testing.T) {
+		cfg := base(TrustedPoolsConfig{
+			Enabled:                false,
+			RejectionTimingFloorMS: 40,
+		})
+		if err := validateTrustedPoolsConfig(cfg); err == nil {
+			t.Fatal("disabled floor < 50 accepted")
+		}
+	})
+
 	t.Run("enabled accepts floor of 50ms", func(t *testing.T) {
 		cfg := base(TrustedPoolsConfig{
 			Enabled:                true,

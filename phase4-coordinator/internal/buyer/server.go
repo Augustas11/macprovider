@@ -504,9 +504,13 @@ func WithTrustPoolStatusStore(store *trustpool.Store) Option {
 }
 
 // WithPoolRejectionTimingFloor sets the SPEC-043-R007 active pool_unavailable
-// timing floor. Values <= 0 keep the normative 50 ms default.
+// timing floor. Values <= 0 keep the normative 50 ms default. Positive values
+// below 50 ms are clamped to 50 ms so option wiring cannot undercut R007.
 func WithPoolRejectionTimingFloor(floor time.Duration) Option {
 	return func(s *Server) {
+		if floor > 0 && floor < 50*time.Millisecond {
+			floor = 50 * time.Millisecond
+		}
 		s.poolRejectionTimingFloor = floor
 	}
 }
@@ -8577,6 +8581,9 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 
 func (s *Server) poolRejectionTimingFloorOrDefault() time.Duration {
 	if s == nil || s.poolRejectionTimingFloor <= 0 {
+		return 50 * time.Millisecond
+	}
+	if s.poolRejectionTimingFloor < 50*time.Millisecond {
 		return 50 * time.Millisecond
 	}
 	return s.poolRejectionTimingFloor

@@ -1027,14 +1027,30 @@ type StorageConfig struct {
 // with that reconstructed registry; reconstruction failure disables pool support
 // while preserving global routing.
 type TrustedPoolsConfig struct {
-	Enabled                          bool                                       `yaml:"enabled"`
-	RefreshIntervalS                 int                                        `yaml:"refresh_interval_s"`
+	Enabled          bool `yaml:"enabled"`
+	RefreshIntervalS int  `yaml:"refresh_interval_s"`
+	// RejectionTimingFloorMS is the SPEC-043-R007 active minimum for
+	// pool_unavailable rejection paths. Zero means the normative 50 ms floor.
+	// Positive values below 50 are rejected at config validation.
+	RejectionTimingFloorMS           int                                        `yaml:"rejection_timing_floor_ms"`
 	ProductionActivation             TrustedPoolsProductionActivationConfig     `yaml:"production_activation"`
 	CreatorAdminCredentials          []TrustedPoolsCreatorAdminCredentialConfig `yaml:"creator_admin_credentials"`
 	CreatorAdminProviderIDs          map[string][]string                        `yaml:"creator_admin_provider_ids"`
 	CreatorAdminProviderDelegatedIDs map[string][]string                        `yaml:"creator_admin_provider_delegated_ids"`
 	CreatorAdminBuyerAccountIDs      map[string][]string                        `yaml:"creator_admin_buyer_account_ids"`
 	ProviderOwnerPublicKeys          map[string]string                          `yaml:"provider_owner_public_keys"`
+}
+
+// RejectionTimingFloor returns the active pool-rejection timing floor.
+// Unconfigured (0) defaults to 50 ms. Positive sub-50 values clamp to 50 ms.
+func (t TrustedPoolsConfig) RejectionTimingFloor() time.Duration {
+	ms := t.RejectionTimingFloorMS
+	if ms <= 0 {
+		ms = 50
+	} else if ms < 50 {
+		ms = 50
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 type TrustedPoolsProductionActivationConfig struct {
@@ -1364,6 +1380,7 @@ func Default() Config {
 		TrustedPools: TrustedPoolsConfig{
 			Enabled:                          false,
 			RefreshIntervalS:                 30,
+			RejectionTimingFloorMS:           0,
 			CreatorAdminCredentials:          []TrustedPoolsCreatorAdminCredentialConfig{},
 			CreatorAdminProviderIDs:          map[string][]string{},
 			CreatorAdminProviderDelegatedIDs: map[string][]string{},
@@ -2166,6 +2183,12 @@ func (c Config) Validate() error {
 	}
 	if c.TrustedPools.Enabled && !c.Coordinator.RequireGatewayContext {
 		return fmt.Errorf("trusted_pools.enabled requires coordinator.require_gateway_context=true")
+	}
+	if c.TrustedPools.RejectionTimingFloorMS < 0 {
+		return fmt.Errorf("trusted_pools.rejection_timing_floor_ms must be >= 0")
+	}
+	if c.TrustedPools.RejectionTimingFloorMS > 0 && c.TrustedPools.RejectionTimingFloorMS < 50 {
+		return fmt.Errorf("trusted_pools.rejection_timing_floor_ms must be >= 50 (got %d)", c.TrustedPools.RejectionTimingFloorMS)
 	}
 	if c.TrustedPools.Enabled && (c.TrustedPools.RefreshIntervalS <= 0 || c.TrustedPools.RefreshIntervalS > 60) {
 		return fmt.Errorf("trusted_pools.refresh_interval_s must be in [1,60] when trusted_pools.enabled=true")

@@ -48,7 +48,7 @@ actually exercises the path (or recapture after merge proves them):
 | `creator_suspension_root_compromise_freeze_verified` | Proven in harness on new captures; committed envelope still false |
 | `descendant_signer_rejection_verified` | Proven in harness on new captures; committed envelope still false |
 | `delegation_revocation_verified` | Proven in harness on new captures via canonical `ProviderPoolDelegationV1` grant/revoke (`member_revoked` is not delegation proof); committed envelope still false |
-| `pool_existence_oracle_within_threshold` | Proven in harness on new captures via buyer/gateway rejection timing floor + unknown vs unauthorized distribution test; committed envelope still false |
+| `pool_existence_oracle_within_threshold` | Proven in harness on new captures via buyer/gateway rejection timing floor + unknown/unauthorized/disabled distribution test (wallet covered at gateway); committed envelope still false |
 
 Also still missing for Gate D:
 

@@ -272,8 +272,6 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 		}
 	}
 
-	oracle := assertCreatorMVPPoolExistenceOracle(t, server, chatBody, root.poolID)
-
 	statusReq := httptest.NewRequest(http.MethodGet, "/v1/trust-pools/"+root.poolID+"/pool_status.json", nil)
 	statusReq.Header.Set("Authorization", "Bearer gateway-secret")
 	statusReq.Header.Set("X-MacProvider-Account", creatorMVPBuyerAccount)
@@ -391,6 +389,7 @@ func TestJourneyTrustedPoolCreatorMVPCandidate(t *testing.T) {
 	if paused.Routeable || len(paused.Members) != 0 {
 		t.Fatalf("paused snapshot = %+v, want fail-closed members", paused)
 	}
+	oracle := assertCreatorMVPPoolExistenceOracle(t, server, chatBody, root.poolID)
 
 	suspended = validCreatorApproval("creator-a", "approval-v1", "approval-version-1", "candidate", graceEnds, trustpool.CreatorStatusSuspended)
 	postAdminCreator(t, handler, creatorMVPOperatorKey, suspended, http.StatusAccepted)
@@ -589,7 +588,7 @@ func creatorMVPEvidence(t *testing.T, in creatorMVPEvidenceInput) map[string]any
 			creatorMVPStep("step-03-manifest-create-accepted", "Signed candidate manifest accepted after pool create; pool stayed non-routeable until promotion."),
 			creatorMVPStep("step-04-negative-manifest-cases", "Unsigned manifest and prohibited routing-claim snapshot were rejected before durable append."),
 			creatorMVPStep("step-05-provider-membership", "Undelegated provider admission failed; delegated provider required ProviderPoolDelegationV1; owner delegation_revoked removed the delegated member while owned member kept routing."),
-			creatorMVPStep("step-06-buyer-authorization", "Dedicated buyer grant succeeded; unauthorized and unknown pool selections failed closed with generic pool_unavailable under the active timing floor within SPEC-043-R007 p95/p99 oracle bounds."),
+			creatorMVPStep("step-06-buyer-authorization", "Dedicated buyer grant succeeded; unauthorized, unknown, and disabled pool selections failed closed with generic pool_unavailable under the active timing floor within SPEC-043-R007 p95/p99 oracle bounds."),
 			creatorMVPStep("step-07-promise-surfaces", "Authorized policy and status documents used no-store cache control and kept the Trusted Pool confidentiality scope."),
 			creatorMVPStep("step-08-activation-gate", "Promotion before root/manifest/membership failed closed; candidate promotion after preflight published a routeable snapshot."),
 			creatorMVPStep("step-09-successful-pooled-request", "Authorized pooled chat returned 200 through the admitted member only."),
@@ -822,8 +821,10 @@ type creatorMVPPoolExistenceOracle struct {
 	FloorMS             int
 	Method              string
 	SampleCountPerClass int
+	ClassesCovered      []string
 	UnknownP50MS        float64
 	UnauthorizedP50MS   float64
+	DisabledP50MS       float64
 	P95DeltaMS          float64
 	P99DeltaMS          float64
 	MannWhitneyPValue   float64
@@ -834,18 +835,23 @@ func (o creatorMVPPoolExistenceOracle) Evidence() map[string]any {
 		"floor_ms":               o.FloorMS,
 		"method":                 o.Method,
 		"sample_count_per_class": o.SampleCountPerClass,
+		"classes_covered":        o.ClassesCovered,
 		"unknown_p50_ms":         o.UnknownP50MS,
 		"unauthorized_p50_ms":    o.UnauthorizedP50MS,
+		"disabled_p50_ms":        o.DisabledP50MS,
 		"p95_delta_ms":           o.P95DeltaMS,
 		"p99_delta_ms":           o.P99DeltaMS,
 		"mann_whitney_p_value":   o.MannWhitneyPValue,
 		"statistical_test":       "two-sided Mann-Whitney U with normal approximation; fail if p < 0.01",
+		"intentional_gaps":       []string{"pool_policy_stale remains a distinct error code", "wallet_session rejection covered by gateway unit distribution test"},
 	}
 }
 
-// assertCreatorMVPPoolExistenceOracle proves SPEC-043-R007: unknown vs unauthorized
-// pool_unavailable rejection latency honors the active floor and stays inside the
-// journey distribution bounds (p95 delta <= 15ms, p99 delta <= 25ms, Mann-Whitney p >= 0.01).
+// assertCreatorMVPPoolExistenceOracle proves SPEC-043-R007: unknown vs
+// unauthorized vs disabled (paused/non-routeable) pool_unavailable rejection
+// latency honors the active floor and stays inside the journey distribution
+// bounds (p95 delta <= 15ms, p99 delta <= 25ms, Mann-Whitney p >= 0.01).
+// Call after the pool is paused so the disabled class is measurable.
 func assertCreatorMVPPoolExistenceOracle(t *testing.T, server *buyer.Server, body []byte, poolID string) creatorMVPPoolExistenceOracle {
 	t.Helper()
 	const (
@@ -868,6 +874,17 @@ func assertCreatorMVPPoolExistenceOracle(t *testing.T, server *buyer.Server, bod
 		if code != "pool_unavailable" && !strings.Contains(resp.Body.String(), "pool_unavailable") {
 			t.Fatalf("pool rejection body=%s, want pool_unavailable", resp.Body.String())
 		}
+		if got := resp.Header().Get("Retry-After"); got != "" {
+			t.Fatalf("Retry-After=%q, want absent for pool_unavailable", got)
+		}
+		var env struct {
+			Error struct {
+				Retryable bool `json:"retryable"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &env); err == nil && env.Error.Retryable {
+			t.Fatalf("pool_unavailable retryable=true body=%s, want false", resp.Body.String())
+		}
 		if elapsed+5*time.Millisecond < floor {
 			t.Fatalf("elapsed=%s below floor=%s account=%s pool=%s", elapsed, floor, accountID, selectPool)
 		}
@@ -875,31 +892,54 @@ func assertCreatorMVPPoolExistenceOracle(t *testing.T, server *buyer.Server, bod
 	}
 	unknown := make([]time.Duration, 0, samples)
 	unauthorized := make([]time.Duration, 0, samples)
+	disabled := make([]time.Duration, 0, samples)
 	for i := 0; i < samples; i++ {
 		unknown = append(unknown, measure(creatorMVPBuyerAccount, unknownPoolID))
 		unauthorized = append(unauthorized, measure("acct-other", poolID))
+		disabled = append(disabled, measure(creatorMVPBuyerAccount, poolID))
 	}
-	p95Delta := absCreatorMVPDuration(percentileCreatorMVPDuration(unknown, 0.95) - percentileCreatorMVPDuration(unauthorized, 0.95))
-	p99Delta := absCreatorMVPDuration(percentileCreatorMVPDuration(unknown, 0.99) - percentileCreatorMVPDuration(unauthorized, 0.99))
-	if p95Delta > 15*time.Millisecond {
-		t.Fatalf("p95 delta=%s exceeds 15ms unknown=%v unauthorized=%v", p95Delta, unknown, unauthorized)
+	maxP95 := absCreatorMVPDuration(percentileCreatorMVPDuration(unknown, 0.95) - percentileCreatorMVPDuration(unauthorized, 0.95))
+	maxP99 := absCreatorMVPDuration(percentileCreatorMVPDuration(unknown, 0.99) - percentileCreatorMVPDuration(unauthorized, 0.99))
+	pairs := [][2][]time.Duration{
+		{unknown, unauthorized},
+		{unknown, disabled},
+		{unauthorized, disabled},
 	}
-	if p99Delta > 25*time.Millisecond {
-		t.Fatalf("p99 delta=%s exceeds 25ms unknown=%v unauthorized=%v", p99Delta, unknown, unauthorized)
-	}
-	pValue := mannWhitneyCreatorMVPPValue(unknown, unauthorized)
-	if pValue < 0.01 {
-		t.Fatalf("mann-whitney p=%g < 0.01 distinguishes unknown=%v unauthorized=%v", pValue, unknown, unauthorized)
+	minP := 1.0
+	for _, pair := range pairs {
+		p95 := absCreatorMVPDuration(percentileCreatorMVPDuration(pair[0], 0.95) - percentileCreatorMVPDuration(pair[1], 0.95))
+		p99 := absCreatorMVPDuration(percentileCreatorMVPDuration(pair[0], 0.99) - percentileCreatorMVPDuration(pair[1], 0.99))
+		if p95 > maxP95 {
+			maxP95 = p95
+		}
+		if p99 > maxP99 {
+			maxP99 = p99
+		}
+		pValue := mannWhitneyCreatorMVPPValue(pair[0], pair[1])
+		if pValue < minP {
+			minP = pValue
+		}
+		if p95 > 15*time.Millisecond {
+			t.Fatalf("p95 delta=%s exceeds 15ms pair=%v/%v", p95, pair[0], pair[1])
+		}
+		if p99 > 25*time.Millisecond {
+			t.Fatalf("p99 delta=%s exceeds 25ms pair=%v/%v", p99, pair[0], pair[1])
+		}
+		if pValue < 0.01 {
+			t.Fatalf("mann-whitney p=%g < 0.01 distinguishes pair=%v/%v", pValue, pair[0], pair[1])
+		}
 	}
 	return creatorMVPPoolExistenceOracle{
 		FloorMS:             int(floor / time.Millisecond),
 		Method:              "active_sleep_to_floor",
 		SampleCountPerClass: samples,
+		ClassesCovered:      []string{"unknown", "unauthorized", "disabled"},
 		UnknownP50MS:        float64(percentileCreatorMVPDuration(unknown, 0.50)) / float64(time.Millisecond),
 		UnauthorizedP50MS:   float64(percentileCreatorMVPDuration(unauthorized, 0.50)) / float64(time.Millisecond),
-		P95DeltaMS:          float64(p95Delta) / float64(time.Millisecond),
-		P99DeltaMS:          float64(p99Delta) / float64(time.Millisecond),
-		MannWhitneyPValue:   pValue,
+		DisabledP50MS:       float64(percentileCreatorMVPDuration(disabled, 0.50)) / float64(time.Millisecond),
+		P95DeltaMS:          float64(maxP95) / float64(time.Millisecond),
+		P99DeltaMS:          float64(maxP99) / float64(time.Millisecond),
+		MannWhitneyPValue:   minP,
 	}
 }
 

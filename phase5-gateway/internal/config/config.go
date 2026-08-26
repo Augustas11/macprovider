@@ -292,17 +292,21 @@ type TrustedPoolsConfig struct {
 	AccountPools          map[string][]string `yaml:"account_pools"`
 	// RejectionTimingFloorMS is the SPEC-043-R007 active minimum for every
 	// pool-selection rejection path (unknown/unauthorized/disabled/unavailable).
-	// Zero means the normative 50 ms floor. Values below 50 are rejected at
-	// config validation when trusted pools are enabled.
+	// Zero means the normative 50 ms floor. Positive values below 50 are
+	// rejected at config validation even when trusted pools are disabled,
+	// because a named selector while disabled is itself an R007 rejection class.
 	RejectionTimingFloorMS int `yaml:"rejection_timing_floor_ms"`
 }
 
 // RejectionTimingFloor returns the active pool-rejection timing floor.
 // Unconfigured (0) defaults to 50 ms so fail-closed oracle protection remains
-// on even when operators omit the YAML key.
+// on even when operators omit the YAML key. Positive sub-50 values are clamped
+// to 50 ms as defense in depth if validation is bypassed.
 func (t TrustedPoolsConfig) RejectionTimingFloor() time.Duration {
 	ms := t.RejectionTimingFloorMS
 	if ms <= 0 {
+		ms = 50
+	} else if ms < 50 {
 		ms = 50
 	}
 	return time.Duration(ms) * time.Millisecond
@@ -930,8 +934,8 @@ func validateTrustedPoolsConfig(c Config) error {
 	if tp.RejectionTimingFloorMS < 0 {
 		return fmt.Errorf("features.trusted_pools.rejection_timing_floor_ms must be >= 0")
 	}
-	if tp.Enabled && tp.RejectionTimingFloorMS > 0 && tp.RejectionTimingFloorMS < 50 {
-		return fmt.Errorf("features.trusted_pools.rejection_timing_floor_ms must be >= 50 when trusted pools are enabled (got %d)", tp.RejectionTimingFloorMS)
+	if tp.RejectionTimingFloorMS > 0 && tp.RejectionTimingFloorMS < 50 {
+		return fmt.Errorf("features.trusted_pools.rejection_timing_floor_ms must be >= 50 (got %d)", tp.RejectionTimingFloorMS)
 	}
 	if !tp.Enabled {
 		return nil
