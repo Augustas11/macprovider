@@ -10,6 +10,7 @@ set -euo pipefail
 COORDINATOR_DB_PATH="${COORDINATOR_DB_PATH:-/var/lib/macprovider/coordinator.db}"
 COORDINATOR_AUDIT_DB_PATH="${COORDINATOR_AUDIT_DB_PATH:-}"
 SKIP_CHECKSUM="${SKIP_CHECKSUM:-0}"
+ALLOW_UNPAIRED_AUDIT_RESTORE="${ALLOW_UNPAIRED_AUDIT_RESTORE:-0}"
 
 log() { printf '[coordinator-archive-restore] %s\n' "$*" >&2; }
 fail() { log "ERROR: $*"; exit 1; }
@@ -97,6 +98,7 @@ paired_audit_archive_for() {
       suffix=${archive_base#coordinator-}
       candidate="$archive_dir/coordinator-audit-$suffix"
       [ -f "$candidate" ] && printf '%s\n' "$candidate"
+      return 0
       ;;
   esac
 }
@@ -124,6 +126,9 @@ restore_archive_to_temp() {
 }
 
 AUDIT_ARCHIVE_PATH=$(paired_audit_archive_for "$ARCHIVE_PATH")
+if [ -z "$AUDIT_ARCHIVE_PATH" ] && [ "$ALLOW_UNPAIRED_AUDIT_RESTORE" != "1" ]; then
+  refuse "paired coordinator-audit archive missing; set ALLOW_UNPAIRED_AUDIT_RESTORE=1 only for legacy primary-only forensic restores"
+fi
 PRIMARY_TMP="$TMP_DIR/coordinator.db"
 AUDIT_TMP="$TMP_DIR/coordinator-audit.db"
 restore_archive_to_temp "$ARCHIVE_PATH" "$PRIMARY_TMP"

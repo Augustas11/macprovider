@@ -73,7 +73,7 @@ func OpenMDAStore(path string) (*MDAStore, error) {
 			return nil, err
 		}
 	}
-	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(path))
+	db, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(path))
 	if err != nil {
 		return nil, err
 	}

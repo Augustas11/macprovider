@@ -33,6 +33,22 @@ func bootstrapPrincipal(label string) string {
 	return "mp-" + hex.EncodeToString(sum[:16])
 }
 
+func TestOpenStoreDisablesSQLiteAutocheckpointForPrimaryDB(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var got int
+	if err := store.DB().QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&got); err != nil {
+		t.Fatalf("PRAGMA wal_autocheckpoint: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("wal_autocheckpoint=%d want 0", got)
+	}
+}
+
 func TestValidateTokenReadOnlyAuthenticatesWithoutRefreshingUsage(t *testing.T) {
 	ctx := context.Background()
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))

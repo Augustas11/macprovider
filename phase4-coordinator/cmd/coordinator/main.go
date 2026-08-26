@@ -235,7 +235,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "canary sanction storage: %v\n", err)
 		os.Exit(1)
 	}
-	auditStore, err := audit.OpenStore(cfg.Storage.DBPath)
+	auditStore, err := audit.OpenStoreWithManualWALCheckpoint(cfg.Storage.DBPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "audit log storage: %v\n", err)
 		os.Exit(1)

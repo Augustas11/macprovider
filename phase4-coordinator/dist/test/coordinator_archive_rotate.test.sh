@@ -249,6 +249,25 @@ set -e
 [ "$audit_primary_rc" = "4" ] || fail "audit archive as primary should refuse with exit 4"
 grep -q "audit archive cannot be restored as the primary archive" "$TMP/audit-as-primary.err" || fail "audit archive primary refusal text missing"
 
+UNPAIRED_DIR="$TMP/unpaired-archive"
+mkdir -p "$UNPAIRED_DIR"
+cp "$archive_path" "$UNPAIRED_DIR/$(basename "$archive_path")"
+cp "${archive_path}.sha256" "$UNPAIRED_DIR/$(basename "$archive_path").sha256"
+unpaired_archive="$UNPAIRED_DIR/$(basename "$archive_path")"
+set +e
+"$RESTORE" "$unpaired_archive" "$TMP/unpaired-restored.db" >"$TMP/unpaired.out" 2>"$TMP/unpaired.err"
+unpaired_rc=$?
+set -e
+[ "$unpaired_rc" = "4" ] || fail "unpaired audit restore should refuse with exit 4"
+grep -q "paired coordinator-audit archive missing" "$TMP/unpaired.err" || fail "unpaired audit restore refusal text missing"
+
+UNPAIRED_RESTORE_DIR="$TMP/unpaired-restore-target"
+mkdir -p "$UNPAIRED_RESTORE_DIR"
+ALLOW_UNPAIRED_AUDIT_RESTORE=1 \
+  "$RESTORE" "$unpaired_archive" "$UNPAIRED_RESTORE_DIR/restored.db" >"$TMP/unpaired-override.out" 2>"$TMP/unpaired-override.err"
+[ -f "$UNPAIRED_RESTORE_DIR/restored.db" ] || fail "unpaired override restore target missing"
+[ ! -f "$UNPAIRED_RESTORE_DIR/coordinator-audit.db" ] || fail "unpaired override unexpectedly restored audit DB"
+
 RESTORE_DIR="$TMP/restore-target"
 mkdir -p "$RESTORE_DIR"
 restored="$RESTORE_DIR/restored.db"
