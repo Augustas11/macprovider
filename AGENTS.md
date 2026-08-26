@@ -88,15 +88,16 @@ command and result.
 ## Git Workflow
 
 Never do write-heavy work in canonical `/Users/augstar/macprovider-poc` unless
-the user explicitly says to use that checkout. Start from a fresh sibling
-worktree:
+the user explicitly says to use that checkout. Start from a fresh worktree under
+the hidden local worktree root so Finder does not fill with task directories:
 
 ```bash
 git status -sb
 git worktree list
 git fetch origin
-git worktree add ../macprovider-<topic> -b <scope>/<topic> origin/main
-cd ../macprovider-<topic>
+mkdir -p /Users/augstar/.codex/worktrees/macprovider
+git worktree add /Users/augstar/.codex/worktrees/macprovider/<topic> -b codex/<topic> origin/main
+cd /Users/augstar/.codex/worktrees/macprovider/<topic>
 ```
 
 Use one branch per task. Before pushing or opening a PR, verify
@@ -114,7 +115,16 @@ After any PR squash-merge or direct docs push, sync canonical main:
 git -C /Users/augstar/macprovider-poc fetch origin
 git -C /Users/augstar/macprovider-poc checkout main
 git -C /Users/augstar/macprovider-poc reset --hard origin/main
+git -C /Users/augstar/macprovider-poc worktree prune
+git -C /Users/augstar/macprovider-poc branch --merged origin/main
 ```
+
+Do not leave completed task worktrees behind. After a PR has merged or a task is
+abandoned, run `scripts/prune-merged-worktrees.sh` from the canonical checkout,
+inspect the dry-run, then run `scripts/prune-merged-worktrees.sh --apply` only
+for clean worktrees reported as merged into or patch-equivalent to `origin/main`.
+If a PR is still open, either keep the worktree intentionally and say so, or
+remove it only after confirming there is no unpushed work needed locally.
 
 Do not force-push `main`, admin-merge, bypass branch protection, or merge with
 red required checks unless the user gives explicit written approval for that

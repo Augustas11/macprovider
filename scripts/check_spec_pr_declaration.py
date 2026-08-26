@@ -55,6 +55,7 @@ GOVERNANCE_ONLY_PATHS = (
     "scripts/check_spec_governance.py",
     "scripts/check_spec_pr_declaration.py",
     "scripts/gen_spec_index.py",
+    "scripts/prune-merged-worktrees.sh",
     "scripts/tests/",
     "specs/",
 )
