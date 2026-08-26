@@ -115,15 +115,16 @@ func TestInsertSettlementReceiptOutboxIsIdempotent(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	ts := time.Date(2026, 6, 7, 14, 23, 9, 123000000, time.UTC)
+	payload := `{"event":"one"}`
 
-	inserted, err := store.InsertSettlementReceiptOutbox(ctx, ts, "settlement_receipt_verdict", "provider-a", `{"event":"one"}`, 42)
+	inserted, err := store.InsertSettlementReceiptOutbox(ctx, ts, "settlement_receipt_verdict", "provider-a", payload, 42)
 	if err != nil {
 		t.Fatalf("first insert: %v", err)
 	}
 	if !inserted {
 		t.Fatal("first insert inserted=false want true")
 	}
-	inserted, err = store.InsertSettlementReceiptOutbox(ctx, ts.Add(time.Hour), "settlement_receipt_verdict", "provider-a", `{"event":"two"}`, 42)
+	inserted, err = store.InsertSettlementReceiptOutbox(ctx, ts, "settlement_receipt_verdict", "provider-a", payload, 42)
 	if err != nil {
 		t.Fatalf("second insert: %v", err)
 	}
@@ -141,6 +142,84 @@ WHERE settlement_receipt_audit_outbox_id = 42`).Scan(&count, &gotTS, &gotPayload
 	}
 	if count != 1 || gotTS != ts.Format(time.RFC3339Nano) || gotPayload != `{"event":"one"}` {
 		t.Fatalf("row count/ts/payload = %d/%s/%s", count, gotTS, gotPayload)
+	}
+}
+
+func TestInsertSettlementReceiptOutboxRefusesMismatchedDuplicate(t *testing.T) {
+	tests := []struct {
+		name      string
+		ts        time.Time
+		eventType string
+		provider  string
+		payload   string
+	}{
+		{
+			name:      "timestamp",
+			ts:        time.Date(2026, 6, 7, 15, 23, 9, 123000000, time.UTC),
+			eventType: "settlement_receipt_verdict",
+			provider:  "provider-a",
+			payload:   `{"event":"one"}`,
+		},
+		{
+			name:      "event type",
+			ts:        time.Date(2026, 6, 7, 14, 23, 9, 123000000, time.UTC),
+			eventType: "settlement_receipt_replayed",
+			provider:  "provider-a",
+			payload:   `{"event":"one"}`,
+		},
+		{
+			name:      "provider",
+			ts:        time.Date(2026, 6, 7, 14, 23, 9, 123000000, time.UTC),
+			eventType: "settlement_receipt_verdict",
+			provider:  "provider-b",
+			payload:   `{"event":"one"}`,
+		},
+		{
+			name:      "payload",
+			ts:        time.Date(2026, 6, 7, 14, 23, 9, 123000000, time.UTC),
+			eventType: "settlement_receipt_verdict",
+			provider:  "provider-a",
+			payload:   `{"event":"two"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := openTestStore(t)
+			defer store.Close()
+			ctx := context.Background()
+			originalTS := time.Date(2026, 6, 7, 14, 23, 9, 123000000, time.UTC)
+			originalPayload := `{"event":"one"}`
+
+			inserted, err := store.InsertSettlementReceiptOutbox(ctx, originalTS, "settlement_receipt_verdict", "provider-a", originalPayload, 42)
+			if err != nil {
+				t.Fatalf("first insert: %v", err)
+			}
+			if !inserted {
+				t.Fatal("first insert inserted=false want true")
+			}
+
+			inserted, err = store.InsertSettlementReceiptOutbox(ctx, tt.ts, tt.eventType, tt.provider, tt.payload, 42)
+			if err == nil {
+				t.Fatal("mismatched duplicate err=nil want error")
+			}
+			if inserted {
+				t.Fatal("mismatched duplicate inserted=true want false")
+			}
+			assertErrorContains(t, err, "already exists with different audit event")
+
+			var count int
+			var gotTS, gotEventType, gotProvider, gotPayload string
+			if err := store.DB().QueryRowContext(ctx, `
+SELECT COUNT(*), MIN(ts_utc), MIN(event_type), MIN(provider_id), MIN(payload_json)
+FROM audit_log
+WHERE settlement_receipt_audit_outbox_id = 42`).Scan(&count, &gotTS, &gotEventType, &gotProvider, &gotPayload); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 || gotTS != originalTS.Format(time.RFC3339Nano) || gotEventType != "settlement_receipt_verdict" || gotProvider != "provider-a" || gotPayload != originalPayload {
+				t.Fatalf("row count/ts/event/provider/payload = %d/%s/%s/%s/%s", count, gotTS, gotEventType, gotProvider, gotPayload)
+			}
+		})
 	}
 }
 

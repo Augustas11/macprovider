@@ -197,7 +197,29 @@ INSERT OR IGNORE INTO audit_log (
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	if n > 0 {
+		return true, nil
+	}
+	tsUTC := ts.UTC().Format(time.RFC3339Nano)
+	var gotTS, gotEventType, gotPayload string
+	var gotProvider sql.NullString
+	if err := s.db.QueryRowContext(ctx, `
+SELECT ts_utc, event_type, provider_id, payload_json
+FROM audit_log
+WHERE settlement_receipt_audit_outbox_id = ?`, outboxID).Scan(&gotTS, &gotEventType, &gotProvider, &gotPayload); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("settlement receipt audit outbox id %d was ignored but no existing audit row was found", outboxID)
+		}
+		return false, err
+	}
+	if gotTS != tsUTC ||
+		gotEventType != eventType ||
+		gotProvider.Valid != provider.Valid ||
+		(gotProvider.Valid && gotProvider.String != provider.String) ||
+		gotPayload != payloadJSON {
+		return false, fmt.Errorf("settlement receipt audit outbox id %d already exists with different audit event", outboxID)
+	}
+	return false, nil
 }
 
 func (s *Store) columnExists(ctx context.Context, table, column string) (bool, error) {

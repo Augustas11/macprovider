@@ -3,7 +3,7 @@
 #
 # Phase 3 for issue #1197 intentionally ships dry-run-first sizing and
 # snapshot scaffolding only. It reports coordinator-specific hot table counts
-# and terminal settlement bundle eligibility, but refuses live prune by default.
+# and candidate terminal settlement bundles, but refuses live prune by default.
 # Do not weaken settlement/audit compliance here:
 #   - settlement chains are never age-only deleted;
 #   - audit_log is never considered below the existing 90-day floor;
@@ -219,7 +219,7 @@ AND received_at_unix_ms < $cutoff_ms
 SQL
 }
 
-eligible_terminal_bundle_count() {
+candidate_terminal_bundle_count() {
   if ! table_exists "settlement_receipt_verdicts"; then
     printf '0\n'
     return 0
@@ -230,7 +230,7 @@ eligible_terminal_bundle_count() {
   sqlite_scalar "SELECT COUNT(*) FROM (SELECT account_scope_hash, request_id, attempt_n, provider_id FROM settlement_receipt_verdicts WHERE $where GROUP BY account_scope_hash, request_id, attempt_n, provider_id);"
 }
 
-eligible_terminal_row_count() {
+candidate_terminal_row_count() {
   if ! table_exists "settlement_receipt_verdicts"; then
     printf '0\n'
     return 0
@@ -252,22 +252,22 @@ audit_floor_row_count() {
 }
 
 predicted_reclaim_bytes() {
-  local eligible total bytes
-  eligible=$(eligible_terminal_row_count)
+  local candidates total bytes
+  candidates=$(candidate_terminal_row_count)
   total=$(table_count "settlement_receipt_verdicts")
   bytes=$(dbstat_bytes "settlement_receipt_verdicts")
   if [ "$total" -le 0 ] || [ "$bytes" -le 0 ]; then
     printf '0\n'
     return 0
   fi
-  awk -v e="$eligible" -v t="$total" -v b="$bytes" 'BEGIN { printf "%.0f\n", (e / t) * b }'
+  awk -v e="$candidates" -v t="$total" -v b="$bytes" 'BEGIN { printf "%.0f\n", (e / t) * b }'
 }
 
 run_dry_report() {
   local size bundles rows reclaim audit_rows
   size=$(stat_size "$COORDINATOR_DB_PATH")
   log "DRY_RUN=1 coordinator.db size=${size}B"
-  log "terminal settlement eligibility requires closed terminal receipt verdicts older than ${COORDINATOR_ARCHIVE_TERMINAL_DAYS}d"
+  log "candidate terminal settlement bundle reporting requires closed terminal receipt verdicts older than ${COORDINATOR_ARCHIVE_TERMINAL_DAYS}d"
   log "audit_log reporting floor=${COORDINATOR_ARCHIVE_AUDIT_DAYS}d (minimum 90d)"
 
   for table in \
@@ -280,15 +280,15 @@ run_dry_report() {
   done
   report_audit_sibling
 
-  bundles=$(eligible_terminal_bundle_count)
+  bundles=$(candidate_terminal_bundle_count)
   abort_on_sqlite_error
-  rows=$(eligible_terminal_row_count)
+  rows=$(candidate_terminal_row_count)
   abort_on_sqlite_error
   reclaim=$(predicted_reclaim_bytes)
   abort_on_sqlite_error
   audit_rows=$(audit_floor_row_count)
   abort_on_sqlite_error
-  log "eligible_terminal_settlement_bundles=$bundles eligible_receipt_verdict_rows=$rows predicted_reclaim_bytes_approx=$reclaim"
+  log "candidate_terminal_settlement_bundles=$bundles candidate_receipt_verdict_rows=$rows predicted_reclaim_bytes_approx=$reclaim"
   log "audit_log_rows_older_than_floor=$audit_rows (reported only; this script does not delete audit_log)"
   log "DRY_RUN complete: no DB changes, no snapshots, no deletes, no VACUUM"
 }
