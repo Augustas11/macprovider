@@ -11,6 +11,7 @@ readonly expected_bottle_sha256="5477285c4ebec45713873ae4002affece39e427c5f1b655
 # GitHub macos-15-intel runners currently expose either reviewed Homebrew
 # formula text digest for this same OpenSSL 3.6.3 sequoia bottle.
 readonly -a expected_formula_sha256s=(
+  "e15cca35502166eb7a93940f3fe489e490b09a7b9e07ba3145d7ec1471bcd8d1"
   "773b90da6562a4018e1b5033b01432500002c4636cdfd35acf68d1a4b457590c"
   "00e19cdcb1b7d99058a8a15f316e5dce2e4b5cd2afee14b272e7f5448624801d"
 )
