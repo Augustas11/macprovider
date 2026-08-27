@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.13
+Version: v0.1.14
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -50,7 +50,10 @@ The v0.1.8 recovery amendment also covers a provider that cannot establish an
 accepted coordinator session. A valid signed release remains discoverable and
 installable under the local pinned release trust root. Coordinator policy may
 recommend a target but cannot make coordinator connectivity a prerequisite for
-repairing an outdated or rejected provider.
+repairing an outdated or rejected provider. SPEC-020-R005 (v0.1.14) extends this:
+a provider that *is* admitted but whose coordinator-recommended target cannot make
+forward progress may also invoke the signed recovery rail, so an accepted-but-stuck
+session is not left without a self-heal path.
 
 The baseline implementation already has a mature manual update path in
 `phase3-binary/Sources/macprovider-cli/SelfUpdate.swift`: GitHub Releases
@@ -384,6 +387,44 @@ local-health, and rollback requirement in R-2 through R-4. Explicit automatic
 update opt-out MUST NOT block this manual command. Its release discovery MUST
 use the same signed monotonic discovery head and anti-replay state as
 SPEC-020-R001.
+
+**SPEC-020-R005 — Recover an accepted-but-stuck session via the signed rail.**
+v0.1.8 scoped coordinator-independent recovery to a provider that *cannot
+establish* an accepted session, which leaves a real gap: a provider that holds an
+accepted session but whose coordinator-recommended autoupdate cannot make forward
+progress — because the coordinator advertises a `recommended_binary_version` with
+no accompanying `recommended_compatibility_set_id` (a target-missing or
+unconfigured-policy coordinator), or because the recommended target is
+repeatedly unusable by the installed set — has no self-heal path and strands
+while still serving. Eligibility MUST require a *persistent*, not transient,
+failure: the provider MUST count consecutive coordinator-recommendation
+forward-progress failures for the current recommendation identity, where a single
+failure cycle is EITHER one recorded cooldown/failure for a recommended target OR
+one observation that the recommendation yields no installable compatibility-set
+target (a missing `recommended_compatibility_set_id`). Both kinds increment the
+same counter; a single or momentary target-missing observation (for example a
+transient coordinator payload omission during a rollout) MUST NOT by itself grant
+eligibility. Only when this consecutive-failure count reaches
+`accepted_session_recovery_failure_threshold` (default 3) for the current
+recommendation does the provider become eligible to invoke the SPEC-020-R001
+signed recovery discovery rail, gated by the same signed monotonic discovery
+head, anti-replay state, discovery cooldown/backoff, and every R-2 through R-4
+safety invariant. The counter MUST reset to zero when the coordinator
+recommendation identity changes or the coordinator-recommendation path next makes
+forward progress (a successful detection→prepare past the compatibility-target
+gate), so recovery eligibility never persists past the stuck condition.
+
+This fallback MUST be strictly additive to recovery reach and MUST NOT: (a) change
+the provider's buyer-serving, routing, trust, or admission state; (b) run the
+coordinator-recommendation rail and the signed-recovery rail concurrently for the
+same target (the mutation lock in R-2 remains the single serialization point); or
+(c) take precedence over a coordinator recommendation that is still making forward
+progress. When the coordinator later advertises a target the provider can install,
+the counter resets and the coordinator-recommendation path resumes as the primary
+rail. The fallback is a recovery-reach change only, never a routing or authority
+change. Eligibility, the consecutive-failure count, the current recommendation
+identity, and each reset MUST be observable per R-6.8, and R005 behavior MUST be
+covered by the acceptance criteria AC-V0.1-R005-1 through AC-V0.1-R005-4.
 
 ### R-2. Safety invariants
 
@@ -909,6 +950,18 @@ R-6.7. The provider's local status endpoint SHOULD expose the current
 autoupdate state, including `enabled`, `last_event`, `cooldown_until`, and
 `pending_target_version`.
 
+R-6.8. Accepted-session recovery (SPEC-020-R005) MUST be observable. Each
+consecutive-failure increment and each counter reset MUST emit an observability
+event carrying the current recommendation identity, the consecutive-failure
+count, and the reason for the increment (a recorded target failure vs a
+missing-compatibility-target observation). Becoming eligible MUST emit a distinct
+event naming the threshold and recommendation identity; the subsequent invocation
+of the signed recovery rail on an accepted session MUST be attributable to R005
+via a reason/metadata marker (the `source` stays `github_poll` per R-6.4;
+attribution MUST NOT add a new `source` value) so an accepted-session recovery is
+never indistinguishable from an ordinary non-accepted signed-recovery poll. All
+R-6.8 payloads remain subject to the R-6.6 redaction rules.
+
 ## Acceptance criteria
 
 AC-V0.1-1. End-to-end autoupdate: given a running provider at version `N` and
@@ -1219,6 +1272,31 @@ fails after a release swap, only the updater orchestrator that still owns the
 shared mutation lock and has already fenced reload helpers MAY restore the
 preserved release.
 
+AC-V0.1-R005-1. Threshold counting, not transience: an accepted-session provider
+whose coordinator recommendation records fewer than
+`accepted_session_recovery_failure_threshold` consecutive forward-progress
+failures (including a single missing-compatibility-target observation) MUST NOT
+invoke the signed recovery rail; once the threshold is reached for the current
+recommendation, it MUST become eligible.
+
+AC-V0.1-R005-2. Target-missing is stuck only when persistent: a coordinator that
+advertises a `recommended_binary_version` with no `recommended_compatibility_set_id`
+across at least the threshold of consecutive observations makes the accepted
+provider eligible; a single such observation followed by a valid target (rollout
+transient) resets the counter and grants no eligibility.
+
+AC-V0.1-R005-3. Primary-rail precedence and reset: while the
+coordinator-recommendation path is making forward progress it takes precedence and
+the signed-recovery rail is not invoked; when the coordinator later advertises an
+installable target (or the recommendation identity changes), the counter resets to
+zero and the coordinator path resumes as primary.
+
+AC-V0.1-R005-4. Additive, serialized, attributable: an accepted-session recovery
+invocation changes no buyer-serving, routing, trust, or admission state; never
+runs concurrently with the coordinator-recommendation rail for the same target
+(shared mutation lock); and emits R-6.8 observability that attributes the
+invocation to R005 with the recommendation identity and consecutive-failure count.
+
 ## Threat model
 
 T-1. Attacker controls the GitHub release pipeline through signing-key
@@ -1333,6 +1411,16 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.14 (2026-08-28): Added SPEC-020-R005, accepted-but-stuck session recovery.
+  v0.1.8 scoped coordinator-independent recovery to providers that cannot
+  establish a session; R005 closes the residual gap where an admitted provider
+  whose coordinator-recommended target makes no forward progress (target-missing
+  or unconfigured coordinator policy, or a recommended target unusable by the
+  installed set) had no self-heal path while still serving. The fallback is
+  additive recovery reach only — bounded by a failure threshold, gated by the
+  same signed discovery head and every R-2..R-4 invariant, never running both
+  rails concurrently for the same target, and never a routing/trust/admission
+  change. Normative behavior extended; no existing requirement weakened.
 - v0.1.13 (2026-08-27): Removed companion-watchdog rollback authority. The
   watchdog remains a current-boot-gated liveness monitor; pending marker,
   rollback backup, release-byte, plist, watchdog-script, and Malibu app

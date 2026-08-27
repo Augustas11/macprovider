@@ -561,7 +561,7 @@
     {
       "spec_id": "SPEC-020",
       "title": "Provider autoupdate",
-      "version": "v0.1.13",
+      "version": "v0.1.14",
       "path": "specs/SPEC-020-provider-autoupdate.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1986,6 +1986,21 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/896",
         "rationale": "Mutation-lock ownership, launchd helper fencing, listener-bound commit gates, CLI-owned rollback-entry fencing, rollback availability independent of watchdog launchd state, legacy first-hop bridge regressions, watchdog no-mutation regressions, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records a provider/model launchd PID change across installer rollback, restored provider/watchdog/manifest/service state, and empty update locks after the run. The supplemental convergence artifact records successful launchd service activation at v1.8.61, ready/routing-eligible admission, encrypted leg and hash verification, model_loaded telemetry, and an HTTP 200 buyer request routed to the target provider. Signed journey-result packaging still needs to bind lock/fence/listener/cleanup evidence into a promotable conformance record."
+      }
+    },
+    {
+      "requirement_id": "SPEC-020-R005",
+      "spec_id": "SPEC-020",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1235",
+        "rationale": "SPEC-020 v0.1.14 added SPEC-020-R005 (accepted-but-stuck session recovery). IMPL pending: the signed-recovery poll gate (CoordinatorClient.swift runSignedRecoveryDiscoveryIfDue, currently gated on !coordinatorSessionAccepted) must be extended so an accepted session becomes eligible after accepted_session_recovery_failure_threshold consecutive coordinator-recommendation forward-progress failures for the current recommendation (counting both recorded target failures and missing-compatibility-target observations), resetting on forward progress or recommendation-identity change, with R-6.8 observability and AC-V0.1-R005-1..4 coverage."
       }
     },
     {
