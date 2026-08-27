@@ -28,6 +28,30 @@ SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 KEY_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+# Minimum provider-CLI version whose manifest parser ACCEPTS a given
+# provider_cli.designated_identifier. A release whose declared minimum-supported
+# client floor is BELOW the value here cannot be installed by clients in the gap:
+# they reject the compatibility-set manifest at parse time and strand with no
+# self-heal path. The Malibu rebrand (identifier tolerance landed in v1.8.95,
+# commit 9c78c988) orphaned every <=1.8.94 client this way. Keep this table in
+# lockstep with the client parser's accepted-identifier tolerance in
+# phase3-binary/Sources/macprovider-cli/CompatibilitySetManifest.swift.
+CLIENT_IDENTIFIER_FLOORS = {
+    "live.malibu.provider.cli": (1, 8, 95),
+    "live.streamvc.macprovider.cli": (0, 0, 0),
+}
+
+
+def parse_semver(value: str) -> tuple[int, int, int]:
+    """Parse 'X.Y.Z' or 'vX.Y.Z' into a comparable tuple; raise on malformed."""
+    text = value[1:] if value.startswith("v") else value
+    if not SEMVER.fullmatch(text):
+        fail(f"malformed version {value!r}: expected X.Y.Z or vX.Y.Z")
+    major, minor, patch = (int(part) for part in text.split("."))
+    return (major, minor, patch)
+
+
 CATALOG_FILES = (
     "release.json",
     "trusted-keys.json",
@@ -784,6 +808,34 @@ def command_validate(args: argparse.Namespace) -> None:
         fail("--require-signature also requires --public-key")
 
 
+def command_client_floor(args: argparse.Namespace) -> None:
+    """Report — and optionally assert — the minimum client version that can
+    accept this manifest's provider-CLI identifier, so a release cannot silently
+    orphan the clients between the declared support floor and that minimum."""
+    envelope = validate_envelope(read_regular(pathlib.Path(args.input), "manifest"), args.require_signature)
+    identifier = envelope["signed"]["components"]["provider_cli"]["designated_identifier"]
+    floor = CLIENT_IDENTIFIER_FLOORS.get(identifier)
+    if floor is None:
+        fail(
+            f"unrecognized provider_cli.designated_identifier {identifier!r}: add its "
+            "minimum-accepting client version to CLIENT_IDENTIFIER_FLOORS (and confirm "
+            "the client parser tolerates it) before releasing"
+        )
+    required = ".".join(str(part) for part in floor)
+    if args.assert_min_supported is not None:
+        declared = parse_semver(args.assert_min_supported)
+        if declared < floor:
+            fail(
+                f"declared minimum-supported client {args.assert_min_supported} is below "
+                f"{required}, the oldest client that accepts identifier {identifier!r}. "
+                f"Clients in [{args.assert_min_supported}, {required}) reject this manifest "
+                "and strand with no self-heal path. Bump the supported-client floor to "
+                f"{required} (and ship a bridge/reinstall path for the orphaned range) "
+                "before releasing."
+            )
+    print(required)
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     subcommands = root.add_subparsers(dest="command", required=True)
@@ -822,6 +874,19 @@ def parser() -> argparse.ArgumentParser:
     validate.add_argument("--payload-directory")
     validate.add_argument("--openssl")
     validate.set_defaults(handler=command_validate)
+
+    client_floor = subcommands.add_parser(
+        "client-floor",
+        help="print the minimum client version that accepts this manifest's CLI identifier; "
+        "with --assert-min-supported, fail if the declared support floor is below it",
+    )
+    client_floor.add_argument("--input", required=True)
+    client_floor.add_argument("--require-signature", action="store_true")
+    client_floor.add_argument(
+        "--assert-min-supported",
+        help="declared minimum-supported client version (X.Y.Z or vX.Y.Z); fail if below the manifest's floor",
+    )
+    client_floor.set_defaults(handler=command_client_floor)
     return root
 
 
