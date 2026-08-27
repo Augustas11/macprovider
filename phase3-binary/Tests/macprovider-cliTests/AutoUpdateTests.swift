@@ -2140,6 +2140,257 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(marker.targetCompatibilitySetSHA256, manifest.envelopeSHA256)
     }
 
+    // SPEC-020-R005 round-6 HIGH: the swap-boundary gate is the authoritative
+    // precedence check. When it returns .abort at the swap boundary, the payload is
+    // NOT activated (binary unchanged) and the pending marker is unwound — proving
+    // the gate sits AT the swap and aborts the terminal action itself.
+    func testSwapBoundaryGateAbortPreventsActivation() async throws {
+        let fixture = try TempHome()
+        let manifestSigningKey = P256.Signing.PrivateKey()
+        let manifestPublicKey = manifestSigningKey.publicKey.pemRepresentation
+        let store = AutoUpdateMarkerStore(
+            homeDirectory: fixture.url,
+            compatibilityManifestPublicKeyPEM: manifestPublicKey
+        )
+        try store.ensureTrustedRoot()
+        let binaryDirectory = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(at: binaryDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let binary = binaryDirectory.appendingPathComponent("macprovider-cli")
+        let newBinary = payload.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: binary)
+        try Data("new-binary".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        try writeOwnedReleaseResources(in: binaryDirectory, prefix: "old")
+        try writeOwnedReleaseResources(in: payload, prefix: "new")
+        _ = try CompatibilityManifestFixture(
+            root: binaryDirectory,
+            privateKey: manifestSigningKey,
+            version: "1.8.48",
+            providerCLIVersion: "1.8.48",
+            malibuAppVersion: "1.8.43",
+            commit: "1111111111111111111111111111111111111111",
+            populateResources: false
+        )
+        let manifestFixture = try CompatibilityManifestFixture(
+            root: payload,
+            privateKey: manifestSigningKey,
+            version: "1.8.50",
+            providerCLIVersion: "1.8.50",
+            malibuAppVersion: "1.8.43",
+            commit: "2222222222222222222222222222222222222222",
+            populateResources: false
+        )
+        let manifest = try CompatibilitySetManifest.loadValidated(
+            from: payload,
+            expectedProviderVersion: "1.8.50",
+            publicKeyPEM: manifestPublicKey
+        )
+        XCTAssertEqual(manifest.compatibilitySetID, manifestFixture.compatibilitySetID)
+        let prepared = PreparedSelfUpdate(
+            tempDir: fixture.url,
+            newBinary: newBinary,
+            stagedMalibuApp: nil,
+            signedPolicy: nil,
+            compatibilityManifest: manifest,
+            artifactIndexSHA256: String(repeating: "a", count: 64)
+        )
+        let head = SignedReleaseDiscoveryHead(
+            releaseSequence: 12,
+            targetVersion: "1.8.50",
+            targetCompatibilitySetID: manifest.compatibilitySetID,
+            targetArtifactIndexSHA256: prepared.artifactIndexSHA256,
+            signedPolicyMinimum: nil,
+            signedPolicyRevoked: [],
+            issuedAt: Date().addingTimeInterval(-30),
+            expiresAt: Date().addingTimeInterval(300),
+            digest: String(repeating: "b", count: 64)
+        )
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.8.48",
+            providerStatus: status,
+            markerStore: store,
+            trustProvider: {
+                // Irrelevant here: the .abort gate throws before any trust check.
+                AutoUpdateTrustState(
+                    v2Accepted: false, tier: nil, encryptedLegValid: false,
+                    attestationRequired: false, attestationSatisfied: false,
+                    tokenConfigured: true, tokenValidated: false,
+                    bearerlessDuplicate: false, connected: false,
+                    stableReason: "coordinator_disconnected"
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        do {
+            try await updater.preserveMarkerAndSwapForTest(
+                updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                target: "1.8.50",
+                prepared: prepared,
+                authorityMode: "signed_release",
+                discoveryHead: head,
+                swapBoundaryGate: { .abort(reason: "accepted_session_recovery_superseded_by_primary") }
+            )
+            XCTFail("expected the swap-boundary gate to abort the swap")
+        } catch let abort as AutoUpdateSwapPrecedenceAborted {
+            XCTAssertEqual(abort.reason, "accepted_session_recovery_superseded_by_primary")
+        }
+
+        // (1) The payload was NOT activated — the terminal swap did not run.
+        XCTAssertEqual(try String(contentsOf: binary), "old-binary")
+        XCTAssertEqual(try String(contentsOf: newBinary), "new-binary")
+        // (2) round-7 HIGH: NO durable pending marker remains — a pre-activation
+        // abort fully rolls back, so it cannot lock out the primary rail.
+        XCTAssertNil(try store.readPending())
+        // (3) The lock is released: a subsequent update attempt acquires the lock
+        // and does NOT hit transactionPending. Prove it via a real re-run that now
+        // proceeds and activates.
+        try await updater.preserveMarkerAndSwapForTest(
+            updateID: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+            target: "1.8.50",
+            prepared: prepared,
+            authorityMode: "signed_release",
+            discoveryHead: head,
+            swapBoundaryGate: { .proceed }
+        )
+        XCTAssertEqual(try String(contentsOf: binary), "new-binary")
+    }
+
+    // SPEC-020-R005 round-7 HIGH (discrimination, the other direction): a genuine
+    // post-writePending FAILURE that is NOT a precedence abort still PRESERVES the
+    // durable pending marker for CLI startup recovery — the clean rollback must not
+    // be broadened to arbitrary thrown errors. Here `.ensureTrust` with lost trust
+    // throws trustStateLost at the same swap-boundary position as the abort.
+    func testGenuinePostWritePendingFailurePreservesPendingMarker() async throws {
+        let fixture = try TempHome()
+        let manifestSigningKey = P256.Signing.PrivateKey()
+        let manifestPublicKey = manifestSigningKey.publicKey.pemRepresentation
+        let store = AutoUpdateMarkerStore(
+            homeDirectory: fixture.url,
+            compatibilityManifestPublicKeyPEM: manifestPublicKey
+        )
+        try store.ensureTrustedRoot()
+        let binaryDirectory = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(at: binaryDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let binary = binaryDirectory.appendingPathComponent("macprovider-cli")
+        let newBinary = payload.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: binary)
+        try Data("new-binary".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        try writeOwnedReleaseResources(in: binaryDirectory, prefix: "old")
+        try writeOwnedReleaseResources(in: payload, prefix: "new")
+        _ = try CompatibilityManifestFixture(
+            root: binaryDirectory,
+            privateKey: manifestSigningKey,
+            version: "1.8.48",
+            providerCLIVersion: "1.8.48",
+            malibuAppVersion: "1.8.43",
+            commit: "1111111111111111111111111111111111111111",
+            populateResources: false
+        )
+        _ = try CompatibilityManifestFixture(
+            root: payload,
+            privateKey: manifestSigningKey,
+            version: "1.8.50",
+            providerCLIVersion: "1.8.50",
+            malibuAppVersion: "1.8.43",
+            commit: "2222222222222222222222222222222222222222",
+            populateResources: false
+        )
+        let manifest = try CompatibilitySetManifest.loadValidated(
+            from: payload,
+            expectedProviderVersion: "1.8.50",
+            publicKeyPEM: manifestPublicKey
+        )
+        let prepared = PreparedSelfUpdate(
+            tempDir: fixture.url,
+            newBinary: newBinary,
+            stagedMalibuApp: nil,
+            signedPolicy: nil,
+            compatibilityManifest: manifest,
+            artifactIndexSHA256: String(repeating: "a", count: 64)
+        )
+        let head = SignedReleaseDiscoveryHead(
+            releaseSequence: 12,
+            targetVersion: "1.8.50",
+            targetCompatibilitySetID: manifest.compatibilitySetID,
+            targetArtifactIndexSHA256: prepared.artifactIndexSHA256,
+            signedPolicyMinimum: nil,
+            signedPolicyRevoked: [],
+            issuedAt: Date().addingTimeInterval(-30),
+            expiresAt: Date().addingTimeInterval(300),
+            digest: String(repeating: "b", count: 64)
+        )
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.8.48",
+            providerStatus: status,
+            markerStore: store,
+            trustProvider: {
+                // Lost trust: `.ensureTrust` will throw trustStateLost at the swap
+                // boundary, a NON-abort error after writePending.
+                AutoUpdateTrustState(
+                    v2Accepted: false, tier: nil, encryptedLegValid: false,
+                    attestationRequired: false, attestationSatisfied: false,
+                    tokenConfigured: true, tokenValidated: false,
+                    bearerlessDuplicate: false, connected: false,
+                    stableReason: "attestation_degraded"
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        do {
+            try await updater.preserveMarkerAndSwapForTest(
+                updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                target: "1.8.50",
+                prepared: prepared,
+                authorityMode: "signed_release",
+                discoveryHead: head,
+                swapBoundaryGate: { .ensureTrust }
+            )
+            XCTFail("expected ensureTrust to abort on lost trust")
+        } catch let error as AutoUpdateError {
+            guard case .trustStateLost = error else {
+                return XCTFail("expected trustStateLost, got \(error)")
+            }
+        }
+
+        // Binary unchanged, but the durable pending marker IS preserved for CLI
+        // startup recovery (the genuine-failure path is unchanged).
+        XCTAssertEqual(try String(contentsOf: binary), "old-binary")
+        XCTAssertNotNil(try store.readPending())
+    }
+
     func testAutoUpdaterOwnsMutationLockBeforeFencingReloadJobs() throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
@@ -2843,6 +3094,261 @@ final class AutoUpdateTests: XCTestCase {
         let release = try await update.resolveReleaseByTags(normalizedTarget: "1.7.0")
 
         XCTAssertEqual(release.tagName, "1.7.0")
+    }
+
+    // MARK: - SPEC-020-R005 handleCoordinatorRecommendation outcome mapping
+
+    private func r005PinnedTrust() -> AutoUpdateTrustState {
+        AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "pinned",
+            encryptedLegValid: true,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: true,
+            tokenValidated: true,
+            bearerlessDuplicate: false,
+            connected: true
+        )
+    }
+
+    private func r005Status() -> ProviderStatus {
+        ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+    }
+
+    // The live production state: the coordinator advertises a recommended binary
+    // version with no compatibility-set target. The recommendation resolves a
+    // release but has no installable compatibility-set target -> .missingTarget.
+    func testHandleCoordinatorRecommendationReturnsMissingTargetWhenNoCompatSet() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let binaryDir = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binaryDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let binary = binaryDir.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: binary)
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+
+        let latest = "https://api.github.com/repos/Augustas11/macprovider/releases/latest"
+        let vTag = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/tags/v1.7.0")!
+        AutoUpdateMockURLProtocol.responses = [
+            vTag: (200, Data(#"{"tag_name":"1.7.0","assets":[]}"#.utf8)),
+        ]
+        defer { AutoUpdateMockURLProtocol.responses = [:] }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AutoUpdateMockURLProtocol.self]
+
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: r005Status(),
+            expectedCompatibilitySetID: nil,
+            releasesAPIURL: latest,
+            markerStore: store,
+            session: URLSession(configuration: configuration),
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
+
+        XCTAssertEqual(outcome, .missingTarget)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "coordinator_compatibility_target_missing")
+    }
+
+    func testHandleCoordinatorRecommendationReturnsNotAttemptedOnTargetNotNewer() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.8.0",
+            providerStatus: r005Status(),
+            markerStore: store,
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
+        XCTAssertEqual(outcome, .notAttempted)
+    }
+
+    func testHandleCoordinatorRecommendationReturnsNotAttemptedOnTrustSkip() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: r005Status(),
+            markerStore: store,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: false,
+                    tier: nil,
+                    encryptedLegValid: false,
+                    attestationRequired: false,
+                    attestationSatisfied: false,
+                    tokenConfigured: true,
+                    tokenValidated: false,
+                    bearerlessDuplicate: false,
+                    connected: false,
+                    stableReason: "coordinator_disconnected"
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
+        XCTAssertEqual(outcome, .notAttempted)
+    }
+
+    func testHandleCoordinatorRecommendationReturnsForwardProgressFailureOnUnsupportedTopology() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: r005Status(),
+            markerStore: store,
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { false }
+        )
+
+        let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
+        XCTAssertEqual(outcome, .forwardProgressFailure)
+    }
+
+    func testHandleCoordinatorRecommendationReturnsCooldownActive() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        store.recordCooldown(target: "1.7.0", failureClass: .other)
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: r005Status(),
+            markerStore: store,
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
+        XCTAssertEqual(outcome, .cooldownActive)
+    }
+
+    // MEDIUM-2: target_revoked_or_below_minimum records a cooldown/failure, so it
+    // is a recorded forward-progress failure cycle and MUST increment the counter.
+    func testHandleCoordinatorRecommendationReturnsForwardProgressFailureOnBelowMinimum() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        try await store.updateSignedPolicy(minimum: "1.8.0", revoked: [])
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: r005Status(),
+            markerStore: store,
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        // Target 1.7.0 is below the persisted minimum 1.8.0.
+        let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
+        XCTAssertEqual(outcome, .forwardProgressFailure)
+    }
+
+    // SPEC-020-R005 round-4 MEDIUM-2 / R-6.8: an R005-triggered signed-recovery
+    // invocation that ends on a NON-detection terminal path still carries the R005
+    // attribution on the terminal event (the coordinator only sees the last event).
+    func testR005AttributionSurvivesOnNonDetectionTerminalEvent() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        var config = AppConfig.defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path)
+        config.autoUpdateEnabled = false
+        let updater = AutoUpdater(
+            config: config,
+            currentVersion: "1.6.0",
+            providerStatus: r005Status(),
+            markerStore: store,
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+        let attribution = [
+            "accepted_session_recovery": "true",
+            "recommendation_identity": "99.9.9|<none>",
+            "consecutive_failure_count": "3",
+        ]
+
+        // autoupdate disabled => terminal event is `autoupdate_disabled` (a non-
+        // detection path that previously dropped the R005 marker).
+        await updater.handleSignedReleaseDiscovery(attribution: attribution)
+
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "autoupdate_disabled")
+        let meta = event?["extra_metadata"] as? [String: String]
+        XCTAssertEqual(meta?["accepted_session_recovery"], "true")
+        XCTAssertEqual(meta?["consecutive_failure_count"], "3")
     }
 
     private func signedDiscoveryPayload(
