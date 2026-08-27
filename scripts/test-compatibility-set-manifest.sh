@@ -65,6 +65,20 @@ python3 "$tool" validate \
 cp "$manifest" "$payload/compatibility-set.json"
 python3 "$tool" validate --input "$manifest" --payload-directory "$payload"
 
+# client-floor: the generated manifest carries the Malibu CLI identifier, so the
+# oldest client that can accept it is 1.8.95. A declared support floor below that
+# must be rejected — that gap is exactly what the Malibu rebrand orphaned
+# (every <=1.8.94 client). A floor at/above 1.8.95 must pass.
+floor="$(python3 "$tool" client-floor --input "$manifest")"
+[ "$floor" = "1.8.95" ] || fail "client-floor expected 1.8.95, got '$floor'"
+python3 "$tool" client-floor --input "$manifest" --assert-min-supported 1.8.95 >/dev/null \
+  || fail "client-floor should accept a support floor at 1.8.95"
+python3 "$tool" client-floor --input "$manifest" --assert-min-supported v1.9.0 >/dev/null \
+  || fail "client-floor should accept a support floor above 1.8.95"
+if python3 "$tool" client-floor --input "$manifest" --assert-min-supported v1.7.11 >/dev/null 2>&1; then
+  fail "client-floor must reject a support floor of v1.7.11 for a Malibu-identifier manifest"
+fi
+
 python3 - "$schema" "$rollback_schema" "$manifest" "$local_artifacts" \
   "$provider_cli_version" "$malibu_app_version" <<'PY'
 import hashlib
