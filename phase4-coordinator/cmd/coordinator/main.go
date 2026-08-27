@@ -117,7 +117,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "  coordinator --version           (print build version)")
 			fmt.Fprintln(os.Stderr, "  coordinator partner-keys <issue|revoke|list> [flags]")
 			fmt.Fprintln(os.Stderr, "  coordinator visibility revert --id <pid> --reason TEXT")
-			fmt.Fprintln(os.Stderr, "  coordinator migrate-indexes --config <path>  (one-shot operator migration)")
+			fmt.Fprintln(os.Stderr, "  coordinator migrate-indexes --config <path> [--config-overlay <path>]  (one-shot operator migration)")
 			fmt.Fprintln(os.Stderr, "  coordinator backfill-attempt-n --config <path>  (one-shot attempt_n backfill)")
 			fmt.Fprintln(os.Stderr, "  coordinator stats-migrate [--admin-dsn DSN] [--check]  (SPEC-017 stats/rewards migrations)")
 			os.Exit(2)
