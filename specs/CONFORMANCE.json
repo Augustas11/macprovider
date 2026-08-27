@@ -1302,7 +1302,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces with resolved MVP retention-policy registry fields, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current and the document fresh_until_utc is still valid, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites including registered retention-policy ids, lifecycle fail-closed tests including unresolved retention policies, operator-only admin API mutations for public-announcement/reviewed-artifact records, an environment-key-only CLI for nonce issuance, reviewed-artifact/public-announcement mutations, and pool health/audit/distribution exports, a bounded bearer-token creator administration surface for admitted creators to inspect their own approval/pools and perform allowlisted candidate operations, a protected manual signer path plus governance validator for non-promoting JOURNEY-TRUSTED-POOL-CREATOR-MVP evidence artifacts, and a closed PoolPromotionTransitionV1 production-promotion artifact plus append-only spec043-promotion-ledger that remains fail-closed until a production-release approver key is registered. Raw operator admin events cannot activate a routeable pool; a signed isolated-candidate creator-MVP envelope is now committed and remains evidence-only. Requirements remain pending until CONFORMANCE evidence[] promotion of that envelope, a registered production-release approver key, production reviewed-artifact lifecycle ownership, custody-class production gates, full production activation gates, and production rollout proof exist."
+        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. Isolated-candidate promoter consume of sibling spec043-ppt-20260827T032524Z-1 filled SPEC-043-R001 through R012; that fill is not a live Trusted Pool launch. Spec-level implementation_status stays partial, production_status stays not-deployed, and spec-level evidence[] stays empty. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces with resolved MVP retention-policy registry fields, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current and the document fresh_until_utc is still valid, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites including registered retention-policy ids, lifecycle fail-closed tests including unresolved retention policies, operator-only admin API mutations for public-announcement/reviewed-artifact records, an environment-key-only CLI for nonce issuance, reviewed-artifact/public-announcement mutations, and pool health/audit/distribution exports, a bounded bearer-token creator administration surface for admitted creators to inspect their own approval/pools and perform allowlisted candidate operations, a protected manual signer path plus governance validator for JOURNEY-TRUSTED-POOL-CREATOR-MVP evidence artifacts, a closed PoolPromotionTransitionV1 production-promotion artifact plus append-only spec043-promotion-ledger, and a registered production-release approver key. Raw operator admin events cannot activate a routeable pool. Remaining before any live announcement: production reviewed-artifact lifecycle ownership, custody-class production gates, full production activation gates, on-call readiness, production timing-floor remeasure, and production rollout proof."
       }
     },
     {
@@ -5722,7 +5722,7 @@
     {
       "requirement_id": "SPEC-043-R001",
       "spec_id": "SPEC-043",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/trustpool/durable_store.go:type CreatorApproval",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertCreatorApproval",
@@ -5745,18 +5745,26 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Approved creator account: durable creator approval records now exist, store approval id/version, public display name, legal/support contact, billing contact, emergency endpoint, acknowledged maximum response time, product category, data-retention category, support owner, launch environment, Creator Agreement expiry/grace timestamps, pricing schedule id/version, claim/disclosure/criteria hashes, approval actor/timestamp, monotonic approval revision, status, and suspension reason, and routeability/mutation checks consume them. Exact duplicate approval retries return the existing revision rather than bumping affected route generations. A bounded background refresher now replays durable state and closes expired routeability gates at the same revision. Still pending: creator-facing approval workflow, pending creator-admin operation invalidation, full R006 re-verification before reactivation, Creator Agreement template approval, and signed journey evidence."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        },
+        {
+          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
+          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-043-R002",
       "spec_id": "SPEC-043",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/poolmanifest/manifest.go:type IdentityCore",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) IssueRootRegistrationNonce",
@@ -5776,18 +5784,26 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Creator root issuer registration: SPEC-042 identity-core primitives, creator-gated nonce issuance, one-time nonce consumption, durable replay rejection of duplicate root-registration nonce use, durable root registration replay, fingerprint reuse rejection, proof-of-possession verification, suspension invalidation of pending root nonces, and bounded bearer-token creator routes for creator-owned nonce/event submission are implemented locally. A protected builder/workflow/validator path now exists for non-promoting signed creator-MVP candidate evidence. A signed isolated-candidate creator-MVP envelope is now committed and remains evidence-only. Still pending: CONFORMANCE promotion of that envelope, root retirement, custody-disclosure mutation, immutable lineage tombstones beyond candidate freeze, and production promotion evidence."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        },
+        {
+          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
+          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-043-R003",
       "spec_id": "SPEC-043",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/poolmanifest/authoritylog.go:func BuildAuthorityLog",
         "phase4-coordinator/internal/poolmanifest/policyhistory.go:func BuildPolicyHistory",
@@ -5802,18 +5818,26 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool creation request: manifest verification primitives and durable created-state initialization exist through the operator-mediated event path and the bounded bearer-token creator event path, and pool creation is gated on a matching enabled creator approval. Operator-approved public announcement is implemented as a separate approval record and derived replay visibility state bound to the current manifest digest and creator approval binding. A protected builder/workflow/validator path now exists for non-promoting signed creator-MVP candidate evidence. A signed isolated-candidate creator-MVP envelope is now committed and remains evidence-only. Still pending: CONFORMANCE promotion of that envelope, full SPEC-042 identity-core acceptance proof for production launch, intended buyer disclosure validation, and production promotion evidence."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        },
+        {
+          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
+          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-043-R004",
       "spec_id": "SPEC-043",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/poolmanifest/persist.go:func ReconstructPool",
         "phase4-coordinator/internal/trustpool/registry.go:type Registry",
@@ -5872,18 +5896,26 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Durable coordinator state: a default-off SQLite event ledger, durable creator approval table with monotonic per-creator approval revisions, durable reviewed-distribution artifact records/history, durable public-announcement approval records bound to operation id, manifest digest, stored current reviewed distribution artifact digest, and creator approval state, immutable public-announcement history, idempotent append path, replay-checked candidate/restrictive admin append path, rejection of raw active lifecycle publication, explicit candidate promotion append path with local preflight, read-at-boot replay model, creator approval route gate, public-visibility replay gate/generation, public policy/status freshness fail-closed serving guard, routeable registry reconstruction, membership/blocklist/lifecycle snapshotting, root nonce reuse rejection during durable replay, revision-fenced live registry refresh after event and approval mutations, route-time grace expiry checks, same-revision background routeability expiry refresh, routeable snapshot export of grace-expiry timestamps, buyer-authorization snapshot reads, and startup wiring are implemented locally. A protected builder/workflow/validator path now exists for non-promoting signed creator-MVP candidate evidence, and a signed isolated-candidate envelope is committed evidence-only. Still pending: CONFORMANCE evidence[] promotion of that envelope, rollback-resistant production promotion authorization/evidence, and production migration evidence. Local production activation now has a default-off coordinator config and store promotion gate: production-labeled pools still fail closed unless trusted_pools.production_activation names an allowed launch environment, a signed-launch evidence digest, and a root-custody disclosure hash matching the reconstructed root issuer."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        },
+        {
+          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
+          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-043-R005",
       "spec_id": "SPEC-043",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/trustpool/admin_handler.go:type AdminDeps",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func NewAdminHandler",
@@ -5941,18 +5973,26 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Creator administration surface: a default-off operator-only API now appends replay-checked durable pool-control events for candidate/restrictive state, exposes an operator-only promotion endpoint for the local candidate activation gate, upserts/reads creator approval records, issues idempotent root-registration nonces, records reviewed distribution artifacts as operation-id-bound durable state, records operation-id-bound, digest-bound, stored-reviewed-artifact-bound, non-candidate-launch-bound, and creator-state-bound public-announcement approvals, returns schema-versioned no-store envelopes, rejects conflicting operation-id sources and cross-mutation operation-id reuse, rejects raw active lifecycle transitions, maps creator/promotion/public-announcement gate failures to closed error codes, refreshes live state after accepted event, promotion, or approval mutations, exposes operator-only admin API mutations for reviewed-artifact/public-announcement records, wraps those mutations in the existing environment-key-only CLI with URL-bound pool id and idempotency header forwarding, and exports per-pool health, audit, reviewed-artifact history, public-announcement approval/history, and candidate-marked distribution packages through the existing environment-key-only CLI wrapper. The bounded bearer-token creator API now lets admitted creators inspect their own approval/pool state, list own events, issue root-registration nonces, create candidate pools, perform allowlisted candidate/restrictive mutations, and export owned pool health/audit/distribution while hiding or forbidding operator-only promotion, reviewed-artifact/public-announcement, signed-lifecycle, and cross-creator actions. A protected builder/workflow/validator path now exists for non-promoting signed creator-MVP candidate evidence. A signed isolated-candidate creator-MVP envelope is now committed and remains evidence-only. Still pending: CONFORMANCE promotion of that envelope, signer rotation, rollback-resistant production promotion authorization, production reviewed-artifact lifecycle, full production launch authorization, and policy-aware authorization beyond raw MVP events."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        },
+        {
+          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
+          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-043-R006",
       "spec_id": "SPEC-043",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) AddMember",
         "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Revoke",
@@ -5968,18 +6008,26 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Single-operator membership model: durable member-admit/member-revoke events now replay into the routeable registry and preserve revoked-provider fail-closed behavior across restart. Still pending: creator-owned admin authorization, delegation proof verification, admitted-Mac ownership checks, and predicate verification at admission time."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        },
+        {
+          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
+          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-043-R007",
       "spec_id": "SPEC-043",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase5-gateway/internal/config/config.go:type TrustedPoolsConfig",
         "phase5-gateway/internal/router/pool_selection.go:func (s *Server) resolvePoolSelection",
@@ -5998,18 +6046,26 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Buyer authorization: static gateway account_pools config exists as a seam, and coordinator-side durable buyer authorization events now replay into the trustpool registry and fail closed at pool-selected request time. The committed Gate C signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope records pool_existence_oracle_within_threshold true (buyer/gateway rejection timing floor plus unknown/unauthorized/disabled distribution; wallet covered at gateway). Still pending: CONFORMANCE evidence[] promotion of that envelope, creator-managed buyer/API-key administration, gateway DB refresh from coordinator state, per-key scopes, wallet-session pool binding, and production timing-floor remeasure."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        },
+        {
+          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
+          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-043-R008",
       "spec_id": "SPEC-043",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/buyer/server.go:func WithPoolMembership",
         "phase4-coordinator/internal/config/config.go:type TrustedPoolsConfig",
@@ -6052,18 +6108,26 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Production enablement gate: coordinator startup now has a default-off trusted_pools.enabled switch that reconstructs durable state, applies creator approval routeability gates at reconstruction/publication time, publishes route-time grace expiry deadlines into the registry, wires WithPoolMembership and the buyer-authenticated status store only after successful replay, runs a bounded background refresher that replays durable state and updates same-revision time-gate closures without replacing the live registry on refresh error, mounts a candidate/restrictive operator admin surface only in the enabled mode, and disables pool support without failing global startup when durable reconstruction fails; otherwise it does not advertise pool support. A local operator-only candidate promotion gate can move created or paused candidate pools to active after preflighting root registration, accepted manifest, enabled creator approval, buyer authorization, registered manifest retention-policy id, and at least the accepted-manifest `min_eligible_members` non-revoked members; active routeable snapshots also fail closed when replay sees an unknown or non-canonical accepted-manifest retention-policy id. Public promise surfaces now fail closed when public-announcement approval is absent, launch environment is candidate, manifest-stale, reviewed-artifact-stale, creator-approval-state-stale, or the reconstructed document fresh_until_utc is stale/malformed, and expose a distinct visibility generation; raw active lifecycle transitions still fail closed, and production-labeled promotion is rejected. Still pending: full live production activation checks, signed launch evidence, rollback-resistant production promotion authorization, and production rollout proof."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        },
+        {
+          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
+          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-043-R009",
       "spec_id": "SPEC-043",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/trustpool/policy.go:func BuildPolicyDocument",
         "phase4-coordinator/internal/trustpool/policy.go:func ValidatePromiseClaimsText",
@@ -6115,18 +6179,26 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Public promise and claim control: gateway-authenticated buyer policy/status surfaces are implemented locally with authorized-buyer-only reconstruction, no-store cache control, non-enumerating 404s, creator provenance fields, accepted-manifest min_eligible_members, min_binary_version, and resolved MVP retention-policy registry projection, manifest digest/policy hash disclosure, count-only membership/status disclosure, shared single-operator supply disclosure, live route-time readiness and eligible member count derived from the routeable registry snapshot plus live provider-serving and binary-floor state on served buyer/public endpoints, explicit coordinator/provider plaintext-visibility disclosures, active routeability fail-closed behavior below accepted-manifest member minimums and for unknown/non-canonical accepted-manifest retention-policy ids, separator-normalized prohibited-term rejection for buyer-visible creator approval metadata at write and read/reconstruct time, pool ids, root issuer key labels, lifecycle reasons, and manifest snapshots, invalid manifest min_binary_version rejection, exact candidate split_execution_status enforcement, and structured Layer-3 privacy-field rejection for relay-blind mode/capability in the v0.1 candidate path. The built-in MVP retention-policy registry resolves `minimal`, `standard`, and `extended-dispute` exact ids into closed policy/status fields for governing policy version, field categories, min/max retention period, deletion SLA, and dispute-audit retention minimum; policy/status documents do not fall back to creator approval retention category once a manifest exists, and unknown or non-canonical ids fail candidate promotion and active routeability. Public-announcement approval is now implemented locally: unauthenticated public policy/status endpoints are per-source rate-limited, globally work-limited before replay, and serve redacted documents only when an operator approval matches the current operation id, pool_id, non-candidate launch environment, manifest_core_digest, stored current reviewed_distribution_artifact_digest, creator approval record/version, and creator approval revision; public documents redact internal creator approval, Agreement, root-key, lifecycle-reason, route-gate, buyer-count, and supply-count fields while exposing only the route-time eligible count; public serving re-checks fresh_until_utc and collapses stale, equal-boundary, blank, or malformed values to non-enumerating 404; missing or mismatched reviewed artifacts fail approval, stale approvals are rejected at write time, operation-id reuse across trustpool mutation classes is rejected, public audit exports immutable reviewed-artifact and announcement history, and manifest, reviewed-artifact distribution digest, or creator-approval changes collapse public lookup back to non-enumerating 404 while advancing public visibility generation. Still pending: immutable approved root issuer custody class from registration, production retention matrix/legal package and operational deletion/audit subsystem, production reviewed-artifact lifecycle, and claim-control coverage for every future mutable operational field and creator-submitted disclosure surface."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        },
+        {
+          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
+          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-043-R010",
       "spec_id": "SPEC-043",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/route_snapshot.go:type RouteSnapshot"
       ],
@@ -6136,18 +6208,26 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Settlement and payout boundaries: route-snapshot pool_id binding exists, but creator split payout is intentionally not implemented and manifest version/digest settlement context remains incomplete."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        },
+        {
+          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
+          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-043-R011",
       "spec_id": "SPEC-043",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/buyer/server.go:func (s *Server) poolGenerationStale",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertCreatorApproval",
@@ -6185,18 +6265,26 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Lifecycle and emergency control: durable lifecycle-change events now replay into routeable snapshots, non-active pools expose zero routeable members while preserving generation, raw active events are rejected, the explicit promotion path can publish an active snapshot from created or paused candidate pools only after local preflight, production-labeled promotion remains blocked pending durable production authorization, creator suspension/expiry gates publish affected pools as non-routeable with empty routeable membership, approval revisions plus route-time/background expiry advance affected pool generations for the existing buyer dispatch fence, signed emergency controls now pause/drain/retire or immediately revoke a target provider through proof-bearing durable events, active uncommitted dispatch attempts for provider-bound immediate revocation are cancelled through event-driven registry watches, shared buyer attempt context cancellation, and transport pre-commit guards, and public policy/status freshness fails closed when fresh_until_utc is stale, equal to observation time, blank, or malformed. Still pending: delivery-drain proof, break-glass RBAC/audit/status, notifications, positive override TTL, production-grade R006 reactivation sweep/evidence, rollback-resistant positive override, and root-compromise retirement controls."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        },
+        {
+          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
+          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-043-R012",
       "spec_id": "SPEC-043",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "scripts/pool_promotion_transition.py:SPEC043_PROMOTION_LEDGER",
         "scripts/pool_promotion_transition.py:validate_pool_promotion_transition",
@@ -6222,13 +6310,21 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "DECISION_REQUIRED",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1160",
-        "rationale": "Launch evidence and rollback: a protected manual builder/workflow/validator path exists for non-promoting signed JOURNEY-TRUSTED-POOL-CREATOR-MVP candidate evidence, and a closed PoolPromotionTransitionV1 schema plus append-only spec043-promotion-ledger now persist run-id high-watermarks, consumed authorization ids, per-pool transition epochs, and launch-key tombstones outside coordinator snapshots. The promoter consumes a sibling PoolPromotionTransitionV1 before rewriting CONFORMANCE; creator-MVP envelopes stay evidence-only until that consumed_authorization is present. An operator-owned production-release public key is registered at `security/spec-043-production-release-p256-v1.pem`; the sibling signer uses `MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM` and does not consume the ledger or rewrite CONFORMANCE. A local isolated candidate harness and a committed same-day integer-run_id signed create-to-route-to-settle-to-pause envelope (workflow 33026618698, run_id 1 on 469c436b52053848d4d932a03d33c1921c7cdb08, expires_at 2026-08-27) now exist with freeze, descendant-signer rejection, ProviderPoolDelegationV1 revocation, and pool-existence oracle observations true; `docs/runbooks/trusted-pool-creator-launch.md` records operator pause/revoke policy. The prior signed integer-run_id envelope (workflow 32936678404) has expires_at 2026-08-26. The historical Gate C envelope (workflow 32926445757) still has a capture-string run_id. Sibling unsigned/signed output paths use the capture timestamp rather than the 12-requirement candidate stem so NAME_MAX cannot block signing. A signed sibling from workflow 33034409714 is committed at `journeys/evidence/trusted-pool-creator-mvp-20260827T000309Z.pool-promotion-transition.signed.json` (`run_id` 1, authorization_id `spec043-ppt-20260827T000309Z-1`). Promoter consume of that pair was rejected because commit evidence 469c436b52053848d4d932a03d33c1921c7cdb08 no longer matches current mapped `func main` in `phase4-coordinator/cmd/coordinator/main.go` and `class ProductionReleaseKeyAndBuilderTests` in `scripts/tests/test_pool_promotion_transition.py`; the ledger was not durably consumed. A same-day signed recapture from workflow 33037491210 is committed at `journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json` (`run_id` 1 on fd50904396f3f11c2db633c9ed69b28d61a7ef65). CONFORMANCE `evidence[]` stays empty pending a new sibling consume, so SPEC-043-R012 remains pending."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        },
+        {
+          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
+          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-08-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-044-R001",
