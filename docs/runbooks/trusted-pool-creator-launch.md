@@ -1,9 +1,9 @@
-# Trusted Pool creator launch (SPEC-043 Gate C)
+# Trusted Pool creator launch (SPEC-043)
 
 This is the operator runbook for an approved **single-operator Trusted Pool**.
-It does not authorize a live external creator launch. SPEC-043 stays pending
-until Gate D promotion: signed candidate evidence plus a sibling
-`PoolPromotionTransitionV1` consumed with a registered production-release key.
+It does not authorize a live external creator launch. Isolated-candidate
+CONFORMANCE fill for SPEC-043-R001 through R012 is not a live Trusted Pool
+announcement.
 
 Buyer-facing wording is **Trusted Pool**. Do not call this a Privacy Pool,
 coordinator-blind, anonymous, ZK, or regulated-compliance product.
@@ -12,7 +12,7 @@ Issue: https://github.com/Augustas11/macprovider/issues/1160
 
 ## Pilot policy
 
-Until Gate D lands, production coordinators must keep:
+Until a live external creator is announced, production coordinators must keep:
 
 - `trusted_pools.enabled` off, or any enabled pool in a non-routeable lifecycle
 - membership limited to the creator’s own admitted Macs (SPEC-003)
@@ -28,7 +28,7 @@ Until Gate D lands, production coordinators must keep:
 Harness:
 `phase4-coordinator/internal/trustpool/spec043_creator_mvp_journey_test.go:TestJourneyTrustedPoolCreatorMVPCandidate`
 
-Candidate journey evidence (evidence-only, not in CONFORMANCE `evidence[]`):
+Candidate journey evidence (isolated-candidate CONFORMANCE fill, not a live launch):
 `journeys/JOURNEY-TRUSTED-POOL-CREATOR-MVP.md`
 
 That run covers create → root/manifest → member → buyer grant → candidate
@@ -42,14 +42,16 @@ rows stay zero.
 These journey observations are **true** on the signed same-day recapture from
 workflow [`33037491210`](https://github.com/Augustas11/macprovider/actions/runs/33037491210)
 (`journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.*`, `run_id` `1` on
-`fd50904396f3f11c2db633c9ed69b28d61a7ef65`, `expires_at` `2026-08-27`). They remain
-evidence-only: CONFORMANCE `evidence[]` is empty. The signed envelope from workflow
+`fd50904396f3f11c2db633c9ed69b28d61a7ef65`, `expires_at` `2026-08-27`). Promoter
+consume of sibling [`33039343666`](https://github.com/Augustas11/macprovider/actions/runs/33039343666)
+(`authorization_id` `spec043-ppt-20260827T032524Z-1`) filled SPEC-043-R001 through
+R012. Isolated-candidate CONFORMANCE is not a live Trusted Pool launch. The signed
+envelope from workflow
 [`33026618698`](https://github.com/Augustas11/macprovider/actions/runs/33026618698)
-(`20260827T000309Z`, capture `469c436b52053848d4d932a03d33c1921c7cdb08`) cannot
-fill current HEAD selectors (`func main` in coordinator `main.go` and
-`class ProductionReleaseKeyAndBuilderTests`). The prior signed integer-`run_id`
+was not consumed. The prior signed integer-`run_id`
 envelope (workflow [`32936678404`](https://github.com/Augustas11/macprovider/actions/runs/32936678404))
-has `expires_at` `2026-08-26`. Do not announce a live creator until Gate D exists.
+has `expires_at` `2026-08-26`. Do not announce a live creator until remaining
+production-readiness items exist.
 
 | Observation | Status |
 |---|---|
@@ -58,9 +60,8 @@ has `expires_at` `2026-08-26`. Do not announce a live creator until Gate D exist
 | `delegation_revocation_verified` | True on signed same-day recapture via canonical `ProviderPoolDelegationV1` grant/revoke (`member_revoked` is not delegation proof) |
 | `pool_existence_oracle_within_threshold` | True on signed same-day recapture via buyer/gateway rejection timing floor + unknown/unauthorized/disabled distribution test (wallet covered at gateway) |
 
-Also still missing for Gate D:
+Also still missing before any live announcement:
 
-- CONFORMANCE `evidence[]` only through promoter consume of the committed sibling
 - production on-call readiness record, reviewed-artifact lifecycle ownership,
   and production timing-floor remeasure
 
@@ -143,32 +144,28 @@ ledger or fill CONFORMANCE `evidence[]`.
 
 ## Next gates
 
-- Same-day signed recapture is committed (workflow
+- Same-day signed recapture is consumed (candidate workflow
   [`33037491210`](https://github.com/Augustas11/macprovider/actions/runs/33037491210),
-  `run_id` `1` on `fd50904396f3f11c2db633c9ed69b28d61a7ef65`, `expires_at`
-  `2026-08-27`). Freeze, descendant-signer, delegation, and pool-existence
-  oracle observations are true. Sign a **new** sibling bound to that candidate.
-  The signed `20260827T000309Z` envelope (workflow
-  [`33026618698`](https://github.com/Augustas11/macprovider/actions/runs/33026618698))
-  and sibling (workflow
-  [`33034409714`](https://github.com/Augustas11/macprovider/actions/runs/33034409714))
-  remain committed but cannot promote current HEAD: commit evidence
-  `469c436b52053848d4d932a03d33c1921c7cdb08` no longer matches mapped
-  `func main` and `class ProductionReleaseKeyAndBuilderTests`. The ledger stays
-  `ledger_init` only. The prior signed envelope (workflow
+  sibling workflow
+  [`33039343666`](https://github.com/Augustas11/macprovider/actions/runs/33039343666),
+  `authorization_id` `spec043-ppt-20260827T032524Z-1`, `run_id` `1` on
+  `fd50904396f3f11c2db633c9ed69b28d61a7ef65`, `expires_at` `2026-08-27`).
+  SPEC-043-R001 through R012 are conformant. Isolated-candidate CONFORMANCE is
+  not a live Trusted Pool launch. The signed `20260827T000309Z` envelope and
+  sibling remain unconsumed. The prior signed envelope (workflow
   [`32936678404`](https://github.com/Augustas11/macprovider/actions/runs/32936678404))
   has `expires_at` `2026-08-26`.
 - Historical Gate C envelope (workflow
   [`32926445757`](https://github.com/Augustas11/macprovider/actions/runs/32926445757))
   still has a capture-string `run_id`.
-- Promoter wiring is in place: `--promotion-transition` consumes a sibling
-  `PoolPromotionTransitionV1` before rewriting CONFORMANCE, and governance
-  keeps creator-MVP evidence-only until a matching `consumed_authorization`
-  exists.
+- Promoter wiring consumed sibling `spec043-ppt-20260827T032524Z-1` before
+  rewriting CONFORMANCE. Governance treats that creator-MVP envelope as
+  requirement evidence because a matching `consumed_authorization` exists.
+  Isolated-candidate CONFORMANCE is not a live Trusted Pool launch.
 - Operator key registration: `security/spec-043-production-release-p256-v1.pem`
   is registered. The sibling signer used
-  `MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM` and did not
-  consume the ledger or rewrite CONFORMANCE.
-- Gate D still needs CONFORMANCE `evidence[]` only through the promoter
-  consume flow, on-call readiness, reviewed-artifact lifecycle ownership,
-  and production timing-floor remeasure.
+  `MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM` and does not
+  consume the ledger or rewrite CONFORMANCE by itself.
+- Gate D CONFORMANCE fill for R001-R012 is done through promoter consume.
+  Remaining before live announcement: on-call readiness, reviewed-artifact
+  lifecycle ownership, and production timing-floor remeasure.
