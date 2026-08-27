@@ -4160,7 +4160,7 @@
     {
       "requirement_id": "SPEC-015-R001",
       "spec_id": "SPEC-015",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:buildSettlement",
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
@@ -4175,13 +4175,21 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "CODE_BUG",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1197",
-        "rationale": "Issue #1197 moves settlement receipt audit payload writes out of the hot coordinator transaction. Previous signed buyer-paid-path evidence remains historical, but mapped selector fragments changed and require a fresh protected signed buyer-paid-path promotion from main after this implementation lands."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:ea5cd0a8c70e8838264a57b6958c0ecb2af78d83",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-09-26"
+        },
+        {
+          "artifact": "sha256:561b12eb2a3b99df1eae88ba5556fbb1252a5cfeec8887362d617d91c51e1e54",
+          "source": "journeys/evidence/buyer-paid-path-20260827T012419Z.spec-015-r001-spec-022-r004.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-09-26"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-015-R002",
@@ -4360,7 +4368,7 @@
     {
       "requirement_id": "SPEC-022-R004",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
         "phase4-coordinator/internal/billing/settlement_verifier.go:VerifySettlementReceipt"
@@ -4373,13 +4381,21 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "CODE_BUG",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1197",
-        "rationale": "Issue #1197 changes the settlement receipt ingestion hot path while preserving verified receipt semantics. Previous signed buyer-paid-path evidence remains historical, but mapped selector fragments changed and require a fresh protected signed buyer-paid-path promotion from main after this implementation lands."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:ea5cd0a8c70e8838264a57b6958c0ecb2af78d83",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-09-26"
+        },
+        {
+          "artifact": "sha256:561b12eb2a3b99df1eae88ba5556fbb1252a5cfeec8887362d617d91c51e1e54",
+          "source": "journeys/evidence/buyer-paid-path-20260827T012419Z.spec-015-r001-spec-022-r004.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-09-26"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-022-R005",
@@ -4576,7 +4592,7 @@
     {
       "requirement_id": "SPEC-022-R011",
       "spec_id": "SPEC-022",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/billing/settlement_receipts.go:insertSettlementReceiptVerdictAuditConn"
       ],
@@ -4587,13 +4603,21 @@
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "CODE_BUG",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1197",
-        "rationale": "Issue #1197 moves settlement audit payload persistence to an outbox drain. Previous signed buyer-enforce evidence remains historical, but mapped selector fragments changed and require a fresh protected signed buyer-enforce promotion from main after this implementation lands."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:ea5cd0a8c70e8838264a57b6958c0ecb2af78d83",
+          "source": null,
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-09-26"
+        },
+        {
+          "artifact": "sha256:041229a9de08e0f9038fc04323c82dc2dbb45e0669481f58f95a785c65c44f20",
+          "source": "journeys/evidence/buyer-enforce-20260827T012422Z.spec-022-r011.journey-result.signed.json",
+          "captured_at": "2026-08-27",
+          "expires_at": "2026-09-26"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-016-R001",

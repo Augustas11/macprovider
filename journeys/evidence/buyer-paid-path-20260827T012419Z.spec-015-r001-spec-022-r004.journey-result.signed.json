@@ -1,0 +1,166 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEUCIQDSsxO6VEXpfUJNJVzVXkfZt0B5pHHGvntFYqJ1QSXZYQIgc3Muy0v/z63qT/AEj3NFYzQbjQusOrXwIqMjGuVRkYU=",
+      "signed_sha256": "ff529790bacce29e348cbdaad89e0d8cb62dbe8e54bcf4d13a91a5a09634d173",
+      "verified_at": "2026-08-27T02:04:02Z",
+      "verifier": ".github/workflows/promote-signed-buyer-paid-path-journey.yml:33032068816:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-BUYER-PAID-PATH",
+    "requirement_ids": [
+      "SPEC-015-R001",
+      "SPEC-022-R004"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "ea5cd0a8c70e8838264a57b6958c0ecb2af78d83"
+    },
+    "captured_at": "2026-08-27T01:24:19Z",
+    "expires_at": "2026-09-26",
+    "operator": {
+      "identity_fingerprint": "19fc9a8b5b9134d581ac7089082d4d6da1f4ea4e3049c6c52bd963be62e93295",
+      "role": "acceptance-operator"
+    },
+    "environment": {
+      "candidate": "commit:ea5cd0a8c70e8838264a57b6958c0ecb2af78d83",
+      "class": "isolated-candidate-paid-path",
+      "hardware_profile": "local-macos-redacted"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-buyer-paid-path",
+        "sha256": "2071597c4fc4da4fc5a59a476684ba4896f8f2b2c76b1682049bbc5453f85779",
+        "source": "journeys/evidence/buyer-paid-path-20260827T012419Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "isolated candidate paid-path journey passed in observe mode without payout-ready mutation"
+    },
+    "steps": [
+      {
+        "id": "step-01-capture-config",
+        "status": "pass",
+        "assertion": "isolated candidate captured in observe mode with an API-key subject and no settlement runner",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-02-nonstream-chat",
+        "status": "pass",
+        "assertion": "API-key non-streaming chat returned 200 with OpenAI-compatible usage",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-03-quota-settlement",
+        "status": "pass",
+        "assertion": "gateway quota reservation settled after the 200 and did not leak",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-04-ledger-credit",
+        "status": "pass",
+        "assertion": "coordinator ledger wrote a payable observe-mode credit whose persisted rates reproduce the default rate-card split",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-05-receipt-ingest",
+        "status": "pass",
+        "assertion": "SPEC-015 v0.4 settlement receipt was ingested and verified in observe mode",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-06-streaming-chat",
+        "status": "pass",
+        "assertion": "streaming chat terminated cleanly; settled completion tokens equal the 12-token fixture prefix, not a byte-length estimate",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-07-failure-refund",
+        "status": "pass",
+        "assertion": "pre-dispatch failure returned a buyer error envelope and refunded quota with no provider credit",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-08-disclosure",
+        "status": "pass",
+        "assertion": "buyer models disclosure names paid entrypoints and observe-mode prose; it does not claim currently enforcing",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-09-receipt-retrieval",
+        "status": "pass",
+        "assertion": "owner GET /v1/receipts/{id} returns metadata-only 200; missing is 404; unauthenticated is 401",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-10-redaction",
+        "status": "pass",
+        "assertion": "retained artifacts contain fingerprints only; bearer tokens, private keys, and raw prompt/output are absent",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      },
+      {
+        "id": "step-11-restore-config",
+        "status": "pass",
+        "assertion": "settlement mode remained observe, no payout-ready mutation, and enforce was not activated",
+        "artifacts": [
+          "redacted-buyer-paid-path"
+        ]
+      }
+    ],
+    "redaction": {
+      "local_account_names_redacted": true,
+      "operator_identity_redacted": true,
+      "secrets_redacted": true
+    },
+    "run_id": "buyer-paid-path-20260827T012419Z",
+    "execution_mode": "isolated-candidate-paid-path",
+    "observations": {
+      "bearer_tokens_redacted": true,
+      "buyer_receipt_retrieval_exposed": true,
+      "enforce_activated": false,
+      "isolated_environment": true,
+      "payout_ready_mutated": false,
+      "production_side_effects": false,
+      "raw_prompt_output_redacted": true,
+      "settlement_mode": "observe"
+    },
+    "candidate_identity": {
+      "autotune_catalog_sha256": "56c4c20a8d0b3a1944ff0539829d0f517097c5189f22d7f1453c8e491dff1720",
+      "autotune_catalog_version": "published-2026-07-29-inband-provenance-v1",
+      "coordinator_config_sha256": "33c66df6cfece161dd3753d501304b5cafcd252277945346c589082e720e0e53",
+      "gateway_base_url_sha256": "469d2415529f7d735866596c56038d5aa81f646d8b1fd751a8345010baf38c64",
+      "rate_card_matched_key": "default",
+      "rate_card_sha256": "68eb8794a2388cd73727b23db7e13adee8ae2c8e30bc0eeef5ad887223398cd3",
+      "rate_card_version": "51d4eb9d29024e759c8e41610ad3f13614253e52f47bc032c92f46adb599ad42",
+      "signed_catalog_id": "integration-catalog",
+      "signed_catalog_key_id": "integration-catalog-key",
+      "verified_model_sha256": "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90"
+    }
+  }
+}
