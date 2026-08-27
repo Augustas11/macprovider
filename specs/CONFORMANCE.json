@@ -1989,6 +1989,21 @@
       }
     },
     {
+      "requirement_id": "SPEC-020-R005",
+      "spec_id": "SPEC-020",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1235",
+        "rationale": "SPEC-020 v0.1.14 added SPEC-020-R005 (accepted-but-stuck session recovery). IMPL pending: the signed-recovery poll gate (CoordinatorClient.swift runSignedRecoveryDiscoveryIfDue, currently gated on !coordinatorSessionAccepted) must be extended so an accepted session becomes eligible after accepted_session_recovery_failure_threshold consecutive coordinator-recommendation forward-progress failures for the current recommendation (counting both recorded target failures and missing-compatibility-target observations), resetting on forward progress or recommendation-identity change, with R-6.8 observability and AC-V0.1-R005-1..4 coverage."
+      }
+    },
+    {
       "requirement_id": "SPEC-023-R001",
       "spec_id": "SPEC-023",
       "state": "conformant",
