@@ -4175,20 +4175,7 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
-          "source": null,
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        },
-        {
-          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
-          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
@@ -4386,20 +4373,7 @@
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:5ed5d7190bd878fe3623fff9a5684e71eddfb8f1",
-          "source": null,
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        },
-        {
-          "artifact": "sha256:77b9de93bbbdc7a853e1196379769bb25d93c0bd1d683c1ca62a80038237d389",
-          "source": "journeys/evidence/buyer-paid-path-20260817T045519Z.spec-005-r001-spec-005-r002-spec-006-r001-spec-006-r002-spec-006-r003-spec-015-r001-spec-022-r001-spec-022-r002-spec-022-r003-spec-022-r004-spec-022-r005-spec-022-r010.journey-result.signed.json",
-          "captured_at": "2026-08-17",
-          "expires_at": "2026-09-16"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
@@ -4613,20 +4587,7 @@
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
-          "source": null,
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
-        },
-        {
-          "artifact": "sha256:5ede794fefc03470f1e3e5c0c401e95c8b9842c2c4aa0ac0fb7fcefd0ee39e14",
-          "source": "journeys/evidence/buyer-enforce-20260818T065941Z.spec-022-r007-spec-022-r008-spec-022-r009-spec-022-r011.journey-result.signed.json",
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
-        }
-      ],
+      "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
