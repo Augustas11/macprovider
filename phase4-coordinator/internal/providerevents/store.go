@@ -49,6 +49,21 @@ type LastKnown struct {
 	Presence        string     `json:"presence,omitempty"` // connected|offline
 	Diagnostic      string     `json:"diagnostic,omitempty"`
 	DiagnosticAt    *time.Time `json:"diagnostic_at,omitempty"`
+	// Durable classification scalars persisted so offline incident triage can
+	// bucket a provider from admin truth without a live diagnostics export.
+	// JSON blobs (safety_telemetry/last_autoupdate_event) are intentionally
+	// omitted for offline rows — too heavy and stale to be useful.
+	Hostname                 string `json:"hostname,omitempty"`
+	Tier                     string `json:"tier,omitempty"`
+	HashStatus               string `json:"hash_status,omitempty"`
+	AttestationStatus        string `json:"attestation_status,omitempty"`
+	AttestationTier          string `json:"attestation_tier,omitempty"`
+	EncryptedLeg             bool   `json:"encrypted_leg,omitempty"`
+	CatalogAdmissionMode     string `json:"catalog_admission_mode,omitempty"`
+	BenchmarkQuarantined     bool   `json:"benchmark_quarantined,omitempty"`
+	AdmissionCeilingExcluded bool   `json:"admission_ceiling_excluded,omitempty"`
+	AdmissionEvidenceStale   bool   `json:"admission_evidence_stale,omitempty"`
+	AdmissionSandboxed       bool   `json:"admission_sandboxed,omitempty"`
 }
 
 // Store is the durable journal + last-known surface used by operator GETs.
@@ -182,6 +197,17 @@ CREATE INDEX IF NOT EXISTS idx_provider_last_known_seen
 		`ALTER TABLE provider_last_known ADD COLUMN model_hash TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE provider_last_known ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE provider_last_known ADD COLUMN diagnostic_at_utc TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE provider_last_known ADD COLUMN hostname TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE provider_last_known ADD COLUMN tier TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE provider_last_known ADD COLUMN hash_status TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE provider_last_known ADD COLUMN attestation_status TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE provider_last_known ADD COLUMN attestation_tier TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE provider_last_known ADD COLUMN encrypted_leg INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE provider_last_known ADD COLUMN catalog_admission_mode TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE provider_last_known ADD COLUMN benchmark_quarantined INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE provider_last_known ADD COLUMN admission_ceiling_excluded INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE provider_last_known ADD COLUMN admission_evidence_stale INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE provider_last_known ADD COLUMN admission_sandboxed INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, alterErr := s.db.ExecContext(ctx, stmt); alterErr != nil &&
 			!strings.Contains(strings.ToLower(alterErr.Error()), "duplicate column") {
@@ -282,8 +308,11 @@ INSERT INTO provider_last_known (
 	provider_id, assigned_id, binary_version, model_id, model_loaded, model_hash,
 	state, auth_state,
 	connected_at_utc, last_heartbeat_at_utc, last_activity_at_utc,
-	last_seen_at_utc, routing_eligible, diagnostic, diagnostic_at_utc
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	last_seen_at_utc, routing_eligible, diagnostic, diagnostic_at_utc,
+	hostname, tier, hash_status, attestation_status, attestation_tier,
+	encrypted_leg, catalog_admission_mode, benchmark_quarantined,
+	admission_ceiling_excluded, admission_evidence_stale, admission_sandboxed
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(provider_id) DO UPDATE SET
 	assigned_id = CASE
 		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.assigned_id
@@ -351,6 +380,56 @@ ON CONFLICT(provider_id) DO UPDATE SET
 		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.diagnostic_at_utc
 		WHEN excluded.diagnostic_at_utc = '' THEN provider_last_known.diagnostic_at_utc
 		ELSE excluded.diagnostic_at_utc
+	END,
+	hostname = CASE
+		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.hostname
+		WHEN excluded.hostname = '' THEN provider_last_known.hostname
+		ELSE excluded.hostname
+	END,
+	tier = CASE
+		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.tier
+		WHEN excluded.tier = '' THEN provider_last_known.tier
+		ELSE excluded.tier
+	END,
+	hash_status = CASE
+		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.hash_status
+		WHEN excluded.hash_status = '' THEN provider_last_known.hash_status
+		ELSE excluded.hash_status
+	END,
+	attestation_status = CASE
+		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.attestation_status
+		WHEN excluded.attestation_status = '' THEN provider_last_known.attestation_status
+		ELSE excluded.attestation_status
+	END,
+	attestation_tier = CASE
+		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.attestation_tier
+		WHEN excluded.attestation_tier = '' THEN provider_last_known.attestation_tier
+		ELSE excluded.attestation_tier
+	END,
+	encrypted_leg = CASE
+		WHEN excluded.last_seen_at_utc >= provider_last_known.last_seen_at_utc THEN excluded.encrypted_leg
+		ELSE provider_last_known.encrypted_leg
+	END,
+	catalog_admission_mode = CASE
+		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.catalog_admission_mode
+		WHEN excluded.catalog_admission_mode = '' THEN provider_last_known.catalog_admission_mode
+		ELSE excluded.catalog_admission_mode
+	END,
+	benchmark_quarantined = CASE
+		WHEN excluded.last_seen_at_utc >= provider_last_known.last_seen_at_utc THEN excluded.benchmark_quarantined
+		ELSE provider_last_known.benchmark_quarantined
+	END,
+	admission_ceiling_excluded = CASE
+		WHEN excluded.last_seen_at_utc >= provider_last_known.last_seen_at_utc THEN excluded.admission_ceiling_excluded
+		ELSE provider_last_known.admission_ceiling_excluded
+	END,
+	admission_evidence_stale = CASE
+		WHEN excluded.last_seen_at_utc >= provider_last_known.last_seen_at_utc THEN excluded.admission_evidence_stale
+		ELSE provider_last_known.admission_evidence_stale
+	END,
+	admission_sandboxed = CASE
+		WHEN excluded.last_seen_at_utc >= provider_last_known.last_seen_at_utc THEN excluded.admission_sandboxed
+		ELSE provider_last_known.admission_sandboxed
 	END`,
 		providerID,
 		strings.TrimSpace(snap.AssignedID),
@@ -367,6 +446,17 @@ ON CONFLICT(provider_id) DO UPDATE SET
 		boolToInt(snap.RoutingEligible),
 		RedactDiagnostic(snap.Diagnostic, DefaultMaxDiagnostic),
 		formatOptionalTime(snap.DiagnosticAt),
+		RedactDiagnostic(snap.Hostname, 128),
+		RedactDiagnostic(snap.Tier, 64),
+		RedactDiagnostic(snap.HashStatus, 64),
+		RedactDiagnostic(snap.AttestationStatus, 64),
+		RedactDiagnostic(snap.AttestationTier, 64),
+		boolToInt(snap.EncryptedLeg),
+		RedactDiagnostic(snap.CatalogAdmissionMode, 64),
+		boolToInt(snap.BenchmarkQuarantined),
+		boolToInt(snap.AdmissionCeilingExcluded),
+		boolToInt(snap.AdmissionEvidenceStale),
+		boolToInt(snap.AdmissionSandboxed),
 	)
 	return err
 }
@@ -379,7 +469,10 @@ func (s *SQLiteStore) GetLastKnown(ctx context.Context, providerID string) (Last
 	row := s.db.QueryRowContext(ctx, `
 SELECT provider_id, assigned_id, binary_version, model_id, model_loaded, model_hash, state, auth_state,
 	connected_at_utc, last_heartbeat_at_utc, last_activity_at_utc,
-	last_seen_at_utc, routing_eligible, diagnostic, diagnostic_at_utc
+	last_seen_at_utc, routing_eligible, diagnostic, diagnostic_at_utc,
+	hostname, tier, hash_status, attestation_status, attestation_tier,
+	encrypted_leg, catalog_admission_mode, benchmark_quarantined,
+	admission_ceiling_excluded, admission_evidence_stale, admission_sandboxed
 FROM provider_last_known WHERE provider_id = ?`, providerID)
 	snap, err := scanLastKnown(row)
 	if err == sql.ErrNoRows {
@@ -405,7 +498,10 @@ func (s *SQLiteStore) ListLastKnown(ctx context.Context, limit int, afterSeenAt,
 		rows, err = s.db.QueryContext(ctx, `
 SELECT provider_id, assigned_id, binary_version, model_id, model_loaded, model_hash, state, auth_state,
 	connected_at_utc, last_heartbeat_at_utc, last_activity_at_utc,
-	last_seen_at_utc, routing_eligible, diagnostic, diagnostic_at_utc
+	last_seen_at_utc, routing_eligible, diagnostic, diagnostic_at_utc,
+	hostname, tier, hash_status, attestation_status, attestation_tier,
+	encrypted_leg, catalog_admission_mode, benchmark_quarantined,
+	admission_ceiling_excluded, admission_evidence_stale, admission_sandboxed
 FROM provider_last_known
 ORDER BY last_seen_at_utc DESC, provider_id ASC
 LIMIT ?`, limit)
@@ -413,7 +509,10 @@ LIMIT ?`, limit)
 		rows, err = s.db.QueryContext(ctx, `
 SELECT provider_id, assigned_id, binary_version, model_id, model_loaded, model_hash, state, auth_state,
 	connected_at_utc, last_heartbeat_at_utc, last_activity_at_utc,
-	last_seen_at_utc, routing_eligible, diagnostic, diagnostic_at_utc
+	last_seen_at_utc, routing_eligible, diagnostic, diagnostic_at_utc,
+	hostname, tier, hash_status, attestation_status, attestation_tier,
+	encrypted_leg, catalog_admission_mode, benchmark_quarantined,
+	admission_ceiling_excluded, admission_evidence_stale, admission_sandboxed
 FROM provider_last_known
 WHERE last_seen_at_utc < ?
    OR (last_seen_at_utc = ? AND provider_id > ?)
@@ -646,10 +745,13 @@ func scanEvent(row rowScanner) (Event, error) {
 
 func scanLastKnown(row rowScanner) (LastKnown, error) {
 	var (
-		snap                                    LastKnown
-		connectedRaw, heartbeatRaw, activityRaw string
-		lastSeenRaw, diagnosticAtRaw            string
-		routing, modelLoaded                    int
+		snap                                     LastKnown
+		connectedRaw, heartbeatRaw, activityRaw  string
+		lastSeenRaw, diagnosticAtRaw             string
+		routing, modelLoaded                     int
+		encryptedLeg, benchmarkQuarantined       int
+		admissionCeilingExcluded                 int
+		admissionEvidenceStale, admissionSandbox int
 	)
 	if err := row.Scan(
 		&snap.ProviderID,
@@ -667,6 +769,17 @@ func scanLastKnown(row rowScanner) (LastKnown, error) {
 		&routing,
 		&snap.Diagnostic,
 		&diagnosticAtRaw,
+		&snap.Hostname,
+		&snap.Tier,
+		&snap.HashStatus,
+		&snap.AttestationStatus,
+		&snap.AttestationTier,
+		&encryptedLeg,
+		&snap.CatalogAdmissionMode,
+		&benchmarkQuarantined,
+		&admissionCeilingExcluded,
+		&admissionEvidenceStale,
+		&admissionSandbox,
 	); err != nil {
 		return LastKnown{}, err
 	}
@@ -695,6 +808,11 @@ func scanLastKnown(row rowScanner) (LastKnown, error) {
 	snap.LastSeenAt = lastSeen.UTC()
 	snap.RoutingEligible = routing != 0
 	snap.ModelLoaded = modelLoaded != 0
+	snap.EncryptedLeg = encryptedLeg != 0
+	snap.BenchmarkQuarantined = benchmarkQuarantined != 0
+	snap.AdmissionCeilingExcluded = admissionCeilingExcluded != 0
+	snap.AdmissionEvidenceStale = admissionEvidenceStale != 0
+	snap.AdmissionSandboxed = admissionSandbox != 0
 	diagnosticAt, err := parseOptionalTime(diagnosticAtRaw)
 	if err != nil {
 		return LastKnown{}, err

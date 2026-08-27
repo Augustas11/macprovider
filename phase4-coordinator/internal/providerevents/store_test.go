@@ -304,6 +304,166 @@ func TestLastKnownStoresRedactedDiagnosticStatus(t *testing.T) {
 	}
 }
 
+func TestLastKnownClassificationScalarsRoundTrip(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	seen := time.Date(2026, 8, 27, 3, 0, 0, 0, time.UTC)
+	if err := store.UpsertLastKnown(ctx, LastKnown{
+		ProviderID:               "augustass-macbook-air",
+		AssignedID:               "asg-1",
+		LastSeenAt:               seen,
+		Hostname:                 "augustass-macbook-air.local",
+		Tier:                     "trusted",
+		HashStatus:               "hash_verified",
+		AttestationStatus:        "attested",
+		AttestationTier:          "hardware",
+		EncryptedLeg:             true,
+		CatalogAdmissionMode:     "strict",
+		BenchmarkQuarantined:     true,
+		AdmissionCeilingExcluded: true,
+		AdmissionEvidenceStale:   true,
+		AdmissionSandboxed:       true,
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	snap, ok, err := store.GetLastKnown(ctx, "augustass-macbook-air")
+	if err != nil || !ok {
+		t.Fatalf("get: ok=%v err=%v", ok, err)
+	}
+	if snap.Hostname != "augustass-macbook-air.local" || snap.Tier != "trusted" {
+		t.Fatalf("hostname/tier round-trip failed: %#v", snap)
+	}
+	if snap.HashStatus != "hash_verified" || snap.AttestationStatus != "attested" || snap.AttestationTier != "hardware" {
+		t.Fatalf("hash/attestation round-trip failed: %#v", snap)
+	}
+	if snap.CatalogAdmissionMode != "strict" {
+		t.Fatalf("catalog_admission_mode round-trip failed: %#v", snap)
+	}
+	if !snap.EncryptedLeg || !snap.BenchmarkQuarantined || !snap.AdmissionCeilingExcluded ||
+		!snap.AdmissionEvidenceStale || !snap.AdmissionSandboxed {
+		t.Fatalf("bool classification flags round-trip failed: %#v", snap)
+	}
+
+	// Older snapshot must not clobber a fresher non-empty classification.
+	older := seen.Add(-time.Hour)
+	if err := store.UpsertLastKnown(ctx, LastKnown{
+		ProviderID: "augustass-macbook-air",
+		AssignedID: "asg-1",
+		LastSeenAt: older,
+		Tier:       "provisional",
+	}); err != nil {
+		t.Fatalf("stale upsert: %v", err)
+	}
+	snap, ok, err = store.GetLastKnown(ctx, "augustass-macbook-air")
+	if err != nil || !ok {
+		t.Fatalf("get after stale: ok=%v err=%v", ok, err)
+	}
+	if snap.Tier != "trusted" {
+		t.Fatalf("stale upsert clobbered tier: %q", snap.Tier)
+	}
+}
+
+func TestMigrateAddsClassificationColumnsBackCompat(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Simulate a pre-classification schema: original columns only, plus a row.
+	if _, err := db.ExecContext(ctx, `
+CREATE TABLE provider_last_known (
+	provider_id TEXT PRIMARY KEY,
+	assigned_id TEXT NOT NULL DEFAULT '',
+	binary_version TEXT NOT NULL DEFAULT '',
+	model_id TEXT NOT NULL DEFAULT '',
+	model_loaded INTEGER NOT NULL DEFAULT 0,
+	model_hash TEXT NOT NULL DEFAULT '',
+	state TEXT NOT NULL DEFAULT '',
+	auth_state TEXT NOT NULL DEFAULT '',
+	connected_at_utc TEXT NOT NULL DEFAULT '',
+	last_heartbeat_at_utc TEXT NOT NULL DEFAULT '',
+	last_activity_at_utc TEXT NOT NULL DEFAULT '',
+	last_seen_at_utc TEXT NOT NULL,
+	routing_eligible INTEGER NOT NULL DEFAULT 0,
+	diagnostic TEXT NOT NULL DEFAULT '',
+	diagnostic_at_utc TEXT NOT NULL DEFAULT ''
+)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO provider_last_known (provider_id, binary_version, last_seen_at_utc)
+VALUES ('legacy-mac', '1.8.57', '2026-08-27T00:00:00.000000000Z')`); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+
+	// Opening the store must run the backward-compatible ALTERs, not error.
+	store, err := NewSQLiteStore(db)
+	if err != nil {
+		t.Fatalf("migrate legacy db: %v", err)
+	}
+
+	// New columns must exist.
+	cols := map[string]bool{}
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(provider_last_known)`)
+	if err != nil {
+		t.Fatalf("table_info: %v", err)
+	}
+	for rows.Next() {
+		var (
+			cid         int
+			name, ctype string
+			notnull, pk int
+			dflt        sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			t.Fatalf("scan table_info: %v", err)
+		}
+		cols[name] = true
+	}
+	rows.Close()
+	for _, want := range []string{
+		"hostname", "tier", "hash_status", "attestation_status", "attestation_tier",
+		"encrypted_leg", "catalog_admission_mode", "benchmark_quarantined",
+		"admission_ceiling_excluded", "admission_evidence_stale", "admission_sandboxed",
+	} {
+		if !cols[want] {
+			t.Fatalf("migration did not add column %q", want)
+		}
+	}
+
+	// Legacy row must read back with zero-value classification defaults.
+	snap, ok, err := store.GetLastKnown(ctx, "legacy-mac")
+	if err != nil || !ok {
+		t.Fatalf("get legacy row: ok=%v err=%v", ok, err)
+	}
+	if snap.BinaryVersion != "1.8.57" {
+		t.Fatalf("legacy row lost binary_version: %#v", snap)
+	}
+	if snap.Tier != "" || snap.Hostname != "" || snap.EncryptedLeg || snap.BenchmarkQuarantined {
+		t.Fatalf("legacy row did not default cleanly: %#v", snap)
+	}
+
+	// A subsequent upsert must persist the new fields on the migrated table.
+	if err := store.UpsertLastKnown(ctx, LastKnown{
+		ProviderID: "legacy-mac",
+		LastSeenAt: time.Date(2026, 8, 27, 4, 0, 0, 0, time.UTC),
+		Tier:       "trusted",
+		HashStatus: "hash_verified",
+	}); err != nil {
+		t.Fatalf("upsert after migration: %v", err)
+	}
+	snap, _, err = store.GetLastKnown(ctx, "legacy-mac")
+	if err != nil {
+		t.Fatalf("get after migration upsert: %v", err)
+	}
+	if snap.Tier != "trusted" || snap.HashStatus != "hash_verified" {
+		t.Fatalf("post-migration upsert not persisted: %#v", snap)
+	}
+}
+
 func containsAny(s string, parts ...string) bool {
 	for _, p := range parts {
 		if p != "" && strings.Contains(s, p) {

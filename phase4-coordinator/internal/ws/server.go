@@ -3618,6 +3618,20 @@ func (s *Server) handleDiagnosticStatus(conn net.Conn, providerID, assignedID st
 	}
 	lastKnown.RoutingEligible = live.RoutingEligible()
 	lastKnown.AuthState = string(live.AuthState)
+	// Durable classification scalars come from the authoritative live session,
+	// not the provider-reported diagnostic payload, so offline triage buckets
+	// match admission truth.
+	lastKnown.Hostname = live.Hostname
+	lastKnown.Tier = string(live.Tier)
+	lastKnown.HashStatus = string(live.HashStatus)
+	lastKnown.AttestationStatus = string(live.AttestationStatus)
+	lastKnown.AttestationTier = live.AttestationTier
+	lastKnown.EncryptedLeg = live.EncryptedLeg
+	lastKnown.CatalogAdmissionMode = live.CatalogAdmissionMode
+	lastKnown.BenchmarkQuarantined = live.BenchmarkQuarantined
+	lastKnown.AdmissionCeilingExcluded = live.AdmissionCeilingExcluded
+	lastKnown.AdmissionEvidenceStale = live.AdmissionEvidenceStale
+	lastKnown.AdmissionSandboxed = live.AdmissionSandboxed
 	if lastKnown.BinaryVersion == "" {
 		lastKnown.BinaryVersion = live.BinaryVersion
 	}

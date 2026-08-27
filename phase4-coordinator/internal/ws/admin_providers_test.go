@@ -58,17 +58,26 @@ func TestAdminProvidersOfflineLastKnownAndEvents(t *testing.T) {
 	ctx := context.Background()
 	seen := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	if err := store.UpsertLastKnown(ctx, providerevents.LastKnown{
-		ProviderID:    "augustass-macbook-air",
-		AssignedID:    "asg-1",
-		BinaryVersion: "1.8.57",
-		ModelID:       "qwen2.5-coder-14b",
-		ModelLoaded:   true,
-		ModelHash:     strings.Repeat("a", 64),
-		State:         "unavailable",
-		AuthState:     "bearer_validated",
-		LastSeenAt:    seen,
-		Diagnostic:    "network_offline: Authorization: Bearer mpk_should_redact",
-		DiagnosticAt:  &seen,
+		ProviderID:             "augustass-macbook-air",
+		AssignedID:             "asg-1",
+		BinaryVersion:          "1.8.57",
+		ModelID:                "qwen2.5-coder-14b",
+		ModelLoaded:            true,
+		ModelHash:              strings.Repeat("a", 64),
+		State:                  "unavailable",
+		AuthState:              "bearer_validated",
+		LastSeenAt:             seen,
+		Diagnostic:             "network_offline: Authorization: Bearer mpk_should_redact",
+		DiagnosticAt:           &seen,
+		Hostname:               "augustass-macbook-air.local",
+		Tier:                   "trusted",
+		HashStatus:             "hash_verified",
+		AttestationStatus:      "attested",
+		AttestationTier:        "hardware",
+		EncryptedLeg:           true,
+		CatalogAdmissionMode:   "strict",
+		BenchmarkQuarantined:   true,
+		AdmissionEvidenceStale: true,
 	}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
@@ -117,6 +126,17 @@ func TestAdminProvidersOfflineLastKnownAndEvents(t *testing.T) {
 	}
 	if body.Provider["model_loaded"] != true || body.Provider["model_hash"] != strings.Repeat("a", 64) {
 		t.Fatalf("diagnostic model fields missing: %#v", body.Provider)
+	}
+	if body.Provider["hostname"] != "augustass-macbook-air.local" || body.Provider["tier"] != "trusted" {
+		t.Fatalf("offline classification scalars missing: %#v", body.Provider)
+	}
+	if body.Provider["hash_status"] != "hash_verified" || body.Provider["attestation_status"] != "attested" ||
+		body.Provider["attestation_tier"] != "hardware" {
+		t.Fatalf("offline hash/attestation scalars missing: %#v", body.Provider)
+	}
+	if body.Provider["encrypted_leg"] != true || body.Provider["catalog_admission_mode"] != "strict" ||
+		body.Provider["benchmark_quarantined"] != true || body.Provider["admission_evidence_stale"] != true {
+		t.Fatalf("offline admission/policy scalars missing: %#v", body.Provider)
 	}
 	if containsSecret(body.Provider["diagnostic"].(string)) {
 		t.Fatalf("provider diagnostic leaked secret: %q", body.Provider["diagnostic"])
@@ -174,17 +194,23 @@ func TestAdminProvidersConnectedUsesLivePool(t *testing.T) {
 
 	now := time.Now().UTC()
 	provider := &pool.Provider{
-		ProviderID:      "m4-anon",
-		AssignedID:      "asg-live",
-		BinaryVersion:   "1.8.57",
-		ModelID:         "llama",
-		State:           pool.StateReady,
-		AuthState:       pool.AuthBearerValidated,
-		ConnectedAt:     now,
-		LastHeartbeatAt: now,
-		LastActivityAt:  now,
-		SlotsFree:       1,
-		SlotsTotal:      1,
+		ProviderID:        "m4-anon",
+		AssignedID:        "asg-live",
+		BinaryVersion:     "1.8.57",
+		ModelID:           "llama",
+		State:             pool.StateReady,
+		AuthState:         pool.AuthBearerValidated,
+		ConnectedAt:       now,
+		LastHeartbeatAt:   now,
+		LastActivityAt:    now,
+		SlotsFree:         1,
+		SlotsTotal:        1,
+		Hostname:          "m4-anon.local",
+		Tier:              pool.TierTrusted,
+		HashStatus:        pool.HashStatusVerified,
+		AttestationStatus: pool.AttestationStatusAttested,
+		AttestationTier:   pool.AttestationTierHardware,
+		EncryptedLeg:      true,
 	}
 	if _, ok := h.Registry.Register(provider, nil); !ok {
 		t.Fatal("register live provider failed")
@@ -220,6 +246,16 @@ func TestAdminProvidersConnectedUsesLivePool(t *testing.T) {
 	}
 	if body.Provider["diagnostic"] != "network_offline: redacted" || body.Provider["diagnostic_at"] == nil {
 		t.Fatalf("live detail dropped diagnostic fields: %#v", body.Provider)
+	}
+	if body.Provider["hostname"] != "m4-anon.local" || body.Provider["tier"] != "trusted" {
+		t.Fatalf("live classification fields missing: %#v", body.Provider)
+	}
+	if body.Provider["hash_status"] != "hash_verified" || body.Provider["attestation_status"] != "attested" ||
+		body.Provider["attestation_tier"] != "hardware" {
+		t.Fatalf("live hash/attestation fields missing: %#v", body.Provider)
+	}
+	if body.Provider["encrypted_leg"] != true {
+		t.Fatalf("live encrypted_leg flag missing: %#v", body.Provider)
 	}
 
 	listReq, err := http.NewRequest(http.MethodGet, h.HTTP.URL+"/admin/providers", nil)
