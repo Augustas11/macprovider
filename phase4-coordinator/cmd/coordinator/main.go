@@ -242,6 +242,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer auditStore.Close()
+	settlementReceiptAuditStore, err := audit.OpenSettlementReceiptStore(audit.DefaultDBPath(cfg.Storage.DBPath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "settlement receipt audit storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer settlementReceiptAuditStore.Close()
 	admissionStore, err := providerws.NewSQLiteAdmissionStore(reqLogStore.DB())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "admission storage: %v\n", err)
@@ -1264,8 +1270,10 @@ func main() {
 	startSettlementStartupScan(context.Background(), billingStore, cfg.Settlement, time.Now().UTC(), logger)
 	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
+	flushSettlementReceiptAuditOutbox := startSettlementReceiptAuditOutboxDrainer(shutdownCtx, billingStore, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, metricsHandle, logger)
 	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, cfg.Storage.RequestLogPruneOnStartup, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
+	startAuditLogRetentionPruner(shutdownCtx, settlementReceiptAuditStore, cfg.Storage.AuditLogRetentionDays, cfg.Storage.AuditLogPruneOnStartup, logger)
 	startProviderConnectionEventPruner(shutdownCtx, connectionEventStore, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
 	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
@@ -1338,6 +1346,9 @@ func main() {
 			case <-ctx.Done():
 				logger.Warn().Msg("receipt rotation audit drain timed out at shutdown")
 			}
+			outboxFlushCtx, outboxFlushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			flushSettlementReceiptAuditOutbox(outboxFlushCtx)
+			outboxFlushCancel()
 			logger.Info().Msg("coordinator shutdown complete")
 			return
 		case err := <-errs:
@@ -1407,6 +1418,18 @@ type requestLogPruner interface {
 
 type settlementStartupScanner interface {
 	StartStartupScan(context.Context, config.SettlementConfig, time.Time) error
+}
+
+type settlementReceiptAuditOutboxDrainer interface {
+	DrainSettlementReceiptAuditOutbox(context.Context, billing.SettlementReceiptAuditSink, int) (int, error)
+	PruneSettlementReceiptAuditOutbox(context.Context, time.Time, int) (int64, error)
+	SettlementReceiptAuditOutboxStats(context.Context) (billing.SettlementReceiptAuditOutboxStats, error)
+}
+
+type settlementReceiptAuditOutboxObserver interface {
+	ObserveSettlementReceiptAuditOutbox(int64, time.Duration)
+	IncSettlementReceiptAuditOutboxDrain(string)
+	AddSettlementReceiptAuditOutboxRows(string, int64)
 }
 
 const (
@@ -1498,6 +1521,105 @@ func startSettlementStartupScan(ctx context.Context, scanner settlementStartupSc
 	if err := scanner.StartStartupScan(ctx, settlement, now); err != nil {
 		logger.Warn().Err(err).Msg("billing startup scan failed")
 	}
+}
+
+func startSettlementReceiptAuditOutboxDrainer(ctx context.Context, store settlementReceiptAuditOutboxDrainer, sink billing.SettlementReceiptAuditSink, retentionDays int, observer settlementReceiptAuditOutboxObserver, logger zerolog.Logger) func(context.Context) {
+	if store == nil || sink == nil {
+		return func(context.Context) {}
+	}
+	const (
+		batchLimit    = 100
+		pruneLimit    = 500
+		drainInterval = 30 * time.Second
+		drainTimeout  = 5 * time.Second
+		statsTimeout  = time.Second
+	)
+	observeStats := func(runCtx context.Context) {
+		statsCtx, cancel := context.WithTimeout(runCtx, statsTimeout)
+		defer cancel()
+		stats, err := store.SettlementReceiptAuditOutboxStats(statsCtx)
+		if err != nil {
+			logger.Warn().Err(err).Msg("settlement receipt audit outbox stats failed")
+			return
+		}
+		var oldestAge time.Duration
+		if stats.HasOldestPendingCreated {
+			oldestAge = time.Since(stats.OldestPendingCreatedAt)
+			if oldestAge < 0 {
+				oldestAge = 0
+			}
+		}
+		if observer != nil {
+			observer.ObserveSettlementReceiptAuditOutbox(stats.PendingRows, oldestAge)
+		}
+	}
+	drain := func(runCtx context.Context) (int, error) {
+		drainCtx, cancel := context.WithTimeout(runCtx, drainTimeout)
+		defer cancel()
+		drained, err := store.DrainSettlementReceiptAuditOutbox(drainCtx, sink, batchLimit)
+		outcome := "success"
+		if err != nil {
+			outcome = "error"
+			logger.Warn().Err(err).Msg("settlement receipt audit outbox drain failed")
+		}
+		if observer != nil {
+			observer.IncSettlementReceiptAuditOutboxDrain(outcome)
+			observer.AddSettlementReceiptAuditOutboxRows("drained", int64(drained))
+		}
+		if drained > 0 {
+			logger.Info().Int("drained_rows", drained).Msg("settlement receipt audit outbox drained rows")
+		}
+		if retentionDays > 0 {
+			cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
+			pruneCtx, cancel := context.WithTimeout(runCtx, drainTimeout)
+			defer cancel()
+			pruned, err := store.PruneSettlementReceiptAuditOutbox(pruneCtx, cutoff, pruneLimit)
+			if err != nil {
+				logger.Warn().Err(err).Msg("settlement receipt audit outbox prune failed")
+			} else if pruned > 0 {
+				logger.Info().Int64("pruned_rows", pruned).Msg("settlement receipt audit outbox pruned rows")
+			}
+			if observer != nil {
+				observer.AddSettlementReceiptAuditOutboxRows("pruned", pruned)
+			}
+		}
+		observeStats(runCtx)
+		return drained, err
+	}
+	flushOne := func(runCtx context.Context) {
+		if runCtx == nil {
+			runCtx = context.Background()
+		}
+		_, _ = drain(runCtx)
+	}
+	flushAll := func(runCtx context.Context) {
+		if runCtx == nil {
+			runCtx = context.Background()
+		}
+		for {
+			if runCtx.Err() != nil {
+				return
+			}
+			drained, err := drain(runCtx)
+			if drained == 0 || (err == nil && drained < batchLimit) {
+				return
+			}
+		}
+	}
+	flushOne(ctx)
+	go func() {
+		ticker := time.NewTicker(drainInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				flushOne(ctx)
+			}
+		}
+	}()
+	return flushAll
 }
 
 // mustParseTrustedProxies parses cfg.Proxy.TrustedProxies into the

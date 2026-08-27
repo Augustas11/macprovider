@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -283,6 +285,78 @@ func TestMoneySQLiteActivityMiddlewareMarksRequests(t *testing.T) {
 	}
 }
 
+func TestSettlementReceiptAuditOutboxDrainerPrunesAfterDrainError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &settlementReceiptAuditOutboxDrainerStub{
+		drained:      1,
+		drainErr:     errors.New("poison outbox row"),
+		drainCalled:  make(chan struct{}, 2),
+		pruneCalled:  make(chan struct{}, 2),
+		statsPending: 1,
+	}
+	observer := &settlementReceiptAuditOutboxObserverStub{
+		drainOutcomes: make(chan string, 2),
+		rowOps:        make(chan string, 4),
+	}
+
+	startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 90, observer, zerolog.Nop())
+
+	assertSignal(t, store.drainCalled, "audit outbox drain")
+	assertSignal(t, store.pruneCalled, "audit outbox prune")
+	assertStringSignal(t, observer.drainOutcomes, "error", "audit outbox drain outcome")
+	assertStringSignal(t, observer.rowOps, "drained", "audit outbox drained row metric")
+}
+
+func TestSettlementReceiptAuditOutboxShutdownFlushDrains(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &settlementReceiptAuditOutboxDrainerStub{
+		drainedBatches: []int{0, 100, 100, 50},
+		drainCalled:    make(chan struct{}, 4),
+		pruneCalled:    make(chan struct{}, 2),
+	}
+
+	flush := startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 0, nil, zerolog.Nop())
+	assertSignal(t, store.drainCalled, "initial audit outbox drain")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+	defer shutdownCancel()
+	flush(shutdownCtx)
+	assertSignal(t, store.drainCalled, "shutdown audit outbox drain")
+	assertSignal(t, store.drainCalled, "shutdown audit outbox second batch")
+	assertSignal(t, store.drainCalled, "shutdown audit outbox final batch")
+	assertNoSignal(t, store.drainCalled, "shutdown audit outbox extra batch")
+}
+
+func TestSettlementReceiptAuditOutboxShutdownFlushContinuesAfterPartialError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &settlementReceiptAuditOutboxDrainerStub{
+		drainedBatches: []int{0, 99, 99, 2, 0},
+		drainErrs: []error{
+			nil,
+			errors.New("poison outbox row"),
+			errors.New("poison outbox row"),
+			nil,
+			errors.New("only poison rows remain"),
+		},
+		drainCalled: make(chan struct{}, 5),
+		pruneCalled: make(chan struct{}, 5),
+	}
+
+	flush := startSettlementReceiptAuditOutboxDrainer(ctx, store, settlementReceiptAuditSinkStub{}, 0, nil, zerolog.Nop())
+	assertSignal(t, store.drainCalled, "initial audit outbox drain")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+	defer shutdownCancel()
+	flush(shutdownCtx)
+	assertSignal(t, store.drainCalled, "shutdown audit outbox first partial batch")
+	assertSignal(t, store.drainCalled, "shutdown audit outbox second partial batch")
+	assertSignal(t, store.drainCalled, "shutdown audit outbox final successful batch")
+	assertNoSignal(t, store.drainCalled, "shutdown audit outbox poison-only spin")
+}
+
 type startupScanStub struct {
 	called chan config.SettlementConfig
 }
@@ -327,6 +401,101 @@ type fixedIdleTracker struct {
 
 func (t fixedIdleTracker) IdleFor(time.Time) time.Duration {
 	return t.idleFor
+}
+
+type settlementReceiptAuditOutboxDrainerStub struct {
+	drained        int
+	drainedBatches []int
+	drainErrs      []error
+	drainErr       error
+	pruned         int64
+	drainCalled    chan struct{}
+	pruneCalled    chan struct{}
+	statsPending   int64
+}
+
+func (s *settlementReceiptAuditOutboxDrainerStub) DrainSettlementReceiptAuditOutbox(context.Context, billing.SettlementReceiptAuditSink, int) (int, error) {
+	s.drainCalled <- struct{}{}
+	err := s.drainErr
+	if len(s.drainErrs) > 0 {
+		err = s.drainErrs[0]
+		s.drainErrs = s.drainErrs[1:]
+	}
+	if len(s.drainedBatches) > 0 {
+		drained := s.drainedBatches[0]
+		s.drainedBatches = s.drainedBatches[1:]
+		return drained, err
+	}
+	return s.drained, err
+}
+
+func (s *settlementReceiptAuditOutboxDrainerStub) PruneSettlementReceiptAuditOutbox(context.Context, time.Time, int) (int64, error) {
+	s.pruneCalled <- struct{}{}
+	return s.pruned, nil
+}
+
+func (s *settlementReceiptAuditOutboxDrainerStub) SettlementReceiptAuditOutboxStats(context.Context) (billing.SettlementReceiptAuditOutboxStats, error) {
+	stats := billing.SettlementReceiptAuditOutboxStats{PendingRows: s.statsPending}
+	if s.statsPending > 0 {
+		stats.OldestPendingCreatedAt = time.Now().Add(-time.Minute)
+		stats.HasOldestPendingCreated = true
+	}
+	return stats, nil
+}
+
+type settlementReceiptAuditSinkStub struct{}
+
+func (settlementReceiptAuditSinkStub) InsertSettlementReceiptOutbox(context.Context, time.Time, string, string, string, int64) (bool, error) {
+	return true, nil
+}
+
+type settlementReceiptAuditOutboxObserverStub struct {
+	drainOutcomes chan string
+	rowOps        chan string
+}
+
+func (s *settlementReceiptAuditOutboxObserverStub) ObserveSettlementReceiptAuditOutbox(int64, time.Duration) {
+}
+
+func (s *settlementReceiptAuditOutboxObserverStub) IncSettlementReceiptAuditOutboxDrain(outcome string) {
+	s.drainOutcomes <- outcome
+}
+
+func (s *settlementReceiptAuditOutboxObserverStub) AddSettlementReceiptAuditOutboxRows(operation string, rows int64) {
+	if rows <= 0 {
+		return
+	}
+	s.rowOps <- operation
+}
+
+func assertSignal(t *testing.T, ch <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("%s did not run", name)
+	}
+}
+
+func assertStringSignal(t *testing.T, ch <-chan string, want, name string) {
+	t.Helper()
+	select {
+	case got := <-ch:
+		if got != want {
+			t.Fatalf("%s=%q want %q", name, got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("%s did not run", name)
+	}
+}
+
+func assertNoSignal(t *testing.T, ch <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-ch:
+		t.Fatalf("%s unexpectedly ran", name)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func assertNoImmediatePrune(t *testing.T, called <-chan time.Time, name string) {
