@@ -2650,6 +2650,51 @@ final class AutoUpdateTests: XCTestCase {
         }
     }
 
+    func testCompatibilityManifestInvalidReasonSurfacesSanitizedSublabel() {
+        // The specific rejection sublabel (e.g. cli_identifier) must be surfaced so
+        // remote diagnosis can tell an identifier/rebrand mismatch apart from a
+        // truncated payload — the generic code alone previously hid this root cause.
+        XCTAssertEqual(
+            AutoUpdater.redactedReason(for: UpdateError.compatibilityManifestInvalid("cli_identifier")),
+            "compatibility_set_invalid:cli_identifier"
+        )
+        // An internally-interpolated component label (e.g. "<component>_digest_mismatch")
+        // is a valid slug and is surfaced.
+        XCTAssertEqual(
+            AutoUpdater.redactedReason(for: UpdateError.compatibilityManifestInvalid("catalog_digest_mismatch")),
+            "compatibility_set_invalid:catalog_digest_mismatch"
+        )
+        // The longest current internal throw label (49 chars) must still surface —
+        // the length bound has to clear every real label, not just short ones.
+        XCTAssertEqual(
+            AutoUpdater.redactedReason(
+                for: UpdateError.compatibilityManifestInvalid("updater_rollback_plan_noncanonical_or_unsupported")
+            ),
+            "compatibility_set_invalid:updater_rollback_plan_noncanonical_or_unsupported"
+        )
+        // Empty labels degrade to the bare stable code.
+        XCTAssertEqual(
+            AutoUpdater.redactedReason(for: UpdateError.compatibilityManifestInvalid("")),
+            "compatibility_set_invalid"
+        )
+        // Any label that does not fully match the strict slug shape is dropped whole
+        // to the bare code — the label is never partially transformed — so no
+        // path/username/secret fragment can leak. (Filtering separators alone would
+        // have left "someone"/"secret" behind, which is the failure this guards.)
+        let dirty = AutoUpdater.redactedReason(
+            for: UpdateError.compatibilityManifestInvalid("/Users/someone/secret path!!")
+        )
+        XCTAssertEqual(dirty, "compatibility_set_invalid")
+        for leaked in ["someone", "secret", "users", "/"] {
+            XCTAssertFalse(dirty.lowercased().contains(leaked), "reason must not contain \(leaked)")
+        }
+        // A slug longer than the 64-char bound also degrades to the bare code.
+        XCTAssertEqual(
+            AutoUpdater.redactedReason(for: UpdateError.compatibilityManifestInvalid(String(repeating: "x", count: 80))),
+            "compatibility_set_invalid"
+        )
+    }
+
     func testSignedPolicyPersistenceIsMonotonic() async throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)

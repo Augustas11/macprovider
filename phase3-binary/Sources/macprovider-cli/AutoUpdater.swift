@@ -179,15 +179,14 @@ struct AutoUpdater: Sendable {
                 await fail(updateID: updateID, target: target, phase: .download, failure: .targetReleaseNotFound, reason: "target_release_not_found")
                 return
             }
-            let prepared: PreparedSelfUpdate
-            do {
-                prepared = try await update.prepareValidatedUpdate(from: release)
-            } catch {
-                let failure = Self.failureClass(for: error)
-                await fail(updateID: updateID, target: target, phase: Self.phase(for: error), failure: failure, reason: Self.redactedReason(for: error))
-                return
-            }
-            defer { prepared.cleanup() }
+            // The coordinator's recommended compatibility-set target is a precondition
+            // known without downloading the release payload. Check it here — after the
+            // eligibility/trust re-checks and release resolution, but before the full
+            // download+extract in prepareValidatedUpdate — so a node the coordinator
+            // advertised a binary version to without a compatibility-set target fails
+            // fast with coordinator_compatibility_target_missing instead of downloading
+            // and extracting a release it will only reject at the guard below. Placed
+            // after the trust re-checks so trust-loss failures keep precedence.
             guard let expectedCompatibilitySetID else {
                 await fail(
                     updateID: updateID,
@@ -198,6 +197,15 @@ struct AutoUpdater: Sendable {
                 )
                 return
             }
+            let prepared: PreparedSelfUpdate
+            do {
+                prepared = try await update.prepareValidatedUpdate(from: release)
+            } catch {
+                let failure = Self.failureClass(for: error)
+                await fail(updateID: updateID, target: target, phase: Self.phase(for: error), failure: failure, reason: Self.redactedReason(for: error))
+                return
+            }
+            defer { prepared.cleanup() }
             guard prepared.compatibilityManifest.compatibilitySetID == expectedCompatibilitySetID else {
                 await fail(
                     updateID: updateID,
@@ -785,7 +793,21 @@ struct AutoUpdater: Sendable {
             return "insufficient_disk_space"
         case UpdateError.missingReleaseResource:
             return "release_resource_missing"
-        case UpdateError.compatibilityManifestInvalid:
+        case UpdateError.compatibilityManifestInvalid(let label):
+            // Surface the specific manifest-rejection sublabel (e.g. cli_identifier,
+            // signature_invalid) instead of a generic string, so remote diagnosis can
+            // tell an identifier/rebrand mismatch apart from a truncated payload. All
+            // real throw sites use fixed internal slug labels. Append the label ONLY
+            // when the WHOLE string already matches the strict internal slug shape;
+            // an unexpected label is dropped to the bare code rather than partially
+            // transformed, so no path/username/secret fragment can ever be emitted
+            // (filtering out separators alone would leave sensitive words behind).
+            // Cap 64 covers the longest current internal label
+            // ("updater_rollback_plan_noncanonical_or_unsupported", 49) with margin
+            // while still bounding log size against an unexpected long string.
+            if label.range(of: #"^[a-z0-9_]{1,64}$"#, options: .regularExpression) != nil {
+                return "compatibility_set_invalid:\(label)"
+            }
             return "compatibility_set_invalid"
         case UpdateError.compatibilityManifestVersionMismatch:
             return "compatibility_set_version_mismatch"
