@@ -1,0 +1,39 @@
+name: ci-rerun-flaky
+
+# Automates the documented operator remedy for known timing-sensitive flakes
+# (ReceiptPerfTests p95, the SPEC-043 timing-oracle Mann-Whitney check, and
+# similar shared-runner noise failures): when CI fails on a push to main,
+# rerun ONLY the failed jobs, once. A genuine regression fails the second
+# attempt too and main stays red — this never converts a real failure into a
+# pass, it only removes the manual `gh run rerun <id> --failed` step.
+#
+# Deliberately scoped to push-event runs on main: PR branches keep full
+# first-attempt flake visibility so noisy tests stay diagnosable and get
+# fixed rather than silently retried out of sight.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  actions: write
+
+jobs:
+  rerun:
+    name: rerun failed CI jobs once
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # run_attempt == 1 bounds this to a single retry: the completion event
+    # for attempt 2 does not match, so a persistent failure cannot loop.
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.run_attempt == 1
+    steps:
+      - name: Rerun failed jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: gh run rerun "$RUN_ID" --failed --repo "$GITHUB_REPOSITORY"

@@ -73,6 +73,7 @@ test-dist:
 	bash scripts/test-signed-buyer-enforce-journey-workflow.sh
 	bash scripts/test-signed-local-consumer-endpoint-journey-workflow.sh
 	bash scripts/test-signed-trusted-pool-creator-mvp-journey-workflow.sh
+	bash scripts/test-signed-trusted-pool-layer2-journey-workflow.sh
 	bash scripts/test-signed-pool-promotion-transition-workflow.sh
 	bash scripts/test-spec043-production-release-key-provision.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_provider_prebeta_journey_result
@@ -82,9 +83,15 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_local_consumer_endpoint_evidence_capture
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_local_consumer_endpoint_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_creator_mvp_journey_result
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_layer2_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pool_promotion_transition
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pool_rejection_timing_floor
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_journey_result_tools
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_provider_prebeta_payout_posture
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_malibu_fleet_ledger
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_mlx_candidates
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_pricing_engine
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_pricing_receipt
 	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-acceptance-promotion.sh
 	bash scripts/test-release-toolchain.sh
@@ -99,6 +106,12 @@ test-dist:
 	bash scripts/test-renew-release-discovery-head.sh
 	bash scripts/test-tier2-provider-artifact.sh
 	bash scripts/test-tier2-provider-release.sh
+	bash scripts/test-tier2-activation-safety.sh
+	bash scripts/test-tier2-attestation-safety.sh
+	bash scripts/test-tier2-behavioral-safety.sh
+	bash scripts/test-tier2-encrypted-leg-safety.sh
+	bash scripts/test-tier2-live-verifier.sh
+	bash scripts/test-tier2-mda-artifact.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_pearl_updater.py
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_tier2_enforcement_watchdog.py
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl/config/test_pearl_config_reconcile.py
@@ -106,17 +119,21 @@ test-dist:
 	bash ops/pearl-updater/test_transaction_gate_systemd.sh
 	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh
 	bash scripts/test-catalog-release.sh
+	bash scripts/test-autotune-gate-matrix.sh
 	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
 	bash -n phase4-coordinator/dist/deploy-malibu-emission-pearl.sh
 	bash -n phase4-coordinator/dist/deploy-opoi-v0-pearl.sh
 	bash -n phase5-gateway/dist/deploy-pearl-vps.sh
 	bash phase4-coordinator/dist/test/check_deploy_config_test.sh
 	bash phase4-coordinator/dist/test/c2_timer_config_migration_test.sh
+	bash phase4-coordinator/dist/test/autotune_rate_card_config_migration_test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_c2_precheck.test.sh
 	bash phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_api_perf_tuning_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_catalog_routes_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_stats_test.sh
+	bash phase4-coordinator/dist/test/check_nginx_mdm_enroll_routes_test.sh
+	bash phase4-coordinator/dist/test/check_nginx_referral_routes_test.sh
 	bash phase4-coordinator/dist/test/check_stats_inventory_deploy_test.sh
 	bash phase4-coordinator/dist/test/check_stats_billing_mirror_deploy_test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_config_mode_test.sh
@@ -124,6 +141,10 @@ test-dist:
 	bash phase4-coordinator/dist/test/check_deploy_static_feed_access.test.sh
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_smoke_probe.test.sh
+	bash phase4-coordinator/dist/test/coord_deploy_drift_redact.test.sh
+	bash phase4-coordinator/dist/test/coord_deploy_tier2_migration_gate.test.sh
+	bash phase4-coordinator/dist/test/check_monitor_email_mute_test.sh
+	bash phase4-coordinator/dist/test/check_monitor_sandbox_test.sh
 	bash phase4-coordinator/dist/test/check_pearl_tls_test.sh
 	bash phase4-coordinator/dist/test/check_pearl_tcp_test.sh
 	SPEC015_NGINX_LIVE_OPTIONAL=$${SPEC015_NGINX_LIVE_OPTIONAL:-1} bash phase4-coordinator/dist/test/check_nginx_receipt_header_live_test.sh
@@ -133,6 +154,7 @@ test-dist:
 	bash scripts/test-install-launchd-enable.sh
 	bash scripts/test-install-version-pin.sh
 	bash scripts/test-install-amfi-retry.sh
+	bash scripts/test-install-autotune-recommend-config.sh
 	bash phase3-binary/dist/test/install_referral_handoff.test.sh
 	bash phase3-binary/dist/test/install_fresh_evidence.test.sh
 	bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
@@ -141,11 +163,17 @@ test-dist:
 	bash phase3-binary/dist/test/install_transaction_lock.test.sh
 	bash phase3-binary/dist/test/install_coordinator_admission.test.sh
 	bash phase3-binary/dist/test/provider_upgrade_transaction.test.sh
+	bash phase3-binary/dist/test/install_bundled_repair.test.sh
+	bash phase3-binary/dist/test/install_headless_fleet.test.sh
+	bash phase3-binary/dist/test/install_port_validation.test.sh
+	bash phase3-binary/dist/test/install_prefix.test.sh
+	bash phase3-binary/dist/test/uninstall_path_safety.test.sh
 	bash scripts/test-watchdog-inline-drift.sh
 	bash phase3-binary/dist/test/watchdog_health_scope.test.sh
 	bash phase3-binary/dist/test/watchdog_rollback_paths.test.sh
 	bash ops/macprovider-watchdog/Scripts/test-ac-19-20-watchdog-recovery.sh
 	node --test test/e2e/canary-buyer/probe.test.mjs test/e2e/canary-buyer/safety.test.mjs
+	node --test frontdoor/provider-portal/mining-health.test.mjs
 	bash test/e2e/canary-buyer/run-canary.test.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/aead-rekey-oneshot/test_aead_rekey_oneshot.py
 

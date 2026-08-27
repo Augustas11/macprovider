@@ -39,6 +39,10 @@ AUTOTUNE_PREFETCH_RECEIPT_PATH=""
 staging_dir="$workdir/staging"
 mkdir -p "$staging_dir"
 EXISTING_INSTALL_WAS_PRESENT=1
+# The extracted region now branches on the headless-fleet install mode; this
+# harness covers the default GUI install path.
+HEADLESS=0
+HEADLESS_USER=""
 FAKE_CLI_LOG="$workdir/cli.log"
 export FAKE_CLI_LOG
 
@@ -64,6 +68,18 @@ prompt_yes_no() {
 # provide the direct execution behavior explicitly.
 run_macprovider_cli_with_amfi_retry() {
   "$INSTALL_DIR/macprovider-cli" "$@"
+}
+
+# The missing-catalog-identity branch probes for a live provider that must not
+# be stopped; stub the port-ownership probe so each case picks its branch.
+own_macprovider_cli_holds_live_port() {
+  return "${FAKE_LIVE_PORT_HELD_RC:-1}"
+}
+
+# Defined outside the extracted region; a no-op in the GUI mode this harness
+# covers (the real function returns immediately unless HEADLESS=1).
+enforce_headless_config_overrides() {
+  return 0
 }
 
 write_recommendation_config() {
@@ -216,15 +232,37 @@ run_upgrade_prefetch_case() {
 }
 
 run_upgrade_missing_catalog_identity_case() {
+  # An empty signed-catalog identity fails closed only while a provider is
+  # live (active launchd service, or a manually started CLI holding the live
+  # port); with no live provider to protect, the installer falls through to a
+  # full fresh recommendation instead of dead-ending the retry loop.
+  # Every branch must resolve before the staged CLI is reached.
   : > "$FAKE_CLI_LOG"
   if (
     AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+    INSTALL_TX_SERVICE_WAS_ACTIVE=1
+    REPAIR_EXISTING_INSTALL=0
     prefetch_upgrade_autotune_model
   ) >/dev/null 2>&1; then
-    die "stale upgrade without an exact catalog model identity must fail before cutover"
+    die "stale upgrade with an active provider service and no exact catalog model identity must fail before cutover"
   fi
+  if (
+    AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+    INSTALL_TX_SERVICE_WAS_ACTIVE=0
+    FAKE_LIVE_PORT_HELD_RC=0
+    prefetch_upgrade_autotune_model
+  ) >/dev/null 2>&1; then
+    die "stale upgrade with a manually started live provider and no exact catalog model identity must fail before cutover"
+  fi
+  (
+    AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+    INSTALL_TX_SERVICE_WAS_ACTIVE=0
+    FAKE_LIVE_PORT_HELD_RC=1
+    prefetch_upgrade_autotune_model
+  ) >/dev/null 2>&1 \
+    || die "missing catalog identity with no live provider should fall through to a fresh recommendation"
   [ ! -s "$FAKE_CLI_LOG" ] \
-    || die "missing catalog identity reached the staged CLI instead of failing before cutover"
+    || die "missing catalog identity reached the staged CLI instead of resolving before cutover"
 }
 
 run_upgrade_prefetch_case

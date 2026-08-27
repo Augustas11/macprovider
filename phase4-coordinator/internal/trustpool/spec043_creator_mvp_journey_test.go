@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -869,7 +870,7 @@ func assertCreatorMVPPoolExistenceOracle(t *testing.T, server *buyer.Server, bod
 	t.Helper()
 	const (
 		floor   = 50 * time.Millisecond
-		samples = 16
+		samples = 48
 	)
 	unknownPoolID := "zzzzzzzzzzzzzzzzzzzzzz"
 	if len(unknownPoolID) != 22 {
@@ -903,45 +904,82 @@ func assertCreatorMVPPoolExistenceOracle(t *testing.T, server *buyer.Server, bod
 		}
 		return elapsed
 	}
-	unknown := make([]time.Duration, 0, samples)
-	unauthorized := make([]time.Duration, 0, samples)
-	disabled := make([]time.Duration, 0, samples)
-	for i := 0; i < samples; i++ {
-		unknown = append(unknown, measure(creatorMVPBuyerAccount, unknownPoolID))
-		unauthorized = append(unauthorized, measure("acct-other", poolID))
-		disabled = append(disabled, measure(creatorMVPBuyerAccount, poolID))
+	// CI-noise hardening (4 false-fails in the 48h before this change, all on
+	// shared hosted runners): SPEC-043-R007 fixes the thresholds (p95 delta
+	// 15ms / p99 delta 25ms / p < 0.01) but leaves sample count and harness
+	// method to the journey harness. 48 samples per class keeps p95/p99 real
+	// percentiles instead of the distribution max, the class measurement
+	// order cycles through all six permutations so a runner-load trend cannot
+	// masquerade as a class difference, and a threshold breach is re-measured
+	// once on a completely fresh distribution before failing — a genuine
+	// timing oracle differs on both attempts, while independent runner noise
+	// at p < 0.01 does not.
+	classes := [3]func() time.Duration{
+		func() time.Duration { return measure(creatorMVPBuyerAccount, unknownPoolID) },
+		func() time.Duration { return measure("acct-other", poolID) },
+		func() time.Duration { return measure(creatorMVPBuyerAccount, poolID) },
 	}
-	maxP95 := absCreatorMVPDuration(percentileCreatorMVPDuration(unknown, 0.95) - percentileCreatorMVPDuration(unauthorized, 0.95))
-	maxP99 := absCreatorMVPDuration(percentileCreatorMVPDuration(unknown, 0.99) - percentileCreatorMVPDuration(unauthorized, 0.99))
-	pairs := [][2][]time.Duration{
-		{unknown, unauthorized},
-		{unknown, disabled},
-		{unauthorized, disabled},
+	orders := [6][3]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}
+	collect := func() (unknown, unauthorized, disabled []time.Duration) {
+		byClass := [3][]time.Duration{
+			make([]time.Duration, 0, samples),
+			make([]time.Duration, 0, samples),
+			make([]time.Duration, 0, samples),
+		}
+		for i := 0; i < samples; i++ {
+			for _, class := range orders[i%len(orders)] {
+				byClass[class] = append(byClass[class], classes[class]())
+			}
+		}
+		return byClass[0], byClass[1], byClass[2]
 	}
-	minP := 1.0
-	for _, pair := range pairs {
-		p95 := absCreatorMVPDuration(percentileCreatorMVPDuration(pair[0], 0.95) - percentileCreatorMVPDuration(pair[1], 0.95))
-		p99 := absCreatorMVPDuration(percentileCreatorMVPDuration(pair[0], 0.99) - percentileCreatorMVPDuration(pair[1], 0.99))
-		if p95 > maxP95 {
-			maxP95 = p95
+	type oracleStats struct {
+		maxP95, maxP99 time.Duration
+		minP           float64
+	}
+	evaluate := func(unknown, unauthorized, disabled []time.Duration) (oracleStats, string) {
+		stats := oracleStats{minP: 1.0}
+		pairs := [][2][]time.Duration{
+			{unknown, unauthorized},
+			{unknown, disabled},
+			{unauthorized, disabled},
 		}
-		if p99 > maxP99 {
-			maxP99 = p99
+		for _, pair := range pairs {
+			p95 := absCreatorMVPDuration(percentileCreatorMVPDuration(pair[0], 0.95) - percentileCreatorMVPDuration(pair[1], 0.95))
+			p99 := absCreatorMVPDuration(percentileCreatorMVPDuration(pair[0], 0.99) - percentileCreatorMVPDuration(pair[1], 0.99))
+			if p95 > stats.maxP95 {
+				stats.maxP95 = p95
+			}
+			if p99 > stats.maxP99 {
+				stats.maxP99 = p99
+			}
+			pValue := mannWhitneyCreatorMVPPValue(pair[0], pair[1])
+			if pValue < stats.minP {
+				stats.minP = pValue
+			}
+			if p95 > 15*time.Millisecond {
+				return stats, fmt.Sprintf("p95 delta=%s exceeds 15ms pair=%v/%v", p95, pair[0], pair[1])
+			}
+			if p99 > 25*time.Millisecond {
+				return stats, fmt.Sprintf("p99 delta=%s exceeds 25ms pair=%v/%v", p99, pair[0], pair[1])
+			}
+			if pValue < 0.01 {
+				return stats, fmt.Sprintf("mann-whitney p=%g < 0.01 distinguishes pair=%v/%v", pValue, pair[0], pair[1])
+			}
 		}
-		pValue := mannWhitneyCreatorMVPPValue(pair[0], pair[1])
-		if pValue < minP {
-			minP = pValue
-		}
-		if p95 > 15*time.Millisecond {
-			t.Fatalf("p95 delta=%s exceeds 15ms pair=%v/%v", p95, pair[0], pair[1])
-		}
-		if p99 > 25*time.Millisecond {
-			t.Fatalf("p99 delta=%s exceeds 25ms pair=%v/%v", p99, pair[0], pair[1])
-		}
-		if pValue < 0.01 {
-			t.Fatalf("mann-whitney p=%g < 0.01 distinguishes pair=%v/%v", pValue, pair[0], pair[1])
+		return stats, ""
+	}
+	unknown, unauthorized, disabled := collect()
+	stats, failure := evaluate(unknown, unauthorized, disabled)
+	if failure != "" {
+		t.Logf("pool existence oracle breach on first distribution; re-measuring fresh: %s", failure)
+		unknown, unauthorized, disabled = collect()
+		stats, failure = evaluate(unknown, unauthorized, disabled)
+		if failure != "" {
+			t.Fatalf("pool existence oracle breach reproduced on a fresh distribution: %s", failure)
 		}
 	}
+	maxP95, maxP99, minP := stats.maxP95, stats.maxP99, stats.minP
 	return creatorMVPPoolExistenceOracle{
 		FloorMS:             int(floor / time.Millisecond),
 		Method:              "active_sleep_to_floor",

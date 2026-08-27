@@ -5,7 +5,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-GOCACHE="${GOCACHE:-/private/tmp/macprovider-go-build-cache}"
+# Default to a writable per-platform temp cache; /private/tmp is macOS-only
+# and unwritable on Linux CI runners.
+GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/macprovider-go-build-cache}"
 export GOCACHE
 
 cd "$REPO_ROOT/phase4-coordinator"
