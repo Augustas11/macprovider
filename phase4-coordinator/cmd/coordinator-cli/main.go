@@ -51,6 +51,10 @@ func main() {
 		err = revokeReferral(os.Args[2:], os.Stdout)
 	case "trust-pool-admin":
 		err = trustPoolAdmin(os.Args[2:], os.Getenv, os.Stdin, os.Stdout)
+	case "trust-pool-oncall":
+		err = trustPoolOnCall(os.Args[2:], os.Getenv, os.Stdin, os.Stdout)
+	case "trust-pool-artifact-lifecycle":
+		err = trustPoolArtifactLifecycle(os.Args[2:], os.Getenv, os.Stdin, os.Stdout)
 	default:
 		usage()
 		os.Exit(2)
@@ -623,5 +627,5 @@ func preFlipAuditRun(args []string, stdout io.Writer) (stale bool, err error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit|create-seed-referral|adjust-seed-referral|replace-seed-referral|revoke-referral|trust-pool-admin> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit|create-seed-referral|adjust-seed-referral|replace-seed-referral|revoke-referral|trust-pool-admin|trust-pool-oncall|trust-pool-artifact-lifecycle> [flags]")
 }

@@ -62,8 +62,19 @@ production-readiness items exist.
 
 Also still missing before any live announcement:
 
-- production on-call readiness record, reviewed-artifact lifecycle ownership,
-  and production timing-floor remeasure
+- a production on-call readiness record stored in the launch environment
+  (`POST /admin/trust-pools/on-call-readiness`, CLI
+  `coordinator-cli trust-pool-oncall`). Durable signed records exist; production
+  `PromotePool` still does not consult them. Wiring that gate needs a recapture
+  window because `validatePromotion` is evidence-mapped.
+- a reviewed-artifact lifecycle owner for the live pool
+  (`POST /admin/trust-pools/pools/{id}/reviewed-artifact-lifecycle`, CLI
+  `coordinator-cli trust-pool-artifact-lifecycle`). This is separate from the
+  digest-bound reviewed-artifact upsert.
+- a production timing-floor remeasure. Isolated-candidate oracle proof is not
+  that remeasure. Use `scripts/measure-pool-rejection-timing-floor.py`; it
+  refuses production hosts unless `--environment production --allow-production`
+  and never treats offline `--samples-json` as a production remeasure.
 
 ## Fail-closed checks (candidate or staging)
 
@@ -80,6 +91,25 @@ Operator admin (environment key only; never a creator bearer):
 coordinator-cli trust-pool-admin set-lifecycle --pool-id <pool_id> ...
 coordinator-cli trust-pool-admin revoke-provider --pool-id <pool_id> ...
 coordinator-cli trust-pool-admin upsert-creator ...   # suspend / re-enable
+coordinator-cli trust-pool-oncall upsert --json-file <signed-oncall.json>
+coordinator-cli trust-pool-oncall get --launch-environment-id <env_id>
+coordinator-cli trust-pool-artifact-lifecycle upsert --pool-id <pool_id> --owner <owner> ...
+```
+
+On-call records are Ed25519-signed by a MacProvider operations authority. The
+coordinator allowlists that key as SHA-256 of the 32-byte public key via
+`MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256`. TTL defaults to 90 days and
+rejects longer intervals. Missing or expired rows are launch blockers; they are
+not yet a `PromotePool` production-gate check.
+
+Reviewed-artifact lifecycle ownership is a separate durable row from
+`review-distribution-artifact`. Assign an owner and `environment_class` of
+`candidate` or `production` before treating a pool as live-ready.
+
+Offline timing-floor check (does **not** count as production remeasure):
+
+```bash
+python3 scripts/measure-pool-rejection-timing-floor.py --samples-json samples.json
 ```
 
 Expected:
@@ -167,5 +197,8 @@ ledger or fill CONFORMANCE `evidence[]`.
   `MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM` and does not
   consume the ledger or rewrite CONFORMANCE by itself.
 - Gate D CONFORMANCE fill for R001-R012 is done through promoter consume.
-  Remaining before live announcement: on-call readiness, reviewed-artifact
-  lifecycle ownership, and production timing-floor remeasure.
+  Remaining before live announcement: a production on-call readiness row in the
+  launch environment (PromotePool still does not consult it), a reviewed-artifact
+  lifecycle owner for the live pool, and a production timing-floor remeasure.
+  Durable admin/CLI surfaces and `scripts/measure-pool-rejection-timing-floor.py`
+  exist; they do not announce a live Trusted Pool.

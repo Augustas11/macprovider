@@ -571,7 +571,10 @@ CREATE TABLE IF NOT EXISTS trustpool_creator_approvals (
 	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_trustpool_root_registration_nonces_operation ON trustpool_root_registration_nonces(operation_id) WHERE operation_id IS NOT NULL`); err != nil {
 		return err
 	}
-	return s.migrateManifestAcceptanceTables(ctx)
+	if err := s.migrateManifestAcceptanceTables(ctx); err != nil {
+		return err
+	}
+	return s.migrateLiveReadinessTables(ctx)
 }
 
 func (s *Store) migrateManifestAcceptanceTables(ctx context.Context) error {
@@ -1141,6 +1144,8 @@ func operationIDExists(ctx context.Context, q eventQueryer, operationID string) 
 		`SELECT 1 FROM trustpool_manifest_acceptance_high_water WHERE operation_id = ? LIMIT 1`,
 		`SELECT 1 FROM trustpool_reviewed_distribution_artifact_history WHERE operation_id = ? LIMIT 1`,
 		`SELECT 1 FROM trustpool_public_announcement_history WHERE operation_id = ? LIMIT 1`,
+		`SELECT 1 FROM trustpool_oncall_readiness_history WHERE operation_id = ? LIMIT 1`,
+		`SELECT 1 FROM trustpool_reviewed_artifact_lifecycle_history WHERE operation_id = ? LIMIT 1`,
 	} {
 		rows, err := q.QueryContext(ctx, query, operationID)
 		if err != nil {

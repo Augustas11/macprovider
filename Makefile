@@ -83,6 +83,7 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_local_consumer_endpoint_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_creator_mvp_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pool_promotion_transition
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pool_rejection_timing_floor
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_journey_result_tools
 	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-acceptance-promotion.sh
