@@ -1,0 +1,161 @@
+{
+  "captured_at": "2026-08-27T01:24:22Z",
+  "environment": {
+    "candidate": "commit:ea5cd0a8c70e8838264a57b6958c0ecb2af78d83",
+    "class": "isolated-candidate-enforce",
+    "hardware_profile": "local-macos-redacted"
+  },
+  "expires_at": "2026-09-26",
+  "harness": {
+    "execution_mode": "isolated-candidate-enforce",
+    "id": "test/integration:TestJourneyBuyerEnforceIsolatedCandidate",
+    "isolated_sqlite": true,
+    "production_pearl": false,
+    "production_side_effects": false,
+    "real_binaries": true,
+    "settlement_runner": false
+  },
+  "journey_id": "JOURNEY-BUYER-ENFORCE",
+  "observations": {
+    "enforce_activated": true,
+    "isolated_environment": true,
+    "job_enabled": false,
+    "payout_ready_mutated": false,
+    "production_pearl": false,
+    "production_side_effects": false,
+    "raw_prompt_output_redacted": true,
+    "settlement_mode_end": "observe",
+    "settlement_mode_start": "enforce",
+    "start_job_enabled": false
+  },
+  "operator": {
+    "identity_fingerprint": "36f99b7bd0ed27f09c26023e50341e9044b5786b9bdba2bc55a02986716ff7a6",
+    "role": "acceptance-operator"
+  },
+  "redaction": {
+    "local_account_names_redacted": true,
+    "operator_identity_redacted": true,
+    "secrets_redacted": true
+  },
+  "repository": {
+    "commit": "ea5cd0a8c70e8838264a57b6958c0ecb2af78d83",
+    "name": "Augustas11/macprovider"
+  },
+  "requirement_ids": [
+    "SPEC-022-R007",
+    "SPEC-022-R008",
+    "SPEC-022-R009",
+    "SPEC-022-R011"
+  ],
+  "result": {
+    "status": "pass",
+    "summary": "isolated candidate enforce journey passed without payout-ready mutation or Pearl flip"
+  },
+  "run_id": "buyer-enforce-20260827T012422Z",
+  "schema_version": "macprovider.buyer-enforce-evidence.v1",
+  "steps": [
+    {
+      "id": "step-01-capture-config",
+      "status": "pass",
+      "assertion": "isolated candidate captured in enforce mode with an API-key subject and no settlement runner",
+      "artifacts": [
+        "redacted-buyer-enforce"
+      ],
+      "details": {
+        "auth_subject": "api_key",
+        "demo_token_used": false,
+        "enforce_activated": true,
+        "isolated_sqlite": true,
+        "job_enabled": false,
+        "pending_deadline_s": 1,
+        "production_pearl": false,
+        "settlement_mode": "enforce",
+        "wallet_session_used": false
+      }
+    },
+    {
+      "id": "step-02-verified-debit",
+      "status": "pass",
+      "assertion": "reservation-first debit settled only after a verified settlement-capable receipt",
+      "artifacts": [
+        "redacted-buyer-enforce"
+      ],
+      "details": {
+        "http_status": 200,
+        "reservation_status": "settled",
+        "settled_tokens": 20,
+        "settlement_outcome": "verified",
+        "settlement_policy_mode": "enforce",
+        "usage_outcome": "spec022_verified"
+      }
+    },
+    {
+      "id": "step-03-payout-exclusion",
+      "status": "pass",
+      "assertion": "job_enabled stayed false and verified enforce traffic created no payout-ready rows",
+      "artifacts": [
+        "redacted-buyer-enforce"
+      ],
+      "details": {
+        "job_enabled": false,
+        "payout_exclusion_outcome": "excluded_until_spec022_verified",
+        "payout_ready_count": 0
+      }
+    },
+    {
+      "id": "step-04-missing-receipt-quarantine",
+      "status": "pass",
+      "assertion": "deadline quarantine released the buyer reservation and kept payout exclusion",
+      "artifacts": [
+        "redacted-buyer-enforce"
+      ],
+      "details": {
+        "payout_ready_count": 0,
+        "reason": "missing_receipt_deadline_elapsed",
+        "receipt_present": 0,
+        "reservation_status": "refunded",
+        "settlement_outcome": "quarantined"
+      }
+    },
+    {
+      "id": "step-05-policy-pinning",
+      "status": "pass",
+      "assertion": "observe rollback did not rewrite already-enforced ledger or verdict rows",
+      "artifacts": [
+        "redacted-buyer-enforce"
+      ],
+      "details": {
+        "credit_count": 2,
+        "pinned_policy_mode": "enforce",
+        "pinned_route_snapshot": "enforce",
+        "yaml_mode_after_rewrite": "observe"
+      }
+    },
+    {
+      "id": "step-06-audit",
+      "status": "pass",
+      "assertion": "per-attempt settlement audit is structured and omits raw prompts, outputs, and secrets",
+      "artifacts": [
+        "redacted-buyer-enforce"
+      ],
+      "details": {
+        "raw_prompt_output_redacted": true,
+        "verdict_audit_events": 3
+      }
+    },
+    {
+      "id": "step-07-restore-config",
+      "status": "pass",
+      "assertion": "settlement job stayed disabled and production Pearl was not touched",
+      "artifacts": [
+        "redacted-buyer-enforce"
+      ],
+      "details": {
+        "job_enabled": false,
+        "payout_ready_mutated": false,
+        "production_pearl": false,
+        "yaml_mode": "observe"
+      }
+    }
+  ]
+}
