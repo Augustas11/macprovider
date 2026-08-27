@@ -170,3 +170,51 @@ func TestMigrateIndexesCheckRejectsBogusFormatBeforeOpen(t *testing.T) {
 		t.Errorf("bogus --format triggered schema migration before format validation")
 	}
 }
+
+func TestMigrateIndexesCheckHonorsConfigOverlay(t *testing.T) {
+	dir := t.TempDir()
+	baseDBPath := filepath.Join(dir, "base.db")
+	overlayDBPath := filepath.Join(dir, "overlay.db")
+	configPath := filepath.Join(dir, "coordinator.yaml")
+	overlayPath := filepath.Join(dir, "coordinator.overlay.yaml")
+
+	db, err := sql.Open("sqlite", overlayDBPath)
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `CREATE TABLE request_log (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts_utc TEXT NOT NULL,
+		request_id TEXT NOT NULL,
+		model TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("seed legacy schema: %v", err)
+	}
+	_ = db.Close()
+
+	if err := os.WriteFile(configPath, []byte("auth:\n  operator_key: 0123456789abcdefABCDEFghijklmnop\n  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA\nstorage:\n  db_path: "+baseDBPath+"\n"), 0o644); err != nil {
+		t.Fatalf("write base config: %v", err)
+	}
+	if err := os.WriteFile(overlayPath, []byte("storage:\n  db_path: "+overlayDBPath+"\n"), 0o644); err != nil {
+		t.Fatalf("write overlay config: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	rc := runMigrateIndexesIO([]string{"--config", configPath, "--config-overlay", overlayPath, "--check", "--format", "json"}, &stdout, &stderr)
+	if rc != 0 {
+		t.Fatalf("rc=%d stderr=%s", rc, stderr.String())
+	}
+
+	var got struct {
+		MigrationState string `json:"migration_state"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode json: %v\nstdout=%s", err, stdout.String())
+	}
+	if got.MigrationState != "legacy" {
+		t.Fatalf("migration_state=%q, want legacy from overlay DB: stdout=%s", got.MigrationState, stdout.String())
+	}
+	if _, err := os.Stat(baseDBPath); !os.IsNotExist(err) {
+		t.Fatalf("base db was touched despite overlay storage.db_path: stat err=%v", err)
+	}
+}

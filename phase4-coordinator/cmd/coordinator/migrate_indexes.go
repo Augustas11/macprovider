@@ -2,7 +2,7 @@ package main
 
 // SPEC-002 v1.4.2 R-2 / ISS-188 operator-runbook subcommand:
 //
-//	coordinator migrate-indexes --config <path>
+//	coordinator migrate-indexes --config <path> [--config-overlay <path>]
 //
 // One-shot CREATE INDEX for request_log.external_request_id (and any
 // future ensureIndex DDL). Intentionally NOT invoked from the daemon
@@ -32,6 +32,7 @@ func runMigrateIndexesIO(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("migrate-indexes", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "coordinator.yaml", "path to coordinator YAML config")
+	configOverlay := fs.String("config-overlay", "", "optional coordinator YAML config overlay")
 	timeout := fs.Duration("timeout", 30*time.Minute, "max time the index build may run")
 	// SPEC-002 v1.5.1 R-2 / issue #197: --check reports per-key
 	// migration state without mutating the schema. Intended for
@@ -52,7 +53,7 @@ func runMigrateIndexesIO(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.LoadWithOverlay(*configPath, *configOverlay)
 	if err != nil {
 		fmt.Fprintf(stderr, "config: %v\n", err)
 		return 1

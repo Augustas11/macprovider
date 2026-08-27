@@ -77,6 +77,12 @@ AUXILIARY_UNITS = (
     "stats-billing-mirror.timer",
     "stats-billing-mirror.service",
 )
+REQUIRED_REQUEST_LOG_INDEX_KEYS = frozenset(
+    {
+        "external_request_id",
+        "account_external_request_id",
+    }
+)
 COORDINATOR_ASSET = "coordinator-linux-amd64"
 COORDINATOR_CLI_ASSET = "coordinator-cli-linux-amd64"
 GATEWAY_ASSET = "gateway-linux-amd64"
@@ -2210,6 +2216,183 @@ class Updater:
             if candidate is not None:
                 value = candidate
         return value
+
+    @staticmethod
+    def _coordinator_command_environment(runtime: CoordinatorRuntime) -> dict[str, str]:
+        environment = {
+            "HOME": "/nonexistent",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+            "TMPDIR": "/tmp",
+        }
+        environment.update(runtime.environment)
+        return environment
+
+    def _coordinator_migrate_indexes_argv(self, *, check: bool) -> list[str]:
+        runtime = self.coordinator_runtime_state or self.coordinator_runtime()
+        argv = [
+            str(self.install_root / "coordinator"),
+            "migrate-indexes",
+            "--config",
+            str(runtime.base_config),
+        ]
+        if runtime.overlay_config is not None:
+            argv.extend(["--config-overlay", str(runtime.overlay_config)])
+        if check:
+            argv.extend(["--check", "--format", "json"])
+        return argv
+
+    def _coordinator_request_log_index_status(self) -> dict[str, Any]:
+        runtime = self.coordinator_runtime_state or self.coordinator_runtime()
+        result = self.run_command(
+            self._coordinator_migrate_indexes_argv(check=True),
+            check=False,
+            timeout=120,
+            env=self._coordinator_command_environment(runtime),
+        )
+        if result.returncode != 0:
+            raise UpdateError("coordinator migrate-indexes --check failed; output suppressed")
+        if len(result.stdout.encode("utf-8")) > MAX_CANDIDATE_OUTPUT_BYTES:
+            raise UpdateError("coordinator migrate-indexes --check output exceeds updater safety limit")
+        try:
+            status = json.loads(result.stdout)
+        except ValueError as exc:
+            raise UpdateError("coordinator migrate-indexes --check returned invalid JSON") from exc
+        if not isinstance(status, dict):
+            raise UpdateError("coordinator migrate-indexes --check returned non-object JSON")
+        migration_state = status.get("migration_state")
+        keys = status.get("keys")
+        if migration_state not in ("legacy", "unindexed", "indexed"):
+            raise UpdateError("coordinator migrate-indexes --check returned an unknown migration_state")
+        if not isinstance(keys, list) or not keys:
+            raise UpdateError("coordinator migrate-indexes --check returned no migration keys")
+        seen: set[str] = set()
+        expected_aggregate = "indexed"
+        for key in keys:
+            if not isinstance(key, dict) or not isinstance(key.get("key"), str) or not key["key"]:
+                raise UpdateError("coordinator migrate-indexes --check returned an invalid migration key")
+            name = key["key"]
+            if name in seen:
+                raise UpdateError("coordinator migrate-indexes --check returned duplicate migration keys")
+            seen.add(name)
+            key_state = key.get("state")
+            if key_state not in ("legacy", "unindexed", "indexed"):
+                raise UpdateError("coordinator migrate-indexes --check returned an unknown key state")
+            index_present = key.get("index_present")
+            if index_present is not None and not isinstance(index_present, bool):
+                raise UpdateError("coordinator migrate-indexes --check returned an invalid index_present value")
+            columns_present = key.get("columns_present")
+            if columns_present is not None and not isinstance(columns_present, bool):
+                raise UpdateError("coordinator migrate-indexes --check returned an invalid columns_present value")
+            if key_state == "legacy":
+                if columns_present is True or index_present is True:
+                    raise UpdateError("coordinator migrate-indexes --check returned inconsistent legacy key state")
+                expected_aggregate = "legacy"
+            elif key_state == "unindexed":
+                if columns_present is False or index_present is True:
+                    raise UpdateError("coordinator migrate-indexes --check returned inconsistent unindexed key state")
+                if expected_aggregate != "legacy":
+                    expected_aggregate = "unindexed"
+            elif key_state == "indexed" and (columns_present is not True or index_present is not True):
+                raise UpdateError("coordinator migrate-indexes --check returned inconsistent indexed key state")
+        missing_keys = sorted(REQUIRED_REQUEST_LOG_INDEX_KEYS - seen)
+        if missing_keys:
+            raise UpdateError(
+                f"coordinator migrate-indexes --check omitted required migration key: {missing_keys[0]}"
+            )
+        if migration_state != expected_aggregate:
+            raise UpdateError("coordinator migrate-indexes --check returned inconsistent migration_state")
+        return status
+
+    @staticmethod
+    def _migration_key_states(status: dict[str, Any]) -> dict[str, str]:
+        states: dict[str, str] = {}
+        for key in status["keys"]:
+            name = str(key["key"])
+            state = key.get("state")
+            states[name] = state if isinstance(state, str) else "unknown"
+        return states
+
+    def ensure_coordinator_request_log_indexes(self) -> None:
+        before = self._coordinator_request_log_index_status()
+        before_state = str(before["migration_state"])
+        before_keys = self._migration_key_states(before)
+        if before_state == "indexed":
+            self.audit(
+                "coordinator_request_log_indexes",
+                "success",
+                action="check",
+                migration_state=before_state,
+                key_states=before_keys,
+            )
+            return
+
+        runtime = self.coordinator_runtime_state or self.coordinator_runtime()
+        result = self.run_command(
+            self._coordinator_migrate_indexes_argv(check=False),
+            check=False,
+            timeout=31 * 60,
+            env=self._coordinator_command_environment(runtime),
+        )
+        if result.returncode != 0:
+            self.audit(
+                "coordinator_request_log_indexes",
+                "failed",
+                action="migrate",
+                previous_migration_state=before_state,
+                key_states=before_keys,
+            )
+            raise UpdateError("coordinator migrate-indexes failed; output suppressed")
+
+        after = self._coordinator_request_log_index_status()
+        after_state = str(after["migration_state"])
+        after_keys = self._migration_key_states(after)
+        if after_state != "indexed":
+            self.audit(
+                "coordinator_request_log_indexes",
+                "failed",
+                action="verify",
+                previous_migration_state=before_state,
+                migration_state=after_state,
+                key_states=after_keys,
+            )
+            raise UpdateError("coordinator request_log indexes are still not indexed after migrate-indexes")
+        self.audit(
+            "coordinator_request_log_indexes",
+            "success",
+            action="migrate",
+            previous_migration_state=before_state,
+            migration_state=after_state,
+            key_states=after_keys,
+        )
+
+    def require_coordinator_request_log_indexes_for_current_release(self) -> None:
+        status = self._coordinator_request_log_index_status()
+        migration_state = str(status["migration_state"])
+        key_states = self._migration_key_states(status)
+        if migration_state != "indexed":
+            self.audit(
+                "coordinator_request_log_indexes",
+                "failed",
+                action="already_current_check",
+                migration_state=migration_state,
+                key_states=key_states,
+            )
+            raise UpdateError(
+                "already-current Pearl release cannot skip rollout until coordinator request_log indexes are indexed"
+            )
+        self.audit(
+            "coordinator_request_log_indexes",
+            "success",
+            action="already_current_check",
+            migration_state=migration_state,
+            key_states=key_states,
+        )
+
+    def skip_already_current_release(self, release: Release, current: SemVer) -> None:
+        self.require_coordinator_request_log_indexes_for_current_release()
+        self.audit("rollout_skipped", "already_current", candidate=release.tag, current=str(current))
 
     @staticmethod
     def _database_path(value: str, description: str) -> Path:
@@ -5164,6 +5347,7 @@ class Updater:
         self.wait_for("coordinator health/version", self.config.service_health_timeout_s, lambda: self.local_coordinator_ready(release, False))
         if release.catalog is not None:
             self.assert_effective_tier2_catalog_path()
+        self.ensure_coordinator_request_log_indexes()
         self.systemctl("start", "macprovider-gateway.service")
         self.wait_for(
             "gateway systemd active state",
@@ -6259,7 +6443,7 @@ def main(argv: list[str]) -> int:
         if args.plan:
             return 0
         if decision == "already_current":
-            updater.audit("rollout_skipped", "already_current", candidate=release.tag, current=str(current))
+            updater.skip_already_current_release(release, current)
             return 0
         updater.apply(release, current)
         return 0
