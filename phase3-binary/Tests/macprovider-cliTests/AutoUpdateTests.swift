@@ -2563,6 +2563,78 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
     }
 
+    func testStartupHandoffEvictsStaleLocalStatusOwnerBeforeRestart() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let binaryDir = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: binaryDir,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let binary = binaryDir.appendingPathComponent("macprovider-cli")
+        try Data("current-binary".utf8).write(to: binary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+
+        let leaseStore = ProviderLifecycleLeaseStore(
+            url: ProviderLifecycleLeaseStore.candidateURL(rootDirectory: fixture.url)
+        )
+        let operationID = "autoupdate:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        let lease = try leaseStore.acquire(kind: .maintenance, operationID: operationID, duration: 300)
+        var config = AppConfig.defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path)
+        config.providerID = "provider-test"
+        let order = LockedStringRecorder()
+        let updater = AutoUpdater(
+            config: config,
+            currentVersion: "1.8.109",
+            providerStatus: ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            markerStore: store,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: true,
+                    tier: "pinned",
+                    encryptedLegValid: true,
+                    attestationRequired: false,
+                    attestationSatisfied: true,
+                    tokenConfigured: true,
+                    tokenValidated: true,
+                    bearerlessDuplicate: false,
+                    connected: true
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: { order.append("restart") },
+            fenceReloadJobs: {},
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true },
+            lifecycleLeaseStore: leaseStore,
+            evictStaleLocalStatusOwner: { targetVersion, expectedExecutablePath in
+                order.append("evict:\(targetVersion):\(expectedExecutablePath)")
+            }
+        )
+
+        try await updater.prepareStartupHandoffEvictAndRestartForTest(
+            maintenanceLease: lease,
+            operationID: operationID,
+            targetVersion: "1.8.110",
+            readinessTimeoutSeconds: 300
+        )
+
+        XCTAssertEqual(order.snapshot(), ["evict:1.8.110:\(binary.path)", "restart"])
+        guard case let .valid(record) = leaseStore.inspect() else {
+            XCTFail("expected prepared startup handoff")
+            return
+        }
+        XCTAssertEqual(record.startupHandoff?.targetExecutablePath, binary.path)
+        XCTAssertEqual(record.startupHandoff?.state, .prepared)
+    }
+
     func testAutoupdateReasonRedactionUsesStableCodes() {
         let errors: [Error] = [
             UpdateError.invalidURL("https://example.com/update?token=secret"),
@@ -3368,6 +3440,23 @@ private final class LockedInvocationCounter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return count
+    }
+}
+
+private final class LockedStringRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+
+    func append(_ value: String) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+
+    func snapshot() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
     }
 }
 

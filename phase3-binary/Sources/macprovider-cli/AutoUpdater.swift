@@ -34,6 +34,7 @@ struct AutoUpdater: Sendable {
     typealias Restart = @Sendable () throws -> Void
     typealias FenceReloadJobs = @Sendable () throws -> Void
     typealias Availability = @Sendable () -> Bool
+    typealias EvictStaleLocalStatusOwner = @Sendable (_ targetVersion: String, _ expectedExecutablePath: String) async -> Void
 
     let config: AppConfig
     let currentVersion: String
@@ -51,6 +52,7 @@ struct AutoUpdater: Sendable {
     let rollbackObserverAvailable: Availability
     let launchdProviderAvailable: Availability
     let lifecycleLeaseStore: ProviderLifecycleLeaseStore
+    let evictStaleLocalStatusOwner: EvictStaleLocalStatusOwner
 
     init(
         config: AppConfig,
@@ -72,7 +74,13 @@ struct AutoUpdater: Sendable {
         },
         rollbackObserverAvailable: @escaping Availability = { AutoUpdater.defaultRollbackObserverAvailable() },
         launchdProviderAvailable: @escaping Availability = { AutoUpdater.defaultLaunchdProviderAvailable() },
-        lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore()
+        lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore(),
+        evictStaleLocalStatusOwner: @escaping EvictStaleLocalStatusOwner = { targetVersion, expectedExecutablePath in
+            await SelfUpdate.evictStaleLocalStatusOwnerIfManaged(
+                targetVersion: targetVersion,
+                expectedExecutablePath: expectedExecutablePath
+            )
+        }
     ) {
         self.config = config
         self.currentVersion = currentVersion
@@ -90,6 +98,7 @@ struct AutoUpdater: Sendable {
         self.rollbackObserverAvailable = rollbackObserverAvailable
         self.launchdProviderAvailable = launchdProviderAvailable
         self.lifecycleLeaseStore = lifecycleLeaseStore
+        self.evictStaleLocalStatusOwner = evictStaleLocalStatusOwner
     }
 
     func handleCoordinatorRecommendation(_ rawRecommended: String) async {
@@ -239,25 +248,13 @@ struct AutoUpdater: Sendable {
             await record(updateID: updateID, target: target, phase: .swap, outcome: .success, reason: "binary_swap_complete", attempt: 1)
             try await ensureEligible(phase: .restart)
             do {
-                guard let lease = maintenanceLease,
-                      let providerID = config.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !providerID.isEmpty,
-                      let current = currentBinaryURL()
-                else {
-                    throw ProviderLifecycleLeaseError.invalidHandoffField("provider_id")
-                }
-                _ = try lifecycleLeaseStore.prepareStartupHandoff(
-                    maintenanceLeaseID: lease.leaseID,
+                try await prepareStartupHandoffEvictAndRestart(
+                    maintenanceLease: maintenanceLease,
                     operationID: "autoupdate:\(updateID)",
-                    providerID: providerID,
-                    serviceIdentity: SelfUpdate.launchdLabel,
-                    targetExecutablePath: current.path,
-                    targetExecutableSHA256: try AutoUpdateMarkerStore.sha256(file: current),
-                    handoffDuration: 60,
-                    startupLeaseDuration: TimeInterval(prepared.compatibilityManifest.readinessTimeoutSeconds)
+                    targetVersion: target,
+                    readinessTimeoutSeconds: prepared.compatibilityManifest.readinessTimeoutSeconds
                 )
                 startupHandoffPrepared = true
-                try restartLaunchd()
             } catch {
                 try? rollbackCommittedSwapAfterRestartFailure(
                     commitTracker,
@@ -412,25 +409,13 @@ struct AutoUpdater: Sendable {
             )
             await record(updateID: updateID, target: providerTarget, source: .githubPoll, phase: .swap, outcome: .success, reason: "binary_swap_complete", attempt: 1)
             do {
-                guard let lease = maintenanceLease,
-                      let providerID = config.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !providerID.isEmpty,
-                      let current = currentBinaryURL()
-                else {
-                    throw ProviderLifecycleLeaseError.invalidHandoffField("provider_id")
-                }
-                _ = try lifecycleLeaseStore.prepareStartupHandoff(
-                    maintenanceLeaseID: lease.leaseID,
+                try await prepareStartupHandoffEvictAndRestart(
+                    maintenanceLease: maintenanceLease,
                     operationID: "autoupdate:\(updateID)",
-                    providerID: providerID,
-                    serviceIdentity: SelfUpdate.launchdLabel,
-                    targetExecutablePath: current.path,
-                    targetExecutableSHA256: try AutoUpdateMarkerStore.sha256(file: current),
-                    handoffDuration: 60,
-                    startupLeaseDuration: TimeInterval(prepared.compatibilityManifest.readinessTimeoutSeconds)
+                    targetVersion: providerTarget,
+                    readinessTimeoutSeconds: prepared.compatibilityManifest.readinessTimeoutSeconds
                 )
                 startupHandoffPrepared = true
-                try restartLaunchd()
             } catch {
                 try? rollbackCommittedSwapAfterRestartFailure(
                     commitTracker,
@@ -515,6 +500,33 @@ struct AutoUpdater: Sendable {
         }
     }
 
+    private func prepareStartupHandoffEvictAndRestart(
+        maintenanceLease: ProviderLifecycleLeaseRecord?,
+        operationID: String,
+        targetVersion: String,
+        readinessTimeoutSeconds: Int
+    ) async throws {
+        guard let lease = maintenanceLease,
+              let providerID = config.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !providerID.isEmpty,
+              let current = currentBinaryURL()
+        else {
+            throw ProviderLifecycleLeaseError.invalidHandoffField("provider_id")
+        }
+        _ = try lifecycleLeaseStore.prepareStartupHandoff(
+            maintenanceLeaseID: lease.leaseID,
+            operationID: operationID,
+            providerID: providerID,
+            serviceIdentity: SelfUpdate.launchdLabel,
+            targetExecutablePath: current.path,
+            targetExecutableSHA256: try AutoUpdateMarkerStore.sha256(file: current),
+            handoffDuration: 60,
+            startupLeaseDuration: TimeInterval(readinessTimeoutSeconds)
+        )
+        await evictStaleLocalStatusOwner(targetVersion, current.path)
+        try restartLaunchd()
+    }
+
     func preserveMarkerAndSwapForTest(
         updateID: String,
         target: String,
@@ -534,6 +546,20 @@ struct AutoUpdater: Sendable {
             discoveryHead: discoveryHead,
             requireCurrentTrustAtSwap: requireCurrentTrustAtSwap,
             whileHolding: lock
+        )
+    }
+
+    func prepareStartupHandoffEvictAndRestartForTest(
+        maintenanceLease: ProviderLifecycleLeaseRecord?,
+        operationID: String,
+        targetVersion: String,
+        readinessTimeoutSeconds: Int
+    ) async throws {
+        try await prepareStartupHandoffEvictAndRestart(
+            maintenanceLease: maintenanceLease,
+            operationID: operationID,
+            targetVersion: targetVersion,
+            readinessTimeoutSeconds: readinessTimeoutSeconds
         )
     }
 
