@@ -652,7 +652,7 @@ PY
 }
 
 validate_install_dir() {
-validated="$({ python3 - "$INSTALL_DIR" "$HOME" <<'PY'
+validated="$({ python3 - "$INSTALL_DIR" "$HOME" "${REPAIR_EXISTING_INSTALL:-0}" <<'PY'
 import os
 import stat
 import sys
@@ -663,7 +663,7 @@ import errno
 import grp
 import re
 
-raw, raw_home = sys.argv[1:]
+raw, raw_home, repair_raw = sys.argv[1:]
 if not raw.startswith("/"):
     raise SystemExit("install directory must be absolute")
 if any(part in {".", ".."} for part in raw.split("/")):
@@ -671,6 +671,7 @@ if any(part in {".", ".."} for part in raw.split("/")):
 
 home = os.path.normpath(raw_home)
 target = os.path.normpath(raw)
+repair_mode = repair_raw == "1"
 if target == home:
     raise SystemExit("install directory must not be HOME itself")
 try:
@@ -680,6 +681,25 @@ except ValueError:
     raise SystemExit("install directory must be inside HOME")
 
 uid = os.getuid()
+uuid_pattern = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
+
+def repair_home_write_acl(fields, path, everyone_gid, allow_home_acl_write=False):
+    if not repair_mode or os.path.normpath(path) != home:
+        return False
+    if (
+        len(fields) != 6
+        or fields[0] != "group"
+        or not uuid_pattern.fullmatch(fields[1])
+        or fields[2] != "everyone"
+        or fields[3] != str(everyone_gid)
+        or fields[4] != "allow"
+    ):
+        return False
+    permissions = set(filter(None, fields[5].split(",")))
+    return permissions == {"write", "append"}
 
 def safe_directory_acl(path):
     if sys.platform != "darwin":
@@ -722,12 +742,10 @@ def safe_directory_acl(path):
             everyone_gid = grp.getgrnam("everyone").gr_gid
             if len(lines) < 2 or lines[0] != "!#acl 1":
                 return False
-            uuid_pattern = re.compile(
-                r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
-                r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
-            )
             for line in lines[1:]:
                 fields = line.split(":")
+                if repair_home_write_acl(fields, path, everyone_gid):
+                    continue
                 if (
                     len(fields) != 6
                     or fields[0] != "group"
@@ -767,6 +785,113 @@ print(target)
 PY
   } 2>&1)" || die 7 "unsafe MACPROVIDER_INSTALL_DIR: $validated"
   INSTALL_DIR="$validated"
+}
+
+remediate_repair_home_write_acl() {
+  [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ] || return 0
+  acl_status="$({ python3 - "$HOME" <<'PY'
+import ctypes
+import errno
+import grp
+import os
+import re
+import sys
+
+home = os.path.normpath(sys.argv[1])
+if sys.platform != "darwin":
+    print("absent")
+    raise SystemExit(0)
+
+uuid_pattern = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
+
+def exact_home_write_acl(fields, everyone_gid):
+    if (
+        len(fields) != 6
+        or fields[0] != "group"
+        or not uuid_pattern.fullmatch(fields[1])
+        or fields[2] != "everyone"
+        or fields[3] != str(everyone_gid)
+        or fields[4] != "allow"
+    ):
+        return False
+    permissions = set(filter(None, fields[5].split(",")))
+    return permissions == {"write", "append"}
+
+def safe_deny_delete_acl(fields, everyone_gid):
+    return (
+        len(fields) == 6
+        and fields[0] == "group"
+        and bool(uuid_pattern.fullmatch(fields[1]))
+        and fields[2] == "everyone"
+        and fields[3] == str(everyone_gid)
+        and fields[4] == "deny"
+        and fields[5] == "delete"
+    )
+
+try:
+    libc = ctypes.CDLL(None, use_errno=True)
+    acl_get_fd_np = libc.acl_get_fd_np
+    acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+    acl_get_fd_np.restype = ctypes.c_void_p
+    acl_to_text = libc.acl_to_text
+    acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_long)]
+    acl_to_text.restype = ctypes.c_void_p
+    acl_free = libc.acl_free
+    acl_free.argtypes = [ctypes.c_void_p]
+    acl_free.restype = ctypes.c_int
+except (AttributeError, OSError):
+    raise SystemExit("acl inspection unavailable")
+
+directory_fd = os.open(home, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+try:
+    ctypes.set_errno(0)
+    acl = acl_get_fd_np(directory_fd, 0x00000100)  # ACL_TYPE_EXTENDED
+    if not acl:
+        if ctypes.get_errno() in (0, errno.ENOENT):
+            print("absent")
+            raise SystemExit(0)
+        raise SystemExit("acl inspection failed")
+    try:
+        text_length = ctypes.c_long()
+        text_pointer = acl_to_text(acl, ctypes.byref(text_length))
+        if not text_pointer:
+            raise SystemExit("acl inspection failed")
+        try:
+            lines = ctypes.string_at(text_pointer, text_length.value).decode(
+                "utf-8", errors="strict"
+            ).splitlines()
+        finally:
+            acl_free(text_pointer)
+        everyone_gid = grp.getgrnam("everyone").gr_gid
+        if len(lines) < 2 or lines[0] != "!#acl 1":
+            raise SystemExit("acl inspection failed")
+        matches = 0
+        for line in lines[1:]:
+            fields = line.split(":")
+            if exact_home_write_acl(fields, everyone_gid):
+                matches += 1
+                continue
+            if safe_deny_delete_acl(fields, everyone_gid):
+                continue
+            raise SystemExit("unexpected HOME ACL shape")
+        print("remove" if matches else "absent")
+    finally:
+        acl_free(acl)
+finally:
+    os.close(directory_fd)
+PY
+  } 2>&1)" || die 70 "could not inspect repair HOME ACL"
+  [ "$acl_status" = "remove" ] || return 0
+  /bin/chmod -a "group:everyone allow add_file,add_subdirectory" "$HOME" \
+    || die 70 "could not remove repair HOME ACL barrier"
+  log "Repair preflight: removed the known HOME ACL barrier before provider directory mutation."
+  old_repair_mode="$REPAIR_EXISTING_INSTALL"
+  REPAIR_EXISTING_INSTALL=0
+  validate_install_dir
+  REPAIR_EXISTING_INSTALL="$old_repair_mode"
 }
 
 validate_port_value() {
@@ -1174,10 +1299,16 @@ acquire_install_lock() {
   lock_status_path="$(mktemp "${TMPDIR:-/tmp}/macprovider-install-lock.XXXXXX")" \
     || die 70 "could not allocate installer lock handshake"
   python3 - "$HOME" "$CONFIG_DIR" "$INSTALL_LOCK_PATH" "$PROVIDER_MUTATION_ROOT" \
-    "$PROVIDER_MUTATION_LOCK_PATH" "$PROVIDER_MUTATION_PENDING_PATH" "$$" "$lock_status_path" <<'PY' &
+    "$PROVIDER_MUTATION_LOCK_PATH" "$PROVIDER_MUTATION_PENDING_PATH" "$$" "$lock_status_path" \
+    "${REPAIR_EXISTING_INSTALL:-0}" <<'PY' &
 import fcntl
+import ctypes
+import errno
+import grp
 import json
 import os
+import pwd
+import re
 import secrets
 import signal
 import stat
@@ -1185,9 +1316,15 @@ import subprocess
 import sys
 import time
 
-home, config_dir, lock_path, mutation_root, mutation_lock_path, mutation_pending_path, owner_pid_text, status_path = sys.argv[1:]
+home, config_dir, lock_path, mutation_root, mutation_lock_path, mutation_pending_path, owner_pid_text, status_path, repair_raw = sys.argv[1:]
 owner_pid = int(owner_pid_text)
 uid = os.getuid()
+repair_mode = repair_raw == "1"
+provider_user = pwd.getpwuid(uid).pw_name
+uuid_pattern = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
 
 def write_status(value):
     flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
@@ -1226,6 +1363,79 @@ def boot_session():
     except OSError:
         return ""
 
+def repair_home_write_acl(fields, path, everyone_gid, allow_home_acl_write=False):
+    if not repair_mode or not allow_home_acl_write or os.path.normpath(path) != home:
+        return False
+    if (
+        len(fields) != 6
+        or fields[0] != "group"
+        or not uuid_pattern.fullmatch(fields[1])
+        or fields[2] != "everyone"
+        or fields[3] != str(everyone_gid)
+        or fields[4] != "allow"
+    ):
+        return False
+    permissions = set(filter(None, fields[5].split(",")))
+    return permissions == {"write", "append"}
+
+def reject_non_owner_write_acl(path, allow_home_acl_write=False):
+    if sys.platform != "darwin":
+        return
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_to_text = libc.acl_to_text
+        acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_long)]
+        acl_to_text.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError) as exc:
+        raise RuntimeError("provider mutation ACL inspection unavailable") from exc
+    directory_fd = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        ctypes.set_errno(0)
+        acl = acl_get_fd_np(directory_fd, 0x00000100)  # ACL_TYPE_EXTENDED
+        if not acl:
+            if ctypes.get_errno() in (0, errno.ENOENT):
+                return
+            raise RuntimeError("provider mutation ACL inspection failed")
+        try:
+            text_length = ctypes.c_long()
+            text_pointer = acl_to_text(acl, ctypes.byref(text_length))
+            if not text_pointer:
+                raise RuntimeError("provider mutation ACL inspection failed")
+            try:
+                lines = ctypes.string_at(text_pointer, text_length.value).decode(
+                    "utf-8", errors="strict"
+                ).splitlines()
+            finally:
+                acl_free(text_pointer)
+            everyone_gid = grp.getgrnam("everyone").gr_gid
+            if len(lines) < 2 or lines[0] != "!#acl 1":
+                raise RuntimeError("provider mutation ACL inspection failed")
+            write_permissions = {"write", "append", "add_file", "add_subdirectory", "writeattr", "writeextattr", "delete_child"}
+            for line in lines[1:]:
+                fields = line.split(":")
+                if repair_home_write_acl(fields, path, everyone_gid, allow_home_acl_write=allow_home_acl_write):
+                    continue
+                if len(fields) != 6:
+                    raise RuntimeError("provider mutation ACL inspection failed")
+                permissions = set(filter(None, fields[5].split(",")))
+                if permissions & write_permissions:
+                    if fields[0] == "user" and fields[2] == provider_user:
+                        continue
+                    raise RuntimeError("provider mutation path has non-owner-write ACL")
+        finally:
+            acl_free(acl)
+    finally:
+        os.close(directory_fd)
+
 home = os.path.normpath(home)
 config_dir = os.path.normpath(config_dir)
 mutation_root = os.path.normpath(mutation_root)
@@ -1234,6 +1444,7 @@ if os.path.commonpath([home, config_dir]) != home:
 if os.path.commonpath([home, mutation_root]) != home:
     raise SystemExit("provider mutation directory must remain inside HOME")
 current = home
+reject_non_owner_write_acl(home, allow_home_acl_write=True)
 for component in os.path.relpath(config_dir, home).split(os.sep):
     current = os.path.join(current, component)
     try:
@@ -1303,6 +1514,7 @@ try:
             raise RuntimeError(f"provider mutation path is not a no-follow directory: {current}")
         if info.st_uid != uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             raise RuntimeError(f"provider mutation path is not private to the installing user: {current}")
+        reject_non_owner_write_acl(current)
     mutation_directory_fd = os.open(mutation_root, directory_flags)
     mutation_lock_fd = os.open(
         os.path.basename(mutation_lock_path),
@@ -6786,12 +6998,24 @@ begin_install_transaction() {
   arm_install_recovery_agent \
     || die 70 "could not arm independent interrupted-install recovery before live mutation"
   if [ "$INSTALL_TX_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
-    reclaim_launchd_service "$WATCHDOG_LABEL" \
-      || die 70 "could not suspend the existing watchdog for the protected install transaction"
+    if [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ]; then
+      quiesce_repair_watchdog_label_for_transaction \
+        "$WATCHDOG_LABEL" "$WATCHDOG_PLIST_BOOTSTRAP_PATH" "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$WATCHDOG_DIR/watchdog.sh" \
+        || die 70 "could not safely stop the existing watchdog for repair"
+    else
+      reclaim_launchd_service "$WATCHDOG_LABEL" \
+        || die 70 "could not suspend the existing watchdog for the protected install transaction"
+    fi
   fi
   if [ "$INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
-    reclaim_legacy_launchd_service "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
-      || die 70 "could not suspend the existing legacy watchdog for the protected install transaction"
+    if [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ]; then
+      quiesce_repair_watchdog_label_for_transaction \
+        "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$WATCHDOG_DIR/watchdog.sh" \
+        || die 70 "could not safely stop the existing legacy watchdog for repair"
+    else
+      reclaim_legacy_launchd_service "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
+        || die 70 "could not suspend the existing legacy watchdog for the protected install transaction"
+    fi
   fi
 }
 
@@ -7582,6 +7806,114 @@ reclaim_legacy_launchd_service() {
   launchctl_service bootout "$service_target" >/dev/null 2>&1
 }
 
+quiesce_repair_watchdog_label_for_transaction() {
+  local label="$1"
+  local expected_plist="$2"
+  local expected_program="$3"
+  local legacy_program="$4"
+  local service_target="$LAUNCHD_DOMAIN/$label"
+  local service_details
+  local print_rc=0
+  service_details="$(launchctl_service print "$service_target" 2>/dev/null | head -c 65537)" || print_rc=$?
+  if [ "$print_rc" -ne 0 ]; then
+    if [ "${#service_details}" -gt 65536 ]; then
+      log "Refusing repair transaction watchdog quiesce for $label because launchd identity exceeded the inspection limit."
+      return 1
+    fi
+    local loaded_rc=0
+    launchd_print_loaded "$service_target" || loaded_rc=$?
+    if [ "$loaded_rc" -eq 0 ]; then
+      log "Refusing repair transaction watchdog quiesce for $label because launchd identity changed during inspection."
+      return 1
+    fi
+    [ "$loaded_rc" -eq 1 ] || {
+      log "Refusing repair transaction watchdog quiesce for $label because launchd state is indeterminate."
+      return 1
+    }
+    return 0
+  fi
+  [ -n "$service_details" ] || return 1
+  if [ "${#service_details}" -gt 65536 ]; then
+    log "Refusing repair transaction watchdog quiesce for $label because launchd identity exceeded the inspection limit."
+    return 1
+  fi
+
+  local program_line
+  local program_count
+  local plist_path
+  local plist_path_count
+  local watchdog_pid
+  local watchdog_pid_count
+  program_line="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*program = //p' | head -n 1)"
+  program_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*program = / { count++ } END { print count + 0 }')"
+  plist_path="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*path = //p' | head -n 1)"
+  plist_path_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*path = / { count++ } END { print count + 0 }')"
+  watchdog_pid="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*pid = //p' | head -n 1)"
+  watchdog_pid_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*pid = / { count++ } END { print count + 0 }')"
+  if [ "$program_count" -ne 1 ] || [ "$plist_path_count" -ne 1 ]; then
+    log "Refusing repair transaction watchdog quiesce for $label because launchd returned an ambiguous identity."
+    return 1
+  fi
+  if [ "$watchdog_pid_count" -gt 1 ]; then
+    log "Refusing repair transaction watchdog quiesce for $label because launchd returned ambiguous process identity."
+    return 1
+  fi
+  case "$watchdog_pid" in
+    ''|*[!0-9]*) [ -z "$watchdog_pid" ] || return 1 ;;
+  esac
+  if [ "$plist_path" != "$expected_plist" ]; then
+    log "Refusing repair transaction watchdog quiesce for $label because launchd plist identity is unexpected."
+    return 1
+  fi
+  if [ "$program_line" != "$expected_program" ] && [ "$program_line" != "$legacy_program" ]; then
+    log "Refusing repair transaction watchdog quiesce for $label because launchd executable identity is unexpected."
+    return 1
+  fi
+
+  log "Repair preflight: stopping loaded watchdog $label before validating and replacing provider software."
+  launchctl_service bootout "$service_target" >/dev/null 2>&1 || return 1
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    local loaded_rc=0
+    launchd_print_loaded "$service_target" || loaded_rc=$?
+    if [ "$loaded_rc" -ne 0 ]; then
+      if [ "$loaded_rc" -ne 1 ]; then
+        log "Refusing to continue repair because launchd state for watchdog $label is indeterminate after bootout."
+        return 1
+      fi
+      if [ -n "$watchdog_pid" ] && pid_is_live_non_zombie "$watchdog_pid"; then
+        local observed_executable
+        local observed_command
+        observed_executable="$(lsof -nP -a -p "$watchdog_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+        observed_command="$(ps -p "$watchdog_pid" -o command= 2>/dev/null | head -n 1 || true)"
+        if [ "$observed_executable" = "$expected_program" ] || [ "$observed_executable" = "$legacy_program" ] || [ -z "$observed_executable" ]; then
+          log "Refusing to continue repair because watchdog pid $watchdog_pid remained live after bootout."
+          return 1
+        fi
+        if [ -z "$observed_command" ] \
+          || printf '%s\n' "$observed_command" | grep -F -- "$expected_program" >/dev/null \
+          || printf '%s\n' "$observed_command" | grep -F -- "$legacy_program" >/dev/null; then
+          log "Refusing to continue repair because watchdog pid $watchdog_pid still matched managed command identity after bootout."
+          return 1
+        fi
+      fi
+      return 0
+    fi
+    sleep 0.1
+  done
+  log "Refusing to continue repair because watchdog $label remained loaded after bootout."
+  return 1
+}
+
+quiesce_repair_watchdogs_for_transaction() {
+  [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ] || return 0
+  quiesce_repair_watchdog_label_for_transaction \
+    "$WATCHDOG_LABEL" "$WATCHDOG_PLIST_BOOTSTRAP_PATH" "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$WATCHDOG_DIR/watchdog.sh" \
+    || die 5 "could not safely stop existing Malibu watchdog before repair validation"
+  quiesce_repair_watchdog_label_for_transaction \
+    "$LEGACY_WATCHDOG_LABEL" "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" "${WATCHDOG_BOOTSTRAP_PATH:-$WATCHDOG_PATH}" "$WATCHDOG_DIR/watchdog.sh" \
+    || die 5 "could not safely stop existing legacy watchdog before repair validation"
+}
+
 prompt_yes_no() {
   prompt="$1"
   default="$2"
@@ -8359,6 +8691,13 @@ validate_headless_acceptance_source() {
   done
   [ -z "$missing_fields" ] \
     || die 7 "headless mode requires a signed acceptance asset bundle and exact provenance pins; missing: $missing_fields"
+}
+
+validate_repair_privilege_domain() {
+  [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ] || return 0
+  if [ "${HEADLESS:-0}" = "1" ] || [ "${LAUNCHD_DOMAIN:-}" = "system" ]; then
+    die 7 "Malibu.app repair supports user-domain LaunchAgents only; headless/system LaunchDaemon repair requires the signed acceptance fallback"
+  fi
 }
 
 resolve_release_tag() {
@@ -11804,7 +12143,7 @@ main() {
     armed_boot="$(cat "$ARMED_FILE" 2>/dev/null || true)"
   fi
   if [ "$armed_boot" != "$boot_id" ]; then
-    log "arming watchdog (boot=${boot_id}): first observed local provider health for provider_id=${pid}"
+    log "arming watchdog (boot=${boot_id}): first observed local provider health"
     printf "%s" "$boot_id" > "$ARMED_FILE"
   fi
   coord_ip="$(resolve_coordinator_ip)"
@@ -11816,7 +12155,7 @@ main() {
     # Healthy. Stay silent so the log file does not bloat.
     exit 0
   fi
-  log "warning: provider process $provider_pid is locally healthy, but no ESTABLISHED TCP to ${coord_ip}:${COORDINATOR_PORT} for provider_id=${pid}"
+  log "warning: provider process $provider_pid is locally healthy, but no ESTABLISHED TCP to ${coord_ip}:${COORDINATOR_PORT}"
   # No ESTABLISHED connection. Coordinator TCP state is advisory only:
   # the health verdict is the installed provider process plus local
   # /v1/health. Do not kick solely because another process can or
@@ -12903,16 +13242,536 @@ print(hashlib.sha256(tokenless.encode("utf-8")).hexdigest())
 PY
 }
 
+repair_autoupdate_recovery_preflight() {
+  [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ] || return 0
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  [ -e "$PROVIDER_MUTATION_PENDING_PATH" ] || [ -L "$PROVIDER_MUTATION_PENDING_PATH" ] || return 0
+  [ "${HEADLESS:-0}" != "1" ] || return 0
+  [ "${LAUNCHD_DOMAIN:-}" != "system" ] || return 0
+  recovery_action="${1:-classify}"
+  case "$recovery_action" in
+    classify|quarantine) ;;
+    *) die 70 "invalid repair autoupdate recovery action" ;;
+  esac
+  mkdir -p "$LOG_DIR" \
+    || die 70 "could not create provider log directory for repair autoupdate recovery"
+  recovery_status_path="$(mktemp "${TMPDIR:-/tmp}/macprovider-repair-autoupdate.XXXXXX")" \
+    || die 70 "could not allocate repair autoupdate recovery status"
+  # Malformed or expired pending.json has no trustworthy rollback target to
+  # restore. Repair preserves its bytes by atomically renaming it under both the
+  # installer and provider-update locks, then proceeds; valid active markers
+  # stay authoritative and still block repair through acquire_install_lock.
+  python3 - "$HOME" "$CONFIG_DIR" "$INSTALL_LOCK_PATH" "$PROVIDER_MUTATION_ROOT" \
+    "$PROVIDER_MUTATION_LOCK_PATH" "$PROVIDER_MUTATION_PENDING_PATH" "$recovery_status_path" "$BINARY_PATH" "$recovery_action" <<'PY' \
+    || die 70 "could not inspect repair autoupdate recovery state"
+import datetime
+import ctypes
+import errno
+import fcntl
+import grp
+import hashlib
+import json
+import os
+import pwd
+import re
+import stat
+import subprocess
+import sys
+
+home, config_dir, install_lock_path, mutation_root, mutation_lock_path, mutation_pending_path, status_path, binary_path, action = sys.argv[1:]
+uid = os.getuid()
+provider_user = pwd.getpwuid(uid).pw_name
+home = os.path.normpath(home)
+config_dir = os.path.normpath(config_dir)
+mutation_root = os.path.normpath(mutation_root)
+mutation_pending_path = os.path.normpath(mutation_pending_path)
+binary_path = os.path.normpath(binary_path)
+uuid_pattern = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
+uuid4_pattern = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+semver_pattern = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+sha256_pattern = re.compile(r"^[0-9a-f]{64}$")
+compatibility_id_pattern = re.compile(
+    r"^[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}:v[0-9]+\.[0-9]+\.[0-9]+@[0-9a-f]{40}$"
+)
+
+def write_status(value):
+    fd = os.open(status_path, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.write(fd, (value + "\n").encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def repair_home_write_acl(fields, path, everyone_gid, allow_home_acl_write=False):
+    if not allow_home_acl_write or os.path.normpath(path) != home:
+        return False
+    if (
+        len(fields) != 6
+        or fields[0] != "group"
+        or not uuid_pattern.fullmatch(fields[1])
+        or fields[2] != "everyone"
+        or fields[3] != str(everyone_gid)
+        or fields[4] != "allow"
+    ):
+        return False
+    permissions = set(filter(None, fields[5].split(",")))
+    return permissions == {"write", "append"}
+
+def reject_non_owner_write_acl(path, allow_home_acl_write=False):
+    if sys.platform != "darwin":
+        return
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_to_text = libc.acl_to_text
+        acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_long)]
+        acl_to_text.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError) as exc:
+        raise RuntimeError("provider mutation ACL inspection unavailable") from exc
+    directory_fd = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        ctypes.set_errno(0)
+        acl = acl_get_fd_np(directory_fd, 0x00000100)  # ACL_TYPE_EXTENDED
+        if not acl:
+            if ctypes.get_errno() in (0, errno.ENOENT):
+                return
+            raise RuntimeError("provider mutation ACL inspection failed")
+        try:
+            text_length = ctypes.c_long()
+            text_pointer = acl_to_text(acl, ctypes.byref(text_length))
+            if not text_pointer:
+                raise RuntimeError("provider mutation ACL inspection failed")
+            try:
+                lines = ctypes.string_at(text_pointer, text_length.value).decode(
+                    "utf-8", errors="strict"
+                ).splitlines()
+            finally:
+                acl_free(text_pointer)
+            everyone_gid = grp.getgrnam("everyone").gr_gid
+            if len(lines) < 2 or lines[0] != "!#acl 1":
+                raise RuntimeError("provider mutation ACL inspection failed")
+            write_permissions = {"write", "append", "add_file", "add_subdirectory", "writeattr", "writeextattr", "delete_child"}
+            for line in lines[1:]:
+                fields = line.split(":")
+                if repair_home_write_acl(fields, path, everyone_gid, allow_home_acl_write=allow_home_acl_write):
+                    continue
+                if len(fields) != 6:
+                    raise RuntimeError("provider mutation ACL inspection failed")
+                permissions = set(filter(None, fields[5].split(",")))
+                if permissions & write_permissions:
+                    if fields[0] == "user" and fields[2] == provider_user:
+                        continue
+                    raise RuntimeError("provider mutation path has non-owner-write ACL")
+        finally:
+            acl_free(acl)
+    finally:
+        os.close(directory_fd)
+
+def validate_private_directory(path, allow_home_acl_write=False):
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise RuntimeError("provider mutation path is not a no-follow directory")
+    if info.st_uid != uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError("provider mutation path is not private to the installing user")
+    reject_non_owner_write_acl(path, allow_home_acl_write=allow_home_acl_write)
+    return info
+
+def no_extended_acl(fd):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = acl_get_fd_np(fd, 0x00000100)  # ACL_TYPE_EXTENDED
+    if acl:
+        acl_free(acl)
+        return False
+    return ctypes.get_errno() in (0, errno.ENOENT)
+
+def canonical_absolute_path(marker, key):
+    value = marker.get(key)
+    if not isinstance(value, str) or "\x00" in value:
+        raise ValueError(key)
+    normalized = os.path.normpath(value)
+    if (
+        not os.path.isabs(value)
+        or value != normalized
+        or value.endswith("/")
+        or os.path.basename(value) in {"", ".", ".."}
+    ):
+        raise ValueError(key)
+    return value
+
+def int_field(marker, key, minimum, maximum):
+    value = marker.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(key)
+    if value < minimum or value > maximum:
+        raise ValueError(key)
+    return value
+
+def optional_pair(marker, left, right):
+    left_value = marker.get(left)
+    right_value = marker.get(right)
+    if (left_value is None) != (right_value is None):
+        raise ValueError(left)
+    return left_value, right_value
+
+def validate_backup_file(path, expected_size, expected_sha256):
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+    digest = hashlib.sha256()
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != uid
+            or info.st_nlink != 1
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or info.st_size != expected_size
+            or not no_extended_acl(fd)
+        ):
+            raise ValueError("backup_path")
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    finally:
+        os.close(fd)
+    if digest.hexdigest() != expected_sha256:
+        raise ValueError("backup_path")
+
+def reject_owned_path(path):
+    info = os.lstat(path)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or info.st_uid != uid
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or (not stat.S_ISDIR(info.st_mode) and info.st_nlink != 1)
+    ):
+        raise ValueError(path)
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if stat.S_ISDIR(info.st_mode):
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino) or not no_extended_acl(fd):
+            raise ValueError(path)
+    finally:
+        os.close(fd)
+    return info
+
+def sha256_file(path):
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+    digest = hashlib.sha256()
+    try:
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    finally:
+        os.close(fd)
+    return digest.hexdigest()
+
+def release_tree_sha256(root_path):
+    records = []
+    for current, directory_names, file_names in os.walk(root_path, topdown=True, followlinks=False):
+        directory_names.sort()
+        file_names.sort()
+        for name in directory_names + file_names:
+            path = os.path.join(current, name)
+            item_info = reject_owned_path(path)
+            relative = os.path.relpath(path, root_path)
+            if "\x00" in relative or "\n" in relative or relative == ".." or relative.startswith("../"):
+                raise ValueError("release_backup_path")
+            mode = stat.S_IMODE(item_info.st_mode)
+            if stat.S_ISDIR(item_info.st_mode):
+                record = f"d\0{relative}\0{mode}\0"
+            elif stat.S_ISREG(item_info.st_mode):
+                record = f"f\0{relative}\0{mode}\0{item_info.st_size}\0{sha256_file(path)}\0"
+            else:
+                raise ValueError("release_backup_path")
+            records.append((relative, record.encode("utf-8")))
+    digest = hashlib.sha256()
+    for _, record in sorted(records, key=lambda item: item[0]):
+        digest.update(record)
+    return digest.hexdigest()
+
+def validate_release_backup(root_path, expected_sha256):
+    reject_owned_path(root_path)
+    allowed = lambda name: name in {
+        "mlx.metallib",
+        "THIRD-PARTY-NOTICES.txt",
+        "compatibility-set.json",
+        "compatibility-set-local",
+        "catalog-release",
+        "external-local-members",
+        "Malibu.app.zip",
+        "malibu-app-state.json",
+    } or name.endswith(".bundle")
+    if any(not allowed(name) for name in os.listdir(root_path)):
+        raise ValueError("release_backup_path")
+    if release_tree_sha256(root_path) != expected_sha256:
+        raise ValueError("release_backup_sha256")
+
+def validate_active_marker(marker):
+    if not isinstance(marker, dict):
+        return False
+    required = {"update_id", "target_version", "target_path", "backup_path", "size", "mode", "sha256", "marker_deadline"}
+    try:
+        if not required.issubset(marker.keys()):
+            raise ValueError("required")
+        update_id = marker["update_id"]
+        if not isinstance(update_id, str) or not uuid4_pattern.fullmatch(update_id):
+            raise ValueError("update_id")
+        target_version = marker["target_version"]
+        if not isinstance(target_version, str) or not semver_pattern.fullmatch(target_version):
+            raise ValueError("target_version")
+        target_path = canonical_absolute_path(marker, "target_path")
+        backup_path = canonical_absolute_path(marker, "backup_path")
+        if target_path != binary_path:
+            raise ValueError("target_path")
+        expected_backup = os.path.join(os.path.dirname(target_path), f".macprovider-cli.rollback-{update_id}")
+        if backup_path != expected_backup:
+            raise ValueError("backup_path")
+        size = int_field(marker, "size", 0, 1024 * 1024 * 1024)
+        int_field(marker, "mode", 0, 0o7777)
+        sha256 = marker["sha256"]
+        if not isinstance(sha256, str) or not sha256_pattern.fullmatch(sha256):
+            raise ValueError("sha256")
+        release_backup, release_sha = optional_pair(marker, "release_backup_path", "release_backup_sha256")
+        if release_backup is not None:
+            release_backup = canonical_absolute_path(marker, "release_backup_path")
+            expected_release_backup = os.path.join(os.path.dirname(target_path), f".macprovider-cli.release-rollback-{update_id}")
+            if release_backup != expected_release_backup or not isinstance(release_sha, str) or not sha256_pattern.fullmatch(release_sha):
+                raise ValueError("release_backup_path")
+            release_info = os.lstat(release_backup)
+            if (
+                not stat.S_ISDIR(release_info.st_mode)
+                or stat.S_ISLNK(release_info.st_mode)
+                or release_info.st_uid != uid
+                or release_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            ):
+                raise ValueError("release_backup_path")
+            validate_release_backup(release_backup, release_sha)
+        compatibility_id, compatibility_sha = optional_pair(marker, "target_compatibility_set_id", "target_compatibility_set_sha256")
+        if compatibility_id is not None:
+            if (
+                not isinstance(compatibility_id, str)
+                or not compatibility_id_pattern.fullmatch(compatibility_id)
+                or not isinstance(compatibility_sha, str)
+                or not sha256_pattern.fullmatch(compatibility_sha)
+            ):
+                raise ValueError("target_compatibility_set_id")
+        discovery_sequence, discovery_sha = optional_pair(marker, "discovery_head_sequence", "discovery_head_sha256")
+        if discovery_sequence is not None:
+            if (
+                not isinstance(discovery_sequence, int)
+                or isinstance(discovery_sequence, bool)
+                or discovery_sequence <= 0
+                or not isinstance(discovery_sha, str)
+                or not sha256_pattern.fullmatch(discovery_sha)
+            ):
+                raise ValueError("discovery_head_sequence")
+        authority = marker.get("update_authority_mode")
+        if authority is not None:
+            if authority not in {"coordinator_recommendation", "signed_release"}:
+                raise ValueError("update_authority_mode")
+            if authority == "signed_release" and (compatibility_id is None or discovery_sequence is None):
+                raise ValueError("update_authority_mode")
+        commit_owner = marker.get("commit_owner")
+        if commit_owner is not None and commit_owner not in {"coordinator", "self_update"}:
+            raise ValueError("commit_owner")
+        previous_fields = (
+            marker.get("previous_version"),
+            marker.get("previous_compatibility_set_id"),
+            marker.get("previous_compatibility_set_sha256"),
+            marker.get("transaction_state"),
+        )
+        if any(value is not None for value in previous_fields):
+            if any(value is None for value in previous_fields):
+                raise ValueError("previous_compatibility_set_id")
+            previous_version, previous_id, previous_sha, transaction_state = previous_fields
+            if compatibility_id is None or release_backup is None:
+                raise ValueError("previous_compatibility_set_id")
+            if not isinstance(previous_version, str) or not semver_pattern.fullmatch(previous_version):
+                raise ValueError("previous_version")
+            if not isinstance(previous_id, str) or not compatibility_id_pattern.fullmatch(previous_id):
+                raise ValueError("previous_compatibility_set_id")
+            if not isinstance(previous_sha, str) or not sha256_pattern.fullmatch(previous_sha):
+                raise ValueError("previous_compatibility_set_sha256")
+            if transaction_state not in {
+                "activating_target",
+                "restoring_previous",
+                "awaiting_previous_readiness",
+            }:
+                raise ValueError("transaction_state")
+        raw_deadline = marker["marker_deadline"]
+        if not isinstance(raw_deadline, str) or not raw_deadline.endswith("Z"):
+            raise ValueError("marker_deadline")
+        deadline = datetime.datetime.strptime(raw_deadline, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if deadline < now or deadline > now + datetime.timedelta(seconds=60 + 30 * 60):
+            raise ValueError("marker_deadline")
+        validate_backup_file(backup_path, size, sha256)
+        return True
+    except Exception:
+        return False
+
+if os.path.commonpath([home, config_dir]) != home:
+    raise RuntimeError("config directory must remain inside HOME")
+if os.path.commonpath([home, mutation_root]) != home:
+    raise RuntimeError("provider mutation directory must remain inside HOME")
+if mutation_pending_path != os.path.join(mutation_root, "pending.json"):
+    raise RuntimeError("unexpected provider mutation pending marker path")
+
+home_info = validate_private_directory(home, allow_home_acl_write=True)
+current = home
+for component in os.path.relpath(config_dir, home).split(os.sep):
+    current = os.path.join(current, component)
+    if not os.path.exists(current):
+        os.mkdir(current, 0o700)
+    info = validate_private_directory(current)
+    if info.st_dev != home_info.st_dev:
+        raise RuntimeError("config path crosses an unexpected device")
+current = home
+for component in os.path.relpath(mutation_root, home).split(os.sep):
+    current = os.path.join(current, component)
+    if not os.path.exists(current):
+        os.mkdir(current, 0o700)
+    info = validate_private_directory(current)
+    if info.st_dev != home_info.st_dev:
+        raise RuntimeError("provider mutation path crosses an unexpected device")
+
+pending_info = os.lstat(mutation_pending_path)
+if (
+    not stat.S_ISREG(pending_info.st_mode)
+    or stat.S_ISLNK(pending_info.st_mode)
+    or pending_info.st_uid != uid
+    or pending_info.st_nlink != 1
+    or pending_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    or pending_info.st_size < 0
+    or pending_info.st_size > 65536
+):
+    raise RuntimeError("pending provider mutation marker is unsafe")
+
+descriptors = []
+try:
+    for path in (install_lock_path, mutation_lock_path):
+        directory = os.path.dirname(path)
+        name = os.path.basename(path)
+        dir_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        descriptors.append(dir_fd)
+        fd = os.open(name, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=dir_fd)
+        descriptors.append(fd)
+        lock_info = os.fstat(fd)
+        if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != uid or lock_info.st_nlink != 1:
+            raise RuntimeError("provider mutation lock is unsafe")
+        os.fchmod(fd, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            write_status("deferred")
+            raise SystemExit(0)
+
+    pending_fd = os.open(
+        "pending.json",
+        os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=descriptors[-2],
+    )
+    try:
+        opened = os.fstat(pending_fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != uid
+            or opened.st_nlink != 1
+            or opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or (opened.st_dev, opened.st_ino) != (pending_info.st_dev, pending_info.st_ino)
+            or opened.st_size != pending_info.st_size
+            or not no_extended_acl(pending_fd)
+        ):
+            raise RuntimeError("pending provider mutation marker is unsafe")
+        raw = os.read(pending_fd, opened.st_size + 1)
+    finally:
+        os.close(pending_fd)
+    if len(raw) != pending_info.st_size:
+        raise RuntimeError("pending provider mutation marker changed during read")
+    try:
+        marker = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        marker = None
+
+    if validate_active_marker(marker):
+        write_status("active")
+        raise SystemExit(0)
+    if action == "classify":
+        write_status("invalid")
+        raise SystemExit(0)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    os.replace("pending.json", f"pending-quarantined-{stamp}.json", src_dir_fd=descriptors[-2], dst_dir_fd=descriptors[-2])
+    os.fsync(descriptors[-2])
+    write_status("quarantined")
+finally:
+    for descriptor in reversed(descriptors):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+PY
+  recovery_result="$(cat "$recovery_status_path" 2>/dev/null || true)"
+  rm -f "$recovery_status_path"
+  case "$recovery_result" in
+    invalid)
+      quiesce_repair_watchdogs_for_transaction
+      repair_autoupdate_recovery_preflight quarantine
+      ;;
+    quarantined)
+      log "Repair preflight: quarantined malformed orphaned autoupdate recovery marker before acquiring installer ownership."
+      ;;
+    active|deferred|"")
+      ;;
+    *)
+      die 70 "could not resolve repair autoupdate recovery state"
+      ;;
+  esac
+}
+
 main() {
   detect_platform
   validate_provider_token_environment
   validate_launchd_mode
+  validate_repair_privilege_domain
   validate_headless_acceptance_source
   validate_port_value "$PORT"
   for tool in curl tar shasum grep sed awk date hostname mktemp openssl find python3 lsof cmp diff readlink ps; do
     require_tool "$tool"
   done
   validate_install_dir
+  remediate_repair_home_write_acl
+  repair_autoupdate_recovery_preflight
   acquire_install_lock
   validate_headless_install_topology
   recover_orphaned_install_transactions
@@ -12959,13 +13818,13 @@ main() {
     log "Latest release: $tag"
   fi
   if [ -n "${BUNDLED_APP}" ]; then
-    [ "$REPAIR_EXISTING_INSTALL" -eq 1 ] \
+    [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ] \
       || die 7 "MACPROVIDER_BUNDLED_APP is only allowed for existing-install repair"
     TMPDIR_PATH="$(mktemp -d)"
     asset_kind="bundled"
     log "Repairing from Malibu.app bundled provider CLI (no GitHub download)."
   else
-    [ "$REPAIR_EXISTING_INSTALL" -eq 0 ] \
+    [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 0 ] \
       || die 7 "existing-install repair requires MACPROVIDER_BUNDLED_APP from Malibu.app"
     download_release "$tag"
     verify_sha256
@@ -13082,12 +13941,15 @@ main() {
   # emergency downgrade.
   log "Waiting up to 30s for exact coordinator admission and buyer-serving readiness."
   if ! wait_for_coordinator "$provider_id" "$coordinator_base"; then
-    if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
+    if [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ]; then
+      log "Coordinator did not admit the repaired provider yet; committing local repair and leaving coordinator rejoin as telemetry."
+    elif [ "$EMERGENCY_ROLLBACK" = "1" ]; then
       log "Coordinator did not admit the restored provider through active legacy_bridge; rolling back."
+      exit 6
     else
       log "Coordinator did not admit the exact local catalog envelope for buyer traffic; rolling back."
+      exit 6
     fi
-    exit 6
   fi
   if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
     verify_emergency_config_activation
