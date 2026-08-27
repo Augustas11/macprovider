@@ -2,12 +2,26 @@ package trustpool
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 )
+
+func (h *adminHandler) handlePromotePoolGuarded(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		poolID := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(r.URL.Path, "/promote"), "/admin/trust-pools/pools/"))
+		if poolID != "" && !strings.Contains(poolID, "/") {
+			if err := h.deps.Store.RequireOnCallReadinessForPromotion(r.Context(), poolID); errors.Is(err, ErrOnCallReadiness) {
+				h.writeMutationError(w, err)
+				return
+			}
+		}
+	}
+	h.handlePromotePool(w, r)
+}
 
 func (h *adminHandler) onCallAuthorityKeySHA256() string {
 	return strings.TrimSpace(os.Getenv("MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256"))
