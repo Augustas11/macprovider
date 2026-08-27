@@ -143,6 +143,10 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleListPools(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/reviewed-distribution-artifact"):
 		h.handleReviewedDistributionArtifact(w, r)
+	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/reviewed-artifact-lifecycle"):
+		h.handleReviewedArtifactLifecycle(w, r)
+	case r.URL.Path == "/admin/trust-pools/on-call-readiness":
+		h.handleOnCallReadiness(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/public-announcement"):
 		h.handlePublicAnnouncementApproval(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/promote"):
@@ -1721,6 +1725,10 @@ func (h *adminHandler) writeMutationErrorResponse(w http.ResponseWriter, err err
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "provider_delegation_invalid"}})
 	case errors.Is(err, ErrMalformedDurableEvent):
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
+	case errors.Is(err, ErrOnCallReadiness):
+		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "on_call_readiness_rejected"}})
+	case errors.Is(err, ErrReviewedArtifactLifecycle):
+		writeAdminJSON(w, http.StatusConflict, map[string]any{"error": map[string]string{"code": "reviewed_artifact_lifecycle_rejected"}})
 	default:
 		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_event"}})
 	}
