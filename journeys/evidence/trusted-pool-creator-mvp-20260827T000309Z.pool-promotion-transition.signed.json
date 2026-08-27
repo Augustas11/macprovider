@@ -1,0 +1,53 @@
+{
+  "schema_version": "macprovider.pool-promotion-transition-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-spec043-production-release-p256-v1",
+      "signature": "MEUCIQCydsvO0BLUfTSUXpFqs5kK3aa9er0jyWEC6zFJlu9BAgIgOAcTSo4rqS0881yLSImr5Mij8eLN7jI/ZCodLPDA0T4=",
+      "signed_sha256": "446cefe59dbfeb6dfe53f43820f094c8a69a5e96f31fd51e7bfff1e702228b31",
+      "verified_at": "2026-08-27T02:54:06Z",
+      "verifier": ".github/workflows/build-signed-pool-promotion-transition.yml:33034409714:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "spec-043-promotion-auth-v1",
+    "journey_id": "JOURNEY-TRUSTED-POOL-CREATOR-MVP",
+    "run_id": 1,
+    "journey_result_digest": "4eb0715804c1168b64257f83d73cabb3d189d2a27979e1130dbc2b298d2de438",
+    "live_activation_target": "production-trusted-pool-creator-mvp",
+    "environment_id": "production-trusted-pool-creator-mvp",
+    "environment_class": "production",
+    "schema_migration_hash": "bf13f925db09a409dbf2796008ed08e2fc3afc1a36492ad03568594c971f6c4b",
+    "approval_record_version": 1,
+    "creator_agreement_version": 1,
+    "pricing_schedule_version": 1,
+    "authorization_id": "spec043-ppt-20260827T000309Z-1",
+    "authorized_actor": "macprovider-ops",
+    "credential_id": "macprovider-spec043-production-release-p256-v1",
+    "rbac_role": "production-release-approver",
+    "authorized_at": "2026-08-27T02:54:04Z",
+    "expiry": "2026-08-28T01:54:04Z",
+    "target_lifecycle_transition": "active",
+    "pool_id": "lPLeU65D3HgkRhBsPxyPDA",
+    "candidate_environment_id": "candidate-trusted-pool-creator-mvp",
+    "coordinator_build_id": "coordinator-isolated-candidate",
+    "gateway_build_id": "gateway-isolated-candidate",
+    "provider_build_id": "provider-isolated-candidate",
+    "approval_record_id": "approval-v1",
+    "creator_agreement_id": "agreement-approval-v1",
+    "creator_agreement_expires_at": "2026-08-27T23:03:06Z",
+    "creator_agreement_grace_ends_at": "2026-08-28T00:03:06Z",
+    "pricing_schedule_id": "pricing-approval-v1",
+    "gate_check_id": "candidate-promote:op-promote",
+    "verifier_challenge": "isolated-candidate-trusted-pool-creator-mvp",
+    "effective_config_digest": "c98717d052d263560ee54446956eb34e4b4a7ff41566007e390f26386ab577c9",
+    "feature_flag_digest": "b88b88f6b48e8647ac2c4f337836cbaedff25803ddac3fe84d7674b59322c2da",
+    "governance_file_digest": "621e091a60b182d9b089afaa3941a568eb175a01c1ba1cbaab63daa8c54718ce",
+    "reviewed_distribution_artifact_digest": "a569a745d4dfba05fe6857a4a2bdbd2b9b3e4a9cba4d77445c73eb0e5d9d89a3",
+    "root_issuer_fingerprint": "278b9647f40153cbed8eb597f4b78df0ee07a13d05db49925a887068c39a4097",
+    "routeable_snapshot_digest": "81e88ce0339edfe74b24b2f3cf63242fe8586f1b6c8063857567016dc2ee6d18",
+    "pool_generation": 15,
+    "transition_epoch": 1
+  }
+}

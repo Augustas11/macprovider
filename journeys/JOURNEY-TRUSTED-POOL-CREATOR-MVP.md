@@ -1,6 +1,6 @@
 # JOURNEY-TRUSTED-POOL-CREATOR-MVP
 
-Status: draft journey contract; same-day integer-run_id signed envelope committed; no SPEC-043 promotion
+Status: draft journey contract; same-day integer-run_id signed envelope and unconsumed sibling committed; no SPEC-043 promotion
 Owner: Trusted Pool creator onboarding
 Specs: SPEC-043, SPEC-042
 Requirements: SPEC-043-R001, SPEC-043-R002, SPEC-043-R003, SPEC-043-R004, SPEC-043-R005, SPEC-043-R006, SPEC-043-R007, SPEC-043-R008, SPEC-043-R009, SPEC-043-R010, SPEC-043-R011, SPEC-043-R012
@@ -20,6 +20,15 @@ Signed integer-`run_id` envelope (evidence-only, not in CONFORMANCE `evidence[]`
 - `expires_at`: `2026-08-27`
 - Freeze, descendant-signer rejection, `delegation_revocation_verified`, and `pool_existence_oracle_within_threshold` are true
 
+Signed `PoolPromotionTransitionV1` sibling (unconsumed; not in CONFORMANCE `evidence[]`):
+
+- Signed transition: `journeys/evidence/trusted-pool-creator-mvp-20260827T000309Z.pool-promotion-transition.signed.json`
+- Workflow run: [`33034409714`](https://github.com/Augustas11/macprovider/actions/runs/33034409714)
+- Manifest: `journeys/evidence/trusted-pool-creator-mvp-20260827T000309Z.pool-promotion-transition.evidence-manifest.json`
+- `authorization_id`: `spec043-ppt-20260827T000309Z-1`
+- `live_activation_target`: `production-trusted-pool-creator-mvp`
+- `run_id`: `1`
+
 Historical signed integer-`run_id` envelope (`expires_at` `2026-08-26`; evidence-only):
 
 - Redacted artifact: `journeys/evidence/trusted-pool-creator-mvp-20260826T054329Z.redacted.json`
@@ -36,7 +45,7 @@ Historical Gate C envelope (capture-string `run_id`; evidence-only):
 
 Historical Gate A envelope (pre-proof flags false) remains committed at `journeys/evidence/trusted-pool-creator-mvp-20260825T072753Z.*`.
 
-The same-day integer-`run_id` envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is JSON integer `1`. Dispatch `.github/workflows/build-signed-pool-promotion-transition.yml` from reviewed `main` bound to this envelope. `scripts/promote-signed-journey-result.py` requires `--promotion-transition` for this journey and consumes that sibling into `journeys/ledgers/spec-043-promotion-auth.jsonl` before rewriting CONFORMANCE. Without a matching `consumed_authorization`, governance keeps the envelope evidence-only. The production-release public key is registered; the sibling signer does not rewrite CONFORMANCE. Do not promote SPEC-043 from this harness alone. The 20260826 signed envelope's `expires_at` is no longer the current UTC calendar day. The Gate C envelope's capture-string `run_id` remains historical.
+The same-day integer-`run_id` envelope is not a `PoolPromotionTransitionV1` artifact. Its `run_id` is JSON integer `1`. The sibling from workflow `33034409714` is committed and validates without `--consume`. `scripts/promote-signed-journey-result.py` requires `--promotion-transition` for this journey and consumes that sibling into `journeys/ledgers/spec-043-promotion-auth.jsonl` before rewriting CONFORMANCE. Without a matching `consumed_authorization`, governance keeps the envelope evidence-only. Do not promote SPEC-043 from this harness alone. The 20260826 signed envelope's `expires_at` is no longer the current UTC calendar day. The Gate C envelope's capture-string `run_id` remains historical.
 
 Live-readiness runbook (Gate C; does not promote SPEC-043): `docs/runbooks/trusted-pool-creator-launch.md`
 
