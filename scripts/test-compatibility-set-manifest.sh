@@ -216,7 +216,9 @@ for required in (
 for required in (
     'compatibility-set.json)',
     'cp "$staging_dir/compatibility-set.json" "$INSTALL_DIR/compatibility-set.json"',
-    '"compatibility-set.json", "compatibility-set-local", "catalog-release"',
+    '"compatibility-set.json"',
+    '"compatibility-set-local"',
+    '"catalog-release"',
 ):
     assert required in installer, required
 PY

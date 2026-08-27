@@ -2,8 +2,8 @@ import CryptoKit
 import Darwin
 import Foundation
 
-/// Canonical auto-update state machine shared with
-/// ops/macprovider-watchdog/watchdog.sh:
+/// Canonical auto-update state machine owned by the installer/CLI transaction
+/// path. The watchdog observes liveness only and does not restore update state.
 ///
 /// no_update -> download -> pending_install -> committed
 ///                                      \-> restoring_previous
@@ -16,10 +16,10 @@ import Foundation
 /// Legacy pending markers without a release snapshot remain binary-only. The
 /// restarted provider commits by writing
 /// a success sentinel and clearing pending.json. If a crash, sleep, or restart
-/// leaves pending.json behind past marker_deadline, both the CLI recovery path
-/// and watchdog treat that as pending_install requiring rollback, not as an
-/// invalid marker. Malformed markers are quarantined; expired but otherwise
-/// valid markers are restored from their backup.
+/// leaves pending.json behind past marker_deadline, the CLI startup recovery
+/// path treats that as pending_install requiring rollback, not as an invalid
+/// marker. Malformed markers are quarantined by transaction owners; expired
+/// but otherwise valid markers are restored from their backup by CLI recovery.
 struct AutoUpdatePendingMarker: Codable, Equatable {
     let updateID: String
     let targetVersion: String
@@ -608,9 +608,8 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         try acquireLock(allowPending: false)
     }
 
-    /// Recovery and authoritative commit must serialize with installers,
-    /// updater activation, and the independent watchdog while an existing
-    /// pending marker remains armed.
+    /// Recovery and authoritative commit must serialize with installers and
+    /// updater activation while an existing pending marker remains armed.
     func acquireRecoveryLock() throws -> AutoUpdateLock {
         try acquireLock(allowPending: true)
     }

@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.12
+Version: v0.1.13
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -33,6 +33,10 @@ autoupdate boundary. The existing `consumer_user` LaunchAgent and Keychain track
 is unchanged; system-domain headless autoupdate/rollback remains a future
 extension until this spec adds a corresponding implementation and acceptance
 journey.
+v0.1.13 removes watchdog rollback ownership. The companion watchdog remains a
+local liveness monitor only; installer, Malibu repair, and CLI startup recovery
+are the only transaction owners allowed to mutate pending markers, rollback
+backups, live release bytes, watchdog scripts, plists, or Malibu app artifacts.
 
 ## Goal
 
@@ -71,12 +75,13 @@ session lifecycle; it does not replace the cryptographic update mechanism.
 - Replacing the existing manual `macprovider-cli update` command.
 
 Convergence boundary: SPEC-020 guarantees convergence to latest only for
-default-installed, launchd-managed providers with autoupdate enabled and
-rollback observation available. Providers with explicit opt-out,
-missing/disabled watchdog, or unsupported install topology are outside the
-latest-assumption population. Future features that depend on latest-provider
-behavior MUST exclude old binaries via the existing `required_binary_version`
-admission gate or an equivalent explicit gate.
+default-installed, launchd-managed providers with autoupdate enabled and CLI
+startup recovery available. Providers with explicit opt-out or unsupported
+install topology are outside the latest-assumption population. A missing or
+disabled companion watchdog affects local liveness supervision, not rollback
+authority. Future features that depend on latest-provider behavior MUST exclude
+old binaries via the existing `required_binary_version` admission gate or an
+equivalent explicit gate.
 
 ### macOS execution profiles and path notation
 
@@ -579,18 +584,23 @@ the currently pending autoupdate. The existing manual update behavior that
 overwrites only the old binary by POSIX rename is insufficient until the
 complete executable-plus-resources rollback target is staged.
 
-R-4.4. Autoupdate eligibility MUST fail closed if the watchdog or an equivalent
-rollback observer is absent, disabled, or unavailable, with
-`failure_class:"rollback_observer_unavailable"`. Missing rollback observation
-MUST prevent download, drain, swap, and marker creation for the target.
+R-4.4. Autoupdate eligibility MUST NOT depend on the companion watchdog as a
+rollback observer. The rollback observer is the CLI startup recovery path that
+shares the provider mutation locks and `pending.json` state machine. If CLI
+startup recovery is disabled, unavailable, or cannot share the transaction
+state, autoupdate MUST fail closed with
+`failure_class:"rollback_observer_unavailable"` before download, drain, swap,
+or marker creation.
 
 R-4.5. Every provider release mutator and recovery observer MUST share one
 kernel-held ownership boundary. The outer lock is
 `$HOME/.config/macprovider/install.lock`; installer, manual CLI update,
-coordinator autoupdate, Malibu update, watchdog, and install/autoupdate recovery
-MUST acquire it before inspecting or mutating live binary, resource, config,
-plist, recommendation, service, or recovery state. Autoupdate and its observers
-MUST then acquire the inner
+coordinator autoupdate, Malibu repair, and CLI startup/install recovery MUST
+acquire it before inspecting or mutating live binary, resource, config, plist,
+recommendation, service, or recovery state. The companion watchdog MUST NOT
+acquire this lock for rollback, write pending markers, restore release bytes,
+rewrite plists, or restart the provider as part of update recovery. Autoupdate
+and its recovery owners MUST then acquire the inner
 `$HOME/.local/share/macprovider/autoupdate/update.lock`. Acquisition order is
 always outer `install.lock`, then inner `update.lock`; release order is the
 reverse. No path may wait for the outer lock while holding the inner lock.
@@ -684,11 +694,12 @@ then atomic rename. The adjacent-resource snapshot MUST use
 deterministic tree digest MUST match `release_backup_sha256` before restore.
 
 R-4.8. Marker, binary backup, and release snapshot entries MUST be opened with
-symlink-following disabled. The watchdog or equivalent rollback observer MUST
-`lstat` every path, reject symlinks, reject unexpected hard links, reject
-malformed JSON, and reject any path outside the trusted state and binary
-directories before copying, renaming, or restoring. The watchdog MUST verify
-the binary SHA-256 and release-tree SHA-256 before restore.
+symlink-following disabled. The CLI startup recovery owner MUST `lstat` every
+path, reject symlinks, reject unexpected hard links, reject malformed JSON, and
+reject any path outside the trusted state and binary directories before copying,
+renaming, or restoring. It MUST verify the binary SHA-256 and release-tree
+SHA-256 before restore. The companion watchdog MUST NOT perform these restore
+checks because it is not a rollback owner.
 
 R-4.9. Trusted state root. `$HOME/.local/share/macprovider` and
 `$HOME/.local/share/macprovider/autoupdate` MUST be created or repaired as
@@ -697,19 +708,21 @@ component is a symlink, is not owned by the provider UID, has group/world
 write, has non-owner-write ACLs, or crosses an unexpected device/mount
 boundary.
 
-R-4.10. Startup and watchdog recovery MUST handle invalid pending markers as a
-state machine. If `pending.json` exists but neither the outer provider mutation
-lock nor `update.lock` has a live holder and no observer process is running,
-the marker is orphaned. The provider or watchdog
-MUST emit `failure_class:"orphaned_pending_marker"` and delete the marker after
-restoring from backup if the backup is valid by size and hash. If the backup is
-not valid, it MUST quarantine the marker by renaming it to
+R-4.10. CLI startup recovery MUST handle invalid pending markers as a state
+machine. If `pending.json` exists but neither the outer provider mutation lock
+nor `update.lock` has a live holder and no CLI recovery process is running, the
+marker is orphaned. CLI startup recovery MUST emit
+`failure_class:"orphaned_pending_marker"` and delete the marker after restoring
+from backup if the backup is valid by size and hash. If the backup is not
+valid, it MUST quarantine the marker by renaming it to
 `pending-quarantined-<timestamp>.json` and disable autoupdate until an operator
 clears the quarantine. If `pending.json` references a `backup_path` that is
-missing or hash-mismatched, the provider or watchdog MUST emit
+missing or hash-mismatched, CLI startup recovery MUST emit
 `failure_class:"rollback_backup_corrupt"`, MUST NOT delete the live binary
 because no rollback is possible, MUST disable autoupdate for the session, and
-MUST surface a structured event.
+MUST surface a structured event. The companion watchdog may log that a pending
+marker exists, but MUST leave all marker, backup, release, plist, watchdog, and
+Malibu app bytes untouched.
 
 **SPEC-020-R003 — Separate local update integrity from network readiness.**
 After activation, the updater MUST first decide local update success from the
@@ -777,14 +790,14 @@ retention is deferred to v0.3.0.
 
 R-4.11. If the new binary crashes, fails to start, fails local provider health,
 or fails exact signed-set identity verification within 60 seconds of the new
-process start, the provider health monitor MUST evaluate the preserved prior
+process start, the CLI recovery owner MUST evaluate the preserved prior
 release's signed compatibility-set ID/digest and CLI component version against
 the preserved rollback record, then evaluate it against
 `effective_minimum_safe_binary_version` and
 `effective_revoked_binary_versions` before restoration. If the prior release is
-allowed, the monitor restores the complete payload and restarts the canonical
+allowed, CLI recovery restores the complete payload and restarts the canonical
 launchd provider service in the selected profile.
-If the prior release is revoked or below the effective minimum, the monitor
+If the prior release is revoked or below the effective minimum, CLI recovery
 MUST NOT restore or restart it; it MUST stop the failed target, retain the
 validated recovery material and pending marker, emit
 `failure_class:"rollback_target_disallowed"`, and require the separately
@@ -801,11 +814,12 @@ class:
   coordinator did not report current/previous network readiness or returned
   different catalog identity; report without rollback.
 
-R-4.12. After watchdog rollback, autoupdate MUST be disabled for the rest of the
-provider session and the provider MUST emit a structured rollback failure event.
-The next provider process start MAY re-enable autoupdate unless disabled by
-configuration or cooldown state. A `rollback_target_disallowed` stop remains
-fenced across restart until emergency recovery supplies an allowed signed set.
+R-4.12. After CLI startup recovery performs rollback, autoupdate MUST be
+disabled for the rest of the provider session and the provider MUST emit a
+structured rollback failure event. The next provider process start MAY re-enable
+autoupdate unless disabled by configuration or cooldown state. A
+`rollback_target_disallowed` stop remains fenced across restart until emergency
+recovery supplies an allowed signed set.
 
 R-4.13. Reserved for future headless system-domain update and rollback
 semantics. Until that version lands, `headless_fleet` is outside the autoupdate
@@ -947,7 +961,7 @@ opt-out event and optional notify-only message, but no download, drain, swap,
 or restart occurs.
 
 AC-V0.1-10. Post-swap rollback classification: given a new binary that fails to
-start or exits within 60 seconds, the provider health monitor emits
+start or exits within 60 seconds, CLI startup recovery emits
 `failure_class:"post_start_crash"`. Given a new binary that starts but fails
 local provider health or exact signed-set verification, it emits
 `failure_class:"post_start_health_failed"`. An allowed prior release is restored
@@ -1001,9 +1015,11 @@ coordinator recommendation that has neither `v<NORMALIZED_TARGET>` nor
 cooldown keyed by `(NORMALIZED_TARGET, failure_class)`.
 
 AC-V0.1-16. Rollback observer unavailable rejected: given missing or disabled
-watchdog/equivalent rollback observation, autoupdate fails eligibility with
+CLI startup recovery/equivalent transaction-owned rollback observation,
+autoupdate fails eligibility with
 `failure_class:"rollback_observer_unavailable"` before download, drain, swap,
-or marker creation.
+or marker creation. Missing companion watchdog alone MUST NOT be treated as
+missing rollback authority.
 
 AC-V0.1-17. Coordinator-visible event redaction: heartbeat and `state_update`
 payloads containing `last_autoupdate_event` carry an event object that
@@ -1022,19 +1038,22 @@ required tarball, checksum, or signature asset, the provider emits
 for that target.
 
 AC-V0.1-19. Orphaned pending marker recovered: given `pending.json` exists,
-both the outer `install.lock` and inner `update.lock` are unheld, no observer
-process is running, and the referenced binary plus release backups are valid by
-size and hash, startup or watchdog recovery emits
+both the outer `install.lock` and inner `update.lock` are unheld, no CLI
+recovery process is running, and the referenced binary plus release backups are
+valid by size and hash, CLI startup recovery emits
 `failure_class:"orphaned_pending_marker"`, restores from backup, deletes the
-marker, and surfaces a structured event. If the backup is not valid, recovery
-quarantines the marker as `pending-quarantined-<timestamp>.json` and disables
-autoupdate until operator repair.
+marker, and surfaces a structured event. If the backup is not valid, CLI
+recovery quarantines the marker as `pending-quarantined-<timestamp>.json` and
+disables autoupdate until operator repair. A watchdog tick over the same
+expired marker MUST leave the live binary/release bytes, marker, backup,
+watchdog script, launchd plists, and Malibu app untouched.
 
 AC-V0.1-20. Corrupt rollback backup blocks rollback: given `pending.json`
-references a missing or hash-mismatched `backup_path`, startup or watchdog
-recovery emits `failure_class:"rollback_backup_corrupt"`, does not delete the
-live binary, disables autoupdate for the session, and surfaces a structured
-event.
+references a missing or hash-mismatched `backup_path`, CLI startup recovery
+emits `failure_class:"rollback_backup_corrupt"`, does not delete the live
+binary, disables autoupdate for the session, and surfaces a structured event.
+The watchdog MUST NOT quarantine or repair the marker because it is not the
+transaction owner.
 
 AC-V0.1-21. Trusted state root hardened: startup creates or repairs
 `$HOME/.local/share/macprovider` and
@@ -1091,13 +1110,15 @@ degraded, draining, legacy, incompatible, or sanctioned provider reports
 not prevent or undo an independently proven local signed-set/health commit.
 
 AC-V0.1-27. Shared mutation ownership: installer, manual update, coordinator
-autoupdate, Malibu, watchdog, and both recovery paths contend on the same outer
-`~/.config/macprovider/install.lock`; autoupdate owners then take
+autoupdate, Malibu repair, CLI startup recovery, and install recovery contend
+on the same outer `~/.config/macprovider/install.lock`; autoupdate owners then take
 `~/.local/share/macprovider/autoupdate/update.lock`. Cross-writer tests prove
 the fixed outer-then-inner order, live-owner refusal, stale-file recovery,
 installer-record PID-reuse/start-identity rejection, boot-change recovery,
 pending-transaction fencing, reverse-order release, and SIGKILL recovery
-without mixed release components or deadlock.
+without mixed release components or deadlock. Watchdog tests prove its
+compatibility recovery entry point is non-mutating and cannot restore rollback
+bytes or launchd state from stale markers.
 
 AC-V0.1-28. Signed discovery replay resistance: after accepting discovery head
 sequence `N` and digest `D`, a lower sequence is rejected with
@@ -1157,12 +1178,13 @@ adopted handoff promptly after the exact pending marker disappears, changes, or
 expires; it MUST NOT retain a maintenance exclusion for the handoff's original
 maximum lifetime after commit.
 
-Every rollback entry point, including coordinator orphan recovery and the
-watchdog copy embedded in the installer, MUST fence the stable helper and exact
-lowercase-UUID legacy helpers before restoring bytes. Only bounded positive
-launchd absence proof permits helper-plist removal and restoration; unknown
-inspection results retain the marker, backup, and current bytes for a later
-bounded retry.
+Every rollback entry point, including coordinator orphan recovery and CLI
+startup recovery, MUST fence the stable helper and exact lowercase-UUID legacy
+helpers before restoring bytes. Only bounded positive launchd absence proof
+permits helper-plist removal and restoration; unknown inspection results retain
+the marker, backup, and current bytes for a later bounded retry. The watchdog
+copy embedded in the installer MUST NOT restore bytes, fence helpers, rewrite
+plists, or bootstrap/kickstart the provider as update recovery.
 
 When rollback retains a marker in `restoring_previous` or
 `awaiting_previous_readiness`, the restored previous binary MAY start only when
@@ -1183,7 +1205,7 @@ terminate-then-kill behavior. A service-loaded probe that times out or returns
 an unknown result MUST throw or otherwise stop the restart transaction; it
 MUST NOT be interpreted as service absence.
 
-After watchdog rollback restores the preserved release, its bootstrap and
+After CLI startup recovery restores the preserved release, its bootstrap and
 kickstart operations MUST also be bounded. Bootstrap success is accepted; a
 nonzero bootstrap is accepted only when a bounded exact-service print proves
 the canonical provider is already loaded. Kickstart MUST succeed. A timeout,
@@ -1247,13 +1269,15 @@ write access to provider-owned executable or state paths is inside the trust
 boundary and must be controlled by filesystem permissions.
 
 T-7. Provider installer/update processes race with each other, launchctl, or
-the watchdog, making mutation ownership and rollback observation an attack
-surface. The shared outer lock, fixed outer-then-inner ordering, durable
+liveness supervision, making mutation ownership and rollback observation an
+attack surface. The shared outer lock, fixed outer-then-inner ordering, durable
 PID/start/boot ownership, pending-transaction fencing, atomic markers,
 same-directory rollback targets, trusted-path validation, executable-file
 validation, and a single pending update ID defend against mixed releases,
 deadlock, stale-marker rollback, path injection, and rollback to
-attacker-chosen files. Residual risk: launchd/watchdog logic bugs can still
+attacker-chosen files. The companion watchdog is outside mutation ownership and
+therefore cannot restore a stale binary, release set, plist, watchdog script, or
+Malibu app artifact. Residual risk: launchd/watchdog liveness bugs can still
 create availability failures; v0.1.0 limits rollback to one prior release and
 disables autoupdate for the session after rollback.
 
@@ -1309,11 +1333,15 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.13 (2026-08-27): Removed companion-watchdog rollback authority. The
+  watchdog remains a current-boot-gated liveness monitor; pending marker,
+  rollback backup, release-byte, plist, watchdog-script, and Malibu app
+  mutations belong only to installer/Malibu repair and CLI startup/install
+  recovery owners.
 - v0.1.12 (2026-08-25): Named SPEC-026's SSH-only `headless_fleet` mode as an
   explicit unsupported autoupdate topology for this version. The existing
   per-user LaunchAgent topology is retained as `consumer_user`; system-domain
-  update, one-shot reload, watchdog rollback, and reboot recovery remain future
-  work.
+  update, one-shot reload, rollback, and reboot recovery remain future work.
 - v0.1.11 (2026-07-21): Adds the protected `renew-release-discovery-head.yml`
   recurring signer and the anonymous v1.8.55 bridge verifier. Renewal appends a
   greater sequence-bound transport for the unchanged latest stable target;

@@ -561,7 +561,7 @@
     {
       "spec_id": "SPEC-020",
       "title": "Provider autoupdate",
-      "version": "v0.1.12",
+      "version": "v0.1.13",
       "path": "specs/SPEC-020-provider-autoupdate.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -714,7 +714,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg` + menu bar wrapper)",
-      "version": "v0.23",
+      "version": "v0.24",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1908,8 +1908,9 @@
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:providerReloadLaunchAgentData",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:runLaunchctlCommand",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForLocalHealthIfManaged",
-        "ops/macprovider-watchdog/watchdog.sh:def fence_reload_helpers",
-        "phase3-binary/dist/install.sh:def fence_reload_helpers"
+        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:defaultRollbackObserverAvailable",
+        "ops/macprovider-watchdog/watchdog.sh:autoupdate_recovery_tick",
+        "phase3-binary/dist/install.sh:autoupdate_recovery_tick"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testAutoUpdaterOwnsMutationLockBeforeFencingReloadJobs",
@@ -1955,9 +1956,12 @@
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperTimesOutHungBootstrapWithoutRemovingProviderPlist",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperTimesOutHungPrintWithoutBootstrappingOrRemovingProviderPlist",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperWaitsForCanonicalAbsenceThenBootstrapsExactlyOnce",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testDefaultRollbackObserverFollowsCLIStartupRecoveryNotWatchdog",
         "phase3-binary/Tests/macprovider-cliTests/ProviderLifecycleLeaseTests.swift::testLaunchdServiceProcessIDFailsClosedWhenBoundedLaunchctlTimesOut",
         "phase3-binary/Tests/macprovider-cliTests/ProviderLifecycleLeaseTests.swift::testLaunchdServiceProcessIDParsesOnlySuccessfulPositivePID",
-        "ops/macprovider-watchdog/Scripts/test-ac-19-20-watchdog-recovery.sh:TEST_RELOAD_HELPER_INSPECTION_ERROR",
+        "phase3-binary/dist/test/watchdog_rollback_paths.test.sh:assert_watchdog_does_not_own_rollback",
+        "phase3-binary/dist/test/watchdog_rollback_paths.test.sh:assert_watchdog_does_not_restore_release_payload",
+        "phase3-binary/dist/test/watchdog_rollback_paths.test.sh:assert_watchdog_does_not_quarantine_malformed_marker",
         "scripts/test-watchdog-inline-drift.sh:WATCHDOG_EOF"
       ],
       "journeys": [
@@ -1981,7 +1985,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/896",
-        "rationale": "Mutation-lock ownership, launchd helper fencing, listener-bound commit gates, rollback-entry fencing, legacy first-hop bridge regressions, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records Air5/Qwen launchd PID change across installer rollback, restored provider/watchdog/manifest/service state, and empty update locks after the run. The supplemental Air5 convergence artifact records successful launchd service activation at v1.8.61, Pearl ready/routing-eligible admission, encrypted leg and hash verification, model_loaded telemetry, and an HTTP 200 buyer request routed to Air5. Signed journey-result packaging still needs to bind lock/fence/listener/cleanup evidence into a promotable conformance record."
+        "rationale": "Mutation-lock ownership, launchd helper fencing, listener-bound commit gates, CLI-owned rollback-entry fencing, rollback availability independent of watchdog launchd state, legacy first-hop bridge regressions, watchdog no-mutation regressions, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records a provider/model launchd PID change across installer rollback, restored provider/watchdog/manifest/service state, and empty update locks after the run. The supplemental convergence artifact records successful launchd service activation at v1.8.61, ready/routing-eligible admission, encrypted leg and hash verification, model_loaded telemetry, and an HTTP 200 buyer request routed to the target provider. Signed journey-result packaging still needs to bind lock/fence/listener/cleanup evidence into a promotable conformance record."
       }
     },
     {

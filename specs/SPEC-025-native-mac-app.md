@@ -1,6 +1,13 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.23 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.24 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.24 (2026-08-27, watchdog authority reduction).** Aligns with
+SPEC-020 v0.1.13: the companion watchdog is a current-boot-gated local liveness
+monitor only. It no longer owns auto-update rollback, release-byte restore,
+launchd plist restore, watchdog script restore, Malibu app restore, or
+rollback-driven provider bootstrap/kickstart. Installer/Malibu repair and CLI
+startup/install recovery remain the transaction owners.
 
 **Change log v0.23 (2026-08-25, headless fleet boundary).** SPEC-026 v0.27
 defines a separate SSH-only `headless_fleet` profile for the existing CLI, with
@@ -326,7 +333,7 @@ From reading `phase3-binary/`:
 | Runtime | `mlx-swift-examples` (MLXLLM, MLXLMCommon) — pure Swift, no Python | Runs inside the **managed CLI** process, not the app; the app is a thin monitor wrapper. |
 | Auth model | `provider_id` + `provider_token` bearer, per SPEC-001 / XSEC-1 | The CLI alone obtains, stores, and consumes the bearer. Malibu may read a legacy App item only long enough to migrate it into CLI custody, then deletes it. |
 | Config | `~/.config/macprovider/config.yaml`, initially containing `provider_token` | A restarted CLI removes the exact matching migration source transactionally only after Keychain-backed coordinator admission. The fixed 0600 backup is the handoff snapshot; deletion is confirmed before journal retirement. |
-| Provider service + watchdog LaunchAgents | `install.sh` installs BOTH the KeepAlive **provider service** `live.malibu.provider` (plist `live.malibu.provider.plist` — **this is the evidence the app checks**) and a SEPARATE **companion watchdog** `live.malibu.provider-watchdog` (`StartInterval=60`, `install.sh:47,4264`) that health-observes the daemon; on routine ticks its restart request is a **no-op** (the provider service's `KeepAlive` performs routine restarts), except during auto-update rollback recovery where it force-restarts the provider service (`install.sh:4086,4113`) (reconciled v0.6/v0.8, §8 — the evidence plist is the provider service, NOT the watchdog). Evidence: `install_manifest.json` or the provider-service plist. | **The App track installs and relies on both** (via `install.sh`). `SMAppService.mainApp.register()` is a **separate** concern — it registers `Malibu.app` itself as a login item (`AppLoginItem.swift`), not the CLI daemon. |
+| Provider service + watchdog LaunchAgents | `install.sh` installs BOTH the KeepAlive **provider service** `live.malibu.provider` (plist `live.malibu.provider.plist` — **this is the evidence the app checks**) and a SEPARATE **companion watchdog** `live.malibu.provider-watchdog` (`StartInterval=60`, `install.sh:47,4264`) that health-observes the daemon. The watchdog is a liveness monitor only; auto-update rollback and recovery mutation are owned by installer/Malibu repair and CLI startup/install recovery (SPEC-020 v0.1.13, §8 — the evidence plist is the provider service, NOT the watchdog). Evidence: `install_manifest.json` or the provider-service plist. | **The App track installs and relies on both** (via `install.sh`). `SMAppService.mainApp.register()` is a **separate** concern — it registers `Malibu.app` itself as a login item (`AppLoginItem.swift`), not the CLI daemon. |
 | Portal | `portal.malibu.tech` (SPEC-014) — installer catalog | **Reconciled v0.2:** the wrapper does **not** open a portal URL for token issuance (removed with `malibu://`). App-track registration happens inside `install.sh` / the CLI track. |
 | Release manifest / checksum | `scripts/sign-catalog.go`, `compatibility-set-manifest.py`, `compatibility-artifact-index.py`, tier2 release scripts | Binds the exact signed provider compatibility set and typed rollback plan. |
 | Signing + notarization pipeline | `.github/workflows/release.yml` "Sign + notarize binary" step + `phase3-binary/dist/release-signing-runbook.md` | Reuse the existing keychain-import / codesign / `notarytool submit --wait` / `stapler` pattern verbatim; extend to sign the `.app` and `.dmg` |
@@ -600,8 +607,7 @@ sanitized CLI-authenticated projections and never transfers provider credentials
 │                               ▼ (127.0.0.1:<port from config.yaml>)   │
 │   ┌── launchd provider service live.malibu.provider (KeepAlive) ─┐ │
 │   │   macprovider-cli   ← owned/restarted by launchd KeepAlive, NOT the │ │
-│   │   app (+ health watchdog: routine no-op, force-kickstart on         │ │
-│   │   auto-update rollback — §8)                                        │ │
+│   │   app (+ health watchdog: local liveness monitor only — §8)         │ │
 │   └──────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────┘
   MalibuAgent.start() gate (in order, MalibuAgent.swift:64-87):
@@ -664,9 +670,9 @@ negotiation and reattachment.
 
 **Reconciled v0.2/v0.7 — the wrapper does NOT spawn, restart, or SIGTERM a CLI child.**
 The launchd **provider service** `live.malibu.provider` (`KeepAlive`) that
-`install.sh` installs owns the CLI's lifecycle and routine restarts (the companion
-watchdog is a no-op on routine health failures, but DOES force-restart the provider
-service during auto-update rollback recovery — §8).
+`install.sh` installs owns the CLI's lifecycle and routine restarts. The companion
+watchdog remains a current-boot-gated local liveness monitor and does not own
+auto-update rollback or recovery mutation (§8).
 `MalibuAgent` holds a `var child: CLIChildProcess?` but **never instantiates it** in
 shipped code — `CLIChildProcess(` has no call site in `Sources` or `Tests`; the field
 is only read to defensively release a child left by an *older* build
@@ -681,9 +687,8 @@ What the app actually does around lifecycle:
   is surfaced as "Reconnecting" (`MalibuAgent.swift:307`); **diagnosed**
   startup/health failures and the first-attach timeout transition to **`.error`**, not
   "Reconnecting" (`MalibuAgent.swift:89,391`). Routine recovery of the daemon is the
-  launchd provider service's `KeepAlive` job (the watchdog is a no-op on routine health
-  but force-restarts the provider service during auto-update rollback, §8), not an in-app
-  restart loop.
+  launchd provider service's `KeepAlive` job plus the watchdog's current-boot-gated
+  liveness checks (§8), not an in-app restart loop.
 - **Quit:** `agent.shutdown(gracefulSeconds:)` stops only Malibu monitoring; it never
   drains or signals the launchd provider. Update/uninstall drain is owned by the CLI
   transaction.
@@ -849,18 +854,17 @@ conflated them; v0.6 splits the provider service from its watchdog):
 
 2. **The companion watchdog — `live.malibu.provider-watchdog`** (a SEPARATE
    `StartInterval=60` launchd job that runs the watchdog binary, `install.sh:47,4264`).
-   Distinct from the provider service. **Reconciled v0.7/v0.8 — it does NOT restart the
-   CLI for routine health failures:** on a routine unhealthy tick it only records a kick
-   request that is a **no-op** (`note_provider_restart_request` logs "skipped: launchd
-   KeepAlive is the sole runtime manager", `install.sh:3575-3577,4198-4225`) — the
-   provider service's launchd **`KeepAlive`** performs routine restarts. **The one
-   exception:** each watchdog tick first runs `autoupdate_recovery_tick`
-   (`install.sh:4192`), whose rollback path restores a rolled-back binary and DOES
-   force-restart the provider service via `launchctl bootstrap` + `kickstart -k`
-   (`install.sh:4086,4113`). So: routine health → KeepAlive; auto-update rollback →
-   watchdog force-kickstart. `install.sh` (run by the app during onboarding) installs
-   **both** the provider service and this watchdog — v0.1's claim that the App track does
-   NOT install the watchdog was false.
+   Distinct from the provider service. **Reconciled v0.24 — it is not a rollback
+   owner:** the watchdog may request a launchd kick only after it has observed local
+   health in the current boot and a later local `/v1/health` failure is paired with a
+   restart-worthy `/v1/status` state. It may log that an autoupdate `pending.json`
+   exists, but it MUST NOT restore CLI bytes, release resources, launchd plists, the
+   watchdog script, or Malibu.app; it also MUST NOT bootstrap/kickstart the provider as
+   update recovery. Auto-update rollback and stale-marker quarantine are owned by
+   installer/Malibu repair and CLI startup/install recovery under SPEC-020 v0.1.13.
+   `install.sh` (run by the app during onboarding) installs **both** the provider
+   service and this watchdog — v0.1's claim that the App track does NOT install the
+   watchdog was false.
 
 3. **The app login item — `SMAppService.mainApp`.** Registers `Malibu.app` itself to
    launch at login (`AppLoginItem.swift:6-30`), called at the end of a successful
@@ -1002,7 +1006,8 @@ These are the things I'd flag as **must-decide before P0**, in priority order:
 - Coordinator protocol.
 - Receipt shape, signing, or verification (`macprovider-verify` still works against both tracks).
 - On-chain flows, payout logic, $MALIBU emissions, staking.
-- CLI-track `install.sh` / `uninstall.sh` / watchdog — unchanged, keep shipping.
+- CLI-track `install.sh` / `uninstall.sh` — unchanged except for the watchdog's
+  SPEC-020 v0.1.13 authority reduction.
 - Existing CLI signing/notarization pipeline in `release.yml`. This spec **adds** steps that consume its output; it does not modify the CLI substeps or their secrets.
 - Existing signed `.pkg` delivery container (`live.malibu.provider.cli`, preinstall blocks GUI install). The App-track `.dmg` is a completely separate artifact.
 - Portal (SPEC-014) surface — **unchanged (reconciled v0.2).** v0.1 proposed a
