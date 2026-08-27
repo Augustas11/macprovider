@@ -69,7 +69,9 @@ def write_json_atomically(path: Path, value: dict[str, Any]) -> None:
     if path.parent.is_symlink():
         die(f"output parent must not be a symlink: {path.parent}")
     payload = json.dumps(value, indent=2, sort_keys=False) + "\n"
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+    # Keep the tempfile prefix short. Destination names copied from
+    # SPEC-043 evidence stems can leave no room under NAME_MAX.
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=".ppt.", delete=False) as handle:
         temporary = Path(handle.name)
         handle.write(payload)
     try:

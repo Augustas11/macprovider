@@ -147,7 +147,9 @@ ledger or fill CONFORMANCE `evidence[]`.
   oracle observations are true. It remains evidence-only: CONFORMANCE
   `evidence[]` is empty. Dispatch
   `.github/workflows/build-signed-pool-promotion-transition.yml` from reviewed
-  `main` bound to that envelope. The prior signed envelope (workflow
+  `main` bound to that envelope. Sibling artifacts are named
+  `trusted-pool-creator-mvp-<capture>.pool-promotion-transition.signed.json`,
+  not the 12-requirement candidate stem. The prior signed envelope (workflow
   [`32936678404`](https://github.com/Augustas11/macprovider/actions/runs/32936678404))
   has `expires_at` `2026-08-26`.
 - Historical Gate C envelope (workflow

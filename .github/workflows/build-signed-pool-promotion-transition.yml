@@ -100,8 +100,10 @@ jobs:
           python3 scripts/register-spec043-production-release-key.py --check
           python3 scripts/check_spec_governance.py --base-ref origin/main
           stem="$(basename "$CANDIDATE_INPUT" .journey-result.signed.json)"
-          payload="$RUNNER_TEMP/${stem}.pool-promotion-transition.unsigned.json"
-          envelope="journeys/evidence/${stem}.pool-promotion-transition.signed.json"
+          capture="${stem%%.spec-043-*}"
+          [[ "$capture" =~ ^trusted-pool-creator-mvp-[0-9]{8}T[0-9]{6}Z$ ]] || { echo "::error::signed candidate path is missing a capture timestamp" >&2; exit 1; }
+          payload="$RUNNER_TEMP/${capture}.pool-promotion-transition.unsigned.json"
+          envelope="journeys/evidence/${capture}.pool-promotion-transition.signed.json"
           printf 'candidate=%s\n' "$CANDIDATE_INPUT" >> "$GITHUB_OUTPUT"
           printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
           printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
