@@ -39,20 +39,24 @@ rows stay zero.
 
 ## Blocked before any live announcement
 
-These journey observations are **true** on the integer-`run_id` signed envelope from
-workflow [`33026618698`](https://github.com/Augustas11/macprovider/actions/runs/33026618698)
-(`journeys/evidence/trusted-pool-creator-mvp-20260827T000309Z.*`, `run_id` `1` on
-`469c436b52053848d4d932a03d33c1921c7cdb08`, `expires_at` `2026-08-27`). They remain
-evidence-only: CONFORMANCE `evidence[]` is empty. The prior signed integer-`run_id`
+These journey observations are **true** on the unsigned same-day recapture
+`journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.redacted.json`
+(`run_id` `1` on `fd50904396f3f11c2db633c9ed69b28d61a7ef65`, `expires_at`
+`2026-08-27`). They remain evidence-only: CONFORMANCE `evidence[]` is empty.
+The signed envelope from workflow
+[`33026618698`](https://github.com/Augustas11/macprovider/actions/runs/33026618698)
+(`20260827T000309Z`, capture `469c436b52053848d4d932a03d33c1921c7cdb08`) cannot
+fill current HEAD selectors (`func main` in coordinator `main.go` and
+`class ProductionReleaseKeyAndBuilderTests`). The prior signed integer-`run_id`
 envelope (workflow [`32936678404`](https://github.com/Augustas11/macprovider/actions/runs/32936678404))
 has `expires_at` `2026-08-26`. Do not announce a live creator until Gate D exists.
 
 | Observation | Status |
 |---|---|
-| `creator_suspension_root_compromise_freeze_verified` | True on signed integer-`run_id` envelope |
-| `descendant_signer_rejection_verified` | True on signed integer-`run_id` envelope |
-| `delegation_revocation_verified` | True on signed integer-`run_id` envelope via canonical `ProviderPoolDelegationV1` grant/revoke (`member_revoked` is not delegation proof) |
-| `pool_existence_oracle_within_threshold` | True on signed integer-`run_id` envelope via buyer/gateway rejection timing floor + unknown/unauthorized/disabled distribution test (wallet covered at gateway) |
+| `creator_suspension_root_compromise_freeze_verified` | True on unsigned same-day recapture |
+| `descendant_signer_rejection_verified` | True on unsigned same-day recapture |
+| `delegation_revocation_verified` | True on unsigned same-day recapture via canonical `ProviderPoolDelegationV1` grant/revoke (`member_revoked` is not delegation proof) |
+| `pool_existence_oracle_within_threshold` | True on unsigned same-day recapture via buyer/gateway rejection timing floor + unknown/unauthorized/disabled distribution test (wallet covered at gateway) |
 
 Also still missing for Gate D:
 
@@ -139,16 +143,20 @@ ledger or fill CONFORMANCE `evidence[]`.
 
 ## Next gates
 
-- Same-day integer-`run_id` signed candidate envelope is committed (workflow
-  [`33026618698`](https://github.com/Augustas11/macprovider/actions/runs/33026618698),
-  `run_id` `1` on `469c436b52053848d4d932a03d33c1921c7cdb08`, `expires_at`
+- Same-day unsigned recapture is committed at
+  `journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.redacted.json`
+  (`run_id` `1` on `fd50904396f3f11c2db633c9ed69b28d61a7ef65`, `expires_at`
   `2026-08-27`). Freeze, descendant-signer, delegation, and pool-existence
-  oracle observations are true. A sibling `PoolPromotionTransitionV1` from
-  workflow [`33034409714`](https://github.com/Augustas11/macprovider/actions/runs/33034409714)
-  is committed at
-  `journeys/evidence/trusted-pool-creator-mvp-20260827T000309Z.pool-promotion-transition.signed.json`.
-  It remains unconsumed: CONFORMANCE `evidence[]` is empty. The prior signed
+  oracle observations are true. Sign it from reviewed `main`, then sign a
+  **new** sibling bound to that candidate. The signed `20260827T000309Z`
   envelope (workflow
+  [`33026618698`](https://github.com/Augustas11/macprovider/actions/runs/33026618698))
+  and sibling (workflow
+  [`33034409714`](https://github.com/Augustas11/macprovider/actions/runs/33034409714))
+  remain committed but cannot promote current HEAD: commit evidence
+  `469c436b52053848d4d932a03d33c1921c7cdb08` no longer matches mapped
+  `func main` and `class ProductionReleaseKeyAndBuilderTests`. The ledger stays
+  `ledger_init` only. The prior signed envelope (workflow
   [`32936678404`](https://github.com/Augustas11/macprovider/actions/runs/32936678404))
   has `expires_at` `2026-08-26`.
 - Historical Gate C envelope (workflow
