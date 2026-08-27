@@ -561,7 +561,7 @@
     {
       "spec_id": "SPEC-020",
       "title": "Provider autoupdate",
-      "version": "v0.1.13",
+      "version": "v0.1.14",
       "path": "specs/SPEC-020-provider-autoupdate.md",
       "status": "normative",
       "owner": "@Augustas11",
