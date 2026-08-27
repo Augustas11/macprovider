@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -142,6 +143,126 @@ func TestOnCallReadiness_UpsertGetIdempotentAndRejects(t *testing.T) {
 	if _, found, err := store.OnCallReadiness(ctx, "missing-env"); err != nil || found {
 		t.Fatalf("missing env found=%v err=%v, want false nil", found, err)
 	}
+}
+
+func TestRequireOnCallReadinessForPromotion(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("candidate skips", func(t *testing.T) {
+		t.Parallel()
+		store, err := trustpool.NewStore(openTrustPoolDB(t))
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		root := seedCandidatePool(t, store)
+		if err := store.RequireOnCallReadinessForPromotion(ctx, root.poolID); err != nil {
+			t.Fatalf("candidate RequireOnCallReadinessForPromotion: %v", err)
+		}
+	})
+
+	t.Run("missing production record fails closed and PromotePool still succeeds", func(t *testing.T) {
+		t.Parallel()
+		db := openTrustPoolDB(t)
+		store := newProductionActivationStore(t, db)
+		root := seedProductionPromotablePool(t, store)
+		if err := store.RequireOnCallReadinessForPromotion(ctx, root.poolID); err == nil || !errors.Is(err, trustpool.ErrOnCallReadiness) {
+			t.Fatalf("missing on-call err=%v, want ErrOnCallReadiness", err)
+		}
+		state, _, _, err := store.PromotePool(ctx, trustpool.DurableEvent{
+			OperationID: "op-promote-store-bypass",
+			PoolID:      root.poolID,
+		})
+		if err != nil {
+			t.Fatalf("PromotePool without on-call: %v", err)
+		}
+		if got := state.Pools[root.poolID].Lifecycle; got != trustpool.LifecycleActive {
+			t.Fatalf("in-process PromotePool lifecycle=%q, want active", got)
+		}
+	})
+
+	t.Run("current production record allows", func(t *testing.T) {
+		t.Parallel()
+		db := openTrustPoolDB(t)
+		store := newProductionActivationStore(t, db)
+		root := seedProductionPromotablePool(t, store)
+		upsertSignedOnCall(t, store, "op-oncall-prod", "production")
+		if err := store.RequireOnCallReadinessForPromotion(ctx, root.poolID); err != nil {
+			t.Fatalf("current on-call: %v", err)
+		}
+	})
+
+	t.Run("expired production record fails closed", func(t *testing.T) {
+		t.Parallel()
+		db := openTrustPoolDB(t)
+		store := newProductionActivationStore(t, db)
+		root := seedProductionPromotablePool(t, store)
+		upsertSignedOnCall(t, store, "op-oncall-expired-row", "production")
+		expireStoredOnCall(t, db, "production")
+		if err := store.RequireOnCallReadinessForPromotion(ctx, root.poolID); err == nil || !errors.Is(err, trustpool.ErrOnCallReadiness) {
+			t.Fatalf("expired on-call err=%v, want ErrOnCallReadiness", err)
+		}
+	})
+
+	t.Run("unknown pool is left to PromotePool", func(t *testing.T) {
+		t.Parallel()
+		store, err := trustpool.NewStore(openTrustPoolDB(t))
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if err := store.RequireOnCallReadinessForPromotion(ctx, "pool-missing"); err != nil {
+			t.Fatalf("missing pool: %v", err)
+		}
+	})
+}
+
+func TestAdminHandler_PromoteCandidateSkipsOnCallReadiness(t *testing.T) {
+	t.Parallel()
+	store, err := trustpool.NewStore(openTrustPoolDB(t))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    trustpool.NewRegistry(),
+		OperatorKey: "operator-secret",
+	})
+	root := seedCandidatePool(t, store)
+	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote-candidate", http.StatusAccepted)
+}
+
+func TestAdminHandler_PromoteProductionRequiresOnCallReadiness(t *testing.T) {
+	t.Parallel()
+	db := openTrustPoolDB(t)
+	store := newProductionActivationStore(t, db)
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    trustpool.NewRegistry(),
+		OperatorKey: "operator-secret",
+	})
+	root := seedProductionPromotablePool(t, store)
+
+	missing := postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote-missing-oncall", http.StatusConflict)
+	assertAdminErrorCode(t, missing, "on_call_readiness_rejected")
+
+	upsertSignedOnCall(t, store, "op-oncall-http", "production")
+	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote-with-oncall", http.StatusAccepted)
+}
+
+func TestAdminHandler_PromoteProductionRejectsExpiredOnCallReadiness(t *testing.T) {
+	t.Parallel()
+	db := openTrustPoolDB(t)
+	store := newProductionActivationStore(t, db)
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    trustpool.NewRegistry(),
+		OperatorKey: "operator-secret",
+	})
+	root := seedProductionPromotablePool(t, store)
+	upsertSignedOnCall(t, store, "op-oncall-http-expired", "production")
+	expireStoredOnCall(t, db, "production")
+	expired := postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote-expired-oncall", http.StatusConflict)
+	assertAdminErrorCode(t, expired, "on_call_readiness_rejected")
 }
 
 func TestOnCallReadiness_ExpiredMethod(t *testing.T) {
@@ -457,4 +578,86 @@ func postAdminReviewedArtifactLifecycle(t *testing.T, h http.Handler, operatorKe
 		t.Fatalf("success body missing reviewed_artifact_lifecycle: %s", recw.Body.String())
 	}
 	return recw
+}
+
+func newProductionActivationStore(t *testing.T, db *sql.DB) *trustpool.Store {
+	t.Helper()
+	store, err := trustpool.NewStore(db, trustpool.WithProductionActivationGate(trustpool.ProductionActivationGate{
+		AllowedLaunchEnvironments: []string{"production"},
+		RootCustodyHashes:         []string{hexDigest("custody")},
+		EvidenceSHA256:            strings.Repeat("b", 64),
+	}))
+	if err != nil {
+		t.Fatalf("NewStore production gate: %v", err)
+	}
+	return store
+}
+
+func seedProductionPromotablePool(t *testing.T, store *trustpool.Store) rootFixture {
+	t.Helper()
+	ctx := context.Background()
+	ts := time.Unix(1800000750, 0).UTC()
+	root := newRootFixture(t)
+	approveCreator(t, store, "creator-a", "approval-v1", "approval-version-1", "production", time.Now().Add(24*time.Hour), trustpool.CreatorStatusEnabled)
+	appendTrustPoolEvents(t, ctx, store,
+		ev("op-create", ts, trustpool.EventPoolCreated, root.poolID, func(e *trustpool.DurableEvent) {
+			e.CreatorAccountID = "creator-a"
+			e.ApprovalRecordID = "approval-v1"
+		}),
+		signedRootRegistrationForIssueInEnvironment(t, "op-root", ts.Add(time.Second), root.poolID, "creator-a", "approval-v1", issueRootNonceInEnvironment(t, store, "creator-a", "approval-v1", "production", ts.Add(time.Hour)), root, "production"),
+		signedManifest(t, "op-manifest", ts.Add(2*time.Second), root.poolID, 1, root),
+		ev("op-member", ts.Add(3*time.Second), trustpool.EventMemberAdmitted, root.poolID, func(e *trustpool.DurableEvent) {
+			e.ProviderID = "provider-a"
+		}),
+		ev("op-buyer", ts.Add(4*time.Second), trustpool.EventBuyerAuthorized, root.poolID, func(e *trustpool.DurableEvent) {
+			e.BuyerAccountID = "acct-a"
+		}),
+	)
+	return root
+}
+
+func upsertSignedOnCall(t *testing.T, store *trustpool.Store, operationID, envID string) trustpool.OnCallReadiness {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	allow := trustpool.OnCallAuthorityKeySHA256(priv.Public().(ed25519.PublicKey))
+	rec, err := trustpool.SignOnCallReadiness(priv, validOnCallReadiness(operationID, envID))
+	if err != nil {
+		t.Fatalf("SignOnCallReadiness: %v", err)
+	}
+	stored, err := store.UpsertOnCallReadiness(context.Background(), rec, allow)
+	if err != nil {
+		t.Fatalf("UpsertOnCallReadiness: %v", err)
+	}
+	return stored
+}
+
+func expireStoredOnCall(t *testing.T, db *sql.DB, envID string) {
+	t.Helper()
+	expiredAt := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	res, err := db.Exec(`UPDATE trustpool_oncall_readiness SET last_confirmed_at_utc = ?, confirmation_ttl_seconds = 60 WHERE launch_environment_id = ?`, expiredAt, envID)
+	if err != nil {
+		t.Fatalf("expire on-call: %v", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n != 1 {
+		t.Fatalf("expire on-call rows=%d err=%v, want 1", n, err)
+	}
+}
+
+func assertAdminErrorCode(t *testing.T, rec *httptest.ResponseRecorder, want string) {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode admin error: %v body=%s", err, rec.Body.String())
+	}
+	if body.Error.Code != want {
+		t.Fatalf("admin error code=%q, want %q body=%s", body.Error.Code, want, rec.Body.String())
+	}
 }

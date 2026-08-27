@@ -150,7 +150,7 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/public-announcement"):
 		h.handlePublicAnnouncementApproval(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/promote"):
-		h.handlePromotePool(w, r)
+		h.handlePromotePoolGuarded(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/lifecycle"):
 		h.handleRestrictiveLifecycle(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/trust-pools/pools/") && strings.HasSuffix(r.URL.Path, "/audit"):

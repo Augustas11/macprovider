@@ -27,8 +27,9 @@ var (
 )
 
 // OnCallReadiness is the SPEC-043-R008/R011 signed launch-environment
-// on-call record. Production PromotePool does not yet consume this row;
-// missing/expired records still fail live announcement by operator policy.
+// on-call record. Operator HTTP/CLI production promote consults this row
+// via RequireOnCallReadinessForPromotion. Store.PromotePool still does not;
+// wiring that mapped path needs a recapture window.
 type OnCallReadiness struct {
 	OperationID                           string        `json:"operation_id"`
 	LaunchEnvironmentID                   string        `json:"launch_environment_id"`
@@ -382,6 +383,45 @@ ON CONFLICT(launch_environment_id) DO UPDATE SET
 		return OnCallReadiness{}, err
 	}
 	return rec, nil
+}
+
+// RequireOnCallReadinessForPromotion fail-closes operator HTTP production
+// promote when the reconstructed pool is non-candidate and the matching
+// on-call row is missing or expired. Candidate pools skip this check so the
+// isolated-candidate journey stays valid. Missing pools and pools without a
+// root issuer are left to PromotePool preconditions. This is not inside the
+// PromotePool transaction.
+func (s *Store) RequireOnCallReadinessForPromotion(ctx context.Context, poolID string) error {
+	poolID = strings.TrimSpace(poolID)
+	if poolID == "" {
+		return nil
+	}
+	state, err := s.Reconstruct(ctx)
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		return nil
+	}
+	p := state.Pools[poolID]
+	if p == nil || p.RootIssuer == nil {
+		return nil
+	}
+	environment := strings.TrimSpace(p.RootIssuer.LaunchEnvironment)
+	if environment == "" || environment == promotionLaunchEnvironmentCandidate {
+		return nil
+	}
+	rec, ok, err := s.OnCallReadiness(ctx, environment)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: production promotion requires current on-call readiness for %s", ErrOnCallReadiness, environment)
+	}
+	if rec.Expired(time.Now().UTC()) {
+		return fmt.Errorf("%w: on-call readiness expired for %s", ErrOnCallReadiness, environment)
+	}
+	return nil
 }
 
 func (s *Store) OnCallReadiness(ctx context.Context, launchEnvironmentID string) (OnCallReadiness, bool, error) {

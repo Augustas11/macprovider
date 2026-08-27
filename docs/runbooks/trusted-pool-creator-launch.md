@@ -64,9 +64,10 @@ Also still missing before any live announcement:
 
 - a production on-call readiness record stored in the launch environment
   (`POST /admin/trust-pools/on-call-readiness`, CLI
-  `coordinator-cli trust-pool-oncall`). Durable signed records exist; production
-  `PromotePool` still does not consult them. Wiring that gate needs a recapture
-  window because `validatePromotion` is evidence-mapped.
+  `coordinator-cli trust-pool-oncall`). Operator HTTP/CLI production promote
+  fail-closes without a current row. In-process `Store.PromotePool` still does
+  not consult on-call; wiring `validatePromotion` needs a recapture window
+  because that function is evidence-mapped.
 - a reviewed-artifact lifecycle owner for the live pool
   (`POST /admin/trust-pools/pools/{id}/reviewed-artifact-lifecycle`, CLI
   `coordinator-cli trust-pool-artifact-lifecycle`). This is separate from the
@@ -198,7 +199,8 @@ ledger or fill CONFORMANCE `evidence[]`.
   consume the ledger or rewrite CONFORMANCE by itself.
 - Gate D CONFORMANCE fill for R001-R012 is done through promoter consume.
   Remaining before live announcement: a production on-call readiness row in the
-  launch environment (PromotePool still does not consult it), a reviewed-artifact
-  lifecycle owner for the live pool, and a production timing-floor remeasure.
-  Durable admin/CLI surfaces and `scripts/measure-pool-rejection-timing-floor.py`
-  exist; they do not announce a live Trusted Pool.
+  launch environment (operator HTTP/CLI production promote now consults it;
+  `Store.PromotePool` still does not), a reviewed-artifact lifecycle owner for
+  the live pool, and a production timing-floor remeasure. Durable admin/CLI
+  surfaces and `scripts/measure-pool-rejection-timing-floor.py` exist; they do
+  not announce a live Trusted Pool.
