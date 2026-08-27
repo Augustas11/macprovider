@@ -1728,7 +1728,8 @@ class PearlUpdaterTests(unittest.TestCase):
 
     def test_restart_order_and_external_canary_final_gate(self):
         release = self.verify()
-        self.updater.systemctl = mock.Mock()
+        order = []
+        self.updater.systemctl = mock.Mock(side_effect=lambda _action, unit: order.append(f"systemctl:{unit}"))
         self.updater.run_canary_gate = mock.Mock()
         self.updater.service_active = mock.Mock(return_value=True)
         self.updater.local_coordinator_ready = mock.Mock(return_value=True)
@@ -1741,8 +1742,9 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.verify_exact_catalog_admission = mock.Mock()
         self.updater.verify_exact_provider_canary = mock.Mock()
         self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
-        self.updater.verify_live_runtime_binding = mock.Mock()
-        self.updater.restore_auxiliary_services = mock.Mock()
+        self.updater.ensure_coordinator_request_log_indexes = mock.Mock(side_effect=lambda: order.append("index-guard"))
+        self.updater.verify_live_runtime_binding = mock.Mock(side_effect=lambda _release: order.append("live-binding"))
+        self.updater.restore_auxiliary_services = mock.Mock(side_effect=lambda: order.append("restore-auxiliary"))
         self.updater.restore_auxiliary_timers = mock.Mock()
         self.updater._restore_canary_timer = mock.Mock()
         self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
@@ -1755,6 +1757,9 @@ class PearlUpdaterTests(unittest.TestCase):
                 mock.call("start", "macprovider-gateway.service"),
             ],
         )
+        self.assertLess(order.index("index-guard"), order.index("systemctl:macprovider-gateway.service"))
+        self.assertLess(order.index("index-guard"), order.index("live-binding"))
+        self.assertLess(order.index("index-guard"), order.index("restore-auxiliary"))
         self.updater.prove_serving_recovery.assert_called_once_with(
             self.updater.release_identity(release)
         )
@@ -1775,6 +1780,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.assert_effective_tier2_catalog_path = mock.Mock(
             side_effect=updater_module.UpdateError("effective tier2.catalog_path is not the release-bound current catalog path")
         )
+        self.updater.ensure_coordinator_request_log_indexes = mock.Mock()
         self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
 
         with self.assertRaisesRegex(updater_module.UpdateError, "effective tier2.catalog_path"):
@@ -1786,6 +1792,511 @@ class PearlUpdaterTests(unittest.TestCase):
             [mock.call("start", "macprovider-coordinator.service")],
         )
         self.updater.local_gateway_ready.assert_not_called()
+        self.updater.ensure_coordinator_request_log_indexes.assert_not_called()
+
+    def test_rollout_migrates_indexes_before_gateway_and_traffic_restore(self):
+        release = self.verify()
+        self.updater.systemctl = mock.Mock()
+        self.updater.service_active = mock.Mock(return_value=True)
+        self.updater.local_coordinator_ready = mock.Mock(return_value=True)
+        self.updater.local_gateway_ready = mock.Mock(return_value=True)
+        self.updater.assert_effective_tier2_catalog_path = mock.Mock()
+        self.updater.ensure_coordinator_request_log_indexes = mock.Mock(
+            side_effect=updater_module.UpdateError("index guard failed")
+        )
+        self.updater.verify_live_runtime_binding = mock.Mock()
+        self.updater.restore_auxiliary_services = mock.Mock()
+        self.updater.prove_serving_recovery = mock.Mock()
+        self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "index guard failed"):
+            self.updater.verify_rollout(release)
+
+        self.updater.ensure_coordinator_request_log_indexes.assert_called_once_with()
+        self.assertEqual(
+            self.updater.systemctl.call_args_list,
+            [mock.call("start", "macprovider-coordinator.service")],
+        )
+        self.updater.local_gateway_ready.assert_not_called()
+        self.updater.verify_live_runtime_binding.assert_not_called()
+        self.updater.restore_auxiliary_services.assert_not_called()
+        self.updater.prove_serving_recovery.assert_not_called()
+
+    def test_migrate_indexes_uses_live_base_overlay_and_referenced_environment(self):
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        base = install / "coordinator.yaml"
+        overlay = self.root / "coordinator.overlay.yaml"
+        base.write_text("storage:\n  db_path: /srv/macprovider/base.sqlite\n")
+        overlay.write_text("storage:\n  db_path: /srv/macprovider/pearl.sqlite\n")
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            base,
+            overlay,
+            {"TOKEN": "sentinel-secret"},
+        )
+        self.updater.audit = mock.Mock()
+        calls = []
+
+        def fake_run(argv, *, check=True, timeout, env=None, input_text=None):
+            calls.append({"argv": list(argv), "timeout": timeout, "env": dict(env or {})})
+            if "--check" in argv:
+                check_count = sum(1 for call in calls if "--check" in call["argv"])
+                state = "unindexed" if check_count == 1 else "indexed"
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    stdout=json.dumps(
+                            {
+                                "migration_state": state,
+                                "keys": [
+                                    {
+                                        "key": "external_request_id",
+                                        "state": state,
+                                        "columns_present": True,
+                                        "index_present": state == "indexed",
+                                    },
+                                    {
+                                        "key": "account_external_request_id",
+                                        "state": state,
+                                        "columns_present": True,
+                                        "index_present": state == "indexed",
+                                    },
+                                ],
+                            }
+                    ),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(argv, 0, stdout="migrate-indexes ok\n", stderr="")
+
+        self.updater.run_command = mock.Mock(side_effect=fake_run)
+
+        self.updater.ensure_coordinator_request_log_indexes()
+
+        self.assertEqual(len(calls), 3)
+        self.assertIn("--config-overlay", calls[0]["argv"])
+        self.assertEqual(calls[0]["argv"][calls[0]["argv"].index("--config") + 1], str(base))
+        self.assertEqual(calls[0]["argv"][calls[0]["argv"].index("--config-overlay") + 1], str(overlay))
+        for call in calls:
+            self.assertEqual(call["env"]["TOKEN"], "sentinel-secret")
+            self.assertEqual(call["env"]["HOME"], "/nonexistent")
+        self.updater.audit.assert_called_with(
+            "coordinator_request_log_indexes",
+            "success",
+            action="migrate",
+            previous_migration_state="unindexed",
+            migration_state="indexed",
+            key_states={
+                "external_request_id": "indexed",
+                "account_external_request_id": "indexed",
+            },
+        )
+
+    def test_migrate_indexes_check_failure_suppresses_command_output(self):
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            self.root / "coordinator.yaml",
+            None,
+            {"TOKEN": "sentinel-secret"},
+        )
+        self.updater.run_command = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["coordinator"],
+                1,
+                stdout="sentinel-secret in stdout",
+                stderr="sentinel-secret in stderr",
+            )
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "output suppressed") as raised:
+            self.updater.ensure_coordinator_request_log_indexes()
+
+        self.assertNotIn("sentinel-secret", str(raised.exception))
+        self.updater.run_command.assert_called_once()
+
+    def test_migrate_indexes_mutation_failure_suppresses_command_output(self):
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            self.root / "coordinator.yaml",
+            None,
+            {"TOKEN": "sentinel-secret"},
+        )
+        self.updater.audit = mock.Mock()
+        unindexed = json.dumps(
+            {
+                "migration_state": "unindexed",
+                "keys": [
+                    {
+                        "key": "external_request_id",
+                        "state": "unindexed",
+                        "columns_present": True,
+                        "index_present": False,
+                    },
+                    {
+                        "key": "account_external_request_id",
+                        "state": "unindexed",
+                        "columns_present": True,
+                        "index_present": False,
+                    },
+                ],
+            }
+        )
+        self.updater.run_command = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess(["coordinator"], 0, stdout=unindexed, stderr=""),
+                subprocess.CompletedProcess(
+                    ["coordinator"],
+                    1,
+                    stdout="sentinel-secret in stdout",
+                    stderr="sentinel-secret in stderr",
+                ),
+            ]
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "output suppressed") as raised:
+            self.updater.ensure_coordinator_request_log_indexes()
+
+        self.assertNotIn("sentinel-secret", str(raised.exception))
+        self.assertEqual(self.updater.run_command.call_count, 2)
+        self.updater.audit.assert_called_once_with(
+            "coordinator_request_log_indexes",
+            "failed",
+            action="migrate",
+            previous_migration_state="unindexed",
+            key_states={
+                "external_request_id": "unindexed",
+                "account_external_request_id": "unindexed",
+            },
+        )
+
+    def test_migrate_indexes_status_rejects_inconsistent_json(self):
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            self.root / "coordinator.yaml",
+            None,
+            {},
+        )
+        self.updater.run_command = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["coordinator"],
+                0,
+                stdout=json.dumps(
+                    {
+                            "migration_state": "indexed",
+                            "keys": [
+                                {
+                                    "key": "external_request_id",
+                                    "state": "unindexed",
+                                    "columns_present": True,
+                                    "index_present": False,
+                                },
+                                {
+                                    "key": "account_external_request_id",
+                                    "state": "indexed",
+                                    "columns_present": True,
+                                    "index_present": True,
+                                }
+                            ],
+                        }
+                ),
+                stderr="",
+            )
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "inconsistent migration_state"):
+            self.updater.ensure_coordinator_request_log_indexes()
+
+        self.updater.run_command.assert_called_once()
+
+    def test_migrate_indexes_status_rejects_inconsistent_index_marker(self):
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            self.root / "coordinator.yaml",
+            None,
+            {},
+        )
+        self.updater.run_command = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["coordinator"],
+                0,
+                stdout=json.dumps(
+                    {
+                        "migration_state": "indexed",
+                        "keys": [
+                            {
+                                "key": "external_request_id",
+                                "state": "indexed",
+                                "columns_present": True,
+                                "index_present": False,
+                            },
+                            {
+                                "key": "account_external_request_id",
+                                "state": "indexed",
+                                "columns_present": True,
+                                "index_present": True,
+                            }
+                        ],
+                    }
+                ),
+                stderr="",
+            )
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "inconsistent indexed key state"):
+            self.updater.ensure_coordinator_request_log_indexes()
+
+        self.updater.run_command.assert_called_once()
+
+    def test_migrate_indexes_status_rejects_missing_index_marker_for_indexed_key(self):
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            self.root / "coordinator.yaml",
+            None,
+            {},
+        )
+        self.updater.run_command = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["coordinator"],
+                0,
+                stdout=json.dumps(
+                    {
+                        "migration_state": "indexed",
+                        "keys": [
+                            {
+                                "key": "external_request_id",
+                                "state": "indexed",
+                                "columns_present": True,
+                            },
+                            {
+                                "key": "account_external_request_id",
+                                "state": "indexed",
+                                "columns_present": True,
+                                "index_present": True,
+                            }
+                        ],
+                    }
+                ),
+                stderr="",
+            )
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "inconsistent indexed key state"):
+            self.updater.ensure_coordinator_request_log_indexes()
+
+        self.updater.run_command.assert_called_once()
+
+    def test_migrate_indexes_status_rejects_inconsistent_columns_marker(self):
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            self.root / "coordinator.yaml",
+            None,
+            {},
+        )
+        self.updater.run_command = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["coordinator"],
+                0,
+                stdout=json.dumps(
+                    {
+                        "migration_state": "indexed",
+                        "keys": [
+                            {
+                                "key": "external_request_id",
+                                "state": "indexed",
+                                "columns_present": False,
+                                "index_present": True,
+                            },
+                            {
+                                "key": "account_external_request_id",
+                                "state": "indexed",
+                                "columns_present": True,
+                                "index_present": True,
+                            }
+                        ],
+                    }
+                ),
+                stderr="",
+            )
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "inconsistent indexed key state"):
+            self.updater.ensure_coordinator_request_log_indexes()
+
+        self.updater.run_command.assert_called_once()
+
+    def test_migrate_indexes_status_rejects_unindexed_with_index_marker(self):
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            self.root / "coordinator.yaml",
+            None,
+            {},
+        )
+        self.updater.run_command = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["coordinator"],
+                0,
+                stdout=json.dumps(
+                    {
+                        "migration_state": "unindexed",
+                        "keys": [
+                            {
+                                "key": "external_request_id",
+                                "state": "unindexed",
+                                "columns_present": True,
+                                "index_present": True,
+                            },
+                            {
+                                "key": "account_external_request_id",
+                                "state": "unindexed",
+                                "columns_present": True,
+                                "index_present": False,
+                            }
+                        ],
+                    }
+                ),
+                stderr="",
+            )
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "inconsistent unindexed key state"):
+            self.updater.ensure_coordinator_request_log_indexes()
+
+        self.updater.run_command.assert_called_once()
+
+    def test_migrate_indexes_status_requires_current_mandatory_keys(self):
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            self.root / "coordinator.yaml",
+            None,
+            {},
+        )
+        self.updater.run_command = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["coordinator"],
+                0,
+                stdout=json.dumps(
+                    {
+                        "migration_state": "indexed",
+                        "keys": [
+                            {
+                                "key": "external_request_id",
+                                "state": "indexed",
+                                "columns_present": True,
+                                "index_present": True,
+                            }
+                        ],
+                    }
+                ),
+                stderr="",
+            )
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "omitted required migration key"):
+            self.updater.ensure_coordinator_request_log_indexes()
+
+        self.updater.run_command.assert_called_once()
+
+    def test_migrate_indexes_status_rejects_unknown_only_keys(self):
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            self.root / "coordinator.yaml",
+            None,
+            {},
+        )
+        self.updater.run_command = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["coordinator"],
+                0,
+                stdout=json.dumps(
+                    {
+                            "migration_state": "indexed",
+                            "keys": [
+                                {
+                                    "key": "future_only",
+                                    "state": "indexed",
+                                    "columns_present": True,
+                                    "index_present": True,
+                                }
+                            ],
+                        }
+                ),
+                stderr="",
+            )
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "omitted required migration key"):
+            self.updater.ensure_coordinator_request_log_indexes()
+
+        self.updater.run_command.assert_called_once()
+
+    def test_already_current_skip_requires_indexed_request_log_keys(self):
+        release = self.verify()
+        self.updater.audit = mock.Mock()
+        self.updater._coordinator_request_log_index_status = mock.Mock(
+            return_value={
+                "migration_state": "indexed",
+                "keys": [
+                    {
+                        "key": "external_request_id",
+                        "state": "indexed",
+                        "index_present": True,
+                    },
+                    {
+                        "key": "account_external_request_id",
+                        "state": "indexed",
+                        "index_present": True,
+                    },
+                ],
+            }
+        )
+
+        self.updater.skip_already_current_release(release, updater_module.SemVer.parse("1.8.27"))
+
+        self.updater.audit.assert_has_calls(
+            [
+                mock.call(
+                    "coordinator_request_log_indexes",
+                    "success",
+                    action="already_current_check",
+                    migration_state="indexed",
+                    key_states={
+                        "external_request_id": "indexed",
+                        "account_external_request_id": "indexed",
+                    },
+                ),
+                mock.call(
+                    "rollout_skipped",
+                    "already_current",
+                    candidate=release.tag,
+                    current="1.8.27",
+                ),
+            ]
+        )
+
+    def test_already_current_skip_fails_closed_when_indexes_are_unindexed(self):
+        release = self.verify()
+        self.updater.audit = mock.Mock()
+        self.updater._coordinator_request_log_index_status = mock.Mock(
+            return_value={
+                "migration_state": "unindexed",
+                "keys": [
+                    {
+                        "key": "external_request_id",
+                        "state": "indexed",
+                        "index_present": True,
+                    },
+                    {
+                        "key": "account_external_request_id",
+                        "state": "unindexed",
+                        "index_present": False,
+                    },
+                ],
+            }
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "cannot skip rollout"):
+            self.updater.skip_already_current_release(release, updater_module.SemVer.parse("1.8.27"))
+
+        self.updater.audit.assert_called_once_with(
+            "coordinator_request_log_indexes",
+            "failed",
+            action="already_current_check",
+            migration_state="unindexed",
+            key_states={
+                "external_request_id": "indexed",
+                "account_external_request_id": "unindexed",
+            },
+        )
 
     def test_bridge_rollout_requires_capacity_and_safe_active_deadline(self):
         deadline = (
@@ -5806,6 +6317,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.verify_provider_admission_rollout_policy = mock.Mock()
         self.updater.verify_exact_catalog_admission = mock.Mock()
         self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
+        self.updater.ensure_coordinator_request_log_indexes = mock.Mock()
         self.updater.verify_live_runtime_binding = mock.Mock()
         self.updater.restore_auxiliary_timers = mock.Mock()
         self.updater._restore_canary_timer = mock.Mock()
