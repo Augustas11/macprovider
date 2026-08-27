@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -30,6 +31,22 @@ type adminProviderView struct {
 	RecentEvents    int        `json:"recent_event_count,omitempty"`
 	Diagnostic      string     `json:"diagnostic,omitempty"`
 	DiagnosticAt    *time.Time `json:"diagnostic_at,omitempty"`
+	// Operator-only classification fields projected from live pool.Provider
+	// (and, for the durable scalars, from the offline LastKnown snapshot).
+	// These stay behind operator auth and are never surfaced buyer-side.
+	Hostname                 string                        `json:"hostname,omitempty"`
+	Tier                     string                        `json:"tier,omitempty"`
+	HashStatus               string                        `json:"hash_status,omitempty"`
+	AttestationStatus        string                        `json:"attestation_status,omitempty"`
+	AttestationTier          string                        `json:"attestation_tier,omitempty"`
+	EncryptedLeg             bool                          `json:"encrypted_leg,omitempty"`
+	CatalogAdmissionMode     string                        `json:"catalog_admission_mode,omitempty"`
+	BenchmarkQuarantined     bool                          `json:"benchmark_quarantined,omitempty"`
+	AdmissionCeilingExcluded bool                          `json:"admission_ceiling_excluded,omitempty"`
+	AdmissionEvidenceStale   bool                          `json:"admission_evidence_stale,omitempty"`
+	AdmissionSandboxed       bool                          `json:"admission_sandboxed,omitempty"`
+	LastAutoupdateEvent      json.RawMessage               `json:"last_autoupdate_event,omitempty"`
+	SafetyTelemetry          *pool.ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
 }
 
 func (s *Server) handleAdminProviders(w http.ResponseWriter, r *http.Request) {
@@ -245,16 +262,29 @@ func (s *Server) writeAdminProviderEvents(w http.ResponseWriter, r *http.Request
 
 func adminViewFromLive(p pool.Provider) adminProviderView {
 	view := adminProviderView{
-		ProviderID:      p.ProviderID,
-		Presence:        "connected",
-		AssignedID:      p.AssignedID,
-		BinaryVersion:   p.BinaryVersion,
-		ModelID:         p.ModelID,
-		ModelLoaded:     p.State == pool.StateReady || p.State == pool.StateBusy || p.State == pool.StateDegraded,
-		ModelHash:       p.ModelHash,
-		State:           string(p.State),
-		AuthState:       string(p.AuthState),
-		RoutingEligible: p.RoutingEligible(),
+		ProviderID:               p.ProviderID,
+		Presence:                 "connected",
+		AssignedID:               p.AssignedID,
+		BinaryVersion:            p.BinaryVersion,
+		ModelID:                  p.ModelID,
+		ModelLoaded:              p.State == pool.StateReady || p.State == pool.StateBusy || p.State == pool.StateDegraded,
+		ModelHash:                p.ModelHash,
+		State:                    string(p.State),
+		AuthState:                string(p.AuthState),
+		RoutingEligible:          p.RoutingEligible(),
+		Hostname:                 p.Hostname,
+		Tier:                     string(p.Tier),
+		HashStatus:               string(p.HashStatus),
+		AttestationStatus:        string(p.AttestationStatus),
+		AttestationTier:          p.AttestationTier,
+		EncryptedLeg:             p.EncryptedLeg,
+		CatalogAdmissionMode:     p.CatalogAdmissionMode,
+		BenchmarkQuarantined:     p.BenchmarkQuarantined,
+		AdmissionCeilingExcluded: p.AdmissionCeilingExcluded,
+		AdmissionEvidenceStale:   p.AdmissionEvidenceStale,
+		AdmissionSandboxed:       p.AdmissionSandboxed,
+		LastAutoupdateEvent:      p.LastAutoupdateEvent,
+		SafetyTelemetry:          p.SafetyTelemetry,
 	}
 	if !p.ConnectedAt.IsZero() {
 		t := p.ConnectedAt.UTC()
@@ -289,21 +319,32 @@ func adminViewFromLastKnown(snap providerevents.LastKnown) adminProviderView {
 		presence = "offline"
 	}
 	return adminProviderView{
-		ProviderID:      snap.ProviderID,
-		Presence:        presence,
-		AssignedID:      snap.AssignedID,
-		BinaryVersion:   snap.BinaryVersion,
-		ModelID:         snap.ModelID,
-		ModelLoaded:     snap.ModelLoaded,
-		ModelHash:       snap.ModelHash,
-		State:           snap.State,
-		AuthState:       snap.AuthState,
-		ConnectedAt:     snap.ConnectedAt,
-		LastHeartbeatAt: snap.LastHeartbeatAt,
-		LastActivityAt:  snap.LastActivityAt,
-		LastSeenAt:      snap.LastSeenAt,
-		RoutingEligible: snap.RoutingEligible,
-		Diagnostic:      snap.Diagnostic,
-		DiagnosticAt:    snap.DiagnosticAt,
+		ProviderID:               snap.ProviderID,
+		Presence:                 presence,
+		AssignedID:               snap.AssignedID,
+		BinaryVersion:            snap.BinaryVersion,
+		ModelID:                  snap.ModelID,
+		ModelLoaded:              snap.ModelLoaded,
+		ModelHash:                snap.ModelHash,
+		State:                    snap.State,
+		AuthState:                snap.AuthState,
+		ConnectedAt:              snap.ConnectedAt,
+		LastHeartbeatAt:          snap.LastHeartbeatAt,
+		LastActivityAt:           snap.LastActivityAt,
+		LastSeenAt:               snap.LastSeenAt,
+		RoutingEligible:          snap.RoutingEligible,
+		Diagnostic:               snap.Diagnostic,
+		DiagnosticAt:             snap.DiagnosticAt,
+		Hostname:                 snap.Hostname,
+		Tier:                     snap.Tier,
+		HashStatus:               snap.HashStatus,
+		AttestationStatus:        snap.AttestationStatus,
+		AttestationTier:          snap.AttestationTier,
+		EncryptedLeg:             snap.EncryptedLeg,
+		CatalogAdmissionMode:     snap.CatalogAdmissionMode,
+		BenchmarkQuarantined:     snap.BenchmarkQuarantined,
+		AdmissionCeilingExcluded: snap.AdmissionCeilingExcluded,
+		AdmissionEvidenceStale:   snap.AdmissionEvidenceStale,
+		AdmissionSandboxed:       snap.AdmissionSandboxed,
 	}
 }
