@@ -1,0 +1,255 @@
+{
+  "candidate_identity": {
+    "autotune_catalog_sha256": "56c4c20a8d0b3a1944ff0539829d0f517097c5189f22d7f1453c8e491dff1720",
+    "autotune_catalog_version": "published-2026-07-29-inband-provenance-v1",
+    "coordinator_config_sha256": "33c66df6cfece161dd3753d501304b5cafcd252277945346c589082e720e0e53",
+    "gateway_base_url_sha256": "469d2415529f7d735866596c56038d5aa81f646d8b1fd751a8345010baf38c64",
+    "rate_card_matched_key": "default",
+    "rate_card_sha256": "68eb8794a2388cd73727b23db7e13adee8ae2c8e30bc0eeef5ad887223398cd3",
+    "rate_card_version": "51d4eb9d29024e759c8e41610ad3f13614253e52f47bc032c92f46adb599ad42",
+    "signed_catalog_id": "integration-catalog",
+    "signed_catalog_key_id": "integration-catalog-key",
+    "verified_model_sha256": "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90"
+  },
+  "captured_at": "2026-08-27T01:24:19Z",
+  "environment": {
+    "candidate": "commit:ea5cd0a8c70e8838264a57b6958c0ecb2af78d83",
+    "class": "isolated-candidate-paid-path",
+    "hardware_profile": "local-macos-redacted"
+  },
+  "expires_at": "2026-09-26",
+  "harness": {
+    "execution_mode": "isolated-candidate-paid-path",
+    "id": "test/integration:TestJourneyBuyerPaidPathIsolatedCandidate",
+    "isolated_sqlite": true,
+    "production_side_effects": false,
+    "real_binaries": true,
+    "settlement_runner": false
+  },
+  "journey_id": "JOURNEY-BUYER-PAID-PATH",
+  "observations": {
+    "bearer_tokens_redacted": true,
+    "buyer_receipt_retrieval_exposed": true,
+    "enforce_activated": false,
+    "isolated_environment": true,
+    "payout_ready_mutated": false,
+    "production_side_effects": false,
+    "raw_prompt_output_redacted": true,
+    "settlement_mode": "observe"
+  },
+  "operator": {
+    "identity_fingerprint": "19fc9a8b5b9134d581ac7089082d4d6da1f4ea4e3049c6c52bd963be62e93295",
+    "role": "acceptance-operator"
+  },
+  "quota": {
+    "ending": 999960,
+    "starting": 1000000
+  },
+  "redaction": {
+    "local_account_names_redacted": true,
+    "operator_identity_redacted": true,
+    "secrets_redacted": true
+  },
+  "repository": {
+    "commit": "ea5cd0a8c70e8838264a57b6958c0ecb2af78d83",
+    "name": "Augustas11/macprovider"
+  },
+  "requirement_ids": [
+    "SPEC-005-R001",
+    "SPEC-005-R002",
+    "SPEC-006-R001",
+    "SPEC-006-R002",
+    "SPEC-006-R003",
+    "SPEC-015-R001",
+    "SPEC-022-R001",
+    "SPEC-022-R002",
+    "SPEC-022-R003",
+    "SPEC-022-R004",
+    "SPEC-022-R005",
+    "SPEC-022-R006",
+    "SPEC-022-R010"
+  ],
+  "result": {
+    "status": "pass",
+    "summary": "isolated candidate paid-path journey passed in observe mode without payout-ready mutation"
+  },
+  "run_id": "buyer-paid-path-20260827T012419Z",
+  "schema_version": "macprovider.buyer-paid-path-evidence.v1",
+  "steps": [
+    {
+      "id": "step-01-capture-config",
+      "status": "pass",
+      "assertion": "isolated candidate captured in observe mode with an API-key subject and no settlement runner",
+      "artifacts": [
+        "redacted-buyer-paid-path"
+      ],
+      "details": {
+        "account_fingerprint": "9bd8ce0390549582085bb3aafdf3fdbf60ffb1dc8ec25fcb6f3c5fd651fb7170",
+        "auth_subject": "api_key",
+        "demo_token_used": false,
+        "enforce_activated": false,
+        "isolated_sqlite": true,
+        "job_enabled": false,
+        "settlement_mode": "observe",
+        "starting_quota": 1000000,
+        "wallet_session_used": false
+      }
+    },
+    {
+      "id": "step-02-nonstream-chat",
+      "status": "pass",
+      "assertion": "API-key non-streaming chat returned 200 with OpenAI-compatible usage",
+      "artifacts": [
+        "redacted-buyer-paid-path"
+      ],
+      "details": {
+        "gateway_request_sha256": "bd7662a5eeb41614e720d477abfcb2272e19a8a70a93b7e3bc8560d44ad326e9",
+        "http_status": 200,
+        "usage_present": true
+      }
+    },
+    {
+      "id": "step-03-quota-settlement",
+      "status": "pass",
+      "assertion": "gateway quota reservation settled after the 200 and did not leak",
+      "artifacts": [
+        "redacted-buyer-paid-path"
+      ],
+      "details": {
+        "not_r008_evidence": true,
+        "observe_mode_debit": true,
+        "remaining_quota": 999980,
+        "reservation_status": "settled",
+        "settled_tokens": 20
+      }
+    },
+    {
+      "id": "step-04-ledger-credit",
+      "status": "pass",
+      "assertion": "coordinator ledger wrote a payable observe-mode credit whose persisted rates reproduce the default rate-card split",
+      "artifacts": [
+        "redacted-buyer-paid-path"
+      ],
+      "details": {
+        "completion_rate_per_mtok": 1000000,
+        "completion_tokens": 12,
+        "credit_id_fingerprint": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+        "global_multiplier_ppm": 1000000,
+        "gross_credits": 16,
+        "prompt_rate_per_mtok": 500000,
+        "prompt_tokens": 8,
+        "provider_credits": 14,
+        "provider_share_bps": 9000,
+        "rate_card_matched_key": "default",
+        "settled_flag": 0,
+        "settlement_policy_mode": "observe"
+      }
+    },
+    {
+      "id": "step-05-receipt-ingest",
+      "status": "pass",
+      "assertion": "SPEC-015 v0.4 settlement receipt was ingested and verified in observe mode",
+      "artifacts": [
+        "redacted-buyer-paid-path"
+      ],
+      "details": {
+        "buyer_debit_outcome": "no_money_movement_step5",
+        "provider_settlement_outcome": "no_money_movement_step5",
+        "raw_prompt_output_absent": true,
+        "receipt_result": "valid",
+        "receipt_version": "4",
+        "settlement_outcome": "verified"
+      }
+    },
+    {
+      "id": "step-06-streaming-chat",
+      "status": "pass",
+      "assertion": "streaming chat terminated cleanly; settled completion tokens equal the 12-token fixture prefix, not a byte-length estimate",
+      "artifacts": [
+        "redacted-buyer-paid-path"
+      ],
+      "details": {
+        "completion_tokens": 12,
+        "delivered_prefix_sha256": "077e71d22e9003f3ce6b3bf2039d0441efb517870edc0fe849ec594fd6dcee47",
+        "done_marker": true,
+        "http_status": 200,
+        "reservation_status": "settled",
+        "settled_tokens": 20,
+        "stream_ledger": true
+      }
+    },
+    {
+      "id": "step-07-failure-refund",
+      "status": "pass",
+      "assertion": "pre-dispatch failure returned a buyer error envelope and refunded quota with no provider credit",
+      "artifacts": [
+        "redacted-buyer-paid-path"
+      ],
+      "details": {
+        "error_code": "model_not_found",
+        "error_retryable": false,
+        "http_status": 404,
+        "ledger_row_count": 2,
+        "quota_status": "refunded"
+      }
+    },
+    {
+      "id": "step-08-disclosure",
+      "status": "pass",
+      "assertion": "buyer models disclosure names paid entrypoints and observe-mode prose; it does not claim currently enforcing",
+      "artifacts": [
+        "redacted-buyer-paid-path"
+      ],
+      "details": {
+        "chat_included": true,
+        "enforce_claimed": false,
+        "excluded_named": true,
+        "http_status": 200,
+        "observe_mode": true
+      }
+    },
+    {
+      "id": "step-09-receipt-retrieval",
+      "status": "pass",
+      "assertion": "owner GET /v1/receipts/{id} returns metadata-only 200; missing is 404; unauthenticated is 401",
+      "artifacts": [
+        "redacted-buyer-paid-path"
+      ],
+      "details": {
+        "buyer_receipt_retrieval_exposed": true,
+        "http_status": 200,
+        "missing_http_status": 404,
+        "surface": "metadata",
+        "unauthenticated_http_status": 401
+      }
+    },
+    {
+      "id": "step-10-redaction",
+      "status": "pass",
+      "assertion": "retained artifacts contain fingerprints only; bearer tokens, private keys, and raw prompt/output are absent",
+      "artifacts": [
+        "redacted-buyer-paid-path"
+      ],
+      "details": {
+        "bearer_tokens_redacted": true,
+        "payout_ready_mutated": false,
+        "raw_prompt_output_redacted": true
+      }
+    },
+    {
+      "id": "step-11-restore-config",
+      "status": "pass",
+      "assertion": "settlement mode remained observe, no payout-ready mutation, and enforce was not activated",
+      "artifacts": [
+        "redacted-buyer-paid-path"
+      ],
+      "details": {
+        "ending_quota": 999960,
+        "enforce_activated": false,
+        "job_enabled": false,
+        "payout_ready_mutated": false,
+        "settlement_mode": "observe"
+      }
+    }
+  ]
+}
