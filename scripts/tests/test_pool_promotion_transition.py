@@ -1526,6 +1526,59 @@ class ProductionReleaseKeyAndBuilderTests(unittest.TestCase):
             self.assertEqual(0, status)
             self.assertTrue(output_path.is_file())
 
+    def test_builder_writes_name_max_runner_temp_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner_temp = Path(directory) / "runner-temp"
+            runner_temp.mkdir()
+            fixture = write_promotion_root(root, self.openssl_bin)
+            candidate = sign_candidate_envelope(
+                candidate_payload(candidate_identity=identity_payload()),
+                private_key_pem=fixture["acceptance_private"],
+                public_key_pem=fixture["acceptance_public"],
+                openssl_bin=self.openssl_bin,
+            )
+            candidate_path = root / "journeys" / "evidence" / "trusted-pool-creator-mvp-test.journey-result.signed.json"
+            candidate_path.write_text(json.dumps(candidate) + "\n", encoding="utf-8")
+            long_name = "payload-" + ("a" * 230) + ".unsigned.json"
+            self.assertGreater(len("." + long_name + ".xxxxxxxx"), 255)
+            output_path = runner_temp / long_name
+            builder = load_script_module(BUILDER, "build_pool_promotion_transition_long_name")
+            env = {**os.environ, "RUNNER_TEMP": str(runner_temp)}
+            with mock.patch.dict(os.environ, env, clear=False):
+                status = builder.main(
+                    [
+                        "--root",
+                        str(root),
+                        "--candidate",
+                        str(candidate_path),
+                        "--output",
+                        str(output_path),
+                        "--live-activation-target",
+                        "production-trusted-pool-creator-mvp",
+                        "--schema-migration-hash",
+                        DIGEST,
+                        "--approval-record-version",
+                        "1",
+                        "--creator-agreement-version",
+                        "1",
+                        "--pricing-schedule-version",
+                        "1",
+                        "--authorization-id",
+                        "authz-builder-long-name",
+                        "--authorized-actor",
+                        "ops-approver",
+                        "--credential-id",
+                        "cred-1",
+                        "--authorized-at",
+                        "2026-08-25T11:00:00Z",
+                        "--expiry",
+                        "2026-08-26T10:00:00Z",
+                    ]
+                )
+            self.assertEqual(0, status)
+            self.assertTrue(output_path.is_file())
+
     def test_builder_rejects_conformance_output_even_with_force(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1597,6 +1650,42 @@ class ProductionReleaseKeyAndBuilderTests(unittest.TestCase):
                 )
             self.assertEqual(0, status)
             self.assertTrue((evidence / "out.pool-promotion-transition.signed.json").is_file())
+
+    def test_sign_writes_name_max_evidence_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_empty_keyring_root(root)
+            private_pem, public_pem = generate_p256_key(self.openssl_bin, root, "operator")
+            result = register_production_release_public_key(
+                root,
+                public_pem,
+                issuer="macprovider-ops",
+                valid_from="2026-01-01T00:00:00Z",
+                valid_until="2027-01-01T00:00:00Z",
+                openssl_bin=self.openssl_bin,
+            )
+            self.assertEqual([], result.errors)
+            evidence = root / "journeys" / "evidence"
+            evidence.mkdir(parents=True, exist_ok=True)
+            unsigned = root / "unsigned.json"
+            unsigned.write_text("{}\n", encoding="utf-8")
+            long_name = "sibling-" + ("a" * 200) + ".pool-promotion-transition.signed.json"
+            self.assertGreater(len("." + long_name + ".xxxxxxxx"), 255)
+            signer = load_script_module(SIGNER, "sign_pool_promotion_transition_long_name")
+            env = {**os.environ, "MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM": private_pem}
+            with mock.patch.dict(os.environ, env, clear=False):
+                status = signer.main(
+                    [
+                        "--root",
+                        str(root),
+                        "--input",
+                        str(unsigned),
+                        "--output",
+                        f"journeys/evidence/{long_name}",
+                    ]
+                )
+            self.assertEqual(0, status)
+            self.assertTrue((evidence / long_name).is_file())
 
 
 if __name__ == "__main__":

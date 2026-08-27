@@ -54,10 +54,30 @@ required_workflow = [
     "signed-pool-promotion-transition-${{ steps.request.outputs.short_sha }}",
     "macprovider.signed-pool-promotion-transition.v1",
     "JOURNEY-TRUSTED-POOL-CREATOR-MVP",
+    'capture="${stem%%.spec-043-*}"',
+    '[[ "$capture" =~ ^trusted-pool-creator-mvp-[0-9]{8}T[0-9]{6}Z$ ]]',
+    'payload="$RUNNER_TEMP/${capture}.pool-promotion-transition.unsigned.json"',
+    'envelope="journeys/evidence/${capture}.pool-promotion-transition.signed.json"',
 ]
 for value in required_workflow:
     if value not in workflow:
         raise SystemExit(f"workflow contract is missing: {value}")
+if 'payload="$RUNNER_TEMP/${stem}.pool-promotion-transition.unsigned.json"' in workflow:
+    raise SystemExit("unsigned payload must not reuse the 12-requirement candidate stem")
+if 'envelope="journeys/evidence/${stem}.pool-promotion-transition.signed.json"' in workflow:
+    raise SystemExit("signed sibling path must not reuse the 12-requirement candidate stem")
+live_stem = (
+    "trusted-pool-creator-mvp-20260827T000309Z.spec-043-r001-spec-043-r002-"
+    "spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-"
+    "spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012"
+)
+capture = live_stem.split(".spec-043-", 1)[0]
+for name in (
+    f"{capture}.pool-promotion-transition.unsigned.json",
+    f"{capture}.pool-promotion-transition.signed.json",
+):
+    if len(name) > 255:
+        raise SystemExit(f"sibling filename exceeds NAME_MAX: {name}")
 
 if "\n  push:" in workflow or "\n  pull_request:" in workflow:
     raise SystemExit("workflow must be manual dispatch only")
