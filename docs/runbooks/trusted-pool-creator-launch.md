@@ -8,7 +8,12 @@ announcement.
 Buyer-facing wording is **Trusted Pool**. Do not call this a Privacy Pool,
 coordinator-blind, anonymous, ZK, or regulated-compliance product.
 
-Issue: https://github.com/Augustas11/macprovider/issues/1160
+Issue: https://github.com/Augustas11/macprovider/issues/1233
+
+Creator-MVP evidence and promotion-gate work on
+https://github.com/Augustas11/macprovider/issues/1160 is complete. Isolated-candidate
+CONFORMANCE is not a live Trusted Pool launch. Remaining live-readiness before
+announce is tracked on issue 1233.
 
 ## Pilot policy
 
