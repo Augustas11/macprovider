@@ -1215,7 +1215,7 @@ struct SelfUpdate {
             uid: uid
         )
 
-        // Reload the rollback observer synchronously while the provider is
+        // Reload the companion liveness watchdog synchronously while the provider is
         // still alive. The provider must be reloaded by an independent
         // one-shot launchd job because booting out its own service terminates
         // this process before it can issue the matching bootstrap.

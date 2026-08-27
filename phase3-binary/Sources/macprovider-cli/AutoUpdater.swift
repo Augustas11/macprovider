@@ -505,7 +505,7 @@ struct AutoUpdater: Sendable {
                     }
                 } catch {
                     // Leave the durable marker and both snapshots intact so
-                    // the independent watchdog can retry the same restore.
+                    // CLI startup recovery can retry the same restore.
                 }
             } else {
                 markerStore.removeRollbackBackups(marker)
@@ -627,7 +627,7 @@ struct AutoUpdater: Sendable {
                 )
             } catch {
                 // Keep the pending marker and both backups durable so
-                // the watchdog can retry a failed in-process restore.
+                // CLI startup recovery can retry a failed in-process restore.
             }
         }
         if rollbackSafeToClean,
@@ -816,12 +816,13 @@ struct AutoUpdater: Sendable {
         }
     }
 
-    static func defaultRollbackObserverAvailable() -> Bool {
+    static func defaultRollbackObserverAvailable(
+        launchdProviderAvailable: Availability = { AutoUpdater.defaultLaunchdProviderAvailable() }
+    ) -> Bool {
         if ProcessInfo.processInfo.environment["MACPROVIDER_ROLLBACK_OBSERVER_TEST_AVAILABLE"] == "1" {
             return true
         }
-        return launchctlServiceLoaded(label: SelfUpdate.watchdogLaunchdLabel)
-            || launchctlServiceLoaded(label: SelfUpdate.legacyWatchdogLaunchdLabel)
+        return launchdProviderAvailable()
     }
 
     static func defaultLaunchdProviderAvailable() -> Bool {

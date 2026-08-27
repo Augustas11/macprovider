@@ -1,8 +1,7 @@
 # macprovider-watchdog
 
-External LaunchAgent that observes the installed Mac provider process
-and runs auto-update rollback recovery. It ships alongside every
-install of `macprovider-cli` via the public
+External LaunchAgent that observes the installed Mac provider process.
+It ships alongside every install of `macprovider-cli` via the public
 `get.malibu.tech/install.sh` flow.
 
 ## What it does
@@ -31,9 +30,11 @@ defaults the restart cooldown to 300 seconds. Coordinator TCP state is
 logged as advisory only; another process reaching the coordinator is not
 treated as proof that the provider is healthy.
 
-The watchdog still runs auto-update rollback recovery. A rollback may
-bootstrap/kick the main provider label after restoring the prior binary
-so the restored executable takes effect.
+The watchdog does not own auto-update rollback recovery. If an
+auto-update pending marker exists, the watchdog logs that transaction
+state and leaves marker, backup, release, plist, watchdog, and Malibu app
+bytes untouched for the installer, Malibu repair, or CLI startup/install
+recovery owner.
 
 It reads the provider identity from
 `~/.config/macprovider/config.yaml` (the file
@@ -67,7 +68,7 @@ LaunchAgent before bootstrapping the new one.
 ### Inspect
 
 The watchdog logs to `~/Library/Logs/macprovider/watchdog.log` (only
-when it detects an issue or performs rollback work — healthy ticks are
+when it detects an issue or observes pending update state; healthy ticks are
 silent so the log does not bloat). To see whether the LaunchAgent is
 loaded:
 

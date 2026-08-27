@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import XCTest
 @testable import MacProviderCore
@@ -17,6 +18,26 @@ final class AutoUpdateTests: XCTestCase {
             label: SelfUpdate.launchdLabel,
             executablePath: "/usr/bin/false",
             timeout: 0.5
+        ))
+    }
+
+    func testDefaultRollbackObserverFollowsCLIStartupRecoveryNotWatchdog() {
+        let key = "MACPROVIDER_ROLLBACK_OBSERVER_TEST_AVAILABLE"
+        let previous = getenv(key).map { String(cString: $0) }
+        unsetenv(key)
+        defer {
+            if let previous {
+                setenv(key, previous, 1)
+            } else {
+                unsetenv(key)
+            }
+        }
+
+        XCTAssertTrue(AutoUpdater.defaultRollbackObserverAvailable(
+            launchdProviderAvailable: { true }
+        ))
+        XCTAssertFalse(AutoUpdater.defaultRollbackObserverAvailable(
+            launchdProviderAvailable: { false }
         ))
     }
 
