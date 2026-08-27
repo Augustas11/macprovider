@@ -1,0 +1,11 @@
+{
+  "schema_version": "macprovider.signed-pool-promotion-transition.v1",
+  "source_sha": "23f99f826f4589ebb5f7c558208854fc62f8db2f",
+  "journey_id": "JOURNEY-TRUSTED-POOL-CREATOR-MVP",
+  "signed_candidate": "journeys/evidence/trusted-pool-creator-mvp-20260827T000309Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
+  "signed_candidate_sha256": "602675baea10f2037899766972c9d25b2a508da43c363a8c44bd7c6804a4c659",
+  "signed_transition": "journeys/evidence/trusted-pool-creator-mvp-20260827T000309Z.pool-promotion-transition.signed.json",
+  "signed_transition_sha256": "d603fec44dd8387deb4aa80f6b24a614090692b62f59bc350dd867c6717c2b9c",
+  "workflow_run_id": "33034409714",
+  "workflow_run_attempt": "1"
+}

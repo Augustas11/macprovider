@@ -56,8 +56,7 @@ has `expires_at` `2026-08-26`. Do not announce a live creator until Gate D exist
 
 Also still missing for Gate D:
 
-- signed sibling `PoolPromotionTransitionV1` for the same-day envelope
-- CONFORMANCE `evidence[]` only through promoter consume of that sibling
+- CONFORMANCE `evidence[]` only through promoter consume of the committed sibling
 - production on-call readiness record, reviewed-artifact lifecycle ownership,
   and production timing-floor remeasure
 
@@ -144,12 +143,12 @@ ledger or fill CONFORMANCE `evidence[]`.
   [`33026618698`](https://github.com/Augustas11/macprovider/actions/runs/33026618698),
   `run_id` `1` on `469c436b52053848d4d932a03d33c1921c7cdb08`, `expires_at`
   `2026-08-27`). Freeze, descendant-signer, delegation, and pool-existence
-  oracle observations are true. It remains evidence-only: CONFORMANCE
-  `evidence[]` is empty. Dispatch
-  `.github/workflows/build-signed-pool-promotion-transition.yml` from reviewed
-  `main` bound to that envelope. Sibling artifacts are named
-  `trusted-pool-creator-mvp-<capture>.pool-promotion-transition.signed.json`,
-  not the 12-requirement candidate stem. The prior signed envelope (workflow
+  oracle observations are true. A sibling `PoolPromotionTransitionV1` from
+  workflow [`33034409714`](https://github.com/Augustas11/macprovider/actions/runs/33034409714)
+  is committed at
+  `journeys/evidence/trusted-pool-creator-mvp-20260827T000309Z.pool-promotion-transition.signed.json`.
+  It remains unconsumed: CONFORMANCE `evidence[]` is empty. The prior signed
+  envelope (workflow
   [`32936678404`](https://github.com/Augustas11/macprovider/actions/runs/32936678404))
   has `expires_at` `2026-08-26`.
 - Historical Gate C envelope (workflow
@@ -160,11 +159,9 @@ ledger or fill CONFORMANCE `evidence[]`.
   keeps creator-MVP evidence-only until a matching `consumed_authorization`
   exists.
 - Operator key registration: `security/spec-043-production-release-p256-v1.pem`
-  is registered. Dispatch
-  `.github/workflows/build-signed-pool-promotion-transition.yml` from reviewed
-  `main` to sign a sibling. That workflow uses
-  `MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM` and does not
+  is registered. The sibling signer used
+  `MACPROVIDER_SPEC043_PRODUCTION_RELEASE_SIGNING_KEY_PEM` and did not
   consume the ledger or rewrite CONFORMANCE.
-- Gate D still needs a sibling artifact signed by that key, CONFORMANCE
-  `evidence[]` only through the promoter consume flow, on-call readiness,
-  reviewed-artifact lifecycle ownership, and production timing-floor remeasure.
+- Gate D still needs CONFORMANCE `evidence[]` only through the promoter
+  consume flow, on-call readiness, reviewed-artifact lifecycle ownership,
+  and production timing-floor remeasure.
