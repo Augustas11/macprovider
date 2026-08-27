@@ -65,7 +65,7 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 	if account != nil {
 		reqRow.AccountID = account.ID()
 	}
-	return sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+	return sqliteutil.TransactObserved(ctx, s.db, "billing_hot_path", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
 		if err := reqLogStore.InsertExec(ctx, conn, reqRow); err != nil {
 			return err
 		}
@@ -310,7 +310,7 @@ func (s *Store) writeRequestLogWithIdentity(ctx context.Context, reqLogStore *re
 	if account != nil {
 		reqRow.AccountID = account.ID()
 	}
-	return sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+	return sqliteutil.TransactObserved(ctx, s.db, "request_log_identity", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
 		if err := reqLogStore.InsertExec(ctx, conn, reqRow); err != nil {
 			return err
 		}

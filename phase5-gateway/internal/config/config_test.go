@@ -27,6 +27,16 @@ func TestAccountAdmissionDefaults(t *testing.T) {
 	}
 }
 
+func TestRetry503DefaultsKeepNoProviderRetryOff(t *testing.T) {
+	cfg := Default()
+	if !cfg.Retry503.Enabled {
+		t.Fatal("Retry503.Enabled=false want true so transient provider 502 retries stay supported")
+	}
+	if cfg.Retry503.RetryNoProviderAvailable {
+		t.Fatal("Retry503.RetryNoProviderAvailable=true want false to avoid retry storms against empty capacity")
+	}
+}
+
 func TestWalletSessionsDefaultOffDoesNotRequireSecrets(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Auth.WalletSessions = WalletSessionsConfig{}

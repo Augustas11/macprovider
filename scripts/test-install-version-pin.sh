@@ -775,6 +775,10 @@ MOCK_LEGACY_VERSION="1.8.105"
 export MOCK_LEGACY_VERSION
 rc=0
 ( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21b2-non-headless-legacy-smoke-rejected" 7 "$rc"
+HEADLESS=1
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
 report "case21b2-legacy-smoke-older-version-accepted" 0 "$rc"
 MOCK_LEGACY_VERSION="1.8.104"
 rc=0
@@ -813,6 +817,7 @@ rc=0
 ( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
 report "case21b2-altered-preflight-error-rejected" 7 "$rc"
 unset MOCK_LEGACY_PREFLIGHT_VARIANT
+unset HEADLESS
 unset MOCK_LEGACY_VERSION
 rm -f "$INSTALL_DIR/compatibility-set.json"
 
@@ -830,6 +835,44 @@ report "case21c-newer-provider-component-accepted" 0 "$rc"
 rc=0
 ( validate_acceptance_provider_component_target 1.8.39 ) >/dev/null 2>&1 || rc=$?
 report "case21c-provider-component-downgrade-rejected" 7 "$rc"
+# Headless SSH support follows the signed provider CLI component, not only the
+# compatibility-set release tag, because private sets may pin components.
+HEADLESS=1
+MACPROVIDER_MIN_HEADLESS_VERSION=v1.8.108
+rc=0
+( validate_acceptance_provider_component_target 1.8.107 ) >/dev/null 2>&1 || rc=$?
+report "case21c-headless-provider-component-below-floor-rejected" 7 "$rc"
+rc=0
+( validate_acceptance_provider_component_target 1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case21c-headless-provider-component-at-floor-accepted" 0 "$rc"
+unset HEADLESS MACPROVIDER_MIN_HEADLESS_VERSION
+cat > "$REAL_INSTALLED_BINARY" <<'SCRIPT'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    printf '1.8.4\n0\n'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+SCRIPT
+chmod +x "$REAL_INSTALLED_BINARY"
+rc=0
+( validate_acceptance_provider_component_target 1.8.41 ) >/dev/null 2>&1 || rc=$?
+report "case21c-installed-component-multiline-version-rejected" 7 "$rc"
+cat > "$REAL_INSTALLED_BINARY" <<'SCRIPT'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    printf '1.8.40\n'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+SCRIPT
+chmod +x "$REAL_INSTALLED_BINARY"
 EMERGENCY_ROLLBACK=1
 rc=0
 ( validate_acceptance_provider_component_target 1.8.39 ) >/dev/null 2>&1 || rc=$?
@@ -853,6 +896,14 @@ report "case21d-staged-provider-matches-signed-component" 0 "$rc"
 rc=0
 ( validate_staged_acceptance_provider_component 1.8.41 ) >/dev/null 2>&1 || rc=$?
 report "case21d-staged-provider-mismatch-rejected" 5 "$rc"
+cat > "$staging_dir/macprovider-cli" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '1.8.4\n0\n'
+SCRIPT
+chmod +x "$staging_dir/macprovider-cli"
+rc=0
+( validate_staged_acceptance_provider_component 1.8.40 ) >/dev/null 2>&1 || rc=$?
+report "case21d-staged-provider-multiline-version-rejected" 5 "$rc"
 rm -rf "$staging_dir"
 
 ################################################################

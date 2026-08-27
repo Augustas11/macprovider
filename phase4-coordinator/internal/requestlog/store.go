@@ -127,6 +127,14 @@ func OpenStoreReadOnly(dbPath string) (*Store, error) {
 }
 
 func OpenStore(dbPath string) (*Store, error) {
+	return openStore(dbPath, false)
+}
+
+func OpenStoreWithManualWALCheckpoint(dbPath string) (*Store, error) {
+	return openStore(dbPath, true)
+}
+
+func openStore(dbPath string, manualWALCheckpoint bool) (*Store, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("db path is required")
 	}
@@ -135,7 +143,11 @@ func OpenStore(dbPath string) (*Store, error) {
 			return nil, err
 		}
 	}
-	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(dbPath))
+	dsn := sqliteutil.WithPragmas(dbPath)
+	if manualWALCheckpoint {
+		dsn = sqliteutil.WithManualWALCheckpointPragmas(dbPath)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}

@@ -205,6 +205,10 @@ storage:
   db_path: "/var/lib/macprovider/coordinator.db"
   snapshot_interval_s: 300
   request_log_retention_days: 90
+  # Defaults are true for backward compatibility. Set false to defer DELETE
+  # retention work to the scheduled pruner tick during buyer traffic relief.
+  request_log_prune_on_startup: true
+  audit_log_prune_on_startup: true
 
 logging:
   level: "info"

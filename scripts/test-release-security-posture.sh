@@ -912,6 +912,7 @@ def validate_sealed_openssl_installer(candidate):
         'readonly expected_bottle_tag="sequoia"',
         'readonly expected_bottle_sha256="5477285c4ebec45713873ae4002affece39e427c5f1b655c6a3df49c6b90f924"',
         'readonly -a expected_formula_sha256s=(',
+        '"e15cca35502166eb7a93940f3fe489e490b09a7b9e07ba3145d7ec1471bcd8d1"',
         '"773b90da6562a4018e1b5033b01432500002c4636cdfd35acf68d1a4b457590c"',
         '"00e19cdcb1b7d99058a8a15f316e5dce2e4b5cd2afee14b272e7f5448624801d"',
         "actual_formula_sha256 not in expected_formula_sha256s",
@@ -968,6 +969,14 @@ for description, mutation in (
         ),
     ),
     (
+        "reviewed current formula digest removal",
+        sealed_openssl_installer.replace(
+            '  "e15cca35502166eb7a93940f3fe489e490b09a7b9e07ba3145d7ec1471bcd8d1"\n',
+            "",
+            1,
+        ),
+    ),
+    (
         "reviewed legacy formula digest removal",
         sealed_openssl_installer.replace(
             '  "773b90da6562a4018e1b5033b01432500002c4636cdfd35acf68d1a4b457590c"\n',
@@ -976,7 +985,7 @@ for description, mutation in (
         ),
     ),
     (
-        "reviewed current formula digest removal",
+        "reviewed alternate formula digest removal",
         sealed_openssl_installer.replace(
             '  "00e19cdcb1b7d99058a8a15f316e5dce2e4b5cd2afee14b272e7f5448624801d"\n',
             "",

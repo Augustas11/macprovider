@@ -60,6 +60,38 @@ func TestValidateTokenReadOnlyAuthenticatesWithoutRefreshingUsage(t *testing.T) 
 	}
 }
 
+func TestOpenStoreWithManualWALCheckpointDisablesAutocheckpoint(t *testing.T) {
+	store, err := auth.OpenStoreWithManualWALCheckpoint(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var got int
+	if err := store.DB().QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&got); err != nil {
+		t.Fatalf("PRAGMA wal_autocheckpoint: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("wal_autocheckpoint=%d want 0", got)
+	}
+}
+
+func TestOpenStoreKeepsSQLiteAutocheckpointOwnerDefault(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var got int
+	if err := store.DB().QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&got); err != nil {
+		t.Fatalf("PRAGMA wal_autocheckpoint: %v", err)
+	}
+	if got == 0 {
+		t.Fatal("auth store disabled wal_autocheckpoint without an explicit checkpoint owner")
+	}
+}
+
 func TestOpenStoreUpgradesPreRecoverySocialTablesAdditively(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "coordinator.db")
 	db, err := sql.Open("sqlite", path)

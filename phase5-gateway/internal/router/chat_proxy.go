@@ -791,7 +791,7 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 			resp.Body = io.NopCloser(bytes.NewReader(body))
 		}
 		resp.ContentLength = int64(len(body))
-		if readErr != nil || !isCoordinatorChatRetryEligible(resp.StatusCode, body) {
+		if readErr != nil || !isCoordinatorChatRetryEligible(resp.StatusCode, body, s.cfg.Retry503) {
 			return resp, false, priorProviderDispatch, nil
 		}
 		if attempt == maxAttempts {
@@ -2081,12 +2081,13 @@ func coordinatorTier2PolicyError(status int, body []byte) bool {
 }
 
 // isCoordinatorChatRetryEligible returns true when the coordinator response
-// indicates the request MAY succeed on a retry — momentarily unavailable pool
-// (503) or transient provider transport failure (502). It intentionally does
-// NOT retry null-usage provider errors, tier2 policy errors, or post-inference
-// structured-output failures that already ran billing.
-func isCoordinatorChatRetryEligible(status int, body []byte) bool {
-	if isCoordNoProviderAvailable503(status, body) {
+// indicates the request MAY succeed on a retry. Transient provider transport
+// failures (502) use the shared retry loop whenever retry_503.enabled is on;
+// coordinator capacity-empty 503s are additionally gated by
+// retry_503.retry_no_provider_available so operators can avoid amplifying an
+// empty provider pool.
+func isCoordinatorChatRetryEligible(status int, body []byte, cfg config.Retry503Config) bool {
+	if cfg.RetryNoProviderAvailable && isCoordNoProviderAvailable503(status, body) {
 		return true
 	}
 	return isCoordTransientProvider502(status, body)

@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,35 @@ WHERE type IN ('table', 'index') AND name IN (
 		if !seen[name] {
 			t.Fatalf("missing schema object %q; got %#v", name, seen)
 		}
+	}
+}
+
+func TestOpenStoreKeepsSQLiteAutocheckpointOwnerDefault(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+
+	var got int
+	if err := store.DB().QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&got); err != nil {
+		t.Fatalf("PRAGMA wal_autocheckpoint: %v", err)
+	}
+	if got == 0 {
+		t.Fatal("audit store disabled wal_autocheckpoint without an explicit checkpoint owner")
+	}
+}
+
+func TestOpenStoreWithManualWALCheckpointDisablesAutocheckpoint(t *testing.T) {
+	store, err := OpenStoreWithManualWALCheckpoint(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var got int
+	if err := store.DB().QueryRowContext(context.Background(), `PRAGMA wal_autocheckpoint`).Scan(&got); err != nil {
+		t.Fatalf("PRAGMA wal_autocheckpoint: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("wal_autocheckpoint=%d want 0", got)
 	}
 }
 

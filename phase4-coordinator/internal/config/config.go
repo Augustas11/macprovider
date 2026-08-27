@@ -1012,9 +1012,11 @@ type GitHubOAuthConfig struct {
 }
 
 type StorageConfig struct {
-	DBPath                  string `yaml:"db_path"`
-	SnapshotIntervalS       int    `yaml:"snapshot_interval_s"`
-	RequestLogRetentionDays int    `yaml:"request_log_retention_days"`
+	DBPath                   string `yaml:"db_path"`
+	SnapshotIntervalS        int    `yaml:"snapshot_interval_s"`
+	RequestLogRetentionDays  int    `yaml:"request_log_retention_days"`
+	RequestLogPruneOnStartup bool   `yaml:"request_log_prune_on_startup"`
+	AuditLogPruneOnStartup   bool   `yaml:"audit_log_prune_on_startup"`
 	// SPEC-002 v1.3.5 §7.10.1 R-7.10.2 — retention for the
 	// operator_model_swap audit_log table (and any future audit event
 	// types). Default 90 days mirrors request_log_retention_days.
@@ -1372,10 +1374,12 @@ func Default() Config {
 			ResponseTimeAnomalyMinMS:       10000,
 		},
 		Storage: StorageConfig{
-			DBPath:                  "coordinator.db",
-			SnapshotIntervalS:       300,
-			RequestLogRetentionDays: 90,
-			AuditLogRetentionDays:   90,
+			DBPath:                   "coordinator.db",
+			SnapshotIntervalS:        300,
+			RequestLogRetentionDays:  90,
+			RequestLogPruneOnStartup: true,
+			AuditLogPruneOnStartup:   true,
+			AuditLogRetentionDays:    90,
 		},
 		TrustedPools: TrustedPoolsConfig{
 			Enabled:                          false,

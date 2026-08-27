@@ -259,10 +259,11 @@ type RoutingConfig struct {
 }
 
 type Retry503Config struct {
-	Enabled       bool `yaml:"enabled"`
-	MaxAttempts   int  `yaml:"max_attempts"`
-	BackoffBaseMs int  `yaml:"backoff_base_ms"`
-	BackoffMaxMs  int  `yaml:"backoff_max_ms"`
+	Enabled                  bool `yaml:"enabled"`
+	RetryNoProviderAvailable bool `yaml:"retry_no_provider_available"`
+	MaxAttempts              int  `yaml:"max_attempts"`
+	BackoffBaseMs            int  `yaml:"backoff_base_ms"`
+	BackoffMaxMs             int  `yaml:"backoff_max_ms"`
 }
 
 type ExplorerConfig struct {
@@ -463,7 +464,7 @@ func Default() Config {
 		},
 		CORS:     CORSConfig{AllowedOrigins: []string{"https://console.malibu.tech", "https://malibu.tech"}},
 		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
-		Retry503: Retry503Config{Enabled: true, MaxAttempts: 3, BackoffBaseMs: 100, BackoffMaxMs: 500},
+		Retry503: Retry503Config{Enabled: true, RetryNoProviderAvailable: false, MaxAttempts: 3, BackoffBaseMs: 100, BackoffMaxMs: 500},
 		Explorer: ExplorerConfig{Enabled: false},
 		Features: FeaturesConfig{ResponsesAPIEnabled: false, AnthropicMessagesEnabled: false, RelayBlindRequests: RelayBlindRequestsConfig{
 			Enabled:                    false,
