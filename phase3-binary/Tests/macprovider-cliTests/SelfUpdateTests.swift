@@ -746,25 +746,31 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(Array(arguments.prefix(2)), ["/bin/sh", "-c"])
         let script = try XCTUnwrap(arguments.last)
         XCTAssertEqual(
-            script.components(separatedBy: "bootout 'gui/501/live.malibu.provider'").count - 1,
+            script.components(separatedBy: "bootout_and_wait_absent 'gui/501/live.malibu.provider'").count - 1,
+            1
+        )
+        XCTAssertEqual(
+            script.components(separatedBy: "bootout_and_wait_absent 'gui/501/live.streamvc.macprovider'").count - 1,
             1
         )
         let bootoutRange = try XCTUnwrap(
-            script.range(of: "bootout 'gui/501/live.malibu.provider'")
-        )
-        let absenceRange = try XCTUnwrap(
-            script.range(of: "print 'gui/501/live.malibu.provider'")
+            script.range(of: "bootout_and_wait_absent 'gui/501/live.malibu.provider'")
         )
         let bootstrapRange = try XCTUnwrap(
             script.range(
                 of: "bootstrap 'gui/501' '\(launchAgents.appendingPathComponent("live.malibu.provider.plist").path)'"
             )
         )
-        XCTAssertLessThan(bootoutRange.lowerBound, absenceRange.lowerBound)
-        XCTAssertLessThan(absenceRange.lowerBound, bootstrapRange.lowerBound)
+        XCTAssertLessThan(bootoutRange.lowerBound, bootstrapRange.lowerBound)
+        XCTAssertLessThan(
+            try XCTUnwrap(script.range(of: "bootout_and_wait_absent 'gui/501/live.streamvc.macprovider'")).lowerBound,
+            bootoutRange.lowerBound
+        )
         XCTAssertTrue(script.contains("while [ \"$attempt\" -lt 100 ]"))
+        XCTAssertTrue(script.contains("print \"$target\""))
         XCTAssertTrue(script.contains("[ \"$status\" -eq 113 ]"))
         XCTAssertTrue(script.contains("*\"Could not find service\"*"))
+        XCTAssertTrue(script.contains("wait_for_absence()"))
         XCTAssertTrue(script.contains("[ \"$provider_absent\" -eq 1 ] || exit 75"))
         XCTAssertEqual(
             script.components(
@@ -781,6 +787,8 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(
             result.log,
             [
+                "bootout gui/501/live.streamvc.macprovider",
+                "print gui/501/live.streamvc.macprovider",
                 "bootout gui/501/live.malibu.provider",
                 "print gui/501/live.malibu.provider",
                 "sleep 0.1",
@@ -804,6 +812,10 @@ final class SelfUpdateTests: XCTestCase {
             3
         )
         XCTAssertEqual(result.log.filter { $0 == "sleep 0.1" }.count, 2)
+        XCTAssertEqual(
+            result.log.filter { $0 == "print gui/501/live.streamvc.macprovider" }.count,
+            1
+        )
         XCTAssertFalse(result.log.contains { $0.hasPrefix("bootstrap ") })
         XCTAssertFalse(result.helperPlistExists)
     }
@@ -818,6 +830,10 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(result.status, 5)
         XCTAssertEqual(
             result.log.filter { $0 == "print gui/501/live.malibu.provider" }.count,
+            1
+        )
+        XCTAssertEqual(
+            result.log.filter { $0 == "print gui/501/live.streamvc.macprovider" }.count,
             1
         )
         XCTAssertFalse(result.log.contains { $0.hasPrefix("bootstrap ") })
@@ -868,6 +884,84 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(result.log.filter { $0.hasPrefix("bootstrap ") }.count, 1)
         XCTAssertTrue(result.providerPlistExists)
         XCTAssertFalse(result.helperPlistExists)
+    }
+
+    func testCompatibilityReloadFencesLegacyWatchdogBeforeCanonicalWatchdogReload() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("launchd-reload-legacy-watchdog-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let launchAgents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        for label in [SelfUpdate.watchdogLaunchdLabel, SelfUpdate.launchdLabel] {
+            try Data("plist".utf8).write(to: launchAgents.appendingPathComponent("\(label).plist"))
+        }
+        var present = Set([SelfUpdate.legacyWatchdogLaunchdLabel, SelfUpdate.watchdogLaunchdLabel])
+        var commands: [([String], Bool)] = []
+
+        try SelfUpdate.reloadCompatibilityLaunchdJobs(
+            homeDirectory: home,
+            uid: 501,
+            serviceLoaded: { present.contains($0) },
+            servicePresent: { present.contains($0) },
+            loadedServiceLabels: { [] },
+            runLaunchctl: { arguments, allowFailure in
+                commands.append((arguments, allowFailure))
+                if arguments == ["bootout", "gui/501/\(SelfUpdate.legacyWatchdogLaunchdLabel)"] {
+                    present.remove(SelfUpdate.legacyWatchdogLaunchdLabel)
+                }
+                if arguments == ["bootout", "gui/501/\(SelfUpdate.watchdogLaunchdLabel)"] {
+                    present.remove(SelfUpdate.watchdogLaunchdLabel)
+                }
+            }
+        )
+
+        XCTAssertEqual(
+            commands.map(\.0),
+            [
+                ["bootout", "gui/501/live.malibu.provider-compatibility-reload"],
+                ["bootout", "gui/501/live.streamvc.macprovider-watchdog"],
+                ["bootout", "gui/501/live.malibu.provider-watchdog"],
+                [
+                    "bootstrap",
+                    "gui/501",
+                    launchAgents.appendingPathComponent("live.malibu.provider-watchdog.plist").path,
+                ],
+                [
+                    "bootstrap",
+                    "gui/501",
+                    launchAgents.appendingPathComponent(
+                        "live.malibu.provider-compatibility-reload.plist"
+                    ).path,
+                ],
+            ]
+        )
+        XCTAssertEqual(commands.map(\.1), [true, true, false, false, false])
+    }
+
+    func testCompatibilityLaunchdServiceFenceAcceptsBootoutAlreadyAbsentRace() throws {
+        var present = true
+        var commands: [([String], Bool)] = []
+
+        try SelfUpdate.fenceLaunchdServiceIfPresent(
+            label: SelfUpdate.legacyWatchdogLaunchdLabel,
+            uid: 501,
+            servicePresent: { label in
+                XCTAssertEqual(label, SelfUpdate.legacyWatchdogLaunchdLabel)
+                return present
+            },
+            runLaunchctl: { arguments, allowFailure in
+                commands.append((arguments, allowFailure))
+                present = false
+            },
+            removalMaxChecks: 3,
+            sleep: { _ in XCTFail("already-absent service should not sleep") }
+        )
+
+        XCTAssertEqual(
+            commands.map(\.0),
+            [["bootout", "gui/501/\(SelfUpdate.legacyWatchdogLaunchdLabel)"]]
+        )
+        XCTAssertEqual(commands.map(\.1), [true])
     }
 
     func testCompatibilityReloadFencesLegacyJobsBeforeValidatingCanonicalPlists() throws {
@@ -1321,6 +1415,419 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(SelfUpdate.localHealthRequiredConsecutiveSamples, 11)
     }
 
+    func testStaleLocalStatusOwnerSelectsOnlyOldServeProcessAtExpectedPath() {
+        let status: [String: Any] = [
+            "binary_version": "1.8.102",
+            "status": "ready",
+            "service_instance": [
+                "role": "serve",
+                "pid": 60750,
+            ],
+        ]
+
+        XCTAssertEqual(
+            SelfUpdate.staleLocalStatusOwnerPIDToTerminate(
+                status,
+                targetVersion: "1.8.109",
+                expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+                currentProcessID: 82367,
+                executablePath: { pid in
+                    pid == 60750 ? "/Users/provider/macprovider/macprovider-cli" : nil
+                }
+            ),
+            60750
+        )
+    }
+
+    func testStaleLocalStatusOwnerDoesNotSelectCurrentProcessWrongRoleOrUnknownVersion() {
+        let staleServe: [String: Any] = [
+            "binary_version": "1.8.102",
+            "service_instance": [
+                "role": "serve",
+                "pid": 60750,
+            ],
+        ]
+
+        XCTAssertNil(SelfUpdate.staleLocalStatusOwnerPIDToTerminate(
+            staleServe,
+            targetVersion: "1.8.109",
+            expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+            currentProcessID: 60750,
+            executablePath: { _ in "/Users/provider/macprovider/macprovider-cli" }
+        ))
+
+        var updateProcess = staleServe
+        updateProcess["service_instance"] = [
+            "role": "update",
+            "pid": 60750,
+        ]
+        XCTAssertNil(SelfUpdate.staleLocalStatusOwnerPIDToTerminate(
+            updateProcess,
+            targetVersion: "1.8.109",
+            expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+            currentProcessID: 82367,
+            executablePath: { _ in "/Users/provider/macprovider/macprovider-cli" }
+        ))
+
+        var missingVersion = staleServe
+        missingVersion.removeValue(forKey: "binary_version")
+        XCTAssertNil(SelfUpdate.staleLocalStatusOwnerPIDToTerminate(
+            missingVersion,
+            targetVersion: "1.8.109",
+            expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+            currentProcessID: 82367,
+            executablePath: { _ in "/Users/provider/macprovider/macprovider-cli" }
+        ))
+
+        XCTAssertNil(SelfUpdate.staleLocalStatusOwnerPIDToTerminate(
+            staleServe,
+            targetVersion: "1.8.109",
+            expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+            currentProcessID: 82367,
+            executablePath: { _ in "/tmp/macprovider-cli" }
+        ))
+    }
+
+    func testStaleLocalStatusOwnerBindsProcessStartIdentity() {
+        let status: [String: Any] = [
+            "binary_version": "1.8.102",
+            "service_instance": [
+                "role": "serve",
+                "pid": 60750,
+            ],
+        ]
+
+        XCTAssertEqual(
+            SelfUpdate.staleLocalStatusOwnerToTerminate(
+                status,
+                targetVersion: "1.8.110",
+                expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+                currentProcessID: 82367,
+                executablePath: { _ in "/Users/provider/macprovider/macprovider-cli" },
+                processStartMicroseconds: { _ in 99_001 }
+            ),
+            SelfUpdate.StaleLocalStatusOwner(pid: 60750, processStartMicroseconds: 99_001)
+        )
+
+        XCTAssertNil(SelfUpdate.staleLocalStatusOwnerToTerminate(
+            status,
+            targetVersion: "1.8.110",
+            expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+            currentProcessID: 82367,
+            executablePath: { _ in "/Users/provider/macprovider/macprovider-cli" },
+            processStartMicroseconds: { _ in nil }
+        ))
+    }
+
+    func testEvictStaleLocalStatusOwnerTerminatesManagedOldServeProcess() async throws {
+        let status: [String: Any] = [
+            "binary_version": "1.8.102",
+            "service_instance": [
+                "role": "serve",
+                "pid": 60750,
+            ],
+        ]
+        var signals: [(pid_t, Int32)] = []
+
+        let evictedPID = try await SelfUpdate.evictStaleLocalStatusOwner(
+            status,
+            targetVersion: "1.8.110",
+            expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+            currentProcessID: 82367,
+            launchdServiceProcessID: { label in
+                label == SelfUpdate.launchdLabel ? 60750 : nil
+            },
+            executablePath: { pid in
+                pid == 60750 ? "/Users/provider/macprovider/macprovider-cli" : nil
+            },
+            processStartMicroseconds: { pid in
+                pid == 60750 ? 99_001 : nil
+            },
+            refreshStatus: {
+                [
+                    "binary_version": "1.8.110",
+                    "service_instance": [
+                        "role": "serve",
+                        "pid": 60751,
+                    ],
+                ]
+            },
+            terminate: { pid, signal in
+                signals.append((pid, signal))
+                return 0
+            },
+            sleep: { _ in },
+            terminationPolls: 1
+        )
+
+        XCTAssertEqual(evictedPID, 60750)
+        XCTAssertEqual(signals.map(\.0), [60750, 60750])
+        XCTAssertEqual(signals.map(\.1), [SIGTERM, 0])
+        XCTAssertFalse(signals.map(\.1).contains(SIGKILL))
+    }
+
+    func testEvictStaleLocalStatusOwnerSkipsManualServeProcessWithoutLaunchdOwnership() async throws {
+        let status: [String: Any] = [
+            "binary_version": "1.8.102",
+            "service_instance": [
+                "role": "serve",
+                "pid": 60750,
+            ],
+        ]
+        var signals: [(pid_t, Int32)] = []
+
+        let unmanagedPID = try await SelfUpdate.evictStaleLocalStatusOwner(
+            status,
+            targetVersion: "1.8.110",
+            expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+            currentProcessID: 82367,
+            launchdServiceProcessID: { _ in nil },
+            executablePath: { pid in
+                pid == 60750 ? "/Users/provider/macprovider/macprovider-cli" : nil
+            },
+            processStartMicroseconds: { pid in
+                pid == 60750 ? 99_001 : nil
+            },
+            refreshStatus: { status },
+            terminate: { pid, signal in
+                signals.append((pid, signal))
+                return 0
+            },
+            sleep: { _ in },
+            terminationPolls: 1
+        )
+
+        let differentLaunchdOwnerPID = try await SelfUpdate.evictStaleLocalStatusOwner(
+            status,
+            targetVersion: "1.8.110",
+            expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+            currentProcessID: 82367,
+            launchdServiceProcessID: { label in
+                label == SelfUpdate.launchdLabel ? 60751 : nil
+            },
+            executablePath: { pid in
+                pid == 60750 ? "/Users/provider/macprovider/macprovider-cli" : nil
+            },
+            processStartMicroseconds: { pid in
+                pid == 60750 ? 99_001 : nil
+            },
+            refreshStatus: { status },
+            terminate: { pid, signal in
+                signals.append((pid, signal))
+                return 0
+            },
+            sleep: { _ in },
+            terminationPolls: 1
+        )
+
+        XCTAssertNil(unmanagedPID)
+        XCTAssertNil(differentLaunchdOwnerPID)
+        XCTAssertTrue(signals.isEmpty)
+    }
+
+    func testEvictStaleLocalStatusOwnerIfManagedSwallowsSignalFailure() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SelfUpdateTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: tempDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+        let configURL = tempDirectory.appendingPathComponent("config.yaml")
+        try "port: 18080\n".write(to: configURL, atomically: true, encoding: .utf8)
+
+        let previousConfig = getenv("MACPROVIDER_CONFIG").map { String(cString: $0) }
+        setenv("MACPROVIDER_CONFIG", configURL.path, 1)
+        defer {
+            if let previousConfig {
+                setenv("MACPROVIDER_CONFIG", previousConfig, 1)
+            } else {
+                unsetenv("MACPROVIDER_CONFIG")
+            }
+        }
+
+        let actions = UpdateActionRecorder()
+        let status: [String: Any] = [
+            "binary_version": "1.8.102",
+            "service_instance": [
+                "role": "serve",
+                "pid": 60750,
+            ],
+        ]
+
+        await SelfUpdate.evictStaleLocalStatusOwnerIfManaged(
+            targetVersion: "1.8.110",
+            expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+            environment: ProviderLifecycleLeaseEnvironment(
+                wallMilliseconds: { 0 },
+                monotonicNanoseconds: { 0 },
+                bootSession: { "boot" },
+                processStartMicroseconds: { pid in
+                    pid == 60750 ? 99_001 : nil
+                },
+                processID: { 82367 },
+                launchdServiceProcessID: { label in
+                    label == SelfUpdate.launchdLabel ? 60750 : nil
+                },
+                executablePath: { pid in
+                    pid == 60750 ? "/Users/provider/macprovider/macprovider-cli" : nil
+                }
+            ),
+            terminate: { pid, signal in
+                actions.append("signal:\(pid):\(signal)")
+                errno = EPERM
+                return -1
+            },
+            fetchStatus: { port in
+                actions.append("fetch:\(port)")
+                return status
+            },
+            sleep: { _ in }
+        )
+
+        XCTAssertEqual(actions.snapshot(), ["fetch:18080", "signal:60750:\(SIGTERM)"])
+    }
+
+    func testEvictStaleLocalStatusOwnerIfManagedTimesOutStatusFetch() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SelfUpdateTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: tempDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+        let configURL = tempDirectory.appendingPathComponent("config.yaml")
+        try "port: 18080\n".write(to: configURL, atomically: true, encoding: .utf8)
+
+        let previousConfig = getenv("MACPROVIDER_CONFIG").map { String(cString: $0) }
+        setenv("MACPROVIDER_CONFIG", configURL.path, 1)
+        defer {
+            if let previousConfig {
+                setenv("MACPROVIDER_CONFIG", previousConfig, 1)
+            } else {
+                unsetenv("MACPROVIDER_CONFIG")
+            }
+        }
+
+        let actions = UpdateActionRecorder()
+        let started = DispatchTime.now().uptimeNanoseconds
+        await SelfUpdate.evictStaleLocalStatusOwnerIfManaged(
+            targetVersion: "1.8.110",
+            expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+            terminate: { _, signal in
+                actions.append("signal:\(signal)")
+                return 0
+            },
+            fetchStatus: { port in
+                actions.append("fetch:\(port)")
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+                return [:]
+            },
+            sleep: { _ in },
+            evictionDeadlineNanoseconds: 20_000_000
+        )
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+
+        XCTAssertLessThan(elapsed, 1_000_000_000)
+        XCTAssertEqual(actions.snapshot(), ["fetch:18080"])
+    }
+
+    func testEvictStaleLocalStatusOwnerEscalatesAndWaitsAfterKill() async throws {
+        let status: [String: Any] = [
+            "binary_version": "1.8.102",
+            "service_instance": [
+                "role": "serve",
+                "pid": 60750,
+            ],
+        ]
+        var signals: [(pid_t, Int32)] = []
+        var refreshCount = 0
+
+        let evictedPID = try await SelfUpdate.evictStaleLocalStatusOwner(
+            status,
+            targetVersion: "1.8.110",
+            expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+            currentProcessID: 82367,
+            launchdServiceProcessID: { label in
+                label == SelfUpdate.launchdLabel ? 60750 : nil
+            },
+            executablePath: { pid in
+                pid == 60750 ? "/Users/provider/macprovider/macprovider-cli" : nil
+            },
+            processStartMicroseconds: { pid in
+                pid == 60750 ? 99_001 : nil
+            },
+            refreshStatus: {
+                refreshCount += 1
+                if refreshCount < 2 {
+                    return status
+                }
+                return [
+                    "binary_version": "1.8.110",
+                    "service_instance": [
+                        "role": "serve",
+                        "pid": 60751,
+                    ],
+                ]
+            },
+            terminate: { pid, signal in
+                signals.append((pid, signal))
+                return 0
+            },
+            sleep: { _ in },
+            terminationPolls: 1,
+            killPolls: 1
+        )
+
+        XCTAssertEqual(evictedPID, 60750)
+        XCTAssertEqual(signals.map(\.0), [60750, 60750, 60750, 60750])
+        XCTAssertEqual(signals.map(\.1), [SIGTERM, 0, SIGKILL, 0])
+    }
+
+    func testEvictStaleLocalStatusOwnerDoesNotKillAfterPIDReuse() async throws {
+        let status: [String: Any] = [
+            "binary_version": "1.8.102",
+            "service_instance": [
+                "role": "serve",
+                "pid": 60750,
+            ],
+        ]
+        var signals: [(pid_t, Int32)] = []
+        var currentStart: Int64 = 99_001
+
+        let evictedPID = try await SelfUpdate.evictStaleLocalStatusOwner(
+            status,
+            targetVersion: "1.8.110",
+            expectedExecutablePath: "/Users/provider/macprovider/macprovider-cli",
+            currentProcessID: 82367,
+            launchdServiceProcessID: { label in
+                label == SelfUpdate.launchdLabel ? 60750 : nil
+            },
+            executablePath: { _ in "/Users/provider/macprovider/macprovider-cli" },
+            processStartMicroseconds: { _ in currentStart },
+            refreshStatus: {
+                return nil
+            },
+            terminate: { pid, signal in
+                signals.append((pid, signal))
+                if signal == SIGTERM {
+                    currentStart = 100_002
+                }
+                return 0
+            },
+            sleep: { _ in },
+            terminationPolls: 1,
+            killPolls: 1
+        )
+
+        XCTAssertEqual(evictedPID, 60750)
+        XCTAssertEqual(signals.map(\.0), [60750])
+        XCTAssertEqual(signals.map(\.1), [SIGTERM])
+        XCTAssertFalse(signals.map(\.1).contains(SIGKILL))
+    }
+
     func testRestartFailureRecoveryCommandReloadsBothCompatibilityJobs() {
         let home = URL(fileURLWithPath: "/Users/provider", isDirectory: true)
 
@@ -1461,7 +1968,8 @@ private func runReloadHelperScenario(
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
 
     let logURL = root.appendingPathComponent("commands.log")
-    let countURL = root.appendingPathComponent("print-count")
+    let providerCountURL = root.appendingPathComponent("provider-print-count")
+    let legacyCountURL = root.appendingPathComponent("legacy-provider-print-count")
     let launchctlURL = root.appendingPathComponent("launchctl")
     let sleepURL = root.appendingPathComponent("sleep")
     let commandSleepURL = root.appendingPathComponent("command-sleep")
@@ -1470,7 +1978,11 @@ private func runReloadHelperScenario(
         "live.malibu.provider-compatibility-reload.plist"
     )
     let absentAt = absentAfterCheck ?? (maxChecks + 1)
-    let forcedPrintFailure = printFailureStatus.map { "exit \($0)" } ?? ":"
+    let forcedProviderPrintFailure = printFailureStatus.map {
+        """
+        if [ "$2" = "gui/501/live.malibu.provider" ]; then exit \($0); fi
+        """
+    } ?? ":"
     let forcedHang = hangOperation.map {
         "if [ \"$1\" = \"\($0)\" ]; then trap '' TERM; while :; do :; done; fi"
     } ?? ":"
@@ -1480,12 +1992,26 @@ private func runReloadHelperScenario(
     printf '%s\\n' "$*" >> '\(logURL.path)'
     \(forcedHang)
     if [ "$1" = "print" ]; then
-      \(forcedPrintFailure)
+      \(forcedProviderPrintFailure)
+      case "$2" in
+        gui/501/live.streamvc.macprovider)
+          count_file='\(legacyCountURL.path)'
+          absent_at=1
+          ;;
+        gui/501/live.malibu.provider)
+          count_file='\(providerCountURL.path)'
+          absent_at=\(absentAt)
+          ;;
+        *)
+          count_file='\(providerCountURL.path)'
+          absent_at=\(absentAt)
+          ;;
+      esac
       count=0
-      if [ -f '\(countURL.path)' ]; then count=$(/bin/cat '\(countURL.path)'); fi
+      if [ -f "$count_file" ]; then count=$(/bin/cat "$count_file"); fi
       count=$((count + 1))
-      printf '%s\\n' "$count" > '\(countURL.path)'
-      if [ "$count" -ge \(absentAt) ]; then
+      printf '%s\\n' "$count" > "$count_file"
+      if [ "$count" -ge "$absent_at" ]; then
         printf '%s\\n' 'Could not find service' >&2
         exit 113
       fi

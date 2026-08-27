@@ -40,6 +40,29 @@ check:
 Do not approve candidate `sign_publish` unless intentionally testing protected
 publication/signing behavior.
 
+## Damaged-provider repair candidate scope
+
+A candidate that changes updater, watchdog, or launchd repair logic is not
+proof that an already-running older coordinator autoupdate can heal itself. The
+first coordinator-recommended hop still runs the already-installed binary's
+updater code. Keep the checked-in and live coordinator recommendation on the
+previous stable version until a separate promoted-rollout gate proves that
+first-hop path from the previous stable.
+
+For damaged-provider acceptance, run the candidate through a path that executes
+the candidate payload directly, such as a pinned installer or acceptance-update
+flow. Required evidence:
+
+- `whoami` on the remote Mac is the expected provider user.
+- Preflight records the current and legacy provider/watchdog launchd labels
+  without printing provider IDs, tokens, or secrets.
+- Post-repair `/v1/status` reports the target binary version and a fresh
+  `serve` service instance.
+- The canonical `live.malibu.provider` and `live.malibu.provider-watchdog`
+  launchd services are loaded, and legacy labels are absent.
+- The public coordinator recommendation remains on the previous stable until
+  this evidence is reviewed.
+
 ## Production release gate
 
 1. Create the signed annotated tag on the intended `main` commit.

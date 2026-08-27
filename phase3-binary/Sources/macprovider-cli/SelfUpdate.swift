@@ -52,6 +52,47 @@ struct SelfUpdate {
     // uninterrupted health, exceeding launchd's observed ten-second retry
     // cadence for legacy `submit` jobs.
     static let localHealthRequiredConsecutiveSamples = 11
+    static let staleLocalStatusEvictionDeadlineNanoseconds: UInt64 = 5_000_000_000
+    struct StaleLocalStatusOwner: Equatable {
+        let pid: pid_t
+        let processStartMicroseconds: Int64
+    }
+    private enum StaleLocalStatusEvictionRace {
+        case completed
+        case timedOut
+    }
+
+    private final class StaleLocalStatusEvictionCompletion: @unchecked Sendable {
+        private let lock = NSLock()
+        private var race: StaleLocalStatusEvictionRace?
+        private var continuation: CheckedContinuation<StaleLocalStatusEvictionRace, Never>?
+
+        func complete(_ newRace: StaleLocalStatusEvictionRace) {
+            lock.lock()
+            guard race == nil else {
+                lock.unlock()
+                return
+            }
+            race = newRace
+            let waiting = continuation
+            continuation = nil
+            lock.unlock()
+            waiting?.resume(returning: newRace)
+        }
+
+        func wait() async -> StaleLocalStatusEvictionRace {
+            await withCheckedContinuation { waiting in
+                lock.lock()
+                if let race {
+                    lock.unlock()
+                    waiting.resume(returning: race)
+                    return
+                }
+                continuation = waiting
+                lock.unlock()
+            }
+        }
+    }
     static let stagedCLIPreflightArguments = ["--version"]
     static let currentSigningInformationFlags = SecCSFlags(
         rawValue: kSecCSSigningInformation
@@ -898,6 +939,12 @@ struct SelfUpdate {
                 throw error
             }
         }
+        if replaceBinary == nil, let current {
+            await Self.evictStaleLocalStatusOwnerIfManaged(
+                targetVersion: targetVersion,
+                expectedExecutablePath: current.path
+            )
+        }
         do {
             if let restartLaunchd {
                 try restartLaunchd()
@@ -1086,6 +1133,271 @@ struct SelfUpdate {
         return "\(pid):\(instanceID)"
     }
 
+    static func staleLocalStatusOwnerPIDToTerminate(
+        _ status: [String: Any]?,
+        targetVersion: String,
+        expectedExecutablePath: String,
+        currentProcessID: pid_t,
+        executablePath: (pid_t) -> String?
+    ) -> pid_t? {
+        guard let status,
+              let binaryVersion = status["binary_version"] as? String,
+              binaryVersion != targetVersion,
+              let serviceInstance = status["service_instance"] as? [String: Any],
+              serviceInstance["role"] as? String == "serve",
+              let pid = serviceInstance["pid"] as? Int,
+              pid > 0,
+              pid != Int(currentProcessID),
+              executablePath(pid_t(pid)) == expectedExecutablePath
+        else {
+            return nil
+        }
+        return pid_t(pid)
+    }
+
+    static func staleLocalStatusOwnerToTerminate(
+        _ status: [String: Any]?,
+        targetVersion: String,
+        expectedExecutablePath: String,
+        currentProcessID: pid_t,
+        executablePath: (pid_t) -> String?,
+        processStartMicroseconds: (pid_t) -> Int64?
+    ) -> StaleLocalStatusOwner? {
+        guard let pid = staleLocalStatusOwnerPIDToTerminate(
+            status,
+            targetVersion: targetVersion,
+            expectedExecutablePath: expectedExecutablePath,
+            currentProcessID: currentProcessID,
+            executablePath: executablePath
+        ),
+              let processStart = processStartMicroseconds(pid),
+              processStart > 0
+        else {
+            return nil
+        }
+        return StaleLocalStatusOwner(pid: pid, processStartMicroseconds: processStart)
+    }
+
+    static func evictStaleLocalStatusOwnerIfManaged(
+        targetVersion: String,
+        expectedExecutablePath: String,
+        environment: ProviderLifecycleLeaseEnvironment = .live,
+        terminate: @escaping @Sendable (pid_t, Int32) -> Int32 = { pid, signal in Darwin.kill(pid, signal) },
+        fetchStatus: @escaping @Sendable (Int) async throws -> [String: Any] = { port in
+            try await LocalStatusClient.fetch(port: port)
+        },
+        sleep: @escaping @Sendable (UInt64) async -> Void = { nanoseconds in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+        },
+        evictionDeadlineNanoseconds: UInt64 = SelfUpdate.staleLocalStatusEvictionDeadlineNanoseconds
+    ) async {
+        let config = try? ConfigLoader.load(cli: CLIOverrides())
+        guard let port = config?.port else { return }
+        await runStaleLocalStatusEvictionWithDeadline(evictionDeadlineNanoseconds) {
+            let status = try? await fetchStatus(port)
+            _ = try? await evictStaleLocalStatusOwner(
+                status,
+                targetVersion: targetVersion,
+                expectedExecutablePath: expectedExecutablePath,
+                currentProcessID: environment.processID(),
+                launchdServiceProcessID: environment.launchdServiceProcessID,
+                executablePath: environment.executablePath,
+                processStartMicroseconds: environment.processStartMicroseconds,
+                refreshStatus: { try? await fetchStatus(port) },
+                terminate: terminate,
+                sleep: sleep
+            )
+        }
+    }
+
+    private static func runStaleLocalStatusEvictionWithDeadline(
+        _ timeoutNanoseconds: UInt64,
+        operation: @escaping @Sendable () async -> Void
+    ) async {
+        guard timeoutNanoseconds > 0 else { return }
+        let completion = StaleLocalStatusEvictionCompletion()
+        let operationTask = Task {
+            await operation()
+            completion.complete(.completed)
+        }
+        let timeoutTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                completion.complete(.timedOut)
+            } catch {
+                return
+            }
+        }
+        _ = await completion.wait()
+        operationTask.cancel()
+        timeoutTask.cancel()
+    }
+
+    static func evictStaleLocalStatusOwner(
+        _ status: [String: Any]?,
+        targetVersion: String,
+        expectedExecutablePath: String,
+        currentProcessID: pid_t,
+        launchdServiceProcessID: @escaping (String) -> pid_t?,
+        executablePath: @escaping (pid_t) -> String?,
+        processStartMicroseconds: @escaping (pid_t) -> Int64?,
+        refreshStatus: @escaping () async -> [String: Any]?,
+        terminate: (pid_t, Int32) -> Int32,
+        sleep: @escaping (UInt64) async -> Void,
+        terminationPolls: Int = 40,
+        killPolls: Int = 12
+    ) async throws -> pid_t? {
+        guard let staleOwner = staleLocalStatusOwnerToTerminate(
+            status,
+            targetVersion: targetVersion,
+            expectedExecutablePath: expectedExecutablePath,
+            currentProcessID: currentProcessID,
+            executablePath: executablePath,
+            processStartMicroseconds: processStartMicroseconds
+        ) else {
+            return nil
+        }
+        guard let launchdServiceLabel = launchdManagedLabel(
+            for: staleOwner,
+            launchdServiceProcessID: launchdServiceProcessID
+        ) else {
+            return nil
+        }
+
+        guard !Task.isCancelled else { return nil }
+        try signalStaleLocalStatusOwner(
+            staleOwner,
+            launchdServiceLabel: launchdServiceLabel,
+            signal: SIGTERM,
+            operation: "terminate stale provider status owner",
+            expectedExecutablePath: expectedExecutablePath,
+            launchdServiceProcessID: launchdServiceProcessID,
+            executablePath: executablePath,
+            processStartMicroseconds: processStartMicroseconds,
+            terminate: terminate
+        )
+        if await waitForStaleLocalStatusOwnerExit(
+            staleOwner,
+            targetVersion: targetVersion,
+            expectedExecutablePath: expectedExecutablePath,
+            currentProcessID: currentProcessID,
+            launchdServiceLabel: launchdServiceLabel,
+            launchdServiceProcessID: launchdServiceProcessID,
+            executablePath: executablePath,
+            processStartMicroseconds: processStartMicroseconds,
+            refreshStatus: refreshStatus,
+            terminate: terminate,
+            sleep: sleep,
+            attempts: terminationPolls
+        ) {
+            return staleOwner.pid
+        }
+
+        guard !Task.isCancelled else { return nil }
+        try signalStaleLocalStatusOwner(
+            staleOwner,
+            launchdServiceLabel: launchdServiceLabel,
+            signal: SIGKILL,
+            operation: "kill stale provider status owner",
+            expectedExecutablePath: expectedExecutablePath,
+            launchdServiceProcessID: launchdServiceProcessID,
+            executablePath: executablePath,
+            processStartMicroseconds: processStartMicroseconds,
+            terminate: terminate
+        )
+        if await waitForStaleLocalStatusOwnerExit(
+            staleOwner,
+            targetVersion: targetVersion,
+            expectedExecutablePath: expectedExecutablePath,
+            currentProcessID: currentProcessID,
+            launchdServiceLabel: launchdServiceLabel,
+            launchdServiceProcessID: launchdServiceProcessID,
+            executablePath: executablePath,
+            processStartMicroseconds: processStartMicroseconds,
+            refreshStatus: refreshStatus,
+            terminate: terminate,
+            sleep: sleep,
+            attempts: killPolls
+        ) {
+            return staleOwner.pid
+        }
+
+        throw UpdateError.processFailed("kill stale provider status owner timeout", ETIMEDOUT)
+    }
+
+    private static func launchdManagedLabel(
+        for owner: StaleLocalStatusOwner,
+        launchdServiceProcessID: (String) -> pid_t?
+    ) -> String? {
+        [
+            launchdLabel,
+            legacyLaunchdLabel,
+        ].first { label in
+            launchdServiceProcessID(label) == owner.pid
+        }
+    }
+
+    private static func signalStaleLocalStatusOwner(
+        _ owner: StaleLocalStatusOwner,
+        launchdServiceLabel: String,
+        signal: Int32,
+        operation: String,
+        expectedExecutablePath: String,
+        launchdServiceProcessID: (String) -> pid_t?,
+        executablePath: (pid_t) -> String?,
+        processStartMicroseconds: (pid_t) -> Int64?,
+        terminate: (pid_t, Int32) -> Int32
+    ) throws {
+        guard launchdServiceProcessID(launchdServiceLabel) == owner.pid,
+              executablePath(owner.pid) == expectedExecutablePath,
+              processStartMicroseconds(owner.pid) == owner.processStartMicroseconds
+        else {
+            return
+        }
+        guard terminate(owner.pid, signal) == 0 || errno == ESRCH else {
+            throw UpdateError.processFailed(operation, errno)
+        }
+    }
+
+    private static func waitForStaleLocalStatusOwnerExit(
+        _ owner: StaleLocalStatusOwner,
+        targetVersion: String,
+        expectedExecutablePath: String,
+        currentProcessID: pid_t,
+        launchdServiceLabel: String,
+        launchdServiceProcessID: @escaping (String) -> pid_t?,
+        executablePath: @escaping (pid_t) -> String?,
+        processStartMicroseconds: @escaping (pid_t) -> Int64?,
+        refreshStatus: @escaping () async -> [String: Any]?,
+        terminate: (pid_t, Int32) -> Int32,
+        sleep: @escaping (UInt64) async -> Void,
+        attempts: Int
+    ) async -> Bool {
+        for _ in 0 ..< attempts {
+            if launchdServiceProcessID(launchdServiceLabel) != owner.pid
+                || executablePath(owner.pid) != expectedExecutablePath
+                || processStartMicroseconds(owner.pid) != owner.processStartMicroseconds {
+                return true
+            }
+            if terminate(owner.pid, 0) != 0 && errno == ESRCH {
+                return true
+            }
+            if let refreshed = await refreshStatus(),
+               staleLocalStatusOwnerToTerminate(
+                refreshed,
+                targetVersion: targetVersion,
+                expectedExecutablePath: expectedExecutablePath,
+                currentProcessID: currentProcessID,
+                executablePath: executablePath,
+                processStartMicroseconds: processStartMicroseconds
+               ) != owner {
+                return true
+            }
+            await sleep(250_000_000)
+        }
+        return false
+    }
+
     private func restartLaunchdIfInstalled() throws {
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
         let launchAgents = homeDirectory.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
@@ -1215,6 +1527,12 @@ struct SelfUpdate {
             uid: uid
         )
 
+        try fenceLaunchdServiceIfPresent(
+            label: legacyWatchdogLaunchdLabel,
+            uid: uid,
+            servicePresent: servicePresent,
+            runLaunchctl: runLaunchctl
+        )
         // Reload the companion liveness watchdog synchronously while the provider is
         // still alive. The provider must be reloaded by an independent
         // one-shot launchd job because booting out its own service terminates
@@ -1250,6 +1568,37 @@ struct SelfUpdate {
                 )
             }
             throw bootstrapError
+        }
+    }
+
+    static func fenceLaunchdServiceIfPresent(
+        label: String,
+        uid: uid_t = getuid(),
+        servicePresent: (String) throws -> Bool,
+        runLaunchctl: ([String], Bool) throws -> Void,
+        removalMaxChecks: Int = 100,
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    ) throws {
+        guard removalMaxChecks > 0 else {
+            throw UpdateError.processFailed("launchd service absence check", EINVAL)
+        }
+        guard try servicePresent(label) else {
+            return
+        }
+        let domain = "gui/\(uid)"
+        try runLaunchctl(["bootout", "\(domain)/\(label)"], true)
+        var absent = false
+        for attempt in 0 ..< removalMaxChecks {
+            if try !servicePresent(label) {
+                absent = true
+                break
+            }
+            if attempt + 1 < removalMaxChecks {
+                sleep(0.1)
+            }
+        }
+        guard absent else {
+            throw UpdateError.processFailed("fence launchd service \(label)", EBUSY)
         }
     }
 
@@ -1320,6 +1669,7 @@ struct SelfUpdate {
         }
         let domain = "gui/\(uid)"
         let target = "\(domain)/\(launchdLabel)"
+        let legacyTarget = "\(domain)/\(legacyLaunchdLabel)"
         let helperTarget = "\(domain)/\(providerReloadLaunchdLabel)"
         let launchctl = shellQuote(launchctlPath)
         let sleep = shellQuote(sleepPath)
@@ -1338,22 +1688,24 @@ struct SelfUpdate {
         if wait "$command_pid"; then return 0; else return $?; fi; }
         """
         let waitForProviderRemoval = """
-        provider_absent=0; attempt=0; while [ "$attempt" -lt \(providerRemovalMaxChecks) ]; do \
-        if output=$(run_bounded \(launchctl) print \(shellQuote(target)) 2>&1); then status=0; else status=$?; fi; \
-        if [ "$status" -eq 113 ]; then \
-        case "$output" in *"Could not find service"*) provider_absent=1; break ;; *) exit "$status" ;; esac; \
+        wait_for_absence() { target="$1"; provider_absent=0; attempt=0; while [ "$attempt" -lt \(providerRemovalMaxChecks) ]; do \
+        if output=$(run_bounded \(launchctl) print "$target" 2>&1); then status=0; else status=$?; fi; \
+        if [ "$status" -eq 113 ]; then case "$output" in *"Could not find service"*) provider_absent=1; break ;; *) exit "$status" ;; esac; \
         elif [ "$status" -ne 0 ]; then exit "$status"; fi; \
-        attempt=$((attempt + 1)); \
-        if [ "$attempt" -lt \(providerRemovalMaxChecks) ]; then \(sleep) 0.1; fi; \
-        done; [ "$provider_absent" -eq 1 ] || exit 75
+        attempt=$((attempt + 1)); if [ "$attempt" -lt \(providerRemovalMaxChecks) ]; then \(sleep) 0.1; fi; \
+        done; [ "$provider_absent" -eq 1 ] || exit 75; }
+        bootout_and_wait_absent() { target="$1"; \
+        if run_bounded \(launchctl) bootout "$target" >/dev/null 2>&1; then :; else status=$?; [ "$status" -ne 124 ] || exit "$status"; fi; \
+        wait_for_absence "$target"; }
         """
         let script = [
             "set -eu",
             "cleanup() { /bin/rm -f \(shellQuote(helperPlistPath)) >/dev/null 2>&1 || true; }",
             "trap cleanup EXIT HUP INT TERM",
             runBounded,
-            "if run_bounded \(launchctl) bootout \(shellQuote(target)) >/dev/null 2>&1; then :; else status=$?; [ \"$status\" -ne 124 ] || exit \"$status\"; fi",
             waitForProviderRemoval,
+            "bootout_and_wait_absent \(shellQuote(legacyTarget))",
+            "bootout_and_wait_absent \(shellQuote(target))",
             "run_bounded \(launchctl) bootstrap \(shellQuote(domain)) \(shellQuote(providerPlistPath))",
             "/bin/rm -f \(shellQuote(helperPlistPath))",
             "trap - EXIT HUP INT TERM",
@@ -2542,9 +2894,11 @@ enum UpdateError: Error, CustomStringConvertible {
 }
 
 struct LocalStatusClient {
-    static func fetch(port: Int) async throws -> [String: Any] {
+    static func fetch(port: Int, timeoutSeconds: TimeInterval = 1.0) async throws -> [String: Any] {
         let url = URL(string: "http://127.0.0.1:\(port)/v1/status")!
-        let (data, response) = try await URLSession.shared.data(from: url)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeoutSeconds
+        let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw UpdateError.httpStatus(http.statusCode)
         }
