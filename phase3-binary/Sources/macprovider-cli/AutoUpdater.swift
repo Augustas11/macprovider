@@ -330,6 +330,10 @@ struct AutoUpdater: Sendable {
                 return
             }
             try markerStore.ensureTrustedRoot()
+            if let activeCooldown = markerStore.activeCooldown(target: "<discovery>") {
+                await record(updateID: updateID, target: "<discovery>", source: .githubPoll, phase: .cooldown, outcome: .skipped, reason: "cooldown_\(activeCooldown.failureClass.rawValue)_until_\(ISO8601DateFormatter.autoupdate.string(from: activeCooldown.until))", attempt: activeCooldown.attempt)
+                return
+            }
             let update = SelfUpdate(currentVersion: currentVersion, releasesAPIURL: releasesAPIURL, session: session)
             let head: SignedReleaseDiscoveryHead
             do {

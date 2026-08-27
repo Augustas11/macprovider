@@ -2190,6 +2190,75 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(fenceObservedOwnedLock.value, 1)
     }
 
+    func testDiscoveryHonorsDiscoveryCooldownWithoutPollingNetwork() async throws {
+        // Regression for the discovery-head cooldown that was written by
+        // `fail(... target: "<discovery>" ...)` on discovery_head_expired /
+        // replay / equivocation but never consulted before the next poll,
+        // so head-expiry failures retried every cycle with no backoff
+        // (observed x139/x157 on live nodes). The discovery path must check
+        // the "<discovery>" sentinel cooldown up front, the same way the
+        // concrete-target cooldown is checked once a valid head resolves.
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        store.recordCooldown(target: "<discovery>", failureClass: .discoveryHeadExpired)
+
+        DiscoveryCooldownGuardMockURLProtocol.requestCount = 0
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DiscoveryCooldownGuardMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: status,
+            releasesAPIURL: "https://example.invalid/releases",
+            markerStore: store,
+            session: session,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: true,
+                    tier: "pinned",
+                    encryptedLegValid: true,
+                    attestationRequired: false,
+                    attestationSatisfied: true,
+                    tokenConfigured: true,
+                    tokenValidated: true,
+                    bearerlessDuplicate: false,
+                    connected: true
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        await updater.handleSignedReleaseDiscovery()
+
+        XCTAssertEqual(DiscoveryCooldownGuardMockURLProtocol.requestCount, 0)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["source"] as? String, AutoUpdateSource.githubPoll.rawValue)
+        XCTAssertEqual(event?["phase"] as? String, AutoUpdatePhase.cooldown.rawValue)
+        XCTAssertEqual(event?["outcome"] as? String, AutoUpdateOutcome.skipped.rawValue)
+        XCTAssertEqual(event?["target_version"] as? String, "<discovery>")
+        XCTAssertTrue(
+            (event?["reason"] as? String)?.hasPrefix("cooldown_\(AutoUpdateFailureClass.discoveryHeadExpired.rawValue)_until_") ?? false
+        )
+    }
+
     func testTrustLossRollbackAndCleanupRemainUnderMutationLock() throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
@@ -3529,6 +3598,22 @@ private final class AutoUpdateCounter: @unchecked Sendable {
         value += 1
         return value
     }
+}
+
+/// Fails every request but records that one was attempted, so tests can
+/// assert a cooldown-skip path never reaches the network.
+private final class DiscoveryCooldownGuardMockURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var requestCount = 0
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        DiscoveryCooldownGuardMockURLProtocol.requestCount += 1
+        client?.urlProtocol(self, didFailWithError: URLError(.fileDoesNotExist))
+    }
+
+    override func stopLoading() {}
 }
 
 private final class AutoUpdateMockURLProtocol: URLProtocol {
