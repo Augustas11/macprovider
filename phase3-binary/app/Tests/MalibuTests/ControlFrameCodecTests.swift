@@ -14,11 +14,16 @@ final class ControlFrameCodecTests: XCTestCase {
         return try ControlCodec.decode(encoded)
     }
 
+    // Stamped once per process: stamping Date() per call let two
+    // referralStatus() values straddle a whole-second boundary and fail the
+    // round-trip equality after wire truncation to seconds.
+    private static let referralObservedAt = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970) - 1)
+
     private func referralStatus(
         state: String = ReferralStatusProjection.eligible,
         pending: ReferralPendingChallengeProjection? = nil
     ) -> ReferralStatusProjection {
-        let observedAt = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970) - 1)
+        let observedAt = Self.referralObservedAt
         return ReferralStatusProjection(
             campaign: "launch",
             joinBaseURL: URL(string: "https://malibu.tech/j")!,

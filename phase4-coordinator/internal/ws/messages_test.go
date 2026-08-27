@@ -3,7 +3,6 @@ package ws
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"net"
@@ -90,15 +89,16 @@ func TestParseDiagnosticStatusBoundsAndIdentity(t *testing.T) {
 }
 
 func TestHandleDiagnosticStatusRequiresAssignedSession(t *testing.T) {
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "events.db"))
+	// Open through the production constructor: it caps the pool at one
+	// connection and sets busy_timeout/WAL. A raw sql.Open here let the
+	// background event worker and the polling reader race on separate
+	// pooled connections with no busy timeout, surfacing transient
+	// SQLITE_BUSY under CI load.
+	store, err := providerevents.Open(filepath.Join(t.TempDir(), "events.db"))
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		t.Fatalf("open store: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	store, err := providerevents.NewSQLiteStore(db)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
+	t.Cleanup(func() { _ = store.Close() })
 	registry := pool.NewRegistry(nil)
 	server := NewServer(config.Default(), registry, zerolog.Nop(), WithConnectionEventStore(store))
 	now := time.Now().UTC()
