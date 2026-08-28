@@ -952,6 +952,16 @@ func WithAutotuneFeeds(feeds AutotuneFeeds) Option {
 	}
 }
 
+// SetAutotuneFeeds atomically swaps the served signed feed bytes. The SIGHUP
+// reload calls this only after the new feeds are loaded and signature-verified
+// (LoadAutotuneFeeds); on any failure the caller keeps the prior feeds
+// (fail-closed), so /v1/rate-card etc. never serve unverified bytes.
+func (s *Server) SetAutotuneFeeds(feeds AutotuneFeeds) {
+	s.autotuneFeedsMu.Lock()
+	defer s.autotuneFeedsMu.Unlock()
+	s.autotuneFeeds = feeds
+}
+
 func (s *Server) autotuneFeedsSnapshot() AutotuneFeeds {
 	s.autotuneFeedsMu.RLock()
 	defer s.autotuneFeedsMu.RUnlock()
