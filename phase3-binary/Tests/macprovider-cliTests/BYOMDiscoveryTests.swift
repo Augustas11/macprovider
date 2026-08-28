@@ -194,6 +194,20 @@ final class BYOMDiscoveryTests: XCTestCase {
         ))
     }
 
+    func testAdmissionClientUsesDirectNoProxyConfigurationForInsecureLoopbackTesting() throws {
+        let baseURL = try XCTUnwrap(BYOMModelAdmissionClient.httpBaseURL(
+            from: "http://127.0.0.1:11434",
+            allowInsecureLoopbackHTTP: true
+        ))
+        let configuration = BYOMModelAdmissionClient.urlSessionConfiguration(for: baseURL)
+
+        XCTAssertEqual(configuration.connectionProxyDictionary?.isEmpty, true)
+        XCTAssertNil(configuration.urlCache)
+        XCTAssertNil(configuration.httpCookieStorage)
+        XCTAssertEqual(configuration.httpCookieAcceptPolicy, .never)
+        XCTAssertFalse(configuration.waitsForConnectivity)
+    }
+
     func testOllamaDiscoveryUsesHermeticLoopbackResponseAndRedactsUnsafeFields() async throws {
         let root = try temporaryDirectory("byom-ollama")
         let namespace = root.appendingPathComponent("ns")

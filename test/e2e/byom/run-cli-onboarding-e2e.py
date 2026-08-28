@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import pathlib
+import secrets
 import shutil
 import subprocess
 import sys
@@ -13,8 +14,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 
-PROVIDER_ID = "provider-byom-e2e"
-PROVIDER_TOKEN = "provider-token-e2e"
 MODEL_NAME = "qwen3-8b"
 SERVED_MODEL_REF = "ollama:" + MODEL_NAME
 CATALOG_MODEL_KEY = "qwen3-8b"
@@ -54,7 +53,13 @@ class LocalHTTPServer:
         self.state = state
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
         self.httpd.state = state
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.started = False
+        self.ready = threading.Event()
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+
+    def _serve(self):
+        self.ready.set()
+        self.httpd.serve_forever()
 
     @property
     def origin(self):
@@ -62,11 +67,17 @@ class LocalHTTPServer:
         return "http://%s:%d" % (host, port)
 
     def start(self):
+        if self.started:
+            return
         self.thread.start()
+        self.ready.wait(timeout=5)
+        self.started = True
 
     def stop(self):
-        self.httpd.shutdown()
-        self.thread.join(timeout=5)
+        if self.started:
+            self.httpd.shutdown()
+            self.thread.join(timeout=5)
+            self.started = False
         self.httpd.server_close()
 
 
@@ -168,7 +179,8 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
         for key in required:
             assert_true(key in payload, "offer request missing " + key)
         assert_true(payload["schema"] == "model_admission_offer_submit.v1", "wrong offer schema")
-        assert_true(payload["provider_id"] == PROVIDER_ID, "wrong provider_id in offer")
+        provider_id = self.server.state["provider_id"]
+        assert_true(payload["provider_id"] == provider_id, "wrong provider_id in offer")
         assert_true(payload["served_model_ref"] == SERVED_MODEL_REF, "wrong served_model_ref in offer")
         assert_true(payload["catalog_model_key"] == CATALOG_MODEL_KEY, "wrong catalog_model_key in offer")
         assert_true(len(payload["evaluation_digest_sha256"]) == 64, "offer missing evaluation digest")
@@ -186,7 +198,8 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
 
     def handle_withdraw(self, payload):
         assert_true(payload["schema"] == "model_admission_withdraw_request.v1", "wrong withdraw schema")
-        assert_true(payload["provider_id"] == PROVIDER_ID, "wrong provider_id in withdraw")
+        provider_id = self.server.state["provider_id"]
+        assert_true(payload["provider_id"] == provider_id, "wrong provider_id in withdraw")
         assert_true(payload["served_model_ref"] == SERVED_MODEL_REF, "wrong served_model_ref in withdraw")
         assert_true(payload["reason_code"] == "provider_requested", "wrong withdraw reason")
         assert_true(payload.get("provider_signature"), "withdraw missing signature")
@@ -196,7 +209,7 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
             "schema": "model_admission_withdraw.v1",
             "generated_at": "2027-01-15T08:00:01Z",
             "cli_version": "test",
-            "provider_id": PROVIDER_ID,
+            "provider_id": provider_id,
             "candidate_id": candidate_id,
             "served_model_ref": payload["served_model_ref"],
             "catalog_model_key": payload.get("catalog_model_key"),
@@ -224,7 +237,7 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
             "schema": "model_admission_status.v1",
             "generated_at": NOW,
             "cli_version": "test",
-            "provider_id": PROVIDER_ID,
+            "provider_id": self.server.state["provider_id"],
             "candidate_id": candidate_id,
             "served_model_ref": served_model_ref,
             "catalog_model_key": catalog_model_key,
@@ -263,7 +276,7 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
 
     def require_auth(self):
         got = self.headers.get("authorization")
-        assert_true(got == "Bearer " + PROVIDER_TOKEN, "bad Authorization header")
+        assert_true(got == "Bearer " + self.server.state["provider_token"], "bad Authorization header")
 
     def record(self, method, path, payload):
         self.server.state["requests"].append({
@@ -347,7 +360,14 @@ def main():
     root = repo_root()
     temp_root = pathlib.Path(tempfile.mkdtemp(prefix="macprovider-byom-e2e-"))
     ollama = LocalHTTPServer(OllamaHandler, {"paths": [], "chat_bodies": []})
-    coordinator = LocalHTTPServer(CoordinatorHandler, {"requests": [], "statuses": {}})
+    provider_id = "provider-byom-e2e-" + secrets.token_hex(8)
+    provider_token = "provider-token-e2e-" + secrets.token_hex(16)
+    coordinator = LocalHTTPServer(CoordinatorHandler, {
+        "requests": [],
+        "statuses": {},
+        "provider_id": provider_id,
+        "provider_token": provider_token,
+    })
     try:
         cli = build_cli(root, os.environ.get("MACPROVIDER_CLI_BINARY"))
         ollama.start()
@@ -361,8 +381,8 @@ def main():
         config = temp_root / "config.yaml"
         config.write_text(
             "\n".join([
-                "provider_id: " + PROVIDER_ID,
-                "provider_token: " + PROVIDER_TOKEN,
+                "provider_id: " + provider_id,
+                "provider_token: " + provider_token,
                 "coordinator_url: " + coordinator.origin,
                 "credential_store: protected_file",
                 "",

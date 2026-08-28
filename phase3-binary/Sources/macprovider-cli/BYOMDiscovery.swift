@@ -1490,6 +1490,13 @@ struct BYOMModelAdmissionClient: Sendable {
         return components.url
     }
 
+    static func urlSessionConfiguration(for baseURL: URL) -> URLSessionConfiguration {
+        if baseURL.scheme == "http" {
+            return BYOMURLSessionHTTPClient.directLoopbackConfiguration()
+        }
+        return .ephemeral
+    }
+
     func submitOffer(_ package: BYOMOfferSubmissionPackage, bearerToken: String) async throws -> BYOMAdmissionStatusWire {
         var request = URLRequest(url: baseURL.appendingPathComponent("v1/provider/model-admission/offers"))
         request.httpMethod = "POST"
@@ -1541,7 +1548,11 @@ struct BYOMModelAdmissionClient: Sendable {
         if let session {
             (data, response) = try await session.data(for: request)
         } else {
-            let ephemeral = URLSession(configuration: .ephemeral, delegate: NoRedirectURLSessionDelegate(), delegateQueue: nil)
+            let ephemeral = URLSession(
+                configuration: Self.urlSessionConfiguration(for: baseURL),
+                delegate: NoRedirectURLSessionDelegate(),
+                delegateQueue: nil
+            )
             defer { ephemeral.finishTasksAndInvalidate() }
             (data, response) = try await ephemeral.data(for: request)
         }
@@ -1571,7 +1582,11 @@ struct BYOMModelAdmissionClient: Sendable {
         if let session {
             (data, response) = try await session.data(for: request)
         } else {
-            let ephemeral = URLSession(configuration: .ephemeral, delegate: NoRedirectURLSessionDelegate(), delegateQueue: nil)
+            let ephemeral = URLSession(
+                configuration: Self.urlSessionConfiguration(for: baseURL),
+                delegate: NoRedirectURLSessionDelegate(),
+                delegateQueue: nil
+            )
             defer { ephemeral.finishTasksAndInvalidate() }
             (data, response) = try await ephemeral.data(for: request)
         }
