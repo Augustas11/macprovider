@@ -2284,7 +2284,6 @@
       "implementation": [
         "phase4-coordinator/internal/referralapi/xapi.go:parseJoinBaseURL",
         "phase4-coordinator/internal/referralapi/validate.go:ValidationHandler",
-        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:localStatusCapabilities",
         "phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift:hasTrustedReferralBoundary"
       ],
       "tests": [
@@ -6332,60 +6331,88 @@
       "requirement_id": "SPEC-044-R001",
       "spec_id": "SPEC-044",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:localStatusCapabilities",
+        "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsBuilder",
+        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsCatalogEconomicsCommand",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:catalogEconomics"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testLocalOnlyCandidateEncodesExplicitNullMoneyFields",
+        "phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift::testModelsCatalogEconomicsRequiresJSON",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderStatusTests.swift::testStatusResponsePublishesVersionedLocalCapabilityContract",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCapabilityManifestRequiresRecommendationAndAdoptionContracts"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "CLI-owned economics projection is not implemented yet; Malibu must continue using the existing static model-management fallback until a signed compatible CLI projection lands."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1257",
+        "rationale": "Slice #1256 adds the CLI-owned projection command and capability advertisement, but SPEC-044 remains pending until Malibu consumes the signed compatible projection in-product and release evidence exists."
       }
     },
     {
       "requirement_id": "SPEC-044-R002",
       "spec_id": "SPEC-044",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsWire",
+        "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsBuilder",
+        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsCatalogEconomicsCommand"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testLocalOnlyCandidateEncodesExplicitNullMoneyFields",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testCatalogPricedFreshSignedRateCardPermitsEconomicsWithoutSettlement",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testSettlementCapableRequiresCoordinatorSettlementState"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "The versioned catalog economics projection, closed row schema, forced model-action and long-evaluation confirmation, action descriptors, and transaction-event stream have not been implemented or decoded by Malibu yet."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1257",
+        "rationale": "Slice #1256 defines and tests the JSON projection schema with fail-closed action descriptors, but forced model-action confirmation, long-evaluation transaction events, and Malibu decoding remain pending."
       }
     },
     {
       "requirement_id": "SPEC-044-R003",
       "spec_id": "SPEC-044",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsBuilder"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testFallbackAndStaleRateCardsKeepMoneyFieldsNull",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testFeedIntegrityWarningsBlockEconomicsEvenWithCoordinatorPricing"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Signed-feed trust, stale/fallback priority, invalid max-age handling, and money-action disablement are not yet projected through the new Malibu contract."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1257",
+        "rationale": "Slice #1256 projects signed/fallback/stale/integrity states conservatively from the CLI, but Malibu rendering, transaction disabling, and release evidence remain pending."
       }
     },
     {
       "requirement_id": "SPEC-044-R004",
       "spec_id": "SPEC-044",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsBuilder"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testLocalOnlyCandidateEncodesExplicitNullMoneyFields",
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testCatalogPricedFreshSignedRateCardPermitsEconomicsWithoutSettlement"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Provider-safe rate display and forbidden earnings-claim copy checks are not implemented for the new model catalog view."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1257",
+        "rationale": "Slice #1256 keeps unsafe money fields null and separates catalog_priced from settlement_capable in the CLI projection, but provider-facing Malibu copy, localization, and forbidden earnings-claim checks remain pending."
       }
     },
     {
@@ -6407,15 +6434,20 @@
       "requirement_id": "SPEC-044-R006",
       "spec_id": "SPEC-044",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsWire",
+        "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsBuilder"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testLocalOnlyCandidateEncodesExplicitNullMoneyFields"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Immediate/deferred switch gating, null action-model non-actionability, and per-action unavailable reasons are not wired through the CLI/Malibu transaction path."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1257",
+        "rationale": "Slice #1256 emits explicit unavailable action descriptors with null transaction fields, but CLI/Malibu transaction execution, confirmation, and refresh handling remain pending."
       }
     },
     {
@@ -6467,15 +6499,20 @@
       "requirement_id": "SPEC-044-R010",
       "spec_id": "SPEC-044",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelCatalogEconomics.swift:struct ModelCatalogEconomicsWire",
+        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsCatalogEconomicsCommand"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testLocalOnlyCandidateEncodesExplicitNullMoneyFields"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "The new projection privacy boundary and diagnostics redaction behavior have not been implemented or tested."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1257",
+        "rationale": "Slice #1256 limits the projection to feed digests, candidate identifiers, and coordinator admission status, but full diagnostics redaction and Malibu privacy treatment remain pending."
       }
     },
     {
