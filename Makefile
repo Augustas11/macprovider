@@ -54,6 +54,7 @@ test-integration:
 # false-failing the gate (the 2026-06-17 regression that forced SKIP_C2_CHECK=1).
 test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_upstream_watch
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_contract_lock
 	node --test phase3-binary/app/Tests/MalibuTests/payout-signer-chain.test.mjs
 	bash scripts/test-production-exceptions.sh
 	bash scripts/test-coordinator-advertised-version-test.sh

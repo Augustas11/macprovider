@@ -39,7 +39,7 @@ jobs:
       - name: Verify specs/ root is canonical-only (no re-accumulated clutter)
         run: python3 scripts/gen_spec_index.py --lint
       - name: Prove governance validator rejects seeded drift
-        run: python3 -m unittest -v scripts.tests.test_spec_governance scripts.tests.test_spec_pr_declaration scripts.tests.test_buyer_paid_path_journey_result scripts.tests.test_local_consumer_endpoint_evidence_capture scripts.tests.test_local_consumer_endpoint_journey_result
+        run: python3 -m unittest -v scripts.tests.test_spec_governance scripts.tests.test_spec_pr_declaration scripts.tests.test_byom_contract_lock scripts.tests.test_buyer_paid_path_journey_result scripts.tests.test_local_consumer_endpoint_evidence_capture scripts.tests.test_local_consumer_endpoint_journey_result
       - name: Require explicit behavior-change declaration
         if: github.event_name == 'pull_request'
         run: python3 scripts/check_spec_pr_declaration.py --event "$GITHUB_EVENT_PATH" --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}"
