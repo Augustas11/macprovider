@@ -1,0 +1,72 @@
+name: Discovery head freshness alarm
+
+# Read-only backstop for the signed release-discovery self-heal rail. The renewal
+# workflow (renew-release-discovery-head.yml) auto-dispatches weekly at 168h
+# validity but still waits on the production-release approval; if that approval is
+# skipped/late, this alarm fails (and notifies) BEFORE the head lapses fleet-wide.
+# No secrets, no production-release environment, no signing — it only reads the
+# latest head's self-asserted expiry.
+
+on:
+  schedule:
+    # Every 6 hours: far more often than the weekly renewal, so a stale head is
+    # caught with well over a day of runway (alarm threshold is 48h).
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      min_hours:
+        description: "Alarm if the head expires within this many hours (default 48)"
+        required: false
+        default: "48"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discovery-head-freshness-alarm
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Alarm on a stale self-heal discovery head
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout freshness check
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve latest signed discovery head and check freshness
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MIN_HOURS: ${{ github.event.inputs.min_hours || '48' }}
+        run: |
+          set -euo pipefail
+          # Mirror EXACTLY what the client sees, not what exists. The client
+          # (SelfUpdate.swift releaseDiscoveryPageSize=20) fetches only the 20
+          # most-recent releases and picks the highest-sequence
+          # release-discovery-v1-<seq> transport among them, with the strict
+          # grammar [1-9][0-9]* (SignedReleaseDiscovery.swift / the verifier at
+          # scripts/verify-release-discovery-transport.py). If 20 newer non-transport
+          # releases push every transport out of that window, the client sees NO
+          # head and the rail is down — so this alarm must use the SAME 20-release
+          # window and grammar, and alarm when no client-visible transport exists.
+          latest_tag="$(
+            gh release list --repo "$GITHUB_REPOSITORY" --limit 20 \
+              --json tagName --jq '.[].tagName' \
+            | grep -E '^release-discovery-v1-[1-9][0-9]*$' \
+            | sort -t- -k4,4n \
+            | tail -1
+          )"
+          if [ -z "${latest_tag:-}" ]; then
+            echo "::error::no client-visible release-discovery-v1-* transport in the 20 most-recent releases — the self-heal rail is DOWN for clients; renew now." >&2
+            exit 1
+          fi
+          echo "latest client-visible transport: $latest_tag"
+          gh release download "$latest_tag" --repo "$GITHUB_REPOSITORY" \
+            --pattern macprovider-release-discovery.json --output - \
+          | python3 scripts/check-discovery-head-freshness.py --min-hours "$MIN_HOURS"

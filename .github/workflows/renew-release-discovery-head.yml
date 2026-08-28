@@ -9,10 +9,17 @@ on:
   workflow_dispatch:
     inputs:
       validity_hours:
-        description: "Signed-head validity window in hours (1-168; default 24)"
+        description: "Signed-head validity window in hours (1-168; default 168)"
         required: false
-        default: "24"
+        default: "168"
         type: string
+  schedule:
+    # Weekly auto-dispatch, well inside the 168h (7-day) validity window, so the
+    # signed self-heal head never lapses because an operator forgot to dispatch.
+    # The run still enters the production-release environment and waits for the
+    # antfleet-ops approval; the read-only discovery-head freshness alarm
+    # (discovery-head-freshness-alarm.yml) backstops a skipped/late approval.
+    - cron: "0 16 * * 1"
 
 permissions:
   contents: read
@@ -66,7 +73,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          VALIDITY_HOURS_INPUT: ${{ github.event.inputs.validity_hours || '24' }}
+          VALIDITY_HOURS_INPUT: ${{ github.event.inputs.validity_hours || '168' }}
         run: |
           set -euo pipefail
           work="$RUNNER_TEMP/renew-discovery"
