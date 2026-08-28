@@ -13,6 +13,7 @@ struct ModelsCommand: AsyncParsableCommand {
             ModelsEvaluateCommand.self,
             ModelsOfferCommand.self,
             ModelsAdmissionCommand.self,
+            ModelsCatalogEconomicsCommand.self,
             ModelsSwitchCommand.self,
             ModelsStatusCommand.self,
             ModelsBrowseCommand.self,
@@ -337,6 +338,126 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
             writeStderr(error.description)
             throw ExitCode(2)
         }
+    }
+}
+
+struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "catalog-economics",
+        abstract: "Project BYOM catalog economics with fail-closed admission gates."
+    )
+
+    @Flag(name: .customLong("json"), help: "Emit the strict model_catalog_economics.v1 JSON contract.")
+    var emitJSON = false
+
+    @Flag(help: "Do not read coordinator admission status; emit local/default admission gates only.")
+    var skipCoordinatorStatus = false
+
+    @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
+    var config: String?
+
+    @Option(help: "HuggingFace model identifier or local model path. Overrides MACPROVIDER_MODEL and config file model.")
+    var model: String?
+
+    @Option(help: "Comma-separated list of HuggingFace model IDs (or local paths). Overrides MACPROVIDER_SUPPORTED_MODELS and config supported_models.")
+    var supportedModels: String?
+
+    @Option(help: "Control socket path override. Overrides MACPROVIDER_CTL_SOCKET_PATH and config ctl_socket_path. Default $TMPDIR/macprovider-cli/ctl.sock.")
+    var ctlSocketPath: String?
+
+    @Option(help: "Coordinator WebSocket/HTTPS URL. Overrides MACPROVIDER_COORDINATOR_URL and config file coordinator_url.")
+    var coordinatorURL: String?
+
+    @Option(help: "Stable provider identifier. Overrides MACPROVIDER_PROVIDER_ID and config file provider_id.")
+    var providerID: String?
+
+    @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
+    var localDiscoveryNamespacePath: String?
+
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    var mlxCacheDir: String?
+
+    @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var ollamaOrigin: String = "http://127.0.0.1:11434"
+
+    @Flag(help: "Skip the Ollama-compatible loopback adapter during candidate lookup.")
+    var skipOllama = false
+
+    func run() async throws {
+        guard emitJSON else {
+            writeStderr("models catalog-economics is JSON-only in this release; pass --json")
+            throw ExitCode(2)
+        }
+
+        let modelsConfig = try? loadModelsConfig(
+            config: config,
+            model: model,
+            supportedModels: supportedModels,
+            ctlSocketPath: ctlSocketPath
+        )
+        let currentModelID = await readCurrentModelID(config: modelsConfig)
+        let environment = BYOMDiscoveryEnvironment.production(
+            namespacePath: localDiscoveryNamespacePath,
+            mlxCacheDir: mlxCacheDir,
+            ollamaOrigin: skipOllama ? nil : ollamaOrigin
+        )
+        let discovery = await BYOMDiscoveryRunner(environment: environment).discover()
+        let inputs = await AutotuneStaticInputs().loadRecommendationInputs()
+        let admissions = await readAdmissionStatuses(
+            discovery: discovery
+        )
+        let document = ModelCatalogEconomicsBuilder.makeProjection(
+            currentModelID: currentModelID,
+            discovery: discovery,
+            admissionStatuses: admissions,
+            demand: inputs.demand,
+            candidateCatalog: inputs.candidate,
+            rateCard: inputs.rateCard
+        )
+        for warning in document.warnings.sorted() {
+            writeStderr("models catalog-economics warning: \(warning)")
+        }
+        try ModelSwitchingWireCodec.printJSON(document)
+    }
+
+    private func readCurrentModelID(config: AppConfig?) async -> String? {
+        guard let config else { return nil }
+        let socketPath = ControlSocketPaths.resolve(ctlSocketPath: config.ctlSocketPath)
+        guard let (connection, status) = try? await connectAndReadStatus(socketPath: socketPath) else {
+            return nil
+        }
+        await connection.close()
+        return status.currentModelID
+    }
+
+    private func readAdmissionStatuses(
+        discovery: BYOMDiscoveryWire
+    ) async -> [String: BYOMAdmissionStatusWire] {
+        guard !skipCoordinatorStatus,
+              let resolved = try? loadModelAdmissionConfig(
+                  config: config,
+                  coordinatorURL: coordinatorURL,
+                  providerID: providerID
+              ),
+              let client = try? BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
+        else {
+            return [:]
+        }
+        guard let bearer = try? KeychainProviderCredentialStore().load(providerID: resolved.providerID) else {
+            return [:]
+        }
+        var statuses: [String: BYOMAdmissionStatusWire] = [:]
+        for candidate in discovery.candidates {
+            guard let status = try? await client.status(
+                candidateID: candidate.candidateID,
+                providerID: resolved.providerID,
+                bearerToken: bearer
+            ) else {
+                continue
+            }
+            statuses[candidate.candidateID] = status
+        }
+        return statuses
     }
 }
 

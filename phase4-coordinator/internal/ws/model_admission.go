@@ -269,7 +269,7 @@ func (s *memoryModelAdmissionStore) LatestModelAdmissionStatus(_ context.Context
 func (s *memoryModelAdmissionStore) LatestModelAdmissionRouteStatus(_ context.Context, providerID, servedModelRef, catalogModelKey string) (ModelAdmissionEvent, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return latestModelAdmissionRouteStatusFromEvents(s.latest, providerID, servedModelRef, catalogModelKey)
+	return latestModelAdmissionRouteStatusFromEvents(s.events, providerID, servedModelRef, catalogModelKey)
 }
 
 type SQLiteModelAdmissionStore struct {
@@ -692,20 +692,20 @@ func (s *SQLiteModelAdmissionStore) LatestModelAdmissionRouteStatus(ctx context.
  LIMIT 1`), providerID, servedModelRef, catalogModelKey)
 }
 
-func latestModelAdmissionRouteStatusFromEvents(events map[string]ModelAdmissionEvent, providerID, servedModelRef, catalogModelKey string) (ModelAdmissionEvent, bool, error) {
+// latestModelAdmissionRouteStatusFromEvents mirrors the SQLite store's
+// `ORDER BY id DESC LIMIT 1` route-status semantics: it walks the append-ordered
+// event log from newest to oldest and returns the LAST-APPENDED event matching
+// the filter — not the greatest CreatedAt. This keeps memory/SQLite parity so a
+// backdated demotion or withdrawal appended after a settlement_capable event is
+// still treated as the latest route status in both stores (money-path
+// regressions in buyer tests, which use the memory store, cannot hide behind a
+// CreatedAt tie-break).
+func latestModelAdmissionRouteStatusFromEvents(events []ModelAdmissionEvent, providerID, servedModelRef, catalogModelKey string) (ModelAdmissionEvent, bool, error) {
 	servedModelRef = strings.TrimSpace(servedModelRef)
 	catalogModelKey = strings.ToLower(strings.TrimSpace(catalogModelKey))
-	var latest ModelAdmissionEvent
-	var found bool
-	for _, event := range events {
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
 		if event.ProviderID != providerID {
-			continue
-		}
-		if servedModelRef == "" && catalogModelKey == "" {
-			if !found || event.CreatedAt.After(latest.CreatedAt) {
-				latest = event
-				found = true
-			}
 			continue
 		}
 		if servedModelRef != "" && event.ServedModelRef != servedModelRef {
@@ -714,12 +714,9 @@ func latestModelAdmissionRouteStatusFromEvents(events map[string]ModelAdmissionE
 		if catalogModelKey != "" && strings.ToLower(strings.TrimSpace(event.CatalogModelKey)) != catalogModelKey {
 			continue
 		}
-		if !found || event.CreatedAt.After(latest.CreatedAt) {
-			latest = event
-			found = true
-		}
+		return event, true, nil
 	}
-	return latest, found, nil
+	return ModelAdmissionEvent{}, false, nil
 }
 
 type modelAdmissionQueryer interface {

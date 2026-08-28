@@ -1893,6 +1893,55 @@ func TestPoolCheckReportsExactCatalogAdmissionAndServingEligibility(t *testing.T
 	}
 }
 
+func TestPoolCheckReadinessAppliesBYOMSettlementGate(t *testing.T) {
+	// A marked BYOM provider that is serving-capable but NOT settlement_capable
+	// must report buyer_serving=false through the readiness path, matching the
+	// main routing paths. Regression: providerBuyerServing previously skipped the
+	// BYOM settlement gate, so /v1/pool/check?details=readiness could publish a
+	// paid-serving readiness claim (network_state="buyer_serving") pre-settlement.
+	registry := pool.NewRegistry(nil)
+	now := time.Now().UTC()
+	p := byomAdmissionProvider(t, pool.Provider{
+		ProviderID:       "byom-readiness",
+		AssignedID:       "session-1",
+		Hostname:         "byom-readiness.local",
+		ModelID:          "model-a",
+		MaxContextTokens: 20000,
+		MaxConcurrency:   1,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		Tier:             pool.TierPinned,
+		InferencePath:    pool.InferencePathHTTPForwarding,
+		State:            pool.StateReady,
+		LastHeartbeatAt:  now,
+		LastActivityAt:   now,
+		ConnectedAt:      now,
+	})
+	registry.Register(&p, nil)
+	store := providerws.NewMemoryModelAdmissionStore()
+	seedBYOMAdmissionState(t, store, p, "offer_submitted") // non-settlement
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithModelAdmissionStore(store),
+	)
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=byom-readiness&assigned_id=session-1&details=readiness", nil)
+	req.RemoteAddr = "198.51.100.1:12345"
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["buyer_serving"] != false {
+		t.Fatalf("non-settlement BYOM must not be buyer_serving via readiness: %+v", response)
+	}
+}
+
 func TestPoolCheckReadinessEvidenceIsPublicAndLegacyIsNotBuyerServing(t *testing.T) {
 	for _, tc := range []struct {
 		name          string

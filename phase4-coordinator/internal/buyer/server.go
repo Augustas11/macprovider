@@ -1506,7 +1506,13 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) providerBuyerServing(p pool.Provider) bool {
-	return p.ServingCapable() && !s.tier2ProviderExcluded(p) && s.checkQuota(p)
+	// The BYOM settlement gate must apply here too: readiness/deployment
+	// surfaces (/v1/pool/check) publish buyer_serving from this helper, and the
+	// provider CLI turns that into a "buyer_serving" network-state claim. Without
+	// this gate a non-settlement BYOM provider (catalog_priced, offer_submitted,
+	// withdrawn, revoked, ...) would advertise paid-serving readiness before it is
+	// settlement_capable, diverging from the main routing paths that all apply it.
+	return p.ServingCapable() && !s.tier2ProviderExcluded(p) && s.checkQuota(p) && s.byomDefaultPaidRoutingEligible(p)
 }
 
 func (s *Server) handleReceiptKeys(w http.ResponseWriter, r *http.Request) {

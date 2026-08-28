@@ -882,7 +882,10 @@ func modelAdmissionDecisionLifecycle(t *testing.T, store providerws.ModelAdmissi
 	if err != nil {
 		t.Fatalf("append offer: %v", err)
 	}
-	catalogPriced := submitted
+	// catalog_priced and settlement_capable require trusted catalog authority
+	// evidence (SPEC-047-R003 / slice-7); attach it so the coordinator admits the
+	// decision.
+	catalogPriced := withTrustedCatalogDecisionFields(submitted)
 	catalogPriced.State = "catalog_priced"
 	catalogPriced.ReasonCode = ""
 	catalogPriced.RequestID = "request_catalog_" + tag
@@ -975,7 +978,7 @@ func TestModelAdmissionKeylessDecisionReplayIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("append offer: %v", err)
 	}
-	catalogPriced := submitted
+	catalogPriced := withTrustedCatalogDecisionFields(submitted)
 	catalogPriced.State = "catalog_priced"
 	catalogPriced.ReasonCode = ""
 	catalogPriced.RequestID = ""
@@ -1153,6 +1156,54 @@ func TestModelAdmissionRuntimeDriftRevocationRequiresSettlementState(t *testing.
 	if !drift || revocation.State != "revoked" {
 		t.Fatalf("settlement_capable drift must revoke: drift=%v state=%q", drift, revocation.State)
 	}
+}
+
+// Memory and SQLite stores must agree on "latest" route status by APPEND ORDER,
+// not CreatedAt: a demotion/withdrawal appended after settlement_capable but
+// carrying an earlier CreatedAt must still be reported as latest by both stores.
+// Buyer money-path routing uses the memory store, so a CreatedAt tie-break there
+// could hide a demotion that SQLite (ORDER BY id DESC) correctly surfaces.
+func TestModelAdmissionRouteStatusUsesAppendOrderAcrossStores(t *testing.T) {
+	run := func(t *testing.T, store providerws.ModelAdmissionStore) {
+		cat, _ := modelAdmissionDecisionLifecycle(t, store, "aop")
+		// settlement_capable was appended at CreatedAt 1800000040. Append a
+		// BACKDATED withdrawal (earlier CreatedAt) for the same served ref.
+		withdrawal := providerws.ModelAdmissionEvent{
+			ProviderID:            cat.ProviderID,
+			CandidateID:           cat.CandidateID,
+			ServedModelRef:        cat.ServedModelRef,
+			State:                 "withdrawn",
+			ReasonCode:            "provider_requested",
+			RequestID:             "wd-aop",
+			Nonce:                 "wd-nonce-aop",
+			PayloadDigestSHA256:   stringsOf("9", 64),
+			SignatureDigestSHA256: stringsOf("8", 64),
+			CreatedAt:             time.Unix(1800000000, 0).UTC(),
+		}
+		if _, _, err := store.AppendModelAdmissionWithdrawal(context.Background(), withdrawal); err != nil {
+			t.Fatalf("append backdated withdrawal: %v", err)
+		}
+		got, found, err := store.LatestModelAdmissionRouteStatus(context.Background(), cat.ProviderID, cat.ServedModelRef, "")
+		if err != nil || !found {
+			t.Fatalf("route status found=%v err=%v", found, err)
+		}
+		if got.State != "withdrawn" {
+			t.Fatalf("latest route status must be the last-appended event (withdrawn), got %q", got.State)
+		}
+	}
+	t.Run("memory", func(t *testing.T) { run(t, providerws.NewMemoryModelAdmissionStore()) })
+	t.Run("sqlite", func(t *testing.T) {
+		db, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		store, err := providerws.NewSQLiteModelAdmissionStore(db.DB())
+		if err != nil {
+			t.Fatal(err)
+		}
+		run(t, store)
+	})
 }
 
 func TestSQLiteModelAdmissionStorePersistsRouteStatusLookup(t *testing.T) {
