@@ -12,6 +12,7 @@ struct ModelsCommand: AsyncParsableCommand {
             ModelsDiscoverCommand.self,
             ModelsEvaluateCommand.self,
             ModelsOfferCommand.self,
+            ModelsAdmissionCommand.self,
             ModelsSwitchCommand.self,
             ModelsStatusCommand.self,
             ModelsBrowseCommand.self,
@@ -104,7 +105,7 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
 struct ModelsOfferCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "offer",
-        abstract: "Dry-run a provider-local BYOM admission offer."
+        abstract: "Dry-run or submit a provider-local BYOM admission offer."
     )
 
     @Argument(help: "Candidate id, served model reference, or display name from models discover --json.")
@@ -115,6 +116,24 @@ struct ModelsOfferCommand: AsyncParsableCommand {
 
     @Flag(name: .customLong("json"), help: "Emit the strict model_admission_offer_dry_run.v1 JSON contract.")
     var emitJSON = false
+
+    @Flag(help: "Confirm coordinator state mutation for a non-earning BYOM offer submission.")
+    var yes = false
+
+    @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
+    var config: String?
+
+    @Option(help: "Coordinator WebSocket/HTTPS URL. Overrides MACPROVIDER_COORDINATOR_URL and config file coordinator_url.")
+    var coordinatorURL: String?
+
+    @Option(help: "Stable provider identifier. Overrides MACPROVIDER_PROVIDER_ID and config file provider_id.")
+    var providerID: String?
+
+    @Option(help: "Optional 64-character lowercase SHA-256 digest of a local evaluation document.")
+    var evaluationDigestSHA256: String?
+
+    @Option(help: "Requested non-earning disclosure class for coordinator admission.")
+    var requestedDisclosureClass: String = "non_earning_provider_asserted"
 
     @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
     var localDiscoveryNamespacePath: String?
@@ -129,8 +148,12 @@ struct ModelsOfferCommand: AsyncParsableCommand {
     var skipOllama = false
 
     func run() async throws {
-        guard dryRun, emitJSON else {
-            writeStderr("models offer is dry-run JSON-only in this release; pass --dry-run --json")
+        guard emitJSON else {
+            if dryRun {
+                writeStderr("models offer is dry-run JSON-only in this release; pass --json")
+            } else {
+                writeStderr("models offer submission is JSON-only in this release; pass --json")
+            }
             throw ExitCode(2)
         }
         let environment = BYOMDiscoveryEnvironment.production(
@@ -138,12 +161,129 @@ struct ModelsOfferCommand: AsyncParsableCommand {
             mlxCacheDir: mlxCacheDir,
             ollamaOrigin: skipOllama ? nil : ollamaOrigin
         )
-        let document = await BYOMOfferDryRunRunner(target: candidate, environment: environment).dryRun()
-        for warning in document.warnings.sorted() {
-            writeStderr("models offer warning: \(warning)")
+        if dryRun {
+            let document = await BYOMOfferDryRunRunner(target: candidate, environment: environment).dryRun()
+            for warning in document.warnings.sorted() {
+                writeStderr("models offer warning: \(warning)")
+            }
+            try ModelSwitchingWireCodec.printJSON(document)
+            return
         }
-        try ModelSwitchingWireCodec.printJSON(document)
+        guard yes else {
+            writeStderr("models offer submission mutates coordinator admission state; pass --yes --json after reviewing models offer --dry-run --json")
+            throw ExitCode(2)
+        }
+        do {
+            let resolved = try loadModelAdmissionConfig(
+                config: config,
+                coordinatorURL: coordinatorURL,
+                providerID: providerID
+            )
+            let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
+            let runtime = BYOMModelAdmissionRuntime(environment: environment, client: client)
+            let status = try await runtime.submitOffer(
+                providerID: resolved.providerID,
+                target: candidate,
+                evaluationDigestSHA256: evaluationDigestSHA256,
+                requestedDisclosureClass: requestedDisclosureClass
+            )
+            try ModelSwitchingWireCodec.printJSON(status)
+        } catch let error as BYOMModelAdmissionError {
+            writeStderr(error.description)
+            throw ExitCode(2)
+        }
     }
+}
+
+struct ModelsAdmissionCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "admission",
+        abstract: "Read BYOM model admission state.",
+        subcommands: [
+            ModelsAdmissionStatusCommand.self,
+        ]
+    )
+}
+
+struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "status",
+        abstract: "Read coordinator-backed BYOM admission status."
+    )
+
+    @Argument(help: "Candidate id, served model reference, or display name from models discover --json.")
+    var candidate: String
+
+    @Flag(name: .customLong("json"), help: "Emit the strict model_admission_status.v1 JSON contract.")
+    var emitJSON = false
+
+    @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
+    var config: String?
+
+    @Option(help: "Coordinator WebSocket/HTTPS URL. Overrides MACPROVIDER_COORDINATOR_URL and config file coordinator_url.")
+    var coordinatorURL: String?
+
+    @Option(help: "Stable provider identifier. Overrides MACPROVIDER_PROVIDER_ID and config file provider_id.")
+    var providerID: String?
+
+    @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
+    var localDiscoveryNamespacePath: String?
+
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    var mlxCacheDir: String?
+
+    @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var ollamaOrigin: String = "http://127.0.0.1:11434"
+
+    @Flag(help: "Skip the Ollama-compatible loopback adapter during candidate lookup.")
+    var skipOllama = false
+
+    func run() async throws {
+        guard emitJSON else {
+            writeStderr("models admission status is JSON-only in this release; pass --json")
+            throw ExitCode(2)
+        }
+        do {
+            let resolved = try loadModelAdmissionConfig(
+                config: config,
+                coordinatorURL: coordinatorURL,
+                providerID: providerID
+            )
+            let environment = BYOMDiscoveryEnvironment.production(
+                namespacePath: localDiscoveryNamespacePath,
+                mlxCacheDir: mlxCacheDir,
+                ollamaOrigin: skipOllama ? nil : ollamaOrigin
+            )
+            let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
+            let runtime = BYOMModelAdmissionRuntime(environment: environment, client: client)
+            let status = try await runtime.status(providerID: resolved.providerID, target: candidate)
+            try ModelSwitchingWireCodec.printJSON(status)
+        } catch let error as BYOMModelAdmissionError {
+            writeStderr(error.description)
+            throw ExitCode(2)
+        }
+    }
+}
+
+private func loadModelAdmissionConfig(
+    config: String?,
+    coordinatorURL: String?,
+    providerID: String?
+) throws -> (coordinatorURL: String, providerID: String) {
+    let resolved = try ConfigLoader.load(cli: CLIOverrides(
+        coordinatorURL: coordinatorURL,
+        providerID: providerID,
+        configPath: config
+    ))
+    guard let providerID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !providerID.isEmpty else {
+        throw BYOMModelAdmissionError.missingProviderID
+    }
+    guard let coordinatorURL = resolved.coordinatorURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !coordinatorURL.isEmpty else {
+        throw BYOMModelAdmissionError.missingCoordinatorURL
+    }
+    return (coordinatorURL, providerID)
 }
 
 struct ModelsListCommand: AsyncParsableCommand {

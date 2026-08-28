@@ -253,6 +253,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "admission storage: %v\n", err)
 		os.Exit(1)
 	}
+	byomOfferStore, err := providerws.NewSQLiteModelAdmissionStore(reqLogStore.DB())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "BYOM offer storage: %v\n", err)
+		os.Exit(1)
+	}
 	connectionEventStore, err := providerevents.Open(providerevents.DefaultDBPath(cfg.Storage.DBPath))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "provider connection events storage: %v\n", err)
@@ -531,6 +536,7 @@ func main() {
 	wsOpts = append(wsOpts, providerws.WithVersion(version))
 	wsOpts = append(wsOpts, providerws.WithReferralPolicy(referralPolicy))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
+	wsOpts = append(wsOpts, providerws.WithModelAdmissionStore(byomOfferStore))
 	wsOpts = append(wsOpts, providerws.WithConnectionEventStore(connectionEventStore))
 	wsOpts = append(wsOpts, providerws.WithConnectionEventMetrics(metricsHandle))
 	if canaryStore != nil {
