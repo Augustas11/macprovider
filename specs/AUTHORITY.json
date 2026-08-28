@@ -687,6 +687,7 @@
       "id": "provider-byom-discovery",
       "owner_spec": "SPEC-046",
       "consumers": [
+        "SPEC-044",
         "SPEC-047"
       ],
       "status": "declared",
@@ -698,7 +699,8 @@
       "id": "network-model-admission",
       "owner_spec": "SPEC-047",
       "consumers": [
-        "SPEC-044"
+        "SPEC-044",
+        "SPEC-046"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,

@@ -1399,7 +1399,8 @@
         "SPEC-023",
         "SPEC-032",
         "SPEC-033",
-        "SPEC-045"
+        "SPEC-045",
+        "SPEC-047"
       ],
       "implementation_status": "pending-reconciliation",
       "production_status": "not-deployed",

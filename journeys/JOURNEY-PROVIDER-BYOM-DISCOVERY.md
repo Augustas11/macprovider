@@ -55,6 +55,9 @@ The signed result MUST contain these passing steps:
    for secret, prompt, completion, endpoint credential, and local path redaction.
 9. `step-09-state-boundary` - Confirm the evaluated candidate remains
    non-routable and non-earning unless SPEC-047 admission state is present.
+10. `step-10-local-state-ladder` - Exercise `local_only`, `offerable`, and
+   local-default `not_offered` candidates and confirm the CLI reports the
+   provider-facing next action and local transition reason for each state.
 
 ## Required Evidence Contract
 
@@ -84,6 +87,7 @@ The redacted evidence and signed result MUST set these booleans to `true`:
 - `adapter_failure_warned`
 - `candidate_evaluated`
 - `loopback_runtime_discovered`
+- `local_state_ladder_verified`
 - `mlx_cache_discovered`
 - `non_loopback_rejected`
 - `opaque_endpoint_candidate_discovered`

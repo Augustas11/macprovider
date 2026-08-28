@@ -49,7 +49,8 @@ The signed result MUST contain these passing steps:
    through explicit experimental disclosure and confirm economics remain null.
 6. `step-06-catalog-matched-not-settlement` - Admit one catalog-matched
    candidate that may show trusted catalog economics but is not yet settlement
-   capable; confirm no positive provider settlement occurs.
+   capable; confirm no buyer-final debit, default buyer paid routing, settlement
+   ledger row, or positive provider settlement occurs.
 7. `step-07-revocation-on-drift` - Change or simulate a mismatched admitted
    predicate and confirm routing/settlement fail closed with revocation or
    demotion.
@@ -58,7 +59,17 @@ The signed result MUST contain these passing steps:
 9. `step-09-settlement-capable-case` - Promote one catalog-verified candidate
    to settlement-capable and verify route-time snapshot plus receipt
    verification requirements remain enforced.
-10. `step-10-redaction-review` - Review offer packages, coordinator events,
+10. `step-10-admission-status-presentation` - Run
+   `models admission status <candidate> --json` for catalog-matched and novel
+   non-catalog candidates and confirm status output includes provider-facing
+   state meaning, next action, and the distinction between "not earning-eligible
+   yet; catalog/receipt path exists" and "no earning path exists in this release".
+11. `step-11-transition-validity` - Attempt at least one invalid transition
+   outside the SPEC-047 matrix, one valid rejected-offer/re-offer path, one valid
+   withdrawal/re-offer path, and one valid revocation/re-offer path; confirm
+   invalid transitions are rejected and re-entry requires refreshed
+   provider-signed evidence.
+12. `step-12-redaction-review` - Review offer packages, coordinator events,
    status, logs, and evidence artifacts for secret, prompt, completion, path,
    and endpoint redaction.
 
@@ -91,12 +102,17 @@ The redacted evidence and signed result MUST set these booleans to `true`:
 - `default_buyer_invisibility_verified`
 - `dry_run_did_not_submit`
 - `network_visible_unpriced_disclosed`
+- `earning_path_disclosure_verified`
 - `provider_signature_verified`
 - `rejected_opaque_endpoint_verified`
 - `revocation_on_drift_verified`
 - `sandbox_probe_only_blocked_from_paid_routing`
 - `synthetic_probe_used_provider_channel`
 - `settlement_capable_case_verified`
+- `transition_matrix_enforced`
+- `rejected_reoffer_required_fresh_evidence`
+- `withdrawn_reoffer_required_fresh_evidence`
+- `revoked_reoffer_required_fresh_evidence`
 - `withdrawal_verified`
 
 They MUST set these booleans to `false`:
