@@ -1428,6 +1428,8 @@ struct BYOMWithdrawalBuilder {
 }
 
 struct BYOMModelAdmissionClient: Sendable {
+    private static let allowInsecureLoopbackCoordinatorEnvironmentKey =
+        "MACPROVIDER_BYOM_ALLOW_INSECURE_LOOPBACK_COORDINATOR"
     private static let maxStatusResponseBytes = 64 * 1024
 
     let baseURL: URL
@@ -1447,6 +1449,18 @@ struct BYOMModelAdmissionClient: Sendable {
     }
 
     static func httpBaseURL(from coordinatorURL: String?) -> URL? {
+        httpBaseURL(
+            from: coordinatorURL,
+            allowInsecureLoopbackHTTP: ProcessInfo.processInfo.environment[
+                allowInsecureLoopbackCoordinatorEnvironmentKey
+            ] == "1"
+        )
+    }
+
+    static func httpBaseURL(
+        from coordinatorURL: String?,
+        allowInsecureLoopbackHTTP: Bool
+    ) -> URL? {
         guard let coordinatorURL,
               var components = URLComponents(string: coordinatorURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             return nil
@@ -1461,6 +1475,12 @@ struct BYOMModelAdmissionClient: Sendable {
             components.scheme = "https"
         case "https":
             break
+        case "http":
+            guard allowInsecureLoopbackHTTP,
+                  let loopbackURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(coordinatorURL) else {
+                return nil
+            }
+            return loopbackURL
         default:
             return nil
         }
