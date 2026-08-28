@@ -181,7 +181,12 @@ struct ModelsOfferCommand: AsyncParsableCommand {
                 providerID: providerID
             )
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
-            let runtime = BYOMModelAdmissionRuntime(environment: environment, client: client)
+            let runtime = BYOMModelAdmissionRuntime(
+                environment: environment,
+                credentialStore: ProviderCredentialStoreFactory.providerStore(for: resolved.config),
+                identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
+                client: client
+            )
             let status = try await runtime.submitOffer(
                 providerID: resolved.providerID,
                 target: candidate,
@@ -257,7 +262,12 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin
             )
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
-            let runtime = BYOMModelAdmissionRuntime(environment: environment, client: client)
+            let runtime = BYOMModelAdmissionRuntime(
+                environment: environment,
+                credentialStore: ProviderCredentialStoreFactory.providerStore(for: resolved.config),
+                identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
+                client: client
+            )
             let status = try await runtime.status(providerID: resolved.providerID, target: candidate)
             try ModelSwitchingWireCodec.printJSON(status)
         } catch let error as BYOMModelAdmissionError {
@@ -327,7 +337,12 @@ struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
                 ollamaOrigin: skipOllama ? nil : ollamaOrigin
             )
             let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
-            let runtime = BYOMModelAdmissionRuntime(environment: environment, client: client)
+            let runtime = BYOMModelAdmissionRuntime(
+                environment: environment,
+                credentialStore: ProviderCredentialStoreFactory.providerStore(for: resolved.config),
+                identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
+                client: client
+            )
             let withdrawal = try await runtime.withdraw(
                 providerID: resolved.providerID,
                 target: candidate,
@@ -434,16 +449,14 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
         discovery: BYOMDiscoveryWire
     ) async -> [String: BYOMAdmissionStatusWire] {
         guard !skipCoordinatorStatus,
-              let resolved = try? loadModelAdmissionConfig(
-                  config: config,
-                  coordinatorURL: coordinatorURL,
-                  providerID: providerID
-              ),
+              let resolved = try? loadModelAdmissionRuntimeConfig(),
               let client = try? BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
         else {
             return [:]
         }
-        guard let bearer = try? KeychainProviderCredentialStore().load(providerID: resolved.providerID) else {
+        guard let bearer = try? ProviderCredentialStoreFactory
+            .providerStore(for: resolved.config)
+            .load(providerID: resolved.providerID) else {
             return [:]
         }
         var statuses: [String: BYOMAdmissionStatusWire] = [:]
@@ -459,14 +472,37 @@ struct ModelsCatalogEconomicsCommand: AsyncParsableCommand {
         }
         return statuses
     }
+
+    private func loadModelAdmissionRuntimeConfig() throws -> (
+        config: AppConfig,
+        coordinatorURL: String,
+        providerID: String
+    ) {
+        var resolved = try ConfigLoader.load(cli: CLIOverrides(
+            coordinatorURL: coordinatorURL,
+            providerID: providerID,
+            configPath: config
+        ))
+        guard let providerID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !providerID.isEmpty else {
+            throw BYOMModelAdmissionError.missingProviderID
+        }
+        guard let coordinatorURL = resolved.coordinatorURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !coordinatorURL.isEmpty else {
+            throw BYOMModelAdmissionError.missingCoordinatorURL
+        }
+        resolved.providerID = providerID
+        resolved.coordinatorURL = coordinatorURL
+        return (resolved, coordinatorURL, providerID)
+    }
 }
 
 private func loadModelAdmissionConfig(
     config: String?,
     coordinatorURL: String?,
     providerID: String?
-) throws -> (coordinatorURL: String, providerID: String) {
-    let resolved = try ConfigLoader.load(cli: CLIOverrides(
+) throws -> (config: AppConfig, coordinatorURL: String, providerID: String) {
+    var resolved = try ConfigLoader.load(cli: CLIOverrides(
         coordinatorURL: coordinatorURL,
         providerID: providerID,
         configPath: config
@@ -479,7 +515,9 @@ private func loadModelAdmissionConfig(
           !coordinatorURL.isEmpty else {
         throw BYOMModelAdmissionError.missingCoordinatorURL
     }
-    return (coordinatorURL, providerID)
+    resolved.providerID = providerID
+    resolved.coordinatorURL = coordinatorURL
+    return (resolved, coordinatorURL, providerID)
 }
 
 struct ModelsListCommand: AsyncParsableCommand {
