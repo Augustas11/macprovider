@@ -18,6 +18,11 @@ enum BYOMDiscoveryWarning: String, Codable, Sendable {
     case namespacePermissionInvalid = "namespace_permission_invalid"
 }
 
+enum BYOMDiscoveryNamespaceMode: Sendable {
+    case readOrCreate
+    case readOnly
+}
+
 struct BYOMDiscoveryWire: Codable, Equatable, Sendable {
     struct Adapter: Codable, Equatable, Sendable {
         let runtimeSource: String
@@ -546,6 +551,87 @@ struct BYOMEvaluationWire: Codable, Equatable, Sendable {
     }
 }
 
+struct BYOMOfferDryRunWire: Codable, Equatable, Sendable {
+    let schema: String
+    let generatedAt: String
+    let cliVersion: String
+    let candidateID: String
+    let servedModelRef: String
+    let catalogModelKey: String?
+    let wouldSubmit: Bool
+    let likelyAdmissionState: String
+    let likelyAdmissionStateSource: String
+    let providerGuidance: BYOMDiscoveryWire.Guidance
+    let reasonCode: String?
+    let warnings: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case generatedAt = "generated_at"
+        case cliVersion = "cli_version"
+        case candidateID = "candidate_id"
+        case servedModelRef = "served_model_ref"
+        case catalogModelKey = "catalog_model_key"
+        case wouldSubmit = "would_submit"
+        case likelyAdmissionState = "likely_admission_state"
+        case likelyAdmissionStateSource = "likely_admission_state_source"
+        case providerGuidance = "provider_guidance"
+        case reasonCode = "reason_code"
+        case warnings
+    }
+
+    init(
+        generatedAt: String = ModelSwitchingWireCodec.timestamp(),
+        cliVersion: String = CoordinatorClient.binaryVersion,
+        candidateID: String,
+        servedModelRef: String,
+        catalogModelKey: String?,
+        wouldSubmit: Bool,
+        likelyAdmissionState: String,
+        likelyAdmissionStateSource: String,
+        providerGuidance: BYOMDiscoveryWire.Guidance,
+        reasonCode: String?,
+        warnings: [String]
+    ) {
+        schema = "model_admission_offer_dry_run.v1"
+        self.generatedAt = generatedAt
+        self.cliVersion = cliVersion
+        self.candidateID = candidateID
+        self.servedModelRef = servedModelRef
+        self.catalogModelKey = catalogModelKey
+        self.wouldSubmit = wouldSubmit
+        self.likelyAdmissionState = likelyAdmissionState
+        self.likelyAdmissionStateSource = likelyAdmissionStateSource
+        self.providerGuidance = providerGuidance
+        self.reasonCode = reasonCode
+        self.warnings = warnings
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schema, forKey: .schema)
+        try container.encode(generatedAt, forKey: .generatedAt)
+        try container.encode(cliVersion, forKey: .cliVersion)
+        try container.encode(candidateID, forKey: .candidateID)
+        try container.encode(servedModelRef, forKey: .servedModelRef)
+        if let catalogModelKey {
+            try container.encode(catalogModelKey, forKey: .catalogModelKey)
+        } else {
+            try container.encodeNil(forKey: .catalogModelKey)
+        }
+        try container.encode(wouldSubmit, forKey: .wouldSubmit)
+        try container.encode(likelyAdmissionState, forKey: .likelyAdmissionState)
+        try container.encode(likelyAdmissionStateSource, forKey: .likelyAdmissionStateSource)
+        try container.encode(providerGuidance, forKey: .providerGuidance)
+        if let reasonCode {
+            try container.encode(reasonCode, forKey: .reasonCode)
+        } else {
+            try container.encodeNil(forKey: .reasonCode)
+        }
+        try container.encode(warnings, forKey: .warnings)
+    }
+}
+
 struct BYOMDiscoveryEnvironment: Sendable {
     let namespaceURL: URL
     let mlxCacheRoot: URL
@@ -697,20 +783,28 @@ struct BYOMDiscoveryRunner {
     private let environment: BYOMDiscoveryEnvironment
     private let fileManager: FileManager
     private let httpClient: any BYOMDiscoveryHTTPClient
+    private let namespaceMode: BYOMDiscoveryNamespaceMode
 
     init(
         environment: BYOMDiscoveryEnvironment,
         fileManager: FileManager = .default,
-        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()
+        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient(),
+        namespaceMode: BYOMDiscoveryNamespaceMode = .readOrCreate
     ) {
         self.environment = environment
         self.fileManager = fileManager
         self.httpClient = httpClient
+        self.namespaceMode = namespaceMode
     }
 
     func discover() async -> BYOMDiscoveryWire {
-        let namespace = BYOMDiscoveryNamespaceStore(fileManager: fileManager)
-            .readOrCreateNamespace(at: environment.namespaceURL)
+        let namespaceStore = BYOMDiscoveryNamespaceStore(fileManager: fileManager)
+        let namespace: BYOMDiscoveryNamespaceStore.Result = switch namespaceMode {
+        case .readOrCreate:
+            namespaceStore.readOrCreateNamespace(at: environment.namespaceURL)
+        case .readOnly:
+            namespaceStore.readNamespace(at: environment.namespaceURL)
+        }
         let catalog = BYOMCatalogMatcher()
         var adapters: [BYOMDiscoveryWire.Adapter] = []
         var candidates: [BYOMDiscoveryWire.Candidate] = []
@@ -1227,6 +1321,179 @@ struct BYOMEvaluationRunner: Sendable {
     }
 }
 
+struct BYOMOfferDryRunRunner: Sendable {
+    private let target: String
+    private let environment: BYOMDiscoveryEnvironment
+    private let httpClient: any BYOMDiscoveryHTTPClient
+
+    init(
+        target: String,
+        environment: BYOMDiscoveryEnvironment,
+        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()
+    ) {
+        self.target = target
+        self.environment = environment
+        self.httpClient = httpClient
+    }
+
+    func dryRun() async -> BYOMOfferDryRunWire {
+        let discovery = await BYOMDiscoveryRunner(
+            environment: environment,
+            httpClient: httpClient,
+            namespaceMode: .readOnly
+        ).discover()
+        guard let candidate = selectLocalOfferCandidate(from: discovery.candidates) else {
+            let reason = "candidate_not_found"
+            let warnings = discovery.warnings.sorted()
+            return BYOMOfferDryRunWire(
+                candidateID: "unknown",
+                servedModelRef: "unknown",
+                catalogModelKey: nil,
+                wouldSubmit: false,
+                likelyAdmissionState: "local_only",
+                likelyAdmissionStateSource: "local_default",
+                providerGuidance: dryRunGuidance(
+                    wouldSubmit: false,
+                    catalogModelKey: nil,
+                    reasonCode: reason,
+                    warnings: warnings
+                ),
+                reasonCode: reason,
+                warnings: warnings
+            )
+        }
+
+        let warnings = candidate.warningCodes.sorted()
+        let reason = reasonCode(for: candidate, warnings: Set(warnings))
+        let wouldSubmit = canSubmitLocalDryRun(candidate: candidate, reasonCode: reason)
+        return BYOMOfferDryRunWire(
+            candidateID: candidate.candidateID,
+            servedModelRef: candidate.servedModelRef,
+            catalogModelKey: candidate.catalogModelKey,
+            wouldSubmit: wouldSubmit,
+            likelyAdmissionState: localDefaultAdmissionState(candidate.admissionState),
+            likelyAdmissionStateSource: "local_default",
+            providerGuidance: dryRunGuidance(
+                wouldSubmit: wouldSubmit,
+                catalogModelKey: candidate.catalogModelKey,
+                reasonCode: reason,
+                warnings: warnings
+            ),
+            reasonCode: reason,
+            warnings: warnings
+        )
+    }
+
+    private func selectLocalOfferCandidate(from candidates: [BYOMDiscoveryWire.Candidate]) -> BYOMDiscoveryWire.Candidate? {
+        let normalizedTarget = BYOMCandidateIdentity.normalizedServedModelRef(target)
+        return candidates.first {
+            $0.candidateID == target
+                || BYOMCandidateIdentity.normalizedServedModelRef($0.servedModelRef) == normalizedTarget
+                || BYOMCandidateIdentity.normalizedServedModelRef($0.displayName) == normalizedTarget
+        }
+    }
+
+    private func canSubmitLocalDryRun(candidate: BYOMDiscoveryWire.Candidate, reasonCode: String?) -> Bool {
+        guard candidate.candidateID.hasPrefix("byom_"),
+              !candidate.candidateID.hasPrefix("byom_unstable_"),
+              candidate.admissionStateSource == "local_default",
+              candidate.admissionState == "offerable",
+              candidate.readinessState == "ready",
+              candidate.fitState != "does_not_fit" else {
+            return false
+        }
+        return !Set(candidate.warningCodes).contains(BYOMDiscoveryWarning.candidateIDUnstable.rawValue)
+            && !Set(candidate.warningCodes).contains(BYOMDiscoveryWarning.namespacePermissionInvalid.rawValue)
+            && reasonCode != BYOMDiscoveryWarning.evaluationRequired.rawValue
+            && reasonCode != BYOMDiscoveryWarning.requiresPreparation.rawValue
+    }
+
+    private func localDefaultAdmissionState(_ state: String) -> String {
+        switch state {
+        case "offerable", "not_offered":
+            return state
+        default:
+            return "local_only"
+        }
+    }
+
+    private func reasonCode(for candidate: BYOMDiscoveryWire.Candidate, warnings: Set<String>) -> String? {
+        let blockingReasons = [
+            BYOMDiscoveryWarning.candidateIDUnstable.rawValue,
+            BYOMDiscoveryWarning.namespacePermissionInvalid.rawValue,
+            BYOMDiscoveryWarning.adapterRejectedNonLoopback.rawValue,
+            BYOMDiscoveryWarning.adapterMalformedResponse.rawValue,
+            BYOMDiscoveryWarning.adapterResponseTruncated.rawValue,
+            BYOMDiscoveryWarning.requiresPreparation.rawValue,
+            BYOMDiscoveryWarning.evaluationRequired.rawValue,
+        ]
+        if let blocker = blockingReasons.first(where: warnings.contains) {
+            return blocker
+        }
+        if candidate.catalogModelKey == nil {
+            return "no_trusted_catalog_match"
+        }
+        if warnings.contains(BYOMDiscoveryWarning.catalogMatchUnverified.rawValue) {
+            return "catalog_binding_unverified"
+        }
+        if warnings.contains(BYOMDiscoveryWarning.evaluationRequired.rawValue) {
+            return BYOMDiscoveryWarning.evaluationRequired.rawValue
+        }
+        return nil
+    }
+
+    private func dryRunGuidance(
+        wouldSubmit: Bool,
+        catalogModelKey: String?,
+        reasonCode: String?,
+        warnings: [String]
+    ) -> BYOMDiscoveryWire.Guidance {
+        if wouldSubmit {
+            if catalogModelKey == nil {
+                return BYOMDiscoveryWire.Guidance(
+                    stateLabelKey: "byom.offer_dry_run.would_submit",
+                    stateMeaningKey: "byom.offer_dry_run.no_earning_path_v0_1",
+                    nextAction: "submit_offer",
+                    transitionReasonCode: reasonCode,
+                    earningPathClass: "no_earning_path_in_v0_1"
+                )
+            }
+            return BYOMDiscoveryWire.Guidance(
+                stateLabelKey: "byom.offer_dry_run.would_submit",
+                stateMeaningKey: "byom.offer_dry_run.catalog_path_missing_trusted_binding",
+                nextAction: "submit_offer",
+                transitionReasonCode: reasonCode,
+                earningPathClass: "not_earning_yet_catalog_or_receipt_path_exists"
+            )
+        }
+        if reasonCode == BYOMDiscoveryWarning.evaluationRequired.rawValue {
+            if catalogModelKey == nil {
+                return BYOMDiscoveryWire.Guidance(
+                    stateLabelKey: "byom.offer_dry_run.blocked",
+                    stateMeaningKey: "byom.offer_dry_run.no_earning_path_v0_1",
+                    nextAction: "evaluate",
+                    transitionReasonCode: reasonCode,
+                    earningPathClass: "no_earning_path_in_v0_1"
+                )
+            }
+            return BYOMDiscoveryWire.Guidance(
+                stateLabelKey: "byom.offer_dry_run.blocked",
+                stateMeaningKey: "byom.offer_dry_run.catalog_path_missing_trusted_binding",
+                nextAction: "evaluate",
+                transitionReasonCode: reasonCode,
+                earningPathClass: "not_earning_yet_catalog_or_receipt_path_exists"
+            )
+        }
+        return BYOMDiscoveryWire.Guidance(
+            stateLabelKey: "byom.offer_dry_run.blocked",
+            stateMeaningKey: "byom.offer_dry_run.not_submitted_not_earning",
+            nextAction: "fix_local_blocker",
+            transitionReasonCode: reasonCode ?? warnings.sorted().first,
+            earningPathClass: "local_inventory_only"
+        )
+    }
+}
+
 struct BYOMDiscoveryNamespaceStore {
     struct Result: Sendable {
         let bytes: Data?
@@ -1264,6 +1531,25 @@ struct BYOMDiscoveryNamespaceStore {
                 return Result(bytes: nil, warnings: [.candidateIDUnstable])
             }
             try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return Result(bytes: data, warnings: [])
+        } catch {
+            return Result(bytes: nil, warnings: [.candidateIDUnstable])
+        }
+    }
+
+    func readNamespace(at url: URL) -> Result {
+        do {
+            let parent = url.deletingLastPathComponent()
+            guard fileManager.fileExists(atPath: url.path) else {
+                return Result(bytes: nil, warnings: [.candidateIDUnstable])
+            }
+            guard namespaceDirectoryPermissionsArePrivate(parent), namespaceFilePermissionsArePrivate(url) else {
+                return Result(bytes: nil, warnings: [.namespacePermissionInvalid, .candidateIDUnstable])
+            }
+            let data = try Data(contentsOf: url)
+            guard data.count == 32 else {
+                return Result(bytes: nil, warnings: [.namespacePermissionInvalid, .candidateIDUnstable])
+            }
             return Result(bytes: data, warnings: [])
         } catch {
             return Result(bytes: nil, warnings: [.candidateIDUnstable])
