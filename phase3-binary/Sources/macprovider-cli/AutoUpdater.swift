@@ -27,6 +27,24 @@ private final class AutoUpdateCommitTracker {
     var committedSwap = false
 }
 
+/// Decision returned by the swap-boundary gate, evaluated inside the swap critical
+/// section (no await between it and `activateReleasePayload`). This is the SINGLE
+/// authoritative precedence/trust gate for the swap:
+/// - `.proceed`: swap (non-accepted signed rail — no gate);
+/// - `.ensureTrust`: run `ensureEligible(.swap)` then swap (primary rail — throws
+///   `AutoUpdateError.trustStateLost` on degradation, preserving its rollback path);
+/// - `.abort(reason:)`: do not swap; throw `AutoUpdateSwapPrecedenceAborted` so the
+///   caller records the reason (the accepted-session R005 rail: trust/precedence).
+enum AutoUpdateSwapBoundaryDecision: Sendable, Equatable {
+    case proceed
+    case ensureTrust
+    case abort(reason: String)
+}
+
+struct AutoUpdateSwapPrecedenceAborted: Error {
+    let reason: String
+}
+
 struct AutoUpdater: Sendable {
     typealias TrustProvider = @Sendable () async -> AutoUpdateTrustState
     typealias Drain = @Sendable (_ target: String) async throws -> Bool
@@ -101,34 +119,66 @@ struct AutoUpdater: Sendable {
         self.evictStaleLocalStatusOwner = evictStaleLocalStatusOwner
     }
 
-    func handleCoordinatorRecommendation(_ rawRecommended: String) async {
+    /// Lightweight outcome of a single coordinator-recommendation cycle, used by
+    /// the caller (CoordinatorClient) to drive SPEC-020-R005 accepted-session
+    /// recovery. The mapping to exit points is:
+    /// - `.notAttempted`: trust-skip, autoupdate-disabled, an invalid/unparseable
+    ///   recommended version, or `target_not_newer`. Not counted, not reset — the
+    ///   recommendation never engaged a real target and recorded no failure.
+    /// - `.missingTarget`: the coordinator advertised a `recommended_binary_version`
+    ///   with no installable compatibility-set target
+    ///   (`coordinator_compatibility_target_missing`).
+    /// - `.cooldownActive`: an active discovery/target cooldown skipped the attempt.
+    /// - `.forwardProgressFailure`: any `fail(...)` for a present target before the
+    ///   compatibility-target gate is cleared (target-revoked/below-minimum,
+    ///   topology/observer, release-not-found, prepare/download failure,
+    ///   compatibility-set mismatch).
+    /// - `.forwardProgress`: execution reached past the compatibility-target gate
+    ///   (a successful detect→prepare with a matching compatibility set), or the
+    ///   update succeeded. Later transient failures past the gate still count as
+    ///   forward progress because the stuck condition has been cleared.
+    enum RecommendationOutcome: Sendable, Equatable {
+        case notAttempted
+        case missingTarget
+        case cooldownActive
+        case forwardProgressFailure
+        case forwardProgress
+    }
+
+    @discardableResult
+    func handleCoordinatorRecommendation(_ rawRecommended: String) async -> RecommendationOutcome {
         let updateID = UUID().uuidString.lowercased()
         let entryTrust = await trustProvider()
         guard !SessionAutoupdateGate.shared.isDisabled else {
             await record(updateID: updateID, target: "<session-disabled>", phase: .eligibility, outcome: .skipped, reason: "signed_policy_persist_failed", attempt: 1)
-            return
+            return .notAttempted
         }
         guard entryTrust.isEligible else {
             await record(updateID: updateID, target: "<notify-only>", phase: .eligibility, outcome: .skipped, reason: entryTrust.lossReason, attempt: 1)
-            return
+            return .notAttempted
         }
         let validated: AutoUpdateRecommendation
         do {
             validated = try AutoUpdateRecommendation.validate(rawRecommended)
         } catch let AutoUpdateValidationError.versionTooLong(sha) {
             await record(updateID: updateID, target: "<redacted>", phase: .eligibility, outcome: .failure, reason: "version_too_long", attempt: 1, failure: .recommendedVersionInvalid, sha: sha)
-            return
+            return .notAttempted
         } catch AutoUpdateValidationError.componentTooLong {
             await record(updateID: updateID, target: "<invalid>", phase: .eligibility, outcome: .failure, reason: "version_component_too_long", attempt: 1, failure: .recommendedVersionInvalid)
-            return
+            return .notAttempted
         } catch {
             await record(updateID: updateID, target: "<invalid>", phase: .eligibility, outcome: .failure, reason: "recommended_version_invalid", attempt: 1, failure: .recommendedVersionInvalid)
-            return
+            return .notAttempted
         }
 
         let target = validated.normalized
         await record(updateID: updateID, target: target, phase: .detection, outcome: .inProgress, reason: "recommended_binary_version_detected", attempt: 1)
         let commitTracker = AutoUpdateCommitTracker()
+        // Set once execution clears the compatibility-target gate; from that point
+        // any later failure is still forward progress for R005 accounting because
+        // the stuck condition (cannot get an installable target past the gate) is
+        // resolved.
+        var forwardProgressReached = false
         var mutationLock: AutoUpdateLock?
         defer { withExtendedLifetime(mutationLock) {} }
         var maintenanceLease: ProviderLifecycleLeaseRecord?
@@ -141,31 +191,34 @@ struct AutoUpdater: Sendable {
 
         guard SelfUpdate.compareSemver(currentVersion, target) == .orderedAscending else {
             await record(updateID: updateID, target: target, phase: .eligibility, outcome: .noop, reason: "target_not_newer", attempt: 1)
-            return
+            return .notAttempted
         }
         guard AutoUpdateConfig.enabled(config) else {
             print("A newer version is available (v\(target)), but autoupdate is disabled.")
             await record(updateID: updateID, target: target, phase: .eligibility, outcome: .skipped, reason: "autoupdate_disabled", attempt: 1)
-            return
+            return .notAttempted
         }
         do {
             let policy = markerStore.effectivePolicy()
             if let minimum = policy.minimum, SelfUpdate.compareSemver(target, minimum) == .orderedAscending || policy.revoked.contains(target) {
+                // fail(...) records a cooldown/failure for this target, so per
+                // SPEC-020-R005 this is a recorded forward-progress failure cycle
+                // and MUST increment the counter (not .notAttempted).
                 await fail(updateID: updateID, target: target, phase: .eligibility, failure: .targetRevokedOrBelowMinimum, reason: "target_revoked_or_below_minimum")
-                return
+                return .forwardProgressFailure
             }
             guard launchdProviderAvailable() else {
                 await fail(updateID: updateID, target: target, phase: .eligibility, failure: .other, reason: "unsupported_install_topology")
-                return
+                return .forwardProgressFailure
             }
             guard rollbackObserverAvailable() else {
                 await fail(updateID: updateID, target: target, phase: .eligibility, failure: .rollbackObserverUnavailable, reason: "rollback_observer_unavailable")
-                return
+                return .forwardProgressFailure
             }
             try markerStore.ensureTrustedRoot()
             if let activeCooldown = markerStore.activeCooldown(target: target) {
                 await record(updateID: updateID, target: target, phase: .cooldown, outcome: .skipped, reason: "cooldown_\(activeCooldown.failureClass.rawValue)_until_\(ISO8601DateFormatter.autoupdate.string(from: activeCooldown.until))", attempt: activeCooldown.attempt)
-                return
+                return .cooldownActive
             }
             try await ensureEligible(phase: .eligibility)
             let heldMutationLock = try acquireUpdateLockAndFenceReloadJobs()
@@ -177,7 +230,7 @@ struct AutoUpdater: Sendable {
                 release = try await update.resolveReleaseByTags(normalizedTarget: target)
             } catch UpdateError.releaseNotFound {
                 await fail(updateID: updateID, target: target, phase: .download, failure: .targetReleaseNotFound, reason: "target_release_not_found")
-                return
+                return .forwardProgressFailure
             }
             // The coordinator's recommended compatibility-set target is a precondition
             // known without downloading the release payload. Check it here — after the
@@ -195,7 +248,7 @@ struct AutoUpdater: Sendable {
                     failure: .other,
                     reason: "coordinator_compatibility_target_missing"
                 )
-                return
+                return .missingTarget
             }
             let prepared: PreparedSelfUpdate
             do {
@@ -203,7 +256,7 @@ struct AutoUpdater: Sendable {
             } catch {
                 let failure = Self.failureClass(for: error)
                 await fail(updateID: updateID, target: target, phase: Self.phase(for: error), failure: failure, reason: Self.redactedReason(for: error))
-                return
+                return .forwardProgressFailure
             }
             defer { prepared.cleanup() }
             guard prepared.compatibilityManifest.compatibilitySetID == expectedCompatibilitySetID else {
@@ -214,8 +267,12 @@ struct AutoUpdater: Sendable {
                     failure: .other,
                     reason: "coordinator_compatibility_target_mismatch"
                 )
-                return
+                return .forwardProgressFailure
             }
+            // Past the compatibility-target gate: a matching installable target was
+            // resolved and prepared, so R005 treats this recommendation as making
+            // forward progress even if a later transient (drain/restart) fails.
+            forwardProgressReached = true
             if try markerStore.preflightInstalledMalibuAppReplacement() != nil,
                prepared.stagedMalibuApp == nil {
                 await fail(
@@ -225,7 +282,7 @@ struct AutoUpdater: Sendable {
                     failure: .other,
                     reason: "signed_malibu_bundle_missing"
                 )
-                return
+                return .forwardProgress
             }
             maintenanceLease = try lifecycleLeaseStore.acquire(
                 kind: .maintenance,
@@ -237,7 +294,7 @@ struct AutoUpdater: Sendable {
             guard drained else {
                 await fail(updateID: updateID, target: target, phase: .drain, failure: .drainTimeout, reason: "drain_timeout")
                 try? await sendReady()
-                return
+                return .forwardProgress
             }
             try await ensureEligible(phase: .backup)
             try await preserveMarkerAndSwap(
@@ -247,7 +304,7 @@ struct AutoUpdater: Sendable {
                 tracker: commitTracker,
                 authorityMode: "coordinator_recommendation",
                 discoveryHead: nil,
-                requireCurrentTrustAtSwap: true,
+                swapBoundaryGate: { .ensureTrust },
                 whileHolding: heldMutationLock
             )
             if let signedPolicy = prepared.signedPolicy {
@@ -273,7 +330,7 @@ struct AutoUpdater: Sendable {
                 }
                 startupHandoffPrepared = false
                 await fail(updateID: updateID, target: target, phase: .restart, failure: .other, reason: Self.redactedReason(for: error))
-                return
+                return .forwardProgress
             }
             await record(updateID: updateID, target: target, phase: .restart, outcome: .inProgress, reason: "launchctl_restart_invoked", attempt: 1)
         } catch AutoUpdateMarkerError.lockContended {
@@ -299,16 +356,44 @@ struct AutoUpdater: Sendable {
         } catch {
             await fail(updateID: updateID, target: target, phase: .eligibility, failure: .other, reason: Self.redactedReason(for: error))
         }
+        // Success path falls through here (forwardProgressReached == true). Every
+        // caught failure also reaches here: forward progress if it happened past
+        // the compatibility-target gate, otherwise a forward-progress failure.
+        return forwardProgressReached ? .forwardProgress : .forwardProgressFailure
     }
 
-    func handleSignedReleaseDiscovery() async {
+    func handleSignedReleaseDiscovery(
+        attribution: [String: String] = [:],
+        preSwapGuard: (@Sendable () async -> String?)? = nil,
+        swapBoundaryGate: (@Sendable () async -> AutoUpdateSwapBoundaryDecision)? = nil
+    ) async {
         let updateID = UUID().uuidString.lowercased()
+        // SPEC-020-R005 / R-6.8 (round-4 MEDIUM-2): the coordinator only ever sees
+        // `last_autoupdate_event`, so if any terminal event on an R005-triggered
+        // invocation dropped the attribution, a later plain `github_poll` event
+        // would overwrite the R005 marker and the invocation would be
+        // indistinguishable from an ordinary poll. These helpers stamp the R005
+        // `attribution` (empty for the non-accepted path, i.e. unchanged) onto
+        // EVERY record/fail in this invocation so whichever event lands last still
+        // carries the marker.
+        func recordR005(target: String, phase: AutoUpdatePhase, outcome: AutoUpdateOutcome, reason: String, attempt: Int = 1) async {
+            await record(updateID: updateID, target: target, source: .githubPoll, phase: phase, outcome: outcome, reason: reason, attempt: attempt, extraMetadata: attribution)
+        }
+        func failR005(target: String, phase: AutoUpdatePhase, failure: AutoUpdateFailureClass, reason: String) async {
+            await fail(updateID: updateID, target: target, source: .githubPoll, phase: phase, failure: failure, reason: reason, extraMetadata: attribution)
+        }
+
+        // When invoked to recover an accepted-but-stuck session, emit a distinct,
+        // attributable marker up front.
+        if !attribution.isEmpty {
+            await recordR005(target: "<discovery>", phase: .eligibility, outcome: .inProgress, reason: "accepted_session_recovery_signed_rail_invoked")
+        }
         guard !SessionAutoupdateGate.shared.isDisabled else {
-            await record(updateID: updateID, target: "<session-disabled>", source: .githubPoll, phase: .eligibility, outcome: .skipped, reason: "signed_policy_persist_failed", attempt: 1)
+            await recordR005(target: "<session-disabled>", phase: .eligibility, outcome: .skipped, reason: "signed_policy_persist_failed")
             return
         }
         guard AutoUpdateConfig.enabled(config) else {
-            await record(updateID: updateID, target: "<disabled>", source: .githubPoll, phase: .eligibility, outcome: .skipped, reason: "autoupdate_disabled", attempt: 1)
+            await recordR005(target: "<disabled>", phase: .eligibility, outcome: .skipped, reason: "autoupdate_disabled")
             return
         }
         let commitTracker = AutoUpdateCommitTracker()
@@ -322,16 +407,16 @@ struct AutoUpdater: Sendable {
 
         do {
             guard launchdProviderAvailable() else {
-                await fail(updateID: updateID, target: "<unknown>", source: .githubPoll, phase: .eligibility, failure: .other, reason: "unsupported_install_topology")
+                await failR005(target: "<unknown>", phase: .eligibility, failure: .other, reason: "unsupported_install_topology")
                 return
             }
             guard rollbackObserverAvailable() else {
-                await fail(updateID: updateID, target: "<unknown>", source: .githubPoll, phase: .eligibility, failure: .rollbackObserverUnavailable, reason: "rollback_observer_unavailable")
+                await failR005(target: "<unknown>", phase: .eligibility, failure: .rollbackObserverUnavailable, reason: "rollback_observer_unavailable")
                 return
             }
             try markerStore.ensureTrustedRoot()
             if let activeCooldown = markerStore.activeCooldown(target: "<discovery>") {
-                await record(updateID: updateID, target: "<discovery>", source: .githubPoll, phase: .cooldown, outcome: .skipped, reason: "cooldown_\(activeCooldown.failureClass.rawValue)_until_\(ISO8601DateFormatter.autoupdate.string(from: activeCooldown.until))", attempt: activeCooldown.attempt)
+                await recordR005(target: "<discovery>", phase: .cooldown, outcome: .skipped, reason: "cooldown_\(activeCooldown.failureClass.rawValue)_until_\(ISO8601DateFormatter.autoupdate.string(from: activeCooldown.until))", attempt: activeCooldown.attempt)
                 return
             }
             let update = SelfUpdate(currentVersion: currentVersion, releasesAPIURL: releasesAPIURL, session: session)
@@ -343,17 +428,17 @@ struct AutoUpdater: Sendable {
                     revoked: head.signedPolicyRevoked
                 )
             } catch UpdateError.discoveryHeadReplay {
-                await fail(updateID: updateID, target: "<discovery>", source: .githubPoll, phase: .eligibility, failure: .discoveryHeadReplay, reason: "discovery_head_replay")
+                await failR005(target: "<discovery>", phase: .eligibility, failure: .discoveryHeadReplay, reason: "discovery_head_replay")
                 return
             } catch UpdateError.discoveryHeadEquivocation {
-                await fail(updateID: updateID, target: "<discovery>", source: .githubPoll, phase: .eligibility, failure: .discoveryHeadEquivocation, reason: "discovery_head_equivocation")
+                await failR005(target: "<discovery>", phase: .eligibility, failure: .discoveryHeadEquivocation, reason: "discovery_head_equivocation")
                 return
             } catch UpdateError.discoveryHeadExpired {
-                await fail(updateID: updateID, target: "<discovery>", source: .githubPoll, phase: .eligibility, failure: .discoveryHeadExpired, reason: "discovery_head_expired")
+                await failR005(target: "<discovery>", phase: .eligibility, failure: .discoveryHeadExpired, reason: "discovery_head_expired")
                 return
             }
             let target = head.targetVersion
-            await record(updateID: updateID, target: target, source: .githubPoll, phase: .detection, outcome: .inProgress, reason: "signed_release_discovery_detected", attempt: 1)
+            await recordR005(target: target, phase: .detection, outcome: .inProgress, reason: "signed_release_discovery_detected")
             let canonicalBinary = currentBinaryURL()
             let installedReleaseVersion = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
                 launchedExecutableURL: Bundle.main.executableURL,
@@ -367,16 +452,16 @@ struct AutoUpdater: Sendable {
                 _ = try? markerStore.ensurePathEntrypointMatchesInstallAuthority(
                     launchedExecutableURL: Bundle.main.executableURL
                 )
-                await record(updateID: updateID, target: target, source: .githubPoll, phase: .eligibility, outcome: .noop, reason: "target_not_newer", attempt: 1)
+                await recordR005(target: target, phase: .eligibility, outcome: .noop, reason: "target_not_newer")
                 return
             }
             let policy = markerStore.effectivePolicy()
             if let minimum = policy.minimum, SelfUpdate.compareSemver(target, minimum) == .orderedAscending || policy.revoked.contains(target) {
-                await fail(updateID: updateID, target: target, source: .githubPoll, phase: .eligibility, failure: .targetRevokedOrBelowMinimum, reason: "target_revoked_or_below_minimum")
+                await failR005(target: target, phase: .eligibility, failure: .targetRevokedOrBelowMinimum, reason: "target_revoked_or_below_minimum")
                 return
             }
             if let activeCooldown = markerStore.activeCooldown(target: target) {
-                await record(updateID: updateID, target: target, source: .githubPoll, phase: .cooldown, outcome: .skipped, reason: "cooldown_\(activeCooldown.failureClass.rawValue)_until_\(ISO8601DateFormatter.autoupdate.string(from: activeCooldown.until))", attempt: activeCooldown.attempt)
+                await recordR005(target: target, phase: .cooldown, outcome: .skipped, reason: "cooldown_\(activeCooldown.failureClass.rawValue)_until_\(ISO8601DateFormatter.autoupdate.string(from: activeCooldown.until))", attempt: activeCooldown.attempt)
                 return
             }
             let lock = try acquireUpdateLockAndFenceReloadJobs()
@@ -390,12 +475,20 @@ struct AutoUpdater: Sendable {
             try SelfUpdate.requireDiscoveryHead(head, matches: prepared)
             let providerTarget = prepared.compatibilityManifest.providerCLIVersion
             guard prepared.compatibilityManifest.compatibilitySetID == head.targetCompatibilitySetID else {
-                await fail(updateID: updateID, target: target, source: .githubPoll, phase: .eligibility, failure: .other, reason: "discovery_compatibility_target_mismatch")
+                await failR005(target: target, phase: .eligibility, failure: .other, reason: "discovery_compatibility_target_mismatch")
                 return
             }
             if try markerStore.preflightInstalledMalibuAppReplacement() != nil,
                prepared.stagedMalibuApp == nil {
-                await fail(updateID: updateID, target: target, source: .githubPoll, phase: .eligibility, failure: .other, reason: "signed_malibu_bundle_missing")
+                await failR005(target: target, phase: .eligibility, failure: .other, reason: "signed_malibu_bundle_missing")
+                return
+            }
+            // round-4 HIGH-1(b): re-validate the accepted-session invariants after
+            // the suspending discovery/prepare awaits and BEFORE any coordinator-
+            // visible drain or the swap. Trust-loss or primary-rail forward progress
+            // in the interim aborts the cycle (a later re-observation retries).
+            if let preSwapGuard, let abortReason = await preSwapGuard() {
+                await recordR005(target: providerTarget, phase: .eligibility, outcome: .skipped, reason: abortReason)
                 return
             }
             maintenanceLease = try lifecycleLeaseStore.acquire(
@@ -405,21 +498,36 @@ struct AutoUpdater: Sendable {
             )
             let drained = try await drain(providerTarget)
             guard drained else {
-                await fail(updateID: updateID, target: providerTarget, source: .githubPoll, phase: .drain, failure: .drainTimeout, reason: "drain_timeout")
+                await failR005(target: providerTarget, phase: .drain, failure: .drainTimeout, reason: "drain_timeout")
                 try? await sendReady()
                 return
             }
-            try await preserveMarkerAndSwap(
-                updateID: updateID,
-                target: providerTarget,
-                prepared: prepared,
-                tracker: commitTracker,
-                authorityMode: "signed_release",
-                discoveryHead: head,
-                requireCurrentTrustAtSwap: false,
-                whileHolding: lock
-            )
-            await record(updateID: updateID, target: providerTarget, source: .githubPoll, phase: .swap, outcome: .success, reason: "binary_swap_complete", attempt: 1)
+            do {
+                try await preserveMarkerAndSwap(
+                    updateID: updateID,
+                    target: providerTarget,
+                    prepared: prepared,
+                    tracker: commitTracker,
+                    authorityMode: "signed_release",
+                    discoveryHead: head,
+                    // round-6 HIGH: the swap-boundary gate is the SINGLE authoritative
+                    // precedence/trust check, evaluated inside the swap critical
+                    // section with no await before activateReleasePayload. For the
+                    // accepted-session rail it re-runs the FULL trust + generation +
+                    // identity + eligibility decision AT the swap boundary, so a
+                    // context change during the drain await aborts the swap. The
+                    // non-accepted rail passes nil → { .proceed }, unchanged.
+                    swapBoundaryGate: swapBoundaryGate ?? { .proceed },
+                    whileHolding: lock
+                )
+            } catch let abort as AutoUpdateSwapPrecedenceAborted {
+                // Accepted-session precedence/trust abort AT the swap boundary: the
+                // marker/backup were already unwound by preserveMarkerAndSwap; record
+                // the R005-attributed skip and do not proceed.
+                await recordR005(target: providerTarget, phase: .swap, outcome: .skipped, reason: abort.reason)
+                return
+            }
+            await recordR005(target: providerTarget, phase: .swap, outcome: .success, reason: "binary_swap_complete")
             do {
                 try await prepareStartupHandoffEvictAndRestart(
                     maintenanceLease: maintenanceLease,
@@ -437,17 +545,17 @@ struct AutoUpdater: Sendable {
                     _ = try? lifecycleLeaseStore.clear(ifLeaseID: maintenanceLease.leaseID)
                 }
                 startupHandoffPrepared = false
-                await fail(updateID: updateID, target: providerTarget, source: .githubPoll, phase: .restart, failure: .other, reason: Self.redactedReason(for: error))
+                await failR005(target: providerTarget, phase: .restart, failure: .other, reason: Self.redactedReason(for: error))
                 return
             }
-            await record(updateID: updateID, target: providerTarget, source: .githubPoll, phase: .restart, outcome: .inProgress, reason: "launchctl_restart_invoked", attempt: 1)
+            await recordR005(target: providerTarget, phase: .restart, outcome: .inProgress, reason: "launchctl_restart_invoked")
         } catch AutoUpdateMarkerError.lockContended {
-            await fail(updateID: updateID, target: "<unknown>", source: .githubPoll, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "provider_mutation_in_progress")
+            await failR005(target: "<unknown>", phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "provider_mutation_in_progress")
         } catch AutoUpdateMarkerError.transactionPending {
-            await fail(updateID: updateID, target: "<unknown>", source: .githubPoll, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "autoupdate_already_pending")
+            await failR005(target: "<unknown>", phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "autoupdate_already_pending")
         } catch {
             let failure = Self.failureClass(for: error)
-            await fail(updateID: updateID, target: "<unknown>", source: .githubPoll, phase: Self.phase(for: error), failure: failure, reason: Self.redactedReason(for: error))
+            await failR005(target: "<unknown>", phase: Self.phase(for: error), failure: failure, reason: Self.redactedReason(for: error))
         }
     }
 
@@ -458,7 +566,7 @@ struct AutoUpdater: Sendable {
         tracker: AutoUpdateCommitTracker,
         authorityMode: String,
         discoveryHead: SignedReleaseDiscoveryHead?,
-        requireCurrentTrustAtSwap: Bool,
+        swapBoundaryGate: @Sendable () async -> AutoUpdateSwapBoundaryDecision,
         whileHolding lock: AutoUpdateLock
     ) async throws {
         defer { withExtendedLifetime(lock) {} }
@@ -482,8 +590,18 @@ struct AutoUpdater: Sendable {
         do {
             try markerStore.writePending(marker)
             tracker.committedMarker = true
-            if requireCurrentTrustAtSwap {
+            // Swap-boundary gate: the authoritative precedence/trust check. There is
+            // NO await between this decision and activateReleasePayload below (the
+            // `.abort` and `.proceed` arms are synchronous, and the single await in
+            // `.ensureTrust` is the primary rail's own trust check under its own held
+            // lock), so nothing can interleave between the decision and the swap.
+            switch await swapBoundaryGate() {
+            case .proceed:
+                break
+            case .ensureTrust:
                 try await ensureEligible(phase: .swap)
+            case let .abort(reason):
+                throw AutoUpdateSwapPrecedenceAborted(reason: reason)
             }
             try markerStore.activateReleasePayload(
                 from: prepared.newBinary.deletingLastPathComponent(),
@@ -493,6 +611,22 @@ struct AutoUpdater: Sendable {
                 rollbackMarker: marker
             )
             tracker.committedSwap = true
+        } catch let abort as AutoUpdateSwapPrecedenceAborted where !tracker.committedSwap {
+            // round-7 HIGH: a swap-boundary precedence/trust abort is a PRE-activation
+            // abort — nothing was swapped (committedSwap == false; activateReleasePayload
+            // never ran, the live binary is unchanged). Fully roll back the pending
+            // transaction: clear the pending marker AND release the lock, leaving NO
+            // durable pending state. Otherwise the primary rail that SUPERSEDED this
+            // recovery would be locked out by the leftover `awaiting_previous_readiness`
+            // pending marker (acquireLock rejects any pending marker) — inverting the
+            // precedence the abort was meant to enforce. This is deliberately NOT the
+            // restoreBackupAfterFencing preserve-for-startup path, which exists only for
+            // genuine mid/post-activation fencing failures where partial state must
+            // survive; the discrimination is strictly on the abort error type with no
+            // activation side effect, never broadened to arbitrary thrown errors.
+            markerStore.removeRollbackBackups(marker)
+            markerStore.clearPendingAndLock(target: nil)
+            throw abort
         } catch {
             if tracker.committedMarker {
                 do {
@@ -549,6 +683,7 @@ struct AutoUpdater: Sendable {
     ) async throws {
         let lock = try acquireUpdateLockAndFenceReloadJobs()
         defer { withExtendedLifetime(lock) {} }
+        let decision: AutoUpdateSwapBoundaryDecision = requireCurrentTrustAtSwap ? .ensureTrust : .proceed
         try await preserveMarkerAndSwap(
             updateID: updateID,
             target: target,
@@ -556,7 +691,29 @@ struct AutoUpdater: Sendable {
             tracker: AutoUpdateCommitTracker(),
             authorityMode: authorityMode,
             discoveryHead: discoveryHead,
-            requireCurrentTrustAtSwap: requireCurrentTrustAtSwap,
+            swapBoundaryGate: { decision },
+            whileHolding: lock
+        )
+    }
+
+    func preserveMarkerAndSwapForTest(
+        updateID: String,
+        target: String,
+        prepared: PreparedSelfUpdate,
+        authorityMode: String,
+        discoveryHead: SignedReleaseDiscoveryHead?,
+        swapBoundaryGate: @escaping @Sendable () async -> AutoUpdateSwapBoundaryDecision
+    ) async throws {
+        let lock = try acquireUpdateLockAndFenceReloadJobs()
+        defer { withExtendedLifetime(lock) {} }
+        try await preserveMarkerAndSwap(
+            updateID: updateID,
+            target: target,
+            prepared: prepared,
+            tracker: AutoUpdateCommitTracker(),
+            authorityMode: authorityMode,
+            discoveryHead: discoveryHead,
+            swapBoundaryGate: swapBoundaryGate,
             whileHolding: lock
         )
     }
@@ -714,12 +871,12 @@ struct AutoUpdater: Sendable {
         _ = phase
     }
 
-    private func fail(updateID: String, target: String, source: AutoUpdateSource = .coordinator, phase: AutoUpdatePhase, failure: AutoUpdateFailureClass, reason: String) async {
+    private func fail(updateID: String, target: String, source: AutoUpdateSource = .coordinator, phase: AutoUpdatePhase, failure: AutoUpdateFailureClass, reason: String, extraMetadata: [String: String] = [:]) async {
         markerStore.recordCooldown(target: target, failureClass: failure)
-        await record(updateID: updateID, target: target, source: source, phase: phase, outcome: .failure, reason: reason, attempt: 1, failure: failure)
+        await record(updateID: updateID, target: target, source: source, phase: phase, outcome: .failure, reason: reason, attempt: 1, failure: failure, extraMetadata: extraMetadata)
     }
 
-    private func record(updateID: String, target: String, source: AutoUpdateSource = .coordinator, phase: AutoUpdatePhase, outcome: AutoUpdateOutcome, reason: String, attempt: Int, failure: AutoUpdateFailureClass? = nil, sha: String? = nil) async {
+    private func record(updateID: String, target: String, source: AutoUpdateSource = .coordinator, phase: AutoUpdatePhase, outcome: AutoUpdateOutcome, reason: String, attempt: Int, failure: AutoUpdateFailureClass? = nil, sha: String? = nil, extraMetadata: [String: String] = [:]) async {
         let inflight = await providerStatus.snapshot().requestsInFlight
         await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
             updateID: updateID,
@@ -732,7 +889,8 @@ struct AutoUpdater: Sendable {
             attempt: attempt,
             failureClass: failure,
             inflightRequests: phase == .drain ? inflight : nil,
-            recommendedBinaryVersionSHA256: sha
+            recommendedBinaryVersionSHA256: sha,
+            extraMetadata: extraMetadata
         ))
     }
 

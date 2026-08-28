@@ -240,6 +240,38 @@ actor CoordinatorClient {
     private var autoupdateDrainExtensions = false
     private var autoupdateAttemptedTargets = Set<String>()
     private var lastSignedRecoveryDiscoveryAttempt: Date?
+    // SPEC-020-R005: consecutive coordinator-recommendation forward-progress
+    // failure counter for the current recommendation identity. Drives accepted-
+    // but-stuck session recovery via the signed rail once it reaches threshold.
+    private var acceptedSessionRecoveryTracker = AcceptedSessionRecoveryTracker()
+    // SPEC-020-R005: the raw coordinator recommendation for the current accepted
+    // session, retained so the periodic heartbeat tick can re-observe a stuck
+    // recommendation and accumulate the counter across ticks (the recommendation
+    // is otherwise evaluated only once at session acceptance). Cleared when the
+    // session resets.
+    private var currentCoordinatorRecommendation: String?
+    private var acceptedRecoveryReobservationInFlight = false
+    private var lastAcceptedRecoveryReobservation: Date?
+    // SPEC-020-R005 (re-audit HIGH-1): the normalized identity of the coordinator
+    // recommendation whose PRIMARY (mutating) rail is currently in flight. The
+    // pure re-observation path skips entirely while this is set for its identity,
+    // so an observation can never race the primary rail or be misclassified.
+    private var coordinatorRecommendationInFlightIdentity: String?
+    // SPEC-020-R005 (round-4 HIGH-2): monotonically bumped whenever the coordinator
+    // recommendation context changes (compat-set target reassigned, or the session
+    // reset). An outcome computed against a captured generation is DISCARDED if the
+    // generation has advanced by the time it resolves, so a re-entrant
+    // disconnect/reconnect or changed payload can never fold a stale outcome into
+    // the wrong identity's counter.
+    private var coordinatorRecommendationGeneration = 0
+    private var signedRecoveryInvocationStubbedForTest = false
+    #if DEBUG
+    // Test-only trust override, compiled out of release builds so it can never
+    // bypass the real autoupdate trust gate in production.
+    private var autoupdateTrustOverrideForTest: (@Sendable () -> AutoUpdateTrustState)?
+    #endif
+    private var testSignedRecoveryInvocationCount = 0
+    private var testLastSignedRecoveryWasAcceptedRecovery: Bool?
     private var recommendedCompatibilitySetID: String?
     private var webSocket: ProviderWebSocketTask?
     private var coordinatorSessionAccepted = false
@@ -580,6 +612,8 @@ actor CoordinatorClient {
         autoupdateDemotionReason = "coordinator_disconnected"
         autoupdateDisabledForSessionReason = nil
         recommendedCompatibilitySetID = nil
+        currentCoordinatorRecommendation = nil
+        coordinatorRecommendationGeneration &+= 1
         try? autoupdateMarkerStore.clearCompatibilityAdmission()
         autoupdateTrustState = AutoUpdateTrustState(
             v2Accepted: false,
@@ -1850,6 +1884,8 @@ actor CoordinatorClient {
         autoupdateAssignedProviderTokenAdopted = false
         autoupdateDemotionReason = "coordinator_disconnected"
         recommendedCompatibilitySetID = nil
+        currentCoordinatorRecommendation = nil
+        coordinatorRecommendationGeneration &+= 1
         try? autoupdateMarkerStore.clearCompatibilityAdmission()
         autoupdateTrustState = AutoUpdateTrustState(
             v2Accepted: false,
@@ -2288,6 +2324,143 @@ actor CoordinatorClient {
         lastSignedRecoveryDiscoveryAttempt = Date()
     }
 
+    // SPEC-020-R005 test seams.
+    func configureAcceptedRecoveryForTest(
+        accepted: Bool,
+        recommendation: String?,
+        compatibilitySetID: String?
+    ) {
+        coordinatorSessionAccepted = accepted
+        currentCoordinatorRecommendation = recommendation
+        recommendedCompatibilitySetID = compatibilitySetID
+        coordinatorRecommendationGeneration &+= 1
+    }
+
+    func setRecordedCooldownForTest(target: String, failureClass: AutoUpdateFailureClass) {
+        autoupdateMarkerStore.recordCooldown(target: target, failureClass: failureClass)
+    }
+
+    func markTargetAttemptedForTest(_ normalizedVersion: String) {
+        autoupdateAttemptedTargets.insert(normalizedVersion)
+    }
+
+    func setCoordinatorRecommendationInFlightForTest(_ normalizedIdentity: String?) {
+        coordinatorRecommendationInFlightIdentity = normalizedIdentity
+    }
+
+    func recommendationGenerationForTest() -> Int {
+        coordinatorRecommendationGeneration
+    }
+
+    func recommendedCompatibilitySetIDForTest() -> String? {
+        recommendedCompatibilitySetID
+    }
+
+    func mutateRecommendedCompatibilitySetIDForTest(_ compatibilitySetID: String?) {
+        recommendedCompatibilitySetID = compatibilitySetID
+        coordinatorRecommendationGeneration &+= 1
+    }
+
+    func setAutoupdateDisabledForSessionReasonForTest(_ reason: String?) {
+        autoupdateDisabledForSessionReason = reason
+    }
+
+    #if DEBUG
+    func setAutoupdateTrustOverrideForTest(_ override: (@Sendable () -> AutoUpdateTrustState)?) {
+        autoupdateTrustOverrideForTest = override
+    }
+    #endif
+
+    @discardableResult
+    func registerRecommendationOutcomeForTest(
+        _ outcome: AutoUpdater.RecommendationOutcome,
+        normalizedVersion: String,
+        capturedCompatibilitySetID: String?,
+        capturedGeneration: Int
+    ) async -> Bool {
+        await registerCoordinatorRecommendationOutcome(
+            outcome,
+            normalizedVersion: normalizedVersion,
+            capturedCompatibilitySetID: capturedCompatibilitySetID,
+            capturedGeneration: capturedGeneration
+        )
+    }
+
+    func acceptedRecoveryPreSwapAbortReasonForTest() -> String? {
+        acceptedRecoveryPreSwapAbortReason(
+            capturedGeneration: coordinatorRecommendationGeneration,
+            capturedIdentity: acceptedSessionRecoveryTracker.identity ?? "<none>"
+        )
+    }
+
+    func acceptedRecoveryPreSwapAbortReasonForTest(
+        capturedGeneration: Int,
+        capturedIdentity: String
+    ) -> String? {
+        acceptedRecoveryPreSwapAbortReason(
+            capturedGeneration: capturedGeneration,
+            capturedIdentity: capturedIdentity
+        )
+    }
+
+    func acceptedSessionRecoveryIdentityForTest() -> String? {
+        acceptedSessionRecoveryTracker.identity
+    }
+
+    func acceptedRecoverySwapBoundaryDecisionForTest(
+        capturedGeneration: Int,
+        capturedIdentity: String
+    ) -> AutoUpdateSwapBoundaryDecision {
+        acceptedRecoverySwapBoundaryDecision(
+            capturedGeneration: capturedGeneration,
+            capturedIdentity: capturedIdentity
+        )
+    }
+
+    func runSignedRecoveryDiscoveryForTest(now: Date) async {
+        await runSignedRecoveryDiscoveryIfDue(now: now)
+    }
+
+    func applyPrimaryRecommendationOutcomeForTest(
+        _ outcome: AutoUpdater.RecommendationOutcome,
+        normalizedVersion: String
+    ) async {
+        await applyPrimaryRecommendationOutcome(
+            outcome,
+            normalizedVersion: normalizedVersion,
+            capturedCompatibilitySetID: recommendedCompatibilitySetID,
+            capturedGeneration: coordinatorRecommendationGeneration
+        )
+    }
+
+    func currentCoordinatorRecommendationForTest() -> String? {
+        currentCoordinatorRecommendation
+    }
+
+    func stubSignedRecoveryInvocationForTest() {
+        signedRecoveryInvocationStubbedForTest = true
+    }
+
+    func reobserveAcceptedSessionRecoveryForTest(now: Date) async {
+        await reobserveAcceptedSessionRecoveryIfDue(now: now)
+    }
+
+    func acceptedSessionRecoveryEligibleForTest() -> Bool {
+        acceptedSessionRecoveryTracker.isEligible
+    }
+
+    func acceptedSessionRecoveryFailureCountForTest() -> Int {
+        acceptedSessionRecoveryTracker.consecutiveFailureCount
+    }
+
+    func signedRecoveryInvocationCountForTest() -> Int {
+        testSignedRecoveryInvocationCount
+    }
+
+    func lastSignedRecoveryWasAcceptedRecoveryForTest() -> Bool? {
+        testLastSignedRecoveryWasAcceptedRecovery
+    }
+
     // Issue #189 R1 security MEDIUM: assert that any inbound frame
     // bumps the heartbeat success timestamp via handle().
     func handleForTest(_ message: URLSessionWebSocketTask.Message) async throws {
@@ -2721,6 +2894,7 @@ actor CoordinatorClient {
         autoupdateDrainExtensions = payload["autoupdate_drain_extensions"] as? Bool == true
         autoupdateAttemptedTargets.removeAll()
         recommendedCompatibilitySetID = compatibilityAdmission?.recommended
+        coordinatorRecommendationGeneration &+= 1
         autoupdateDisabledForSessionReason = nil
         do {
             if let compatibilityAdmission {
@@ -3803,6 +3977,12 @@ actor CoordinatorClient {
                     // not silently absorb every tick for hours.
                     try await self?.sendHeartbeatBounded(resetWindow: rollWindow)
                     await self?.recordHeartbeatSuccess()
+                    // SPEC-020-R005 (HIGH-1): re-observe a stuck coordinator
+                    // recommendation on the periodic tick so the accepted-session
+                    // recovery counter can accumulate to the threshold. Self-
+                    // throttled and single-in-flight; a no-op unless accepted and
+                    // a recommendation is pending.
+                    await self?.reobserveAcceptedSessionRecoveryIfDue()
                 } catch {
                     Self.keepaliveDebug("keepalive_send_error error=\(error)")
                     await self?.closeWebSocketAfterKeepaliveFailure()
@@ -4159,35 +4339,101 @@ actor CoordinatorClient {
     }
 
     private func runAutoupdateIfEligible(_ recommended: String) async {
-        if let parsed = try? AutoUpdateRecommendation.validate(recommended) {
-            let trust = currentAutoupdateTrustState()
-            guard trust.isEligible else {
-                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                    updateID: UUID().uuidString.lowercased(),
-                    currentVersion: Self.binaryVersion,
-                    targetVersion: parsed.normalized,
-                    phase: .eligibility,
-                    outcome: .skipped,
-                    reason: trust.lossReason,
-                    attempt: 1
-                ))
-                return
-            }
-            guard !autoupdateAttemptedTargets.contains(parsed.normalized) else {
-                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                    updateID: UUID().uuidString.lowercased(),
-                    currentVersion: Self.binaryVersion,
-                    targetVersion: parsed.normalized,
-                    phase: .cooldown,
-                    outcome: .skipped,
-                    reason: "already_attempted_this_session",
-                    attempt: 1
-                ))
-                return
-            }
-            autoupdateAttemptedTargets.insert(parsed.normalized)
+        // MEDIUM-1: validate/normalize the recommendation ONCE. An invalid
+        // recommendation still emits the invalid-version event (via the updater)
+        // but never enters the R005 identity/counter path — a raw, unnormalized,
+        // or unvalidated version must never become an R005 identity or land in an
+        // unredacted event target_version.
+        guard let parsed = try? AutoUpdateRecommendation.validate(recommended) else {
+            _ = await makeCoordinatorRecommendationUpdater().handleCoordinatorRecommendation(recommended)
+            return
         }
-        let updater = AutoUpdater(
+        let normalized = parsed.normalized
+        let trust = currentAutoupdateTrustState()
+        guard trust.isEligible else {
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: UUID().uuidString.lowercased(),
+                currentVersion: Self.binaryVersion,
+                targetVersion: normalized,
+                phase: .eligibility,
+                outcome: .skipped,
+                reason: trust.lossReason,
+                attempt: 1
+            ))
+            return
+        }
+        // SPEC-020-R005 (HIGH-1): remember the active recommendation so the
+        // heartbeat tick can re-observe it while the accepted session persists, and
+        // mark this identity in flight so a pure re-observation can never interleave
+        // with (or be evaluated against) the primary rail. The in-flight mark covers
+        // the whole remainder of this method — including its own signed-recovery
+        // invocation — and is cleared on exit.
+        currentCoordinatorRecommendation = recommended
+        coordinatorRecommendationInFlightIdentity = normalized
+        defer {
+            if coordinatorRecommendationInFlightIdentity == normalized {
+                coordinatorRecommendationInFlightIdentity = nil
+            }
+        }
+        guard !autoupdateAttemptedTargets.contains(normalized) else {
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: UUID().uuidString.lowercased(),
+                currentVersion: Self.binaryVersion,
+                targetVersion: normalized,
+                phase: .cooldown,
+                outcome: .skipped,
+                reason: "already_attempted_this_session",
+                attempt: 1
+            ))
+            return
+        }
+        autoupdateAttemptedTargets.insert(normalized)
+        // HIGH-2: capture the recommendation context BEFORE the evaluating await, so
+        // a re-entrant change (disconnect/reconnect, changed payload) that mutates
+        // the live context is detected and the stale outcome discarded.
+        let capturedCompat = recommendedCompatibilitySetID
+        let capturedGeneration = coordinatorRecommendationGeneration
+        let outcome = await makeCoordinatorRecommendationUpdater().handleCoordinatorRecommendation(recommended)
+        await applyPrimaryRecommendationOutcome(
+            outcome,
+            normalizedVersion: normalized,
+            capturedCompatibilitySetID: capturedCompat,
+            capturedGeneration: capturedGeneration
+        )
+    }
+
+    /// Post-outcome handling shared by the primary coordinator rail. Folds the
+    /// outcome into the R005 counter and, while still holding an accepted session,
+    /// invokes the signed recovery rail if the recommendation is now persistently
+    /// stuck. handleCoordinatorRecommendation has fully returned (its mutation lock
+    /// released) so the two rails run strictly sequentially, never concurrently for
+    /// the same target.
+    private func applyPrimaryRecommendationOutcome(
+        _ outcome: AutoUpdater.RecommendationOutcome,
+        normalizedVersion: String,
+        capturedCompatibilitySetID: String?,
+        capturedGeneration: Int
+    ) async {
+        let applied = await registerCoordinatorRecommendationOutcome(
+            outcome,
+            normalizedVersion: normalizedVersion,
+            capturedCompatibilitySetID: capturedCompatibilitySetID,
+            capturedGeneration: capturedGeneration
+        )
+        if applied, outcome == .forwardProgress {
+            // HIGH-2: a recommendation that reached forward progress is resolved.
+            // Drop the cached recommendation so no later heartbeat re-observation
+            // can re-arm eligibility for this identity — only a NEW coordinator
+            // recommendation may drive R005 again. Only when the outcome actually
+            // applied to the current identity (a stale/discarded outcome must not
+            // clear a newer recommendation's cache).
+            currentCoordinatorRecommendation = nil
+        }
+        await runSignedRecoveryDiscoveryIfDue()
+    }
+
+    private func makeCoordinatorRecommendationUpdater() -> AutoUpdater {
+        AutoUpdater(
             config: appConfig,
             currentVersion: Self.binaryVersion,
             providerStatus: providerStatus,
@@ -4197,28 +4443,344 @@ actor CoordinatorClient {
             drain: { target in try await self.autoupdateDrain(target: target) },
             sendReady: { try await self.sendStateUpdate(state: .ready, reason: "autoupdate_timeout_skipped_ready") }
         )
-        await updater.handleCoordinatorRecommendation(recommended)
+    }
+
+    /// SPEC-020-R005 (re-audit HIGH-1/HIGH-2): while an accepted session persists
+    /// and its coordinator recommendation stays stuck, the recommendation is
+    /// otherwise evaluated only once (at acceptance) — a duplicate primary
+    /// evaluation exits via `already_attempted_this_session` before registering an
+    /// outcome, so the counter would freeze at 1 and never reach the threshold.
+    ///
+    /// This periodic re-observation (hooked into the heartbeat tick) is a PURE,
+    /// READ-ONLY observation: it never calls `handleCoordinatorRecommendation`,
+    /// never acquires the mutation lock, and never installs. It only reads the
+    /// valid R005 stuck-state signals for the cached recommendation and, when one
+    /// is present, routes that observation through the counter. This is what keeps
+    /// it from racing the primary rail (HIGH-1) or re-arming after forward progress
+    /// via a re-triggered cooldown (HIGH-2).
+    private func reobserveAcceptedSessionRecoveryIfDue(now: Date = Date()) async {
+        guard coordinatorSessionAccepted else { return }
+        guard let recommended = currentCoordinatorRecommendation else { return }
+        guard let parsed = try? AutoUpdateRecommendation.validate(recommended) else { return }
+        let normalized = parsed.normalized
+        // HIGH-1: never observe while the primary rail owns this identity.
+        guard coordinatorRecommendationInFlightIdentity != normalized else { return }
+        guard !acceptedRecoveryReobservationInFlight else { return }
+        if let lastAcceptedRecoveryReobservation,
+           now.timeIntervalSince(lastAcceptedRecoveryReobservation) < acceptedRecoveryReobservationIntervalSeconds() {
+            return
+        }
+        acceptedRecoveryReobservationInFlight = true
+        lastAcceptedRecoveryReobservation = now
+        defer { acceptedRecoveryReobservationInFlight = false }
+
+        let capturedCompat = recommendedCompatibilitySetID
+        let capturedGeneration = coordinatorRecommendationGeneration
+        guard let outcome = observeAcceptedSessionRecoveryStuckState(normalizedVersion: normalized) else {
+            // No stuck signal → observe nothing (no increment, no signed rail).
+            return
+        }
+        await registerCoordinatorRecommendationOutcome(
+            outcome,
+            normalizedVersion: normalized,
+            capturedCompatibilitySetID: capturedCompat,
+            capturedGeneration: capturedGeneration
+        )
+        await runSignedRecoveryDiscoveryIfDue(now: now)
+    }
+
+    /// Pure, read-only classification of the current recommendation's R005
+    /// stuck-state. Returns `.missingTarget` when the coordinator advertises a
+    /// newer binary version with no installable compatibility-set target, or
+    /// `.cooldownActive` when a recorded cooldown/failure keeps the target
+    /// unusable; `nil` (observe nothing) otherwise. NEVER mutates, NEVER acquires
+    /// the mutation lock, NEVER runs the installer.
+    private func observeAcceptedSessionRecoveryStuckState(
+        normalizedVersion: String
+    ) -> AutoUpdater.RecommendationOutcome? {
+        // A disabled provider is intentionally not updating — not stuck — and the
+        // signed rail would no-op anyway.
+        guard AutoUpdateConfig.enabled(appConfig) else { return nil }
+        // round-6 MEDIUM: R005 eligibility is for a CURRENT recommendation that
+        // cannot make forward progress, NOT a not-newer / no-op target. A
+        // recommendation that is not strictly newer than the running binary is a
+        // no-op (the primary rail returns target_not_newer), so it can never be a
+        // stuck signal — never count its (possibly stale) cooldown. This gate must
+        // precede BOTH the missing-target and the cooldown observation.
+        guard SelfUpdate.compareSemver(Self.binaryVersion, normalizedVersion) == .orderedAscending else {
+            return nil
+        }
+        // Missing installable compatibility target: newer recommended version with
+        // no compatibility-set id (the live production stuck state). Unchanged — this
+        // classifies every tick regardless of cooldown and reaches threshold.
+        if recommendedCompatibilitySetID == nil {
+            return .missingTarget
+        }
+        // round-8 HIGH: has-compat-set repeatedly-unusable target. The robust stuck
+        // signal is "this newer target was ATTEMPTED this session and made no forward
+        // progress" — because `autoupdateAttemptedTargets` blocks any further primary
+        // progress on it for the session, it is persistently unusable whether or not a
+        // cooldown is momentarily active. Keying on a momentary cooldown was fragile:
+        // the single ~300s cooldown expires before the (>= 300s) re-observation
+        // interval, so the counter plateaued at 1 and never armed. (The not-newer
+        // guard above still excludes no-op targets, so an attempted not-newer target
+        // is never counted — round-6 MEDIUM stays fixed.) A cooldown that IS active is
+        // kept as an OR for the pre-attempt-record window.
+        if autoupdateAttemptedTargets.contains(normalizedVersion)
+            || autoupdateMarkerStore.activeCooldown(target: normalizedVersion) != nil {
+            return .cooldownActive
+        }
+        return nil
+    }
+
+    private func acceptedRecoveryReobservationIntervalSeconds() -> TimeInterval {
+        let jitter = TimeInterval(Int.random(in: 0...30))
+        return 300 + jitter
+    }
+
+    private func recommendationIdentity(normalizedVersion: String, compatibilitySetID: String?) -> String {
+        "\(normalizedVersion)|\(compatibilitySetID ?? "<none>")"
+    }
+
+    /// SPEC-020-R005 counter + R-6.8 observability. Increments on
+    /// missing-target/recorded-failure/cooldown, resets on forward progress or a
+    /// recommendation-identity change, and emits the per-increment, per-reset, and
+    /// becoming-eligible events. Identity = (NORMALIZED recommended version,
+    /// recommended compatibility-set id) — the caller passes a validated, normalized
+    /// version so `v1.7.0` and `1.7.0` map to one identity and no raw text lands in
+    /// the (unredacted) event `target_version`.
+    ///
+    /// round-4 HIGH-2: the outcome was computed against a captured recommendation
+    /// context (`capturedCompatibilitySetID` + `capturedGeneration`). Because the
+    /// actor is re-entrant across the evaluating await, a disconnect/reconnect or
+    /// changed coordinator payload can mutate that context before the outcome
+    /// resolves. If the captured context no longer matches live state, the outcome
+    /// is DISCARDED (the tracker is not touched) so a stale outcome can never fold
+    /// into the wrong identity's counter. Returns true iff the outcome was applied.
+    @discardableResult
+    private func registerCoordinatorRecommendationOutcome(
+        _ outcome: AutoUpdater.RecommendationOutcome,
+        normalizedVersion: String,
+        capturedCompatibilitySetID: String?,
+        capturedGeneration: Int
+    ) async -> Bool {
+        let identity = recommendationIdentity(normalizedVersion: normalizedVersion, compatibilitySetID: capturedCompatibilitySetID)
+        let liveIdentity = recommendationIdentity(normalizedVersion: normalizedVersion, compatibilitySetID: recommendedCompatibilitySetID)
+        guard capturedGeneration == coordinatorRecommendationGeneration, identity == liveIdentity else {
+            await emitAcceptedRecoveryEvent(
+                reason: "accepted_session_recovery_outcome_discarded_stale",
+                version: normalizedVersion,
+                identity: identity,
+                count: acceptedSessionRecoveryTracker.consecutiveFailureCount,
+                extra: ["live_identity": liveIdentity]
+            )
+            return false
+        }
+        let transition = acceptedSessionRecoveryTracker.register(outcome: outcome, identity: identity)
+        for event in transition.events {
+            switch event {
+            case let .increment(reason, count):
+                await emitAcceptedRecoveryEvent(
+                    reason: "accepted_session_recovery_failure_increment",
+                    version: normalizedVersion,
+                    identity: identity,
+                    count: count,
+                    extra: ["increment_reason": reason.rawValue]
+                )
+            case let .reset(reason, count):
+                await emitAcceptedRecoveryEvent(
+                    reason: "accepted_session_recovery_counter_reset",
+                    version: normalizedVersion,
+                    identity: identity,
+                    count: count,
+                    extra: ["reset_reason": reason.rawValue]
+                )
+            case let .eligible(count, threshold):
+                await emitAcceptedRecoveryEvent(
+                    reason: "accepted_session_recovery_eligible",
+                    version: normalizedVersion,
+                    identity: identity,
+                    count: count,
+                    extra: ["failure_threshold": String(threshold)]
+                )
+            }
+        }
+        return true
+    }
+
+    private func emitAcceptedRecoveryEvent(
+        reason: String,
+        version: String,
+        identity: String,
+        count: Int,
+        extra: [String: String]
+    ) async {
+        var meta = extra
+        meta["recommendation_identity"] = identity
+        meta["consecutive_failure_count"] = String(count)
+        // R-6.8 events reuse the redaction-bearing AutoUpdateEvent (R-6.6). They
+        // are counter observations, not update attempts, so they carry the
+        // coordinator source with an eligibility phase / skipped outcome.
+        await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+            updateID: UUID().uuidString.lowercased(),
+            currentVersion: Self.binaryVersion,
+            targetVersion: version,
+            source: .coordinator,
+            phase: .eligibility,
+            outcome: .skipped,
+            reason: reason,
+            attempt: 1,
+            extraMetadata: meta
+        ))
     }
 
     private func runSignedRecoveryDiscoveryIfDue(now: Date = Date()) async {
-        guard !coordinatorSessionAccepted else { return }
+        // SPEC-020-R005: the signed rail fires when the provider holds no accepted
+        // session (the original SPEC-020-R001 reach) OR when it holds an accepted
+        // session but the current coordinator recommendation is persistently stuck
+        // (consecutive-failure count has reached the threshold).
+        let acceptedRecovery = coordinatorSessionAccepted
+        if acceptedRecovery, !acceptedSessionRecoveryTracker.isEligible {
+            return
+        }
+        // round-4 HIGH-1(a): for the ACCEPTED-session R005 trigger, re-check current
+        // autoupdate trust BEFORE invoking the signed rail. Trust-loss (token /
+        // attestation degraded) must take precedence — the accepted-session recovery
+        // must not install while the coordinator session's trust is gone. The
+        // non-accepted (disconnected) signed-recovery path is unchanged: it
+        // intentionally does not gate on coordinator-session trust.
+        if acceptedRecovery, !currentAutoupdateTrustState().isEligible {
+            await emitAcceptedRecoveryEvent(
+                reason: "accepted_session_recovery_trust_lost_preinvocation",
+                version: "<discovery>",
+                identity: acceptedSessionRecoveryTracker.identity ?? "<none>",
+                count: acceptedSessionRecoveryTracker.consecutiveFailureCount,
+                extra: ["loss_reason": currentAutoupdateTrustState().lossReason]
+            )
+            return
+        }
         if let lastSignedRecoveryDiscoveryAttempt,
            now.timeIntervalSince(lastSignedRecoveryDiscoveryAttempt) < signedRecoveryDiscoveryIntervalSeconds() {
             return
         }
         lastSignedRecoveryDiscoveryAttempt = now
+        if signedRecoveryInvocationStubbedForTest {
+            testSignedRecoveryInvocationCount += 1
+            testLastSignedRecoveryWasAcceptedRecovery = acceptedRecovery
+            return
+        }
+        // AC-V0.1-R005-4: an accepted-session recovery that still holds a live
+        // coordinator session MUST drain via the coordinator-aware path
+        // (state_update + drain_status) so the coordinator stops routing buyers
+        // while the swap runs. MEDIUM: the drain mode is decided at DRAIN TIME from
+        // live session state (not captured here), and falls back to the local drain
+        // if the session dropped between discovery and drain. Signed-release
+        // authority for the swap is unchanged.
         let updater = AutoUpdater(
             config: appConfig,
             currentVersion: Self.binaryVersion,
             providerStatus: providerStatus,
             markerStore: autoupdateMarkerStore,
             trustProvider: { await self.currentAutoupdateTrustState() },
-            drain: { target in await self.autoupdateLocalDrain(target: target) },
-            sendReady: {
-                await self.providerStatus.setState(.ready, reason: "autoupdate_timeout_skipped_ready")
-            }
+            drain: { target in await self.signedRecoveryDrain(target: target) },
+            sendReady: { try await self.signedRecoverySendReady() }
         )
-        await updater.handleSignedReleaseDiscovery()
+        var attribution: [String: String] = [:]
+        var preSwapGuard: (@Sendable () async -> String?)?
+        var swapBoundaryGate: (@Sendable () async -> AutoUpdateSwapBoundaryDecision)?
+        if acceptedRecovery {
+            // R-6.8: attribute the accepted-session invocation to R005. The
+            // `source` stays github_poll per R-6.4; attribution rides in metadata.
+            attribution = [
+                "accepted_session_recovery": "true",
+                "recommendation_identity": acceptedSessionRecoveryTracker.identity ?? "<none>",
+                "consecutive_failure_count": String(acceptedSessionRecoveryTracker.consecutiveFailureCount),
+            ]
+            // round-5 HIGH: capture the recommendation identity + generation at the
+            // point the R005 recovery run is INVOKED, so the guard detects a context
+            // change even before the lagging tracker eligibility catches up.
+            let capturedGeneration = coordinatorRecommendationGeneration
+            let capturedIdentity = acceptedSessionRecoveryTracker.identity ?? "<none>"
+            // Cheap pre-drain early-out — avoids a pointless drain if already
+            // superseded/trust-lost. NOT authoritative (a suspension, the drain,
+            // follows it); the swap-boundary gate below is the authority.
+            preSwapGuard = { [weak self] in
+                guard let self else { return "accepted_session_recovery_client_gone" }
+                return await self.acceptedRecoveryPreSwapAbortReason(
+                    capturedGeneration: capturedGeneration,
+                    capturedIdentity: capturedIdentity
+                )
+            }
+            // round-6 HIGH: the authoritative gate, evaluated AT the swap boundary
+            // (no await before the swap). It re-runs the FULL trust + generation +
+            // identity + eligibility decision, so a context change during the drain
+            // await aborts the swap. Session-dropped → nil abort reason → .proceed as
+            // the disconnected R001 rail (no coordinator-session trust gate), which is
+            // the round-5 accepted→disconnected fallback.
+            swapBoundaryGate = { [weak self] in
+                guard let self else { return .abort(reason: "accepted_session_recovery_client_gone") }
+                return await self.acceptedRecoverySwapBoundaryDecision(
+                    capturedGeneration: capturedGeneration,
+                    capturedIdentity: capturedIdentity
+                )
+            }
+        }
+        await updater.handleSignedReleaseDiscovery(
+            attribution: attribution,
+            preSwapGuard: preSwapGuard,
+            swapBoundaryGate: swapBoundaryGate
+        )
+    }
+
+    /// round-4 HIGH-1 + round-5/6 HIGH: pre-swap re-validation for the accepted-
+    /// session R005 rail, used both as the cheap pre-drain early-out and as the
+    /// authoritative swap-boundary gate. Aborts if the accepted-session invariants no
+    /// longer hold: trust lost, the recommendation context changed since invocation
+    /// (generation or identity), or the tracker is no longer eligible. Returns nil to
+    /// proceed. When the session has dropped entirely, returns nil so recovery can
+    /// proceed on the disconnected R001 rail (whose swap does not gate on session
+    /// trust).
+    private func acceptedRecoveryPreSwapAbortReason(
+        capturedGeneration: Int,
+        capturedIdentity: String
+    ) -> String? {
+        guard coordinatorSessionAccepted else {
+            // Session dropped mid-flight: no accepted-session invariant to protect;
+            // let the (now disconnected-authority) swap proceed as an R001 recovery.
+            return nil
+        }
+        guard currentAutoupdateTrustState().isEligible else {
+            return "trust_state_lost"
+        }
+        // round-5 HIGH: a context change (generation bump, or the tracker's identity
+        // moved) means the primary rail is viable again for a NEW recommendation.
+        // Tracker eligibility lags a generation change by one outcome registration,
+        // so never rely on `isEligible` alone.
+        guard coordinatorRecommendationGeneration == capturedGeneration,
+              (acceptedSessionRecoveryTracker.identity ?? "<none>") == capturedIdentity else {
+            return "accepted_session_recovery_superseded_by_primary"
+        }
+        guard acceptedSessionRecoveryTracker.isEligible else {
+            return "accepted_session_recovery_superseded_by_primary"
+        }
+        return nil
+    }
+
+    /// round-6 HIGH: single source of truth for the accepted-session swap-boundary
+    /// decision. Wraps `acceptedRecoveryPreSwapAbortReason` into the swap gate's
+    /// decision type. Used verbatim by the production swap-boundary closure so a test
+    /// exercises exactly the production decision.
+    private func acceptedRecoverySwapBoundaryDecision(
+        capturedGeneration: Int,
+        capturedIdentity: String
+    ) -> AutoUpdateSwapBoundaryDecision {
+        if let reason = acceptedRecoveryPreSwapAbortReason(
+            capturedGeneration: capturedGeneration,
+            capturedIdentity: capturedIdentity
+        ) {
+            return .abort(reason: reason)
+        }
+        return .proceed
     }
 
     private func signedRecoveryDiscoveryIntervalSeconds() -> TimeInterval {
@@ -4227,6 +4789,11 @@ actor CoordinatorClient {
     }
 
     private func currentAutoupdateTrustState() -> AutoUpdateTrustState {
+        #if DEBUG
+        if let autoupdateTrustOverrideForTest {
+            return autoupdateTrustOverrideForTest()
+        }
+        #endif
         if let reason = autoupdateDisabledForSessionReason {
             return AutoUpdateTrustState(
                 v2Accepted: false,
@@ -4358,12 +4925,26 @@ actor CoordinatorClient {
         return Date() >= deadline
     }
 
-    private func autoupdateDrain(target: String) async throws -> Bool {
+    /// Reference flag set once a coordinator-visible drain side effect (the
+    /// `state_update(draining)` frame, or a drain_status send) has SUCCEEDED, so a
+    /// caller can distinguish a throw before any coordinator side effect from one
+    /// after. Actor-isolated in practice; only ever touched on the actor.
+    private final class CoordinatorDrainSideEffect {
+        var fired = false
+    }
+
+    private func autoupdateDrain(
+        target: String,
+        sideEffect: CoordinatorDrainSideEffect? = nil
+    ) async throws -> Bool {
         heartbeatTask?.cancel()
         heartbeatTask = nil
         heartbeatWatchdogTask?.cancel()
         heartbeatWatchdogTask = nil
         try await sendStateUpdate(state: .draining, reason: "autoupdate_to_\(target)")
+        // The coordinator has now seen the draining frame (it stops routing buyers);
+        // any later throw must be reconciled, not silently degraded.
+        sideEffect?.fired = true
         try await sendDrainStatus(phase: "starting")
         try await sendDrainStatus(phase: "in_progress")
         let softDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 120)
@@ -4421,6 +5002,76 @@ actor CoordinatorClient {
 
     func autoupdateLocalDrainForTest(target: String) async -> Bool {
         await autoupdateLocalDrain(target: target)
+    }
+
+    /// SPEC-020-R005 drain selector for the signed recovery rail. The mode is
+    /// decided at DRAIN TIME from live session state — coordinator-aware only while
+    /// an accepted session is still present.
+    ///
+    /// MEDIUM (round-3): the coordinator-aware drain can throw AFTER it has already
+    /// emitted a coordinator-visible side effect (the `state_update(draining)`
+    /// frame). Silently falling back to the local drain there would leave the
+    /// coordinator holding a stale draining/routing view for a live accepted
+    /// session (AC-V0.1-R005-4 nonconformance). So:
+    /// - throw BEFORE any coordinator side effect fired → local fallback is fine
+    ///   (the coordinator never saw draining);
+    /// - throw AFTER a side effect fired → best-effort send a terminal ready so the
+    ///   coordinator abandons the draining view, and ABORT this drain cycle (do not
+    ///   swap under a half-broken coordinator view; a later re-observation retries);
+    /// - if that terminal ready ALSO fails the session is genuinely dead → local
+    ///   fallback is acceptable, logged.
+    private func signedRecoveryDrain(target: String) async -> Bool {
+        if coordinatorSessionAccepted {
+            let sideEffect = CoordinatorDrainSideEffect()
+            do {
+                return try await autoupdateDrain(target: target, sideEffect: sideEffect)
+            } catch {
+                Self.keepaliveDebug("signed_recovery_coordinator_drain_fallback error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
+                if sideEffect.fired {
+                    // round-4 MEDIUM-1: a coordinator-visible drain side effect (the
+                    // draining frame) already fired. Attempt the terminal ready
+                    // reconcile best-effort, but ABORT the recovery cycle regardless
+                    // of whether that send succeeds — never fall through to a local
+                    // drain + swap behind a partially committed coordinator drain (on
+                    // a transient ready failure the coordinator can still hold the
+                    // stale draining view while the swap proceeds). A later re-
+                    // observation tick retries if still stuck.
+                    _ = await sendCoordinatorReadyBestEffort(reason: "autoupdate_drain_aborted_partial")
+                    return false
+                }
+            }
+        }
+        return await autoupdateLocalDrain(target: target)
+    }
+
+    /// Best-effort tell the coordinator the provider is ready again (used to undo a
+    /// partially committed coordinator drain). Returns true if the ready frame was
+    /// sent; on failure it still reconciles local state to ready and returns false.
+    private func sendCoordinatorReadyBestEffort(reason: String) async -> Bool {
+        do {
+            try await sendStateUpdate(state: .ready, reason: reason)
+            return true
+        } catch {
+            Self.keepaliveDebug("signed_recovery_ready_send_failed error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
+            await providerStatus.setState(.ready, reason: reason)
+            return false
+        }
+    }
+
+    private func signedRecoverySendReady() async throws {
+        if coordinatorSessionAccepted {
+            do {
+                try await sendStateUpdate(state: .ready, reason: "autoupdate_timeout_skipped_ready")
+                return
+            } catch {
+                Self.keepaliveDebug("signed_recovery_coordinator_ready_fallback error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
+            }
+        }
+        await providerStatus.setState(.ready, reason: "autoupdate_timeout_skipped_ready")
+    }
+
+    func signedRecoveryDrainForTest(target: String) async -> Bool {
+        await signedRecoveryDrain(target: target)
     }
 
     // resetWindow=true rolls the since-last metrics window (the coordinator-

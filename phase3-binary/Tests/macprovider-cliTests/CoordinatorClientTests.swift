@@ -510,6 +510,684 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(snapshot.activeRequestIDCount, 0)
     }
 
+    // SPEC-020-R005 (c): a persistently missing-target accepted session accumulates
+    // the consecutive-failure counter across periodic PURE-OBSERVATION ticks (no
+    // handleCoordinatorRecommendation, no mutation lock) and becomes eligible at the
+    // threshold, then invokes the signed rail as an accepted-session recovery.
+    func testAcceptedSessionMissingTargetReachesEligibilityAcrossTicks() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        // Newer version + no compatibility-set target => pure observation classifies
+        // .missingTarget without touching the installer.
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: nil)
+        await client.setAutoupdateTrustOverrideForTest { CoordinatorClientTests.r005EligibleTrust() }
+        await client.stubSignedRecoveryInvocationForTest()
+
+        let base = Date()
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base)
+        var count = await client.acceptedSessionRecoveryFailureCountForTest()
+        var eligible = await client.acceptedSessionRecoveryEligibleForTest()
+        XCTAssertEqual(count, 1)
+        XCTAssertFalse(eligible)
+
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(400))
+        count = await client.acceptedSessionRecoveryFailureCountForTest()
+        eligible = await client.acceptedSessionRecoveryEligibleForTest()
+        var invocations = await client.signedRecoveryInvocationCountForTest()
+        XCTAssertEqual(count, 2)
+        XCTAssertFalse(eligible)
+        XCTAssertEqual(invocations, 0)
+
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(800))
+        count = await client.acceptedSessionRecoveryFailureCountForTest()
+        eligible = await client.acceptedSessionRecoveryEligibleForTest()
+        invocations = await client.signedRecoveryInvocationCountForTest()
+        let lastWasAccepted = await client.lastSignedRecoveryWasAcceptedRecoveryForTest()
+        XCTAssertEqual(count, 3)
+        XCTAssertTrue(eligible)
+        XCTAssertGreaterThanOrEqual(invocations, 1)
+        XCTAssertEqual(lastWasAccepted, true)
+    }
+
+    // SPEC-020-R005: a recorded cooldown for the recommended target is also a pure
+    // observable stuck-signal and accumulates across ticks.
+    func testAcceptedSessionCooldownObservationAccumulates() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        // Isolate the marker store to a per-test home: this is the only accepted-recovery
+        // test that depends on a PERSISTED cooldown surviving between calls. The default
+        // shared marker store points at the real global cooldowns file, which other tests
+        // in the full suite overwrite/clear — polluting the persisted cooldown and making
+        // the observation return nil (count 0) under full-suite ordering. Create the
+        // autoupdate root explicitly: recordCooldown does `try? atomicWrite`, which
+        // silently no-ops if the directory is absent (a fresh temp home has no cooldown
+        // written → activeCooldown nil → count 0), so the dir must exist for the
+        // persisted cooldown to survive.
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("coordinator-cooldown-observe-\(UUID().uuidString)", isDirectory: true)
+        let autoupdateRoot = home.appendingPathComponent(".local/share/macprovider/autoupdate", isDirectory: true)
+        try FileManager.default.createDirectory(at: autoupdateRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let markerStore = AutoUpdateMarkerStore(homeDirectory: home)
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            autoupdateMarkerStore: markerStore
+        )
+        // Compatibility-set target present (so not missing-target), but a recorded
+        // cooldown keeps it unusable => .cooldownActive observation.
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: "set-x")
+        await client.setRecordedCooldownForTest(target: "99.9.9", failureClass: .other)
+        await client.stubSignedRecoveryInvocationForTest()
+
+        let base = Date()
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base)
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(400))
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(800))
+        let count = await client.acceptedSessionRecoveryFailureCountForTest()
+        let eligible = await client.acceptedSessionRecoveryEligibleForTest()
+        XCTAssertEqual(count, 3)
+        XCTAssertTrue(eligible)
+    }
+
+    // SPEC-020-R005 round-8 HIGH (the exact regression): a has-compat-set target that
+    // repeatedly fails must reach threshold across throttled re-observation ticks even
+    // after its single ~300s cooldown has EXPIRED — the stuck signal is "attempted this
+    // session and not progressed", not a momentary cooldown. Primary attempt records
+    // count=1; the cooldown then expires; each later tick still increments to arm.
+    func testRepeatedlyUnusableCompatSetTargetReachesThresholdAfterCooldownExpiry() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: "set-x")
+        await client.stubSignedRecoveryInvocationForTest()
+
+        // Primary attempt this session: the target is recorded as attempted and the
+        // failure registers count=1. NO active cooldown is present at re-observation
+        // time (it has expired) — the observation must rely on the attempted signal.
+        await client.markTargetAttemptedForTest("99.9.9")
+        await client.applyPrimaryRecommendationOutcomeForTest(.forwardProgressFailure, normalizedVersion: "99.9.9")
+        var count = await client.acceptedSessionRecoveryFailureCountForTest()
+        let eligibleEarly = await client.acceptedSessionRecoveryEligibleForTest()
+        XCTAssertEqual(count, 1)
+        XCTAssertFalse(eligibleEarly)
+
+        // Successive throttled ticks (cooldown long expired) still increment to arm.
+        let base = Date()
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base)
+        count = await client.acceptedSessionRecoveryFailureCountForTest()
+        XCTAssertEqual(count, 2)
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(400))
+        count = await client.acceptedSessionRecoveryFailureCountForTest()
+        let eligible = await client.acceptedSessionRecoveryEligibleForTest()
+        XCTAssertEqual(count, 3)
+        XCTAssertTrue(eligible)
+    }
+
+    // SPEC-020-R005 round-8: a has-compat-set target that makes forward progress after
+    // one failure does NOT keep counting — forward progress resets the tracker and
+    // drops the cached recommendation, so the attempted signal is no longer observed.
+    func testCompatSetTargetForwardProgressStopsAttemptedCounting() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: "set-x")
+        await client.stubSignedRecoveryInvocationForTest()
+
+        await client.markTargetAttemptedForTest("99.9.9")
+        await client.applyPrimaryRecommendationOutcomeForTest(.forwardProgressFailure, normalizedVersion: "99.9.9")
+        var interimCount = await client.acceptedSessionRecoveryFailureCountForTest()
+        XCTAssertEqual(interimCount, 1)
+
+        // Forward progress: reset + cache cleared.
+        await client.applyPrimaryRecommendationOutcomeForTest(.forwardProgress, normalizedVersion: "99.9.9")
+        interimCount = await client.acceptedSessionRecoveryFailureCountForTest()
+        XCTAssertEqual(interimCount, 0)
+
+        // Ticks find no cached recommendation (even though the target is still marked
+        // attempted) and do not re-arm.
+        let base = Date()
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base)
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(400))
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(800))
+        let count = await client.acceptedSessionRecoveryFailureCountForTest()
+        let eligible = await client.acceptedSessionRecoveryEligibleForTest()
+        XCTAssertEqual(count, 0)
+        XCTAssertFalse(eligible)
+    }
+
+    static func r005EligibleTrust() -> AutoUpdateTrustState {
+        AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "pinned",
+            encryptedLegValid: true,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: true,
+            tokenValidated: true,
+            bearerlessDuplicate: false,
+            connected: true
+        )
+    }
+
+    static func r005IneligibleTrust() -> AutoUpdateTrustState {
+        AutoUpdateTrustState(
+            v2Accepted: false,
+            tier: nil,
+            encryptedLegValid: false,
+            attestationRequired: false,
+            attestationSatisfied: false,
+            tokenConfigured: true,
+            tokenValidated: false,
+            bearerlessDuplicate: false,
+            connected: false,
+            stableReason: "attestation_degraded"
+        )
+    }
+
+    private func primeAcceptedRecoveryEligible(_ client: CoordinatorClient, normalizedVersion: String) async {
+        let compat = await client.recommendedCompatibilitySetIDForTest()
+        let gen = await client.recommendationGenerationForTest()
+        for _ in 0 ..< 3 {
+            await client.registerRecommendationOutcomeForTest(
+                .forwardProgressFailure,
+                normalizedVersion: normalizedVersion,
+                capturedCompatibilitySetID: compat,
+                capturedGeneration: gen
+            )
+        }
+    }
+
+    // SPEC-020-R005 round-4 HIGH-2: an outcome computed against identity A must NOT
+    // mutate the tracker if the live recommendation context changed (to B, or a new
+    // generation) before the outcome resolves.
+    func testStaleRecommendationOutcomeIsDiscarded() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: "set-A")
+
+        // Capture identity A's context, then the coordinator payload changes to B.
+        let capturedCompat = await client.recommendedCompatibilitySetIDForTest()
+        let capturedGen = await client.recommendationGenerationForTest()
+        await client.mutateRecommendedCompatibilitySetIDForTest("set-B")
+
+        // A stale A-outcome must be discarded — neither A nor B counter is touched.
+        let applied = await client.registerRecommendationOutcomeForTest(
+            .forwardProgressFailure,
+            normalizedVersion: "99.9.9",
+            capturedCompatibilitySetID: capturedCompat,
+            capturedGeneration: capturedGen
+        )
+        XCTAssertFalse(applied)
+        var count = await client.acceptedSessionRecoveryFailureCountForTest()
+        XCTAssertEqual(count, 0)
+
+        // A fresh B-outcome (matching live context) IS applied.
+        let compatB = await client.recommendedCompatibilitySetIDForTest()
+        let genB = await client.recommendationGenerationForTest()
+        let appliedB = await client.registerRecommendationOutcomeForTest(
+            .forwardProgressFailure,
+            normalizedVersion: "99.9.9",
+            capturedCompatibilitySetID: compatB,
+            capturedGeneration: genB
+        )
+        XCTAssertTrue(appliedB)
+        count = await client.acceptedSessionRecoveryFailureCountForTest()
+        XCTAssertEqual(count, 1)
+    }
+
+    // SPEC-020-R005 round-4 HIGH-1(a): the accepted-session signed rail is NOT
+    // invoked when current autoupdate trust is lost, even at threshold eligibility.
+    func testAcceptedRecoveryTrustLostBlocksSignedRailPreInvocation() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: nil)
+        await client.stubSignedRecoveryInvocationForTest()
+        await primeAcceptedRecoveryEligible(client, normalizedVersion: "99.9.9")
+        let eligible = await client.acceptedSessionRecoveryEligibleForTest()
+        XCTAssertTrue(eligible)
+
+        // Trust lost => no invocation despite eligibility.
+        await client.setAutoupdateTrustOverrideForTest { CoordinatorClientTests.r005IneligibleTrust() }
+        await client.runSignedRecoveryDiscoveryForTest(now: Date())
+        var invocations = await client.signedRecoveryInvocationCountForTest()
+        XCTAssertEqual(invocations, 0)
+
+        // Trust restored => the accepted-session recovery invokes.
+        await client.setAutoupdateTrustOverrideForTest { CoordinatorClientTests.r005EligibleTrust() }
+        await client.runSignedRecoveryDiscoveryForTest(now: Date().addingTimeInterval(1000))
+        invocations = await client.signedRecoveryInvocationCountForTest()
+        let lastWasAccepted = await client.lastSignedRecoveryWasAcceptedRecoveryForTest()
+        XCTAssertEqual(invocations, 1)
+        XCTAssertEqual(lastWasAccepted, true)
+    }
+
+    // SPEC-020-R005 round-4 HIGH-1(a)+(b): the pre-swap guard aborts on trust loss
+    // and on primary-rail supersession (tracker no longer eligible).
+    func testAcceptedRecoveryPreSwapGuardAbortsOnTrustLossAndSupersession() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: nil)
+        await primeAcceptedRecoveryEligible(client, normalizedVersion: "99.9.9")
+
+        // Trust eligible + tracker eligible => proceed.
+        await client.setAutoupdateTrustOverrideForTest { CoordinatorClientTests.r005EligibleTrust() }
+        var reason = await client.acceptedRecoveryPreSwapAbortReasonForTest()
+        XCTAssertNil(reason)
+
+        // Trust lost => abort.
+        await client.setAutoupdateTrustOverrideForTest { CoordinatorClientTests.r005IneligibleTrust() }
+        reason = await client.acceptedRecoveryPreSwapAbortReasonForTest()
+        XCTAssertEqual(reason, "trust_state_lost")
+
+        // Trust restored but primary rail made forward progress (tracker reset) =>
+        // abort as superseded.
+        await client.setAutoupdateTrustOverrideForTest { CoordinatorClientTests.r005EligibleTrust() }
+        await client.applyPrimaryRecommendationOutcomeForTest(.forwardProgress, normalizedVersion: "99.9.9")
+        reason = await client.acceptedRecoveryPreSwapAbortReasonForTest()
+        XCTAssertEqual(reason, "accepted_session_recovery_superseded_by_primary")
+    }
+
+    // SPEC-020-R005 round-5 HIGH: the pre-swap guard aborts on a recommendation-
+    // context change (generation/identity) even while the tracker is still NOMINALLY
+    // eligible for the OLD identity — eligibility lags a generation change by one
+    // outcome registration, so the guard must not rely on tracker.isEligible alone.
+    func testPreSwapGuardAbortsOnGenerationChangeDespiteStaleEligibility() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: nil)
+        await primeAcceptedRecoveryEligible(client, normalizedVersion: "99.9.9")
+        await client.setAutoupdateTrustOverrideForTest { CoordinatorClientTests.r005EligibleTrust() }
+
+        // Capture the context at invocation (generation N, identity A).
+        let capturedGen = await client.recommendationGenerationForTest()
+        let capturedIdentityOpt = await client.acceptedSessionRecoveryIdentityForTest()
+        let capturedIdentity = try XCTUnwrap(capturedIdentityOpt)
+
+        // The coordinator context changes (reconnect / new recommendation B): the
+        // generation bumps but the tracker is still eligible for identity A.
+        await client.mutateRecommendedCompatibilitySetIDForTest("set-B")
+        let stillEligibleForA = await client.acceptedSessionRecoveryEligibleForTest()
+        XCTAssertTrue(stillEligibleForA)
+
+        // The guard, aware of the captured generation, aborts as superseded.
+        let reason = await client.acceptedRecoveryPreSwapAbortReasonForTest(
+            capturedGeneration: capturedGen,
+            capturedIdentity: capturedIdentity
+        )
+        XCTAssertEqual(reason, "accepted_session_recovery_superseded_by_primary")
+    }
+
+    // SPEC-020-R005 round-6 HIGH (the terminal fix): model the real temporal
+    // sequence — the pre-drain early-out passes, the coordinator then accepts a new
+    // recommendation DURING the drain await (generation bumps), and the authoritative
+    // SWAP-BOUNDARY gate (evaluated after drain, at the swap) aborts as superseded
+    // even though the tracker is still nominally eligible for the old identity.
+    func testSwapBoundaryGateAbortsAfterMidDrainGenerationBump() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: nil)
+        await primeAcceptedRecoveryEligible(client, normalizedVersion: "99.9.9")
+        await client.setAutoupdateTrustOverrideForTest { CoordinatorClientTests.r005EligibleTrust() }
+
+        // Invocation: capture (generation N, identity A).
+        let capturedGen = await client.recommendationGenerationForTest()
+        let capturedIdentityOpt = await client.acceptedSessionRecoveryIdentityForTest()
+        let capturedIdentity = try XCTUnwrap(capturedIdentityOpt)
+
+        // Pre-drain early-out passes (nothing has changed yet).
+        let preDrain = await client.acceptedRecoveryPreSwapAbortReasonForTest(
+            capturedGeneration: capturedGen,
+            capturedIdentity: capturedIdentity
+        )
+        XCTAssertNil(preDrain)
+        var decision = await client.acceptedRecoverySwapBoundaryDecisionForTest(
+            capturedGeneration: capturedGen,
+            capturedIdentity: capturedIdentity
+        )
+        XCTAssertEqual(decision, .proceed)
+
+        // DURING the drain await, the coordinator accepts a new installable
+        // recommendation B: the generation bumps; the tracker still reads eligible
+        // for A (eligibility lags a generation by one outcome registration).
+        await client.mutateRecommendedCompatibilitySetIDForTest("set-B")
+        let stillEligibleForA = await client.acceptedSessionRecoveryEligibleForTest()
+        XCTAssertTrue(stillEligibleForA)
+
+        // The swap-boundary gate (evaluated after drain) aborts as superseded — the
+        // signed rail will not swap under signed_release while the primary rail is
+        // again viable.
+        decision = await client.acceptedRecoverySwapBoundaryDecisionForTest(
+            capturedGeneration: capturedGen,
+            capturedIdentity: capturedIdentity
+        )
+        XCTAssertEqual(decision, .abort(reason: "accepted_session_recovery_superseded_by_primary"))
+    }
+
+    // SPEC-020-R005 round-6 MEDIUM: re-observation must NOT count a stale cooldown
+    // for a recommendation that is not newer than the running binary (a no-op
+    // target, never an R005 stuck signal).
+    func testNotNewerRecommendationWithCooldownDoesNotArmRecovery() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        // The recommended version equals the running binary version (not newer), and
+        // it has an active cooldown from a prior failure.
+        let running = CoordinatorClient.binaryVersion
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: running, compatibilitySetID: "set-x")
+        await client.setRecordedCooldownForTest(target: running, failureClass: .other)
+        // Even marked attempted, a not-newer target must never count (the newer guard
+        // precedes the attempted signal — round-6 MEDIUM stays fixed under round-8).
+        await client.markTargetAttemptedForTest(running)
+        await client.stubSignedRecoveryInvocationForTest()
+
+        let base = Date()
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base)
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(400))
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(800))
+        let count = await client.acceptedSessionRecoveryFailureCountForTest()
+        let eligible = await client.acceptedSessionRecoveryEligibleForTest()
+        let invocations = await client.signedRecoveryInvocationCountForTest()
+        XCTAssertEqual(count, 0)
+        XCTAssertFalse(eligible)
+        XCTAssertEqual(invocations, 0)
+    }
+
+    // SPEC-020-R005 round-5 MEDIUM: an accepted→disconnected transition after
+    // invocation (no trust degradation) must NOT be blocked by the swap-boundary
+    // gate. The gate permits the fallback: while accepted it proceeds, and after the
+    // session drops it STILL proceeds (the disconnected R001 rail's swap does not
+    // gate on coordinator-session trust).
+    func testAcceptedToDisconnectedFallbackNotBlockedByTrustAtSwap() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: nil)
+        await primeAcceptedRecoveryEligible(client, normalizedVersion: "99.9.9")
+        await client.setAutoupdateTrustOverrideForTest { CoordinatorClientTests.r005EligibleTrust() }
+
+        let capturedGen = await client.recommendationGenerationForTest()
+        let capturedIdentityOpt = await client.acceptedSessionRecoveryIdentityForTest()
+        let capturedIdentity = try XCTUnwrap(capturedIdentityOpt)
+
+        // While still accepted: the swap-boundary gate proceeds.
+        var decision = await client.acceptedRecoverySwapBoundaryDecisionForTest(
+            capturedGeneration: capturedGen,
+            capturedIdentity: capturedIdentity
+        )
+        XCTAssertEqual(decision, .proceed)
+
+        // Session drops (no attestation/token degradation): the swap-boundary gate
+        // STILL proceeds — the disconnected R001 rail is not blocked.
+        await client.configureAcceptedRecoveryForTest(accepted: false, recommendation: nil, compatibilitySetID: nil)
+        decision = await client.acceptedRecoverySwapBoundaryDecisionForTest(
+            capturedGeneration: capturedGen,
+            capturedIdentity: capturedIdentity
+        )
+        XCTAssertEqual(decision, .proceed)
+    }
+
+    // SPEC-020-R005 (a) / re-audit HIGH-1: re-observation does NOT run and does NOT
+    // count while the primary coordinator rail is in flight for the same identity.
+    func testReobservationSkipsWhilePrimaryRailInFlight() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: nil)
+        await client.stubSignedRecoveryInvocationForTest()
+
+        // Primary rail owns this identity: the tick must be a complete no-op.
+        await client.setCoordinatorRecommendationInFlightForTest("99.9.9")
+        await client.reobserveAcceptedSessionRecoveryForTest(now: Date())
+        var count = await client.acceptedSessionRecoveryFailureCountForTest()
+        XCTAssertEqual(count, 0)
+
+        // Once the primary rail releases the identity, observation resumes.
+        await client.setCoordinatorRecommendationInFlightForTest(nil)
+        await client.reobserveAcceptedSessionRecoveryForTest(now: Date().addingTimeInterval(400))
+        count = await client.acceptedSessionRecoveryFailureCountForTest()
+        XCTAssertEqual(count, 1)
+    }
+
+    // SPEC-020-R005 (b) / re-audit HIGH-2 / AC-V0.1-R005-3: after the primary rail
+    // reaches forward progress, the resolved recommendation is dropped, so later
+    // heartbeat ticks do NOT re-arm eligibility until a NEW recommendation arrives.
+    func testForwardProgressClearsRecommendationAndPreventsReArm() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: nil)
+        await client.stubSignedRecoveryInvocationForTest()
+
+        let base = Date()
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base)
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(400))
+        var count = await client.acceptedSessionRecoveryFailureCountForTest()
+        XCTAssertEqual(count, 2)
+
+        // Primary rail makes forward progress: counter resets AND the cached
+        // recommendation is dropped.
+        await client.applyPrimaryRecommendationOutcomeForTest(.forwardProgress, normalizedVersion: "99.9.9")
+        count = await client.acceptedSessionRecoveryFailureCountForTest()
+        let cached = await client.currentCoordinatorRecommendationForTest()
+        XCTAssertEqual(count, 0)
+        XCTAssertNil(cached)
+
+        // Subsequent ticks find no recommendation and do not re-arm.
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(1200))
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(1600))
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(2000))
+        count = await client.acceptedSessionRecoveryFailureCountForTest()
+        let eligible = await client.acceptedSessionRecoveryEligibleForTest()
+        let invocations = await client.signedRecoveryInvocationCountForTest()
+        XCTAssertEqual(count, 0)
+        XCTAssertFalse(eligible)
+        XCTAssertEqual(invocations, 0)
+    }
+
+    // SPEC-020-R005 / AC-V0.1-R005-4: an accepted-session recovery drains via the
+    // coordinator-aware path (state_update draining + drain_status frames) so the
+    // coordinator stops routing buyers.
+    func testAcceptedSessionRecoveryDrainsViaCoordinatorAwarePath() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        // Live accepted session at drain time => coordinator-aware drain.
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: nil, compatibilitySetID: nil)
+
+        let drained = await client.signedRecoveryDrainForTest(target: "1.9.0")
+        XCTAssertTrue(drained)
+        let frames = await recorder.frames
+        XCTAssertTrue(frames.contains { ($0["type"] as? String) == "drain_status" }, "expected drain_status frame")
+        XCTAssertTrue(
+            frames.contains {
+                ($0["type"] as? String) == "state_update" && ($0["state"] as? String) == "draining"
+            },
+            "expected state_update draining frame"
+        )
+    }
+
+    func testDisconnectedRecoveryDrainSendsNoCoordinatorFrames() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        // No accepted session (default) => local drain, no coordinator frames.
+        let client = try await makeClient(status: status, recorder: recorder)
+
+        let drained = await client.signedRecoveryDrainForTest(target: "1.9.0")
+        XCTAssertTrue(drained)
+        let frames = await recorder.frames
+        XCTAssertFalse(frames.contains { ($0["type"] as? String) == "drain_status" })
+        XCTAssertFalse(frames.contains { ($0["type"] as? String) == "state_update" })
+    }
+
+    // SPEC-020-R005 (d) / MEDIUM: if the accepted session drops before drain (the
+    // coordinator-aware send throws), the drain falls back to the local drain and
+    // still completes rather than failing.
+    func testAcceptedSessionRecoveryDrainFallsBackToLocalWhenSendFails() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            sendOverride: { _ in throw CoordinatorClientTestError.sendStateUpdateFailed }
+        )
+        // Accepted at entry, but every coordinator send fails (session dropped).
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: nil, compatibilitySetID: nil)
+
+        let drained = await client.signedRecoveryDrainForTest(target: "1.9.0")
+        XCTAssertTrue(drained)
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.activeRequestIDCount, 0)
+    }
+
+    // SPEC-020-R005 round-3 MEDIUM / AC-V0.1-R005-4: when the coordinator-aware
+    // drain has already emitted state_update(draining) but a subsequent drain_status
+    // send throws, the recovery must NOT silently local-drain. It must reconcile the
+    // coordinator view by sending a terminal ready frame and abort the drain cycle.
+    func testAcceptedSessionRecoveryReconcilesCoordinatorAfterPartialDrain() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        // state_update frames succeed (coordinator-visible side effect fires), but
+        // drain_status frames throw — simulating a socket that fails mid-drain after
+        // the draining frame was already delivered.
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            sendOverride: { frame in
+                if (frame["type"] as? String) == "drain_status" {
+                    throw CoordinatorClientTestError.sendStateUpdateFailed
+                }
+                await recorder.append(frame)
+            }
+        )
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: nil, compatibilitySetID: nil)
+
+        let drained = await client.signedRecoveryDrainForTest(target: "1.9.0")
+        // Drain aborted (not completed) rather than proceeding to swap.
+        XCTAssertFalse(drained)
+        let frames = await recorder.frames
+        // Coordinator saw the draining frame ...
+        XCTAssertTrue(
+            frames.contains {
+                ($0["type"] as? String) == "state_update" && ($0["state"] as? String) == "draining"
+            },
+            "expected the draining side effect to have fired"
+        )
+        // ... and then a terminal ready frame reconciling the stale draining view.
+        XCTAssertTrue(
+            frames.contains {
+                ($0["type"] as? String) == "state_update" && ($0["state"] as? String) == "ready"
+            },
+            "expected a terminal ready frame to reconcile the coordinator drain view"
+        )
+    }
+
+    // SPEC-020-R005 round-4 MEDIUM-1: once a coordinator-visible drain side effect
+    // fired, a transient failure of the compensating ready send must still ABORT the
+    // cycle — never fall through to a local drain + swap while the coordinator may
+    // still hold the stale draining view.
+    func testAcceptedSessionRecoveryAbortsWhenReadyReconcileAlsoFails() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        // The draining state_update succeeds (side effect fires); every other send —
+        // including the compensating ready state_update and all drain_status — throws.
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            sendOverride: { frame in
+                if (frame["type"] as? String) == "state_update",
+                   (frame["state"] as? String) == "draining" {
+                    await recorder.append(frame)
+                    return
+                }
+                throw CoordinatorClientTestError.sendStateUpdateFailed
+            }
+        )
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: nil, compatibilitySetID: nil)
+
+        let drained = await client.signedRecoveryDrainForTest(target: "1.9.0")
+        // Aborted (no swap), even though the ready reconcile could not be delivered.
+        XCTAssertFalse(drained)
+        let frames = await recorder.frames
+        XCTAssertTrue(
+            frames.contains {
+                ($0["type"] as? String) == "state_update" && ($0["state"] as? String) == "draining"
+            },
+            "expected the draining side effect to have fired"
+        )
+        // The ready reconcile threw, so no ready frame is recorded — but the cycle
+        // still aborted rather than local-draining.
+        XCTAssertFalse(
+            frames.contains {
+                ($0["type"] as? String) == "state_update" && ($0["state"] as? String) == "ready"
+            }
+        )
+    }
+
     func testPostDrainReconnectLoopReentersConnectPath() async throws {
         let recorder = CoordinatorFrameRecorder()
         let attempts = ReconnectAttemptRecorder()
@@ -5777,6 +6455,7 @@ private actor CoordinatorFrameRecorder {
         frames.append(frame)
     }
 }
+
 
 private actor ReconnectAttemptRecorder {
     private var count = 0
