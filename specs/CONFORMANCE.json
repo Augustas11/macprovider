@@ -2224,7 +2224,7 @@
         "phase4-coordinator/internal/pool/provider.go:func (r *Registry) QuarantineForProofOfWeightsReload",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) SetProofOfWeightsConfig",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) revalidateProofOfWeightsAdmissions",
-        "phase4-coordinator/internal/ws/server.go:func (s *Server) checkAutotuneHelloGate",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) checkAutotuneHelloGateWithCatalog",
         "phase4-coordinator/cmd/coordinator/main.go:func reloadCoordinatorConfig",
         "phase4-coordinator/cmd/coordinator/main.go:func telemetryDriftEvaluatorForReload"
       ],
