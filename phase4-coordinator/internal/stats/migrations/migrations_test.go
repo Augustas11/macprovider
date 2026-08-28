@@ -46,6 +46,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{23, "malibu_reward_audit_events"},
 		{24, "malibu_epoch_disposition_facts"},
 		{25, "routability_current"},
+		{26, "provider_autoupdate_events"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -925,4 +926,43 @@ func TestApptrackRegisterAttemptsMigrationShape(t *testing.T) {
 	} {
 		mustContain(t, downSQL, needle, "registration attempt rollback artifact")
 	}
+}
+
+// TestProviderAutoupdateEventsMigrationShape locks the Epic #1235 Child B / B2
+// append-only ingest table's grants, including the BIGSERIAL sequence USAGE grant
+// without which every runtime insert fails "permission denied for sequence" (the
+// boot smoke only SELECTs, so it would not catch a missing sequence grant).
+func TestProviderAutoupdateEventsMigrationShape(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	var body string
+	for _, m := range all {
+		if m.Name == "provider_autoupdate_events" {
+			body = m.SQL
+		}
+	}
+	if body == "" {
+		t.Fatal("provider_autoupdate_events migration body is empty")
+	}
+	for _, needle := range []string{
+		"CREATE TABLE IF NOT EXISTS provider_autoupdate_events",
+		"id              BIGSERIAL PRIMARY KEY",
+		"GRANT SELECT ON provider_autoupdate_events TO provider_onboarding",
+		"GRANT INSERT (",
+		// The append-only runtime insert needs nextval() on the owned sequence.
+		"GRANT USAGE, SELECT ON SEQUENCE provider_autoupdate_events_id_seq TO provider_onboarding",
+		"REVOKE ALL ON provider_autoupdate_events FROM stats_reader, provider_portal",
+		"CREATE OR REPLACE FUNCTION prune_provider_autoupdate_events",
+		"SET search_path = pg_catalog, public, pg_temp",
+	} {
+		mustContain(t, body, needle, "autoupdate outcome ingest migration")
+	}
+	// Runtime onboarding role must not receive table-level insert (column-scoped
+	// only) or delete on the append-only ledger.
+	mustNotContain(t, body, "GRANT SELECT, INSERT ON provider_autoupdate_events",
+		"runtime onboarding role must not receive table-level insert")
+	mustNotContain(t, body, "GRANT DELETE ON provider_autoupdate_events",
+		"runtime onboarding role must not delete durable autoupdate events")
 }
