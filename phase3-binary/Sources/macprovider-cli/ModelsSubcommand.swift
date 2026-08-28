@@ -10,6 +10,7 @@ struct ModelsCommand: AsyncParsableCommand {
         subcommands: [
             ModelsListCommand.self,
             ModelsDiscoverCommand.self,
+            ModelsEvaluateCommand.self,
             ModelsSwitchCommand.self,
             ModelsStatusCommand.self,
             ModelsBrowseCommand.self,
@@ -52,6 +53,48 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
         let document = await BYOMDiscoveryRunner(environment: environment).discover()
         for warning in document.warnings.sorted() {
             writeStderr("models discover warning: \(warning)")
+        }
+        try ModelSwitchingWireCodec.printJSON(document)
+    }
+}
+
+struct ModelsEvaluateCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "evaluate",
+        abstract: "Evaluate a provider-local BYOM candidate."
+    )
+
+    @Argument(help: "Candidate id, served model reference, or display name from models discover --json.")
+    var candidate: String
+
+    @Flag(name: .customLong("json"), help: "Emit the strict provider_byom_evaluation.v1 JSON contract.")
+    var emitJSON = false
+
+    @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
+    var localDiscoveryNamespacePath: String?
+
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    var mlxCacheDir: String?
+
+    @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var ollamaOrigin: String = "http://127.0.0.1:11434"
+
+    @Flag(help: "Skip the Ollama-compatible loopback adapter during candidate lookup.")
+    var skipOllama = false
+
+    func run() async throws {
+        guard emitJSON else {
+            writeStderr("models evaluate is JSON-only in this release; pass --json")
+            throw ExitCode(2)
+        }
+        let environment = BYOMDiscoveryEnvironment.production(
+            namespacePath: localDiscoveryNamespacePath,
+            mlxCacheDir: mlxCacheDir,
+            ollamaOrigin: skipOllama ? nil : ollamaOrigin
+        )
+        let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluate()
+        for warning in document.warnings.sorted() {
+            writeStderr("models evaluate warning: \(warning)")
         }
         try ModelSwitchingWireCodec.printJSON(document)
     }
