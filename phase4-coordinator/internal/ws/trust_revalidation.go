@@ -168,7 +168,7 @@ func (s *Server) runAdmissionEvidenceRevalidationSweep() {
 	defer s.proofOfWeightsAdmissionMu.RUnlock()
 
 	powCfg := s.proofOfWeightsConfig()
-	if !powCfg.RequireAutotuneHelloGate || s.autotuneCatalog == nil || s.autotuneEvidence == nil || powCfg.AutotuneEvidenceTTLDays <= 0 {
+	if !powCfg.RequireAutotuneHelloGate || s.currentAutotuneCatalog() == nil || s.autotuneEvidence == nil || powCfg.AutotuneEvidenceTTLDays <= 0 {
 		return
 	}
 	ttl := time.Duration(powCfg.AutotuneEvidenceTTLDays) * 24 * time.Hour

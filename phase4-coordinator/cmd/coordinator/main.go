@@ -1412,6 +1412,34 @@ func loadPreviousAutotuneCatalog(cfg config.AutotuneFeedsConfig) ([]*autotune.Ca
 	return []*autotune.Catalog{previous}, nil
 }
 
+// loadAutotuneCatalogForReload re-loads and verifies the signed autotune feed
+// set the same way boot does (main), for the SIGHUP hot-reload (#1268). It
+// returns the served feed bytes, the parsed active catalog, and the compatible
+// previous catalogs, or an error — the caller keeps the prior catalog on any
+// error (fail-closed), so a bad feed can never be swapped in.
+func loadAutotuneCatalogForReload(cfg config.AutotuneFeedsConfig) (buyer.AutotuneFeeds, *autotune.Catalog, []*autotune.Catalog, error) {
+	feeds, err := buyer.LoadAutotuneFeeds(cfg)
+	if err != nil {
+		return buyer.AutotuneFeeds{}, nil, nil, err
+	}
+	if len(feeds.AutotuneCandidatesJSON) == 0 {
+		return buyer.AutotuneFeeds{}, nil, nil, fmt.Errorf("autotune candidate catalog missing after reload")
+	}
+	catalog, err := autotune.ParseCatalog(feeds.AutotuneCandidatesJSON)
+	if err != nil {
+		return buyer.AutotuneFeeds{}, nil, nil, fmt.Errorf("autotune candidate catalog: %w", err)
+	}
+	if autotune.IsPermanentlyRejectedReleaseID(catalog.Version) {
+		return buyer.AutotuneFeeds{}, nil, nil, fmt.Errorf("autotune candidate catalog: release ID %q is permanently rejected", catalog.Version)
+	}
+	catalog.SignerKeyID = feeds.AutotuneCandidatesVerification.KeyID
+	compatible, err := loadPreviousAutotuneCatalog(cfg)
+	if err != nil {
+		return buyer.AutotuneFeeds{}, nil, nil, fmt.Errorf("autotune previous catalog: %w", err)
+	}
+	return feeds, catalog, compatible, nil
+}
+
 type requestLogPruner interface {
 	PruneBefore(context.Context, time.Time) (int64, error)
 }
@@ -2924,12 +2952,45 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
 	}
-	telemetryDrift, err := telemetryDriftEvaluatorForReload(cfg, autotuneCatalog, autotuneEvidenceStore)
+	// #1268 SIGHUP autotune feed reload: re-parse + verify the signed feed set so
+	// an operator can re-stamp/refresh the rate-card/candidate/demand-rank feeds
+	// (e.g. a freshness renewal) without a coordinator restart. Baseline is the
+	// LIVE catalog (a prior successful reload may have advanced it past the boot
+	// pointer in autotuneCatalog), so telemetry-drift, the hello-gate check, and
+	// the tier2 binding all validate against the catalog actually in force.
+	// Fail-closed — any parse/rejected-id/previous-catalog error keeps the prior
+	// catalog + served bytes; the swap lands only after the tier2 reload succeeds.
+	effectiveAutotuneCatalog := autotuneCatalog
+	if live := wsServer.CurrentAutotuneCatalog(); live != nil {
+		effectiveAutotuneCatalog = live
+	}
+	var reloadedAutotuneCatalog *autotune.Catalog
+	var reloadedAutotuneCompatible []*autotune.Catalog
+	var reloadedAutotuneFeeds buyer.AutotuneFeeds
+	haveReloadedAutotune := false
+	if strings.TrimSpace(cfg.AutotuneFeeds.AutotuneCandidatesPath) != "" {
+		if feeds, catalog, compatible, aerr := loadAutotuneCatalogForReload(cfg.AutotuneFeeds); aerr != nil {
+			logger.Error().Err(aerr).Msg("autotune feed reload rejected; keeping prior catalog and served feeds")
+		} else {
+			reloadedAutotuneCatalog = catalog
+			reloadedAutotuneCompatible = compatible
+			reloadedAutotuneFeeds = feeds
+			effectiveAutotuneCatalog = catalog
+			haveReloadedAutotune = true
+		}
+	} else if effectiveAutotuneCatalog != nil {
+		// Config cleared the feed paths but a catalog is live. Disabling autotune
+		// admission mid-flight is a boot-only operation (it would fail-open the
+		// hello gate), so the live catalog + served bytes are kept and a restart
+		// is required to disable — logged rather than silently ignored.
+		logger.Warn().Msg("autotune feed paths cleared on reload; keeping the live catalog (disable requires a restart)")
+	}
+	telemetryDrift, err := telemetryDriftEvaluatorForReload(cfg, effectiveAutotuneCatalog, autotuneEvidenceStore)
 	if err != nil {
 		logger.Error().Err(err).Msg("proof_of_weights config reload rejected")
 		return
 	}
-	if cfg.ProofOfWeights.RequireAutotuneHelloGate && (autotuneCatalog == nil || autotuneEvidenceStore == nil) {
+	if cfg.ProofOfWeights.RequireAutotuneHelloGate && (effectiveAutotuneCatalog == nil || autotuneEvidenceStore == nil) {
 		logger.Error().Msg("proof_of_weights config reload rejected: autotune hello gate dependencies are not wired")
 		return
 	}
@@ -2963,7 +3024,7 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	// Tier-2 rows conflicting with the in-memory autotune admission catalog
 	// before the package singleton is swapped.
 	if _, err := tier2.ConfigureDefaultStrict(cfg.Tier2, logger, func(next *tier2.Catalog) error {
-		return catalogbind.RequireActiveReleaseBinding(autotuneCatalog, next)
+		return catalogbind.RequireActiveReleaseBinding(effectiveAutotuneCatalog, next)
 	}); err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
@@ -2999,6 +3060,29 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			Int("billing.force_credit_settlement_hold_seconds", cfg.Billing.ForceCreditSettlementHoldSeconds).
 			Str("event", "spec005_v0_4_route_layer_flag_reload").
 			Msg("quarantine force-void route-layer flag reloaded")
+	}
+	if haveReloadedAutotune {
+		// #1268 MED-1: publish the autotune catalog + served feed bytes only
+		// AFTER every fallible reload step above (telemetry-drift build, tier2
+		// binding, billing snapshot) has succeeded, and adjacent to the
+		// telemetry-drift evaluator swap below. telemetryDrift was already built
+		// against reloadedAutotuneCatalog (effectiveAutotuneCatalog), so the live
+		// catalog and the evaluator that captured its pointer now land together
+		// with no early `return` between them — a mid-reload billing failure can
+		// no longer leave the new catalog live while the drift evaluator still
+		// holds the old one. The tier2 reload above already validated
+		// RequireActiveReleaseBinding against reloadedAutotuneCatalog, so this
+		// swap cannot install a catalog that conflicts with the applied tier2
+		// rows. The WS admission catalog and the buyer-served feed bytes swap
+		// together.
+		wsServer.SetAutotuneCatalog(reloadedAutotuneCatalog, reloadedAutotuneCompatible...)
+		buyerServer.SetAutotuneFeeds(reloadedAutotuneFeeds)
+		logger.Info().
+			Str("autotune_catalog_version", reloadedAutotuneCatalog.Version).
+			Int("autotune_compatible_previous_releases", len(reloadedAutotuneCompatible)).
+			Str("autotune_catalog_signer_key_id", reloadedAutotuneCatalog.SignerKeyID).
+			Str("event", "autotune_feed_sighup_reload").
+			Msg("autotune signed feed reloaded without restart")
 	}
 	proofReload := wsServer.SetProofOfWeightsConfig(cfg.ProofOfWeights)
 	wsServer.SetTelemetryDriftEvaluator(telemetryDrift)

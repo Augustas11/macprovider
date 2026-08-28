@@ -143,7 +143,13 @@ type Server struct {
 	// catalog holds an explicitly-injected tier2.Catalog for tests that
 	// want isolation from the package-singleton; nil means "use
 	// tier2.Default()". M3-8d (audit TEST-4). See s.catalogRef().
-	catalog                        *tier2.Catalog
+	catalog *tier2.Catalog
+	// autotuneCatalogMu guards autotuneCatalog + autotuneCompatibleCatalogs so
+	// the SIGHUP feed reload (SetAutotuneCatalog) can atomically swap them while
+	// hello admission reads them concurrently. Construction-time Options write
+	// the fields before Serve() starts any goroutine (happens-before), so they
+	// stay lock-free; every runtime read goes through a getter under RLock.
+	autotuneCatalogMu              sync.RWMutex
 	autotuneCatalog                *autotune.Catalog
 	autotuneCompatibleCatalogs     map[string]*autotune.Catalog
 	autotuneCatalogEnforced        bool
@@ -433,14 +439,104 @@ func WithCatalog(c *tier2.Catalog) Option {
 // gate.
 func WithAutotuneCatalog(catalog *autotune.Catalog, compatible ...*autotune.Catalog) Option {
 	return func(s *Server) {
+		// Construction runs before Serve() launches any goroutine, so this
+		// write is lock-free; runtime swaps use SetAutotuneCatalog.
 		s.autotuneCatalog = catalog
-		s.autotuneCompatibleCatalogs = make(map[string]*autotune.Catalog, len(compatible))
-		for _, previous := range compatible {
-			if previous != nil && previous.Version != "" && !autotune.IsPermanentlyRejectedReleaseID(previous.Version) && (catalog == nil || previous.Version != catalog.Version) {
-				s.autotuneCompatibleCatalogs[previous.Version] = previous
-			}
+		s.autotuneCompatibleCatalogs = buildCompatibleCatalogSet(catalog, compatible)
+	}
+}
+
+// buildCompatibleCatalogSet rebuilds the previous/compatible admission map with
+// the invariant that a compatible entry is a non-rejected, distinctly-versioned
+// prior release. Shared by construction and the SIGHUP swap so both apply the
+// same rules.
+func buildCompatibleCatalogSet(catalog *autotune.Catalog, compatible []*autotune.Catalog) map[string]*autotune.Catalog {
+	next := make(map[string]*autotune.Catalog, len(compatible))
+	for _, previous := range compatible {
+		if previous != nil && previous.Version != "" && !autotune.IsPermanentlyRejectedReleaseID(previous.Version) && (catalog == nil || previous.Version != catalog.Version) {
+			next[previous.Version] = previous
 		}
 	}
+	return next
+}
+
+// currentAutotuneCatalog returns the active catalog under RLock. The pointer is
+// immutable once published, so it stays valid after the lock is released.
+func (s *Server) currentAutotuneCatalog() *autotune.Catalog {
+	s.autotuneCatalogMu.RLock()
+	defer s.autotuneCatalogMu.RUnlock()
+	return s.autotuneCatalog
+}
+
+// autotuneCatalogSnapshot returns the active catalog and the compatible map
+// together under a single RLock, so a reader that consults both cannot observe
+// a torn (current, compatible) pair across a concurrent SetAutotuneCatalog. The
+// compatible map is replaced wholesale (never mutated in place), so the returned
+// reference stays safe to read after the lock is released.
+func (s *Server) autotuneCatalogSnapshot() (*autotune.Catalog, map[string]*autotune.Catalog) {
+	s.autotuneCatalogMu.RLock()
+	defer s.autotuneCatalogMu.RUnlock()
+	return s.autotuneCatalog, s.autotuneCompatibleCatalogs
+}
+
+// SetAutotuneCatalog atomically swaps the active + compatible catalogs. The
+// SIGHUP feed reload calls this only after the new feed is parsed and validated;
+// on any validation failure the caller keeps the prior catalog (fail-closed).
+func (s *Server) SetAutotuneCatalog(catalog *autotune.Catalog, compatible ...*autotune.Catalog) {
+	next := buildCompatibleCatalogSet(catalog, compatible)
+	s.autotuneCatalogMu.Lock()
+	s.autotuneCatalog = catalog
+	s.autotuneCompatibleCatalogs = next
+	s.autotuneCatalogMu.Unlock()
+}
+
+// CurrentAutotuneCatalog exposes the live active catalog to the coordinator's
+// SIGHUP reload so it validates the tier2 binding against the catalog actually
+// in force (which a prior successful reload may have advanced past the boot
+// pointer), never a stale boot capture.
+func (s *Server) CurrentAutotuneCatalog() *autotune.Catalog {
+	return s.currentAutotuneCatalog()
+}
+
+// resolveProviderCatalog resolves the catalog a live session was admitted
+// against by the release id it presented at hello, NOT the stored
+// current/previous mode label. A SIGHUP catalog swap (a freshness re-stamp)
+// moves the active release, which makes the mode label stale but does not change
+// CatalogReleaseID — the release whose SHA/evidence the session is bound to.
+// Resolving by it keeps an already-admitted session valid across the swap
+// (retained as a compatible "previous"), instead of resolving it against the new
+// active catalog and failing its evidence SHA. Sessions without catalog metadata
+// (legacy / not_required / bridge) return ok=false so callers skip catalog-bound
+// checks exactly as before. isCurrent reports whether the resolved catalog is the
+// active one, for callers that cross-check a previous release against the active.
+func (s *Server) resolveProviderCatalog(provider pool.Provider) (resolved, current *autotune.Catalog, isCurrent, ok bool) {
+	if provider.CatalogAdmissionMode != "current" && provider.CatalogAdmissionMode != "previous" {
+		return nil, nil, false, false
+	}
+	cur, compatible := s.autotuneCatalogSnapshot()
+	if provider.CatalogReleaseID != "" {
+		// Resolve by the exact release the session presented. This is the case
+		// production catalogAdmission always produces, and it is what keeps a
+		// live session valid across a swap: after a re-stamp the session's old
+		// release is retained as a compatible "previous" and resolves here.
+		if cur != nil && provider.CatalogReleaseID == cur.Version {
+			return cur, cur, true, true
+		}
+		if prev := compatible[provider.CatalogReleaseID]; prev != nil {
+			return prev, cur, false, true
+		}
+		// A non-empty release that is neither the active catalog nor a retained
+		// compatible one is no longer served: resolution fails so the caller
+		// treats the session as catalog-unavailable.
+		return nil, cur, false, false
+	}
+	// Empty release id (a session admitted before catalog metadata existed):
+	// honor the stored mode against the active catalog, matching pre-#1268
+	// behavior. "previous" with no release id has no resolvable catalog.
+	if provider.CatalogAdmissionMode == "current" && cur != nil {
+		return cur, cur, true, true
+	}
+	return nil, cur, false, false
 }
 
 // WithAutotuneCatalogEnforcement configures strict admission or an explicitly
@@ -741,7 +837,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 			return s.verifyProviderModelIdentity(modelID, expectedHash, reportedHash, reportedAlgorithm)
 		})(registry)
 	}
-	if s.autotuneCatalog != nil && !s.autotuneCatalogEnforced && !s.autotuneCatalogBridgeDeadline.IsZero() && registry != nil {
+	if s.currentAutotuneCatalog() != nil && !s.autotuneCatalogEnforced && !s.autotuneCatalogBridgeDeadline.IsZero() && registry != nil {
 		go s.runAutotuneCatalogBridgeDeadline()
 	}
 	if cfg.Pool.CanaryEnabled && registry != nil {
@@ -767,7 +863,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	// strict autotune evidence TTL checks run only when the hello gate is enabled
 	// and its catalog+evidence dependencies are wired. Both use the same 30s
 	// sweep cadence.
-	if (s.providerTrust != nil || s.rewardsTrust != nil || (s.autotuneCatalog != nil && s.autotuneEvidence != nil)) && registry != nil {
+	if (s.providerTrust != nil || s.rewardsTrust != nil || (s.currentAutotuneCatalog() != nil && s.autotuneEvidence != nil)) && registry != nil {
 		go s.runTrustRevalidationLoop()
 	}
 	return s
@@ -978,7 +1074,7 @@ func (s *Server) SetProofOfWeightsConfig(next config.ProofOfWeightsConfig) Proof
 }
 
 func (s *Server) revalidateProofOfWeightsAdmissions(cfg config.ProofOfWeightsConfig, result ProofOfWeightsReloadResult) ProofOfWeightsReloadResult {
-	if s.autotuneCatalog == nil || s.autotuneEvidence == nil || cfg.AutotuneEvidenceTTLDays <= 0 {
+	if s.currentAutotuneCatalog() == nil || s.autotuneEvidence == nil || cfg.AutotuneEvidenceTTLDays <= 0 {
 		for _, provider := range s.pool.Snapshot() {
 			if s.pool.SetAdmissionEvidenceStale(provider.ProviderID, provider.AssignedID, true) {
 				result.StillEvidenceStale++
@@ -1149,7 +1245,7 @@ func (s *Server) verifyProviderModelIdentity(modelID, expectedHash, reportedHash
 		}
 		return pool.HashStatusMismatch
 	}
-	if s.autotuneCatalog == nil {
+	if s.currentAutotuneCatalog() == nil {
 		return pool.HashStatusCatalogUnavailable
 	}
 	return pool.HashStatusUncatalogued
@@ -2505,7 +2601,13 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 			}
 		}
 	}
-	catalogAdmissionMode, catalogCompatible := s.catalogAdmission(hello)
+	// #1268 MED-2: pin ONE autotune catalog generation for the whole of this
+	// admission. catalogAdmission classifies the hello, expectedAdmissionModelHash
+	// derives the expected hash, and the hello gate authorizes hardware trust —
+	// all three must see the same (current, compatible) pair even if an operator
+	// SIGHUP-swaps the feed between these reads.
+	admissionCurrent, admissionCompatible := s.autotuneCatalogSnapshot()
+	catalogAdmissionMode, catalogCompatible := s.catalogAdmissionWithCatalog(hello, admissionCurrent, admissionCompatible)
 	if !catalogCompatible {
 		if firstHopOnly {
 			catalogAdmissionMode = "update_bridge"
@@ -2524,7 +2626,7 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 		catalogAdmissionMode = "update_bridge"
 	}
 	now := s.now()
-	expectedModelHash := s.expectedAdmissionModelHash(hello, catalogAdmissionMode)
+	expectedModelHash := s.expectedAdmissionModelHashWithCatalog(hello, catalogAdmissionMode, admissionCurrent, admissionCompatible)
 	hashStatus := pool.HashStatus("")
 	tier2Cfg := s.tier2Config()
 	if tier2.ModelHashActive(tier2Cfg) {
@@ -2624,7 +2726,7 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 			Msg("admitting update-only first-hop bridge session")
 	} else {
 		var gateOK bool
-		admissionObservation, gateOK := s.checkAutotuneHelloGate(conn, hello)
+		admissionObservation, gateOK := s.checkAutotuneHelloGateWithCatalog(conn, hello, admissionCurrent)
 		if !gateOK {
 			return nil, false
 		}
@@ -2703,9 +2805,19 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 }
 
 func (s *Server) expectedAdmissionModelHash(hello Hello, admissionMode string) string {
-	catalog := s.autotuneCatalog
+	current, compatible := s.autotuneCatalogSnapshot()
+	return s.expectedAdmissionModelHashWithCatalog(hello, admissionMode, current, compatible)
+}
+
+// expectedAdmissionModelHashWithCatalog is the snapshot-free core so a single
+// admission can thread ONE (current, compatible) generation through
+// catalogAdmission, this hash lookup, and the hello gate — a SIGHUP swap between
+// those reads must not mix an old current with a new compatible within one hello
+// (#1268 MED-2).
+func (s *Server) expectedAdmissionModelHashWithCatalog(hello Hello, admissionMode string, current *autotune.Catalog, compatible map[string]*autotune.Catalog) string {
+	catalog := current
 	if admissionMode == "previous" {
-		catalog = s.autotuneCompatibleCatalogs[hello.CatalogReleaseID]
+		catalog = compatible[hello.CatalogReleaseID]
 	}
 	if catalog == nil || (admissionMode != "current" && admissionMode != "previous") {
 		return ""
@@ -2722,11 +2834,8 @@ func (s *Server) expectedProviderModelHash(providerID, assignedID, modelID strin
 	if !ok {
 		return ""
 	}
-	catalog := s.autotuneCatalog
-	if provider.CatalogAdmissionMode == "previous" {
-		catalog = s.autotuneCompatibleCatalogs[provider.CatalogReleaseID]
-	}
-	if catalog == nil || (provider.CatalogAdmissionMode != "current" && provider.CatalogAdmissionMode != "previous") {
+	catalog, _, _, resolvedOK := s.resolveProviderCatalog(provider)
+	if !resolvedOK || catalog == nil {
 		return ""
 	}
 	_, row, ok := catalog.HighestClaimedTier(modelID)
@@ -2751,9 +2860,17 @@ type autotuneAdmissionObservation struct {
 // the same evidence read runs observe-only so heartbeat model changes can be
 // compared against the admitted RAM ceiling without affecting routing.
 func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (autotuneAdmissionObservation, bool) {
+	return s.checkAutotuneHelloGateWithCatalog(conn, hello, s.currentAutotuneCatalog())
+}
+
+// checkAutotuneHelloGateWithCatalog is the snapshot-free core so the caller can
+// pass the same active catalog it used for catalogAdmission / expected-hash,
+// keeping one admission on a single catalog generation across a SIGHUP swap
+// (#1268 MED-2).
+func (s *Server) checkAutotuneHelloGateWithCatalog(conn net.Conn, hello Hello, catalog *autotune.Catalog) (autotuneAdmissionObservation, bool) {
 	powCfg := s.proofOfWeightsConfig()
 	requireGate := powCfg.RequireAutotuneHelloGate
-	if s.autotuneCatalog == nil || s.autotuneEvidence == nil {
+	if catalog == nil || s.autotuneEvidence == nil {
 		if requireGate {
 			s.log.Error().Str("provider_id", hello.ProviderID).Msg("autotune hello gate enabled but dependencies are not wired")
 			s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
@@ -2799,7 +2916,7 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (autotuneAdm
 		}
 		return autotuneAdmissionObservation{}, true
 	}
-	decision := autotune.EvaluateHelloGateForHello(s.autotuneCatalog, evidence, hello.ModelID, hello.BinaryVersion)
+	decision := autotune.EvaluateHelloGateForHello(catalog, evidence, hello.ModelID, hello.BinaryVersion)
 	if !decision.Allowed {
 		if !requireGate {
 			return autotuneAdmissionObservation{
@@ -2844,7 +2961,15 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (autotuneAdm
 }
 
 func (s *Server) catalogAdmission(hello Hello) (string, bool) {
-	catalog := s.autotuneCatalog
+	catalog, compatible := s.autotuneCatalogSnapshot()
+	return s.catalogAdmissionWithCatalog(hello, catalog, compatible)
+}
+
+// catalogAdmissionWithCatalog is the snapshot-free core so a single admission
+// can pin one (current, compatible) generation and reuse it for the expected
+// model hash and the hello gate — a SIGHUP swap mid-admission must not classify
+// a hello against one generation and hash it against another (#1268 MED-2).
+func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Catalog, compatible map[string]*autotune.Catalog) (string, bool) {
 	if catalog == nil {
 		return "not_required", true
 	}
@@ -2876,7 +3001,7 @@ func (s *Server) catalogAdmission(hello Hello) (string, bool) {
 	providerCatalog := catalog
 	admissionMode := "current"
 	if hello.CatalogReleaseID != catalog.Version {
-		providerCatalog = s.autotuneCompatibleCatalogs[hello.CatalogReleaseID]
+		providerCatalog = compatible[hello.CatalogReleaseID]
 		admissionMode = "previous"
 	}
 	if providerCatalog == nil ||
@@ -2913,25 +3038,27 @@ func (s *Server) catalogAdmission(hello Hello) (string, bool) {
 }
 
 func (s *Server) populateCatalogHelloAck(ack *HelloAck) {
-	if ack == nil || s.autotuneCatalog == nil {
+	catalog := s.currentAutotuneCatalog()
+	if ack == nil || catalog == nil {
 		return
 	}
 	ack.CatalogCompatible = true
-	ack.CatalogReleaseID = s.autotuneCatalog.Version
-	ack.CatalogPolicyVersion = s.autotuneCatalog.PolicyVersion
-	ack.CandidateCatalogSHA256 = s.autotuneCatalog.SHA256
-	ack.CatalogSignerKeyID = s.autotuneCatalog.SignerKeyID
+	ack.CatalogReleaseID = catalog.Version
+	ack.CatalogPolicyVersion = catalog.PolicyVersion
+	ack.CandidateCatalogSHA256 = catalog.SHA256
+	ack.CatalogSignerKeyID = catalog.SignerKeyID
 }
 
 func (s *Server) populateCatalogAuthResponse(response *AuthResponse) {
-	if response == nil || s.autotuneCatalog == nil {
+	catalog := s.currentAutotuneCatalog()
+	if response == nil || catalog == nil {
 		return
 	}
 	response.CatalogCompatible = true
-	response.CatalogReleaseID = s.autotuneCatalog.Version
-	response.CatalogPolicyVersion = s.autotuneCatalog.PolicyVersion
-	response.CandidateCatalogSHA256 = s.autotuneCatalog.SHA256
-	response.CatalogSignerKeyID = s.autotuneCatalog.SignerKeyID
+	response.CatalogReleaseID = catalog.Version
+	response.CatalogPolicyVersion = catalog.PolicyVersion
+	response.CandidateCatalogSHA256 = catalog.SHA256
+	response.CatalogSignerKeyID = catalog.SignerKeyID
 }
 
 func (s *Server) requireCompatibleSet(conn net.Conn, providedID string, authV2 bool) bool {
@@ -4919,20 +5046,24 @@ func (s *Server) observeAdmissionCeilingDrift(provider pool.Provider, priorModel
 }
 
 func (s *Server) catalogMinRAMForProviderModel(provider pool.Provider, modelID string) (int, bool) {
-	catalog := s.autotuneCatalog
-	if catalog == nil {
+	resolved, current, isCurrent, ok := s.resolveProviderCatalog(provider)
+	if !ok || resolved == nil {
 		return 0, false
 	}
-	if provider.CatalogAdmissionMode == "previous" {
-		previousCatalog := s.autotuneCompatibleCatalogs[provider.CatalogReleaseID]
-		if previousCatalog == nil {
+	if !isCurrent {
+		// Provider is on a compatible previous release (either admitted there at
+		// hello, or moved there by a catalog swap). Admit its ceiling only while
+		// the selected row is identity- and policy-equivalent to the active
+		// release, so a stale previous catalog cannot lift the ceiling.
+		if current == nil {
 			return 0, false
 		}
+		previousCatalog := resolved
 		previousKey, _, ok := previousCatalog.HighestClaimedTier(modelID)
 		if !ok {
 			return 0, false
 		}
-		activeKey, activeRow, ok := catalog.HighestClaimedTier(modelID)
+		activeKey, activeRow, ok := current.HighestClaimedTier(modelID)
 		if !ok {
 			return 0, false
 		}
@@ -4940,16 +5071,16 @@ func (s *Server) catalogMinRAMForProviderModel(provider pool.Provider, modelID s
 		if !ok {
 			return 0, false
 		}
-		activeIdentity, ok := catalog.RowIdentity(activeKey)
+		activeIdentity, ok := current.RowIdentity(activeKey)
 		if !ok || !strings.EqualFold(previousIdentity, activeIdentity) {
 			return 0, false
 		}
-		if !previousCatalog.PolicyEquivalent(previousKey, catalog, activeKey) {
+		if !previousCatalog.PolicyEquivalent(previousKey, current, activeKey) {
 			return 0, false
 		}
 		return activeRow.MinRAMGB, true
 	}
-	_, row, ok := catalog.HighestClaimedTier(modelID)
+	_, row, ok := resolved.HighestClaimedTier(modelID)
 	if !ok {
 		return 0, false
 	}
@@ -4957,10 +5088,8 @@ func (s *Server) catalogMinRAMForProviderModel(provider pool.Provider, modelID s
 }
 
 func (s *Server) autotuneCatalogForProvider(provider pool.Provider) *autotune.Catalog {
-	if provider.CatalogAdmissionMode == "previous" {
-		return s.autotuneCompatibleCatalogs[provider.CatalogReleaseID]
-	}
-	return s.autotuneCatalog
+	resolved, _, _, _ := s.resolveProviderCatalog(provider)
+	return resolved
 }
 
 type admissionCeilingRouteVerdict struct {
