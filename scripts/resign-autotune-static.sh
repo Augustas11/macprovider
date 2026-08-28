@@ -53,10 +53,16 @@ python3 "$REPO_ROOT/scripts/catalog-release.py" generate --signer-key-id "$KEY_I
 private_b64="$(tr -d '[:space:]' < "$KEY_PATH")"
 [ -n "$private_b64" ] || fatal "private key file is empty"
 
-derived_public_b64="$(PRIV_B64="$private_b64" swift -e '
+# The private key is passed to the Swift signer as a FILE PATH, never as bytes in
+# the child process environment (process env is a leakage surface even on the
+# signing host). The Swift snippet reads and base64-decodes the file itself.
+derived_public_b64="$(KEY_FILE="$KEY_PATH" swift -e '
 import CryptoKit
 import Foundation
-guard let raw = ProcessInfo.processInfo.environment["PRIV_B64"].flatMap({ Data(base64Encoded: $0) }),
+let env = ProcessInfo.processInfo.environment
+guard let path = env["KEY_FILE"],
+      let text = try? String(contentsOfFile: path, encoding: .utf8),
+      let raw = Data(base64Encoded: text.trimmingCharacters(in: .whitespacesAndNewlines)),
       let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: raw) else { exit(1) }
 print(key.publicKey.rawRepresentation.base64EncodedString())
 ')" || fatal "private key is not a raw 32-byte Ed25519 key"
@@ -73,11 +79,13 @@ sign_one() {
   [ -f "$json_path" ] || fatal "missing input JSON: $json_path"
 
   local signature_b64
-  signature_b64="$(PRIV_B64="$private_b64" INPUT_PATH="$json_path" swift -e '
+  signature_b64="$(KEY_FILE="$KEY_PATH" INPUT_PATH="$json_path" swift -e '
 import CryptoKit
 import Foundation
 let env = ProcessInfo.processInfo.environment
-guard let raw = env["PRIV_B64"].flatMap({ Data(base64Encoded: $0) }),
+guard let keyPath = env["KEY_FILE"],
+      let keyText = try? String(contentsOfFile: keyPath, encoding: .utf8),
+      let raw = Data(base64Encoded: keyText.trimmingCharacters(in: .whitespacesAndNewlines)),
       let path = env["INPUT_PATH"],
       let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: raw),
       let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)),
