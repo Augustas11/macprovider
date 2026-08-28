@@ -86,14 +86,14 @@ mkdir -p "$TMP/own/bin"
 cat > "$TMP/own/bin/lsof" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-  *"-d txt"*) printf 'p4242\nn%s/macprovider/macprovider-cli\n' "$HOME" ;;
+  *"-d txt"*) printf 'p4242\nn%s/macprovider/malibu-cli\n' "$HOME" ;;
   *-t*) echo 4242 ;;
-  *) printf "COMMAND PID\nmacprovider-cli 4242\n" ;;
+  *) printf "COMMAND PID\nmalibu-cli 4242\n" ;;
 esac
 EOF
 cat > "$TMP/own/bin/pgrep" <<'EOF'
 #!/usr/bin/env bash
-echo "4242 macprovider-cli --port 18080"
+echo "4242 malibu-cli --port 18080"
 EOF
 chmod +x "$TMP/own/bin/"*
 PATH="$TMP/own/bin:/usr/bin:/bin" bash -c "source '$TMP/harness.sh'; ensure_port_free 0" >/tmp/install-port.out 2>/tmp/install-port.err

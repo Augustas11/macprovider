@@ -122,7 +122,7 @@ Full operator runbook at `docs/operations/spec-018-v0.2-deploy.md`.
 
 ## Fixture locations
 
-- Swift multi-turn/request/hash tests: `phase3-binary/Tests/macprovider-cliTests/MultiTurnTests.swift`,
+- Swift multi-turn/request/hash tests: `phase3-binary/Tests/malibu-cliTests/MultiTurnTests.swift`,
   `PromptCanonicalizerTests.swift`, `OutputCanonicalizerTests.swift`,
   `PromptOutputCanonicalizerParityTests.swift`, `HTTPServerReceiptTests.swift`,
   `InferenceRelayTests.swift`, `HTTPServerSwapTests.swift`
@@ -254,7 +254,7 @@ Smoke after r1 absorption (manual completion):
 ## Known non-blocking polish (audit may catch)
 
 - Package.swift unhandled-resources warning for 3 fixture files in
-  `Tests/macprovider-cliTests/Fixtures/SPEC015_v03_jcs/`. Addressed in r1
+  `Tests/malibu-cliTests/Fixtures/SPEC015_v03_jcs/`. Addressed in r1
   absorption via Package.swift declaration
 - Sendable closure capture warnings on `streamedAnyToolCallDelta` flag in
   HTTPServer.swift + InferenceRelay.swift — Swift 6 strict-concurrency would

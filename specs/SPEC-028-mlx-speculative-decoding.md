@@ -6,7 +6,7 @@
 **Revision history:**
 - v0.1 (2026-07-05): initial research-round draft.
 - v0.2 (2026-07-05): greedy-only gate confirmed for v0.1; draft-model hash explicitly out of scope (no SPEC-011 amendment); gpt-oss waived from v0.1 compatibility; AC-10 reframed as ratio over measured baseline plus a sustained-thermal window; FR-4 gains a concrete `ProviderCapacity` headroom refresh and fixed plain-vs-spec equivalence fixture; FR-5 gains a v0.1 request-feature allowlist; FR-8 gates heartbeat telemetry behind an operator opt-in until a coordinator SPEC consumes it; FR-9 gains a counter-reset on warm-swap boundary; FR-12 defines fail-closed runtime speculative error handling.
-**Depends on:** SPEC-001 v1.6 (`macprovider-cli serve`, OpenAI-compatible HTTP, heartbeat/status), SPEC-010 v1.5 (`supported_models[]` semantics), SPEC-011 v0.5 (warm-swap state machine and target `model_hash` heartbeat), SPEC-013 v0.3 (`autotune` serving knobs and static candidate catalog), SPEC-015 v0.4.2 (locked settlement receipt usage schema), `mlx-swift-lm` 3.31.4.
+**Depends on:** SPEC-001 v1.6 (`malibu-cli serve`, OpenAI-compatible HTTP, heartbeat/status), SPEC-010 v1.5 (`supported_models[]` semantics), SPEC-011 v0.5 (warm-swap state machine and target `model_hash` heartbeat), SPEC-013 v0.3 (`autotune` serving knobs and static candidate catalog), SPEC-015 v0.4.2 (locked settlement receipt usage schema), `mlx-swift-lm` 3.31.4.
 
 SPEC-028 is provider-side only. With no draft model configured, provider behavior MUST be byte-identical to the existing non-speculative serve path. SPEC-028 MUST NOT change the buyer API, the SPEC-015 v0.4 receipt tuple, settlement verifier behavior, or coordinator routing policy.
 
@@ -18,7 +18,7 @@ In this document, "v0.1" means the first implementation profile of SPEC-028, not
 
 MacProvider serves MLX models from Apple Silicon contributors. The current Phase 3 binary calls `mlx-swift-lm` directly from Swift and generates tokens through `TokenIterator` plus `generate` in `ModelRuntime.swift`. The pinned Swift dependency already exposes speculative decoding, where a smaller compatible draft model proposes tokens and the target model verifies them.
 
-SPEC-028 defines the first locked surface for wiring that primitive into `macprovider-cli serve` as an opt-in operator performance feature.
+SPEC-028 defines the first locked surface for wiring that primitive into `malibu-cli serve` as an opt-in operator performance feature.
 
 Non-normative motivation: the 2026-07-03 leyten/shard technical report measured a large draftable-text throughput gap on consumer hardware. That result is not the same mechanism as MLX linear speculative decoding, but it is enough evidence to justify a MacProvider-native research and benchmark track.
 
@@ -62,7 +62,7 @@ No buyer-visible JSON response, SSE frame, token count, receipt tuple, or error 
 
 ### FR-2. CLI flags
 
-`macprovider-cli serve` MUST add:
+`malibu-cli serve` MUST add:
 
 | Flag | Type | Default | Validation |
 |---|---|---|---|
@@ -329,12 +329,12 @@ For the first implementation profile, the 8 GB tier MUST use a pinned long-conte
 
 Implementation will likely touch:
 
-- `phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift`
+- `phase3-binary/Sources/malibu-cli/MalibuCLI.swift`
 - `phase3-binary/Sources/MacProviderCore/Config.swift`
-- `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift`
-- `phase3-binary/Sources/macprovider-cli/ProviderStatus.swift`
-- `phase3-binary/Sources/macprovider-cli/HTTPServer.swift`
-- `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift`
+- `phase3-binary/Sources/malibu-cli/ModelRuntime.swift`
+- `phase3-binary/Sources/malibu-cli/ProviderStatus.swift`
+- `phase3-binary/Sources/malibu-cli/HTTPServer.swift`
+- `phase3-binary/Sources/malibu-cli/CoordinatorClient.swift`
 - tests for config precedence, runtime gating, status/heartbeat telemetry, receipts, and warm-swap lifecycle.
 
 Those edits are out of scope for this research branch.

@@ -532,17 +532,17 @@ if "/usr/local/lib/macprovider-go-verifier" in ci_workflow:
     raise SystemExit("Linux CI must not retain a divergent /usr/local sealed Go path")
 for requirement in (
     "-destination 'generic/platform=macOS'",
-    'BUILT_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")',
+    'BUILT_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/malibu-cli")',
     'case " $BUILT_PROVIDER_CLI_ARCHES " in',
     '*" arm64 "*) ;;',
-    '/usr/bin/lipo "$PRODUCTS/macprovider-cli" -thin arm64 -output "$THIN_PROVIDER_CLI"',
+    '/usr/bin/lipo "$PRODUCTS/malibu-cli" -thin arm64 -output "$THIN_PROVIDER_CLI"',
     'THIN_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$THIN_PROVIDER_CLI")',
     '[ "$THIN_PROVIDER_CLI_ARCHES" = arm64 ]',
-    'ACTUAL_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")',
+    'ACTUAL_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/malibu-cli")',
     '[ "$ACTUAL_PROVIDER_CLI_ARCHES" = arm64 ]',
     'PACKAGE_HOST_ARCH=$(uname -m)',
     'case "$PACKAGE_HOST_ARCH" in',
-    'ACTUAL_PROVIDER_CLI_VERSION=$("$PRODUCTS/macprovider-cli" --version',
+    'ACTUAL_PROVIDER_CLI_VERSION=$("$PRODUCTS/malibu-cli" --version',
     "Deferring arm64 provider runtime checks",
 ):
     if package_script.count(requirement) != 1:
@@ -675,17 +675,17 @@ for requirement in (
 if "needs: [build, verify_provider_runtime]" not in publish:
     raise SystemExit("protected publication must depend on the arm64 runtime verifier")
 for forbidden in (
-    '"$WORK/macprovider-cli" release-payload-preflight',
-    '"$pkg_expand_dir/Payload/macprovider-cli" --version',
+    '"$WORK/malibu-cli" release-payload-preflight',
+    '"$pkg_expand_dir/Payload/malibu-cli" --version',
 ):
     if forbidden in publish:
         raise SystemExit(
             f"Intel protected publication must not execute an arm64 payload: {forbidden}"
         )
 for requirement in (
-    'signed_provider_arches=$(/usr/bin/lipo -archs "$WORK/macprovider-cli")',
+    'signed_provider_arches=$(/usr/bin/lipo -archs "$WORK/malibu-cli")',
     '[ "$signed_provider_arches" = arm64 ]',
-    'pkg_provider_arches=$(/usr/bin/lipo -archs "$pkg_expand_dir/Payload/macprovider-cli")',
+    'pkg_provider_arches=$(/usr/bin/lipo -archs "$pkg_expand_dir/Payload/malibu-cli")',
     'if [ "$pkg_provider_arches" != arm64 ]; then',
 ):
     if publish.count(requirement) != 1:
@@ -723,6 +723,9 @@ for requirement in (
     'cmp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"',
     'cp -R "$WORK/compatibility-set-local" "$APP/Contents/Resources/compatibility-set-local"',
     'cp -R "$WORK/catalog-release" "$APP/Contents/Resources/catalog-release"',
+    'legacy_tar_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"',
+    'tar -tzf "$legacy_tar_asset" | grep -qx \'macprovider-cli\'',
+    'release_assets=("$tar_asset" "$legacy_tar_asset" "$coordinator_asset" "$coordinator_cli_asset" "$gateway_asset")',
     'release_assets+=("$compatibility_manifest")',
     'cmp "$compatibility_manifest" "$compatibility_extract/compatibility-set.json"',
 ):
@@ -743,7 +746,7 @@ app_sign = publish.split("- name: Sign + notarize + staple Malibu.app", 1)[1].sp
     "\n      - name:", 1
 )[0]
 first_bundle_write = app_sign.find(
-    'cp "$WORK/macprovider-cli" "$APP/Contents/MacOS/macprovider-cli"'
+    'cp "$WORK/malibu-cli" "$APP/Contents/MacOS/malibu-cli"'
 )
 compatibility_copy = app_sign.find(
     'cp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"'
@@ -874,7 +877,7 @@ if publish.count(team_requirement) != 2:
 cli_sign = publish.split("- name: Sign + notarize binary", 1)[1].split(
     "\n      - name:", 1
 )[0]
-if "--entitlements phase3-binary/dist/macprovider-cli.entitlements" in cli_sign:
+if "--entitlements phase3-binary/dist/malibu-cli.entitlements" in cli_sign:
     raise SystemExit("CLI signing must not attach restricted keychain-access-groups entitlements")
 if "bash scripts/require-cli-se-entitlements.sh" not in cli_sign:
     raise SystemExit("CLI signing must prove the CLI has no restricted entitlements")
@@ -1369,7 +1372,7 @@ if appcast_position < 0 or appcast_position > provenance_position:
 if 'if [ "$tag" = v1.8.39 ]' not in prepare or 'legacy appcast must exist only for v1.8.39' not in prepare:
     raise SystemExit("release assets do not fail closed outside the one-time bridge tag")
 for requirement in (
-    "provider_cli=$tar_asset",
+    "provider_cli=$legacy_tar_asset",
     "malibu_app=$app_dmg_asset",
     "coordinator=$coordinator_asset",
     "coordinator_cli=$coordinator_cli_asset",

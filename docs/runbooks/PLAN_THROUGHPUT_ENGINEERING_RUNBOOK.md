@@ -97,12 +97,12 @@ beta/throughput-engineering/
 
 1. Cherry-pick or re-port from `perf/mlx-compile-bf16` (see `audits/2026-06-30/perf-mlx-engine.md`):
    - `DecodeBenchCommand.swift`
-   - `MacProviderCLI.swift` subcommand registration
+   - `MalibuCLI.swift` subcommand registration
    - Tests in `WeightCastTests.swift` only if `WeightCast` also lands (optional)
 2. **Do not** wire `CompiledDecode` or bf16 cast in this task — harness only.
 3. CLI shape:
    ```bash
-   macprovider-cli decode-bench \
+   malibu-cli decode-bench \
      --model <mlx-repo-id> \
      --prefill-tokens 512 \
      --decode-tokens 256 \
@@ -144,7 +144,7 @@ beta/throughput-engineering/
 
 ### Procedure
 
-1. Hardware record: chip, RAM, macOS, `macprovider-cli` version, `Package.resolved` mlx pins.
+1. Hardware record: chip, RAM, macOS, `malibu-cli` version, `Package.resolved` mlx pins.
 2. Per model: 3+ runs, report p50 decode TPS, p50 prefill TPS, TTFT for 512 prefill / 256 decode.
 3. Cross-check Gemma vs `DecodeBandwidthModel` implied active params (T0-02 may use spreadsheet; T2-02 ports the Swift module).
 4. Store immutable JSON under `audits/2026-07-07/bench-snapshots/` (copy from gitignored `state/perf/`).

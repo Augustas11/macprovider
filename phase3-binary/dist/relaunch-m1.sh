@@ -30,20 +30,20 @@ if [ -f "$PIDFILE" ]; then
   fi
   rm -f "$PIDFILE"
 fi
-pkill -f "macprovider-cli --port $PORT" 2>/dev/null || true
+pkill -f "malibu-cli --port $PORT" 2>/dev/null || true
 sleep 1
 
 log "step 2/4: verifying install dir exists"
-if [ ! -x "$INSTALL_DIR/macprovider-cli" ]; then
-  log "  FATAL: $INSTALL_DIR/macprovider-cli not found"
+if [ ! -x "$INSTALL_DIR/malibu-cli" ]; then
+  log "  FATAL: $INSTALL_DIR/malibu-cli not found"
   log "  This script only RELAUNCHES the existing install."
   log "  If the binary is missing, contact the operator for a fresh install."
   exit 1
 fi
 
-log "step 3/4: launching macprovider-cli"
+log "step 3/4: launching malibu-cli"
 cd "$INSTALL_DIR"
-nohup ./macprovider-cli \
+nohup ./malibu-cli \
   --port "$PORT" \
   --model "$MODEL" \
   --provider-id "$PROVIDER_ID" \

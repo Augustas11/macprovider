@@ -14,7 +14,7 @@ expected_shape: |
 
 target:
   coordinator_url: https://coordinator.malibu.tech
-  cli_bin: ../../phase3-binary/.build/release/macprovider-cli
+  cli_bin: ../../phase3-binary/.build/release/malibu-cli
 
 hardware_matrix:
   - {label: m1-8gb,   chip: "Apple M1",       memoryGB: 8,  bandwidthTier: C, expected: at_least_one_eligible_row}

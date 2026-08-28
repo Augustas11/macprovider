@@ -45,7 +45,7 @@ Swift baseline failure:
 - Full suite log: `/tmp/spec015-v04-swift-test.log`.
 - Failing test:
   `ModelsSubcommandTests.testModelsListDisabledModePrintsIdleTableAndExitsZero`
-  at `phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift:64`.
+  at `phase3-binary/Tests/malibu-cliTests/ModelsSubcommandTests.swift:64`.
 - Targeted rerun:
   `swift test --filter ModelsSubcommandTests/testModelsListDisabledModePrintsIdleTableAndExitsZero`
   also failed with the same assertion.
@@ -70,7 +70,7 @@ What landed:
 - Shared fixture corpus:
   `testdata/spec015/v04_settlement_receipts.json`.
 - Swift fixture/parity tests:
-  `phase3-binary/Tests/macprovider-cliTests/SPEC015V04SettlementFixtureTests.swift`.
+  `phase3-binary/Tests/malibu-cliTests/SPEC015V04SettlementFixtureTests.swift`.
 - Go module-local conformance tests:
   `phase4-coordinator/internal/spec015contract/`,
   `phase5-gateway/internal/spec015contract/`, and

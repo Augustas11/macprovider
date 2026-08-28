@@ -39,7 +39,7 @@ The current coordinator reward math has three important properties:
 
 Provider hardware self-report exists but is not yet enough for routing:
 
-- `phase3-binary/Sources/macprovider-cli/AutotuneRuntimeSupport.swift` records chip string, RAM, OS version, and binary version through `MachineFingerprinter.sample()`.
+- `phase3-binary/Sources/malibu-cli/AutotuneRuntimeSupport.swift` records chip string, RAM, OS version, and binary version through `MachineFingerprinter.sample()`.
 - It reads `hw.memsize`, but does not currently report a normalized memory-bandwidth value.
 - The coordinator currently does not filter or tier providers by hardware class.
 
@@ -472,7 +472,7 @@ Exact-model rows are the fastest safe path. Per-class rows are cleaner but requi
 | Persist/report hardware tier fields | `phase4-coordinator/internal/pool/provider.go`, WS provider registration/status structs | Coordinator restart and provider binary update if adding probe fields | 80-150 LOC |
 | Enforce route eligibility | `phase4-coordinator/internal/buyer/server.go:4227-4350` | Coordinator restart | 80-150 LOC plus tests |
 | Prevent pinned-provider bypass | Same buyer selection path and pinned-provider validation helpers | Coordinator restart | Included above |
-| Add provider probe bandwidth mapping | `phase3-binary/Sources/macprovider-cli/AutotuneRuntimeSupport.swift` | Provider binary release | 80-120 LOC |
+| Add provider probe bandwidth mapping | `phase3-binary/Sources/malibu-cli/AutotuneRuntimeSupport.swift` | Provider binary release | 80-120 LOC |
 | Add audit logs/metrics | Buyer selection path plus existing logger/metrics packages | Coordinator restart | 50-100 LOC |
 
 Total estimate: 350-600 LOC with unit tests and routing tests.

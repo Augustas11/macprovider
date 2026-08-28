@@ -86,8 +86,8 @@ func canonicalTupleValue(v any) ([]byte, error) {
 // trim it so the result matches json.Marshal's no-newline contract.
 //
 // Audit-trail note: this MUST match the Swift authority for SPEC-015,
-// which is phase3-binary/Sources/macprovider-cli/RFC8785JCS.swift —
-// NOT phase3-binary/Sources/macprovider-cli/Tier2Attestation.swift's
+// which is phase3-binary/Sources/malibu-cli/RFC8785JCS.swift —
+// NOT phase3-binary/Sources/malibu-cli/Tier2Attestation.swift's
 // `goJSONString`. The Tier2 attestation helper deliberately escapes
 // <, >, & to match Go's default json.Marshal because it's signing
 // over Go-equivalent bytes; the SPEC-015 receipt path uses

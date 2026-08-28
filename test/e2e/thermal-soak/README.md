@@ -58,7 +58,7 @@ Requirements for a valid run:
   M1 Air is fanless and throttles hard; that is *signal*, not a defect).
 - Stand the lab stack up **once** and leave it. Rapid coordinator restarts
   wedge the provider CLI's v2 proof-auth (`auth_request proof rejected: type`,
-  pool → 0); recover with `pkill -9 -f macprovider-cli` and let launchd
+  pool → 0); recover with `pkill -9 -f malibu-cli` and let launchd
   respawn one.
 
 ## Files

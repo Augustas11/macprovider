@@ -124,7 +124,7 @@ validate_artifact_entries() {
       /*|*"/../"*|../*|*/..|..)
         die "unsafe provider artifact path: $entry"
         ;;
-      macprovider-cli)
+      malibu-cli)
         has_binary=1
         ;;
       mlx.metallib|mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib)
@@ -191,7 +191,7 @@ validate_artifact_entries() {
 $entries
 EOF
 
-  [ "$has_binary" -eq 1 ] || die "provider artifact does not contain macprovider-cli"
+  [ "$has_binary" -eq 1 ] || die "provider artifact does not contain malibu-cli"
   [ "$has_metal" -eq 1 ] || die "provider artifact lacks MLX Metal kernels (mlx.metallib or mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib)"
   if [[ ! "$PROVIDER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
     die "PROVIDER_VERSION must be a stable semantic version: $PROVIDER_VERSION"
@@ -258,7 +258,7 @@ temp_parent="$(cd "$temp_parent" && pwd -P)"
 tmpdir="$(mktemp -d "$temp_parent/tier2-provider-artifact.XXXXXX")"
 
 tar -xzf "$PROVIDER_ARTIFACT" -C "$tmpdir"
-provider_binary="$tmpdir/macprovider-cli"
+provider_binary="$tmpdir/malibu-cli"
 [ -x "$provider_binary" ] || die "extracted provider binary is not executable: $provider_binary"
 
 log "provider artifact includes MLX Metal kernels"

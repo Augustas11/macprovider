@@ -63,7 +63,7 @@ struct MalibuModelCapabilityManifest: Decodable, Sendable {
     func supports(_ capability: String, peer: MalibuModelPeerEvidence) -> Bool {
         guard let tier = tiers[capability],
                   peer.contractCompatible,
-                  peer.lifecycleOwner == "macprovider_cli",
+                  ProviderLifecycleAuthority.isAccepted(peer.lifecycleOwner),
                   peer.serviceInstanceID != nil,
                   peer.servicePID != nil,
                   peer.isFresh(),
@@ -585,7 +585,7 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
     ) throws -> URL {
         if let peer {
             guard peer.contractCompatible,
-                  peer.lifecycleOwner == "macprovider_cli",
+                  ProviderLifecycleAuthority.isAccepted(peer.lifecycleOwner),
                   peer.serviceInstanceID != nil,
                   peer.isFresh(),
                   let binaryVersion = peer.binaryVersion,
@@ -618,7 +618,7 @@ final class MalibuModelCLI: MalibuModelCLIRunning {
            Self.isSignedProviderCLI(at: configured, runningPID: nil) {
             return configured
         }
-        let bundled = bundleURL.appendingPathComponent("Contents/MacOS/macprovider-cli")
+        let bundled = bundleURL.appendingPathComponent("Contents/MacOS/malibu-cli")
         if InstalledProviderMonitor.isOwnerPrivateExecutable(atPath: bundled.path),
            Self.isSignedProviderCLI(at: bundled, runningPID: nil) {
             return bundled

@@ -1,4 +1,4 @@
-name: Release macprovider-cli
+name: Release malibu-cli
 
 on:
   workflow_dispatch:
@@ -459,8 +459,8 @@ jobs:
             rm -rf "$runtime_dir"
           }
           trap cleanup_runtime EXIT
-          tar -xzf "$provider_archive" -C "$runtime_dir" macprovider-cli
-          provider_binary="$runtime_dir/macprovider-cli"
+          tar -xzf "$provider_archive" -C "$runtime_dir" malibu-cli
+          provider_binary="$runtime_dir/malibu-cli"
           test -x "$provider_binary"
           provider_arches=$(/usr/bin/lipo -archs "$provider_binary")
           test "$provider_arches" = arm64
@@ -673,7 +673,7 @@ jobs:
           WORK=$(mktemp -d)
           echo "WORK=$WORK" >> "$GITHUB_ENV"
           tar xzf "$src" -C "$WORK"
-          test -x "$WORK/macprovider-cli"
+          test -x "$WORK/malibu-cli"
           test -f "$WORK/compatibility-set.json"
 
           # Bind the semantic compatibility set before it enters any final
@@ -711,25 +711,25 @@ jobs:
             --timestamp \
             --identifier live.malibu.provider.cli \
             --sign "$SIGNING_ID" \
-            "$WORK/macprovider-cli"
+            "$WORK/malibu-cli"
 
           # Verify the signature before notarizing — surfaces problems
           # early (e.g. cert expired) without burning notary submission
           # quota.
-          codesign --verify --strict --verbose=2 "$WORK/macprovider-cli"
-          bash scripts/require-cli-se-entitlements.sh "$WORK/macprovider-cli"
-          CLI_REQUIREMENT=$(codesign -d -r- "$WORK/macprovider-cli" 2>&1)
+          codesign --verify --strict --verbose=2 "$WORK/malibu-cli"
+          bash scripts/require-cli-se-entitlements.sh "$WORK/malibu-cli"
+          CLI_REQUIREMENT=$(codesign -d -r- "$WORK/malibu-cli" 2>&1)
           printf '%s\n' "$CLI_REQUIREMENT" | grep -F 'identifier "live.malibu.provider.cli"' >/dev/null || {
             echo "::error::CLI designated requirement lacks the stable release identifier" >&2
             exit 1
           }
           codesign --verify --strict --verbose=2 \
             -R="identifier \"live.malibu.provider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" \
-            "$WORK/macprovider-cli" || {
+            "$WORK/malibu-cli" || {
             echo "::error::CLI designated requirement is not pinned to the release Team ID" >&2
             exit 1
           }
-          signed_provider_arches=$(/usr/bin/lipo -archs "$WORK/macprovider-cli")
+          signed_provider_arches=$(/usr/bin/lipo -archs "$WORK/malibu-cli")
           [ "$signed_provider_arches" = arm64 ] || {
             echo "::error::signed provider binary is not exact arm64" >&2
             exit 1
@@ -743,7 +743,7 @@ jobs:
           # (--wait blocks until notarization completes, typically 1-15
           # minutes).
           NOTARIZE_ZIP="$SIGNING_TMP/notary.zip"
-          (cd "$WORK" && /usr/bin/ditto -c -k --keepParent macprovider-cli "$NOTARIZE_ZIP")
+          (cd "$WORK" && /usr/bin/ditto -c -k --keepParent malibu-cli "$NOTARIZE_ZIP")
 
           scripts/notarytool-submit-with-retry.sh "$NOTARIZE_ZIP" \
             --apple-id "$APPLE_NOTARY_APPLE_ID" \
@@ -755,12 +755,12 @@ jobs:
           # Step 4: re-tar with the signed + notarized binary.
           # Preserve the same internal layout package.sh produced; the
           # only difference vs the input tarball is that
-          # macprovider-cli now carries a real signature chain. Name every
+          # malibu-cli now carries a real signature chain. Name every
           # member explicitly so the shipped archive cannot regain an
           # ambiguous root entry after the unsigned archive was validated.
           rm -f "$src"
           release_archive_members=(
-            macprovider-cli
+            malibu-cli
             mlx.metallib
             THIRD-PARTY-NOTICES.txt
             compatibility-set.json
@@ -792,7 +792,7 @@ jobs:
             PKG_SCRIPTS="$WORK/pkg-scripts"
             mkdir -p "$PKG_ROOT"
             mkdir -p "$PKG_SCRIPTS"
-            cp "$WORK/macprovider-cli" "$PKG_ROOT/macprovider-cli"
+            cp "$WORK/malibu-cli" "$PKG_ROOT/malibu-cli"
             if [ -f "$WORK/mlx.metallib" ]; then
               cp "$WORK/mlx.metallib" "$PKG_ROOT/mlx.metallib"
             fi
@@ -807,14 +807,14 @@ jobs:
             fi
             printf '%s\n' \
               '#!/bin/sh' \
-              'echo "macprovider-cli.pkg is a signed delivery container for install.sh." >&2' \
+              'echo "malibu-cli.pkg is a signed delivery container for install.sh." >&2' \
               'echo "Install with: curl -fsSL https://get.malibu.tech/install.sh | bash" >&2' \
               'exit 1' \
               > "$PKG_SCRIPTS/preinstall"
             chmod 755 "$PKG_SCRIPTS/preinstall"
 
-            UNSIGNED_PKG="$WORK/macprovider-cli-unsigned.pkg"
-            SIGNED_PKG="$WORK/macprovider-cli.pkg"
+            UNSIGNED_PKG="$WORK/malibu-cli-unsigned.pkg"
+            SIGNED_PKG="$WORK/malibu-cli.pkg"
             pkgbuild \
               --root "$PKG_ROOT" \
               --scripts "$PKG_SCRIPTS" \
@@ -891,8 +891,8 @@ jobs:
             echo "::error::build.keychain absent; CLI signing step cleanup ran too early." >&2
             exit 1
           }
-          [ -n "${WORK:-}" ] && [ -x "$WORK/macprovider-cli" ] || {
-            echo "::error::signed macprovider-cli not available for Malibu.app bundling" >&2
+          [ -n "${WORK:-}" ] && [ -x "$WORK/malibu-cli" ] || {
+            echo "::error::signed malibu-cli not available for Malibu.app bundling" >&2
             exit 1
           }
 
@@ -912,8 +912,8 @@ jobs:
             "$tag" "$APP" \
             scripts/dist/malibu-v1.8.32-sparkle-public-key
 
-          cp "$WORK/macprovider-cli" "$APP/Contents/MacOS/macprovider-cli"
-          chmod 755 "$APP/Contents/MacOS/macprovider-cli"
+          cp "$WORK/malibu-cli" "$APP/Contents/MacOS/malibu-cli"
+          chmod 755 "$APP/Contents/MacOS/malibu-cli"
           [ -f "$WORK/mlx.metallib" ] || {
             echo "::error::signed CLI payload lacks mlx.metallib for Malibu.app bundling" >&2
             exit 1
@@ -962,8 +962,8 @@ jobs:
               "$nested_bundle"
           done < <(find "$APP/Contents/MacOS" -mindepth 1 -maxdepth 1 -type d -name '*.bundle' -print0)
 
-          SOURCE_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
-          source_cli_sha256="$(shasum -a 256 "$WORK/macprovider-cli" | awk '{print $1}')"
+          SOURCE_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/malibu-cli" 2>&1)
+          source_cli_sha256="$(shasum -a 256 "$WORK/malibu-cli" | awk '{print $1}')"
           codesign --force \
             --options runtime \
             --timestamp \
@@ -973,21 +973,21 @@ jobs:
             "$APP"
 
           codesign --verify --strict --verbose=2 --deep "$APP"
-          bundled_cli_sha256="$(shasum -a 256 "$APP/Contents/MacOS/macprovider-cli" | awk '{print $1}')"
+          bundled_cli_sha256="$(shasum -a 256 "$APP/Contents/MacOS/malibu-cli" | awk '{print $1}')"
           if [ "$bundled_cli_sha256" != "$source_cli_sha256" ]; then
             echo "::error::Malibu embedded CLI sha256 differs from standalone CLI" >&2
             echo "::error::standalone=$source_cli_sha256 embedded=$bundled_cli_sha256" >&2
             exit 1
           fi
-          bash scripts/require-cli-se-entitlements.sh "$APP/Contents/MacOS/macprovider-cli"
-          BUNDLED_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
+          bash scripts/require-cli-se-entitlements.sh "$APP/Contents/MacOS/malibu-cli"
+          BUNDLED_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/malibu-cli" 2>&1)
           printf '%s\n' "$BUNDLED_CLI_REQUIREMENT" | grep -F 'identifier "live.malibu.provider.cli"' >/dev/null || {
             echo "::error::Bundling changed the CLI designated requirement identifier" >&2
             exit 1
           }
           codesign --verify --strict --verbose=2 \
             -R="identifier \"live.malibu.provider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" \
-            "$APP/Contents/MacOS/macprovider-cli" || {
+            "$APP/Contents/MacOS/malibu-cli" || {
             echo "::error::Bundled CLI designated requirement is not pinned to the release Team ID" >&2
             exit 1
           }
@@ -1198,7 +1198,7 @@ jobs:
                   echo "::error::unsafe $label path: $entry" >&2
                   exit 1
                   ;;
-                macprovider-cli)
+                malibu-cli)
                   has_binary=1
                   ;;
                 mlx.metallib)
@@ -1265,7 +1265,7 @@ jobs:
           $entries
           EOF
             [ "$has_binary" -eq 1 ] || {
-              echo "::error::$label does not contain macprovider-cli" >&2
+              echo "::error::$label does not contain malibu-cli" >&2
               exit 1
             }
             [ "$has_catalog_manifest" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/release.json" >&2; exit 1; }
@@ -1302,19 +1302,19 @@ jobs:
           pkg_expand_dir="$preflight_dir/pkg-expanded"
           pkg_payload_tar="$preflight_dir/pkg-payload.tar.gz"
           mkdir -p "$tar_payload_dir"
-          tar -xzf "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" -C "$tar_payload_dir" macprovider-cli
+          tar -xzf "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" -C "$tar_payload_dir" malibu-cli
           pkgutil --expand-full "$pkg_src" "$pkg_expand_dir"
-          test -x "$pkg_expand_dir/Payload/macprovider-cli"
+          test -x "$pkg_expand_dir/Payload/malibu-cli"
           validate_payload_entries "$pkg_expand_dir/Payload" "provider package payload"
 
-          tar_binary_sha="$(shasum -a 256 "$tar_payload_dir/macprovider-cli" | awk '{print $1}')"
-          pkg_binary_sha="$(shasum -a 256 "$pkg_expand_dir/Payload/macprovider-cli" | awk '{print $1}')"
+          tar_binary_sha="$(shasum -a 256 "$tar_payload_dir/malibu-cli" | awk '{print $1}')"
+          pkg_binary_sha="$(shasum -a 256 "$pkg_expand_dir/Payload/malibu-cli" | awk '{print $1}')"
           if [ "$pkg_binary_sha" != "$tar_binary_sha" ]; then
             echo "::error::package binary sha256 differs from tarball binary" >&2
             exit 1
           fi
 
-          pkg_provider_arches=$(/usr/bin/lipo -archs "$pkg_expand_dir/Payload/macprovider-cli")
+          pkg_provider_arches=$(/usr/bin/lipo -archs "$pkg_expand_dir/Payload/malibu-cli")
           if [ "$pkg_provider_arches" != arm64 ]; then
             echo "::error::provider package binary is not exact arm64" >&2
             exit 1
@@ -1370,8 +1370,8 @@ jobs:
           app_src="phase3-binary/app/dist/Malibu-${tag}.pkg"
           app_dmg_src="phase3-binary/app/dist/Malibu-${tag}.dmg"
           appcast_src="phase3-binary/app/dist/appcast.xml"
-          tar_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
-          pkg_asset="macprovider-cli-${tag}-darwin-arm64.pkg"
+          tar_asset="malibu-cli-${tag}-darwin-arm64.tar.gz"
+          pkg_asset="malibu-cli-${tag}-darwin-arm64.pkg"
           app_asset="Malibu-${tag}.pkg"
           app_dmg_asset="Malibu-${tag}.dmg"
           appcast_asset="appcast.xml"
@@ -1382,6 +1382,7 @@ jobs:
           pearl_metadata_sig="pearl-release.json.sig"
           compatibility_manifest="compatibility-set.json"
           compatibility_artifact_index="compatibility-artifact-index.json"
+          legacy_tar_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
           catalog_manifest_src="phase3-binary/catalog/autotune/release.json"
           catalog_keys_src="phase3-binary/catalog/autotune/trusted-keys.json"
           catalog_tier2_src="phase3-binary/catalog/autotune/tier2-catalog.json"
@@ -1405,7 +1406,26 @@ jobs:
           }
           trap cleanup_release_signing_key EXIT
           cp "$src" "$tar_asset"
-          release_assets=("$tar_asset" "$coordinator_asset" "$coordinator_cli_asset" "$gateway_asset")
+          legacy_bridge_dir="$(mktemp -d "$RUNNER_TEMP/legacy-provider-cli.XXXXXX")"
+          tar -xzf "$src" -C "$legacy_bridge_dir"
+          cp "$legacy_bridge_dir/malibu-cli" "$legacy_bridge_dir/macprovider-cli"
+          legacy_archive_members=(
+            macprovider-cli
+            mlx.metallib
+            THIRD-PARTY-NOTICES.txt
+            compatibility-set.json
+            compatibility-set-local
+            catalog-release
+          )
+          for legacy_bundle in mlx-swift_Cmlx.bundle swift-nio_NIOPosix.bundle; do
+            if [ -d "$legacy_bridge_dir/$legacy_bundle" ]; then
+              legacy_archive_members+=("$legacy_bundle")
+            fi
+          done
+          tar czf "$legacy_tar_asset" -C "$legacy_bridge_dir" "${legacy_archive_members[@]}"
+          tar -tzf "$legacy_tar_asset" | grep -qx 'macprovider-cli'
+          rm -rf "$legacy_bridge_dir"
+          release_assets=("$tar_asset" "$legacy_tar_asset" "$coordinator_asset" "$coordinator_cli_asset" "$gateway_asset")
           cp "$catalog_manifest_src" release.json
           cp "$catalog_keys_src" trusted-keys.json
           cp "$catalog_tier2_src" tier2-catalog.json
@@ -1558,7 +1578,7 @@ jobs:
             -signature "$pearl_metadata_sig" "$pearl_metadata"
           release_assets+=("$pearl_metadata" "$pearl_metadata_sig")
           artifact_index_arguments=(
-            --artifact "provider_cli=$tar_asset"
+            --artifact "provider_cli=$legacy_tar_asset"
             --artifact "malibu_app=$app_dmg_asset"
             --artifact "coordinator=$coordinator_asset"
             --artifact "coordinator_cli=$coordinator_cli_asset"
@@ -1625,7 +1645,7 @@ jobs:
             cp CHANGELOG.md release-notes.md
           else
             cat > release-notes.md <<EOF
-          # macprovider-cli $tag
+          # malibu-cli $tag
 
           Darwin arm64 build for Apple Silicon Macs.
 
@@ -1801,7 +1821,7 @@ jobs:
             "${release_assets[@]}" \
             checksums.txt \
             checksums.txt.sig \
-            --title "macprovider-cli $tag" \
+            --title "malibu-cli $tag" \
             --notes-file release-notes.md \
             --target "$release_commit" \
             --verify-tag \

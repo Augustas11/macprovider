@@ -44,7 +44,7 @@ require_line '<string>$config_path</string>' "launchd absolute config env value"
 require_line 'Model download ${bar}' "model download progress bar"
 require_line 'known_weight_gb_for_model()' "built-in model download size estimates"
 require_line 'partial model cache detected' "partial cache cold-timeout path"
-require_line 'macprovider-cli autotune --config' "valid autotune operator handoff"
+require_line 'malibu-cli autotune --config' "valid autotune operator handoff"
 
 if grep -Fq 'autotune --provider-id' "$INSTALL_SH"; then
   die "installer must not print the unsupported autotune --provider-id option"

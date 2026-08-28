@@ -13,7 +13,7 @@ You are designing **SPEC-018 v0.2**, building on locked **SPEC-018 v0.1.5** (`sp
 
 ## This deliverable: §10a #2 — model_hash → tool-call-family registry
 
-**Current state (v0.1):** Parser family selection in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:482-487` uses `modelID` substring match (Qwen2.5/Qwen3 → Qwen family; Llama-3.3 → Llama family). `modelID` is **self-declared by the provider** — a malicious provider can advertise modelID `qwen3-fake` while loading arbitrary weights. v0.1.5 trusts the provider; buyer-side validation obligation per §1 + AC-20 is the v0.1 mitigation.
+**Current state (v0.1):** Parser family selection in `phase3-binary/Sources/malibu-cli/ToolCallParser.swift:482-487` uses `modelID` substring match (Qwen2.5/Qwen3 → Qwen family; Llama-3.3 → Llama family). `modelID` is **self-declared by the provider** — a malicious provider can advertise modelID `qwen3-fake` while loading arbitrary weights. v0.1.5 trusts the provider; buyer-side validation obligation per §1 + AC-20 is the v0.1 mitigation.
 
 **Required v0.2 state:** Parser family selection is gated by `model_hash`. A registry maps `{model_hash → tool_call_family}`. Unknown hash → no synthesis (fail closed). The provider cannot lie about which tool-call family it serves because `model_hash` is verified by SPEC-008 against the actually-loaded weights.
 

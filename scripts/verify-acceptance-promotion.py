@@ -120,6 +120,7 @@ def verify_directory(args: argparse.Namespace) -> None:
         fail("candidate directory has duplicate or unsafe basenames")
     release_names = read_asset_names(root / "release-assets.txt")
     required_release_names = {
+        f"malibu-cli-{args.tag}-darwin-arm64.tar.gz",
         f"macprovider-cli-{args.tag}-darwin-arm64.tar.gz",
         f"Malibu-{args.tag}.dmg",
         "release-toolchain.json",

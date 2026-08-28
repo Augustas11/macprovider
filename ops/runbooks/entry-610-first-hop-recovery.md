@@ -16,7 +16,7 @@ rollback) unless explicitly waived in decision log.
 ## Why this exists
 
 Public CLI **1.8.48** is the last pre-fix updater. It still requires a
-fresh coordinator compatibility admission before `macprovider-cli update`
+fresh coordinator compatibility admission before `malibu-cli update`
 activates a signed release:
 
 - `accepted_compatibility_set_id` must equal the installed set
@@ -27,7 +27,7 @@ change the already-shipped 1.8.48 binary. Production therefore needs a
 server-compatible bridge the old updater can accept without weakening
 signature, downgrade, or revocation controls.
 
-## Preferred path (ordinary `macprovider-cli update`)
+## Preferred path (ordinary `malibu-cli update`)
 
 On Pearl, overlay the live compatibility-set policy with the exact public
 pre-fix set in `first_hop_bridge_ids` while `target_id` (and
@@ -62,14 +62,14 @@ Operator journey on a reachable coordinator:
 # a valid Pearl first-hop admission. One symlink repair makes ordinary update
 # use the coherent ~/macprovider payload (J2 control). Newer CLIs also
 # auto-repair this at update/serve time (#616).
-if [ -e "$HOME/.local/bin/macprovider-cli" ] && [ ! -L "$HOME/.local/bin/macprovider-cli" ] \
-  && [ -x "$HOME/macprovider/macprovider-cli" ]; then
-  ln -sfn "$HOME/macprovider/macprovider-cli" "$HOME/.local/bin/macprovider-cli"
+if [ -e "$HOME/.local/bin/malibu-cli" ] && [ ! -L "$HOME/.local/bin/malibu-cli" ] \
+  && [ -x "$HOME/macprovider/malibu-cli" ]; then
+  ln -sfn "$HOME/macprovider/malibu-cli" "$HOME/.local/bin/malibu-cli"
 fi
 
-macprovider-cli update
-macprovider-cli --version
-macprovider-cli status
+malibu-cli update
+malibu-cli --version
+malibu-cli status
 ```
 
 After the hop (≥1.8.49 provider component), remove the bridge id and rely on
@@ -83,8 +83,8 @@ surgery):
 
 ```bash
 curl -fsSL https://get.malibu.tech/install.sh | MACPROVIDER_VERSION=v1.8.56 bash
-macprovider-cli --version
-macprovider-cli status
+malibu-cli --version
+malibu-cli status
 ```
 
 `install.sh` upgrade-in-place installs the complete signed compatibility set
@@ -94,7 +94,7 @@ without calling the 1.8.48 coordinator-admission gate.
 
 After the first recovery-capable CLI is active:
 
-1. Disconnected manual `macprovider-cli update` via signed discovery
+1. Disconnected manual `malibu-cli update` via signed discovery
 2. Coordinator-rejected update via signed discovery
 3. Default autoupdate without an accepted session
 4. Explicit `auto_update_enabled: false` still allows manual update

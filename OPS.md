@@ -901,7 +901,7 @@ gate executed AFTER the merge.
 
 ## 11. Operator-side provider watchdog (issue #189 / #191)
 
-Every install of `macprovider-cli` via the public
+Every install of `malibu-cli` via the public
 `get.malibu.tech/install.sh` flow now ships an external LaunchAgent
 that catches a class of silent half-open-TCP wedge originally tracked
 in issue #189 (the in-process bounded send + Darwin.exit(1) liveness
@@ -997,6 +997,6 @@ bash ops/macprovider-watchdog/uninstall.sh
   pending evidence we see this happen in production; for now the
   in-process liveness watchdog (#189 / PR #204) is the primary
   detection path.
-- **macprovider-cli process not running at all.** launchd's
+- **malibu-cli process not running at all.** launchd's
   `KeepAlive` on the main service handles this; the watchdog only
   helps when the process is running but its WebSocket is wedged.

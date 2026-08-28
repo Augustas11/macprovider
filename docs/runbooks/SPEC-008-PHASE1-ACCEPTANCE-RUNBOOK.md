@@ -22,7 +22,7 @@ Expected local artifacts before activation:
 
 | Artifact | Expected evidence |
 |---|---|
-| `phase3-binary/dist/phase3-binary-m4-v1.2.5.tar.gz` | `scripts/check-tier2-release-artifacts.sh` logs the observed SHA-256, or compares it when `PROVIDER_SHA256=<expected>` is set; extracted `macprovider-cli --version` prints `1.2.5` |
+| `phase3-binary/dist/phase3-binary-m4-v1.2.5.tar.gz` | `scripts/check-tier2-release-artifacts.sh` logs the observed SHA-256, or compares it when `PROVIDER_SHA256=<expected>` is set; extracted `malibu-cli --version` prints `1.2.5` |
 | `phase4-coordinator/dist/coordinator-linux-amd64` | SHA-256 `8b8bbb58f1062e504d414aaec3712660bf4c98b53a8d49a7554a2288687b1a91`; binary contains `tier2 catalog loaded` |
 | `.omc/tier2/tier2-catalog.json` | Signed Ed25519 catalog with two `artifact_manifest` model entries |
 | `.omc/tier2/catalog-signing-key.pub` | Public key `IVH2aAlTudARJSK3e7XGmcGjxAqwm6lReGiS-0U9aFQ` |
@@ -140,7 +140,7 @@ gh release view --repo Augustas11/macprovider --json tagName
 
 The release must include:
 
-- `macprovider-cli-v1.2.5-darwin-arm64.tar.gz`;
+- `malibu-cli-v1.2.5-darwin-arm64.tar.gz`;
 - `checksums.txt`;
 - `checksums.txt.sig`.
 
@@ -171,10 +171,10 @@ self-update path, use the same public release API as the installer:
 
 ```bash
 MACPROVIDER_RELEASES_API_URL=https://api.github.com/repos/Augustas11/macprovider/releases/latest \
-  ~/macprovider/macprovider-cli update --check
+  ~/macprovider/malibu-cli update --check
 
 MACPROVIDER_RELEASES_API_URL=https://api.github.com/repos/Augustas11/macprovider/releases/latest \
-  ~/macprovider/macprovider-cli update
+  ~/macprovider/malibu-cli update
 ```
 
 The installer path remains preferred because it verifies `checksums.txt.sig` and
@@ -183,7 +183,7 @@ rewrites the launchd plist with the current websocket coordinator arguments.
 After the provider command returns, verify locally on that Mac:
 
 ```bash
-~/macprovider/macprovider-cli --version
+~/macprovider/malibu-cli --version
 launchctl list | grep live.malibu.provider
 curl -fsS http://127.0.0.1:8080/v1/models
 tail -n 80 ~/Library/Logs/macprovider/macprovider.err.log

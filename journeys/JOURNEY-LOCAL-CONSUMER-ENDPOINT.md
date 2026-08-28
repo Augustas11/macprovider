@@ -13,7 +13,7 @@ Execution mode: staging-or-production-local-consumer-endpoint
 ## Purpose
 
 This journey defines the signed real-gateway evidence required to promote the
-local consumer endpoint mode. It proves that a reviewed `macprovider-cli
+local consumer endpoint mode. It proves that a reviewed `malibu-cli
 consume` build can be used by an OpenAI SDK through the loopback base URL and
 generated local token while preserving local budget, recovery, and redaction
 invariants.
@@ -42,7 +42,7 @@ passed, and it does not make any SPEC-045 requirement conformant by itself.
   injected transport.
 - Use a short-lived buyer credential through the approved secret-injection
   mechanism. Record only redacted fingerprints.
-- Start `macprovider-cli consume` with a positive local budget, explicit model
+- Start `malibu-cli consume` with a positive local budget, explicit model
   allowlist, trusted pricing, and a ledger path whose redacted digest can be
   captured.
 - Use an OpenAI SDK configured with the local endpoint base URL and generated

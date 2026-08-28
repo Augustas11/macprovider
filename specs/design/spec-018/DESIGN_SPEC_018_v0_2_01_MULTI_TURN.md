@@ -23,7 +23,7 @@ You are designing **SPEC-018 v0.2**, building on locked **SPEC-018 v0.1.5** (`sp
 
 ## Design questions to answer
 
-1. **Where exactly does the provider reject today?** Identify the code path in `phase3-binary/Sources/macprovider-cli/` (likely an input validation layer or chat-template adapter) that emits `unsupported_tool_messages`. Cite line numbers.
+1. **Where exactly does the provider reject today?** Identify the code path in `phase3-binary/Sources/malibu-cli/` (likely an input validation layer or chat-template adapter) that emits `unsupported_tool_messages`. Cite line numbers.
 
 2. **MLX chat-template threading**: How should `role:"tool"` content be threaded into the MLX model's chat template? Different model families (Qwen2.5/Qwen3, Llama-3.3) have different multi-turn tool-call template conventions. Should the parser-family registry (§3.1) own the inverse: "given family X, render tool messages using template Y"? Or should the chat template be carried out-of-band per modelID?
 

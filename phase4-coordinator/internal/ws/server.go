@@ -2493,7 +2493,7 @@ func (s *Server) prepareProviderAdmissionDeferredQuota(conn net.Conn, auth provi
 func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth providerAuth, hello Hello, checkQuota bool) (*pool.Provider, bool) {
 	// Exact pre-fix sets listed in first_hop_bridge_ids may open an
 	// update-only session so public 1.8.48 can persist coordinator
-	// compatibility admission and run ordinary `macprovider-cli update`
+	// compatibility admission and run ordinary `malibu-cli update`
 	// (#610). They never become buyer-routable.
 	firstHopOnly := s.cfg.Coordinator.CompatibilitySet.IsFirstHopBridgeOnly(hello.CompatibilitySetID)
 	if !firstHopOnly {
@@ -5602,7 +5602,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		Version                  string `json:"version"`
 		RecommendedBinaryVersion string `json:"recommended_binary_version"`
 		// RequiredBinaryVersion mirrors the hard admission floor so
-		// `macprovider-cli doctor` can tell an operator WHY a build is being
+		// `malibu-cli doctor` can tell an operator WHY a build is being
 		// closed with 4004 without inventing a new coordinator endpoint
 		// (#767). Empty when no floor is configured. Like the recommendation
 		// above it is NOT capability-gated: /healthz is an operator/monitoring

@@ -63,7 +63,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
 
     func testHandoffImportsThenVerifiesWithFreshInvocation() async throws {
         let recorder = HandoffInvocationRecorder(exitCodes: [0, 0])
-        let executable = URL(fileURLWithPath: "/tmp/macprovider-cli")
+        let executable = URL(fileURLWithPath: "/tmp/malibu-cli")
         let config = URL(fileURLWithPath: "/tmp/config with spaces.yaml")
 
         try await ProviderCredentialHandoffRunner.migrate(
@@ -87,7 +87,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
         do {
             try await ProviderCredentialHandoffRunner.migrate(
                 configURL: URL(fileURLWithPath: "/tmp/config.yaml"),
-                executableURL: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+                executableURL: URL(fileURLWithPath: "/tmp/malibu-cli"),
                 run: { executable, arguments in
                     await recorder.run(executable: executable, arguments: arguments)
                 }
@@ -107,7 +107,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
         do {
             try await ProviderCredentialHandoffRunner.migrate(
                 configURL: URL(fileURLWithPath: "/tmp/config.yaml"),
-                executableURL: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+                executableURL: URL(fileURLWithPath: "/tmp/malibu-cli"),
                 run: { executable, arguments in
                     await recorder.run(executable: executable, arguments: arguments)
                 }
@@ -125,7 +125,37 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("credential-handoff-home-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: home) }
-        let executable = home.appendingPathComponent("custom/bin/macprovider-cli")
+        let executable = home.appendingPathComponent("custom/bin/malibu-cli")
+        try FileManager.default.createDirectory(
+            at: executable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(FileManager.default.createFile(atPath: executable.path, contents: Data("test".utf8)))
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let manifest = home.appendingPathComponent(
+            "Library/Application Support/macprovider/install_manifest.json"
+        )
+        try FileManager.default.createDirectory(
+            at: manifest.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try JSONSerialization.data(withJSONObject: [
+            "install_prefix": executable.deletingLastPathComponent().path,
+            "binary_path": executable.path,
+        ])
+            .write(to: manifest)
+
+        XCTAssertEqual(
+            try ProviderCredentialHandoffRunner.resolveInstalledExecutable(home: home),
+            executable.standardizedFileURL
+        )
+    }
+
+    func testResolveInstalledExecutableAcceptsLegacyManifestBinaryName() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("credential-handoff-legacy-home-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let executable = home.appendingPathComponent("macprovider/macprovider-cli")
         try FileManager.default.createDirectory(
             at: executable.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -162,7 +192,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
             at: manifest.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try JSONSerialization.data(withJSONObject: ["binary_path": "relative/macprovider-cli"])
+        try JSONSerialization.data(withJSONObject: ["binary_path": "relative/malibu-cli"])
             .write(to: manifest)
 
         XCTAssertThrowsError(
@@ -255,7 +285,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
         let recorder = CapturedInvocationRecorder(results: [
             .init(exitCode: 0, standardOutput: Self.credentialJSON(operation: "status"))
         ])
-        let executable = URL(fileURLWithPath: "/tmp/macprovider-cli")
+        let executable = URL(fileURLWithPath: "/tmp/malibu-cli")
         let config = URL(fileURLWithPath: "/tmp/config with spaces.yaml")
 
         let status = try await ProviderCredentialHandoffRunner.credentialStatus(
@@ -288,7 +318,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
 
         let status = try await ProviderCredentialHandoffRunner.repairCredential(
             configURL: config,
-            executableURL: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+            executableURL: URL(fileURLWithPath: "/tmp/malibu-cli"),
             expectedProviderID: "provider-a",
             proveRestart: true,
             previousServiceInstanceID: "instance-old",
@@ -318,7 +348,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
         do {
             _ = try await ProviderCredentialHandoffRunner.credentialStatus(
                 configURL: URL(fileURLWithPath: "/tmp/config.yaml"),
-                executableURL: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+                executableURL: URL(fileURLWithPath: "/tmp/malibu-cli"),
                 expectedProviderID: "provider-a",
                 run: { _, _ in result }
             )
@@ -336,7 +366,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
         do {
             _ = try await ProviderCredentialHandoffRunner.repairCredential(
                 configURL: URL(fileURLWithPath: "/tmp/config.yaml"),
-                executableURL: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+                executableURL: URL(fileURLWithPath: "/tmp/malibu-cli"),
                 run: { executable, arguments in
                     await recorder.run(executable: executable, arguments: arguments)
                 }
@@ -356,7 +386,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
             )
         ])
         let config = URL(fileURLWithPath: "/tmp/config with spaces.yaml")
-        let executable = URL(fileURLWithPath: "/tmp/macprovider-cli")
+        let executable = URL(fileURLWithPath: "/tmp/malibu-cli")
 
         let result = try await ProviderCredentialHandoffRunner.stageAdmissionIdentityRecovery(
             configURL: config,
@@ -394,7 +424,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
                     "contract_version": 1,
                     "operation": "recover_admission_identity",
                     "provider_id": "provider-a",
-                    "owner": "macprovider_cli",
+                    "owner": "malibu_cli",
                     "state": "committed",
                     "public_key_sha256": committed,
                     "restart_safe": true,
@@ -405,7 +435,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
 
         let result = try await ProviderCredentialHandoffRunner.activateAdmissionIdentityRecovery(
             configURL: config,
-            executableURL: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+            executableURL: URL(fileURLWithPath: "/tmp/malibu-cli"),
             expectedProviderID: "provider-a",
             previousServiceInstanceID: "instance-old",
             run: { executable, arguments in
@@ -436,7 +466,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
 
         let result = try await ProviderCredentialHandoffRunner.admissionIdentityRecoveryStatus(
             configURL: config,
-            executableURL: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+            executableURL: URL(fileURLWithPath: "/tmp/malibu-cli"),
             expectedProviderID: "provider-a",
             run: { executable, arguments in
                 await recorder.run(executable: executable, arguments: arguments)
@@ -463,7 +493,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
         do {
             _ = try await ProviderCredentialHandoffRunner.credentialStatus(
                 configURL: URL(fileURLWithPath: "/tmp/config.yaml"),
-                executableURL: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+                executableURL: URL(fileURLWithPath: "/tmp/malibu-cli"),
                 run: { _, _ in .init(exitCode: 0, standardOutput: data) }
             )
             XCTFail("expected incompatible contract")
@@ -498,7 +528,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
             "contract_version": 1,
             "operation": "recover_admission_identity",
             "provider_id": "provider-a",
-            "owner": "macprovider_cli",
+            "owner": "malibu_cli",
             "state": "approval_required",
             "candidate_public_key_sha256": candidate,
             "restart_safe": true,
@@ -523,7 +553,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
             "contract_version": 1,
             "operation": "admission_identity_recovery_status",
             "provider_id": "provider-a",
-            "owner": "macprovider_cli",
+            "owner": "malibu_cli",
             "state": "approval_required",
             "candidate_public_key_sha256": candidate,
             "restart_safe": true,

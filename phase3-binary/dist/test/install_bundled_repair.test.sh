@@ -58,11 +58,11 @@ printf 'old-mlx\n' > "$INSTALL_DIR/mlx.metallib"
 app="$TMP/Malibu.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/compatibility-set-local" \
   "$app/Contents/Resources/catalog-release"
-cat > "$app/Contents/MacOS/macprovider-cli" <<'EOF'
+cat > "$app/Contents/MacOS/malibu-cli" <<'EOF'
 #!/bin/bash
 echo "1.8.104"
 EOF
-chmod 0755 "$app/Contents/MacOS/macprovider-cli"
+chmod 0755 "$app/Contents/MacOS/malibu-cli"
 printf 'new-mlx\n' > "$app/Contents/MacOS/mlx.metallib"
 printf '{"signed":{"components":{"provider_cli":{"version":"1.8.104"}}}}\n' \
   > "$app/Contents/Resources/compatibility-set.json"
@@ -79,7 +79,7 @@ mkdir -p "$TMPDIR_PATH"
 tag="v1.8.104"
 
 stage_bundled_repair_payload
-[ -x "$TMPDIR_PATH/staging/macprovider-cli" ]
+[ -x "$TMPDIR_PATH/staging/malibu-cli" ]
 [ -f "$TMPDIR_PATH/staging/compatibility-set.json" ]
 [ -d "$TMPDIR_PATH/staging/compatibility-set-local" ]
 [ -d "$TMPDIR_PATH/staging/catalog-release" ]

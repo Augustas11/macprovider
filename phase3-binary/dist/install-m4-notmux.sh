@@ -56,7 +56,7 @@ xattr -dr com.apple.quarantine "$INSTALL_DIR" 2>/dev/null || true
 
 log "step 4/6: launching binary via nohup (no tmux required)"
 cd "$INSTALL_DIR"
-nohup ./macprovider-cli --port "$PORT" --model "$MODEL" > "$LOGFILE" 2>&1 &
+nohup ./malibu-cli --port "$PORT" --model "$MODEL" > "$LOGFILE" 2>&1 &
 BINARY_PID=$!
 echo "$BINARY_PID" > "$PIDFILE"
 log "  PID: $BINARY_PID  (saved to $PIDFILE)"

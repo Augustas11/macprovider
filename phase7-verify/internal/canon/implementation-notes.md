@@ -5,11 +5,11 @@
 `phase7-verify/testdata/canon_fixtures.json` is generated from the Swift
 canonicalizers in:
 
-- `phase3-binary/Sources/macprovider-cli/PromptCanonicalizer.swift`
-- `phase3-binary/Sources/macprovider-cli/OutputCanonicalizer.swift`
+- `phase3-binary/Sources/malibu-cli/PromptCanonicalizer.swift`
+- `phase3-binary/Sources/malibu-cli/OutputCanonicalizer.swift`
 
 The generator is guarded by `REGENERATE_CANON_FIXTURES=1` in
-`phase3-binary/Tests/macprovider-cliTests/PromptOutputCanonicalizerParityTests.swift`.
+`phase3-binary/Tests/malibu-cliTests/PromptOutputCanonicalizerParityTests.swift`.
 The same test also reads the shared fixture corpus without regeneration and
 asserts Swift still emits every expected canonical byte string and hash.
 

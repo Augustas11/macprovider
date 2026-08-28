@@ -200,7 +200,7 @@ beta/catalog-expansion/
 
 ### Procedure
 
-1. Load `mlx-community/gemma-4-26b-a4b-it-4bit` via `macprovider-cli serve` (or Malibu agent path).
+1. Load `mlx-community/gemma-4-26b-a4b-it-4bit` via `malibu-cli serve` (or Malibu agent path).
 2. Send `POST /v1/chat/completions` with:
    - Single-turn user message
    - Multi-turn system+user+assistant
@@ -307,7 +307,7 @@ Executor agent after P0-01..05:
 |-------|-------|
 | **ID** | `P1-01` |
 | **Machines** | 32 GB (M-Base, required) + 48 GB (M-Pro, optional) — minimum **1 clean run on 32 GB** |
-| **Tooling** | Stage1 probe path (`Stage1Iterator.swift:379–537`) or `macprovider-cli autotune` — **not** ad-hoc single-shot scripts |
+| **Tooling** | Stage1 probe path (`Stage1Iterator.swift:379–537`) or `malibu-cli autotune` — **not** ad-hoc single-shot scripts |
 
 ### Contamination caveat (from P0-01 — pinned session 2026-07-07)
 
@@ -324,13 +324,13 @@ P0-01 **GREEN stands for memory** (~15 GB resident, 32 GB load PASS) but its **~
 
 ### Environment prep (mandatory before any TPS number)
 
-1. **Quit all other `macprovider-cli serve` instances** (including dev providers on alternate ports).
+1. **Quit all other `malibu-cli serve` instances** (including dev providers on alternate ports).
 2. **Quit heavy apps** (browsers, other agents, node servers on inference ports).
 3. Record **before each run**:
    - `memory_pressure` one-liner
-   - `ps aux \| head` or process count of `macprovider-cli`
+   - `ps aux \| head` or process count of `malibu-cli`
    - Chip + RAM GB + power mode if not on AC
-4. Prefer **release build** (`phase3-binary/.build/release/macprovider-cli`) per P0-01/P0-04.
+4. Prefer **release build** (`phase3-binary/.build/release/malibu-cli`) per P0-01/P0-04.
 5. **Reboot optional** but recommended if prior session loaded large models (memory fragmentation).
 
 ### gpt-oss sanity check (gate before locking Gemma bench gates)

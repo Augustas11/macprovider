@@ -12,7 +12,7 @@ own log/state writes under system-owned support roots, not inside the fleet
 user's home.
 
 **Change log v0.27 (2026-08-25, SSH-only headless fleet mode).** The existing
-`macprovider-cli` gains an explicit `headless_fleet` install profile for Macs
+`malibu-cli` gains an explicit `headless_fleet` install profile for Macs
 administered only through SSH. It runs in the launchd system domain without an
 Aqua login session, keeps the provider bearer and receipt/admission private keys
 in a protected-file store owned by the selected non-root fleet user, and exposes
@@ -60,7 +60,7 @@ external rollout evidence.
 **Change log v0.23 (2026-07-14, issue #585 admission-identity rotation).**
 The CLI-owned admission identity is now restart-safe but rotatable: the stable legacy
 Keychain service remains the current slot, with separate pending and bounded previous
-slots. `macprovider-cli credentials rotate-admission-identity` stages one idempotent
+slots. `malibu-cli credentials rotate-admission-identity` stages one idempotent
 candidate, takes the maintenance lease, restarts the launchd provider, and requires a
 fresh buyer-serving proof before reporting success. The current key signs the complete
 initial transcript containing `provider_admission_next_public_key`; the coordinator
@@ -74,7 +74,7 @@ This change log supersedes v0.18/v0.19 descriptions of the admission key as non-
 **Change log v0.22 (2026-07-14, issue #585 Option 2 credential-custody
 slice).** The shipped CLI-track onboarding now hands the bearer to CLI-owned Keychain
 storage while Malibu retains YAML. Import calls the installed
-`macprovider-cli credentials import --config` and then a separate
+`malibu-cli credentials import --config` and then a separate
 `credentials verify --config` against one immutable snapshot; the second process's
 exact-value proof permits the App marker/link transition but not YAML removal. A
 restarted launchd provider removes YAML only after authenticated coordinator admission.
@@ -123,7 +123,7 @@ service `KeepAlive` does; auth citations corrected `server.go:1210`→`:1216`.
 **Change log v0.19 (2026-07-13, R6 audit-loop convergence — code source of truth;
 security lane PASS 0/0/0).** R6 (code 0C/1H/3M, security **0C/0H/0M**, architect
 0C/0H/3M). The HIGH was an over-statement of dormancy: **§4.3 `identity_signature` is
-LIVE via the CLI track** — the `macprovider-cli` the app monitors signs it with its
+LIVE via the CLI track** — the `malibu-cli` the app monitors signs it with its
 stable **bootstrap identity** for `mp-*` admission (`CoordinatorClient.swift:1842`,
 `identity_signature.go:127`, `server.go:1216`), only the App-side `p_*` responder is
 dormant. Corrected the §4 scope banner, §10 checklist ("gates §4.1 register + §5.3 App
@@ -213,7 +213,7 @@ matched to shipped code; code is source of truth):** The **CLI-wrapper refactor 
 in-app **register → autotune → spawn-child** flow is gone: `LaunchProviderController`
 now runs the bundled CLI-track **`install.sh`** (which registers, autotunes, downloads
 the model, and installs the launchd provider service + companion watchdog) and
-`MalibuAgent` **monitors** the launchd-managed `macprovider-cli` over local HTTP — it
+`MalibuAgent` **monitors** the launchd-managed `malibu-cli` over local HTTP — it
 does not spawn a child.
 `RegisterClient.postRegister` and the `MALIBU_ONBOARD_V2` flag are gone from the live
 path (so §8's migration matrix and AC-026-09 no longer apply). v0.14 rewrites §6.1 /
@@ -229,11 +229,11 @@ monitor-only flow (present but unreachable — a carried gap, §4.3).
 apparatus is DORMANT).** The shipped Malibu app does **not** create the App-track
 device `p_*` Ed25519 identity, does **not** call `/v1/providers/register`, and does
 **not** perform App Attest or App-`p_*` identity signing at runtime. (Reconciled v0.18:
-the `macprovider-cli` the app monitors DOES sign `identity_signature` with its stable
+the `malibu-cli` the app monitors DOES sign `identity_signature` with its stable
 bootstrap identity for `mp-*` admission — a LIVE §4.3 dependency; only the App-side
 `p_*` responder is dormant. See the §4 scope banner.) Instead,
 `install.sh` onboards a **standard CLI-track provider**: it generates a fresh
-`mp-<32-hex>` principal and runs `macprovider-cli bootstrap-auth`, which acquires a
+`mp-<32-hex>` principal and runs `malibu-cli bootstrap-auth`, which acquires a
 `provider_token` via the coordinator's **tokenless WebSocket admission** handshake
 (`install.sh:2484-2505,3112-3125`; `BootstrapAuthCommand.swift`;
 `CoordinatorClient.swift:569-575,1989-2056`). Bootstrap persists that bearer directly
@@ -700,7 +700,7 @@ v0.4's partial edits; SEC + ARCH HIGHs were real. v0.5 closes all:
   running CLI against it, but `config.yaml` is a file path, not
   a directory. v0.5 moves the file to
   `~/.config/macprovider/config.yaml.cli-backup-<timestamp>` and
-  documents `macprovider-cli --config <backup-file>` for
+  documents `malibu-cli --config <backup-file>` for
   reclaim.
 - **§10 step 7 rewritten** to use `provider_auth_policy.signature_exempt_until`,
   `migration_time + 7 days`, both App and CLI pre-cutover ids,
@@ -967,7 +967,7 @@ against v0.1. v0.2 closes each. Load-bearing changes:
   object replay across arbitrary identities.
 - **SPEC-023 autotune stays on-device.** v0.1 had the coordinator
   return `recommended_model` from `/register`. v0.2 removes it; the
-  App runs `macprovider-cli autotune --recommend --json` locally after
+  App runs `malibu-cli autotune --recommend --json` locally after
   identity is minted, preserving SPEC-023's signed-catalog + rate-card
   privacy invariants.
 - **"Coordinator escrow" renamed to "unpaid ledger backlog".** Aligns
@@ -987,7 +987,7 @@ against v0.1. v0.2 closes each. Load-bearing changes:
   introduced by [SPEC-025](./SPEC-025-native-mac-app.md). Brand is
   Malibu; user-visible strings never say "MacProvider",
   `malibu.tech`, or "node".
-- **CLI track** — existing `macprovider-cli` binary launched via
+- **CLI track** — existing `malibu-cli` binary launched via
   `install.sh` by developer users. As of v0.22, App import stages the YAML bearer in
   CLI Keychain and keeps the private YAML until a restarted launchd process is admitted;
   older installed CLIs fail the handoff without losing the source.
@@ -1000,7 +1000,7 @@ against v0.1. v0.2 closes each. Load-bearing changes:
   flow is the CLI-track `mp-<32hex>` principal (§2). Same algorithm
   (`Curve25519.Signing.PrivateKey`, generated the same way as the
   SPEC-015 receipt key at
-  `phase3-binary/Sources/macprovider-cli/ReceiptKeyStore.swift:41`)
+  `phase3-binary/Sources/malibu-cli/ReceiptKeyStore.swift:41`)
   but a separate keypair in a separate Keychain slot. Does NOT rotate on
   the SPEC-015 receipt-key rotation path; rotation of the identity key
   itself is out of scope for v0.2 (open question §13).
@@ -1141,7 +1141,7 @@ and without entering a wallet address unless they want to.
 
 ### 2.1 SSH-only headless fleet profile
 
-The existing `macprovider-cli` MUST support two explicit, mutually exclusive
+The existing `malibu-cli` MUST support two explicit, mutually exclusive
 macOS installation profiles:
 
 | `install_profile` | Runtime domain | Secret custody | Intended operator |
@@ -1352,7 +1352,7 @@ operation while identity remains stable.
 The App target does not export the receipt-key private material to
 the CLI subprocess. The CLI generates and manages its own receipt key
 via `KeychainReceiptKeyStore` at
-`phase3-binary/Sources/macprovider-cli/*.swift` per SPEC-015,
+`phase3-binary/Sources/malibu-cli/*.swift` per SPEC-015,
 unchanged. CLI admission-key rotation is the §4.3 old-key-signed generation advance; it
 does not migrate `provider_identities`, provider tokens, payout bindings, or provider ID.
 Only rotation of the dormant App-derived `p_*` identity remains a future concern (§13).
@@ -1401,12 +1401,12 @@ registration to succeed.
 > **Scope banner (reconciled v0.14/v0.18).** The coordinator-side contracts in §4 are
 > **implemented and conform coordinator-side** (Go tests pass). Client exercise differs
 > per section — a critical distinction: the shipped **Malibu app** is a monitor wrapper,
-> but the **`macprovider-cli` it monitors** is a full v2 client.
+> but the **`malibu-cli` it monitors** is a full v2 client.
 > - **§4.1 `/v1/providers/register`** — **dormant**: neither the app nor `install.sh`
 >   calls it; current main deletes `RegisterClient`. Onboarding uses `bootstrap-auth` +
 >   tokenless WS admission (§6.1).
 > - **§4.3 `identity_signature` proof-stage** — **LIVE via the CLI track**: the
->   launchd-managed `macprovider-cli` signs `identity_signature` with its stable
+>   launchd-managed `malibu-cli` signs `identity_signature` with its stable
 >   **bootstrap identity** on the v2 auth handshake (`CoordinatorClient.swift:1842`), the
 >   coordinator verifies it (`identity_signature.go:127`), and admission requires it under
 >   `provider_auth_policy` (`server.go:1216`). The Malibu **app** itself does not sign;
@@ -1449,7 +1449,7 @@ input. The concrete v1 handoff is:
    process argument, child environment, or log. A noninteractive fresh install
    without a source file exits with typed status 20. A restart-safe incumbent
    bypasses this fresh-only intake. Both paths call the installed
-   `macprovider-cli bootstrap-auth --referral-code-file <source>`.
+   `malibu-cli bootstrap-auth --referral-code-file <source>`.
 4. `bootstrap-auth` opens the source with no-follow owner/mode/link/ACL and
    device/inode stability checks, reuses the durable provider/receipt identity,
    and sends the exact code in both signed bootstrap stages. Its owner-only
@@ -1648,7 +1648,7 @@ Coordinator MUST:
    ```
 
    `recommended_model` is NOT returned here. In the shipped flow
-   `install.sh` runs `macprovider-cli autotune --recommend` on-device
+   `install.sh` runs `malibu-cli autotune --recommend` on-device
    per SPEC-023 (§6.1 step 7b); the app does not mint via §4.1 (§4.1
    client note).
 
@@ -2821,7 +2821,7 @@ without the explicit import flow.
   earnings on the CLI-track provider_id continue to accrue but
   are no longer accessible via `Malibu.app`; they can be
   reclaimed via
-  `macprovider-cli --config <backup-file-path>` which
+  `malibu-cli --config <backup-file-path>` which
   supports pointing at an arbitrary config file. The dialog
   displays the exact reclaim command for copy.
 - Option C (secondary link): **Cancel** — closes the dialog and
@@ -3253,7 +3253,7 @@ criteria in §5.2 by 25%.
   - **Start fresh:** moves `config.yaml` to
     `~/.config/macprovider/config.yaml.cli-backup-<UTC-timestamp>`,
     proceeds to Fresh state, and displays the exact
-    `macprovider-cli --config <backup-file>` reclaim command.
+    `malibu-cli --config <backup-file>` reclaim command.
   - **Cancel:** closes the dialog and quits the App with no file
     changes.
 - **AC-026-16.** §4.1 duplicate-register bearer-proof mechanic

@@ -46,7 +46,7 @@ def runner(output: str):
 
 
 installed = types.SimpleNamespace(st_dev=0x11, st_ino=42)
-path = "/Users/canary/macprovider-cli"
+path = "/Users/canary/malibu-cli"
 
 for vnode_path in implementations:
     assert vnode_path(123, installed, path, runner("ftxt\nD0x11\ni42\nn" + path + "\n")) == path

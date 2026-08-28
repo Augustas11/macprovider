@@ -18,7 +18,7 @@ cd "$PHASE3_DIR"
 
 TAG=${1:-$(git rev-parse --short HEAD)}
 PROVIDER_CLI_VERSION=$(sed -n 's/^[[:space:]]*static let binaryVersion = "\([0-9][0-9.]*\)"$/\1/p' \
-  "$PHASE3_DIR/Sources/macprovider-cli/CoordinatorClient.swift" | head -1)
+  "$PHASE3_DIR/Sources/malibu-cli/CoordinatorClient.swift" | head -1)
 MALIBU_APP_VERSION=$(sed -n 's/^[[:space:]]*MARKETING_VERSION:[[:space:]]*"\([0-9][0-9.]*\)"$/\1/p' \
   "$PHASE3_DIR/app/project.yml" | head -1)
 [ -n "$PROVIDER_CLI_VERSION" ] || {
@@ -89,7 +89,7 @@ python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" validate \
 
 echo "==> Building Release configuration (this takes ~5-10 min)..."
 BUILD_LOG="$PACKAGE_WORK_DIR/package-build.log"
-if ! xcodebuild -scheme macprovider-cli \
+if ! xcodebuild -scheme malibu-cli \
                 -configuration Release \
                 -destination 'generic/platform=macOS' \
                 -derivedDataPath "$RELEASE_DIR" \
@@ -107,13 +107,13 @@ rm -f "$BUILD_LOG"
 PRODUCTS="$RELEASE_DIR/Build/Products/Release"
 
 # Sanity: binary + Metal kernels present.
-if [ ! -f "$PRODUCTS/macprovider-cli" ] ||
-   [ -L "$PRODUCTS/macprovider-cli" ] ||
-   [ ! -x "$PRODUCTS/macprovider-cli" ]; then
-  echo "FATAL: macprovider-cli not found at $PRODUCTS"
+if [ ! -f "$PRODUCTS/malibu-cli" ] ||
+   [ -L "$PRODUCTS/malibu-cli" ] ||
+   [ ! -x "$PRODUCTS/malibu-cli" ]; then
+  echo "FATAL: malibu-cli not found at $PRODUCTS"
   exit 1
 fi
-BUILT_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")
+BUILT_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/malibu-cli")
 case " $BUILT_PROVIDER_CLI_ARCHES " in
   *" arm64 "*) ;;
   *)
@@ -122,9 +122,9 @@ case " $BUILT_PROVIDER_CLI_ARCHES " in
     ;;
 esac
 if [ "$BUILT_PROVIDER_CLI_ARCHES" != arm64 ]; then
-  THIN_PROVIDER_CLI="$PACKAGE_WORK_DIR/macprovider-cli.arm64"
-  PRODUCT_REPLACEMENT="$PRODUCTS/.macprovider-cli.arm64.$$"
-  /usr/bin/lipo "$PRODUCTS/macprovider-cli" -thin arm64 -output "$THIN_PROVIDER_CLI"
+  THIN_PROVIDER_CLI="$PACKAGE_WORK_DIR/malibu-cli.arm64"
+  PRODUCT_REPLACEMENT="$PRODUCTS/.malibu-cli.arm64.$$"
+  /usr/bin/lipo "$PRODUCTS/malibu-cli" -thin arm64 -output "$THIN_PROVIDER_CLI"
   THIN_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$THIN_PROVIDER_CLI")
   [ "$THIN_PROVIDER_CLI_ARCHES" = arm64 ] || {
     echo "FATAL: thinned provider CLI architecture $THIN_PROVIDER_CLI_ARCHES is not exact arm64" >&2
@@ -132,10 +132,10 @@ if [ "$BUILT_PROVIDER_CLI_ARCHES" != arm64 ]; then
   }
   cp "$THIN_PROVIDER_CLI" "$PRODUCT_REPLACEMENT"
   chmod 0755 "$PRODUCT_REPLACEMENT"
-  mv -f "$PRODUCT_REPLACEMENT" "$PRODUCTS/macprovider-cli"
+  mv -f "$PRODUCT_REPLACEMENT" "$PRODUCTS/malibu-cli"
   PRODUCT_REPLACEMENT=
 fi
-ACTUAL_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")
+ACTUAL_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/malibu-cli")
 [ "$ACTUAL_PROVIDER_CLI_ARCHES" = arm64 ] || {
   echo "FATAL: packaged provider CLI architecture $ACTUAL_PROVIDER_CLI_ARCHES is not exact arm64" >&2
   exit 1
@@ -143,7 +143,7 @@ ACTUAL_PROVIDER_CLI_ARCHES=$(/usr/bin/lipo -archs "$PRODUCTS/macprovider-cli")
 PACKAGE_HOST_ARCH=$(uname -m)
 case "$PACKAGE_HOST_ARCH" in
   arm64)
-    ACTUAL_PROVIDER_CLI_VERSION=$("$PRODUCTS/macprovider-cli" --version | tr -d '\r\n')
+    ACTUAL_PROVIDER_CLI_VERSION=$("$PRODUCTS/malibu-cli" --version | tr -d '\r\n')
     [ "$ACTUAL_PROVIDER_CLI_VERSION" = "$PROVIDER_CLI_VERSION" ] || {
       echo "FATAL: built provider CLI version $ACTUAL_PROVIDER_CLI_VERSION does not match declared component $PROVIDER_CLI_VERSION" >&2
       exit 1
@@ -172,7 +172,7 @@ fi
 }
 
 echo "==> Build products:"
-ls -la "$PRODUCTS/macprovider-cli"
+ls -la "$PRODUCTS/malibu-cli"
 ls -la "$PRODUCTS/mlx.metallib"
 
 echo "==> Gathering third-party license notices..."
@@ -182,7 +182,7 @@ NOTICES_FILE="$PACKAGE_WORK_DIR/THIRD-PARTY-NOTICES.txt"
 echo "==> Staging tarball contents..."
 STAGE_DIR="$PACKAGE_WORK_DIR/stage"
 mkdir -p "$STAGE_DIR"
-cp "$PRODUCTS/macprovider-cli" "$STAGE_DIR/"
+cp "$PRODUCTS/malibu-cli" "$STAGE_DIR/"
 cp "$PRODUCTS/mlx.metallib" "$STAGE_DIR/"
 if [ -d "$PRODUCTS/mlx-swift_Cmlx.bundle" ]; then
     cp -r "$PRODUCTS/mlx-swift_Cmlx.bundle" "$STAGE_DIR/"
@@ -220,7 +220,7 @@ echo "==> Packaging tarball: $TARBALL"
 # evidence. Final container hashes intentionally live in the signed release
 # checksum set rather than the embedded envelope.
 archive_members=(
-  macprovider-cli
+  malibu-cli
   mlx.metallib
   THIRD-PARTY-NOTICES.txt
   compatibility-set.json
@@ -250,7 +250,7 @@ echo
 echo "==> NEXT: test locally before shipping."
 echo "  cd /tmp && mkdir m4-test && cd m4-test"
 echo "  tar xzf $PHASE3_DIR/$TARBALL"
-echo "  ./macprovider-cli --port 18081 --model mlx-community/Qwen2.5-7B-Instruct-4bit &"
+echo "  ./malibu-cli --port 18081 --model mlx-community/Qwen2.5-7B-Instruct-4bit &"
 echo "  sleep 45 # 7B takes longer to load"
 echo "  curl -sS http://127.0.0.1:18081/v1/models | python3 -m json.tool"
 echo "  # If model id returns, tarball is shippable. kill %1 to stop."

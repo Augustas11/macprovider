@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 // Newline-delimited JSON framing over a Unix domain socket connected to
-// macprovider-cli's ControlSocket server. One connection, one writer, one reader.
+// malibu-cli's ControlSocket server. One connection, one writer, one reader.
 //
 // AUDIT R2 CODE H1 fix: the read loop no longer runs on the actor. Previously
 // `Task { await self.readLoop(...) }` was actor-isolated, so a blocking

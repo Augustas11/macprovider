@@ -23,10 +23,10 @@ Cherry-ported from `origin/perf/mlx-compile-bf16` commit `aa10847`
 (`perf(provider): MLX compile()+bf16 decode-engine scaffolding`).
 
 **Files added:**
-- `phase3-binary/Sources/macprovider-cli/DecodeBenchCommand.swift` (new)
+- `phase3-binary/Sources/malibu-cli/DecodeBenchCommand.swift` (new)
 
 **Files modified:**
-- `phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift` — added
+- `phase3-binary/Sources/malibu-cli/MalibuCLI.swift` — added
   `DecodeBenchCommand.self` to subcommands list
 
 **Files NOT ported (by design):**
@@ -39,7 +39,7 @@ Cherry-ported from `origin/perf/mlx-compile-bf16` commit `aa10847`
 ## 3. CLI shape
 
 ```bash
-macprovider-cli decode-bench \
+malibu-cli decode-bench \
   --model mlx-community/Qwen2.5-7B-Instruct-4bit \
   --prefill-tokens 512 \
   --decode-tokens 256 \
@@ -52,7 +52,7 @@ Full `--help` output:
 ```
 OVERVIEW: Run a pure-decode benchmark for a target model (T0-01 of throughput runbook).
 
-USAGE: macprovider-cli decode-bench [--model <model>] [--decode-tokens <decode-tokens>]
+USAGE: malibu-cli decode-bench [--model <model>] [--decode-tokens <decode-tokens>]
        [--prefill-tokens <prefill-tokens>] [--runs <runs>] [--label <label>]
        [--output <output>] [--output-dir <output-dir>] [--stdout-only]
 
@@ -96,7 +96,7 @@ This matches the semantics that `min_sustained_tps` catalog gates express
 - Chip: Apple M5
 - RAM: 32 GB
 - macOS: 26.5
-- `macprovider-cli` version: 1.8.19
+- `malibu-cli` version: 1.8.19
 - `mlx-swift-lm` pin: 3.31.4
 - `mlx-swift` pin: 0.31.6
 
@@ -146,7 +146,7 @@ pass criterion.
 launchctl bootout "gui/$(id -u)/live.malibu.provider" 2>/dev/null || true
 
 # 2. Run bench
-.build/arm64-apple-macosx/release/macprovider-cli decode-bench \
+.build/arm64-apple-macosx/release/malibu-cli decode-bench \
   --model mlx-community/Qwen2.5-7B-Instruct-4bit \
   --prefill-tokens 512 \
   --decode-tokens 256 \
@@ -168,7 +168,7 @@ The `mlx-swift_Cmlx.bundle` pattern from `audits/2026-06-30/perf-mlx-engine.md`
 (manually copying the bundle next to the release binary) was required in that
 bench session because it used a standalone release binary extracted from the
 package. In the worktree's `.build/arm64-apple-macosx/release/` tree, SPM
-places the `phase3-binary_macprovider-cli.bundle` adjacent to the binary;
+places the `phase3-binary_malibu-cli.bundle` adjacent to the binary;
 MLX resolves Metal shaders via the bundle at that path.
 
 For the T0-02 bench run (production or operator-extracted binary), apply the

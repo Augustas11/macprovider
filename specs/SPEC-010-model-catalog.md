@@ -1502,7 +1502,7 @@ predicate available for SPEC-011 / SPEC-012 to consume.
   — wide-scope predecessor and split rationale
 - [SPEC-012 source audit history](../audits/spec-012/SPEC-012-source-audit-history.md)
   — rounds 1-3 against the wide-scope v0.1, v0.2, v0.3
-- [phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift](../phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift)
+- [phase3-binary/Sources/malibu-cli/MalibuCLI.swift](../phase3-binary/Sources/malibu-cli/MalibuCLI.swift)
 - [phase4-coordinator/internal/ws/messages.go](../phase4-coordinator/internal/ws/messages.go)
 - [phase4-coordinator/internal/pool/provider.go](../phase4-coordinator/internal/pool/provider.go)
 - [phase4-coordinator/internal/buyer/server.go](../phase4-coordinator/internal/buyer/server.go)

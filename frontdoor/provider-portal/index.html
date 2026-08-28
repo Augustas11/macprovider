@@ -1215,10 +1215,10 @@
           el("div", { class: "claim-ok" }, "Your Mac is linked."),
           el("p", { class: "h-sub" }, "Redirecting to your dashboard…"));
       } else {
-        var msg = "Something went wrong. Try running macprovider-cli claim again.";
+        var msg = "Something went wrong. Try running malibu-cli claim again.";
         var withCopy = false;
         if (state.claim.error === "pair_ot_invalid") {
-          msg = "This link expired. Run `macprovider-cli claim` on your Mac for a fresh link.";
+          msg = "This link expired. Run `malibu-cli claim` on your Mac for a fresh link.";
           withCopy = true;
         } else if (state.claim.error === "already_owned") {
           msg = "This Mac is already linked to a different account. Open Malibu for account help.";
@@ -1227,7 +1227,7 @@
         }
         cardKids.push(el("p", { class: "h-sub" }, msg));
         if (withCopy) {
-          cardKids.push(snippetNode("macprovider-cli claim", "claim-refresh"));
+          cardKids.push(snippetNode("malibu-cli claim", "claim-refresh"));
         }
       }
       return el("div", { class: "signin-wrap" },

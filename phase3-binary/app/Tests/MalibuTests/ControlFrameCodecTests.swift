@@ -4,7 +4,7 @@ import XCTest
 // AUDIT R1 ARCHITECT A8: parity tests for the app-side ControlFrame codec.
 // These lock the wire-format against silent drift from the CLI side. The
 // duplicated definitions in phase3-binary/app/Sources/Malibu/Agent/
-// ControlSocketFrame.swift and phase3-binary/Sources/macprovider-cli/
+// ControlSocketFrame.swift and phase3-binary/Sources/malibu-cli/
 // ControlSocket.swift will be consolidated in a follow-up SPEC-025 §12
 // conflict #9 PR; until then these tests catch divergence.
 

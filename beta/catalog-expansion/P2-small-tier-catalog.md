@@ -58,7 +58,7 @@ No separate alias row required (unlike Gemma google-slash path).
 | Field | Value |
 |-------|-------|
 | **Machine** | MacBook Air Mac17,3 — Apple **M5**, **32 GB** RAM (16 GB tier not available on executor) |
-| **Binary** | `/Applications/Malibu.app/Contents/MacOS/macprovider-cli` **1.8.19** |
+| **Binary** | `/Applications/Malibu.app/Contents/MacOS/malibu-cli` **1.8.19** |
 | **Note** | Worktree `swift build -c release` binary fails MLX metallib load; Malibu binary used for bench (same as prior Llama 8B session logs) |
 | **run_id** | `FC1DCD16-B6AD-4F28-AC48-478EB4C25335` |
 | **Started (UTC)** | `2026-07-07T11:37:52Z` |
@@ -119,7 +119,7 @@ Baked offline fallback: `qwen3-8b` row added to `bakedRateCardJSON` at 13.5k / 2
 
 - `phase3-binary/dist/static/autotune-candidates.json`
 - `phase3-binary/dist/static/demand-rank.json`
-- `phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift` — all three baked strings byte-aligned with live + rate card
+- `phase3-binary/Sources/malibu-cli/AutotuneRecommend.swift` — all three baked strings byte-aligned with live + rate card
 
 ---
 

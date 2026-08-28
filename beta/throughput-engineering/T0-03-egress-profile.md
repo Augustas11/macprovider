@@ -57,7 +57,7 @@ Per-request summary emitted to stderr at stream end:
 
 ```bash
 # Load a model (e.g. Qwen2.5-7B, ~25 TPS on M-series)
-MACPROVIDER_PERF_TRACE=1 macprovider-cli serve --model mlx-community/Qwen2.5-7B-Instruct-4bit
+MACPROVIDER_PERF_TRACE=1 malibu-cli serve --model mlx-community/Qwen2.5-7B-Instruct-4bit
 
 # In another terminal — send a streaming request via the coordinator path (Tier-2):
 # The PERF_TRACE output appears on the server's stderr after the stream completes.
@@ -191,11 +191,11 @@ or RED on the actual Pearl VPS coordinator path.
 
 | File | Change |
 |------|--------|
-| `phase3-binary/Sources/macprovider-cli/EgressPerfTrace.swift` | **NEW** — flag, TaskLocal, trace accumulator, statistics, stderr summary |
-| `phase3-binary/Sources/macprovider-cli/InferenceRelay.swift` | Inject trace via TaskLocal in `processStreaming`; instrument `sendChunk` seal timing |
-| `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift` | Record decode callback entry timestamp in `stream()` generate callback |
-| `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift` | Record `URLSessionWebSocketTask.send` duration in static `send(_:to:)` |
-| `phase3-binary/Tests/macprovider-cliTests/EgressPerfTraceTests.swift` | **NEW** — 12 unit tests: flag off, no-op when disabled, verdict thresholds, TaskLocal propagation |
+| `phase3-binary/Sources/malibu-cli/EgressPerfTrace.swift` | **NEW** — flag, TaskLocal, trace accumulator, statistics, stderr summary |
+| `phase3-binary/Sources/malibu-cli/InferenceRelay.swift` | Inject trace via TaskLocal in `processStreaming`; instrument `sendChunk` seal timing |
+| `phase3-binary/Sources/malibu-cli/ModelRuntime.swift` | Record decode callback entry timestamp in `stream()` generate callback |
+| `phase3-binary/Sources/malibu-cli/CoordinatorClient.swift` | Record `URLSessionWebSocketTask.send` duration in static `send(_:to:)` |
+| `phase3-binary/Tests/malibu-cliTests/EgressPerfTraceTests.swift` | **NEW** — 12 unit tests: flag off, no-op when disabled, verdict thresholds, TaskLocal propagation |
 
 ### Test results
 

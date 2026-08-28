@@ -51,6 +51,7 @@ import sys
 names = {
     "cleanup", "transaction_path_exists", "transaction_file_or_absent",
     "transaction_directory_or_absent", "transaction_binary_or_absent",
+    "owned_provider_executable_matches",
     "validate_transaction_path_kinds", "validate_transaction_filesystems", "install_tx_path_matches",
     "stage_install_tx_symlink", "stage_install_tx_path", "stage_install_tx_plist",
     "stage_lifecycle_snapshot", "record_lifecycle_state",
@@ -146,7 +147,7 @@ record = {
     "transition_at": "2026-07-15T17:00:00.000Z",
     "state": state,
     "reason_code": reason,
-    "authority": "macprovider_cli",
+    "authority": "malibu_cli",
     "writer": writer,
     "provider_id": "mac",
     "model_id": "qwen3-coder-30b-a3b-instruct",
@@ -421,7 +422,7 @@ service_identity = override_service_identity or "live.malibu.provider"
 override_target_path = os.environ.get("PREPARED_OVERRIDE_TARGET_PATH", "")
 target_executable_path = (
     override_target_path
-    or "/Applications/MacProvider.app/Contents/MacOS/macprovider-cli"
+    or "/Applications/MacProvider.app/Contents/MacOS/malibu-cli"
 )
 
 
@@ -532,10 +533,11 @@ make_case() {
   mkdir -p "$root/bin" "$home/macprovider" "$home/.local/bin" \
     "$home/.config/macprovider" "$home/Library/LaunchAgents" "$root/tx" \
     "$home/.local/share/macprovider-watchdog" "$home/Library/Application Support/macprovider"
-  printf 'old-binary\n' > "$home/macprovider/macprovider-cli"
+  printf 'old-binary\n' > "$home/macprovider/malibu-cli"
   printf 'old-resource\n' > "$home/macprovider/mlx.metallib"
-  chmod +x "$home/macprovider/macprovider-cli"
-  ln -s "$home/macprovider/macprovider-cli" "$home/.local/bin/macprovider-cli"
+  chmod +x "$home/macprovider/malibu-cli"
+  ln -s "$home/macprovider/malibu-cli" "$home/.local/bin/malibu-cli"
+  ln -s "$home/macprovider/malibu-cli" "$home/.local/bin/macprovider-cli"
   printf 'model: old-model\nprovider_id: upgrade-provider\n' > "$home/.config/macprovider/config.yaml"
   printf 'upgrade-provider\n' > "$home/.config/macprovider/provider_id"
   printf '{"model_id":"old-model","generated_at":"old"}\n' > "$home/.config/macprovider/last-recommendation.json"
@@ -544,7 +546,7 @@ make_case() {
     '<plist version="1.0"><dict>' \
     '<key>Label</key><string>live.malibu.provider</string>' \
     '<key>ProgramArguments</key><array>' \
-    "<string>$home/macprovider/macprovider-cli</string>" \
+    "<string>$home/macprovider/malibu-cli</string>" \
     '</array><key>Comment</key><string>old-provider-plist</string>' \
     '</dict></plist>' > "$home/Library/LaunchAgents/live.malibu.provider.plist"
   printf 'old-watchdog\n' > "$home/.local/share/macprovider-watchdog/macprovider-health-monitor"
@@ -615,12 +617,12 @@ case "$1" in
         ;;
       *streamvc.macprovider*)
         printf 'program = %s\npath = %s\n' \
-          "$CASE_ROOT/home/macprovider/macprovider-cli" \
+          "$CASE_ROOT/home/macprovider/malibu-cli" \
           "$CASE_ROOT/home/Library/LaunchAgents/live.streamvc.macprovider.plist"
         ;;
       *)
         printf 'program = %s\npath = %s\n' \
-          "$CASE_ROOT/home/macprovider/macprovider-cli" \
+          "$CASE_ROOT/home/macprovider/malibu-cli" \
           "$CASE_ROOT/home/Library/LaunchAgents/live.malibu.provider.plist"
         ;;
     esac
@@ -727,14 +729,14 @@ elif [ -s "$CASE_ROOT/manual-current.pid" ]; then
 fi
 [ -n "$manual_pid" ] || exit 1
 if printf '%s\n' "$arguments" | grep -q -- '-d txt'; then
-  printf 'p%s\nn%s\n' "$manual_pid" "$CASE_ROOT/home/macprovider/macprovider-cli"
+  printf 'p%s\nn%s\n' "$manual_pid" "$CASE_ROOT/home/macprovider/malibu-cli"
 elif printf '%s\n' "$arguments" | grep -q -- '-d cwd'; then
   printf 'p%s\nn%s\n' "$manual_pid" "$CASE_ROOT/manual-cwd"
 elif printf ' %s ' "$arguments" | grep -q -- ' -t '; then
   [ ! -f "$CASE_ROOT/manual-never-bind" ] || exit 1
   printf '%s\n' "$manual_pid"
 else
-  printf 'COMMAND PID\nmacprovider-cli %s\n' "$manual_pid"
+  printf 'COMMAND PID\nmalibu-cli %s\n' "$manual_pid"
 fi
 EOF
   chmod +x "$root/bin/lsof"
@@ -744,7 +746,7 @@ EOF
 if [ -s "$CASE_ROOT/manual-current.pid" ]; then
   pid="$(cat "$CASE_ROOT/manual-current.pid")"
   if kill -0 "$pid" >/dev/null 2>&1; then
-    printf '%s %s --port %s\n' "$pid" "$CASE_ROOT/home/macprovider/macprovider-cli" "$(cat "$CASE_ROOT/manual-port")"
+    printf '%s %s --port %s\n' "$pid" "$CASE_ROOT/home/macprovider/malibu-cli" "$(cat "$CASE_ROOT/manual-port")"
     exit 0
   fi
 fi
@@ -826,8 +828,8 @@ int main(int argc, char **argv) {
   for (;;) pause();
 }
 EOF
-  cc -O2 -o "$root/home/macprovider/macprovider-cli" "$root/manual-provider.c"
-  shasum -a 256 "$root/home/macprovider/macprovider-cli" | awk '{print $1}' > "$root/manual-old.sha256"
+  cc -O2 -o "$root/home/macprovider/malibu-cli" "$root/manual-provider.c"
+  shasum -a 256 "$root/home/macprovider/malibu-cli" | awk '{print $1}' > "$root/manual-old.sha256"
   printf '%s\n' "$port" > "$root/manual-port"
   mkdir -p "$root/manual-cwd"
   # Literal shell syntax and lossy-ps edge cases prove argv is captured from
@@ -837,7 +839,7 @@ EOF
     cd "$root/manual-cwd"
     MACPROVIDER_RECOVERY_CONTEXT=$'exact context with spaces\tand tab; $(not evaluated)' \
       PATH="$root/bin:/usr/bin:/bin" \
-      exec "$root/home/macprovider/macprovider-cli" --port "$port" --model old-model \
+      exec "$root/home/macprovider/malibu-cli" --port "$port" --model old-model \
         --fixture-log "$root/manual-fixture.log" \
         --bind-gate "$root/manual-never-bind" \
         --whitespace $'two words\twith tab' \
@@ -947,7 +949,7 @@ run_case() {
       '<plist version="1.0"><dict>' \
       '<key>Label</key><string>live.streamvc.macprovider</string>' \
       '<key>ProgramArguments</key><array>' \
-      "<string>$root/home/macprovider/macprovider-cli</string>" \
+      "<string>$root/home/macprovider/malibu-cli</string>" \
       '</array><key>Comment</key><string>old-legacy-provider-plist</string>' \
       '</dict></plist>' > "$root/home/Library/LaunchAgents/live.streamvc.macprovider.plist"
     printf '%s\n' \
@@ -989,7 +991,9 @@ run_case() {
       HOME="$CASE_ROOT/home"
       INSTALL_DIR="$HOME/macprovider"
       BIN_DIR="$HOME/.local/bin"
-      BINARY_PATH="$BIN_DIR/macprovider-cli"
+      BINARY_PATH="$BIN_DIR/malibu-cli"
+      LEGACY_BINARY_PATH="$BIN_DIR/macprovider-cli"
+      LEGACY_INSTALL_BINARY_PATH="$INSTALL_DIR/macprovider-cli"
       CONFIG_DIR="$HOME/.config/macprovider"
       CONFIG_PATH="$CONFIG_DIR/config.yaml"
       PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
@@ -1027,6 +1031,7 @@ run_case() {
       INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE=0
       INSTALL_TX_HAD_INSTALL_DIR=0
       INSTALL_TX_HAD_BINARY_PATH=0
+      INSTALL_TX_HAD_LEGACY_BINARY_PATH=0
       INSTALL_TX_HAD_CONFIG=0
       INSTALL_TX_HAD_PROVIDER_ID=0
       INSTALL_TX_HAD_RECOMMENDATION=0
@@ -1045,6 +1050,7 @@ run_case() {
       INSTALL_TX_WATCHDOG_WAS_DISABLED=0
       INSTALL_TX_ROLLING_BACK=0
       INSTALL_TX_BINARY_KIND="symlink"
+      INSTALL_TX_LEGACY_BINARY_KIND="symlink"
       CUTOVER_STARTED=0
       INSTALL_LOCK_HELD=0
       INSTALL_LOCK_TOKEN="test-lock-token"
@@ -1068,11 +1074,11 @@ run_case() {
           printf "REC_MANUAL_READY_TIMEOUT_SECONDS=1\n" >> "$INSTALL_TX_BACKUP/state.sh"
           : > "$CASE_ROOT/manual-never-bind"
         fi
-        printf "new-binary\n" > "$INSTALL_DIR/macprovider-cli.new"
-        chmod +x "$INSTALL_DIR/macprovider-cli.new"
-        mv "$INSTALL_DIR/macprovider-cli.new" "$INSTALL_DIR/macprovider-cli"
+        printf "new-binary\n" > "$INSTALL_DIR/malibu-cli.new"
+        chmod +x "$INSTALL_DIR/malibu-cli.new"
+        mv "$INSTALL_DIR/malibu-cli.new" "$INSTALL_DIR/malibu-cli"
       else
-        printf "new-binary\n" > "$INSTALL_DIR/macprovider-cli"
+        printf "new-binary\n" > "$INSTALL_DIR/malibu-cli"
       fi
       printf "new-resource\n" > "$INSTALL_DIR/mlx.metallib"
       if [ "$INSTALL_PHASE" = "credential-self-test" ]; then
@@ -1144,13 +1150,13 @@ run_case() {
           ;;
         manual-self-test) exit 9 ;;
         new-manual-self-test)
-          cat > "$INSTALL_DIR/macprovider-cli" <<'MANUAL'
+          cat > "$INSTALL_DIR/malibu-cli" <<'MANUAL'
 #!/usr/bin/env bash
 trap "" TERM
 while :; do sleep 1; done
 MANUAL
-          chmod +x "$INSTALL_DIR/macprovider-cli"
-          "$INSTALL_DIR/macprovider-cli" &
+          chmod +x "$INSTALL_DIR/malibu-cli"
+          "$INSTALL_DIR/malibu-cli" &
           MANUAL_PID=$!
           printf "%s\n" "$MANUAL_PID" > "$CASE_ROOT/new-manual.pid"
           kill -0 "$MANUAL_PID"
@@ -1208,7 +1214,7 @@ MANUAL
 assert_old_install_files() {
   root="$1"
   home="$root/home"
-  grep -F 'old-binary' "$home/macprovider/macprovider-cli" >/dev/null
+  grep -F 'old-binary' "$home/macprovider/malibu-cli" >/dev/null
   grep -F 'old-resource' "$home/macprovider/mlx.metallib" >/dev/null
   grep -F 'model: old-model' "$home/.config/macprovider/config.yaml" >/dev/null
   grep -F 'upgrade-provider' "$home/.config/macprovider/provider_id" >/dev/null
@@ -1217,7 +1223,8 @@ assert_old_install_files() {
   grep -F 'old-watchdog' "$home/.local/share/macprovider-watchdog/macprovider-health-monitor" >/dev/null
   grep -F 'old-watchdog-plist' "$home/Library/LaunchAgents/live.malibu.provider-watchdog.plist" >/dev/null
   grep -F '"version":"old"' "$home/Library/Application Support/macprovider/install_manifest.json" >/dev/null
-  [ "$(readlink "$home/.local/bin/macprovider-cli")" = "$home/macprovider/macprovider-cli" ]
+  [ "$(readlink "$home/.local/bin/malibu-cli")" = "$home/macprovider/malibu-cli" ]
+  [ "$(readlink "$home/.local/bin/macprovider-cli")" = "$home/macprovider/malibu-cli" ]
 }
 
 assert_old_install() {
@@ -1246,6 +1253,7 @@ assert_recovery_preserved() {
   [ -s "$recovery/recover.sh" ]
   [ -x "$recovery/observe.sh" ]
   grep -F 'REC_INSTALL_RECOVERY_LABEL=live.malibu.provider-install-recovery' "$recovery/state.sh" >/dev/null
+  grep -F 'REC_HAD_LEGACY_BINARY_PATH=1' "$recovery/state.sh" >/dev/null
   grep -F 'fcntl.flock(lock_fd, fcntl.LOCK_EX)' "$recovery/observe.sh" >/dev/null
   grep -F "Run exactly: bash '$recovery/recover.sh'" "$root/stderr.log" >/dev/null
 }
@@ -1321,7 +1329,7 @@ fi
 run_case lifecycle_absent_restore "" "" "" self-test active bind absent-before
 root="$TMP/lifecycle_absent_restore"
 [ "$(cat "$root/rc")" -eq 9 ]
-grep -F 'old-binary' "$root/home/macprovider/macprovider-cli" >/dev/null
+grep -F 'old-binary' "$root/home/macprovider/malibu-cli" >/dev/null
 grep -F 'model: old-model' "$root/home/.config/macprovider/config.yaml" >/dev/null
 if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/state-v1.json" ]; then
   echo "rollback stranded a lifecycle-state file where the incumbent had none" >&2
@@ -1407,7 +1415,7 @@ fi
 # the complete durable backup plus an exact, rerunnable recovery command.
 run_case restore_cp_failure "" "" fail-restore-cp
 [ "$(cat "$TMP/restore_cp_failure/rc")" -eq 70 ]
-grep -F 'new-binary' "$TMP/restore_cp_failure/home/macprovider/macprovider-cli" >/dev/null
+grep -F 'new-binary' "$TMP/restore_cp_failure/home/macprovider/malibu-cli" >/dev/null
 grep -F 'model: new-model' "$TMP/restore_cp_failure/home/.config/macprovider/config.yaml" >/dev/null
 [ -f "$TMP/restore_cp_failure/service-active" ]
 assert_recovery_preserved "$TMP/restore_cp_failure"
@@ -1420,7 +1428,7 @@ grep -F 'model: new-model' "$TMP/permission_failure/home/.config/macprovider/con
 assert_recovery_preserved "$TMP/permission_failure"
 permission_recovery="$(recovery_dir "$TMP/permission_failure")"
 grep -R -F 'new-binary' "$permission_recovery/failed-current" >/dev/null
-grep -F 'old-binary' "$TMP/permission_failure/home/macprovider/macprovider-cli" >/dev/null
+grep -F 'old-binary' "$TMP/permission_failure/home/macprovider/malibu-cli" >/dev/null
 
 # launchd failures are fatal after file restoration, and the verified backup is
 # retained instead of being silently discarded.
@@ -1463,7 +1471,7 @@ grep -F 'provider_token: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 run_case confirmed_credential_restore "" "" "" credential-self-test
 root="$TMP/confirmed_credential_restore"
 [ "$(cat "$root/rc")" -eq 9 ]
-grep -F 'old-binary' "$root/home/macprovider/macprovider-cli" >/dev/null
+grep -F 'old-binary' "$root/home/macprovider/malibu-cli" >/dev/null
 grep -F 'old-resource' "$root/home/macprovider/mlx.metallib" >/dev/null
 grep -F 'model: old-model' "$root/home/.config/macprovider/config.yaml" >/dev/null
 grep -F 'provider_id: "mp-0123456789abcdef0123456789abcdef"' \
@@ -1481,7 +1489,7 @@ grep -F '"version":"old"' "$root/home/Library/Application Support/macprovider/in
 run_case commit_cleanup_failure "" "" "" commit-cleanup
 root="$TMP/commit_cleanup_failure"
 [ "$(cat "$root/rc")" -eq 0 ]
-grep -F 'new-binary' "$root/home/macprovider/macprovider-cli" >/dev/null
+grep -F 'new-binary' "$root/home/macprovider/malibu-cli" >/dev/null
 grep -F 'new-resource' "$root/home/macprovider/mlx.metallib" >/dev/null
 grep -F 'model: new-model' "$root/home/.config/macprovider/config.yaml" >/dev/null
 committed_recovery="$(find "$root/home/.config/macprovider" -maxdepth 1 -type d \
@@ -1532,7 +1540,7 @@ assert_snapshot_aborted_pre_mutation() {
   # begin_install_transaction dies 70 before marking cutover; the inner harness
   # propagates that. The incumbent binary/config/service are left intact.
   [ "$(cat "$root/rc")" -eq 70 ]
-  grep -F 'old-binary' "$root/home/macprovider/macprovider-cli" >/dev/null
+  grep -F 'old-binary' "$root/home/macprovider/malibu-cli" >/dev/null
   grep -F 'model: old-model' "$root/home/.config/macprovider/config.yaml" >/dev/null
   [ -f "$root/service-active" ]
   # No durable recovery bundle survives a pre-mutation snapshot failure.
@@ -1603,7 +1611,7 @@ def require(condition, message):
 require(record["writer"] == "installer", "must be installer-owned")
 require(record["state"] == "rollback_in_progress", "must be rollback_in_progress")
 require(record["reason_code"] == "install_rollback_restored_translated", "reserved reason code")
-require(record["authority"] == "macprovider_cli", "authority preserved")
+require(record["authority"] == "malibu_cli", "authority preserved")
 require(record["version"] == 1, "version preserved")
 require(record["provider_id"] == "mac", "provider_id preserved")
 require(record["model_id"] == "qwen3-coder-30b-a3b-instruct", "model_id preserved")
@@ -1735,12 +1743,12 @@ set -e
 
 binary_fifo_root="$TMP/special-binary-entry"
 mkdir -p "$binary_fifo_root"
-mkfifo "$binary_fifo_root/macprovider-cli"
+mkfifo "$binary_fifo_root/malibu-cli"
 set +e
 (
   set -euo pipefail
   . "$TMP/functions.sh"
-  stage_install_tx_path "$binary_fifo_root/macprovider-cli" "$binary_fifo_root/staged" file
+  stage_install_tx_path "$binary_fifo_root/malibu-cli" "$binary_fifo_root/staged" file
 )
 binary_fifo_rc=$?
 set -e
@@ -2134,7 +2142,7 @@ if [ -e "$root/home/Library/Application Support/macprovider/lifecycle/lease.json
 fi
 
 # (A-05.12) target_executable_path containing a ".." component
-# ("/Applications/MacProvider.app/Contents/MacOS/../MacOS/macprovider-cli"):
+# ("/Applications/MacProvider.app/Contents/MacOS/../MacOS/malibu-cli"):
 # Swift's validateTargetExecutablePath rejects any path where
 # path != URL(fileURLWithPath: path).standardizedFileURL.path, and
 # standardizedFileURL resolves the ".." away. The previous shell mirror used
@@ -2148,7 +2156,7 @@ fi
 # mutation-guards the new rule: allowing ".." components would false-PRESERVE
 # and fail this test.
 lease_fixture="$TMP/lease_prepared_handoff_target_path_dotdot.json"
-PREPARED_OVERRIDE_TARGET_PATH="/Applications/MacProvider.app/Contents/MacOS/../MacOS/macprovider-cli" \
+PREPARED_OVERRIDE_TARGET_PATH="/Applications/MacProvider.app/Contents/MacOS/../MacOS/malibu-cli" \
   write_prepared_handoff_lease_record "$lease_fixture" "provider-restart-8" 999999 valid
 MUTATION_LEASE_JSON="$(cat "$lease_fixture")" \
   run_case lease_prepared_handoff_target_path_dotdot "" "" "" self-test
@@ -2503,7 +2511,7 @@ if decoded[1] != decoded[0]:
     raise SystemExit(f"restored cwd/environment differs from exact original: {decoded!r}")
 PY
 [ ! -e "$root/pwned" ]
-[ "$(shasum -a 256 "$root/home/macprovider/macprovider-cli" | awk '{print $1}')" = "$(cat "$root/manual-old.sha256")" ]
+[ "$(shasum -a 256 "$root/home/macprovider/malibu-cli" | awk '{print $1}')" = "$(cat "$root/manual-old.sha256")" ]
 grep -F 'model: old-model' "$root/home/.config/macprovider/config.yaml" >/dev/null
 [ -z "$(recovery_dir "$root")" ]
 terminate_test_process "$restored_pid"

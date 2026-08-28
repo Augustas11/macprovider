@@ -101,7 +101,7 @@ Positive cached-token billing remains eligible only under SPEC-005 §5.3.1's sti
 
 ### 2.1 `ConversationCache` today
 
-[`ConversationCache.swift`](../../phase3-binary/Sources/macprovider-cli/ConversationCache.swift) is an actor-backed, process-wide store of token sequences and `[KVCache]` layers. Its default limits are:
+[`ConversationCache.swift`](../../phase3-binary/Sources/malibu-cli/ConversationCache.swift) is an actor-backed, process-wide store of token sequences and `[KVCache]` layers. Its default limits are:
 
 - eight conversation entries;
 - 200,000 total tokens;
@@ -609,7 +609,7 @@ The answer to question 15 is deliberately deferred. It does not reopen or modify
 
 ### Repository implementation and research sources
 
-- [`ConversationCache.swift`](../../phase3-binary/Sources/macprovider-cli/ConversationCache.swift): shipped in-RAM exact-LCP reuse, lifecycle, and limits.
+- [`ConversationCache.swift`](../../phase3-binary/Sources/malibu-cli/ConversationCache.swift): shipped in-RAM exact-LCP reuse, lifecycle, and limits.
 - [`Config.swift`](../../phase3-binary/Sources/MacProviderCore/Config.swift): real idle-prewarm surface and defaults.
 - [`test/e2e/coldwarm-ttft/`](../../test/e2e/coldwarm-ttft/README.md): merged RESEARCH_234 harness to reuse for KVS scenarios.
 - [RESEARCH_232 batching prompt](../../audits/_prompts/RESEARCH_232_MULTISTREAM_BATCHING_PROMPT.md): shared scheduler/paged-KV interaction.

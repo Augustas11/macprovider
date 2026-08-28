@@ -1,14 +1,14 @@
 import XCTest
 @testable import Malibu
 
-/// Pins the wall-clock budget the App gives `macprovider-cli autotune
+/// Pins the wall-clock budget the App gives `malibu-cli autotune
 /// --recommend --json` on fresh-install onboarding.
 ///
 /// **Design decision (R3)**: this timeout is the App-side authoritative
 /// ceiling for autotune runtime. The CLI's declared
 /// `AutotuneCommand.maxDuration = 7200s` is NOT enforced on the
 /// `--recommend` code path — `runAutotuneRecommend()` at
-/// `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:131-139`
+/// `phase3-binary/Sources/malibu-cli/AutotuneCommand.swift:131-139`
 /// returns before the deadline is created at :157-161, and
 /// `AutotuneRecommendationBenchmarker.benchmarks()` runs with no
 /// deadline / cancellation input. So the App cannot rely on a

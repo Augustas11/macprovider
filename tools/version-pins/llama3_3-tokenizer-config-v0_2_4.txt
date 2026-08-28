@@ -22,7 +22,7 @@
 # - Tool-result rendering (provider injecting): plain JSON-stringified result
 #   content inside the ipython turn body
 #
-# Implementation in phase3-binary/Sources/macprovider-cli/ToolPromptRenderer.swift
+# Implementation in phase3-binary/Sources/malibu-cli/ToolPromptRenderer.swift
 # follows this structural contract. Golden fixture in MultiTurnTests.swift verifies
 # the structural assertions: presence of <|python_tag|>, <|eot_id|>, ipython turn
 # delimiters in the expected positions for a known multi-turn fixture input.

@@ -1,5 +1,5 @@
 // Package jcs is a Go hand-port of
-// phase3-binary/Sources/macprovider-cli/RFC8785JCS.swift.
+// phase3-binary/Sources/malibu-cli/RFC8785JCS.swift.
 //
 // The implementation intentionally mirrors the Swift source of truth: object
 // keys are sorted by UTF-16 code units, string values are normalized to NFC

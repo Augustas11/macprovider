@@ -58,7 +58,7 @@ legacy path/query form and validates the fragment before projecting it.
 - `/v1/status` now publishes a versioned, capability-gated local contract. Each
   response identifies the observation, its bounded validity, the stable running
   service instance, and the last CLI-authored lifecycle transition. Malibu remains a
-  reader/renderer; `macprovider-cli` is the sole lifecycle authority.
+  reader/renderer; `malibu-cli` is the sole lifecycle authority.
 - Provider credential diagnostics now distinguish missing, locked, access-denied,
   corrupt, conflict, unavailable, and ready custody without emitting token bytes or a
   token-derived identifier. `credentials status` exposes the same redacted v1
@@ -77,7 +77,7 @@ legacy path/query form and validates the fragment before projecting it.
 - §10 OQ-1 (streaming usage chunk client compat) and OQ-2 (tier announcement format) are marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-001.
 
 **Change log v1.8.1 (2026-07-14, issue #585 — Option 2 credential-custody slice):**
-- The launchd-managed `macprovider-cli` becomes the authority for the provider bearer.
+- The launchd-managed `malibu-cli` becomes the authority for the provider bearer.
   It stores the bearer in the macOS login Keychain under service
   `live.malibu.provider.provider-token.v1`, account `<provider_id>`, using the
   legacy login-Keychain default ACL/designated requirement and non-interactive reads.
@@ -293,7 +293,7 @@ know about how the implementation diverges from or interprets the spec:
 
 ## 1. Mission
 
-The Phase 3 binary (`macprovider-cli`) is a Swift command-line tool that
+The Phase 3 binary (`malibu-cli`) is a Swift command-line tool that
 runs on Apple Silicon Macs and replaces `mlx_lm.server` as the inference
 layer for Mac Provider contributors. It wraps `mlx-swift-lm` to serve
 OpenAI-compatible HTTP inference, strips the SSE quirks and stop-token
@@ -396,7 +396,7 @@ chain (see Section 3 for the hook-point diagram).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                          macprovider-cli                            │
+│                          malibu-cli                            │
 │                                                                     │
 │  ┌───────────┐    ┌───────────┐    ┌──────────────────────────┐    │
 │  │ CLI Entry  │──→│ Config    │──→│ Model Loader              │    │
@@ -1005,7 +1005,7 @@ provider joining the coordinator MUST fail explicitly rather than silently conne
 bearerless. The deliberate exceptions are local/no-join or donor mode and a fresh
 high-entropy `mp-<32hex>` principal using the tokenless first-claim bootstrap protocol.
 
-`macprovider-cli credentials import --config <path>` MUST import the exact
+`malibu-cli credentials import --config <path>` MUST import the exact
 `provider_id`/top-level `provider_token` pair from the selected file only when the
 Keychain item is absent or already equal. An existing mismatch MUST fail without
 mutation. Both commands return only redacted result metadata.
@@ -1015,10 +1015,10 @@ value. Running `verify` as a second process is the compatibility transaction's
 fresh-process staging proof. It is not coordinator admission and never authorizes
 Malibu to delete the live migration source.
 
-`macprovider-cli credentials status --config <path>` MUST be non-mutating and emit
+`malibu-cli credentials status --config <path>` MUST be non-mutating and emit
 credential contract version 1 with `credential_store`, `operation`, `provider_id`,
 `source`, `condition`, `restart_safe`, `migration_pending`, `recoverable`, and
-`action`. `macprovider-cli credentials repair --config <path>` MUST require an
+`action`. `malibu-cli credentials repair --config <path>` MUST require an
 owner-owned regular file with mode no broader than 0600, reject symlinks, and verify
 the file's device/inode/size/mtime identity before using its token. Repair MAY add an
 absent item only through the absent-or-equal import primitive and MAY replace an item
@@ -1052,7 +1052,7 @@ and every other result fails closed as indeterminate. Credential destruction req
 future explicit full-identity-reset operation; routine uninstall is not that operation.
 
 The local `GET /v1/status` response includes a versioned envelope. Contract v1 has
-`minimum_reader_version=1`, names `macprovider_cli` as `lifecycle_owner`, and advertises
+`minimum_reader_version=1`, names `malibu_cli` as `lifecycle_owner`, and advertises
 only fields a reader may trust through these capabilities:
 `buyer_serving_authority_v1`, `catalog_status_v1`, `credential_status_v1`,
 `status_observation_v1`, `service_instance_v1`, `lifecycle_transition_v1`,
@@ -1066,7 +1066,7 @@ supported version. An absent envelope is the legacy-reader path.
 "local_status_contract": {
   "version": 1,
   "minimum_reader_version": 1,
-  "lifecycle_owner": "macprovider_cli",
+  "lifecycle_owner": "malibu_cli",
   "capabilities": ["status_observation_v1", "service_instance_v1", "lifecycle_transition_v1", "referral_bootstrap_v1", "referral_status_v1", "referral_advocacy_v1", "referral_fragment_links_v1"]
 },
 "observation": {
@@ -1086,7 +1086,7 @@ supported version. An absent envelope is the legacy-reader path.
   "transition_at": "RFC 3339 timestamp",
   "state": "ready | busy | degraded | unavailable",
   "reason_code": "machine-readable transition reason",
-  "authority": "macprovider_cli"
+  "authority": "malibu_cli"
 },
 "credential": {
   "source": "cli_keychain | config_fallback | none",
@@ -1216,7 +1216,7 @@ on a standardized 200-token generation from a 500-token prompt. Both
 streaming and non-streaming modes meet this bar.
 
 **NFR-2. Cold start time.**
-From `macprovider-cli start` to the first request being serviceable
+From `malibu-cli start` to the first request being serviceable
 (model loaded, self-test passed, HTTP server listening): under 30
 seconds on M4 hardware with a 7B 4-bit model. Under 60 seconds on M1
 8GB with a 3B 4-bit model.
@@ -1504,7 +1504,7 @@ binary. See AC-2.
 
 #### v1.3 provider CLI additions (serve + models)
 
-The `macprovider-cli` top-level subcommand inventory gains `models` as
+The `malibu-cli` top-level subcommand inventory gains `models` as
 the sixth subcommand alongside the existing `serve`, `status`,
 `self-test`, `update`, and `uninstall` commands. The `models`
 subcommand has actions `models list`, `models switch <model-id>
@@ -1563,14 +1563,14 @@ The `serve` command gains the following additive flags:
   code 2 with stderr diagnostic at startup per R-3.9.1. Only
   meaningful when `--enable-warm-swap` is set.
 - `--ctl-socket-path <path>` — override the macOS-native default per
-  SPEC-011 v0.5 R-3.1.5. Default `$TMPDIR/macprovider-cli/ctl.sock`,
+  SPEC-011 v0.5 R-3.1.5. Default `$TMPDIR/malibu-cli/ctl.sock`,
   resolved via `FileManager.default.temporaryDirectory`. Socket parent
   directory mode is `0700`; socket mode is `0600`. Meaningful whenever the
   control socket opens — i.e. when `--enable-warm-swap` **or** receipt rotation
   is enabled (R-6.9.1 reconciled v1.7), not warm-swap only.
 - `--switch-state-path <path>` — override the cooldown state file per
   SPEC-011 v0.5 R-3.1.4. Default
-  `$HOME/Library/Application Support/macprovider-cli/last-switch.ts`.
+  `$HOME/Library/Application Support/malibu-cli/last-switch.ts`.
 
 ### 6.3. POST /v1/chat/completions (streaming)
 
@@ -1725,13 +1725,13 @@ fields are OPTIONAL and informational.
 
 `tier` is `"pinned"` or `"provisional"` (see SPEC-002 v1.1 § 7.5 for
 admission tier semantics). The provider uses this for display purposes
-(e.g., `macprovider-cli status` output) and MUST NOT change its
+(e.g., `malibu-cli status` output) and MUST NOT change its
 inference behavior based on tier.
 
 `recommended_binary_version` is a semver string. If the provider's
 `binary_version` (from hello) is older than this value, the provider
 SHOULD log a warning: "A newer version is available (vX.Y.Z). Run
-'macprovider-cli update' to upgrade." The coordinator does NOT enforce
+'malibu-cli update' to upgrade." The coordinator does NOT enforce
 the version — providers running older binaries continue to function.
 
 #### 6.5.1. `pair_ot` and `claim_url` on `hello_ack` (NEW in v1.5)
@@ -2582,7 +2582,7 @@ receipts-only socket exists but rejects `switch_request`.
 
 R-6.8.1 When `--enable-warm-swap` is enabled, the existing immutable
 `let container` / `let modelID` / `let modelHash` fields in
-`ModelRuntime` (`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift`
+`ModelRuntime` (`phase3-binary/Sources/malibu-cli/ModelRuntime.swift`
 lines 25-68, 86-147) MUST be refactored to actor-isolated mutable state
 per SPEC-011 v0.5 R-3.2.1.
 
@@ -2637,7 +2637,7 @@ existing boot semantics and L-1 back-compat.
 R-6.9.1 (reconciled v1.7) The serve process opens the control socket when
 **either** `--enable-warm-swap` (SPEC-011 v0.5 R-3.1.0 / R-3.1.5) **or**
 receipt-key rotation is enabled — the latter requires `--enable-receipts` with a
-non-empty `provider_id` and a configured coordinator (`MacProviderCLI.swift`:
+non-empty `provider_id` and a configured coordinator (`MalibuCLI.swift`:
 `enableWarmSwap || receiptRotator != nil`). The ≤ v1.6 "socket absent unless
 `--enable-warm-swap`" wording was too narrow: it would make receipt rotation
 impossible in receipts-only mode and understates when this same-EUID privileged
@@ -2654,7 +2654,7 @@ returns `.other`; `models` prints only "switch rejected", `ModelsSubcommand.swif
 which an operator *interprets* as warm-swap-not-enabled but which is not a
 distinct status code. The `status_request` probe never surfaces it at all.)
 
-The macOS-native default path is `$TMPDIR/macprovider-cli/ctl.sock`,
+The macOS-native default path is `$TMPDIR/malibu-cli/ctl.sock`,
 resolved via `FileManager.default.temporaryDirectory`, per SPEC-011
 v0.5 R-3.1.5. Why not `$XDG_RUNTIME_DIR`: that variable is a Linux /
 freedesktop convention and is not set on stock macOS; SPEC-011 v0.5
@@ -2714,7 +2714,7 @@ only these `type`s and MUST reject unknown types per §6.9.1.
 
 The receipt-key-rotation and App-track metrics/pause/resume/shutdown frames are the
 App-track control surface (SPEC-015 / SPEC-025). Admission identity signing is not a
-local-control operation: `macprovider-cli` owns the durable admission key and signs
+local-control operation: `malibu-cli` owns the durable admission key and signs
 the coordinator proof directly (SPEC-026 §4.3). None of these ten alter the §6.9.3
 `models`-CLI detection precedence, which keys only on `status_response`.
 
@@ -2759,7 +2759,7 @@ here as owner of last resort:
 
 R-6.9.5 The `models` CLI MUST use the SPEC-011 v0.5 R-3.1.5.x
 three-case detection precedence: ENOENT exits 4 with
-`"macprovider-cli serve is not running on this host (no control socket
+`"malibu-cli serve is not running on this host (no control socket
 at <socket_path>)"`; ECONNREFUSED exits 4 with `"stale control socket
 at <socket_path> (no listener); remove the file and restart serve"`;
 connect-success plus missing `status_response` within 2s exits 4 with
@@ -2799,10 +2799,10 @@ byte-identical default.
 
 R-6.10.2 `model_hash` MUST be a raw 64-character lowercase hex string
 matching the output of `modelWeightArtifactManifestHash()` at
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:294-325`
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:294-325`
 (which formats the SHA-256 of the artifact manifest via the
 `hexString()` byte→hex helper at
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:340`) per
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:340`) per
 SPEC-011 v0.5 R-3.3.1.
 
 R-6.10.3 `loading: bool` MUST reflect the §6.8 state machine:
@@ -3001,7 +3001,7 @@ control-socket progress lines per §6.9.
 
 ### 6.14. `models browse` subcommand (NEW in v1.4)
 
-**R-6.14.1 Action.** `macprovider-cli models browse` performs an
+**R-6.14.1 Action.** `malibu-cli models browse` performs an
 unauthenticated GET against the HuggingFace API at
 `https://huggingface.co/api/models` with the following query params:
 
@@ -3569,7 +3569,7 @@ default.
 Point the binary at a nonexistent model path. Verify: exits with code 1,
 prints diagnostic to stderr, no HTTP server starts, no partial state.
 
-**Run by:** `macprovider-cli --model /nonexistent/path 2>&1; echo "exit: $?"`
+**Run by:** `malibu-cli --model /nonexistent/path 2>&1; echo "exit: $?"`
 
 **AC-11. WS-tunneled inference (non-streaming).**
 A mock coordinator sends `inference_request` with `stream: false` over
@@ -3663,7 +3663,7 @@ v1.7 additive heartbeat fields (`hardware_summary`, spec-decode,
 `last_autoupdate_event`, §6.15.2) may still be present, as they ride the
 heartbeat independently of `--enable-warm-swap`;
 (c) no control socket file exists at
-`$TMPDIR/macprovider-cli/ctl.sock` while serve is running per
+`$TMPDIR/malibu-cli/ctl.sock` while serve is running per
 SPEC-011 v0.5 R-3.1.0 / R-3.1.5 / AC-18 — **provided receipt rotation is also
 disabled** (R-6.9.1 reconciled v1.7: receipts-mode opens the socket
 independently of warm swap);
@@ -3694,10 +3694,10 @@ exit code 2 BEFORE opening the coordinator WS with stderr containing
 A v1.3 binary `serve` started with **neither** `--enable-warm-swap` **nor**
 receipt rotation enabled (i.e. not `--enable-receipts` with a provider ID +
 coordinator; see R-6.9.1 reconciled v1.7) MUST NOT
-create any file at `$TMPDIR/macprovider-cli/ctl.sock`. A
-`macprovider-cli models list` invocation against that binary MUST
+create any file at `$TMPDIR/malibu-cli/ctl.sock`. A
+`malibu-cli models list` invocation against that binary MUST
 take the R-6.9.5 / R-3.1.5.x ENOENT case-1 path: exit code 4 with
-stderr containing `"macprovider-cli serve is not running on this
+stderr containing `"malibu-cli serve is not running on this
 host (no control socket at"` (followed by the resolved socket path).
 Traces to SPEC-011 v0.5 AC-18 case-1 and SPEC-001 v1.3 R-6.9.5. (Note: a
 receipts-only socket **does** exist and answers `status_request`; a
@@ -3711,7 +3711,7 @@ AC-22 and AC-26.
 
 **AC-18.5. macOS-native socket path.**
 The default control socket path resolves to
-`$TMPDIR/macprovider-cli/ctl.sock` via
+`$TMPDIR/malibu-cli/ctl.sock` via
 `FileManager.default.temporaryDirectory`. Linux/freedesktop runtime-dir
 environment paths MUST NOT appear anywhere in the binary's runtime path
 resolution; they are unset on stock macOS. Traces to SPEC-011 v0.5
@@ -3781,8 +3781,8 @@ Traces to SPEC-011 v0.5 AC-18 and SPEC-010 v1.5 AC-16.
 
 **AC-18.12. Control-socket detection precedence — ECONNREFUSED.**
 A v1.3 binary `serve --enable-warm-swap` running with a stale socket
-file at `$TMPDIR/macprovider-cli/ctl.sock` left by a prior crashed
-process (file exists but no listener) MUST cause `macprovider-cli
+file at `$TMPDIR/malibu-cli/ctl.sock` left by a prior crashed
+process (file exists but no listener) MUST cause `malibu-cli
 models list` to take the R-6.9.5 / R-3.1.5.x ECONNREFUSED case-2
 path: exit code 4 with stderr containing `"stale control socket at"`
 and `"remove the file and restart serve"`. Traces to SPEC-011 v0.5
@@ -3790,7 +3790,7 @@ R-3.1.5.x case 2 and SPEC-001 v1.3 R-6.9.5.
 
 **AC-18.13. Control-socket detection precedence — handshake timeout.**
 If the binary connects to the control socket successfully but no
-`status_response` arrives within 2 seconds, `macprovider-cli models
+`status_response` arrives within 2 seconds, `malibu-cli models
 list` MUST take the R-6.9.5 / R-3.1.5.x case-3 path: exit code 4
 with stderr containing `"serve is running but warm-swap is not
 enabled (or serve is unresponsive)"`. Traces to SPEC-011 v0.5
@@ -3799,7 +3799,7 @@ R-3.1.5.x case 3 and SPEC-001 v1.3 R-6.9.5.
 **AC-18.14. Cooldown soft guard + `--force` bypass.**
 A v1.3 binary `serve --enable-warm-swap` that has successfully
 processed a `models switch <X>` within the last 10 seconds MUST cause
-the next `macprovider-cli models switch <Y>` to exit code 6 with
+the next `malibu-cli models switch <Y>` to exit code 6 with
 stderr containing `"swap on cooldown for"` and `"Re-issue with
 --force to bypass"` per SPEC-011 v0.5 R-3.1.4 / R-3.1.2 step 4. The
 same invocation with `--force` MUST bypass the cooldown soft guard
@@ -3914,7 +3914,7 @@ and compiles an empty main.
 **Step 2. CLI entry and config loader.**
 Implement argument parsing (FR-19) and YAML config loading. The binary
 accepts `--port`, `--model`, `--coordinator`, `--config`, `--log-level`.
-Deliverable: `macprovider-cli --help` prints usage.
+Deliverable: `malibu-cli --help` prints usage.
 
 **Step 3. Model loader.**
 Wrap `mlx-swift-lm` to load a model from a HuggingFace path. Read
@@ -3978,7 +3978,7 @@ acceptance criteria.
 phase3-binary/
 ├── Package.swift
 ├── Sources/
-│   └── macprovider-cli/
+│   └── malibu-cli/
 │       ├── main.swift
 │       ├── Config.swift                 # FR-19
 │       ├── ModelLoader.swift            # Step 3, FR-6
@@ -4006,7 +4006,7 @@ phase3-binary/
 │   └── MacProviderCore/
 │       └── SupportedModels.swift        # §6.2 SPEC-010 resolution/pre-flight
 ├── Tests/
-│   └── macprovider-cliTests/
+│   └── malibu-cliTests/
 │       ├── RequestValidatorTests.swift
 │       ├── StopTokenFilterTests.swift
 │       ├── ContextPreflightTests.swift
@@ -4022,15 +4022,15 @@ phase3-binary/
 
 Expected v1.3 implementation modifications to existing files:
 
-- `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift` —
+- `phase3-binary/Sources/malibu-cli/ModelRuntime.swift` —
   refactored per §6.8.1 from immutable `let` fields to actor-isolated
   mutable `current_container`.
-- `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift` —
+- `phase3-binary/Sources/malibu-cli/CoordinatorClient.swift` —
   extended v2 `auth_request` builder to emit SPEC-010 fields when
   opt-in flags are set; heartbeat builder gains opt-in-gated
   `model_hash` / `loading` fields per §6.10. Existing `helloMessage`
   hash source-of-truth follows §6.10.4 on reconnect.
-- `phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift` — adds
+- `phase3-binary/Sources/malibu-cli/MalibuCLI.swift` — adds
   `models` subcommand to the existing subcommand list (currently lines
   7-15).
 

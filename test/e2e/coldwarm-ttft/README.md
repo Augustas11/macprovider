@@ -234,8 +234,8 @@ run in CI. Like the cold-cycle path it refuses a production coordinator (`§6`
 production fence): the targets must be **local providers you own**.
 
 ```bash
-export KVS01A_PROVIDER_CMD="macprovider-cli serve --config /path/to/local-enabled.yaml"
-export KVS01A_PROVIDER_CMD_NODISK="macprovider-cli serve --config /path/to/local-disabled.yaml"
+export KVS01A_PROVIDER_CMD="malibu-cli serve --config /path/to/local-enabled.yaml"
+export KVS01A_PROVIDER_CMD_NODISK="malibu-cli serve --config /path/to/local-disabled.yaml"
 export KVS01A_BASE=http://127.0.0.1:8080
 export KVS01A_PROMPT_TOKENS=2500          # v1 allowlist class under the 256 MiB ceiling; 8k is KVS-01b
 ./kvs-01a.sh --cycles 30                  # gate mode: >= 30 samples/arm (correctness gate; thresholds advisory)

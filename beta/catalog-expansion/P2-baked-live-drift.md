@@ -70,9 +70,9 @@ All other recommendable-model rows already matched coordinator projection (inclu
 
 | File | Change |
 |------|--------|
-| `phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift` | Updated `bakedRateCardJSON` version, `generated_at`, Nemotron credits |
-| `phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift` | Nemotron baked-rate assertions; freshness mock rate-card version |
-| `phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendSimulateTests.swift` | Expected baked rate-card version string |
+| `phase3-binary/Sources/malibu-cli/AutotuneRecommend.swift` | Updated `bakedRateCardJSON` version, `generated_at`, Nemotron credits |
+| `phase3-binary/Tests/malibu-cliTests/AutotuneRecommendTests.swift` | Nemotron baked-rate assertions; freshness mock rate-card version |
+| `phase3-binary/Tests/malibu-cliTests/AutotuneRecommendSimulateTests.swift` | Expected baked rate-card version string |
 
 **Not touched:** `phase3-binary/dist/static/*`, `coordinator.yaml`, tier-2 catalog, `ServeCommandTests` (candidate `generated_at` unchanged).
 

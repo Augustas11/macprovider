@@ -23,7 +23,7 @@ that #482 measured before compile).
 - Current pin: `phase3-binary/Package.swift` has
   `mlx-swift-examples` **exact `2.29.1`** (released 2025-10-16). Through that
   pin we transitively get `mlx-swift 0.29.x`.
-- Engine files: `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift`
+- Engine files: `phase3-binary/Sources/malibu-cli/ModelRuntime.swift`
   (1,684 lines, uses `MLXLLM`), `InferenceRelay.swift` (865 lines, streams
   chunks back over WS).
 - Autotune candidates today: Qwen2.5-32B-Instruct-4bit, Qwen2.5-14B,
@@ -174,7 +174,7 @@ NOT need Darkbloom's `CompilableRotatingKVCache` machinery.
    `model(inputs, cache: ...)` or equivalent). This is the call to wrap.
 
 2. **Implement:**
-   - New file `phase3-binary/Sources/macprovider-cli/CompiledDecode.swift`.
+   - New file `phase3-binary/Sources/malibu-cli/CompiledDecode.swift`.
    - Wrapper using MLX's `compile()` (check the exact Swift API in our
      locked mlx-swift version — function name may be `compile`, `compiled`,
      or via a property wrapper depending on version).

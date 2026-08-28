@@ -17,7 +17,7 @@ governed by `specs/AUTHORITY.json`, `specs/CONFORMANCE.json`, and the matching
 
 ## Project Structure
 
-- `phase3-binary/` - Swift package for `macprovider-cli`, Malibu.app assets,
+- `phase3-binary/` - Swift package for `malibu-cli`, Malibu.app assets,
   installer, catalog, release, and provider runtime scripts.
 - `phase4-coordinator/` - Go coordinator, provider pool, billing, rewards,
   onboarding, stats, auth, and deployment scripts.
@@ -180,7 +180,7 @@ scoped to the fix files.
 Provider CLI releases that ship both Malibu.app and the standalone tarball need
 release-asset proof, not just green workflows:
 
-- Compare SHA-256 byte identity between both embedded `macprovider-cli`
+- Compare SHA-256 byte identity between both embedded `malibu-cli`
   binaries after final signing, notarization, stapling, and packaging.
 - Do not use `codesign --force --deep` to paper over nested signing.
 - Verify the updater path from the previous stable version.
@@ -199,7 +199,7 @@ Runbook: `docs/runbooks/provider-cli-release-verification.md`.
   `.cursor/`, `.omc/`, or `.omx/` when a tool needs them.
 - Current versions of record live in line 3 of each `specs/SPEC-NNN-*.md` and
   the `binaryVersion` constant in
-  `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift`; do not
+  `phase3-binary/Sources/malibu-cli/CoordinatorClient.swift`; do not
   hardcode drifting versions in agent instructions.
 - Production coordinator is `coordinator.malibu.tech`; public installer redirect
   is `get.malibu.tech/install.sh`.

@@ -7,7 +7,7 @@
   does not sign the current live feed in this PR.
 - `autotune-static-v4.public.base64` — current live static-feed public key,
   base64 of the 32-byte raw Curve25519 (Ed25519) **public** key. Also baked verbatim into
-  [`AutotuneRecommend.swift`](../../../Sources/macprovider-cli/AutotuneRecommend.swift)
+  [`AutotuneRecommend.swift`](../../../Sources/malibu-cli/AutotuneRecommend.swift)
   as `autotune_static_json_ed25519_v4`. Committing the public key here
   makes it easy to spot rotations in `git log`.
 - `autotune-static-v3.public.base64` — prior public key retained for
@@ -44,7 +44,7 @@ The runtime verification model relies on:
    `https://coordinator.malibu.tech/v1/demand-rank` and
    `https://coordinator.malibu.tech/v1/autotune-candidates` (URL
    hardcoded in
-   [`AutotuneRecommend.swift`](../../../Sources/macprovider-cli/AutotuneRecommend.swift))
+   [`AutotuneRecommend.swift`](../../../Sources/malibu-cli/AutotuneRecommend.swift))
    and verify each `.sig` sidecar against the baked pubkey.
 2. **The private key** is held only by the operator running
    `scripts/resign-autotune-static.sh` locally. It never enters

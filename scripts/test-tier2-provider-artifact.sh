@@ -45,7 +45,7 @@ make_fake_binary() {
   local include_surfaces="$3"
   local supports_release_preflight="${4:-1}"
   mkdir -p "$dir"
-  cat >"$dir/macprovider-cli" <<EOF
+  cat >"$dir/malibu-cli" <<EOF
 #!/usr/bin/env bash
 if [ -n "\${FAKE_PROVIDER_EXECUTION_MARKER:-}" ]; then
   : > "\$FAKE_PROVIDER_EXECUTION_MARKER"
@@ -60,7 +60,7 @@ fi
 exit 64
 EOF
   if [ "$include_surfaces" = "1" ]; then
-    cat >>"$dir/macprovider-cli" <<'EOF'
+    cat >>"$dir/malibu-cli" <<'EOF'
 # provider_ecdh_public_key
 # tier2_capabilities
 # selected_aead_suite
@@ -71,7 +71,7 @@ EOF
 # inference_response_chunk
 EOF
   else
-    cat >>"$dir/macprovider-cli" <<'EOF'
+    cat >>"$dir/malibu-cli" <<'EOF'
 # provider_ecdh_public_key
 # tier2_capabilities
 # selected_aead_suite
@@ -81,7 +81,7 @@ EOF
 # A256GCM
 EOF
   fi
-  chmod +x "$dir/macprovider-cli"
+  chmod +x "$dir/malibu-cli"
   printf 'fake metallib\n' >"$dir/mlx.metallib"
 }
 
@@ -110,7 +110,7 @@ def add_file(tar, name, data, mode=0o644):
     tar.addfile(info, io.BytesIO(payload))
 
 with tarfile.open(out, "w:gz") as tar:
-    add_file(tar, "macprovider-cli", "#!/usr/bin/env bash\nprintf '1.2.6\\n'\n", 0o755)
+    add_file(tar, "malibu-cli", "#!/usr/bin/env bash\nprintf '1.2.6\\n'\n", 0o755)
     if kind != "symlink-metallib":
         add_file(tar, "mlx.metallib", "fake metallib\n")
 
@@ -126,7 +126,7 @@ with tarfile.open(out, "w:gz") as tar:
     elif kind == "hardlink":
         info = tarfile.TarInfo("hardlink")
         info.type = tarfile.LNKTYPE
-        info.linkname = "macprovider-cli"
+        info.linkname = "malibu-cli"
         tar.addfile(info)
     elif kind == "fifo":
         info = tarfile.TarInfo("fifo")
@@ -374,7 +374,7 @@ assert_contains "$WORKDIR/skip-surface.err" "SPEC-008 Phase 2 B6 provider artifa
 forbidden_dir="$WORKDIR/forbidden"
 forbidden_tar="$WORKDIR/forbidden.tar.gz"
 make_fake_binary "$forbidden_dir" "1.2.6" "1"
-printf '# DeviceCheck\n' >>"$forbidden_dir/macprovider-cli"
+printf '# DeviceCheck\n' >>"$forbidden_dir/malibu-cli"
 make_tarball "$forbidden_dir" "$forbidden_tar"
 forbidden_sha="$(sha256_file "$forbidden_tar")"
 

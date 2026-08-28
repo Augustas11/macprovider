@@ -136,7 +136,7 @@ struct AgentSnapshot: Equatable {
     var admissionIdentityRecoveryOperatorRequest: String? = nil
     var admissionIdentityRecoveryJournalState: String? = nil
     var coordinatorIdentityAdmissionMode: String?
-    /// Whether macprovider-cli reports an active coordinator WebSocket session.
+    /// Whether malibu-cli reports an active coordinator WebSocket session.
     /// Distinct from verified buyer-serving readiness.
     var coordinatorConnected: Bool?
     /// Canonical provider state reported by /v1/status. `buyer_serving` is the
@@ -288,7 +288,7 @@ struct AgentSnapshot: Equatable {
 
     func hasTrustedReferralBoundary() -> Bool {
         localStatusContractCompatible == true
-            && localStatusLifecycleOwner == "macprovider_cli"
+            && ProviderLifecycleAuthority.isAccepted(localStatusLifecycleOwner)
             && localStatusCapabilities.contains("referral_status_v1")
             && localStatusCapabilities.contains("referral_fragment_links_v1")
             && localStatusCapabilities.contains("service_instance_v1")
@@ -1856,7 +1856,7 @@ enum AgentSnapshotPresenter {
             "coordinator admission",
             "coordinator",
             "provider cli",
-            "macprovider-cli",
+            "malibu-cli",
             "cli-owned",
             "terminal path",
             "referral_bootstrap_v1",

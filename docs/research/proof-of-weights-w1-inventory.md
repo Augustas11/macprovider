@@ -10,7 +10,7 @@
 
 | Component | Path | Role |
 |-----------|------|------|
-| Provider manifest hash | `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift` `modelWeightArtifactManifestHash` | SHA-256 over safetensors manifest at load |
+| Provider manifest hash | `phase3-binary/Sources/malibu-cli/ModelRuntime.swift` `modelWeightArtifactManifestHash` | SHA-256 over safetensors manifest at load |
 | Coordinator catalog verify | `phase4-coordinator/internal/tier2/catalog.go` `VerifyProviderHash` | Five-state hash enum at hello + heartbeat |
 | WS admission hash stamp | `phase4-coordinator/internal/ws/server.go` `prepareProviderAdmission` | Sets `pool.Provider.HashStatus` at connect |
 | Buyer routing exclusion | `phase4-coordinator/internal/buyer/server.go` `Tier2Decision` + `routing/filter.go` | `ReasonTier2HashMismatch` / `ReasonTier2HashRequired` |
@@ -50,7 +50,7 @@
 
 1. Edit signed tier-2 catalog JSON + rate-card model rows in git (operator PR).
 2. Deploy coordinator with updated `tier2.catalog_path` / hot-reload (SIGHUP).
-3. Providers run `macprovider-cli autotune --recommend --apply` so `model_catalog_*` + `model_artifact_sha256` match the pinned row.
+3. Providers run `malibu-cli autotune --recommend --apply` so `model_catalog_*` + `model_artifact_sha256` match the pinned row.
 4. Hello carries `model_hash` from live manifest; coordinator verifies against catalog via `VerifyProviderHash`.
 5. Mismatch → no buyer traffic; settlement receipts quarantine if hash diverges at payout time.
 

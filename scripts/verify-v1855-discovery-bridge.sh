@@ -2,7 +2,7 @@
 # Prove the one-time v1.8.55 → append-only trust-preserving bridge without
 # mutating the permanently immutable fixed release-discovery transport.
 #
-# Ordinary macprovider-cli update from public v1.8.55 cannot enumerate
+# Ordinary malibu-cli update from public v1.8.55 cannot enumerate
 # release-discovery-v1-* transports. The supported bridge is an authenticated
 # coordinator recommendation (or acceptance-candidate installer) for the exact
 # signed numeric target. This anonymous check proves:
@@ -94,7 +94,7 @@ PY
 "$root/scripts/verify-anonymous-release-discovery.sh" \
   "$target_tag" "$target_commit" "$target_tag" "$transport_tag"
 
-client_asset="macprovider-cli-v1.8.55-darwin-arm64.tar.gz"
+client_asset="malibu-cli-v1.8.55-darwin-arm64.tar.gz"
 client_base="https://github.com/$repository/releases/download/v1.8.55"
 for name in "$client_asset" checksums.txt checksums.txt.sig; do
   curl "${curl_args[@]}" "$client_base/$name" -o "$work/$name"
@@ -108,9 +108,9 @@ expected_client_sha="$(awk -v name="$client_asset" '$2 == name { print $1 }' "$w
 actual_client_sha="$(shasum -a 256 "$work/$client_asset" | awk '{print $1}')"
 [[ "$actual_client_sha" == "$expected_client_sha" ]] || die "v1.8.55 archive checksum differs"
 mkdir "$work/client"
-tar -xzf "$work/$client_asset" -C "$work/client" macprovider-cli
-client="$work/client/macprovider-cli"
-[[ -x "$client" ]] || die "verified v1.8.55 archive lacks executable macprovider-cli"
+tar -xzf "$work/$client_asset" -C "$work/client" malibu-cli
+client="$work/client/malibu-cli"
+[[ -x "$client" ]] || die "verified v1.8.55 archive lacks executable malibu-cli"
 codesign --verify --strict --verbose=2 "$client"
 [[ "$("$client" --version)" == "1.8.55" ]] || die "v1.8.55 binary version differs"
 

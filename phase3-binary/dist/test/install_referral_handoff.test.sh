@@ -18,7 +18,7 @@ assert unset in source
 assert source.index(capture) < source.index(unset) < source.index(first_child)
 
 assert 'bootstrap_auth_args+=(--referral-code-file "$REFERRAL_CODE_SOURCE_FILE")' in source
-assert 'run_macprovider_cli_with_amfi_retry "${bootstrap_auth_args[@]}"' in source
+assert 'run_malibu_cli_with_amfi_retry "${bootstrap_auth_args[@]}"' in source
 assert '20|21|22|23|24|25|26|27)' in source
 main = source[source.rindex("\nmain() {"):]
 assert main.index("prepare_fresh_referral_code") < main.index('tag="$(resolve_release_tag)"')
@@ -29,7 +29,7 @@ assert main.index("enable_fresh_referral_receipts") < main.index(
     "use_fresh_recommendation_if_available"
 )
 publish = "publish_bootstrap_identity_for_rollback"
-bootstrap = 'run_macprovider_cli_with_amfi_retry "${bootstrap_auth_args[@]}"'
+bootstrap = 'run_malibu_cli_with_amfi_retry "${bootstrap_auth_args[@]}"'
 ensure_start = source.index("ensure_provider_credentials()")
 ensure_end = source.index("submit_required_hardware_evidence()", ensure_start)
 ensure_source = source[ensure_start:ensure_end]
@@ -75,8 +75,8 @@ die() {
 }
 log() { printf '[test] %s\n' "$*"; }
 installed_provider_binary_path() {
-  if [ -x "$INSTALL_DIR/macprovider-cli" ]; then
-    printf '%s\n' "$INSTALL_DIR/macprovider-cli"
+  if [ -x "$INSTALL_DIR/malibu-cli" ]; then
+    printf '%s\n' "$INSTALL_DIR/malibu-cli"
   elif [ -x "$BINARY_PATH" ]; then
     printf '%s\n' "$BINARY_PATH"
   fi
@@ -100,7 +100,7 @@ read_config_model() {
 
 valid_code="MAL1-S-key_1-issuer_1-AAAAAAAAAAAAAAAAAAAAAAAAAA"
 INSTALL_DIR="$workdir/fresh/macprovider"
-BINARY_PATH="$workdir/fresh/bin/macprovider-cli"
+BINARY_PATH="$workdir/fresh/bin/malibu-cli"
 MANIFEST_PATH="$workdir/fresh/install_manifest.json"
 PLIST_PATH="$workdir/fresh/live.malibu.provider.plist"
 PROVIDER_ID_PATH="$workdir/fresh/provider_id"
@@ -159,7 +159,7 @@ supplied_file="$workdir/supplied-referral"
 printf '%s' "$valid_code" > "$supplied_file"
 chmod 600 "$supplied_file"
 INSTALL_DIR="$workdir/supplied/macprovider"
-BINARY_PATH="$workdir/supplied/bin/macprovider-cli"
+BINARY_PATH="$workdir/supplied/bin/malibu-cli"
 MANIFEST_PATH="$workdir/supplied/install_manifest.json"
 PLIST_PATH="$workdir/supplied/live.malibu.provider.plist"
 PROVIDER_ID_PATH="$workdir/supplied/provider_id"
@@ -177,7 +177,7 @@ set +e
 missing_file_output="$(
   (
     INSTALL_DIR="$workdir/missing-file/macprovider"
-    BINARY_PATH="$workdir/missing-file/bin/macprovider-cli"
+    BINARY_PATH="$workdir/missing-file/bin/malibu-cli"
     MANIFEST_PATH="$workdir/missing-file/install_manifest.json"
     PLIST_PATH="$workdir/missing-file/live.malibu.provider.plist"
     PROVIDER_ID_PATH="$workdir/missing-file/provider_id"
@@ -203,7 +203,7 @@ set +e
 empty_file_output="$(
   (
     INSTALL_DIR="$workdir/empty-file/macprovider"
-    BINARY_PATH="$workdir/empty-file/bin/macprovider-cli"
+    BINARY_PATH="$workdir/empty-file/bin/malibu-cli"
     MANIFEST_PATH="$workdir/empty-file/install_manifest.json"
     PLIST_PATH="$workdir/empty-file/live.malibu.provider.plist"
     PROVIDER_ID_PATH="$workdir/empty-file/provider_id"
@@ -228,7 +228,7 @@ set +e
 symlink_file_output="$(
   (
     INSTALL_DIR="$workdir/symlink-file/macprovider"
-    BINARY_PATH="$workdir/symlink-file/bin/macprovider-cli"
+    BINARY_PATH="$workdir/symlink-file/bin/malibu-cli"
     MANIFEST_PATH="$workdir/symlink-file/install_manifest.json"
     PLIST_PATH="$workdir/symlink-file/live.malibu.provider.plist"
     PROVIDER_ID_PATH="$workdir/symlink-file/provider_id"
@@ -251,7 +251,7 @@ set +e
 missing_output="$(
   (
     INSTALL_DIR="$workdir/missing/macprovider"
-    BINARY_PATH="$workdir/missing/bin/macprovider-cli"
+    BINARY_PATH="$workdir/missing/bin/malibu-cli"
     MANIFEST_PATH="$workdir/missing/install_manifest.json"
     PLIST_PATH="$workdir/missing/live.malibu.provider.plist"
     PROVIDER_ID_PATH="$workdir/missing/provider_id"
@@ -271,16 +271,16 @@ set -e
 printf '%s' "$missing_output" | grep -Fq "invite code is required"
 
 mkdir -p "$workdir/existing/macprovider" "$workdir/existing/bin"
-cat > "$workdir/existing/bin/macprovider-cli" <<'EOF'
+cat > "$workdir/existing/bin/malibu-cli" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod 755 "$workdir/existing/bin/macprovider-cli"
+chmod 755 "$workdir/existing/bin/malibu-cli"
 printf 'mp-0123456789abcdef0123456789abcdef\n' > "$workdir/existing/provider_id"
 printf 'provider_id: "mp-0123456789abcdef0123456789abcdef"\nprovider_token: "legacy-token"\n' \
   > "$workdir/existing/config.yaml"
 INSTALL_DIR="$workdir/existing/macprovider"
-BINARY_PATH="$workdir/existing/bin/macprovider-cli"
+BINARY_PATH="$workdir/existing/bin/malibu-cli"
 MANIFEST_PATH="$workdir/existing/install_manifest.json"
 PLIST_PATH="$workdir/existing/live.malibu.provider.plist"
 PROVIDER_ID_PATH="$workdir/existing/provider_id"
@@ -316,7 +316,7 @@ set +e
 stale_output="$(
   (
     INSTALL_DIR="$workdir/stale/macprovider"
-    BINARY_PATH="$workdir/stale/bin/macprovider-cli"
+    BINARY_PATH="$workdir/stale/bin/malibu-cli"
     MANIFEST_PATH="$workdir/stale/install_manifest.json"
     PLIST_PATH="$workdir/stale/live.malibu.provider.plist"
     PROVIDER_ID_PATH="$workdir/stale/provider_id"

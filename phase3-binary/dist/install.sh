@@ -3,7 +3,7 @@
 #
 # Launchd template substitutions performed by this script:
 #   __USER_HOME__       -> absolute installing user's HOME
-#   __BINARY_PATH__     -> absolute ~/.local/bin/macprovider-cli path
+#   __BINARY_PATH__     -> absolute ~/.local/bin/malibu-cli path
 #   __LOG_DIR__         -> absolute ~/Library/Logs/macprovider path
 #   __CONFIG_PATH__     -> absolute provider config path
 
@@ -36,7 +36,8 @@ COORDINATOR_URL_DEFAULT="wss://coordinator.malibu.tech/ws/provider"
 COORDINATOR_BASE_DEFAULT="https://coordinator.malibu.tech"
 INSTALL_DIR="${MACPROVIDER_INSTALL_DIR:-$HOME/macprovider}"
 BIN_DIR="$HOME/.local/bin"
-BINARY_PATH="$BIN_DIR/macprovider-cli"
+BINARY_PATH="$BIN_DIR/malibu-cli"
+LEGACY_BINARY_PATH="$BIN_DIR/macprovider-cli"
 CONFIG_DIR="$HOME/.config/macprovider"
 CONFIG_PATH="$CONFIG_DIR/config.yaml"
 PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
@@ -136,7 +137,8 @@ STAGED_PROVIDER_ID_PATH=""
 AUTOTUNE_BENCHMARK_PORT=""
 AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
 AUTOTUNE_PREFETCH_RECEIPT_PATH=""
-MACPROVIDER_CLI_EXECUTABLE="$INSTALL_DIR/macprovider-cli"
+MALIBU_CLI_EXECUTABLE="$INSTALL_DIR/malibu-cli"
+LEGACY_INSTALL_BINARY_PATH="$INSTALL_DIR/macprovider-cli"
 LIFECYCLE_STAGED_CLI_TRUSTED=0
 LAUNCHD_INSTALLED=0
 WATCHDOG_INSTALLED=0
@@ -149,6 +151,7 @@ INSTALL_TX_SERVICE_WAS_ACTIVE=0
 INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE=0
 INSTALL_TX_HAD_INSTALL_DIR=0
 INSTALL_TX_HAD_BINARY_PATH=0
+INSTALL_TX_HAD_LEGACY_BINARY_PATH=0
 INSTALL_TX_HAD_CONFIG=0
 INSTALL_TX_HAD_PROVIDER_ID=0
 INSTALL_TX_HAD_RECOMMENDATION=0
@@ -165,6 +168,7 @@ INSTALL_TX_LEGACY_WATCHDOG_WAS_ACTIVE=0
 INSTALL_TX_WATCHDOG_WAS_DISABLED=0
 INSTALL_TX_ROLLING_BACK=0
 INSTALL_TX_BINARY_KIND="symlink"
+INSTALL_TX_LEGACY_BINARY_KIND="symlink"
 INSTALL_LOCK_HELD=0
 INSTALL_LOCK_TOKEN=""
 INSTALL_LOCK_HOLDER_PID=""
@@ -338,6 +342,25 @@ require_launchd_service_absent() {
   fi
   [ "$status" -eq 1 ] \
     || die 7 "could not determine launchd service state for $target"
+}
+
+owned_provider_executable_matches() {
+  candidate="$1"
+  shift || true
+  [ -n "$candidate" ] || return 1
+  install_dir="${INSTALL_DIR:-}"
+  binary_path="${BINARY_PATH:-}"
+  legacy_binary_path="${LEGACY_BINARY_PATH:-}"
+  legacy_install_binary_path="${LEGACY_INSTALL_BINARY_PATH:-}"
+  [ -n "$legacy_binary_path" ] || [ -z "$binary_path" ] || legacy_binary_path="$(dirname "$binary_path")/macprovider-cli"
+  [ -n "$legacy_install_binary_path" ] || [ -z "$install_dir" ] || legacy_install_binary_path="$install_dir/macprovider-cli"
+  canonical_install_binary_path=""
+  [ -z "$install_dir" ] || canonical_install_binary_path="$install_dir/malibu-cli"
+  for allowed in "$@" "$canonical_install_binary_path" "$binary_path" "$legacy_binary_path" "$legacy_install_binary_path"; do
+    [ -n "$allowed" ] || continue
+    [ "$candidate" = "$allowed" ] && return 0
+  done
+  return 1
 }
 
 launchctl_service() {
@@ -601,8 +624,8 @@ record_lifecycle_state() {
   local lifecycle_cli="$BINARY_PATH"
   [ "$DRY_RUN" -eq 0 ] || return 0
   if [ "${LIFECYCLE_STAGED_CLI_TRUSTED:-0}" -eq 1 ] \
-    && [ -x "${MACPROVIDER_CLI_EXECUTABLE:-}" ]; then
-    lifecycle_cli="$MACPROVIDER_CLI_EXECUTABLE"
+    && [ -x "${MALIBU_CLI_EXECUTABLE:-}" ]; then
+    lifecycle_cli="$MALIBU_CLI_EXECUTABLE"
   fi
   [ -x "$lifecycle_cli" ] || return 1
   local lifecycle_args=(
@@ -932,7 +955,7 @@ try:
         if not stat.S_ISREG(source_info.st_mode):
             raise RuntimeError("provider_binary_source_not_regular")
         temporary_fd, temporary = tempfile.mkstemp(
-            prefix=".macprovider-cli.install.",
+            prefix=".malibu-cli.install.",
             dir=target_directory,
         )
         while True:
@@ -987,7 +1010,7 @@ PY
   return 1
 }
 
-# Retry macprovider-cli up to two additional times if the first
+# Retry malibu-cli up to two additional times if the first
 # post-install invocation is SIGKILL'd by the kernel with a CODESIGNING
 # "Invalid Page" / "Taskgated Invalid Signature" verdict. Two failure
 # flavors have been observed:
@@ -1032,9 +1055,9 @@ PY
 # Diagnostic lines are written to stderr so they remain visible even
 # when callers redirect the helper's stdout to `/dev/null` (as the
 # freshness-check call site does).
-run_macprovider_cli_with_amfi_retry() {
+run_malibu_cli_with_amfi_retry() {
   local rc=0
-  local cli_path="$MACPROVIDER_CLI_EXECUTABLE"
+  local cli_path="$MALIBU_CLI_EXECUTABLE"
   if [ "${HEADLESS:-0}" = "1" ]; then
     MACPROVIDER_PROTECTED_CREDENTIAL_ROOT="$CONFIG_DIR/protected-credentials" \
       "$cli_path" "$@" || rc=$?
@@ -1044,7 +1067,7 @@ run_macprovider_cli_with_amfi_retry() {
   if [ "$rc" -ne 137 ]; then
     return "$rc"
   fi
-  log "macprovider-cli was SIGKILL'd on first invocation (rc=$rc); likely a transient AMFI code-signature race after pkg install. Retrying once after 2s." >&2
+  log "malibu-cli was SIGKILL'd on first invocation (rc=$rc); likely a transient AMFI code-signature race after pkg install. Retrying once after 2s." >&2
   sleep 2
   rc=0
   if [ "${HEADLESS:-0}" = "1" ]; then
@@ -1056,7 +1079,7 @@ run_macprovider_cli_with_amfi_retry() {
   if [ "$rc" -ne 137 ]; then
     return "$rc"
   fi
-  log "macprovider-cli was SIGKILL'd again on the 2s retry; the AMFI cache may be pinned to the pkg-installer inode. Refreshing the binary inode via an atomic same-directory replacement and retrying once more." >&2
+  log "malibu-cli was SIGKILL'd again on the 2s retry; the AMFI cache may be pinned to the pkg-installer inode. Refreshing the binary inode via an atomic same-directory replacement and retrying once more." >&2
   local replacement_rc=0
   atomic_replace_provider_binary "$cli_path" "$cli_path" || replacement_rc=$?
   if [ "$replacement_rc" -ne 0 ]; then
@@ -1075,7 +1098,7 @@ run_macprovider_cli_with_amfi_retry() {
     "$cli_path" "$@" || rc=$?
   fi
   if [ "$rc" -eq 137 ]; then
-    log "macprovider-cli was SIGKILL'd after the inode refresh; this is likely a genuine signature failure rather than the AMFI cache." >&2
+    log "malibu-cli was SIGKILL'd after the inode refresh; this is likely a genuine signature failure rather than the AMFI cache." >&2
   fi
   return "$rc"
 }
@@ -2365,7 +2388,9 @@ stage_install_tx_plist() {
     alternate_program_2=""
     expected_user="${6:-}"
   fi
-  python3 - "$source_path" "$copied_path" "$expected_label" "$expected_program" "$alternate_program" "$alternate_program_2" "$expected_user" <<'PY'
+  LEGACY_BINARY_PATH="${LEGACY_BINARY_PATH:-}" \
+    LEGACY_INSTALL_BINARY_PATH="${LEGACY_INSTALL_BINARY_PATH:-}" \
+    python3 - "$source_path" "$copied_path" "$expected_label" "$expected_program" "$alternate_program" "$alternate_program_2" "$expected_user" <<'PY'
 import os
 import plistlib
 import stat
@@ -2493,9 +2518,16 @@ try:
     if program is None and arguments is None:
         fail("missing_program_identity")
     effective_program = program if program is not None else arguments[0]
-    allowed_programs = [expected_program, alternate_program]
-    if alternate_program_2:
-        allowed_programs.append(alternate_program_2)
+    allowed_programs = {path for path in (expected_program, alternate_program, alternate_program_2) if path}
+    if expected_label in {"live.malibu.provider", "live.streamvc.macprovider"}:
+        allowed_programs.update(
+            path
+            for path in (
+                os.environ.get("LEGACY_BINARY_PATH"),
+                os.environ.get("LEGACY_INSTALL_BINARY_PATH"),
+            )
+            if path
+        )
     if effective_program not in allowed_programs:
         fail("unexpected_program")
 
@@ -2862,9 +2894,11 @@ write_install_recovery_artifacts() {
   : "${LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH:=$LEGACY_WATCHDOG_PLIST_PATH}"
 
   {
-    printf 'REC_INSTALL_DIR=%q\n' "$INSTALL_DIR"
-    printf 'REC_BINARY_PATH=%q\n' "$BINARY_PATH"
-    printf 'REC_CONFIG_PATH=%q\n' "$CONFIG_PATH"
+	    printf 'REC_INSTALL_DIR=%q\n' "$INSTALL_DIR"
+	    printf 'REC_BINARY_PATH=%q\n' "$BINARY_PATH"
+	    printf 'REC_LEGACY_BINARY_PATH=%q\n' "$LEGACY_BINARY_PATH"
+	    printf 'REC_LEGACY_INSTALL_BINARY_PATH=%q\n' "$LEGACY_INSTALL_BINARY_PATH"
+	    printf 'REC_CONFIG_PATH=%q\n' "$CONFIG_PATH"
     printf 'REC_PROVIDER_ID_PATH=%q\n' "$PROVIDER_ID_PATH"
     printf 'REC_RECOMMENDATION_PATH=%q\n' "$RECOMMENDATION_PATH"
     printf 'REC_PROVIDER_LABEL=%q\n' "$PROVIDER_LABEL"
@@ -2895,6 +2929,7 @@ write_install_recovery_artifacts() {
     printf 'REC_UID=%q\n' "$UID"
     printf 'REC_HAD_INSTALL_DIR=%q\n' "$INSTALL_TX_HAD_INSTALL_DIR"
     printf 'REC_HAD_BINARY_PATH=%q\n' "$INSTALL_TX_HAD_BINARY_PATH"
+    printf 'REC_HAD_LEGACY_BINARY_PATH=%q\n' "$INSTALL_TX_HAD_LEGACY_BINARY_PATH"
     printf 'REC_HAD_CONFIG=%q\n' "$INSTALL_TX_HAD_CONFIG"
     printf 'REC_HAD_PROVIDER_ID=%q\n' "$INSTALL_TX_HAD_PROVIDER_ID"
     printf 'REC_HAD_RECOMMENDATION=%q\n' "$INSTALL_TX_HAD_RECOMMENDATION"
@@ -2918,6 +2953,7 @@ write_install_recovery_artifacts() {
     printf 'REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH=%q\n' "$LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH"
     printf 'REC_WATCHDOG_WAS_DISABLED=%q\n' "$INSTALL_TX_WATCHDOG_WAS_DISABLED"
     printf 'REC_BINARY_KIND=%q\n' "$INSTALL_TX_BINARY_KIND"
+    printf 'REC_LEGACY_BINARY_KIND=%q\n' "$INSTALL_TX_LEGACY_BINARY_KIND"
     printf 'REC_REFERRAL_REPLACE_INCUMBENT=%q\n' "$REFERRAL_REPLACE_INCUMBENT"
   } | write_atomic_install_file "$state_path" 0600 || return 1
 
@@ -3053,7 +3089,7 @@ validate_recovery_launchdaemon_plist() {
   managed_path="$1"
   bootstrap_path="$2"
   python3 - "$managed_path" "$bootstrap_path" "$REC_HEADLESS_USER" \
-    "$REC_INSTALL_DIR/macprovider-cli" "/Library/Application Support/macprovider/macprovider-health-monitor" \
+    "$REC_INSTALL_DIR/malibu-cli" "/Library/Application Support/macprovider/macprovider-health-monitor" \
     "$REC_CONFIG_PATH" <<'PY'
 import os
 import plistlib
@@ -3102,7 +3138,7 @@ snapshot_recovery_launchdaemon_plist() {
   managed_path="$1"
   bootstrap_path="$2"
   python3 - "$managed_path" "$bootstrap_path" "$REC_HEADLESS_USER" \
-    "$REC_INSTALL_DIR/macprovider-cli" "/Library/Application Support/macprovider/macprovider-health-monitor" \
+    "$REC_INSTALL_DIR/malibu-cli" "/Library/Application Support/macprovider/macprovider-health-monitor" \
     "$REC_CONFIG_PATH" <<'PY'
 import base64
 import os
@@ -3944,6 +3980,7 @@ managed_bundle = re.compile(r".*\.bundle$")
 
 def installer_owned(name):
     return name in {
+        "malibu-cli",
         "macprovider-cli",
         "mlx.metallib",
         "THIRD-PARTY-NOTICES.txt",
@@ -3951,7 +3988,7 @@ def installer_owned(name):
         "compatibility-set-local",
         "catalog-release",
     } or bool(managed_bundle.fullmatch(name)) or bool(
-        re.fullmatch(r"macprovider-cli\.v[0-9.]+\.bak", name)
+        re.fullmatch(r"malibu-cli\.v[0-9.]+\.bak", name)
     )
 
 
@@ -4212,7 +4249,8 @@ fault = os.environ.get("RECOVERY_LIFECYCLE_FAULT", "")
 uid = os.getuid()
 MAX_STATE_BYTES = 1024 * 1024
 LOCK_TIMEOUT_SECONDS = 10.0
-AUTHORITY = "macprovider_cli"
+AUTHORITY = "malibu_cli"
+LEGACY_AUTHORITY = "macprovider_cli"
 SCHEMA_VERSION = 1
 RESERVED_TRANSLATION_REASON = "install_rollback_restored_translated"
 
@@ -4393,7 +4431,12 @@ try:
             translated["transition_at"] = transition_at
             translated["state"] = "rollback_in_progress"
             translated["reason_code"] = RESERVED_TRANSLATION_REASON
-            translated["authority"] = AUTHORITY
+            snapshot_authority = base.get("authority")
+            translated["authority"] = (
+                snapshot_authority
+                if snapshot_authority in (AUTHORITY, LEGACY_AUTHORITY)
+                else AUTHORITY
+            )
             translated["writer"] = "installer"
             translated["operation_id"] = fresh_operation_id
             # Durable operator pause survives the rollback even if the
@@ -4568,7 +4611,7 @@ uid = os.getuid()
 # kernel start timeval via sysctl(KERN_PROC_PID) -> kinfo_proc.p_starttime (see
 # process_start_microseconds), the same value Swift reads via
 # proc_pidinfo(PROC_PIDTBSDINFO), and compares at full microsecond precision.
-# The fail-open is gone; the paired Swift startup fallback (MacProviderCLI.swift:
+# The fail-open is gone; the paired Swift startup fallback (MalibuCLI.swift:
 # leaseNotValid now also falls back to replaceable acquisition) additionally
 # hardens the pre-existing invalid-owner adopted-record surface.
 #
@@ -5299,7 +5342,7 @@ def record_shared_validity_ok(record):
     # window did not bracket `now` (issued in the future, or already expired, on
     # either the wall or the monotonic axis) was PRESERVED by the shell yet
     # REJECTED by Swift's validationFailure. For a handoff-bearing lease, serve
-    # startup only falls back on handoffNotPrepared (MacProviderCLI.swift ~1413),
+    # startup only falls back on handoffNotPrepared (MalibuCLI.swift ~1413),
     # so preserving such a record can restart-loop rollback startup. This gate
     # closes that divergence by running Swift's shared window/boot checks BEFORE
     # both preservation branches, exactly where Swift runs them.
@@ -5762,6 +5805,16 @@ recovery_failed() {
 service_loaded() {
   recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$1" >/dev/null 2>&1
 }
+recovery_owned_provider_executable_matches() {
+  candidate="$1"
+  shift || true
+  [ -n "$candidate" ] || return 1
+  for allowed in "$@" "$REC_INSTALL_DIR/malibu-cli" "$REC_BINARY_PATH" "${REC_LEGACY_BINARY_PATH:-}" "${REC_LEGACY_INSTALL_BINARY_PATH:-}"; do
+    [ -n "$allowed" ] || continue
+    [ "$candidate" = "$allowed" ] && return 0
+  done
+  return 1
+}
 service_identity_matches() {
   service_label="$1"
   expected_path="$2"
@@ -5777,6 +5830,10 @@ service_identity_matches() {
   service_program="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*program = //p')"
   service_path="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*path = //p')"
   [ "$service_path" = "$expected_path" ] || return 1
+  if [ "$service_label" = "$REC_PROVIDER_LABEL" ] || [ "$service_label" = "$REC_LEGACY_PROVIDER_LABEL" ]; then
+    recovery_owned_provider_executable_matches "$service_program" "$expected_program" "$alternate_program" "$alternate_program_2"
+    return "$?"
+  fi
   [ "$service_program" = "$expected_program" ] \
     || [ "$service_program" = "$alternate_program" ] \
     || { [ -n "$alternate_program_2" ] && [ "$service_program" = "$alternate_program_2" ]; }
@@ -5819,7 +5876,7 @@ if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-sta
         || recovery_failed "could not start the unexpectedly inactive pre-cutover provider service"
     fi
     service_identity_matches "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
-      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      "$REC_INSTALL_DIR/malibu-cli" "$REC_BINARY_PATH" \
       || recovery_failed "pre-cutover provider service has an unexpected identity"
   fi
   if [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
@@ -5834,7 +5891,7 @@ if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-sta
         || recovery_failed "could not start the unexpectedly inactive pre-cutover legacy provider service"
     fi
     service_identity_matches "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" \
-      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      "$REC_INSTALL_DIR/malibu-cli" "$REC_BINARY_PATH" \
       || recovery_failed "pre-cutover legacy provider service has an unexpected identity"
   fi
   if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
@@ -5892,7 +5949,7 @@ stop_owned_manual_provider() {
     printf '%s\n' "$observed_port_pids" | grep -Fxq "$candidate_pid" || return 1
   fi
   observed_executable="$(lsof -nP -a -p "$candidate_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-  if [ "$observed_executable" != "$expected_executable" ] && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; }; then
+  if ! recovery_owned_provider_executable_matches "$observed_executable" "$expected_executable" "$alternate_executable"; then
     return 1
   fi
   kill -TERM "$candidate_pid" >/dev/null 2>&1 || return 1
@@ -5903,7 +5960,7 @@ stop_owned_manual_provider() {
   done
   if pid_is_live_non_zombie "$candidate_pid"; then
     observed_executable="$(lsof -nP -a -p "$candidate_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-    if [ "$observed_executable" != "$expected_executable" ] && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; }; then
+    if ! recovery_owned_provider_executable_matches "$observed_executable" "$expected_executable" "$alternate_executable"; then
       return 1
     fi
     kill -KILL "$candidate_pid" >/dev/null 2>&1 || return 1
@@ -6033,6 +6090,7 @@ chmod 700 "$RESTORE_STAGING_DIR" \
   || recovery_failed "could not secure randomized restore staging directory"
 INSTALL_CANDIDATE="$RESTORE_STAGING_DIR/install-dir"
 BINARY_CANDIDATE="$RESTORE_STAGING_DIR/binary-path"
+LEGACY_BINARY_CANDIDATE="$RESTORE_STAGING_DIR/legacy-binary-path"
 CONFIG_CANDIDATE="$RESTORE_STAGING_DIR/config.yaml"
 PROVIDER_ID_CANDIDATE="$RESTORE_STAGING_DIR/provider_id"
 RECOMMENDATION_CANDIDATE="$RESTORE_STAGING_DIR/last-recommendation.json"
@@ -6051,6 +6109,9 @@ if [ "$REC_HAD_INSTALL_DIR" -eq 1 ]; then
 fi
 if [ "$REC_HAD_BINARY_PATH" -eq 1 ]; then
   stage_restore "$RECOVERY_DIR/binary-path" "$BINARY_CANDIDATE" "$REC_BINARY_KIND" || recovery_failed "could not stage and verify the previous CLI path"
+fi
+if [ "${REC_HAD_LEGACY_BINARY_PATH:-0}" -eq 1 ]; then
+  stage_restore "$RECOVERY_DIR/legacy-binary-path" "$LEGACY_BINARY_CANDIDATE" "$REC_LEGACY_BINARY_KIND" || recovery_failed "could not stage and verify the previous legacy CLI path"
 fi
 if [ "$REC_HAD_CONFIG" -eq 1 ]; then
   stage_restore "$RECOVERY_DIR/config.yaml" "$CONFIG_CANDIDATE" file || recovery_failed "could not stage and verify the previous config"
@@ -6109,17 +6170,17 @@ if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_PLIST" -eq 1 ] || recovery_failed "the prior provider service was active but no recoverable plist was preserved"
   if [ -f "$RECOVERY_DIR/provider-service-created" ] && [ ! -L "$RECOVERY_DIR/provider-service-created" ]; then
     stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
-      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      "$REC_INSTALL_DIR/malibu-cli" "$REC_BINARY_PATH" \
       "the transaction provider service"
   else
     stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
-      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      "$REC_INSTALL_DIR/malibu-cli" "$REC_BINARY_PATH" \
       "the incumbent provider service"
   fi
 else
   if [ -f "$RECOVERY_DIR/provider-service-created" ] && [ ! -L "$RECOVERY_DIR/provider-service-created" ]; then
     stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
-      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      "$REC_INSTALL_DIR/malibu-cli" "$REC_BINARY_PATH" \
       "the transaction provider service"
   fi
   service_loaded "$REC_PROVIDER_LABEL" && recovery_failed "provider service is active even though it was inactive before the failed install"
@@ -6127,7 +6188,7 @@ fi
 if [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_LEGACY_PLIST" -eq 1 ] || recovery_failed "the prior legacy provider service was active but no recoverable plist was preserved"
   stop_loaded_service "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" \
-    "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+    "$REC_INSTALL_DIR/malibu-cli" "$REC_BINARY_PATH" \
     "the incumbent legacy provider service"
 fi
 if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
@@ -6176,13 +6237,14 @@ if [ -s "$RECOVERY_DIR/new-manual.pid" ]; then
     ''|*[!0-9]*) recovery_failed "recorded manual provider pid is invalid" ;;
   esac
   if pid_is_live_non_zombie "$NEW_MANUAL_PID"; then
-    stop_owned_manual_provider "$NEW_MANUAL_PID" "$REC_INSTALL_DIR/macprovider-cli" \
+    stop_owned_manual_provider "$NEW_MANUAL_PID" "$REC_INSTALL_DIR/malibu-cli" \
       || recovery_failed "could not stop and prove death of the failed manual provider process"
   fi
 fi
 
 swap_restore install-dir "$REC_INSTALL_DIR" "$INSTALL_CANDIDATE" "$REC_HAD_INSTALL_DIR" || recovery_failed "could not restore the previous install directory"
 swap_restore binary-path "$REC_BINARY_PATH" "$BINARY_CANDIDATE" "$REC_HAD_BINARY_PATH" || recovery_failed "could not restore the previous CLI path"
+swap_restore legacy-binary-path "$REC_LEGACY_BINARY_PATH" "$LEGACY_BINARY_CANDIDATE" "${REC_HAD_LEGACY_BINARY_PATH:-0}" || recovery_failed "could not restore the previous legacy CLI path"
 swap_restore config.yaml "$REC_CONFIG_PATH" "$CONFIG_CANDIDATE" "$REC_HAD_CONFIG" || recovery_failed "could not restore the previous config"
 swap_restore provider_id "$REC_PROVIDER_ID_PATH" "$PROVIDER_ID_CANDIDATE" "$REC_HAD_PROVIDER_ID" || recovery_failed "could not restore the previous provider id"
 swap_restore last-recommendation.json "$REC_RECOMMENDATION_PATH" "$RECOMMENDATION_CANDIDATE" "$REC_HAD_RECOMMENDATION" || recovery_failed "could not restore the previous recommendation"
@@ -6227,14 +6289,14 @@ if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous provider service"
   recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous provider service"
   service_identity_matches "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
-    "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+    "$REC_INSTALL_DIR/malibu-cli" "$REC_BINARY_PATH" \
     || recovery_failed "previous provider service has an unexpected identity"
 elif [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_LEGACY_PLIST" -eq 1 ] || recovery_failed "previous legacy service was active but no previous plist was preserved"
   recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous legacy provider service"
   recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous legacy provider service"
   service_identity_matches "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" \
-    "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+    "$REC_INSTALL_DIR/malibu-cli" "$REC_BINARY_PATH" \
     || recovery_failed "previous legacy provider service has an unexpected identity"
 else
   if recovery_launchctl print "$REC_LAUNCHD_DOMAIN/$REC_PROVIDER_LABEL" >/dev/null 2>&1; then
@@ -6277,7 +6339,7 @@ if [ -s "$RECOVERY_DIR/manual-provider.json" ]; then
   [ "$REC_SERVICE_WAS_ACTIVE" -eq 0 ] || recovery_failed "manual provider record conflicts with an active prior launchd service"
   [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 0 ] || recovery_failed "manual provider record conflicts with an active prior legacy launchd service"
   mkdir -p "$REC_LOG_DIR" || recovery_failed "could not recreate the previous manual provider log directory"
-  python3 - "$RECOVERY_DIR/manual-provider.json" "$REC_INSTALL_DIR/macprovider-cli" \
+  python3 - "$RECOVERY_DIR/manual-provider.json" "$REC_INSTALL_DIR/malibu-cli" \
     "$REC_LOG_DIR/macprovider.out.log" "$REC_LOG_DIR/macprovider.err.log" \
     "$RECOVERY_DIR/manual-restored.pid" "$REC_MANUAL_READY_TIMEOUT_SECONDS" <<'PY' \
     || recovery_failed "could not restart the previous manual provider safely"
@@ -6648,7 +6710,9 @@ capture_manual_provider_for_recovery() {
   manual_cwd="$(lsof -nP -a -p "$manual_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
   [ -n "$manual_cwd" ] \
     || die 70 "could not capture the existing manual provider working directory before stopping it"
-  python3 - "$manual_pid" "$manual_executable" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
+  LEGACY_BINARY_PATH="${LEGACY_BINARY_PATH:-}" \
+    LEGACY_INSTALL_BINARY_PATH="${LEGACY_INSTALL_BINARY_PATH:-}" \
+    python3 - "$manual_pid" "$manual_executable" "$INSTALL_DIR/malibu-cli" "$BINARY_PATH" \
     "$manual_cwd" "$PORT" "$INSTALL_TX_BACKUP/manual-provider.json" <<'PY' \
     || die 70 "existing manual provider invocation was not safe to preserve; current provider was left running"
 import base64
@@ -6667,9 +6731,18 @@ try:
 except ValueError as error:
     raise SystemExit("invalid manual provider pid") from error
 observed = os.path.realpath(observed_executable)
-trusted = {os.path.realpath(path) for path in (install_executable, path_executable) if os.path.exists(path)}
+trusted = {
+    os.path.realpath(path)
+    for path in (
+        install_executable,
+        path_executable,
+        os.environ.get("LEGACY_BINARY_PATH"),
+        os.environ.get("LEGACY_INSTALL_BINARY_PATH"),
+    )
+    if path and os.path.exists(path)
+}
 if observed not in trusted:
-    raise SystemExit("manual provider executable is not a trusted installed macprovider-cli")
+    raise SystemExit("manual provider executable is not a trusted installed malibu-cli")
 
 libc = ctypes.CDLL(None, use_errno=True)
 libc.sysctlbyname.argtypes = [
@@ -6795,7 +6868,7 @@ stop_owned_manual_provider() {
     printf '%s\n' "$observed_port_pids" | grep -Fxq "$candidate_pid" || return 1
   fi
   observed_executable="$(lsof -nP -a -p "$candidate_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-  if [ "$observed_executable" != "$expected_executable" ] && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; }; then
+  if ! owned_provider_executable_matches "$observed_executable" "$expected_executable" "$alternate_executable"; then
     return 1
   fi
   kill -TERM "$candidate_pid" >/dev/null 2>&1 || return 1
@@ -6806,7 +6879,7 @@ stop_owned_manual_provider() {
   done
   if pid_is_live_non_zombie "$candidate_pid"; then
     observed_executable="$(lsof -nP -a -p "$candidate_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-    if [ "$observed_executable" != "$expected_executable" ] && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; }; then
+    if ! owned_provider_executable_matches "$observed_executable" "$expected_executable" "$alternate_executable"; then
       return 1
     fi
     kill -KILL "$candidate_pid" >/dev/null 2>&1 || return 1
@@ -6857,6 +6930,18 @@ begin_install_transaction() {
     fi
     INSTALL_TX_HAD_BINARY_PATH=1
   fi
+  if [ -e "$LEGACY_BINARY_PATH" ] || [ -L "$LEGACY_BINARY_PATH" ]; then
+    if [ -L "$LEGACY_BINARY_PATH" ]; then
+      INSTALL_TX_LEGACY_BINARY_KIND="symlink"
+      stage_install_tx_path "$LEGACY_BINARY_PATH" "$recovery_staging/legacy-binary-path" symlink \
+        || die 70 "could not stage and verify the previous legacy CLI path; current install was not changed (partial recovery data: $recovery_staging)"
+    else
+      INSTALL_TX_LEGACY_BINARY_KIND="file"
+      stage_install_tx_path "$LEGACY_BINARY_PATH" "$recovery_staging/legacy-binary-path" file \
+        || die 70 "could not stage and verify the previous legacy CLI path; current install was not changed (partial recovery data: $recovery_staging)"
+    fi
+    INSTALL_TX_HAD_LEGACY_BINARY_PATH=1
+  fi
   if [ -f "$CONFIG_PATH" ]; then
     stage_install_tx_path "$CONFIG_PATH" "$recovery_staging/config.yaml" file \
       || die 70 "could not stage and verify the previous config; current install was not changed (partial recovery data: $recovery_staging)"
@@ -6876,7 +6961,7 @@ begin_install_transaction() {
     verify_published_launchd_plist "$PLIST_PATH" "$PLIST_BOOTSTRAP_PATH" \
       || die 70 "managed provider plist does not match the published LaunchDaemon plist; current install was not changed"
     stage_install_tx_plist "$PLIST_PATH" "$recovery_staging/provider.plist" \
-      "$PROVIDER_LABEL" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" "${HEADLESS_USER:-}" \
+      "$PROVIDER_LABEL" "$INSTALL_DIR/malibu-cli" "$BINARY_PATH" "${HEADLESS_USER:-}" \
       || die 70 "could not stage and verify the previous launchd plist; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_PLIST=1
   fi
@@ -6912,7 +6997,7 @@ begin_install_transaction() {
     INSTALL_TX_HAD_LIFECYCLE_STATE=1
   fi
   rm -f "$lifecycle_snapshot_meta"
-  if [ "$INSTALL_TX_HAD_INSTALL_DIR" -eq 1 ] || [ "$INSTALL_TX_HAD_BINARY_PATH" -eq 1 ] || [ "$INSTALL_TX_HAD_MANIFEST" -eq 1 ]; then
+  if [ "$INSTALL_TX_HAD_INSTALL_DIR" -eq 1 ] || [ "$INSTALL_TX_HAD_BINARY_PATH" -eq 1 ] || [ "$INSTALL_TX_HAD_LEGACY_BINARY_PATH" -eq 1 ] || [ "$INSTALL_TX_HAD_MANIFEST" -eq 1 ]; then
     EXISTING_INSTALL_WAS_PRESENT=1
   fi
   if launchctl_service print "$LAUNCHD_DOMAIN/$PROVIDER_LABEL" >/dev/null 2>&1; then
@@ -6931,7 +7016,7 @@ begin_install_transaction() {
     verify_published_launchd_plist "$LEGACY_PLIST_PATH" "$LEGACY_PLIST_BOOTSTRAP_PATH" \
       || die 70 "managed legacy provider plist does not match the published LaunchDaemon plist; current install was not changed"
     stage_install_tx_plist "$LEGACY_PLIST_PATH" "$recovery_staging/legacy-provider.plist" \
-      "$LEGACY_PROVIDER_LABEL" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" "${HEADLESS_USER:-}" \
+      "$LEGACY_PROVIDER_LABEL" "$INSTALL_DIR/malibu-cli" "$BINARY_PATH" "${HEADLESS_USER:-}" \
       || die 70 "could not stage and verify the previous legacy launchd plist; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_LEGACY_PLIST=1
   fi
@@ -7138,7 +7223,7 @@ rollback_install_transaction() {
     || log "WARNING: could not persist rollback lifecycle state before restoring the previous install"
   log "Install did not pass admission; restoring the previous provider installation."
   if [ -n "$MANUAL_PID" ] && pid_is_live_non_zombie "$MANUAL_PID"; then
-    if ! stop_owned_manual_provider "$MANUAL_PID" "$INSTALL_DIR/macprovider-cli"; then
+    if ! stop_owned_manual_provider "$MANUAL_PID" "$INSTALL_DIR/malibu-cli"; then
       log "ERROR: could not stop and prove death of the failed manual provider process; recovery data was preserved at $INSTALL_TX_BACKUP"
       INSTALL_TX_ROLLING_BACK=0
       return 70
@@ -7458,10 +7543,13 @@ if config_ids != [provider_id]:
 manifest = json.loads(read_owned(manifest_path).decode("utf-8"))
 labels = manifest.get("launchd_labels") if isinstance(manifest, dict) else None
 plists = manifest.get("launchd_plists") if isinstance(manifest, dict) else None
+canonical_install_binary_path = os.path.join(install_dir, "malibu-cli")
+legacy_install_binary_path = os.path.join(install_dir, "macprovider-cli")
+legacy_path_entrypoint = os.path.join(os.path.dirname(binary_path), "macprovider-cli")
 if (
     not isinstance(manifest, dict)
     or manifest.get("install_prefix") != install_dir
-    or manifest.get("binary_path") != os.path.join(install_dir, "macprovider-cli")
+    or manifest.get("binary_path") not in (canonical_install_binary_path, legacy_install_binary_path)
     or not isinstance(labels, list)
     or not all(isinstance(value, str) for value in labels)
     or label not in labels
@@ -7480,7 +7568,12 @@ if program is None:
     if not isinstance(arguments, list) or not arguments:
         raise SystemExit(1)
     program = arguments[0]
-if program not in (os.path.join(install_dir, "macprovider-cli"), binary_path):
+if program not in (
+    canonical_install_binary_path,
+    legacy_install_binary_path,
+    binary_path,
+    legacy_path_entrypoint,
+):
     raise SystemExit(1)
 PY
 }
@@ -7640,45 +7733,45 @@ ensure_port_free() {
   fi
   holding_cmd="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1 " (pid " $2 ")"}')"
 
-  # F-603-V7-2: an existing macprovider-cli on this port is the normal
+  # F-603-V7-2: an existing malibu-cli on this port is the normal
   # upgrade-in-place case. Stop that service and continue; only foreign
   # holders should block the install.
   own_provider_holds_port=0
   for holding_pid in $holding_pids; do
     holding_executable="$(lsof -a -p "$holding_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-    if [ "$holding_executable" = "$INSTALL_DIR/macprovider-cli" ]; then
+    if owned_provider_executable_matches "$holding_executable"; then
       own_provider_holds_port=1
       break
     fi
   done
   if [ "$own_provider_holds_port" -eq 1 ]; then
     if [ "$stop_own_provider" != "1" ]; then
-      log "Existing macprovider-cli holding port $PORT; will stop it after release verification."
+      log "Existing malibu-cli holding port $PORT; will stop it after release verification."
       return
     fi
-    log "Existing macprovider-cli holding port $PORT; stopping it for upgrade-in-place."
+    log "Existing malibu-cli holding port $PORT; stopping it for upgrade-in-place."
     if [ "$INSTALL_TX_SERVICE_WAS_ACTIVE" -eq 0 ] && [ "$INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE" -eq 0 ]; then
       case "$holding_pids" in
-        *$'\n'*) die 70 "multiple manual macprovider-cli processes hold port $PORT; refusing ambiguous recovery capture" ;;
+        *$'\n'*) die 70 "multiple manual malibu-cli processes hold port $PORT; refusing ambiguous recovery capture" ;;
       esac
       capture_manual_provider_for_recovery "$holding_pids"
     fi
     reclaim_launchd_service "$PROVIDER_LABEL" \
       || die 5 "could not reclaim existing provider launchd service"
-    reclaim_legacy_launchd_service "$LEGACY_PROVIDER_LABEL" "$LEGACY_PLIST_BOOTSTRAP_PATH" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
+    reclaim_legacy_launchd_service "$LEGACY_PROVIDER_LABEL" "$LEGACY_PLIST_BOOTSTRAP_PATH" "$INSTALL_DIR/malibu-cli" "$BINARY_PATH" \
       || die 5 "could not reclaim legacy provider launchd service"
     sleep 2
     if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
-      log "Port $PORT still held after launchctl bootout; stopping each revalidated macprovider-cli PID."
+      log "Port $PORT still held after launchctl bootout; stopping each revalidated malibu-cli PID."
       for holding_pid in $holding_pids; do
         if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -Fxq "$holding_pid"; then
-          stop_owned_manual_provider "$holding_pid" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" "$PORT" \
-            || die 70 "could not safely stop macprovider-cli pid $holding_pid after revalidating executable and port ownership"
+          stop_owned_manual_provider "$holding_pid" "$INSTALL_DIR/malibu-cli" "$BINARY_PATH" "$PORT" \
+            || die 70 "could not safely stop malibu-cli pid $holding_pid after revalidating executable and port ownership"
         fi
       done
     fi
     if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
-      die 6 "could not stop existing macprovider-cli on port $PORT; please stop manually and retry"
+      die 6 "could not stop existing malibu-cli on port $PORT; please stop manually and retry"
     fi
     log "Port $PORT freed; proceeding with upgrade."
     return
@@ -7688,7 +7781,7 @@ ensure_port_free() {
   log "Either stop that process, or set MACPROVIDER_PORT to a free port and re-run."
   log "Note: env var must be on the bash side of the pipe, not the curl side:"
   log "  curl -fsSL https://get.malibu.tech/install.sh | MACPROVIDER_PORT=18080 bash"
-  die 6 "port $PORT busy; macprovider-cli cannot bind"
+  die 6 "port $PORT busy; malibu-cli cannot bind"
 }
 
 # Reclaim by launchd service target rather than plist path. A standalone
@@ -7707,7 +7800,7 @@ reclaim_launchd_service() {
   local had_plist
   case "$label" in
     "$PROVIDER_LABEL")
-      expected_program="$INSTALL_DIR/macprovider-cli"
+      expected_program="$INSTALL_DIR/malibu-cli"
       legacy_program="$BINARY_PATH"
       expected_plist="$PLIST_BOOTSTRAP_PATH"
       had_plist="${INSTALL_TX_HAD_PLIST:-0}"
@@ -7762,7 +7855,12 @@ reclaim_launchd_service() {
     log "Refusing to reclaim $label because launchd plist identity is unexpected: ${plist_path:-<missing>}"
     return 1
   fi
-  if [ "$program_line" != "$expected_program" ] && [ "$program_line" != "$legacy_program" ]; then
+  if [ "$label" = "$PROVIDER_LABEL" ]; then
+    owned_provider_executable_matches "$program_line" "$expected_program" "$legacy_program" || {
+      log "Refusing to reclaim $label with unexpected executable: $program_line"
+      return 1
+    }
+  elif [ "$program_line" != "$expected_program" ] && [ "$program_line" != "$legacy_program" ]; then
     log "Refusing to reclaim $label with unexpected executable: $program_line"
     return 1
   fi
@@ -7798,7 +7896,12 @@ reclaim_legacy_launchd_service() {
     log "Refusing to reclaim legacy $label because launchd plist identity is unexpected: ${plist_path:-<missing>}"
     return 1
   fi
-  if [ "$program_line" != "$expected_program" ] && [ "$program_line" != "$legacy_program" ]; then
+  if [ "$label" = "$LEGACY_PROVIDER_LABEL" ]; then
+    owned_provider_executable_matches "$program_line" "$expected_program" "$legacy_program" || {
+      log "Refusing to reclaim legacy $label with unexpected executable: $program_line"
+      return 1
+    }
+  elif [ "$program_line" != "$expected_program" ] && [ "$program_line" != "$legacy_program" ]; then
     log "Refusing to reclaim legacy $label with unexpected executable: $program_line"
     return 1
   fi
@@ -8311,7 +8414,7 @@ hf_check_model() {
   case "$http_code" in
     200) ;;
     401|403|404)
-      die 7 "model $id is not accessible on HuggingFace (private, gated, or doesn't exist). For a gated repo, use 'macprovider-cli models switch' post-install with HF_TOKEN set."
+      die 7 "model $id is not accessible on HuggingFace (private, gated, or doesn't exist). For a gated repo, use 'malibu-cli models switch' post-install with HF_TOKEN set."
       ;;
     network_error)
       log "WARNING: could not reach HuggingFace API; using local RAM-fit estimate only."
@@ -8564,7 +8667,7 @@ validate_inputs() {
 
 latest_release_tag() {
   # Scan the recent release list and pick the newest tag that names a
-  # macprovider-cli release (tag matches ^v[0-9], e.g. v1.3.1). The
+  # malibu-cli release (tag matches ^v[0-9], e.g. v1.3.1). The
   # /releases/latest endpoint can't be trusted on its own: it returns
   # whichever release is flagged "Latest" repo-wide, so any unrelated
   # release published under the same repo (e.g. macprovider-verify
@@ -8628,7 +8731,7 @@ latest_release_tag() {
           }
         '
   )"
-  [ -n "$tag" ] || die 3 "no non-prerelease macprovider-cli release (tag ^v[0-9]) found in recent GitHub Releases"
+  [ -n "$tag" ] || die 3 "no non-prerelease malibu-cli release (tag ^v[0-9]) found in recent GitHub Releases"
   printf "%s" "$tag"
 }
 
@@ -8670,7 +8773,7 @@ validate_headless_release_tag() {
   [ "$HEADLESS" = "1" ] || return 0
   validate_macprovider_version_tag "$tag"
   if ! version_at_least "$tag" "$MACPROVIDER_MIN_HEADLESS_VERSION"; then
-    die 7 "headless mode requires macprovider-cli $MACPROVIDER_MIN_HEADLESS_VERSION or newer; $tag does not support SSH-only protected-file fleet installation"
+    die 7 "headless mode requires malibu-cli $MACPROVIDER_MIN_HEADLESS_VERSION or newer; $tag does not support SSH-only protected-file fleet installation"
   fi
 }
 
@@ -8824,7 +8927,7 @@ if info.st_mode & stat.S_IWOTH:
 if not os.access(path, os.R_OK | os.X_OK):
     raise SystemExit("bundled Malibu.app must be readable by the installing user")
 required = [
-    os.path.join(path, "Contents/MacOS/macprovider-cli"),
+    os.path.join(path, "Contents/MacOS/malibu-cli"),
     os.path.join(path, "Contents/Resources/compatibility-set.json"),
 ]
 for candidate in required:
@@ -8854,22 +8957,22 @@ stage_bundled_repair_payload() {
   if [ -n "${BUNDLED_CLI:-}" ]; then
     bundled_cli="$(validated_bundled_cli "$BUNDLED_CLI")" \
       || die 7 "unsafe MACPROVIDER_BUNDLED_CLI"
-    [ "$bundled_cli" = "$(validated_bundled_cli "$bundled_app/Contents/MacOS/macprovider-cli")" ] \
+    [ "$bundled_cli" = "$(validated_bundled_cli "$bundled_app/Contents/MacOS/malibu-cli")" ] \
       || die 7 "MACPROVIDER_BUNDLED_CLI must be the Malibu.app embedded provider CLI"
   else
-    bundled_cli="$(validated_bundled_cli "$bundled_app/Contents/MacOS/macprovider-cli")" \
+    bundled_cli="$(validated_bundled_cli "$bundled_app/Contents/MacOS/malibu-cli")" \
       || die 7 "Malibu.app is missing an executable provider CLI"
   fi
   [ -n "$TMPDIR_PATH" ] || die 5 "bundled repair staging requires a temp directory"
   staging_dir="$TMPDIR_PATH/staging"
   rm -rf "$staging_dir"
   mkdir -p "$staging_dir"
-  cp -p "$bundled_cli" "$staging_dir/macprovider-cli" \
+  cp -p "$bundled_cli" "$staging_dir/malibu-cli" \
     || die 5 "failed to stage the Malibu.app bundled provider CLI"
-  chmod 0755 "$staging_dir/macprovider-cli" \
+  chmod 0755 "$staging_dir/malibu-cli" \
     || die 5 "failed to mark the staged bundled provider CLI executable"
-  [ -x "$staging_dir/macprovider-cli" ] \
-    || die 5 "staged bundled macprovider-cli is not executable"
+  [ -x "$staging_dir/malibu-cli" ] \
+    || die 5 "staged bundled malibu-cli is not executable"
   macos_dir="$bundled_app/Contents/MacOS"
   resources_dir="$bundled_app/Contents/Resources"
   [ -f "$macos_dir/mlx.metallib" ] \
@@ -8887,7 +8990,7 @@ stage_bundled_repair_payload() {
     cp -p "$resources_dir/THIRD-PARTY-NOTICES.txt" "$staging_dir/THIRD-PARTY-NOTICES.txt" \
       || die 5 "failed to stage THIRD-PARTY-NOTICES.txt from Malibu.app"
   fi
-  staged_version="$("$staging_dir/macprovider-cli" --version 2>/dev/null | tr -d '\r\n')" \
+  staged_version="$("$staging_dir/malibu-cli" --version 2>/dev/null | tr -d '\r\n')" \
     || die 5 "bundled provider CLI did not report a version"
   case "$staged_version" in
     v*) ;;
@@ -8904,7 +9007,7 @@ PY
 )" || die 5 "Malibu.app compatibility-set.json is not a signed provider payload"
   [ "$manifest_version" = "$tag" ] \
     || die 5 "Malibu.app compatibility-set.json version $manifest_version does not match pinned repair target $tag"
-  MACPROVIDER_CLI_EXECUTABLE="$staging_dir/macprovider-cli"
+  MALIBU_CLI_EXECUTABLE="$staging_dir/malibu-cli"
   asset_kind="bundled"
   asset_path="$bundled_cli"
   log "Staged Malibu.app bundled provider CLI $staged_version and matching compatibility set without downloading GitHub release assets."
@@ -8912,8 +9015,8 @@ PY
 
 download_release() {
   tag="$1"
-  tarball_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
-  pkg_asset="macprovider-cli-${tag}-darwin-arm64.pkg"
+  tarball_asset="malibu-cli-${tag}-darwin-arm64.tar.gz"
+  pkg_asset="malibu-cli-${tag}-darwin-arm64.pkg"
   base="https://github.com/${GITHUB_REPO}/releases/download/${tag}"
   TMPDIR_PATH="$(mktemp -d)"
   tarball_path="$TMPDIR_PATH/$tarball_asset"
@@ -9204,7 +9307,7 @@ validate_staged_entries() {
       /*|*"/../"*|../*|*/..|..)
         die 5 "unsafe tarball path: $entry"
         ;;
-      macprovider-cli)
+      malibu-cli)
         has_binary=1
         ;;
       mlx.metallib)
@@ -9276,7 +9379,7 @@ validate_staged_entries() {
 $entries
 EOF
 
-  [ "$has_binary" -eq 1 ] || die 5 "$label does not contain macprovider-cli"
+  [ "$has_binary" -eq 1 ] || die 5 "$label does not contain malibu-cli"
   [ "$has_bundle" -eq 1 ] || die 5 "$label does not contain a SwiftPM resource bundle"
   catalog_member_count=$((
     has_catalog_manifest +
@@ -9375,9 +9478,9 @@ stage_release_payload() {
       die 5 "release asset was not selected"
       ;;
   esac
-  chmod +x "$staging_dir/macprovider-cli" 2>/dev/null || true
-  [ -x "$staging_dir/macprovider-cli" ] || die 5 "staged macprovider-cli is not executable"
-  MACPROVIDER_CLI_EXECUTABLE="$staging_dir/macprovider-cli"
+  chmod +x "$staging_dir/malibu-cli" 2>/dev/null || true
+  [ -x "$staging_dir/malibu-cli" ] || die 5 "staged malibu-cli is not executable"
+  MALIBU_CLI_EXECUTABLE="$staging_dir/malibu-cli"
 }
 
 prepare_staged_config() {
@@ -9571,14 +9674,14 @@ read_config_model() {
 
 read_config_provider_token_line() {
   [ -f "$CONFIG_PATH" ] || return 1
-  run_macprovider_cli_with_amfi_retry credentials config-token-status --config "$CONFIG_PATH" >/dev/null \
+  run_malibu_cli_with_amfi_retry credentials config-token-status --config "$CONFIG_PATH" >/dev/null \
     || return 1
   printf "provider_token: <redacted>\n"
 }
 
 scrub_config_provider_token() {
   [ -f "$CONFIG_PATH" ] || return 0
-  run_macprovider_cli_with_amfi_retry credentials scrub-config-token --config "$CONFIG_PATH" >/dev/null
+  run_malibu_cli_with_amfi_retry credentials scrub-config-token --config "$CONFIG_PATH" >/dev/null
 }
 
 read_config_provider_id() {
@@ -9682,9 +9785,9 @@ ensure_provider_credentials() {
   local attempted_referral_bootstrap=0
   credential_already_present=0
   if [ -n "$(read_config_provider_token_line || true)" ]; then
-    run_macprovider_cli_with_amfi_retry credentials import --config "$CONFIG_PATH" \
+    run_malibu_cli_with_amfi_retry credentials import --config "$CONFIG_PATH" \
       || die 6 "provider credential migration into CLI credential custody failed"
-    run_macprovider_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
+    run_malibu_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
       || die 6 "provider credential migration verification failed"
     if [ "$HEADLESS" = "1" ]; then
       scrub_config_provider_token \
@@ -9696,7 +9799,7 @@ ensure_provider_credentials() {
     credential_already_present=1
   else
     credential_verify_rc=0
-    run_macprovider_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
+    run_malibu_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
       || credential_verify_rc=$?
     case "$credential_verify_rc" in
       0)
@@ -9737,7 +9840,7 @@ ensure_provider_credentials() {
     fi
   fi
   bootstrap_auth_rc=0
-  run_macprovider_cli_with_amfi_retry "${bootstrap_auth_args[@]}" || bootstrap_auth_rc=$?
+  run_malibu_cli_with_amfi_retry "${bootstrap_auth_args[@]}" || bootstrap_auth_rc=$?
   case "$bootstrap_auth_rc" in
     0) ;;
     20|21|22|23|24|25|26|27)
@@ -9748,7 +9851,7 @@ ensure_provider_credentials() {
       ;;
     *) die 6 "provider credential bootstrap failed before evidence admission" ;;
   esac
-  run_macprovider_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
+  run_malibu_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
     || die 6 "provider credential bootstrap completed without restart-safe CLI custody"
   if [ "$attempted_referral_bootstrap" -eq 1 ]; then
     REFERRAL_BOOTSTRAP_COMPLETED=1
@@ -9774,7 +9877,7 @@ ensure_replacement_referral_preflight_before_cutover() {
 
 submit_required_hardware_evidence() {
   log "Submitting the exact stored autotune evidence before provider service start."
-  run_macprovider_cli_with_amfi_retry autotune --recommend --freshness-check \
+  run_malibu_cli_with_amfi_retry autotune --recommend --freshness-check \
     --submit-hardware-evidence --require-hardware-evidence --config "$CONFIG_PATH" >/dev/null \
     || die 6 "authenticated hardware evidence admission failed before service start"
 }
@@ -9807,8 +9910,8 @@ run_autotune_recommend_apply() {
     log "Would run paid-yield recommendation before service start."
     return 0
   fi
-  if [ ! -x "${MACPROVIDER_CLI_EXECUTABLE:-$INSTALL_DIR/macprovider-cli}" ]; then
-    die 5 "staged macprovider-cli missing before autotune recommendation"
+  if [ ! -x "${MALIBU_CLI_EXECUTABLE:-$INSTALL_DIR/malibu-cli}" ]; then
+    die 5 "staged malibu-cli missing before autotune recommendation"
   fi
   autotune_candidate_args=()
   upgrade_candidate_model_id="${AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID:-}"
@@ -9823,7 +9926,7 @@ run_autotune_recommend_apply() {
     )
   fi
   log "Running paid-yield recommendation before service start."
-  if run_macprovider_cli_with_amfi_retry autotune --recommend --apply \
+  if run_malibu_cli_with_amfi_retry autotune --recommend --apply \
     ${autotune_candidate_args[@]+"${autotune_candidate_args[@]}"} \
     --port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH" --no-submit-hardware-evidence; then
     recommended_model="$(read_config_model || true)"
@@ -9832,7 +9935,7 @@ run_autotune_recommend_apply() {
     if [ -n "$recommended_model" ] && [ -n "$artifact_path" ] && [ -n "$artifact_sha" ]; then
       case "$artifact_path" in
         /*)
-          log "Configuration applied. Start the provider with: macprovider-cli serve"
+          log "Configuration applied. Start the provider with: malibu-cli serve"
           if prompt_yes_no "Start provider now with $recommended_model? [Y/n]" "Y"; then
             model="$recommended_model"
             log "Recommendation selected verified model: $model (artifact: $artifact_path)"
@@ -9841,7 +9944,7 @@ run_autotune_recommend_apply() {
             return 0
           fi
           SKIP_PROVIDER_START=1
-          log "Provider start declined. macprovider-cli is installed, but the provider service will not be started."
+          log "Provider start declined. malibu-cli is installed, but the provider service will not be started."
           return 0
           ;;
       esac
@@ -9849,7 +9952,7 @@ run_autotune_recommend_apply() {
     log "No paid model currently clears rate-card or hardware requirements on this Mac."
     if prompt_yes_no "Enable donor mode? [y/N]" "N"; then
       log "Applying donor-mode configuration."
-      run_macprovider_cli_with_amfi_retry autotune --recommend --apply --donor-mode \
+      run_malibu_cli_with_amfi_retry autotune --recommend --apply --donor-mode \
         ${autotune_candidate_args[@]+"${autotune_candidate_args[@]}"} \
         --port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH" --no-submit-hardware-evidence \
         || die 6 "donor-mode recommendation failed before service start"
@@ -9870,24 +9973,24 @@ run_autotune_recommend_apply() {
       die 6 "donor mode did not apply a verified local model artifact before service start"
     fi
     SKIP_PROVIDER_START=1
-    log "Donor mode declined. macprovider-cli is installed, but the provider service will not be started."
+    log "Donor mode declined. malibu-cli is installed, but the provider service will not be started."
     return 0
   fi
   die 6 "autotune recommendation failed before service start"
 }
 
-# Returns 0 when an owned macprovider-cli process is currently LISTENing on
+# Returns 0 when an owned malibu-cli process is currently LISTENing on
 # $PORT. INSTALL_TX_SERVICE_WAS_ACTIVE only reflects the launchd snapshot, so a
-# manually started provider (macprovider-cli serve) is invisible to it; this
+# manually started provider (malibu-cli serve) is invisible to it; this
 # mirrors the executable-ownership check in ensure_port_free so the empty
 # signed-catalog-id fall-through stays fail-closed for manual live providers.
-own_macprovider_cli_holds_live_port() {
+own_malibu_cli_holds_live_port() {
   local holding_pids holding_pid holding_executable
   holding_pids="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null || true)"
   [ -n "$holding_pids" ] || return 1
   for holding_pid in $holding_pids; do
     holding_executable="$(lsof -a -p "$holding_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-    if [ "$holding_executable" = "$INSTALL_DIR/macprovider-cli" ]; then
+    if owned_provider_executable_matches "$holding_executable"; then
       return 0
     fi
   done
@@ -9907,7 +10010,7 @@ prefetch_upgrade_autotune_model() {
     # minimally-seeded config left by an interrupted first run (e.g. a Malibu
     # "Retry" after the first attempt installed files but did not start a
     # provider). If a provider is actually running -- either a launchd service
-    # (INSTALL_TX_SERVICE_WAS_ACTIVE) or a manually started macprovider-cli
+    # (INSTALL_TX_SERVICE_WAS_ACTIVE) or a manually started malibu-cli
     # holding the live port -- we still fail closed rather than stop a live
     # earner for a blind re-tune. Otherwise there is no live provider to
     # protect, so fall through to a full fresh recommendation instead of
@@ -9918,7 +10021,7 @@ prefetch_upgrade_autotune_model() {
     # stronger guard against stopping an actual earner. Normal upgrades keep
     # the historical fail-closed behavior for any loaded provider label.
     if { [ "${INSTALL_TX_SERVICE_WAS_ACTIVE:-0}" -eq 1 ] && [ "${REPAIR_EXISTING_INSTALL:-0}" -ne 1 ]; } \
-      || own_macprovider_cli_holds_live_port; then
+      || own_malibu_cli_holds_live_port; then
       die 6 "active provider lacks an exact signed-catalog model identity; the active provider was not stopped"
     fi
     log "Existing install has no verified signed-catalog model and no live provider; running a full fresh recommendation."
@@ -9926,7 +10029,7 @@ prefetch_upgrade_autotune_model() {
   fi
   AUTOTUNE_PREFETCH_RECEIPT_PATH="$staging_dir/autotune-prefetch-receipt.json"
   log "Prefetching and verifying the installed model's exact signed artifact while the current provider remains available."
-  run_macprovider_cli_with_amfi_retry autotune --recommend --prefetch \
+  run_malibu_cli_with_amfi_retry autotune --recommend --prefetch \
     --candidate-models "$upgrade_candidate_model_id" \
     --prefetch-receipt "$AUTOTUNE_PREFETCH_RECEIPT_PATH" \
     --config "$CONFIG_PATH" --no-submit-hardware-evidence >/dev/null \
@@ -9940,11 +10043,11 @@ use_fresh_recommendation_if_available() {
   if [ "$DRY_RUN" -eq 1 ]; then
     return 1
   fi
-  if [ ! -x "$MACPROVIDER_CLI_EXECUTABLE" ] || [ ! -f "$CONFIG_PATH" ]; then
+  if [ ! -x "$MALIBU_CLI_EXECUTABLE" ] || [ ! -f "$CONFIG_PATH" ]; then
     return 1
   fi
 
-  if run_macprovider_cli_with_amfi_retry autotune --recommend --freshness-check --no-submit-hardware-evidence --config "$CONFIG_PATH" >/dev/null; then
+  if run_malibu_cli_with_amfi_retry autotune --recommend --freshness-check --no-submit-hardware-evidence --config "$CONFIG_PATH" >/dev/null; then
     enforce_headless_config_overrides
     ensure_provider_credentials
     submit_required_hardware_evidence
@@ -9985,11 +10088,11 @@ install_binary() {
   fi
   run mkdir -p "$BIN_DIR" "$INSTALL_DIR"
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "Would install macprovider-cli to $BINARY_PATH"
+    log "Would install malibu-cli to $BINARY_PATH"
     log "Would keep release support files in $INSTALL_DIR"
     return
   fi
-  if [ -z "$staging_dir" ] || [ ! -x "$staging_dir/macprovider-cli" ]; then
+  if [ -z "$staging_dir" ] || [ ! -x "$staging_dir/malibu-cli" ]; then
     stage_release_payload
   fi
 
@@ -9997,11 +10100,11 @@ install_binary() {
   # .bundle directories adjacent to the binary. We install the REAL binary
   # into $INSTALL_DIR alongside those resources, then place a symlink at
   # $BINARY_PATH so PATH users + the launchd plist still find it via the canonical
-  # SPEC-003 FR-C2 location (~/.local/bin/macprovider-cli).
+  # SPEC-003 FR-C2 location (~/.local/bin/malibu-cli).
   # Prior v1.2.1 install separated them and Metal failed with
   # "library not found" at runtime.
-  real_binary="$INSTALL_DIR/macprovider-cli"
-  atomic_replace_provider_binary "$staging_dir/macprovider-cli" "$real_binary" \
+  real_binary="$INSTALL_DIR/malibu-cli"
+  atomic_replace_provider_binary "$staging_dir/malibu-cli" "$real_binary" \
     || die 5 "could not atomically activate the verified provider binary"
 
   # Metal resources live alongside the real binary (where mlx-swift looks).
@@ -10037,10 +10140,15 @@ install_binary() {
   # Atomic symlink swap at the canonical path.
   rm -f "$BINARY_PATH"
   ln -s "$real_binary" "$BINARY_PATH"
+  rm -f "$LEGACY_BINARY_PATH" "$LEGACY_INSTALL_BINARY_PATH"
+  ln -s "$real_binary" "$LEGACY_BINARY_PATH"
+  ln -s "$real_binary" "$LEGACY_INSTALL_BINARY_PATH"
 
-  [ -x "$real_binary" ] || die 5 "macprovider-cli was not installed at $real_binary"
+  [ -x "$real_binary" ] || die 5 "malibu-cli was not installed at $real_binary"
   [ -L "$BINARY_PATH" ] || die 5 "symlink not created at $BINARY_PATH"
-  MACPROVIDER_CLI_EXECUTABLE="$real_binary"
+  [ -L "$LEGACY_BINARY_PATH" ] || die 5 "legacy symlink not created at $LEGACY_BINARY_PATH"
+  [ -L "$LEGACY_INSTALL_BINARY_PATH" ] || die 5 "legacy symlink not created at $LEGACY_INSTALL_BINARY_PATH"
+  MALIBU_CLI_EXECUTABLE="$real_binary"
   if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ]; then
     record_lifecycle_state rollback_in_progress signed_emergency_rollback_activated \
       || die 5 "failed to persist emergency rollback lifecycle state"
@@ -10057,7 +10165,7 @@ check_install_dir_clean() {
   local entries
   # F-603-V7-7: warn on mixed-state directories such as leftover Python
   # virtualenvs, but do not block an otherwise valid partner upgrade.
-  entries=$(ls -A "$INSTALL_DIR" 2>/dev/null | grep -vE '^(macprovider-cli(\.v[0-9.]+\.bak)?|mlx\.metallib|THIRD-PARTY-NOTICES\.txt|compatibility-set\.json|compatibility-set-local|catalog-release|.*\.bundle)$' | head -20 || true)
+  entries=$(ls -A "$INSTALL_DIR" 2>/dev/null | grep -vE '^(malibu-cli(\.v[0-9.]+\.bak)?|macprovider-cli|mlx\.metallib|THIRD-PARTY-NOTICES\.txt|compatibility-set\.json|compatibility-set-local|catalog-release|.*\.bundle)$' | head -20 || true)
   if [ -n "$entries" ]; then
     log "WARNING: $INSTALL_DIR contains non-macprovider entries:"
     while IFS= read -r entry; do
@@ -10245,7 +10353,7 @@ install_plist() {
 
   reclaim_launchd_service "$PROVIDER_LABEL" \
     || die 5 "could not reclaim existing provider launchd service"
-  reclaim_legacy_launchd_service "$LEGACY_PROVIDER_LABEL" "$LEGACY_PLIST_BOOTSTRAP_PATH" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
+  reclaim_legacy_launchd_service "$LEGACY_PROVIDER_LABEL" "$LEGACY_PLIST_BOOTSTRAP_PATH" "$INSTALL_DIR/malibu-cli" "$BINARY_PATH" \
     || die 5 "could not reclaim legacy provider launchd service"
   render_plist "$model" "$provider_id" "$coordinator_url" \
     | write_atomic_install_file "$PLIST_PATH" \
@@ -10257,7 +10365,7 @@ install_plist() {
       || die 70 "could not durably record the provider launchd mutation"
   fi
   publish_launchd_plist "$PLIST_PATH" "$PLIST_BOOTSTRAP_PATH" \
-    "$PROVIDER_LABEL" "$INSTALL_DIR/macprovider-cli" \
+    "$PROVIDER_LABEL" "$INSTALL_DIR/malibu-cli" \
     || die 5 "failed to publish launchd service plist"
   launchctl_service enable "$LAUNCHD_DOMAIN/$PROVIDER_LABEL" || die 5 "failed to enable launchd service"
   launchctl_service bootstrap "$LAUNCHD_DOMAIN" "$PLIST_BOOTSTRAP_PATH" || die 5 "failed to load launchd service"
@@ -10271,7 +10379,7 @@ render_plist() {
   protected_credential_root="$(xml_escape "$CONFIG_DIR/protected-credentials")"
   # F-603-V7-4: launchd must invoke the real binary path, not the
   # ~/.local/bin symlink, so Swift Bundle resolution finds adjacent bundles.
-  binary_path="$(xml_escape "$INSTALL_DIR/macprovider-cli")"
+  binary_path="$(xml_escape "$INSTALL_DIR/malibu-cli")"
   log_dir="$(xml_escape "$LOG_DIR")"
   credential_store="keychain"
   launchd_user_entry=""
@@ -10362,7 +10470,7 @@ set -euo pipefail
 
 LABEL="${MACPROVIDER_WATCHDOG_LABEL:-live.malibu.provider}"
 CONFIG_PATH="${MACPROVIDER_CONFIG_PATH:-$HOME/.config/macprovider/config.yaml}"
-BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
+BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/malibu-cli}"
 LIFECYCLE_LEASE_PATH="${MACPROVIDER_LIFECYCLE_LEASE_PATH:-$HOME/Library/Application Support/macprovider/lifecycle/lease.json}"
 LIFECYCLE_LEASE_OWNER_UID="${MACPROVIDER_LIFECYCLE_LEASE_OWNER_UID:-$(id -u)}"
 COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.malibu.tech}"
@@ -10938,7 +11046,7 @@ render_watchdog_plist() {
   fi
   log_dir="$(xml_escape "$watchdog_log_dir")"
   config_path="$(xml_escape "$CONFIG_PATH")"
-  binary_path="$(xml_escape "$INSTALL_DIR/macprovider-cli")"
+  binary_path="$(xml_escape "$INSTALL_DIR/malibu-cli")"
   protected_credential_root="$(xml_escape "$CONFIG_DIR/protected-credentials")"
   coord_host="$(xml_escape "$(printf "%s" "$1" | sed -E 's#^wss?://##; s#/.*##')")"
   credential_store="keychain"
@@ -11109,6 +11217,10 @@ write_install_manifest() {
     return
   fi
   mkdir -p "$MANIFEST_DIR"
+  legacy_binary_path="${LEGACY_BINARY_PATH:-}"
+  [ -n "$legacy_binary_path" ] || legacy_binary_path="$(dirname "$BINARY_PATH")/macprovider-cli"
+  legacy_install_binary_path="${LEGACY_INSTALL_BINARY_PATH:-}"
+  [ -n "$legacy_install_binary_path" ] || legacy_install_binary_path="$INSTALL_DIR/macprovider-cli"
   labels_json="[]"
   if [ "$LAUNCHD_INSTALLED" -eq 1 ] && [ "$WATCHDOG_INSTALLED" -eq 1 ]; then
     labels_json='["live.malibu.provider","live.malibu.provider-watchdog"]'
@@ -11125,8 +11237,12 @@ write_install_manifest() {
   "provider_config_root": $(json_escape "$CONFIG_DIR"),
   "provider_state_root": $(json_escape "$HOME/.local/share/macprovider"),
   "install_prefix": $(json_escape "$INSTALL_DIR"),
-  "binary_path": $(json_escape "$INSTALL_DIR/macprovider-cli"),
+  "binary_path": $(json_escape "$INSTALL_DIR/malibu-cli"),
   "symlink_path": $(json_escape "$BINARY_PATH"),
+  "legacy_symlink_paths": [
+    $(json_escape "$legacy_binary_path"),
+    $(json_escape "$legacy_install_binary_path")
+  ],
   "launchd_labels": $labels_json,
   "launchd_plists": [
     $(json_escape "$PLIST_PATH"),
@@ -11147,13 +11263,13 @@ start_manual_service() {
   if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ]; then
     assert_install_lock_ownership
   fi
-  log "Starting macprovider-cli directly for non-launchd self-test."
+  log "Starting malibu-cli directly for non-launchd self-test."
   mkdir -p "$LOG_DIR"
   (
     cd "$INSTALL_DIR"
     # F-603-V7-4: direct background self-test also invokes the real binary
     # so MLX resolves adjacent Metal resources.
-    nohup "$INSTALL_DIR/macprovider-cli" \
+    nohup "$INSTALL_DIR/malibu-cli" \
       serve \
       --config "$CONFIG_PATH" \
       > "$LOG_DIR/macprovider.out.log" \
@@ -11300,7 +11416,7 @@ wait_for_local_model() {
     if [ "$now" -ge "$next_progress" ]; then
       elapsed=$(( now - start_ts ))
       if [ "$port_seen" -eq 0 ]; then
-        log "Still waiting for macprovider-cli to bind port ${PORT} (${elapsed}s elapsed)..."
+        log "Still waiting for malibu-cli to bind port ${PORT} (${elapsed}s elapsed)..."
         print_model_download_progress "$cache_check" "$estimate_gb" "$elapsed" "$previous_cache_kb"
         previous_cache_kb="$MODEL_PROGRESS_CACHE_KB"
       else
@@ -11321,11 +11437,11 @@ print_local_self_test_diagnostics() {
   log ""
   log "==========================================================="
   log "Self-test timeout reached. THIS DOES NOT NECESSARILY MEAN"
-  log "THE BINARY FAILED. macprovider-cli is likely still loading"
+  log "THE BINARY FAILED. malibu-cli is likely still loading"
   log "the model in the background."
   log ""
   log "To check if the binary is alive:"
-  log "  ps aux | grep macprovider-cli | grep -v grep"
+  log "  ps aux | grep malibu-cli | grep -v grep"
   log ""
   log "To check if the model is still downloading:"
   log "  du -sh ~/.cache/huggingface/hub/"
@@ -11494,16 +11610,24 @@ print_pid() {
 
 print_autotune_handoff() {
   printf "To tune throughput / latency parameters for your specific Mac, run:\n"
-  printf '  macprovider-cli autotune --config "%s"\n' "$CONFIG_PATH"
+  printf '  malibu-cli autotune --config "%s"\n' "$CONFIG_PATH"
   printf "To refresh the paid-model recommendation after install or update, run:\n"
-  printf "  macprovider-cli autotune --recommend --apply\n"
+  printf "  malibu-cli autotune --recommend --apply\n"
 }
 
 installed_provider_binary_path() {
-  if [ -x "$INSTALL_DIR/macprovider-cli" ]; then
-    printf '%s\n' "$INSTALL_DIR/macprovider-cli"
+  local legacy_binary_path="${LEGACY_BINARY_PATH:-}"
+  local legacy_install_binary_path="${LEGACY_INSTALL_BINARY_PATH:-}"
+  [ -n "$legacy_binary_path" ] || legacy_binary_path="$(dirname "$BINARY_PATH")/macprovider-cli"
+  [ -n "$legacy_install_binary_path" ] || legacy_install_binary_path="$INSTALL_DIR/macprovider-cli"
+  if [ -x "$INSTALL_DIR/malibu-cli" ]; then
+    printf '%s\n' "$INSTALL_DIR/malibu-cli"
+  elif [ -x "$legacy_install_binary_path" ]; then
+    printf '%s\n' "$legacy_install_binary_path"
   elif [ -x "$BINARY_PATH" ]; then
     printf '%s\n' "$BINARY_PATH"
+  elif [ -x "$legacy_binary_path" ]; then
+    printf '%s\n' "$legacy_binary_path"
   fi
 }
 
@@ -11607,8 +11731,8 @@ import sys
 
 expected = (
     b"Error: Unknown option '--config'\n"
-    b"Usage: macprovider-cli credentials <subcommand>\n"
-    b"  See 'macprovider-cli credentials --help' for more information.\n"
+    b"Usage: malibu-cli credentials <subcommand>\n"
+    b"  See 'malibu-cli credentials --help' for more information.\n"
 )
 if sys.argv[2] != "2" or open(sys.argv[1], "rb").read() != expected:
     raise SystemExit(1)
@@ -11656,7 +11780,7 @@ validate_acceptance_provider_component_target() {
   validate_macprovider_version_tag "$provider_target_tag"
   if [ "${HEADLESS:-0}" = "1" ] \
       && ! version_at_least "$provider_target_tag" "$MACPROVIDER_MIN_HEADLESS_VERSION"; then
-    die 7 "headless mode requires macprovider-cli $MACPROVIDER_MIN_HEADLESS_VERSION or newer; acceptance provider component $provider_target_tag does not support SSH-only protected-file fleet installation"
+    die 7 "headless mode requires malibu-cli $MACPROVIDER_MIN_HEADLESS_VERSION or newer; acceptance provider component $provider_target_tag does not support SSH-only protected-file fleet installation"
   fi
   installed_version="$(installed_provider_binary_version "$installed_binary")" \
     || die 7 "installed provider CLI version preflight failed before acceptance upgrade"
@@ -11674,7 +11798,7 @@ validate_acceptance_provider_component_target() {
 validate_staged_acceptance_provider_component() {
   local provider_target="$1"
   local staged_provider_version
-  staged_provider_version="$(installed_provider_binary_version "$staging_dir/macprovider-cli")" \
+  staged_provider_version="$(installed_provider_binary_version "$staging_dir/malibu-cli")" \
     || die 5 "staged acceptance provider CLI version preflight failed"
   case "$staged_provider_version" in
     v*) staged_provider_version="${staged_provider_version#v}" ;;
@@ -12021,7 +12145,9 @@ repair_autoupdate_recovery_preflight() {
   # installer and provider-update locks, then proceeds; valid active markers
   # stay authoritative and still block repair through acquire_install_lock.
   python3 - "$HOME" "$CONFIG_DIR" "$INSTALL_LOCK_PATH" "$PROVIDER_MUTATION_ROOT" \
-    "$PROVIDER_MUTATION_LOCK_PATH" "$PROVIDER_MUTATION_PENDING_PATH" "$recovery_status_path" "$BINARY_PATH" "$recovery_action" <<'PY' \
+    "$PROVIDER_MUTATION_LOCK_PATH" "$PROVIDER_MUTATION_PENDING_PATH" "$recovery_status_path" \
+    "$BINARY_PATH" "${INSTALL_DIR:-$HOME/macprovider}/malibu-cli" \
+    "${LEGACY_BINARY_PATH:-}" "${LEGACY_INSTALL_BINARY_PATH:-}" "$recovery_action" <<'PY' \
     || die 70 "could not inspect repair autoupdate recovery state"
 import datetime
 import ctypes
@@ -12037,7 +12163,7 @@ import stat
 import subprocess
 import sys
 
-home, config_dir, install_lock_path, mutation_root, mutation_lock_path, mutation_pending_path, status_path, binary_path, action = sys.argv[1:]
+home, config_dir, install_lock_path, mutation_root, mutation_lock_path, mutation_pending_path, status_path, binary_path, install_binary_path, legacy_binary_path, legacy_install_binary_path, action = sys.argv[1:]
 uid = os.getuid()
 provider_user = pwd.getpwuid(uid).pw_name
 home = os.path.normpath(home)
@@ -12045,6 +12171,9 @@ config_dir = os.path.normpath(config_dir)
 mutation_root = os.path.normpath(mutation_root)
 mutation_pending_path = os.path.normpath(mutation_pending_path)
 binary_path = os.path.normpath(binary_path)
+install_binary_path = os.path.normpath(install_binary_path)
+legacy_binary_path = os.path.normpath(legacy_binary_path) if legacy_binary_path else None
+legacy_install_binary_path = os.path.normpath(legacy_install_binary_path) if legacy_install_binary_path else None
 uuid_pattern = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
     r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
@@ -12311,9 +12440,21 @@ def validate_active_marker(marker):
             raise ValueError("target_version")
         target_path = canonical_absolute_path(marker, "target_path")
         backup_path = canonical_absolute_path(marker, "backup_path")
-        if target_path != binary_path:
+        accepted_targets = {
+            path
+            for path in (binary_path, install_binary_path, legacy_binary_path, legacy_install_binary_path)
+            if path
+        }
+        if target_path not in accepted_targets:
             raise ValueError("target_path")
-        expected_backup = os.path.join(os.path.dirname(target_path), f".macprovider-cli.rollback-{update_id}")
+        target_name = os.path.basename(target_path)
+        if target_name == "malibu-cli":
+            rollback_stem = "malibu-cli"
+        elif target_name == "macprovider-cli":
+            rollback_stem = "macprovider-cli"
+        else:
+            raise ValueError("target_path")
+        expected_backup = os.path.join(os.path.dirname(target_path), f".{rollback_stem}.rollback-{update_id}")
         if backup_path != expected_backup:
             raise ValueError("backup_path")
         size = int_field(marker, "size", 0, 1024 * 1024 * 1024)
@@ -12324,7 +12465,7 @@ def validate_active_marker(marker):
         release_backup, release_sha = optional_pair(marker, "release_backup_path", "release_backup_sha256")
         if release_backup is not None:
             release_backup = canonical_absolute_path(marker, "release_backup_path")
-            expected_release_backup = os.path.join(os.path.dirname(target_path), f".macprovider-cli.release-rollback-{update_id}")
+            expected_release_backup = os.path.join(os.path.dirname(target_path), f".{rollback_stem}.release-rollback-{update_id}")
             if release_backup != expected_release_backup or not isinstance(release_sha, str) or not sha256_pattern.fullmatch(release_sha):
                 raise ValueError("release_backup_path")
             release_info = os.lstat(release_backup)
@@ -12628,7 +12769,7 @@ main() {
   fi
   if [ "$SKIP_PROVIDER_START" -eq 1 ]; then
     if restore_existing_provider_if_start_skipped; then
-      log "Re-run macprovider-cli autotune --recommend --apply when you want to change the active provider model."
+      log "Re-run malibu-cli autotune --recommend --apply when you want to change the active provider model."
       exit 0
     fi
     assert_install_lock_ownership
@@ -12645,9 +12786,9 @@ main() {
     commit_install_transaction
     log "Install complete without starting a provider service."
     log "To re-check paid-yield recommendation later, run:"
-    log "  macprovider-cli autotune --recommend --apply"
+    log "  malibu-cli autotune --recommend --apply"
     log "To opt into local donor-mode testing, run:"
-    log "  macprovider-cli autotune --recommend --apply --donor-mode"
+    log "  malibu-cli autotune --recommend --apply --donor-mode"
     exit 0
   fi
   if [ "$AUTOTUNE_RECOMMENDATION_REQUIRED" -eq 1 ]; then
@@ -12661,7 +12802,7 @@ main() {
     run_autotune_recommend_apply
     if [ "$SKIP_PROVIDER_START" -eq 1 ]; then
       if restore_existing_provider_if_start_skipped; then
-        log "Re-run macprovider-cli autotune --recommend --apply when you want to change the active provider model."
+        log "Re-run malibu-cli autotune --recommend --apply when you want to change the active provider model."
         exit 0
       fi
       install_binary

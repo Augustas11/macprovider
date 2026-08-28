@@ -198,6 +198,7 @@ release_names=(
   "macprovider-release-discovery.json"
   "macprovider-release-discovery.json.sig"
   "macprovider-cli-${tag}-darwin-arm64.tar.gz"
+  "malibu-cli-${tag}-darwin-arm64.tar.gz"
   "pearl-release.json"
   "pearl-release.json.sig"
   "release-provenance.json"

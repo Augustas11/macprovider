@@ -1,6 +1,6 @@
 # #582 — Supported stranger onboarding (no-exception path)
 
-End-to-end path for a fresh Malibu / `macprovider-cli` install that reaches a
+End-to-end path for a fresh Malibu / `malibu-cli` install that reaches a
 terminal **user-visible** state without SSH, manual Postgres edits, temporary
 `proof_of_weights.require_autotune_hello_gate=false`, or other production
 exceptions.
@@ -14,7 +14,7 @@ hardware-trust API), Malibu public-status shell (#655).
 | Step | Actor | What happens | User-visible terminal (if stuck) |
 |------|-------|--------------|----------------------------------|
 | 1. Install | Stranger | Installer / Malibu bootstrap installs CLI + config | Model is preparing |
-| 2. Autotune evidence | Stranger / installer | `macprovider-cli autotune --recommend` (or Malibu **Retry provider setup** → `--recover-hardware-admission`) loads the **signed live** candidate catalog, probes, and submits hardware evidence | If only the baked catalog is available, CLI **fail-closes before submit/apply** with actionable copy (offline `--no-submit-hardware-evidence` diagnostics remain allowed) |
+| 2. Autotune evidence | Stranger / installer | `malibu-cli autotune --recommend` (or Malibu **Retry provider setup** → `--recover-hardware-admission`) loads the **signed live** candidate catalog, probes, and submits hardware evidence | If only the baked catalog is available, CLI **fail-closes before submit/apply** with actionable copy (offline `--no-submit-hardware-evidence` diagnostics remain allowed) |
 | 3. Trust park | Pearl | Verifier parks unknown hardware as `waiting_trust` | **Pending hardware verification** |
 | 4. Operator approve | Operator | Dual-control admin API (below) — durable `source=operator_api` trust root | Still **Pending hardware verification** until verifier promotes |
 | 5. Verifier promote | Pearl | `stats-hardware-verifier` moves job → `verified` when trust is live | Waiting for network approval → reconnect |
@@ -22,9 +22,9 @@ hardware-trust API), Malibu public-status shell (#655).
 
 Other supported terminals (no gate disable):
 
-- **Pending hardware verification** — resubmit with `macprovider-cli autotune --recommend --freshness-check --require-hardware-evidence` (Malibu Retry uses the same). Exit 10 falls through to corrective recovery.
-- **Not eligible: admission evidence failed** — `autotune_evidence_invalid` / `autotune_model_cap_exceeded`. Recover with `macprovider-cli autotune --recommend --recover-hardware-admission` (drain → recommend/apply with required evidence → restore).
-- **This Mac is not currently eligible** — uncatalogued model uses corrective recovery; catalog/software update required remains `macprovider-cli update`.
+- **Pending hardware verification** — resubmit with `malibu-cli autotune --recommend --freshness-check --require-hardware-evidence` (Malibu Retry uses the same). Exit 10 falls through to corrective recovery.
+- **Not eligible: admission evidence failed** — `autotune_evidence_invalid` / `autotune_model_cap_exceeded`. Recover with `malibu-cli autotune --recommend --recover-hardware-admission` (drain → recommend/apply with required evidence → restore).
+- **This Mac is not currently eligible** — uncatalogued model uses corrective recovery; catalog/software update required remains `malibu-cli update`.
 - Identity / signing setup remains under the existing repair paths (out of scope for this runbook).
 
 ## Operator trust approval (no YAML / DB edits)

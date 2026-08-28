@@ -7,7 +7,7 @@
   <string>live.malibu.provider</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__INSTALL_DIR__/macprovider-cli</string>
+    <string>__INSTALL_DIR__/malibu-cli</string>
     <string>serve</string>
     <string>--config</string>
     <string>__HOME__/.config/macprovider/config.yaml</string>

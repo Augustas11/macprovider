@@ -331,7 +331,7 @@ to smuggle a catalog/feed change into the runtime lane.
    provider payload without mutating the live provider:
 
 ```bash
-~/macprovider/macprovider-cli --version | tee canary-prior-provider-tag.txt
+~/macprovider/malibu-cli --version | tee canary-prior-provider-tag.txt
 KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.39
 ```
 

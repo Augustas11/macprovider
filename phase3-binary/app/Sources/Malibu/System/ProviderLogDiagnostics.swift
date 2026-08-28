@@ -1,6 +1,6 @@
 import Foundation
 
-/// Maps macprovider-cli stderr lines (launchd or Malibu-spawned) to operator-facing text.
+/// Maps malibu-cli stderr lines (launchd or Malibu-spawned) to operator-facing text.
 enum ProviderLogDiagnostics {
     static let providerSoftwareInstallHandledAutoupdateACLMarker =
         "autoupdate acl_home_repair_handled=malibu_provider_software_install_success"

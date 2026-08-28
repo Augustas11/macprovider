@@ -17,7 +17,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         "credential custody",
         "coordinator admission",
         "provider cli",
-        "macprovider-cli",
+        "malibu-cli",
         "cli-owned",
         "terminal path",
         "referral_bootstrap_v1",
@@ -296,7 +296,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             "Keep Malibu online · retry setup if this lasts more than an hour."
         )
         XCTAssertEqual(pendingStatus.executableAction, .retryHardwareVerification)
-        XCTAssertFalse(pendingStatus.safeNextAction?.contains("macprovider-cli") == true)
+        XCTAssertFalse(pendingStatus.safeNextAction?.contains("malibu-cli") == true)
         XCTAssertTrue(pendingStatus.detail?.contains("usually under an hour") == true)
         XCTAssertFalse(pendingStatus.detail?.contains("wait for operator approval") == true)
         XCTAssertEqual(AgentSnapshotPresenter.short(pending), "Pending")
@@ -316,7 +316,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(rejectedStatus.title, "Not eligible: admission evidence failed")
         XCTAssertEqual(rejectedStatus.safeNextAction, "Retry provider setup while online.")
         XCTAssertEqual(rejectedStatus.executableAction, .retryHardwareVerification)
-        XCTAssertFalse(rejectedStatus.safeNextAction?.contains("macprovider-cli") == true)
+        XCTAssertFalse(rejectedStatus.safeNextAction?.contains("malibu-cli") == true)
         XCTAssertEqual(AgentSnapshotPresenter.short(rejected), "Ineligible")
         XCTAssertEqual(AgentSnapshotPresenter.stateLine(rejected), "Not eligible: admission evidence failed")
         XCTAssertEqual(
@@ -669,7 +669,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         var snapshot = AgentSnapshot.empty
         snapshot.localStatusContractVersion = 1
         snapshot.localStatusContractCompatible = true
-        snapshot.localStatusLifecycleOwner = "macprovider_cli"
+        snapshot.localStatusLifecycleOwner = "malibu_cli"
         snapshot.localStatusCapabilities = ["status_observation_v1"]
         snapshot.statusObservationID = "observation-a"
         snapshot.statusObservedAt = Date()
@@ -681,7 +681,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.lifecycleState = "busy"
         snapshot.lifecycleReason = "request_capacity_full"
 
-        XCTAssertEqual(AgentSnapshotPresenter.statusContractLine(snapshot), "v1 · macprovider_cli")
+        XCTAssertEqual(AgentSnapshotPresenter.statusContractLine(snapshot), "v1 · malibu_cli")
         XCTAssertEqual(AgentSnapshotPresenter.serviceInstanceLine(snapshot), "serve · PID 4321 · abcdef01")
         XCTAssertEqual(AgentSnapshotPresenter.lifecycleLine(snapshot), "busy · request capacity full")
 

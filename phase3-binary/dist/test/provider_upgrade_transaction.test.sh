@@ -21,6 +21,7 @@ extract_function() {
 
 for function_name in \
   validate_install_dir validate_port_value \
+  owned_provider_executable_matches \
   release_install_lock acquire_install_lock \
   validate_repair_privilege_domain \
   read_config_provider_id read_config_provider_token_line \
@@ -31,7 +32,7 @@ for function_name in \
   repair_autoupdate_recovery_preflight autoupdate_recovery_supported autoupdate_recovery_tick \
   prepare_staged_config activate_staged_config select_autotune_benchmark_port \
   semantic_merge_config restore_existing_provider_if_start_skipped \
-  prefetch_upgrade_autotune_model own_macprovider_cli_holds_live_port \
+  prefetch_upgrade_autotune_model own_malibu_cli_holds_live_port \
   validate_staged_entries; do
   extract_function "$function_name" >> "$TMP/helpers.sh"
 done
@@ -75,8 +76,8 @@ strict = transaction.index("quiesce_repair_watchdog_label_for_transaction")
 generic = transaction.index("reclaim_launchd_service")
 if not strict < generic:
     raise SystemExit("repair watchdog shutdown must use strict liveness proof before generic reclaim")
-helper = source[source.index("run_macprovider_cli_with_amfi_retry() {"):source.index("detect_existing_port() {")]
-if 'local cli_path="$MACPROVIDER_CLI_EXECUTABLE"' not in helper:
+helper = source[source.index("run_malibu_cli_with_amfi_retry() {"):source.index("detect_existing_port() {")]
+if 'local cli_path="$MALIBU_CLI_EXECUTABLE"' not in helper:
     raise SystemExit("recommendation helper is not routed to the staged CLI")
 recommend_helper = source[source.index("run_autotune_recommend_apply() {"):source.index("use_fresh_recommendation_if_available() {")]
 if '--port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH"' not in recommend_helper:
@@ -145,7 +146,7 @@ REPAIR_CONFIG_PATH="$REPAIR_HOME/.config/macprovider/config.yaml"
 REPAIR_PROVIDER_ID_PATH="$REPAIR_HOME/.config/macprovider/provider_id"
 REPAIR_MANIFEST_PATH="$REPAIR_HOME/Library/Application Support/macprovider/install_manifest.json"
 REPAIR_PLIST_PATH="$REPAIR_HOME/Library/LaunchAgents/live.malibu.provider.plist"
-REPAIR_BINARY_PATH="$REPAIR_HOME/.local/bin/macprovider-cli"
+REPAIR_BINARY_PATH="$REPAIR_HOME/.local/bin/malibu-cli"
 REPAIR_PROVIDER_ID="mp-0123456789abcdef0123456789abcdef"
 cat > "$REPAIR_CONFIG_PATH" <<EOF
 model: "seed"
@@ -156,7 +157,7 @@ printf '%s\n' "$REPAIR_PROVIDER_ID" > "$REPAIR_PROVIDER_ID_PATH"
 cat > "$REPAIR_MANIFEST_PATH" <<EOF
 {
   "install_prefix": "$REPAIR_INSTALL_DIR",
-  "binary_path": "$REPAIR_INSTALL_DIR/macprovider-cli",
+  "binary_path": "$REPAIR_INSTALL_DIR/malibu-cli",
   "launchd_labels": ["live.malibu.provider"],
   "launchd_plists": ["$REPAIR_PLIST_PATH"]
 }
@@ -166,7 +167,7 @@ cat > "$REPAIR_PLIST_PATH" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>live.malibu.provider</string>
-<key>Program</key><string>$REPAIR_INSTALL_DIR/macprovider-cli</string>
+<key>Program</key><string>$REPAIR_INSTALL_DIR/malibu-cli</string>
 </dict></plist>
 EOF
 chmod 600 "$REPAIR_CONFIG_PATH" "$REPAIR_PROVIDER_ID_PATH" "$REPAIR_MANIFEST_PATH" "$REPAIR_PLIST_PATH"
@@ -535,7 +536,7 @@ if /usr/sbin/sysctl -n kern.bootsessionuuid >/dev/null 2>&1 \
     HOME="$lock_home"
     CONFIG_DIR="$lock_config"
     INSTALL_LOCK_PATH="$lock_config/install.lock"
-    BINARY_PATH="$lock_home/.local/bin/macprovider-cli"
+    BINARY_PATH="$lock_home/.local/bin/malibu-cli"
     LOG_DIR="$lock_home/Library/Logs/macprovider"
     LOG_PATH="$lock_home/Library/Logs/macprovider/watchdog.log"
     MACPROVIDER_AUTOUPDATE_STATE_ROOT="$lock_pending_root"
@@ -585,11 +586,11 @@ PY
 )"
   marker_update_id="12345678-1234-4234-9234-123456789abc"
   mkdir -p "$lock_home/.local/bin"
-  printf 'target\n' > "$lock_home/.local/bin/macprovider-cli"
-  printf 'backup\n' > "$lock_home/.local/bin/.macprovider-cli.rollback-$marker_update_id"
-  marker_backup_hash="$(shasum -a 256 "$lock_home/.local/bin/.macprovider-cli.rollback-$marker_update_id" | awk '{ print $1 }')"
-  python3 - "$lock_pending_root/pending.json" "$lock_home/.local/bin/macprovider-cli" \
-    "$lock_home/.local/bin/.macprovider-cli.rollback-$marker_update_id" "$marker_deadline" "$marker_update_id" \
+  printf 'target\n' > "$lock_home/.local/bin/malibu-cli"
+  printf 'backup\n' > "$lock_home/.local/bin/.malibu-cli.rollback-$marker_update_id"
+  marker_backup_hash="$(shasum -a 256 "$lock_home/.local/bin/.malibu-cli.rollback-$marker_update_id" | awk '{ print $1 }')"
+  python3 - "$lock_pending_root/pending.json" "$lock_home/.local/bin/malibu-cli" \
+    "$lock_home/.local/bin/.malibu-cli.rollback-$marker_update_id" "$marker_deadline" "$marker_update_id" \
     "$marker_backup_hash" <<'PY'
 import json
 import pathlib
@@ -613,7 +614,7 @@ PY
     HOME="$lock_home"
     CONFIG_DIR="$lock_config"
     INSTALL_LOCK_PATH="$lock_config/install.lock"
-    BINARY_PATH="$lock_home/.local/bin/macprovider-cli"
+    BINARY_PATH="$lock_home/.local/bin/malibu-cli"
     LOG_DIR="$lock_home/Library/Logs/macprovider"
     LOG_PATH="$lock_home/Library/Logs/macprovider/watchdog.log"
     MACPROVIDER_AUTOUPDATE_STATE_ROOT="$lock_pending_root"
@@ -677,10 +678,133 @@ PY
   }
   test -f "$lock_pending_root/pending.json"
   rm -f "$lock_pending_root/pending.json"
-  release_backup="$lock_home/.local/bin/.macprovider-cli.release-rollback-$marker_update_id"
-  mkdir -m 700 "$release_backup"
+  mkdir -p "$lock_home/macprovider"
+  printf 'install-target\n' > "$lock_home/macprovider/malibu-cli"
+  printf 'install-backup\n' > "$lock_home/macprovider/.malibu-cli.rollback-$marker_update_id"
+  install_marker_backup_hash="$(shasum -a 256 "$lock_home/macprovider/.malibu-cli.rollback-$marker_update_id" | awk '{ print $1 }')"
+  python3 - "$lock_pending_root/pending.json" "$lock_home/macprovider/malibu-cli" \
+    "$lock_home/macprovider/.malibu-cli.rollback-$marker_update_id" "$marker_deadline" "$marker_update_id" \
+    "$install_marker_backup_hash" <<'PY'
+import json
+import pathlib
+import sys
+
+pending, target, backup, deadline, update_id, backup_hash = sys.argv[1:]
+pathlib.Path(pending).write_text(json.dumps({
+    "backup_path": backup,
+    "marker_deadline": deadline,
+    "mode": 493,
+    "sha256": backup_hash,
+    "size": 15,
+    "target_path": target,
+    "target_version": "1.2.3",
+    "update_id": update_id,
+}, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+  chmod 600 "$lock_pending_root/pending.json"
+  repair_install_pending_rc=0
+  (
+    HOME="$lock_home"
+    CONFIG_DIR="$lock_config"
+    INSTALL_LOCK_PATH="$lock_config/install.lock"
+    INSTALL_DIR="$lock_home/macprovider"
+    BINARY_PATH="$lock_home/.local/bin/malibu-cli"
+    LOG_DIR="$lock_home/Library/Logs/macprovider"
+    LOG_PATH="$lock_home/Library/Logs/macprovider/watchdog.log"
+    MACPROVIDER_AUTOUPDATE_STATE_ROOT="$lock_pending_root"
+    PROVIDER_MUTATION_ROOT="$lock_pending_root"
+    PROVIDER_MUTATION_LOCK_PATH="$lock_pending_root/update.lock"
+    PROVIDER_MUTATION_PENDING_PATH="$lock_pending_root/pending.json"
+    LABEL="live.malibu.provider"
+    LAUNCHD_DOMAIN="gui/$UID"
+    REPAIR_EXISTING_INSTALL=1
+    DRY_RUN=0
+    log() { :; }
+    die() { exit "$1"; }
+    quiesce_repair_watchdogs_for_transaction() { exit 99; }
+    repair_autoupdate_recovery_preflight
+  ) || repair_install_pending_rc=$?
+  [ "$repair_install_pending_rc" -eq 0 ] || {
+    echo "repair autoupdate recovery preflight rejected an active install-path malibu-cli pending marker" >&2
+    exit 1
+  }
+  test -f "$lock_pending_root/pending.json"
+  (
+    HOME="$lock_home"
+    CONFIG_DIR="$lock_config"
+    INSTALL_LOCK_PATH="$lock_config/install.lock"
+    PROVIDER_MUTATION_ROOT="$lock_pending_root"
+    PROVIDER_MUTATION_LOCK_PATH="$lock_pending_root/update.lock"
+    PROVIDER_MUTATION_PENDING_PATH="$lock_pending_root/pending.json"
+    DRY_RUN=0
+    REPAIR_EXISTING_INSTALL=1
+    INSTALL_LOCK_HELD=0
+    INSTALL_LOCK_TOKEN=""
+    INSTALL_LOCK_HOLDER_PID=""
+    log() { :; }
+    die() { exit "$1"; }
+    acquire_install_lock
+  ) || repair_install_pending_rc=$?
+  [ "$repair_install_pending_rc" -eq 73 ] || {
+    echo "repair did not preserve install-path pending.json authority with exit 73" >&2
+    exit 1
+  }
+  test -f "$lock_pending_root/pending.json"
+  rm -f "$lock_pending_root/pending.json"
+  printf 'legacy-target\n' > "$lock_home/.local/bin/macprovider-cli"
+  printf 'legacy-backup\n' > "$lock_home/.local/bin/.macprovider-cli.rollback-$marker_update_id"
+  legacy_marker_backup_hash="$(shasum -a 256 "$lock_home/.local/bin/.macprovider-cli.rollback-$marker_update_id" | awk '{ print $1 }')"
   python3 - "$lock_pending_root/pending.json" "$lock_home/.local/bin/macprovider-cli" \
     "$lock_home/.local/bin/.macprovider-cli.rollback-$marker_update_id" "$marker_deadline" "$marker_update_id" \
+    "$legacy_marker_backup_hash" <<'PY'
+import json
+import pathlib
+import sys
+
+pending, target, backup, deadline, update_id, backup_hash = sys.argv[1:]
+pathlib.Path(pending).write_text(json.dumps({
+    "backup_path": backup,
+    "marker_deadline": deadline,
+    "mode": 493,
+    "sha256": backup_hash,
+    "size": 14,
+    "target_path": target,
+    "target_version": "1.2.3",
+    "update_id": update_id,
+}, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+  chmod 600 "$lock_pending_root/pending.json"
+  repair_legacy_pending_rc=0
+  (
+    HOME="$lock_home"
+    CONFIG_DIR="$lock_config"
+    INSTALL_LOCK_PATH="$lock_config/install.lock"
+    BINARY_PATH="$lock_home/.local/bin/malibu-cli"
+    LEGACY_BINARY_PATH="$lock_home/.local/bin/macprovider-cli"
+    LEGACY_INSTALL_BINARY_PATH="$lock_home/macprovider/macprovider-cli"
+    LOG_DIR="$lock_home/Library/Logs/macprovider"
+    PROVIDER_MUTATION_ROOT="$lock_pending_root"
+    PROVIDER_MUTATION_LOCK_PATH="$lock_pending_root/update.lock"
+    PROVIDER_MUTATION_PENDING_PATH="$lock_pending_root/pending.json"
+    LABEL="live.malibu.provider"
+    LAUNCHD_DOMAIN="gui/$UID"
+    REPAIR_EXISTING_INSTALL=1
+    DRY_RUN=0
+    log() { :; }
+    die() { exit "$1"; }
+    quiesce_repair_watchdogs_for_transaction() { exit 99; }
+    repair_autoupdate_recovery_preflight
+  ) || repair_legacy_pending_rc=$?
+  [ "$repair_legacy_pending_rc" -eq 0 ] || {
+    echo "repair autoupdate recovery preflight rejected an active legacy macprovider-cli pending marker" >&2
+    exit 1
+  }
+  test -f "$lock_pending_root/pending.json"
+  rm -f "$lock_pending_root/pending.json"
+  release_backup="$lock_home/.local/bin/.malibu-cli.release-rollback-$marker_update_id"
+  mkdir -m 700 "$release_backup"
+  python3 - "$lock_pending_root/pending.json" "$lock_home/.local/bin/malibu-cli" \
+    "$lock_home/.local/bin/.malibu-cli.rollback-$marker_update_id" "$marker_deadline" "$marker_update_id" \
     "$marker_backup_hash" "$release_backup" <<'PY'
 import json
 import pathlib
@@ -705,7 +829,7 @@ PY
     HOME="$lock_home"
     CONFIG_DIR="$lock_config"
     INSTALL_LOCK_PATH="$lock_config/install.lock"
-    BINARY_PATH="$lock_home/.local/bin/macprovider-cli"
+    BINARY_PATH="$lock_home/.local/bin/malibu-cli"
     LOG_DIR="$lock_home/Library/Logs/macprovider"
     PROVIDER_MUTATION_ROOT="$lock_pending_root"
     PROVIDER_MUTATION_LOCK_PATH="$lock_pending_root/update.lock"
@@ -725,11 +849,11 @@ PY
   test ! -e "$lock_pending_root/pending.json"
   off_target_dir="$lock_home/off-target"
   mkdir -p "$off_target_dir"
-  printf 'offtarget\n' > "$off_target_dir/macprovider-cli"
-  printf 'offbackup\n' > "$off_target_dir/.macprovider-cli.rollback-$marker_update_id"
-  off_backup_hash="$(shasum -a 256 "$off_target_dir/.macprovider-cli.rollback-$marker_update_id" | awk '{ print $1 }')"
-  python3 - "$lock_pending_root/pending.json" "$off_target_dir/macprovider-cli" \
-    "$off_target_dir/.macprovider-cli.rollback-$marker_update_id" "$marker_deadline" "$marker_update_id" \
+  printf 'offtarget\n' > "$off_target_dir/malibu-cli"
+  printf 'offbackup\n' > "$off_target_dir/.malibu-cli.rollback-$marker_update_id"
+  off_backup_hash="$(shasum -a 256 "$off_target_dir/.malibu-cli.rollback-$marker_update_id" | awk '{ print $1 }')"
+  python3 - "$lock_pending_root/pending.json" "$off_target_dir/malibu-cli" \
+    "$off_target_dir/.malibu-cli.rollback-$marker_update_id" "$marker_deadline" "$marker_update_id" \
     "$off_backup_hash" <<'PY'
 import json
 import pathlib
@@ -752,7 +876,7 @@ PY
     HOME="$lock_home"
     CONFIG_DIR="$lock_config"
     INSTALL_LOCK_PATH="$lock_config/install.lock"
-    BINARY_PATH="$lock_home/.local/bin/macprovider-cli"
+    BINARY_PATH="$lock_home/.local/bin/malibu-cli"
     LOG_DIR="$lock_home/Library/Logs/macprovider"
     PROVIDER_MUTATION_ROOT="$lock_pending_root"
     PROVIDER_MUTATION_LOCK_PATH="$lock_pending_root/update.lock"
@@ -770,10 +894,10 @@ PY
     exit 1
   }
   test ! -e "$lock_pending_root/pending.json"
-  printf 'backup\n' > "$lock_home/.local/bin/.macprovider-cli.rollback-$marker_update_id"
-  marker_backup_hash="$(shasum -a 256 "$lock_home/.local/bin/.macprovider-cli.rollback-$marker_update_id" | awk '{ print $1 }')"
-  python3 - "$lock_pending_root/pending.json" "$lock_home/.local/bin/macprovider-cli" \
-    "$lock_home/.local/bin/.macprovider-cli.rollback-$marker_update_id" "$marker_deadline" "$marker_update_id" \
+  printf 'backup\n' > "$lock_home/.local/bin/.malibu-cli.rollback-$marker_update_id"
+  marker_backup_hash="$(shasum -a 256 "$lock_home/.local/bin/.malibu-cli.rollback-$marker_update_id" | awk '{ print $1 }')"
+  python3 - "$lock_pending_root/pending.json" "$lock_home/.local/bin/malibu-cli" \
+    "$lock_home/.local/bin/.malibu-cli.rollback-$marker_update_id" "$marker_deadline" "$marker_update_id" \
     "$marker_backup_hash" <<'PY'
 import json
 import pathlib
@@ -798,7 +922,7 @@ PY
       HOME="$lock_home"
       CONFIG_DIR="$lock_config"
       INSTALL_LOCK_PATH="$lock_config/install.lock"
-      BINARY_PATH="$lock_home/.local/bin/macprovider-cli"
+      BINARY_PATH="$lock_home/.local/bin/malibu-cli"
       LOG_DIR="$lock_home/Library/Logs/macprovider"
       PROVIDER_MUTATION_ROOT="$lock_pending_root"
       PROVIDER_MUTATION_LOCK_PATH="$lock_pending_root/update.lock"
@@ -830,7 +954,7 @@ PY
       INSTALL_DIR="$acl_home/macprovider"
       CONFIG_DIR="$acl_config"
       INSTALL_LOCK_PATH="$acl_config/install.lock"
-      BINARY_PATH="$acl_home/.local/bin/macprovider-cli"
+      BINARY_PATH="$acl_home/.local/bin/malibu-cli"
       PROVIDER_MUTATION_ROOT="$acl_pending_root"
       PROVIDER_MUTATION_LOCK_PATH="$acl_pending_root/update.lock"
       PROVIDER_MUTATION_PENDING_PATH="$acl_pending_root/pending.json"
@@ -865,7 +989,7 @@ else
 fi
 
 complete_payload="$(printf '%s\n' \
-  macprovider-cli \
+  malibu-cli \
   mlx.metallib \
   compatibility-set.json \
   compatibility-set-local \
@@ -1067,7 +1191,7 @@ fi
   exit 1
 }
 
-# And when a MANUALLY started macprovider-cli holds the live port (no launchd
+# And when a MANUALLY started malibu-cli holds the live port (no launchd
 # service, so INSTALL_TX_SERVICE_WAS_ACTIVE=0), prefetch must ALSO fail closed --
 # INSTALL_TX_SERVICE_WAS_ACTIVE alone is not a sufficient live-provider signal.
 if (
@@ -1075,7 +1199,7 @@ if (
   # The -d txt query resolves the executable; the -iTCP query lists the pid.
   lsof() {
     case "$*" in
-      *-d\ txt*) printf 'n%s/macprovider-cli\n' "$INSTALL_DIR" ;;
+      *-d\ txt*) printf 'n%s/malibu-cli\n' "$INSTALL_DIR" ;;
       *-iTCP:*) printf '4242\n' ;;
       *) return 1 ;;
     esac

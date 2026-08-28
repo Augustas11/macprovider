@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 /// Ask the kernel for a free TCP port on 127.0.0.1 before spawning
-/// `macprovider-cli serve`. The CLI defaults to port 8080 for its local
+/// `malibu-cli serve`. The CLI defaults to port 8080 for its local
 /// HTTP inference endpoint and has no auto-fallback if that port is
 /// occupied. On any developer Mac running a Node dev server / Rails app /
 /// jaeger / anything on 8080, the CLI dies with

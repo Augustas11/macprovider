@@ -34,7 +34,7 @@ SPEC-046 defines the CLI-owned provider-local discovery and evaluation surface f
 
 Discovery is inventory, not earning. A candidate discovered under this spec is not buyer-routable, catalog-priced, settlement-capable, trust-tiered, or provider-creditable until a separate network admission contract admits it under SPEC-047 and the money-path owner specs.
 
-The first release is CLI-first. Malibu may later render this information, but v0.1 requires the stable behavior to exist in `macprovider-cli` before any app view depends on it.
+The first release is CLI-first. Malibu may later render this information, but v0.1 requires the stable behavior to exist in `malibu-cli` before any app view depends on it.
 
 Accepted journey id: `JOURNEY-PROVIDER-BYOM-DISCOVERY`.
 
@@ -42,7 +42,7 @@ Accepted journey id: `JOURNEY-PROVIDER-BYOM-DISCOVERY`.
 
 SPEC-046 does not create a public gateway, buyer API surface, coordinator routing state, provider payout rule, rate-card entry, model catalog entry, or settlement-capable receipt profile.
 
-SPEC-046 does not authorize `macprovider-cli` to bind public listeners, scan LAN/public hosts, download arbitrary weights, execute model repository code, install runtimes, mutate provider serving config, or upload raw local transcripts.
+SPEC-046 does not authorize `malibu-cli` to bind public listeners, scan LAN/public hosts, download arbitrary weights, execute model repository code, install runtimes, mutate provider serving config, or upload raw local transcripts.
 
 SPEC-046 does not allow Malibu or the CLI to present discovered candidates as higher-paying, verified, trusted, catalog-priced, settlement-capable, or eligible to earn.
 
@@ -52,7 +52,7 @@ SPEC-046 does not replace SPEC-045. SPEC-045 is buyer-side local endpoint mode. 
 
 SPEC-046 owns `provider-byom-discovery`: local runtime adapter discovery, candidate identity projection, local evaluation, discovery privacy, and the CLI command contract for provider-side BYOM candidates.
 
-SPEC-001 remains authoritative for the `macprovider-cli` binary lifecycle, provider process boundaries, control socket conventions, and provider-side serving behavior. SPEC-046 consumes that authority by reserving provider-local `models discover` and `models evaluate` behavior.
+SPEC-001 remains authoritative for the `malibu-cli` binary lifecycle, provider process boundaries, control socket conventions, and provider-side serving behavior. SPEC-046 consumes that authority by reserving provider-local `models discover` and `models evaluate` behavior.
 
 SPEC-010 remains authoritative for signed catalog model identity. SPEC-046 may compare a discovered candidate with catalog identifiers, but it must not create canonical catalog identities or imply that a candidate is catalog-backed.
 
@@ -68,7 +68,7 @@ SPEC-045 is related local endpoint prior art. SPEC-046 must reuse its loopback, 
 
 ## 3. Normative requirements
 
-**SPEC-046-R001 - CLI-owned discovery commands.** `macprovider-cli` MUST expose a provider-local discovery command with stable spelling reserved for `models discover --json` and a provider-local evaluation command with stable spelling reserved for `models evaluate <candidate-id-or-ref> --json`. Both commands MUST emit JSON only to stdout when `--json` is set and MUST emit warnings, progress, and redacted diagnostics to stderr. If Malibu consumes discovery in a later app release, it MUST consume the CLI projection or capability-negotiated equivalent and MUST NOT inspect runtime files, local HTTP endpoints, or model caches directly.
+**SPEC-046-R001 - CLI-owned discovery commands.** `malibu-cli` MUST expose a provider-local discovery command with stable spelling reserved for `models discover --json` and a provider-local evaluation command with stable spelling reserved for `models evaluate <candidate-id-or-ref> --json`. Both commands MUST emit JSON only to stdout when `--json` is set and MUST emit warnings, progress, and redacted diagnostics to stderr. If Malibu consumes discovery in a later app release, it MUST consume the CLI projection or capability-negotiated equivalent and MUST NOT inspect runtime files, local HTTP endpoints, or model caches directly.
 
 **SPEC-046-R002 - Safe adapter scope.** Discovery adapters MUST be explicit, bounded, and local. The v0.1 adapter enum is `mlx_cache`, `ollama_loopback`, `lmstudio_loopback`, `llamacpp_loopback`, and `openai_compatible_loopback`. Loopback HTTP adapters MUST accept only IPv4 loopback addresses in `127.0.0.0/8` and IPv6 `::1`; they MUST reject wildcard, LAN, VPN, public, private non-loopback, link-local, multicast, Unix-domain, unresolved, redirected, proxied, or hostname-expanded non-loopback targets. The CLI MUST NOT scan ports or networks; an adapter endpoint is either a well-known loopback default for that runtime or an operator-supplied loopback origin. Adapter requests MUST use short timeouts, bounded response headers, bounded decoded body bytes, bounded JSON nesting/parser work, and a closed endpoint allowlist. Adapter failures MUST produce warning codes, not partial trust claims.
 
@@ -100,9 +100,9 @@ When coordinator reachability changes, a locally eligible candidate may move bet
 
 The intended implementation is a CLI-first projection:
 
-1. Add discovery adapter interfaces behind `macprovider-cli models discover --json`.
+1. Add discovery adapter interfaces behind `malibu-cli models discover --json`.
 2. Add the closed discovery envelope and schema tests.
-3. Add `macprovider-cli models evaluate <candidate> --json` with a bounded local harness.
+3. Add `malibu-cli models evaluate <candidate> --json` with a bounded local harness.
 4. Persist no long-lived state except optional redacted local evaluation cache records defined by the implementation.
 5. Let SPEC-047 own all coordinator submission and network state.
 6. Let SPEC-044 consume only network-eligible economics after admission.

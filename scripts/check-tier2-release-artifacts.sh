@@ -77,8 +77,8 @@ temp_parent="${TMPDIR:-/tmp}"
 [ -d "$temp_parent" ] || die "temporary directory parent does not exist: $temp_parent"
 temp_parent="$(cd "$temp_parent" && pwd -P)"
 tmpdir="$(mktemp -d "$temp_parent/tier2-artifacts.XXXXXX")"
-tar -xzf "$PROVIDER_ARTIFACT" -C "$tmpdir" macprovider-cli
-provider_version="$("$tmpdir/macprovider-cli" --version)"
+tar -xzf "$PROVIDER_ARTIFACT" -C "$tmpdir" malibu-cli
+provider_version="$("$tmpdir/malibu-cli" --version)"
 if [ "$provider_version" != "$PROVIDER_VERSION" ]; then
   die "provider version mismatch: got $provider_version want $PROVIDER_VERSION"
 fi

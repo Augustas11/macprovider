@@ -44,11 +44,11 @@ No `d-inference` source inspected. Port is pure arithmetic (Foundation only, no 
 |------|--------|
 | `phase3-binary/Sources/MacProviderCore/DecodeBandwidthModel.swift` | **New** — ports `DecodeBandwidthModel` enum + adds `SiliconBandwidthTier` |
 | `phase3-binary/Tests/MacProviderCoreTests/DecodeBandwidthModelTests.swift` | **New** — 29 unit tests |
-| `phase3-binary/Sources/macprovider-cli/DecodeBenchCommand.swift` | **Modified** — adds `--report-sparsity`, `--total-params-b`, `--bandwidth-gbps` flags + `SparsityReport` JSON field |
+| `phase3-binary/Sources/malibu-cli/DecodeBenchCommand.swift` | **Modified** — adds `--report-sparsity`, `--total-params-b`, `--bandwidth-gbps` flags + `SparsityReport` JSON field |
 
 ### Naming note: `SiliconBandwidthTier` not `BandwidthTier`
 
-The `macprovider-cli` target already defines an internal `BandwidthTier` enum (in `AutotuneRecommend.swift`) with categorical A/B/C/S tier values. To avoid shadowing, the new chip-bandwidth mapping type in `MacProviderCore` is named **`SiliconBandwidthTier`** with `bandwidthGBps: Double` for each chip family.
+The `malibu-cli` target already defines an internal `BandwidthTier` enum (in `AutotuneRecommend.swift`) with categorical A/B/C/S tier values. To avoid shadowing, the new chip-bandwidth mapping type in `MacProviderCore` is named **`SiliconBandwidthTier`** with `bandwidthGBps: Double` for each chip family.
 
 ---
 
@@ -146,7 +146,7 @@ The measured 26.3 TPS is **3.1× faster than a dense 20B** — the MoE sparsity 
 ## `decode-bench --report-sparsity` (optional — implemented)
 
 ```bash
-macprovider-cli decode-bench \
+malibu-cli decode-bench \
   --model mlx-community/gpt-oss-20b-MXFP4-Q8 \
   --total-params-b 20.0 \
   --bandwidth-gbps 118.6 \

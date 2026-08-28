@@ -212,7 +212,7 @@ broader MDM/enterprise packaging.
 architect/code caught app-side build/distribution twins: §2 token-backup documented as
 best-effort/may-persist (aligned to §7); §4 `.dmg` table — post-install runs `install.sh`
 (SMAppService only registers the app login item, §8), and the pipeline already emits an
-optional signed App `.pkg`; §5.1 bundle tree adds the **required** `macprovider-cli` +
+optional signed App `.pkg`; §5.1 bundle tree adds the **required** `malibu-cli` +
 `mlx.metallib` under `Contents/MacOS/` (`release.yml:556`,
 `verify-tier2-provider-release.sh:405`); §6.2 CI recipe bannered as design-intent
 (`release.yml` authoritative — archive-copy + `hdiutil`, not `-exportArchive`/`create-dmg`);
@@ -228,7 +228,7 @@ bearerless on restart); §2 config table corrected — the wrapper DOES rewrite 
 `config.yaml` to strip the token (`ProviderConfig.swift:312`); §3.3 states there ARE two
 update authorities (Sparkle for `.app`; the CLI's own coordinator-driven `AutoUpdater`,
 enabled by default — `AutoUpdateTrustState.swift:148`), not "no second authority"; §5.1
-bundle layout — the bundled `macprovider-cli` in `Contents/MacOS/` is **required** by
+bundle layout — the bundled `malibu-cli` in `Contents/MacOS/` is **required** by
 the release pipeline (`release.yml:544`, `verify-tier2-provider-release.sh:405`), not
 optional; §7 token backup documented as not-guaranteed-transient (best-effort delete,
 recovery retains).
@@ -255,7 +255,7 @@ lifecycle; the App track does NOT install the watchdog" were **superseded**. Shi
 reality (`phase3-binary/app/Sources/Malibu/`): **Malibu is a monitor-only wrapper.**
 Onboarding runs the bundled CLI-track `install.sh` (which registers the provider,
 autotunes, downloads the model, and installs the launchd watchdog); the app then
-**adopts and monitors** the launchd-managed `macprovider-cli` over local HTTP
+**adopts and monitors** the launchd-managed `malibu-cli` over local HTTP
 (`/v1/health` + `/v1/status`) — it does **not** spawn a CLI child, and the
 control-socket / in-app-register / in-app-autotune machinery still compiles but has
 **no production caller** (retained only as test/legacy surface). The `malibu://`
@@ -270,10 +270,10 @@ SPEC-026 §6/§7 + the Malibu sources as source of truth pending this v0.2 revis
 
 ## 0. Terminology
 
-- **CLI track** — existing `macprovider-cli` binary + `install.sh` + the launchd **provider service** `live.malibu.provider` and its separate companion watchdog `live.malibu.provider-watchdog` (§8). Developer-facing.
+- **CLI track** — existing `malibu-cli` binary + `install.sh` + the launchd **provider service** `live.malibu.provider` and its separate companion watchdog `live.malibu.provider-watchdog` (§8). Developer-facing.
 - **App track** — new `Malibu.app` (this spec). Non-developer-facing; brand is Malibu (see [malibu-branding memory]). User-visible strings never say "MacProvider" or `malibu.tech`.
 - **Wrapper** — the Swift/SwiftUI code added by this spec (`Malibu.app`).
-- **Managed CLI** — the existing `macprovider-cli` binary, installed and run by the
+- **Managed CLI** — the existing `malibu-cli` binary, installed and run by the
   **launchd provider service** `live.malibu.provider` (`KeepAlive`) that `install.sh`
   sets up (plus a companion health watchdog, §8). The wrapper
   **adopts and monitors** it; it does **not** launch it. (Reconciled v0.2 — v0.1
@@ -293,7 +293,7 @@ with those tracks on the same Mac under SPEC-026 §2.1.
 
 ## 1. Goal
 
-Ship a **click-and-forget provider experience** for non-developer Mac users. Replace the terminal-only path (`curl … | bash` at `malibu.tech/host/`) with a signed, notarized `.dmg` containing `Malibu.app` — a menu bar wrapper around the existing `macprovider-cli` binary.
+Ship a **click-and-forget provider experience** for non-developer Mac users. Replace the terminal-only path (`curl … | bash` at `malibu.tech/host/`) with a signed, notarized `.dmg` containing `Malibu.app` — a menu bar wrapper around the existing `malibu-cli` binary.
 
 ### Success criteria
 
@@ -327,9 +327,9 @@ From reading `phase3-binary/`:
 
 | Component | Where | What we reuse |
 |---|---|---|
-| Provider daemon | `Sources/macprovider-cli/MacProviderCLI.swift` | Ship the compiled binary inside `Malibu.app/Contents/MacOS/` |
-| Local HTTP | `Sources/macprovider-cli/HTTPServer.swift` on `127.0.0.1:<port>` | Authoritative versioned lifecycle/status channel. Malibu polls `GET /v1/health` + `GET /v1/status`; unsupported older contracts degrade without false failure. |
-| Control-plane IPC | `Sources/macprovider-cli/ControlSocket.swift` — typed JSON frames on an owner-only Unix socket | Read-only CLI-authenticated earnings/status projection. It never transfers a bearer or lifecycle ownership to Malibu. |
+| Provider daemon | `Sources/malibu-cli/MalibuCLI.swift` | Ship the compiled binary inside `Malibu.app/Contents/MacOS/` |
+| Local HTTP | `Sources/malibu-cli/HTTPServer.swift` on `127.0.0.1:<port>` | Authoritative versioned lifecycle/status channel. Malibu polls `GET /v1/health` + `GET /v1/status`; unsupported older contracts degrade without false failure. |
+| Control-plane IPC | `Sources/malibu-cli/ControlSocket.swift` — typed JSON frames on an owner-only Unix socket | Read-only CLI-authenticated earnings/status projection. It never transfers a bearer or lifecycle ownership to Malibu. |
 | Runtime | `mlx-swift-examples` (MLXLLM, MLXLMCommon) — pure Swift, no Python | Runs inside the **managed CLI** process, not the app; the app is a thin monitor wrapper. |
 | Auth model | `provider_id` + `provider_token` bearer, per SPEC-001 / XSEC-1 | The CLI alone obtains, stores, and consumes the bearer. Malibu may read a legacy App item only long enough to migrate it into CLI custody, then deletes it. |
 | Config | `~/.config/macprovider/config.yaml`, initially containing `provider_token` | A restarted CLI removes the exact matching migration source transactionally only after Keychain-backed coordinator admission. The fixed 0600 backup is the handoff snapshot; deletion is confirmed before journal retirement. |
@@ -388,7 +388,7 @@ From reading `phase3-binary/`:
      `MACPROVIDER_REFERRAL_CODE_FILE` to the sanitized install environment.
      `install.sh` captures and unsets that path before launching any child; it
      never reads, logs, copies, or persists the code. It invokes
-     `macprovider-cli bootstrap-auth --referral-code-file <source>`, and the CLI
+     `malibu-cli bootstrap-auth --referral-code-file <source>`, and the CLI
      reopens the source with no-follow identity checks before reading it. The
      durable CLI journal
      `~/.config/macprovider/onboarding/referral-attempt-v1.json` stores only the
@@ -488,7 +488,7 @@ time (60–240 s for the first model) in the background.
 
 ### 3.3 Updates — CLI-owned signed compatibility set
 
-- The release artifact index binds one exact version of Malibu.app, macprovider-cli,
+- The release artifact index binds one exact version of Malibu.app, malibu-cli,
   launchd definitions, watchdog, catalog/resources, coordinator admission metadata,
   and rollback schema. Every compatibility-set member is hash-bound and release-role
   checked before mutation.
@@ -528,7 +528,7 @@ time (60–240 s for the first model) in the background.
   authority only until a separately reviewed production release contract says
   otherwise.
 - The launchd CLI owns both scheduled and user-requested updates. Malibu's menu and
-  dashboard invoke `macprovider-cli update`; they do not download or replace artifacts.
+  dashboard invoke `malibu-cli update`; they do not download or replace artifacts.
   Removing the Sparkle dependency/runtime and feed settings eliminates the prior
   second update authority. Independent Malibu release publication still emits a signed
   public appcast and `latest.dmg` compatibility surface for already-installed Sparkle
@@ -586,7 +586,7 @@ Ship `.dmg` for v1. **Reconciled v0.4:** the pipeline already emits an **optiona
 ## 5. Wrapper ↔ CLI: architecture (reconciled v0.2 — monitor-only)
 
 **Shipped model:** `Malibu.app` is a **thin monitor wrapper**. `install.sh` (bundled
-in `Contents/Resources/`) sets up a **launchd provider-service-managed** `macprovider-cli`
+in `Contents/Resources/`) sets up a **launchd provider-service-managed** `malibu-cli`
 (`live.malibu.provider`, `KeepAlive`) plus a companion health watchdog (§8);
 the app then adopts and **observes** it over local HTTP plus a capability-gated,
 owner-only control socket. The app never spawns the CLI; the socket carries typed,
@@ -606,7 +606,7 @@ sanitized CLI-authenticated projections and never transfers provider credentials
 │                               │ GET /v1/health + /v1/status           │
 │                               ▼ (127.0.0.1:<port from config.yaml>)   │
 │   ┌── launchd provider service live.malibu.provider (KeepAlive) ─┐ │
-│   │   macprovider-cli   ← owned/restarted by launchd KeepAlive, NOT the │ │
+│   │   malibu-cli   ← owned/restarted by launchd KeepAlive, NOT the │ │
 │   │   app (+ health watchdog: local liveness monitor only — §8)         │ │
 │   └──────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────┘
@@ -632,7 +632,7 @@ Malibu.app/Contents/
   Info.plist                       # LSUIElement=true; no update feed or URL scheme
   MacOS/
     Malibu                         # Swift binary (wrapper)
-    macprovider-cli                # REQUIRED — signed CLI copied in by release.yml:556; verify-tier2-provider-release.sh:405 rejects a bundle without it
+    malibu-cli                # REQUIRED — signed CLI copied in by release.yml:915-916; verify-tier2-provider-release.sh:494 rejects a bundle without it
     mlx.metallib                   # REQUIRED — MLX Metal shader library (release.yml)
   Resources/
     install.sh                     # bundled CLI-track installer (mode 755, project.yml:72-75)
@@ -640,11 +640,11 @@ Malibu.app/Contents/
   _CodeSignature/
 ```
 
-Note (reconciled v0.3): the **running** provider is the `macprovider-cli` that
+Note (reconciled v0.3): the **running** provider is the `malibu-cli` that
 `install.sh` installs into `~/macprovider/` (the launchd-managed location). Separately,
-the release pipeline **REQUIRES** a `macprovider-cli` binary bundled in
-`Contents/MacOS/`: `release.yml:544` copies it in and
-`verify-tier2-provider-release.sh:405` **rejects an App bundle without it** (reconciled
+the release pipeline **REQUIRES** a `malibu-cli` binary bundled in
+`Contents/MacOS/`: `release.yml:915-916` copies it in and
+`verify-tier2-provider-release.sh:494` **rejects an App bundle without it** (reconciled
 v0.3 — required, not optional). The bundled copy is the signed transaction invoker and
 installation source; the live daemon remains the launchd install. `Info.plist` carries **no**
 `malibu://` URL scheme (removed by PR #418; tombstone at `MalibuApp.swift:35-38`).
@@ -692,14 +692,14 @@ What the app actually does around lifecycle:
 - **Quit:** `agent.shutdown(gracefulSeconds:)` stops only Malibu monitoring; it never
   drains or signals the launchd provider. Update/uninstall drain is owned by the CLI
   transaction.
-- **Uninstall:** delegate to `macprovider-cli uninstall --yes` (§3.4).
+- **Uninstall:** delegate to `malibu-cli uninstall --yes` (§3.4).
 
 ## 6. Signing & notarization
 
 **Extending, not building.** The CI job "Sign + notarize binary" in `.github/workflows/release.yml` already:
 
 - imports a Developer ID Application `.p12` into a transient keychain (`security create-keychain build.keychain` → deleted on exit),
-- codesigns `macprovider-cli` with `--options runtime --timestamp`,
+- codesigns `malibu-cli` with `--options runtime --timestamp`,
 - verifies with `codesign --verify --strict --verbose=2`,
 - wraps in a transient `.zip` (Apple's rule for bare Mach-O), submits via `xcrun notarytool submit --wait`,
 - re-tars the signed binary back into `phase3-binary-m4-<tag>.tar.gz`,
@@ -734,7 +734,7 @@ Runs on the same macOS runner as the existing job, after the CLI binary is signe
 
 1. `xcodebuild -scheme Malibu -configuration Release archive -archivePath Malibu.xcarchive` (new Xcode project lives at `phase3-binary/app/Malibu.xcodeproj`).
 2. `xcodebuild -exportArchive -archivePath Malibu.xcarchive -exportPath build/Malibu -exportOptionsPlist app/ExportOptions.plist` → `Malibu.app` (already signed by Xcode).
-3. Copy the already-signed `macprovider-cli` into `Malibu.app/Contents/MacOS/`.
+3. Copy the already-signed `malibu-cli` into `Malibu.app/Contents/MacOS/`.
 4. Re-sign the whole bundle bottom-up in one pass so the outer signature covers the newly-embedded CLI:
    `codesign --force --options runtime --timestamp --entitlements phase3-binary/app/Malibu.entitlements --sign "$SIGNING_ID" --deep Malibu.app`
 5. `codesign --verify --strict --verbose=2 --deep Malibu.app`
@@ -946,13 +946,13 @@ This landing page change is **file-level small** (`host/index.html` in the malib
 
 **Historical (reconciled v0.2).** This table is the original pre-#418 build plan and
 is retained for provenance. It shipped, but the architecture inverted: P0's "spawns
-bundled `macprovider-cli`" + the P0 `metrics_request`/`shutdown_request` control-socket
+bundled `malibu-cli`" + the P0 `metrics_request`/`shutdown_request` control-socket
 frames and P1's `malibu://` portal deep-link were **superseded** by the CLI-wrapper
 model (run `install.sh`, monitor over HTTP). See §3.1 and §5 for the shipped flow.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **P0 — Skeleton** (1 wk) | Swift menu bar app in a new Xcode project, spawns bundled `macprovider-cli`, no onboarding, hardcoded `config.yaml` copied by hand. Add `metrics_request` + `shutdown_request` frames to `ControlSocket`. | End-to-end job served through `.app` on a dev Mac. |
+| **P0 — Skeleton** (1 wk) | Swift menu bar app in a new Xcode project, spawns bundled `malibu-cli`, no onboarding, hardcoded `config.yaml` copied by hand. Add `metrics_request` + `shutdown_request` frames to `ControlSocket`. | End-to-end job served through `.app` on a dev Mac. |
 | **P1 — Onboarding** (1 wk) | `malibu://` URL scheme; portal deep-link flow; wallet paste; hardware autotune call; `SMAppService.register()`; dashboard read-only. | 5 friendly testers install by drag-drop and start earning without CLI. |
 | **P2 — `.app`/`.dmg` signing** (0.5 wk) | **Extend** existing `release.yml` "Sign + notarize binary" step with the App-track substeps in §6.2. Verify entitlements + hardened runtime. No new secrets except `SPARKLE_EDDSA_PRIVATE_KEY`. | Gatekeeper accepts `.dmg` on a fresh macOS 14 install (no `xattr -d`); `stapler validate` passes. |
 | **P3 — Sparkle + updates** (0.5 wk) | Appcast, EdDSA signing key, delta patches, phased rollout. | Live `v0.1 → v0.2` update on 5 test Macs, one via delta patch. |
@@ -975,7 +975,7 @@ self-updates via its own coordinator-driven `AutoUpdater` (`CoordinatorClient.sw
 enabled by default — §3.3), NOT via `install.sh`/the watchdog. **Reconciled v0.3:**
 `CLIUpdateRunner` / `MalibuAgent.updateCLINow()` compile but have **no production caller**
 (§3.3) — the app
-does NOT invoke `macprovider-cli update` at runtime. **#5 portal deep-link
+does NOT invoke `malibu-cli update` at runtime. **#5 portal deep-link
 handshake** — MOOT: the `malibu://` scheme and portal token handoff were removed;
 registration happens inside `install.sh`. **#4/#3 (library validation / linking)** and
 **#6/#7 (weights path / login-item rejection)** remain as build details. The list

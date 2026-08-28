@@ -2,7 +2,7 @@ import Foundation
 
 /// Provider-visible last-hour idle-prewarm projection. Mirrors
 /// `ProviderIdlePrewarmSummary` in
-/// `Sources/macprovider-cli/ProviderEarningsClient.swift` — duplicated for P0
+/// `Sources/malibu-cli/ProviderEarningsClient.swift` — duplicated for P0
 /// (see the ControlSocketFrame note above on consolidating the wire mirrors).
 struct ProviderIdlePrewarmSummary: Codable, Equatable {
     let eventsLast1h: [String: Int64]

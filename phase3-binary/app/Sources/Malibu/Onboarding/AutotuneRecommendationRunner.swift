@@ -1,14 +1,14 @@
 import Foundation
 
 enum AutotuneRecommendationRunner {
-    /// Wall-clock budget for `macprovider-cli autotune --recommend --json`.
+    /// Wall-clock budget for `malibu-cli autotune --recommend --json`.
     ///
     /// Autotune runs Stage-1 probes against every non-blocked, RAM-eligible
     /// row in the catalog. Rows that fail artifact verification (e.g. stale
     /// HuggingFace cache hash mismatch on an unrelated model) are skipped with
     /// a diagnostic instead of aborting the whole run. Optional
     /// `--candidate-models` scopes probes to matching catalog `model_id`s. Each probe spawns a subprocess of
-    /// `macprovider-cli serve`, waits for MLX to load the model, then does a
+    /// `malibu-cli serve`, waits for MLX to load the model, then does a
     /// prewarm HTTP call followed by measured TTFT + tokens/sec replicates.
     ///
     /// Per-candidate strict worst case (see `Stage1Prober` in
@@ -30,7 +30,7 @@ enum AutotuneRecommendationRunner {
     ///
     /// **This timeout is the App-side authoritative ceiling.** The CLI's
     /// declared `AutotuneCommand.maxDuration = 7200s` at
-    /// `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:47-48`
+    /// `phase3-binary/Sources/malibu-cli/AutotuneCommand.swift:47-48`
     /// is only enforced by the non-recommend path (deadline created at
     /// `AutotuneCommand.swift:157-161`). `runAutotuneRecommend()` at
     /// `AutotuneCommand.swift:131-139` returns before that deadline is
@@ -133,7 +133,7 @@ enum AutotuneRecommendationRunner {
     static let recoveryCancelGraceSeconds: TimeInterval = 120
 
     /// Runs the CLI corrective recovery transaction. Drain/restore and evidence
-    /// requirements are owned by macprovider-cli; Malibu only launches and
+    /// requirements are owned by malibu-cli; Malibu only launches and
     /// cooperatively cancels (no SIGKILL) so restore can complete.
     static func runHardwareAdmissionRecovery(
         cliURL: URL,

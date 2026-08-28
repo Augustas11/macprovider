@@ -94,7 +94,7 @@ def base_evidence(source_commit: str) -> dict:
             "compatibility_set": f"Augustas11/macprovider:v1.8.92@{source_commit}",
             "operating_system": "Version 26.5 (Build 25F71)",
             "production_equivalent_conditions": {
-                "provider_service": "launchd-managed macprovider-cli serve",
+                "provider_service": "launchd-managed malibu-cli serve",
                 "network_state_before": "buyer_serving",
                 "network_state_after": "buyer_serving",
                 "coordinator_connected_before": True,

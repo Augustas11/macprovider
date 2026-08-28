@@ -651,7 +651,7 @@ final class MalibuAgent: ObservableObject {
     }
 
     /// Stop a Malibu-spawned CLI child before attaching to launchd. Without
-    /// this, onboarding can leave two macprovider-cli processes (different
+    /// this, onboarding can leave two malibu-cli processes (different
     /// ports, same provider_id) running concurrently.
     private func releaseSpawnedChildForLaunchdMonitor() async {
         invalidateProviderProjectionFreshness()
@@ -1681,7 +1681,7 @@ final class MalibuAgent: ObservableObject {
             #endif
         }
         let bundled = bundleURL
-            .appendingPathComponent("Contents/MacOS/macprovider-cli")
+            .appendingPathComponent("Contents/MacOS/malibu-cli")
         if FileManager.default.isExecutableFile(atPath: bundled.path) { return bundled }
         throw POSIXError(.ENOENT)
     }

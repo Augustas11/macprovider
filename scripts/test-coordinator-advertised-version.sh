@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source_file="$repo_root/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
+source_file="$repo_root/phase3-binary/Sources/malibu-cli/CoordinatorClient.swift"
 app_project_file="$repo_root/phase3-binary/app/project.yml"
 release_builds_file="$repo_root/phase3-binary/app/release-builds.tsv"
 expected_version="${1:-}"

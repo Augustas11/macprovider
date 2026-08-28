@@ -225,7 +225,7 @@ enum CLIInstallRunner {
             homeDirectory: homeDirectory,
             fileManager: fileManager
         )
-        let defaultProgram = homeDirectory.appendingPathComponent("macprovider/macprovider-cli").standardizedFileURL
+        let defaultProgram = homeDirectory.appendingPathComponent("macprovider/malibu-cli").standardizedFileURL
         if configuredProgram != defaultProgram {
             explicit["MACPROVIDER_INSTALL_DIR"] = configuredProgram.deletingLastPathComponent().path
         }
@@ -289,7 +289,7 @@ enum CLIInstallRunner {
             return URL(fileURLWithPath: override)
             #endif
         }
-        let bundled = bundleURL.appendingPathComponent("Contents/MacOS/macprovider-cli")
+        let bundled = bundleURL.appendingPathComponent("Contents/MacOS/malibu-cli")
         if FileManager.default.isExecutableFile(atPath: bundled.path) {
             return bundled
         }
@@ -366,7 +366,7 @@ enum CLIInstallRunner {
                 processLines: macproviderProcessLines(),
                 logLines: logLines,
                 cliInstalled: FileManager.default.isExecutableFile(
-                    atPath: NSHomeDirectory() + "/macprovider/macprovider-cli"
+                    atPath: NSHomeDirectory() + "/macprovider/malibu-cli"
                 )
             )
         }
@@ -496,7 +496,7 @@ enum CLIInstallRunner {
             return text
                 .split(whereSeparator: \.isNewline)
                 .map(String.init)
-                .filter { $0.contains("macprovider-cli") && !$0.contains("/bin/ps") }
+                .filter { $0.contains("malibu-cli") && !$0.contains("/bin/ps") }
         }
 
         private static func extractFlag(_ flag: String, from command: String) -> String? {

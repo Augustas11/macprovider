@@ -67,8 +67,8 @@ curl -sI 'https://coordinator.malibu.tech/scep' | head -5
 curl -sI 'https://coordinator.malibu.tech/mdm/checkin' | head -5
 
 # Provider CLI (on Apple Silicon Mac)
-macprovider-cli enroll status
-macprovider-cli enroll run
+malibu-cli enroll status
+malibu-cli enroll run
 ```
 
 After `enroll run`, confirm device check-in:

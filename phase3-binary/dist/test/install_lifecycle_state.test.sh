@@ -27,7 +27,7 @@ EOF
 chmod +x "$TMP/installed-cli" "$TMP/staged-cli"
 
 BINARY_PATH="$TMP/installed-cli"
-MACPROVIDER_CLI_EXECUTABLE="$TMP/staged-cli"
+MALIBU_CLI_EXECUTABLE="$TMP/staged-cli"
 LIFECYCLE_STAGED_CLI_TRUSTED=0
 INSTALLED_LOG="$TMP/installed.log"
 STAGED_LOG="$TMP/staged.log"
@@ -132,7 +132,7 @@ awk '
 CONFIG_PATH="$TMP/config.yaml"
 printf 'model: qwen3-coder-30b-a3b-instruct\n' > "$CONFIG_PATH"
 DRY_RUN=0
-run_macprovider_cli_with_amfi_retry() { return 12; }
+run_malibu_cli_with_amfi_retry() { return 12; }
 log() { :; }
 die() {
   local code="$1"

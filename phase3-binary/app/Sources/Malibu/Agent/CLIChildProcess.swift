@@ -1,6 +1,6 @@
 import Foundation
 
-// Owns the macprovider-cli child process: launch, restart with backoff,
+// Owns the malibu-cli child process: launch, restart with backoff,
 // route stdout/stderr to log file, expose an "unexpectedly exited" signal.
 
 @MainActor
@@ -49,7 +49,7 @@ final class CLIChildProcess {
 
         let proc = Process()
         proc.executableURL = launch.executable
-        // Flag names must match phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift
+        // Flag names must match phase3-binary/Sources/malibu-cli/MalibuCLI.swift
         // (ArgumentParser derives kebab-case from the camelCase @Option name).
         //
         // --enable-warm-swap is required: the CLI only opens the control socket when

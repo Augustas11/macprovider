@@ -57,7 +57,7 @@ run_watchdog() {
   HOME="$TMP/home" \
   PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   MACPROVIDER_LOG_DIR="$TMP/logs" \
-  MACPROVIDER_BINARY_PATH="${WATCHDOG_TEST_BINARY_PATH:-$TMP/home/macprovider/macprovider-cli}" \
+  MACPROVIDER_BINARY_PATH="${WATCHDOG_TEST_BINARY_PATH:-$TMP/home/macprovider/malibu-cli}" \
   MACPROVIDER_LIFECYCLE_LEASE_PATH="$TMP/home/Library/Application Support/macprovider/lifecycle/lease.json" \
   MACPROVIDER_LIFECYCLE_LEASE_OWNER_UID="$(id -u)" \
   MACPROVIDER_CURL="$TMP/bin/curl" \
@@ -281,15 +281,15 @@ unset WATCHDOG_TEST_LEASE_LOG WATCHDOG_TEST_LEASE_MODE MACPROVIDER_HEADLESS WATC
 rm -rf "$TMP/bin" "$TMP/logs" "$TMP/launchctl.log" "$TMP/home/.local/share/macprovider-watchdog/state"
 make_fake_common
 mkdir -p "$TMP/home/macprovider"
-cat > "$TMP/home/macprovider/macprovider-cli" <<'EOF'
+cat > "$TMP/home/macprovider/malibu-cli" <<'EOF'
 #!/usr/bin/env bash
 echo "unexpected watchdog binary execution: $*" >> "$WATCHDOG_TEST_LEASE_LOG"
 exit 99
 EOF
-chmod +x "$TMP/home/macprovider/macprovider-cli"
+chmod +x "$TMP/home/macprovider/malibu-cli"
 cat > "$TMP/bin/ps" <<EOF
 #!/usr/bin/env bash
-echo "$TMP/home/macprovider/macprovider-cli --port 18080"
+echo "$TMP/home/macprovider/malibu-cli --port 18080"
 EOF
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -309,7 +309,7 @@ cat > "$TMP/bin/lsof" <<'EOF'
 case "$*" in
   *'-d txt -Fn'*)
     printf 'n%s\n' "/usr/lib/dyld"
-    printf 'n%s\n' "$HOME/macprovider/macprovider-cli"
+    printf 'n%s\n' "$HOME/macprovider/malibu-cli"
     printf 'n%s\n' "$HOME/Library/Application Support/macprovider/provider.sqlite-shm"
     ;;
   *) echo 4242 ;;
@@ -351,11 +351,11 @@ run_watchdog
 grep -F 'has no validated PID' "$TMP/logs/watchdog.log" >/dev/null
 unset WATCHDOG_TEST_SERVICE_OUTPUT
 
-cat > "$TMP/home/macprovider/macprovider-cli" <<'EOF'
+cat > "$TMP/home/macprovider/malibu-cli" <<'EOF'
 #!/usr/bin/env bash
 exit 1
 EOF
-chmod +x "$TMP/home/macprovider/macprovider-cli"
+chmod +x "$TMP/home/macprovider/malibu-cli"
 rm -f "$TMP/home/.local/share/macprovider-watchdog/state/last_kick"
 WATCHDOG_TEST_HEALTH_STATUS=22
 export WATCHDOG_TEST_HEALTH_STATUS
@@ -425,15 +425,15 @@ provider_owner_pid=$!
 /usr/bin/tail -f /dev/null &
 forged_owner_pid=$!
 mkdir -p "$TMP/home/macprovider"
-cat > "$TMP/home/macprovider/macprovider-cli" <<'EOF'
+cat > "$TMP/home/macprovider/malibu-cli" <<'EOF'
 #!/usr/bin/env bash
 echo "unexpected watchdog binary execution: $*" >> "$WATCHDOG_TEST_LEASE_LOG"
 exit 99
 EOF
-chmod +x "$TMP/home/macprovider/macprovider-cli"
+chmod +x "$TMP/home/macprovider/malibu-cli"
 cat > "$TMP/bin/ps" <<EOF
 #!/usr/bin/env bash
-echo "$TMP/home/macprovider/macprovider-cli --port 18080"
+echo "$TMP/home/macprovider/malibu-cli --port 18080"
 EOF
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash

@@ -4,7 +4,7 @@ import XCTest
 final class CLIInstallActivityMonitorTests: XCTestCase {
     func testGithubDownloadIsTheFirstVisibleStage() {
         let progress = CLIInstallRunner.ActivityMonitor.progress(
-            processLines: ["curl -L https://github.com/Augustas11/macprovider/releases/download/v1.8.93/macprovider-cli"]
+            processLines: ["curl -L https://github.com/Augustas11/macprovider/releases/download/v1.8.93/malibu-cli"]
         )
         XCTAssertEqual(progress.stage, .downloadingRelease)
         XCTAssertEqual(progress.detail, "Downloading provider software…")
@@ -24,7 +24,7 @@ final class CLIInstallActivityMonitorTests: XCTestCase {
 
     func testModelPullShowsPercentFromLogLines() {
         let progress = CLIInstallRunner.ActivityMonitor.progress(
-            processLines: ["/Users/a/macprovider/macprovider-cli models pull Qwen/Qwen3-8B"],
+            processLines: ["/Users/a/macprovider/malibu-cli models pull Qwen/Qwen3-8B"],
             logLines: [
                 "Fetching snapshot",
                 "model.safetensors:  42%|████      | 1.23GB / 2.90GB",
@@ -49,8 +49,8 @@ final class CLIInstallActivityMonitorTests: XCTestCase {
     func testAutotuneOutranksModelDownload() {
         let progress = CLIInstallRunner.ActivityMonitor.progress(
             processLines: [
-                "/Users/a/macprovider/macprovider-cli autotune --recommend",
-                "/Users/a/macprovider/macprovider-cli models pull Qwen/Qwen3-8B",
+                "/Users/a/macprovider/malibu-cli autotune --recommend",
+                "/Users/a/macprovider/malibu-cli models pull Qwen/Qwen3-8B",
             ],
             logLines: ["model.safetensors: 99%"],
             cliInstalled: true
@@ -64,7 +64,7 @@ final class CLIInstallActivityMonitorTests: XCTestCase {
     func testServeNoJoinNamesTheModelUnderTest() {
         let progress = CLIInstallRunner.ActivityMonitor.progress(
             processLines: [
-                "macprovider-cli serve --no-join --model Qwen/Qwen3-8B --port 8080",
+                "malibu-cli serve --no-join --model Qwen/Qwen3-8B --port 8080",
             ]
         )
         XCTAssertEqual(progress.stage, .autotune)

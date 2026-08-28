@@ -155,7 +155,7 @@ final class ReferralOnboardingTests: XCTestCase {
     }
 
     func testInstallerEnvironmentPassesRepairIntentOnlyWhenRequested() throws {
-        let bundledCLI = URL(fileURLWithPath: "/Applications/Malibu.app/Contents/MacOS/macprovider-cli")
+        let bundledCLI = URL(fileURLWithPath: "/Applications/Malibu.app/Contents/MacOS/malibu-cli")
         let bundledApp = URL(fileURLWithPath: "/Applications/Malibu.app")
         let repairEnvironment = try CLIInstallRunner.installerEnvironment(
             parentEnvironment: ["MACPROVIDER_REPAIR_EXISTING_INSTALL": "1"],
@@ -216,14 +216,14 @@ final class ReferralOnboardingTests: XCTestCase {
                 bundledVersion: "1.8.105"
             ),
             repairExistingInstall: true,
-            bundledCLIPath: URL(fileURLWithPath: "/Applications/Malibu.app/Contents/MacOS/macprovider-cli"),
+            bundledCLIPath: URL(fileURLWithPath: "/Applications/Malibu.app/Contents/MacOS/malibu-cli"),
             bundledAppPath: URL(fileURLWithPath: "/Applications/Malibu.app")
         )
         XCTAssertEqual(repairEnvironment["MACPROVIDER_VERSION"], "v1.8.105")
         XCTAssertEqual(repairEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"], "1")
         XCTAssertEqual(
             repairEnvironment["MACPROVIDER_BUNDLED_CLI"],
-            "/Applications/Malibu.app/Contents/MacOS/macprovider-cli"
+            "/Applications/Malibu.app/Contents/MacOS/malibu-cli"
         )
         XCTAssertEqual(repairEnvironment["MACPROVIDER_BUNDLED_APP"], "/Applications/Malibu.app")
     }
@@ -260,7 +260,7 @@ final class ReferralOnboardingTests: XCTestCase {
             at: manifest.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let customProgram = home.appendingPathComponent("provider-support/macprovider-cli")
+        let customProgram = home.appendingPathComponent("provider-support/malibu-cli")
         try JSONSerialization.data(withJSONObject: [
             "install_prefix": customProgram.deletingLastPathComponent().path,
             "binary_path": customProgram.path,

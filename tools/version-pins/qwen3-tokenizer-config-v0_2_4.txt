@@ -11,7 +11,7 @@
 # template structure normatively per §3.8.1 "byte-exact where upstream is
 # byte-stable, structural plus pinned upstream artifact where they are not."
 #
-# IMPL prompt golden fixtures in phase3-binary/Tests/macprovider-cliTests/MultiTurnTests.swift
+# IMPL prompt golden fixtures in phase3-binary/Tests/malibu-cliTests/MultiTurnTests.swift
 # assert the rendered prompt structure matches the chat_template semantics of this pinned
 # config. Future updates: re-fetch + verify SHA-256 + update this pin file before
 # updating ToolPromptRenderer.swift Qwen-family rendering.

@@ -36,7 +36,7 @@ mkdir -p "$(dirname "$OUTPUT")"
     printf "THIRD-PARTY NOTICES\n"
     printf "===================\n"
     printf "This file lists the open-source packages statically linked into\n"
-    printf "the macprovider-cli binary, together with their license/notice text.\n\n"
+    printf "the malibu-cli binary, together with their license/notice text.\n\n"
 } > "$OUTPUT"
 
 found_any=0

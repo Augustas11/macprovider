@@ -440,7 +440,7 @@ class MalibuFleetLedgerTests(unittest.TestCase):
                     "provider": [
                         "Coordinator tier: trusted",
                         "Provider software could not be verified for repair. Your provider identity was not changed.",
-                        "A newer version is available (v1.8.104). Run 'macprovider-cli update' to upgrade.",
+                        "A newer version is available (v1.8.104). Run 'malibu-cli update' to upgrade.",
                     ],
                     "watchdog": [
                         "[2026-08-20T09:34:50Z] autoupdate recovery_error=acl_write_rejected:/Users/external-provider-a",

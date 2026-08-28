@@ -131,7 +131,7 @@ Reverts to `mlx_lm.server` in ~30 seconds. Cloudflare tunnel unaffected.
 When to rollback (any of):
 - Mac fans spin permanently (binary stuck)
 - `curl /v1/models` returns 500 / hangs > 30s
-- You see crash logs in Console.app for `macprovider-cli`
+- You see crash logs in Console.app for `malibu-cli`
 - Anything feels off — there's no penalty for rolling back
 
 ## Validation window

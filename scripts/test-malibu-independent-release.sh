@@ -135,7 +135,7 @@ valid_sha="$(printf 'a%.0s' {1..64})"
 valid_archive_sha="$(printf 'b%.0s' {1..64})"
 valid_cli_version="$(
   sed -nE 's/^[[:space:]]*static let binaryVersion = "([^"]+)".*$/\1/p' \
-    "$root/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
+    "$root/phase3-binary/Sources/malibu-cli/CoordinatorClient.swift"
 )"
 valid_cli_tag="v$valid_cli_version"
 policy_file="$work/release-policy.env"

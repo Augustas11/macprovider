@@ -163,12 +163,12 @@ def main() -> int:
         if not isinstance(arguments, list) or len(arguments) < 4 or arguments[1:3] != ["serve", "--config"]:
             fail("canary provider LaunchAgent has unexpected ProgramArguments")
 
-        binary_fd = os.open("macprovider-cli", os.O_RDONLY | NOFOLLOW, dir_fd=install_fd)
+        binary_fd = os.open("malibu-cli", os.O_RDONLY | NOFOLLOW, dir_fd=install_fd)
         binary_info = os.fstat(binary_fd)
         if not stat.S_ISREG(binary_info.st_mode) or binary_info.st_uid != os.getuid() or binary_info.st_mode & 0o111 == 0:
             fail("canary installation binary is not a safe executable")
         install_absolute = install_path if os.path.isabs(install_path) else os.path.join(home, install_path)
-        expected_binary = os.path.normpath(os.path.join(install_absolute, "macprovider-cli"))
+        expected_binary = os.path.normpath(os.path.join(install_absolute, "malibu-cli"))
         if os.path.normpath(arguments[0]) != expected_binary:
             fail("canary LaunchAgent does not use the catalog installation root")
 

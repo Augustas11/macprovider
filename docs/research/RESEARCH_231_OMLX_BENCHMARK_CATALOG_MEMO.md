@@ -40,7 +40,7 @@ Catalog baseline: `published-2026-07-07-p2-qwen3-8b` (9 recommendable rows)
 | RESEARCH_227 rate card | `specs/RESEARCH_227_RATE_CARD_V3_MEMO.md` | 2026-06-30 | Demand ranks |
 | SPEC-023 gates | `specs/SPEC-023-installer-autotune-recommend.md` v0.5 | 2026-07-06 | Advisory QoS semantics |
 | oMLX upstream repo | https://github.com/jundot/omlx | 2026-07-09 | Local-only bench APIs (not community board) |
-| Bandwidth tier derive | `phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift` | 2026-07-09 | Chip → tier mapping |
+| Bandwidth tier derive | `phase3-binary/Sources/malibu-cli/AutotuneRecommend.swift` | 2026-07-09 | Chip → tier mapping |
 
 ### Data limitation (documented)
 

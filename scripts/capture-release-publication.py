@@ -63,7 +63,7 @@ if release.get("tag_name") != tag:
     fail("numeric release tag differs from signed provenance")
 if release.get("target_commitish") != commit:
     fail("numeric release target differs from signed provenance")
-expected_title = expected_title_override or f"macprovider-cli {tag}"
+expected_title = expected_title_override or f"malibu-cli {tag}"
 body_sha256 = None
 if notes_path is not None:
     if not notes_path.is_file() or notes_path.is_symlink():

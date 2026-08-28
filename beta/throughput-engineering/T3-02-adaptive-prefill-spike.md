@@ -348,8 +348,8 @@ per-model experimentation; Phase C static tier table is **DEFERRED**.
 | File | What was checked |
 |------|-----------------|
 | `phase3-binary/Package.resolved` | Confirmed pin: `mlx-swift-lm 3.31.4`, revision `bd4b743` |
-| `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift` | All `GenerateParameters` constructions (6 sites), `TokenIterator` call sites |
-| `phase3-binary/Sources/macprovider-cli/DecodeBenchCommand.swift` | `prepare()` call + `prefillStepSize` usage |
+| `phase3-binary/Sources/malibu-cli/ModelRuntime.swift` | All `GenerateParameters` constructions (6 sites), `TokenIterator` call sites |
+| `phase3-binary/Sources/malibu-cli/DecodeBenchCommand.swift` | `prepare()` call + `prefillStepSize` usage |
 | `mlx-swift-lm@bd4b743:Libraries/MLXLMCommon/Evaluate.swift` | `GenerateParameters.prefillStepSize`, `TokenIterator.init`, `prepare()` |
 | `mlx-swift-lm@bd4b743:Libraries/MLXLLM/LLMModel.swift` | Base `prepare(_:cache:windowSize:)` chunked loop |
 | `mlx-swift-lm@bd4b743:Libraries/MLXLMCommon/LanguageModel.swift` | Protocol shape, `PrepareResult` enum |

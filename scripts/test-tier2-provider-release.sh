@@ -48,7 +48,7 @@ make_fake_binary() {
   local version="$2"
   local include_surfaces="$3"
   mkdir -p "$dir"
-  cat >"$dir/macprovider-cli" <<EOF
+  cat >"$dir/malibu-cli" <<EOF
 #!/usr/bin/env bash
 if [ -n "\${EXECUTION_MARKER:-}" ]; then
   printf 'executed\n' >"\$EXECUTION_MARKER"
@@ -61,7 +61,7 @@ exit 0
 EOF
   printf '%s\n' 'fixture metal library' >"$dir/mlx.metallib"
   if [ "$include_surfaces" = "1" ]; then
-    cat >>"$dir/macprovider-cli" <<'EOF'
+    cat >>"$dir/malibu-cli" <<'EOF'
 # provider_ecdh_public_key
 # tier2_capabilities
 # selected_aead_suite
@@ -72,7 +72,7 @@ EOF
 # inference_response_chunk
 EOF
   fi
-  chmod +x "$dir/macprovider-cli"
+  chmod +x "$dir/malibu-cli"
 }
 
 make_release_fixture() {
@@ -83,19 +83,26 @@ make_release_fixture() {
   local app_mode="${5:-none}"
   mkdir -p "$fixture_dir"
   local binary_dir="$fixture_dir/bin"
-  local asset="$fixture_dir/macprovider-cli-v$version-darwin-arm64.tar.gz"
-  local pkg_asset="$fixture_dir/macprovider-cli-v$version-darwin-arm64.pkg"
+  local asset="$fixture_dir/malibu-cli-v$version-darwin-arm64.tar.gz"
+  local legacy_asset="$fixture_dir/macprovider-cli-v$version-darwin-arm64.tar.gz"
+  local pkg_asset="$fixture_dir/malibu-cli-v$version-darwin-arm64.pkg"
   local app_asset="$fixture_dir/Malibu-v$version.dmg"
   make_fake_binary "$binary_dir" "$version" "$include_surfaces"
-  tar -czf "$asset" -C "$binary_dir" macprovider-cli mlx.metallib
+  tar -czf "$asset" -C "$binary_dir" malibu-cli mlx.metallib
   sha256_file "$asset" | awk -v asset="$(basename "$asset")" '{ print $1 "  " asset }' >"$fixture_dir/checksums.txt"
+  local legacy_dir="$fixture_dir/legacy-bin"
+  mkdir -p "$legacy_dir"
+  cp "$binary_dir/malibu-cli" "$legacy_dir/macprovider-cli"
+  cp "$binary_dir/mlx.metallib" "$legacy_dir/mlx.metallib"
+  tar -czf "$legacy_asset" -C "$legacy_dir" macprovider-cli mlx.metallib
+  sha256_file "$legacy_asset" | awk -v asset="$(basename "$legacy_asset")" '{ print $1 "  " asset }' >>"$fixture_dir/checksums.txt"
   case "$package_mode" in
     none)
       ;;
     good|bad-extra)
       local pkg_root="$fixture_dir/pkg-root"
       mkdir -p "$pkg_root/Payload/example.bundle"
-      cp "$binary_dir/macprovider-cli" "$pkg_root/Payload/macprovider-cli"
+      cp "$binary_dir/malibu-cli" "$pkg_root/Payload/malibu-cli"
       if [ -f "$binary_dir/mlx.metallib" ]; then
         cp "$binary_dir/mlx.metallib" "$pkg_root/Payload/mlx.metallib"
       fi
@@ -118,12 +125,12 @@ make_release_fixture() {
       local app_root="$fixture_dir/app-root"
       mkdir -p "$app_root/Malibu.app/Contents/MacOS"
       printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$app_root/Malibu.app/Contents/MacOS/Malibu"
-      cp "$binary_dir/macprovider-cli" "$app_root/Malibu.app/Contents/MacOS/macprovider-cli"
+      cp "$binary_dir/malibu-cli" "$app_root/Malibu.app/Contents/MacOS/malibu-cli"
       if [ "$app_mode" = "bad-cli" ]; then
-        printf '%s\n' '# app signing mutated this copy' >>"$app_root/Malibu.app/Contents/MacOS/macprovider-cli"
+        printf '%s\n' '# app signing mutated this copy' >>"$app_root/Malibu.app/Contents/MacOS/malibu-cli"
       fi
       cp "$binary_dir/mlx.metallib" "$app_root/Malibu.app/Contents/MacOS/mlx.metallib"
-      chmod +x "$app_root/Malibu.app/Contents/MacOS/Malibu" "$app_root/Malibu.app/Contents/MacOS/macprovider-cli"
+      chmod +x "$app_root/Malibu.app/Contents/MacOS/Malibu" "$app_root/Malibu.app/Contents/MacOS/malibu-cli"
       (cd "$app_root" && python3 - "$app_asset" <<'PY'
 import os
 import sys
@@ -170,7 +177,7 @@ done
 [ -n "$url" ] || exit 2
 name="${url##*/}"
 case "$name" in
-  macprovider-cli-*-darwin-arm64.tar.gz|macprovider-cli-*-darwin-arm64.pkg|Malibu-v*.dmg|checksums.txt|checksums.txt.sig)
+  malibu-cli-*-darwin-arm64.tar.gz|macprovider-cli-*-darwin-arm64.tar.gz|malibu-cli-*-darwin-arm64.pkg|Malibu-v*.dmg|checksums.txt|checksums.txt.sig)
     cp "$RELEASE_FIXTURE_DIR/$name" "$out"
     ;;
   *)
@@ -244,7 +251,7 @@ import zipfile
 with zipfile.ZipFile(sys.argv[1]) as archive:
     archive.extractall(sys.argv[2])
 PY
-  chmod +x "$mount/Malibu.app/Contents/MacOS/Malibu" "$mount/Malibu.app/Contents/MacOS/macprovider-cli"
+  chmod +x "$mount/Malibu.app/Contents/MacOS/Malibu" "$mount/Malibu.app/Contents/MacOS/malibu-cli"
   exit 0
 fi
 if [ "${1:-}" = "detach" ]; then
@@ -277,6 +284,7 @@ PATH="$WORKDIR:$PATH" \
   RELEASE_TAG=v1.2.6 \
   "$VERIFIER" >"$WORKDIR/good.out" 2>"$WORKDIR/good.err"
 assert_contains "$WORKDIR/good.err" "SPEC-008 B6 provider GitHub Release verifier passed"
+assert_contains "$WORKDIR/good.err" "legacy provider bridge binary matches canonical tarball binary"
 
 bad_sig_fixture="$WORKDIR/bad-signature"
 cp -R "$good_fixture" "$bad_sig_fixture"
@@ -293,7 +301,7 @@ assert_contains "$WORKDIR/bad-sig.err" "checksums.txt signature verification fai
 
 bad_sha_fixture="$WORKDIR/bad-sha"
 cp -R "$good_fixture" "$bad_sha_fixture"
-bad_asset="$bad_sha_fixture/macprovider-cli-v1.2.6-darwin-arm64.tar.gz"
+bad_asset="$bad_sha_fixture/malibu-cli-v1.2.6-darwin-arm64.tar.gz"
 printf 'tampered' >>"$bad_asset"
 if PATH="$WORKDIR:$PATH" \
   CURL_BIN="$WORKDIR/curl" \

@@ -18,7 +18,7 @@
 # MacProvider
 
 MacProvider turns Apple Silicon Macs into remote-addressable MLX inference
-providers behind the Malibu network. Provider Macs run `macprovider-cli` over an
+providers behind the Malibu network. Provider Macs run `malibu-cli` over an
 outbound WebSocket connection, while buyers use an OpenAI-compatible API through
 `api.malibu.tech`.
 
@@ -40,7 +40,7 @@ wire contracts.
 
 ```text
 Provider Mac
-  macprovider-cli + mlx-lm
+  malibu-cli + mlx-lm
         |
         | outbound WebSocket
         v
@@ -79,11 +79,11 @@ in the autoupdate path.
 Useful provider commands:
 
 ```bash
-macprovider-cli status
-macprovider-cli models list
-macprovider-cli models switch <model-id>
-macprovider-cli autotune
-macprovider-cli update
+malibu-cli status
+malibu-cli models list
+malibu-cli models switch <model-id>
+malibu-cli autotune
+malibu-cli update
 ```
 
 Provider implementation details live in [phase3-binary/](phase3-binary/).
@@ -122,12 +122,12 @@ Worked SDK examples are in
 
 ## Local Consumer Endpoint
 
-`macprovider-cli consume` can run a loopback-only local OpenAI-compatible
+`malibu-cli consume` can run a loopback-only local OpenAI-compatible
 endpoint for tools that expect a local `/v1` server. It keeps the upstream buyer
 credential in local custody and gives local clients a per-run bearer token.
 
 ```bash
-macprovider-cli consume run \
+malibu-cli consume run \
   --credential-file ~/.config/macprovider/buyer-api-key \
   --allow-model mlx-community/Llama-3.2-3B-Instruct-4bit \
   --budget-usd 5

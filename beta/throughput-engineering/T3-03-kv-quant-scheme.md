@@ -74,10 +74,10 @@ Both exceed the ≥10% KV headroom GREEN criterion by ~9–10×.
 | File | Change |
 |------|--------|
 | `phase3-binary/Sources/MacProviderCore/KVQuantRecommendation.swift` | New — `KVQuantFamily` enum + `KVQuantRecommendation` classification/recommendation |
-| `phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift` | Wired family default at serve ModelRuntime init site (operator override always wins via `??`) |
-| `phase3-binary/Tests/macprovider-cliTests/KVQuantRecommendationTests.swift` | New — 11 tests: classification, recommended bits, override semantics, full catalog coverage |
+| `phase3-binary/Sources/malibu-cli/MalibuCLI.swift` | Wired family default at serve ModelRuntime init site (operator override always wins via `??`) |
+| `phase3-binary/Tests/malibu-cliTests/KVQuantRecommendationTests.swift` | New — 11 tests: classification, recommended bits, override semantics, full catalog coverage |
 
-### Wiring in `MacProviderCLI.swift`
+### Wiring in `MalibuCLI.swift`
 
 ```swift
 // T3-03: apply family-based KV-quant default when the operator has

@@ -21,10 +21,10 @@ run_go_test() {
 }
 
 # Provider-side issuance and streaming transport invariants.
-run_swift_test "macprovider_cliTests.HTTPServerReceiptTests/testHTTPNonStreamingHandlerWritesV04SettlementReceipt"
-run_swift_test "macprovider_cliTests.HTTPServerReceiptTests/testHTTPStreamingHandlerWritesV04SettlementReceiptTrailerWithWarmSwapDisabled"
-run_swift_test "macprovider_cliTests.HTTPServerReceiptTests/testStreamingHeadersStayReceiptFreeAndByteStable"
-run_swift_test "macprovider_cliTests.InferenceRelayTests/testRelayNonStreamingEndFrameCarriesV04SettlementReceipt"
+run_swift_test "malibu_cliTests.HTTPServerReceiptTests/testHTTPNonStreamingHandlerWritesV04SettlementReceipt"
+run_swift_test "malibu_cliTests.HTTPServerReceiptTests/testHTTPStreamingHandlerWritesV04SettlementReceiptTrailerWithWarmSwapDisabled"
+run_swift_test "malibu_cliTests.HTTPServerReceiptTests/testStreamingHeadersStayReceiptFreeAndByteStable"
+run_swift_test "malibu_cliTests.InferenceRelayTests/testRelayNonStreamingEndFrameCarriesV04SettlementReceipt"
 
 # Coordinator route snapshot, output-prefix, verdict, and AC-43..AC-71 gate.
 run_go_test phase4-coordinator ./internal/billing \

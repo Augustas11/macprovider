@@ -81,7 +81,7 @@ artifact.
    selection, selected target, compatibility manifest, downgrade/revocation
    gate result, mutation-lock ownership, update apply, launchd restart, local
    health, cleanup, coordinator reconnection, and buyer-serving result.
-4. Exercise SPEC-020-R002 by running `macprovider-cli update` while the
+4. Exercise SPEC-020-R002 by running `malibu-cli update` while the
    provider has no live accepted coordinator session, or while the coordinator
    rejects the current installed version. The run must show that manual recovery
    ignores automatic-update opt-out and coordinator admission while still
@@ -155,7 +155,7 @@ Stop and mark the run failed if any of the following occur:
 The following do not satisfy this journey by themselves:
 
 - CI green checks, unit tests, or static validation.
-- Matching `macprovider-cli --version` output without signed discovery,
+- Matching `malibu-cli --version` output without signed discovery,
   compatibility-set, launchd, rollback, and buyer-serving proof.
 - Gatekeeper success or notarization success alone.
 - A curl health probe that bypasses Pearl and buyer routing.

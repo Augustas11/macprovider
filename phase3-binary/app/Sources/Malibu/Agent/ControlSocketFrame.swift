@@ -8,7 +8,7 @@ enum ReferralWireDate {
     }
 }
 
-// Wire-format mirror of ControlSocketFrame in Sources/macprovider-cli/ControlSocket.swift.
+// Wire-format mirror of ControlSocketFrame in Sources/malibu-cli/ControlSocket.swift.
 // Duplicated for P0. Extract to a shared `MacProviderControl` library target so the
 // CLI and the app share one source of truth (SPEC-025 §12 conflict #9 — followup).
 

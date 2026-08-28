@@ -26,17 +26,17 @@ therefore not valid and are reported as INVALID.
 
 | File | Change |
 |------|--------|
-| `phase3-binary/Sources/macprovider-cli/CompiledDecode.swift` | **New.** Ported from `perf/mlx-compile-bf16`. `CompiledDecode` enum (env-flag), `KVCacheUpdatableAdapter`, `CompiledDecodeStep` class. |
-| `phase3-binary/Sources/macprovider-cli/DecodeBenchCommand.swift` | Added `import MLX`, dynamic env-flag read, `runCompiledOnce()` function with manual prefill + compiled decode loop. |
-| `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift` | Env-flag check + stderr log in `stream()`. Full production wire-in deferred to follow-up (correctness gate not passed). |
-| `phase3-binary/Tests/macprovider-cliTests/ScaffoldTests.swift` | `CompiledDecodeFlagTests` (5 tests) + `DecodeBenchHelperTests` (6 tests). All pass. |
+| `phase3-binary/Sources/malibu-cli/CompiledDecode.swift` | **New.** Ported from `perf/mlx-compile-bf16`. `CompiledDecode` enum (env-flag), `KVCacheUpdatableAdapter`, `CompiledDecodeStep` class. |
+| `phase3-binary/Sources/malibu-cli/DecodeBenchCommand.swift` | Added `import MLX`, dynamic env-flag read, `runCompiledOnce()` function with manual prefill + compiled decode loop. |
+| `phase3-binary/Sources/malibu-cli/ModelRuntime.swift` | Env-flag check + stderr log in `stream()`. Full production wire-in deferred to follow-up (correctness gate not passed). |
+| `phase3-binary/Tests/malibu-cliTests/ScaffoldTests.swift` | `CompiledDecodeFlagTests` (5 tests) + `DecodeBenchHelperTests` (6 tests). All pass. |
 
 ---
 
 ## Build & Test
 
 ```
-swift build -c release  →  Build complete (macprovider-cli)
+swift build -c release  →  Build complete (malibu-cli)
 swift test              →  968 tests, 8 skipped, 0 failures
 ```
 
@@ -108,7 +108,7 @@ In practice:
 
 `KVCacheSimple.offset` must be stored as an `MLXArray` (or computed from one) so
 that index arithmetic is a node in the computation graph rather than a constant.
-This requires a change to mlx-swift-lm; it cannot be fixed in macprovider-cli.
+This requires a change to mlx-swift-lm; it cannot be fixed in malibu-cli.
 
 **Tracking:** [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406)
 (MLXArray-based `KVCacheSimple.offset` for `MLX.compile()` compatibility).

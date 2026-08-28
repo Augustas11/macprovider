@@ -1,6 +1,6 @@
 import Foundation
 
-/// Minimal HuggingFace API client used by `macprovider-cli models browse`.
+/// Minimal HuggingFace API client used by `malibu-cli models browse`.
 ///
 /// Surface is intentionally narrow: search `mlx-community/*` models with an
 /// optional substring filter and a result cap. The fetcher is injectable so

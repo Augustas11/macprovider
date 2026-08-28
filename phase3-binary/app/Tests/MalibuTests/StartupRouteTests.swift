@@ -13,7 +13,7 @@ final class StartupRouteTests: XCTestCase {
         "credential custody",
         "coordinator admission",
         "provider cli",
-        "macprovider-cli",
+        "malibu-cli",
         "cli-owned",
         "terminal path",
         "referral_bootstrap_v1",
@@ -79,7 +79,7 @@ final class StartupRouteTests: XCTestCase {
         let expectedPlist = root.appendingPathComponent(
             "Library/LaunchAgents/live.malibu.provider.plist"
         )
-        let expectedProgram = root.appendingPathComponent("macprovider/macprovider-cli")
+        let expectedProgram = root.appendingPathComponent("macprovider/malibu-cli")
         let launchctl = root.appendingPathComponent("launchctl")
         try FileManager.default.createDirectory(at: launchctl.deletingLastPathComponent(), withIntermediateDirectories: true)
         try "#!/bin/sh\nprintf 'program = %s\\npath = %s\\n' '\(expectedProgram.path)' '\(expectedPlist.path)'\n"
@@ -107,7 +107,7 @@ final class StartupRouteTests: XCTestCase {
         let providerPlist = root.appendingPathComponent(
             "Library/LaunchAgents/live.malibu.provider.plist"
         )
-        let providerProgram = root.appendingPathComponent("macprovider/macprovider-cli")
+        let providerProgram = root.appendingPathComponent("macprovider/malibu-cli")
         let providerID = paths.configFile.deletingLastPathComponent().appendingPathComponent("provider_id")
         let manifest = root.appendingPathComponent(
             "Library/Application Support/macprovider/install_manifest.json"
@@ -212,7 +212,7 @@ final class StartupRouteTests: XCTestCase {
         let providerPlist = root.appendingPathComponent(
             "Library/LaunchAgents/live.malibu.provider.plist"
         )
-        let providerProgram = root.appendingPathComponent("macprovider/macprovider-cli")
+        let providerProgram = root.appendingPathComponent("macprovider/malibu-cli")
         let providerID = paths.configFile.deletingLastPathComponent().appendingPathComponent("provider_id")
         let manifest = root.appendingPathComponent(
             "Library/Application Support/macprovider/install_manifest.json"
@@ -258,6 +258,47 @@ final class StartupRouteTests: XCTestCase {
         let paths = try makeTempPaths()
         let root = paths.appSupport.deletingLastPathComponent()
         let installDirectory = root.appendingPathComponent("macprovider")
+        let providerProgram = installDirectory.appendingPathComponent("malibu-cli")
+        let legacyProgram = root.appendingPathComponent(".local/bin/malibu-cli")
+        let providerPlist = root.appendingPathComponent(
+            "Library/LaunchAgents/live.malibu.provider.plist"
+        )
+        let launchctl = root.appendingPathComponent("launchctl")
+        try FileManager.default.createDirectory(at: installDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: legacyProgram.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "#!/bin/sh\n".write(to: legacyProgram, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: legacyProgram.path)
+        try writeRepairEvidence(
+            paths: paths,
+            root: root,
+            manifest: [
+                "install_prefix": installDirectory.path,
+                "binary_path": providerProgram.path,
+                "launchd_labels": ["live.malibu.provider"],
+                "launchd_plists": [providerPlist.path]
+            ],
+            plistLabel: "live.malibu.provider",
+            plistProgram: legacyProgram.path
+        )
+        try "#!/bin/sh\nexit 1\n".write(to: launchctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launchctl.path)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let state = await StartupState.detect(
+            paths: paths,
+            homeDirectory: root,
+            launchctlURL: launchctl
+        )
+
+        XCTAssertTrue(state.launchdJobNeedsRepair)
+        XCTAssertTrue(state.providerLaunchdJobNeedsRepair)
+        XCTAssertEqual(state.route(), .repairExistingInstall)
+    }
+
+    func testDetectRoutesLegacyMacProviderProgramToRepairMissingProvider() async throws {
+        let paths = try makeTempPaths()
+        let root = paths.appSupport.deletingLastPathComponent()
+        let installDirectory = root.appendingPathComponent("macprovider")
         let providerProgram = installDirectory.appendingPathComponent("macprovider-cli")
         let legacyProgram = root.appendingPathComponent(".local/bin/macprovider-cli")
         let providerPlist = root.appendingPathComponent(
@@ -299,7 +340,7 @@ final class StartupRouteTests: XCTestCase {
         let paths = try makeTempPaths()
         let root = paths.appSupport.deletingLastPathComponent()
         let launchctl = root.appendingPathComponent("launchctl")
-        let providerProgram = root.appendingPathComponent("macprovider/macprovider-cli")
+        let providerProgram = root.appendingPathComponent("macprovider/malibu-cli")
         let providerPlist = root.appendingPathComponent(
             "Library/LaunchAgents/live.malibu.provider.plist"
         )
@@ -334,7 +375,7 @@ final class StartupRouteTests: XCTestCase {
         let paths = try makeTempPaths()
         let root = paths.appSupport.deletingLastPathComponent()
         let launchctl = root.appendingPathComponent("launchctl")
-        let providerProgram = root.appendingPathComponent("macprovider/macprovider-cli")
+        let providerProgram = root.appendingPathComponent("macprovider/malibu-cli")
         let providerPlist = root.appendingPathComponent(
             "Library/LaunchAgents/live.malibu.provider.plist"
         )
@@ -368,7 +409,7 @@ final class StartupRouteTests: XCTestCase {
         let providerPlist = root.appendingPathComponent(
             "Library/LaunchAgents/live.malibu.provider.plist"
         )
-        let providerProgram = root.appendingPathComponent("macprovider/macprovider-cli")
+        let providerProgram = root.appendingPathComponent("macprovider/malibu-cli")
         let providerID = paths.configFile.deletingLastPathComponent().appendingPathComponent("provider_id")
         let launchctl = root.appendingPathComponent("launchctl")
         try FileManager.default.createDirectory(at: providerPlist.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -436,7 +477,7 @@ final class StartupRouteTests: XCTestCase {
         let providerPlist = root.appendingPathComponent(
             "Library/LaunchAgents/live.malibu.provider.plist"
         )
-        let customProgram = root.appendingPathComponent("provider-support/macprovider-cli")
+        let customProgram = root.appendingPathComponent("provider-support/malibu-cli")
         let manifest = root.appendingPathComponent(
             "Library/Application Support/macprovider/install_manifest.json"
         )

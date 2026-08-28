@@ -58,15 +58,15 @@ to a different model does not wrongly accept it.
 Add a stored optional `catalogModelIDAlias: String?` to each of the three
 validation owners, injected from config; pass a gated `aliases:` array:
 
-- **`HTTPServer`** (`Sources/macprovider-cli/HTTPServer.swift`): add init param
+- **`HTTPServer`** (`Sources/malibu-cli/HTTPServer.swift`): add init param
   `catalogModelIDAlias: String?`, store it. At the `validateModelMatches(modelID)`
   call (only runs when `!warmSwapEnabled`, so served == configured `modelID`),
   pass `aliases: aliasList(catalogModelIDAlias)`.
-- **`InferenceRelay`** (`Sources/macprovider-cli/InferenceRelay.swift`): add init
+- **`InferenceRelay`** (`Sources/malibu-cli/InferenceRelay.swift`): add init
   param `catalogModelIDAlias: String?`, store it, and thread it into the static
   `process(...)`. At `validateModelMatches(validationModelID)`, pass
   `aliases: warmSwapEnabled ? [] : aliasList(catalogModelIDAlias)`.
-- **`ModelRuntime`** (`Sources/macprovider-cli/ModelRuntime.swift`): add init
+- **`ModelRuntime`** (`Sources/malibu-cli/ModelRuntime.swift`): add init
   param `catalogModelIDAlias: String? = nil` (default nil so benchmark/canary/
   decode-bench constructors are unchanged), store it. In
   `acquireRequestHandle`, at `validateModelMatches(snapshot.modelID)`, pass
@@ -80,13 +80,13 @@ CoordinatorClient.swift:324-327).
 
 ### 3. Wiring (pass `config.modelCatalogModelID`, trimmed, at construction)
 
-- `Sources/macprovider-cli/MacProviderCLI.swift:~624` — `HTTPServer(...)`: add
+- `Sources/malibu-cli/MalibuCLI.swift:~624` — `HTTPServer(...)`: add
   `catalogModelIDAlias: <trimmed config.modelCatalogModelID>`.
-- `Sources/macprovider-cli/MacProviderCLI.swift:~490` — the serve-path
+- `Sources/malibu-cli/MalibuCLI.swift:~490` — the serve-path
   `ModelRuntime(...)`: add `catalogModelIDAlias: <trimmed config.modelCatalogModelID>`.
   Do NOT set it for decode-bench / canary / non-serve ModelRuntime constructions
   (leave default nil).
-- `Sources/macprovider-cli/CoordinatorClient.swift:~845` — `InferenceRelay(...)`:
+- `Sources/malibu-cli/CoordinatorClient.swift:~845` — `InferenceRelay(...)`:
   add `catalogModelIDAlias: catalogModelIDForCoordinator` (already trimmed there).
 
 ## Tests (add, do not weaken existing)

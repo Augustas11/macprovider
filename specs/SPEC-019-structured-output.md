@@ -31,19 +31,19 @@ and rejects any other type with HTTP 400
 (`phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:371-379`).
 Runtime inference renders messages through `ToolPromptRenderer.renderMessages`
 before MLX preparation in preflight, non-streaming, and streaming paths
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:400`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:454`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:540`) and only
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:400`,
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:454`,
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:540`) and only
 post-processes native tool-call text through `parseToolCallsIfRequested`
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:483`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:598`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:873-886`).
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:483`,
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:598`,
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:873-886`).
 
 Receipt binding needs no SPEC-015 schema change: SPEC-015's canonical prompt
 object includes `response_format`
 (`specs/SPEC-015-receipts.md:1191-1204`, canonical prompt JSON object fields),
 and the provider implementation JCS-canonicalizes it into the prompt hash
-(`phase3-binary/Sources/macprovider-cli/PromptCanonicalizer.swift:5-16`, JCS
+(`phase3-binary/Sources/malibu-cli/PromptCanonicalizer.swift:5-16`, JCS
 encoder setup and prompt hash input). SPEC-006 already lists `response_format`
 in the buyer API allow-list (`specs/SPEC-006-buyer-api.md:1036-1047`, allowed
 chat-completions request fields).
@@ -57,24 +57,24 @@ follow-on surface promoted after streaming-incremental wire contract stability
 
 v0.2.0 amendment anchors at `47dc2724`: the current provider still rejects
 structured streaming before inference
-(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:220`,
-`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:455-474`), and the
+(`phase3-binary/Sources/malibu-cli/HTTPServer.swift:220`,
+`phase3-binary/Sources/malibu-cli/HTTPServer.swift:455-474`), and the
 coordinator mirrors the `stream:true` rejects
 (`phase4-coordinator/internal/buyer/server.go:3676-3687`). The current
 streaming provider emits OpenAI-style SSE content deltas and terminates success
 with `data: [DONE]`
-(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:520-587`,
-`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:1074-1085`,
-`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:1139-1148`). Current
+(`phase3-binary/Sources/malibu-cli/HTTPServer.swift:520-587`,
+`phase3-binary/Sources/malibu-cli/HTTPServer.swift:1074-1085`,
+`phase3-binary/Sources/malibu-cli/HTTPServer.swift:1139-1148`). Current
 streaming error fallback already writes an error envelope followed by `[DONE]`
 after SSE has started
-(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:588-615`). The
+(`phase3-binary/Sources/malibu-cli/HTTPServer.swift:588-615`). The
 non-streaming structured validator entry point is
 `validateStructuredCompletion`
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:504-510`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:911-939`), while the
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:504-510`,
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:911-939`), while the
 streaming path currently returns an unvalidated final `CompletionResult`
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:520-641`). The v0.1
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:520-641`). The v0.1
 schema subset reject helper rejects all unknown keywords at provider and
 coordinator boundaries
 (`phase3-binary/Sources/MacProviderCore/JSONSchemaValidator.swift:65-67`,
@@ -173,8 +173,8 @@ removes those buyer-visible reject codes from the active error-code table and
 returns HTTP 200 `text/event-stream` for accepted streaming requests. Failure is
 reported, if needed, as a terminal SSE error frame after inference has run. The
 current v0.1 reject sites are the provider pre-stream gate
-(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:220`,
-`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:455-474`) and the
+(`phase3-binary/Sources/malibu-cli/HTTPServer.swift:220`,
+`phase3-binary/Sources/malibu-cli/HTTPServer.swift:455-474`) and the
 coordinator pre-dispatch gate
 (`phase4-coordinator/internal/buyer/server.go:3676-3687`).
 
@@ -186,7 +186,7 @@ response and the SPEC-019 response schema does not apply to
 tool's own JSON Schema. If the model does not emit a tool call, the assistant
 content MUST satisfy this SPEC. Current runtime already performs tool parsing
 only when request tools exist
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:873-886`, tool-call
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:873-886`, tool-call
 parse gate).
 
 ## 2. Acceptance criteria
@@ -278,7 +278,7 @@ levels returns HTTP 400 `json_schema_too_deep` at both provider and coordinator.
 AC-13. Deep-nesting fixture: validation rejects output whose decoded JSON depth
 exceeds `32` with HTTP 502 `json_schema_validation_failed` and
 `FaultBreakerQualifying`; valid depth `32` succeeds. This reuses the SPEC-018
-depth posture (`phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:4-6`,
+depth posture (`phase3-binary/Sources/malibu-cli/ToolCallParser.swift:4-6`,
 public depth and byte constants; `specs/SPEC-018-agentic-tool-calling.md:963-975`,
 SPEC-018 cap table and fail-closed behavior).
 
@@ -288,7 +288,7 @@ AC-14. `response_format: {"type":"json_object"}` constrains the final assistant
 content to valid JSON with top-level object or array. Fail condition: the
 current silent no-op remains, where the field is parsed but never consulted by
 runtime inference (`phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:83`,
-parse field; `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:477-500`,
+parse field; `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:477-500`,
 current non-streaming output handling).
 
 AC-15. `response_format: {"type":"json_schema", ...}` produces assistant
@@ -340,7 +340,7 @@ returns HTTP 200 `text/event-stream` and emits normal OpenAI-compatible SSE
 content deltas. End-of-stream validation runs over the concatenated assistant
 content buffer before success is finalized. Fail condition: either current
 v0.1 reject code remains active
-(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:455-474`,
+(`phase3-binary/Sources/malibu-cli/HTTPServer.swift:455-474`,
 `phase4-coordinator/internal/buyer/server.go:3676-3687`), or the provider
 skips structured validation on the final streaming buffer.
 
@@ -371,7 +371,7 @@ verbatim through `[DONE]` without gateway-side positive / ok settlement and
 without remapping to `stream_malformed` or any other code. Provider,
 coordinator, and gateway behavior MUST each be enforced by a fixture or unit
 test. This leverages the existing provider WS status allow-list precedent at
-`phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:529`, the
+`phase3-binary/Sources/malibu-cli/InferenceRelay.swift:529`, the
 coordinator writer site at
 `phase4-coordinator/internal/buyer/server.go:5150-5170`, and the affected
 gateway normalization site at
@@ -418,8 +418,8 @@ AC-V2-7. Streaming token-incremental `content` deltas concatenate to the same
 assistant content bytes as the non-streaming response for the same deterministic
 fixture, modulo transport chunk boundaries. The provider already computes
 content deltas from `emittedText` to the candidate/final text
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:562-592`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:603-619`); v0.2
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:562-592`,
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:603-619`); v0.2
 requires the validated final buffer to be that same concatenation. Fail
 condition: streaming validation uses bytes that differ from the buyer-visible
 delta concatenation.
@@ -430,7 +430,7 @@ the stream ends with a terminal SSE error frame using
 `malformed_json_response`, `retryable:false`, and an actionable buyer message.
 This is the streaming analogue of AC-18 and reuses the current empty /
 whitespace classification
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:942-956`). Fail
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:942-956`). Fail
 condition: the buyer sees 200 success with empty content, or the error is
 `retryable:true`.
 
@@ -590,11 +590,11 @@ AC-21. Family-prompt rendering fixtures for Qwen3 and Llama-3.3 show the schema
 instruction is injected into the chat-template system position byte-equivalently
 per family. The implementation MUST reuse the modelID-match family mechanism
 used by `ToolPromptRenderer`
-(`phase3-binary/Sources/macprovider-cli/ToolPromptRenderer.swift:37-51`,
+(`phase3-binary/Sources/malibu-cli/ToolPromptRenderer.swift:37-51`,
 family matching) and the existing render hook sites
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:400`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:454`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:540`).
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:400`,
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:454`,
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:540`).
 
 AC-22a. Composite-render empty-tool-history fixture: a request with `tools` and
 `response_format:json_schema`, but no multi-turn tool data, follows the §4
@@ -630,7 +630,7 @@ byte of `response_format.json_schema.schema` changes. This is a no-schema-change
 regression against SPEC-015's `response_format` canonical prompt field
 (`specs/SPEC-015-receipts.md:1191-1204`, canonical prompt object includes
 `response_format`) and current JCS implementation
-(`phase3-binary/Sources/macprovider-cli/PromptCanonicalizer.swift:5-16`, JCS
+(`phase3-binary/Sources/malibu-cli/PromptCanonicalizer.swift:5-16`, JCS
 canonicalizer behavior).
 
 AC-26. Money-path proof: `malformed_json_response` and
@@ -855,12 +855,12 @@ not a substitute for §5 validation.
 Rendering uses the same family key mechanism as SPEC-018 v0.2: modelID
 substring match for Qwen (`qwen2.5` or `qwen3`) and Llama-3.3 (`llama-3.3`), as
 implemented by `ToolPromptRenderer`
-(`phase3-binary/Sources/macprovider-cli/ToolPromptRenderer.swift:37-51`, family
+(`phase3-binary/Sources/malibu-cli/ToolPromptRenderer.swift:37-51`, family
 matching). The render hook lives where `ToolPromptRenderer.renderMessages` is
 currently called before `context.processor.prepare`
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:400`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:454`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:540`). v0.1.0 MUST
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:400`,
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:454`,
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:540`). v0.1.0 MUST
 NOT introduce a model-hash registry.
 
 The injected instruction MUST be placed in the chat-template system position.
@@ -919,9 +919,9 @@ assistant content buffer is validated at end-of-stream.
 ## 5. Validator behavior
 
 After non-streaming inference completes and stop-token filtering has run
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:477-483`,
-non-streaming post-processing; `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:592-599`,
-streaming final post-processing; `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:811-828`,
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:477-483`,
+non-streaming post-processing; `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:592-599`,
+streaming final post-processing; `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:811-828`,
 stop-token filtering), the provider applies this sequence:
 
 1. If valid SPEC-018 tool calls were produced and request tools are enabled,
@@ -964,7 +964,7 @@ mislead the buyer about which field actually failed.
 
 **Empty content under `json_schema` / `json_object`**: if final inference output
 (post stop-token filtering,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:811-828`) is the empty
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:811-828`) is the empty
 string `""`, the response is classified as HTTP 502 `malformed_json_response`
 with `inference_ran:true`, `settlement_ran:true`, `FaultBreakerQualifying`.
 Empty string is not a JSON value.
@@ -1010,11 +1010,11 @@ non-streaming, using the same structured validator semantics; v0.2 relaxes the
 pre-inference `stream:true` reject gate rather than introducing constrained
 decoding. Current non-streaming validation is anchored at
 `validateStructuredCompletion`
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:504-510`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:911-939`), and the
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:504-510`,
+`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:911-939`), and the
 current streaming path already returns the final `CompletionResult` after
 emitting content deltas
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:562-641`).
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:562-641`).
 
 Validation trigger: when the streaming generator is ready to emit its success
 terminal `[DONE]`, the provider first validates the concatenated content buffer.
@@ -1023,18 +1023,18 @@ usage chunk, and `data: [DONE]` success terminal. If validation fails, the
 provider emits a terminal SSE error frame in the SPEC-018 v0.2.4 §10d.4 shape
 and does not emit a success terminal. The current provider success terminal is
 `writeSSEDone()`
-(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:568-587`,
-`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:1084-1089`), and the
+(`phase3-binary/Sources/malibu-cli/HTTPServer.swift:568-587`,
+`phase3-binary/Sources/malibu-cli/HTTPServer.swift:1084-1089`), and the
 current post-start error path already writes `error.envelope` followed by
 `[DONE]`
-(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:588-592`).
+(`phase3-binary/Sources/malibu-cli/HTTPServer.swift:588-592`).
 
 Empty-content and whitespace-only override: the v0.1 empty-content rule applies
 unchanged, except the buyer-visible surface is a terminal SSE error frame rather
 than HTTP 502 after a non-streaming response. Empty string and ASCII
 whitespace-only content map to `malformed_json_response`, `retryable:false`,
 and an actionable buyer-side message
-(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:942-956`).
+(`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:942-956`).
 
 Validator panic / fatal-error catch-all: the v0.1 catch-all posture applies to
 streaming end-of-stream validation. A panic, thrown error, recursion abort,
@@ -1177,7 +1177,7 @@ Structured-output parsing and validation never run on over-cap output; this
 mirrors SPEC-018 §10d.7 fail-closed posture.
 
 Decoded output JSON depth is capped at `32`, matching SPEC-018's public depth
-constant (`phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:4-6`,
+constant (`phase3-binary/Sources/malibu-cli/ToolCallParser.swift:4-6`,
 public depth constant).
 
 v0.2 does not change SPEC-019 schema-size or schema-depth caps. For streaming
@@ -1320,7 +1320,7 @@ Provider-to-coordinator WS streaming terminal validation failure MUST close the
 WS stream with `inference_response_end.status` in `{malformed_json_response,
 json_schema_validation_failed}`, preserve retryability, and omit a receipt. This
 requirement leverages the existing WS end-status allow-list precedent at
-`phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:529`.
+`phase3-binary/Sources/malibu-cli/InferenceRelay.swift:529`.
 
 Coordinator terminal v0.2 SSE error frames for SPEC-019 streaming validation
 failure MUST populate `request_id` and `settlement_ran:true`. The writer site
@@ -1425,7 +1425,7 @@ computed over the raw `response_format` JSON value as received in the request
 body. Defaulted-but-absent fields, notably `strict` defaulting to `true`, are NOT
 folded into the hash. Buyers seeking byte-stable receipts MUST send defaulted
 fields explicitly. This is the JCS-canonicalization contract of
-`phase3-binary/Sources/macprovider-cli/PromptCanonicalizer.swift:5-16` applied
+`phase3-binary/Sources/malibu-cli/PromptCanonicalizer.swift:5-16` applied
 to v0.1.0; a future version MAY fold defaults in but MUST announce the
 migration.
 
@@ -1443,7 +1443,7 @@ from default behavior.
 **v0.2 receipt invariant**: no SPEC-015 schema change is required for streaming
 structured output. `response_format` remains bound into the prompt hash through
 the existing JCS canonical prompt object
-(`phase3-binary/Sources/macprovider-cli/PromptCanonicalizer.swift:5-16`).
+(`phase3-binary/Sources/malibu-cli/PromptCanonicalizer.swift:5-16`).
 Top-level `$schema` bytes count toward `json_schema_max_bytes = 16_384` and are
 JCS-canonicalized into the receipt `prompt_hash` per §9. '`$schema` is ignored'
 refers only to validation-time meta-schema selection -- `$schema` bytes are NOT
@@ -1594,7 +1594,7 @@ v0.2 audit lanes should additionally probe:
     structured-output terminal-error streams. The provider SSE headers are
     currently `content-type`, `cache-control`, `connection`, and
     `transfer-encoding: chunked`
-    (`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:1169-1178`).
+    (`phase3-binary/Sources/malibu-cli/HTTPServer.swift:1169-1178`).
 14. Whether `[DONE]` remains the right transport close marker for both success
     and failure paths when the failure is semantically terminal-error rather
     than successful completion.

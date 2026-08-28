@@ -13,11 +13,11 @@ BINARY=""
 PROVIDER_PID=""
 
 build_binary() {
-  (cd "$PHASE3_DIR" && xcodebuild -scheme macprovider-cli -configuration Debug -destination "$BUILD_DESTINATION" build >/dev/null)
+  (cd "$PHASE3_DIR" && xcodebuild -scheme malibu-cli -configuration Debug -destination "$BUILD_DESTINATION" build >/dev/null)
   local binary_path
-  binary_path="$(find "$HOME/Library/Developer/Xcode/DerivedData" -path "*/Build/Products/Debug/macprovider-cli" -type f -print 2>/dev/null | head -1)"
+  binary_path="$(find "$HOME/Library/Developer/Xcode/DerivedData" -path "*/Build/Products/Debug/malibu-cli" -type f -print 2>/dev/null | head -1)"
   PRODUCTS_DIR="$(dirname "$binary_path")"
-  BINARY="$PRODUCTS_DIR/macprovider-cli"
+  BINARY="$PRODUCTS_DIR/malibu-cli"
   if [[ ! -x "$BINARY" ]]; then
     echo "missing built binary: $BINARY" >&2
     exit 1

@@ -232,7 +232,7 @@ jobs:
           mkdir "$payload"
           tar -xzf "candidate/phase3-binary/dist/phase3-binary-m4-${TAG}.tar.gz" \
             -C "$payload"
-          provider_version="$("$payload/macprovider-cli" --version)"
+          provider_version="$("$payload/malibu-cli" --version)"
           malibu_version="$(/usr/libexec/PlistBuddy \
             -c 'Print :CFBundleShortVersionString' \
             "$RUNNER_TEMP/Malibu.app/Contents/Info.plist")"

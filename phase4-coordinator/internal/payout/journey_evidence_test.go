@@ -134,7 +134,7 @@ func TestPayoutAddressRegistrationJourneyEvidence(t *testing.T) {
 		"oversized_body_test":          "phase3-binary/app/Tests/MalibuTests/PayoutWalletFlowTests.swift:testOversizedBodyRejected",
 		"signer_html_sha256":           fileSHA256(t, root, "phase3-binary/app/Sources/Malibu/Resources/payout-signer/signer.html"),
 		"payout_wallet_flow_sha256":    fileSHA256(t, root, "phase3-binary/app/Sources/Malibu/Dashboard/PayoutWalletFlow.swift"),
-		"payout_cli_client_sha256":     fileSHA256(t, root, "phase3-binary/Sources/macprovider-cli/PayoutAddressClient.swift"),
+		"payout_cli_client_sha256":     fileSHA256(t, root, "phase3-binary/Sources/malibu-cli/PayoutAddressClient.swift"),
 		"private_key_stayed_in_signer": true,
 	})
 
@@ -295,7 +295,7 @@ func TestPayoutAddressRegistrationJourneyEvidence(t *testing.T) {
 			"addresses_go_sha256":           fileSHA256(t, root, "phase4-coordinator/internal/payout/addresses.go"),
 			"eip712_go_sha256":              fileSHA256(t, root, "phase4-coordinator/internal/payout/eip712.go"),
 			"attempts_go_sha256":            fileSHA256(t, root, "phase4-coordinator/internal/payout/attempts.go"),
-			"payout_address_client_sha256":  fileSHA256(t, root, "phase3-binary/Sources/macprovider-cli/PayoutAddressClient.swift"),
+			"payout_address_client_sha256":  fileSHA256(t, root, "phase3-binary/Sources/malibu-cli/PayoutAddressClient.swift"),
 			"payout_wallet_flow_sha256":     fileSHA256(t, root, "phase3-binary/app/Sources/Malibu/Dashboard/PayoutWalletFlow.swift"),
 			"payout_signer_resource_sha256": fileSHA256(t, root, "phase3-binary/app/Sources/Malibu/Resources/payout-signer/signer.html"),
 		},

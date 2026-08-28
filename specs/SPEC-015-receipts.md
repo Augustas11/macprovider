@@ -222,7 +222,7 @@ version-bump exception.
     rewritten to use the heartbeat-reported hash route (the
     existing observability surface visible at Pearl journald
     `model_hash_verified` events; SPEC-011 §3.3.1 wire) rather
-    than a non-existent `macprovider-cli models inspect`
+    than a non-existent `malibu-cli models inspect`
     subcommand. v0.3 does NOT demand a new introspection
     CLI; if implementations want one for ergonomics, that's
     a future SPEC-001 extension, not a v0.3 prereq.
@@ -1033,7 +1033,7 @@ the invariant explicit on the receipt side).
 
 SPEC-013 v0.3 remains the authoritative `autotune` CLI subcommand
 spec. SPEC-015 v0.1 reuses
-`phase3-binary/Sources/macprovider-cli/RFC8785JCS.swift` (added by
+`phase3-binary/Sources/malibu-cli/RFC8785JCS.swift` (added by
 SPEC-013) for canonical encoding; no parallel canonicalizer is
 permitted.
 
@@ -1077,7 +1077,7 @@ v0.1's design choices and their justifications:
   unambiguous canonical form for JSON that survives field-order
   permutations and floating-point representation; the in-house Swift
   implementation at
-  `phase3-binary/Sources/macprovider-cli/RFC8785JCS.swift` is
+  `phase3-binary/Sources/malibu-cli/RFC8785JCS.swift` is
   battle-tested by SPEC-013.
 - **Seven-field tuple.** The set was chosen to cover the four
   buyer-observable claims (model name, prompt content, output content,
@@ -1176,7 +1176,7 @@ fields explicitly.
 Let `T` be the receipt tuple object. The signing input MUST be
 `JCS(T)` as defined by RFC 8785, with the additive profile pinned
 below. The implementation reuses
-`phase3-binary/Sources/macprovider-cli/RFC8785JCS.swift` and MUST
+`phase3-binary/Sources/malibu-cli/RFC8785JCS.swift` and MUST
 extend it with two clearly-named additions:
 
 1. **Object key order:** UTF-16 code-unit lexicographic, per
@@ -3583,7 +3583,7 @@ MLX container at the moment of receipt generation.
 - **MLX container route (alternative — direct binary
   introspection):** compute SHA-256 over the MLX container the
   provider has loaded (same algorithm
-  `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:294-325`
+  `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:294-325`
   uses for the heartbeat report); assert byte-equality with
   `receipt.model_hash`. v0.3 does NOT require a new
   `models inspect` CLI subcommand to expose this; an
@@ -4883,7 +4883,7 @@ M8 finding required explicit per-field justification.
   `RFC8785JCS.swift` from SPEC-013's implementation.
 - RFC 8785 — JSON Canonicalization Scheme.
 - RFC 8032 — EdDSA / ed25519.
-- `phase3-binary/Sources/macprovider-cli/RFC8785JCS.swift` —
+- `phase3-binary/Sources/malibu-cli/RFC8785JCS.swift` —
   in-house JCS implementation.
 
 **v0.3 additional references:**

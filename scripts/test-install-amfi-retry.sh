@@ -2,8 +2,8 @@
 # Hermetic regression guard for install.sh's post-install
 # AMFI/Taskgated SIGKILL retry + inode-refresh helper.
 #
-# Extracts `run_macprovider_cli_with_amfi_retry` from install.sh, wires
-# it against a mock `macprovider-cli` whose exit behavior is scripted
+# Extracts `run_malibu_cli_with_amfi_retry` from install.sh, wires
+# it against a mock `malibu-cli` whose exit behavior is scripted
 # per scenario, and asserts:
 #
 #   1. Happy path: rc 0 first try → helper returns 0, no sleep, no
@@ -91,18 +91,18 @@ awk '
 ' "$INSTALL_SH" > "$lib"
 
 if ! grep -q '^atomic_replace_provider_binary()' "$lib" \
-  || ! grep -q '^run_macprovider_cli_with_amfi_retry()' "$lib"; then
+  || ! grep -q '^run_malibu_cli_with_amfi_retry()' "$lib"; then
   fatal "could not extract atomic replacement and AMFI retry helpers from $INSTALL_SH"
 fi
 
 # shellcheck source=/dev/null
 . "$lib"
 
-# Test rig: INSTALL_DIR must exist and contain a mock macprovider-cli
+# Test rig: INSTALL_DIR must exist and contain a mock malibu-cli
 # whose behavior is controllable per scenario.
 INSTALL_DIR="$workdir/install"
 mkdir -p "$INSTALL_DIR"
-export MACPROVIDER_CLI_EXECUTABLE="$INSTALL_DIR/macprovider-cli"
+export MALIBU_CLI_EXECUTABLE="$INSTALL_DIR/malibu-cli"
 
 # Capture the helper's log output for assertion. `log` is a script-
 # level function in install.sh; the extraction above pulls only the
@@ -130,12 +130,12 @@ PY
 }
 
 install_mock() {
-  # Writes a mock macprovider-cli that follows the given script body.
-  cat > "$INSTALL_DIR/macprovider-cli" <<MOCK
+  # Writes a mock malibu-cli that follows the given script body.
+  cat > "$INSTALL_DIR/malibu-cli" <<MOCK
 #!/usr/bin/env bash
 $1
 MOCK
-  chmod +x "$INSTALL_DIR/macprovider-cli"
+  chmod +x "$INSTALL_DIR/malibu-cli"
 }
 
 COUNTER_FILE="$workdir/counter"
@@ -159,7 +159,7 @@ report() {
 reset_log
 install_mock 'exit 0'
 rc=0
-run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
+run_malibu_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
 report "case1-success-first-try" 0 "$rc"
 report "case1-no-retry-log" 0 "$(log_line_count)"
 
@@ -169,7 +169,7 @@ report "case1-no-retry-log" 0 "$(log_line_count)"
 reset_log
 install_mock 'exit 10'
 rc=0
-run_macprovider_cli_with_amfi_retry autotune --recommend --freshness-check >/dev/null 2>&1 || rc=$?
+run_malibu_cli_with_amfi_retry autotune --recommend --freshness-check >/dev/null 2>&1 || rc=$?
 report "case2-exit-10-stale-passthrough" 10 "$rc"
 report "case2-no-retry-log-on-exit-10" 0 "$(log_line_count)"
 
@@ -186,7 +186,7 @@ if [ \"\$n\" -eq 1 ]; then kill -KILL \$\$; fi
 exit 0
 "
 rc=0
-run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
+run_malibu_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
 report "case3-sigkill-then-success-rc" 0 "$rc"
 if log_contains "Retrying once after 2s"; then
   report "case3-first-retry-log-emitted" yes yes
@@ -207,7 +207,7 @@ reset_log
 rm -f "$COUNTER_FILE"
 install_mock 'kill -KILL $$'
 rc=0
-run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
+run_malibu_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
 report "case4-sigkill-thrice-rc" 137 "$rc"
 if log_contains "Retrying once after 2s"; then
   report "case4-first-retry-log-emitted" yes yes
@@ -231,7 +231,7 @@ fi
 reset_log
 install_mock 'exit 1'
 rc=0
-run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
+run_malibu_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
 report "case5-exit-1-passthrough" 1 "$rc"
 report "case5-no-retry-log-on-exit-1" 0 "$(log_line_count)"
 
@@ -243,7 +243,7 @@ report "case5-no-retry-log-on-exit-1" 0 "$(log_line_count)"
 reset_log
 install_mock 'exit 10'
 inner_rc=-1
-if run_macprovider_cli_with_amfi_retry autotune --recommend --freshness-check >/dev/null 2>&1; then
+if run_malibu_cli_with_amfi_retry autotune --recommend --freshness-check >/dev/null 2>&1; then
   inner_rc=0
 else
   inner_rc=$?
@@ -257,7 +257,7 @@ report "case6-if-else-preserves-original-exit" 10 "$inner_rc"
 reset_log
 install_mock 'exit 2'
 triggered=0
-run_macprovider_cli_with_amfi_retry autotune --recommend --apply --donor-mode >/dev/null 2>&1 || triggered=1
+run_malibu_cli_with_amfi_retry autotune --recommend --apply --donor-mode >/dev/null 2>&1 || triggered=1
 report "case7-or-die-triggered-on-non-zero" 1 "$triggered"
 
 ################################################################
@@ -266,13 +266,13 @@ report "case7-or-die-triggered-on-non-zero" 1 "$triggered"
 ################################################################
 reset_log
 install_mock 'exit 0'
-run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || true
+run_malibu_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || true
 case "$-" in *e*) e_after_success=1 ;; *) e_after_success=0 ;; esac
 report "case8-set-e-preserved-after-success" 1 "$e_after_success"
 
 reset_log
 install_mock 'exit 10'
-if run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1; then :; else :; fi
+if run_malibu_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1; then :; else :; fi
 case "$-" in *e*) e_after_nonzero=1 ;; *) e_after_nonzero=0 ;; esac
 report "case8-set-e-preserved-after-nonzero" 1 "$e_after_nonzero"
 
@@ -294,10 +294,10 @@ if [ \"\$n\" -le 2 ]; then kill -KILL \$\$; fi
 echo \"third-attempt-ok\"
 exit 0
 "
-inode_before="$(inode_of "$INSTALL_DIR/macprovider-cli")"
+inode_before="$(inode_of "$INSTALL_DIR/malibu-cli")"
 rc=0
-out="$(run_macprovider_cli_with_amfi_retry autotune --recommend 2>&1)" || rc=$?
-inode_after="$(inode_of "$INSTALL_DIR/macprovider-cli")"
+out="$(run_malibu_cli_with_amfi_retry autotune --recommend 2>&1)" || rc=$?
+inode_after="$(inode_of "$INSTALL_DIR/malibu-cli")"
 report "case9-sigkill-twice-then-success-rc" 0 "$rc"
 if [ "$inode_before" != "$inode_after" ]; then
   report "case9-inode-changed-after-refresh" changed changed
@@ -339,10 +339,10 @@ echo \"\$n\" > \"$COUNTER_FILE\"
 if [ \"\$n\" -eq 1 ]; then kill -KILL \$\$; fi
 exit 0
 "
-inode_before="$(inode_of "$INSTALL_DIR/macprovider-cli")"
+inode_before="$(inode_of "$INSTALL_DIR/malibu-cli")"
 rc=0
-run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
-inode_after="$(inode_of "$INSTALL_DIR/macprovider-cli")"
+run_malibu_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
+inode_after="$(inode_of "$INSTALL_DIR/malibu-cli")"
 report "case10-flavor1-success-rc" 0 "$rc"
 if [ "$inode_before" = "$inode_after" ]; then
   report "case10-inode-unchanged-on-flavor1-success" same same
@@ -363,7 +363,7 @@ install_body="$(awk '
 # Exact source text is the assertion target.
 # shellcheck disable=SC2016
 if printf '%s\n' "$install_body" | grep -Fq \
-  'atomic_replace_provider_binary "$staging_dir/macprovider-cli" "$real_binary"'; then
+  'atomic_replace_provider_binary "$staging_dir/malibu-cli" "$real_binary"'; then
   report "case11-install-uses-atomic-fresh-inode" yes yes
 else
   report "case11-install-uses-atomic-fresh-inode" yes no
@@ -371,7 +371,7 @@ fi
 # Exact source text is the assertion target.
 # shellcheck disable=SC2016
 if printf '%s\n' "$install_body" | grep -Fq \
-  'cp "$staging_dir/macprovider-cli" "$real_binary"'; then
+  'cp "$staging_dir/malibu-cli" "$real_binary"'; then
   report "case11-install-avoids-in-place-overwrite" no yes
 else
   report "case11-install-avoids-in-place-overwrite" no no
@@ -403,7 +403,7 @@ else
   report "case12-atomic-replacement-inode" changed same
 fi
 report "case12-atomic-replacement-cleanup" 0 \
-  "$(find "$atomic_dir" -maxdepth 1 -name '.macprovider-cli.install.*' | wc -l | tr -d ' ')"
+  "$(find "$atomic_dir" -maxdepth 1 -name '.malibu-cli.install.*' | wc -l | tr -d ' ')"
 
 ################################################################
 # Case 13 — pre-rename source failure leaves the prior target exact.
@@ -424,7 +424,7 @@ report "case13-prior-target-bytes-preserved" "$target_before_sha" \
 report "case13-prior-target-inode-preserved" "$target_before_inode" \
   "$(inode_of "$atomic_dir/target")"
 report "case13-staging-cleanup" 0 \
-  "$(find "$atomic_dir" -maxdepth 1 -name '.macprovider-cli.install.*' | wc -l | tr -d ' ')"
+  "$(find "$atomic_dir" -maxdepth 1 -name '.malibu-cli.install.*' | wc -l | tr -d ' ')"
 
 ################################################################
 # Case 14 — a directory target must fail instead of receiving the
@@ -441,7 +441,7 @@ fi
 report "case14-directory-target-remains-empty" 0 \
   "$(find "$atomic_dir/directory-target" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
 report "case14-staging-cleanup" 0 \
-  "$(find "$atomic_dir" -maxdepth 1 -name '.macprovider-cli.install.*' | wc -l | tr -d ' ')"
+  "$(find "$atomic_dir" -maxdepth 1 -name '.malibu-cli.install.*' | wc -l | tr -d ' ')"
 
 ################################################################
 # Case 15 — the implementation must durably order staged-file fsync,
@@ -493,7 +493,7 @@ reset_log
 install_mock 'kill -KILL $$'
 atomic_replace_provider_binary() { return 10; }
 rc=0
-run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
+run_malibu_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
 report "case17-post-replace-amfi-rc" 137 "$rc"
 if log_contains "replacement occurred but directory durability was unconfirmed"; then
   report "case17-post-replace-log-present" yes yes

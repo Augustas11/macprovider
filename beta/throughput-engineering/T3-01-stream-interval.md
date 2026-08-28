@@ -23,10 +23,10 @@ Implements `streamInterval` — a configurable token-batching parameter that acc
 | File | Change |
 |------|--------|
 | `phase3-binary/Sources/MacProviderCore/Config.swift` | Add `streamInterval: Int` to `AppConfig` (default 1) and `CLIOverrides`; wire YAML key `stream_interval`, env `MACPROVIDER_STREAM_INTERVAL`, CLI `--stream-interval` |
-| `phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift` | `@Option --stream-interval` flag; validation in `runServingKnobsPreflight` (must be ≥1); config dump line |
-| `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift` | Store `streamInterval` from config; pass to `InferenceRelay` init |
-| `phase3-binary/Sources/macprovider-cli/InferenceRelay.swift` | `streamInterval` stored property (nonisolated); batching logic in `processStreaming`; pending content flushed on tool-call delta and at stream end |
-| `phase3-binary/Tests/macprovider-cliTests/StreamIntervalBatchingTests.swift` | 9 tests covering config resolution, relay storage, 1-per-token baseline, 4-token batching, remainder flush, large-interval flush, content fidelity |
+| `phase3-binary/Sources/malibu-cli/MalibuCLI.swift` | `@Option --stream-interval` flag; validation in `runServingKnobsPreflight` (must be ≥1); config dump line |
+| `phase3-binary/Sources/malibu-cli/CoordinatorClient.swift` | Store `streamInterval` from config; pass to `InferenceRelay` init |
+| `phase3-binary/Sources/malibu-cli/InferenceRelay.swift` | `streamInterval` stored property (nonisolated); batching logic in `processStreaming`; pending content flushed on tool-call delta and at stream end |
+| `phase3-binary/Tests/malibu-cliTests/StreamIntervalBatchingTests.swift` | 9 tests covering config resolution, relay storage, 1-per-token baseline, 4-token batching, remainder flush, large-interval flush, content fidelity |
 
 ### Batching logic (InferenceRelay.processStreaming)
 
@@ -107,7 +107,7 @@ stream_interval: 4   # default: 1
 
 ```bash
 # CLI
-macprovider-cli serve --stream-interval 4
+malibu-cli serve --stream-interval 4
 
 # env
 MACPROVIDER_STREAM_INTERVAL=4

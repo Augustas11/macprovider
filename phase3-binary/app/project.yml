@@ -4,7 +4,7 @@
 # scripts/install-pinned-xcodegen.sh.
 # Build:    xcodebuild -project Malibu.xcodeproj -scheme Malibu -configuration Release
 #
-# The CLI binary (macprovider-cli) is built separately from the SwiftPM
+# The CLI binary (malibu-cli) is built separately from the SwiftPM
 # package one directory up, then copied into Contents/MacOS/ at the
 # release-signing step (see SPEC-025 §6.2). Locally, developers build
 # the CLI with `swift build -c release --package-path ..` and set the

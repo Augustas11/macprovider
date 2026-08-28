@@ -117,7 +117,7 @@ live runs use `target.coordinator_db_ssh` / `target.gateway_db_ssh`.
 Other targets supported by editing `target.gateway_url` / `target.coordinator_url`:
 
 - **Local stack (real M-series provider)** — start coordinator+gateway
-  locally, attach `macprovider-cli serve` over WS. Use `coordinator_db_path`
+  locally, attach `malibu-cli serve` over WS. Use `coordinator_db_path`
   + `gateway_db_path` instead of `_ssh` variants for local files.
 - **Local stack (synthetic provider)** — via `test/integration` helpers.
   Best for harness self-validation, but won't catch real-model quirks.

@@ -54,7 +54,7 @@ for distinct server-verified X posts.
 
 The coordinator is authoritative for code validity, redemption, attribution,
 invite balances, serving qualification, social decisions, grants, and audit.
-The launchd-managed `macprovider-cli` is authoritative for provider identity,
+The launchd-managed `malibu-cli` is authoritative for provider identity,
 admission keys, bearer custody, registration, provider process management,
 updates, and local lifecycle status. Malibu is an input, interaction, and
 monitoring surface. It MUST NOT receive the provider bearer, sign provider

@@ -31,7 +31,7 @@ if [ -n "$TMUX_BIN" ] && "$TMUX_BIN" has-session -t mlx 2>/dev/null; then
   "$TMUX_BIN" kill-session -t mlx
   log "  killed tmux session 'mlx'"
 else
-  pkill -f "macprovider-cli --port $PORT" 2>/dev/null && log "  killed macprovider-cli directly" || log "  no macprovider-cli running"
+  pkill -f "malibu-cli --port $PORT" 2>/dev/null && log "  killed malibu-cli directly" || log "  no malibu-cli running"
 fi
 
 log "step 2/4: starting mlx_lm.server on port $PORT"

@@ -12,7 +12,7 @@ struct ProviderLifecycleEventSnapshot: Equatable {
     let operationID: String?
 }
 
-/// Observes a launchd-managed macprovider-cli via local HTTP /v1/health and /v1/status.
+/// Observes a launchd-managed malibu-cli via local HTTP /v1/health and /v1/status.
 enum InstalledProviderMonitor {
     static let supportedContractReaderVersion = 1
 
@@ -110,7 +110,7 @@ enum InstalledProviderMonitor {
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default
     ) -> URL {
-        let fallback = homeDirectory.appendingPathComponent("macprovider/macprovider-cli").standardizedFileURL
+        let fallback = homeDirectory.appendingPathComponent("macprovider/malibu-cli").standardizedFileURL
         let manifestURL = homeDirectory.appendingPathComponent(
             "Library/Application Support/macprovider/install_manifest.json"
         )
@@ -127,8 +127,7 @@ enum InstalledProviderMonitor {
         }
         let candidate = URL(fileURLWithPath: manifest.binaryPath).standardizedFileURL
         let prefix = URL(fileURLWithPath: installPrefix).standardizedFileURL
-        guard candidate.lastPathComponent == "macprovider-cli",
-              candidate.deletingLastPathComponent().path == prefix.path,
+        guard isSupportedProviderExecutable(candidate, installDirectory: prefix),
               isSupportedProviderInstallDirectory(prefix, under: homeDirectory) else {
             return fallback
         }
@@ -148,6 +147,16 @@ enum InstalledProviderMonitor {
     static let watchdogLaunchdLabel = "live.malibu.provider-watchdog"
     static let legacyProviderLaunchdLabel = "live.streamvc.macprovider"
     static let legacyWatchdogLaunchdLabel = "live.streamvc.macprovider-watchdog"
+
+    static func isSupportedProviderExecutable(_ executable: URL, installDirectory: URL) -> Bool {
+        let candidate = executable.standardizedFileURL
+        let prefix = installDirectory.standardizedFileURL
+        guard candidate.deletingLastPathComponent().path == prefix.path else {
+            return false
+        }
+        return candidate.lastPathComponent == "malibu-cli"
+            || candidate.lastPathComponent == "macprovider-cli"
+    }
 
     static func launchdServicePID(
         uid: uid_t = getuid(),
@@ -244,7 +253,16 @@ enum InstalledProviderMonitor {
             homeDirectory: homeDirectory,
             fileManager: fileManager
         )).path
-        let legacyProgram = (alternateProgram ?? homeDirectory.appendingPathComponent(".local/bin/macprovider-cli")).path
+        let legacyPrograms: Set<String> = {
+            var programs = Set<String>()
+            if let alternateProgram {
+                programs.insert(alternateProgram.path)
+            }
+            programs.insert(homeDirectory.appendingPathComponent(".local/bin/malibu-cli").path)
+            programs.insert(homeDirectory.appendingPathComponent(".local/bin/macprovider-cli").path)
+            programs.insert(homeDirectory.appendingPathComponent("macprovider/macprovider-cli").path)
+            return programs
+        }()
         let managedPlist = (expectedPlist ?? homeDirectory
             .appendingPathComponent("Library/LaunchAgents")
             .appendingPathComponent("\(label).plist")).path
@@ -260,13 +278,13 @@ enum InstalledProviderMonitor {
                   plistIdentity.label == label else {
                 return legacyFallback() ?? .notLoaded
             }
-            guard plistIdentity.program == managedProgram || plistIdentity.program == legacyProgram else {
+            guard plistIdentity.program == managedProgram || legacyPrograms.contains(plistIdentity.program) else {
                 return .unexpectedExecutable(path: plistIdentity.program)
             }
             guard isOwnerPrivateExecutable(atPath: plistIdentity.program) else {
                 return .missingExecutable(path: plistIdentity.program)
             }
-            if plistIdentity.program == legacyProgram {
+            if legacyPrograms.contains(plistIdentity.program) {
                 return .legacyExecutable(path: plistIdentity.program)
             }
             return legacyFallback() ?? .notLoaded
@@ -293,13 +311,13 @@ enum InstalledProviderMonitor {
               plistIdentity.program == identity.program else {
             return .unexpectedPlist(path: managedPlist)
         }
-        guard identity.program == managedProgram || identity.program == legacyProgram else {
+        guard identity.program == managedProgram || legacyPrograms.contains(identity.program) else {
             return .unexpectedExecutable(path: identity.program)
         }
         guard isOwnerPrivateExecutable(atPath: identity.program) else {
             return .missingExecutable(path: identity.program)
         }
-        if identity.program == legacyProgram {
+        if legacyPrograms.contains(identity.program) {
             return .legacyExecutable(path: identity.program)
         }
         return .validExecutable
@@ -835,19 +853,19 @@ enum InstalledProviderMonitor {
                     && decodedLifecycleAt != nil
                     && Self.lifecycleStates.contains(decodedLifecycleState ?? "")
                     && decodedLifecycleReason?.isEmpty == false
-                    && decodedLifecycleAuthority == "macprovider_cli"
+                    && ProviderLifecycleAuthority.isAccepted(decodedLifecycleAuthority)
                     && Self.lifecycleWriters.contains(decodedLifecycleWriter ?? "")
                     && decodedOperatorPaused != nil
             case "missing":
                 return decodedLifecycleID == nil
                     && decodedLifecycleState == "failed"
                     && decodedLifecycleReason == "lifecycle_state_missing"
-                    && decodedLifecycleAuthority == "macprovider_cli"
+                    && ProviderLifecycleAuthority.isAccepted(decodedLifecycleAuthority)
             case "invalid":
                 return decodedLifecycleID == nil
                     && decodedLifecycleState == "failed"
                     && decodedLifecycleReason == "lifecycle_state_invalid"
-                    && decodedLifecycleAuthority == "macprovider_cli"
+                    && ProviderLifecycleAuthority.isAccepted(decodedLifecycleAuthority)
             default:
                 return false
             }

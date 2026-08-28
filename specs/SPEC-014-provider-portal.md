@@ -148,7 +148,7 @@
 
 `console.malibu.tech` (frontdoor/console, SPEC-009 v0.1) is the
 buyer-facing surface. The seller side has no web surface today: a
-provider runs `macprovider-cli serve` in a terminal, watches log
+provider runs `malibu-cli serve` in a terminal, watches log
 lines, and may hit `GET /v1/health` for a number. SPEC-014 introduces
 **Provider Portal**, a single-pane, **read-only for dashboard/data views** web
 surface that lets a provider sign in and see THIS machine's coordinator-side status
@@ -1044,10 +1044,10 @@ signals:
   JS still tests `unavailable || unknown`, but the coordinator no longer
   emits `unknown`, so the `unknown` branch is **latent-dead**, not
   removed). Row text: "This machine is currently `<state>`."
-  Remediation hint: "Run `macprovider-cli
+  Remediation hint: "Run `malibu-cli
   status` to inspect local state; if the binary is healthy,
   re-check in a few seconds." Copy-to-clipboard CTA:
-  `macprovider-cli status`. Heartbeat-miss diagnosis ("offline
+  `malibu-cli status`. Heartbeat-miss diagnosis ("offline
   for N seconds, threshold M") is DEFERRED to v0.2 because
   `/v1/pool/check` exposes only the enum, not the heartbeat age.
   See Open Q5.
@@ -1075,7 +1075,7 @@ signals:
   bridge).
 
 Each row MUST carry a one-line remediation hint AND a
-copy-to-clipboard `macprovider-cli` invocation. The portal MUST
+copy-to-clipboard `malibu-cli` invocation. The portal MUST
 NEVER execute commands remotely (§7 non-goals). Each row MUST
 cite its source endpoint + JSON path in §5 table (a) or its
 deferred row in §5 table (c).
@@ -1149,14 +1149,14 @@ not a hard requirement; the card MUST present it as a hint.
 1. **Install** via the `install.sh` one-liner (SPEC-003 §4 /
    FR-C2). The installer itself handles model selection (FR-D2 /
    FR-D2.1) and optionally offers launchd auto-start (FR-C5).
-   `macprovider-cli install` is **not** a real subcommand — verify
+   `malibu-cli install` is **not** a real subcommand — verify
    against SPEC-003 §6.2 before citing any CLI verb; `install` is
    not in that table.
-2. **Verify routable** with `macprovider-cli status` (SPEC-003 §4
+2. **Verify routable** with `malibu-cli status` (SPEC-003 §4
    / FR-C4). Local state comes from the binary's in-process
    metrics; provider tier shown by `status` originates from the
    most recent `hello_ack.tier`.
-3. **(Optional)** "Consider running `macprovider-cli autotune`
+3. **(Optional)** "Consider running `malibu-cli autotune`
    before serving." **AUTOTUNE BANNER PROHIBITED.** SPEC-013 §6 /
    NFR-4 forbids any non-HF egress during autotune (no telemetry,
    no recipe upload). The portal therefore CANNOT render autotune
@@ -1190,7 +1190,7 @@ list of binary releases.
     unless listed in `Access-Control-Expose-Headers`, which
     GitHub does not list).
 - Each entry: version, ship date, expandable release notes, and a
-  copy-to-clipboard `macprovider-cli update` CTA. **Reconciled v0.9:** the shipped
+  copy-to-clipboard `malibu-cli update` CTA. **Reconciled v0.9:** the shipped
   portal inserts the GitHub release body as **raw preformatted text in a `<pre>`
   block, not markdown-rendered** (`index.html`). v0.1 documents the raw-`<pre>`
   behavior; markdown rendering is a future enhancement, not a v0.1 requirement. No
@@ -1395,9 +1395,9 @@ stale `unknown`/200 text — that spec needs its own reconciliation (§10.2). Th
 | A.1 | `provider_id` | paste-bearer: pasted session value (AUTH-1); OAuth: selected ownership record (§2.5.5) | inline text |
 | A.1 | manual refresh button | static UI control; on click, re-issues the A.1 `/v1/pool/check` call (table (a) row) | static button + click handler |
 | A.3 | "Unavailable" row text | literal "This machine is currently `<state>`." (state interpolated from the A.3 table (a) row) | static text with one interpolation |
-| A.3 | "Unavailable" row remediation hint | literal "Run `macprovider-cli status` to inspect local state; if the binary is healthy, re-check in a few seconds." | static text |
-| A.3 | "Unavailable" row copy-to-clipboard CTA | `macprovider-cli status` (SPEC-003 §4 / FR-C4, per SPEC-003 §6.2) | code snippet + copy-to-clipboard |
-| B.3 | per-entry `macprovider-cli update` copy-to-clipboard CTA | SPEC-003 §4 / FR-C3 (per SPEC-003 §6.2) | code snippet + copy-to-clipboard |
+| A.3 | "Unavailable" row remediation hint | literal "Run `malibu-cli status` to inspect local state; if the binary is healthy, re-check in a few seconds." | static text |
+| A.3 | "Unavailable" row copy-to-clipboard CTA | `malibu-cli status` (SPEC-003 §4 / FR-C4, per SPEC-003 §6.2) | code snippet + copy-to-clipboard |
+| B.3 | per-entry `malibu-cli update` copy-to-clipboard CTA | SPEC-003 §4 / FR-C3 (per SPEC-003 §6.2) | code snippet + copy-to-clipboard |
 | E.1 | `provider_id` | paste-bearer: pasted session value; OAuth: selected ownership record (§2.5.5) — also persisted on the Mac at `~/.config/macprovider/provider_id`, SPEC-003 §4 / FR-C2 step 10 | inline text |
 | B.1 | "Apple Silicon Mac (M1, M2, M3, M4)" | SPEC-003 §5 / FR-D1 README block | static card |
 | B.1 | "macOS 14 (Sonoma) or later" | SPEC-003 §5 / FR-D1 README block | static card |
@@ -1405,8 +1405,8 @@ stale `unknown`/200 text — that spec needs its own reconciliation (§10.2). Th
 | B.1 | "Internet connection" | SPEC-003 §5 / FR-D1 README block | static card |
 | B.1a | RAM-to-model sizing table | SPEC-003 §5 / FR-D2 + FR-D2.1 | static table |
 | B.2 step 1 | `install.sh` one-liner | SPEC-003 §4 / FR-C2 | code block + copy-to-clipboard |
-| B.2 step 2 | `macprovider-cli status` snippet | SPEC-003 §4 / FR-C4 (per SPEC-003 §6.2) | code block + copy-to-clipboard |
-| B.2 step 3 | `macprovider-cli autotune` snippet | SPEC-013 §7 (CLI surface summary) | code block + copy-to-clipboard |
+| B.2 step 2 | `malibu-cli status` snippet | SPEC-003 §4 / FR-C4 (per SPEC-003 §6.2) | code block + copy-to-clipboard |
+| B.2 step 3 | `malibu-cli autotune` snippet | SPEC-013 §7 (CLI surface summary) | code block + copy-to-clipboard |
 | C.2 | "Fiat payout rail not yet specified — future spec." | SPEC-005 §1.3 + §2.1 D1 + Open Q3 | static badge |
 | D placeholder card | "Monitoring — coming after SPEC-002 amendment" + 3 bullets | Open Q5 + privacy-redaction policy TBD | static card |
 | E.1 | coordinator base URL | `portal-config.json.coordinator_base_url` (AUTH-3) | inline text |
@@ -1562,7 +1562,7 @@ Layered, NOT a flat checklist. Six required groups.
 - [ ] A.3 renders one row when `/v1/pool/check.state ==
       "unavailable"`, with the literal text "This machine is
       currently `<state>`." and a copy-to-clipboard
-      `macprovider-cli status` CTA. (`degraded` does not trigger this
+      `malibu-cli status` CTA. (`degraded` does not trigger this
       row — see the §4.1 pill note; a missing-provider 404 sets
       `state.pool.err` but is not surfaced by the header, and is not
       this row and not §2.2.)
@@ -1581,7 +1581,7 @@ Layered, NOT a flat checklist. Six required groups.
 - [ ] B.1a renders the FR-D2 sizing card adjacent to B.1.
 - [ ] B.2 step 1 cites SPEC-003 §4 / FR-C2 and renders the
       `install.sh` one-liner.
-- [ ] B.2 step 2 renders the `macprovider-cli status` snippet
+- [ ] B.2 step 2 renders the `malibu-cli status` snippet
       with a copy-to-clipboard control and cites SPEC-003 §4 /
       FR-C4 (per the §5 table (b) row).
 - [ ] B.2 step 3 does NOT render an autotune-results banner (only
@@ -1879,7 +1879,7 @@ not yet available.
 
 ### Q2 — Releases repository + GitHub API rate limit + CORS posture
 
-- **Question:** Which GitHub repo hosts `macprovider-cli`
+- **Question:** Which GitHub repo hosts `malibu-cli`
   releases (current or `macprovider-releases`)?
 - **Why:** B.3 polls GitHub Releases for the version feed;
   unauthenticated browser polling is capped at 60 req/IP/hr;

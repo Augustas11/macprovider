@@ -83,7 +83,7 @@ NAX kernels compiled:
 ## Step 3 — Artifact check (minimal staging tarball)
 
 Staged tarball using:
-- Binary: `phase3-binary/.build/arm64-apple-macosx/release/macprovider-cli` (v1.8.16)
+- Binary: `phase3-binary/.build/arm64-apple-macosx/release/malibu-cli` (v1.8.16)
 - Metallib: `mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib` copied as `mlx.metallib` (as `package.sh` does)
 
 ```bash
@@ -176,7 +176,7 @@ The pre-compiled bundle `default.metallib` (Metal 1.2.7, pre-SDK-26.2) does not 
 |----------|---------|-------|
 | Script-built `mlx.metallib` (mlx-swift 0.31.6, Metal 400, SDK 26.5, 38 kernels) | `90c9a8af18123b2f84c17e5e85d31e356e24df69dea5639c9e4aa439a4985274` | Fallback path; debug build; 125 MB |
 | Bundle `default.metallib` (pre-compiled, Metal 1.2.7, 32 kernels) | `7fec3dfb951564f9862bbabfaaec485cf71ab08ee75c395d4200746236ee5c8e` | Production path via package.sh; 2.8 MB |
-| Staging tarball (`macprovider-cli` v1.8.16 + bundle metallib) | `504aef00f7fb4711909ef7c6e010e3a21f64888867d44c64f964b8941feb1309` | Artifact check input |
+| Staging tarball (`malibu-cli` v1.8.16 + bundle metallib) | `504aef00f7fb4711909ef7c6e010e3a21f64888867d44c64f964b8941feb1309` | Artifact check input |
 
 ---
 

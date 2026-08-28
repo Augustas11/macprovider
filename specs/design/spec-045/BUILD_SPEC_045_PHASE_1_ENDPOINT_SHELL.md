@@ -4,7 +4,7 @@ Implement the non-proxying local endpoint shell for SPEC-045. This slice establi
 
 ## Target result
 
-`macprovider-cli consume` starts a macOS loopback-only HTTP/1.1 process, prints redacted setup information, writes a user-private active endpoint descriptor, supports `macprovider-cli consume status`, and loads the upstream buyer credential through the SPEC-045 source order without exposing token material.
+`malibu-cli consume` starts a macOS loopback-only HTTP/1.1 process, prints redacted setup information, writes a user-private active endpoint descriptor, supports `malibu-cli consume status`, and loads the upstream buyer credential through the SPEC-045 source order without exposing token material.
 
 ## Required implementation shape
 
@@ -42,7 +42,7 @@ Implement the non-proxying local endpoint shell for SPEC-045. This slice establi
    - concurrent local endpoint instances fail with `local_active_endpoint_exists`;
    - stale descriptors are ignored using process id plus launch id.
 
-6. Implement `macprovider-cli consume status` without proxying:
+6. Implement `malibu-cli consume status` without proxying:
    - idle/no endpoint returns nonzero `local_endpoint_not_running`;
    - active status reports schema version, launch id, bound URL, upstream origin, credential-source class, credential state, model allowlist, local-auth state, budget placeholders, ledger path class, active request count, pricing trust placeholder, no-store status semantics, and redacted error ring shape;
    - no raw token, prompt, completion, credential path, receipt, upstream body, hostname, OS username, hardware serial, MAC address, stable hardware UUID, or interface name appears in status.

@@ -59,7 +59,7 @@ at the binary layer. The real gaps:
 
 | Gap | Location | Effect |
 |---|---|---|
-| G-1 | Provider binary: 1 model per process, chosen at startup ([SPEC-001 §6.2](SPEC-001-phase3-binary.md), [MacProviderCLI.swift:18](../phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift)) | Operator must restart to change model |
+| G-1 | Provider binary: 1 model per process, chosen at startup ([SPEC-001 §6.2](SPEC-001-phase3-binary.md), [MalibuCLI.swift:18](../phase3-binary/Sources/malibu-cli/MalibuCLI.swift)) | Operator must restart to change model |
 | G-2 | WS auth: single `model_id`, no `supported_models[]` ([messages.go:8](../phase4-coordinator/internal/ws/messages.go)) | Coordinator only knows what is warm |
 | G-3 | Coordinator `Provider` struct: same — single `ModelID` ([provider.go:50](../phase4-coordinator/internal/pool/provider.go)) | Router cannot match "find a provider that supports X" |
 | G-4 | Gateway dispatch rewrites `body.model` (SPEC-004 Entry 35 workaround) | Class-alias workaround for the missing capability negotiation |
@@ -906,8 +906,8 @@ Phase 1 (gates v0.2 implementation):
 - [SPEC-006 v0.8.1](SPEC-006-buyer-api.md) §F-1.5
 - [SPEC-010 round-1 audit](../audits/spec-010/SPEC-010-audit.md) (Codex GPT-5,
   2026-06-06)
-- [phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift](../phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift)
-- [phase3-binary/Sources/macprovider-cli/ModelRuntime.swift](../phase3-binary/Sources/macprovider-cli/ModelRuntime.swift)
+- [phase3-binary/Sources/malibu-cli/MalibuCLI.swift](../phase3-binary/Sources/malibu-cli/MalibuCLI.swift)
+- [phase3-binary/Sources/malibu-cli/ModelRuntime.swift](../phase3-binary/Sources/malibu-cli/ModelRuntime.swift)
 - [phase4-coordinator/internal/ws/messages.go](../phase4-coordinator/internal/ws/messages.go)
 - [phase4-coordinator/internal/pool/provider.go](../phase4-coordinator/internal/pool/provider.go)
 - [phase5-gateway/internal/router/server.go](../phase5-gateway/internal/router/server.go)

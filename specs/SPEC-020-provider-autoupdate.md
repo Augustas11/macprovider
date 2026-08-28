@@ -40,7 +40,7 @@ backups, live release bytes, watchdog scripts, plists, or Malibu app artifacts.
 
 ## Goal
 
-SPEC-020 v0.1.11 defines provider-side autoupdate for `macprovider-cli`.
+SPEC-020 v0.1.11 defines provider-side autoupdate for `malibu-cli`.
 When the coordinator advertises a newer `recommended_binary_version`, the
 provider auto-invokes the existing `SelfUpdate` validation and replacement
 flow, subject to explicit throttling, opt-out, drain, rollback, and
@@ -56,7 +56,7 @@ forward progress may also invoke the signed recovery rail, so an accepted-but-st
 session is not left without a self-heal path.
 
 The baseline implementation already has a mature manual update path in
-`phase3-binary/Sources/macprovider-cli/SelfUpdate.swift`: GitHub Releases
+`phase3-binary/Sources/malibu-cli/SelfUpdate.swift`: GitHub Releases
 lookup, GitHub-host URL validation, ECDSA P-256 signature verification for
 `checksums.txt`, SHA-256 tarball verification, tar path-traversal rejection,
 new-binary `self-test`, POSIX `rename(2)` replacement, launchd restart, and a
@@ -75,7 +75,7 @@ session lifecycle; it does not replace the cryptographic update mechanism.
 - Coordinator-side policy for choosing
   `coordinator_advertised_version.latest_binary_version`. The operator sets
   it; this SPEC defines only provider behavior after observing it.
-- Replacing the existing manual `macprovider-cli update` command.
+- Replacing the existing manual `malibu-cli update` command.
 
 Convergence boundary: SPEC-020 guarantees convergence to latest only for
 default-installed, launchd-managed providers with autoupdate enabled and CLI
@@ -319,7 +319,7 @@ back to an older located transport.
 **Frozen v1.8.55 bridge.** CLI v1.8.55 shipped with discovery fixed to the
 `release-discovery` tag. GitHub made that release immutable, so neither its
 assets nor tag can advance, and deletion would permanently tombstone the tag.
-Therefore ordinary coordinator-independent `macprovider-cli update` from
+Therefore ordinary coordinator-independent `malibu-cli update` from
 v1.8.55 cannot discover the first append-only transport release. Exactly one
 supported trust-preserving bridge is required: either an already-authenticated
 coordinator recommendation resolving the exact signed numeric release, or an
@@ -379,7 +379,7 @@ the same target version using
 v0.1.0.
 
 **SPEC-020-R002 — Keep manual recovery independent of coordinator state.** The
-manual `macprovider-cli update` command MUST work without a live, accepted, or
+manual `malibu-cli update` command MUST work without a live, accepted, or
 cached coordinator compatibility admission. It MAY ignore the automatic-update
 session-attempt throttle, but it MUST enforce every cryptographic, archive,
 signed compatibility-manifest, downgrade, revocation, mutation-lock, activation,
@@ -480,8 +480,8 @@ R-2.5. The provider MUST refuse release assets whose download URLs are not
 HTTPS and GitHub-hosted according to the existing SelfUpdate trust boundary.
 
 R-2.6. The provider MUST refuse archives containing absolute paths,
-path-traversal entries, symlink replacement of `macprovider-cli`, missing
-`macprovider-cli`, multiple candidate binaries, or a non-executable candidate
+path-traversal entries, symlink replacement of `malibu-cli`, missing
+`malibu-cli`, multiple candidate binaries, or a non-executable candidate
 binary.
 
 R-2.7. The provider MUST refuse the update if the downloaded tarball SHA-256
@@ -724,14 +724,14 @@ Behavior:
     `marker_deadline_future_beyond_tolerance` for forensic correlation.
 
 R-4.7. The binary rollback backup path MUST be
-`<binary-dir>/.macprovider-cli.rollback-<update_id>`. Directory ancestry for
+`<binary-dir>/.malibu-cli.rollback-<update_id>`. Directory ancestry for
 the backup MUST have mode 0700 and MUST be owned by the provider UID. The
 backup MUST be the exact current executable bytes, stored on the same
 filesystem as the live binary, and its SHA-256 MUST match the `sha256` recorded
 in the pending marker. Rollback-backup temp files MUST use
 `O_CREAT|O_EXCL|O_NOFOLLOW` on create, `fsync()` file plus parent directory,
 then atomic rename. The adjacent-resource snapshot MUST use
-`<binary-dir>/.macprovider-cli.release-rollback-<update_id>` and its
+`<binary-dir>/.malibu-cli.release-rollback-<update_id>` and its
 deterministic tree digest MUST match `release_backup_sha256` before restore.
 
 R-4.8. Marker, binary backup, and release snapshot entries MUST be opened with
@@ -793,13 +793,13 @@ success, the observer executes the following ordered sequence. Each step MUST
 complete, or its absence MUST be safely recoverable, before the next:
 
 1. **Write success sentinel.** Atomically create
-   `<binary-dir>/.macprovider-cli.success-<update_id>` with
+   `<binary-dir>/.malibu-cli.success-<update_id>` with
    `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, containing the JSON
    `{"update_id":"<uuid>","binary_version":"<NORMALIZED_TARGET>","target_compatibility_set_id":"<set-id>","target_compatibility_set_sha256":"<64-hex>","success_at":"<RFC3339>"}`.
    `fsync()` the file and parent directory, then atomic rename to final name.
 2. **Unlink `pending.json`** via `unlink()`.
 3. **Delete rollback backup** at
-   `<binary-dir>/.macprovider-cli.rollback-<update_id>` via `unlink()`.
+   `<binary-dir>/.malibu-cli.rollback-<update_id>` via `unlink()`.
 4. **Release mutation ownership** by closing the inner `update.lock` fd, then
    closing the outer `install.lock` fd. Lockfile cleanup MUST NOT create an
    unlocked-inode race; implementations MAY retain stable lock inodes.
@@ -808,7 +808,7 @@ complete, or its absence MUST be safely recoverable, before the next:
 **Crash recovery semantics.** On every provider startup (before coordinator
 handshake), the observer MUST scan for a success sentinel:
 
-- If `<binary-dir>/.macprovider-cli.success-<update_id>` exists AND its
+- If `<binary-dir>/.malibu-cli.success-<update_id>` exists AND its
   embedded `binary_version`, `target_compatibility_set_id`, and
   `target_compatibility_set_sha256` match the current binary component version
   and the reverified local signed compatibility-set manifest: this is a delayed
@@ -882,7 +882,7 @@ config file or environment disables autoupdate, the provider MUST NOT attempt
 autoupdate, even when the coordinator advertises a newer version. Explicit
 disabled wins over any enabled value from another source.
 
-R-5.4. Opt-out MUST NOT disable manual `macprovider-cli update`; manual update
+R-5.4. Opt-out MUST NOT disable manual `malibu-cli update`; manual update
 remains an explicit operator action.
 
 R-5.5. When autoupdate is disabled by opt-out, the provider MAY continue to log
@@ -1030,7 +1030,7 @@ the next heartbeat or state update includes `last_autoupdate_event` with a
 bounded structured object reflecting the latest phase and outcome.
 
 AC-V0.1-12. Manual update recovery: with the coordinator unreachable or
-rejecting the installed version, `macprovider-cli update` discovers and
+rejecting the installed version, `malibu-cli update` discovers and
 installs a strictly newer signed release using its signed compatibility
 manifest without fresh or cached coordinator admission. Opt-out configuration
 does not prevent the manual update.

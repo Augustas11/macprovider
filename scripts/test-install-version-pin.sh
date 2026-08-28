@@ -108,7 +108,7 @@ ACCEPTANCE_METADATA_PATH=""
 ACCEPTANCE_METADATA_SIGNATURE_PATH=""
 DOWNLOAD_LOG="$workdir/downloads.log"
 LOG_FILE="$workdir/log.out"
-BINARY_PATH="$workdir/installed-macprovider-cli"
+BINARY_PATH="$workdir/installed-malibu-cli"
 INSTALL_DIR="$workdir"
 
 log() { printf '%s\n' "$*" >> "$LOG_FILE"; }
@@ -205,7 +205,7 @@ reset_mocks() {
   MOCK_SHA="goodhash"
   MOCK_SIGNATURE_FAIL=0
   MOCK_REAL_SHA=0
-  MOCK_CHECKSUMS="goodhash macprovider-cli-v1.7.11-darwin-arm64.pkg"
+  MOCK_CHECKSUMS="goodhash malibu-cli-v1.7.11-darwin-arm64.pkg"
   MOCK_RELEASES_JSON='[{"tag_name":"v1.8.0","prerelease":true},{"tag_name":"verify-v1.0.0","prerelease":false},{"tag_name":"v1.7.11","prerelease":false}]'
   MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.33"}'
   unset MACPROVIDER_VERSION MACPROVIDER_ACCEPTANCE_ASSET_DIR MACPROVIDER_ACCEPTANCE_COMMIT
@@ -229,7 +229,7 @@ reset_mocks
 MACPROVIDER_VERSION="v1.7.11"
 run_release_chain
 report "case1-pinned-url" \
-  "https://github.com/Augustas11/macprovider/releases/download/v1.7.11/macprovider-cli-v1.7.11-darwin-arm64.pkg" \
+  "https://github.com/Augustas11/macprovider/releases/download/v1.7.11/malibu-cli-v1.7.11-darwin-arm64.pkg" \
   "$(cat "$DOWNLOAD_LOG")"
 report "case1-validation-chain-called" 1 "$VALIDATE_CALLED"
 
@@ -285,7 +285,7 @@ rc=0
 ( run_release_chain ) >/dev/null 2>&1 || rc=$?
 report "case6-checksum-mismatch-fails" 4 "$rc"
 report "case6-pinned-only-download" \
-  "https://github.com/Augustas11/macprovider/releases/download/v1.7.11/macprovider-cli-v1.7.11-darwin-arm64.pkg" \
+  "https://github.com/Augustas11/macprovider/releases/download/v1.7.11/malibu-cli-v1.7.11-darwin-arm64.pkg" \
   "$(cat "$DOWNLOAD_LOG")"
 
 ################################################################
@@ -336,7 +336,7 @@ report "case10-emergency-rejects-incompatible-floor" 7 "$rc"
 # Case 11 — only explicit emergency rollback accepts a signed legacy
 # payload shape; path allowlisting remains unchanged.
 ################################################################
-legacy_entries=$'macprovider-cli\nmlx-swift_Cmlx.bundle\nmlx-swift_Cmlx.bundle/Contents\nmlx-swift_Cmlx.bundle/Contents/Resources\nmlx-swift_Cmlx.bundle/Contents/Resources/default.metallib'
+legacy_entries=$'malibu-cli\nmlx-swift_Cmlx.bundle\nmlx-swift_Cmlx.bundle/Contents\nmlx-swift_Cmlx.bundle/Contents/Resources\nmlx-swift_Cmlx.bundle/Contents/Resources/default.metallib'
 reset_mocks
 rc=0
 ( validate_staged_entries "$legacy_entries" "legacy fixture" ) >/dev/null 2>&1 || rc=$?
@@ -522,10 +522,10 @@ done
 ################################################################
 acceptance_dir="$workdir/acceptance-v1.8.33"
 mkdir -m 700 "$acceptance_dir"
-printf 'goodhash macprovider-cli-v1.8.33-darwin-arm64.pkg\n' > "$acceptance_dir/checksums.txt"
+printf 'goodhash malibu-cli-v1.8.33-darwin-arm64.pkg\n' > "$acceptance_dir/checksums.txt"
 printf '{}\n' > "$acceptance_dir/acceptance-candidate.json"
 printf 'signature\n' > "$acceptance_dir/acceptance-candidate.json.sig"
-printf 'candidate-package\n' > "$acceptance_dir/macprovider-cli-v1.8.33-darwin-arm64.pkg"
+printf 'candidate-package\n' > "$acceptance_dir/malibu-cli-v1.8.33-darwin-arm64.pkg"
 chmod 600 "$acceptance_dir"/*
 
 reset_mocks
@@ -666,7 +666,7 @@ report "case21-installed-version-does-not-rewrite-target" "v1.8.33" "$observed_t
 # Case 21b — the installed compatibility preflight follows the normal
 # ~/.local/bin symlink to the real support-directory provider binary.
 ################################################################
-REAL_INSTALLED_BINARY="$INSTALL_DIR/macprovider-cli"
+REAL_INSTALLED_BINARY="$INSTALL_DIR/malibu-cli"
 cat > "$REAL_INSTALLED_BINARY" <<'SCRIPT'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -757,11 +757,11 @@ case "${1:-}" in
   release-payload-preflight)
     if [ "${MOCK_LEGACY_PREFLIGHT_VARIANT:-exact}" = "altered" ]; then
       printf "Error: Unknown option '--config'\n" >&2
-      printf 'Usage: macprovider-cli credentials <subcommand>\n' >&2
+      printf 'Usage: malibu-cli credentials <subcommand>\n' >&2
     else
       printf "Error: Unknown option '--config'\n" >&2
-      printf 'Usage: macprovider-cli credentials <subcommand>\n' >&2
-      printf "  See 'macprovider-cli credentials --help' for more information.\n" >&2
+      printf 'Usage: malibu-cli credentials <subcommand>\n' >&2
+      printf "  See 'malibu-cli credentials --help' for more information.\n" >&2
     fi
     exit "${MOCK_LEGACY_PREFLIGHT_EXIT:-2}"
     ;;
@@ -885,22 +885,22 @@ rm -f "$BINARY_PATH" "$REAL_INSTALLED_BINARY"
 ################################################################
 staging_dir="$workdir/staging"
 mkdir -p "$staging_dir"
-cat > "$staging_dir/macprovider-cli" <<'SCRIPT'
+cat > "$staging_dir/malibu-cli" <<'SCRIPT'
 #!/usr/bin/env bash
 printf '1.8.40\n'
 SCRIPT
-chmod +x "$staging_dir/macprovider-cli"
+chmod +x "$staging_dir/malibu-cli"
 rc=0
 ( validate_staged_acceptance_provider_component 1.8.40 ) >/dev/null 2>&1 || rc=$?
 report "case21d-staged-provider-matches-signed-component" 0 "$rc"
 rc=0
 ( validate_staged_acceptance_provider_component 1.8.41 ) >/dev/null 2>&1 || rc=$?
 report "case21d-staged-provider-mismatch-rejected" 5 "$rc"
-cat > "$staging_dir/macprovider-cli" <<'SCRIPT'
+cat > "$staging_dir/malibu-cli" <<'SCRIPT'
 #!/usr/bin/env bash
 printf '1.8.4\n0\n'
 SCRIPT
-chmod +x "$staging_dir/macprovider-cli"
+chmod +x "$staging_dir/malibu-cli"
 rc=0
 ( validate_staged_acceptance_provider_component 1.8.40 ) >/dev/null 2>&1 || rc=$?
 report "case21d-staged-provider-multiline-version-rejected" 5 "$rc"

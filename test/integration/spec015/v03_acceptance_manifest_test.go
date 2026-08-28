@@ -19,9 +19,9 @@ var spec015V03ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --filter ReceiptBuilderTests"},
 		CIJobs:   []string{"phase3-binary (swift test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/ReceiptBuilderTests.swift", "v03TupleKeys"},
-			{"phase3-binary/Tests/macprovider-cliTests/ReceiptBuilderTests.swift", "testCanonicalTupleIsAlphabeticalUtf16Order"},
-			{"phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift", "receiptVersionV03"},
+			{"phase3-binary/Tests/malibu-cliTests/ReceiptBuilderTests.swift", "v03TupleKeys"},
+			{"phase3-binary/Tests/malibu-cliTests/ReceiptBuilderTests.swift", "testCanonicalTupleIsAlphabeticalUtf16Order"},
+			{"phase3-binary/Sources/malibu-cli/ReceiptBuilder.swift", "receiptVersionV03"},
 		},
 	},
 	{
@@ -31,8 +31,8 @@ var spec015V03ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --filter HTTPServerReceiptTests"},
 		CIJobs:   []string{"phase3-binary (swift test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testHTTPSuccessReceiptCarriesWarmSwapHash"},
-			{"phase3-binary/Sources/macprovider-cli/ModelRuntime.swift", "completeWithServedSnapshot"},
+			{"phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift", "testHTTPSuccessReceiptCarriesWarmSwapHash"},
+			{"phase3-binary/Sources/malibu-cli/ModelRuntime.swift", "completeWithServedSnapshot"},
 		},
 	},
 	{
@@ -42,8 +42,8 @@ var spec015V03ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --filter ReceiptBuilderTests"},
 		CIJobs:   []string{"phase3-binary (swift test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/ReceiptBuilderTests.swift", "testBuildEmitsJSONNullForAbsentModelHash"},
-			{"phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift", "modelHashValue = .null"},
+			{"phase3-binary/Tests/malibu-cliTests/ReceiptBuilderTests.swift", "testBuildEmitsJSONNullForAbsentModelHash"},
+			{"phase3-binary/Sources/malibu-cli/ReceiptBuilder.swift", "modelHashValue = .null"},
 		},
 	},
 	{
@@ -53,8 +53,8 @@ var spec015V03ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --filter HTTPServerReceiptTests"},
 		CIJobs:   []string{"phase3-binary (swift test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testHTTPErrorReceiptInheritsWarmSwapHash"},
-			{"phase3-binary/Sources/macprovider-cli/HTTPServer.swift", "modelHashSource: fallbackHashSource"},
+			{"phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift", "testHTTPErrorReceiptInheritsWarmSwapHash"},
+			{"phase3-binary/Sources/malibu-cli/HTTPServer.swift", "modelHashSource: fallbackHashSource"},
 		},
 	},
 	{
@@ -189,9 +189,9 @@ var spec015V03ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --filter 'HTTPServerReceiptTests/testHTTPReceiptRefusedOnAmbiguousProvenance|HTTPServerReceiptTests/testHTTPAmbiguousProvenanceEmitsReceiptOmittedAudit|HTTPServerReceiptTests/testHTTPReceiptEmittedForNormalInFlightSwap'"},
 		CIJobs:   []string{"phase3-binary (swift test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testHTTPReceiptRefusedOnAmbiguousProvenance"},
-			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testHTTPAmbiguousProvenanceEmitsReceiptOmittedAudit"},
-			{"phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift", "ReceiptModelHashSource"},
+			{"phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift", "testHTTPReceiptRefusedOnAmbiguousProvenance"},
+			{"phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift", "testHTTPAmbiguousProvenanceEmitsReceiptOmittedAudit"},
+			{"phase3-binary/Sources/malibu-cli/ReceiptBuilder.swift", "ReceiptModelHashSource"},
 		},
 	},
 }

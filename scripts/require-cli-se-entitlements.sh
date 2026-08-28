@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fail if a signed macprovider-cli carries restricted entitlements.
+# Fail if a signed malibu-cli carries restricted entitlements.
 # Developer ID naked CLIs cannot embed a provisioning profile; AMFI SIGKILLs
 # keychain-access-groups / application-identifier without one (v1.8.96).
 # Unsigned local/CI builds and 1.8.93-style empty blobs are expected.
@@ -7,7 +7,7 @@ set -euo pipefail
 
 binary="${1:-}"
 if [[ -z "$binary" || ! -f "$binary" ]]; then
-  printf '[require-cli-se-entitlements] ERROR: missing macprovider-cli path\n' >&2
+  printf '[require-cli-se-entitlements] ERROR: missing malibu-cli path\n' >&2
   exit 1
 fi
 

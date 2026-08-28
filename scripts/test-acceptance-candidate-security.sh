@@ -110,7 +110,7 @@ for value in (
     'strings "$RUNNER_TEMP/gateway-linux-amd64" > "$RUNNER_TEMP/gateway-strings.txt"',
     'grep -Fq "$TAG" "$RUNNER_TEMP/coordinator-strings.txt"',
     'grep -Fq "$TAG" "$RUNNER_TEMP/gateway-strings.txt"',
-    'provider_version="$("$payload/macprovider-cli" --version)"',
+    'provider_version="$("$payload/malibu-cli" --version)"',
     '--expected-provider-cli-version "$provider_version"',
     '--expected-malibu-app-version "$malibu_version"',
 ):
@@ -204,15 +204,15 @@ if signer.find('release_assets+=("$output_dir/release-provenance.json")') > sign
     raise SystemExit("acceptance asset selector is emitted before the provenance asset is included")
 if signer.find('"$output_dir/release-assets.txt"') > signer.find('build-checksums'):
     raise SystemExit("acceptance asset selector is emitted after signed checksum construction")
-if re.search(r'\$cli_work/macprovider-cli["}]?\s+--', signer):
+if re.search(r'\$cli_work/malibu-cli["}]?\s+--', signer):
     raise SystemExit("protected signer executes the candidate CLI")
 if "codesign --force --deep" in signer:
     raise SystemExit("acceptance signer must preserve the already-signed embedded CLI bytes")
-if "--entitlements phase3-binary/dist/macprovider-cli.entitlements" in signer:
+if "--entitlements phase3-binary/dist/malibu-cli.entitlements" in signer:
     raise SystemExit("acceptance signer must not attach CLI keychain-access-groups entitlements")
 if "require-cli-se-entitlements.sh" not in signer:
     raise SystemExit("acceptance signer must prove the signed CLI has no restricted entitlements")
-if signer.count('shasum -a 256 "$app/Contents/MacOS/macprovider-cli"') != 2:
+if signer.count('shasum -a 256 "$app/Contents/MacOS/malibu-cli"') != 2:
     raise SystemExit("acceptance signer must prove embedded CLI bytes before and after outer app signing")
 for value in (
     'cp -R "$cli_work/compatibility-set-local" "$app/Contents/Resources/compatibility-set-local"',
@@ -413,10 +413,10 @@ fi
 grep -q 'digest mismatch for gateway-linux-amd64' "$work/tamper.out"
 
 mkdir -p "$work/provider/catalog-release" "$work/provider/compatibility-set-local"
-for name in THIRD-PARTY-NOTICES.txt compatibility-set.json macprovider-cli mlx.metallib; do
+for name in THIRD-PARTY-NOTICES.txt compatibility-set.json malibu-cli mlx.metallib; do
   printf 'fixture:%s\n' "$name" > "$work/provider/$name"
 done
-chmod 755 "$work/provider/macprovider-cli"
+chmod 755 "$work/provider/malibu-cli"
 for name in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig; do
   printf 'fixture:%s\n' "$name" > "$work/provider/catalog-release/$name"
 done

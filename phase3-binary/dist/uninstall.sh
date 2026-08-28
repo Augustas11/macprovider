@@ -5,7 +5,9 @@ set -euo pipefail
 
 INSTALL_DIR="$HOME/macprovider"
 BIN_DIR="$HOME/.local/bin"
-BINARY_PATH="$BIN_DIR/macprovider-cli"
+BINARY_PATH="$BIN_DIR/malibu-cli"
+LEGACY_BINARY_PATH="$BIN_DIR/macprovider-cli"
+LEGACY_INSTALL_BINARY_PATH="$INSTALL_DIR/macprovider-cli"
 PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider.plist"
 LEGACY_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
@@ -61,6 +63,13 @@ print(os.path.realpath(os.path.expanduser(sys.argv[1])))
 PY
 }
 
+normalize_literal_path() {
+  python3 - "$1" <<'PY'
+import os, sys
+print(os.path.abspath(os.path.normpath(os.path.expanduser(sys.argv[1]))))
+PY
+}
+
 manifest_json_value() {
   key="$1"
   [ -f "$MANIFEST_PATH" ] || return 1
@@ -89,6 +98,17 @@ allowed_remove_path() {
   return 1
 }
 
+allowed_remove_literal_path() {
+  candidate="$(normalize_literal_path "$1")"
+  shift
+  for allowed in "$@"; do
+    [ -n "$allowed" ] || continue
+    allowed_literal="$(normalize_literal_path "$allowed")"
+    [ "$candidate" = "$allowed_literal" ] && return 0
+  done
+  return 1
+}
+
 remove_tree_if_allowed() {
   label="$1"
   path="$2"
@@ -99,6 +119,22 @@ remove_tree_if_allowed() {
     die "refusing unsafe $label path: $path"
   fi
   run rm -rf "$path"
+}
+
+remove_literal_path_if_allowed() {
+  label="$1"
+  path="$2"
+  shift 2
+  [ -n "$path" ] || return 0
+  normalized_path="$(normalize_literal_path "$path")"
+  [ -e "$normalized_path" ] || [ -L "$normalized_path" ] || return 0
+  if ! allowed_remove_literal_path "$normalized_path" "$@"; then
+    die "refusing unsafe $label path: $path"
+  fi
+  if [ -d "$normalized_path" ] && [ ! -L "$normalized_path" ]; then
+    die "refusing unsafe $label directory path: $path"
+  fi
+  run rm -f "$normalized_path"
 }
 
 confirm() {
@@ -158,14 +194,26 @@ $LEGACY_WATCHDOG_PLIST_PATH"
   while IFS= read -r plist; do
     [ -n "$plist" ] || continue
     [ -e "$plist" ] || [ -L "$plist" ] || continue
-    remove_tree_if_allowed "plist" "$plist" "$PLIST_PATH" "$WATCHDOG_PLIST_PATH" "$LEGACY_PLIST_PATH" "$LEGACY_WATCHDOG_PLIST_PATH"
+    remove_literal_path_if_allowed "plist" "$plist" "$PLIST_PATH" "$WATCHDOG_PLIST_PATH" "$LEGACY_PLIST_PATH" "$LEGACY_WATCHDOG_PLIST_PATH"
   done <<EOF
 $plists
 EOF
 
   symlink_path="$(manifest_json_value symlink_path 2>/dev/null | head -1 || true)"
   [ -n "$symlink_path" ] || symlink_path="$BINARY_PATH"
-  remove_tree_if_allowed "binary symlink" "$symlink_path" "$BINARY_PATH"
+  remove_literal_path_if_allowed "binary symlink" "$symlink_path" "$BINARY_PATH" "$LEGACY_BINARY_PATH"
+
+  legacy_symlink_paths="$(manifest_json_value legacy_symlink_paths 2>/dev/null || true)"
+  if [ -z "$legacy_symlink_paths" ]; then
+    legacy_symlink_paths="$LEGACY_BINARY_PATH
+$LEGACY_INSTALL_BINARY_PATH"
+  fi
+  while IFS= read -r legacy_symlink; do
+    [ -n "$legacy_symlink" ] || continue
+    remove_literal_path_if_allowed "legacy binary symlink" "$legacy_symlink" "$LEGACY_BINARY_PATH" "$LEGACY_INSTALL_BINARY_PATH"
+  done <<EOF
+$legacy_symlink_paths
+EOF
 
   data_dirs="$(manifest_json_value data_dirs 2>/dev/null || true)"
   if [ "$manifest_missing" -eq 1 ] || [ -z "$data_dirs" ]; then
@@ -187,7 +235,7 @@ EOF
   fi
   rmdir "$MANIFEST_DIR" 2>/dev/null || true
 
-  log "macprovider-cli has been uninstalled."
+  log "malibu-cli has been uninstalled."
   if [ -d "$CACHE_DIR" ]; then
     log "Left cache directory in place: $CACHE_DIR"
   fi

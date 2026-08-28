@@ -23,12 +23,12 @@ chmod +x "$INLINE"
 make_fixture() {
   root="$1"
   mkdir -p "$root/home/.local/share/macprovider/autoupdate" "$root/bin" "$root/logs"
-  printf "new-binary" > "$root/bin/macprovider-cli"
-  printf "old-binary" > "$root/bin/.macprovider-cli.rollback-123e4567-e89b-42d3-a456-426614174000"
-  chmod 755 "$root/bin/macprovider-cli" "$root/bin/.macprovider-cli.rollback-123e4567-e89b-42d3-a456-426614174000"
-  hash="$(shasum -a 256 "$root/bin/.macprovider-cli.rollback-123e4567-e89b-42d3-a456-426614174000" | awk '{print $1}')"
+  printf "new-binary" > "$root/bin/malibu-cli"
+  printf "old-binary" > "$root/bin/.malibu-cli.rollback-123e4567-e89b-42d3-a456-426614174000"
+  chmod 755 "$root/bin/malibu-cli" "$root/bin/.malibu-cli.rollback-123e4567-e89b-42d3-a456-426614174000"
+  hash="$(shasum -a 256 "$root/bin/.malibu-cli.rollback-123e4567-e89b-42d3-a456-426614174000" | awk '{print $1}')"
   cat > "$root/home/.local/share/macprovider/autoupdate/pending.json" <<EOF
-{"update_id":"123e4567-e89b-42d3-a456-426614174000","target_version":"1.8.10","target_path":"$root/bin/macprovider-cli","backup_path":"$root/bin/.macprovider-cli.rollback-123e4567-e89b-42d3-a456-426614174000","size":10,"mode":493,"sha256":"$hash","marker_deadline":"2000-01-01T00:00:00Z"}
+{"update_id":"123e4567-e89b-42d3-a456-426614174000","target_version":"1.8.10","target_path":"$root/bin/malibu-cli","backup_path":"$root/bin/.malibu-cli.rollback-123e4567-e89b-42d3-a456-426614174000","size":10,"mode":493,"sha256":"$hash","marker_deadline":"2000-01-01T00:00:00Z"}
 EOF
   : > "$root/launchctl.log"
   cat > "$root/bin/launchctl" <<'EOF'
@@ -52,14 +52,14 @@ EOF
 add_full_release_fixture() {
   root="$1"
   mkdir -p \
-    "$root/bin/.macprovider-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000/Runtime.bundle" \
-    "$root/bin/.macprovider-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000/catalog-release" \
+    "$root/bin/.malibu-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000/Runtime.bundle" \
+    "$root/bin/.malibu-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000/catalog-release" \
     "$root/bin/Runtime.bundle" \
     "$root/bin/NewOnly.bundle" \
     "$root/bin/catalog-release"
-  printf "old-metal" > "$root/bin/.macprovider-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000/mlx.metallib"
-  printf "old-bundle" > "$root/bin/.macprovider-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000/Runtime.bundle/resource"
-  printf "old-catalog" > "$root/bin/.macprovider-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000/catalog-release/release.json"
+  printf "old-metal" > "$root/bin/.malibu-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000/mlx.metallib"
+  printf "old-bundle" > "$root/bin/.malibu-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000/Runtime.bundle/resource"
+  printf "old-catalog" > "$root/bin/.malibu-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000/catalog-release/release.json"
   printf "new-metal" > "$root/bin/mlx.metallib"
   printf "new-bundle" > "$root/bin/Runtime.bundle/resource"
   printf "new-only" > "$root/bin/NewOnly.bundle/resource"
@@ -70,7 +70,7 @@ invoke_reconcile() {
   script="$1"
   root="$2"
   HOME="$root/home" \
-  MACPROVIDER_BINARY_PATH="$root/bin/macprovider-cli" \
+  MACPROVIDER_BINARY_PATH="$root/bin/malibu-cli" \
   MACPROVIDER_LOG_DIR="$root/logs" \
   MACPROVIDER_FAKE_LAUNCHCTL_LOG="$root/launchctl.log" \
   PATH="$root/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
@@ -81,8 +81,8 @@ assert_watchdog_does_not_own_rollback() {
   script="$1"
   root="$2"
   invoke_reconcile "$script" "$root"
-  cmp -s "$root/bin/macprovider-cli" <(printf "new-binary")
-  cmp -s "$root/bin/.macprovider-cli.rollback-123e4567-e89b-42d3-a456-426614174000" <(printf "old-binary")
+  cmp -s "$root/bin/malibu-cli" <(printf "new-binary")
+  cmp -s "$root/bin/.malibu-cli.rollback-123e4567-e89b-42d3-a456-426614174000" <(printf "old-binary")
   [ -e "$root/home/.local/share/macprovider/autoupdate/pending.json" ]
   grep -F "autoupdate recovery deferred: pending marker exists; transaction owner must resolve update/rollback state" \
     "$root/logs/watchdog.log" >/dev/null
@@ -96,12 +96,12 @@ assert_watchdog_does_not_restore_release_payload() {
   script="$1"
   root="$2"
   invoke_reconcile "$script" "$root"
-  cmp -s "$root/bin/macprovider-cli" <(printf "new-binary")
+  cmp -s "$root/bin/malibu-cli" <(printf "new-binary")
   cmp -s "$root/bin/mlx.metallib" <(printf "new-metal")
   cmp -s "$root/bin/Runtime.bundle/resource" <(printf "new-bundle")
   cmp -s "$root/bin/NewOnly.bundle/resource" <(printf "new-only")
   cmp -s "$root/bin/catalog-release/release.json" <(printf "new-catalog")
-  cmp -s "$root/bin/.macprovider-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000/mlx.metallib" <(printf "old-metal")
+  cmp -s "$root/bin/.malibu-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000/mlx.metallib" <(printf "old-metal")
   [ -e "$root/home/.local/share/macprovider/autoupdate/pending.json" ]
 }
 
@@ -109,11 +109,11 @@ assert_watchdog_does_not_quarantine_malformed_marker() {
   script="$1"
   root="$2"
   mkdir -p "$root/home/.local/share/macprovider/autoupdate" "$root/bin" "$root/logs"
-  printf "repaired-binary" > "$root/bin/macprovider-cli"
+  printf "repaired-binary" > "$root/bin/malibu-cli"
   printf '{"operation_id":"malformed-repair-marker"}\n' > "$root/home/.local/share/macprovider/autoupdate/pending.json"
   : > "$root/launchctl.log"
   invoke_reconcile "$script" "$root"
-  cmp -s "$root/bin/macprovider-cli" <(printf "repaired-binary")
+  cmp -s "$root/bin/malibu-cli" <(printf "repaired-binary")
   [ -e "$root/home/.local/share/macprovider/autoupdate/pending.json" ]
   [ "$(find "$root/home/.local/share/macprovider/autoupdate" -name 'pending-quarantined-*.json' | wc -l | tr -d ' ')" = "0" ]
 }

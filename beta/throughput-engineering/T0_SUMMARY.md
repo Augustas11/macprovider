@@ -23,7 +23,7 @@
 | Machine | MacBook Air (Mac17,3), Apple **M5**, **32 GB** |
 | macOS | 26.5 (25F71) |
 | MLX pins | `mlx-swift` **0.31.6**, `mlx-swift-lm` **3.31.4** |
-| Bench binary | `phase3-binary/.build/release/macprovider-cli` |
+| Bench binary | `phase3-binary/.build/release/malibu-cli` |
 | Metallib | **Must match pin** — built via `scripts/build-mlx-metallib.sh` from mlx-swift 0.31.6 checkout |
 
 ---

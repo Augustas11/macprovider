@@ -469,7 +469,7 @@ def command_validate_provider_payload(args: argparse.Namespace) -> None:
     required_files = {
         "THIRD-PARTY-NOTICES.txt",
         "compatibility-set.json",
-        "macprovider-cli",
+        "malibu-cli",
         "mlx.metallib",
     }
     expected_directories = {"catalog-release", "compatibility-set-local"}

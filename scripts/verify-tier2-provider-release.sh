@@ -28,7 +28,7 @@ usage() {
   cat <<'USAGE'
 usage: scripts/verify-tier2-provider-release.sh [--tag v1.2.6]
 
-Downloads a macprovider-cli GitHub Release asset set, verifies the signed
+Downloads a malibu-cli GitHub Release asset set, verifies the signed
 checksum manifest using the installer public key, verifies the release tarball
 checksum, then runs scripts/check-tier2-provider-artifact.sh against the
 downloaded tarball. When the release also contains Malibu.app, this verifies
@@ -170,7 +170,7 @@ validate_payload_entries() {
       /*|*"/../"*|../*|*/..|..)
         die "unsafe $label path: $entry"
         ;;
-      macprovider-cli)
+      malibu-cli)
         has_binary=1
         ;;
       mlx.metallib)
@@ -236,7 +236,7 @@ validate_payload_entries() {
 $entries
 EOF
 
-  [ "$has_binary" -eq 1 ] || die "$label does not contain macprovider-cli"
+  [ "$has_binary" -eq 1 ] || die "$label does not contain malibu-cli"
   if provider_version_requires_catalog; then
     [ "$has_catalog_manifest" -eq 1 ] || die "$label must contain exactly one catalog-release/release.json"
     [ "$has_catalog_keyring" -eq 1 ] || die "$label must contain exactly one catalog-release/trusted-keys.json"
@@ -274,7 +274,7 @@ import zipfile
 zip_path = sys.argv[1]
 required = {
     "Malibu.app/Contents/MacOS/Malibu",
-    "Malibu.app/Contents/MacOS/macprovider-cli",
+    "Malibu.app/Contents/MacOS/malibu-cli",
 }
 has_metal = False
 seen = set()
@@ -377,8 +377,9 @@ download_file() {
   done
 }
 
-asset="macprovider-cli-${RELEASE_TAG}-darwin-arm64.tar.gz"
-pkg_asset="macprovider-cli-${RELEASE_TAG}-darwin-arm64.pkg"
+asset="malibu-cli-${RELEASE_TAG}-darwin-arm64.tar.gz"
+legacy_asset="macprovider-cli-${RELEASE_TAG}-darwin-arm64.tar.gz"
+pkg_asset="malibu-cli-${RELEASE_TAG}-darwin-arm64.pkg"
 app_asset="Malibu-${RELEASE_TAG}.dmg"
 base="https://github.com/${GITHUB_REPO}/releases/download/${RELEASE_TAG}"
 
@@ -388,6 +389,7 @@ temp_parent="$(cd "$temp_parent" && pwd -P)"
 tmpdir="$(mktemp -d "$temp_parent/tier2-provider-release.XXXXXX")"
 
 tarball_path="$tmpdir/$asset"
+legacy_tarball_path="$tmpdir/$legacy_asset"
 pkg_path="$tmpdir/$pkg_asset"
 app_dmg_path="$tmpdir/$app_asset"
 checksums_path="$tmpdir/checksums.txt"
@@ -419,6 +421,29 @@ actual_sha="$(sha256_file "$tarball_path")"
 [ "$actual_sha" = "$expected_sha" ] || die "provider artifact sha256 mismatch: got $actual_sha want $expected_sha"
 log "provider artifact sha256 verified: $actual_sha"
 
+canonical_payload_dir="$tmpdir/canonical-provider-payload"
+mkdir -p "$canonical_payload_dir"
+tar -xzf "$tarball_path" -C "$canonical_payload_dir" malibu-cli || die "provider tarball lacks malibu-cli"
+canonical_binary_sha="$(sha256_file "$canonical_payload_dir/malibu-cli")"
+
+legacy_expected_sha="$(checksum_for_asset "$checksums_path" "$legacy_asset")"
+if [ -n "$legacy_expected_sha" ]; then
+  legacy_payload_dir="$tmpdir/legacy-provider-payload"
+  mkdir -p "$legacy_payload_dir"
+  download_file "$base/$legacy_asset" "$legacy_tarball_path" "$legacy_asset"
+  legacy_actual_sha="$(sha256_file "$legacy_tarball_path")"
+  [ "$legacy_actual_sha" = "$legacy_expected_sha" ] || die "legacy provider bridge sha256 mismatch: got $legacy_actual_sha want $legacy_expected_sha"
+  log "legacy provider bridge sha256 verified: $legacy_actual_sha"
+  tar -xzf "$legacy_tarball_path" -C "$legacy_payload_dir" macprovider-cli || die "legacy provider bridge lacks macprovider-cli"
+  [ -x "$legacy_payload_dir/macprovider-cli" ] || die "legacy provider bridge macprovider-cli is not executable"
+  legacy_binary_sha="$(sha256_file "$legacy_payload_dir/macprovider-cli")"
+  [ "$legacy_binary_sha" = "$canonical_binary_sha" ] ||
+    die "legacy provider bridge binary sha256 differs from canonical tarball binary"
+  log "legacy provider bridge binary matches canonical tarball binary: $legacy_binary_sha"
+else
+  log "no legacy macprovider-cli bridge entry in checksums.txt"
+fi
+
 pkg_expected_sha="$(checksum_for_asset "$checksums_path" "$pkg_asset")"
 if [ -n "$pkg_expected_sha" ]; then
   download_file "$base/$pkg_asset" "$pkg_path" "$pkg_asset"
@@ -439,22 +464,22 @@ if [ -n "$pkg_expected_sha" ]; then
   pkg_expand_dir="$tmpdir/pkg-expanded"
   pkg_payload_tar="$tmpdir/pkg-payload.tar.gz"
   mkdir -p "$tar_payload_dir"
-  tar -xzf "$tarball_path" -C "$tar_payload_dir" macprovider-cli
+  cp "$canonical_payload_dir/malibu-cli" "$tar_payload_dir/malibu-cli"
   pkgutil --expand-full "$pkg_path" "$pkg_expand_dir" || die "failed to expand provider package"
-  [ -x "$pkg_expand_dir/Payload/macprovider-cli" ] || die "provider package payload lacks executable macprovider-cli"
+  [ -x "$pkg_expand_dir/Payload/malibu-cli" ] || die "provider package payload lacks executable malibu-cli"
   validate_payload_entries "$pkg_expand_dir/Payload" "provider package payload"
 
-  tar_binary_sha="$(sha256_file "$tar_payload_dir/macprovider-cli")"
-  pkg_binary_sha="$(sha256_file "$pkg_expand_dir/Payload/macprovider-cli")"
+  tar_binary_sha="$(sha256_file "$tar_payload_dir/malibu-cli")"
+  pkg_binary_sha="$(sha256_file "$pkg_expand_dir/Payload/malibu-cli")"
   [ "$pkg_binary_sha" = "$tar_binary_sha" ] || die "package binary sha256 differs from tarball binary"
   log "provider package binary matches tarball binary: $pkg_binary_sha"
 
   if [ "$PROVIDER_RUNTIME_MODE" = execute ]; then
-    pkg_version="$("$pkg_expand_dir/Payload/macprovider-cli" --version)"
+    pkg_version="$("$pkg_expand_dir/Payload/malibu-cli" --version)"
     [ "$pkg_version" = "$PROVIDER_VERSION" ] || die "provider package version mismatch: got $pkg_version want $PROVIDER_VERSION"
     log "provider package version ok: $pkg_version"
   else
-    pkg_arches="$("$PROVIDER_LIPO_BIN" -archs "$pkg_expand_dir/Payload/macprovider-cli")"
+    pkg_arches="$("$PROVIDER_LIPO_BIN" -archs "$pkg_expand_dir/Payload/malibu-cli")"
     [ "$pkg_arches" = "$PROVIDER_EXPECTED_ARCHES" ] || {
       die "provider package architecture mismatch: got $pkg_arches want $PROVIDER_EXPECTED_ARCHES"
     }
@@ -491,18 +516,18 @@ if [ -n "$app_expected_sha" ]; then
     die "failed to mount $app_asset"
   app_path="$app_mount_dir/Malibu.app"
   [ -d "$app_path" ] || die "$app_asset does not contain Malibu.app"
-  [ -x "$app_path/Contents/MacOS/macprovider-cli" ] || die "Malibu.app lacks executable bundled macprovider-cli"
+  [ -x "$app_path/Contents/MacOS/malibu-cli" ] || die "Malibu.app lacks executable bundled malibu-cli"
   app_tar_payload_dir="$tmpdir/app-tar-payload"
   mkdir -p "$app_tar_payload_dir"
-  tar -xzf "$tarball_path" -C "$app_tar_payload_dir" macprovider-cli || die "provider tarball lacks macprovider-cli"
-  app_tar_binary_sha="$(sha256_file "$app_tar_payload_dir/macprovider-cli")"
-  app_binary_sha="$(sha256_file "$app_path/Contents/MacOS/macprovider-cli")"
+  cp "$canonical_payload_dir/malibu-cli" "$app_tar_payload_dir/malibu-cli"
+  app_tar_binary_sha="$(sha256_file "$app_tar_payload_dir/malibu-cli")"
+  app_binary_sha="$(sha256_file "$app_path/Contents/MacOS/malibu-cli")"
   [ "$app_binary_sha" = "$app_tar_binary_sha" ] ||
     die "Malibu.app bundled binary sha256 differs from tarball binary"
   log "Malibu.app bundled binary matches tarball binary: $app_binary_sha"
   if [ ! -f "$app_path/Contents/MacOS/mlx.metallib" ] && \
      [ ! -f "$app_path/Contents/MacOS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
-    die "Malibu.app lacks adjacent MLX Metal resources for bundled macprovider-cli"
+    die "Malibu.app lacks adjacent MLX Metal resources for bundled malibu-cli"
   fi
   codesign --verify --strict --deep --verbose=2 "$app_path" || die "Malibu.app code signature verification failed"
   log "Malibu.app code signature verified"

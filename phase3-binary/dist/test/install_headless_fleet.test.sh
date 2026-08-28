@@ -18,7 +18,7 @@ names = [
     "snapshot_headless_launchdaemon_plist",
     "publish_root_file_from_base64",
     "verify_published_launchd_payload",
-    "run_macprovider_cli_with_amfi_retry",
+    "run_malibu_cli_with_amfi_retry",
     "validate_provider_token_environment",
     "validate_launchd_mode",
     "version_at_least",
@@ -127,7 +127,7 @@ set -euo pipefail
 [ "${1:-}" = "-lint" ] && [ -f "${2:-}" ]
 EOF
 
-cat > "$TMP/bin/macprovider-cli" <<'EOF'
+cat > "$TMP/bin/malibu-cli" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 command="${1:-}"
@@ -263,7 +263,7 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   SUDO_BIN="$MOCK_BIN/sudo"
   ROOT_PYTHON3_BIN="$(command -v python3)"
   LAUNCHCTL_BIN="$MOCK_BIN/launchctl"
-  MACPROVIDER_CLI_EXECUTABLE="$MOCK_BIN/macprovider-cli"
+  MALIBU_CLI_EXECUTABLE="$MOCK_BIN/malibu-cli"
   HEADLESS=1
   HEADLESS_USER="$(id -un)"
   HEADLESS_RECOVERY_TRUST_PATH="$SYSTEM_DIR/install-recovery.sha256"
@@ -278,7 +278,7 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   MANIFEST_PATH="$CONFIG_DIR/install_manifest.json"
   LIFECYCLE_LEASE_PATH="$MANIFEST_DIR/lifecycle/lease.json"
   INSTALL_DIR="$HOME/macprovider"
-  BINARY_PATH="$HOME/.local/bin/macprovider-cli"
+  BINARY_PATH="$HOME/.local/bin/malibu-cli"
   LOG_DIR="$HOME/Library/Logs/macprovider"
   WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
   WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"

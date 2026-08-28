@@ -12,7 +12,7 @@ Execution mode: local-provider-discovery
 ## Purpose
 
 This journey defines the signed evidence required to promote provider-local
-BYOM discovery and evaluation. It proves that `macprovider-cli` can discover
+BYOM discovery and evaluation. It proves that `malibu-cli` can discover
 local model/runtime candidates, evaluate at least one candidate through a
 bounded local harness, and preserve the non-earning boundary.
 

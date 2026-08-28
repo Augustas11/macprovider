@@ -54,7 +54,7 @@ enum CLIInstallTeardown {
                             userInfo: [
                                 NSLocalizedDescriptionKey: message?.isEmpty == false
                                     ? message!
-                                    : "macprovider-cli uninstall exited \(process.terminationStatus)"
+                                    : "malibu-cli uninstall exited \(process.terminationStatus)"
                             ]
                         )
                     )

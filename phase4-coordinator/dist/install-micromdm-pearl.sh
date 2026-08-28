@@ -190,4 +190,4 @@ REMOTE
 log "done. Next:"
 log "  1) Ensure nginx has /v1/enroll + /mdm/ + /scep (deploy or --apply-nginx)"
 log "  2) Set tier2.mdm in /etc/macprovider/coordinator.pearl-overlays.yaml and restart coordinator"
-log "  3) POST /v1/enroll smoke + macprovider-cli enroll on a test Mac"
+log "  3) POST /v1/enroll smoke + malibu-cli enroll on a test Mac"

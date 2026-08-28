@@ -97,7 +97,7 @@ python3 "$root/scripts/verify-release-discovery-transport.py" \
   --target-commit "$target_commit" \
   --require-immutable >/dev/null
 
-client_asset="macprovider-cli-${client_tag}-darwin-arm64.tar.gz"
+client_asset="malibu-cli-${client_tag}-darwin-arm64.tar.gz"
 client_base="https://github.com/$repository/releases/download/$client_tag"
 for name in "$client_asset" checksums.txt checksums.txt.sig; do
   curl "${curl_args[@]}" "$client_base/$name" -o "$work/$name"
@@ -111,9 +111,9 @@ expected_client_sha="$(awk -v name="$client_asset" '$2 == name { print $1 }' "$w
 actual_client_sha="$(shasum -a 256 "$work/$client_asset" | awk '{print $1}')"
 [[ "$actual_client_sha" == "$expected_client_sha" ]] || die "client archive checksum differs"
 mkdir "$work/client"
-tar -xzf "$work/$client_asset" -C "$work/client" macprovider-cli
-client="$work/client/macprovider-cli"
-[[ -x "$client" ]] || die "verified client archive lacks executable macprovider-cli"
+tar -xzf "$work/$client_asset" -C "$work/client" malibu-cli
+client="$work/client/malibu-cli"
+[[ -x "$client" ]] || die "verified client archive lacks executable malibu-cli"
 codesign --verify --strict --verbose=2 "$client"
 [[ "$("$client" --version)" == "${client_tag#v}" ]] || die "client binary version differs"
 

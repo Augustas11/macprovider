@@ -33,7 +33,7 @@ DRY_RUN=0
 SKIP_PROVIDER_START=0
 model="initial/model"
 mkdir -p "$INSTALL_DIR"
-MACPROVIDER_CLI_EXECUTABLE="$INSTALL_DIR/macprovider-cli"
+MALIBU_CLI_EXECUTABLE="$INSTALL_DIR/malibu-cli"
 AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID="namespace/existing-model"
 AUTOTUNE_PREFETCH_RECEIPT_PATH=""
 staging_dir="$workdir/staging"
@@ -66,13 +66,13 @@ prompt_yes_no() {
 # This harness exercises recommendation/config behavior, not the installer's
 # AMFI retry ladder. The extracted functions call through this boundary, so
 # provide the direct execution behavior explicitly.
-run_macprovider_cli_with_amfi_retry() {
-  "$INSTALL_DIR/macprovider-cli" "$@"
+run_malibu_cli_with_amfi_retry() {
+  "$INSTALL_DIR/malibu-cli" "$@"
 }
 
 # The missing-catalog-identity branch probes for a live provider that must not
 # be stopped; stub the port-ownership probe so each case picks its branch.
-own_macprovider_cli_holds_live_port() {
+own_malibu_cli_holds_live_port() {
   return "${FAKE_LIVE_PORT_HELD_RC:-1}"
 }
 
@@ -101,7 +101,7 @@ donor_mode: true
 EOF_CONFIG
 }
 
-cat > "$INSTALL_DIR/macprovider-cli" <<'EOF_CLI'
+cat > "$INSTALL_DIR/malibu-cli" <<'EOF_CLI'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -176,7 +176,7 @@ model_artifact_path: "/tmp/macprovider-paid-snapshot"
 model_artifact_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 EOF_PAID
 EOF_CLI
-chmod +x "$INSTALL_DIR/macprovider-cli"
+chmod +x "$INSTALL_DIR/malibu-cli"
 
 run_paid_apply_case() {
   model="initial/model"

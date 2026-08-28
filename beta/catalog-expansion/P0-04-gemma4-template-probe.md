@@ -15,7 +15,7 @@
 | **Chip** | Apple M5 |
 | **Unified RAM** | 32 GB |
 | **OS** | macOS 26.5 (25F71) |
-| **macprovider-cli** | **1.8.16** (release build: `phase3-binary/.build/release/macprovider-cli`) |
+| **malibu-cli** | **1.8.16** (release build: `phase3-binary/.build/release/malibu-cli`) |
 | **Model cache** | `~/Library/Caches/models/mlx-community/gemma-4-26b-a4b-it-4bit` (~15 GB on disk) |
 | **Load path** | `serve --no-join` → `LLMModelFactory.shared.loadContainer` + `#huggingFaceTokenizerLoader()` (`ModelRuntime.swift:1887–1890`) |
 
@@ -25,7 +25,7 @@ Port **8080** was occupied by a local `node` process; probe used **18080**.
 
 ```bash
 cd phase3-binary
-./.build/release/macprovider-cli serve \
+./.build/release/malibu-cli serve \
   --no-join \
   --model mlx-community/gemma-4-26b-a4b-it-4bit \
   --port 18080 \

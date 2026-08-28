@@ -44,7 +44,7 @@ Provider accepts full `messages[]` replay each turn. No session-scoped state. Bu
 ### Code locations (live in `/Users/augstar/macprovider-spec-018-v0-2/`)
 
 **Current rejection paths to remove:**
-- `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:909` `validateToolCallingV1Scope`
+- `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:909` `validateToolCallingV1Scope`
 - Call sites: `:344` (`acquireRequestHandle` pre-streaming), `:395` (`completeWithServedSnapshot` pre-non-streaming)
 - Exact rejection: `:924` (rejects `role:"tool"` with HTTP 400 `unsupported_tool_messages`), `:931` (rejects assistant `tool_calls[]` same code)
 
@@ -54,7 +54,7 @@ Provider accepts full `messages[]` replay each turn. No session-scoped state. Bu
 **Required edits:**
 - Extend `ChatMessage` to preserve `toolCallID: String?` and `toolCalls: [ToolCall]?` fields
 - Replace `request.messages.map { $0.mlxMessage }` at `ModelRuntime.swift:374`, `:428`, `:513` with a renderer that has access to the full OpenAI message objects
-- Add `phase3-binary/Sources/macprovider-cli/ToolPromptRenderer.swift` — selects Qwen/Llama prompt-history rendering by family. Family selection uses modelID-match in v0.2 (same rule as parser side per v0.1.5 §3.2); model_hash-binding moves with v0.3 #2 registry.
+- Add `phase3-binary/Sources/malibu-cli/ToolPromptRenderer.swift` — selects Qwen/Llama prompt-history rendering by family. Family selection uses modelID-match in v0.2 (same rule as parser side per v0.1.5 §3.2); model_hash-binding moves with v0.3 #2 registry.
 
 ### MLX chat-template threading
 

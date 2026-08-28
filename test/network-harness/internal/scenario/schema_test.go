@@ -363,7 +363,7 @@ name: "${GH_TOKEN}"
 mode: sku-econ
 target:
   coordinator_url: https://coordinator.malibu.tech
-  cli_bin: /tmp/macprovider-cli
+  cli_bin: /tmp/malibu-cli
 hardware_matrix:
   - {label: m4, chip: "Apple M4", memoryGB: 32, bandwidthTier: C, expected: at_least_one_eligible_row}
 benchmark_synthesis:

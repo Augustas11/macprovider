@@ -331,7 +331,7 @@ Reports MUST include enough metadata to reproduce winner selection, including se
 - `beta/DECISION_CRITERIA.md:57` through `beta/DECISION_CRITERIA.md:62` and `beta/DECISION_CRITERIA.md:89` through `beta/DECISION_CRITERIA.md:92` require per-workload decision metrics.
 - `specs/SPEC-028-mlx-speculative-decoding.md:71` defines `--num-draft-tokens`.
 - `specs/SPEC-028-mlx-speculative-decoding.md:202` through `specs/SPEC-028-mlx-speculative-decoding.md:215` allow autotune/static-catalog draft candidate extension points and reject blind grid multiplication.
-- `phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:439` decodes the current static catalog row shape.
+- `phase3-binary/Sources/malibu-cli/AutotuneRecommend.swift:439` decodes the current static catalog row shape.
 - `specs/SPEC-023-installer-autotune-recommend.md:320` through `specs/SPEC-023-installer-autotune-recommend.md:342` define the v4 static signing process.
 - `phase3-binary/dist/static/keys/README.md:32` describes the current static feed trust model.
 - `scripts/resign-autotune-static.sh:1` through `scripts/resign-autotune-static.sh:3` describe the v4 static feed signing helper.

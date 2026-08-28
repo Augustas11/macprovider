@@ -74,7 +74,7 @@ release = {
     "draft": False,
     "immutable": True,
     "prerelease": False,
-    "name": f"macprovider-cli {tag}",
+    "name": f"malibu-cli {tag}",
     "body": "reviewed release notes\n",
     "assets": assets,
 }
@@ -301,7 +301,7 @@ import sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert manifest["release_id"] == 401
 assert manifest["prerelease"] is False
-assert manifest["title"] == "macprovider-cli v1.2.3"
+assert manifest["title"] == "malibu-cli v1.2.3"
 assert re.fullmatch(r"[0-9a-f]{64}", manifest["body_sha256"])
 assert re.fullmatch(r"[0-9a-f]{64}", manifest["publication_id"])
 assert manifest["assets"]["Malibu-v1.2.3.dmg"]["id"] == 502

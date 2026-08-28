@@ -74,7 +74,7 @@ def write_capture_inputs(root: Path) -> dict[str, Path]:
     inputs = root / "capture-inputs"
     inputs.mkdir(exist_ok=True)
     files = {
-        "cli": inputs / "macprovider-cli",
+        "cli": inputs / "malibu-cli",
         "ledger": inputs / "ledger.redacted.jsonl",
         "log": inputs / "logs.redacted.txt",
         "rate": inputs / "rate-card.redacted.json",

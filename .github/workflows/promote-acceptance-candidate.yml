@@ -388,12 +388,12 @@ jobs:
             [[ -n "$name" ]] && release_assets+=("$accepted/$name")
           done < "$accepted/release-assets.txt"
           notes="$RUNNER_TEMP/release-notes.md"
-          printf '# macprovider-cli %s\n\nExact bytes promoted after signed physical acceptance.\n' "$TAG" > "$notes"
+          printf '# malibu-cli %s\n\nExact bytes promoted after signed physical acceptance.\n' "$TAG" > "$notes"
           gh release create "$TAG" \
             "${release_assets[@]}" \
             "$accepted/checksums.txt" \
             "$accepted/checksums.txt.sig" \
-            --title "macprovider-cli $TAG" \
+            --title "malibu-cli $TAG" \
             --notes-file "$notes" \
             --target "$CANDIDATE_SHA" \
             --verify-tag \

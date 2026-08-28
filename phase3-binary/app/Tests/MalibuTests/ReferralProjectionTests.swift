@@ -13,7 +13,7 @@ final class ReferralProjectionTests: XCTestCase {
         "coordinator admission",
         "coordinator",
         "provider cli",
-        "macprovider-cli",
+        "malibu-cli",
         "cli-owned",
         "terminal path",
         "referral_bootstrap_v1",
@@ -413,7 +413,7 @@ final class ReferralProjectionTests: XCTestCase {
         var snapshot = AgentSnapshot.empty
         snapshot.cliVersion = "99.1"
         snapshot.localStatusContractCompatible = true
-        snapshot.localStatusLifecycleOwner = "macprovider_cli"
+        snapshot.localStatusLifecycleOwner = "malibu_cli"
         snapshot.localStatusCapabilities = ["referral_status_v1", "referral_fragment_links_v1", "service_instance_v1", "status_observation_v1"]
         snapshot.localProviderID = "provider-1"
         snapshot.serviceRole = "serve"
@@ -435,7 +435,7 @@ final class ReferralProjectionTests: XCTestCase {
     private func trustedReferralSnapshot() -> AgentSnapshot {
         var snapshot = AgentSnapshot.empty
         snapshot.localStatusContractCompatible = true
-        snapshot.localStatusLifecycleOwner = "macprovider_cli"
+        snapshot.localStatusLifecycleOwner = "malibu_cli"
         snapshot.localStatusCapabilities = [
             "referral_status_v1",
             "referral_advocacy_v1",

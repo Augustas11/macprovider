@@ -1,7 +1,7 @@
 # Release signing + notarization — operator runbook
 
 The release workflow (`.github/workflows/release.yml`) signs the
-`macprovider-cli` binary with a Developer ID Application certificate and
+`malibu-cli` binary with a Developer ID Application certificate and
 notarizes via `xcrun notarytool` so freshly-installed binaries pass
 macOS 26.3.1+ launchd's tightened AMFI policy.
 
@@ -13,7 +13,7 @@ artifact shape, the release gate is `notarytool submit --wait` returning
 `Accepted`.
 
 New releases can also publish a signed flat `.pkg` delivery container.
-The package carries the same `macprovider-cli` payload as the tarball,
+The package carries the same `malibu-cli` payload as the tarball,
 is signed with a Developer ID Installer certificate, is submitted to
 notarytool directly, and is stapled after Apple accepts it. `install.sh`
 prefers this package when present and falls back to the tarball for older
@@ -33,7 +33,7 @@ is not a production release.
 Discovered 2026-06-12 when v1.3.1 was the first release attempted on a
 macOS 26.3.1 client. `launchctl bootstrap` failed with
 `5: Input/output error`; AMFI's kernel log surfaced the underlying
-cause: `'macprovider-cli' has no CMS blob`. Adhoc-signed binaries
+cause: `'malibu-cli' has no CMS blob`. Adhoc-signed binaries
 (what Swift's default linker-signing produces) lack the CMS
 certificate chain that 26.3.1's launchd policy now requires. Earlier
 macOS versions accepted adhoc-signed binaries; the policy was tightened
@@ -377,11 +377,11 @@ Run both acceptance paths on separate clean snapshots or hosts. First prove a
 clean bootstrap with no existing CLI or provider support directory:
 
 ```bash
-test ! -e "$HOME/.local/bin/macprovider-cli"
+test ! -e "$HOME/.local/bin/malibu-cli"
 test ! -e "$HOME/macprovider"
 
 bootstrap_dir="$(mktemp -d "$HOME/Library/Caches/macprovider-bootstrap.XXXXXX")"
-tar -xzf "$ACCEPTANCE_ASSET_DIR/macprovider-cli-${TAG}-darwin-arm64.tar.gz" \
+tar -xzf "$ACCEPTANCE_ASSET_DIR/malibu-cli-${TAG}-darwin-arm64.tar.gz" \
   -C "$bootstrap_dir" compatibility-set-local/install.sh
 MACPROVIDER_VERSION="$TAG" \
 MACPROVIDER_ACCEPTANCE_ASSET_DIR="$ACCEPTANCE_ASSET_DIR" \
@@ -391,11 +391,11 @@ MACPROVIDER_ACCEPTANCE_RUN_ID="$ACCEPTANCE_RUN_ID" \
 MACPROVIDER_ACCEPTANCE_RUN_ATTEMPT="$ACCEPTANCE_RUN_ATTEMPT" \
   bash "$bootstrap_dir/compatibility-set-local/install.sh"
 
-test "$("$HOME/.local/bin/macprovider-cli" --version)" = "${TAG#v}"
-codesign --verify --strict --deep "$HOME/.local/bin/macprovider-cli"
-test "$(codesign -dv --verbose=4 "$HOME/.local/bin/macprovider-cli" 2>&1 | awk -F= '/^Identifier=/{print $2}')" = \
+test "$("$HOME/.local/bin/malibu-cli" --version)" = "${TAG#v}"
+codesign --verify --strict --deep "$HOME/.local/bin/malibu-cli"
+test "$(codesign -dv --verbose=4 "$HOME/.local/bin/malibu-cli" 2>&1 | awk -F= '/^Identifier=/{print $2}')" = \
   live.malibu.provider.cli
-spctl -a -t exec "$HOME/.local/bin/macprovider-cli"
+spctl -a -t exec "$HOME/.local/bin/malibu-cli"
 python3 - "$HOME/macprovider/compatibility-set.json" \
   "Augustas11/macprovider:$TAG@$ACCEPTANCE_COMMIT" <<'PY'
 import json, sys
@@ -413,7 +413,7 @@ complete emergency rollback flow.
 
 ```bash
 export PRIOR_VERSION=vX.Y.Z
-test "$(macprovider-cli --version)" = "${PRIOR_VERSION#v}"
+test "$(malibu-cli --version)" = "${PRIOR_VERSION#v}"
 if test -d /Applications/Malibu.app; then
   export MALIBU_APP=/Applications/Malibu.app
 else
@@ -421,7 +421,7 @@ else
 fi
 test -d "$MALIBU_APP"
 
-macprovider-cli update \
+malibu-cli update \
   --acceptance-directory "$ACCEPTANCE_ASSET_DIR" \
   --acceptance-tag "$TAG" \
   --acceptance-commit "$ACCEPTANCE_COMMIT" \
@@ -429,9 +429,9 @@ macprovider-cli update \
   --acceptance-run-id "$ACCEPTANCE_RUN_ID" \
   --acceptance-run-attempt "$ACCEPTANCE_RUN_ATTEMPT"
 
-test "$(macprovider-cli --version)" = "${TAG#v}"
-codesign --verify --strict --deep "$(command -v macprovider-cli)"
-test "$(codesign -dv --verbose=4 "$(command -v macprovider-cli)" 2>&1 | awk -F= '/^Identifier=/{print $2}')" = \
+test "$(malibu-cli --version)" = "${TAG#v}"
+codesign --verify --strict --deep "$(command -v malibu-cli)"
+test "$(codesign -dv --verbose=4 "$(command -v malibu-cli)" 2>&1 | awk -F= '/^Identifier=/{print $2}')" = \
   live.malibu.provider.cli
 codesign --verify --strict --deep "$MALIBU_APP"
 test "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleIdentifier)" = tech.malibu.app
@@ -497,7 +497,7 @@ annotated tag at that exact commit, push it, and verify the peeled remote target
 ```bash
 git fetch origin main
 test "$(git rev-parse origin/main)" = "$RELEASE_COMMIT"
-git tag -s "$TAG" "$RELEASE_COMMIT" -m "macprovider-cli $TAG"
+git tag -s "$TAG" "$RELEASE_COMMIT" -m "malibu-cli $TAG"
 git push origin "refs/tags/$TAG"
 test "$(git ls-remote origin "refs/tags/$TAG^{}" | awk '{print $1}')" = "$RELEASE_COMMIT"
 ```
@@ -803,7 +803,7 @@ GH_TOKEN="$GH_TOKEN" bash scripts/verify-github-release-posture.sh \
   "$REPO" production-release 28995904
 
 git tag -d "$TAG"
-git tag -s "$TAG" "$NEW_COMMIT" -m "macprovider-cli $TAG" \
+git tag -s "$TAG" "$NEW_COMMIT" -m "malibu-cli $TAG" \
   -m "Pre-publication re-anchor after failed run $FAILED_RUN for replacement run $RUN_ID. Prior-tag-object: $OLD_TAG_OBJECT. Prior-tag-commit: $OLD_COMMIT. No GitHub Release or public v1.8.39 asset existed."
 NEW_TAG_OBJECT="$(git rev-parse refs/tags/$TAG)"
 test "$NEW_TAG_OBJECT" != "$OLD_TAG_OBJECT"
@@ -833,8 +833,8 @@ public immutable release.
 
 Expected release assets:
 
-- `macprovider-cli-vX.Y.Z-darwin-arm64.tar.gz` — compatibility artifact
-- `macprovider-cli-vX.Y.Z-darwin-arm64.pkg` — preferred stapled delivery
+- `malibu-cli-vX.Y.Z-darwin-arm64.tar.gz` — compatibility artifact
+- `malibu-cli-vX.Y.Z-darwin-arm64.pkg` — preferred stapled delivery
   container for `install.sh`
 - `checksums.txt`
 - `checksums.txt.sig`
@@ -843,7 +843,7 @@ Expected release assets:
 - `release-provenance.json` — signed through `checksums.txt`; binds every
   release asset hash to the exact tag, commit, and repository
 
-The tarball remains the canonical `macprovider-cli update` artifact until
+The tarball remains the canonical `malibu-cli update` artifact until
 the self-update implementation explicitly learns the package path.
 
 Verify on a macOS 26.3.1+ Mac:
@@ -864,7 +864,7 @@ log show --last 1m | grep -iE "macprovider|AMFI"
 Common follow-up issues:
 
 - **`xcrun stapler` exits with Error 73** — expected if someone tries
-  to staple `macprovider-cli` directly. Raw standalone executables are
+  to staple `malibu-cli` directly. Raw standalone executables are
   not a supported stapler target. Use the signed `.pkg` artifact for a
   stapled release container.
 - **`.pkg` asset is missing** — the release workflow did not find

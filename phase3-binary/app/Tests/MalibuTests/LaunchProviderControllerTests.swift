@@ -493,7 +493,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         harness.monitorHealthy = false
         harness.providerStartFailureMessage =
             "Model catalog is out of date for this Mac. Update Malibu to the latest release, "
-            + "or run: macprovider-cli autotune --recommend --apply"
+            + "or run: malibu-cli autotune --recommend --apply"
         let controller = freshController(harness)
 
         await controller.launch()

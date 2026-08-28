@@ -1,13 +1,13 @@
 # macprovider-watchdog
 
 External LaunchAgent that observes the installed Mac provider process.
-It ships alongside every install of `macprovider-cli` via the public
+It ships alongside every install of `malibu-cli` via the public
 `get.malibu.tech/install.sh` flow.
 
 ## What it does
 
 Every 60 seconds, `watchdog.sh` checks that exactly one installed
-`macprovider-cli` process is running and that the provider's local
+`malibu-cli` process is running and that the provider's local
 `/v1/health` endpoint responds successfully. `/v1/health` returns
 non-2xx for degraded, draining, or unavailable provider states, so a
 provider stuck reporting `unavailable` is detected as locally unhealthy
@@ -38,7 +38,7 @@ recovery owner.
 
 It reads the provider identity from
 `~/.config/macprovider/config.yaml` (the file
-`macprovider-cli` itself reads) — so it generalizes across every
+`malibu-cli` itself reads) — so it generalizes across every
 operator without any hardcoded provider id.
 
 ## Files

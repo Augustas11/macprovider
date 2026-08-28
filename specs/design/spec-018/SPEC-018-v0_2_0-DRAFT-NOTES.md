@@ -26,16 +26,16 @@ Date: 2026-06-27
 
 ## Code location citations encoded
 
-- `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:909` — current `validateToolCallingV1Scope` rejection path.
-- `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:344` — pre-streaming call site.
-- `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:395` — pre-non-streaming call site.
-- `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:924` — current `role:"tool"` rejection.
-- `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:931` — current assistant-history `tool_calls[]` rejection.
+- `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:909` — current `validateToolCallingV1Scope` rejection path.
+- `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:344` — pre-streaming call site.
+- `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:395` — pre-non-streaming call site.
+- `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:924` — current `role:"tool"` rejection.
+- `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:931` — current assistant-history `tool_calls[]` rejection.
 - `phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:194` — existing assistant `tool_calls[]` validation.
 - `phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:202` — existing tool-message validation.
 - `phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:175` — current `ChatMessage` field-loss problem.
-- `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:374`, `:428`, `:513` — `request.messages.map { $0.mlxMessage }` replacement points.
-- `phase3-binary/Sources/macprovider-cli/PromptCanonicalizer.swift:5` and `:31` — receipt prompt canonicalization coverage for messages, `tool_call_id`, and `tool_calls`.
+- `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:374`, `:428`, `:513` — `request.messages.map { $0.mlxMessage }` replacement points.
+- `phase3-binary/Sources/malibu-cli/PromptCanonicalizer.swift:5` and `:31` — receipt prompt canonicalization coverage for messages, `tool_call_id`, and `tool_calls`.
 - `phase4-coordinator/internal/buyer/server.go:1234` — coordinator request structs preserve `tool_call_id` and `tool_calls`.
 - `phase4-coordinator/internal/buyer/server.go:3089` — coordinator request validation area for v0.2 additions.
 - `phase4-coordinator/internal/buyer/server.go:2119` — `forwardWSStreaming` pass-through path.

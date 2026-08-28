@@ -31,7 +31,7 @@ if [ -f "$PIDFILE" ]; then
 else
   log "  no PID file at $PIDFILE; falling back to pkill"
 fi
-pkill -f "macprovider-cli --port $PORT" 2>/dev/null && log "  killed lingering macprovider-cli" || true
+pkill -f "malibu-cli --port $PORT" 2>/dev/null && log "  killed lingering malibu-cli" || true
 
 # Confirm port is free
 sleep 1

@@ -36,8 +36,8 @@ run_case() {
   mode="$1"
   root="$TMP/$mode"
   mkdir -p "$root/install" "$root/config"
-  : > "$root/install/macprovider-cli"
-  chmod +x "$root/install/macprovider-cli"
+  : > "$root/install/malibu-cli"
+  chmod +x "$root/install/malibu-cli"
   provider_id="mp-0123456789abcdef0123456789abcdef"
   case "$mode" in
     predictable-id|existing-legacy) provider_id="office-mac" ;;
@@ -86,7 +86,7 @@ EOF
     publish_bootstrap_identity_for_rollback() {
       printf "publish-bootstrap-identity\n" >> "$CASE_ROOT/calls"
     }
-    run_macprovider_cli_with_amfi_retry() {
+    run_malibu_cli_with_amfi_retry() {
       printf "%s\n" "$*" >> "$CASE_ROOT/calls"
       case "$1" in
         bootstrap-auth)

@@ -150,13 +150,13 @@ Extend `pool.Provider` (non-breaking JSON fields):
 
 | Track | Owner agent | Files (primary) | Deliverables |
 |-------|-------------|-----------------|--------------|
-| **P1-A Provider SE** | executor | `phase3-binary/Sources/macprovider-cli/SecureEnclaveIdentity.swift`, `SEAttestationBuilder.swift`, `Tier2Attestation.swift`, `CoordinatorClient.swift`, tests | Persistent SE key; build signed blob; emit `macprovider-se-p256-v1` token at auth proof; `#if !arch(arm64)` graceful unsupported |
+| **P1-A Provider SE** | executor | `phase3-binary/Sources/malibu-cli/SecureEnclaveIdentity.swift`, `SEAttestationBuilder.swift`, `Tier2Attestation.swift`, `CoordinatorClient.swift`, tests | Persistent SE key; build signed blob; emit `macprovider-se-p256-v1` token at auth proof; `#if !arch(arm64)` graceful unsupported |
 | **P1-B Coordinator verify** | executor | `phase4-coordinator/internal/tier2/pillar_c_se.go`, `pillar_c.go`, `config/config.go`, `coordinator.yaml.example`, tests | Verify SE blob + binding sig; store SE pubkey; set `attestation_tier=self_signed`; format allowlist |
 | **P1-C Liveness loop** | executor | `phase4-coordinator/internal/ws/server.go`, `messages.go`, `phase3-binary/.../CoordinatorClient.swift`, tests | Periodic `se_liveness_challenge` / response; failure counting; provider handler in `receiveLoop` |
 
 ### 1.3 Entitlements / signing notes
 
-- Production Developer ID `macprovider-cli` uses the **process default keychain** (no `kSecAttrAccessGroup`). Do **not** attach `keychain-access-groups` on the naked CLI: AMFI treats that as restricted and SIGKILLs a Developer ID tool with no provisioning profile (v1.8.96).
+- Production Developer ID `malibu-cli` uses the **process default keychain** (no `kSecAttrAccessGroup`). Do **not** attach `keychain-access-groups` on the naked CLI: AMFI treats that as restricted and SIGKILLs a Developer ID tool with no provisioning profile (v1.8.96).
 - A named group (`YF7XNRJUG4.live.malibu.provider`) is only for a future **profiled app bundle** that must share the SE key across binaries. That requires an Apple-issued Developer ID provisioning profile, not a git entitlements plist.
 - Simulator / x86: SE path returns `unsupported` (no fake attestation).
 
@@ -179,7 +179,7 @@ Extend `pool.Provider` (non-breaking JSON fields):
 - [ ] Periodic liveness challenges work on established WS sessions
 - [ ] `tier2.require_attestation: false` — SE attestation is **observed**, not required
 - [ ] `/v1/models` shows accurate partial attestation counts when observe enabled
-- [ ] All new tests pass: `go test ./internal/tier2 ./internal/ws` and `swift test` (macprovider-cli)
+- [ ] All new tests pass: `go test ./internal/tier2 ./internal/ws` and `swift test` (malibu-cli)
 - [ ] No regression to existing MDA artifact path (`apple-managed-device-attestation-acme-v1`)
 
 ### 1.6 Phase 1 explicit non-goals

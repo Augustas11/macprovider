@@ -16,14 +16,14 @@
 | **Unified RAM** | 32 GB (`sysctl hw.memsize` = 34,359,738,368) |
 | **Bandwidth tier** | Tier-C (`BandwidthTier.derive` for base M5) |
 | **OS** | macOS 26.5 (25F71) |
-| **macprovider-cli** | 1.8.16 (release build from task worktree) |
+| **malibu-cli** | 1.8.16 (release build from task worktree) |
 | **Load path** | `serve --no-join` → `LLMModelFactory.shared.loadContainer` + `#huggingFaceTokenizerLoader()` (same as `ModelRuntime.swift:1887–1890`) |
 | **Probe shape** | Stage1-equivalent: ~3,284 prompt tokens (`4096 × 0.8`) + 64 decode tokens, `temperature=0`, streaming |
 
 ### Measurement notes
 
 - **Process RSS undercounts MLX resident memory** on Apple Silicon (typical ~50–90 MB RSS vs multi-GB unified allocations). Primary metric: **system used-memory delta** from pre-load baseline to idle-after-load, corroborated by on-disk weight size and provider `kv_cache_request_completed` logs.
-- Bench used `phase3-binary/.build/release/macprovider-cli` (debug build lacks bundled `default.metallib`).
+- Bench used `phase3-binary/.build/release/malibu-cli` (debug build lacks bundled `default.metallib`).
 - A dev provider (`qwen3-coder-30b` on port 61919) was present but showed negligible RSS; Gemma run used a **clean 17 GB used baseline** (15 GB free). gpt-oss reruns after Gemma were **memory-contaminated** (baseline already ~32 GB used); gpt-oss control numbers below prefer the **first clean active-page delta** and on-disk weights.
 
 ---

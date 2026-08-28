@@ -40,7 +40,7 @@ can be judged. On the 32 GB local host, it did not complete even a bounded
 
 - Host: Apple Silicon M5
 - RAM: 32 GB unified memory
-- Binary: release build of `macprovider-cli`
+- Binary: release build of `malibu-cli`
 - Context cap used: 8192 tokens for the completed matrix
 - Logs: `/tmp/spec028-release-matrix-20260705214654`
 
@@ -111,7 +111,7 @@ the product uses.
 
 ## Proposed rented-host matrix
 
-Run release `macprovider-cli` with generated production resources.
+Run release `malibu-cli` with generated production resources.
 
 Required pairs:
 
@@ -127,8 +127,8 @@ Optional pairs if local snapshots and canary pass:
 Suggested command shape:
 
 ```bash
-./macprovider-cli spec028-benchmark \
-  --fixture phase3-binary/Sources/macprovider-cli/Resources/spec028/spec028-code-iso8601-v1.json \
+./malibu-cli spec028-benchmark \
+  --fixture phase3-binary/Sources/malibu-cli/Resources/spec028/spec028-code-iso8601-v1.json \
   --target /path/to/target \
   --draft /path/to/draft \
   --max-context-tokens 8192 \
@@ -143,10 +143,10 @@ For first 32B smoke on rented hardware:
 
 ```bash
 jq '.request.max_tokens=16' \
-  phase3-binary/Sources/macprovider-cli/Resources/spec028/spec028-code-iso8601-v1.json \
+  phase3-binary/Sources/malibu-cli/Resources/spec028/spec028-code-iso8601-v1.json \
   > /tmp/spec028-code-iso8601-16tok.json
 
-./macprovider-cli spec028-benchmark \
+./malibu-cli spec028-benchmark \
   --fixture /tmp/spec028-code-iso8601-16tok.json \
   --target /path/to/Qwen2.5-Coder-32B-Instruct-4bit \
   --draft /path/to/Qwen2.5-Coder-7B-Instruct-4bit \
@@ -183,7 +183,7 @@ swift test --package-path phase3-binary \
 Result: passed.
 
 ```bash
-swift build --package-path phase3-binary -c release --product macprovider-cli
+swift build --package-path phase3-binary -c release --product malibu-cli
 ```
 
 Result: passed with existing Swift concurrency/deprecation warnings.
@@ -198,12 +198,12 @@ pairs require Apple Silicon hardware with more unified memory.
 ## 2026-07-09 re-verification (isolated worktree)
 
 - Branch rebased cleanly onto current `origin/main` (only conflict was
-  subcommand registration list in `MacProviderCLI.swift` from concurrent
+  subcommand registration list in `MalibuCLI.swift` from concurrent
   additions of `DecodeBenchCommand` + `EnrollCommand`; resolved to include
   `Spec028BenchmarkCommand.self`).
 - `swift test --package-path phase3-binary --filter 'Spec028PlumbingTests'`
   → 30 tests executed (1 skipped), 0 failures.
-- Debug `swift build --package-path phase3-binary --product macprovider-cli`
+- Debug `swift build --package-path phase3-binary --product malibu-cli`
   succeeds.
 - This host: 32 GB unified memory (matches the "local" M5 env used for the
   original matrix; reconfirms 32B/7B pair is not feasible here without

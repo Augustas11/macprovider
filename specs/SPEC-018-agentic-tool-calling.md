@@ -83,7 +83,7 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 - Multi-turn `tool_call_id` validation is format-only and stateless: provider-emitted IDs keep `^call_[a-f0-9]{32}$`; request-accepted IDs use `^call_[A-Za-z0-9]{16,64}$` plus in-request cross-message consistency.
 - v0.3 candidates are explicitly deferred: model-hash registry, prompt-echo guard, and structured `usage.macprovider_malformed_tool_call` exposure.
 
-- **v0.2.0 (2026-06-27, narrow Cline-drop-in draft):** Adds the minimum surface required for "point Cline at macprovider and complete a real multi-turn coding session" on top of locked v0.1.5. **Multi-turn:** AC-14 is closed by requiring the phase3 provider to accept `role:"tool"` messages and assistant-history `tool_calls[]`, preserve `tool_call_id` / `tool_calls` through request parsing, validate the in-request graph, and render prior assistant tool calls plus tool results into the selected model family's native chat-template markup. Current rejection paths are `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:909`, call sites `:353` and `:403`, with exact rejects at `:924` and `:931`; `ChatCompletionRequest.swift:194` / `:202` already validate the structured shapes but `ChatMessage` at `:175` must preserve fields that are currently lost before `request.messages.map { $0.mlxMessage }` at `ModelRuntime.swift:374`, `:428`, and `:513`. **Family renderer:** adds a v0.2 tool prompt-template profile for the input render direction, separate from §3.1 output parser-family selection; v0.2 keys it by modelID-match per §3.2, while the v0.3 registry candidate will move it to verified `model_hash`. **Request caps:** `role:"tool"` content is capped at 256 KiB UTF-8 bytes per message with HTTP 413 `tool_result_too_large`; assistant-history `function.arguments` is capped at 1 MiB with HTTP 413 `tool_call_arguments_too_large`. **Receipts:** no schema change; `PromptCanonicalizer.swift:5` already canonicalizes `messages`, including `tool_call_id` and `tool_calls` at `:31`, but v0.2 requires regression tests proving `prompt_hash` changes when those fields change. **Streaming:** promotes token-incremental OpenAI-style `tool_calls[].function.arguments` deltas, keyed by `index`, with first delta carrying `id` / `type` / `function.name` and later deltas carrying argument fragments. §8.4 is extended with incremental-open, final-close, and no-withdrawal rules; the current coordinator validator at `phase4-coordinator/internal/buyer/server.go:2674` is incompatible with OpenAI incremental fragments and must be replaced for both `forwardWSStreaming` (`server.go:2103`, buyer byte write at `:2149`) and `forwardStreaming` (`server.go:2279`). **Money path:** buyer-visible streaming commit happens at incremental-open, while provider-positive settlement commits only after final-close; mid-stream cap-cross or final-close failure remains `FaultBreakerQualifying` with zero provider-positive credits through existing `phase4-coordinator/internal/buyer/billing_recorder.go:176` and `phase4-coordinator/internal/billing/formula.go:112`. **Argument caps:** replaces the v0.1.5 response-side 256 KiB DoS bound with public v0.2 constants `1_048_576` bytes per call, `2_097_152` bytes per response, and depth `32`, identical at parser and coordinator. **Forward compatibility:** extends AC-23 with AC-23s streaming regression using `openai==2.44.0`, and adds §10c cap invariants that future v0.2.x may raise but not lower the caps or change the inclusive UTF-8 unescaped counting domain. **Deferred:** model-hash registry, prompt-echo guard, and structured `usage.macprovider_malformed_tool_call` remain v0.3 candidates only; v0.2 may use internal failure reasons for logs and terminating SSE error frames but does not expose the v0.3 usage schema.
+- **v0.2.0 (2026-06-27, narrow Cline-drop-in draft):** Adds the minimum surface required for "point Cline at macprovider and complete a real multi-turn coding session" on top of locked v0.1.5. **Multi-turn:** AC-14 is closed by requiring the phase3 provider to accept `role:"tool"` messages and assistant-history `tool_calls[]`, preserve `tool_call_id` / `tool_calls` through request parsing, validate the in-request graph, and render prior assistant tool calls plus tool results into the selected model family's native chat-template markup. Current rejection paths are `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:909`, call sites `:353` and `:403`, with exact rejects at `:924` and `:931`; `ChatCompletionRequest.swift:194` / `:202` already validate the structured shapes but `ChatMessage` at `:175` must preserve fields that are currently lost before `request.messages.map { $0.mlxMessage }` at `ModelRuntime.swift:374`, `:428`, and `:513`. **Family renderer:** adds a v0.2 tool prompt-template profile for the input render direction, separate from §3.1 output parser-family selection; v0.2 keys it by modelID-match per §3.2, while the v0.3 registry candidate will move it to verified `model_hash`. **Request caps:** `role:"tool"` content is capped at 256 KiB UTF-8 bytes per message with HTTP 413 `tool_result_too_large`; assistant-history `function.arguments` is capped at 1 MiB with HTTP 413 `tool_call_arguments_too_large`. **Receipts:** no schema change; `PromptCanonicalizer.swift:5` already canonicalizes `messages`, including `tool_call_id` and `tool_calls` at `:31`, but v0.2 requires regression tests proving `prompt_hash` changes when those fields change. **Streaming:** promotes token-incremental OpenAI-style `tool_calls[].function.arguments` deltas, keyed by `index`, with first delta carrying `id` / `type` / `function.name` and later deltas carrying argument fragments. §8.4 is extended with incremental-open, final-close, and no-withdrawal rules; the current coordinator validator at `phase4-coordinator/internal/buyer/server.go:2674` is incompatible with OpenAI incremental fragments and must be replaced for both `forwardWSStreaming` (`server.go:2103`, buyer byte write at `:2149`) and `forwardStreaming` (`server.go:2279`). **Money path:** buyer-visible streaming commit happens at incremental-open, while provider-positive settlement commits only after final-close; mid-stream cap-cross or final-close failure remains `FaultBreakerQualifying` with zero provider-positive credits through existing `phase4-coordinator/internal/buyer/billing_recorder.go:176` and `phase4-coordinator/internal/billing/formula.go:112`. **Argument caps:** replaces the v0.1.5 response-side 256 KiB DoS bound with public v0.2 constants `1_048_576` bytes per call, `2_097_152` bytes per response, and depth `32`, identical at parser and coordinator. **Forward compatibility:** extends AC-23 with AC-23s streaming regression using `openai==2.44.0`, and adds §10c cap invariants that future v0.2.x may raise but not lower the caps or change the inclusive UTF-8 unescaped counting domain. **Deferred:** model-hash registry, prompt-echo guard, and structured `usage.macprovider_malformed_tool_call` remain v0.3 candidates only; v0.2 may use internal failure reasons for logs and terminating SSE error frames but does not expose the v0.3 usage schema.
 
 - **v0.1.5 (2026-06-27, code r5 polish — 1M absorbed):** Code lane round-5 caught the single residual MEDIUM from v0.1.4's AC-23 baseline-version alignment: §10c at line 440 still said "v0.1.2-baseline parser" while AC-23 at line 396 had been correctly updated to "v0.1.3-baseline parser pinned by `tools/version-pins/openai-python-spec-018-v0_1_3-baseline.txt`." This was precisely the baseline-version drift v0.1.4 set out to close — surgical s/v0.1.2-baseline parser/v0.1.3-baseline parser/ at §10c + cross-reference to the pin file. Code r5 verified all r4 absorptions otherwise CONFIRMED (M-1 AC-23 obligation clear; M-2 §1.1 #4 model_hash overclaim closed; m-1 stale mixed-sentinel reference dropped; m-2 §8.4 v0.1.2 → v0.1.3 cleaned). v0.1.5 is the codex code-lane lock candidate.
 
@@ -120,7 +120,7 @@ The following products are out of scope for SPEC-018 entirely:
 - Ring 2: provider-side agent execution, where a provider runs the agent loop locally with sandbox, filesystem, shell, or network egress authority. That product is reserved for SPEC-019.
 - Ring 3: provider-hosted MCP servers reachable from the model's tool loop. That product is reserved for SPEC-020.
 
-SPEC-018 v0.1.3 ratifies the as-built response-synthesis behavior in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift`, `OutputCanonicalizer.swift`, `ModelRuntime.swift`, `HTTPServer.swift`, `InferenceRelay.swift`, coordinator relay pass-through, and gateway pass-through, with two normative deltas vs the as-built that the v0.1.3 IMPL prompt will patch (enumerated in §1.2). All other §2–§8 behavior is post-hoc ratification.
+SPEC-018 v0.1.3 ratifies the as-built response-synthesis behavior in `phase3-binary/Sources/malibu-cli/ToolCallParser.swift`, `OutputCanonicalizer.swift`, `ModelRuntime.swift`, `HTTPServer.swift`, `InferenceRelay.swift`, coordinator relay pass-through, and gateway pass-through, with two normative deltas vs the as-built that the v0.1.3 IMPL prompt will patch (enumerated in §1.2). All other §2–§8 behavior is post-hoc ratification.
 
 ### 1.1 Known v0.1 limitations (single user-facing callout)
 
@@ -138,7 +138,7 @@ This subsection enumerates the deltas between v0.1.3's normative content and the
 
 **Two normative deltas vs the as-built:**
 
-1. **§3.2 `modelID`-match-required.** As-built (`phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:482-487`) uses OR-based detection (modelID substring match OR raw output sentinel). v0.1.3 normative: modelID match required; sentinel-only detection MUST fall back to plain content. AC-19. Tests in `phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:46-57` will need updating alongside the parser patch.
+1. **§3.2 `modelID`-match-required.** As-built (`phase3-binary/Sources/malibu-cli/ToolCallParser.swift:482-487`) uses OR-based detection (modelID substring match OR raw output sentinel). v0.1.3 normative: modelID match required; sentinel-only detection MUST fall back to plain content. AC-19. Tests in `phase3-binary/Tests/malibu-cliTests/ToolCallParserTests.swift:46-57` will need updating alongside the parser patch.
 2. **§8.4 commit-worthy delta validator.** As-built `hasOpenAIDeltaSignal` (`phase4-coordinator/internal/buyer/server.go:2482-2605`) commits on any non-empty `tool_calls[]` array. v0.1.3 normative: commit-worthy only if delta validates as minimal OpenAI shape AND `function.arguments` JSON nesting depth ≤ 32 AND byte length ≤ 256 KiB (per §8.4 / AC-21). New coordinator test required that rejects `[{}]`, `{"function":{"arguments":"[]"}}`, and 100k-depth nested objects, while accepting only the minimal valid delta. The §3.4 parser-side duplicate validator MUST apply the same depth / byte caps.
 
 **AC-23 baseline-pin file obligation (v0.1.4 addition).** The IMPL prompt MUST commit `tools/version-pins/openai-python-spec-018-v0_1_3-baseline.txt` to the repo root, containing the exact `openai` Python SDK semver pinned as the v0.1.3 wire-shape baseline (the version current at v0.1.3 lock time). AC-23's forward-compatibility regression depends on this file being mechanically reproducible from the repo, not on tribal knowledge of "which OpenAI SDK version was current."
@@ -171,7 +171,7 @@ Each `tool_calls[]` object MUST have:
 - `function.name`: the parsed function name.
 - `function.arguments`: a JSON-encoded string, not a JSON object.
 
-This shape is implemented in `phase3-binary/Sources/macprovider-cli/HTTPServer.swift:776-828`, `phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:566-615`, and `phase3-binary/Sources/macprovider-cli/OutputCanonicalizer.swift:16-38`.
+This shape is implemented in `phase3-binary/Sources/malibu-cli/HTTPServer.swift:776-828`, `phase3-binary/Sources/malibu-cli/InferenceRelay.swift:566-615`, and `phase3-binary/Sources/malibu-cli/OutputCanonicalizer.swift:16-38`.
 
 ### 2.1 ID Generation
 
@@ -185,13 +185,13 @@ The v0.1 as-built implementation uses Swift `UUID().uuidString`, removes hyphens
 
 IDs are non-deterministic (≥122 bits of entropy from the platform UUID generator). A retry of the same model output is not required to reproduce the same IDs. Implementations MUST NOT use an incrementing per-response scheme if that scheme can collide across calls in the same response.
 
-Source: `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:59-75` and `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:77-94`.
+Source: `phase3-binary/Sources/malibu-cli/ToolCallParser.swift:59-75` and `phase3-binary/Sources/malibu-cli/ToolCallParser.swift:77-94`.
 
 ### 2.2 Multi-Call Ordering
 
 When the underlying model output contains N recognized tool calls, the provider MUST preserve textual order. `tool_calls[0]` MUST correspond to the first recognized call in the model output, `tool_calls[1]` to the second, and so on.
 
-Source: `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:29-50`; locked by `phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:21-30`.
+Source: `phase3-binary/Sources/malibu-cli/ToolCallParser.swift:29-50`; locked by `phase3-binary/Tests/malibu-cliTests/ToolCallParserTests.swift:21-30`.
 
 ### 2.3 `arguments` String Encoding
 
@@ -206,13 +206,13 @@ The v0.1 canonicalization rules are:
 - Python-style keyword arguments MUST be converted to a JSON object string with keys sorted recursively at every depth, no insignificant whitespace, and without escaping `/`.
 - Non-object argument values (JSON arrays, scalars, etc.) MUST NOT produce a tool call; the response falls back to plain assistant content.
 
-Source: `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:238-264`, `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:96-123`, and `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:169-188`.
+Source: `phase3-binary/Sources/malibu-cli/ToolCallParser.swift:238-264`, `phase3-binary/Sources/malibu-cli/ToolCallParser.swift:96-123`, and `phase3-binary/Sources/malibu-cli/ToolCallParser.swift:169-188`.
 
 ### 2.4 Content Interleaving
 
 The parser can collect prose outside tool-call delimiters as cleaned content. The v0.1 provider runtime discards that cleaned content whenever at least one tool call is parsed and returns tool calls only. Therefore, when the model emits prose before, between, or after recognized tool calls, the buyer-visible non-streaming message MUST contain `content = null` and the parsed `tool_calls[]`.
 
-Source: parser behavior in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:29-50`; runtime discard in `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:826-839`; response emission in `phase3-binary/Sources/macprovider-cli/HTTPServer.swift:819-828`.
+Source: parser behavior in `phase3-binary/Sources/malibu-cli/ToolCallParser.swift:29-50`; runtime discard in `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:826-839`; response emission in `phase3-binary/Sources/malibu-cli/HTTPServer.swift:819-828`.
 
 ## 3. Detection Grammar
 
@@ -259,13 +259,13 @@ The v0.1 provider rejects ambiguous duplicate keys by abandoning tool-call synth
 
 **Parser-side DoS bounds (Critic M-1 absorption).** The §3.4 duplicate-key validator MUST reject any JSON whose nesting depth exceeds **32** or whose total byte length exceeds **256 KiB**, treating the rejection as a parse failure (fallback to plain assistant content per §3.5). This closes the parser-side DoS where an adversarial model emits multi-MB or deeply-nested `arguments` to exhaust provider memory before the §10a #7 v0.2 byte cap can apply.
 
-Source: JSON duplicate validator in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:266-448`; Python keyword duplicate rejection in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:96-123`; locked by `phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:125-159`. Depth + byte caps are a v0.1.3 IMPL delta per §1.2.
+Source: JSON duplicate validator in `phase3-binary/Sources/malibu-cli/ToolCallParser.swift:266-448`; Python keyword duplicate rejection in `phase3-binary/Sources/malibu-cli/ToolCallParser.swift:96-123`; locked by `phase3-binary/Tests/malibu-cliTests/ToolCallParserTests.swift:125-159`. Depth + byte caps are a v0.1.3 IMPL delta per §1.2.
 
 ### 3.5 Fallback to plain content
 
 If grammar detection fails, parsing fails, the function name is not declared in the request's enabled tools, or a value cannot be represented as a JSON-object `arguments` string, the provider MUST treat the model output as plain assistant content and MUST NOT emit `tool_calls[]`.
 
-Source: `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:4-27`, `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:826-839`.
+Source: `phase3-binary/Sources/malibu-cli/ToolCallParser.swift:4-27`, `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:826-839`.
 
 ### 3.6 Multi-family priority
 
@@ -299,7 +299,7 @@ For a matched family, the renderer MUST preserve conversation order and MUST ren
 
 The renderer MUST run only after §10d.6 request-side `tool_call_id` validation succeeds. It MUST NOT use session-scoped state to decide whether to render a request-side ID. Cross-session Cline resume and buyer-fabricated but internally consistent IDs are accepted per §10d.6.
 
-Source obligation for v0.2 IMPL: `phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:194` already validates assistant `tool_calls[]` and `:202` validates tool messages, but `ChatMessage` at `:175` currently stores only `role` and `content`; v0.2 must preserve `toolCallID` and `toolCalls` through request parsing and replace `request.messages.map { $0.mlxMessage }` at `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:374`, `:428`, and `:513` with a renderer that sees the full OpenAI message objects.
+Source obligation for v0.2 IMPL: `phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:194` already validates assistant `tool_calls[]` and `:202` validates tool messages, but `ChatMessage` at `:175` currently stores only `role` and `content`; v0.2 must preserve `toolCallID` and `toolCalls` through request parsing and replace `request.messages.map { $0.mlxMessage }` at `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:374`, `:428`, and `:513` with a renderer that sees the full OpenAI message objects.
 
 #### 3.8.1 Renderer fixture input and family structures
 
@@ -423,7 +423,7 @@ The provider MAY then emit a usage chunk with `choices = []` and MUST end the st
 
 If tool parsing fails in a tool-enabled streaming request, the provider emits plain content after generation completes and uses the non-tool finish reason (`stop` or `length`).
 
-Source: `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:481-603`, `phase3-binary/Sources/macprovider-cli/HTTPServer.swift:433-556`, `phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:387-509`.
+Source: `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:481-603`, `phase3-binary/Sources/malibu-cli/HTTPServer.swift:433-556`, `phase3-binary/Sources/malibu-cli/InferenceRelay.swift:387-509`.
 
 ## 5. Error Taxonomy
 
@@ -440,7 +440,7 @@ The v0.1 response-synthesis error behavior is:
 - unsupported `tool_choice` values other than omitted, `null`, or `"auto"` produce HTTP 400 with code `unsupported_tool_choice`;
 - current phase3 provider input containing `role: "tool"` or assistant history `tool_calls[]` produces HTTP 400 with code `unsupported_tool_messages`.
 
-Source: fallback behavior in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:4-27`; provider scope validation in `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:909-940`; tests in `phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift:99-155`.
+Source: fallback behavior in `phase3-binary/Sources/malibu-cli/ToolCallParser.swift:4-27`; provider scope validation in `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:909-940`; tests in `phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift:99-155`.
 
 SPEC-018 v0.1 imposes no `max_tool_calls` limit and no per-call `function.arguments` byte cap. No `tool_call_limit_exceeded` error exists in v0.1.
 
@@ -451,7 +451,7 @@ Disambiguation of v0.2+ commitments:
 
 If the underlying model reaches `max_tokens` mid-tool-call and no complete tool call can be parsed, the provider MUST NOT emit a partial tool call. It emits plain assistant content with `finish_reason = "length"` when the token limit is reached.
 
-Source: `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:451-465`, `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:567-590`.
+Source: `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:451-465`, `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:567-590`.
 
 Coordinator request validation for malformed assistant-history `tool_calls[]` remains governed by SPEC-001 and SPEC-002. The coordinator uses HTTP 400 with code `invalid_tools` for invalid request-side tool schema.
 
@@ -469,7 +469,7 @@ Source: request validation in `specs/SPEC-001-phase3-binary.md:950-979` and `spe
 
 **v0.1 implementation limitation (closed in §10a v0.2):** the current phase3 provider rejects multi-turn tool-result messages at the provider boundary with `unsupported_tool_messages`. Therefore, SPEC-018 v0.1 ratifies response synthesis and transport pass-through, but it does not certify a full second-turn provider request after tool execution. This is the v0.2 deliverable — the gate between "wire-shape compatibility certificate" and "actual Ring-1 product release" — per §10a.
 
-Source: `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:920-940`; test coverage in `phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift:124-155`.
+Source: `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:920-940`; test coverage in `phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift:124-155`.
 
 ## 7. Gateway Timeout Co-Requirement (informative)
 
@@ -489,13 +489,13 @@ Every transport component between provider runtime and buyer client MUST preserv
 
 The provider HTTP server emits the OpenAI non-streaming and streaming shapes. It MUST serialize `tool_calls[]` without raw model delimiters.
 
-Source: `phase3-binary/Sources/macprovider-cli/HTTPServer.swift:776-891`; shape tests in `phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift:53-97` and `phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift:223-262`.
+Source: `phase3-binary/Sources/malibu-cli/HTTPServer.swift:776-891`; shape tests in `phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift:53-97` and `phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift:223-262`.
 
 ### 8.2 InferenceRelay
 
 InferenceRelay MUST preserve the generated OpenAI JSON/SSE payloads as `data` strings when forwarding over the coordinator WebSocket relay. It MUST NOT parse, strip, reorder, or canonicalize `tool_calls[]`.
 
-Source: non-streaming forward in `phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:269-309`; streaming forward in `phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:387-509`; frame send helpers in `phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:532-564` and `phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:566-650`.
+Source: non-streaming forward in `phase3-binary/Sources/malibu-cli/InferenceRelay.swift:269-309`; streaming forward in `phase3-binary/Sources/malibu-cli/InferenceRelay.swift:387-509`; frame send helpers in `phase3-binary/Sources/malibu-cli/InferenceRelay.swift:532-564` and `phase3-binary/Sources/malibu-cli/InferenceRelay.swift:566-650`.
 
 ### 8.3 Coordinator WebSocket Relay
 

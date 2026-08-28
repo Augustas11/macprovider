@@ -96,7 +96,7 @@ enum CLIUpdateRunner {
     }
 
     static func installedCLIPath() -> String {
-        NSHomeDirectory() + "/macprovider/macprovider-cli"
+        NSHomeDirectory() + "/macprovider/malibu-cli"
     }
 
     static func resolveExecutableURL() throws -> URL {
@@ -110,7 +110,7 @@ enum CLIUpdateRunner {
             #endif
         }
         let bundled = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/macprovider-cli")
+            .appendingPathComponent("Contents/MacOS/malibu-cli")
         if FileManager.default.isExecutableFile(atPath: bundled.path) {
             return bundled
         }
@@ -548,7 +548,7 @@ enum CLIUpdateRunner {
 
     private static func installedProviderPayloadDirectory(for executableURL: URL) throws -> URL {
         let executable = executableURL.standardizedFileURL
-        guard executable.lastPathComponent == "macprovider-cli" else {
+        guard executable.lastPathComponent == "malibu-cli" else {
             throw Error.appUpdateProofUnavailable
         }
         var info = stat()

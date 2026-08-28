@@ -7,7 +7,7 @@ requests upstream.
 
 ## Target Result
 
-`macprovider-cli consume` supports local budget flags, model admission, durable
+`malibu-cli consume` supports local budget flags, model admission, durable
 micro-USD ledger reservation state, held-reservation recovery, redacted status,
 and unpriced override handling without forwarding chargeable requests.
 
@@ -65,8 +65,8 @@ Chargeable `POST /v1/chat/completions` requests remain fail-closed:
    - reject requests above `--max-request-usd` before appending ledger rows.
 
 6. Implement recovery/status commands:
-   - `macprovider-cli consume budget status`;
-   - `macprovider-cli consume budget release-held --ledger <path>|default
+   - `malibu-cli consume budget status`;
+   - `malibu-cli consume budget release-held --ledger <path>|default
      --run-id <id> --confirm-release-held`;
    - `release-held` changes only matching held reservations and exits nonzero
      with `local_no_held_reservations` when no eligible row exists.

@@ -9,10 +9,10 @@
     "model": "MacBook Air (Mac17,3)",
     "ram_gb": 32,
     "macos": "26.5 (Build 25F71)",
-    "macprovider_cli_version": "1.8.19",
+    "malibu_cli_version": "1.8.19",
     "mlx_swift_pin": "0.31.6 (rev 0bb916c67f4b)",
     "mlx_swift_lm_pin": "3.31.4 (rev bd4b7434e6bd)",
-    "bench_binary": "phase3-binary/.build/release/macprovider-cli (swift build -c release)",
+    "bench_binary": "phase3-binary/.build/release/malibu-cli (swift build -c release)",
     "metallib_source": "built from mlx-swift 0.31.6 checkout via scripts/build-mlx-metallib.sh",
     "production_provider_during_bench": "STOPPED — live.malibu.provider (PID 71387, qwen3-coder-30b-a3b-instruct on port 61919) was safely bootout via launchctl before bench; restored after."
   },

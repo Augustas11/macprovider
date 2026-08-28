@@ -84,16 +84,16 @@ flow. Required evidence:
 ```bash
 bash scripts/verify-malibu-release-artifacts.sh \
   Malibu-vX.Y.Z.dmg \
-  --provider-tarball macprovider-cli-vX.Y.Z-darwin-arm64.tar.gz
+  --provider-tarball malibu-cli-vX.Y.Z-darwin-arm64.tar.gz
 ```
 
 7. Verify local updater acceptance from the previous stable CLI:
 
 ```bash
-macprovider-cli update --check
-macprovider-cli update
-macprovider-cli --version
-macprovider-cli status --advanced
+malibu-cli update --check
+malibu-cli update
+malibu-cli --version
+malibu-cli status --advanced
 ```
 
 If the updater returns `embedded_cli_mismatch`, the release is not
@@ -140,7 +140,7 @@ accepted v2 must remain on the previous provider recommendation.
 
 ## What not to count as release proof
 
-- matching `macprovider-cli --version`
+- matching `malibu-cli --version`
 - matching codesign designated-requirement text
 - Gatekeeper acceptance alone
 - notarization/stapling alone

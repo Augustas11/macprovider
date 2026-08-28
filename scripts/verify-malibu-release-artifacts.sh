@@ -2,7 +2,7 @@
 # Post-release Gatekeeper checks for signed Malibu artifacts (SPEC-025 P2).
 #
 # Usage:
-#   bash scripts/verify-malibu-release-artifacts.sh Malibu-v1.8.11.dmg --provider-tarball macprovider-cli-v1.8.11-darwin-arm64.tar.gz
+#   bash scripts/verify-malibu-release-artifacts.sh Malibu-v1.8.11.dmg --provider-tarball malibu-cli-v1.8.11-darwin-arm64.tar.gz
 #   bash scripts/verify-malibu-release-artifacts.sh /Applications/Malibu.app --expected-cli-sha256 <sha256>
 #   bash scripts/verify-malibu-release-artifacts.sh Malibu-v1.8.39.dmg --legacy-app-only-no-provider-tarball
 #
@@ -84,9 +84,9 @@ verify_embedded_cli_identity() {
   local extract_dir
   local embedded_cli_sha
 
-  [ -x "$app_path/Contents/MacOS/macprovider-cli" ] ||
-    die "Malibu.app lacks executable bundled macprovider-cli"
-  embedded_cli_sha="$(sha256_file "$app_path/Contents/MacOS/macprovider-cli")"
+  [ -x "$app_path/Contents/MacOS/malibu-cli" ] ||
+    die "Malibu.app lacks executable bundled malibu-cli"
+  embedded_cli_sha="$(sha256_file "$app_path/Contents/MacOS/malibu-cli")"
 
   if [ "$legacy_app_only" -eq 1 ]; then
     printf '[verify-malibu-release] warning: legacy app-only verification skipped standalone CLI byte identity\n' >&2
@@ -94,16 +94,16 @@ verify_embedded_cli_identity() {
   fi
 
   bash "$repo_root/scripts/require-cli-se-entitlements.sh" \
-    "$app_path/Contents/MacOS/macprovider-cli"
+    "$app_path/Contents/MacOS/malibu-cli"
 
   if [ -n "$provider_tarball" ]; then
     extract_dir="$(mktemp -d "${TMPDIR:-/tmp}/malibu-provider-cli.XXXXXX")"
-    tar -xzf "$provider_tarball" -C "$extract_dir" macprovider-cli ||
-      die "provider tarball does not contain macprovider-cli"
-    [ -x "$extract_dir/macprovider-cli" ] ||
-      die "provider tarball macprovider-cli is not executable"
-    bash "$repo_root/scripts/require-cli-se-entitlements.sh" "$extract_dir/macprovider-cli"
-    expected_sha="$(sha256_file "$extract_dir/macprovider-cli")"
+    tar -xzf "$provider_tarball" -C "$extract_dir" malibu-cli ||
+      die "provider tarball does not contain malibu-cli"
+    [ -x "$extract_dir/malibu-cli" ] ||
+      die "provider tarball malibu-cli is not executable"
+    bash "$repo_root/scripts/require-cli-se-entitlements.sh" "$extract_dir/malibu-cli"
+    expected_sha="$(sha256_file "$extract_dir/malibu-cli")"
     rm -rf "$extract_dir"
   fi
 

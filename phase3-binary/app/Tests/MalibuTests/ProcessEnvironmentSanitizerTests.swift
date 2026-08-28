@@ -52,7 +52,7 @@ final class ProcessEnvironmentSanitizerTests: XCTestCase {
         let app = root.appendingPathComponent("Malibu.app", isDirectory: true)
         let macos = app.appendingPathComponent("Contents/MacOS", isDirectory: true)
         try FileManager.default.createDirectory(at: macos, withIntermediateDirectories: true)
-        let bundled = macos.appendingPathComponent("macprovider-cli")
+        let bundled = macos.appendingPathComponent("malibu-cli")
         FileManager.default.createFile(atPath: bundled.path, contents: Data())
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bundled.path)
         defer { try? FileManager.default.removeItem(at: root) }

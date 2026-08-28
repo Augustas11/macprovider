@@ -79,7 +79,7 @@ case "${resolved_mode}" in
     # the parent shell are explicitly unset. Defense-in-depth alongside the
     # Go runner's cmd.Env = sanitizedEnv() for CLI shell-outs.
     unset BUYER_TOKEN OPERATOR_TOKEN DEMO_IDENTITY
-    export HARNESS_SKU_ECON_CLI_BIN="${repo_root}/phase3-binary/.build/release/macprovider-cli"
+    export HARNESS_SKU_ECON_CLI_BIN="${repo_root}/phase3-binary/.build/release/malibu-cli"
     ;;
   buyer-fleet|"")
     # buyer-fleet path: source local env file if present, then auto-discover

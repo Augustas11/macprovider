@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version_guard="$repo_root/scripts/test-coordinator-advertised-version.sh"
 policy_guard="$repo_root/scripts/release-staged-version-policy.sh"
-source_file="$repo_root/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
+source_file="$repo_root/phase3-binary/Sources/malibu-cli/CoordinatorClient.swift"
 app_project_file="$repo_root/phase3-binary/app/project.yml"
 binary_version="$(sed -nE 's/^[[:space:]]*static let binaryVersion = "([^"]+)".*$/\1/p' "$source_file" | head -n 1)"
 app_version="$(sed -nE 's/^[[:space:]]*MARKETING_VERSION: "([^"]+)".*$/\1/p' "$app_project_file" | head -n 1)"
@@ -49,11 +49,11 @@ reset_fixture() {
   rm -rf "$fixture"
   mkdir -p \
     "$fixture/scripts" \
-    "$fixture/phase3-binary/Sources/macprovider-cli" \
+    "$fixture/phase3-binary/Sources/malibu-cli" \
     "$fixture/phase3-binary/app" \
     "$fixture/phase4-coordinator/dist"
   cp "$version_guard" "$fixture/scripts/test-coordinator-advertised-version.sh"
-  cp "$source_file" "$fixture/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
+  cp "$source_file" "$fixture/phase3-binary/Sources/malibu-cli/CoordinatorClient.swift"
   cp "$app_project_file" "$fixture/phase3-binary/app/project.yml"
   cp "$repo_root/phase3-binary/app/release-builds.tsv" "$fixture/phase3-binary/app/release-builds.tsv"
   cp "$repo_root/phase4-coordinator/dist/coordinator.yaml" "$fixture/phase4-coordinator/dist/coordinator.yaml"
@@ -132,7 +132,7 @@ fi
 grep -q "does not match CLI binary version" "$work/tag-drift.out"
 
 reset_fixture
-printf '%s\n' '    static let binaryVersion = "9.9.9"' >> "$fixture/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
+printf '%s\n' '    static let binaryVersion = "9.9.9"' >> "$fixture/phase3-binary/Sources/malibu-cli/CoordinatorClient.swift"
 expect_fixture_failure duplicate-cli 'exactly one binaryVersion definition (found 2)'
 
 reset_fixture

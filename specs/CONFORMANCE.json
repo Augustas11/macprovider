@@ -339,7 +339,7 @@
     },
     {
       "spec_id": "SPEC-013",
-      "title": "`macprovider-cli autotune` subcommand",
+      "title": "`malibu-cli autotune` subcommand",
       "version": "0.3.1",
       "path": "specs/SPEC-013-cli-autotune.md",
       "status": "normative",
@@ -1462,14 +1462,14 @@
       "spec_id": "SPEC-001",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func setSleepAssertionDesired",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func runReconnectLoop",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func drainFromCoordinator"
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:func setSleepAssertionDesired",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:private func runReconnectLoop",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:func drainFromCoordinator"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionSurvivesDisconnectAndReleasesOnStop",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionFollowsServingIntent",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionRefusesReArmAfterStop"
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift:testSleepAssertionSurvivesDisconnectAndReleasesOnStop",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift:testSleepAssertionFollowsServingIntent",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift:testSleepAssertionRefusesReArmAfterStop"
       ],
       "journeys": [],
       "evidence": [],
@@ -1598,12 +1598,12 @@
       "spec_id": "SPEC-010",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ModelArtifactIdentity.swift:static let snapshotManifestV1",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:verifiedCatalogArtifactSHA256",
+        "phase3-binary/Sources/malibu-cli/ModelArtifactIdentity.swift:static let snapshotManifestV1",
+        "phase3-binary/Sources/malibu-cli/ModelRuntime.swift:verifiedCatalogArtifactSHA256",
         "phase4-coordinator/internal/modelidentity/identity.go:SnapshotManifestV1"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCanonicalModelIdentityIsNamedAcrossAdmissionAndHeartbeat",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift::testCanonicalModelIdentityIsNamedAcrossAdmissionAndHeartbeat",
         "phase4-coordinator/internal/pool/provider_test.go::TestAirLlamaHeartbeatKeepsCatalogArtifactAndWeightsIdentitiesSeparate"
       ],
       "journeys": [
@@ -1630,13 +1630,13 @@
       "spec_id": "SPEC-010",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:authInitialMessage",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:sendHeartbeat",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:authInitialMessage",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:sendHeartbeat",
         "phase4-coordinator/internal/ws/messages.go:parseModelIdentityMetadata"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCanonicalModelIdentityIsNamedAcrossAdmissionAndHeartbeat",
-        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift::testRuntimeNeverInfersCanonicalAlgorithmFromHashPresence",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift::testCanonicalModelIdentityIsNamedAcrossAdmissionAndHeartbeat",
+        "phase3-binary/Tests/malibu-cliTests/ModelRuntimeSwapTests.swift::testRuntimeNeverInfersCanonicalAlgorithmFromHashPresence",
         "phase4-coordinator/internal/ws/model_identity_test.go::TestCanonicalModelIdentityUsesSignedAutotuneRowWithoutTier2Fallback"
       ],
       "journeys": [
@@ -1663,12 +1663,12 @@
       "spec_id": "SPEC-010",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ModelArtifactIdentity.swift:static let safetensorsManifestV1",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func modelWeightArtifactManifestHash",
+        "phase3-binary/Sources/malibu-cli/ModelArtifactIdentity.swift:static let safetensorsManifestV1",
+        "phase3-binary/Sources/malibu-cli/ModelRuntime.swift:static func modelWeightArtifactManifestHash",
         "phase4-coordinator/internal/pool/provider.go:type HeartbeatUpdate"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapBootTrustDoesNotCompareWeightManifestToCanonicalArtifactHash",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapBootTrustDoesNotCompareWeightManifestToCanonicalArtifactHash",
         "phase4-coordinator/internal/pool/provider_test.go::TestAirLlamaHeartbeatKeepsCatalogArtifactAndWeightsIdentitiesSeparate"
       ],
       "journeys": [
@@ -1769,13 +1769,13 @@
       "spec_id": "SPEC-010",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:beginSwap",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:catalogRuntimeMatches"
+        "phase3-binary/Sources/malibu-cli/ModelRuntime.swift:beginSwap",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:catalogRuntimeMatches"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapNeverPublishesNewModelUnderBootRowIdentity",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapInvalidatesSameModelIDWhenArtifactHashChanges",
-        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift::testRuntimeNeverInfersCanonicalAlgorithmFromHashPresence"
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapNeverPublishesNewModelUnderBootRowIdentity",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapInvalidatesSameModelIDWhenArtifactHashChanges",
+        "phase3-binary/Tests/malibu-cliTests/ModelRuntimeSwapTests.swift::testRuntimeNeverInfersCanonicalAlgorithmFromHashPresence"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
@@ -1801,14 +1801,14 @@
       "spec_id": "SPEC-018",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/HarmonyResponseParser.swift:enum HarmonyResponseParser",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func speculativeRoute",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func parseGeneratedOutput"
+        "phase3-binary/Sources/malibu-cli/HarmonyResponseParser.swift:enum HarmonyResponseParser",
+        "phase3-binary/Sources/malibu-cli/ModelRuntime.swift:static func speculativeRoute",
+        "phase3-binary/Sources/malibu-cli/ModelRuntime.swift:static func parseGeneratedOutput"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/HarmonyResponseParserTests.swift:final class HarmonyResponseParserTests",
-        "phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:final class ToolCallParserTests",
-        "phase3-binary/Tests/macprovider-cliTests/Spec028PlumbingTests.swift:testRuntimeSpeculativeRouteUsesGreedyGateAndDraftAvailability"
+        "phase3-binary/Tests/malibu-cliTests/HarmonyResponseParserTests.swift:final class HarmonyResponseParserTests",
+        "phase3-binary/Tests/malibu-cliTests/ToolCallParserTests.swift:final class ToolCallParserTests",
+        "phase3-binary/Tests/malibu-cliTests/Spec028PlumbingTests.swift:testRuntimeSpeculativeRouteUsesGreedyGateAndDraftAvailability"
       ],
       "journeys": [],
       "evidence": [],
@@ -1824,12 +1824,12 @@
       "spec_id": "SPEC-018",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:enum ToolCallParser",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:struct NativeToolCallStreamEmitter"
+        "phase3-binary/Sources/malibu-cli/ToolCallParser.swift:enum ToolCallParser",
+        "phase3-binary/Sources/malibu-cli/ModelRuntime.swift:struct NativeToolCallStreamEmitter"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:final class ToolCallParserTests",
-        "phase3-binary/Tests/macprovider-cliTests/NativeToolCallStreamEmitterTests.swift:final class NativeToolCallStreamEmitterTests"
+        "phase3-binary/Tests/malibu-cliTests/ToolCallParserTests.swift:final class ToolCallParserTests",
+        "phase3-binary/Tests/malibu-cliTests/NativeToolCallStreamEmitterTests.swift:final class NativeToolCallStreamEmitterTests"
       ],
       "journeys": [],
       "evidence": [
@@ -1847,14 +1847,14 @@
       "spec_id": "SPEC-020",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:handleCoordinatorRecommendation",
-        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:handleSignedReleaseDiscovery",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:runSignedRecoveryDiscoveryIfDue",
-        "phase3-binary/Sources/macprovider-cli/SignedReleaseDiscovery.swift:SignedReleaseDiscoveryHead"
+        "phase3-binary/Sources/malibu-cli/AutoUpdater.swift:handleCoordinatorRecommendation",
+        "phase3-binary/Sources/malibu-cli/AutoUpdater.swift:handleSignedReleaseDiscovery",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:runSignedRecoveryDiscoveryIfDue",
+        "phase3-binary/Sources/malibu-cli/SignedReleaseDiscovery.swift:SignedReleaseDiscoveryHead"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testDefaultUpdateUsesBoundedAppendOnlyDiscoveryListing",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testDiscoveryFailsClosedOnHighestMutableTransportWithoutFallingBack",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testDefaultUpdateUsesBoundedAppendOnlyDiscoveryListing",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testDiscoveryFailsClosedOnHighestMutableTransportWithoutFallingBack",
         "scripts/test-release-discovery-transport.sh:versioned immutable transport fails closed",
         "scripts/test-acceptance-promotion.sh:exact accepted-byte promotion fails closed",
         "scripts/test-renew-release-discovery-head.sh:protected renewal workflow fails closed",
@@ -1889,15 +1889,15 @@
       "spec_id": "SPEC-020",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:struct UpdateCommand",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:discoverSignedReleaseHead",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:acceptanceDiscoveryHeadIfPresent"
+        "phase3-binary/Sources/malibu-cli/MalibuCLI.swift:struct UpdateCommand",
+        "phase3-binary/Sources/malibu-cli/SelfUpdate.swift:discoverSignedReleaseHead",
+        "phase3-binary/Sources/malibu-cli/SelfUpdate.swift:acceptanceDiscoveryHeadIfPresent"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testCoordinatorCompatibilityAdmissionRequiresFreshExactCurrentAndTargetSets",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testAppendOnlyDiscoveryTransportRequiresTagSequenceToMatchSignedHead",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testDefaultUpdateUsesBoundedAppendOnlyDiscoveryListing",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testDiscoveryFailsClosedOnHighestMutableTransportWithoutFallingBack",
+        "phase3-binary/Tests/malibu-cliTests/AutoUpdateTests.swift::testCoordinatorCompatibilityAdmissionRequiresFreshExactCurrentAndTargetSets",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testAppendOnlyDiscoveryTransportRequiresTagSequenceToMatchSignedHead",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testDefaultUpdateUsesBoundedAppendOnlyDiscoveryListing",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testDiscoveryFailsClosedOnHighestMutableTransportWithoutFallingBack",
         "scripts/test-release-discovery-transport.sh:versioned immutable transport fails closed",
         "scripts/test-release-security-posture.sh:release security posture regression checks passed",
         "scripts/test-renew-release-discovery-head.sh:protected renewal workflow fails closed",
@@ -1932,18 +1932,18 @@
       "spec_id": "SPEC-020",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:applyValidatedUpdate",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForLocalHealthIfManaged",
-        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:func writeSuccessSentinel(binaryURL: URL, marker: AutoUpdatePendingMarker)",
-        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:readSuccessSentinel",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:localSignedSetRecoveryAllowed",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:commitPendingAutoupdateAfterServingProof",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func runStartupAutoupdateRecovery()"
+        "phase3-binary/Sources/malibu-cli/SelfUpdate.swift:applyValidatedUpdate",
+        "phase3-binary/Sources/malibu-cli/SelfUpdate.swift:waitForLocalHealthIfManaged",
+        "phase3-binary/Sources/malibu-cli/AutoUpdateMarker.swift:func writeSuccessSentinel(binaryURL: URL, marker: AutoUpdatePendingMarker)",
+        "phase3-binary/Sources/malibu-cli/AutoUpdateMarker.swift:readSuccessSentinel",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:localSignedSetRecoveryAllowed",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:commitPendingAutoupdateAfterServingProof",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:private func runStartupAutoupdateRecovery()"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReadinessFailureRollsBackReplacement",
-        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testSuccessCleanupIsIdempotentAcrossCrashSteps",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testPreStagedSuccessSentinelMismatchDoesNotCleanupPendingOrBackup"
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testReadinessFailureRollsBackReplacement",
+        "phase3-binary/Tests/malibu-cliTests/AutoUpdateTests.swift::testSuccessCleanupIsIdempotentAcrossCrashSteps",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift::testPreStagedSuccessSentinelMismatchDoesNotCleanupPendingOrBackup"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
@@ -1974,70 +1974,70 @@
       "spec_id": "SPEC-020",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:acquireUpdateLockAndFenceReloadJobs",
-        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:rollbackCommittedSwapAfterRestartFailure",
-        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:updateSignedPolicy",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:fenceAutoupdateReloadHelpers",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:waitForStableLocalAutoupdateHealth",
-        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:fenceAuthorizedSelfUpdateReloadJobsAtStartup",
-        "phase3-binary/Sources/macprovider-cli/ProviderLifecycleLease.swift:recoverAdoptedStartupHandoff",
-        "phase3-binary/Sources/macprovider-cli/ProviderLifecycleLease.swift:static func launchdServiceProcessID",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:fenceProviderReloadLaunchdJobs",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:launchctlServiceLoadedOrThrow",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:providerReloadLaunchAgentData",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:runLaunchctlCommand",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForLocalHealthIfManaged",
-        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:defaultRollbackObserverAvailable",
+        "phase3-binary/Sources/malibu-cli/AutoUpdater.swift:acquireUpdateLockAndFenceReloadJobs",
+        "phase3-binary/Sources/malibu-cli/AutoUpdater.swift:rollbackCommittedSwapAfterRestartFailure",
+        "phase3-binary/Sources/malibu-cli/AutoUpdateMarker.swift:updateSignedPolicy",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:fenceAutoupdateReloadHelpers",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:waitForStableLocalAutoupdateHealth",
+        "phase3-binary/Sources/malibu-cli/MalibuCLI.swift:fenceAuthorizedSelfUpdateReloadJobsAtStartup",
+        "phase3-binary/Sources/malibu-cli/ProviderLifecycleLease.swift:recoverAdoptedStartupHandoff",
+        "phase3-binary/Sources/malibu-cli/ProviderLifecycleLease.swift:static func launchdServiceProcessID",
+        "phase3-binary/Sources/malibu-cli/SelfUpdate.swift:fenceProviderReloadLaunchdJobs",
+        "phase3-binary/Sources/malibu-cli/SelfUpdate.swift:launchctlServiceLoadedOrThrow",
+        "phase3-binary/Sources/malibu-cli/SelfUpdate.swift:providerReloadLaunchAgentData",
+        "phase3-binary/Sources/malibu-cli/SelfUpdate.swift:runLaunchctlCommand",
+        "phase3-binary/Sources/malibu-cli/SelfUpdate.swift:waitForLocalHealthIfManaged",
+        "phase3-binary/Sources/malibu-cli/AutoUpdater.swift:defaultRollbackObserverAvailable",
         "ops/macprovider-watchdog/watchdog.sh:autoupdate_recovery_tick",
         "phase3-binary/dist/install.sh:autoupdate_recovery_tick"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testAutoUpdaterOwnsMutationLockBeforeFencingReloadJobs",
-        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testAutoUpdaterServiceLoadedProbeFailsClosedOnTimeoutAndUnknownStatus",
-        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testActivationFailureRefencesBeforeRestoringUnderMutationLock",
-        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testPostSwapPolicyPersistFailureUsesHeldMutationLockAndRefencesBeforeRestore",
-        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testPreLockSignedPolicyPersistFailureNeverRestoresPendingReleaseBytes",
-        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testRestartFailureRollbackDoesNotRestoreBeforeReloadJobsAreFenced",
-        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testTrustLossRollbackAndCleanupRemainUnderMutationLock",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testExpiredOrphanRecoveryFailsClosedWhenReloadHelperFenceFails",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testExpiredOrphanRecoveryFencesReloadHelpersBeforeRestoringBinary",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testExpiredOrphanRecoveryDoesNotRestoreBinaryWhenReloadHelperFenceTimesOut",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testSignedStartupRecoveryKeepsRollbackArmedWhenLocallyUnhealthy",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testSignedStartupRecoveryCommitsStableLocalIdentityBeforeModelIsLoaded",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testLocalAutoupdateHealthRequiresExactListenerEnvelope",
-        "phase3-binary/Tests/macprovider-cliTests/ProviderLifecycleLeaseTests.swift::testAuthorizedAdoptedHandoffRecoversAcrossRestartBeforeCommit",
-        "phase3-binary/Tests/macprovider-cliTests/ProviderLifecycleLeaseTests.swift::testPendingUpdateRetainsStartupHandoffUntilCommitMarkerClears",
-        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testAdoptedRestartBeforeCommitFencesAfterOriginalHandoffExpires",
-        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testAdoptedRestartBeforeCommitFencesAfterReboot",
-        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testCoordinatorStartIsScheduledByListeningCallback",
-        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testCoordinatorOwnedRecommendationFirstHopFencesExactLaunchdTarget",
-        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testCoordinatorOwnedSignedReleaseFirstHopFencesExactLaunchdTarget",
-        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testManualServeProcessCannotUseUpdateHandoffToFenceLaunchdHelper",
-        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testManualProcessCannotUseRetainedRollbackMarker",
-        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testRestoredPreviousStartupFencesWithoutRecoveringFailedTargetHandoff",
-        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testRestoredPreviousStartupRejectsWrongVersionAndBinary",
-        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testV1853FirstHopFencesAfterRecurringHelperKilledFirstAdoptedTarget",
-        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testV1853FirstHopFencesRecurringReloadHelperBeforeStartupWork",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadReloadsWatchdogBeforeProvider",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFencesLegacyJobsBeforeValidatingCanonicalPlists",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFenceFailsClosedWhenServiceInspectionFails",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFenceTreatsDisabledLoadedHelperAsPresent",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadCleansPartiallyBootstrappedHelperOnFailure",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFencesOnlyExactLegacyUUIDLabels",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testBoundedLaunchctlRunnerDrainsOutputWithoutPipeBackpressure",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testBoundedLaunchctlRunnerReportsTimeoutDistinctly",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testLaunchctlServiceLoadedThrowsOnTimeoutForRestartPath",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testLaunchctlTimeoutFailsFenceBeforeUnlinkingHelperPlist",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testLocalHealthRequiresStableHealthyTargetInstance",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperFailsBoundedlyWithoutBootstrapWhenCanonicalNeverDisappears",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperFailsClosedOnUnknownServiceInspectionError",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperTimesOutHungBootoutWithoutBootstrappingOrRemovingProviderPlist",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperTimesOutHungBootstrapWithoutRemovingProviderPlist",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperTimesOutHungPrintWithoutBootstrappingOrRemovingProviderPlist",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperWaitsForCanonicalAbsenceThenBootstrapsExactlyOnce",
-        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testDefaultRollbackObserverFollowsCLIStartupRecoveryNotWatchdog",
-        "phase3-binary/Tests/macprovider-cliTests/ProviderLifecycleLeaseTests.swift::testLaunchdServiceProcessIDFailsClosedWhenBoundedLaunchctlTimesOut",
-        "phase3-binary/Tests/macprovider-cliTests/ProviderLifecycleLeaseTests.swift::testLaunchdServiceProcessIDParsesOnlySuccessfulPositivePID",
+        "phase3-binary/Tests/malibu-cliTests/AutoUpdateTests.swift::testAutoUpdaterOwnsMutationLockBeforeFencingReloadJobs",
+        "phase3-binary/Tests/malibu-cliTests/AutoUpdateTests.swift::testAutoUpdaterServiceLoadedProbeFailsClosedOnTimeoutAndUnknownStatus",
+        "phase3-binary/Tests/malibu-cliTests/AutoUpdateTests.swift::testActivationFailureRefencesBeforeRestoringUnderMutationLock",
+        "phase3-binary/Tests/malibu-cliTests/AutoUpdateTests.swift::testPostSwapPolicyPersistFailureUsesHeldMutationLockAndRefencesBeforeRestore",
+        "phase3-binary/Tests/malibu-cliTests/AutoUpdateTests.swift::testPreLockSignedPolicyPersistFailureNeverRestoresPendingReleaseBytes",
+        "phase3-binary/Tests/malibu-cliTests/AutoUpdateTests.swift::testRestartFailureRollbackDoesNotRestoreBeforeReloadJobsAreFenced",
+        "phase3-binary/Tests/malibu-cliTests/AutoUpdateTests.swift::testTrustLossRollbackAndCleanupRemainUnderMutationLock",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift::testExpiredOrphanRecoveryFailsClosedWhenReloadHelperFenceFails",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift::testExpiredOrphanRecoveryFencesReloadHelpersBeforeRestoringBinary",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift::testExpiredOrphanRecoveryDoesNotRestoreBinaryWhenReloadHelperFenceTimesOut",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift::testSignedStartupRecoveryKeepsRollbackArmedWhenLocallyUnhealthy",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift::testSignedStartupRecoveryCommitsStableLocalIdentityBeforeModelIsLoaded",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift::testLocalAutoupdateHealthRequiresExactListenerEnvelope",
+        "phase3-binary/Tests/malibu-cliTests/ProviderLifecycleLeaseTests.swift::testAuthorizedAdoptedHandoffRecoversAcrossRestartBeforeCommit",
+        "phase3-binary/Tests/malibu-cliTests/ProviderLifecycleLeaseTests.swift::testPendingUpdateRetainsStartupHandoffUntilCommitMarkerClears",
+        "phase3-binary/Tests/malibu-cliTests/ServeCommandTests.swift::testAdoptedRestartBeforeCommitFencesAfterOriginalHandoffExpires",
+        "phase3-binary/Tests/malibu-cliTests/ServeCommandTests.swift::testAdoptedRestartBeforeCommitFencesAfterReboot",
+        "phase3-binary/Tests/malibu-cliTests/ServeCommandTests.swift::testCoordinatorStartIsScheduledByListeningCallback",
+        "phase3-binary/Tests/malibu-cliTests/ServeCommandTests.swift::testCoordinatorOwnedRecommendationFirstHopFencesExactLaunchdTarget",
+        "phase3-binary/Tests/malibu-cliTests/ServeCommandTests.swift::testCoordinatorOwnedSignedReleaseFirstHopFencesExactLaunchdTarget",
+        "phase3-binary/Tests/malibu-cliTests/ServeCommandTests.swift::testManualServeProcessCannotUseUpdateHandoffToFenceLaunchdHelper",
+        "phase3-binary/Tests/malibu-cliTests/ServeCommandTests.swift::testManualProcessCannotUseRetainedRollbackMarker",
+        "phase3-binary/Tests/malibu-cliTests/ServeCommandTests.swift::testRestoredPreviousStartupFencesWithoutRecoveringFailedTargetHandoff",
+        "phase3-binary/Tests/malibu-cliTests/ServeCommandTests.swift::testRestoredPreviousStartupRejectsWrongVersionAndBinary",
+        "phase3-binary/Tests/malibu-cliTests/ServeCommandTests.swift::testV1853FirstHopFencesAfterRecurringHelperKilledFirstAdoptedTarget",
+        "phase3-binary/Tests/malibu-cliTests/ServeCommandTests.swift::testV1853FirstHopFencesRecurringReloadHelperBeforeStartupWork",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testCompatibilityReloadReloadsWatchdogBeforeProvider",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFencesLegacyJobsBeforeValidatingCanonicalPlists",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFenceFailsClosedWhenServiceInspectionFails",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFenceTreatsDisabledLoadedHelperAsPresent",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testCompatibilityReloadCleansPartiallyBootstrappedHelperOnFailure",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFencesOnlyExactLegacyUUIDLabels",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testBoundedLaunchctlRunnerDrainsOutputWithoutPipeBackpressure",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testBoundedLaunchctlRunnerReportsTimeoutDistinctly",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testLaunchctlServiceLoadedThrowsOnTimeoutForRestartPath",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testLaunchctlTimeoutFailsFenceBeforeUnlinkingHelperPlist",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testLocalHealthRequiresStableHealthyTargetInstance",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testReloadHelperFailsBoundedlyWithoutBootstrapWhenCanonicalNeverDisappears",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testReloadHelperFailsClosedOnUnknownServiceInspectionError",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testReloadHelperTimesOutHungBootoutWithoutBootstrappingOrRemovingProviderPlist",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testReloadHelperTimesOutHungBootstrapWithoutRemovingProviderPlist",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testReloadHelperTimesOutHungPrintWithoutBootstrappingOrRemovingProviderPlist",
+        "phase3-binary/Tests/malibu-cliTests/SelfUpdateTests.swift::testReloadHelperWaitsForCanonicalAbsenceThenBootstrapsExactlyOnce",
+        "phase3-binary/Tests/malibu-cliTests/AutoUpdateTests.swift::testDefaultRollbackObserverFollowsCLIStartupRecoveryNotWatchdog",
+        "phase3-binary/Tests/malibu-cliTests/ProviderLifecycleLeaseTests.swift::testLaunchdServiceProcessIDFailsClosedWhenBoundedLaunchctlTimesOut",
+        "phase3-binary/Tests/malibu-cliTests/ProviderLifecycleLeaseTests.swift::testLaunchdServiceProcessIDParsesOnlySuccessfulPositivePID",
         "phase3-binary/dist/test/watchdog_rollback_paths.test.sh:assert_watchdog_does_not_own_rollback",
         "phase3-binary/dist/test/watchdog_rollback_paths.test.sh:assert_watchdog_does_not_restore_release_payload",
         "phase3-binary/dist/test/watchdog_rollback_paths.test.sh:assert_watchdog_does_not_quarantine_malformed_marker",
@@ -2087,15 +2087,15 @@
       "spec_id": "SPEC-023",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func isEligible(",
-        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func advisoryBenchmarkWarnings(",
+        "phase3-binary/Sources/malibu-cli/AutotuneRecommend.swift:func isEligible(",
+        "phase3-binary/Sources/malibu-cli/AutotuneRecommend.swift:static func advisoryBenchmarkWarnings(",
         "phase4-coordinator/internal/autotune/gate.go:func benchmarkPassesGate("
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTPSBelowSignedCatalogGateWarnsWithoutBlockingRecommendation",
-        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTTFTAboveSignedCatalogGateWarnsWithoutBlockingRecommendation",
-        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTPSAndTTFTSignedCatalogGateMissesWarnWithoutBlockingRecommendation",
-        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testThermalThrottleStillHardBlocksEligibility",
+        "phase3-binary/Tests/malibu-cliTests/AutotuneRecommendTests.swift::testTPSBelowSignedCatalogGateWarnsWithoutBlockingRecommendation",
+        "phase3-binary/Tests/malibu-cliTests/AutotuneRecommendTests.swift::testTTFTAboveSignedCatalogGateWarnsWithoutBlockingRecommendation",
+        "phase3-binary/Tests/malibu-cliTests/AutotuneRecommendTests.swift::testTPSAndTTFTSignedCatalogGateMissesWarnWithoutBlockingRecommendation",
+        "phase3-binary/Tests/malibu-cliTests/AutotuneRecommendTests.swift::testThermalThrottleStillHardBlocksEligibility",
         "phase4-coordinator/internal/autotune/gate_test.go::TestEvaluateHelloGateTreatsTPSAndTTFTMissesAsAdvisory",
         "phase4-coordinator/internal/autotune/gate_test.go::TestEvaluateHelloGateRejectsThermalThrottle"
       ],
@@ -2123,16 +2123,16 @@
       "spec_id": "SPEC-023",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:var benchmarkedCount",
-        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func humanTranscript",
-        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:static func donorModeApplyWarning",
+        "phase3-binary/Sources/malibu-cli/AutotuneRecommend.swift:var benchmarkedCount",
+        "phase3-binary/Sources/malibu-cli/AutotuneRecommend.swift:func humanTranscript",
+        "phase3-binary/Sources/malibu-cli/AutotuneCommand.swift:static func donorModeApplyWarning",
         "phase3-binary/dist/install.sh:run_autotune_recommend_apply()"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testRecommendationJSONCarriesBenchGateProvenanceAndDrift",
-        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTranscriptCountsBenchmarkedRowsNotRenderedEligibleRows",
-        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTranscriptSanitizesBenchGateProvenanceControlCharacters",
-        "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift::testDonorModeApplyWarningMatchesSpec"
+        "phase3-binary/Tests/malibu-cliTests/AutotuneRecommendTests.swift::testRecommendationJSONCarriesBenchGateProvenanceAndDrift",
+        "phase3-binary/Tests/malibu-cliTests/AutotuneRecommendTests.swift::testTranscriptCountsBenchmarkedRowsNotRenderedEligibleRows",
+        "phase3-binary/Tests/malibu-cliTests/AutotuneRecommendTests.swift::testTranscriptSanitizesBenchGateProvenanceControlCharacters",
+        "phase3-binary/Tests/malibu-cliTests/AutotuneCommandTests.swift::testDonorModeApplyWarningMatchesSpec"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
@@ -2284,13 +2284,13 @@
       "implementation": [
         "phase4-coordinator/internal/referralapi/xapi.go:parseJoinBaseURL",
         "phase4-coordinator/internal/referralapi/validate.go:ValidationHandler",
-        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:localStatusCapabilities",
+        "phase3-binary/Sources/malibu-cli/HTTPServer.swift:localStatusCapabilities",
         "phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift:hasTrustedReferralBoundary"
       ],
       "tests": [
         "phase4-coordinator/internal/referralapi/xapi_test.go:TestNewXAPIClientRejectsUnsafeJoinBase",
         "phase4-coordinator/internal/referralapi/validate_test.go:TestValidationHandlerAllowsOnlyExactMalibuBrowserOrigin",
-        "phase3-binary/Tests/macprovider-cliTests/ReferralCoordinatorClientTests.swift::testXPostURLValidationMatchesCoordinatorBoundary",
+        "phase3-binary/Tests/malibu-cliTests/ReferralCoordinatorClientTests.swift::testXPostURLValidationMatchesCoordinatorBoundary",
         "phase3-binary/app/Tests/MalibuTests/ReferralProjectionTests.swift::testReferralBoundaryNegotiatesByCapabilityNotMarketingVersion"
       ],
       "journeys": [
@@ -2425,12 +2425,12 @@
       "spec_id": "SPEC-035",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:struct StatusCommand",
-        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:static func statusResponse",
-        "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:actor ProviderStatus"
+        "phase3-binary/Sources/malibu-cli/MalibuCLI.swift:struct StatusCommand",
+        "phase3-binary/Sources/malibu-cli/HTTPServer.swift:static func statusResponse",
+        "phase3-binary/Sources/malibu-cli/ProviderStatus.swift:actor ProviderStatus"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/StatusCommandTests.swift:testLocalStatusJSONIncludesCredentialPresenceBooleans"
+        "phase3-binary/Tests/malibu-cliTests/StatusCommandTests.swift:testLocalStatusJSONIncludesCredentialPresenceBooleans"
       ],
       "journeys": [],
       "evidence": [],
@@ -2446,15 +2446,15 @@
       "spec_id": "SPEC-035",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func diagnosticStatusPayloadForTest",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func sendDiagnosticStatus",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:func diagnosticStatusPayloadForTest",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:private func sendDiagnosticStatus",
         "phase4-coordinator/internal/ws/messages.go:func ParseDiagnosticStatus",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) handleDiagnosticStatus",
         "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) UpsertLastKnown",
         "phase4-coordinator/internal/ws/admin_providers.go:func adminViewFromLastKnown"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testDiagnosticStatusPayloadIsRedactedAndMatchesProviderSnapshot",
+        "phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift:testDiagnosticStatusPayloadIsRedactedAndMatchesProviderSnapshot",
         "phase4-coordinator/internal/ws/messages_test.go:TestParseDiagnosticStatusBoundsAndIdentity",
         "phase4-coordinator/internal/providerevents/store_test.go:TestLastKnownStoresRedactedDiagnosticStatus",
         "phase4-coordinator/internal/ws/admin_providers_test.go:TestAdminProvidersOfflineLastKnownAndEvents"
@@ -4260,12 +4260,12 @@
       "spec_id": "SPEC-015",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:buildSettlement",
+        "phase3-binary/Sources/malibu-cli/ReceiptBuilder.swift:buildSettlement",
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
         "phase4-coordinator/internal/billing/settlement_verifier.go:VerifySettlementReceipt"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ReceiptBuilderTests.swift:testBuildSettlementSignsStrictV04Tuple",
+        "phase3-binary/Tests/malibu-cliTests/ReceiptBuilderTests.swift:testBuildSettlementSignsStrictV04Tuple",
         "phase4-coordinator/internal/billing/spec015_v04_acceptance_test.go:TestSPEC015V04AcceptanceCriteria",
         "phase4-coordinator/internal/billing/settlement_receipts_test.go:TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit",
         "phase4-coordinator/internal/billing/settlement_verifier_test.go:TestVerifySettlementReceiptV04Fixtures"
@@ -5625,7 +5625,7 @@
         "phase4-coordinator/internal/buyer/server.go:func (s *Server) disableTrustPoolsOnMalformedDurableState",
         "phase4-coordinator/cmd/coordinator/main.go:func loadTrustedPools",
         "phase4-coordinator/internal/buyer/server.go:func (s *Server) verifyTrustPoolDurableStateForRouting",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:trustedPoolCapableInitialMessage",
+        "phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:trustedPoolCapableInitialMessage",
         "phase4-coordinator/internal/ws/messages.go:type Tier2Caps struct",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) handleV2Conn",
         "phase4-coordinator/internal/pool/provider.go:type Provider struct",
@@ -6560,16 +6560,16 @@
       "spec_id": "SPEC-045",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeCommand",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeRunCommand",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeEndpointConfig",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeLocalServer"
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumeCommand",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumeRunCommand",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumeEndpointConfig",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumeLocalServer"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testRunCommandStartsThenStopsWithRedactedSetupOutput",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testRunCommandPortCollisionUsesRedactedBindError",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testDescriptorWriteIsUserPrivateAndStatusPayloadIsRedacted",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testActiveDescriptorLockSerializesInstances"
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testRunCommandStartsThenStopsWithRedactedSetupOutput",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testRunCommandPortCollisionUsesRedactedBindError",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testDescriptorWriteIsUserPrivateAndStatusPayloadIsRedacted",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testActiveDescriptorLockSerializesInstances"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -6595,18 +6595,18 @@
       "spec_id": "SPEC-045",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func validatePreAuthBoundsAndFraming",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func validateEndpoint",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func validateLocalBody"
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:private func validatePreAuthBoundsAndFraming",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:private func validateEndpoint",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:private func validateLocalBody"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase2RejectsUnsafeTargetsFramingAndBrowserOrigins",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase2NIOHTTPDecoderLimitsMatchLocalPolicy",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase2EnforcesLocalResourceCapsBeforeBuffering",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase2ModelsReturnsOnlyLocalAllowlistEntries",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayNonStreamingSDKPayloadPassesThroughAndSettlesUsage",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayStreamingSDKPayloadEmitsOpenAICompatibleSSE"
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase2RejectsUnsafeTargetsFramingAndBrowserOrigins",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase2NIOHTTPDecoderLimitsMatchLocalPolicy",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase2EnforcesLocalResourceCapsBeforeBuffering",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase2ModelsReturnsOnlyLocalAllowlistEntries",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayNonStreamingSDKPayloadPassesThroughAndSettlesUsage",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayStreamingSDKPayloadEmitsOpenAICompatibleSSE"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -6632,17 +6632,17 @@
       "spec_id": "SPEC-045",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeLocalTokenVerifier",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeCredentialLoader",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:static func httpRequestBytesForTesting",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func httpRequestBytes"
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumeLocalTokenVerifier",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumeCredentialLoader",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:static func httpRequestBytesForTesting",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:private static func httpRequestBytes"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testLocalTokenVerifierAcceptsOnlyOneAcceptedHeader",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testCredentialSourceOrderPrefersExplicitThenEnvFileThenDefaultThenEnvironment",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testCredentialFileRejectsGroupReadableFileAndSymlink",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testCredentialFileRejectsExtendedACLAndRevalidatesDeletion",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized"
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testLocalTokenVerifierAcceptsOnlyOneAcceptedHeader",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testCredentialSourceOrderPrefersExplicitThenEnvFileThenDefaultThenEnvironment",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testCredentialFileRejectsGroupReadableFileAndSymlink",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testCredentialFileRejectsExtendedACLAndRevalidatesDeletion",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -6668,17 +6668,17 @@
       "spec_id": "SPEC-045",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeBudgetConfig",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumePricedExposureEstimate",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func writeLocalChatAdmissionFailure",
-        "phase3-binary/Sources/macprovider-cli/ConsumeTrustedPricing.swift:struct ConsumeTrustedPricingLoader"
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumeBudgetConfig",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumePricedExposureEstimate",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:private func writeLocalChatAdmissionFailure",
+        "phase3-binary/Sources/malibu-cli/ConsumeTrustedPricing.swift:struct ConsumeTrustedPricingLoader"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3BudgetFlagsParseAndRejectInvalidCombinations",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3BStatusReportsTrustedPricingAvailabilityAndWarnings",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3CPricedEstimateUsesGrossRatesAndRoundsUp",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3CPricedEstimateCapRejectsBeforeLedgerAppend",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3PerRequestCapRejectsBeforeLedgerAppend"
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3BudgetFlagsParseAndRejectInvalidCombinations",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3BStatusReportsTrustedPricingAvailabilityAndWarnings",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3CPricedEstimateUsesGrossRatesAndRoundsUp",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3CPricedEstimateCapRejectsBeforeLedgerAppend",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3PerRequestCapRejectsBeforeLedgerAppend"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -6704,18 +6704,18 @@
       "spec_id": "SPEC-045",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeBudgetLedger",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeBudgetStatusCommand",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeBudgetReleaseHeldCommand",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func forwardUpstreamWithLedgerSettlement"
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:final class ConsumeBudgetLedger",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumeBudgetStatusCommand",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumeBudgetReleaseHeldCommand",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:private func forwardUpstreamWithLedgerSettlement"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3LedgerPathResolutionClassifiesDefaultAbsoluteAndRelative",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DBudgetedTrustedPricingForwardsAndSettlesToUsageBeforeResponse",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3BudgetedUnpricedRequestIsHeldUntilRelease",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3LedgerRejectsMalformedJSONAndUnsupportedTransitions",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3LedgerRejectsRunIDAndAmountMutation",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GStreamingResponseRelaysAfterDoneAndSettlesUsage"
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3LedgerPathResolutionClassifiesDefaultAbsoluteAndRelative",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3DBudgetedTrustedPricingForwardsAndSettlesToUsageBeforeResponse",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3BudgetedUnpricedRequestIsHeldUntilRelease",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3LedgerRejectsMalformedJSONAndUnsupportedTransitions",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3LedgerRejectsRunIDAndAmountMutation",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3GStreamingResponseRelaysAfterDoneAndSettlesUsage"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -6741,17 +6741,17 @@
       "spec_id": "SPEC-045",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeStatusCommand",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:func statusPayload",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeEndpointDescriptor",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeStatusClient"
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumeStatusCommand",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:func statusPayload",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumeEndpointDescriptor",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:struct ConsumeStatusClient"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testStatusCommandNoEndpointUsesRedactedError",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testStatusHandlerRequiresAuthSetsNoStoreAndRedacts",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testDescriptorWriteIsUserPrivateAndStatusPayloadIsRedacted",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3BStatusReportsTrustedPricingAvailabilityAndWarnings",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3NoBudgetStatusUsesNullBudgetAmounts"
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testStatusCommandNoEndpointUsesRedactedError",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testStatusHandlerRequiresAuthSetsNoStoreAndRedacts",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testDescriptorWriteIsUserPrivateAndStatusPayloadIsRedacted",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3BStatusReportsTrustedPricingAvailabilityAndWarnings",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3NoBudgetStatusUsesNullBudgetAmounts"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -6777,17 +6777,17 @@
       "spec_id": "SPEC-045",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func writeLocalError",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func classifyUpstreamFailure",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private static func responseForLocalDelivery",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:private func writeUpstreamResponse"
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:private func writeLocalError",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:private static func classifyUpstreamFailure",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:private static func responseForLocalDelivery",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:private func writeUpstreamResponse"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3DBudgetExceededWinsOverMissingCredentialWithoutMutation",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GStreamingUpstreamErrorResponseIsPreservedAndSettlesEstimate",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3FInvalidCompressedUpstreamResponseWithLedgerWriteFailureKeepsForwardedProvenance",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayRedirectStatusIsPreservedWithoutLocationOrSecondDispatch",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase3GCompressedStreamingResponseFailsBeforeLocalSuccessAndSettlesEstimate"
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3DBudgetExceededWinsOverMissingCredentialWithoutMutation",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3GStreamingUpstreamErrorResponseIsPreservedAndSettlesEstimate",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3FInvalidCompressedUpstreamResponseWithLedgerWriteFailureKeepsForwardedProvenance",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayRedirectStatusIsPreservedWithoutLocationOrSecondDispatch",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase3GCompressedStreamingResponseFailsBeforeLocalSuccessAndSettlesEstimate"
       ],
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
@@ -6813,16 +6813,16 @@
       "spec_id": "SPEC-045",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
-        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumePinnedUpstreamClient",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
+        "phase3-binary/Sources/malibu-cli/ConsumeCommand.swift:final class ConsumePinnedUpstreamClient",
         "scripts/build-local-consumer-endpoint-journey-result.py:def build_payload",
         ".github/workflows/promote-signed-local-consumer-endpoint-journey.yml:--journey-id JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayNonStreamingSDKPayloadPassesThroughAndSettlesUsage",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayStreamingSDKPayloadEmitsOpenAICompatibleSSE",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayRedirectStatusIsPreservedWithoutLocationOrSecondDispatch",
-        "phase3-binary/Tests/macprovider-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayNonStreamingSDKPayloadPassesThroughAndSettlesUsage",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayStreamingSDKPayloadEmitsOpenAICompatibleSSE",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase4FakeGatewayRedirectStatusIsPreservedWithoutLocationOrSecondDispatch",
+        "phase3-binary/Tests/malibu-cliTests/ConsumeCommandTests.swift:testPhase4PinnedUpstreamGeneratedHeadersAreClosedAndSanitized",
         "scripts/test-signed-local-consumer-endpoint-journey-workflow.sh:required_workflow = ["
       ],
       "journeys": [

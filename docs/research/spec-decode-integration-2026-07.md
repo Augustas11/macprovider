@@ -10,7 +10,7 @@ MacProvider's current provider runtime calls `mlx-swift-lm` directly from Swift.
 
 The safe v0.1 shape is provider-side, opt-in, and buyer-invisible:
 
-- Add `macprovider-cli serve --draft-model <id-or-path>` and `--num-draft-tokens <N>`.
+- Add `malibu-cli serve --draft-model <id-or-path>` and `--num-draft-tokens <N>`.
 - Thread both through the flat config/env/CLI pattern used by `kv_bits`, `max_context_override`, and `max_concurrency_override`.
 - Load the draft model beside the target runtime container, fail loudly on tokenizer/cache incompatibility, and fall back only when the operator explicitly disables spec decode.
 - Report acceptance rate as aggregate provider telemetry on `/v1/status` and coordinator heartbeat, not in SPEC-015 v0.4 settlement receipts.
@@ -20,13 +20,13 @@ The safe v0.1 shape is provider-side, opt-in, and buyer-invisible:
 
 Local code/spec anchors:
 
-- CLI entry and serve flags: `phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:19-84`, `:131-153`.
+- CLI entry and serve flags: `phase3-binary/Sources/malibu-cli/MalibuCLI.swift:19-84`, `:131-153`.
 - Config layering: `phase3-binary/Sources/MacProviderCore/Config.swift:19-74`, `:94-140`, `:309-357`, `:365-401`, `:427-469`.
-- Runtime call site: `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:1-8`, `:232-320`, `:667-790`, `:804-930`.
+- Runtime call site: `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:1-8`, `:232-320`, `:667-790`, `:804-930`.
 - Request temperature/top-p parse: `phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:42-55`.
-- Provider capacity/status: `phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:12-39`, `:71-102`, `:149-168`.
-- Heartbeat payload: `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:2059-2088`.
-- Receipt/verifier strict usage schema: `phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:279-285`, `phase4-coordinator/internal/billing/settlement_verifier.go:35-49`, `:273-319`, `:348-354`, `:375-380`, `:511-519`.
+- Provider capacity/status: `phase3-binary/Sources/malibu-cli/ProviderStatus.swift:12-39`, `:71-102`, `:149-168`.
+- Heartbeat payload: `phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:2059-2088`.
+- Receipt/verifier strict usage schema: `phase3-binary/Sources/malibu-cli/ReceiptBuilder.swift:279-285`, `phase4-coordinator/internal/billing/settlement_verifier.go:35-49`, `:273-319`, `:348-354`, `:375-380`, `:511-519`.
 - SPEC constraints: SPEC-001 `:167-193`, `:443-456`, `:1069-1096`, `:1316-1336`, `:1760-1820`, `:1933-1937`; SPEC-010 `:300-303`, `:333-369`, `:490-513`, `:861-879`; SPEC-011 `:110-125`, `:227-239`; SPEC-013 `:252-260`, `:927-929`; SPEC-015 `:1-5`, `:20-45`.
 - Current static candidate catalog: `phase3-binary/dist/static/autotune-candidates.json:1`.
 - Beta workload and Air configs: `beta/workloads.py:26-34`, `:88-240`; `beta/config-m1.yaml:7-23`; `beta/config-m4.yaml:7-21`; `beta/DECISION_CRITERIA.md:54-76`, `:254-264`.
@@ -43,23 +43,23 @@ External upstream anchors:
 ### Current Call Graph
 
 ```text
-macprovider-cli serve
+malibu-cli serve
   -> ServeCommand options
-     phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:19-84
+     phase3-binary/Sources/malibu-cli/MalibuCLI.swift:19-84
   -> AppConfig resolution
      phase3-binary/Sources/MacProviderCore/Config.swift:309-357
      phase3-binary/Sources/MacProviderCore/Config.swift:365-401
      phase3-binary/Sources/MacProviderCore/Config.swift:427-469
   -> HTTPServer starts local OpenAI-compatible API
-     phase3-binary/Sources/macprovider-cli/HTTPServer.swift:27-57
+     phase3-binary/Sources/malibu-cli/HTTPServer.swift:27-57
   -> POST /v1/chat/completions
-     phase3-binary/Sources/macprovider-cli/HTTPServer.swift:144-160
+     phase3-binary/Sources/malibu-cli/HTTPServer.swift:144-160
   -> ModelRuntime.completeWithServedSnapshot or stream
-     phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:667-790
-     phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:804-930
+     phase3-binary/Sources/malibu-cli/ModelRuntime.swift:667-790
+     phase3-binary/Sources/malibu-cli/ModelRuntime.swift:804-930
   -> mlx-swift-lm TokenIterator + generate
-     phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:737-738
-     phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:891-893
+     phase3-binary/Sources/malibu-cli/ModelRuntime.swift:737-738
+     phase3-binary/Sources/malibu-cli/ModelRuntime.swift:891-893
 ```
 
 The provider imports `MLX`, `MLXLLM`, `MLXHuggingFace`, and `MLXLMCommon` directly (`ModelRuntime.swift:1-8`). It creates `GenerateParameters` in Swift (`ModelRuntime.swift:710-716`, `:860-866`), then instantiates `TokenIterator` and calls `generate` (`:737-738`, `:891-893`). That means the SPEC should target `mlx-swift-lm`, not the Python `mlx_lm.server` surface.
@@ -82,13 +82,13 @@ The new config should mirror existing serving knobs:
 
 | Surface | Existing pattern | Spec-decode addition |
 |---|---|---|
-| CLI | `--kv-bits`, `--max-context`, `--max-batch` in `MacProviderCLI.swift:77-84` | `--draft-model <id-or-path>`, `--num-draft-tokens <N>` |
+| CLI | `--kv-bits`, `--max-context`, `--max-batch` in `MalibuCLI.swift:77-84` | `--draft-model <id-or-path>`, `--num-draft-tokens <N>` |
 | YAML | flat keys parsed in `Config.swift:332-341` | `draft_model`, `num_draft_tokens` |
 | Env | `MACPROVIDER_KV_BITS`, `MACPROVIDER_MAX_CONTEXT_OVERRIDE` in `Config.swift:378-380` | `MACPROVIDER_DRAFT_MODEL`, `MACPROVIDER_NUM_DRAFT_TOKENS` |
 | Runtime | `GenerateParameters(... kvBits: kvBitsOverride ...)` at `ModelRuntime.swift:710-716` | Load draft container, pass `draftModel`, `draftCache`, `numDraftTokens` to Swift speculative generate |
 | Telemetry | `ProviderStatus.finishRequest` rolls request/tps windows at `ProviderStatus.swift:149-168` | Add accepted/drafted target-verified counters to the same provider aggregate window |
 
-Preflight should follow the serve-knob fail-loud style in `MacProviderCLI.swift:131-153`: reject `num_draft_tokens < 1`, reject draft-model equal to empty string, and reject configured draft model if it cannot be loaded with a compatible tokenizer/cache.
+Preflight should follow the serve-knob fail-loud style in `MalibuCLI.swift:131-153`: reject `num_draft_tokens < 1`, reject draft-model equal to empty string, and reject configured draft model if it cannot be loaded with a compatible tokenizer/cache.
 
 ## B. Draft Model Compatibility
 
@@ -145,7 +145,7 @@ Python MLX-LM explicitly checks draft tokenizer vocabulary size and raises when 
 - Run a deterministic prompt through both processors and assert identical token IDs.
 - If any check fails, `serve` exits nonzero with `draft_model_tokenizer_mismatch`.
 
-This belongs at startup, not first buyer request, because `ServeCommand.runServingKnobsPreflight` already validates operator knobs at startup (`MacProviderCLI.swift:131-153`).
+This belongs at startup, not first buyer request, because `ServeCommand.runServingKnobsPreflight` already validates operator knobs at startup (`MalibuCLI.swift:131-153`).
 
 ## C. Losslessness Posture
 

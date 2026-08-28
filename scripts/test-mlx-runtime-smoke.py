@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run local no-join model smokes against macprovider-cli.
+"""Run local no-join model smokes against malibu-cli.
 
 The script starts one provider per model, waits for /v1/models, then verifies
 non-streaming and streaming chat completions before terminating the provider.

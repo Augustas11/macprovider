@@ -153,7 +153,7 @@ for required in (
 ):
     assert required in package, required
 assert 'tar czf "$TARBALL" -C "$STAGE_DIR" .' not in package
-assert '"$WORK/macprovider-cli" release-payload-preflight' not in workflow
+assert '"$WORK/malibu-cli" release-payload-preflight' not in workflow
 assert "Verify exact arm64 provider runtime" in workflow
 assert 'provider_version="$("$provider_binary" --version)"' in workflow
 assert "scripts/compatibility-set-manifest.py validate" in workflow
@@ -169,7 +169,7 @@ archive_contract = re.search(
 )
 assert archive_contract is not None
 assert archive_contract.group("required").split() == [
-    "macprovider-cli",
+    "malibu-cli",
     "mlx.metallib",
     "THIRD-PARTY-NOTICES.txt",
     "compatibility-set.json",
@@ -197,7 +197,7 @@ release_archive_contract = re.search(
 )
 assert release_archive_contract is not None
 assert release_archive_contract.group("required").split() == [
-    "macprovider-cli",
+    "malibu-cli",
     "mlx.metallib",
     "THIRD-PARTY-NOTICES.txt",
     "compatibility-set.json",
@@ -240,7 +240,7 @@ PY
 archive_fixture="$work/archive-fixture"
 mkdir -p "$archive_fixture/compatibility-set-local" "$archive_fixture/catalog-release" \
   "$archive_fixture/mlx-swift_Cmlx.bundle/Contents/Resources"
-printf 'fixture\n' > "$archive_fixture/macprovider-cli"
+printf 'fixture\n' > "$archive_fixture/malibu-cli"
 printf 'fixture\n' > "$archive_fixture/mlx.metallib"
 printf 'fixture\n' > "$archive_fixture/THIRD-PARTY-NOTICES.txt"
 printf 'fixture\n' > "$archive_fixture/compatibility-set.json"
@@ -248,7 +248,7 @@ printf 'fixture\n' > "$archive_fixture/compatibility-set-local/install.sh"
 printf 'fixture\n' > "$archive_fixture/catalog-release/release.json"
 printf 'fixture\n' > "$archive_fixture/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
 archive_members=(
-  macprovider-cli
+  malibu-cli
   mlx.metallib
   THIRD-PARTY-NOTICES.txt
   compatibility-set.json

@@ -4,7 +4,7 @@
 needs answered before and after joining the Mac Provider network. All numbers are
 extracted directly from source; none are rounded or paraphrased.
 
-Audience: Mac owners running `macprovider-cli`. For buyer-facing network limits
+Audience: Mac owners running `malibu-cli`. For buyer-facing network limits
 see `phase5-gateway/internal/router/templates/docs.md:130` ("provider availability
 can change as Macs sleep, wake, or disconnect from the network").
 
@@ -227,7 +227,7 @@ Self-serve promotion is on the roadmap but is not implemented.
 ### Sleep assertion
 
 The binary holds a `caffeinate` process for the duration of its run
-(`phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:66-98`,
+(`phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:66-98`,
 `CaffeinateSleepAssertion`). This prevents display sleep and user-idle system
 sleep via `caffeinate -dimsu -w <pid>`. It does **not** prevent lid-close
 sleep.

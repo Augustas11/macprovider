@@ -8,7 +8,7 @@
     "chip": "Apple M5",
     "ram_gb": 32,
     "metallib": "mlx-swift 0.31.6 matched (copied from T0-01 build-mlx-metallib output)",
-    "bench_binary": "phase3-binary/.build/release/macprovider-cli @ e23258b"
+    "bench_binary": "phase3-binary/.build/release/malibu-cli @ e23258b"
   },
   "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
   "bench_params": {

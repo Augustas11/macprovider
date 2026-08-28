@@ -37,8 +37,8 @@ var spec015ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --parallel"},
 		CIJobs:   []string{"phase3-binary (swift test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/ReceiptKeyStoreTests.swift", "testKeychainFirstLaunchGeneratesAndFreshLaunchLoadsSamePrivateKey"},
-			{"phase3-binary/Tests/macprovider-cliTests/ReceiptKeyStoreTests.swift", "com.malibu.provider.receipt-key"},
+			{"phase3-binary/Tests/malibu-cliTests/ReceiptKeyStoreTests.swift", "testKeychainFirstLaunchGeneratesAndFreshLaunchLoadsSamePrivateKey"},
+			{"phase3-binary/Tests/malibu-cliTests/ReceiptKeyStoreTests.swift", "com.malibu.provider.receipt-key"},
 		},
 	},
 	{
@@ -48,7 +48,7 @@ var spec015ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd phase4-coordinator && go test ./... -count=1"},
 		CIJobs:   []string{"phase3-binary (swift test)", "phase4-coordinator (go vet + test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift", "testAuthInitialIncludesReceiptPublicKeyWhenConfigured"},
+			{"phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift", "testAuthInitialIncludesReceiptPublicKeyWhenConfigured"},
 			{"phase4-coordinator/internal/ws/server_test.go", "TestProviderAuthV2InitialReceiptPublicKeyPublishesAfterStateUpdate"},
 		},
 	},
@@ -59,7 +59,7 @@ var spec015ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd phase4-coordinator && go test ./... -count=1"},
 		CIJobs:   []string{"phase3-binary (swift test)", "phase4-coordinator (go vet + test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift", "testAuthInitialOmitsReceiptPublicKeyWhenUnavailableAndProofNeverIncludesIt"},
+			{"phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift", "testAuthInitialOmitsReceiptPublicKeyWhenUnavailableAndProofNeverIncludesIt"},
 			{"phase4-coordinator/internal/ws/server_test.go", "TestPoolzReceiptPubkeyNullForPreV16Provider"},
 		},
 	},
@@ -70,7 +70,7 @@ var spec015ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd phase5-gateway && go test ./... -count=1", "cd test/integration && go test -race -count=1 -timeout 5m . -run TestSpec015ReceiptEnabledCrossServiceHeaderVerifies"},
 		CIJobs:   []string{"phase3-binary (swift test)", "phase5-gateway (go vet + test)", "spec-015-acceptance"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testNonStreamingReceiptHeaderParsesAndSelfVerifies"},
+			{"phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift", "testNonStreamingReceiptHeaderParsesAndSelfVerifies"},
 			{"phase5-gateway/internal/router/server_test.go", "TestReceiptHeaderForwardedAndSiblingMacProviderHeadersStripped"},
 			{"test/integration/scenarios_test.go", "TestSpec015ReceiptEnabledCrossServiceHeaderVerifies"},
 		},
@@ -82,8 +82,8 @@ var spec015ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd test/integration && go test -race -count=1 -timeout 5m . -run TestSpec015ReceiptEnabledCrossServiceHeaderVerifies"},
 		CIJobs:   []string{"phase3-binary (swift test)", "spec-015-acceptance"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/PromptCanonicalizerTests.swift", "testKnownGoodPromptVectorUsesSixteenCommittedKeys"},
-			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "PromptCanonicalizer.promptHash"},
+			{"phase3-binary/Tests/malibu-cliTests/PromptCanonicalizerTests.swift", "testKnownGoodPromptVectorUsesSixteenCommittedKeys"},
+			{"phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift", "PromptCanonicalizer.promptHash"},
 			{"test/integration/scenarios_test.go", "prompt_hash"},
 		},
 	},
@@ -94,8 +94,8 @@ var spec015ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd test/integration && go test -race -count=1 -timeout 5m . -run TestSpec015ReceiptEnabledCrossServiceHeaderVerifies"},
 		CIJobs:   []string{"phase3-binary (swift test)", "spec-015-acceptance"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/OutputCanonicalizerTests.swift", "testKnownGoodOutputVectorUsesThreeCommittedKeys"},
-			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "OutputCanonicalizer.outputHash"},
+			{"phase3-binary/Tests/malibu-cliTests/OutputCanonicalizerTests.swift", "testKnownGoodOutputVectorUsesThreeCommittedKeys"},
+			{"phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift", "OutputCanonicalizer.outputHash"},
 			{"test/integration/scenarios_test.go", "output_hash"},
 		},
 	},
@@ -106,8 +106,8 @@ var spec015ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd test/integration && go test -race -count=1 -timeout 5m . -run TestSpec015ReceiptEnabledCrossServiceHeaderVerifies"},
 		CIJobs:   []string{"phase3-binary (swift test)", "spec-015-acceptance"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/ReceiptBuilderTests.swift", "testBuildSignsTupleAndSignatureSelfVerifies"},
-			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "isValidSignature"},
+			{"phase3-binary/Tests/malibu-cliTests/ReceiptBuilderTests.swift", "testBuildSignsTupleAndSignatureSelfVerifies"},
+			{"phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift", "isValidSignature"},
 			{"test/integration/scenarios_test.go", "VerifyReceiptAgainstPoolzTrust"},
 		},
 	},
@@ -118,7 +118,7 @@ var spec015ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd phase5-gateway && go test ./... -count=1"},
 		CIJobs:   []string{"phase3-binary (swift test)", "phase5-gateway (go vet + test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testStreamingHeadersStayReceiptFreeAndByteStable"},
+			{"phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift", "testStreamingHeadersStayReceiptFreeAndByteStable"},
 			{"phase5-gateway/internal/router/server_test.go", "TestStreamingReceiptHeaderStripped"},
 		},
 	},
@@ -143,8 +143,8 @@ var spec015ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd phase4-coordinator && go test ./... -count=1"},
 		CIJobs:   []string{"phase3-binary (swift test)", "phase4-coordinator (go vet + test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/RotateKeyCommandTests.swift", "testRotateKeyCommitsCandidateAfterReconnectAcceptance"},
-			{"phase3-binary/Tests/macprovider-cliTests/RotateKeyCommandTests.swift", "testRotateKeyLeavesKeychainUnchangedWhenReconnectRejected"},
+			{"phase3-binary/Tests/malibu-cliTests/RotateKeyCommandTests.swift", "testRotateKeyCommitsCandidateAfterReconnectAcceptance"},
+			{"phase3-binary/Tests/malibu-cliTests/RotateKeyCommandTests.swift", "testRotateKeyLeavesKeychainUnchangedWhenReconnectRejected"},
 			{"phase4-coordinator/internal/ws/server_test.go", "TestProviderAuthV2ReceiptRotationMovesPriorPubkeyToPrevious"},
 		},
 	},
@@ -167,7 +167,7 @@ var spec015ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd phase5-gateway && go test ./... -count=1"},
 		CIJobs:   []string{"phase3-binary (swift test)", "phase5-gateway (go vet + test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testNullUsageModelNotLoadedErrorGetsReceiptHeader"},
+			{"phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift", "testNullUsageModelNotLoadedErrorGetsReceiptHeader"},
 			{"phase5-gateway/internal/router/server_test.go", "TestNullUsageErrorReceiptHeaderForwarded"},
 		},
 	},
@@ -191,7 +191,7 @@ var spec015ACs = []acceptanceCriterion{
 		CIJobs:   []string{"integration (cross-service)", "phase3-binary (swift test)"},
 		Evidence: []evidenceAnchor{
 			{"test/integration/scenarios_test.go", "pre-v1.6 fake provider response exposed receipt header"},
-			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testPreKeypairReceiptHeaderIsOmittedWithout500"},
+			{"phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift", "testPreKeypairReceiptHeaderIsOmittedWithout500"},
 		},
 	},
 	{
@@ -201,7 +201,7 @@ var spec015ACs = []acceptanceCriterion{
 		Commands: []string{"bash phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh", "cd phase3-binary && swift test --parallel"},
 		CIJobs:   []string{"deploy tooling (check-deploy-config gate)", "phase3-binary (swift test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testWorstCaseModelIDHeaderStaysUnder4096Bytes"},
+			{"phase3-binary/Tests/malibu-cliTests/HTTPServerReceiptTests.swift", "testWorstCaseModelIDHeaderStaysUnder4096Bytes"},
 			{"phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh", "proxy_buffer_size 8k"},
 			{"test/integration/spec015/run_acceptance.sh", "SPEC-015 AC-15 nginx receipt header deployment buffers"},
 		},
@@ -212,7 +212,7 @@ var spec015ACs = []acceptanceCriterion{
 		SpecStep: "SPEC-015 §14 AC-16",
 		Commands: []string{"cd phase3-binary && swift test --parallel"},
 		CIJobs:   []string{"phase3-binary (swift test)"},
-		Evidence: []evidenceAnchor{{"phase3-binary/Tests/macprovider-cliTests/ReceiptPerfTests.swift", "testReceiptConstructionP95IsUnderFiveMillisecondsFor1024TokenPayload"}},
+		Evidence: []evidenceAnchor{{"phase3-binary/Tests/malibu-cliTests/ReceiptPerfTests.swift", "testReceiptConstructionP95IsUnderFiveMillisecondsFor1024TokenPayload"}},
 	},
 	{
 		Number:   17,
@@ -221,7 +221,7 @@ var spec015ACs = []acceptanceCriterion{
 		Commands: []string{"cd phase3-binary && swift test --parallel", "cd phase4-coordinator && go test ./... -count=1"},
 		CIJobs:   []string{"phase3-binary (swift test)", "phase4-coordinator (go vet + test)"},
 		Evidence: []evidenceAnchor{
-			{"phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift", "testAuthInitialOmitsReceiptPublicKeyWhenUnavailableAndProofNeverIncludesIt"},
+			{"phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift", "testAuthInitialOmitsReceiptPublicKeyWhenUnavailableAndProofNeverIncludesIt"},
 			{"phase4-coordinator/internal/ws/server_test.go", "TestProviderAuthV2ReceiptKeyOmissionClearsLiveReceiptTrustState"},
 		},
 	},

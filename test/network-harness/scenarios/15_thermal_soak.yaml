@@ -21,7 +21,7 @@
 # ## The lab provider must be the ONLY pool member and prod buyers routed   ##
 # ## away. Stand the lab stack up ONCE and leave it — rapid coordinator     ##
 # ## restarts wedge the provider CLI's v2 proof-auth (pool → 0); recover    ##
-# ## with `pkill -9 -f macprovider-cli` and let launchd respawn one.        ##
+# ## with `pkill -9 -f malibu-cli` and let launchd respawn one.        ##
 # ############################################################################
 #
 # Pacing math (reuses 07_sustained_throughput's model):

@@ -143,7 +143,7 @@ app_work="$signing_tmp/app"
 mkdir "$cli_work" "$app_work"
 tar -xzf "$cli_unsigned" -C "$cli_work"
 tar -xzf "$app_unsigned" -C "$app_work"
-[[ -x "$cli_work/macprovider-cli" && ! -L "$cli_work/macprovider-cli" ]] || die "candidate CLI is absent or unsafe"
+[[ -x "$cli_work/malibu-cli" && ! -L "$cli_work/malibu-cli" ]] || die "candidate CLI is absent or unsafe"
 [[ -f "$cli_work/compatibility-set.json" && ! -L "$cli_work/compatibility-set.json" ]] ||
   die "PR589 compatibility-set manifest is absent"
 [[ -d "$cli_work/compatibility-set-local" && ! -L "$cli_work/compatibility-set-local" ]] ||
@@ -199,15 +199,15 @@ codesign --force \
   --identifier live.malibu.provider.cli \
   --keychain "$keychain" \
   --sign "$signing_identity" \
-  "$cli_work/macprovider-cli"
-codesign --verify --strict --verbose=2 "$cli_work/macprovider-cli"
-"$root/scripts/require-cli-se-entitlements.sh" "$cli_work/macprovider-cli"
-cli_requirement="$(codesign -d -r- "$cli_work/macprovider-cli" 2>&1)"
+  "$cli_work/malibu-cli"
+codesign --verify --strict --verbose=2 "$cli_work/malibu-cli"
+"$root/scripts/require-cli-se-entitlements.sh" "$cli_work/malibu-cli"
+cli_requirement="$(codesign -d -r- "$cli_work/malibu-cli" 2>&1)"
 grep -F 'identifier "live.malibu.provider.cli"' <<<"$cli_requirement" >/dev/null ||
   die "signed CLI lacks the stable designated requirement"
 
-cli_notary="$signing_tmp/macprovider-cli-notary.zip"
-(cd "$cli_work" && /usr/bin/ditto -c -k --keepParent macprovider-cli "$cli_notary")
+cli_notary="$signing_tmp/malibu-cli-notary.zip"
+(cd "$cli_work" && /usr/bin/ditto -c -k --keepParent malibu-cli "$cli_notary")
 "$root/scripts/notarytool-submit-with-retry.sh" "$cli_notary" \
   --apple-id "$APPLE_NOTARY_APPLE_ID" \
   --password "$APPLE_NOTARY_PASSWORD" \
@@ -215,7 +215,7 @@ cli_notary="$signing_tmp/macprovider-cli-notary.zip"
   --wait
 rm -f "$cli_notary"
 
-install -m 0755 "$cli_work/macprovider-cli" "$app/Contents/MacOS/macprovider-cli"
+install -m 0755 "$cli_work/malibu-cli" "$app/Contents/MacOS/malibu-cli"
 install -m 0644 "$cli_work/compatibility-set.json" "$app/Contents/Resources/compatibility-set.json"
 cmp "$cli_work/compatibility-set.json" "$app/Contents/Resources/compatibility-set.json"
 [[ -d "$cli_work/catalog-release" && ! -L "$cli_work/catalog-release" ]] ||
@@ -223,7 +223,7 @@ cmp "$cli_work/compatibility-set.json" "$app/Contents/Resources/compatibility-se
 rm -rf "$app/Contents/Resources/compatibility-set-local" "$app/Contents/Resources/catalog-release"
 cp -R "$cli_work/compatibility-set-local" "$app/Contents/Resources/compatibility-set-local"
 cp -R "$cli_work/catalog-release" "$app/Contents/Resources/catalog-release"
-embedded_cli_sha256="$(shasum -a 256 "$app/Contents/MacOS/macprovider-cli" | awk '{print $1}')"
+embedded_cli_sha256="$(shasum -a 256 "$app/Contents/MacOS/malibu-cli" | awk '{print $1}')"
 codesign --force \
   --options runtime \
   --timestamp \
@@ -231,9 +231,9 @@ codesign --force \
   --keychain "$keychain" \
   --sign "$signing_identity" \
   "$app"
-[[ "$(shasum -a 256 "$app/Contents/MacOS/macprovider-cli" | awk '{print $1}')" == "$embedded_cli_sha256" ]] ||
+[[ "$(shasum -a 256 "$app/Contents/MacOS/malibu-cli" | awk '{print $1}')" == "$embedded_cli_sha256" ]] ||
   die "outer Malibu signing changed the already-signed embedded CLI"
-"$root/scripts/require-cli-se-entitlements.sh" "$app/Contents/MacOS/macprovider-cli"
+"$root/scripts/require-cli-se-entitlements.sh" "$app/Contents/MacOS/malibu-cli"
 codesign --verify --strict --verbose=2 --deep "$app"
 app_notary="$signing_tmp/Malibu-notary.zip"
 /usr/bin/ditto -c -k --keepParent "$app" "$app_notary"
@@ -248,10 +248,11 @@ xcrun stapler validate "$app"
 spctl -a -vvv -t exec "$app"
 
 mkdir "$output_dir"
-provider_asset="$output_dir/macprovider-cli-${tag}-darwin-arm64.tar.gz"
+provider_asset="$output_dir/malibu-cli-${tag}-darwin-arm64.tar.gz"
+legacy_provider_asset="$output_dir/macprovider-cli-${tag}-darwin-arm64.tar.gz"
 malibu_asset="$output_dir/Malibu-${tag}.dmg"
 provider_archive_members=(
-  macprovider-cli
+  malibu-cli
   mlx.metallib
   THIRD-PARTY-NOTICES.txt
   compatibility-set.json
@@ -268,6 +269,26 @@ done
 [[ "$provider_bundle_count" -gt 0 ]] || die "signed provider payload lacks a SwiftPM resource bundle"
 tar -czf "$provider_asset" -C "$cli_work" "${provider_archive_members[@]}"
 python3 "$metadata" validate-archive --input "$provider_asset" --forbid-links
+legacy_bridge_dir="$(mktemp -d "$signing_tmp/legacy-provider-cli.XXXXXX")"
+tar -xzf "$provider_asset" -C "$legacy_bridge_dir"
+cp "$legacy_bridge_dir/malibu-cli" "$legacy_bridge_dir/macprovider-cli"
+legacy_archive_members=(
+  macprovider-cli
+  mlx.metallib
+  THIRD-PARTY-NOTICES.txt
+  compatibility-set.json
+  compatibility-set-local
+  catalog-release
+)
+for legacy_bundle in mlx-swift_Cmlx.bundle swift-nio_NIOPosix.bundle; do
+  if [[ -d "$legacy_bridge_dir/$legacy_bundle" ]]; then
+    legacy_archive_members+=("$legacy_bundle")
+  fi
+done
+tar -czf "$legacy_provider_asset" -C "$legacy_bridge_dir" "${legacy_archive_members[@]}"
+python3 "$metadata" validate-archive --input "$legacy_provider_asset" --forbid-links
+tar -tzf "$legacy_provider_asset" | grep -qx 'macprovider-cli' \
+  || die "legacy provider bridge archive lacks macprovider-cli"
 dmg_stage="$signing_tmp/dmg"
 mkdir "$dmg_stage"
 cp -R "$app" "$dmg_stage/Malibu.app"
@@ -315,7 +336,7 @@ fi
   -signature "$output_dir/pearl-release.json.sig" "$output_dir/pearl-release.json"
 
 artifact_arguments=(
-  --artifact "provider_cli=$provider_asset"
+  --artifact "provider_cli=$legacy_provider_asset"
   --artifact "malibu_app=$malibu_asset"
   --artifact "coordinator=$output_dir/coordinator-linux-amd64"
   --artifact "coordinator_cli=$output_dir/coordinator-cli-linux-amd64"
@@ -360,6 +381,7 @@ python3 "$release_discovery" \
 
 release_assets=(
   "$provider_asset"
+  "$legacy_provider_asset"
   "$malibu_asset"
   "$output_dir/release-toolchain.json"
   "$output_dir/coordinator-linux-amd64"

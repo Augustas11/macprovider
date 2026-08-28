@@ -13,10 +13,10 @@
 > with SPEC-032, SPEC-032 governs (including the shipped close-reason names in
 > SPEC-032 FR-HG4, which supersede any reason strings listed here).
 
-**Version:** 0.1 (superseded)  
-**Date:** 2026-07-08  
-**Audience:** Coordinator + macprovider-cli implementers  
-**Spec:** **SPEC-032** (this runbook is no longer the normative source).  
+**Version:** 0.1 (superseded)
+**Date:** 2026-07-08
+**Audience:** Coordinator + malibu-cli implementers
+**Spec:** **SPEC-032** (this runbook is no longer the normative source).
 **Research:** `research/pouw-apple-silicon-mining-alternatives.md`
 
 ---
@@ -266,7 +266,7 @@ Link **rate-card tier multiplier** to liveness streak:
 
 Append to `beta/DECISION_CRITERIA.md`:
 
-> **Entry N — OPoI v0 for mining liveness (2026-07-08)**  
+> **Entry N — OPoI v0 for mining liveness (2026-07-08)**
 > PoM tier gating failed Apple Silicon microbench (~4× @ 75% held). Adopt Keryx **OPoI liveness shape** via existing pool canaries (v0), explicit WS (v1), tier multiplier (v1.1). PoM audit-only.
 
 ---
@@ -279,7 +279,7 @@ phase4-coordinator/internal/ws/messages.go            # opoi_* types
 phase4-coordinator/internal/ws/server.go              # handler + schedule
 phase4-coordinator/internal/ws/opoi_test.go         # new
 phase4-coordinator/coordinator.yaml.example           # canary bank docs
-phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
+phase3-binary/Sources/malibu-cli/CoordinatorClient.swift
 # (SPEC-OPOI-CHALLENGE-WS.md was planned as the normative home but is not yet written — see header)
 ops/runbooks/opoi-challenge-implementation.md         # this file
 ```
@@ -288,16 +288,16 @@ ops/runbooks/opoi-challenge-implementation.md         # this file
 
 ## 10. FAQ
 
-**Q: Is this Pearl/cuPOW?**  
+**Q: Is this Pearl/cuPOW?**
 A: No. Pearl is L1 GEMM PoUW. This is coordinator liveness only.
 
-**Q: Why not PoM?**  
+**Q: Why not PoM?**
 A: See `research/pom-mlx-microbench/RESULTS.md` — insufficient penalty on unified memory.
 
-**Q: Do we already have this?**  
+**Q: Do we already have this?**
 A: **Yes ~80%** — pool canaries are OPoI v0. This runbook formalizes and extends.
 
-**Q: Chain needed?**  
+**Q: Chain needed?**
 A: No.
 
 ---

@@ -39,7 +39,7 @@ Operator catalog pin workflow:
 
 1. Edit signed tier-2 catalog + rate-card rows (operator PR).
 2. Deploy coordinator catalog path / SIGHUP reload.
-3. Providers run `macprovider-cli autotune --recommend --apply` so manifest hash matches pinned row.
+3. Providers run `malibu-cli autotune --recommend --apply` so manifest hash matches pinned row.
 4. Hello carries `model_hash`; coordinator verifies via `tier2.VerifyProviderHash`.
 5. Mismatch → no buyer traffic; settlement quarantine if hash diverges at payout.
 

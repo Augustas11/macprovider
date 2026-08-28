@@ -67,7 +67,7 @@ spec:
 - **Backend is MLX, not GGUF/llama.cpp.**
   [`phase3-binary/Package.swift:19-39`](../../phase3-binary/Package.swift)
   depends on `mlx-swift-lm` (`MLXLLM`/`MLXLMCommon`) + `swift-transformers`.
-  `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift` manages exactly
+  `phase3-binary/Sources/malibu-cli/ModelRuntime.swift` manages exactly
   one loaded model at a time (`currentModelID`/`currentModelHash`, ~lines
   322-410), including warm-swap to a *different single* model.
 - **`phase4-coordinator` is a pure marketplace/routing/billing hub** — one

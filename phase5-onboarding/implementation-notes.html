@@ -44,7 +44,7 @@ modified by this stream.</p>
   replacement installs remove the existing install directory.</li>
   <li>The release workflow wraps the existing
   <code>phase3-binary/dist/package.sh</code> output and renames the
-  asset to <code>macprovider-cli-&lt;tag&gt;-darwin-arm64.tar.gz</code>
+  asset to <code>malibu-cli-&lt;tag&gt;-darwin-arm64.tar.gz</code>
   so the public installer can use the SPEC-003 release shape.</li>
   <li>The launchd template adds <code>__MODEL_ID__</code> because the
   prompt requires <code>--model &lt;MODEL&gt;</code> in
@@ -107,7 +107,7 @@ modified by this stream.</p>
 <h3>Changes</h3>
 <ul>
   <li><code>install.sh</code> now installs the executable at
-  <code>~/.local/bin/macprovider-cli</code>, keeps release support files
+  <code>~/.local/bin/malibu-cli</code>, keeps release support files
   under <code>~/macprovider</code>, points launchd
   <code>ProgramArguments</code> at the canonical binary path, and warns
   when <code>~/.local/bin</code> is not in <code>PATH</code>.</li>
@@ -116,7 +116,7 @@ modified by this stream.</p>
   <code>state:"ready"</code>, instead of grepping <code>/v1/models</code>
   for a provider ID that is not part of that response.</li>
   <li><code>uninstall.sh</code> removes the same artifact set as
-  <code>macprovider-cli uninstall</code>: canonical binary, support
+  <code>malibu-cli uninstall</code>: canonical binary, support
   directory, logs, and launchd plist. It leaves
   <code>~/.cache/macprovider</code> in place and reports that decision.</li>
 </ul>

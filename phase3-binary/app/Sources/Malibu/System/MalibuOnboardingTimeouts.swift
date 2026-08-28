@@ -1,7 +1,7 @@
 import Foundation
 
 /// Central registry of onboarding-path timeouts that Malibu.app applies while
-/// waiting on the `macprovider-cli` subprocess. Every timeout on the "clicked
+/// waiting on the `malibu-cli` subprocess. Every timeout on the "clicked
 /// Launch Provider → reached .live" path must live here so the values can be
 /// audited as a set, not one file at a time.
 ///
@@ -31,7 +31,7 @@ import Foundation
 /// healthy run mid-way through cold boot.
 enum MalibuOnboardingTimeouts {
     /// Time budget for the CLI serve subprocess to open its Unix control
-    /// socket after Malibu.app spawns it (`macprovider-cli serve --ctl-
+    /// socket after Malibu.app spawns it (`malibu-cli serve --ctl-
     /// socket-path ...`). The CLI must:
     ///   1. `Process.run()` returns synchronously; the fork/exec completes
     ///   2. MLX runtime static init

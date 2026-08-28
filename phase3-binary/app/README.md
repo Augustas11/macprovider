@@ -1,6 +1,6 @@
 # Malibu.app — P0 skeleton
 
-Swift + SwiftUI menu-bar wrapper around `macprovider-cli`. See [SPEC-025](../../specs/SPEC-025-native-mac-app.md).
+Swift + SwiftUI menu-bar wrapper around `malibu-cli`. See [SPEC-025](../../specs/SPEC-025-native-mac-app.md).
 
 ## Layout
 
@@ -54,12 +54,12 @@ xcodebuild -project Malibu.xcodeproj -scheme Malibu -configuration Release
 
 ## Running against a locally-built CLI
 
-The `.app` looks for `macprovider-cli` at `Contents/MacOS/macprovider-cli` first, then falls back to `$MALIBU_CLI_PATH`. For local dev:
+The `.app` looks for `malibu-cli` at `Contents/MacOS/malibu-cli` first, then falls back to `$MALIBU_CLI_PATH`. For local dev:
 
 ```
 # from repo root
 swift build -c release --package-path phase3-binary
-export MALIBU_CLI_PATH="$PWD/phase3-binary/.build/release/macprovider-cli"
+export MALIBU_CLI_PATH="$PWD/phase3-binary/.build/release/malibu-cli"
 open build/Release/Malibu.app
 ```
 
@@ -95,7 +95,7 @@ not a second lifecycle or state authority.
 
 Malibu **Quit and Uninstall** runs, in order:
 
-1. `macprovider-cli uninstall --yes` (stops launchd, removes CLI binary/plists/manifest)
+1. `malibu-cli uninstall --yes` (stops launchd, removes CLI binary/plists/manifest)
 2. Malibu login item unregister
 3. App Keychain slots + App Support wipe
 
@@ -104,7 +104,7 @@ CLI-only uninstall remains:
 ```bash
 bash <(curl -fsSL https://get.malibu.tech/uninstall.sh)
 # or
-macprovider-cli uninstall --yes
+malibu-cli uninstall --yes
 ```
 
 CLI uninstall does **not** remove `~/Library/Application Support/Malibu`; use Malibu's

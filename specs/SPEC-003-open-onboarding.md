@@ -148,7 +148,7 @@ One line. Zero operator action. Provider in the pool within 2 minutes
 Two parts make this work:
 
 - **Part C — Distribution + lifecycle.** GitHub Releases, curl-pipe-bash
-  install script at `get.malibu.tech`, `macprovider-cli update`
+  install script at `get.malibu.tech`, `malibu-cli update`
   subcommand, launchd plist for reboot survival, log rotation,
   coordinator-advertised version nudge.
 - **Part D — Onboarding UX.** The README flow, `install.sh` prompts,
@@ -166,9 +166,9 @@ network works, the product doesn't yet exist."
 **Part C — Distribution + lifecycle:**
 - GitHub Releases with tagged binaries, checksums, release notes
 - `install.sh` at `get.malibu.tech`
-- `macprovider-cli update` subcommand (self-update)
-- `macprovider-cli status` subcommand (local + remote state)
-- `macprovider-cli uninstall` subcommand (remove everything)
+- `malibu-cli update` subcommand (self-update)
+- `malibu-cli status` subcommand (local + remote state)
+- `malibu-cli uninstall` subcommand (remove everything)
 - launchd plist for reboot survival
 - Log rotation
 - Coordinator-advertised `recommended_binary_version` in `hello_ack`
@@ -178,7 +178,7 @@ network works, the product doesn't yet exist."
 - README-driven setup flow
 - `install.sh` interactive prompts (model selection, coordinator URL)
 - First-run self-test with user-visible output
-- `macprovider-cli status` for contributor self-diagnostics
+- `malibu-cli status` for contributor self-diagnostics
 - Graceful degradation on coordinator unavailability
 
 ### Companion specs (Parts A + B, shipped together with C + D)
@@ -227,7 +227,7 @@ Stranger's Mac                    get.malibu.tech    GitHub Releases
       │                                                       │
       │  fetch latest release                                 │
       │──────────────────────────────────────────────────────>│
-      │  <── macprovider-cli tarball + checksums ────────────│
+      │  <── malibu-cli tarball + checksums ────────────│
       │                                                       │
       │  verify checksum                                      │
       │  extract to ~/.local/bin/                             │
@@ -237,7 +237,7 @@ Stranger's Mac                    get.malibu.tech    GitHub Releases
       │  write ~/.config/macprovider/config.yaml              │
       │  optionally install launchd plist                     │
       │                                                       │
-      │  macprovider-cli self-test                            │
+      │  malibu-cli self-test                            │
       │  ├─ load model                                        │
       │  ├─ run inference (FR-20 self-test)                   │
       │  └─ connect to coordinator                            │
@@ -290,15 +290,15 @@ Stranger's Mac                    get.malibu.tech    GitHub Releases
 ## 4. Functional requirements — Part C (Distribution + lifecycle)
 
 **FR-C1. GitHub Releases.**
-Each release of `macprovider-cli` is published as a GitHub Release on
+Each release of `malibu-cli` is published as a GitHub Release on
 the `macprovider-poc` repository (or a dedicated `macprovider-releases`
 repo if the operator prefers to separate release artifacts from source).
 
 Release shape:
 - **Tag format:** `v{major}.{minor}.{patch}` (e.g., `v1.2.0`).
   Follows semantic versioning. The tag is created on the `main` branch.
-- **Asset naming:** `macprovider-cli-{version}-{os}-{arch}.tar.gz`
-  (e.g., `macprovider-cli-v1.2.0-darwin-arm64.tar.gz`). Only
+- **Asset naming:** `malibu-cli-{version}-{os}-{arch}.tar.gz`
+  (e.g., `malibu-cli-v1.2.0-darwin-arm64.tar.gz`). Only
   `darwin-arm64` is shipped in v1 (Apple Silicon only).
 - **Checksums:** A `checksums.txt` file containing SHA-256 hashes for
   all assets, formatted as `{hash}  {filename}` (GNU coreutils style).
@@ -338,7 +338,7 @@ The skill is a distribution artifact, not a new runtime protocol. It MUST:
 1. Use `malibu.tech` canonical URLs and MUST NOT point agents at legacy
    `streamvc.live` onboarding URLs.
 2. Cover provider install, status, recovery, update, and uninstall commands
-   using the public installer/uninstaller and the existing `macprovider-cli`
+   using the public installer/uninstaller and the existing `malibu-cli`
    surfaces.
 3. Cover buyer SDK compatibility by pointing OpenAI-compatible clients at
    `https://api.malibu.tech/v1`.
@@ -381,9 +381,9 @@ that:
    (`GET /repos/{owner}/{repo}/releases/latest`).
 4. Downloads the binary tarball and `checksums.txt`.
 5. Verifies the SHA-256 checksum. Exits with error on mismatch.
-6. Extracts the real binary and adjacent `.bundle` directories to `~/macprovider/`, then creates `~/.local/bin/macprovider-cli` as a symlink for PATH discoverability.
+6. Extracts the real binary and adjacent `.bundle` directories to `~/macprovider/`, then creates `~/.local/bin/malibu-cli` as a symlink for PATH discoverability.
 7. Adds `~/.local/bin` to `$PATH` in `~/.zshrc` (if not already
-   present) with a comment marker: `# Added by macprovider-cli`.
+   present) with a comment marker: `# Added by malibu-cli`.
 8. Prompts the user for model selection (FR-D2).
 9. Prompts for coordinator URL (default:
    `wss://coordinator.malibu.tech/ws/provider`).
@@ -393,7 +393,7 @@ that:
     coordinator URL, and generated provider_id.
 12. Optionally installs a launchd plist for reboot survival (FR-C5).
     User is prompted: "Install as a background service? [Y/n]"
-13. Runs `macprovider-cli self-test` to verify the installation.
+13. Runs `malibu-cli self-test` to verify the installation.
 14. Prints a summary: binary version, model, coordinator URL,
     provider_id, and a "you're in the pool!" confirmation if the
     coordinator link succeeded.
@@ -415,8 +415,8 @@ that:
 
 | Path | Purpose |
 |---|---|
-| `~/macprovider/macprovider-cli` | Real binary, adjacent to Swift/MLX `.bundle` directories |
-| `~/.local/bin/macprovider-cli` | Symlink for PATH discoverability |
+| `~/macprovider/malibu-cli` | Real binary, adjacent to Swift/MLX `.bundle` directories |
+| `~/.local/bin/malibu-cli` | Symlink for PATH discoverability |
 | `~/.config/macprovider/config.yaml` | Configuration |
 | `~/.config/macprovider/provider_id` | Stable identity |
 | `~/Library/LaunchAgents/live.malibu.provider.plist` | launchd plist (if opted in) |
@@ -433,14 +433,14 @@ that:
 | `MACPROVIDER_NO_LAUNCHD` | Skip launchd prompt (no plist) |
 | `MACPROVIDER_NO_PROMPT` | Non-interactive mode (uses all defaults) |
 
-**FR-C3. macprovider-cli update subcommand.**
-`macprovider-cli update` performs an atomic self-update:
+**FR-C3. malibu-cli update subcommand.**
+`malibu-cli update` performs an atomic self-update:
 
 1. Queries the GitHub API for the latest release.
 2. Compares the remote version to the running binary's version.
 3. If newer: downloads the tarball and checksums, verifies checksum.
 4. Extracts the new binary to a temporary path.
-5. Runs `macprovider-cli self-test` with the new binary (sanity check
+5. Runs `malibu-cli self-test` with the new binary (sanity check
    before swap).
 6. Atomically replaces the old binary with the new one (rename on same
    filesystem; if cross-filesystem, copy + rename + remove old).
@@ -448,20 +448,20 @@ that:
    `launchctl bootout gui/$UID/live.malibu.provider` then
    `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/live.malibu.provider.plist`
    to restart the service with the new binary.
-8. If no launchd plist, prints "Update complete. Restart macprovider-cli
+8. If no launchd plist, prints "Update complete. Restart malibu-cli
    to use the new version."
 
 If already at the latest version, prints "Already up to date
 (v{version})" and exits 0.
 
-`macprovider-cli update --check` performs only steps 1-2 and prints the
+`malibu-cli update --check` performs only steps 1-2 and prints the
 comparison without downloading.
 
-**FR-C4. macprovider-cli status subcommand.**
-`macprovider-cli status` displays local and remote state:
+**FR-C4. malibu-cli status subcommand.**
+`malibu-cli status` displays local and remote state:
 
 ```
-macprovider-cli v1.2.0
+malibu-cli v1.2.0
 
 Local:
   Model:       mlx-community/Qwen2.5-7B-Instruct-4bit
@@ -479,7 +479,7 @@ Coordinator:
 
 Update:
   Current:     v1.2.0
-  Latest:      v1.2.1 (run 'macprovider-cli update' to upgrade)
+  Latest:      v1.2.1 (run 'malibu-cli update' to upgrade)
 ```
 
 Local state comes from the binary's in-process metrics (same data as
@@ -489,7 +489,7 @@ Update state comes from the GitHub API (cached for 1 hour to avoid rate
 limits).
 
 **FR-C5. launchd plist.**
-The plist ensures `macprovider-cli` starts on login and restarts on
+The plist ensures `malibu-cli` starts on login and restarts on
 crash:
 
 ```xml
@@ -502,7 +502,7 @@ crash:
   <string>live.malibu.provider</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$HOME/macprovider/macprovider-cli</string>
+    <string>$HOME/macprovider/malibu-cli</string>
     <string>--port</string>
     <string>8080</string>
     <string>--model</string>
@@ -543,8 +543,8 @@ crash:
 Notes:
 - `$HOME` is expanded at install time by `install.sh`, not by launchd.
   The plist contains literal absolute paths.
-- The plist invokes `$HOME/macprovider/macprovider-cli`, not the
-  `~/.local/bin/macprovider-cli` symlink. The symlink remains for shell
+- The plist invokes `$HOME/macprovider/malibu-cli`, not the
+  `~/.local/bin/malibu-cli` symlink. The symlink remains for shell
   use, but launchd must use the real path so Swift Bundle resolution
   finds adjacent `.bundle` directories.
 - `KeepAlive.SuccessfulExit = false` means launchd restarts the binary
@@ -553,26 +553,26 @@ Notes:
 - `ProcessType = Background` reduces scheduling priority and power impact.
 - Log rotation is handled by the binary (FR-C8), not launchd.
 
-**FR-C6. macprovider-cli uninstall subcommand.**
-`macprovider-cli uninstall` removes all installed artifacts:
+**FR-C6. malibu-cli uninstall subcommand.**
+`malibu-cli uninstall` removes all installed artifacts:
 
 1. If launchd plist exists: `launchctl bootout
    gui/$UID/live.malibu.provider` (stop the service).
 2. Remove `~/Library/LaunchAgents/live.malibu.provider.plist`.
-3. Remove `~/.local/bin/macprovider-cli`.
+3. Remove `~/.local/bin/malibu-cli`.
 4. Prompt: "Remove configuration and logs? [y/N]"
    - If yes: remove `~/.config/macprovider/` and
      `~/.local/share/macprovider/`.
    - If no: keep config and logs (allows re-install with same identity).
 5. Remove the `PATH` addition from `~/.zshrc` (the line with the
-   `# Added by macprovider-cli` marker).
-6. Print "macprovider-cli has been uninstalled."
+   `# Added by malibu-cli` marker).
+6. Print "malibu-cli has been uninstalled."
 
 **FR-C7. Coordinator-advertised version nudge.**
 The `hello_ack` message includes an optional `recommended_binary_version`
 field (SPEC-001 v1.2.1 § 6.5). If the provider's `binary_version` is
 older, the provider logs a warning: "A newer version is available
-(vX.Y.Z). Run 'macprovider-cli update' to upgrade."
+(vX.Y.Z). Run 'malibu-cli update' to upgrade."
 
 The coordinator does NOT enforce the version — providers running older
 binaries continue to function. Enforcement is deferred (see SPEC-002
@@ -730,7 +730,7 @@ FR-C9.7; a referral code is admission input, never a preprovisioned bearer.
 The flag flip is safe AFTER:
 
 1. The new coordinator binary carrying FR-C9.1/FR-C9.2/FR-C9.4 is deployed on Pearl.
-2. A new release tag of `macprovider-cli` carrying FR-C9.3 is published and `install.sh`'s `latest_release_tag()` resolves to it.
+2. A new release tag of `malibu-cli` carrying FR-C9.3 is published and `install.sh`'s `latest_release_tag()` resolves to it.
 3. A settling window (≥24h, operator's discretion) has elapsed during which existing provisional providers reconnect at least once and self-mint.
 
 Old binaries that cannot parse `assigned_provider_token` will silently drop the field (Swift's JSON decoder ignores unknown keys) and never persist a token; at flag-flip time they are rejected at the WS handshake — same blast radius as the original M1-1 plan, no worse. Entry 60 records this as the explicit compatibility cutoff. The operator action `coordinator-cli list-tokens` may be used during the settling window to verify that all expected provider IDs have at least one unrevoked token row before flipping the flag.
@@ -869,7 +869,7 @@ curl -fsSL https://get.malibu.tech/install.sh | bash
 \`\`\`
 
 The installer will:
-1. Download the latest macprovider-cli binary
+1. Download the latest malibu-cli binary
 2. Ask you to choose a model (based on your Mac's RAM)
 3. Connect you to the network
 4. Optionally set up auto-start on login
@@ -882,17 +882,17 @@ The installer will:
 
 **Check your status:**
 \`\`\`bash
-macprovider-cli status
+malibu-cli status
 \`\`\`
 
 **Update:**
 \`\`\`bash
-macprovider-cli update
+malibu-cli update
 \`\`\`
 
 **Uninstall:**
 \`\`\`bash
-macprovider-cli uninstall
+malibu-cli uninstall
 \`\`\`
 ```
 
@@ -935,7 +935,7 @@ in order:
      (private, gated, or doesn't exist)" message; the installer MUST
      NOT distinguish these because HuggingFace does not disclose
      existence to unauthenticated callers. The error MUST direct the
-     user to `macprovider-cli models switch` post-install with
+     user to `malibu-cli models switch` post-install with
      `HF_TOKEN` set for the gated-repo path.
    - Network error or unexpected status → log warning, skip
      remaining checks, proceed.
@@ -985,7 +985,7 @@ provider's initial WS frame, so no protocol or schema change is
 required for this branch.
 
 **FR-D3. First-run self-test.**
-On first run (or when invoked via `macprovider-cli self-test`), the
+On first run (or when invoked via `malibu-cli self-test`), the
 binary:
 1. Loads the model (this is the slowest step).
 2. Runs the SPEC-001 v1.2.3 FR-20 self-test (short inference, verify
@@ -1035,7 +1035,7 @@ Install.sh upgrade-in-place was exercised at scale for the first time during the
    messaging plus cold-cache deadline extension shipped.
 
 **FR-D4. Status check.**
-See FR-C4 for the full `macprovider-cli status` output format. The
+See FR-C4 for the full `malibu-cli status` output format. The
 status subcommand is the primary diagnostic tool for contributors. It
 answers: "Is my Mac serving? Am I in the pool? What tier am I?"
 
@@ -1068,7 +1068,7 @@ Defined in FR-C2. Summary:
 - **Exit codes:** 0-7 (see FR-C2).
 - **Side effects:** See FR-C2 file table.
 
-### 6.2. macprovider-cli new subcommands
+### 6.2. malibu-cli new subcommands
 
 | Subcommand | Description | Requires running service |
 |---|---|---|
@@ -1098,8 +1098,8 @@ Defined in FR-C1. Summary:
 | Property | Format | Example |
 |---|---|---|
 | Tag | `v{semver}` | `v1.2.0` |
-| Asset | `macprovider-cli-{version}-{os}-{arch}.tar.gz` | `macprovider-cli-v1.2.0-darwin-arm64.tar.gz` |
-| Checksums | `checksums.txt` (SHA-256, GNU format) | `a1b2c3...  macprovider-cli-v1.2.0-darwin-arm64.tar.gz` |
+| Asset | `malibu-cli-{version}-{os}-{arch}.tar.gz` | `malibu-cli-v1.2.0-darwin-arm64.tar.gz` |
+| Checksums | `checksums.txt` (SHA-256, GNU format) | `a1b2c3...  malibu-cli-v1.2.0-darwin-arm64.tar.gz` |
 | Release notes | Markdown body | Version, date, changes, breaking changes, spec version |
 
 ---
@@ -1156,14 +1156,14 @@ and SPEC-002 v1.1.4 (AC-11 through AC-15) must also pass.**
 
 **AC-1. install.sh from clean Mac.**
 
-**Setup:** A Mac with no previous macprovider-cli installation. Model
+**Setup:** A Mac with no previous malibu-cli installation. Model
 already downloaded (to isolate install time from download time).
 
 **Action:** `curl -fsSL https://get.malibu.tech/install.sh | bash`
 (or local `bash install.sh` during testing).
 
 **Expected:**
-1. Binary installed to `~/.local/bin/macprovider-cli`.
+1. Binary installed to `~/.local/bin/malibu-cli`.
 2. Config written to `~/.config/macprovider/config.yaml`.
 3. `provider_id` generated and persisted.
 4. Self-test passes (model loads, inference works, coordinator
@@ -1198,18 +1198,18 @@ coordinator connection success) remains the build-complete gate.
 
 ---
 
-**AC-2. macprovider-cli update.**
+**AC-2. malibu-cli update.**
 
 **Setup:** Install v1.2.0. Publish v1.2.1 to GitHub Releases.
 
-**Action:** `macprovider-cli update`
+**Action:** `malibu-cli update`
 
 **Expected:**
 1. New version detected and downloaded.
 2. Checksum verified.
 3. Binary atomically swapped.
 4. If launchd plist installed: service restarted with new binary.
-5. `macprovider-cli --version` shows `1.2.1`.
+5. `malibu-cli --version` shows `1.2.1`.
 
 **How to verify:** `phase5-onboarding/scripts/test-update.sh`
 
@@ -1217,16 +1217,16 @@ coordinator connection success) remains the build-complete gate.
 
 **AC-3. launchd plist reboot survival.**
 
-**Setup:** Install macprovider-cli with launchd plist. Verify service
+**Setup:** Install malibu-cli with launchd plist. Verify service
 is running (`launchctl list | grep macprovider`).
 
 **Action:** `sudo reboot` (or `launchctl bootout` + `launchctl
 bootstrap` to simulate).
 
 **Expected:**
-1. After reboot, `macprovider-cli serve` is running automatically.
+1. After reboot, `malibu-cli serve` is running automatically.
 2. Provider reconnects to coordinator (visible in `/poolz`).
-3. `macprovider-cli status` shows healthy state.
+3. `malibu-cli status` shows healthy state.
 
 **How to verify:** Manual test.
 
@@ -1234,7 +1234,7 @@ bootstrap` to simulate).
 
 **AC-4. Installer self-test diagnostic output.**
 
-**Setup:** A Mac with `macprovider-cli` installed by `install.sh`, but
+**Setup:** A Mac with `malibu-cli` installed by `install.sh`, but
 with the local self-test forced to fail after the binary binds its local
 HTTP port. During testing, this can be done by temporarily changing the
 model string expected by `wait_for_local_model` to a non-existent model
@@ -1264,7 +1264,7 @@ green install retest.
 
 **Setup/action:** Re-run `install.sh` on an existing v1.2.3+ install, then run a mixed-state directory simulation via `MACPROVIDER_INSTALL_DIR`.
 
-**Expected:** Existing config port is reused; own `macprovider-cli` port holders are stopped while foreign holders still exit 6; launchd invokes the real binary path; warm-cache waits remain 5 minutes; cold-cache waits are 20 minutes with progress; mixed-state directories warn and continue.
+**Expected:** Existing config port is reused; own `malibu-cli` port holders are stopped while foreign holders still exit 6; launchd invokes the real binary path; warm-cache waits remain 5 minutes; cold-cache waits are 20 minutes with progress; mixed-state directories warn and continue.
 
 **How to verify:** Manual upgrade on existing partner-shaped install plus local mixed-directory simulation.
 

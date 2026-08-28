@@ -242,7 +242,7 @@
         "beta/DECISION_CRITERIA.md Entry 160",
         "beta/DECISION_CRITERIA.md Entry 162",
         "phase4-coordinator/internal/ws/server.go",
-        "phase3-binary/Sources/macprovider-cli/CompatibilitySetManifest.swift",
+        "phase3-binary/Sources/malibu-cli/CompatibilitySetManifest.swift",
         "ops/runbooks/pearl-exception-clearance-20260722.md#v1840-coordinator-admission-bridge"
       ],
       "partial_progress": [
@@ -258,7 +258,7 @@
       "status": "planned",
       "environment": "pearl-production",
       "component": "coordinator",
-      "policy_delta": "Exact public pre-fix compatibility set `Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8` may be listed in `coordinator.compatibility_set.first_hop_bridge_ids` so rejected 1.8.48 providers can open an update-only session, receive `recommended_compatibility_set_id=target_id`, and complete ordinary `macprovider-cli update`. Bridge-only sessions use `catalog_admission_mode=update_bridge` and are never buyer-routable.",
+      "policy_delta": "Exact public pre-fix compatibility set `Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8` may be listed in `coordinator.compatibility_set.first_hop_bridge_ids` so rejected 1.8.48 providers can open an update-only session, receive `recommended_compatibility_set_id=target_id`, and complete ordinary `malibu-cli update`. Bridge-only sessions use `catalog_admission_mode=update_bridge` and are never buyer-routable.",
       "authority_surface": "Pearl overlay `coordinator.compatibility_set.first_hop_bridge_ids` plus `target_id` / `accepted_ids` / `coordinator_advertised_version.latest_binary_version` alignment; runtime `catalog_admission_mode=update_bridge`.",
       "reason": "#610 remains open because public 1.8.48 cannot use #631 signed discovery; the first hop was proven only against an isolated acceptance coordinator. Production needs this temporary server bridge (or the install.sh fallback) before the ordinary user update journey is complete.",
       "owner": "provider lifecycle/release recovery",

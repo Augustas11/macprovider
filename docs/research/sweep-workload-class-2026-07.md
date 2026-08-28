@@ -57,7 +57,7 @@ There is no current request-time class classifier in the provider/coordinator pa
 
 Extend the existing `autotune-candidates.json` row shape additively with a per-class profile map. Do not ship a sibling file in v0.1 unless catalog size or consumer separation proves it is needed.
 
-The current static catalog is a signed object with top-level metadata and `rows`; each row carries model identity, RAM/bandwidth eligibility, advisory benchmark gates, runtime status, and notes. The Swift decoder uses a typed `Row` with coding keys for those known fields (`phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:439`). Swift `Decodable` ignores unknown JSON keys by default when decoding keyed containers, so adding an unknown field to each row is backward-compatible for current consumers.
+The current static catalog is a signed object with top-level metadata and `rows`; each row carries model identity, RAM/bandwidth eligibility, advisory benchmark gates, runtime status, and notes. The Swift decoder uses a typed `Row` with coding keys for those known fields (`phase3-binary/Sources/malibu-cli/AutotuneRecommend.swift:439`). Swift `Decodable` ignores unknown JSON keys by default when decoding keyed containers, so adding an unknown field to each row is backward-compatible for current consumers.
 
 Recommended additive shape:
 
@@ -97,7 +97,7 @@ Recommended additive shape:
 
 Use `workload_profiles` rather than `per_class` in the normative SPEC because the first-level keys are harness workload names in v0.1, not a general request taxonomy. Nesting by RAM tier is required because SPEC-028 draft context caps are tier-specific. The nested object should avoid the existing top-level `bench_gate` key so SPEC-023's advisory catalog gates are not confused with workload-specific gate policy and measured profile metrics.
 
-The same static feed trust domain should sign the additive catalog. The current public key is baked into the installer recommendation code with key ID `streamvc-autotune-static-v4` (`phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:684`), and the static-key README describes the single feed trust model and re-signing process (`phase3-binary/dist/static/keys/README.md:32`). A new key would imply a new trust domain; class profiles are still operator-curated candidate recommendations, so reusing the current static key is correct.
+The same static feed trust domain should sign the additive catalog. The current public key is baked into the installer recommendation code with key ID `streamvc-autotune-static-v4` (`phase3-binary/Sources/malibu-cli/AutotuneRecommend.swift:684`), and the static-key README describes the single feed trust model and re-signing process (`phase3-binary/dist/static/keys/README.md:32`). A new key would imply a new trust domain; class profiles are still operator-curated candidate recommendations, so reusing the current static key is correct.
 
 ## D. Runtime Routing
 

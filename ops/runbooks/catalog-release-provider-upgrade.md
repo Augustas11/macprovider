@@ -297,7 +297,7 @@ legacy coordinator.
    signed tag and prefetch the candidate without mutating the live provider:
 
    ```bash
-   ~/macprovider/macprovider-cli --version | tee canary-prior-provider-tag.txt
+   ~/macprovider/malibu-cli --version | tee canary-prior-provider-tag.txt
    KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.31
    ```
 

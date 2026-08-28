@@ -28,7 +28,7 @@
     <key>MACPROVIDER_CONFIG_PATH</key>
     <string>__HOME__/.config/macprovider/config.yaml</string>
     <key>MACPROVIDER_BINARY_PATH</key>
-    <string>__INSTALL_DIR__/macprovider-cli</string>
+    <string>__INSTALL_DIR__/malibu-cli</string>
     <key>MACPROVIDER_COORDINATOR_HOST</key>
     <string>__COORDINATOR_HOST__</string>
     <key>MACPROVIDER_LOG_DIR</key>

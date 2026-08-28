@@ -12,6 +12,7 @@ import sys
 names = [
     "xml_escape",
     "write_atomic_install_file",
+    "owned_provider_executable_matches",
     "launchctl_service",
     "validate_headless_launchdaemon_plist",
     "snapshot_headless_launchdaemon_plist",
@@ -121,14 +122,14 @@ run_reclaim() {
     PROVIDER_LABEL="live.malibu.provider" \
     WATCHDOG_LABEL="live.malibu.provider-watchdog" \
     INSTALL_DIR="$TMP/home/macprovider" \
-    BINARY_PATH="$TMP/home/.local/bin/macprovider-cli" \
+    BINARY_PATH="$TMP/home/.local/bin/malibu-cli" \
     WATCHDOG_DIR="$TMP/home/.local/share/macprovider-watchdog" \
     WATCHDOG_PATH="$TMP/home/.local/share/macprovider-watchdog/macprovider-health-monitor" \
     CONFIG_DIR="$TMP/home/.config/macprovider" \
     CONFIG_PATH="$TMP/home/.config/macprovider/config.yaml" \
     PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider.plist" \
     WATCHDOG_PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist" \
-    PROVIDER_PROGRAM="$TMP/home/.local/bin/macprovider-cli" \
+    PROVIDER_PROGRAM="$TMP/home/.local/bin/malibu-cli" \
     WATCHDOG_PROGRAM="$TMP/home/.local/share/macprovider-watchdog/watchdog.sh" \
     PATH="$TMP/bin:$PATH" \
     LAUNCHD_STATE="$LAUNCHD_STATE" \
@@ -186,7 +187,7 @@ printf '<plist>old-watchdog</plist>\n' > "$TMP/home/Library/LaunchAgents/live.ma
 touch "$TMP/launchd-state"
 HOME="$TMP/home" \
   FUNCTION_PATH="$TMP/functions.sh" \
-  PROVIDER_PROGRAM="$TMP/home/.local/bin/macprovider-cli" \
+  PROVIDER_PROGRAM="$TMP/home/.local/bin/malibu-cli" \
   WATCHDOG_PROGRAM="$TMP/home/.local/share/macprovider-watchdog/watchdog.sh" \
   PATH="$TMP/bin:$PATH" \
   LAUNCHD_STATE="$TMP/launchd-state" \
@@ -203,7 +204,7 @@ HOME="$TMP/home" \
     LAUNCHCTL_BIN="$(command -v launchctl)"
     INSTALL_BIN="$(command -v install)"
     INSTALL_DIR="$HOME/macprovider"
-    BINARY_PATH="$HOME/.local/bin/macprovider-cli"
+    BINARY_PATH="$HOME/.local/bin/malibu-cli"
     WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
     WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
     CONFIG_DIR="$HOME/.config/macprovider"
@@ -242,7 +243,7 @@ FUNCTION_PATH="$TMP/functions.sh" \
   PROVIDER_LABEL="live.malibu.provider" \
   WATCHDOG_LABEL="live.malibu.provider-watchdog" \
   INSTALL_DIR="$TMP/home/macprovider" \
-  BINARY_PATH="$TMP/home/.local/bin/macprovider-cli" \
+  BINARY_PATH="$TMP/home/.local/bin/malibu-cli" \
   WATCHDOG_DIR="$TMP/home/.local/share/macprovider-watchdog" \
   WATCHDOG_PATH="$TMP/home/.local/share/macprovider-watchdog/macprovider-health-monitor" \
   PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider.plist" \
@@ -277,6 +278,7 @@ import sys
 
 names = [
     "validate_port_value",
+    "owned_provider_executable_matches",
     "ensure_port_free",
     "launchctl_service",
     "reclaim_launchd_service",
@@ -312,7 +314,7 @@ cat > "$TMP/port-bin/lsof" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-  *"-d txt"*) printf 'p4242\nn%s/macprovider/macprovider-cli\n' "$HOME" ;;
+  *"-d txt"*) printf 'p4242\nn%s/macprovider/malibu-cli\n' "$HOME" ;;
   *-t*)
     if [ -f "$LSOF_T_SEEN" ]; then
       exit 0
@@ -320,7 +322,7 @@ case "$*" in
     : > "$LSOF_T_SEEN"
     printf '4242\n'
     ;;
-  *) printf "COMMAND PID\nmacprovider-cli 4242\n" ;;
+  *) printf "COMMAND PID\nmalibu-cli 4242\n" ;;
 esac
 EOF
 chmod 0755 "$TMP/port-bin/lsof"
@@ -343,7 +345,7 @@ HOME="$TMP/home" \
     DRY_RUN=0
     PORT=18080
     INSTALL_DIR="$HOME/macprovider"
-    BINARY_PATH="$HOME/.local/bin/macprovider-cli"
+    BINARY_PATH="$HOME/.local/bin/malibu-cli"
     INSTALL_TX_SERVICE_WAS_ACTIVE=0
     INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE=1
     INSTALL_TX_ACTIVE=1

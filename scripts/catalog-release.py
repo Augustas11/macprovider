@@ -22,8 +22,8 @@ from datetime import datetime, timezone
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CATALOG_DIR = ROOT / "phase3-binary" / "catalog" / "autotune"
 STATIC_DIR = ROOT / "phase3-binary" / "dist" / "static"
-SWIFT_SOURCE = ROOT / "phase3-binary" / "Sources" / "macprovider-cli" / "AutotuneRecommend.swift"
-SWIFT_GENERATED = ROOT / "phase3-binary" / "Sources" / "macprovider-cli" / "AutotuneCatalog.generated.swift"
+SWIFT_SOURCE = ROOT / "phase3-binary" / "Sources" / "malibu-cli" / "AutotuneRecommend.swift"
+SWIFT_GENERATED = ROOT / "phase3-binary" / "Sources" / "malibu-cli" / "AutotuneCatalog.generated.swift"
 GO_REJECTED_RELEASES_GENERATED = ROOT / "phase4-coordinator" / "internal" / "autotune" / "rejected_release_ids.generated.go"
 KEYS_PATH = CATALOG_DIR / "trusted-keys.json"
 MANIFEST_PATH = CATALOG_DIR / "release.json"

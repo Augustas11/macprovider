@@ -7,7 +7,7 @@
 
 ## 1. TL;DR verdict
 
-**Go-with-caveats.** MacProvider should adopt shard's *distributed-systems* ideas—single-writer transport, framed activation messages, RTT/VRAM-aware ring placement, async inter-stage send, churn recovery, and per-stage signed receipts—but **not** its CUDA/PyTorch kernel stack. The headline prize (serving a model larger than one Mac's unified memory by sharding layers across Macs) is **blocked on MLX**: MacProvider today loads one full `ModelContainer` per process (`specs/SPEC-010-model-catalog.md:302`, `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:323`) and has no stage-local `forward(hidden, start_pos)` path. Upstream `mlx-lm` documents `sharded_load` + `model.pipeline()` for pipeline-parallel *weight* placement (`ml-explore/mlx` issue #3208, **inference** from public MLX discussion), but MacProvider's `mlx-swift-lm` integration exposes only end-to-end `generate`/`stream`—not cross-machine hidden-state I/O. **Transfer now:** transport hardening patterns and coordinator placement math. **Spike first:** a ~20-line MLX probe that loads layers `[lo:hi]`, runs one block, and returns a hidden tensor. **No-go for now:** porting CUDA graphs, NVFP4/fp8 KV, libp2p sidecar wholesale, or expecting 30 tok/s cross-Mac pipeline without a spec-decode coordinator and MLX stage runtime.
+**Go-with-caveats.** MacProvider should adopt shard's *distributed-systems* ideas—single-writer transport, framed activation messages, RTT/VRAM-aware ring placement, async inter-stage send, churn recovery, and per-stage signed receipts—but **not** its CUDA/PyTorch kernel stack. The headline prize (serving a model larger than one Mac's unified memory by sharding layers across Macs) is **blocked on MLX**: MacProvider today loads one full `ModelContainer` per process (`specs/SPEC-010-model-catalog.md:302`, `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:323`) and has no stage-local `forward(hidden, start_pos)` path. Upstream `mlx-lm` documents `sharded_load` + `model.pipeline()` for pipeline-parallel *weight* placement (`ml-explore/mlx` issue #3208, **inference** from public MLX discussion), but MacProvider's `mlx-swift-lm` integration exposes only end-to-end `generate`/`stream`—not cross-machine hidden-state I/O. **Transfer now:** transport hardening patterns and coordinator placement math. **Spike first:** a ~20-line MLX probe that loads layers `[lo:hi]`, runs one block, and returns a hidden tensor. **No-go for now:** porting CUDA graphs, NVFP4/fp8 KV, libp2p sidecar wholesale, or expecting 30 tok/s cross-Mac pipeline without a spec-decode coordinator and MLX stage runtime.
 
 ---
 
@@ -16,10 +16,10 @@
 | Dimension | MacProvider (today) | shard (proven path) |
 |-----------|---------------------|---------------------|
 | **What splits** | Nothing at inference time. One model per provider process (`specs/SPEC-010-model-catalog.md:302`, `specs/SPEC-001-phase3-binary.md:186`). | Contiguous transformer layer blocks per GPU (`phase0/pipeline.py:3-7`, `shard/node.py:34-79`). |
-| **What crosses the wire** | OpenAI-shaped chat JSON (buyer↔gateway↔coordinator↔provider). Inference payload is HTTP body or WS `inference_request` text frames (`phase4-coordinator/internal/ws/relay.go:160-172`, `phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:219-274`). | Per-hop **hidden-state tensors** + control ops (`verify`, `reset`, `crop`) (`phase0/specpipe.py:136-148`, `shard/transport.py:44-58`). |
+| **What crosses the wire** | OpenAI-shaped chat JSON (buyer↔gateway↔coordinator↔provider). Inference payload is HTTP body or WS `inference_request` text frames (`phase4-coordinator/internal/ws/relay.go:160-172`, `phase3-binary/Sources/malibu-cli/InferenceRelay.swift:219-274`). | Per-hop **hidden-state tensors** + control ops (`verify`, `reset`, `crop`) (`phase0/specpipe.py:136-148`, `shard/transport.py:44-58`). |
 | **Transport** | Provider-initiated WSS to coordinator; Go `runWriter` single-writer relay (`phase4-coordinator/internal/ws/relay.go:160-172`). Optional HTTP forward to provider `:8080` (`phase4-coordinator/internal/buyer/server.go:1679-1696`). No libp2p sidecar in-repo. | Length-prefixed JSON+blob frames (`phase0/wire.py:131-161`, `shard/transport.py:94-105`). libp2p Go sidecar tunnels TCP (`sidecar/main.go:1-18`, `shard/transport.py:1-10`). |
 | **Placement** | Per-provider model match + context + tier2 + quota; sort by throughput objective + sticky (`phase4-coordinator/internal/routing/filter.go:110-129`, `phase4-coordinator/internal/buyer/server.go:5084-5209`). `unified_memory_gb` is inventory/verification, not routing (`phase4-coordinator/internal/onboarding/store_pg.go:270-287`). | VRAM-fit contiguous blocks, fat-node-first, min-latency Hamiltonian ring (`shard/scheduler.py:67-91`, `shard/topology.py:27-34`). Coordinator placed in-region (`docs/NETWORK.md:40-44`). |
-| **Trust / pay** | Per-provider **whole-request** receipts (SPEC-015): model hash, prompt hash, output prefix (`phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:26-52`). Coordinator-trusted settlement path. | Per-**stage** signed receipts chaining `in_root`/`out_root` per activation chunk (`shard/receipt.py:54-82`, `docs/INTEGRATION.md:120-125`). Coverage tiling `[0:layer_count)` (`shard/receipt.py:119-145`). |
+| **Trust / pay** | Per-provider **whole-request** receipts (SPEC-015): model hash, prompt hash, output prefix (`phase3-binary/Sources/malibu-cli/ReceiptBuilder.swift:26-52`). Coordinator-trusted settlement path. | Per-**stage** signed receipts chaining `in_root`/`out_root` per activation chunk (`shard/receipt.py:54-82`, `docs/INTEGRATION.md:120-125`). Coverage tiling `[0:layer_count)` (`shard/receipt.py:119-145`). |
 | **Throughput model** | One Mac runs full decode; ~14 tok/s sustained on M1 8GB (`docs/legacy/phase1/PHASE1_REPORT.md` stress tests, **inference** from HANDOFF). | Pipeline + spec-decode + depth pipelining; ~30–40 tok/s on 3–6 GPU rings over WAN (`shard/README.md:29-31`, `shard/README.md:141-147`). |
 | **Memory ceiling** | Model must fit one Mac: 8GB Air hard Metal OOM ~26K ctx (`docs/legacy/phase1/PHASE1_REPORT.md:224-249`, `HANDOFF.md:307-316`). `ModelFit` uses weight+headroom heuristic (`phase3-binary/Sources/MacProviderCore/ModelFit.swift:11-21`). | Model split across nodes; each holds `load_stage` slice only (`phase0/pipeline.py:81-126`). |
 
@@ -35,7 +35,7 @@ shard's `ModelRuntime` contract is explicit: a stage loads layers `[layer_range]
 
 #### What MacProvider does today
 
-MacProvider wraps **one** `ModelContainer` from `mlx-swift-lm`, loaded wholesale via `loadLocalContainer` (`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:323-347`, `1882+`). Generation is end-to-end: tokenize → `generate`/`stream` with per-layer KV inside the runtime (`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:1129`, `1459`). There is no code path that:
+MacProvider wraps **one** `ModelContainer` from `mlx-swift-lm`, loaded wholesale via `loadLocalContainer` (`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:323-347`, `1882+`). Generation is end-to-end: tokenize → `generate`/`stream` with per-layer KV inside the runtime (`phase3-binary/Sources/malibu-cli/ModelRuntime.swift:1129`, `1459`). There is no code path that:
 
 1. Loads only `model.layers[lo:hi]` (plus embed/norm/head at boundaries).
 2. Accepts an incoming `[1, T, H]` hidden tensor from the network.
@@ -78,7 +78,7 @@ Normative specs lock **one active model per process** (`specs/SPEC-010-model-cat
 |-----------------|----------------------------|-----------------|
 | **Single-writer socket ownership** | `runWriter` + `enqueueRaw` for all coordinator→provider WS writes (`phase4-coordinator/internal/ws/relay.go:160-172`, `phase4-coordinator/internal/ws/server.go:1317-1331`) | **Already shipped** — same pattern |
 | **cwnd keep-warm on idle legs** | `_KeepWarm` daemon sends `{"op":"noop"}` when a send socket idles past `interval_ms`; `recv_data` skips noops (`phase0/m25_pipe.py:100-124`, `154-175`, `211-228`). Wired on coord→head (`417`), stage forward (`1064`), tail return (`1085`). Default **150 ms** for `--serve` gateway (`phase0/m25_scatter_pipe.py:133-139`). Env: `M25_CWND_KEEPWARM_MS` (default 0=OFF), per-job `M25_KEEPWARM_JOB` → `keepwarm_ms` on reset (`phase0/m25_pipe.py:112-113`, `416-435`, `1188-1189`). Tests: `tests/test_cwnd_keepwarm.py:1-9`. | **Transferable with adaptation** — targets **TCP stage-to-stage** idle between decode traversals, not MacProvider's buyer JSON path. MacProvider has write deadlines (`phase4-coordinator/internal/ws/relay.go:228-234`) but no app-level cwnd keep-warm. A MacProvider port would need a WS-safe noop/ping that `InferenceRelay` ignores — same risk called out in Phase 1 below. |
-| **Churn re-dial / adopt** | shard: edge `EDGE_ERRORS` resets connection (`phase0/node_kv.py:26-34`, `phase0/m25_pipe.py:520-526`); hot heal rewires predecessor (`STATE.md:80-85`) | **Partial** — MacProvider: receive/handle decoupling (`phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:950-967`), `waitUntilIdle` before reconnect (`CoordinatorClient.swift:499-504`), retired request TTL (`phase4-coordinator/internal/ws/relay.go:30`, `369-407`) |
+| **Churn re-dial / adopt** | shard: edge `EDGE_ERRORS` resets connection (`phase0/node_kv.py:26-34`, `phase0/m25_pipe.py:520-526`); hot heal rewires predecessor (`STATE.md:80-85`) | **Partial** — MacProvider: receive/handle decoupling (`phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:950-967`), `waitUntilIdle` before reconnect (`CoordinatorClient.swift:499-504`), retired request TTL (`phase4-coordinator/internal/ws/relay.go:30`, `369-407`) |
 | **Framed length-prefixed messages + size caps** | shard: `!Q` length + JSON+blob (`phase0/wire.py:142-161`); PR #24 proposes `SHARD_MAX_FRAME` (**inference**) | **Transferable** — MacProvider inference frames are JSON text over WS without tensor blobs; if activations are added, adopt shard framing in a new `phase4-coordinator/internal/stage/` codec |
 | **Async inter-stage send** | `_AsyncSender` thread + 32 MB SO_SNDBUF (`phase0/specpipe.py:56-97`) | **Transferable** when MacProvider has multi-hop activation forwarding (not applicable to current buyer→single-provider relay) |
 | **TCP_NODELAY** | Set on shard stage sockets (`phase0/m25_pipe.py:30`, `475`) | **Transferable** — worth explicit `TCP_NODELAY` on coordinator relay TCP if not already set (**inference** for MacProvider WS stack) |
@@ -98,7 +98,7 @@ MacProvider today:  buyer ──[chat JSON]──► gateway ──► coordinat
 
 shard's `Scheduler.allocate` distributes layers proportional to VRAM capacity, fat nodes first, contiguous blocks (`shard/scheduler.py:67-91`). `topology.optimal_loop` minimizes measured asymmetric RTT (`shard/topology.py:27-34`). `scheduler_svc.py` (**inference:** open PR #6, not in clone) would expose HTTP `/plan`.
 
-MacProvider's `EligibleCandidates` filters by model ID, context, tier2, quota (`phase4-coordinator/internal/routing/filter.go:110-129`) and sorts by throughput + sticky (`phase4-coordinator/internal/buyer/server.go:5084-5209`). `ProviderCapacity` maps physical RAM → max context/concurrency (`phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:61-71`) but is **per-node**, not per-layer-block.
+MacProvider's `EligibleCandidates` filters by model ID, context, tier2, quota (`phase4-coordinator/internal/routing/filter.go:110-129`) and sorts by throughput + sticky (`phase4-coordinator/internal/buyer/server.go:5084-5209`). `ProviderCapacity` maps physical RAM → max context/concurrency (`phase3-binary/Sources/malibu-cli/ProviderStatus.swift:61-71`) but is **per-node**, not per-layer-block.
 
 **Transferable concepts:**
 
@@ -114,7 +114,7 @@ MacProvider's `EligibleCandidates` filters by model ID, context, tier2, quota (`
 
 shard: each stage signs `{swarm_id, job_id, layer_start, layer_end, in_root, out_root, n_chunks}` (`shard/receipt.py:76-82`). Coordinator collects receipts; `verify_coverage` tiles layers (`shard/receipt.py:119-145`). Payment attribution is per signed receipt (`docs/INTEGRATION.md:120-125`).
 
-MacProvider: **whole-request** receipt binds model hash, prompt, output (`phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:26-52`). One provider serves the full model; receipt proves that provider's work, not a layer block.
+MacProvider: **whole-request** receipt binds model hash, prompt, output (`phase3-binary/Sources/malibu-cli/ReceiptBuilder.swift:26-52`). One provider serves the full model; receipt proves that provider's work, not a layer block.
 
 **Template value for permissionless providers:**
 
@@ -154,7 +154,7 @@ MacProvider: **whole-request** receipt binds model hash, prompt, output (`phase3
 ### Transferable now
 
 1. Single-writer WS relay pattern (`phase4-coordinator/internal/ws/relay.go:160-172`) — already present.
-2. Receive/handle decoupling on provider WS (`phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:950-967`).
+2. Receive/handle decoupling on provider WS (`phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:950-967`).
 3. Retired-request TTL for stale relay frames (`phase4-coordinator/internal/ws/relay.go:30`, `369-407`).
 4. Write-probe before dispatch (`phase4-coordinator/internal/ws/relay.go:31`, `729-734`).
 5. Pickle-free length-prefixed tensor framing design (`phase0/wire.py:131-161`, `shard/transport.py:94-105`) — for any future activation wire.
@@ -190,7 +190,7 @@ MacProvider: **whole-request** receipt binds model hash, prompt, output (`phase3
 **Touches:**
 - `phase4-coordinator/internal/ws/relay.go`
 - `phase4-coordinator/internal/ws/server.go`
-- `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift`
+- `phase3-binary/Sources/malibu-cli/CoordinatorClient.swift`
 
 **Biggest risk:** Naive port of shard's `{"op":"noop"}` on WS text frames could confuse `InferenceRelay` JSON parser — would need typed noop/ping that the relay ignores (shard solves this with `recv_data` filtering at `phase0/m25_pipe.py:224-227`).
 
@@ -214,7 +214,7 @@ MacProvider: **whole-request** receipt binds model hash, prompt, output (`phase3
 **Goal:** One Swift/Python probe: load `mlx-community/*` layers `[0:N/2]`, accept random `[1,1,H]`, return hidden — bit-compare against full-model reference for that block.
 
 **Touches:**
-- New `phase3-binary/Sources/macprovider-cli/StageRuntime.swift` (or Python sidecar prototype)
+- New `phase3-binary/Sources/malibu-cli/StageRuntime.swift` (or Python sidecar prototype)
 - `beta/` spike script only (not production path)
 
 **Biggest risk:** Spike succeeds on Llama-3.2-3B but fails on MoE / GDN hybrids (Qwen3.5, Nemotron) — per-architecture adapters required (`docs/MODEL_RUNTIME.md:46-50`).

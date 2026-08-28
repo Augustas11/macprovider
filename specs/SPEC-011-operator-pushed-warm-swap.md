@@ -60,7 +60,7 @@ typed control-socket frames were defined correctly, but
 - **R2-B2.1 MAJOR fix** (§3.9 advertises stale
   `$XDG_RUNTIME_DIR` default): §3.9 config-additions
   summary now lists `--ctl-socket-path` defaulting to
-  `$TMPDIR/macprovider-cli/ctl.sock` (matching R-3.1.5).
+  `$TMPDIR/malibu-cli/ctl.sock` (matching R-3.1.5).
   Added `--enable-warm-swap` and `--switch-state-path`
   flags to the same summary block. v0.4 also adds AC-26
   asserting no live default path text mentions
@@ -129,10 +129,10 @@ were the highest-leverage fixes:
   default (`--enable-warm-swap=false`).
 - **C.1 CRITICAL fix** (`$XDG_RUNTIME_DIR` doesn't exist on
   macOS): R-3.1.5 default control socket path changed to
-  `$TMPDIR/macprovider-cli/ctl.sock` (macOS-native; standard
+  `$TMPDIR/malibu-cli/ctl.sock` (macOS-native; standard
   for transient runtime files via `FileManager.default.temporaryDirectory`).
   Cooldown state file moved to a per-user persistent location
-  (`$HOME/Library/Application Support/macprovider-cli/`).
+  (`$HOME/Library/Application Support/malibu-cli/`).
   `--ctl-socket-path` override unchanged.
 
 The 5 MAJORs + 3 MINORs:
@@ -236,7 +236,7 @@ coordinator is a passive observer of the heartbeat-reported
 message; that surface (`set_model`) is SPEC-012's territory.
 
 The arm64golf operator gets:
-- A CLI: `macprovider-cli models switch <id>`
+- A CLI: `malibu-cli models switch <id>`
 - Async load in the binary runtime while in-flight requests
   drain on the old model
 - A new audit event the coordinator emits on observing the swap
@@ -279,18 +279,18 @@ Non-negotiable inputs. Not subject to audit revision.
 
 ### 3.1 Provider binary: `models` CLI subcommand
 
-The current binary is `macprovider-cli` with existing
+The current binary is `malibu-cli` with existing
 subcommands `serve`, `status`, `self-test`, `update`,
 `uninstall` (per
-[MacProviderCLI.swift:7-15](../phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift)).
+[MalibuCLI.swift:7-15](../phase3-binary/Sources/malibu-cli/MalibuCLI.swift)).
 SPEC-011 v0.3 adds a `models` subcommand with three actions,
 **gated on the `--enable-warm-swap` flag on `serve`**.
 
 ```
-macprovider-cli serve --enable-warm-swap [...other flags...]
-macprovider-cli models list
-macprovider-cli models switch <model-id> [--force]
-macprovider-cli models status
+malibu-cli serve --enable-warm-swap [...other flags...]
+malibu-cli models list
+malibu-cli models switch <model-id> [--force]
+malibu-cli models status
 ```
 
 #### Rules
@@ -307,7 +307,7 @@ macprovider-cli models status
     (legacy synchronous load path remains).
   - The serve process MUST NOT emit `loading` or `model_hash`
     heartbeat fields (§3.3 fields stay omitted from the wire).
-  - Any invocation of `macprovider-cli models <subcommand>`
+  - Any invocation of `malibu-cli models <subcommand>`
     MUST detect the disabled state (via control socket
     absence per R-3.1.5) and exit code 4 with stderr
     `"warm swap not enabled; restart serve with
@@ -318,7 +318,7 @@ macprovider-cli models status
   Operators who never enable warm swap see byte-identical
   pre-SPEC-011 behavior; this preserves L-1.
 
-- **R-3.1.1** `macprovider-cli models list` MUST print a table
+- **R-3.1.1** `malibu-cli models list` MUST print a table
   to stdout showing local model state. Each row:
   - `model_id` (HuggingFace ID or local path)
   - `state` ∈ {`warm`, `idle`}
@@ -332,7 +332,7 @@ macprovider-cli models status
   HF cache contents with all rows marked `idle`. Exit code 0 in
   both cases.
 
-- **R-3.1.2** `macprovider-cli models switch <model-id>` MUST
+- **R-3.1.2** `malibu-cli models switch <model-id>` MUST
   perform the following sequence in order:
   1. Resolve effective `supported_models` per SPEC-010 R-3.6.1
      priority (CLI flag > ENV > config file).
@@ -343,7 +343,7 @@ macprovider-cli models status
      contacting the running process.
   3. Connect to the running serve process via the control
      socket per R-3.1.5 (macOS default
-     `$TMPDIR/macprovider-cli/ctl.sock`). Use R-3.1.5.x
+     `$TMPDIR/malibu-cli/ctl.sock`). Use R-3.1.5.x
      detection precedence to distinguish "serve not
      running" vs "stale socket" vs "serve running but
      warm-swap disabled"; in each case exit code 4 with
@@ -371,7 +371,7 @@ macprovider-cli models status
        "loading_in_progress", current_target: "Y"}` →
        CLI exits code 3 with stderr `"provider is already
        loading <Y>; refusing to start a second swap. Wait
-       for current switch to complete (macprovider-cli
+       for current switch to complete (malibu-cli
        models status)"`.
      - `{type: "switch_ack", accepted: false, reason:
        "cooldown", seconds_remaining: N}` → CLI exits
@@ -406,7 +406,7 @@ macprovider-cli models status
   MUST track the timestamp of the last successful or in-flight
   `models switch` invocation in a per-host state file at:
   - macOS default:
-    `$HOME/Library/Application Support/macprovider-cli/last-switch.ts`
+    `$HOME/Library/Application Support/malibu-cli/last-switch.ts`
     (durable user-state location; survives reboot, which is
     desirable for short cooldown windows that might span a
     crash)
@@ -419,7 +419,7 @@ macprovider-cli models status
 - **R-3.1.5** **Control socket (in-process signaling) — macOS
   default (C.1 round-1 CRITICAL fix).** The serve process MUST
   listen on a Unix domain socket at:
-  - macOS default: `$TMPDIR/macprovider-cli/ctl.sock`. Per
+  - macOS default: `$TMPDIR/malibu-cli/ctl.sock`. Per
     macOS convention, `$TMPDIR` is always set to a
     per-process / per-user temporary directory (typically
     `/var/folders/<random>/T/`). Swift code uses
@@ -511,14 +511,14 @@ macprovider-cli models status
     enum: `ready`, `loading`, `draining`.
 
 - **R-3.1.5.x** **Disabled-vs-no-serve detection precedence
-  (R2-A2.1 round-2 fix).** When `macprovider-cli models
+  (R2-A2.1 round-2 fix).** When `malibu-cli models
   <subcommand>` attempts to connect to the control socket
   per R-3.1.5, the CLI MUST distinguish three failure modes
   using the existing Unix domain socket primitives — no new
   detection mechanism is required:
   1. **`stat(socket_path)` returns ENOENT** (socket file
      does not exist) → "serve not running on this host."
-     Exit code 4 with stderr `"macprovider-cli serve is not
+     Exit code 4 with stderr `"malibu-cli serve is not
      running on this host (no control socket at
      <socket_path>)"`.
   2. **`connect(socket_path)` returns ECONNREFUSED** (socket
@@ -546,7 +546,7 @@ macprovider-cli models status
   requiring a pid file, lock file, or separate health-probe
   mechanism.
 
-- **R-3.1.6** `macprovider-cli models status` MUST send a
+- **R-3.1.6** `malibu-cli models status` MUST send a
   `status_request` over the control socket and print the
   response to stdout. Exit code 0 on success, 4 if serve is
   not running.
@@ -555,7 +555,7 @@ macprovider-cli models status
 
 **Current architecture (locked).** The Swift `ModelRuntime`
 actor at
-[ModelRuntime.swift:25-68, 86-147](../phase3-binary/Sources/macprovider-cli/ModelRuntime.swift)
+[ModelRuntime.swift:25-68, 86-147](../phase3-binary/Sources/malibu-cli/ModelRuntime.swift)
 stores `modelID`, `container`, `modelHash` as immutable `let`
 fields initialized once at startup. SPEC-011 v0.4 requires
 refactoring this to a mutable-state runtime.
@@ -723,7 +723,7 @@ present.
   a **raw 64-character lowercase hex string** (no `sha256:`
   prefix). This matches SPEC-008 §5.3-5.6 wire format and
   current Swift output at
-  [ModelRuntime.swift:294-325](../phase3-binary/Sources/macprovider-cli/ModelRuntime.swift)
+  [ModelRuntime.swift:294-325](../phase3-binary/Sources/malibu-cli/ModelRuntime.swift)
   (`hexString(SHA256.hash(data: data))`). v0.2's prior
   `"sha256:" + hex` form is REMOVED per C.3 round-1 fix.
   Example: `"a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"`.
@@ -969,7 +969,7 @@ Payload schema:
 
 - **R-3.7.2** The runtime MUST NOT queue the rejected switch.
   If the operator still wants the second switch after the
-  first completes, they MUST reissue `macprovider-cli models
+  first completes, they MUST reissue `malibu-cli models
   switch X`.
 
 - **R-3.7.3** When the runtime is in `ready` state but the
@@ -1018,7 +1018,7 @@ provider is in `loading` or `draining` state:
     [phase4-coordinator/internal/ws/messages.go:8-15](../phase4-coordinator/internal/ws/messages.go)
     includes `ModelHash string`.
   - Current Swift code: `helloMessage` in
-    [phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:675-697](../phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift)
+    [phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:675-697](../phase3-binary/Sources/malibu-cli/CoordinatorClient.swift)
     emits `model_hash` when present.
   - SPEC-008 §5.4 contains a SPEC-001 v1.3 CANDIDATE
     annotation for the `hello.model_hash` field; the
@@ -1078,14 +1078,14 @@ parsed but have no behavioral effect):
                                      Range: 5 ≤ N ≤ 600 per
                                      R-3.9.1.
 
---ctl-socket-path <path>             default $TMPDIR/macprovider-cli/ctl.sock
+--ctl-socket-path <path>             default $TMPDIR/malibu-cli/ctl.sock
                                      Control socket location
                                      per R-3.1.5 (macOS-native
                                      default; see R-3.9.2 for
                                      the prohibited-defaults
                                      rule).
 
---switch-state-path <path>           default $HOME/Library/Application Support/macprovider-cli/last-switch.ts
+--switch-state-path <path>           default $HOME/Library/Application Support/malibu-cli/last-switch.ts
                                      CLI cooldown state file
                                      per R-3.1.4.
 ```
@@ -1176,19 +1176,19 @@ A SPEC-011 binary connecting to a pre-SPEC-011 coordinator:
 
 ### CLI behavior (4 ACs)
 
-- **AC-1** `macprovider-cli models list` with a running serve
+- **AC-1** `malibu-cli models list` with a running serve
   process outputs a table with the current loaded model
   marked `warm` and other HF-cached models marked `idle`.
   Exit code 0.
 
-- **AC-2** `macprovider-cli models switch <X>` happy path:
+- **AC-2** `malibu-cli models switch <X>` happy path:
   pre-flight validation passes (X is in
   `--supported-models`); CLI connects to serve via control
   socket; serve accepts; CLI streams progress events
   (`loading`, `draining`, `loaded`); CLI exits code 0.
 
 - **AC-3** Pre-flight validation fail: invoking
-  `macprovider-cli --model A --supported-models B,C models
+  `malibu-cli --model A --supported-models B,C models
   switch X` (where X is not in `[B, C]` and not equal to A
   since A is also not in [B, C] but that's a SPEC-010-side
   failure caught at serve startup). For the SPEC-011 case:
@@ -1196,7 +1196,7 @@ A SPEC-011 binary connecting to a pre-SPEC-011 coordinator:
   the set, exit code 2 with stderr `"switch target X not in
   --supported-models"` BEFORE control-socket contact.
 
-- **AC-4** `macprovider-cli models status` returns the
+- **AC-4** `malibu-cli models status` returns the
   current loaded model and runtime state. Exit code 0 if
   serve is running; exit code 4 if not.
 
@@ -1337,11 +1337,11 @@ A SPEC-011 binary connecting to a pre-SPEC-011 coordinator:
 
   **Control surface:**
   - No control socket opened at the default path. Test
-    asserts: `stat $TMPDIR/macprovider-cli/ctl.sock` returns
+    asserts: `stat $TMPDIR/malibu-cli/ctl.sock` returns
     "no such file" while serve is running.
-  - `macprovider-cli models list` MUST exit code 4 with
+  - `malibu-cli models list` MUST exit code 4 with
     stderr per R-3.1.5.x precedence rule (case 1: ENOENT →
-    `"macprovider-cli serve is not running on this host
+    `"malibu-cli serve is not running on this host
     (no control socket at ...)"`).
 
   **Coordinator-observable behavior:**
@@ -1712,7 +1712,7 @@ Resolved in v0.2 (outline-audit round-2 decisions):
 Open for v0.5 (if pursued):
 
 - **OQ-1** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed for v0.4 — UDS is correct for the macOS-only provider fleet that exists today; re-open only if Linux/Windows providers ship._ Control-socket signaling: v0.4 picks Unix domain
-  socket at `$TMPDIR/macprovider-cli/ctl.sock` (macOS-native
+  socket at `$TMPDIR/malibu-cli/ctl.sock` (macOS-native
   per R-3.1.5). If a future cross-platform target (Linux
   servers, containers) needs a different transport, v0.5
   may add a localhost HTTP alternative or a platform-
@@ -1767,9 +1767,9 @@ Open for v0.5 (if pursued):
   pipeline (SPEC-011 R-3.3.5 / R-3.5 reuse path)
 - [SPEC-006 v0.8.1](SPEC-006-buyer-api.md) §F-1.5
   survivability invariants (cited in L-6 and R-3.6.5)
-- [phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift](../phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift)
+- [phase3-binary/Sources/malibu-cli/MalibuCLI.swift](../phase3-binary/Sources/malibu-cli/MalibuCLI.swift)
   lines 7-15 (existing CLI structure)
-- [phase3-binary/Sources/macprovider-cli/ModelRuntime.swift](../phase3-binary/Sources/macprovider-cli/ModelRuntime.swift)
+- [phase3-binary/Sources/malibu-cli/ModelRuntime.swift](../phase3-binary/Sources/malibu-cli/ModelRuntime.swift)
   lines 25-68, 86-147 (immutable runtime — §3.2 refactor
   target)
 - [phase4-coordinator/internal/pool/provider.go](../phase4-coordinator/internal/pool/provider.go)

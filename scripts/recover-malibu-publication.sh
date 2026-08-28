@@ -88,7 +88,7 @@ if release.get("immutable") is not True:
     raise SystemExit("numeric release is not immutable")
 if release.get("prerelease") is not False:
     raise SystemExit("numeric release is not stable")
-if release.get("name") != f"macprovider-cli {tag}":
+if release.get("name") != f"malibu-cli {tag}":
     raise SystemExit("numeric release title differs from the reviewed release")
 
 assets = release.get("assets")

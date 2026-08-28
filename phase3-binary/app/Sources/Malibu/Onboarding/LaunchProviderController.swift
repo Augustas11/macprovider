@@ -1,7 +1,7 @@
 import Foundation
 
 // Malibu is a CLI wrapper: onboarding runs install.sh, then Malibu monitors
-// the launchd-managed macprovider-cli. No in-app register/autotune/spawn path.
+// the launchd-managed malibu-cli. No in-app register/autotune/spawn path.
 
 @MainActor
 final class LaunchProviderController: ObservableObject {
@@ -698,13 +698,14 @@ struct StartupState: Equatable {
             return false
         }
         let installDirectory = URL(fileURLWithPath: installPrefix).standardizedFileURL
-        let expectedBinaryPath = installDirectory.appendingPathComponent("macprovider-cli").path
+        let expectedBinaryPath = installDirectory.appendingPathComponent("malibu-cli").path
+        let legacyInstallBinaryPath = installDirectory.appendingPathComponent("macprovider-cli").path
         guard installPrefix == installDirectory.path,
               InstalledProviderMonitor.isSupportedProviderInstallDirectory(
                   installDirectory,
                   under: homeDirectory
               ),
-              binaryPath == expectedBinaryPath,
+              binaryPath == expectedBinaryPath || binaryPath == legacyInstallBinaryPath,
               launchdLabels.contains(InstalledProviderMonitor.providerLaunchdLabel),
               launchdPlists.contains(launchd.path),
               let plistData = InstalledProviderMonitor.readOwnerPrivateRegularFile(
@@ -723,10 +724,17 @@ struct StartupState: Equatable {
         }
         let plistProgram = (plistValues["Program"] as? String)
             ?? (plistValues["ProgramArguments"] as? [String])?.first
-        let legacyBinaryPath = homeDirectory
+        let malibuPathEntrypoint = homeDirectory
+            .appendingPathComponent(".local/bin/malibu-cli")
+            .path
+        let legacyPathEntrypoint = homeDirectory
             .appendingPathComponent(".local/bin/macprovider-cli")
             .path
-        return plistProgram == binaryPath || plistProgram == legacyBinaryPath
+        return plistProgram == binaryPath
+            || plistProgram == expectedBinaryPath
+            || plistProgram == legacyInstallBinaryPath
+            || plistProgram == malibuPathEntrypoint
+            || plistProgram == legacyPathEntrypoint
     }
 
     static func applyMigrationDecision(

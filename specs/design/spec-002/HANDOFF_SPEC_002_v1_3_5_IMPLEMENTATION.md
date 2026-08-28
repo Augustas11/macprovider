@@ -37,7 +37,7 @@ binary in `phase3-binary/` now implements:
 - SPEC-010 catalog flags + `MacProviderCore/SupportedModels.swift`
 - Warm-swap state machine (4 states: `.ready / .loading / .draining
   / .failed`) with atomic swap + drain cancellation
-- Control socket protocol (NDJSON on `$TMPDIR/macprovider-cli/ctl.sock`,
+- Control socket protocol (NDJSON on `$TMPDIR/malibu-cli/ctl.sock`,
   parent 0700 / socket 0600) + `models list / switch / status`
   subcommand
 - Heartbeat extension (opt-in `model_hash` raw lowercase hex + `loading:

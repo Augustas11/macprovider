@@ -16,19 +16,19 @@ on:
         default: "1.8.45"
         type: string
       cli_tag:
-        description: "Exact signed macprovider-cli release tag"
+        description: "Exact signed malibu-cli release tag"
         required: true
         type: string
       cli_version:
-        description: "Exact embedded macprovider-cli version, without a v prefix"
+        description: "Exact embedded malibu-cli version, without a v prefix"
         required: true
         type: string
       cli_sha256:
-        description: "Exact lowercase SHA-256 of the signed macprovider-cli binary"
+        description: "Exact lowercase SHA-256 of the signed malibu-cli binary"
         required: true
         type: string
       cli_archive_sha256:
-        description: "Exact lowercase SHA-256 of the signed macprovider-cli archive"
+        description: "Exact lowercase SHA-256 of the signed malibu-cli archive"
         required: true
         type: string
       source_commit:
@@ -258,11 +258,11 @@ jobs:
           gh release download "$CLI_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --dir "$cli_dir" \
-            --pattern "macprovider-cli-${CLI_TAG}-darwin-arm64.tar.gz"
-          archive="$cli_dir/macprovider-cli-${CLI_TAG}-darwin-arm64.tar.gz"
+            --pattern "malibu-cli-${CLI_TAG}-darwin-arm64.tar.gz"
+          archive="$cli_dir/malibu-cli-${CLI_TAG}-darwin-arm64.tar.gz"
           test "$(shasum -a 256 "$archive" | awk '{print $1}')" = "$CLI_ARCHIVE_SHA256"
           tar -xzf "$archive" -C "$payload_dir"
-          cli="$payload_dir/macprovider-cli"
+          cli="$payload_dir/malibu-cli"
           test "$(shasum -a 256 "$cli" | awk '{print $1}')" = "$CLI_SHA256"
           test "$("$cli" --version)" = "$CLI_VERSION"
           codesign --verify --strict --verbose=2 "$cli"
@@ -294,8 +294,8 @@ jobs:
 
           python3 scripts/prepare-malibu-bootstrap-trust-anchor.py prepare \
             "v${APP_VERSION}" "$app" scripts/dist/malibu-v1.8.32-sparkle-public-key
-          cp "$payload_dir/macprovider-cli" "$app/Contents/MacOS/macprovider-cli"
-          chmod 755 "$app/Contents/MacOS/macprovider-cli"
+          cp "$payload_dir/malibu-cli" "$app/Contents/MacOS/malibu-cli"
+          chmod 755 "$app/Contents/MacOS/malibu-cli"
           cp "$payload_dir/mlx.metallib" "$app/Contents/MacOS/mlx.metallib"
           find "$payload_dir" -mindepth 1 -maxdepth 1 -name '*.bundle' \
             -exec cp -R {} "$app/Contents/MacOS"/ \;
@@ -341,7 +341,7 @@ jobs:
             "$app/Contents/Info.plist"
           python3 scripts/prepare-malibu-bootstrap-trust-anchor.py verify \
             "$app" scripts/dist/malibu-v1.8.32-sparkle-public-key
-          embedded_cli="$app/Contents/MacOS/macprovider-cli"
+          embedded_cli="$app/Contents/MacOS/malibu-cli"
           test "$(shasum -a 256 "$embedded_cli" | awk '{print $1}')" = "$CLI_SHA256"
 
           find "$app/Contents/MacOS" -mindepth 1 -maxdepth 1 -name '*.bundle' \
@@ -652,7 +652,7 @@ jobs:
           hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" "$dmg" >/dev/null
           app="$mount_dir/Malibu.app"
           plist="$app/Contents/Info.plist"
-          cli="$app/Contents/MacOS/macprovider-cli"
+          cli="$app/Contents/MacOS/malibu-cli"
           test -d "$app"
           test -L "$mount_dir/Applications"
           test "$(readlink "$mount_dir/Applications")" = /Applications
@@ -735,7 +735,7 @@ jobs:
           Malibu ${APP_VERSION} includes the reviewed provider onboarding and monitoring
           changes from source commit \`${SOURCE_COMMIT}\`.
 
-          macprovider-cli remains independently versioned. This Malibu artifact embeds
+          malibu-cli remains independently versioned. This Malibu artifact embeds
           exact release \`${CLI_TAG}\` (version \`${CLI_VERSION}\`) with binary SHA-256
           \`${CLI_SHA256}\` and archive SHA-256 \`${CLI_ARCHIVE_SHA256}\`. Malibu and CLI
           marketing versions are intentionally independent.

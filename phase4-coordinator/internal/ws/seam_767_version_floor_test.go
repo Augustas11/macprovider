@@ -11,7 +11,7 @@ import (
 )
 
 // TestProviderHealthzPublishesRequiredBinaryVersion is the coordinator half of
-// #767 item 3: `macprovider-cli doctor` needs a reachable surface that names
+// #767 item 3: `malibu-cli doctor` needs a reachable surface that names
 // the hard admission floor, and /healthz already carries the recommendation.
 // Reusing it avoids inventing a provider-facing version endpoint.
 func TestProviderHealthzPublishesRequiredBinaryVersion(t *testing.T) {

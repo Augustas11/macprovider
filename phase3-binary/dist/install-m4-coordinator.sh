@@ -59,7 +59,7 @@ log "step 4/7: launching binary with coordinator + stable provider_id"
 log "  provider_id:     $PROVIDER_ID"
 log "  coordinator_url: $COORDINATOR_URL"
 cd "$INSTALL_DIR"
-nohup ./macprovider-cli \
+nohup ./malibu-cli \
   --port "$PORT" \
   --model "$MODEL" \
   --provider-id "$PROVIDER_ID" \

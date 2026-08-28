@@ -4,7 +4,7 @@
 **Date:** 2026-07-07  
 **Executor:** bench + gate proposal only (no catalog publish)  
 **MLX pin:** `mlx-swift-lm` 3.31.4, rev `bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`  
-**Binary:** `phase3-binary/.build/release/macprovider-cli` **1.8.16** (release)
+**Binary:** `phase3-binary/.build/release/malibu-cli` **1.8.16** (release)
 
 ---
 
@@ -27,7 +27,7 @@
 
 | Issue | Action |
 |-------|--------|
-| `macprovider-cli` on port **61919** (`qwen3-coder-30b-a3b-instruct`, coordinator-attached) | `kill -TERM` before Phase B; autotune `--drain` on each run |
+| `malibu-cli` on port **61919** (`qwen3-coder-30b-a3b-instruct`, coordinator-attached) | `kill -TERM` before Phase B; autotune `--drain` on each run |
 | Heavy historical swap (~18 GB used at task start) | Cleared after stopping provider; swap fell to ~1.5 GB before gpt-oss |
 | `node` on port **8080** (`antseed` buyer) | Left running (does not bind 18080); noted in snapshot |
 
@@ -38,7 +38,7 @@
 | `machdep.cpu.brand_string` | Apple M5 |
 | `hw.memsize` | 34359738368 |
 | `memory_pressure` (system free %) | **90%** |
-| `pgrep -c macprovider-cli` | **0** |
+| `pgrep -c malibu-cli` | **0** |
 | `vm.swapusage` | total 3072 MB, used **1516 MB**, free 1556 MB |
 | UTC timestamp | **2026-07-07T07:13:50Z** |
 | Assessment | **clean** (no macprovider providers; adequate free RAM) |
@@ -47,7 +47,7 @@
 
 | Field | Value |
 |-------|-------|
-| `pgrep -lf macprovider-cli` | qwen3-coder respawned on 61919 (coordinator relaunch) — cleared by `--drain` at autotune start |
+| `pgrep -lf malibu-cli` | qwen3-coder respawned on 61919 (coordinator relaunch) — cleared by `--drain` at autotune start |
 | `vm.swapusage` | total 4096 MB, used **2523 MB**, free 1573 MB |
 | `system_used_gb` (vm_stat) | **18.27 GB** used / 13.73 GB free |
 | UTC timestamp | **2026-07-07T07:29:05Z** |
@@ -73,7 +73,7 @@
 
 ```bash
 cd phase3-binary
-./.build/release/macprovider-cli autotune \
+./.build/release/malibu-cli autotune \
   --candidate-models mlx-community/gpt-oss-20b-MXFP4-Q8 \
   --drain --verbose --port 18080 --stage1-replicates 3
 ```
@@ -99,7 +99,7 @@ Probe shape (from DB): `target_context=2000`, `measured_prompt_tokens=1600`, `ma
 **Command:**
 
 ```bash
-./.build/release/macprovider-cli autotune \
+./.build/release/malibu-cli autotune \
   --candidate-models mlx-community/gemma-4-26b-a4b-it-4bit \
   --drain --verbose --port 18080 --stage1-replicates 3
 ```

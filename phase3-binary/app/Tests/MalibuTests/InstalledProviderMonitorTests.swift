@@ -65,7 +65,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
           "local_status_contract": {
             "version": 1,
             "minimum_reader_version": 1,
-            "lifecycle_owner": "macprovider_cli",
+            "lifecycle_owner": "malibu_cli",
             "capabilities": [
               "buyer_serving_authority_v1",
               "catalog_status_v1",
@@ -99,7 +99,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
             "transition_at": "2026-07-14T06:59:30Z",
             "state": "serving_buyers",
             "reason_code": "coordinator_buyer_serving_confirmed",
-            "authority": "macprovider_cli",
+            "authority": "malibu_cli",
             "writer": "serve",
             "operation_id": "serve:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
             "operator_paused": false,
@@ -153,7 +153,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
             "recovery_action": "none"
           },
           "admission_identity": {
-            "owner": "macprovider_cli",
+            "owner": "malibu_cli",
             "source": "cli_keychain",
             "state": "recovery_pending",
             "public_key_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -184,7 +184,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
         XCTAssertEqual(snapshot.contractVersion, 1)
         XCTAssertEqual(snapshot.minimumReaderVersion, 1)
         XCTAssertEqual(snapshot.contractCompatible, true)
-        XCTAssertEqual(snapshot.lifecycleOwner, "macprovider_cli")
+        XCTAssertEqual(snapshot.lifecycleOwner, "malibu_cli")
         XCTAssertTrue(snapshot.capabilities.contains("buyer_serving_authority_v1"))
         XCTAssertEqual(snapshot.observationID, "observation-a")
         XCTAssertNotNil(snapshot.observedAt)
@@ -196,7 +196,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
         XCTAssertNotNil(snapshot.serviceStartedAt)
         XCTAssertEqual(snapshot.serviceRole, "serve")
         XCTAssertNotNil(snapshot.transitionAt)
-        XCTAssertEqual(snapshot.transitionAuthority, "macprovider_cli")
+        XCTAssertEqual(snapshot.transitionAuthority, "malibu_cli")
         XCTAssertEqual(snapshot.transitionRecordState, "valid")
         XCTAssertEqual(snapshot.transitionSequence, 17)
         XCTAssertEqual(snapshot.transitionID, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
@@ -242,6 +242,18 @@ final class InstalledProviderMonitorTests: XCTestCase {
         XCTAssertEqual(snapshot.credentialRestartSafe, true)
         XCTAssertEqual(snapshot.credentialMigrationPending, false)
         XCTAssertEqual(snapshot.credentialRecoveryAction, "none")
+
+        let legacyJSON = try XCTUnwrap(String(data: json, encoding: .utf8))
+            .replacingOccurrences(of: "malibu_cli", with: "macprovider_cli")
+            .data(using: .utf8)!
+        let legacySnapshot = try XCTUnwrap(InstalledProviderMonitor.decodeStatus(
+            legacyJSON,
+            now: now,
+            currentBootSession: "boot-a"
+        ))
+        XCTAssertEqual(legacySnapshot.lifecycleOwner, "macprovider_cli")
+        XCTAssertEqual(legacySnapshot.transitionAuthority, "macprovider_cli")
+        XCTAssertEqual(legacySnapshot.transitionRecordState, "valid")
     }
 
     func testBusyHealthStatusRemainsHealthyDuringBuyerRequest() {
@@ -284,7 +296,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
             "transition_at": "2026-07-14T06:59:30Z",
             "state": "serving_buyers",
             "reason_code": "coordinator_buyer_serving_confirmed",
-            "authority": "macprovider_cli",
+            "authority": "malibu_cli",
             "writer": "serve",
             "operator_paused": false
           }
@@ -319,14 +331,14 @@ final class InstalledProviderMonitorTests: XCTestCase {
     func testParseLaunchdServiceProgramPath() {
         let output = """
         gui/501/live.malibu.provider = {
-            program = /Users/provider/macprovider/macprovider-cli
+            program = /Users/provider/macprovider/malibu-cli
             pid = 123
         }
         """
 
         XCTAssertEqual(
             InstalledProviderMonitor.parseLaunchdServiceProgramPath(output),
-            "/Users/provider/macprovider/macprovider-cli"
+            "/Users/provider/macprovider/malibu-cli"
         )
         XCTAssertNil(InstalledProviderMonitor.parseLaunchdServiceProgramPath("pid = 123"))
     }
@@ -334,7 +346,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
     func testParseLaunchdServiceIdentityRequiresOneProgramAndCanonicalPathField() {
         let output = """
         gui/501/live.malibu.provider = {
-            program = /Users/provider/macprovider/macprovider-cli
+            program = /Users/provider/macprovider/malibu-cli
             path = /Users/provider/Library/LaunchAgents/live.malibu.provider.plist
         }
         """
@@ -342,19 +354,19 @@ final class InstalledProviderMonitorTests: XCTestCase {
         XCTAssertEqual(
             InstalledProviderMonitor.parseLaunchdServiceIdentity(output),
             InstalledProviderMonitor.LaunchdServiceIdentity(
-                program: "/Users/provider/macprovider/macprovider-cli",
+                program: "/Users/provider/macprovider/malibu-cli",
                 path: "/Users/provider/Library/LaunchAgents/live.malibu.provider.plist"
             )
         )
         XCTAssertNil(
             InstalledProviderMonitor.parseLaunchdServiceIdentity(
-                "program = /Users/provider/macprovider/macprovider-cli"
+                "program = /Users/provider/macprovider/malibu-cli"
             )
         )
         XCTAssertNil(
             InstalledProviderMonitor.parseLaunchdServiceIdentity(
-                "program = /Users/provider/macprovider/macprovider-cli\n"
-                    + "program = /Users/other/macprovider-cli\n"
+                "program = /Users/provider/macprovider/malibu-cli\n"
+                    + "program = /Users/other/malibu-cli\n"
                     + "path = /Users/provider/Library/LaunchAgents/live.malibu.provider.plist"
             )
         )
@@ -473,7 +485,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
             .appendingPathComponent("malibu-launchd-executable-tests-(UUID().uuidString)")
         let providerDirectory = root.appendingPathComponent("macprovider")
         let launchAgents = root.appendingPathComponent("Library/LaunchAgents")
-        let program = providerDirectory.appendingPathComponent("macprovider-cli")
+        let program = providerDirectory.appendingPathComponent("malibu-cli")
         let plist = launchAgents.appendingPathComponent("live.malibu.provider.plist")
         let launchctl = root.appendingPathComponent("launchctl")
         try FileManager.default.createDirectory(at: providerDirectory, withIntermediateDirectories: true)
@@ -526,7 +538,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("malibu-launchd-unloaded-tests-\(UUID().uuidString)")
         let launchAgents = root.appendingPathComponent("Library/LaunchAgents")
-        let program = root.appendingPathComponent("macprovider/macprovider-cli")
+        let program = root.appendingPathComponent("macprovider/malibu-cli")
         let plist = launchAgents.appendingPathComponent("live.malibu.provider.plist")
         let launchctl = root.appendingPathComponent("launchctl")
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
@@ -554,7 +566,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("malibu-legacy-unloaded-tests-\(UUID().uuidString)")
         let launchAgents = root.appendingPathComponent("Library/LaunchAgents")
-        let legacyProgram = root.appendingPathComponent(".local/bin/macprovider-cli")
+        let legacyProgram = root.appendingPathComponent(".local/bin/malibu-cli")
         let plist = launchAgents.appendingPathComponent("live.malibu.provider.plist")
         let launchctl = root.appendingPathComponent("launchctl")
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
@@ -586,7 +598,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("malibu-legacy-loaded-tests-\(UUID().uuidString)")
         let launchAgents = root.appendingPathComponent("Library/LaunchAgents")
-        let legacyProgram = root.appendingPathComponent(".local/bin/macprovider-cli")
+        let legacyProgram = root.appendingPathComponent(".local/bin/malibu-cli")
         let plist = launchAgents.appendingPathComponent("live.malibu.provider.plist")
         let launchctl = root.appendingPathComponent("launchctl")
         try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
@@ -681,7 +693,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
           "local_status_contract": {
             "version": 1,
             "minimum_reader_version": 1,
-            "lifecycle_owner": "macprovider_cli",
+            "lifecycle_owner": "malibu_cli",
             "capabilities": ["legacy_reader_fallback_v1"]
           },
           "network_state": "buyer_serving",
@@ -718,7 +730,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
           "local_status_contract": {
             "version": 1,
             "minimum_reader_version": 1,
-            "lifecycle_owner": "macprovider_cli",
+            "lifecycle_owner": "malibu_cli",
             "capabilities": [
               "buyer_serving_authority_v1",
               "service_instance_v1",
@@ -754,7 +766,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
           "local_status_contract": {
             "version": 1,
             "minimum_reader_version": 1,
-            "lifecycle_owner": "macprovider_cli",
+            "lifecycle_owner": "malibu_cli",
             "capabilities": [
               "buyer_serving_authority_v1",
               "credential_status_v1",

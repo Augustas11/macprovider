@@ -35,7 +35,7 @@ import textwrap
 root = pathlib.Path(sys.argv[1])
 canonical = pathlib.Path(sys.argv[2]).read_bytes()
 installer = (root / "phase3-binary/dist/install.sh").read_text(encoding="utf-8")
-swift = (root / "phase3-binary/Sources/macprovider-cli/AcceptanceCandidateMetadata.swift").read_text(encoding="utf-8")
+swift = (root / "phase3-binary/Sources/malibu-cli/AcceptanceCandidateMetadata.swift").read_text(encoding="utf-8")
 
 def function_pem(name):
     function = re.search(rf"{name}\(\) \{{(.+?)\n\}}", installer, flags=re.DOTALL)
@@ -90,7 +90,7 @@ control_commit="$(printf 'b%.0s' {1..40})"
 run_id="123456789"
 run_attempt="2"
 artifact_index="$work/assets/compatibility-artifact-index.json"
-payload="$work/assets/macprovider-cli-${tag}-darwin-arm64.tar.gz"
+payload="$work/assets/malibu-cli-${tag}-darwin-arm64.tar.gz"
 provenance="$work/assets/release-provenance.json"
 checksums="$work/assets/checksums.txt"
 compatibility_manifest="$work/assets/compatibility-set.json"
@@ -133,7 +133,7 @@ role_names = {
     "malibu_app": f"Malibu-{tag}.dmg",
     "pearl_metadata": "pearl-release.json",
     "pearl_metadata_signature": "pearl-release.json.sig",
-    "provider_cli": f"macprovider-cli-{tag}-darwin-arm64.tar.gz",
+    "provider_cli": f"malibu-cli-{tag}-darwin-arm64.tar.gz",
 }
 role_paths = {}
 for role, name in role_names.items():

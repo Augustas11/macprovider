@@ -364,7 +364,7 @@ func TestRequestSidePassThrough_ToolCalls_ByteEquivalent(t *testing.T) {
 				{"role":"user","content":"plan"},
 			{"role":"assistant","content":null,"tool_calls":[
 				{"id":"call_alpha12345678901","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"ToolCallParser\",\"n\":1}"}},
-				{"id":"call_beta123456789012","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"phase3-binary/Sources/macprovider-cli/ToolCallParser.swift\"}"}}
+				{"id":"call_beta123456789012","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"phase3-binary/Sources/malibu-cli/ToolCallParser.swift\"}"}}
 			]},
 			{"role":"tool","tool_call_id":"call_alpha12345678901","content":"{\"ok\":true}"},
 				{"role":"tool","tool_call_id":"call_beta123456789012","content":"{\"bytes\":42}"}

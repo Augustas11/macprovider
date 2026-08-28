@@ -85,7 +85,7 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
   <div class="entry">
     <time>2026-06-18</time>
     <p><strong>Scope:</strong> added the Swift-native
-    <code>macprovider-cli autotune</code> parser scaffold and
+    <code>malibu-cli autotune</code> parser scaffold and
     <code>--dry-run</code> candidate-plan output only. Runtime tuning,
     SQLite persistence, provider lifecycle, <code>serve --no-join</code>,
     and <code>--apply</code> remain future step work.</p>
@@ -261,7 +261,7 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
   <time>2026-06-18</time>
   <p><strong>SPEC-013 Step 11 acceptance test suite.</strong> Added explicit
   AC-tagged tests under
-  <code>phase3-binary/Tests/macprovider-cliTests/AutotuneACTests/</code>.
+  <code>phase3-binary/Tests/malibu-cliTests/AutotuneACTests/</code>.
   Each method name includes the AC number and each method comment cites the
   authoritative SPEC-013 line range.</p>
   <ul>
@@ -355,7 +355,7 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     <li><strong>SPEC-003 install note</strong>: add a brief cross-reference
     in <code>specs/SPEC-003-open-onboarding.md</code> §3 (Integration
     narrative) or §6 (Interface contracts) noting that
-    <code>macprovider-cli autotune</code> is part of the installed
+    <code>malibu-cli autotune</code> is part of the installed
     CLI surface after SPEC-003's install.sh. This edit belongs on the
     SPEC PR branch <code>spec/cli-autotune-v1</code> (PR #108), NOT on
     this impl branch — touching SPECs from the impl PR would conflict
@@ -393,7 +393,7 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
   <div class="entry">
     <time>2026-06-18</time>
     <p><strong>Scope:</strong> added the additive
-    <code>macprovider-cli serve --no-join</code> flag required by
+    <code>malibu-cli serve --no-join</code> flag required by
     SPEC-013 FR-E.2. The flag only disables coordinator WebSocket
     participation; model loading, local HTTP serving, supported-models
     preflight, warm-swap control socket setup, and all existing
@@ -626,7 +626,7 @@ swift package describe</pre>
     <p><strong>Verified:</strong> <code>swift build</code> succeeds after the
     CommandLineTools reinstall. First build took 249 seconds; future builds
     should be incremental. The scaffold executable runs at
-    <code>./.build/arm64-apple-macosx/debug/macprovider-cli</code>.</p>
+    <code>./.build/arm64-apple-macosx/debug/malibu-cli</code>.</p>
     <p><strong>Package name correction:</strong> Initial scaffold referenced
     MLX products with <code>package: "mlx-libraries"</code>. SwiftPM resolution
     showed the actual package identity is <code>"mlx-swift-examples"</code>;
@@ -805,7 +805,7 @@ swift package describe</pre>
 <div class="entry">
   <time>2026-05-28</time>
   <p><strong>Canonical MLX build path:</strong> For this binary, the canonical
-  macOS build command is <code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>.
+  macOS build command is <code>xcodebuild -scheme malibu-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>.
   <code>swift build</code> can compile Swift code but does not produce the
   MLX Metal shader resource bundle needed for a working inference binary.</p>
 </div>
@@ -968,7 +968,7 @@ swift package describe</pre>
 <div class="entry">
   <time>2026-05-28</time>
   <p><strong>Resolved Step 4 blocker:</strong> Xcode build products contain
-  <code>macprovider-cli</code>, <code>mlx-swift_Cmlx.bundle</code>, and
+  <code>malibu-cli</code>, <code>mlx-swift_Cmlx.bundle</code>, and
   <code>default.metallib</code>. When running the Xcode-built command-line
   binary from the shell, set <code>DYLD_FRAMEWORK_PATH</code> to
   <code>Build/Products/Debug/PackageFrameworks:Build/Products/Debug</code>
@@ -1004,7 +1004,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     1.30s.</li>
     <li><code>swift test</code> — passed as a build-only test bundle after
     removing unavailable test-framework imports.</li>
-    <li><code>macprovider-cli --help</code> — printed usage with
+    <li><code>malibu-cli --help</code> — printed usage with
     <code>--port</code>, <code>--model</code>, <code>--coordinator</code>,
     <code>--config</code>, and <code>--log-level</code>.</li>
     <li>Default run with no config file — resolved port <code>8080</code>,
@@ -1027,10 +1027,10 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     6.87s with no warnings after the response-close callback was simplified.</li>
     <li><code>swift test</code> — passed as a build-only test bundle in
     1.65s.</li>
-    <li><code>macprovider-cli --help</code> — still prints the Step 2 CLI
+    <li><code>malibu-cli --help</code> — still prints the Step 2 CLI
     usage after wiring the server entry point.</li>
     <li>Live server smoke test — started
-    <code>macprovider-cli --port 18080 --model mlx-community/Llama-3.2-3B-Instruct-4bit</code>
+    <code>malibu-cli --port 18080 --model mlx-community/Llama-3.2-3B-Instruct-4bit</code>
     and verified <code>curl -i http://127.0.0.1:18080/v1/models</code>
     returns HTTP 200 with OpenAI list-shaped JSON containing exactly that
     model id.</li>
@@ -1041,7 +1041,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
 <div class="entry">
   <time>2026-05-28</time>
   <ul>
-    <li><code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
+    <li><code>xcodebuild -scheme malibu-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
     — passed and produced the MLX Metal shader bundle.</li>
     <li>No-model smoke test — <code>GET /v1/models</code> returns HTTP 503
     with OpenAI error envelope <code>model_not_loaded</code>.</li>
@@ -1068,7 +1068,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
 <div class="entry">
   <time>2026-05-27</time>
   <ul>
-    <li><code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
+    <li><code>xcodebuild -scheme malibu-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
     — passed with the Step 5 SSE implementation.</li>
     <li>Raw SSE smoke test — Xcode-built binary served
     <code>stream=true</code> on port <code>18084</code> with
@@ -1096,7 +1096,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
 <div class="entry">
   <time>2026-05-27</time>
   <ul>
-    <li><code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
+    <li><code>xcodebuild -scheme malibu-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
     — passed after adding token-count pre-flight.</li>
     <li>Normal inference guard — with
     <code>MACPROVIDER_MAX_CONTEXT_OVERRIDE=20000</code>, a short
@@ -1117,7 +1117,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
 <div class="entry">
   <time>2026-05-27</time>
   <ul>
-    <li><code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
+    <li><code>xcodebuild -scheme malibu-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
     — passed after adding the coordinator WebSocket client.</li>
     <li>Mock coordinator lifecycle — a temporary stdlib-only WebSocket mock at
     <code>/private/tmp/phase3_mock_coordinator.py</code> accepted the
@@ -1144,7 +1144,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
 <div class="entry">
   <time>2026-05-27</time>
   <ul>
-    <li><code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
+    <li><code>xcodebuild -scheme malibu-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
     — passed after wiring shared provider status, startup throughput
     measurement, and <code>/v1/health</code>.</li>
     <li>Real-model capacity smoke — a temporary mock coordinator launched the
@@ -1168,7 +1168,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
 <div class="entry">
   <time>2026-05-27</time>
   <ul>
-    <li><code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
+    <li><code>xcodebuild -scheme malibu-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
     — passed after adding acceptance scripts, SIGTERM drain waiting, and the
     process-local MLX inference gate.</li>
     <li><code>test-startup-failure.sh</code> — passed; startup with an invalid
@@ -1229,16 +1229,16 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     briefly for cancellation acknowledgements, send
     <code>drain_status complete</code>, close WS, and reset local state to
     <code>ready</code> for the v1.1.4 reconnect fix.</li>
-    <li>Added <code>/v1/status</code> and <code>macprovider-cli status</code>.
+    <li>Added <code>/v1/status</code> and <code>malibu-cli status</code>.
     Status reports binary version, local capacity and counters, active
     request_id count, coordinator connection/session/tier, and recommended
     binary version from <code>hello_ack</code>.</li>
-    <li>Added <code>macprovider-cli update</code> and
+    <li>Added <code>malibu-cli update</code> and
     <code>update --check</code> using URLSession against GitHub Releases,
     checksum verification with SHA-256, archive extraction, self-test command
     probe, atomic binary replacement, and launchd restart if the plist exists.
     No new Swift package dependency was added.</li>
-    <li>Added <code>macprovider-cli uninstall</code> for the while-binary-
+    <li>Added <code>malibu-cli uninstall</code> for the while-binary-
     still-running path: launchd bootout, plist/binary removal, optional config
     and log removal, and zshrc marker cleanup.</li>
     <li>Added a mock-coordinator harness under
@@ -1293,7 +1293,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     URLs, checksum lines must contain exactly one SHA-256 for the selected
     archive, tar entries are rejected if absolute or path-traversing, binary
     selection requires exactly one regular executable non-symlink
-    <code>macprovider-cli</code>, the downloaded binary must pass
+    <code>malibu-cli</code>, the downloaded binary must pass
     <code>self-test</code>, replacement is staged in the target directory and
     completed with POSIX <code>rename</code>, and launchd bootstrap failure is
     no longer hidden.</li>
@@ -1305,7 +1305,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     <code>test-ac13.sh</code> now runs cancellation and
     <code>test-ac14.sh</code> now runs multiplexing.</li>
     <li>Verification after fixes: <code>swift build</code> passed,
-    <code>swift test</code> passed 3 tests, <code>macprovider-cli --version</code>
+    <code>swift test</code> passed 3 tests, <code>malibu-cli --version</code>
     printed <code>1.2.1</code>, <code>test-config-precedence.sh</code>,
     <code>test-startup-failure.sh</code>, <code>test-health.sh</code>,
     <code>test-coordinator.sh</code>, and <code>test-warm-up.sh</code> passed.
@@ -1320,7 +1320,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   <time>2026-05-28</time>
   <ul>
     <li>Kept the canonical binary path at
-    <code>~/.local/bin/macprovider-cli</code> and reconciled uninstall
+    <code>~/.local/bin/malibu-cli</code> and reconciled uninstall
     targets with the public shell uninstaller: binary, support directory,
     logs, and launchd plist are removed; <code>~/.cache/macprovider</code>
     is reported but left in place.</li>
@@ -1522,7 +1522,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     jobs.</li>
     <li>The foreground path scans process snapshots as argv arrays and only
     matches an argv element whose executable basename is
-    <code>macprovider-cli</code> followed immediately by a whole-word
+    <code>malibu-cli</code> followed immediately by a whole-word
     <code>serve</code> subcommand. It deliberately rejects
     <code>autotune</code> argv and substring cases such as
     <code>-serve-helper</code>, avoiding self-matches and helper false
@@ -1579,8 +1579,8 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   class untested). Added
   <code>testHelperBinaryDoesNotMatchForegroundServe</code> with a
   process list containing
-  <code>["/usr/local/bin/macprovider-cli-helper", "serve"]</code>;
-  the <code>lastPathComponent == "macprovider-cli"</code> check
+  <code>["/usr/local/bin/malibu-cli-helper", "serve"]</code>;
+  the <code>lastPathComponent == "malibu-cli"</code> check
   correctly rejects, and the test now pins the behavior.
   Complements
   <code>testServeSubstringDoesNotMatchForegroundServe</code> (which
@@ -1613,7 +1613,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     <li>Selected SPEC-013 FR-D.1 <strong>Shape B</strong> for v1:
     autotune relies on the existing <code>ModelRuntime.configuration(for:)</code>
     online fallback during <code>serve</code> load instead of adding a new
-    <code>macprovider-cli models pull &lt;id&gt;</code> subcommand. Shape A's
+    <code>malibu-cli models pull &lt;id&gt;</code> subcommand. Shape A's
     new pull contract remains out of scope for SPEC-013 v1.</li>
     <li>Added <code>HuggingFaceCacheChecker</code>, a heuristic local-cache
     detector for standard HuggingFace hub paths such as
@@ -1943,7 +1943,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     <li>The emitter returns the operator-facing terminal
     <code>RECOMMENDATION</code> block, pretty JSON schema output, computed
     <code>recipe_hash</code>, alternates, and copy-pasteable
-    <code>macprovider-cli serve</code> command as a pure value. Nil
+    <code>malibu-cli serve</code> command as a pure value. Nil
     <code>kvBits</code> renders as <code>unset</code> in terminal output,
     emits JSON <code>null</code>, and omits <code>--kv-bits</code> from the
     serve command.</li>
@@ -2148,7 +2148,7 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
 <div class="entry">
   <time>2026-06-22</time>
   <p><strong>SPEC-015 Step 7 manual receipt-key rotation.</strong>
-  Added <code>macprovider-cli rotate-key</code> for operator-triggered receipt
+  Added <code>malibu-cli rotate-key</code> for operator-triggered receipt
   signing-key rotation. The command resolves config with receipts enabled,
   requires a stable <code>provider_id</code>, and sends a provider-bound
   <code>rotate_receipt_key_request</code> over the local serve control socket;

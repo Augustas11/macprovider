@@ -11,7 +11,7 @@ Issue **#816** documents why a large/slow single-slot provider (Qwen3-Coder-30B)
 1. **#817 — coordinator** (`phase4-coordinator`, Go): treat an in-flight request as implicit liveness — do NOT evict a provider on stale heartbeat while it has an active request on a slot.
 2. **#818 — gateway** (`phase5-gateway`, Go): make the `decode_idle` stream deadline adaptive to the model's expected tok/s instead of a flat timeout.
 3. **Release + deploy** both to Pearl (server-side; no CLI version, no fleet auto-update); close #817 and #818.
-4. **Park #819** (provider CLI, fix #1) — the root-cause fix, deferred to the next `macprovider-cli` release. Leave #816 (umbrella) + #819 open.
+4. **Park #819** (provider CLI, fix #1) — the root-cause fix, deferred to the next `malibu-cli` release. Leave #816 (umbrella) + #819 open.
 5. **Re-test the 30B on Goose** end-to-end.
 
 ## Ground rules (this repo — see CLAUDE.md)
@@ -23,7 +23,7 @@ Issue **#816** documents why a large/slow single-slot provider (Qwen3-Coder-30B)
 
 ## Root cause recap (evidence — already gathered)
 - **Not memory:** a clean 150-token 30B decode at 12k did **zero swap-outs** (`Swapouts` unchanged), decode finished cleanly. Not capacity-bound.
-- **Provider:** inference dispatched via `Task.detached` on the cooperative pool — `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:779`; heartbeat is a cooperative `Task` — `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:246–250` (Issue #189 comment explicitly names *"cooperative-task starvation"*, mitigated only by a respawn watchdog).
+- **Provider:** inference dispatched via `Task.detached` on the cooperative pool — `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:779`; heartbeat is a cooperative `Task` — `phase3-binary/Sources/malibu-cli/CoordinatorClient.swift:246–250` (Issue #189 comment explicitly names *"cooperative-task starvation"*, mitigated only by a respawn watchdog).
 - A legitimate ~7s decode (`decode_ms=6797`) hogs the pool far longer than the ~**1500 ms** heartbeat window → heartbeat goes stale.
 - Coordinator staleness threshold hint: `phase4-coordinator/tools/mockprovider/main.go:298` ("coordinator only warns on stale (>1.5x) gaps").
 - Observed: coordinator `provider heartbeat stale gap=1551..2528 threshold=1500` during decode; gateway `deadline_phase=decode_idle decode_ms=0 flush_ms=10003` → "Provider timed out during streaming"; buyer effect `503 no_provider_available`.
@@ -47,7 +47,7 @@ Issue **#816** documents why a large/slow single-slot provider (Qwen3-Coder-30B)
 - Deploy new coordinator + gateway to Pearl. **Verify on Pearl:** services active, healthz OK, and the two behaviors above (busy provider not evicted; no false `decode_idle`).
 
 ## Park the CLI fix (#819)
-Close **#817** and **#818** when their PRs merge + deploy to Pearl (reference the PR links + deploy date). Comment on the umbrella **#816** that both server-side fixes shipped and **#819 (provider `macprovider-cli`** — move inference off the cooperative pool, `ModelRuntime.swift:779`) is **DEFERRED** to the next CLI release (build → notarize → fleet auto-update). Leave **#816** and **#819** open.
+Close **#817** and **#818** when their PRs merge + deploy to Pearl (reference the PR links + deploy date). Comment on the umbrella **#816** that both server-side fixes shipped and **#819 (provider `malibu-cli`** — move inference off the cooperative pool, `ModelRuntime.swift:779`) is **DEFERRED** to the next CLI release (build → notarize → fleet auto-update). Leave **#816** and **#819** open.
 
 ## Then: re-test 30B on Goose
 Goose is installed (`/opt/homebrew/bin/goose`), config at `~/.config/goose/config.yaml` (provider `openai`, `OPENAI_HOST: https://api.malibu.tech`, `GOOSE_MODEL: mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`). Buyer key: `~/.config/macprovider/buyer-api-key` (never print it).
@@ -61,7 +61,7 @@ Before the fixes this returned intermittent `503 no_provider_available` and `Pro
 - **Gate A — stale-heartbeat eviction:** fixed by **#2** above.
 - **Gate B — `missing_benchmark` / PoW telemetry drift:** SEPARATE. The prior session **hand-edited** this Mac's 30B config (`max_context_override → 12000`, enabled `idle_prewarm`) **without re-running autotune**, creating `pow_telemetry_drift_detected: missing_benchmark`, which ALSO gates the 30B out of buyer routing. To get a clean test you must ALSO clear Gate B:
   - (a) **Re-run autotune locally on this Mac** to submit fresh hardware evidence for the current config (keychain is fine locally). This was blocked earlier by an evidence-submission **HTTP 429** rate-limit — retry (it likely cleared). Example:
-    `macprovider-cli autotune --recommend --candidate-models mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit --target-context 12000 --max-context-axis 12000 --max-batch-axis 1 --submit-hardware-evidence --apply --recover-hardware-admission --max-duration 1500` (drains the provider ~15–25 min; `--recover-hardware-admission` restores it), **or**
+    `malibu-cli autotune --recommend --candidate-models mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit --target-context 12000 --max-context-axis 12000 --max-batch-axis 1 --submit-hardware-evidence --apply --recover-hardware-admission --max-duration 1500` (drains the provider ~15–25 min; `--recover-hardware-admission` restores it), **or**
   - (b) revert the provider to a config that already has valid evidence.
   - Confirm cleared: `curl -s -H "Authorization: Bearer $(cat ~/.config/macprovider/buyer-api-key)" https://api.malibu.tech/v1/models` shows the 30B present with `max_context_tokens`, and Pearl coordinator logs show no `pow_telemetry_drift_detected` for provider `mp-26592d710fc97aa7c07b260665c67cf6`.
 - Keep `idle_prewarm` enabled (low TTFT).

@@ -12,8 +12,8 @@ let package = Package(
             targets: ["MacProviderCore"]
         ),
         .executable(
-            name: "macprovider-cli",
-            targets: ["macprovider-cli"]
+            name: "malibu-cli",
+            targets: ["malibu-cli"]
         )
     ],
     dependencies: [
@@ -57,7 +57,7 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "macprovider-cli",
+            name: "malibu-cli",
             dependencies: [
                 "MacProviderCore",
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
@@ -70,7 +70,7 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Yams", package: "Yams")
             ],
-            path: "Sources/macprovider-cli",
+            path: "Sources/malibu-cli",
             resources: [
                 .copy("Resources/spec028")
             ],
@@ -79,10 +79,10 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "macprovider-cliTests",
+            name: "malibu-cliTests",
             dependencies: [
                 "MacProviderCore",
-                "macprovider-cli",
+                "malibu-cli",
                 // Real-model paged-KV parity fixtures (PagedKVParityTests) load MLX models
                 // from the local HF cache and drive the paged gather. Test-target only —
                 // the shipped product dependency set / pins are unchanged.
@@ -93,7 +93,7 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
-            path: "Tests/macprovider-cliTests",
+            path: "Tests/malibu-cliTests",
             resources: [
                 .copy("Fixtures/SPEC015_v03_jcs/null_hash.json"),
                 .copy("Fixtures/SPEC015_v03_jcs/non_null_hash.json"),

@@ -71,4 +71,4 @@ The harness is an operational continuity proof, not a replacement wire-protocol
 test. Sequence-0 proof reservation, sequence-1 cutover, bidirectional AEAD, and
 adversarial proof handling stay covered by
 `phase4-coordinator/internal/ws/relay_test.go` and
-`phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift`.
+`phase3-binary/Tests/malibu-cliTests/CoordinatorClientTests.swift`.

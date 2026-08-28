@@ -30,9 +30,9 @@ Local code/spec anchors:
 - Buyer request validation/routing: `phase4-coordinator/internal/buyer/server.go:1445-1514`, `:1602-1644`, `:4167-4202`, `:4750-4868`.
 - Existing coordinator canary config and loop: `phase4-coordinator/internal/config/config.go:255-265`; `phase4-coordinator/internal/ws/server.go:1827-1878`, `:1902-2100`.
 - Existing canary sanction state: `phase4-coordinator/internal/pool/provider.go:908-970`.
-- Provider request defaults and prompt hash fields: `phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:47-55`, `:205-239`; `phase3-binary/Sources/macprovider-cli/PromptCanonicalizer.swift:4-24`.
-- Provider generation path: `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:700-716`, `:850-866`, `:1297-1310`.
-- Provider model-snapshot/warm-swap receipt binding: `phase3-binary/Sources/macprovider-cli/HTTPServer.swift:238-321`, `:556-585`, `:743-755`, `:852-875`.
+- Provider request defaults and prompt hash fields: `phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift:47-55`, `:205-239`; `phase3-binary/Sources/malibu-cli/PromptCanonicalizer.swift:4-24`.
+- Provider generation path: `phase3-binary/Sources/malibu-cli/ModelRuntime.swift:700-716`, `:850-866`, `:1297-1310`.
+- Provider model-snapshot/warm-swap receipt binding: `phase3-binary/Sources/malibu-cli/HTTPServer.swift:238-321`, `:556-585`, `:743-755`, `:852-875`.
 
 External anchors:
 

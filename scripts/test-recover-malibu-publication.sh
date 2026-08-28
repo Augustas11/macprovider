@@ -98,7 +98,7 @@ release = {
     "draft": False,
     "immutable": True,
     "prerelease": False,
-    "name": f"macprovider-cli {tag}",
+    "name": f"malibu-cli {tag}",
     "assets": assets,
 }
 release_path.write_text(json.dumps(release), encoding="utf-8")
@@ -173,7 +173,7 @@ release = {
     "draft": False,
     "immutable": True,
     "prerelease": False,
-    "name": f"macprovider-cli {tag}",
+    "name": f"malibu-cli {tag}",
     "assets": assets,
 }
 release_path.write_text(json.dumps(release), encoding="utf-8")

@@ -5,8 +5,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 group="YF7XNRJUG4.live.malibu.provider"
-ents="$root/phase3-binary/dist/macprovider-cli.entitlements"
-swift="$root/phase3-binary/Sources/macprovider-cli/SecureEnclaveIdentity.swift"
+ents="$root/phase3-binary/dist/malibu-cli.entitlements"
+swift="$root/phase3-binary/Sources/malibu-cli/SecureEnclaveIdentity.swift"
 release="$root/.github/workflows/release.yml"
 acceptance="$root/scripts/sign-acceptance-candidate.sh"
 verifier="$root/scripts/verify-malibu-release-artifacts.sh"
@@ -19,7 +19,7 @@ fail() {
   exit 1
 }
 
-[[ ! -e "$ents" ]] || fail "CLI must not ship macprovider-cli.entitlements (AMFI-restricted)"
+[[ ! -e "$ents" ]] || fail "CLI must not ship malibu-cli.entitlements (AMFI-restricted)"
 [[ -x "$require" ]] || fail "require-cli-se-entitlements.sh must be executable"
 grep -Fq "static let namedProduction = \"$group\"" "$swift" ||
   fail "Swift namedProduction constant must remain $group for profiled overrides"
@@ -29,13 +29,13 @@ fi
 if grep -Fq "static let production = \"$group\"" "$swift"; then
   fail "Swift must not default production CLI to the named keychain group"
 fi
-if grep -Fq -- "--entitlements phase3-binary/dist/macprovider-cli.entitlements" "$release"; then
-  fail "release.yml CLI codesign must not attach macprovider-cli.entitlements"
+if grep -Fq -- "--entitlements phase3-binary/dist/malibu-cli.entitlements" "$release"; then
+  fail "release.yml CLI codesign must not attach malibu-cli.entitlements"
 fi
 grep -Fq "bash scripts/require-cli-se-entitlements.sh" "$release" ||
   fail "release.yml must prove the signed CLI has no restricted entitlements"
-if grep -Fq -- "--entitlements phase3-binary/dist/macprovider-cli.entitlements" "$acceptance"; then
-  fail "acceptance signer CLI codesign must not attach macprovider-cli.entitlements"
+if grep -Fq -- "--entitlements phase3-binary/dist/malibu-cli.entitlements" "$acceptance"; then
+  fail "acceptance signer CLI codesign must not attach malibu-cli.entitlements"
 fi
 grep -Fq "require-cli-se-entitlements.sh" "$acceptance" ||
   fail "acceptance signer must prove the signed CLI has no restricted entitlements"

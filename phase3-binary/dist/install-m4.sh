@@ -57,7 +57,7 @@ rm -rf "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 tar xzf "$TARBALL" -C "$INSTALL_DIR"
 log "  contents extracted:"
-ls -la "$INSTALL_DIR"/macprovider-cli "$INSTALL_DIR"/mlx-swift_Cmlx.bundle 2>&1 | head -4 | sed 's/^/    /'
+ls -la "$INSTALL_DIR"/malibu-cli "$INSTALL_DIR"/mlx-swift_Cmlx.bundle 2>&1 | head -4 | sed 's/^/    /'
 
 log "step 4/6: clearing macOS quarantine attributes (so Gatekeeper allows execution)"
 xattr -dr com.apple.quarantine "$INSTALL_DIR" 2>/dev/null || true
@@ -65,7 +65,7 @@ log "  done"
 
 log "step 5/6: starting binary in tmux session 'mlx' on port $PORT"
 "$TMUX_BIN" new-session -d -s mlx \
-    "cd '$INSTALL_DIR' && ./macprovider-cli --port $PORT --model '$MODEL' 2>&1 | tee /tmp/phase3-binary-m4.log"
+    "cd '$INSTALL_DIR' && ./malibu-cli --port $PORT --model '$MODEL' 2>&1 | tee /tmp/phase3-binary-m4.log"
 
 log "step 6/6: waiting for binary to bind + load model (up to ${TIMEOUT_S}s)"
 deadline=$(( $(date +%s) + TIMEOUT_S ))

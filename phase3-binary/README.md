@@ -1,6 +1,6 @@
 # phase3-binary
 
-This package builds `macprovider-cli`, the Apple Silicon provider binary
+This package builds `malibu-cli`, the Apple Silicon provider binary
 for Mac Provider. The distribution layer in `dist/` publishes a
 darwin-arm64 tarball, may also publish a stapled package delivery
 container, and installs the provider as a user-level service.
@@ -16,8 +16,8 @@ curl -fsSL https://get.malibu.tech/install.sh | bash
 
 The installer:
 
-- Downloads `macprovider-cli-vX.Y.Z-darwin-arm64.tar.gz` from GitHub
-  Releases, or prefers `macprovider-cli-vX.Y.Z-darwin-arm64.pkg` when
+- Downloads `malibu-cli-vX.Y.Z-darwin-arm64.tar.gz` from GitHub
+  Releases, or prefers `malibu-cli-vX.Y.Z-darwin-arm64.pkg` when
   that stapled delivery container is present.
 - Verifies `checksums.txt.sig`, then verifies the selected release asset
   against `checksums.txt`.
@@ -43,7 +43,7 @@ The installer:
 The public installer is intentionally independent of local build output:
 it assumes the matching release tarball already exists on GitHub
 Releases. The tarball remains the canonical self-update artifact until
-`macprovider-cli update` explicitly supports the package delivery path.
+`malibu-cli update` explicitly supports the package delivery path.
 
 ## Trust Model
 
@@ -54,7 +54,7 @@ using the signed/notarized tarball path.
 
 ## Provider economics (earnings, payouts, lifecycle)
 
-Quick reference for Mac owners running `macprovider-cli`:
+Quick reference for Mac owners running `malibu-cli`:
 
 - **Default provider share:** 90% of gross credits per request.
 - **Rate card (default):** 500,000 credits / 1 M prompt tokens; 1,000,000 credits / 1 M completion tokens.

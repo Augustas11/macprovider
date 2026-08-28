@@ -71,7 +71,7 @@ The ml-explore/mlx-swift tag list jumps directly from `0.31.x` series with no `0
 | Exit code | **0** |
 | Duration | 159.48s (cold build in fresh worktree) |
 | Output | `Build complete!` |
-| Binary | `.build/release/macprovider-cli` |
+| Binary | `.build/release/malibu-cli` |
 | Metallib | Built via `scripts/build-mlx-metallib.sh` → `.build/arm64-apple-macosx/release/mlx.metallib` (~119s) |
 
 No warnings or errors in the Swift compilation output. (Sendable concurrency diagnostics from mlx-swift-lm dependencies are pre-existing and not new.)
@@ -225,7 +225,7 @@ against the authoritative resolved graph (currently 0.31.4).
 | RAM | 32 GB |
 | macOS | 26.5 (Build 25F71) |
 | Xcode / Swift | Apple Swift 6.3.3 (swiftlang-6.3.3.1.3) |
-| `macprovider-cli` version | 1.8.19 (from binary in worktree release build) |
+| `malibu-cli` version | 1.8.19 (from binary in worktree release build) |
 | mlx-swift-lm pin | 3.31.4 (rev `bd4b7434e6bd`) |
 | mlx-swift pin | 0.31.6 (rev `0bb916c67f4b`) |
 | Metallib source | Built from mlx-swift 0.31.6 checkout via `scripts/build-mlx-metallib.sh` |

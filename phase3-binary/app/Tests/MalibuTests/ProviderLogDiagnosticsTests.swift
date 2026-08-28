@@ -4,7 +4,7 @@ import XCTest
 final class ProviderLogDiagnosticsTests: XCTestCase {
     func testDiagnoseStaleLaunchAgent() {
         let finding = ProviderLogDiagnostics.diagnose(lines: [
-            "provider process unhealthy: launchd service live.malibu.provider has no validated PID at /Users/provider/macprovider-cli",
+            "provider process unhealthy: launchd service live.malibu.provider has no validated PID at /Users/provider/malibu-cli",
         ])
 
         XCTAssertEqual(finding?.id, "stale_launch_agent")
@@ -22,7 +22,7 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
         XCTAssertEqual(finding?.id, "stale_model_catalog")
         XCTAssertTrue(finding?.userMessage.contains("Model options changed") == true)
         XCTAssertTrue(finding?.userMessage.contains("update provider software") == true)
-        XCTAssertFalse(finding?.userMessage.contains("macprovider-cli") == true)
+        XCTAssertFalse(finding?.userMessage.contains("malibu-cli") == true)
         XCTAssertFalse(finding?.userMessage.contains("autotune --recommend --apply") == true)
     }
 
@@ -134,7 +134,7 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
         let finding = ProviderLogDiagnostics.diagnose(
             providerLines: ["model artifact hash mismatch for /tmp/current"],
             watchdogLines: [
-                "provider process unhealthy: launchd service live.malibu.provider has no validated PID at /Users/provider/macprovider-cli"
+                "provider process unhealthy: launchd service live.malibu.provider has no validated PID at /Users/provider/malibu-cli"
             ]
         )
 
@@ -144,7 +144,7 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
     func testCurrentLaunchdRepairTakesPrecedenceOverGenericProviderFinding() {
         let finding = ProviderLogDiagnostics.diagnose(
             providerLines: [
-                "provider process unhealthy: launchd service live.malibu.provider has no validated PID at /Users/provider/macprovider-cli",
+                "provider process unhealthy: launchd service live.malibu.provider has no validated PID at /Users/provider/malibu-cli",
                 "model artifact hash mismatch for /tmp/current"
             ],
             watchdogLines: [],

@@ -672,7 +672,7 @@ final class CLIUpdateRunnerTests: XCTestCase {
         let fixture = try makeSignedCompatibilityManifest(malibuVersion: "1.8.94")
         let manifestBytes = try Data(contentsOf: fixture.manifest)
         let executable = fixture.manifest.deletingLastPathComponent()
-            .appendingPathComponent("macprovider-cli")
+            .appendingPathComponent("malibu-cli")
         try Data("#!/bin/sh\n".utf8).write(to: executable)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
@@ -697,7 +697,7 @@ final class CLIUpdateRunnerTests: XCTestCase {
     func testInstalledManifestProofRejectsMissingProviderExecutable() throws {
         let fixture = try makeSignedCompatibilityManifest(malibuVersion: "1.8.94")
         let missingExecutable = fixture.manifest.deletingLastPathComponent()
-            .appendingPathComponent("macprovider-cli")
+            .appendingPathComponent("malibu-cli")
 
         XCTAssertThrowsError(
             try CLIUpdateRunner.expectedAppIdentityFromInstalledProviderManifestForTest(

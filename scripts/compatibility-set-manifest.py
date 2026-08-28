@@ -36,7 +36,7 @@ KEY_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 # self-heal path. The Malibu rebrand (identifier tolerance landed in v1.8.95,
 # commit 9c78c988) orphaned every <=1.8.94 client this way. Keep this table in
 # lockstep with the client parser's accepted-identifier tolerance in
-# phase3-binary/Sources/macprovider-cli/CompatibilitySetManifest.swift.
+# phase3-binary/Sources/malibu-cli/CompatibilitySetManifest.swift.
 CLIENT_IDENTIFIER_FLOORS = {
     "live.malibu.provider.cli": (1, 8, 95),
     "live.streamvc.macprovider.cli": (0, 0, 0),

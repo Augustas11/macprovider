@@ -894,14 +894,18 @@ enum ProviderCredentialHandoffRunner {
                 throw Error.invalidCLI("install manifest install_prefix is not trusted")
             }
             let resolved = URL(fileURLWithPath: manifest.binaryPath).standardizedFileURL
-            guard resolved.deletingLastPathComponent().path == prefix.path else {
+            guard InstalledProviderMonitor.isSupportedProviderExecutable(
+                resolved,
+                installDirectory: prefix
+            ) else {
                 throw Error.invalidCLI("install manifest binary_path does not match install_prefix")
             }
             candidate = resolved
         } else {
-            candidate = home.appendingPathComponent("macprovider/macprovider-cli").standardizedFileURL
+            candidate = home.appendingPathComponent("macprovider/malibu-cli").standardizedFileURL
         }
-        guard candidate.lastPathComponent == "macprovider-cli" else {
+        guard candidate.lastPathComponent == "malibu-cli"
+            || candidate.lastPathComponent == "macprovider-cli" else {
             throw Error.invalidCLI("unexpected executable name")
         }
         guard InstalledProviderMonitor.isOwnerPrivateExecutable(atPath: candidate.path),

@@ -10,11 +10,11 @@ Last updated: 2026-08-08
 Providers can currently change the served model and ask for a better paid model
 only through Terminal workflows:
 
-- `macprovider-cli models list`
-- `macprovider-cli models browse`
-- `macprovider-cli models switch <hf-id>`
-- `macprovider-cli models status`
-- `macprovider-cli autotune --recommend --json`
+- `malibu-cli models list`
+- `malibu-cli models browse`
+- `malibu-cli models switch <hf-id>`
+- `malibu-cli models status`
+- `malibu-cli autotune --recommend --json`
 
 Malibu is the provider-facing app, but it currently behaves as a monitor and
 bounded local controller. This creates a sharp UX break: the provider can see
@@ -62,7 +62,7 @@ and CLI options are product-contract surfaces.
 
 ### 2.2 CLI model surfaces
 
-- `phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift` owns
+- `phase3-binary/Sources/malibu-cli/ModelsSubcommand.swift` owns
   `models list`, `models switch`, and `models status`.
 - `models list` prints TSV rows: `model_id<TAB>state`. It reports the current
   runtime model as `warm` and configured supported models as `idle`. If the
@@ -83,12 +83,12 @@ and CLI options are product-contract surfaces.
   socket failures, load failures, and cooldown. `--force` bypasses only selected
   soft guards, not unsupported target, concurrent switch, socket, or load
   failures.
-- `phase3-binary/Sources/macprovider-cli/ModelsBrowseCommand.swift` owns
+- `phase3-binary/Sources/malibu-cli/ModelsBrowseCommand.swift` owns
   `models browse`. It prints TSV rows: `model_id<TAB>est_gb<TAB>fit`, where fit
   can be `fits`, `tight`, `wont_fit`, or `unknown`. It currently has no JSON
   output flag. The command sanitizes HuggingFace-returned IDs for terminal
   display; those sanitized strings are not authoritative action IDs.
-- `phase3-binary/Sources/macprovider-cli/ControlSocket.swift` is the CLI-side
+- `phase3-binary/Sources/malibu-cli/ControlSocket.swift` is the CLI-side
   source of truth for control-frame shapes. Current frames include
   `switch_request`, `switch_ack`, `switch_progress`, and `status_response`; they
   do not include recommendation adoption, download byte progress, or switch
@@ -96,7 +96,7 @@ and CLI options are product-contract surfaces.
 
 ### 2.3 Autotune recommendation surfaces
 
-- `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift` owns
+- `phase3-binary/Sources/malibu-cli/AutotuneCommand.swift` owns
   `autotune --recommend --json`.
 - The same command supports `--candidate-models <ids>` to replace the default
   candidate list for a targeted evaluation. The current implementation is a
@@ -108,7 +108,7 @@ and CLI options are product-contract surfaces.
 `model_recommendation_check_v1` adapter. Its targeted command shape is:
 
   ```text
-  macprovider-cli autotune --recommend --json \
+  malibu-cli autotune --recommend --json \
     --candidate-models <exact-raw-model-id> \
     --check-only --progress-json \
     --isolated-cache-root <private-staging-root> \
@@ -130,11 +130,11 @@ and CLI options are product-contract surfaces.
   Compatible online `Evaluate` step in the MVP; BS953-R014 owns signed
   preparation during the adoption transaction so recommendation JSON and
   preparation cannot be confused.
-- `phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift` emits
+- `phase3-binary/Sources/malibu-cli/AutotuneRecommend.swift` emits
   `schema_version: "autotune_recommend.v1"` with `recommended_model`,
   `serve_config`, `candidates`, `warnings`, hardware metadata, and rate-card
   fields.
-- `phase3-binary/Sources/macprovider-cli/ConfigApplier.swift` is the CLI config
+- `phase3-binary/Sources/malibu-cli/ConfigApplier.swift` is the CLI config
   apply path used by `autotune --recommend --apply`. It writes a token-redacted
   backup beside the config as `config.yaml.bak-<unix>-<counter>` with mode
   `0600`, then atomically replaces the provider config.
@@ -154,26 +154,26 @@ and CLI options are product-contract surfaces.
 - `SPEC-013` keeps classic autotune non-automatic unless explicitly applied.
   `--recommend` is the SPEC-023 paid recommendation path and is the one Malibu
   must use.
-- `phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift` emits visible
+- `phase3-binary/Sources/malibu-cli/AutotuneRecommend.swift` emits visible
   `autotune_recommend.v1` JSON with `hardware.machine`, `hardware.chip`,
   `hardware.memory_gb`, `hardware.bandwidth_tier`, `hardware.detected`,
   `hardware.os_version`, `hardware.binary_version`, and `inputs.*`. The visible
   recommendation JSON does not include `hardware_identity_hash`; that field is
   present in stored/upload state and is not available to Malibu UI dedupe.
-- `phase3-binary/Sources/macprovider-cli/HTTPServer.swift` exposes local status
+- `phase3-binary/Sources/malibu-cli/HTTPServer.swift` exposes local status
   `binary_version`, `local_status_contract.version`,
   `local_status_contract.minimum_reader_version`,
   `local_status_contract.capabilities`, and short-lived observation validity.
-- `phase3-binary/Sources/macprovider-cli/IdlePrewarmer.swift` already contains
+- `phase3-binary/Sources/malibu-cli/IdlePrewarmer.swift` already contains
   the CLI-side `SystemPowerSourceReporter` using IOKit power-source APIs. Malibu
   currently has `ThermalMonitor` but no equivalent app-side power monitor.
 
 ### 2.4 Relevant tests
 
-- `phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift`
+- `phase3-binary/Tests/malibu-cliTests/ModelsSubcommandTests.swift`
   already covers status JSON, list fallback, switch progress, preflight
   rejection, server rejection, and concurrent switch rejection.
-- `phase3-binary/Tests/macprovider-cliTests/EndToEndAcceptanceTests.swift`
+- `phase3-binary/Tests/malibu-cliTests/EndToEndAcceptanceTests.swift`
   covers warm-swap disabled behavior, control-socket permissions, atomic
   in-flight/new-request behavior, loading heartbeat, cooldown behavior, and
   `--force` guard boundaries.
@@ -384,7 +384,7 @@ Acceptance:
    current model, target model, fit status, any warnings, and expected phase
    labels.
 5. Provider clicks `Switch`.
-6. Malibu invokes the launchd-managed `macprovider-cli models switch --json`
+6. Malibu invokes the launchd-managed `malibu-cli models switch --json`
    transaction. The CLI performs the existing supported-model, RAM-fit, and
    cooldown preflight, sends the typed control-socket request, and returns
    authoritative progress/rejection events. Malibu must not send a raw
@@ -950,7 +950,7 @@ Malibu invokes the capability-gated signed check adapter with the exact raw
 browse ID:
 
 ```text
-macprovider-cli autotune --recommend --json \
+malibu-cli autotune --recommend --json \
   --candidate-models <exact-raw-model-id> \
   --check-only --progress-json \
   --isolated-cache-root <private-staging-root> \
@@ -1002,7 +1002,7 @@ Recommendation adoption is owned by one CLI/runtime transaction. The required
 CLI surface is:
 
 ```text
-macprovider-cli models adopt-recommendation \
+malibu-cli models adopt-recommendation \
   --json \
   --config <config.yaml> \
   --recommendation-json <path-or-stdin> \
@@ -1282,7 +1282,7 @@ recommendation has passed the BS953-R014 CLI/runtime transaction.
 Acceptance:
 
 - BS953-AC029: `Adopt` invokes
-  `macprovider-cli models adopt-recommendation --json` and consumes only
+  `malibu-cli models adopt-recommendation --json` and consumes only
   `model_adoption_event.v1` frames for recommendation adoption.
 - BS953-AC030: If recommendation validation, artifact preparation, or config
   apply fails, no live switch request is sent.
@@ -1922,7 +1922,7 @@ existing provider CLI release-verification discipline:
 - Verify Malibu invokes the intended launchd-managed signed CLI for model
   operations, not an arbitrary environment override.
 - Verify byte identity where the release runbook requires comparing embedded
-  and standalone `macprovider-cli` binaries.
+  and standalone `malibu-cli` binaries.
 - Verify updater path from the previous stable version.
 - Do not treat workflow green or matching `--version` as sufficient production
   proof.
