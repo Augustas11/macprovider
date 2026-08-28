@@ -198,9 +198,10 @@ struct ModelsOfferCommand: AsyncParsableCommand {
 struct ModelsAdmissionCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "admission",
-        abstract: "Read BYOM model admission state.",
+        abstract: "Read or withdraw BYOM model admission state.",
         subcommands: [
             ModelsAdmissionStatusCommand.self,
+            ModelsAdmissionWithdrawCommand.self,
         ]
     )
 }
@@ -258,6 +259,80 @@ struct ModelsAdmissionStatusCommand: AsyncParsableCommand {
             let runtime = BYOMModelAdmissionRuntime(environment: environment, client: client)
             let status = try await runtime.status(providerID: resolved.providerID, target: candidate)
             try ModelSwitchingWireCodec.printJSON(status)
+        } catch let error as BYOMModelAdmissionError {
+            writeStderr(error.description)
+            throw ExitCode(2)
+        }
+    }
+}
+
+struct ModelsAdmissionWithdrawCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "withdraw",
+        abstract: "Withdraw a coordinator-backed BYOM admission offer."
+    )
+
+    @Argument(help: "Candidate id, served model reference, or display name from models discover --json.")
+    var candidate: String
+
+    @Flag(name: .customLong("json"), help: "Emit the strict model_admission_withdraw.v1 JSON contract.")
+    var emitJSON = false
+
+    @Flag(help: "Confirm coordinator state mutation for BYOM withdrawal.")
+    var yes = false
+
+    @Option(help: "Closed withdrawal reason code.")
+    var reasonCode: String = "provider_requested"
+
+    @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
+    var config: String?
+
+    @Option(help: "Coordinator WebSocket/HTTPS URL. Overrides MACPROVIDER_COORDINATOR_URL and config file coordinator_url.")
+    var coordinatorURL: String?
+
+    @Option(help: "Stable provider identifier. Overrides MACPROVIDER_PROVIDER_ID and config file provider_id.")
+    var providerID: String?
+
+    @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
+    var localDiscoveryNamespacePath: String?
+
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    var mlxCacheDir: String?
+
+    @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var ollamaOrigin: String = "http://127.0.0.1:11434"
+
+    @Flag(help: "Skip the Ollama-compatible loopback adapter during candidate lookup.")
+    var skipOllama = false
+
+    func run() async throws {
+        guard emitJSON else {
+            writeStderr("models admission withdraw is JSON-only in this release; pass --json")
+            throw ExitCode(2)
+        }
+        guard yes else {
+            writeStderr("models admission withdraw mutates coordinator admission state; pass --yes --json after reviewing models admission status --json")
+            throw ExitCode(2)
+        }
+        do {
+            let resolved = try loadModelAdmissionConfig(
+                config: config,
+                coordinatorURL: coordinatorURL,
+                providerID: providerID
+            )
+            let environment = BYOMDiscoveryEnvironment.production(
+                namespacePath: localDiscoveryNamespacePath,
+                mlxCacheDir: mlxCacheDir,
+                ollamaOrigin: skipOllama ? nil : ollamaOrigin
+            )
+            let client = try BYOMModelAdmissionClient(coordinatorURL: resolved.coordinatorURL)
+            let runtime = BYOMModelAdmissionRuntime(environment: environment, client: client)
+            let withdrawal = try await runtime.withdraw(
+                providerID: resolved.providerID,
+                target: candidate,
+                reasonCode: reasonCode
+            )
+            try ModelSwitchingWireCodec.printJSON(withdrawal)
         } catch let error as BYOMModelAdmissionError {
             writeStderr(error.description)
             throw ExitCode(2)

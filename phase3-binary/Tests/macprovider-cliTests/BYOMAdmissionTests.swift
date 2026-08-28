@@ -168,6 +168,172 @@ final class BYOMAdmissionTests: XCTestCase {
         XCTAssertEqual(status.admissionStateSource, "coordinator")
     }
 
+    func testWithdrawCommandRequiresExplicitYesForCoordinatorMutation() async throws {
+        let command = try ModelsAdmissionWithdrawCommand.parse([
+            "ollama:tiny-offer-1b-q4",
+            "--json",
+            "--skip-ollama",
+            "--coordinator-url", "wss://coordinator.example/ws/provider",
+            "--provider-id", "provider-byom-a",
+        ])
+        let capture = await captureBYOMAdmissionOutput {
+            try await command.run()
+        }
+
+        XCTAssertFalse(command.yes)
+        XCTAssertEqual((capture.error as? ExitCode), ExitCode(2))
+    }
+
+    func testWithdrawalPackageBindsAdmissionIdentityAndNullableCatalogKey() throws {
+        let identity = Curve25519.Signing.PrivateKey()
+        let candidate = byomAdmissionCandidate(
+            candidateID: stableBYOMAdmissionCandidateID("o"),
+            servedModelRef: "ollama:qwen3-8b"
+        )
+
+        let package = try BYOMWithdrawalBuilder.makePackage(
+            providerID: "provider-byom-a",
+            candidate: candidate,
+            admissionIdentity: identity,
+            reasonCode: "provider_requested",
+            now: Date(timeIntervalSince1970: 1_800_000_000),
+            nonce: "withdraw_nonce_test",
+            idempotencyKey: "withdraw_request_test",
+            cliVersion: "test"
+        )
+
+        XCTAssertEqual(package.request.schema, "model_admission_withdraw_request.v1")
+        XCTAssertEqual(package.request.signatureDomain, "macprovider.model_admission.withdraw.v1")
+        XCTAssertEqual(package.request.providerID, "provider-byom-a")
+        XCTAssertNil(package.request.catalogModelKey)
+        XCTAssertEqual(package.request.reasonCode, "provider_requested")
+        XCTAssertFalse(String(decoding: package.encodedRequest, as: UTF8.self).contains("previous_admission_state"))
+        XCTAssertFalse(String(decoding: package.encodedRequest, as: UTF8.self).contains("endpoint"))
+        XCTAssertFalse(String(decoding: package.encodedRequest, as: UTF8.self).contains("payout"))
+
+        let canonical = try RFC8785JCS.canonicalString(package.request.canonicalValue())
+        let signature = try XCTUnwrap(Data(base64Encoded: package.request.providerSignature))
+        XCTAssertTrue(identity.publicKey.isValidSignature(signature, for: Data(canonical.utf8)))
+    }
+
+    func testAdmissionRuntimeWithdrawPostsPackageAndPreservesNonEarningStatus() async throws {
+        let root = try temporaryBYOMAdmissionDirectory("byom-admission-withdraw")
+        let namespace = root.appendingPathComponent("ns")
+        let cache = root.appendingPathComponent("hf", isDirectory: true)
+        try writeBYOMAdmissionNamespace(at: namespace)
+        try createBYOMAdmissionMLXSnapshot(cacheRoot: cache, modelID: "mlx-community/Tiny-1B-4bit")
+
+        let identity = Curve25519.Signing.PrivateKey()
+        let credentialStore = BYOMAdmissionCredentialStore(token: "provider-token-test")
+        let identityStore = BYOMAdmissionIdentityStore(identity: identity)
+        let session = makeBYOMAdmissionSession { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer provider-token-test")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/v1/provider/model-admission/withdrawals")
+            let body = try XCTUnwrap(byomAdmissionRequestBody(request))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            XCTAssertEqual(object["schema"] as? String, "model_admission_withdraw_request.v1")
+            XCTAssertEqual(object["signature_domain"] as? String, "macprovider.model_admission.withdraw.v1")
+            XCTAssertEqual(object["provider_id"] as? String, "provider-byom-a")
+            XCTAssertEqual(object["served_model_ref"] as? String, "mlx-community/Tiny-1B-4bit")
+            XCTAssertEqual(object["reason_code"] as? String, "wrong_model")
+            XCTAssertNil(object["catalog_model_key"] as? String)
+            XCTAssertNil(object["previous_admission_state"])
+            XCTAssertNotNil(object["provider_signature"] as? String)
+            let candidateID = try XCTUnwrap(object["candidate_id"] as? String)
+            let idempotencyKey = try XCTUnwrap(object["idempotency_key"] as? String)
+            return BYOMAdmissionMockHTTPResponse(
+                statusCode: 200,
+                body: """
+                {"accepted_at":"2027-01-15T08:00:01Z","candidate_id":"\(candidateID)","catalog_model_key":null,"cli_version":"test","coordinator_event_id":"withdraw_event_test","generated_at":"2027-01-15T08:00:01Z","idempotency_key":"\(idempotencyKey)","previous_admission_state":"offer_submitted","provider_guidance":{"earning_path_class":"no_earning_path_in_v0_1","next_action":"submit_offer","state_label_key":"byom.admission.withdrawn","state_meaning_key":"byom.admission.not_earning","transition_reason_code":"wrong_model"},"provider_id":"provider-byom-a","reason_code":"wrong_model","resulting_admission_state":"withdrawn","schema":"model_admission_withdraw.v1","served_model_ref":"mlx-community/Tiny-1B-4bit","warnings":[]}
+                """
+            )
+        }
+        let runtime = BYOMModelAdmissionRuntime(
+            environment: BYOMDiscoveryEnvironment(namespaceURL: namespace, mlxCacheRoot: cache, ollamaOrigin: nil),
+            credentialStore: credentialStore,
+            identityStore: identityStore,
+            client: BYOMModelAdmissionClient(baseURL: URL(string: "https://coordinator.test")!, session: session),
+            httpClient: BYOMAdmissionDiscoveryHTTPClient()
+        )
+
+        let withdrawal = try await runtime.withdraw(
+            providerID: "provider-byom-a",
+            target: "mlx-community/Tiny-1B-4bit",
+            reasonCode: "wrong_model"
+        )
+
+        XCTAssertEqual(withdrawal.schema, "model_admission_withdraw.v1")
+        XCTAssertEqual(withdrawal.resultingAdmissionState, "withdrawn")
+        XCTAssertEqual(withdrawal.providerGuidance.nextAction, "submit_offer")
+        XCTAssertEqual(withdrawal.providerGuidance.earningPathClass, "no_earning_path_in_v0_1")
+    }
+
+    func testAdmissionRuntimeWithdrawFallsBackToCoordinatorStatusWhenRuntimeUnavailable() async throws {
+        let root = try temporaryBYOMAdmissionDirectory("byom-admission-withdraw-status-fallback")
+        let namespace = root.appendingPathComponent("ns")
+        let cache = root.appendingPathComponent("hf", isDirectory: true)
+        try writeBYOMAdmissionNamespace(at: namespace)
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+
+        let candidateID = stableBYOMAdmissionCandidateID("q")
+        let identity = Curve25519.Signing.PrivateKey()
+        let credentialStore = BYOMAdmissionCredentialStore(token: "provider-token-test")
+        let identityStore = BYOMAdmissionIdentityStore(identity: identity)
+        let recorder = BYOMAdmissionRequestRecorder()
+        let session = makeBYOMAdmissionSession { request in
+            let count = recorder.record(request)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer provider-token-test")
+            if request.url?.path == "/v1/provider/model-admission/status" {
+                XCTAssertEqual(count, 1)
+                XCTAssertEqual(request.httpMethod, "GET")
+                XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                    .queryItems?.first(where: { $0.name == "candidate_id" })?.value, candidateID)
+                return BYOMAdmissionMockHTTPResponse(
+                    statusCode: 200,
+                    body: """
+                    {"admission_state":"offer_submitted","admission_state_source":"coordinator","allowed_next_states":["offer_rejected","sandbox_probe_only","network_visible_unpriced","network_admitted_unsettled","catalog_priced","withdrawn","revoked"],"candidate_id":"\(candidateID)","catalog_model_key":"qwen3-8b","cli_version":"test","coordinator_event_id":"event_test","generated_at":"2027-01-15T08:00:00Z","provider_guidance":{"earning_path_class":"not_earning_yet_catalog_or_receipt_path_exists","next_action":"wait_for_coordinator","state_label_key":"byom.admission.offer_submitted","state_meaning_key":"byom.admission.not_earning","transition_reason_code":null},"provider_id":"provider-byom-a","schema":"model_admission_status.v1","served_model_ref":"ollama:qwen3-8b","state_observed_at":"2027-01-15T08:00:00Z","warnings":[]}
+                    """
+                )
+            }
+            XCTAssertEqual(count, 2)
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/v1/provider/model-admission/withdrawals")
+            let body = try XCTUnwrap(byomAdmissionRequestBody(request))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            XCTAssertEqual(object["schema"] as? String, "model_admission_withdraw_request.v1")
+            XCTAssertEqual(object["candidate_id"] as? String, candidateID)
+            XCTAssertEqual(object["served_model_ref"] as? String, "ollama:qwen3-8b")
+            XCTAssertEqual(object["catalog_model_key"] as? String, "qwen3-8b")
+            XCTAssertEqual(object["reason_code"] as? String, "runtime_unavailable")
+            let idempotencyKey = try XCTUnwrap(object["idempotency_key"] as? String)
+            return BYOMAdmissionMockHTTPResponse(
+                statusCode: 200,
+                body: """
+                {"accepted_at":"2027-01-15T08:00:01Z","candidate_id":"\(candidateID)","catalog_model_key":"qwen3-8b","cli_version":"test","coordinator_event_id":"withdraw_event_test","generated_at":"2027-01-15T08:00:01Z","idempotency_key":"\(idempotencyKey)","previous_admission_state":"offer_submitted","provider_guidance":{"earning_path_class":"no_earning_path_in_v0_1","next_action":"submit_offer","state_label_key":"byom.admission.withdrawn","state_meaning_key":"byom.admission.not_earning","transition_reason_code":"runtime_unavailable"},"provider_id":"provider-byom-a","reason_code":"runtime_unavailable","resulting_admission_state":"withdrawn","schema":"model_admission_withdraw.v1","served_model_ref":"ollama:qwen3-8b","warnings":[]}
+                """
+            )
+        }
+        let runtime = BYOMModelAdmissionRuntime(
+            environment: BYOMDiscoveryEnvironment(namespaceURL: namespace, mlxCacheRoot: cache, ollamaOrigin: nil),
+            credentialStore: credentialStore,
+            identityStore: identityStore,
+            client: BYOMModelAdmissionClient(baseURL: URL(string: "https://coordinator.test")!, session: session),
+            httpClient: BYOMAdmissionDiscoveryHTTPClient()
+        )
+
+        let withdrawal = try await runtime.withdraw(
+            providerID: "provider-byom-a",
+            target: candidateID,
+            reasonCode: "runtime_unavailable"
+        )
+
+        XCTAssertEqual(withdrawal.resultingAdmissionState, "withdrawn")
+        XCTAssertEqual(withdrawal.servedModelRef, "ollama:qwen3-8b")
+        XCTAssertEqual(withdrawal.catalogModelKey, "qwen3-8b")
+        XCTAssertEqual(recorder.count, 2)
+    }
+
     func testAdmissionStatusClientAcceptsCatalogPricedSettlementTransition() async throws {
         let session = makeBYOMAdmissionSession { _ in
             BYOMAdmissionMockHTTPResponse(
@@ -252,6 +418,32 @@ final class BYOMAdmissionTests: XCTestCase {
             evaluationDigestSHA256: String(repeating: "b", count: 64),
             requestedDisclosureClass: "non_earning_provider_asserted"
         ))
+    }
+
+    func testWithdrawalPackageRejectsUnstableCandidateAndInvalidReason() throws {
+        let identity = Curve25519.Signing.PrivateKey()
+        let unstable = byomAdmissionCandidate(
+            candidateID: "byom_unstable_123",
+            servedModelRef: "ollama:qwen3-8b",
+            warningCodes: ["candidate_id_unstable"]
+        )
+        XCTAssertThrowsError(try BYOMWithdrawalBuilder.makePackage(
+            providerID: "provider-byom-a",
+            candidate: unstable,
+            admissionIdentity: identity,
+            reasonCode: "provider_requested"
+        )) { error in
+            XCTAssertEqual(error as? BYOMModelAdmissionError, .candidateUnstable)
+        }
+        let stable = byomAdmissionCandidate(candidateID: stableBYOMAdmissionCandidateID("p"), servedModelRef: "ollama:qwen3-8b")
+        XCTAssertThrowsError(try BYOMWithdrawalBuilder.makePackage(
+            providerID: "provider-byom-a",
+            candidate: stable,
+            admissionIdentity: identity,
+            reasonCode: "because I said so"
+        )) { error in
+            XCTAssertEqual(error as? BYOMModelAdmissionError, .invalidWithdrawalReason)
+        }
     }
 
     func testAdmissionClientRejectsNonClosedOrInvalidStatusEnvelope() async throws {
@@ -485,6 +677,24 @@ private func byomAdmissionRequestBody(_ request: URLRequest) -> Data? {
         data.append(buffer, count: count)
     }
     return data
+}
+
+private final class BYOMAdmissionRequestRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requests: [URLRequest] = []
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests.count
+    }
+
+    func record(_ request: URLRequest) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        requests.append(request)
+        return requests.count
+    }
 }
 
 private final class BYOMAdmissionMockURLProtocol: URLProtocol {
