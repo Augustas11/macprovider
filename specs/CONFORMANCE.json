@@ -1308,7 +1308,7 @@
     {
       "spec_id": "SPEC-044",
       "title": "Malibu Model Catalog Economics",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1326,7 +1326,9 @@
         "SPEC-023",
         "SPEC-025",
         "SPEC-032",
-        "SPEC-033"
+        "SPEC-033",
+        "SPEC-046",
+        "SPEC-047"
       ],
       "implementation_status": "pending-reconciliation",
       "production_status": "not-deployed",
@@ -1374,6 +1376,82 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/927",
         "rationale": "Issue #927 needs a buyer-side local endpoint that existing OpenAI-compatible tools can point at while keeping buyer credentials, model admission, local estimated-exposure limits, status, and restart behavior explicit. No standalone local consumer endpoint contract exists today."
+      }
+    },
+    {
+      "spec_id": "SPEC-046",
+      "title": "Provider BYOM Discovery",
+      "version": "0.1.0",
+      "path": "specs/SPEC-046-provider-byom-discovery.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-byom-discovery"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-013",
+        "SPEC-018",
+        "SPEC-019",
+        "SPEC-023",
+        "SPEC-032",
+        "SPEC-033",
+        "SPEC-045"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Issue #1240 changes the Malibu model strategy from catalog-first discovery to provider-local BYOM discovery while keeping paid network admission separate. No provider-side discovery/evaluation contract exists today."
+      }
+    },
+    {
+      "spec_id": "SPEC-047",
+      "title": "Network Model Admission",
+      "version": "0.1.0",
+      "path": "specs/SPEC-047-network-model-admission.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "network-model-admission"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-015",
+        "SPEC-018",
+        "SPEC-019",
+        "SPEC-022",
+        "SPEC-023",
+        "SPEC-032",
+        "SPEC-033",
+        "SPEC-046"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Issue #1240 requires a self-service path from provider-local BYOM candidates to network offer/admission states without weakening signed catalog economics, route-time verification, receipt, billing, or payout gates."
       }
     }
   ],
@@ -6860,6 +6938,262 @@
         }
       ],
       "gap": null
+    },
+    {
+      "requirement_id": "SPEC-046-R001",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R002",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R003",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R004",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R005",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R006",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R007",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R008",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R001",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R002",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R003",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R004",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R005",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R006",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R007",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R008",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
     }
   ]
 }

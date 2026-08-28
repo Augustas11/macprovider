@@ -1,12 +1,12 @@
 # SPEC-044 - Malibu Model Catalog Economics
 
-**Version:** 0.1.0
+**Version:** 0.1.1
 
 ```json
 {
   "spec_id": "SPEC-044",
   "title": "Malibu Model Catalog Economics",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -22,7 +22,9 @@
     "SPEC-023",
     "SPEC-025",
     "SPEC-032",
-    "SPEC-033"
+    "SPEC-033",
+    "SPEC-046",
+    "SPEC-047"
   ],
   "implementation_status": "pending-reconciliation",
   "production_status": "not-deployed",
@@ -41,15 +43,17 @@
 
 ## 1. Purpose and scope
 
-SPEC-044 defines the next Malibu provider-facing model selection experience: a native Mac app view that helps a provider understand which network models their machine can serve, what the signed catalog currently pays per token, which choices are locally ready, and which catalog choices need preparation before they can be safely served.
+SPEC-044 defines the next Malibu provider-facing network economics experience: a native Mac app view that helps a provider understand which network-eligible models their machine can serve, what the signed catalog currently pays per token, which choices are locally ready, and which catalog choices need preparation before they can be safely served.
 
 The user outcome is simple: a provider should not be trapped behind the single model selected during `macprovider-cli` install. Malibu should make better model choices legible, explain the economic upside in rate-card terms, and route every action through the installed CLI's signed, versioned transactions.
 
-This spec is required because model choice now crosses product UX, signed model catalog identity, autotune recommendation, rate-card projection, warm-swap safety, and money-facing copy. A static UI can be app-local; a multi-model economics UI is a release contract.
+This spec is required because network-eligible model choice now crosses product UX, signed model catalog identity, autotune recommendation, rate-card projection, warm-swap safety, and money-facing copy. A static UI can be app-local; a multi-model economics UI is a release contract.
+
+SPEC-044 is not the full model universe for Malibu. Provider-local bring-your-own-model discovery is owned by SPEC-046, and promotion from discovered candidate to network-admission state is owned by SPEC-047. SPEC-044 applies only when Malibu presents network eligibility, signed catalog economics, or actions that depend on those states.
 
 ### Explicit non-goals
 
-SPEC-044 does not create an open third-party model marketplace. Models shown as actionable must still come from the MacProvider-owned signed catalog and supported runtime set.
+SPEC-044 does not create an open third-party model marketplace and does not own provider-local model discovery. Models shown with trusted catalog economics or catalog-dependent actions must still come from a network-eligible admission state and, when economics are shown, from the MacProvider-owned signed catalog/rate-card trust path.
 
 SPEC-044 does not redefine billing rates, buyer pricing, provider payout formulas, settlement, or token accounting. SPEC-005 remains authoritative for billing formulas, routing price inputs, provider payout math, settlement economics, and rate-card calculation.
 
@@ -75,9 +79,13 @@ SPEC-020 and SPEC-025 own provider release/update authority and Malibu app lifec
 
 SPEC-032 and SPEC-033 own hardware evidence and verifier boundaries. SPEC-044 consumes fit and eligibility states produced by those owner specs and must not infer trust from app-observed hardware alone.
 
+SPEC-046 owns provider-local BYOM discovery and evaluation. SPEC-044 may display discovery or evaluation state only as a non-economics local-readiness signal when a later Malibu app version consumes the SPEC-046 CLI projection; it must not convert a discovered candidate into a network row.
+
+SPEC-047 owns network model admission. SPEC-044 may present economics only for rows whose SPEC-047 admission state and owner-spec trust inputs permit signed catalog economics; it must hide economics for `local_only`, `not_offered`, `offerable`, `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `withdrawn`, or `revoked` states.
+
 ## 3. Normative requirements
 
-**SPEC-044-R001 - CLI-owned economics projection.** Malibu MUST obtain model economics, readiness, trust state, and actions from an installed, signed `macprovider-cli` projection advertised by a capability named `model_catalog_economics_v1` or a later compatible capability. Malibu MUST NOT fetch coordinator rate feeds, parse static feed files, verify feed signatures, compute billing rates from raw feed bytes, or derive action eligibility from app-local heuristics.
+**SPEC-044-R001 - CLI-owned economics projection.** Malibu MUST obtain model economics, network readiness, trust state, and actions from an installed, signed `macprovider-cli` projection advertised by a capability named `model_catalog_economics_v1` or a later compatible capability. Malibu MUST NOT fetch coordinator rate feeds, parse static feed files, verify feed signatures, compute billing rates from raw feed bytes, derive action eligibility from app-local heuristics, or present a SPEC-046 discovered candidate as a network economics row unless SPEC-047 admission state permits that presentation.
 
 **SPEC-044-R002 - Versioned row schema.** The CLI projection MUST emit a closed, versioned JSON envelope with `schema: "model_catalog_economics.v1"`, a wall-clock RFC3339 `generated_at`, a monotonic unsigned integer `projection_sequence`, a `source` object identifying the CLI build and feed provenance, an array of rows, and a projection-level `warnings` array. The v1 `source` object MUST include `cli_version`, `cli_build_commit`, `process_launch_id`, `process_started_at`, `projection_protocol_version`, `rate_card_source`, nullable `rate_card_digest`, nullable `rate_card_signature_digest`, nullable `demand_feed_digest`, nullable `candidate_feed_digest`, and `rate_card_max_age_seconds`; `process_launch_id` MUST be a lowercase hyphen-separated UUID v4 string generated fresh on CLI process start from at least 128 bits of CSPRNG entropy and MUST NOT be derivable from a PID, host serial, MAC address, host UUID, provider id, wallet, username, or any other hardware or identity value. `source.rate_card_source` MUST use the same closed enum as row `rate_source`: `live_signed`, `static_signed`, or `none`. `projection_sequence` MUST increase within a single CLI process for each newly generated projection and MAY reset after CLI restart; callers MUST use it only to order projections that have the same `source.process_launch_id`. When Malibu observes a new `source.process_launch_id`, it MUST treat the projection as a new CLI session, reset its ordering baseline, discard older in-flight projection ordering comparisons, and show a brief reconnecting or refreshing state before rendering the new projection. Each row MUST include model identity (`model_key`, `served_model_id`, `display_model_id`, nullable `action_model_id`), local state (`is_current`, `weights_present_locally`, `runtime_state`, nullable `estimated_gb`, `fit`, nullable `disabled_reason`, `warning_codes`), economics (nullable `rate_card_version`, nullable `rate_card_generated_at`, nullable `rate_card_key`, `rate_source`, nullable `prompt_rate_usd_per_million_tokens`, nullable `completion_rate_usd_per_million_tokens`, nullable `provider_share_bps`, nullable `provider_prompt_payout_usd_per_million_tokens`, nullable `provider_completion_payout_usd_per_million_tokens`, `economics_state`), demand signals (nullable `demand_rank`, nullable `demand_weight`, nullable `ready_provider_count`, nullable `supply_deficit_score`), and actions (`switch`, `prepare`, `evaluate`, `adopt_recommendation`, `cleanup_staging`) as explicit objects with `available`, `requires_confirmation`, nullable `transaction_kind`, nullable `transaction_id`, nullable `action_timeout_seconds`, nullable `estimated_bytes`, and nullable `unavailable_reason`. Row `warning_codes` MUST be an array of closed warning-code enum values that apply to that specific row; the top-level `warnings` array applies to the projection as a whole. `economics_state: "trusted"` MUST include non-null rate-card identity, provider-share, and prompt/completion catalog and payout fields. Rows with `rate_source: "none"` or `economics_state: "unavailable"` MUST set rate-card identity and all rate/payout numeric fields to null rather than placeholder zero values. Rows with `economics_state: "blocked"` MUST set money-facing rate/payout fields to null unless the CLI can still identify a verified signed rate card while blocking actions for a non-rate reason; Malibu MUST hide economics copy for blocked rows unless `economics_state` is `trusted`. Rows with `economics_state: "fallback"` or `"stale"` MAY include the signed/static/stale rate fields only as disabled warning context and MUST NOT render them as actionable trusted economics. For an available action, `transaction_kind`, `transaction_id`, and `action_timeout_seconds` MUST be non-null; `action_timeout_seconds` MUST be greater than zero and MUST NOT exceed 1800 seconds. For available `switch_model`, `prepare_model`, `switch_model_deferred`, `cleanup_staging`, `adopt_recommendation`, and any `evaluate_model` action with non-null `estimated_bytes` or `action_timeout_seconds` greater than 10 seconds, `requires_confirmation` MUST be true, and Malibu MUST enforce confirmation for those transaction kinds even if a malformed projection sets the flag false. For an unavailable action, `transaction_kind`, `transaction_id`, and `action_timeout_seconds` MUST be null. A row's `rate_source` MUST be equal to `source.rate_card_source` unless the row uses a more conservative value, where `none` is more conservative than `static_signed`, and `static_signed` is more conservative than `live_signed`. Closed v1 enum values are: `runtime_state` = `current`, `ready`, `catalog`, `needs_preparation`, `blocked`; `fit` = `fits`, `does_not_fit`, `unknown`; `rate_source` = `live_signed`, `static_signed`, `none`; `economics_state` = `trusted`, `fallback`, `stale`, `blocked`, `unavailable`; warning codes = `feed_fallback`, `feed_stale`, `feed_signature_invalid`, `feed_generation_mismatch`, `rate_multiplier_unknown`, `model_not_local`, `model_not_supported`, `hardware_fit_unknown`, `hardware_does_not_fit`, `warm_swap_unavailable`, `action_unavailable`, `old_cli_fallback`, `projection_unavailable`, `projection_timeout`, `staging_cleanup_required`; action `transaction_kind` = `switch_model`, `switch_model_deferred`, `prepare_model`, `evaluate_model`, `adopt_recommendation`, `cleanup_staging`, or null when unavailable. The v1 transaction event stream MUST use a closed JSON-lines envelope with `schema: "model_catalog_transaction_event.v1"`, matching `transaction_id`, matching `transaction_kind`, `model_key`, monotonic per-transaction `event_sequence`, RFC3339 `emitted_at`, `state`, nullable `progress`, nullable `error_code`, and nullable `warning_code`. Closed event `state` values are `queued`, `running`, `cancel_requested`, `cancelled`, `succeeded`, `failed`, and `timed_out`; `progress`, when present, MUST include a localized-safe `stage_label_key` and at least one of `bytes_completed`/nullable `bytes_expected`, `percent_complete`, or `heartbeat`. Cancellation MUST be requested through the same CLI-owned transaction interface, MUST produce either `cancel_requested` followed by `cancelled` or a terminal `succeeded`/`failed` if the commit point has already passed, and MUST never require Malibu to kill the CLI process or delete files directly. Unknown enum values, unknown action transaction kinds, malformed event envelopes, or event transaction mismatches MUST make the affected row or transaction non-actionable and show a generic unsupported warning; they MUST NOT make Malibu reject the whole projection unless the projection envelope schema itself is unsupported.
 
@@ -120,6 +128,7 @@ The first journey id is `JOURNEY-MALIBU-MODEL-ECONOMICS`. The journey should cov
 |---|---|---|---|---|
 | `SPEC-044-R001..R012` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Product approval of the economics UX copy, CLI projection schema, typed action set, automated test mapping, and signed release journey. |
 | `malibu-model-economics-ux` | `DECISION_REQUIRED` | `@Augustas11` | `#614` | Authority acceptance that Malibu may present signed catalog economics only as a CLI-owned projection and not as app-side feed verification. |
+| `SPEC-046/SPEC-047 integration` | `DECISION_REQUIRED` | `@Augustas11` | `#1240` | Approval that SPEC-044 is narrowed to network economics and does not own provider-local BYOM discovery or network admission. |
 
 ## 6. Evidence
 
@@ -133,6 +142,8 @@ Current implementation evidence is partial and non-conformant:
 - `phase5-gateway/internal/router/public_feeds.go`, `phase4-coordinator/internal/buyer/autotune_feeds.go`, and `phase4-coordinator/internal/buyer/rate_card.go` already expose and verify rate-card feed material used by the CLI path.
 
 No requirement is conformant until the new projection, UI, tests, and signed journey evidence land.
+
+Issue #1240 records the direction change that SPEC-044 is a network economics UX contract, not the only source of Malibu model discovery.
 
 ## 7. Current contract notes
 
@@ -149,3 +160,4 @@ The app should preserve the current provider mental model: Malibu observes and a
 ## 8. Changelog and history
 
 - 0.1.0 - Initial draft. Defines CLI-owned model catalog economics projection, provider-safe rate display, preparation/switch action gates, stale-feed behavior, privacy boundary, and release evidence for a friendlier Malibu model selection experience.
+- 0.1.1 - Draft amendment for issue #1240. Narrows SPEC-044 to network-eligible economics and delegates provider-local BYOM discovery/admission to SPEC-046 and SPEC-047.

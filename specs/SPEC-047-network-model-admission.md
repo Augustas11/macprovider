@@ -1,0 +1,129 @@
+# SPEC-047 - Network Model Admission
+
+**Version:** 0.1.0
+
+```json
+{
+  "spec_id": "SPEC-047",
+  "title": "Network Model Admission",
+  "version": "0.1.0",
+  "path": "specs/SPEC-047-network-model-admission.md",
+  "status": "draft",
+  "owner": "@Augustas11",
+  "authority_domains": ["network-model-admission"],
+  "supersedes": [],
+  "depends_on": ["SPEC-001", "SPEC-002", "SPEC-005", "SPEC-006", "SPEC-010", "SPEC-011", "SPEC-015", "SPEC-018", "SPEC-019", "SPEC-022", "SPEC-023", "SPEC-032", "SPEC-033", "SPEC-046"],
+  "implementation_status": "pending-reconciliation",
+  "production_status": "not-deployed",
+  "last_reconciled_commit": null,
+  "last_reconciled_at": null,
+  "evidence": [],
+  "requirement_id_migration": "complete",
+  "gap": {
+    "verdict": "DECISION_REQUIRED",
+    "owner": "@Augustas11",
+    "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+    "rationale": "Issue #1240 requires a self-service path from provider-local BYOM candidates to network offer/admission states without weakening signed catalog economics, route-time verification, receipt, billing, or payout gates."
+  }
+}
+```
+
+## 1. Purpose and scope
+
+SPEC-047 defines how a provider-local candidate discovered under SPEC-046 may be offered to the Malibu network and, after explicit checks, become eligible for network visibility, synthetic probes, buyer routing, catalog pricing, and settlement-capable paid traffic. Any synthetic probe is routed through the authenticated provider wire protocol or an admitted provider session; the coordinator MUST NOT dereference provider-submitted endpoint URLs, origins, sockets, or local paths.
+
+The user outcome is a self-service path for providers to bring more models to the network without making Malibu the manual gatekeeper for every possible model. The settlement outcome is equally important: positive provider credit still requires a route-time admitted snapshot and settlement-capable receipt profile governed by the money-path specs.
+
+SPEC-047 is CLI-first and coordinator-backed. The native Malibu app may later present admission state, but it must not mint or infer admission locally.
+
+Accepted journey id: `JOURNEY-NETWORK-MODEL-ADMISSION`.
+
+### Explicit non-goals
+
+SPEC-047 does not replace SPEC-005 billing formulas, SPEC-006 buyer API compatibility, SPEC-010 signed catalog identity, SPEC-015 receipt wire ownership, or SPEC-022 verified settlement.
+
+SPEC-047 does not allow a discovered model, opaque endpoint, provider-proposed price, local evaluation result, or runtime-reported identity to create positive provider credit by itself.
+
+SPEC-047 does not define open public submission from arbitrary internet endpoints. v0.1 admission starts from an authenticated provider and a SPEC-046 candidate.
+
+SPEC-047 does not make unsupported model quality, malicious output, privacy, or model honesty guarantees beyond the explicit admission and disclosure state.
+
+## 2. Dependencies and authority
+
+SPEC-047 owns `network-model-admission`: candidate offer packages, coordinator admission state, state transitions, disclosure classes, revocation, and the boundary between local discovery and network eligibility.
+
+SPEC-001 owns the provider CLI and provider wire-protocol surfaces that submit, advertise, and refresh admitted model state.
+
+SPEC-002 owns coordinator admission/routing and remains authoritative for whether a provider/model pair is routable for a buyer request.
+
+SPEC-005 owns billing formulas, rate math, provider rewards, settlement, and payout-ready ledger behavior.
+
+SPEC-006 owns public buyer API model visibility, error semantics, and buyer-facing disclosure.
+
+SPEC-010 owns canonical signed catalog identity. SPEC-047 may create network offer state for non-catalog candidates, but only SPEC-010-compatible or catalog-derived identities can satisfy catalog-verified settlement.
+
+SPEC-011 owns loaded-model state and warm-swap model-hash emission required before settlement-capable routing.
+
+SPEC-015 and SPEC-022 own receipt and verified-settlement conditions. SPEC-047 adds admission state; it does not by itself make a receipt settlement-capable.
+
+SPEC-018 and SPEC-019 own feature semantics for tool-calling and structured output. Admission may record support levels but cannot redefine those protocols.
+
+SPEC-023 owns signed static feed and rate-card trust. SPEC-047 may consume feed identity, but cannot make unsigned provider price proposals trusted catalog economics.
+
+SPEC-032 and SPEC-033 own hardware evidence and verifier semantics. SPEC-047 consumes hardware evidence only through those owner specs.
+
+SPEC-044 consumes SPEC-047 admission state for Malibu economics UX when the app presents network-eligible or catalog-priced rows. SPEC-047 supplies admission state and does not depend on app presentation to enforce routing or settlement.
+
+SPEC-046 owns discovery/evaluation inventory. SPEC-047 consumes its candidate and evaluation envelopes.
+
+## 3. Normative requirements
+
+**SPEC-047-R001 - Admission state machine.** Coordinator-backed admission MUST use a closed per-provider/per-candidate state machine with these v0.1 states: `not_offered`, `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `catalog_priced`, `settlement_capable`, `withdrawn`, and `revoked`. State transitions MUST be append-only auditable events with actor, reason code, previous state, next state, provider id, candidate id, served model reference, evidence digests, timestamp, and request id. `settlement_capable` MUST NOT be reachable unless SPEC-022 verified-settlement preconditions are satisfiable for that provider/model pair at route time.
+
+**SPEC-047-R002 - Offer package schema.** `macprovider-cli models offer <candidate> --dry-run --json` MUST produce a local preflight result and MUST NOT submit state. `macprovider-cli models offer <candidate> --json` MUST submit a provider-signed offer package only after the operator confirms the candidate, runtime source, served model reference, disclosure class, and non-earning states. The v0.1 offer package MUST be a closed schema; unknown fields MUST be rejected before persistence, state transition, probing, or routing. The v0.1 offer package MUST include schema id, provider id, candidate id, SPEC-046 discovery digest, optional SPEC-046 evaluation digest, runtime source enum, served model reference, catalog match if any, artifact/hash evidence if available, advisory capabilities, fit evidence source, local readiness, requested disclosure class, timestamp, nonce, and provider signature. It MUST NOT include raw prompts, raw completions, endpoint URLs, endpoint origins, hostnames, IP addresses, ports, Unix-domain socket paths, local file paths, raw endpoint credentials, buyer credentials, wallet secrets, or unredacted adapter error bodies. Runtime source and served model reference are identity descriptors only; they MUST NOT be interpreted as network locations for coordinator-side dereference.
+
+**SPEC-047-R003 - Settlement boundary.** A model in `not_offered`, `offer_submitted`, `sandbox_probe_only`, `network_visible_unpriced`, or `network_admitted_unsettled` MUST NOT create buyer-final debit, positive provider credit, earnings visibility, payout-ready rows, catalog payout economics, or "verified" buyer-facing claims. `catalog_priced` MAY show signed rate-card economics only when SPEC-023 and SPEC-044 trust rules are satisfied, but it still MUST NOT create positive provider settlement unless SPEC-022 receipt and route-time verification requirements are also satisfied. `settlement_capable` is the only v0.1 BYOM admission state that may participate in positive provider settlement, and only for request attempts whose route-time snapshot and receipt verification satisfy SPEC-022.
+
+**SPEC-047-R004 - Pricing and economics.** Provider-proposed prices, local benchmark estimates, runtime-reported model names, and demand labels are advisory until converted into a signed MacProvider rate-card entry or a later billing-owner spec defines another trusted price source. The coordinator and Malibu MUST NOT display provider payout rates, expected earnings, higher-paying labels, or catalog economics for `not_offered`, `offer_submitted`, `offer_rejected`, `sandbox_probe_only`, `network_visible_unpriced`, `network_admitted_unsettled`, `withdrawn`, or `revoked` states. `catalog_priced` MAY display signed catalog economics under SPEC-044 while still hiding earning-eligible or settlement-ready claims until the state becomes `settlement_capable`. If an offer has no trusted price, buyer-visible surfaces MAY label it only as unpriced or experimental when explicitly opted in; provider-facing surfaces MUST state that the model is not earning-eligible.
+
+**SPEC-047-R005 - Buyer visibility and routing.** Default public buyer `/v1/models` and default buyer routing MUST include only models that are allowed by SPEC-006 and the active routing policy. Non-settlement BYOM states MUST be hidden from default paid routing. Experimental or unpriced visibility, if enabled, MUST require an explicit account, request, or operator policy opt-in and MUST return disclosure fields that distinguish provider-reported identity from catalog-verified identity. A sole-provider or low-supply condition MUST NOT relax catalog, admission, route-time snapshot, or settlement requirements.
+
+**SPEC-047-R006 - Drift, revocation, and withdrawal.** Providers MUST be able to withdraw an offered candidate through a CLI-owned command. The coordinator MUST revoke or demote an admitted candidate when required identity, artifact/hash, runtime health, hardware fit, policy, or receipt preconditions become stale, mismatched, expired, or unavailable. A provider heartbeat, warm-swap event, loaded-model hash, adapter identity, or runtime source that no longer matches the admitted route-time predicate MUST fail closed for buyer routing and settlement. Revocation MUST be visible in provider-facing status with a reason code and MUST NOT require deleting local model artifacts.
+
+**SPEC-047-R007 - Abuse and privacy controls.** Offer submission MUST be authenticated as the provider, rate-limited per provider identity, bounded by payload size and parser work, replay-protected by nonce or idempotency key, and audited. The coordinator MUST reject offers containing endpoint URLs, endpoint origins, hostnames, IP addresses, port values, Unix-domain socket paths, public/LAN/loopback/private/link-local/multicast address material, redirect targets, encoded network locations, secret-bearing fields, raw local absolute paths, HTML/script-bearing display names, control characters, ambiguous Unicode identifiers, or model identifiers that cannot be normalized under the chosen identity class. Offer state MUST be sanction-aware: a provider under a route, trust, payout, or registration sanction MUST NOT use BYOM admission to bypass that sanction.
+
+**SPEC-047-R008 - Release evidence.** Promotion beyond draft MUST include automated tests for offer dry-run non-submission, provider signature verification, replay rejection, closed-schema unknown-field rejection, endpoint/origin/socket/path rejection including loopback, localhost, IPv6 loopback, encoded IP, redirect, Unix-socket, and local-path variants, state-machine transition validity, synthetic probes using the provider wire protocol rather than coordinator dereference, settlement-boundary enforcement, default buyer invisibility for non-settlement states, explicit experimental disclosure if implemented, pricing trust nullability, revocation on drift, withdrawal, sanction interaction, payload redaction, parser/resource bounds, and SPEC-044 economics gating. Production promotion MUST include a signed journey result covering one rejected opaque endpoint, one sandbox-probe-only offer, one network-visible unpriced offer, one catalog-matched offer that is not yet settlement-capable, one revoked drift case, and one settlement-capable catalog-verified case.
+
+## 4. Implementation, tests, and journeys
+
+The intended implementation sequence is:
+
+1. Add CLI dry-run output for `models offer`.
+2. Add provider-signed offer package generation.
+3. Add coordinator append-only admission event storage.
+4. Add state-machine validation and provider status readback.
+5. Keep non-settlement BYOM states out of default buyer `/v1/models` and paid routing.
+6. Add SPEC-044 economics gating from admission state.
+7. Add revocation and withdrawal.
+8. Only then consider settlement-capable routing for catalog-verified candidates.
+
+The first journey id is `JOURNEY-NETWORK-MODEL-ADMISSION`.
+
+## 5. Open gaps
+
+| Requirement/domain | Verdict | Owner | Issue | Evidence needed |
+|---|---|---|---|---|
+| `SPEC-047-R001..R008` | `DECISION_REQUIRED` | `@Augustas11` | `#1240` | Product/security approval of admission states, settlement boundary, disclosure model, abuse controls, and signed admission journey. |
+| `network-model-admission` | `DECISION_REQUIRED` | `@Augustas11` | `#1240` | Authority acceptance that BYOM network offers may exist before they are catalog-priced or settlement-capable. |
+
+## 6. Evidence
+
+No implementation or production evidence exists yet.
+
+## 7. Current contract notes
+
+The route from local candidate to earning is intentionally multi-step: discovered locally, evaluated locally, offered to the network, admitted for limited network state, catalog-priced when a trusted rate-card source exists, and settlement-capable only when route-time verification and receipts satisfy SPEC-022. This makes model supply broad without letting arbitrary local endpoints mint provider credit.
+
+## 8. Changelog and history
+
+- v0.1.0 - Initial draft for issue #1240. Defines BYOM network admission state and preserves the billing/settlement gate.
