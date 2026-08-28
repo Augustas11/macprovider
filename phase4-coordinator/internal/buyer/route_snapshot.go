@@ -66,10 +66,19 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	}
 	material, ok := tier2.SnapshotMaterial(provider.ModelID, reportedHash)
 	if !ok {
+		if byomAdmissionCandidate(provider) {
+			return nil, fmt.Errorf("BYOM model admission requires trusted catalog material")
+		}
 		return skipOrEnforceError("missing catalog material")
 	}
 	if material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != expectedHash {
 		return nil, fmt.Errorf("tier2 catalog does not match signed admission row")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer cancel()
+	byomBinding, err := b.server.requireBYOMRouteSnapshotBinding(ctx, provider, material)
+	if err != nil {
+		return nil, err
 	}
 	promptHash, err := coordinatorPromptHash(providerBody)
 	if err != nil {
@@ -125,6 +134,7 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		// that served the request ("" for global -> omitted from the digest).
 		PoolID: b.state.poolID,
 	}
+	applyBYOMRouteSnapshotBinding(&snapshot, byomBinding)
 	computeIntegrityRequired, computeIntegrityCovered, computeIntegrityHardwareDigest, err := computeIntegrityRouteBinding(provider, routeMode)
 	if err != nil {
 		return nil, err
@@ -132,8 +142,6 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	snapshot.ComputeIntegrityCaptureRequired = computeIntegrityRequired
 	snapshot.ComputeIntegritySamplingCovered = computeIntegrityCovered
 	snapshot.ComputeIntegrityHardwareDigest = computeIntegrityHardwareDigest
-	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
-	defer cancel()
 	digest, err := store.InsertRouteSnapshot(ctx, snapshot)
 	if err != nil {
 		return nil, err

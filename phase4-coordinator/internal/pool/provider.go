@@ -170,6 +170,16 @@ type Provider struct {
 	CandidateCatalogSHA256 string `json:"catalog_candidate_sha256,omitempty"`
 	CatalogSignerKeyID     string `json:"catalog_signer_key_id,omitempty"`
 	CandidateRowIdentity   string `json:"catalog_row_identity,omitempty"`
+	// BYOM model-admission binding. These fields are coordinator-authored
+	// settlement inputs for provider-supplied models; provider-reported model
+	// names/catalog keys remain non-authoritative without a current admission
+	// event that matches this tuple.
+	ModelAdmissionCandidateID            string `json:"model_admission_candidate_id,omitempty"`
+	ModelAdmissionCoordinatorEventID     string `json:"model_admission_coordinator_event_id,omitempty"`
+	ModelAdmissionServedModelRef         string `json:"model_admission_served_model_ref,omitempty"`
+	ModelAdmissionCatalogModelKey        string `json:"model_admission_catalog_model_key,omitempty"`
+	ModelAdmissionDiscoveryDigestSHA256  string `json:"model_admission_discovery_digest_sha256,omitempty"`
+	ModelAdmissionEvaluationDigestSHA256 string `json:"model_admission_evaluation_digest_sha256,omitempty"`
 	// SPEC-015 v0.1.3 / SPEC-001 v1.6 — raw ed25519 public key bytes
 	// populated from auth_request.provider_receipt_public_key when present.
 	ReceiptPubkey []byte `json:"-"`

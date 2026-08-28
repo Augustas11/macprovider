@@ -748,6 +748,447 @@ func TestRouteSnapshotSkippedForNonSettlementCapableModelHash(t *testing.T) {
 	}
 }
 
+func TestBYOMCatalogPricedIsHiddenFromDefaultPaidModelsAndRouting(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "byom-catalog-priced-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:      true,
+		CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey:    pubkey,
+		RequireHashVerified: true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeObserve)
+	cfg := config.Default().Rewards
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+
+	var reachedProvider bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reachedProvider = true
+		writeProviderOK(w)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x78}, 32))
+	provider := byomAdmissionProvider(t, registry.Snapshot()[0])
+	store := providerws.NewMemoryModelAdmissionStore()
+	seedBYOMAdmissionState(t, store, provider, "catalog_priced")
+	routeProvider := clearBYOMAdmissionFields(provider)
+	registry.Register(&routeProvider, nil)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+		buyer.WithModelAdmissionStore(store),
+	)
+
+	modelsRR := httptest.NewRecorder()
+	server.Handler().ServeHTTP(modelsRR, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if modelsRR.Code != http.StatusOK {
+		t.Fatalf("models status=%d body=%s", modelsRR.Code, modelsRR.Body.String())
+	}
+	var models struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(modelsRR.Body.Bytes(), &models); err != nil {
+		t.Fatalf("models json: %v", err)
+	}
+	if len(models.Data) != 0 {
+		t.Fatalf("catalog_priced BYOM leaked into default /v1/models: %s", modelsRR.Body.String())
+	}
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want no provider available", rr.Code, rr.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, rr, "byom_non_settlement_unavailable", "server_error")
+	if reachedProvider {
+		t.Fatal("catalog_priced BYOM provider was reached by default paid routing")
+	}
+	if got := routeSnapshotCount(t, dbPath); got != 0 {
+		t.Fatalf("route snapshots=%d want 0 for non-settlement BYOM", got)
+	}
+	if got := ledgerCreditCount(t, dbPath); got != 0 {
+		t.Fatalf("ledger credits=%d want 0 for non-settlement BYOM", got)
+	}
+}
+
+func TestBYOMHiddenProviderDoesNotShadowModelClassAlias(t *testing.T) {
+	var reachedHidden bool
+	hiddenUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reachedHidden = true
+		writeProviderOK(w)
+	}))
+	defer hiddenUpstream.Close()
+
+	var reachedClassMember bool
+	classMemberUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reachedClassMember = true
+		writeProviderOK(w)
+	}))
+	defer classMemberUpstream.Close()
+
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "hidden-byom", "session-hidden", hiddenUpstream.URL, 40, bytes.Repeat([]byte{0x66}, 32))
+	hidden := registry.Snapshot()[0]
+	hidden.ModelID = "mlx-fast"
+	hidden = byomAdmissionProvider(t, hidden)
+	hidden.ModelAdmissionServedModelRef = "mlx-fast"
+	hidden.ModelAdmissionCatalogModelKey = ""
+	store := providerws.NewMemoryModelAdmissionStore()
+	seedBYOMAdmissionState(t, store, hidden, "offer_submitted")
+	routeHidden := clearBYOMAdmissionFields(hidden)
+	registry.Register(&routeHidden, nil)
+	registerSettlementProvider(registry, "class-member", "session-member", classMemberUpstream.URL, 30, bytes.Repeat([]byte{0x67}, 32))
+
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithModelAdmissionStore(store),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			ModelClasses: map[string]config.ModelClassConfig{
+				"mlx-fast": {Models: []string{"model-a"}, Objective: "fast"},
+			},
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if reachedHidden {
+		t.Fatal("hidden non-settlement BYOM provider was reached for class alias")
+	}
+	if !reachedClassMember {
+		t.Fatal("class member was not reached after hidden BYOM provider was skipped")
+	}
+}
+
+func TestBYOMSettlementCapableBindsAdmissionEventIntoRouteSnapshot(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "byom-settlement-capable-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:      true,
+		CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey:    pubkey,
+		RequireHashVerified: true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
+	cfg := config.Default().Rewards
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeProviderOK(w)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x79}, 32))
+	provider := byomAdmissionProvider(t, registry.Snapshot()[0])
+	store := providerws.NewMemoryModelAdmissionStore()
+	event := seedBYOMAdmissionState(t, store, provider, "settlement_capable")
+	routeProvider := clearBYOMAdmissionFields(provider)
+	registry.Register(&routeProvider, nil)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+		buyer.WithModelAdmissionStore(store),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryRouteSnapshots(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("route snapshots=%d want 1: %#v", len(rows), rows)
+	}
+	binding := queryRouteSnapshotBYOMBinding(t, dbPath)
+	if binding["model_admission_candidate_id"] != event.CandidateID ||
+		binding["model_admission_coordinator_event_id"] != event.CoordinatorEventID ||
+		binding["model_admission_served_model_ref"] != event.ServedModelRef ||
+		binding["model_admission_catalog_model_key"] != event.CatalogModelKey {
+		t.Fatalf("route snapshot missing current BYOM binding: %#v", binding)
+	}
+	if got := binding["model_admission_discovery_digest_sha256"]; got != event.DiscoveryDigestSHA256 {
+		t.Fatalf("discovery digest=%v want %s", got, event.DiscoveryDigestSHA256)
+	}
+	if got := binding["model_admission_evaluation_digest_sha256"]; got != event.EvaluationDigestSHA256 {
+		t.Fatalf("evaluation digest=%v want %s", got, event.EvaluationDigestSHA256)
+	}
+	if got := ledgerCreditCount(t, dbPath); got != 1 {
+		t.Fatalf("ledger credits=%d want 1 for settlement-capable BYOM", got)
+	}
+}
+
+func TestBYOMSettlementCapableRequiresValidReceiptKeyBeforeRouting(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "byom-invalid-receipt-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:      true,
+		CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey:    pubkey,
+		RequireHashVerified: true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
+	cfg := config.Default().Rewards
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+
+	var reachedProvider bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reachedProvider = true
+		writeProviderOK(w)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, []byte("not-an-ed25519-key"))
+	provider := byomAdmissionProvider(t, registry.Snapshot()[0])
+	store := providerws.NewMemoryModelAdmissionStore()
+	seedBYOMAdmissionState(t, store, provider, "settlement_capable")
+	routeProvider := clearBYOMAdmissionFields(provider)
+	registry.Register(&routeProvider, nil)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+		buyer.WithModelAdmissionStore(store),
+	)
+
+	modelsRR := httptest.NewRecorder()
+	server.Handler().ServeHTTP(modelsRR, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if modelsRR.Code != http.StatusOK {
+		t.Fatalf("models status=%d body=%s", modelsRR.Code, modelsRR.Body.String())
+	}
+	if bytes.Contains(modelsRR.Body.Bytes(), []byte(`"id":"model-a"`)) {
+		t.Fatalf("BYOM with malformed receipt key leaked into /v1/models: %s", modelsRR.Body.String())
+	}
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	assertOpenAIErrorEnvelope(t, rr, "byom_non_settlement_unavailable", "server_error")
+	if reachedProvider {
+		t.Fatal("BYOM provider with malformed receipt key was reached")
+	}
+	if got := routeSnapshotCount(t, dbPath); got != 0 {
+		t.Fatalf("route snapshots=%d want 0 for malformed receipt key", got)
+	}
+	if got := ledgerCreditCount(t, dbPath); got != 0 {
+		t.Fatalf("ledger credits=%d want 0 for malformed receipt key", got)
+	}
+}
+
+func TestBYOMCatalogKeyMismatchFailsClosed(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "byom-catalog-key-mismatch-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:      true,
+		CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey:    pubkey,
+		RequireHashVerified: true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
+	cfg := config.Default().Rewards
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+
+	var reachedProvider bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reachedProvider = true
+		writeProviderOK(w)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x6b}, 32))
+	provider := byomAdmissionProvider(t, registry.Snapshot()[0])
+	provider.ModelAdmissionCatalogModelKey = "qwen3-8b-q4"
+	store := providerws.NewMemoryModelAdmissionStore()
+	seedBYOMAdmissionState(t, store, provider, "settlement_capable")
+	routeProvider := clearBYOMAdmissionFields(provider)
+	registry.Register(&routeProvider, nil)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+		buyer.WithModelAdmissionStore(store),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want no provider available", rr.Code, rr.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, rr, "byom_non_settlement_unavailable", "server_error")
+	if reachedProvider {
+		t.Fatal("BYOM provider with mismatched catalog key was reached by default paid routing")
+	}
+	if got := routeSnapshotCount(t, dbPath); got != 0 {
+		t.Fatalf("route snapshots=%d want 0 for mismatched BYOM catalog key", got)
+	}
+	if got := ledgerCreditCount(t, dbPath); got != 0 {
+		t.Fatalf("ledger credits=%d want 0 for mismatched BYOM catalog key", got)
+	}
+}
+
+func TestBYOMReadmissionRotatesRouteSnapshotAdmissionEvent(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "byom-readmission-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:      true,
+		CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey:    pubkey,
+		RequireHashVerified: true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
+	cfg := config.Default().Rewards
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeProviderOK(w)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x7a}, 32))
+	provider := byomAdmissionProvider(t, registry.Snapshot()[0])
+	store := providerws.NewMemoryModelAdmissionStore()
+	first := seedBYOMAdmissionState(t, store, provider, "settlement_capable")
+	routeProvider := clearBYOMAdmissionFields(provider)
+	registry.Register(&routeProvider, nil)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+		buyer.WithModelAdmissionStore(store),
+	)
+
+	firstRR := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if firstRR.Code != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", firstRR.Code, firstRR.Body.String())
+	}
+	withdraw := first
+	withdraw.ReasonCode = "provider_requested"
+	withdraw.RequestID = "withdraw-before-readmission"
+	withdraw.Nonce = "nonce-withdraw-before-readmission"
+	withdraw.PayloadDigestSHA256 = strings.Repeat("2", 64)
+	withdraw.SignatureDigestSHA256 = strings.Repeat("3", 64)
+	withdraw.CreatedAt = time.Unix(1800000030, 0).UTC()
+	if _, _, err := store.AppendModelAdmissionWithdrawal(context.Background(), withdraw); err != nil {
+		t.Fatalf("AppendModelAdmissionWithdrawal: %v", err)
+	}
+
+	provider.ModelAdmissionDiscoveryDigestSHA256 = strings.Repeat("4", 64)
+	provider.ModelAdmissionEvaluationDigestSHA256 = strings.Repeat("5", 64)
+	second := seedBYOMAdmissionStateWithSuffix(t, store, provider, "settlement_capable", "settlement-capable-readmit")
+	if second.CoordinatorEventID == first.CoordinatorEventID {
+		t.Fatal("readmission reused coordinator event id")
+	}
+	routeProvider = clearBYOMAdmissionFields(provider)
+	registry.Register(&routeProvider, nil)
+	slotsFree := 1
+	registry.ApplyStateUpdate(provider.ProviderID, provider.AssignedID, pool.StateUpdate{State: pool.StateReady, SlotsFree: &slotsFree, At: time.Now().UTC()})
+	secondRR := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi again"}]}`), nil)
+	if secondRR.Code != http.StatusOK {
+		t.Fatalf("second status=%d body=%s", secondRR.Code, secondRR.Body.String())
+	}
+
+	bindings := queryRouteSnapshotBYOMBindings(t, dbPath)
+	if len(bindings) != 2 {
+		t.Fatalf("BYOM route snapshots=%d want 2: %#v", len(bindings), bindings)
+	}
+	if bindings[0]["model_admission_coordinator_event_id"] != first.CoordinatorEventID {
+		t.Fatalf("first snapshot event=%v want %s", bindings[0]["model_admission_coordinator_event_id"], first.CoordinatorEventID)
+	}
+	if bindings[1]["model_admission_coordinator_event_id"] != second.CoordinatorEventID {
+		t.Fatalf("second snapshot event=%v want %s", bindings[1]["model_admission_coordinator_event_id"], second.CoordinatorEventID)
+	}
+	if bindings[1]["model_admission_discovery_digest_sha256"] == bindings[0]["model_admission_discovery_digest_sha256"] {
+		t.Fatalf("readmission snapshot reused stale discovery digest: %#v", bindings)
+	}
+	if bindings[1]["model_admission_discovery_digest_sha256"] != provider.ModelAdmissionDiscoveryDigestSHA256 {
+		t.Fatalf("second snapshot discovery digest=%v want %s", bindings[1]["model_admission_discovery_digest_sha256"], provider.ModelAdmissionDiscoveryDigestSHA256)
+	}
+}
+
 func TestRouteSnapshotSkippedForUppercaseModelHash(t *testing.T) {
 	tier2.ResetForTest()
 	t.Cleanup(tier2.ResetForTest)
@@ -1222,6 +1663,139 @@ func routeSnapshotCount(t *testing.T, dbPath string) int {
 		t.Fatalf("count snapshots: %v", err)
 	}
 	return count
+}
+
+func queryRouteSnapshotBYOMBinding(t *testing.T, dbPath string) map[string]any {
+	t.Helper()
+	bindings := queryRouteSnapshotBYOMBindings(t, dbPath)
+	if len(bindings) == 0 {
+		t.Fatal("no route snapshot rows")
+	}
+	return bindings[0]
+}
+
+func queryRouteSnapshotBYOMBindings(t *testing.T, dbPath string) []map[string]any {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT route_snapshot_json FROM settlement_route_snapshots ORDER BY id ASC`)
+	if err != nil {
+		t.Fatalf("query route snapshot json: %v", err)
+	}
+	defer rows.Close()
+	var got []map[string]any
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatalf("scan route snapshot json: %v", err)
+		}
+		var one map[string]any
+		if err := json.Unmarshal([]byte(raw), &one); err != nil {
+			t.Fatalf("route snapshot json: %v", err)
+		}
+		got = append(got, one)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("route snapshot json rows: %v", err)
+	}
+	return got
+}
+
+func byomAdmissionProvider(t *testing.T, provider pool.Provider) pool.Provider {
+	t.Helper()
+	provider.ModelAdmissionCandidateID = "byom_" + strings.Repeat("a", 52)
+	provider.ModelAdmissionServedModelRef = "ollama:qwen3-8b"
+	provider.ModelAdmissionCatalogModelKey = "model-a"
+	provider.ModelAdmissionDiscoveryDigestSHA256 = strings.Repeat("b", 64)
+	provider.ModelAdmissionEvaluationDigestSHA256 = strings.Repeat("c", 64)
+	return provider
+}
+
+func clearBYOMAdmissionFields(provider pool.Provider) pool.Provider {
+	provider.ModelAdmissionCandidateID = ""
+	provider.ModelAdmissionServedModelRef = ""
+	provider.ModelAdmissionCatalogModelKey = ""
+	provider.ModelAdmissionCoordinatorEventID = ""
+	provider.ModelAdmissionDiscoveryDigestSHA256 = ""
+	provider.ModelAdmissionEvaluationDigestSHA256 = ""
+	return provider
+}
+
+func seedBYOMAdmissionState(t *testing.T, store providerws.ModelAdmissionStore, provider pool.Provider, state string) providerws.ModelAdmissionEvent {
+	t.Helper()
+	return seedBYOMAdmissionStateWithSuffix(t, store, provider, state, state)
+}
+
+func seedBYOMAdmissionStateWithSuffix(t *testing.T, store providerws.ModelAdmissionStore, provider pool.Provider, state, suffix string) providerws.ModelAdmissionEvent {
+	t.Helper()
+	if store == nil {
+		t.Fatal("nil model admission store")
+	}
+	offer := providerws.ModelAdmissionEvent{
+		ProviderID:               provider.ProviderID,
+		CandidateID:              provider.ModelAdmissionCandidateID,
+		ServedModelRef:           provider.ModelAdmissionServedModelRef,
+		CatalogModelKey:          provider.ModelAdmissionCatalogModelKey,
+		DiscoveryDigestSHA256:    provider.ModelAdmissionDiscoveryDigestSHA256,
+		EvaluationDigestSHA256:   provider.ModelAdmissionEvaluationDigestSHA256,
+		RequestedDisclosureClass: "network_admitted_unsettled",
+		RequestID:                "offer-" + suffix,
+		Nonce:                    "nonce-offer-" + suffix,
+		PayloadDigestSHA256:      strings.Repeat("d", 64),
+		SignatureDigestSHA256:    strings.Repeat("e", 64),
+		CreatedAt:                time.Unix(1800000000, 0).UTC(),
+	}
+	stored, _, err := store.AppendModelAdmissionOffer(context.Background(), offer)
+	if err != nil {
+		t.Fatalf("AppendModelAdmissionOffer: %v", err)
+	}
+	if state == "offer_submitted" {
+		return stored
+	}
+	catalogPriced := stored
+	catalogPriced.State = "catalog_priced"
+	catalogPriced.RequestID = "decision-catalog-priced-" + suffix
+	catalogPriced.Nonce = "nonce-catalog-priced-" + suffix
+	catalogPriced.PayloadDigestSHA256 = strings.Repeat("f", 64)
+	catalogPriced.CreatedAt = time.Unix(1800000010, 0).UTC()
+	catalogPriced = withBYOMTrustedCatalogDecisionFields(t, catalogPriced, provider)
+	stored, err = store.AppendModelAdmissionDecision(context.Background(), catalogPriced)
+	if err != nil {
+		t.Fatalf("AppendModelAdmissionDecision(catalog_priced): %v", err)
+	}
+	if state == "catalog_priced" {
+		return stored
+	}
+	settlement := stored
+	settlement.State = state
+	settlement.RequestID = "decision-" + suffix
+	settlement.Nonce = "nonce-" + suffix
+	settlement.PayloadDigestSHA256 = strings.Repeat("1", 64)
+	settlement.CreatedAt = time.Unix(1800000020, 0).UTC()
+	settlement = withBYOMTrustedCatalogDecisionFields(t, settlement, provider)
+	stored, err = store.AppendModelAdmissionDecision(context.Background(), settlement)
+	if err != nil {
+		t.Fatalf("AppendModelAdmissionDecision(%s): %v", state, err)
+	}
+	return stored
+}
+
+func withBYOMTrustedCatalogDecisionFields(t *testing.T, event providerws.ModelAdmissionEvent, provider pool.Provider) providerws.ModelAdmissionEvent {
+	t.Helper()
+	material, ok := tier2.SnapshotMaterial(provider.ModelID, strings.TrimSpace(provider.ModelHash))
+	if !ok {
+		t.Fatalf("missing trusted catalog material for %s", provider.ModelID)
+	}
+	event.CatalogID = material.CatalogID
+	event.CatalogBodyDigest = material.CatalogBodyDigest
+	event.CatalogSignatureKeyID = material.CatalogSignatureKeyID
+	event.CatalogSignaturePubkeyFingerprint = material.CatalogSignaturePubkeyFingerprint
+	event.ExpectedCatalogModelHash = material.ExpectedModelHash
+	event.ExpectedCatalogModelHashAlgorithm = material.ExpectedModelHashAlgorithm
+	return event
 }
 
 func expectedRouteSnapshotPromptHash(t *testing.T, model string) string {

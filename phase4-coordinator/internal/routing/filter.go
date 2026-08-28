@@ -80,6 +80,10 @@ const (
 	// selected, the checker returns true and this reason never fires, so
 	// poolless selection stays byte-identical.
 	ReasonPoolProviderCapability
+	// ReasonBYOMNonSettlement — provider advertises the requested model/class
+	// but has coordinator-owned BYOM admission state that is not currently
+	// settlement_capable for the trusted catalog/hash tuple.
+	ReasonBYOMNonSettlement
 )
 
 // EligibilityChecker is the cross-package boundary between the
@@ -100,6 +104,12 @@ type EligibilityChecker interface {
 	// class check with RoutingEligible(); a false return is
 	// reported as ReasonModelMismatch.
 	ProviderMatchesRequest(p pool.Provider) bool
+
+	// ProviderBYOMSettlementEligible reports whether a matching provider may
+	// enter default paid routing under SPEC-047/SPEC-022 BYOM admission rules.
+	// It is separate from model/class matching so hidden BYOM states cannot
+	// shadow aliases or surface as model_not_found.
+	ProviderBYOMSettlementEligible(p pool.Provider) bool
 
 	// ProviderMeetsModelVersionFloor reports whether the provider's
 	// reported binary_version satisfies the per-model minimum
@@ -220,21 +230,21 @@ type FilterResult struct {
 //  2. ProviderMatchesRequest (model/class + FR-P5 state) — combined
 //     gate; either failure is ReasonModelMismatch (the inline loop
 //     short-circuits to `continue` without separating the two)
-//  3. ProviderMeetsModelVersionFloor — ReasonModelVersionFloor
-//     (#768). Runs immediately after the model match because the
-//     floor is keyed BY model; a no-op when no floors are
-//     configured, so default-config selection stays byte-identical
-//     (AC-SR-1).
-//     3b. ProviderHasSettlementReceiptKey — ReasonReceiptKeyMissing
+//  3. ProviderBYOMSettlementEligible — ReasonBYOMNonSettlement
+//  4. ProviderMeetsModelVersionFloor — ReasonModelVersionFloor
+//     (#768). Runs after the BYOM money gate because hidden admission states
+//     must not enter paid routing even when their binary version is current;
+//     a no-op when no floors are configured.
+//     4b. ProviderHasSettlementReceiptKey — ReasonReceiptKeyMissing
 //     (SPEC-022 R-2.4/R-2.5). A no-op in observe mode / when the
 //     settlement store is unavailable, so default / observe selection
 //     stays byte-identical; under enforce it drops providers with no
 //     active receipt key so routing never selects a box whose route
 //     snapshot is guaranteed to fail pre-dispatch.
-//  4. ProviderContextSufficient — ReasonContextTooSmall
-//  5. Tier2Decision — ReasonTier2HashMismatch / ReasonTier2Hash
+//  5. ProviderContextSufficient — ReasonContextTooSmall
+//  6. Tier2Decision — ReasonTier2HashMismatch / ReasonTier2Hash
 //     Required / ReasonTier2EncryptedLeg / ReasonTier2Attestation
-//  6. QuotaPermits — ReasonQuotaBlocked (applied as a second pass
+//  7. QuotaPermits — ReasonQuotaBlocked (applied as a second pass
 //     here to preserve the "quota is soft, drives 429 only when
 //     every other check passed" semantics)
 //
@@ -286,6 +296,10 @@ func EligibleCandidates(
 		}
 		if !checker.ProviderMatchesRequest(p) {
 			res.Counts[ReasonModelMismatch]++
+			continue
+		}
+		if !checker.ProviderBYOMSettlementEligible(p) {
+			res.Counts[ReasonBYOMNonSettlement]++
 			continue
 		}
 		if !checker.ProviderMeetsModelVersionFloor(p) {

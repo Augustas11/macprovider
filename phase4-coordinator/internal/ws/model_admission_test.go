@@ -19,6 +19,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
@@ -538,6 +539,7 @@ func TestModelAdmissionDecisionStateMachineAndRoutingGate(t *testing.T) {
 	catalogPriced.Nonce = "nonce_catalog_priced"
 	catalogPriced.PayloadDigestSHA256 = stringsOf("e", 64)
 	catalogPriced.CreatedAt = time.Unix(1800000030, 0).UTC()
+	catalogPriced = withTrustedCatalogDecisionFields(catalogPriced)
 	catalogPriced, err = store.AppendModelAdmissionDecision(context.Background(), catalogPriced)
 	if err != nil {
 		t.Fatalf("catalog_priced decision failed: %v", err)
@@ -552,6 +554,7 @@ func TestModelAdmissionDecisionStateMachineAndRoutingGate(t *testing.T) {
 	settlement.Nonce = "nonce_settlement_capable"
 	settlement.PayloadDigestSHA256 = stringsOf("f", 64)
 	settlement.CreatedAt = time.Unix(1800000040, 0).UTC()
+	settlement = withTrustedCatalogDecisionFields(settlement)
 	settlement, err = store.AppendModelAdmissionDecision(context.Background(), settlement)
 	if err != nil {
 		t.Fatalf("settlement_capable decision failed: %v", err)
@@ -560,24 +563,48 @@ func TestModelAdmissionDecisionStateMachineAndRoutingGate(t *testing.T) {
 		t.Fatal("settlement_capable with catalog binding must pass the preliminary settlement-state predicate")
 	}
 	matching := providerws.ModelAdmissionPaidRoutingPredicate{
-		ProviderID:             settlement.ProviderID,
-		CandidateID:            settlement.CandidateID,
-		ServedModelRef:         settlement.ServedModelRef,
-		CatalogModelKey:        settlement.CatalogModelKey,
-		DiscoveryDigestSHA256:  settlement.DiscoveryDigestSHA256,
-		EvaluationDigestSHA256: settlement.EvaluationDigestSHA256,
+		ProviderID:                        settlement.ProviderID,
+		CandidateID:                       settlement.CandidateID,
+		ServedModelRef:                    settlement.ServedModelRef,
+		CatalogModelKey:                   settlement.CatalogModelKey,
+		DiscoveryDigestSHA256:             settlement.DiscoveryDigestSHA256,
+		EvaluationDigestSHA256:            settlement.EvaluationDigestSHA256,
+		CatalogID:                         settlement.CatalogID,
+		CatalogBodyDigest:                 settlement.CatalogBodyDigest,
+		CatalogSignatureKeyID:             settlement.CatalogSignatureKeyID,
+		CatalogSignaturePubkeyFingerprint: settlement.CatalogSignaturePubkeyFingerprint,
+		ExpectedCatalogModelHash:          settlement.ExpectedCatalogModelHash,
+		ExpectedCatalogModelHashAlgorithm: settlement.ExpectedCatalogModelHashAlgorithm,
 	}
-	if providerws.ModelAdmissionDefaultPaidRoutingEligible(settlement, matching) {
-		t.Fatal("settlement_capable remains default paid-routing excluded until SPEC-022/catalog authority is wired")
+	if !providerws.ModelAdmissionDefaultPaidRoutingEligible(settlement, matching) {
+		t.Fatal("settlement_capable with trusted catalog binding must pass default paid-routing predicate")
+	}
+	untrustedCatalog := matching
+	untrustedCatalog.CatalogBodyDigest = ""
+	if providerws.ModelAdmissionDefaultPaidRoutingEligible(settlement, untrustedCatalog) {
+		t.Fatal("settlement_capable without trusted catalog binding must fail closed")
+	}
+	untrustedAlgorithm := matching
+	untrustedAlgorithm.ExpectedCatalogModelHashAlgorithm = ""
+	if providerws.ModelAdmissionDefaultPaidRoutingEligible(settlement, untrustedAlgorithm) {
+		t.Fatal("settlement_capable without trusted catalog hash algorithm must fail closed")
 	}
 	drifted := matching
 	drifted.ServedModelRef = "ollama:different"
 	if providerws.ModelAdmissionDefaultPaidRoutingEligible(settlement, drifted) {
 		t.Fatal("served-model drift must fail closed for default paid routing")
 	}
+	catalogDrifted := matching
+	catalogDrifted.CatalogBodyDigest = stringsOf("6", 64)
+	if providerws.ModelAdmissionDefaultPaidRoutingEligible(settlement, catalogDrifted) {
+		t.Fatal("catalog body drift must fail closed for default paid routing")
+	}
 	revocation, drift := providerws.ModelAdmissionRevocationForRuntimeDrift(settlement, drifted, "runtime_identity_drift", time.Unix(1800000050, 0).UTC())
 	if !drift {
 		t.Fatal("drifted route predicate did not create revocation event")
+	}
+	if _, drift := providerws.ModelAdmissionRevocationForRuntimeDrift(settlement, catalogDrifted, "catalog_identity_drift", time.Unix(1800000051, 0).UTC()); !drift {
+		t.Fatal("catalog identity drift did not create revocation event")
 	}
 	revoked, err := store.AppendModelAdmissionDecision(context.Background(), revocation)
 	if err != nil {
@@ -617,6 +644,15 @@ func TestModelAdmissionDecisionRejectsInvalidCatalogAndReasonTransitions(t *test
 	withoutCatalog.PayloadDigestSHA256 = stringsOf("e", 64)
 	if _, err := store.AppendModelAdmissionDecision(context.Background(), withoutCatalog); err == nil {
 		t.Fatal("catalog_priced transition without catalog binding succeeded")
+	}
+	withoutTrustedCatalog := submitted
+	withoutTrustedCatalog.CatalogModelKey = "qwen3-8b"
+	withoutTrustedCatalog.State = "catalog_priced"
+	withoutTrustedCatalog.RequestID = "request_no_trusted_catalog"
+	withoutTrustedCatalog.Nonce = "nonce_no_trusted_catalog"
+	withoutTrustedCatalog.PayloadDigestSHA256 = stringsOf("1", 64)
+	if _, err := store.AppendModelAdmissionDecision(context.Background(), withoutTrustedCatalog); err == nil {
+		t.Fatal("catalog_priced transition with only provider catalog key succeeded")
 	}
 	rejectedWithoutReason := submitted
 	rejectedWithoutReason.State = "offer_rejected"
@@ -814,6 +850,113 @@ func TestSQLiteModelAdmissionStorePersistsAppendOnlyStatus(t *testing.T) {
 	readback, found, err = reopenedAgain.LatestModelAdmissionStatus(context.Background(), event.ProviderID, event.CandidateID)
 	if err != nil || !found || readback.State != "withdrawn" || readback.DiscoveryDigestSHA256 != event.DiscoveryDigestSHA256 {
 		t.Fatalf("withdraw readback found=%v event=%+v err=%v", found, readback, err)
+	}
+}
+
+func TestSQLiteModelAdmissionStorePersistsRouteStatusLookup(t *testing.T) {
+	db, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := providerws.NewSQLiteModelAdmissionStore(db.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := "provider-byom-a"
+	first := providerws.ModelAdmissionEvent{
+		ProviderID:               providerID,
+		CandidateID:              stableModelAdmissionCandidateID("p"),
+		ServedModelRef:           "ollama:qwen3-8b",
+		CatalogModelKey:          "model-a",
+		DiscoveryDigestSHA256:    stringsOf("a", 64),
+		EvaluationDigestSHA256:   stringsOf("b", 64),
+		RequestedDisclosureClass: "catalog_binding_requested",
+		ReasonCode:               "provider_offer_submitted",
+		RequestID:                "sqlite_route_offer",
+		Nonce:                    "sqlite_route_nonce",
+		PayloadDigestSHA256:      stringsOf("c", 64),
+		SignatureDigestSHA256:    stringsOf("d", 64),
+		CreatedAt:                time.Unix(1800000100, 0).UTC(),
+	}
+	if _, replay, err := store.AppendModelAdmissionOffer(context.Background(), first); err != nil || replay {
+		t.Fatalf("append first replay=%v err=%v", replay, err)
+	}
+	catalogPriced := withTrustedCatalogDecisionFields(first)
+	catalogPriced.State = "catalog_priced"
+	catalogPriced.RequestID = "sqlite_route_catalog_priced"
+	catalogPriced.Nonce = "sqlite_route_catalog_priced_nonce"
+	catalogPriced.PayloadDigestSHA256 = stringsOf("e", 64)
+	catalogPriced.CreatedAt = time.Unix(1800000110, 0).UTC()
+	catalogPriced, err = store.AppendModelAdmissionDecision(context.Background(), catalogPriced)
+	if err != nil {
+		t.Fatalf("catalog_priced decision: %v", err)
+	}
+	readback, found, err := store.LatestModelAdmissionRouteStatus(context.Background(), providerID, "ollama:qwen3-8b", "model-a")
+	if err != nil || !found || readback.State != "catalog_priced" || readback.CoordinatorEventID != catalogPriced.CoordinatorEventID {
+		t.Fatalf("route readback found=%v event=%+v err=%v", found, readback, err)
+	}
+
+	second := first
+	second.CandidateID = stableModelAdmissionCandidateID("q")
+	second.ServedModelRef = "ollama:qwen3-8b-alt"
+	second.DiscoveryDigestSHA256 = stringsOf("6", 64)
+	second.EvaluationDigestSHA256 = stringsOf("7", 64)
+	second.RequestID = "sqlite_route_second_offer"
+	second.Nonce = "sqlite_route_second_nonce"
+	second.PayloadDigestSHA256 = stringsOf("8", 64)
+	second.SignatureDigestSHA256 = stringsOf("9", 64)
+	second.CreatedAt = time.Unix(1800000120, 0).UTC()
+	if _, replay, err := store.AppendModelAdmissionOffer(context.Background(), second); err != nil || replay {
+		t.Fatalf("append second replay=%v err=%v", replay, err)
+	}
+	secondCatalogPriced := withTrustedCatalogDecisionFields(second)
+	secondCatalogPriced.State = "catalog_priced"
+	secondCatalogPriced.RequestID = "sqlite_route_second_catalog_priced"
+	secondCatalogPriced.Nonce = "sqlite_route_second_catalog_priced_nonce"
+	secondCatalogPriced.PayloadDigestSHA256 = stringsOf("0", 64)
+	secondCatalogPriced.CreatedAt = time.Unix(1800000125, 0).UTC()
+	_, err = store.AppendModelAdmissionDecision(context.Background(), secondCatalogPriced)
+	if err != nil {
+		t.Fatalf("second catalog_priced decision: %v", err)
+	}
+	settlement := withTrustedCatalogDecisionFields(second)
+	settlement.State = "settlement_capable"
+	settlement.RequestID = "sqlite_route_second_settlement"
+	settlement.Nonce = "sqlite_route_second_settlement_nonce"
+	settlement.PayloadDigestSHA256 = stringsOf("1", 64)
+	settlement.CreatedAt = time.Unix(1800000130, 0).UTC()
+	settlement, err = store.AppendModelAdmissionDecision(context.Background(), settlement)
+	if err != nil {
+		t.Fatalf("settlement decision: %v", err)
+	}
+	readback, found, err = store.LatestModelAdmissionRouteStatus(context.Background(), providerID, "", "model-a")
+	if err != nil || !found || readback.CandidateID != settlement.CandidateID {
+		t.Fatalf("catalog-key route lookup did not return latest admission event found=%v event=%+v err=%v", found, readback, err)
+	}
+	readback, found, err = store.LatestModelAdmissionRouteStatus(context.Background(), providerID, "ollama:qwen3-8b", "model-a")
+	if err != nil || !found || readback.CandidateID != catalogPriced.CandidateID {
+		t.Fatalf("exact route lookup did not preserve served-ref boundary found=%v event=%+v err=%v", found, readback, err)
+	}
+	withdraw := settlement
+	withdraw.State = "withdrawn"
+	withdraw.ReasonCode = "provider_requested"
+	withdraw.RequestID = "sqlite_route_second_withdraw"
+	withdraw.Nonce = "sqlite_route_second_withdraw_nonce"
+	withdraw.PayloadDigestSHA256 = stringsOf("2", 64)
+	withdraw.SignatureDigestSHA256 = stringsOf("3", 64)
+	withdraw.CreatedAt = time.Unix(1800000140, 0).UTC()
+	withdrawn, replay, err := store.AppendModelAdmissionWithdrawal(context.Background(), withdraw)
+	if err != nil || replay {
+		t.Fatalf("withdraw replay=%v err=%v", replay, err)
+	}
+	reopened, err := providerws.NewSQLiteModelAdmissionStore(db.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	readback, found, err = reopened.LatestModelAdmissionRouteStatus(context.Background(), providerID, "ollama:qwen3-8b-alt", "model-a")
+	if err != nil || !found || readback.State != "withdrawn" || readback.CoordinatorEventID != withdrawn.CoordinatorEventID {
+		t.Fatalf("withdrawn route readback found=%v event=%+v err=%v", found, readback, err)
 	}
 }
 
@@ -1033,20 +1176,39 @@ func stableModelAdmissionCandidateID(value string) string {
 	return "byom_" + strings.Repeat(value, 52)
 }
 
+func withTrustedCatalogDecisionFields(event providerws.ModelAdmissionEvent) providerws.ModelAdmissionEvent {
+	event.CatalogID = "settlement-catalog"
+	event.CatalogBodyDigest = stringsOf("3", 64)
+	event.CatalogSignatureKeyID = "test-key"
+	event.CatalogSignaturePubkeyFingerprint = "ed25519-sha256:" + stringsOf("4", 64)
+	event.ExpectedCatalogModelHash = stringsOf("5", 64)
+	event.ExpectedCatalogModelHashAlgorithm = modelidentity.SnapshotManifestV1
+	return event
+}
+
 func insertModelAdmissionEventForTest(t *testing.T, db *auth.Store, event providerws.ModelAdmissionEvent) {
 	t.Helper()
 	if _, err := db.DB().ExecContext(context.Background(), `
 INSERT INTO model_admission_events(
     provider_id, candidate_id, served_model_ref, catalog_model_key,
+    catalog_id, catalog_body_digest, catalog_signature_key_id,
+    catalog_signature_pubkey_fingerprint, expected_catalog_model_hash,
+    expected_catalog_model_hash_algorithm,
     discovery_digest_sha256, evaluation_digest_sha256, requested_disclosure_class,
     previous_state, state, next_state, actor, coordinator_event_id,
     reason_code, request_id, nonce, payload_digest_sha256,
     signature_digest_sha256, created_at_utc
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		event.ProviderID,
 		event.CandidateID,
 		event.ServedModelRef,
 		event.CatalogModelKey,
+		event.CatalogID,
+		event.CatalogBodyDigest,
+		event.CatalogSignatureKeyID,
+		event.CatalogSignaturePubkeyFingerprint,
+		event.ExpectedCatalogModelHash,
+		event.ExpectedCatalogModelHashAlgorithm,
 		event.DiscoveryDigestSHA256,
 		event.EvaluationDigestSHA256,
 		event.RequestedDisclosureClass,
