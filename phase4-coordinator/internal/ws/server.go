@@ -175,6 +175,9 @@ type Server struct {
 	credentialBootstrapMetrics     CredentialBootstrapMetrics
 	capacityOverClaimMetrics       CapacityOverClaimMetrics
 	connectionEvents               ConnectionEventStore
+	modelAdmissions                ModelAdmissionStore
+	modelAdmissionAttemptMu        sync.Mutex
+	modelAdmissionAttempts         map[string][]time.Time
 	connectionEventMetrics         ConnectionEventMetrics
 	closeEventMeta                 sync.Map // net.Conn -> closeEventMeta
 	connectionEventQueue           chan connectionEventJob
@@ -737,6 +740,14 @@ func WithComputeIntegrityStatusSource(source ComputeIntegrityStatusSource) Optio
 	}
 }
 
+func WithModelAdmissionStore(store ModelAdmissionStore) Option {
+	return func(s *Server) {
+		if store != nil {
+			s.modelAdmissions = store
+		}
+	}
+}
+
 func WithGitHubOAuthClient(client githubOAuthClient) Option {
 	return func(s *Server) {
 		s.githubOAuth = client
@@ -866,6 +877,8 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		losslessnessProfileCursor:     map[string]int{},
 		autotuneCatalogEnforced:       cfg.AutotuneFeeds.EnforceProviderAdmission,
 		autotuneCatalogBridgeDeadline: providerAdmissionBridgeDeadline,
+		modelAdmissions:               NewMemoryModelAdmissionStore(),
+		modelAdmissionAttempts:        map[string][]time.Time{},
 		version:                       "dev",
 	}
 	s.authAttempts = newAuthAttemptStore(1024)
@@ -1358,6 +1371,8 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/admin/admission-canary/clear-admitted-tuple", s.handleAdmissionCanaryClearAdmittedTuple)
 		mux.HandleFunc("/admin/admission-canary/proof-of-weights", s.handleAdmissionCanaryProofOfWeights)
 	}
+	mux.HandleFunc("/v1/provider/model-admission/offers", s.handleProviderModelAdmissionOffer)
+	mux.HandleFunc("/v1/provider/model-admission/status", s.handleProviderModelAdmissionStatus)
 	if s.cfg.Auth.GitHubOAuth.Enabled {
 		mux.HandleFunc("/v1/auth/github/start", s.handleGitHubStart)
 		mux.HandleFunc("/v1/auth/github/callback", s.handleGitHubCallback)
