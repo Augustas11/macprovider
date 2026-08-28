@@ -615,6 +615,13 @@ func main() {
 			wsOpts = append(wsOpts, providerws.WithProviderAuthPolicyAdminStore(onboardingStore))
 			wsOpts = append(wsOpts, providerws.WithHardwareTrustAdminStore(onboardingStore))
 		}
+		// Epic #1235 Child B: heartbeat-driven durable telemetry refresh rides
+		// the same onboarding Postgres handle regardless of whether the public
+		// App-track registration route is enabled — any already-onboarded
+		// provider connecting over ws benefits from freshness, not just new
+		// registrants.
+		wsOpts = append(wsOpts, providerws.WithHardwareProfileRefresher(onboardingStore))
+		wsOpts = append(wsOpts, providerws.WithAutoupdateOutcomeSink(onboardingStore))
 	}
 	var autotuneEvidenceStore autotune.EvidenceStore
 	if autotuneCatalog != nil && onboardingStore != nil && onboardingStore.DB() != nil {

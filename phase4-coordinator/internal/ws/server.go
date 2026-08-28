@@ -194,6 +194,18 @@ type Server struct {
 	idlePrewarmLimits              sync.Map
 	idlePrewarmQueue               chan idlePrewarmRecord
 
+	// Epic #1235 Child B: heartbeat-driven durable telemetry refresh.
+	// hardwareProfileRefresher/autoupdateOutcomes are nil-checked optional
+	// Postgres sinks (wired only when the onboarding store is available),
+	// mirroring providerTrust/idlePrewarm above.
+	hardwareProfileRefresher      HardwareProfileRefresher
+	hardwareProfileRefreshFlushMu sync.Mutex
+	hardwareProfileRefreshFlush   map[string]time.Time
+	hardwareProfileRefreshSlots   chan struct{}
+	autoupdateOutcomes            AutoupdateOutcomeSink
+	autoupdateOutcomeSeen         sync.Map
+	autoupdateOutcomeSlots        chan struct{}
+
 	// SE liveness (Phase 1, Track P1-C).
 	// seLivenessChans maps sessionKey → chan SELivenessResponse for in-flight probes.
 	// seLivenessInFlight guards against concurrent probes for the same session.
@@ -358,6 +370,25 @@ type ProviderTrustChecker interface {
 
 type IdlePrewarmRecorder interface {
 	RecordIdlePrewarmEvent(ctx context.Context, providerID, event, reason string) error
+}
+
+// HardwareProfileRefresher backs Epic #1235 Child B / B1: refreshing the
+// onboarding-only provider_hardware_profiles row from heartbeat-observed
+// fields (chip, unified memory, running binary version) so it does not go
+// stale for a provider that stays connected across an autoupdate without
+// re-registering. See onboarding.PGStore.RefreshProviderHardwareProfile for
+// why this is UPDATE-only.
+type HardwareProfileRefresher interface {
+	RefreshProviderHardwareProfile(ctx context.Context, providerID, appVersion string, observedAt time.Time) error
+}
+
+// AutoupdateOutcomeSink backs Epic #1235 Child B / B2: durably ingesting each
+// DISTINCT autoupdate outcome/reason a provider reports on heartbeat/
+// state_update so fleet-wide autoupdate convergence is queryable. Callers
+// must de-duplicate repeated heartbeat echoes of the same event themselves
+// (see recordAutoupdateOutcomeIfChanged) — this sink always inserts.
+type AutoupdateOutcomeSink interface {
+	RecordAutoupdateOutcome(ctx context.Context, rec onboarding.AutoupdateOutcomeRecord) error
 }
 
 type IdlePrewarmMetrics interface {
@@ -651,6 +682,24 @@ func WithProviderRewardsTrustTierStore(store ProviderRewardsTrustTierStore) Opti
 func WithIdlePrewarmRecorder(recorder IdlePrewarmRecorder) Option {
 	return func(s *Server) {
 		s.idlePrewarm = recorder
+	}
+}
+
+// WithHardwareProfileRefresher installs the Epic #1235 Child B / B1 durable
+// hardware-profile freshness backend. Nil (unset) keeps heartbeat handling
+// exactly as it was before Child B: no Postgres write is attempted.
+func WithHardwareProfileRefresher(refresher HardwareProfileRefresher) Option {
+	return func(s *Server) {
+		s.hardwareProfileRefresher = refresher
+	}
+}
+
+// WithAutoupdateOutcomeSink installs the Epic #1235 Child B / B2 durable
+// autoupdate-outcome ingest backend. Nil (unset) keeps heartbeat/state_update
+// handling exactly as it was before Child B: no Postgres write is attempted.
+func WithAutoupdateOutcomeSink(sink AutoupdateOutcomeSink) Option {
+	return func(s *Server) {
+		s.autoupdateOutcomes = sink
 	}
 }
 
@@ -4989,6 +5038,8 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	}
 	s.applyAdmissionCeilingRouteExclusion(entry, "heartbeat")
 	s.rememberProviderSnapshotCoalesced(*entry)
+	s.refreshHardwareProfileHeartbeatAsync(providerID, entry.BinaryVersion, s.now())
+	s.recordAutoupdateOutcomeIfChanged(providerID, hb.LastAutoupdateEvent, s.now())
 	threshold := s.cfg.HeartbeatInterval() + s.cfg.HeartbeatInterval()/2
 	if gap > threshold {
 		s.log.Warn().Str("provider_id", providerID).Dur("gap", gap).Dur("threshold", threshold).Msg("provider heartbeat stale")
@@ -5403,6 +5454,7 @@ func (s *Server) handleStateUpdate(providerID, assignedID string, payload []byte
 		s.log.Warn().Str("provider_id", providerID).Msg("state_update for unknown provider")
 		return
 	}
+	s.recordAutoupdateOutcomeIfChanged(providerID, update.LastAutoupdateEvent, s.now())
 	if state == pool.StateReady {
 		if timer, ok := s.timers.LoadAndDelete(providerID); ok {
 			timer.(*time.Timer).Stop()
