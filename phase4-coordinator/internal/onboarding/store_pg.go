@@ -188,6 +188,9 @@ SELECT j.generated_at, j.evidence
 	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_register_attempts LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_register_attempts read: %w", err)
 	}
+	if _, err := s.db.ExecContext(timeout, `SELECT provider_id, observed_at, outcome FROM provider_autoupdate_events LIMIT 0`); err != nil {
+		return fmt.Errorf("provider_onboarding smoke provider_autoupdate_events read: %w", err)
+	}
 	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_auth_policy LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_auth_policy read: %w", err)
 	}
@@ -464,6 +467,89 @@ ON CONFLICT (provider_id) DO UPDATE
        last_reported_at = $7
  WHERE provider_hardware_profiles.last_reported_at <= $7`,
 		providerID, chip, normalized, memoryGB, macosVersion, appVersion, observedAt.UTC(),
+	)
+	return err
+}
+
+// RefreshProviderHardwareProfile keeps provider_hardware_profiles from going
+// stale for a provider that stays connected across an autoupdate without ever
+// re-registering or re-submitting autotune evidence (Epic #1235 Child B / B1).
+// Unlike UpsertProviderHardwareProfile this is UPDATE-only and never inserts:
+// a heartbeat carries neither macos_version nor a value valid for the `source`
+// CHECK constraint (app_register/cli_hello/operator), so seeding a fresh row
+// from it would fabricate a profile the provider never actually submitted at
+// onboarding. An unknown provider_id is left absent; empty/non-positive
+// arguments leave the corresponding column untouched (COALESCE-style) so a
+// heartbeat that omits hardware_summary still advances last_reported_at and
+// app_version without blanking a chip/memory value learned at registration.
+func (s *PGStore) RefreshProviderHardwareProfile(ctx context.Context, providerID, appVersion string, observedAt time.Time) error {
+	if s == nil || s.db == nil {
+		return errors.New("onboarding postgres store is nil")
+	}
+	appVersion = trimForStorage(appVersion, 80)
+	// Observe-only: refresh ONLY the freshness (last_reported_at) and reported
+	// version (app_version). We deliberately do NOT touch chip_normalized or
+	// unified_memory_gb — the migration-019 trust trigger clears `verified` when
+	// provider_onboarding changes those, which would let a heartbeat demote a
+	// verified provider and affect admission/routing. Hardware identity is
+	// established at registration/verification, not on a heartbeat.
+	_, err := s.db.ExecContext(ctx, `
+UPDATE provider_hardware_profiles
+   SET app_version = CASE WHEN $2 <> '' THEN $2 ELSE app_version END,
+       last_reported_at = $3
+ WHERE provider_id = $1
+   AND last_reported_at <= $3`,
+		providerID, appVersion, observedAt.UTC(),
+	)
+	return err
+}
+
+// AutoupdateOutcomeRecord is one coordinator-observed autoupdate event
+// reported by a provider's heartbeat/state_update `last_autoupdate_event`
+// field (Epic #1235 Child B / B2). Phase/outcome/reason/failure_class/
+// current_version/target_version are free-form client-reported text with NO
+// enum CHECK, mirroring provider_hardware_profiles.macos_version/app_version:
+// the client-side taxonomy (AutoUpdateEvent.swift) evolves independently of
+// this schema.
+type AutoupdateOutcomeRecord struct {
+	ProviderID     string
+	ObservedAt     time.Time
+	UpdateID       string
+	CurrentVersion string
+	TargetVersion  string
+	Source         string
+	Phase          string
+	Outcome        string
+	Reason         string
+	FailureClass   string
+}
+
+// RecordAutoupdateOutcome durably ingests one DISTINCT autoupdate event so
+// fleet-wide autoupdate convergence is queryable. Callers are expected to
+// de-duplicate repeated heartbeat echoes of the same event before calling
+// this (see internal/ws heartbeat handling) — this method always inserts.
+func (s *PGStore) RecordAutoupdateOutcome(ctx context.Context, rec AutoupdateOutcomeRecord) error {
+	if s == nil || s.db == nil {
+		return errors.New("onboarding postgres store is nil")
+	}
+	if strings.TrimSpace(rec.ProviderID) == "" {
+		return errors.New("autoupdate outcome provider_id is required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO provider_autoupdate_events (
+    provider_id, observed_at, update_id, current_version, target_version,
+    source, phase, outcome, reason, failure_class
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		rec.ProviderID,
+		rec.ObservedAt.UTC(),
+		trimForStorage(rec.UpdateID, 128),
+		trimForStorage(rec.CurrentVersion, 80),
+		trimForStorage(rec.TargetVersion, 80),
+		trimForStorage(rec.Source, 40),
+		trimForStorage(rec.Phase, 40),
+		trimForStorage(rec.Outcome, 40),
+		trimForStorage(rec.Reason, 256),
+		trimForStorage(rec.FailureClass, 80),
 	)
 	return err
 }
