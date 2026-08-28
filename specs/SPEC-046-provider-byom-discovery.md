@@ -1,12 +1,12 @@
 # SPEC-046 - Provider BYOM Discovery
 
-**Version:** 0.1.0
+**Version:** 0.1.1
 
 ```json
 {
   "spec_id": "SPEC-046",
   "title": "Provider BYOM Discovery",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "path": "specs/SPEC-046-provider-byom-discovery.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -54,6 +54,13 @@ SPEC-046 owns `provider-byom-discovery`: local runtime adapter discovery, candid
 
 SPEC-001 remains authoritative for the `macprovider-cli` binary lifecycle, provider process boundaries, control socket conventions, and provider-side serving behavior. SPEC-046 consumes that authority by reserving provider-local `models discover` and `models evaluate` behavior.
 
+SPEC-001 §6.14a owns the model command taxonomy and the legacy JSON
+compatibility oracle. SPEC-046 discovery/evaluation MUST remain separate from
+the existing `models list` / `models browse` surfaces and MUST NOT reuse
+`models_list.v1`, `models_browse.v1`, `model_catalog_error.v1`,
+`model_catalog_json_v1`, `models list.v1`, or `models browse.v1` for BYOM
+candidate inventory.
+
 SPEC-010 remains authoritative for signed catalog model identity. SPEC-046 may compare a discovered candidate with catalog identifiers, but it must not create canonical catalog identities or imply that a candidate is catalog-backed.
 
 SPEC-011 remains authoritative for warm-swap and loaded-model state. SPEC-046 evaluation must not switch the production serving model unless a later SPEC-011-compatible transaction explicitly does so.
@@ -68,7 +75,7 @@ SPEC-045 is related local endpoint prior art. SPEC-046 must reuse its loopback, 
 
 ## 3. Normative requirements
 
-**SPEC-046-R001 - CLI-owned discovery commands.** `macprovider-cli` MUST expose a provider-local discovery command with stable spelling reserved for `models discover --json` and a provider-local evaluation command with stable spelling reserved for `models evaluate <candidate-id-or-ref> --json`. Both commands MUST emit JSON only to stdout when `--json` is set and MUST emit warnings, progress, and redacted diagnostics to stderr. If Malibu consumes discovery in a later app release, it MUST consume the CLI projection or capability-negotiated equivalent and MUST NOT inspect runtime files, local HTTP endpoints, or model caches directly.
+**SPEC-046-R001 - CLI-owned discovery commands.** `macprovider-cli` MUST expose a provider-local discovery command with stable spelling reserved for `models discover --json` and a provider-local evaluation command with stable spelling reserved for `models evaluate <candidate-id-or-ref> --json`. Both commands MUST emit JSON only to stdout when `--json` is set and MUST emit warnings, progress, and redacted diagnostics to stderr. The commands MUST follow the SPEC-001 §6.14a taxonomy: `models discover` is provider-local BYOM inventory, `models evaluate` is bounded local evaluation, and neither command replaces or extends the legacy catalog browse/list schemas. If Malibu consumes discovery in a later app release, it MUST consume the CLI projection or capability-negotiated equivalent and MUST NOT inspect runtime files, local HTTP endpoints, or model caches directly.
 
 **SPEC-046-R002 - Safe adapter scope.** Discovery adapters MUST be explicit, bounded, and local. The v0.1 adapter enum is `mlx_cache`, `ollama_loopback`, `lmstudio_loopback`, `llamacpp_loopback`, and `openai_compatible_loopback`. Loopback HTTP adapters MUST accept only IPv4 loopback addresses in `127.0.0.0/8` and IPv6 `::1`; they MUST reject wildcard, LAN, VPN, public, private non-loopback, link-local, multicast, Unix-domain, unresolved, redirected, proxied, or hostname-expanded non-loopback targets. The CLI MUST NOT scan ports or networks; an adapter endpoint is either a well-known loopback default for that runtime or an operator-supplied loopback origin. Adapter requests MUST use short timeouts, bounded response headers, bounded decoded body bytes, bounded JSON nesting/parser work, and a closed endpoint allowlist. Adapter failures MUST produce warning codes, not partial trust claims.
 
@@ -94,7 +101,7 @@ When coordinator reachability changes, a locally eligible candidate may move bet
 
 **SPEC-046-R007 - Privacy and secret boundary.** Discovery and evaluation MUST NOT expose or persist provider bearer tokens, buyer API keys, wallet secrets, endpoint credentials, environment variables, home-directory paths, usernames, raw local absolute paths, hardware serials, MAC addresses, stable hardware UUIDs, raw prompts, raw completions, raw receipts, raw adapter error bodies, or full local endpoint URLs that contain secret-bearing components. Diagnostics MAY expose redacted adapter type, redacted host class, candidate display name, catalog match key, runtime version, and warning codes sufficient for support. Logs and JSON output MUST distinguish redacted values from absent values.
 
-**SPEC-046-R008 - Release evidence.** Promotion beyond draft MUST include automated tests for adapter allowlisting, loopback rejection, bounded HTTP parsing, malformed adapter responses, candidate schema validation, local-state ladder meaning and next-action projection, advisory capability nullability, catalog-match labeling, read-only discovery, evaluation timeouts and byte caps, no production config mutation, path/token redaction, unevaluated copy restrictions, and SPEC-047 state consumption. Production promotion MUST include a signed journey result covering at least one MLX-cache candidate, one loopback runtime candidate, one opaque endpoint candidate, one adapter failure, one evaluated-but-not-network-admitted candidate, and local `local_only`/`offerable`/`not_offered` state-ladder evidence.
+**SPEC-046-R008 - Release evidence.** Promotion beyond draft MUST include automated tests for adapter allowlisting, loopback rejection, bounded HTTP parsing, malformed adapter responses, candidate schema validation, local-state ladder meaning and next-action projection, advisory capability nullability, catalog-match labeling, read-only discovery, evaluation timeouts and byte caps, no production config mutation, path/token redaction, unevaluated copy restrictions, command-taxonomy separation from legacy `models list`/`models browse`, and SPEC-047 state consumption. Before any provider-visible human discovery/evaluation rendering ships, tests MUST reject forbidden earning-copy meanings with parity to SPEC-044-R004/R009, including claims that a discovered, evaluated, offered, or non-settlement candidate earns, is higher-paying, is buyer-routable by default, is verified, is catalog-priced, or is settlement-capable. Production promotion MUST include a signed journey result covering at least one MLX-cache candidate, one loopback runtime candidate, one opaque endpoint candidate, one adapter failure, one evaluated-but-not-network-admitted candidate, and local `local_only`/`offerable`/`not_offered` state-ladder evidence.
 
 ## 4. Implementation, tests, and journeys
 
@@ -126,4 +133,8 @@ The core invariant is that local discovery is deliberately cheap and broad becau
 
 ## 8. Changelog and history
 
+- v0.1.1 - Narrow contract-lock amendment for issue #1249. Registers SPEC-001
+  command-taxonomy separation, forbids BYOM reuse of legacy browse/list schema
+  strings, and requires forbidden earning-copy tests before provider-visible
+  human rendering.
 - v0.1.0 - Initial draft for issue #1240. Establishes CLI-first provider BYOM discovery/evaluation and separates local inventory from paid network admission.
