@@ -81,6 +81,10 @@ var spec018RetryableByCode = map[string]bool{
 	// succeed once a provider upgrades and reconnects.
 	"model_version_floor_unmet": true,
 	"rate_limited":              true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
+	// BYOM admission states below settlement_capable are intentionally
+	// terminal for the current request: retrying the same paid route must not
+	// imply earning or catalog-priced settlement.
+	"byom_non_settlement_unavailable": false,
 	// SPEC-042 R005/R010 tenant isolation.
 	"pool_state_stale":                     true,  // 409, pool membership changed during routing; re-select
 	"pool_unavailable":                     false, // 503, unknown/unauthorized/disabled/non-active pool; same request must not be retried unchanged
@@ -214,6 +218,7 @@ type Server struct {
 	relay                    RelayFunc
 	settlementRelay          SettlementRelayFunc
 	admission                *providerws.AdmissionManager
+	modelAdmissionStore      providerws.ModelAdmissionStore
 	requestTimeout           time.Duration
 	failoverEnabled          bool
 	failoverTimeout          time.Duration
@@ -635,6 +640,12 @@ func WithAdmission(admission *providerws.AdmissionManager, provisionalWeight flo
 		if provisionalWeight > 0 {
 			s.provisionalWeight = provisionalWeight
 		}
+	}
+}
+
+func WithModelAdmissionStore(store providerws.ModelAdmissionStore) Option {
+	return func(s *Server) {
+		s.modelAdmissionStore = store
 	}
 }
 
@@ -2005,6 +2016,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if !pillarAActive && (p.State != pool.StateReady || !p.CapacityEligible()) {
+			continue
+		}
+		if !s.byomDefaultPaidRoutingEligible(p) {
 			continue
 		}
 		excluded := tier2Active && s.tier2ProviderExcludedForConfig(p, cfg)
@@ -5881,6 +5895,15 @@ type routeError struct {
 	typ     string
 }
 
+func byomNonSettlementRouteError(model string) *routeError {
+	return &routeError{
+		status:  http.StatusServiceUnavailable,
+		code:    "byom_non_settlement_unavailable",
+		message: "No settlement-capable BYOM provider is available for model " + model,
+		typ:     "server_error",
+	}
+}
+
 func (s *Server) selectProvider(ctx context.Context, requestID string, req chatRequest, headers http.Header, dailyKey string, state *forwardState) (pool.Provider, *routeError) {
 	return s.selectProviderExcluding(ctx, requestID, req, headers, nil, dailyKey, state)
 }
@@ -6164,6 +6187,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		if poolActive && result.Counts[routing.ReasonPoolNotMember] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "No eligible member is available for the selected pool"}
 		}
+		if result.Counts[routing.ReasonBYOMNonSettlement] > 0 {
+			return pool.Provider{}, byomNonSettlementRouteError(req.Model)
+		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
 	}
 	objective := s.objectiveForRequest(headers, class)
@@ -6342,6 +6368,9 @@ func stringSliceEqual(a, b []string) bool {
 
 func (s *Server) classForRequest(model string, providers []pool.Provider) *config.ModelClassConfig {
 	for _, p := range providers {
+		if !s.byomDefaultPaidRoutingEligible(p) {
+			continue
+		}
 		if modelIDEqual(p.ModelID, model) {
 			return nil
 		}
@@ -6647,6 +6676,8 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
 			key = "pool_provider_capability_unsatisfied" // SPEC-042 R010: provider-side positive capability advertisement missing
 		case routing.ReasonPoolBinaryTooOld:
 			key = "pool_binary_too_old" // SPEC-042 R004/R010: under-version pool member, observable distinctly
+		case routing.ReasonBYOMNonSettlement:
+			key = "byom_non_settlement"
 		default:
 			key = "other"
 		}
@@ -6868,6 +6899,9 @@ func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string,
 	if !s.providerMatchesRequest(p, model, class) {
 		return pool.Provider{}, &routeError{status: http.StatusNotFound, code: "model_not_found", message: "Pinned provider serves different model"}
 	}
+	if !s.byomDefaultPaidRoutingEligible(p) {
+		return pool.Provider{}, byomNonSettlementRouteError(model)
+	}
 	// #768 self-route preflight gate. The pinned/self-route path bypasses
 	// routing.EligibleCandidates entirely, so the floor must be re-applied here
 	// or a hard pin would be a hole straight through the public routing gate.
@@ -7073,7 +7107,7 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		if s.poolSettlementModeUnsatisfied(state) {
 			return pool.Provider{}, queuedProviderPoolSettlementUnsatisfied
 		}
-		if !s.providerMatchesRequest(provider, model, class) || provider.MaxContextTokens < estimatedTokens {
+		if !s.providerMatchesRequest(provider, model, class) || !s.byomDefaultPaidRoutingEligible(provider) || provider.MaxContextTokens < estimatedTokens {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		// #768 audit R1 (security+architect MEDIUM): the waiter stores only
@@ -7121,7 +7155,7 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
 		if excluded.Has(provider.SortKey()) || !s.providerSlotQueueEligible(provider) {
 			continue
 		}
-		if !s.providerMatchesRequest(provider, checker.model, checker.class) || !checker.ProviderContextSufficient(provider) {
+		if !s.providerMatchesRequest(provider, checker.model, checker.class) || !s.byomDefaultPaidRoutingEligible(provider) || !checker.ProviderContextSufficient(provider) {
 			continue
 		}
 		// SPEC-042 R005: the slot queue re-derives the routing gate by hand,
@@ -7306,6 +7340,10 @@ type eligibilityCtx struct {
 // either failure as ReasonModelMismatch to preserve byte identity.
 func (c *eligibilityCtx) ProviderMatchesRequest(p pool.Provider) bool {
 	return c.s.providerMatchesRequest(p, c.model, c.class) && p.RoutingEligible()
+}
+
+func (c *eligibilityCtx) ProviderBYOMSettlementEligible(p pool.Provider) bool {
+	return c.s.byomDefaultPaidRoutingEligible(p)
 }
 
 // ProviderMeetsModelVersionFloor delegates to the shared #768 gate. See

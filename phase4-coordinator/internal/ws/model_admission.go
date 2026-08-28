@@ -21,6 +21,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/jcs"
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
@@ -57,27 +58,34 @@ type ModelAdmissionStore interface {
 	AppendModelAdmissionWithdrawal(context.Context, ModelAdmissionEvent) (ModelAdmissionEvent, bool, error)
 	AppendModelAdmissionDecision(context.Context, ModelAdmissionEvent) (ModelAdmissionEvent, error)
 	LatestModelAdmissionStatus(context.Context, string, string) (ModelAdmissionEvent, bool, error)
+	LatestModelAdmissionRouteStatus(context.Context, string, string, string) (ModelAdmissionEvent, bool, error)
 }
 
 type ModelAdmissionEvent struct {
-	CoordinatorEventID       string
-	Actor                    string
-	ProviderID               string
-	CandidateID              string
-	ServedModelRef           string
-	CatalogModelKey          string
-	DiscoveryDigestSHA256    string
-	EvaluationDigestSHA256   string
-	RequestedDisclosureClass string
-	PreviousState            string
-	State                    string
-	NextState                string
-	ReasonCode               string
-	RequestID                string
-	Nonce                    string
-	PayloadDigestSHA256      string
-	SignatureDigestSHA256    string
-	CreatedAt                time.Time
+	CoordinatorEventID                string
+	Actor                             string
+	ProviderID                        string
+	CandidateID                       string
+	ServedModelRef                    string
+	CatalogModelKey                   string
+	CatalogID                         string
+	CatalogBodyDigest                 string
+	CatalogSignatureKeyID             string
+	CatalogSignaturePubkeyFingerprint string
+	ExpectedCatalogModelHash          string
+	ExpectedCatalogModelHashAlgorithm string
+	DiscoveryDigestSHA256             string
+	EvaluationDigestSHA256            string
+	RequestedDisclosureClass          string
+	PreviousState                     string
+	State                             string
+	NextState                         string
+	ReasonCode                        string
+	RequestID                         string
+	Nonce                             string
+	PayloadDigestSHA256               string
+	SignatureDigestSHA256             string
+	CreatedAt                         time.Time
 }
 
 type memoryModelAdmissionStore struct {
@@ -237,7 +245,7 @@ func (s *memoryModelAdmissionStore) appendCoordinatorModelAdmissionEvent(event M
 	if !modelAdmissionCoordinatorTransitionAllowed(previous.State, event.State) {
 		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
 	}
-	if modelAdmissionTransitionRequiresCatalogKey(event.State) && strings.TrimSpace(event.CatalogModelKey) == "" {
+	if modelAdmissionTransitionRequiresCatalogAuthority(event.State) && !modelAdmissionEventHasTrustedCatalogAuthority(event) {
 		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
 	}
 	if modelAdmissionTransitionReasonRequired(previous.State, event.State) && strings.TrimSpace(event.ReasonCode) == "" {
@@ -258,6 +266,12 @@ func (s *memoryModelAdmissionStore) LatestModelAdmissionStatus(_ context.Context
 	return event, ok, nil
 }
 
+func (s *memoryModelAdmissionStore) LatestModelAdmissionRouteStatus(_ context.Context, providerID, servedModelRef, catalogModelKey string) (ModelAdmissionEvent, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return latestModelAdmissionRouteStatusFromEvents(s.latest, providerID, servedModelRef, catalogModelKey)
+}
+
 type SQLiteModelAdmissionStore struct {
 	db *sql.DB
 }
@@ -273,6 +287,12 @@ CREATE TABLE IF NOT EXISTS model_admission_events (
     candidate_id TEXT NOT NULL,
     served_model_ref TEXT NOT NULL,
     catalog_model_key TEXT NOT NULL,
+    catalog_id TEXT NOT NULL DEFAULT '',
+    catalog_body_digest TEXT NOT NULL DEFAULT '',
+    catalog_signature_key_id TEXT NOT NULL DEFAULT '',
+    catalog_signature_pubkey_fingerprint TEXT NOT NULL DEFAULT '',
+    expected_catalog_model_hash TEXT NOT NULL DEFAULT '',
+    expected_catalog_model_hash_algorithm TEXT NOT NULL DEFAULT '',
     discovery_digest_sha256 TEXT NOT NULL,
     evaluation_digest_sha256 TEXT NOT NULL,
     requested_disclosure_class TEXT NOT NULL,
@@ -290,6 +310,9 @@ CREATE TABLE IF NOT EXISTS model_admission_events (
 )`); err != nil {
 		return nil, err
 	}
+	if err := ensureSQLiteModelAdmissionColumns(db); err != nil {
+		return nil, err
+	}
 	if _, err := db.ExecContext(context.Background(), `
 CREATE UNIQUE INDEX IF NOT EXISTS model_admission_events_provider_request_id
 ON model_admission_events(provider_id, request_id)`); err != nil {
@@ -300,7 +323,64 @@ CREATE UNIQUE INDEX IF NOT EXISTS model_admission_events_provider_nonce
 ON model_admission_events(provider_id, nonce)`); err != nil {
 		return nil, err
 	}
+	if _, err := db.ExecContext(context.Background(), `
+CREATE INDEX IF NOT EXISTS model_admission_events_provider_route_tuple
+ON model_admission_events(provider_id, served_model_ref, LOWER(catalog_model_key), id DESC)`); err != nil {
+		return nil, err
+	}
+	if _, err := db.ExecContext(context.Background(), `
+CREATE INDEX IF NOT EXISTS model_admission_events_provider_catalog
+ON model_admission_events(provider_id, LOWER(catalog_model_key), id DESC)`); err != nil {
+		return nil, err
+	}
+	if _, err := db.ExecContext(context.Background(), `
+CREATE INDEX IF NOT EXISTS model_admission_events_provider_latest
+ON model_admission_events(provider_id, id DESC)`); err != nil {
+		return nil, err
+	}
 	return &SQLiteModelAdmissionStore{db: db}, nil
+}
+
+func ensureSQLiteModelAdmissionColumns(db *sql.DB) error {
+	rows, err := db.QueryContext(context.Background(), `PRAGMA table_info(model_admission_events)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, column := range []struct {
+		name string
+		sql  string
+	}{
+		{name: "catalog_id", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_id TEXT NOT NULL DEFAULT ''`},
+		{name: "catalog_body_digest", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_body_digest TEXT NOT NULL DEFAULT ''`},
+		{name: "catalog_signature_key_id", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_signature_key_id TEXT NOT NULL DEFAULT ''`},
+		{name: "catalog_signature_pubkey_fingerprint", sql: `ALTER TABLE model_admission_events ADD COLUMN catalog_signature_pubkey_fingerprint TEXT NOT NULL DEFAULT ''`},
+		{name: "expected_catalog_model_hash", sql: `ALTER TABLE model_admission_events ADD COLUMN expected_catalog_model_hash TEXT NOT NULL DEFAULT ''`},
+		{name: "expected_catalog_model_hash_algorithm", sql: `ALTER TABLE model_admission_events ADD COLUMN expected_catalog_model_hash_algorithm TEXT NOT NULL DEFAULT ''`},
+	} {
+		if columns[column.name] {
+			continue
+		}
+		if _, err := db.ExecContext(context.Background(), column.sql); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteModelAdmissionStore) AppendModelAdmissionOffer(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
@@ -384,15 +464,24 @@ SELECT COUNT(DISTINCT candidate_id) FROM model_admission_events WHERE provider_i
 		if _, err := conn.ExecContext(txCtx, `
 INSERT INTO model_admission_events(
     provider_id, candidate_id, served_model_ref, catalog_model_key,
+    catalog_id, catalog_body_digest, catalog_signature_key_id,
+    catalog_signature_pubkey_fingerprint, expected_catalog_model_hash,
+    expected_catalog_model_hash_algorithm,
     discovery_digest_sha256, evaluation_digest_sha256, requested_disclosure_class,
     previous_state, state, next_state, actor, coordinator_event_id,
     reason_code, request_id, nonce, payload_digest_sha256,
     signature_digest_sha256, created_at_utc
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			event.ProviderID,
 			event.CandidateID,
 			event.ServedModelRef,
 			event.CatalogModelKey,
+			event.CatalogID,
+			event.CatalogBodyDigest,
+			event.CatalogSignatureKeyID,
+			event.CatalogSignaturePubkeyFingerprint,
+			event.ExpectedCatalogModelHash,
+			event.ExpectedCatalogModelHashAlgorithm,
 			event.DiscoveryDigestSHA256,
 			event.EvaluationDigestSHA256,
 			event.RequestedDisclosureClass,
@@ -513,7 +602,7 @@ func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEvent(ctx con
 		if !modelAdmissionCoordinatorTransitionAllowed(previous.State, event.State) {
 			return errModelAdmissionReplayConflict
 		}
-		if modelAdmissionTransitionRequiresCatalogKey(event.State) && strings.TrimSpace(event.CatalogModelKey) == "" {
+		if modelAdmissionTransitionRequiresCatalogAuthority(event.State) && !modelAdmissionEventHasTrustedCatalogAuthority(event) {
 			return errModelAdmissionReplayConflict
 		}
 		if modelAdmissionTransitionReasonRequired(previous.State, event.State) && strings.TrimSpace(event.ReasonCode) == "" {
@@ -523,15 +612,24 @@ func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEvent(ctx con
 		if _, err := conn.ExecContext(txCtx, `
 INSERT INTO model_admission_events(
     provider_id, candidate_id, served_model_ref, catalog_model_key,
+    catalog_id, catalog_body_digest, catalog_signature_key_id,
+    catalog_signature_pubkey_fingerprint, expected_catalog_model_hash,
+    expected_catalog_model_hash_algorithm,
     discovery_digest_sha256, evaluation_digest_sha256, requested_disclosure_class,
     previous_state, state, next_state, actor, coordinator_event_id,
     reason_code, request_id, nonce, payload_digest_sha256,
     signature_digest_sha256, created_at_utc
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			event.ProviderID,
 			event.CandidateID,
 			event.ServedModelRef,
 			event.CatalogModelKey,
+			event.CatalogID,
+			event.CatalogBodyDigest,
+			event.CatalogSignatureKeyID,
+			event.CatalogSignaturePubkeyFingerprint,
+			event.ExpectedCatalogModelHash,
+			event.ExpectedCatalogModelHashAlgorithm,
 			event.DiscoveryDigestSHA256,
 			event.EvaluationDigestSHA256,
 			event.RequestedDisclosureClass,
@@ -563,6 +661,67 @@ func (s *SQLiteModelAdmissionStore) LatestModelAdmissionStatus(ctx context.Conte
  LIMIT 1`), providerID, candidateID)
 }
 
+func (s *SQLiteModelAdmissionStore) LatestModelAdmissionRouteStatus(ctx context.Context, providerID, servedModelRef, catalogModelKey string) (ModelAdmissionEvent, bool, error) {
+	servedModelRef = strings.TrimSpace(servedModelRef)
+	catalogModelKey = strings.ToLower(strings.TrimSpace(catalogModelKey))
+	if servedModelRef == "" && catalogModelKey == "" {
+		return scanModelAdmissionEvent(ctx, s.db, modelAdmissionEventSelect(`
+  FROM model_admission_events
+ WHERE provider_id = ?
+ ORDER BY id DESC
+ LIMIT 1`), providerID)
+	}
+	if servedModelRef == "" {
+		return scanModelAdmissionEvent(ctx, s.db, modelAdmissionEventSelect(`
+  FROM model_admission_events
+ WHERE provider_id = ? AND LOWER(catalog_model_key) = ?
+ ORDER BY id DESC
+ LIMIT 1`), providerID, catalogModelKey)
+	}
+	if catalogModelKey == "" {
+		return scanModelAdmissionEvent(ctx, s.db, modelAdmissionEventSelect(`
+  FROM model_admission_events
+ WHERE provider_id = ? AND served_model_ref = ?
+ ORDER BY id DESC
+ LIMIT 1`), providerID, servedModelRef)
+	}
+	return scanModelAdmissionEvent(ctx, s.db, modelAdmissionEventSelect(`
+  FROM model_admission_events
+ WHERE provider_id = ? AND served_model_ref = ? AND LOWER(catalog_model_key) = ?
+ ORDER BY id DESC
+ LIMIT 1`), providerID, servedModelRef, catalogModelKey)
+}
+
+func latestModelAdmissionRouteStatusFromEvents(events map[string]ModelAdmissionEvent, providerID, servedModelRef, catalogModelKey string) (ModelAdmissionEvent, bool, error) {
+	servedModelRef = strings.TrimSpace(servedModelRef)
+	catalogModelKey = strings.ToLower(strings.TrimSpace(catalogModelKey))
+	var latest ModelAdmissionEvent
+	var found bool
+	for _, event := range events {
+		if event.ProviderID != providerID {
+			continue
+		}
+		if servedModelRef == "" && catalogModelKey == "" {
+			if !found || event.CreatedAt.After(latest.CreatedAt) {
+				latest = event
+				found = true
+			}
+			continue
+		}
+		if servedModelRef != "" && event.ServedModelRef != servedModelRef {
+			continue
+		}
+		if catalogModelKey != "" && strings.ToLower(strings.TrimSpace(event.CatalogModelKey)) != catalogModelKey {
+			continue
+		}
+		if !found || event.CreatedAt.After(latest.CreatedAt) {
+			latest = event
+			found = true
+		}
+	}
+	return latest, found, nil
+}
+
 type modelAdmissionQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
@@ -577,6 +736,12 @@ func scanModelAdmissionEvent(ctx context.Context, q modelAdmissionQueryer, query
 		&event.CandidateID,
 		&event.ServedModelRef,
 		&event.CatalogModelKey,
+		&event.CatalogID,
+		&event.CatalogBodyDigest,
+		&event.CatalogSignatureKeyID,
+		&event.CatalogSignaturePubkeyFingerprint,
+		&event.ExpectedCatalogModelHash,
+		&event.ExpectedCatalogModelHashAlgorithm,
 		&event.DiscoveryDigestSHA256,
 		&event.EvaluationDigestSHA256,
 		&event.RequestedDisclosureClass,
@@ -606,6 +771,8 @@ func scanModelAdmissionEvent(ctx context.Context, q modelAdmissionQueryer, query
 
 func modelAdmissionEventSelect(tail string) string {
 	return `SELECT coordinator_event_id, actor, provider_id, candidate_id, served_model_ref, catalog_model_key,
+       catalog_id, catalog_body_digest, catalog_signature_key_id, catalog_signature_pubkey_fingerprint,
+       expected_catalog_model_hash, expected_catalog_model_hash_algorithm,
        discovery_digest_sha256, evaluation_digest_sha256, requested_disclosure_class,
        previous_state, state, next_state, reason_code, request_id, nonce, payload_digest_sha256,
        signature_digest_sha256, created_at_utc` + tail
@@ -655,8 +822,18 @@ func modelAdmissionTransitionReasonRequired(previousState, nextState string) boo
 	}
 }
 
-func modelAdmissionTransitionRequiresCatalogKey(nextState string) bool {
+func modelAdmissionTransitionRequiresCatalogAuthority(nextState string) bool {
 	return nextState == "catalog_priced" || nextState == "settlement_capable"
+}
+
+func modelAdmissionEventHasTrustedCatalogAuthority(event ModelAdmissionEvent) bool {
+	return strings.TrimSpace(event.CatalogModelKey) != "" &&
+		strings.TrimSpace(event.CatalogID) != "" &&
+		validModelAdmissionSHA256Hex(event.CatalogBodyDigest) &&
+		strings.TrimSpace(event.CatalogSignatureKeyID) != "" &&
+		validModelAdmissionReceiptKeyFingerprint(event.CatalogSignaturePubkeyFingerprint) &&
+		validModelAdmissionSHA256Hex(event.ExpectedCatalogModelHash) &&
+		event.ExpectedCatalogModelHashAlgorithm == modelidentity.SnapshotManifestV1
 }
 
 func sameModelAdmissionTuple(previous, next ModelAdmissionEvent) bool {
@@ -692,6 +869,7 @@ func modelAdmissionEvidenceRefreshed(previous, next ModelAdmissionEvent) bool {
 }
 
 func prepareModelAdmissionTransition(event ModelAdmissionEvent, previousState, actor, nextState string) ModelAdmissionEvent {
+	event.CatalogModelKey = strings.ToLower(strings.TrimSpace(event.CatalogModelKey))
 	event.Actor = actor
 	event.PreviousState = previousState
 	event.State = nextState
@@ -705,6 +883,12 @@ func prepareModelAdmissionTransition(event ModelAdmissionEvent, previousState, a
 		event.PreviousState,
 		event.NextState,
 		event.PayloadDigestSHA256,
+		event.CatalogID,
+		event.CatalogBodyDigest,
+		event.CatalogSignatureKeyID,
+		event.CatalogSignaturePubkeyFingerprint,
+		event.ExpectedCatalogModelHash,
+		event.ExpectedCatalogModelHashAlgorithm,
 	}, "\x00")))
 	event.CoordinatorEventID = hex.EncodeToString(sum[:])
 	return event
@@ -726,6 +910,12 @@ func fillCoordinatorModelAdmissionReplayKeys(event ModelAdmissionEvent) ModelAdm
 		event.CandidateID,
 		event.ServedModelRef,
 		event.CatalogModelKey,
+		event.CatalogID,
+		event.CatalogBodyDigest,
+		event.CatalogSignatureKeyID,
+		event.CatalogSignaturePubkeyFingerprint,
+		event.ExpectedCatalogModelHash,
+		event.ExpectedCatalogModelHashAlgorithm,
 		event.State,
 		event.ReasonCode,
 		event.PayloadDigestSHA256,
@@ -750,21 +940,90 @@ func ModelAdmissionSettlementStateCandidate(event ModelAdmissionEvent) bool {
 }
 
 type ModelAdmissionPaidRoutingPredicate struct {
-	ProviderID             string
+	ProviderID                        string
+	CandidateID                       string
+	ServedModelRef                    string
+	CatalogModelKey                   string
+	DiscoveryDigestSHA256             string
+	EvaluationDigestSHA256            string
+	CatalogID                         string
+	CatalogBodyDigest                 string
+	CatalogSignatureKeyID             string
+	CatalogSignaturePubkeyFingerprint string
+	ExpectedCatalogModelHash          string
+	ExpectedCatalogModelHashAlgorithm string
+}
+
+func ModelAdmissionDefaultPaidRoutingEligible(event ModelAdmissionEvent, predicate ModelAdmissionPaidRoutingPredicate) bool {
+	_, ok := ModelAdmissionSettlementBindingForRouteSnapshot(event, ModelAdmissionSettlementPredicate(predicate))
+	return ok
+}
+
+type ModelAdmissionSettlementPredicate struct {
+	ProviderID                        string
+	CandidateID                       string
+	ServedModelRef                    string
+	CatalogModelKey                   string
+	DiscoveryDigestSHA256             string
+	EvaluationDigestSHA256            string
+	CatalogID                         string
+	CatalogBodyDigest                 string
+	CatalogSignatureKeyID             string
+	CatalogSignaturePubkeyFingerprint string
+	ExpectedCatalogModelHash          string
+	ExpectedCatalogModelHashAlgorithm string
+}
+
+type ModelAdmissionSettlementBinding struct {
 	CandidateID            string
+	CoordinatorEventID     string
 	ServedModelRef         string
 	CatalogModelKey        string
 	DiscoveryDigestSHA256  string
 	EvaluationDigestSHA256 string
 }
 
-func ModelAdmissionDefaultPaidRoutingEligible(ModelAdmissionEvent, ModelAdmissionPaidRoutingPredicate) bool {
-	// SPEC-047 #1254 is the withdrawal/revocation gate, not the positive
-	// economics gate. Until the SPEC-022 route-snapshot and signed-catalog
-	// authority are wired by the later settlement slices, BYOM remains excluded
-	// from default paid routing even if the coordinator records a
-	// settlement_capable admission state.
-	return false
+func ModelAdmissionSettlementBindingForRouteSnapshot(event ModelAdmissionEvent, predicate ModelAdmissionSettlementPredicate) (ModelAdmissionSettlementBinding, bool) {
+	if !ModelAdmissionSettlementStateCandidate(event) {
+		return ModelAdmissionSettlementBinding{}, false
+	}
+	if event.ProviderID != predicate.ProviderID ||
+		event.CandidateID != predicate.CandidateID ||
+		event.ServedModelRef != predicate.ServedModelRef ||
+		event.CatalogModelKey != predicate.CatalogModelKey ||
+		event.DiscoveryDigestSHA256 != predicate.DiscoveryDigestSHA256 ||
+		event.EvaluationDigestSHA256 != predicate.EvaluationDigestSHA256 ||
+		event.CatalogID != predicate.CatalogID ||
+		event.CatalogBodyDigest != predicate.CatalogBodyDigest ||
+		event.CatalogSignatureKeyID != predicate.CatalogSignatureKeyID ||
+		event.CatalogSignaturePubkeyFingerprint != predicate.CatalogSignaturePubkeyFingerprint ||
+		event.ExpectedCatalogModelHash != predicate.ExpectedCatalogModelHash ||
+		event.ExpectedCatalogModelHashAlgorithm != predicate.ExpectedCatalogModelHashAlgorithm {
+		return ModelAdmissionSettlementBinding{}, false
+	}
+	if predicate.ExpectedCatalogModelHashAlgorithm != modelidentity.SnapshotManifestV1 {
+		return ModelAdmissionSettlementBinding{}, false
+	}
+	if !validModelAdmissionSHA256Hex(event.CoordinatorEventID) ||
+		!validModelAdmissionSHA256Hex(predicate.DiscoveryDigestSHA256) ||
+		!validModelAdmissionSHA256Hex(predicate.EvaluationDigestSHA256) ||
+		!validModelAdmissionSHA256Hex(predicate.CatalogBodyDigest) ||
+		!validModelAdmissionSHA256Hex(predicate.ExpectedCatalogModelHash) {
+		return ModelAdmissionSettlementBinding{}, false
+	}
+	if strings.TrimSpace(predicate.CatalogID) == "" ||
+		strings.TrimSpace(predicate.CatalogSignatureKeyID) == "" ||
+		!validModelAdmissionReceiptKeyFingerprint(predicate.CatalogSignaturePubkeyFingerprint) {
+		return ModelAdmissionSettlementBinding{}, false
+	}
+	return ModelAdmissionSettlementBinding{
+		CandidateID:            event.CandidateID,
+		CoordinatorEventID:     event.CoordinatorEventID,
+		ServedModelRef:         event.ServedModelRef,
+		CatalogModelKey:        event.CatalogModelKey,
+		DiscoveryDigestSHA256:  event.DiscoveryDigestSHA256,
+		EvaluationDigestSHA256: event.EvaluationDigestSHA256,
+	}, true
 }
 
 func ModelAdmissionRevocationForRuntimeDrift(current ModelAdmissionEvent, predicate ModelAdmissionPaidRoutingPredicate, reasonCode string, now time.Time) (ModelAdmissionEvent, bool) {
@@ -797,6 +1056,12 @@ func ModelAdmissionRevocationForRuntimeDrift(current ModelAdmissionEvent, predic
 		predicate.CatalogModelKey,
 		predicate.DiscoveryDigestSHA256,
 		predicate.EvaluationDigestSHA256,
+		predicate.CatalogID,
+		predicate.CatalogBodyDigest,
+		predicate.CatalogSignatureKeyID,
+		predicate.CatalogSignaturePubkeyFingerprint,
+		predicate.ExpectedCatalogModelHash,
+		predicate.ExpectedCatalogModelHashAlgorithm,
 		reasonCode,
 		now.UTC().Format(time.RFC3339Nano),
 	}, "\x00")))
@@ -818,7 +1083,18 @@ func modelAdmissionRuntimePredicateMatches(event ModelAdmissionEvent, predicate 
 		event.ServedModelRef == predicate.ServedModelRef &&
 		event.CatalogModelKey == predicate.CatalogModelKey &&
 		event.DiscoveryDigestSHA256 == predicate.DiscoveryDigestSHA256 &&
-		event.EvaluationDigestSHA256 == predicate.EvaluationDigestSHA256
+		event.EvaluationDigestSHA256 == predicate.EvaluationDigestSHA256 &&
+		event.CatalogID == predicate.CatalogID &&
+		event.CatalogBodyDigest == predicate.CatalogBodyDigest &&
+		event.CatalogSignatureKeyID == predicate.CatalogSignatureKeyID &&
+		event.CatalogSignaturePubkeyFingerprint == predicate.CatalogSignaturePubkeyFingerprint &&
+		event.ExpectedCatalogModelHash == predicate.ExpectedCatalogModelHash &&
+		event.ExpectedCatalogModelHashAlgorithm == predicate.ExpectedCatalogModelHashAlgorithm
+}
+
+func validModelAdmissionReceiptKeyFingerprint(value string) bool {
+	const prefix = "ed25519-sha256:"
+	return strings.HasPrefix(value, prefix) && validModelAdmissionSHA256Hex(strings.TrimPrefix(value, prefix))
 }
 
 func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *http.Request) {
@@ -1036,11 +1312,12 @@ func (s *Server) verifyModelAdmissionOffer(ctx context.Context, authenticatedPro
 	if signedAt.Before(now.Add(-modelAdmissionMaxClockSkew)) || signedAt.After(now.Add(modelAdmissionMaxClockSkew)) {
 		return ModelAdmissionEvent{}, fmt.Errorf("invalid timestamp")
 	}
+	catalogModelKey := strings.ToLower(strings.TrimSpace(body.CatalogModelKey))
 	return ModelAdmissionEvent{
 		ProviderID:               body.ProviderID,
 		CandidateID:              body.CandidateID,
 		ServedModelRef:           body.ServedModelRef,
-		CatalogModelKey:          body.CatalogModelKey,
+		CatalogModelKey:          catalogModelKey,
 		DiscoveryDigestSHA256:    body.DiscoveryDigestSHA256,
 		EvaluationDigestSHA256:   body.EvaluationDigestSHA256,
 		RequestedDisclosureClass: body.RequestedDisclosureClass,
@@ -1099,11 +1376,12 @@ func (s *Server) verifyModelAdmissionWithdrawal(ctx context.Context, authenticat
 	if signedAt.Before(now.Add(-modelAdmissionMaxClockSkew)) || signedAt.After(now.Add(modelAdmissionMaxClockSkew)) {
 		return ModelAdmissionEvent{}, fmt.Errorf("invalid timestamp")
 	}
+	catalogModelKey := strings.ToLower(strings.TrimSpace(modelAdmissionNullableStringValue(body.CatalogModelKey.Value)))
 	return ModelAdmissionEvent{
 		ProviderID:            body.ProviderID,
 		CandidateID:           body.CandidateID,
 		ServedModelRef:        body.ServedModelRef,
-		CatalogModelKey:       modelAdmissionNullableStringValue(body.CatalogModelKey.Value),
+		CatalogModelKey:       catalogModelKey,
 		State:                 modelAdmissionWithdrawn,
 		ReasonCode:            body.ReasonCode,
 		RequestID:             body.IdempotencyKey,

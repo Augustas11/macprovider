@@ -13,6 +13,7 @@ type stubChecker struct {
 	matches        map[string]bool
 	versionFloorOK map[string]bool
 	receiptKeyOK   map[string]bool
+	byomOK         map[string]bool
 	contextOK      map[string]bool
 	tier2          map[string]routing.RejectionReason
 	tier2Hash      map[string]pool.HashStatus
@@ -24,6 +25,12 @@ type stubChecker struct {
 
 func (s *stubChecker) ProviderMatchesRequest(p pool.Provider) bool {
 	if v, ok := s.matches[p.ProviderID]; ok {
+		return v
+	}
+	return true
+}
+func (s *stubChecker) ProviderBYOMSettlementEligible(p pool.Provider) bool {
+	if v, ok := s.byomOK[p.ProviderID]; ok {
 		return v
 	}
 	return true
@@ -245,6 +252,7 @@ type recordingChecker struct {
 	matchFail        map[string]bool
 	versionFloorFail map[string]bool
 	receiptKeyFail   map[string]bool
+	byomFail         map[string]bool
 	contextFail      map[string]bool
 	tier2Reason      map[string]routing.RejectionReason
 	quotaFail        map[string]bool
@@ -255,6 +263,10 @@ type recordingChecker struct {
 func (r *recordingChecker) ProviderMatchesRequest(p pool.Provider) bool {
 	r.calls = append(r.calls, p.ProviderID+"/match")
 	return !r.matchFail[p.ProviderID]
+}
+func (r *recordingChecker) ProviderBYOMSettlementEligible(p pool.Provider) bool {
+	r.calls = append(r.calls, p.ProviderID+"/byom")
+	return !r.byomFail[p.ProviderID]
 }
 func (r *recordingChecker) ProviderMeetsModelVersionFloor(p pool.Provider) bool {
 	r.calls = append(r.calls, p.ProviderID+"/version_floor")
@@ -300,15 +312,15 @@ func TestEligibleCandidates_OrderingExcludedShortCircuitsEverything(t *testing.T
 	ex.Add(providers[0], keyer)
 	checker := &recordingChecker{t: t, matchFail: map[string]bool{"match-fail-y": true}}
 	res := routing.EligibleCandidates(providers, ex, keyer, checker)
-	// Excluded provider MUST never reach match/version_floor/context/tier2/quota.
+	// Excluded provider MUST never reach match/byom/version_floor/context/tier2/quota.
 	for _, c := range checker.calls {
-		if c == "excluded-x/match" || c == "excluded-x/version_floor" || c == "excluded-x/context" || c == "excluded-x/tier2" || c == "excluded-x/quota" {
+		if c == "excluded-x/match" || c == "excluded-x/byom" || c == "excluded-x/version_floor" || c == "excluded-x/context" || c == "excluded-x/tier2" || c == "excluded-x/quota" {
 			t.Fatalf("excluded provider hit later gate: %q (full calls: %v)", c, checker.calls)
 		}
 	}
-	// match-fail-y reaches match but NOT version_floor/context/tier2/quota.
+	// match-fail-y reaches match but NOT byom/version_floor/context/tier2/quota.
 	for _, c := range checker.calls {
-		if c == "match-fail-y/version_floor" || c == "match-fail-y/context" || c == "match-fail-y/tier2" || c == "match-fail-y/quota" {
+		if c == "match-fail-y/byom" || c == "match-fail-y/version_floor" || c == "match-fail-y/context" || c == "match-fail-y/tier2" || c == "match-fail-y/quota" {
 			t.Fatalf("match-rejected provider hit later gate: %q", c)
 		}
 	}
@@ -319,17 +331,16 @@ func TestEligibleCandidates_OrderingExcludedShortCircuitsEverything(t *testing.T
 
 func TestEligibleCandidates_OrderingPerProviderSequence(t *testing.T) {
 	// For a provider that passes every gate, the call sequence MUST
-	// be exactly match → version_floor → receipt_key → context →
-	// tier2 → quota. FR-SR-18 order, with the #768 per-model version
-	// floor inserted right after the model match (keyed BY model) and
-	// the SPEC-022 R-2.4/R-2.5 receipt-key gate immediately after it.
+	// be exactly match → byom → version_floor → receipt_key → context →
+	// tier2 → quota. FR-SR-18 order keeps the BYOM money gate after the
+	// model/class match and before settlement-specific route prerequisites.
 	t.Parallel()
 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
 	checker := &recordingChecker{t: t}
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
 	// SPEC-042 R005 pool-membership gate is first among property gates
 	// (right after excluded), before the model match.
-	want := []string{"p/pool", "p/pool_cap", "p/pool_binary", "p/match", "p/version_floor", "p/receipt_key", "p/context", "p/tier2", "p/quota"}
+	want := []string{"p/pool", "p/pool_cap", "p/pool_binary", "p/match", "p/byom", "p/version_floor", "p/receipt_key", "p/context", "p/tier2", "p/quota"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("call count: want %d, got %d (calls=%v)", len(want), len(checker.calls), checker.calls)
 	}
@@ -345,7 +356,7 @@ func TestEligibleCandidates_OrderingContextRejectStopsBeforeTier2AndQuota(t *tes
 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
 	checker := &recordingChecker{t: t, contextFail: map[string]bool{"p": true}}
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
-	want := []string{"p/pool", "p/pool_cap", "p/pool_binary", "p/match", "p/version_floor", "p/receipt_key", "p/context"}
+	want := []string{"p/pool", "p/pool_cap", "p/pool_binary", "p/match", "p/byom", "p/version_floor", "p/receipt_key", "p/context"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("context-reject: want sequence %v, got %v", want, checker.calls)
 	}
@@ -370,6 +381,19 @@ func TestEligibleCandidates_ReceiptKeyMissingExcluded(t *testing.T) {
 	}
 	if res.Counts[routing.ReasonReceiptKeyMissing] != 1 {
 		t.Fatalf("want ReasonReceiptKeyMissing==1, got %d (counts=%v)", res.Counts[routing.ReasonReceiptKeyMissing], res.Counts)
+	}
+}
+
+func TestEligibleCandidates_BYOMNonSettlementExcluded(t *testing.T) {
+	t.Parallel()
+	providers := []pool.Provider{mkProvider("settlement"), mkProvider("offered")}
+	checker := &stubChecker{byomOK: map[string]bool{"offered": false}}
+	res := routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+	if len(res.Eligible) != 1 || res.Eligible[0].ProviderID != "settlement" {
+		t.Fatalf("want only settlement-capable BYOM eligible, got %+v", res.Eligible)
+	}
+	if res.Counts[routing.ReasonBYOMNonSettlement] != 1 {
+		t.Fatalf("want ReasonBYOMNonSettlement==1, got %d (counts=%v)", res.Counts[routing.ReasonBYOMNonSettlement], res.Counts)
 	}
 }
 
@@ -498,7 +522,7 @@ func TestEligibleCandidates_OrderingVersionFloorRejectStopsBeforeContext(t *test
 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
 	checker := &recordingChecker{t: t, versionFloorFail: map[string]bool{"p": true}}
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
-	want := []string{"p/pool", "p/pool_cap", "p/pool_binary", "p/match", "p/version_floor"}
+	want := []string{"p/pool", "p/pool_cap", "p/pool_binary", "p/match", "p/byom", "p/version_floor"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("calls = %v, want exactly %v", checker.calls, want)
 	}

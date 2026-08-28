@@ -6596,6 +6596,16 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 	}
 }
 
+func TestBYOMNonSettlementUnavailableIsPermanent(t *testing.T) {
+	const code = "byom_non_settlement_unavailable"
+	if gatewayRetryable(code) {
+		t.Fatalf("code %q must be retryable=false", code)
+	}
+	if !gatewayPermanentCodes[code] {
+		t.Fatalf("code %q must be explicitly classified as permanent", code)
+	}
+}
+
 // gatewayEmittedErrorCodes is every literal string passed as the `code`
 // argument to writeError, writeSSEError, or writeSpec019PreflightError
 // across the non-test .go files in this package, as of the round-2 3-lane
@@ -7459,6 +7469,69 @@ func TestCoordinator404ModelNotFoundPassesThroughAndDoesNotChargeQuota(t *testin
 			}
 			if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
 				t.Fatalf("daily_tokens_reserved=%v, want 0 — reservation must be refunded on coord 404", reserved)
+			}
+		})
+	}
+}
+
+func TestBYOMNonSettlementCoordinatorUnavailableDoesNotChargeOrClaimVerified(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non_stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			coordModelsBody := `{"object":"list","data":[],"tier1_disclosure":{"verified_model_settlement":{"enforce_mode":"Enforce mode may settle only covered paid entrypoints listed in this disclosure whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified."}}}`
+			coordChatBody := `{"error":{"code":"byom_non_settlement_unavailable","message":"No settlement-capable BYOM provider is available for model model-a","param":null,"type":"api_error","inference_ran":false,"settlement_ran":false}}`
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				switch r.URL.Path {
+				case "/v1/models":
+					return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, coordModelsBody), nil
+				case "/v1/chat/completions":
+					return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, coordChatBody), nil
+				default:
+					return responseWithBody(http.StatusNotFound, http.Header{"Content-Type": []string{"application/json"}}, `{"error":{"code":"not_found"}}`), nil
+				}
+			})}
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			fullKey := createAccountAndKey(t, store, cfg, "acct_byom_non_settlement_"+name)
+
+			modelsResp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
+			var models struct {
+				Data []map[string]any `json:"data"`
+			}
+			if err := json.Unmarshal(modelsResp.Body.Bytes(), &models); err != nil {
+				t.Fatalf("models json: %v", err)
+			}
+			if len(models.Data) != 0 {
+				t.Fatalf("gateway synthesized hidden non-settlement BYOM model: %s", modelsResp.Body.String())
+			}
+			if strings.Contains(modelsResp.Body.String(), "settlement_capable") ||
+				strings.Contains(modelsResp.Body.String(), `"verified":true`) {
+				t.Fatalf("gateway exposed buyer-visible verified BYOM claim: %s", modelsResp.Body.String())
+			}
+
+			body := `{"model":"model-a","max_tokens":1000,"messages":[{"role":"user","content":"x"}]}`
+			if stream {
+				body = `{"model":"model-a","max_tokens":1000,"stream":true,"messages":[{"role":"user","content":"x"}]}`
+			}
+			resp := postChat(t, h, fullKey, body, nil)
+			if resp.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status=%d body=%s, want coordinator non-settlement unavailable passthrough", resp.Code, resp.Body.String())
+			}
+			if !strings.Contains(resp.Body.String(), `"code":"byom_non_settlement_unavailable"`) {
+				t.Fatalf("coordinator BYOM unavailable code not preserved: %s", resp.Body.String())
+			}
+
+			usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+			quota := readQuota(t, usageResp)
+			if used := quota["daily_tokens_used"].(float64); used != 0 {
+				t.Fatalf("daily_tokens_used=%v, want 0 for non-settlement BYOM unavailable", used)
+			}
+			if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+				t.Fatalf("daily_tokens_reserved=%v, want 0 for non-settlement BYOM unavailable", reserved)
 			}
 		})
 	}

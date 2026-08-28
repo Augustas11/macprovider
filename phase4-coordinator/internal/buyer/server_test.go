@@ -8305,7 +8305,12 @@ func TestSlotQueueBurstSweepAvoidsBuyerVisible503(t *testing.T) {
 }
 
 func TestSlotQueueAppliesToHTTPRetryReplacementProvider(t *testing.T) {
+	failHit := make(chan struct{}, 1)
 	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case failHit <- struct{}{}:
+		default:
+		}
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}))
 	defer failUpstream.Close()
@@ -8334,6 +8339,11 @@ func TestSlotQueueAppliesToHTTPRetryReplacementProvider(t *testing.T) {
 		buyer.WithSlotQueueConfig(4, 100*time.Millisecond, time.Millisecond),
 	)
 	go func() {
+		select {
+		case <-failHit:
+		case <-time.After(time.Second):
+			return
+		}
 		time.Sleep(10 * time.Millisecond)
 		one := 1
 		registry.ApplyStateUpdate("queued", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})

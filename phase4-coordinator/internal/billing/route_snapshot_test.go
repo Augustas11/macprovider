@@ -133,6 +133,67 @@ func TestRouteSnapshotPoolID_RoundTripsThroughSettlementLoader(t *testing.T) {
 	}
 }
 
+func TestRouteSnapshotBYOMAdmissionBindingDigestAndRoundTrip(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	snap := testRouteSnapshot()
+	snap.ModelAdmissionCandidateID = "byom_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxyz"
+	snap.ModelAdmissionCoordinatorEventID = strings.Repeat("7", 64)
+	snap.ModelAdmissionServedModelRef = "ollama:qwen3-8b"
+	snap.ModelAdmissionCatalogModelKey = "qwen3-8b-q4"
+	snap.ModelAdmissionDiscoveryDigestSHA256 = strings.Repeat("8", 64)
+	snap.ModelAdmissionEvaluationDigestSHA256 = strings.Repeat("9", 64)
+
+	value := snap.Value()
+	for _, key := range []string{
+		"model_admission_candidate_id",
+		"model_admission_coordinator_event_id",
+		"model_admission_served_model_ref",
+		"model_admission_catalog_model_key",
+		"model_admission_discovery_digest_sha256",
+		"model_admission_evaluation_digest_sha256",
+	} {
+		if _, ok := value[key]; !ok {
+			t.Fatalf("missing BYOM route snapshot key %q", key)
+		}
+	}
+	digest, err := store.InsertRouteSnapshot(context.Background(), snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := snap
+	mutated.ModelAdmissionCoordinatorEventID = strings.Repeat("a", 64)
+	mutatedDigest, _, err := mutated.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutatedDigest == digest {
+		t.Fatal("BYOM coordinator event id must change the route snapshot digest")
+	}
+
+	conn, err := store.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	loaded, loadedDigest, err := loadSettlementRouteSnapshotConn(context.Background(), conn, SettlementReceiptIdentity{
+		AccountScope: snap.AccountScope,
+		RequestID:    snap.RequestID,
+		AttemptN:     snap.AttemptN,
+		ProviderID:   snap.ProviderID,
+	})
+	if err != nil {
+		t.Fatalf("loader returned error: %v", err)
+	}
+	if loadedDigest != digest {
+		t.Fatalf("recompute digest %q != insert digest %q", loadedDigest, digest)
+	}
+	if loaded.ModelAdmissionCoordinatorEventID != snap.ModelAdmissionCoordinatorEventID ||
+		loaded.ModelAdmissionDiscoveryDigestSHA256 != snap.ModelAdmissionDiscoveryDigestSHA256 ||
+		loaded.ModelAdmissionEvaluationDigestSHA256 != snap.ModelAdmissionEvaluationDigestSHA256 {
+		t.Fatalf("loader did not recover BYOM binding: %+v", loaded)
+	}
+}
+
 func TestInsertRouteSnapshotPersistsCanonicalDigestAndRejectsRewrite(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	snapshot := testRouteSnapshot()
