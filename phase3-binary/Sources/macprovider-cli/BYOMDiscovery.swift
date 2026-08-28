@@ -13,6 +13,7 @@ enum BYOMDiscoveryWarning: String, Codable, Sendable {
     case catalogMatchUnverified = "catalog_match_unverified"
     case capabilityUnevaluated = "capability_unevaluated"
     case evaluationRequired = "evaluation_required"
+    case evaluationFailed = "evaluation_failed"
     case requiresPreparation = "requires_preparation"
     case namespacePermissionInvalid = "namespace_permission_invalid"
 }
@@ -41,6 +42,13 @@ struct BYOMDiscoveryWire: Codable, Equatable, Sendable {
                 try container.encodeNil(forKey: .originClass)
             }
             try container.encode(warningCodes, forKey: .warningCodes)
+        }
+
+        init(runtimeSource: String, status: String, originClass: String?, warningCodes: [String]) {
+            self.runtimeSource = runtimeSource
+            self.status = status
+            self.originClass = originClass
+            self.warningCodes = warningCodes
         }
     }
 
@@ -81,6 +89,30 @@ struct BYOMDiscoveryWire: Codable, Equatable, Sendable {
             family: nil,
             runtimeVersion: nil
         )
+
+        init(
+            chatCompletions: Bool?,
+            streaming: Bool?,
+            toolCallPassthrough: Bool?,
+            structuredOutputPassthrough: Bool?,
+            jsonMode: Bool?,
+            usageReporting: Bool?,
+            maxContextTokens: Int?,
+            quantization: String?,
+            family: String?,
+            runtimeVersion: String?
+        ) {
+            self.chatCompletions = chatCompletions
+            self.streaming = streaming
+            self.toolCallPassthrough = toolCallPassthrough
+            self.structuredOutputPassthrough = structuredOutputPassthrough
+            self.jsonMode = jsonMode
+            self.usageReporting = usageReporting
+            self.maxContextTokens = maxContextTokens
+            self.quantization = quantization
+            self.family = family
+            self.runtimeVersion = runtimeVersion
+        }
 
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
@@ -135,6 +167,20 @@ struct BYOMDiscoveryWire: Codable, Equatable, Sendable {
                 try container.encodeNil(forKey: .transitionReasonCode)
             }
             try container.encode(earningPathClass, forKey: .earningPathClass)
+        }
+
+        init(
+            stateLabelKey: String,
+            stateMeaningKey: String,
+            nextAction: String,
+            transitionReasonCode: String?,
+            earningPathClass: String
+        ) {
+            self.stateLabelKey = stateLabelKey
+            self.stateMeaningKey = stateMeaningKey
+            self.nextAction = nextAction
+            self.transitionReasonCode = transitionReasonCode
+            self.earningPathClass = earningPathClass
         }
     }
 
@@ -209,6 +255,44 @@ struct BYOMDiscoveryWire: Codable, Equatable, Sendable {
             try container.encode(providerGuidance, forKey: .providerGuidance)
             try container.encode(warningCodes, forKey: .warningCodes)
         }
+
+        init(
+            candidateID: String,
+            runtimeSource: String,
+            displayName: String,
+            servedModelRef: String,
+            catalogModelKey: String?,
+            identityState: String,
+            locality: String,
+            estimatedGB: Double?,
+            contextWindowTokens: Int?,
+            capabilities: Capabilities,
+            readinessState: String,
+            fitState: String,
+            evaluationState: String,
+            admissionState: String,
+            admissionStateSource: String,
+            providerGuidance: Guidance,
+            warningCodes: [String]
+        ) {
+            self.candidateID = candidateID
+            self.runtimeSource = runtimeSource
+            self.displayName = displayName
+            self.servedModelRef = servedModelRef
+            self.catalogModelKey = catalogModelKey
+            self.identityState = identityState
+            self.locality = locality
+            self.estimatedGB = estimatedGB
+            self.contextWindowTokens = contextWindowTokens
+            self.capabilities = capabilities
+            self.readinessState = readinessState
+            self.fitState = fitState
+            self.evaluationState = evaluationState
+            self.admissionState = admissionState
+            self.admissionStateSource = admissionStateSource
+            self.providerGuidance = providerGuidance
+            self.warningCodes = warningCodes
+        }
     }
 
     let schema: String
@@ -244,6 +328,221 @@ struct BYOMDiscoveryWire: Codable, Equatable, Sendable {
         self.adapters = adapters
         self.candidates = candidates
         self.warnings = warnings
+    }
+}
+
+struct BYOMEvaluationWire: Codable, Equatable, Sendable {
+    struct CapabilityResult: Codable, Equatable, Sendable {
+        let result: String
+        let source: String
+        let reasonCode: String?
+
+        enum CodingKeys: String, CodingKey {
+            case result
+            case source
+            case reasonCode = "reason_code"
+        }
+
+        init(result: String, source: String, reasonCode: String? = nil) {
+            self.result = result
+            self.source = source
+            self.reasonCode = reasonCode
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(result, forKey: .result)
+            try container.encode(source, forKey: .source)
+            if let reasonCode {
+                try container.encode(reasonCode, forKey: .reasonCode)
+            } else {
+                try container.encodeNil(forKey: .reasonCode)
+            }
+        }
+    }
+
+    struct MutationSummary: Codable, Equatable, Sendable {
+        let productionConfigMutated: Bool
+        let coordinatorStateMutated: Bool
+        let productionModelSwitched: Bool
+        let runtimeStarted: Bool
+        let downloadsStarted: Bool
+        let temporaryFilesCreated: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case productionConfigMutated = "production_config_mutated"
+            case coordinatorStateMutated = "coordinator_state_mutated"
+            case productionModelSwitched = "production_model_switched"
+            case runtimeStarted = "runtime_started"
+            case downloadsStarted = "downloads_started"
+            case temporaryFilesCreated = "temporary_files_created"
+        }
+
+        static let none = MutationSummary(
+            productionConfigMutated: false,
+            coordinatorStateMutated: false,
+            productionModelSwitched: false,
+            runtimeStarted: false,
+            downloadsStarted: false,
+            temporaryFilesCreated: false
+        )
+    }
+
+    struct DiagnosticHashes: Codable, Equatable, Sendable {
+        let promptSHA256: String
+        let responseBodySHA256: String?
+
+        enum CodingKeys: String, CodingKey {
+            case promptSHA256 = "prompt_sha256"
+            case responseBodySHA256 = "response_body_sha256"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(promptSHA256, forKey: .promptSHA256)
+            if let responseBodySHA256 {
+                try container.encode(responseBodySHA256, forKey: .responseBodySHA256)
+            } else {
+                try container.encodeNil(forKey: .responseBodySHA256)
+            }
+        }
+    }
+
+    let schema: String
+    let generatedAt: String
+    let cliVersion: String
+    let candidateID: String
+    let runtimeSource: String
+    let servedModelRef: String
+    let catalogModelKey: String?
+    let adapterIdentity: String
+    let healthResult: String
+    let latencyMs: Int?
+    let completionTokens: Int?
+    let tokensPerSecond: Double?
+    let requestCount: Int
+    let outputBytes: Int
+    let usageReportingSource: String
+    let capabilityResults: [String: CapabilityResult]
+    let fitEstimateSource: String
+    let mutationSummary: MutationSummary
+    let diagnosticHashes: DiagnosticHashes
+    let providerGuidance: BYOMDiscoveryWire.Guidance
+    let offerPreconditionsAppearSatisfied: Bool
+    let warnings: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case generatedAt = "generated_at"
+        case cliVersion = "cli_version"
+        case candidateID = "candidate_id"
+        case runtimeSource = "runtime_source"
+        case servedModelRef = "served_model_ref"
+        case catalogModelKey = "catalog_model_key"
+        case adapterIdentity = "adapter_identity"
+        case healthResult = "health_result"
+        case latencyMs = "latency_ms"
+        case completionTokens = "completion_tokens"
+        case tokensPerSecond = "tokens_per_second"
+        case requestCount = "request_count"
+        case outputBytes = "output_bytes"
+        case usageReportingSource = "usage_reporting_source"
+        case capabilityResults = "capability_results"
+        case fitEstimateSource = "fit_estimate_source"
+        case mutationSummary = "mutation_summary"
+        case diagnosticHashes = "diagnostic_hashes"
+        case providerGuidance = "provider_guidance"
+        case offerPreconditionsAppearSatisfied = "offer_preconditions_appear_satisfied"
+        case warnings
+    }
+
+    init(
+        generatedAt: String = ModelSwitchingWireCodec.timestamp(),
+        cliVersion: String = CoordinatorClient.binaryVersion,
+        candidateID: String,
+        runtimeSource: String,
+        servedModelRef: String,
+        catalogModelKey: String?,
+        adapterIdentity: String,
+        healthResult: String,
+        latencyMs: Int?,
+        completionTokens: Int?,
+        tokensPerSecond: Double?,
+        requestCount: Int,
+        outputBytes: Int,
+        usageReportingSource: String,
+        capabilityResults: [String: CapabilityResult],
+        fitEstimateSource: String,
+        mutationSummary: MutationSummary,
+        diagnosticHashes: DiagnosticHashes,
+        providerGuidance: BYOMDiscoveryWire.Guidance,
+        offerPreconditionsAppearSatisfied: Bool,
+        warnings: [String]
+    ) {
+        schema = "provider_byom_evaluation.v1"
+        self.generatedAt = generatedAt
+        self.cliVersion = cliVersion
+        self.candidateID = candidateID
+        self.runtimeSource = runtimeSource
+        self.servedModelRef = servedModelRef
+        self.catalogModelKey = catalogModelKey
+        self.adapterIdentity = adapterIdentity
+        self.healthResult = healthResult
+        self.latencyMs = latencyMs
+        self.completionTokens = completionTokens
+        self.tokensPerSecond = tokensPerSecond
+        self.requestCount = requestCount
+        self.outputBytes = outputBytes
+        self.usageReportingSource = usageReportingSource
+        self.capabilityResults = capabilityResults
+        self.fitEstimateSource = fitEstimateSource
+        self.mutationSummary = mutationSummary
+        self.diagnosticHashes = diagnosticHashes
+        self.providerGuidance = providerGuidance
+        self.offerPreconditionsAppearSatisfied = offerPreconditionsAppearSatisfied
+        self.warnings = warnings
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schema, forKey: .schema)
+        try container.encode(generatedAt, forKey: .generatedAt)
+        try container.encode(cliVersion, forKey: .cliVersion)
+        try container.encode(candidateID, forKey: .candidateID)
+        try container.encode(runtimeSource, forKey: .runtimeSource)
+        try container.encode(servedModelRef, forKey: .servedModelRef)
+        if let catalogModelKey {
+            try container.encode(catalogModelKey, forKey: .catalogModelKey)
+        } else {
+            try container.encodeNil(forKey: .catalogModelKey)
+        }
+        try container.encode(adapterIdentity, forKey: .adapterIdentity)
+        try container.encode(healthResult, forKey: .healthResult)
+        if let latencyMs {
+            try container.encode(latencyMs, forKey: .latencyMs)
+        } else {
+            try container.encodeNil(forKey: .latencyMs)
+        }
+        if let completionTokens {
+            try container.encode(completionTokens, forKey: .completionTokens)
+        } else {
+            try container.encodeNil(forKey: .completionTokens)
+        }
+        if let tokensPerSecond {
+            try container.encode(tokensPerSecond, forKey: .tokensPerSecond)
+        } else {
+            try container.encodeNil(forKey: .tokensPerSecond)
+        }
+        try container.encode(requestCount, forKey: .requestCount)
+        try container.encode(outputBytes, forKey: .outputBytes)
+        try container.encode(usageReportingSource, forKey: .usageReportingSource)
+        try container.encode(capabilityResults, forKey: .capabilityResults)
+        try container.encode(fitEstimateSource, forKey: .fitEstimateSource)
+        try container.encode(mutationSummary, forKey: .mutationSummary)
+        try container.encode(diagnosticHashes, forKey: .diagnosticHashes)
+        try container.encode(providerGuidance, forKey: .providerGuidance)
+        try container.encode(offerPreconditionsAppearSatisfied, forKey: .offerPreconditionsAppearSatisfied)
+        try container.encode(warnings, forKey: .warnings)
     }
 }
 
@@ -295,6 +594,23 @@ struct BYOMHTTPResponse: Sendable {
 
 protocol BYOMDiscoveryHTTPClient: Sendable {
     func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse
+    func post(
+        _ url: URL,
+        jsonBody: Data,
+        maxHeaderBytes: Int,
+        maxBodyBytes: Int
+    ) async throws -> BYOMHTTPResponse
+}
+
+extension BYOMDiscoveryHTTPClient {
+    func post(
+        _ url: URL,
+        jsonBody: Data,
+        maxHeaderBytes: Int,
+        maxBodyBytes: Int
+    ) async throws -> BYOMHTTPResponse {
+        throw BYOMDiscoveryAdapterError.rejectedNonLoopback
+    }
 }
 
 final class BYOMURLSessionHTTPClient: BYOMDiscoveryHTTPClient, @unchecked Sendable {
@@ -302,6 +618,32 @@ final class BYOMURLSessionHTTPClient: BYOMDiscoveryHTTPClient, @unchecked Sendab
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        return try await perform(request, maxHeaderBytes: maxHeaderBytes, maxBodyBytes: maxBodyBytes)
+    }
+
+    func post(
+        _ url: URL,
+        jsonBody: Data,
+        maxHeaderBytes: Int,
+        maxBodyBytes: Int
+    ) async throws -> BYOMHTTPResponse {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("application/json", forHTTPHeaderField: "accept")
+        request.httpBody = jsonBody
+        return try await perform(request, maxHeaderBytes: maxHeaderBytes, maxBodyBytes: maxBodyBytes)
+    }
+
+    private func perform(
+        _ request: URLRequest,
+        maxHeaderBytes: Int,
+        maxBodyBytes: Int
+    ) async throws -> BYOMHTTPResponse {
+        guard let url = request.url, BYOMLoopbackOriginValidator.isSafeLoopbackHTTPURL(url) else {
+            throw BYOMDiscoveryAdapterError.rejectedNonLoopback
+        }
         let session = Self.directLoopbackSession()
         defer { session.invalidateAndCancel() }
         let (bytes, response) = try await session.bytes(for: request)
@@ -418,6 +760,470 @@ struct BYOMDiscoveryRunner {
             candidates: candidates,
             warnings: Array(warnings).sorted()
         )
+    }
+}
+
+struct BYOMEvaluationLimits: Sendable {
+    let timeoutSeconds: Double
+    let maxRequestBytes: Int
+    let maxHeaderBytes: Int
+    let maxBodyBytes: Int
+    let maxOutputBytes: Int
+    let maxTokens: Int
+    let requestCount: Int
+
+    static let standard = BYOMEvaluationLimits(
+        timeoutSeconds: 3.0,
+        maxRequestBytes: 16 * 1024,
+        maxHeaderBytes: BYOMDiscoveryHTTPBounds.maxHeaderBytes,
+        maxBodyBytes: 256 * 1024,
+        maxOutputBytes: 64 * 1024,
+        maxTokens: 8,
+        requestCount: 1
+    )
+}
+
+struct BYOMEvaluationRunner: Sendable {
+    private static let prompt = "MacProvider BYOM local evaluation health probe. Reply with one short word."
+
+    private let target: String
+    private let environment: BYOMDiscoveryEnvironment
+    private let limits: BYOMEvaluationLimits
+    private let httpClient: any BYOMDiscoveryHTTPClient
+
+    init(
+        target: String,
+        environment: BYOMDiscoveryEnvironment,
+        limits: BYOMEvaluationLimits = .standard,
+        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()
+    ) {
+        self.target = target
+        self.environment = environment
+        self.limits = limits
+        self.httpClient = httpClient
+    }
+
+    func evaluate() async -> BYOMEvaluationWire {
+        let discovery = await BYOMDiscoveryRunner(environment: environment, httpClient: httpClient).discover()
+        guard let candidate = selectLocalEvaluationCandidate(from: discovery.candidates) else {
+            let warnings = [BYOMDiscoveryWarning.evaluationFailed.rawValue]
+            return failureDocument(
+                candidateID: "unknown",
+                runtimeSource: "unknown",
+                servedModelRef: "unknown",
+                catalogModelKey: nil,
+                adapterIdentity: "unknown",
+                healthResult: "blocked",
+                responseBody: nil,
+                warnings: warnings,
+                guidance: evaluationGuidance(health: "blocked", warnings: Set(warnings))
+            )
+        }
+
+        guard candidate.candidateID.hasPrefix("byom_"),
+              !candidate.candidateID.hasPrefix("byom_unstable_"),
+              !candidate.warningCodes.contains(BYOMDiscoveryWarning.candidateIDUnstable.rawValue),
+              !candidate.warningCodes.contains(BYOMDiscoveryWarning.namespacePermissionInvalid.rawValue) else {
+            let warnings = mergedWarnings(candidate, adding: [.candidateIDUnstable])
+            return failureDocument(
+                for: candidate,
+                healthResult: "blocked",
+                responseBody: nil,
+                warnings: warnings,
+                guidance: evaluationGuidance(health: "blocked", warnings: Set(warnings))
+            )
+        }
+
+        guard candidate.readinessState == "ready", candidate.fitState != "does_not_fit" else {
+            let warnings = mergedWarnings(candidate, adding: [.requiresPreparation])
+            return failureDocument(
+                for: candidate,
+                healthResult: "blocked",
+                responseBody: nil,
+                warnings: warnings,
+                guidance: evaluationGuidance(health: "blocked", warnings: Set(warnings))
+            )
+        }
+
+        guard candidate.runtimeSource == "ollama_loopback",
+              let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(environment.ollamaOrigin ?? ""),
+              let runtimeModel = ollamaModelName(from: candidate.servedModelRef) else {
+            let warnings = mergedWarnings(candidate, adding: [.requiresPreparation])
+            return failureDocument(
+                for: candidate,
+                healthResult: "blocked",
+                responseBody: nil,
+                warnings: warnings,
+                guidance: evaluationGuidance(health: "blocked", warnings: Set(warnings))
+            )
+        }
+
+        return await evaluateOpenAICompatible(candidate: candidate, runtimeModel: runtimeModel, baseURL: baseURL)
+    }
+
+    private func evaluateOpenAICompatible(
+        candidate: BYOMDiscoveryWire.Candidate,
+        runtimeModel: String,
+        baseURL: URL
+    ) async -> BYOMEvaluationWire {
+        let requestBody: Data
+        do {
+            requestBody = try BYOMEvaluationJSON.chatCompletionsRequest(model: runtimeModel, prompt: Self.prompt, maxTokens: limits.maxTokens)
+        } catch {
+            let warnings = mergedWarnings(candidate, adding: [.evaluationFailed])
+            return failureDocument(
+                for: candidate,
+                healthResult: "failed",
+                responseBody: nil,
+                warnings: warnings,
+                guidance: evaluationGuidance(health: "failed", warnings: Set(warnings))
+            )
+        }
+        guard requestBody.count <= limits.maxRequestBytes else {
+            let warnings = mergedWarnings(candidate, adding: [.adapterResponseTruncated, .evaluationFailed])
+            return failureDocument(
+                for: candidate,
+                healthResult: "failed",
+                responseBody: nil,
+                warnings: warnings,
+                guidance: evaluationGuidance(health: "failed", warnings: Set(warnings))
+            )
+        }
+
+        let started = Date()
+        do {
+            let response = try await withTimeout(seconds: limits.timeoutSeconds) {
+                try await httpClient.post(
+                    baseURL.appendingPathComponent("v1/chat/completions"),
+                    jsonBody: requestBody,
+                    maxHeaderBytes: limits.maxHeaderBytes,
+                    maxBodyBytes: limits.maxBodyBytes
+                )
+            }
+            let elapsed = max(Date().timeIntervalSince(started), 0)
+            guard response.statusCode == 200 else {
+                let warnings = mergedWarnings(candidate, adding: nonOKWarnings(response))
+                return failureDocument(
+                    for: candidate,
+                    healthResult: "failed",
+                    latencyMs: milliseconds(elapsed),
+                    responseBody: response.body,
+                    requestCount: limits.requestCount,
+                    warnings: warnings,
+                    guidance: evaluationGuidance(health: "failed", warnings: Set(warnings))
+                )
+            }
+            guard response.body.count <= limits.maxOutputBytes else {
+                let warnings = mergedWarnings(candidate, adding: [.adapterResponseTruncated, .evaluationFailed])
+                return failureDocument(
+                    for: candidate,
+                    healthResult: "failed",
+                    latencyMs: milliseconds(elapsed),
+                    responseBody: response.body,
+                    requestCount: limits.requestCount,
+                    warnings: warnings,
+                    guidance: evaluationGuidance(health: "failed", warnings: Set(warnings))
+                )
+            }
+            let parsed: BYOMEvaluationJSON.ParsedChatCompletion
+            do {
+                parsed = try BYOMEvaluationJSON.parseChatCompletions(
+                    response.body,
+                    maxCompletionTokens: limits.maxTokens
+                )
+            } catch let error as BYOMDiscoveryAdapterError {
+                let warning: BYOMDiscoveryWarning = switch error {
+                case .truncated:
+                    .adapterResponseTruncated
+                case .malformed:
+                    .adapterMalformedResponse
+                case .rejectedNonLoopback:
+                    .adapterRejectedNonLoopback
+                }
+                let warnings = mergedWarnings(candidate, adding: [warning, .evaluationFailed])
+                return failureDocument(
+                    for: candidate,
+                    healthResult: "failed",
+                    latencyMs: milliseconds(elapsed),
+                    responseBody: response.body,
+                    requestCount: limits.requestCount,
+                    warnings: warnings,
+                    guidance: evaluationGuidance(health: "failed", warnings: Set(warnings))
+                )
+            } catch {
+                let warnings = mergedWarnings(candidate, adding: [.adapterMalformedResponse, .evaluationFailed])
+                return failureDocument(
+                    for: candidate,
+                    healthResult: "failed",
+                    latencyMs: milliseconds(elapsed),
+                    responseBody: response.body,
+                    requestCount: limits.requestCount,
+                    warnings: warnings,
+                    guidance: evaluationGuidance(health: "failed", warnings: Set(warnings))
+                )
+            }
+            let usageSource = parsed.completionTokens == nil ? "absent" : "runtime_reported"
+            let tps: Double?
+            if let tokens = parsed.completionTokens, elapsed > 0 {
+                tps = (Double(tokens) / elapsed * 100).rounded() / 100
+            } else {
+                tps = nil
+            }
+            let warnings = mergedWarnings(candidate, excluding: [.evaluationRequired, .capabilityUnevaluated])
+            return BYOMEvaluationWire(
+                candidateID: candidate.candidateID,
+                runtimeSource: candidate.runtimeSource,
+                servedModelRef: candidate.servedModelRef,
+                catalogModelKey: candidate.catalogModelKey,
+                adapterIdentity: "openai_compatible_loopback",
+                healthResult: "passed",
+                latencyMs: milliseconds(elapsed),
+                completionTokens: parsed.completionTokens,
+                tokensPerSecond: tps,
+                requestCount: limits.requestCount,
+                outputBytes: response.body.count,
+                usageReportingSource: usageSource,
+                capabilityResults: capabilityResults(chatPassed: true, usageSource: usageSource),
+                fitEstimateSource: "discovery_fit_state",
+                mutationSummary: .none,
+                diagnosticHashes: diagnosticHashes(responseBody: response.body),
+                providerGuidance: evaluationGuidance(health: "passed", warnings: Set(warnings)),
+                offerPreconditionsAppearSatisfied: candidate.admissionState == "offerable",
+                warnings: warnings
+            )
+        } catch is CancellationError {
+            let warnings = mergedWarnings(candidate, adding: [.adapterTimeout, .evaluationFailed])
+            return failureDocument(
+                for: candidate,
+                healthResult: "timed_out",
+                responseBody: nil,
+                requestCount: limits.requestCount,
+                warnings: warnings,
+                guidance: evaluationGuidance(health: "timed_out", warnings: Set(warnings))
+            )
+        } catch let error as URLError where error.code == .timedOut {
+            let warnings = mergedWarnings(candidate, adding: [.adapterTimeout, .evaluationFailed])
+            return failureDocument(
+                for: candidate,
+                healthResult: "timed_out",
+                responseBody: nil,
+                requestCount: limits.requestCount,
+                warnings: warnings,
+                guidance: evaluationGuidance(health: "timed_out", warnings: Set(warnings))
+            )
+        } catch let error as BYOMDiscoveryAdapterError {
+            let warning: BYOMDiscoveryWarning
+            switch error {
+            case .truncated:
+                warning = .adapterResponseTruncated
+            case .malformed:
+                warning = .adapterMalformedResponse
+            case .rejectedNonLoopback:
+                warning = .adapterRejectedNonLoopback
+            }
+            let warnings = mergedWarnings(candidate, adding: [warning, .evaluationFailed])
+            return failureDocument(
+                for: candidate,
+                healthResult: "failed",
+                responseBody: nil,
+                requestCount: limits.requestCount,
+                warnings: warnings,
+                guidance: evaluationGuidance(health: "failed", warnings: Set(warnings))
+            )
+        } catch {
+            let warnings = mergedWarnings(candidate, adding: [.evaluationFailed])
+            return failureDocument(
+                for: candidate,
+                healthResult: "failed",
+                responseBody: nil,
+                requestCount: limits.requestCount,
+                warnings: warnings,
+                guidance: evaluationGuidance(health: "failed", warnings: Set(warnings))
+            )
+        }
+    }
+
+    private func selectLocalEvaluationCandidate(from candidates: [BYOMDiscoveryWire.Candidate]) -> BYOMDiscoveryWire.Candidate? {
+        let normalizedTarget = BYOMCandidateIdentity.normalizedServedModelRef(target)
+        return candidates.first {
+            $0.candidateID == target
+                || BYOMCandidateIdentity.normalizedServedModelRef($0.servedModelRef) == normalizedTarget
+                || BYOMCandidateIdentity.normalizedServedModelRef($0.displayName) == normalizedTarget
+        }
+    }
+
+    private func ollamaModelName(from servedModelRef: String) -> String? {
+        guard servedModelRef.hasPrefix("ollama:") else { return nil }
+        let name = String(servedModelRef.dropFirst("ollama:".count))
+        guard BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(name) else { return nil }
+        return name
+    }
+
+    private func mergedWarnings(
+        _ candidate: BYOMDiscoveryWire.Candidate,
+        adding added: [BYOMDiscoveryWarning] = [],
+        excluding excluded: [BYOMDiscoveryWarning] = []
+    ) -> [String] {
+        var warnings = Set(candidate.warningCodes)
+        warnings.formUnion(added.map(\.rawValue))
+        warnings.subtract(excluded.map(\.rawValue))
+        return Array(warnings).sorted()
+    }
+
+    private func failureDocument(
+        for candidate: BYOMDiscoveryWire.Candidate,
+        healthResult: String,
+        latencyMs: Int? = nil,
+        responseBody: Data?,
+        requestCount: Int = 0,
+        warnings: [String],
+        guidance: BYOMDiscoveryWire.Guidance
+    ) -> BYOMEvaluationWire {
+        failureDocument(
+            candidateID: candidate.candidateID,
+            runtimeSource: candidate.runtimeSource,
+            servedModelRef: candidate.servedModelRef,
+            catalogModelKey: candidate.catalogModelKey,
+            adapterIdentity: adapterIdentity(for: candidate),
+            healthResult: healthResult,
+            latencyMs: latencyMs,
+            responseBody: responseBody,
+            requestCount: requestCount,
+            warnings: warnings,
+            guidance: guidance
+        )
+    }
+
+    private func failureDocument(
+        candidateID: String,
+        runtimeSource: String,
+        servedModelRef: String,
+        catalogModelKey: String?,
+        adapterIdentity: String,
+        healthResult: String,
+        latencyMs: Int? = nil,
+        responseBody: Data?,
+        requestCount: Int = 0,
+        warnings: [String],
+        guidance: BYOMDiscoveryWire.Guidance
+    ) -> BYOMEvaluationWire {
+        BYOMEvaluationWire(
+            candidateID: candidateID,
+            runtimeSource: runtimeSource,
+            servedModelRef: servedModelRef,
+            catalogModelKey: catalogModelKey,
+            adapterIdentity: adapterIdentity,
+            healthResult: healthResult,
+            latencyMs: latencyMs,
+            completionTokens: nil,
+            tokensPerSecond: nil,
+            requestCount: requestCount,
+            outputBytes: responseBody?.count ?? 0,
+            usageReportingSource: "not_evaluated",
+            capabilityResults: capabilityResults(chatPassed: false, usageSource: "not_evaluated"),
+            fitEstimateSource: "discovery_fit_state",
+            mutationSummary: .none,
+            diagnosticHashes: diagnosticHashes(responseBody: responseBody),
+            providerGuidance: guidance,
+            offerPreconditionsAppearSatisfied: false,
+            warnings: warnings
+        )
+    }
+
+    private func adapterIdentity(for candidate: BYOMDiscoveryWire.Candidate) -> String {
+        switch candidate.runtimeSource {
+        case "ollama_loopback":
+            return "openai_compatible_loopback"
+        case "mlx_cache":
+            return "mlx_cache_local_artifact"
+        default:
+            return "unknown"
+        }
+    }
+
+    private func nonOKWarnings(_ response: BYOMHTTPResponse) -> [BYOMDiscoveryWarning] {
+        guard (300..<400).contains(response.statusCode),
+              let location = header("location", in: response.headers),
+              let url = URL(string: location),
+              !BYOMLoopbackOriginValidator.isSafeLoopbackHTTPURL(url) else {
+            return [.evaluationFailed]
+        }
+        return [.adapterRejectedNonLoopback, .evaluationFailed]
+    }
+
+    private func header(_ name: String, in headers: [(String, String)]) -> String? {
+        headers.first { $0.0.caseInsensitiveCompare(name) == .orderedSame }?.1
+    }
+
+    private func capabilityResults(chatPassed: Bool, usageSource: String) -> [String: BYOMEvaluationWire.CapabilityResult] {
+        [
+            "chat_completions": BYOMEvaluationWire.CapabilityResult(
+                result: chatPassed ? "passed" : "not_tested",
+                source: chatPassed ? "evaluation" : "not_evaluated"
+            ),
+            "streaming": BYOMEvaluationWire.CapabilityResult(result: "not_tested", source: "not_evaluated"),
+            "tool_call_passthrough": BYOMEvaluationWire.CapabilityResult(result: "not_tested", source: "not_evaluated"),
+            "structured_output_passthrough": BYOMEvaluationWire.CapabilityResult(result: "not_tested", source: "not_evaluated"),
+            "json_mode": BYOMEvaluationWire.CapabilityResult(result: "not_tested", source: "not_evaluated"),
+            "usage_reporting": BYOMEvaluationWire.CapabilityResult(
+                result: usageSource == "runtime_reported" ? "passed" : "not_tested",
+                source: usageSource
+            ),
+        ]
+    }
+
+    private func evaluationGuidance(health: String, warnings: Set<String>) -> BYOMDiscoveryWire.Guidance {
+        if health == "passed" {
+            return BYOMDiscoveryWire.Guidance(
+                stateLabelKey: "byom.evaluation.passed",
+                stateMeaningKey: "byom.evaluation.passed_not_earning",
+                nextAction: warnings.isEmpty ? "offer_dry_run" : "fix_local_blocker",
+                transitionReasonCode: warnings.sorted().first,
+                earningPathClass: "local_inventory_only"
+            )
+        }
+        return BYOMDiscoveryWire.Guidance(
+            stateLabelKey: health == "timed_out" ? "byom.evaluation.timed_out" : "byom.evaluation.blocked_or_failed",
+            stateMeaningKey: "byom.evaluation.not_earning",
+            nextAction: "fix_local_blocker",
+            transitionReasonCode: warnings.sorted().first,
+            earningPathClass: "local_inventory_only"
+        )
+    }
+
+    private func diagnosticHashes(responseBody: Data?) -> BYOMEvaluationWire.DiagnosticHashes {
+        BYOMEvaluationWire.DiagnosticHashes(
+            promptSHA256: sha256Hex(Data(Self.prompt.utf8)),
+            responseBodySHA256: responseBody.map(sha256Hex)
+        )
+    }
+
+    private func withTimeout<T: Sendable>(
+        seconds: Double,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw URLError(.timedOut)
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw URLError(.timedOut)
+            }
+            return result
+        }
+    }
+
+    private func milliseconds(_ seconds: TimeInterval) -> Int {
+        max(0, Int((seconds * 1000).rounded()))
+    }
+
+    private func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -932,6 +1738,21 @@ enum BYOMLoopbackOriginValidator {
         return components.url
     }
 
+    static func isSafeLoopbackHTTPURL(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme == "http",
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil,
+              let host = components.host,
+              isLoopbackLiteral(host),
+              components.port.map({ (1...65535).contains($0) }) ?? false else {
+            return false
+        }
+        return true
+    }
+
     static func isLoopbackLiteral(_ host: String) -> Bool {
         let normalized = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
         if normalized == "::1" { return true }
@@ -1013,6 +1834,85 @@ enum BYOMDiscoveryJSON {
         default:
             return nil
         }
+    }
+}
+
+enum BYOMEvaluationJSON {
+    struct ParsedChatCompletion: Equatable, Sendable {
+        let completionTokens: Int?
+    }
+
+    static func chatCompletionsRequest(model: String, prompt: String, maxTokens: Int) throws -> Data {
+        let body: [String: Any] = [
+            "model": model,
+            "stream": false,
+            "temperature": 0,
+            "max_tokens": maxTokens,
+            "messages": [
+                [
+                    "role": "user",
+                    "content": prompt,
+                ],
+            ],
+        ]
+        return try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+    }
+
+    static func parseChatCompletions(_ data: Data, maxCompletionTokens: Int) throws -> ParsedChatCompletion {
+        guard data.count <= BYOMDiscoveryHTTPBounds.maxBodyBytes,
+              let text = String(data: data, encoding: .utf8),
+              case .object(let root) = try? StrictJSONParser.parse(text),
+              case .array(let choices)? = root["choices"],
+              let firstChoice = choices.first,
+              isValidProbeChoice(firstChoice) else {
+            throw BYOMDiscoveryAdapterError.malformed
+        }
+        let usageTokens: Int?
+        if case .object(let usage)? = root["usage"] {
+            usageTokens = try completionTokens(in: usage, maxCompletionTokens: maxCompletionTokens)
+        } else {
+            usageTokens = nil
+        }
+        return ParsedChatCompletion(completionTokens: usageTokens)
+    }
+
+    private static func isValidProbeChoice(_ value: JSONValue) -> Bool {
+        guard case .object(let choice) = value,
+              case .object(let message)? = choice["message"],
+              case .string(let content)? = message["content"],
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        if case .string(let role)? = message["role"],
+           role.lowercased() != "assistant" {
+            return false
+        }
+        return true
+    }
+
+    private static func completionTokens(
+        in object: [String: JSONValue],
+        maxCompletionTokens: Int
+    ) throws -> Int? {
+        for key in ["completion_tokens", "completionTokens", "output_tokens"] {
+            guard let value = object[key] else { continue }
+            switch value {
+            case .int(let tokens) where tokens >= 0 && tokens <= maxCompletionTokens:
+                return tokens
+            case .double(let tokens)
+                where tokens.isFinite
+                    && tokens >= 0
+                    && tokens <= Double(maxCompletionTokens)
+                    && tokens.rounded(.towardZero) == tokens:
+                guard let exact = Int(exactly: tokens), exact <= maxCompletionTokens else {
+                    throw BYOMDiscoveryAdapterError.malformed
+                }
+                return exact
+            default:
+                throw BYOMDiscoveryAdapterError.malformed
+            }
+        }
+        return nil
     }
 }
 
