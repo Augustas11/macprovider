@@ -1,6 +1,6 @@
 # JOURNEY-TRUSTED-POOL-CREATOR-MVP
 
-Status: draft journey contract; same-day signed recapture consumed into CONFORMANCE; no live Trusted Pool announcement
+Status: draft journey contract; latest signed CONFORMANCE evidence expired 2026-08-27; no live Trusted Pool announcement
 Owner: Trusted Pool creator onboarding
 Specs: SPEC-043, SPEC-042
 Requirements: SPEC-043-R001, SPEC-043-R002, SPEC-043-R003, SPEC-043-R004, SPEC-043-R005, SPEC-043-R006, SPEC-043-R007, SPEC-043-R008, SPEC-043-R009, SPEC-043-R010, SPEC-043-R011, SPEC-043-R012
@@ -9,7 +9,7 @@ Issue: https://github.com/Augustas11/macprovider/issues/1053
 Evidence owner: https://github.com/Augustas11/macprovider/issues/1053
 Execution mode: isolated-candidate-trusted-pool-creator-mvp
 
-Signed same-day recapture (CONFORMANCE `evidence[]` filled via promoter consume):
+Historical signed same-day recapture (expired; no current CONFORMANCE claim):
 
 - Redacted artifact: `journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.redacted.json`
 - Signed envelope: `journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json`
@@ -21,7 +21,7 @@ Signed same-day recapture (CONFORMANCE `evidence[]` filled via promoter consume)
 - Freeze, descendant-signer rejection, `delegation_revocation_verified`, and `pool_existence_oracle_within_threshold` are true
 - Recapture reason: promoter consume of the `20260827T000309Z` envelope failed because commit evidence `469c436b52053848d4d932a03d33c1921c7cdb08` no longer matches current mapped `func main` in `phase4-coordinator/cmd/coordinator/main.go` and `class ProductionReleaseKeyAndBuilderTests` in `scripts/tests/test_pool_promotion_transition.py`. The promotion ledger was not durably consumed for that pair.
 
-Signed `PoolPromotionTransitionV1` sibling (consumed; authorization_id `spec043-ppt-20260827T032524Z-1`):
+Historical signed `PoolPromotionTransitionV1` sibling (expired consumed authorization_id `spec043-ppt-20260827T032524Z-1`):
 
 - Signed transition: `journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.pool-promotion-transition.signed.json`
 - Workflow run: [`33039343666`](https://github.com/Augustas11/macprovider/actions/runs/33039343666)
@@ -66,7 +66,7 @@ Historical Gate C envelope (capture-string `run_id`; evidence-only):
 
 Historical Gate A envelope (pre-proof flags false) remains committed at `journeys/evidence/trusted-pool-creator-mvp-20260825T072753Z.*`.
 
-The `20260827T032524Z` signed envelope's `run_id` is JSON integer `1`. `scripts/promote-signed-journey-result.py --promotion-transition` consumed sibling `spec043-ppt-20260827T032524Z-1` into `journeys/ledgers/spec-043-promotion-auth.jsonl` and filled SPEC-043-R001 through R012. Isolated-candidate CONFORMANCE is not a live Trusted Pool launch. Do not announce an external creator from this harness alone. The 20260826 signed envelope's `expires_at` is no longer the current UTC calendar day. The Gate C envelope's capture-string `run_id` remains historical.
+The `20260827T032524Z` signed envelope's `run_id` is JSON integer `1`. `scripts/promote-signed-journey-result.py --promotion-transition` consumed sibling `spec043-ppt-20260827T032524Z-1` into `journeys/ledgers/spec-043-promotion-auth.jsonl` and previously filled SPEC-043-R001 through R012. That evidence expired on 2026-08-27, so current CONFORMANCE rows are pending until fresh protected same-day evidence is produced and consumed. Isolated-candidate CONFORMANCE is not a live Trusted Pool launch. Do not announce an external creator from this harness alone. The 20260826 signed envelope's `expires_at` is no longer the current UTC calendar day. The Gate C envelope's capture-string `run_id` remains historical.
 
 Live-readiness runbook: `docs/runbooks/trusted-pool-creator-launch.md`
 

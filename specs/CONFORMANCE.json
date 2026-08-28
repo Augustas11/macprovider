@@ -1302,13 +1302,13 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. Isolated-candidate promoter consume of sibling spec043-ppt-20260827T032524Z-1 filled SPEC-043-R001 through R012; that fill is not a live Trusted Pool launch. Spec-level implementation_status stays partial, production_status stays not-deployed, and spec-level evidence[] stays empty. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces with resolved MVP retention-policy registry fields, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current and the document fresh_until_utc is still valid, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites including registered retention-policy ids, lifecycle fail-closed tests including unresolved retention policies, operator-only admin API mutations for public-announcement/reviewed-artifact records, an environment-key-only CLI for nonce issuance, reviewed-artifact/public-announcement mutations, and pool health/audit/distribution exports, a bounded bearer-token creator administration surface for admitted creators to inspect their own approval/pools and perform allowlisted candidate operations, a protected manual signer path plus governance validator for JOURNEY-TRUSTED-POOL-CREATOR-MVP evidence artifacts, a closed PoolPromotionTransitionV1 production-promotion artifact plus append-only spec043-promotion-ledger, and a registered production-release approver key. Raw operator admin events cannot activate a routeable pool. Remaining before any live announcement: production reviewed-artifact lifecycle ownership, custody-class production gates, full production activation gates, on-call readiness, production timing-floor remeasure, and production rollout proof."
+        "rationale": "SPEC-043 is the SPEC-042A enablement profile for approved external creators launching single-operator Trusted Pools. Isolated-candidate promoter consume of sibling spec043-ppt-20260827T032524Z-1 previously filled SPEC-043-R001 through R012, but that same-day evidence expired on 2026-08-27; those rows are pending until a fresh protected signed candidate journey and promotion transition are consumed. That fill was not a live Trusted Pool launch. Spec-level implementation_status stays partial, production_status stays not-deployed, and spec-level evidence[] stays empty. The first MVP code slices now have a default-off coordinator durable trustpool event ledger, durable creator approval records, replay-checked operator admin event append surface for candidate/restrictive state, creator-gated root nonce issuance, creator-gated positive pool mutations, boot reconstruction into the routing registry, revision-fenced live registry refresh after accepted admin or approval mutations, route-time approval expiry checks, background routeability expiry refresh, coordinator-side buyer authorization enforcement, signed root registration, signed manifest acceptance with candidate overclaim rejection, gateway-authenticated buyer policy/status surfaces with resolved MVP retention-policy registry fields, public-announcement approvals bound to operation id, pool id, non-candidate launch environment, manifest digest, reviewed distribution artifact digest, and current creator approval state, rate-limited and globally work-limited public policy/status endpoints that serve redacted documents only while those approval bindings remain current and the document fresh_until_utc is still valid, an auditable public-visibility generation and immutable public-announcement history, an explicit operator-only candidate promotion path that preflights local activation prerequisites including registered retention-policy ids, lifecycle fail-closed tests including unresolved retention policies, operator-only admin API mutations for public-announcement/reviewed-artifact records, an environment-key-only CLI for nonce issuance, reviewed-artifact/public-announcement mutations, and pool health/audit/distribution exports, a bounded bearer-token creator administration surface for admitted creators to inspect their own approval/pools and perform allowlisted candidate operations, a protected manual signer path plus governance validator for JOURNEY-TRUSTED-POOL-CREATOR-MVP evidence artifacts, a closed PoolPromotionTransitionV1 production-promotion artifact plus append-only spec043-promotion-ledger, and a registered production-release approver key. Raw operator admin events cannot activate a routeable pool. Remaining before any live announcement: production reviewed-artifact lifecycle ownership, custody-class production gates, full production activation gates, on-call readiness, production timing-floor remeasure, and production rollout proof."
       }
     },
     {
       "spec_id": "SPEC-044",
       "title": "Malibu Model Catalog Economics",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1326,7 +1326,9 @@
         "SPEC-023",
         "SPEC-025",
         "SPEC-032",
-        "SPEC-033"
+        "SPEC-033",
+        "SPEC-046",
+        "SPEC-047"
       ],
       "implementation_status": "pending-reconciliation",
       "production_status": "not-deployed",
@@ -1374,6 +1376,83 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/927",
         "rationale": "Issue #927 needs a buyer-side local endpoint that existing OpenAI-compatible tools can point at while keeping buyer credentials, model admission, local estimated-exposure limits, status, and restart behavior explicit. No standalone local consumer endpoint contract exists today."
+      }
+    },
+    {
+      "spec_id": "SPEC-046",
+      "title": "Provider BYOM Discovery",
+      "version": "0.1.0",
+      "path": "specs/SPEC-046-provider-byom-discovery.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-byom-discovery"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-013",
+        "SPEC-018",
+        "SPEC-019",
+        "SPEC-023",
+        "SPEC-032",
+        "SPEC-033",
+        "SPEC-045",
+        "SPEC-047"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Issue #1240 changes the Malibu model strategy from catalog-first discovery to provider-local BYOM discovery while keeping paid network admission separate. No provider-side discovery/evaluation contract exists today."
+      }
+    },
+    {
+      "spec_id": "SPEC-047",
+      "title": "Network Model Admission",
+      "version": "0.1.0",
+      "path": "specs/SPEC-047-network-model-admission.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "network-model-admission"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-015",
+        "SPEC-018",
+        "SPEC-019",
+        "SPEC-022",
+        "SPEC-023",
+        "SPEC-032",
+        "SPEC-033",
+        "SPEC-046"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "Issue #1240 requires a self-service path from provider-local BYOM candidates to network offer/admission states without weakening signed catalog economics, route-time verification, receipt, billing, or payout gates."
       }
     }
   ],
@@ -5741,7 +5820,7 @@
     {
       "requirement_id": "SPEC-043-R001",
       "spec_id": "SPEC-043",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/trustpool/durable_store.go:type CreatorApproval",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertCreatorApproval",
@@ -5764,26 +5843,18 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
-          "source": null,
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        },
-        {
-          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
-          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
     },
     {
       "requirement_id": "SPEC-043-R002",
       "spec_id": "SPEC-043",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/poolmanifest/manifest.go:type IdentityCore",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) IssueRootRegistrationNonce",
@@ -5803,26 +5874,18 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
-          "source": null,
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        },
-        {
-          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
-          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
     },
     {
       "requirement_id": "SPEC-043-R003",
       "spec_id": "SPEC-043",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/poolmanifest/authoritylog.go:func BuildAuthorityLog",
         "phase4-coordinator/internal/poolmanifest/policyhistory.go:func BuildPolicyHistory",
@@ -5837,26 +5900,18 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
-          "source": null,
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        },
-        {
-          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
-          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
     },
     {
       "requirement_id": "SPEC-043-R004",
       "spec_id": "SPEC-043",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/poolmanifest/persist.go:func ReconstructPool",
         "phase4-coordinator/internal/trustpool/registry.go:type Registry",
@@ -5915,26 +5970,18 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
-          "source": null,
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        },
-        {
-          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
-          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
     },
     {
       "requirement_id": "SPEC-043-R005",
       "spec_id": "SPEC-043",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/trustpool/admin_handler.go:type AdminDeps",
         "phase4-coordinator/internal/trustpool/admin_handler.go:func NewAdminHandler",
@@ -5992,26 +6039,18 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
-          "source": null,
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        },
-        {
-          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
-          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
     },
     {
       "requirement_id": "SPEC-043-R006",
       "spec_id": "SPEC-043",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) AddMember",
         "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Revoke",
@@ -6027,26 +6066,18 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
-          "source": null,
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        },
-        {
-          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
-          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
     },
     {
       "requirement_id": "SPEC-043-R007",
       "spec_id": "SPEC-043",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase5-gateway/internal/config/config.go:type TrustedPoolsConfig",
         "phase5-gateway/internal/router/pool_selection.go:func (s *Server) resolvePoolSelection",
@@ -6065,26 +6096,18 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
-          "source": null,
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        },
-        {
-          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
-          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
     },
     {
       "requirement_id": "SPEC-043-R008",
       "spec_id": "SPEC-043",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/buyer/server.go:func WithPoolMembership",
         "phase4-coordinator/internal/config/config.go:type TrustedPoolsConfig",
@@ -6127,26 +6150,18 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
-          "source": null,
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        },
-        {
-          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
-          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
     },
     {
       "requirement_id": "SPEC-043-R009",
       "spec_id": "SPEC-043",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/trustpool/policy.go:func BuildPolicyDocument",
         "phase4-coordinator/internal/trustpool/policy.go:func ValidatePromiseClaimsText",
@@ -6198,26 +6213,18 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
-          "source": null,
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        },
-        {
-          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
-          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
     },
     {
       "requirement_id": "SPEC-043-R010",
       "spec_id": "SPEC-043",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/billing/route_snapshot.go:type RouteSnapshot"
       ],
@@ -6227,26 +6234,18 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
-          "source": null,
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        },
-        {
-          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
-          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
     },
     {
       "requirement_id": "SPEC-043-R011",
       "spec_id": "SPEC-043",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/buyer/server.go:func (s *Server) poolGenerationStale",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) UpsertCreatorApproval",
@@ -6284,26 +6283,18 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
-          "source": null,
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        },
-        {
-          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
-          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
     },
     {
       "requirement_id": "SPEC-043-R012",
       "spec_id": "SPEC-043",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "scripts/pool_promotion_transition.py:SPEC043_PROMOTION_LEDGER",
         "scripts/pool_promotion_transition.py:validate_pool_promotion_transition",
@@ -6329,21 +6320,13 @@
       "journeys": [
         "JOURNEY-TRUSTED-POOL-CREATOR-MVP"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:fd50904396f3f11c2db633c9ed69b28d61a7ef65",
-          "source": null,
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        },
-        {
-          "artifact": "sha256:ef1e5aa5f9d946eeef0c6496981a034a2851e290ef42255724ef689312447210",
-          "source": "journeys/evidence/trusted-pool-creator-mvp-20260827T032524Z.spec-043-r001-spec-043-r002-spec-043-r003-spec-043-r004-spec-043-r005-spec-043-r006-spec-043-r007-spec-043-r008-spec-043-r009-spec-043-r010-spec-043-r011-spec-043-r012.journey-result.signed.json",
-          "captured_at": "2026-08-27",
-          "expires_at": "2026-08-27"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1053",
+        "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
     },
     {
       "requirement_id": "SPEC-044-R001",
@@ -6860,6 +6843,262 @@
         }
       ],
       "gap": null
+    },
+    {
+      "requirement_id": "SPEC-046-R001",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R002",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R003",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R004",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R005",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R006",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R007",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-046-R008",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-BYOM-DISCOVERY"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R001",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R002",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R003",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R004",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R005",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R006",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R007",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R008",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+      }
     }
   ]
 }
