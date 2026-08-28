@@ -6474,7 +6474,7 @@
         "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testCatalogPricedFreshSignedRateCardPermitsEconomicsWithoutSettlement",
         "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testSettlementCapableRequiresCoordinatorSettlementState",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsDecodeRejectsUnsupportedEnvelopeKeys",
-        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsQuarantinesMalformedRowsWithoutBlockingTrustedRows",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsFailsClosedOnAnyMalformedRow",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsDegradesUnsafeActionDescriptor",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsDegradesProjectionLevelTrustWarnings",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsDegradesContradictorySwitchableRows",
@@ -6664,7 +6664,7 @@
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ModelCatalogEconomicsTests.swift::testLocalOnlyCandidateEncodesExplicitNullMoneyFields",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsDecodeRejectsUnsupportedEnvelopeKeys",
-        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsQuarantinesMalformedRowsWithoutBlockingTrustedRows",
+        "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsFailsClosedOnAnyMalformedRow",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testCatalogEconomicsRejectsUnsafeProviderVisibleModelText"
       ],
       "journeys": [],

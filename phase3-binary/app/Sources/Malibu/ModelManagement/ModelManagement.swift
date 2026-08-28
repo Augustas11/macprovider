@@ -513,24 +513,11 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         }
     }
 
-    private struct DecodedRow: Decodable {
-        let row: Row?
-
-        init(from decoder: Decoder) throws {
-            do {
-                row = try Row(from: decoder)
-            } catch {
-                row = nil
-            }
-        }
-    }
-
     let schema: String
     let generatedAt: String
     let projectionSequence: UInt64
     let source: Source
     let rows: [Row]
-    let invalidRowCount: Int
     let warnings: [String]
 
     enum CodingKeys: String, CodingKey, CaseIterable {
@@ -549,9 +536,11 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         generatedAt = try container.decode(String.self, forKey: .generatedAt)
         projectionSequence = try container.decode(UInt64.self, forKey: .projectionSequence)
         source = try container.decode(Source.self, forKey: .source)
-        let decodedRows = try container.decode([DecodedRow].self, forKey: .rows)
-        rows = decodedRows.compactMap(\.row)
-        invalidRowCount = decodedRows.count - rows.count
+        // Strict, closed-schema decode: any malformed / unknown-field row fails
+        // the WHOLE projection (fail-closed) rather than being quarantined and the
+        // rest of the trusted rows still rendered. A malformed row can indicate a
+        // tampered or incompatible projection, so none of it is trustworthy.
+        rows = try container.decode([Row].self, forKey: .rows)
         warnings = try container.decode([String].self, forKey: .warnings)
     }
 
@@ -588,6 +577,10 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
                 currentModelID: currentModelID
             )
         }
+    }
+
+    var generatedAtDate: Date? {
+        Self.date(from: generatedAt)
     }
 
     var freshnessDeadline: Date? {
@@ -644,6 +637,23 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
                   row.providerPromptPayoutUSDPerMillionTokens != nil,
                   row.providerCompletionPayoutUSDPerMillionTokens != nil else {
                 throw ModelManagementError.invalidCatalog
+            }
+            // A trusted-economics row that is NOT settlement_capable (e.g.
+            // catalog_priced) may display signed catalog rates, but the provider
+            // is not earning yet. It MUST carry the non-earning disclosure warning
+            // so Malibu always shows "No provider credit yet" alongside the rates.
+            // Reject a projection that shows catalog economics for a
+            // non-settlement row without it — the disclosure must not depend on a
+            // possibly-omitted warning, and a settlement_capable row must not
+            // carry it.
+            if row.admission.settlementCapable {
+                guard !row.warningCodes.contains("admission_state_not_settlement_capable") else {
+                    throw ModelManagementError.invalidCatalog
+                }
+            } else {
+                guard row.warningCodes.contains("admission_state_not_settlement_capable") else {
+                    throw ModelManagementError.invalidCatalog
+                }
             }
         }
         if row.switchAction.available {
@@ -776,7 +786,9 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
                   let timeout = action.actionTimeoutSeconds,
                   Self.closedTransactionKinds.contains(kind),
                   UUID(uuidString: transactionID) != nil,
-                  (1...1_800).contains(timeout) else {
+                  (1...1_800).contains(timeout),
+                  // An available action must not carry an unavailable reason.
+                  action.unavailableReason == nil else {
                 throw ModelManagementError.invalidCatalog
             }
             if ["switch_model", "switch_model_deferred", "prepare_model", "cleanup_staging", "adopt_recommendation"].contains(kind)
@@ -786,7 +798,14 @@ struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
         } else {
             guard action.transactionKind == nil,
                   action.transactionID == nil,
-                  action.actionTimeoutSeconds == nil else {
+                  action.actionTimeoutSeconds == nil,
+                  // An unavailable action must carry a non-empty reason so the UI
+                  // never renders a disabled action with no explanation. The reason
+                  // is mapped to localized copy through a closed switch at display
+                  // time, so unknown values degrade safely rather than showing raw
+                  // text.
+                  let reason = action.unavailableReason,
+                  !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw ModelManagementError.invalidCatalog
             }
         }
@@ -1526,6 +1545,7 @@ final class ModelManagementStore: ObservableObject {
     private var backgroundCheckSafetyCancelled = false
     private var catalogProjectionProcessLaunchID: String?
     private var catalogProjectionSequence: UInt64?
+    private var catalogProjectionAcceptedGeneratedAt: Date?
     private var catalogProjectionExpiryTask: Task<Void, Never>?
 
     init(
@@ -1819,6 +1839,7 @@ final class ModelManagementStore: ObservableObject {
         catalogProjectionExpiryTask = nil
         catalogProjectionProcessLaunchID = nil
         catalogProjectionSequence = nil
+        catalogProjectionAcceptedGeneratedAt = nil
     }
 
     private func refreshCatalogEconomics(configuredModel: String?) async {
@@ -1850,17 +1871,11 @@ final class ModelManagementStore: ObservableObject {
             self.listState = rows.contains(where: { $0.action == .switchModel }) ? .ready : .viewOnly
             self.operation = .idle
             if rows.isEmpty {
-                self.statusLine = document.invalidRowCount > 0
-                    ? String(localized: "Network catalog loaded, but unsupported rows were hidden. Local BYOM discovery remains CLI-only in this release.", comment: "Catalog economics unsupported rows")
-                    : String(localized: "Network catalog has no admitted economics rows yet. Local BYOM discovery remains CLI-only in this release.", comment: "Catalog economics empty")
+                self.statusLine = String(localized: "Network catalog has no admitted economics rows yet. Local BYOM discovery remains CLI-only in this release.", comment: "Catalog economics empty")
             } else if rows.contains(where: { $0.providerCompletionPayoutUSDPerMillionTokens != nil }) {
-                self.statusLine = document.invalidRowCount > 0
-                    ? String(localized: "Network catalog rates loaded from the provider CLI projection. Unsupported rows were hidden.", comment: "Catalog economics loaded with unsupported rows")
-                    : String(localized: "Network catalog rates loaded from the provider CLI projection.", comment: "Catalog economics loaded")
+                self.statusLine = String(localized: "Network catalog rates loaded from the provider CLI projection.", comment: "Catalog economics loaded")
             } else {
-                self.statusLine = document.invalidRowCount > 0
-                    ? String(localized: "Network catalog loaded with no trusted rate rows available. Unsupported rows were hidden.", comment: "Catalog economics no trusted rates with unsupported rows")
-                    : String(localized: "Network catalog loaded with no trusted rate rows available.", comment: "Catalog economics no trusted rates")
+                self.statusLine = String(localized: "Network catalog loaded with no trusted rate rows available.", comment: "Catalog economics no trusted rates")
             }
             scheduleCatalogProjectionExpiry(document)
         } catch {
@@ -1873,14 +1888,25 @@ final class ModelManagementStore: ObservableObject {
     }
 
     private func acceptCatalogProjection(_ document: MalibuModelCatalogEconomicsDocument) -> Bool {
-        guard catalogProjectionProcessLaunchID == document.source.processLaunchID,
-              let previousSequence = catalogProjectionSequence else {
-            catalogProjectionProcessLaunchID = document.source.processLaunchID
-            catalogProjectionSequence = document.projectionSequence
-            return true
+        guard let incomingGeneratedAt = document.generatedAtDate else {
+            return false
         }
-        guard document.projectionSequence > previousSequence else { return false }
+        // Never accept a projection older than the one currently displayed, even
+        // when it carries a different process_launch_id. A slow reply from an
+        // OLDER CLI process (before a restart) must not overwrite newer accepted
+        // state and reintroduce stale rates/actions. Cross-process ordering is by
+        // generated_at; within a process, projection_sequence is the tiebreaker.
+        if let acceptedGeneratedAt = catalogProjectionAcceptedGeneratedAt,
+           incomingGeneratedAt < acceptedGeneratedAt {
+            return false
+        }
+        if catalogProjectionProcessLaunchID == document.source.processLaunchID,
+           let previousSequence = catalogProjectionSequence {
+            guard document.projectionSequence > previousSequence else { return false }
+        }
+        catalogProjectionProcessLaunchID = document.source.processLaunchID
         catalogProjectionSequence = document.projectionSequence
+        catalogProjectionAcceptedGeneratedAt = incomingGeneratedAt
         return true
     }
 
@@ -2394,6 +2420,11 @@ final class ModelManagementStore: ObservableObject {
               let data = lines[0].data(using: .utf8) else {
             throw ModelManagementError.invalidCatalog
         }
+        // Reject ambiguous input with duplicate object keys before decoding: the
+        // closed-schema decoder rejects unknown keys but Foundation silently keeps
+        // one value for a duplicated known key, which could smuggle conflicting
+        // trusted-economics values into a rendered row.
+        try MalibuStrictJSON.rejectDuplicateKeys(data)
         return try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: data)
     }
 
@@ -2515,6 +2546,19 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
 
     let id: String
     let displayID: String
+    // The coordinator-verified catalog identity (catalog model key) for a
+    // trusted-economics network-catalog row. displayID is the provider-REPORTED
+    // name and must never be presented as catalog-verified; when this is set the
+    // UI shows it as the authoritative catalog identity so provider-reported text
+    // cannot masquerade as verified. nil for rows without trusted catalog
+    // economics.
+    let catalogVerifiedModelKey: String?
+    // Non-blocking "no provider credit yet" disclosure for a trusted-economics
+    // row that is not settlement_capable (e.g. catalog_priced). It is rendered
+    // beside the rates regardless of whether the row is switchable / actionable,
+    // so a switchable catalog_priced row can never show rates without the
+    // non-earning caveat. nil for settlement_capable and non-economics rows.
+    let nonEarningDisclosure: String?
     var category: Category
     let state: String
     let weightsPresentLocally: Bool
@@ -2532,6 +2576,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     init(row: MalibuModelsListDocument.Row, currentModelID: String?, warmSwapAvailable: Bool) {
         id = row.actionModelID
         displayID = row.displayID
+        catalogVerifiedModelKey = nil
+        nonEarningDisclosure = nil
         state = row.state
         weightsPresentLocally = row.weightsPresentLocally
         fit = row.fit ?? "unknown"
@@ -2578,6 +2624,12 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         let projectedID = row.actionModelID ?? row.modelKey
         id = projectedID
         displayID = row.displayModelID
+        catalogVerifiedModelKey = (row.economicsState == "trusted" && row.admission.catalogEconomicsPermitted)
+            ? row.modelKey
+            : nil
+        nonEarningDisclosure = (row.economicsState == "trusted" && !row.admission.settlementCapable)
+            ? String(localized: "No provider credit yet; catalog and receipt checks are still required.", comment: "Non-earning disclosure beside catalog rates for a non-settlement row")
+            : nil
         state = row.runtimeState
         weightsPresentLocally = row.weightsPresentLocally
         fit = Self.displayFit(row.fit)
@@ -2647,6 +2699,8 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
 
         id = projectedID
         displayID = row.displayModelID
+        catalogVerifiedModelKey = nil
+        nonEarningDisclosure = nil
         state = row.runtimeState
         weightsPresentLocally = row.weightsPresentLocally
         fit = Self.displayFit(row.fit)

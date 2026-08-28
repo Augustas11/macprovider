@@ -105,7 +105,6 @@ struct ModelSwitcherSheet: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .accessibilityLabel(Text(String(localized: "Catalog rate disclosure", comment: "Catalog economics disclosure accessibility label")))
                         }
                         section(ModelFeatureUI.current, category: .current)
                         section(ModelFeatureUI.ready, category: .ready)
@@ -303,11 +302,29 @@ private struct ModelRowView: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(row.displayID)
-                    .font(.body.monospaced())
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
+                if let catalogVerifiedModelKey = row.catalogVerifiedModelKey {
+                    // Present the coordinator-verified catalog identity as the
+                    // authoritative name; the provider-reported display name is
+                    // shown as clearly-labelled secondary text so it can never be
+                    // mistaken for a catalog-verified identity.
+                    Text(catalogVerifiedModelKey)
+                        .font(.body.monospaced())
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    Text(String(localized: "Provider-reported: \(row.displayID)", comment: "Provider-reported model name shown under the catalog-verified identity"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                } else {
+                    Text(row.displayID)
+                        .font(.body.monospaced())
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
                 HStack(spacing: 8) {
                     Text(row.categoryLabel)
                     Text(String(localized: "Fit: \(fitLabel(row.fit))", comment: "Model fit status"))
@@ -333,6 +350,15 @@ private struct ModelRowView: View {
                     Text(String(localized: "Provider share rate: prompt $\(formattedPrompt) per 1M tokens.", comment: "Provider prompt payout rate"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let nonEarningDisclosure = row.nonEarningDisclosure {
+                    // Shown beside the rates regardless of whether the row is
+                    // switchable/actionable, so catalog_priced (non-settlement)
+                    // rates are never presented without the non-earning caveat.
+                    Text(nonEarningDisclosure)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if let blockReason = row.blockReason {

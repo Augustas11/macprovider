@@ -1,5 +1,14 @@
 # BYOM CLI Onboarding E2E
 
+**Status: manual macOS release evidence — not part of `make test` or required PR
+coverage.** This harness builds the Swift `macprovider-cli` and drives the
+provider-visible onboarding path end to end; run it on macOS
+(`make test-byom-e2e` from the repository root) before promoting a
+BYOM-affecting provider CLI/app release and capture the result as release
+evidence. It is deliberately not wired into the per-PR CI gate because it
+requires a Swift build and process orchestration; PR-level coverage of these
+contracts lives in the Swift unit tests and the coordinator Go tests.
+
 This harness exercises the provider-visible BYOM onboarding path through the
 real `macprovider-cli` executable with hermetic loopback fixtures:
 

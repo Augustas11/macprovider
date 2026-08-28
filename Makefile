@@ -6,11 +6,20 @@
 # targets below to preserve parallel jobs and failure isolation.
 
 .PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist \
+        test-byom-e2e \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
         build-linux check check-exceptions fmt verify-autotune-catalog
 
 test: test-coordinator test-gateway test-integration test-dist
+
+# BYOM CLI onboarding process E2E. This is MANUAL macOS release evidence, not
+# part of `make test` / required PR coverage: it builds the Swift macprovider-cli
+# and drives the provider-visible offer/status/catalog-economics/withdraw path
+# against a hermetic loopback fake coordinator. Run on macOS before promoting a
+# BYOM-affecting provider CLI/app release. See test/e2e/byom/README.md.
+test-byom-e2e:
+	test/e2e/byom/run-cli-onboarding-e2e.py
 
 verify-autotune-catalog:
 	python3 scripts/catalog-release.py verify

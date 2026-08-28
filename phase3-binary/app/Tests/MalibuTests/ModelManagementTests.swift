@@ -119,25 +119,151 @@ final class ModelManagementTests: XCTestCase {
         ))
     }
 
-    func testCatalogEconomicsQuarantinesMalformedRowsWithoutBlockingTrustedRows() throws {
+    func testCatalogEconomicsFailsClosedOnAnyMalformedRow() throws {
+        // A projection containing ANY malformed row must fail the WHOLE decode
+        // (fail-closed / closed-schema), never quarantine the bad row and still
+        // render trusted rates from the rest.
         let missingNullable = trustedEconomicsRowJSON()
             .replacingOccurrences(of: #","disabled_reason":null"#, with: "")
-        let unknownKey = trustedEconomicsRowJSON()
-            .replacingOccurrences(of: #""model_key":"qwen3-8b""#, with: #""model_key":"qwen3-8b","provider_secret_path":"/private/tmp/key""#)
-        let document = try JSONDecoder().decode(
+        XCTAssertThrowsError(try JSONDecoder().decode(
             MalibuModelCatalogEconomicsDocument.self,
             from: Data(catalogEconomicsJSON(rows: [
                 missingNullable,
+                trustedEconomicsRowJSON(),
+            ]).utf8)
+        ))
+
+        let unknownKey = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: #""model_key":"qwen3-8b""#, with: #""model_key":"qwen3-8b","provider_secret_path":"/private/tmp/key""#)
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [
                 unknownKey,
                 trustedEconomicsRowJSON(),
             ]).utf8)
-        )
+        ))
+    }
 
-        XCTAssertEqual(document.invalidRowCount, 2)
-        let rows = try document.validated(now: ModelTestTimestamp.date)
-            .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
-        XCTAssertEqual(rows.map(\.displayID), ["mlx-community/Qwen3-8B-4bit"])
-        XCTAssertEqual(rows.first?.category, .networkCatalog)
+    // A row that fails row-level validation is demoted to a non-economics
+    // (blocked) row by rowsForMalibu — no provider payout is shown — rather than
+    // rendering trusted rates. Returns the rendered provider payout for the row
+    // (nil when the row was demoted / shows no economics).
+    private func renderedProviderPayout(forRow rowJSON: String) throws -> Double? {
+        let rows = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        return rows.first?.providerCompletionPayoutUSDPerMillionTokens ?? nil
+    }
+
+    func testCatalogEconomicsRequiresNonEarningDisclosureForNonSettlementTrustedRow() throws {
+        // A catalog_priced (non-settlement) trusted row that OMITS the non-earning
+        // warning is demoted (no rates shown) — the "No provider credit yet"
+        // disclosure must not depend on a possibly-omitted CLI warning.
+        XCTAssertNil(try renderedProviderPayout(forRow: trustedEconomicsRowJSON(warningCodesJSON: "[]")))
+        // With the warning present, the non-settlement row shows economics.
+        XCTAssertNotNil(try renderedProviderPayout(forRow: trustedEconomicsRowJSON()))
+        // A settlement_capable row that CONTRADICTORILY carries the non-settlement
+        // warning is demoted; without it, it shows economics.
+        XCTAssertNil(try renderedProviderPayout(
+            forRow: trustedEconomicsRowJSON(admissionState: "settlement_capable", settlementCapable: true)
+        ))
+        XCTAssertNotNil(try renderedProviderPayout(
+            forRow: trustedEconomicsRowJSON(admissionState: "settlement_capable", settlementCapable: true, warningCodesJSON: "[]")
+        ))
+    }
+
+    func testCatalogEconomicsRejectsActionDescriptorReasonMismatch() throws {
+        // An unavailable action with no reason demotes the row (no economics).
+        let unavailableNoReason = #"{"available":false,"requires_confirmation":false,"transaction_kind":null,"transaction_id":null,"action_timeout_seconds":null,"estimated_bytes":null,"unavailable_reason":null}"#
+        XCTAssertNil(try renderedProviderPayout(forRow: trustedEconomicsRowJSON(switchAction: unavailableNoReason)))
+        // An available action carrying an unavailable reason likewise demotes it.
+        let availableWithReason = #"{"available":true,"requires_confirmation":true,"transaction_kind":"switch_model","transaction_id":"c23c5d4c-3e4f-47ac-b72d-7f8f172747a0","action_timeout_seconds":20,"estimated_bytes":null,"unavailable_reason":"action_unavailable"}"#
+        XCTAssertNil(try renderedProviderPayout(forRow: trustedEconomicsRowJSON(switchAction: availableWithReason)))
+    }
+
+    @MainActor
+    func testCatalogProjectionRejectsStaleReplyFromOlderProcess() async throws {
+        let switchAction = availableActionJSON(kind: "switch_model", timeout: 20)
+        let newer = catalogEconomicsJSON(
+            rows: [trustedEconomicsRowJSON(switchAction: switchAction)],
+            generatedAt: Self.timestamp(offset: -10)
+        )
+        // A late reply from an OLDER CLI process: different process_launch_id and
+        // an earlier generated_at, carrying no rows.
+        let olderProcess = catalogEconomicsJSON(rows: [], generatedAt: Self.timestamp(offset: -120))
+            .replacingOccurrences(
+                of: "c13c5d4c-3e4f-47ac-b72d-7f8f172747a0",
+                with: "a1111111-2222-3333-4444-555555555555"
+            )
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(exitCode: 0, stdout: newer, stderr: ""),
+            ModelCLIResult(exitCode: 0, stdout: olderProcess, stderr: ""),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.staleProcess.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: [
+            MalibuModelCapabilityManifest.catalogEconomics,
+            MalibuModelCapabilityManifest.readySwitch,
+        ])
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        let firstRows = store.rows.map(\.id)
+        XCTAssertFalse(firstRows.isEmpty)
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        // The older-process reply must be rejected; the newer accepted rows stay,
+        // rather than being cleared by the stale empty projection.
+        XCTAssertEqual(store.rows.map(\.id), firstRows)
+    }
+
+    func testCatalogEconomicsRejectsDuplicateJSONKeys() throws {
+        XCTAssertThrowsError(try MalibuStrictJSON.rejectDuplicateKeys(Data(#"{"a":1,"a":2}"#.utf8)))
+        XCTAssertThrowsError(try MalibuStrictJSON.rejectDuplicateKeys(Data(#"{"x":{"k":1,"k":2}}"#.utf8)))
+        XCTAssertNoThrow(try MalibuStrictJSON.rejectDuplicateKeys(Data(#"{"a":1,"b":2}"#.utf8)))
+    }
+
+    func testCatalogEconomicsRowCarriesVerifiedCatalogIdentity() throws {
+        let rows = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [trustedEconomicsRowJSON()]).utf8)
+        )
+        .validated(now: ModelTestTimestamp.date)
+        .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        // The coordinator-verified catalog identity (model_key) is carried
+        // separately from the provider-reported display name.
+        XCTAssertEqual(rows.first?.catalogVerifiedModelKey, "qwen3-8b")
+        XCTAssertEqual(rows.first?.displayID, "mlx-community/Qwen3-8B-4bit")
+    }
+
+    func testSwitchableCatalogPricedRowStillShowsNonEarningDisclosure() throws {
+        // A switchable catalog_priced (non-settlement) row shows rates AND is
+        // actionable, but must ALSO carry the non-earning disclosure — the caveat
+        // cannot be dropped just because the row is .switchModel / not blocked.
+        let switchAction = availableActionJSON(kind: "switch_model", timeout: 20)
+        let switchable = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [trustedEconomicsRowJSON(switchAction: switchAction)]).utf8)
+        )
+        .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        let row = try XCTUnwrap(switchable.first)
+        XCTAssertEqual(row.action, .switchModel)
+        XCTAssertNotNil(row.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertNotNil(row.nonEarningDisclosure)
+
+        // A settlement_capable row shows rates but carries NO non-earning caveat.
+        let settlement = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [
+                trustedEconomicsRowJSON(admissionState: "settlement_capable", settlementCapable: true, warningCodesJSON: "[]")
+            ]).utf8)
+        )
+        .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        XCTAssertNotNil(settlement.first?.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertNil(settlement.first?.nonEarningDisclosure)
     }
 
     func testCatalogEconomicsDegradesUnsafeActionDescriptor() throws {
