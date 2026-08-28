@@ -9,12 +9,52 @@ struct ModelsCommand: AsyncParsableCommand {
         abstract: "Inspect or switch the provider warm model.",
         subcommands: [
             ModelsListCommand.self,
+            ModelsDiscoverCommand.self,
             ModelsSwitchCommand.self,
             ModelsStatusCommand.self,
             ModelsBrowseCommand.self,
             ModelsAdoptRecommendationCommand.self,
         ]
     )
+}
+
+struct ModelsDiscoverCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "discover",
+        abstract: "Discover provider-local BYOM candidates."
+    )
+
+    @Flag(name: .customLong("json"), help: "Emit the strict provider_byom_discovery.v1 JSON contract.")
+    var emitJSON = false
+
+    @Option(help: ArgumentHelp("CLI-owned local discovery namespace path.", visibility: .hidden))
+    var localDiscoveryNamespacePath: String?
+
+    @Option(help: "HuggingFace cache root to inspect read-only. Defaults to HF_HUB_CACHE, HF_HOME/hub, or ~/.cache/huggingface/hub.")
+    var mlxCacheDir: String?
+
+    @Option(help: "Ollama-compatible loopback origin to query. Must be http://127.0.0.0/8:<port> or http://[::1]:<port>.")
+    var ollamaOrigin: String = "http://127.0.0.1:11434"
+
+    @Flag(help: "Skip the Ollama-compatible loopback adapter.")
+    var skipOllama = false
+
+    func run() async throws {
+        guard emitJSON else {
+            writeStderr("models discover is JSON-only in this release; pass --json")
+            throw ExitCode(2)
+        }
+        let environment = BYOMDiscoveryEnvironment.production(
+            namespacePath: localDiscoveryNamespacePath,
+            mlxCacheDir: mlxCacheDir,
+            ollamaOrigin: skipOllama ? nil : ollamaOrigin
+        )
+        let document = await BYOMDiscoveryRunner(environment: environment).discover()
+        for warning in document.warnings.sorted() {
+            writeStderr("models discover warning: \(warning)")
+        }
+        try ModelSwitchingWireCodec.printJSON(document)
+    }
 }
 
 struct ModelsListCommand: AsyncParsableCommand {
