@@ -64,5 +64,21 @@ r="$(run_installer "$INSTALL_SH" "$TMP/cltbin" 25)"
 [ "$r" = "EXIT:0" ] || { echo "FAIL: healthy Mac should complete dry-run (EXIT:0), got '$r'"; tail -5 "$TMP/out.log"; exit 1; }
 pass "healthy Mac (real python3 + CLT) proceeds normally — no false positive"
 
+# 4) HIGH (final-audit reproduction) — a BLOCKING non-system python3 earlier in
+#    PATH must make the CURRENT guarded installer EXIT:8 (bounded probe), NOT hang.
+#    This is the public-shell-installer bypass the security lane reproduced.
+mkdir -p "$TMP/blockbin"
+cp "$TMP/cltbin/xcode-select" "$TMP/blockbin/xcode-select"   # CLT present, irrelevant: python3 resolves here first
+cat > "$TMP/blockbin/python3" <<'EOF'
+#!/usr/bin/env bash
+sleep 3600
+EOF
+chmod +x "$TMP/blockbin/python3"
+export MACPROVIDER_PY_PROBE_BUDGET=3
+r="$(run_installer "$INSTALL_SH" "$TMP/blockbin" 12)"
+unset MACPROVIDER_PY_PROBE_BUDGET
+[ "$r" = "EXIT:8" ] || { echo "FAIL: blocking non-system python3 should EXIT:8 (bounded probe), got '$r'"; tail -5 "$TMP/out.log"; exit 1; }
+pass "blocking non-system python3 in PATH -> fast EXIT:8, no hang (public-installer bypass closed)"
+
 echo "== #1286 fresh-Mac e2e OK =="
 echo "NOTE: real notarized DMG + Malibu.app GUI on a genuinely CLT-free Mac/VM is the T3 canary before messaging providers; a sandbox cannot run the app bundle."

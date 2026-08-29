@@ -7228,33 +7228,72 @@ require_tool() {
 # (xcode-select -p does not trigger the install prompt), kick off the CLT
 # installer for the user (consumer/GUI only), and exit fast with a dedicated,
 # actionable code the app surfaces as a clear message. (#1285)
+# Bounded "does this python3 actually run?" probe. Executes a trivial program
+# with a hard time budget so a BROKEN or BLOCKING interpreter (e.g. a hung shim
+# earlier in PATH, or a python3 with a missing dylib) fails fast with die 8
+# instead of hanging the whole install at the first real python3 call. macOS has
+# no GNU `timeout`, so enforce the budget with a background job + kill. Returns 0
+# only if python3 exits 0 within the budget; non-zero on failure/crash; 124 on
+# timeout. (#1286)
+_python3_runs_quickly() {
+  local py="$1" budget="${MACPROVIDER_PY_PROBE_BUDGET:-8}" waited=0 pid
+  "$py" -c 'import sys; sys.exit(0)' >/dev/null 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+    [ "$waited" -lt "$budget" ] && continue
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    return 124
+  done
+  wait "$pid"
+}
+
+# Confirm one python3 path is present AND genuinely usable, or die 8. For the CLT
+# stub at /usr/bin/python3 we must NOT execute it blindly (that pops the hidden
+# "Install Command Line Developer Tools" dialog and hangs), so we first prove the
+# selected developer directory actually contains a real python3; only then is it
+# safe to probe. Any other python3 is a real interpreter path we probe directly —
+# presence via `command -v` is not enough, since a broken/blocking python3 would
+# otherwise sail through and hang the next real call. (#1285/#1286)
+_python3_usable_or_die() {
+  local py="$1" ctx="$2" devdir
+  [ -n "$py" ] || die 8 "This Mac is missing python3, which provider setup requires ($ctx). Install Apple's Command Line Developer Tools (xcode-select --install) or a working python3, then try again."
+  if [ "$py" = "/usr/bin/python3" ]; then
+    # `xcode-select -p` only prints the selected path (no install prompt) and can
+    # be stale/removed, so require the resolved tool to actually exist+execute
+    # before we dare run /usr/bin/python3.
+    devdir="$(xcode-select -p 2>/dev/null || true)"
+    if [ -z "$devdir" ] || [ ! -x "$devdir/usr/bin/python3" ]; then
+      if [ "${HEADLESS:-0}" != "1" ]; then
+        # Best-effort: open the GUI Command Line Tools installer for the user.
+        xcode-select --install >/dev/null 2>&1 || true
+        die 8 "This Mac needs Apple's Command Line Developer Tools to finish provider setup (they include python3). A system installer has been opened — click Install, wait for it to finish, then reopen Malibu."
+      fi
+      die 8 "This Mac is missing Apple's Command Line Developer Tools, which provider setup requires (they include python3). Install them with: xcode-select --install, then re-run the installer."
+    fi
+    # CLT is selected and backed by a real python3 -> /usr/bin/python3 delegates
+    # to it and is safe to probe below.
+  fi
+  _python3_runs_quickly "$py" \
+    || die 8 "This Mac's python3 ($py) is present but did not run correctly ($ctx) — it may be broken or a stub. Install Apple's Command Line Developer Tools (xcode-select --install) or a working python3, then try again."
+}
+
 ensure_python3_usable() {
-  local py devdir
-  py="$(command -v python3 2>/dev/null || true)"
-  # Only /usr/bin/python3 is the CLT stub. A python3 anywhere else (Homebrew,
-  # python.org, an active CLT/Xcode toolchain) is real and safe to use.
-  if [ "$py" != "/usr/bin/python3" ]; then
-    [ -n "$py" ] || die 8 "This Mac is missing python3, which provider setup requires. Install Apple's Command Line Developer Tools (or Xcode), then try again."
-    return 0
+  # (1) The interpreter that user-context python3 calls resolve to (the first is
+  # validate_install_dir, immediately after this guard).
+  _python3_usable_or_die "$(command -v python3 2>/dev/null || true)" "user interpreter"
+  # (2) In headless mode, privileged root helpers ALWAYS run ROOT_PYTHON3_BIN
+  # (/usr/bin/python3) under sudo. When the resolved user interpreter is a
+  # different python3 (e.g. Homebrew), the check above does NOT prove the system
+  # interpreter is usable, so validate it independently. (#1286 MEDIUM)
+  if [ "${HEADLESS:-0}" = "1" ] \
+     && [ "$(command -v python3 2>/dev/null || true)" != "${ROOT_PYTHON3_BIN:-/usr/bin/python3}" ]; then
+    _python3_usable_or_die "${ROOT_PYTHON3_BIN:-/usr/bin/python3}" "system root interpreter"
   fi
-  # /usr/bin/python3 present. It resolves to a real python3 ONLY if a developer
-  # directory is selected AND that directory actually still contains a working
-  # python3. `xcode-select -p` alone is not enough: it just prints the selected
-  # path, which can be stale/removed, so its success would let a dangling stub
-  # through to the first real python3 call and hang. Verify the resolved tool
-  # exists and is executable — without invoking the stub (which is what triggers
-  # the CLT install dialog). (#1285/#1286)
-  devdir="$(xcode-select -p 2>/dev/null || true)"
-  if [ -n "$devdir" ] && [ -x "$devdir/usr/bin/python3" ]; then
-    return 0
-  fi
-  if [ "${HEADLESS:-0}" != "1" ]; then
-    # Best-effort: open the GUI Command Line Tools installer for the user. This
-    # is what the stub would have triggered, but now visibly and up front.
-    xcode-select --install >/dev/null 2>&1 || true
-    die 8 "This Mac needs Apple's Command Line Developer Tools to finish provider setup (they include python3). A system installer has been opened — click Install, wait for it to finish, then reopen Malibu."
-  fi
-  die 8 "This Mac is missing Apple's Command Line Developer Tools, which provider setup requires (they include python3). Install them with: xcode-select --install, then re-run the installer."
 }
 
 read_line() {
