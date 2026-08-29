@@ -3,7 +3,7 @@
   "receipt_type": "openrouter-pricing-fetch-failure",
   "started_at": "2026-08-09T10:06:40Z",
   "finished_at": "2026-08-09T10:06:44Z",
-  "engine_commit": "6638ac0ab6b935730f0a8ba1e0bedcdaf59dd7b6",
+  "engine_commit": "2a571ed7f8ec97fbdecb7cd78ad4496cebfc9c32",
   "command": [
     "python",
     "scripts/openrouter_pricing_engine.py",
@@ -36,5 +36,5 @@
   "execution": {
     "worktree_clean": true
   },
-  "evidence_digest": "sha256:96b0b4754b2a7f5164d0f3c6e66d08125ef8ec259a19931d53b55be566584ab0"
+  "evidence_digest": "sha256:339c6ac15137aff090e770f08c4c888b4d3f652d4fd4baeb99f4e6d44949f9c5"
 }
