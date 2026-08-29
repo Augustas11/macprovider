@@ -1041,7 +1041,7 @@ final class ServeCommandTests: XCTestCase {
         try Data("{}".utf8).write(to: snapshot.appendingPathComponent("config.json"))
         let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
         let currentCatalogJSON = """
-        {"version":"current-catalog","generated_at":"2026-07-29T08:45:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"legacy_unverified","notes":"test fixture"}},"runtime_status":"recommendable"}}}
+        {"version":"current-catalog","generated_at":"2026-08-28T11:07:13Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"legacy_unverified","notes":"test fixture"}},"runtime_status":"recommendable"}}}
         """
         let rateCardJSON = Self.validRateCardJSON(keys: [key])
         let demandRankJSON = Self.validDemandRankJSON(keys: [key], version: "current-catalog")
@@ -1067,7 +1067,7 @@ final class ServeCommandTests: XCTestCase {
                 return catalogBytes
             },
             verifySignature: { _, _ in true },
-            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-07-29T08:45:00Z")! }
+            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-28T11:07:13Z")! }
         )
         var config = AppConfig.defaults()
         config.model = key
@@ -1153,7 +1153,7 @@ final class ServeCommandTests: XCTestCase {
                 catalogKey: "test-model",
                 configuredModel: nil,
                 rateCardKey: "test-model",
-                rateCardGeneratedAt: "2026-07-29T09:00:00Z"
+                rateCardGeneratedAt: "2026-08-28T11:22:13Z"
             )
             XCTFail("paid coordinator join must block signed rate-card/catalog release mismatch")
         } catch {
@@ -1383,7 +1383,7 @@ final class ServeCommandTests: XCTestCase {
         configuredModel: String?,
         rateCardKey: String,
         rateCardSidecarMissing: Bool = false,
-        rateCardGeneratedAt: String = "2026-07-29T08:45:00Z"
+        rateCardGeneratedAt: String = "2026-08-28T11:07:13Z"
     ) async throws {
         let hub = try tempDir()
         let resolver = CachedModelArtifactResolver(hubRoot: hub)
@@ -1396,7 +1396,7 @@ final class ServeCommandTests: XCTestCase {
         try Data("{}".utf8).write(to: snapshot.appendingPathComponent("config.json"))
         let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
         let catalogJSON = """
-        {"version":"test-catalog","generated_at":"2026-07-29T08:45:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"legacy_unverified","notes":"test fixture"}},"runtime_status":"\(runtimeStatus)"}}}
+        {"version":"test-catalog","generated_at":"2026-08-28T11:07:13Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"legacy_unverified","notes":"test fixture"}},"runtime_status":"\(runtimeStatus)"}}}
         """
         let rateCardJSON = Self.validRateCardJSON(keys: [rateCardKey], generatedAt: rateCardGeneratedAt)
         let demandRankJSON = Self.validDemandRankJSON(keys: [key], version: "test-catalog")
@@ -1425,7 +1425,7 @@ final class ServeCommandTests: XCTestCase {
                 return catalogBytes
             },
             verifySignature: { _, _ in true },
-            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-07-29T08:45:00Z")! }
+            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-28T11:07:13Z")! }
         )
         var config = AppConfig.defaults()
         config.donorMode = donorMode
@@ -1467,7 +1467,7 @@ final class ServeCommandTests: XCTestCase {
         try Data("{}".utf8).write(to: snapshot.appendingPathComponent("config.json"))
         let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
         let catalogJSON = """
-        {"version":"test-catalog","generated_at":"2026-07-29T08:45:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"legacy_unverified","notes":"test fixture"}},"runtime_status":"recommendable"}}}
+        {"version":"test-catalog","generated_at":"2026-08-28T11:07:13Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"legacy_unverified","notes":"test fixture"}},"runtime_status":"recommendable"}}}
         """
         let rateCardJSON = Self.validRateCardJSON(keys: [key])
         let demandRankJSON = Self.validDemandRankJSON(keys: [key], version: "test-catalog")
@@ -1493,7 +1493,7 @@ final class ServeCommandTests: XCTestCase {
                 return catalogBytes
             },
             verifySignature: { _, _ in true },
-            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-07-29T08:45:00Z")! }
+            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-28T11:07:13Z")! }
         )
         var config = AppConfig.defaults()
         config.model = key
@@ -1521,7 +1521,7 @@ final class ServeCommandTests: XCTestCase {
 
     private static func validRateCardJSON(
         keys: [String],
-        generatedAt: String = "2026-07-29T08:45:00Z"
+        generatedAt: String = "2026-08-28T11:07:13Z"
     ) -> String {
         var rows: [String: RateCardProjection.Row] = [
             "default": RateCardProjection.Row(
@@ -1558,7 +1558,7 @@ final class ServeCommandTests: XCTestCase {
     private static func validDemandRankJSON(
         keys: [String],
         version: String,
-        generatedAt: String = "2026-07-29T08:45:00Z"
+        generatedAt: String = "2026-08-28T11:07:13Z"
     ) -> String {
         let rowsJSON = keys.sorted().enumerated().map { index, key -> String in
             "\(Self.jsonStringLiteral(key)):{\"demand_weight\":0.5,\"rank\":\(index + 1),\"recommendable\":true,\"min_provider_target\":1}"

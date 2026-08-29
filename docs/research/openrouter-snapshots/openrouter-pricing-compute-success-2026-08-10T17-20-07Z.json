@@ -27,17 +27,17 @@
     "policy_path": "scripts/openrouter_pricing_policy.json",
     "policy_file_sha256": "sha256:97462653d8c01c6fc024103bcae38543e4a716d8091099a49930ad4b77d44b75",
     "rate_card_path": "phase3-binary/catalog/autotune/rate-card.json",
-    "rate_card_file_sha256": "sha256:68eb8794a2388cd73727b23db7e13adee8ae2c8e30bc0eeef5ad887223398cd3"
+    "rate_card_content_sha256": "sha256:29b15e7fc6e85634c80918cb88acb87c5646d1132755555567a81a76b120343c"
   },
   "exit_status": 0,
-  "stdout": "openrouter-rate-card-proposal-2026-08-10T17-20-07Z-258cfbdbb4b81600.json",
+  "stdout": "openrouter-rate-card-proposal-2026-08-10T17-20-07Z-49fc996399bba31f.json",
   "stderr": "",
   "output_directory_listing": [
     {
-      "filename": "openrouter-rate-card-proposal-2026-08-10T17-20-07Z-258cfbdbb4b81600.json",
+      "filename": "openrouter-rate-card-proposal-2026-08-10T17-20-07Z-49fc996399bba31f.json",
       "bytes": 37211,
-      "sha256": "sha256:5ae45c69c534cf44398d76e870459168654e830be77800616dc31c6b4dea254c"
+      "sha256": "sha256:a10ba542608f25bc089f5edabfffb4f440dd47f98481d0cbc631c50f0dcd795e"
     }
   ],
-  "evidence_digest": "sha256:0174e212223eb21df1d86e332fb511f6271a1a255bd38751c81744f6b13f0d71"
+  "evidence_digest": "sha256:423f43f43ea194c27c9f575b1fa621ee5347ed0034377a79839ff4b612df7240"
 }

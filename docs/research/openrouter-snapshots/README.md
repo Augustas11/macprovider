@@ -127,8 +127,17 @@ count that the failed generation could not validate.
 
 Compute receipts additionally require `inputs` and prohibit `source`. `inputs`
 contains `snapshot_content_digest`, `snapshot_file_sha256`, `policy_path`,
-`policy_file_sha256`, `rate_card_path`, and `rate_card_file_sha256`. These must
-name and hash the exact inputs passed to `compute`.
+`policy_file_sha256`, `rate_card_path`, and `rate_card_content_sha256`. These
+must name and hash the exact inputs passed to `compute`. The snapshot and policy
+are immutable archived inputs bound by whole-file SHA-256, but the rate card is
+a live signed feed whose `generated_at` is periodically re-stamped to renew
+freshness without changing pricing. `rate_card_content_sha256` therefore binds
+the rate card's pricing content with `generated_at` excluded (the canonical hash
+computed by the engine's `rate_card_digest` and by `rate_card_content_sha256` in
+the runner), so a freshness renewal does not invalidate archived receipts while
+any real pricing change -- `version`, `policy_version`, `usd_per_million_credits`,
+or a `rows` value -- still does. Each archived proposal binds the same content
+hash in its `rate_card_reference_digest`.
 
 A success receipt is invalid unless its inventory contains exactly one artifact
 of the matching type. A fetch-failure receipt is invalid if its inventory is

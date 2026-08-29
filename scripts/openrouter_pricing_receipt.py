@@ -64,6 +64,22 @@ def sha256_file(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def rate_card_content_sha256(path: Path) -> str:
+    """Provenance hash of the rate card's pricing content, excluding freshness.
+
+    ``generated_at`` is a freshness field: the signed static feed is periodically
+    re-stamped to reset the client 30-day horizon without changing any pricing
+    content, so binding the whole file would make a freshness renewal invalidate
+    every archived compute receipt. This canonical hash excludes ``generated_at``
+    (mirroring the engine's ``rate_card_digest`` and the snapshot's freshness-free
+    ``content_digest``) so a real pricing change -- ``version``, ``policy_version``,
+    ``usd_per_million_credits``, or any ``rows`` value -- still changes it.
+    """
+    rate_card = read_object(path, "rate card")
+    rate_card.pop("generated_at", None)
+    return sha256_bytes(canonical_json(rate_card))
+
+
 def read_object(path: Path, description: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -323,7 +339,7 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
     inputs = receipt["inputs"]
     expected = {
         "snapshot_path", "snapshot_content_digest", "snapshot_file_sha256",
-        "policy_path", "policy_file_sha256", "rate_card_path", "rate_card_file_sha256",
+        "policy_path", "policy_file_sha256", "rate_card_path", "rate_card_content_sha256",
     }
     if not isinstance(inputs, dict) or set(inputs) != expected:
         raise ReceiptError("compute receipt input binding is malformed")
@@ -332,10 +348,13 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
     rate_card_path = resolve_repo_path(repo, inputs["rate_card_path"], "inputs.rate_card_path")
     for path, field in (
         (snapshot_path, "snapshot_file_sha256"), (policy_path, "policy_file_sha256"),
-        (rate_card_path, "rate_card_file_sha256"),
     ):
         if sha256_file(path) != inputs[field]:
             raise ReceiptError(f"compute receipt {field} does not match exact input bytes")
+    # The rate card is a live, freshness-restamped feed, so bind its pricing
+    # content (generated_at excluded) rather than the whole-file bytes.
+    if rate_card_content_sha256(rate_card_path) != inputs["rate_card_content_sha256"]:
+        raise ReceiptError("compute receipt rate_card_content_sha256 does not match rate-card pricing content")
     snapshot = read_object(snapshot_path, "snapshot")
     if snapshot.get("content_digest") != inputs["snapshot_content_digest"]:
         raise ReceiptError("compute receipt snapshot semantic digest mismatch")
@@ -490,7 +509,7 @@ def command_run(args: argparse.Namespace) -> int:
     policy_relative = policy.relative_to(repo).as_posix()
     rate_card_relative = rate_card.relative_to(repo).as_posix()
     policy_hash = sha256_file(policy)
-    rate_card_hash = sha256_file(rate_card)
+    rate_card_hash = rate_card_content_sha256(rate_card)
 
     with tempfile.TemporaryDirectory(prefix="openrouter-pricing-run-") as temporary_name:
         temporary = Path(temporary_name)
@@ -571,7 +590,7 @@ def command_run(args: argparse.Namespace) -> int:
             "snapshot_content_digest": snapshot["content_digest"],
             "snapshot_file_sha256": sha256_file(snapshot_path),
             "policy_path": policy_relative, "policy_file_sha256": policy_hash,
-            "rate_card_path": rate_card_relative, "rate_card_file_sha256": rate_card_hash,
+            "rate_card_path": rate_card_relative, "rate_card_content_sha256": rate_card_hash,
         }
         compute_args = [
             ENGINE_PATH, "compute", "--snapshot", str(archived_snapshot),

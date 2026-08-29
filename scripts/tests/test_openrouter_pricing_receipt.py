@@ -23,7 +23,7 @@ SPEC.loader.exec_module(receipt)
 
 ARCHIVE = REPO / "docs" / "research" / "openrouter-snapshots"
 SNAPSHOT = ARCHIVE / "openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58ac6728ec.json"
-PROPOSAL = ARCHIVE / "openrouter-rate-card-proposal-2026-08-10T10-06-14Z-d60d0d8d828bbd5c.json"
+PROPOSAL = ARCHIVE / "openrouter-rate-card-proposal-2026-08-10T10-06-14Z-c72b3106dc0a0ccc.json"
 POLICY = REPO / "scripts" / "openrouter_pricing_policy.json"
 RATE_CARD = REPO / "phase3-binary" / "catalog" / "autotune" / "rate-card.json"
 # The engine_commit bound in synthetic test receipts must be an ancestor of the
@@ -73,7 +73,7 @@ class ReceiptTests(unittest.TestCase):
                 "policy_path": POLICY.relative_to(REPO).as_posix(),
                 "policy_file_sha256": receipt.sha256_file(POLICY),
                 "rate_card_path": RATE_CARD.relative_to(REPO).as_posix(),
-                "rate_card_file_sha256": receipt.sha256_file(RATE_CARD),
+                "rate_card_content_sha256": receipt.rate_card_content_sha256(RATE_CARD),
             }
             value["command"] = receipt.expected_compute_command(value["inputs"])
             path = self.write(directory, value)
@@ -161,7 +161,7 @@ class ReceiptTests(unittest.TestCase):
             "policy_path": POLICY.relative_to(REPO).as_posix(),
             "policy_file_sha256": receipt.sha256_file(POLICY),
             "rate_card_path": RATE_CARD.relative_to(REPO).as_posix(),
-            "rate_card_file_sha256": receipt.sha256_file(RATE_CARD),
+            "rate_card_content_sha256": receipt.rate_card_content_sha256(RATE_CARD),
         }
         value["command"] = receipt.expected_compute_command(value["inputs"])
         return value
