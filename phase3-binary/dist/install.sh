@@ -7232,19 +7232,37 @@ require_tool() {
 # with a hard time budget so a BROKEN or BLOCKING interpreter (e.g. a hung shim
 # earlier in PATH, or a python3 with a missing dylib) fails fast with die 8
 # instead of hanging the whole install at the first real python3 call. macOS has
-# no GNU `timeout`, so enforce the budget with a background job + kill. Returns 0
-# only if python3 exits 0 within the budget; non-zero on failure/crash; 124 on
-# timeout. (#1286)
+# no GNU `timeout`, so enforce the budget with a background job + kill.
+#
+# CRITICAL: probe with the SAME stdin-script style the installer actually uses
+# (`python3 - ...` fed a heredoc, e.g. validate_install_dir at the first real
+# call), NOT `python3 -c`. A shim can exit 0 for `-c` yet block reading stdin on
+# `python3 -`, which would let the probe pass and the installer still hang. (#1286)
+# Returns 0 only if python3 exits 0 within the budget; non-zero on failure/crash;
+# 124 on timeout.
 _python3_runs_quickly() {
-  local py="$1" budget="${MACPROVIDER_PY_PROBE_BUDGET:-8}" waited=0 pid
-  "$py" -c 'import sys; sys.exit(0)' >/dev/null 2>&1 &
+  local py="$1" budget waited=0 pid
+  # Validate/clamp the (normally-unset) budget override so a bogus or huge value
+  # can't defeat the "fast" guarantee.
+  budget="${MACPROVIDER_PY_PROBE_BUDGET:-8}"
+  case "$budget" in ''|*[!0-9]*) budget=8 ;; esac
+  [ "$budget" -ge 1 ] 2>/dev/null || budget=8
+  [ "$budget" -le 60 ] 2>/dev/null || budget=60
+  "$py" - >/dev/null 2>&1 <<'PYEOF' &
+import sys
+sys.exit(0)
+PYEOF
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     sleep 1
     waited=$((waited + 1))
     [ "$waited" -lt "$budget" ] && continue
+    # Reap the interpreter AND any children it spawned (e.g. a shim's `sleep`),
+    # so a wedged probe leaves nothing behind.
+    pkill -P "$pid" 2>/dev/null || true
     kill -TERM "$pid" 2>/dev/null || true
     sleep 1
+    pkill -KILL -P "$pid" 2>/dev/null || true
     kill -KILL "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
     return 124

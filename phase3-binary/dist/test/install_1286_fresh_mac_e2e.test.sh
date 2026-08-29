@@ -14,10 +14,12 @@ pass(){ printf '  \342\234\223 %s\n' "$*"; }
 # echoes "EXIT:<code>" or "HANG" — never blocks the suite.
 run_installer() {  # $1=script  $2=extra PATH prefix  $3=timeout_s ; rest via env already set
   local script="$1" pathpref="$2" t="$3" home; home="$(mktemp -d)"
-  ( HOME="$home" MACPROVIDER_PORT=8899 PATH="$pathpref:/usr/bin:/bin:/usr/sbin:/sbin" \
+  ( set -m   # own process group per run so a HANG can be reaped whole (no orphan shims)
+    HOME="$home" MACPROVIDER_PORT=8899 PATH="$pathpref:/usr/bin:/bin:/usr/sbin:/sbin" \
       bash -s -- --dry-run < "$script" > "$TMP/out.log" 2>&1 & p=$!
     for _ in $(seq 1 "$t"); do kill -0 $p 2>/dev/null || break; sleep 1; done
-    if kill -0 $p 2>/dev/null; then echo HANG; kill -9 $p 2>/dev/null; else wait $p; echo "EXIT:$?"; fi )
+    if kill -0 $p 2>/dev/null; then echo HANG; kill -9 -"$p" 2>/dev/null || kill -9 "$p" 2>/dev/null
+    else wait $p; echo "EXIT:$?"; fi ) 2>/dev/null
 }
 
 # ---- Fresh-Mac simulation: no CLT. xcode-select -p fails; python3 resolves to
@@ -69,9 +71,11 @@ pass "healthy Mac (real python3 + CLT) proceeds normally — no false positive"
 #    This is the public-shell-installer bypass the security lane reproduced.
 mkdir -p "$TMP/blockbin"
 cp "$TMP/cltbin/xcode-select" "$TMP/blockbin/xcode-select"   # CLT present, irrelevant: python3 resolves here first
+# Adversarial shim: fast for `-c`, BLOCKS on `-` (stdin script mode the installer
+# actually uses). A naive `-c` probe would pass this and the installer would hang.
 cat > "$TMP/blockbin/python3" <<'EOF'
 #!/usr/bin/env bash
-sleep 3600
+case "${1:-}" in -c) exit 0 ;; *) sleep 3600 ;; esac
 EOF
 chmod +x "$TMP/blockbin/python3"
 export MACPROVIDER_PY_PROBE_BUDGET=3

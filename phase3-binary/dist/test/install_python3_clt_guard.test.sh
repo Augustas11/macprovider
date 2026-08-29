@@ -24,6 +24,11 @@ printf 'die() { echo "DIE:$1"; exit "$1"; }\n' >> "$TMP/guard.sh"
 GOOD="$TMP/good-python3"; printf '#!/bin/sh\nexit 0\n' > "$GOOD"; chmod +x "$GOOD"
 BROKEN="$TMP/broken-python3"; printf '#!/bin/sh\nexit 1\n' > "$BROKEN"; chmod +x "$BROKEN"
 BLOCK="$TMP/blocking-python3"; printf '#!/bin/sh\nsleep 3600\n' > "$BLOCK"; chmod +x "$BLOCK"
+# Adversarial shim: exits 0 for `-c` (what a naive probe uses) but BLOCKS on `-`
+# (stdin script mode — what the installer actually uses). Proves the probe must
+# match the real invocation style. (round-3 HIGH)
+STDINBLOCK="$TMP/stdinblock-python3"
+printf '#!/bin/sh\ncase "${1:-}" in -c) exit 0 ;; *) sleep 3600 ;; esac\n' > "$STDINBLOCK"; chmod +x "$STDINBLOCK"
 
 # A real developer dir that actually contains an executable python3.
 DEVDIR="$TMP/devdir"; mkdir -p "$DEVDIR/usr/bin"
@@ -67,9 +72,10 @@ expect "E no-python3"        "$(run_guard "" "" 2 1)"             "DIE:8"
 
 # ── Part 2: the real bounded probe (good / broken / blocking) ────────────────
 probe_rc() { ( set +e; source "$TMP/guard.sh"; MACPROVIDER_PY_PROBE_BUDGET=2 _python3_runs_quickly "$1" 2>/dev/null; echo $? ) ; }
-expect "P good-exec"     "$(probe_rc "$GOOD")"   "0"
-expect "P broken-exec"   "$(probe_rc "$BROKEN")" "1"
-expect "P blocking-exec" "$(probe_rc "$BLOCK")"  "124"   # times out, not hangs
+expect "P good-exec"       "$(probe_rc "$GOOD")"       "0"
+expect "P broken-exec"     "$(probe_rc "$BROKEN")"     "1"
+expect "P blocking-exec"   "$(probe_rc "$BLOCK")"      "124"   # times out, not hangs
+expect "P stdin-blocking"  "$(probe_rc "$STDINBLOCK")" "124"   # -c passes but stdin blocks -> caught
 
 # ── Part 3: HIGH — a blocking non-system python3 dies 8 (does NOT hang) ───────
 run_guard_probe() { # <py-path> [HEADLESS] [ROOT_PY]  (real probe, small budget)
@@ -83,8 +89,9 @@ run_guard_probe() { # <py-path> [HEADLESS] [ROOT_PY]  (real probe, small budget)
     ensure_python3_usable 2>/dev/null && echo "OK"
   )
 }
-expect "H1 blocking-nonsystem" "$(run_guard_probe "$BLOCK")" "DIE:8"
-expect "H2 good-nonsystem"     "$(run_guard_probe "$GOOD")"  "OK"
+expect "H1 blocking-nonsystem" "$(run_guard_probe "$BLOCK")"      "DIE:8"
+expect "H2 good-nonsystem"     "$(run_guard_probe "$GOOD")"       "OK"
+expect "H3 stdin-blocking"     "$(run_guard_probe "$STDINBLOCK")" "DIE:8"   # round-3 HIGH
 
 # ── Part 4: MEDIUM — headless root interpreter validated independently ────────
 # User python3 is a good non-system interpreter, but the system root interpreter
