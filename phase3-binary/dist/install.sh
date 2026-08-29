@@ -7219,6 +7219,38 @@ require_tool() {
   command -v "$1" >/dev/null 2>&1 || die 2 "missing required tool: $1"
 }
 
+# The installer relies on python3 in dozens of places. On a stock, non-developer
+# Mac `command -v python3` still succeeds because /usr/bin/python3 exists as an
+# Xcode Command Line Tools *stub*. Invoking that stub triggers the OS
+# "Install Command Line Developer Tools" dialog, which appears BEHIND the Malibu
+# window and blocks the installer indefinitely (looks like a hang at
+# "Starting installer"). Detect the non-functional stub WITHOUT invoking it
+# (xcode-select -p does not trigger the install prompt), kick off the CLT
+# installer for the user (consumer/GUI only), and exit fast with a dedicated,
+# actionable code the app surfaces as a clear message. (#1285)
+ensure_python3_usable() {
+  local py
+  py="$(command -v python3 2>/dev/null || true)"
+  # Only /usr/bin/python3 is the CLT stub. A python3 anywhere else (Homebrew,
+  # python.org, an active CLT/Xcode toolchain) is real and safe to use.
+  if [ "$py" != "/usr/bin/python3" ]; then
+    [ -n "$py" ] || die 8 "This Mac is missing python3, which provider setup requires. Install Apple's Command Line Developer Tools (or Xcode), then try again."
+    return 0
+  fi
+  # /usr/bin/python3 present. If an active developer toolchain is selected, the
+  # stub resolves to a real python3 and works. If not, it is the bare stub.
+  if xcode-select -p >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ "${HEADLESS:-0}" != "1" ]; then
+    # Best-effort: open the GUI Command Line Tools installer for the user. This
+    # is what the stub would have triggered, but now visibly and up front.
+    xcode-select --install >/dev/null 2>&1 || true
+    die 8 "This Mac needs Apple's Command Line Developer Tools to finish provider setup (they include python3). A system installer has been opened — click Install, wait for it to finish, then reopen Malibu."
+  fi
+  die 8 "This Mac is missing Apple's Command Line Developer Tools, which provider setup requires (they include python3). Install them with: xcode-select --install, then re-run the installer."
+}
+
 read_line() {
   REPLY=""
   # In curl-pipe-bash invocations, /dev/tty often exists as a character
@@ -12533,6 +12565,9 @@ main() {
   for tool in curl tar shasum grep sed awk date hostname mktemp openssl find python3 lsof cmp diff readlink ps; do
     require_tool "$tool"
   done
+  # python3 needs a functional check beyond command -v: on a stock Mac the CLT
+  # stub passes command -v but hangs the first real invocation. (#1285)
+  ensure_python3_usable
   validate_install_dir
   remediate_repair_home_write_acl
   repair_autoupdate_recovery_preflight

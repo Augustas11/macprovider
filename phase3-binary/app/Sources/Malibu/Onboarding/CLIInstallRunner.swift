@@ -11,6 +11,7 @@ enum CLIInstallRunner {
         case referralFailure(ReferralFailure)
         case repairEvidenceMissing
         case bundledCLINotFound
+        case developerToolsRequired
         case nonZeroExit(Int32)
         case launchFailed(String)
 
@@ -52,6 +53,8 @@ enum CLIInstallRunner {
                 return "Provider software could not be verified for repair. Your provider identity was not changed."
             case .bundledCLINotFound:
                 return "Provider software for repair was not found in Malibu. Your provider identity was not changed."
+            case .developerToolsRequired:
+                return "This Mac needs Apple's Command Line Developer Tools to finish setup (they include python3). A system installer should have opened — click Install, wait for it to finish, then reopen Malibu."
             case let .nonZeroExit(code):
                 return "Provider software install failed (exit \(code)). Your provider identity was not changed."
             case .launchFailed(_):
@@ -69,6 +72,9 @@ enum CLIInstallRunner {
     ) -> Error? {
         if exitCode == 0 {
             return nil
+        }
+        if exitCode == 8 {
+            return Error.developerToolsRequired
         }
         if repairExistingInstall, exitCode == 20 || exitCode == 28 {
             return Error.repairEvidenceMissing

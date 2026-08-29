@@ -118,6 +118,7 @@ test-dist:
 	bash scripts/test-tier2-enforcement-safety.sh
 	bash ops/pearl-updater/test_transaction_gate_systemd.sh
 	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh
+	bash phase3-binary/dist/test/install_python3_clt_guard.test.sh
 	bash scripts/test-catalog-release.sh
 	bash scripts/test-autotune-gate-matrix.sh
 	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
