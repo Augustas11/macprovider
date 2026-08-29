@@ -79,6 +79,55 @@ class ReceiptTests(unittest.TestCase):
             path = self.write(directory, value)
             receipt.validate_receipt(path, REPO)
 
+    def test_replay_tolerates_freshness_restamp_but_catches_pricing_change(self):
+        # The archived proposal must still replay after a generated_at-only feed
+        # re-stamp (only the freshness-coupled rate_card_reference_digest changes),
+        # yet any real pricing change must still break the replay.
+        snapshot = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        rate_card = json.loads(RATE_CARD.read_text(encoding="utf-8"))
+        proposal = json.loads(PROPOSAL.read_text(encoding="utf-8"))
+        now = receipt.parse_time(proposal["generated_at"], "proposal.generated_at")
+
+        fresh = dict(rate_card)
+        fresh["generated_at"] = "2026-12-31T00:00:00Z"
+        replay_fresh = receipt.engine.build_proposal(snapshot, policy, fresh, now=now)
+        self.assertNotEqual(proposal, replay_fresh)
+        self.assertEqual(
+            receipt.drop_reference_digest(proposal),
+            receipt.drop_reference_digest(replay_fresh),
+        )
+
+        tampered = json.loads(RATE_CARD.read_text(encoding="utf-8"))
+        tampered["rows"]["openai/gpt-oss-20b"]["completion_rate_per_mtok"] += 1
+        replay_tampered = receipt.engine.build_proposal(snapshot, policy, tampered, now=now)
+        self.assertNotEqual(
+            receipt.drop_reference_digest(proposal),
+            receipt.drop_reference_digest(replay_tampered),
+        )
+
+    def test_legacy_whole_file_rate_card_binding_is_accepted(self):
+        # Pre-migration archived receipts bind the whole rate-card file; the
+        # validator still accepts that legacy field so they stay byte-unchanged.
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            copied = directory / PROPOSAL.name
+            shutil.copyfile(PROPOSAL, copied)
+            snapshot = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+            value = self.base("openrouter-pricing-compute-success", copied)
+            value["inputs"] = {
+                "snapshot_path": SNAPSHOT.relative_to(REPO).as_posix(),
+                "snapshot_content_digest": snapshot["content_digest"],
+                "snapshot_file_sha256": receipt.sha256_file(SNAPSHOT),
+                "policy_path": POLICY.relative_to(REPO).as_posix(),
+                "policy_file_sha256": receipt.sha256_file(POLICY),
+                "rate_card_path": RATE_CARD.relative_to(REPO).as_posix(),
+                "rate_card_file_sha256": receipt.sha256_file(RATE_CARD),
+            }
+            value["command"] = receipt.expected_compute_command(value["inputs"])
+            path = self.write(directory, value)
+            receipt.validate_receipt(path, REPO)
+
     def test_validate_fetch_binds_policy_and_confirmation_provenance(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
