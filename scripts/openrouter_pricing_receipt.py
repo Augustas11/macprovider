@@ -71,13 +71,26 @@ def rate_card_content_sha256(path: Path) -> str:
     re-stamped to reset the client 30-day horizon without changing any pricing
     content, so binding the whole file would make a freshness renewal invalidate
     every archived compute receipt. This canonical hash excludes ``generated_at``
-    (mirroring the engine's ``rate_card_digest`` and the snapshot's freshness-free
-    ``content_digest``) so a real pricing change -- ``version``, ``policy_version``,
-    ``usd_per_million_credits``, or any ``rows`` value -- still changes it.
+    (mirroring the snapshot's freshness-free ``content_digest``) so a real pricing
+    change -- ``version``, ``policy_version``, ``usd_per_million_credits``, or any
+    ``rows`` value -- still changes it. This binding lives entirely in the receipt
+    validator; the engine and archived proposals are left untouched.
     """
     rate_card = read_object(path, "rate card")
     rate_card.pop("generated_at", None)
     return sha256_bytes(canonical_json(rate_card))
+
+
+def drop_reference_digest(proposal: Mapping[str, Any]) -> dict[str, Any]:
+    """Proposal without the freshness-coupled ``rate_card_reference_digest``.
+
+    The engine records ``rate_card_reference_digest`` as the SHA-256 of the whole
+    rate card, so a freshness-only ``generated_at`` re-stamp changes it while
+    leaving every priced row identical. Compare replays with this breadcrumb
+    removed; the rate-card content binding and the priced rows still fail closed
+    on any real pricing change.
+    """
+    return {key: value for key, value in proposal.items() if key != "rate_card_reference_digest"}
 
 
 def read_object(path: Path, description: str) -> dict[str, Any]:
@@ -337,11 +350,25 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
         return
 
     inputs = receipt["inputs"]
-    expected = {
+    base_fields = {
         "snapshot_path", "snapshot_content_digest", "snapshot_file_sha256",
-        "policy_path", "policy_file_sha256", "rate_card_path", "rate_card_content_sha256",
+        "policy_path", "policy_file_sha256", "rate_card_path",
     }
-    if not isinstance(inputs, dict) or set(inputs) != expected:
+    # The rate card is a live signed feed whose ``generated_at`` is periodically
+    # re-stamped (a freshness renewal that resets the client 30-day horizon)
+    # without changing any pricing. Receipts bind the rate card's freshness-free
+    # pricing content (``rate_card_content_sha256``) so a renewal does not
+    # invalidate them, while any real pricing change still does. Pre-migration
+    # archived receipts bound the whole rate-card file (``rate_card_file_sha256``)
+    # and are still accepted so their historical bytes validate unchanged; the
+    # engine and those receipts are deliberately left untouched.
+    if not isinstance(inputs, dict):
+        raise ReceiptError("compute receipt input binding is malformed")
+    if set(inputs) == base_fields | {"rate_card_content_sha256"}:
+        rate_card_binding = "rate_card_content_sha256"
+    elif set(inputs) == base_fields | {"rate_card_file_sha256"}:
+        rate_card_binding = "rate_card_file_sha256"
+    else:
         raise ReceiptError("compute receipt input binding is malformed")
     snapshot_path = resolve_repo_path(repo, inputs["snapshot_path"], "inputs.snapshot_path")
     policy_path = resolve_repo_path(repo, inputs["policy_path"], "inputs.policy_path")
@@ -351,10 +378,11 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
     ):
         if sha256_file(path) != inputs[field]:
             raise ReceiptError(f"compute receipt {field} does not match exact input bytes")
-    # The rate card is a live, freshness-restamped feed, so bind its pricing
-    # content (generated_at excluded) rather than the whole-file bytes.
-    if rate_card_content_sha256(rate_card_path) != inputs["rate_card_content_sha256"]:
-        raise ReceiptError("compute receipt rate_card_content_sha256 does not match rate-card pricing content")
+    if rate_card_binding == "rate_card_content_sha256":
+        if rate_card_content_sha256(rate_card_path) != inputs["rate_card_content_sha256"]:
+            raise ReceiptError("compute receipt rate_card_content_sha256 does not match rate-card pricing content")
+    elif sha256_file(rate_card_path) != inputs["rate_card_file_sha256"]:
+        raise ReceiptError("compute receipt rate_card_file_sha256 does not match exact input bytes")
     snapshot = read_object(snapshot_path, "snapshot")
     if snapshot.get("content_digest") != inputs["snapshot_content_digest"]:
         raise ReceiptError("compute receipt snapshot semantic digest mismatch")
@@ -375,7 +403,12 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
         )
     except engine.EngineError as error:
         raise ReceiptError(f"proposal replay failed: {error}") from error
-    if proposal != replay:
+    # ``rate_card_reference_digest`` is the engine's whole-rate-card digest, so a
+    # freshness-only re-stamp changes it even though pricing is unchanged. The
+    # rate-card content is already bound above (or, for legacy receipts, the exact
+    # file bytes), and every priced row is compared below, so a real pricing
+    # change still fails the replay; only this freshness breadcrumb is excused.
+    if drop_reference_digest(proposal) != drop_reference_digest(replay):
         raise ReceiptError("archived proposal does not exactly replay from bound inputs")
 
 

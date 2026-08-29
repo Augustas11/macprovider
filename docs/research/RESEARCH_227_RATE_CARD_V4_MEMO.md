@@ -58,10 +58,8 @@ Of the 50 rows, 47 are `active_priced` and three are
 The schema-version 2 fetch receipt also binds normalization to the exact
 `scripts/openrouter_pricing_policy.json` bytes at
 `sha256:97462653d8c01c6fc024103bcae38543e4a716d8091099a49930ad4b77d44b75`.
-The compute receipt binds the exact snapshot and policy bytes and the read-only
-rate-card pricing content (its `rate_card_content_sha256`, canonicalized with
-the freshness field `generated_at` excluded) and passes an exact proposal
-replay.
+The compute receipt binds the exact snapshot, policy, and read-only rate-card
+bytes and passes an exact proposal replay.
 
 Committed evidence:
 
@@ -71,26 +69,20 @@ Committed evidence:
 | Superseded pre-fix fetch receipt | `openrouter-pricing-fetch-success-2026-08-10T10-05-13Z.json` |
 | Superseded pre-fix snapshot | `openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58ac6728ec.json` |
 | Superseded pre-fix compute receipt | `openrouter-pricing-compute-success-2026-08-10T10-06-14Z.json` |
-| Superseded pre-fix proposal | `openrouter-rate-card-proposal-2026-08-10T10-06-14Z-c72b3106dc0a0ccc.json` |
+| Superseded pre-fix proposal | `openrouter-rate-card-proposal-2026-08-10T10-06-14Z-d60d0d8d828bbd5c.json` |
 | Final post-fix fetch receipt | `openrouter-pricing-fetch-success-2026-08-10T17-19-52Z.json` |
 | Final post-fix snapshot | `openrouter-pricing-snapshot-2026-08-10T17-20-06Z-e1fe9caa0e710957.json` |
 | Final post-fix compute receipt | `openrouter-pricing-compute-success-2026-08-10T17-20-07Z.json` |
-| Final post-fix proposal | `openrouter-rate-card-proposal-2026-08-10T17-20-07Z-49fc996399bba31f.json` |
+| Final post-fix proposal | `openrouter-rate-card-proposal-2026-08-10T17-20-07Z-258cfbdbb4b81600.json` |
 
-> **Evidence regenerated under proposal schema v2 (drop-gate fix #990), then
-> re-derived for the freshness-decoupling fix.** Both committed proposals above
-> were re-derived from their snapshots under the corrected engine, and every
-> committed receipt was migrated to receipt-schema v2. When the pricing
-> provenance was decoupled from rate-card feed freshness (the engine
-> `rate_card_reference_digest` and the receipt `rate_card_content_sha256` now
-> exclude the freshness field `generated_at`), both proposals were re-derived
-> again — only their `rate_card_reference_digest` changed, so their canonical
-> filename suffixes changed — and every committed receipt had its `engine_commit`
-> rebound to `2a571ed7` (the commit that carries the freshness-decoupled engine),
-> so the receipt evidence harness validates the full set. The re-derived
-> proposals still show `dropped: []` / `retained: 3` — the earlier committed
-> artifacts' `dropped` rows for served models (`gpt-oss-20b`, `qwen2.5-coder-32b`)
-> were the schema-v1 false-delisting signal #990 fixes.
+> **Evidence regenerated under proposal schema v2 (drop-gate fix #990).** Both
+> committed proposals above were re-derived from their snapshots under the
+> corrected engine, and every committed receipt was migrated to receipt-schema
+> v2 with its `engine_commit` rebound to `6638ac0a` (an on-`main` commit that
+> carries the v2 engine), so the receipt evidence harness validates the full set.
+> The re-derived proposals now show `dropped: []` / `retained: 3` — the earlier
+> committed artifacts' `dropped` rows for served models (`gpt-oss-20b`,
+> `qwen2.5-coder-32b`) were the schema-v1 false-delisting signal #990 fixes.
 
 The final snapshot was fetched at `2026-08-10T17:20:06Z`; its semantic digest
 is `sha256:b3b620810102afd2055acfad169ab1ed08f89e66f33f5aa8febacbc039808d04`
@@ -98,10 +90,10 @@ and its serialized-file SHA-256 is
 `sha256:98379baf240dd7966b9fef4a68413e21b1e464a249306917cc97e36c18b4df3a`.
 The proposal was generated at `2026-08-10T17:20:07Z`, references that exact
 semantic digest, and has serialized-file SHA-256
-`sha256:a10ba542608f25bc089f5edabfffb4f440dd47f98481d0cbc631c50f0dcd795e`.
+`sha256:1b0d3f27435674a4e4d248ad0f0e9f7fbd75bbb9935098552c6a0870471bb875`.
 The fetch and compute receipt evidence digests are respectively
-`sha256:57bd077a73ec2dfcd2d8ac6be41e54f72d20a6ad81e3681f0b89027a9d4325c3`
-and `sha256:cfa47f1597282ba9a85d657c638f7871f195234435b56abf9dc8c0a86ec21a31`.
+`sha256:72e394f6356f0ef5294033de75401d682e3cb7bb6507bf12a6bfdadb21b27fad`
+and `sha256:25a985af8dc01c91eb17405837bc88bab444d452cbd57a6aef07f6b68c1d383b`.
 The executable validator verified both archived copies and rebuilt the proposal
 exactly from the bound inputs. The receipt contract and canonical digest
 algorithm are specified in the archive README.

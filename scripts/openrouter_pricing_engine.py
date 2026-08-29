@@ -939,24 +939,8 @@ def load_json_file(path: Path, description: str) -> dict[str, Any]:
     return value
 
 
-def rate_card_content_payload(rate_card: Mapping[str, Any]) -> dict[str, Any]:
-    """Rate-card payload for provenance binding, excluding the freshness stamp.
-
-    ``generated_at`` is a freshness field: the signed static feed is periodically
-    re-stamped (a renewal that resets the client 30-day horizon) without changing
-    any pricing content. Binding the whole card would make every freshness renewal
-    invalidate archived proposals. Excluding ``generated_at`` -- mirroring how
-    ``snapshot_digest_payload`` excludes ``fetched_at`` -- keeps the digest a pure
-    pricing-content binding: any change to ``version``, ``policy_version``,
-    ``usd_per_million_credits``, or ``rows`` still changes it.
-    """
-    payload = dict(rate_card)
-    payload.pop("generated_at", None)
-    return payload
-
-
 def rate_card_digest(rate_card: Mapping[str, Any]) -> str:
-    return sha256_prefixed(rate_card_content_payload(rate_card))
+    return sha256_prefixed(rate_card)
 
 
 def validate_rate_card(rate_card: Mapping[str, Any]) -> None:

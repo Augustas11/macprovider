@@ -127,17 +127,22 @@ count that the failed generation could not validate.
 
 Compute receipts additionally require `inputs` and prohibit `source`. `inputs`
 contains `snapshot_content_digest`, `snapshot_file_sha256`, `policy_path`,
-`policy_file_sha256`, `rate_card_path`, and `rate_card_content_sha256`. These
-must name and hash the exact inputs passed to `compute`. The snapshot and policy
-are immutable archived inputs bound by whole-file SHA-256, but the rate card is
-a live signed feed whose `generated_at` is periodically re-stamped to renew
-freshness without changing pricing. `rate_card_content_sha256` therefore binds
-the rate card's pricing content with `generated_at` excluded (the canonical hash
-computed by the engine's `rate_card_digest` and by `rate_card_content_sha256` in
-the runner), so a freshness renewal does not invalidate archived receipts while
-any real pricing change -- `version`, `policy_version`, `usd_per_million_credits`,
-or a `rows` value -- still does. Each archived proposal binds the same content
-hash in its `rate_card_reference_digest`.
+`policy_file_sha256`, `rate_card_path`, and a rate-card binding. The snapshot and
+policy are immutable archived inputs bound by whole-file SHA-256. The rate card,
+however, is a live signed feed whose `generated_at` is periodically re-stamped to
+renew freshness without changing pricing, so new receipts bind
+`rate_card_content_sha256`: a canonical hash of the rate card with `generated_at`
+excluded. That binding is freshness-tolerant yet still changes on any real
+pricing change (`version`, `policy_version`, `usd_per_million_credits`, or a
+`rows` value). Pre-migration archived receipts bind the whole rate-card file as
+`rate_card_file_sha256`; the validator still accepts that legacy form so those
+historical receipts and their engine binding stay byte-unchanged. This freshness
+decoupling lives entirely in the receipt validator (`openrouter_pricing_receipt.py`):
+the engine and every archived proposal are untouched. During the exact proposal
+replay the validator excludes the freshness-coupled `rate_card_reference_digest`
+(the engine's whole-rate-card digest, which a re-stamp changes even though every
+priced row is identical); the rate-card content binding and the priced rows
+themselves still fail the replay closed on any real pricing change.
 
 A success receipt is invalid unless its inventory contains exactly one artifact
 of the matching type. A fetch-failure receipt is invalid if its inventory is

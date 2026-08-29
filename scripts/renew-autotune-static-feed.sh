@@ -105,12 +105,11 @@ for name in ("autotune-candidates.json", "demand-rank.json"):
     p.write_text(json.dumps(obj, separators=(",", ":"), sort_keys=True))
 rc = cat_dir / "rate-card.json"
 obj = json.loads(rc.read_text())
-# generated_at is a freshness field only. Pricing provenance is bound to the
-# rate-card's CONTENT, not the whole file: the openrouter engine's
-# rate_card_reference_digest and the pricing-receipt rate_card_content_sha256
-# both canonicalize the card with generated_at excluded, so this freshness-only
-# re-stamp is provenance-safe and does not invalidate any archived proposal or
-# compute receipt. version is a rows-hash; leave it.
+# generated_at is a freshness field only. The openrouter pricing-receipt
+# validator binds the rate-card's CONTENT (rate_card_content_sha256, generated_at
+# excluded) and tolerates the freshness-coupled rate_card_reference_digest on
+# replay, so this freshness-only re-stamp is provenance-safe and does not
+# invalidate a content-bound compute receipt. version is a rows-hash; leave it.
 obj["generated_at"] = now_iso
 rc.write_text(json.dumps(obj, separators=(",", ":"), sort_keys=True))
 print(f"re-stamped candidate/demand version={release_id} generated_at={now_iso} (rate-card date only)")
