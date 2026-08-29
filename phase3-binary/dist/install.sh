@@ -8570,7 +8570,12 @@ latest_release_tag() {
   # release published under the same repo (e.g. macprovider-verify
   # under tag verify-vX.Y.Z) silently hijacks the installer.
   api_url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=30"
-  json="$(curl -fsSL "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
+  # Bound network stalls: --connect-timeout guards a captive portal / black-holed
+  # socket, --speed-limit/--speed-time abort a mid-transfer stall, and --retry
+  # rides out transient failures. Without these the installer hangs indefinitely
+  # on a stalled GitHub API socket and the Malibu UI is stuck at "Starting
+  # installer…" (its progress monitor only tracks macprovider-cli processes).
+  json="$(curl -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
   tag="$(
     printf "%s" "$json" \
       | awk '
@@ -8947,8 +8952,8 @@ download_release() {
       || die 3 "failed to stage acceptance-candidate.json.sig"
     log "Using protected non-public acceptance assets for $tag."
   else
-    curl -fL "$base/checksums.txt" -o "$checksums_path" || die 3 "failed to download checksums.txt"
-    curl -fL "$base/checksums.txt.sig" -o "$checksums_sig_path" || die 3 "failed to download checksums.txt.sig"
+    curl -fL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$base/checksums.txt" -o "$checksums_path" || die 3 "failed to download checksums.txt"
+    curl -fL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$base/checksums.txt.sig" -o "$checksums_sig_path" || die 3 "failed to download checksums.txt.sig"
   fi
   verify_checksum_signature
 
@@ -8966,7 +8971,7 @@ download_release() {
         cp "$acceptance_dir/$pkg_asset" "$pkg_path" || die 3 "failed to stage acceptance package"
       else
         log "Downloading signed package $pkg_asset from GitHub Releases."
-        curl -fL "$base/$pkg_asset" -o "$pkg_path" || die 3 "failed to download release package"
+        curl -fL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$base/$pkg_asset" -o "$pkg_path" || die 3 "failed to download release package"
       fi
       asset_path="$pkg_path"
       asset_kind="pkg"
@@ -8982,7 +8987,7 @@ download_release() {
     cp "$acceptance_dir/$tarball_asset" "$tarball_path" || die 3 "failed to stage acceptance tarball"
   else
     log "Downloading $tarball_asset from GitHub Releases."
-    curl -fL "$base/$tarball_asset" -o "$tarball_path" || die 3 "failed to download release tarball"
+    curl -fL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$base/$tarball_asset" -o "$tarball_path" || die 3 "failed to download release tarball"
   fi
   asset_path="$tarball_path"
   asset_kind="tar"
