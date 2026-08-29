@@ -3084,10 +3084,28 @@ struct ProbeSafetyAssessment: Equatable {
             && warningCount >= 2
             && warningCount * 2 >= readable.count
 
-        let thermalStates = samples.map(\.thermalState)
-        let thermalKnown = !thermalStates.isEmpty && thermalStates.allSatisfy { $0 != nil }
-        let thermalThrottleDetected = !thermalKnown
-            || thermalStates.compactMap { $0 }.contains { ThermalGate.shouldThrottle($0) }
+        // #1269 fix: `thermalThrottleDetected` now means "sustained thermal
+        // throttle", not "any single throttling sample". The install-time probe
+        // runs while the Mac is hot from unpacking/verifying/signing, so a lone
+        // transient throttle (the observed thermal fair/nominal oscillation) used
+        // to trip the hard veto and sink every candidate — rolling back an
+        // otherwise-capable Mac. This mirrors the #742 swap_detected sustained
+        // rule exactly, computed over the same interval series:
+        // - TRUE only when at least 2 readable samples throttle AND throttling
+        //   samples are >= 50% of the READABLE (non-nil) thermal samples, so a
+        //   genuinely throttled node still hard-blocks.
+        // - Fail-closed to TRUE only when the thermal state could not be read for
+        //   the ENTIRE series (every sample nil, or an empty series), matching the
+        //   prior nil-fail-closed intent. A single transient unreadable/throttling
+        //   sample must never veto the paid path.
+        let readableThermal = samples.compactMap(\.thermalState)
+        let throttleCount = readableThermal.filter { ThermalGate.shouldThrottle($0) }.count
+        let thermalThrottleDetected: Bool
+        if readableThermal.isEmpty {
+            thermalThrottleDetected = true
+        } else {
+            thermalThrottleDetected = throttleCount >= 2 && throttleCount * 2 >= readableThermal.count
+        }
         return ProbeSafetyAssessment(
             swapDetected: swapDetected,
             thermalThrottleDetected: thermalThrottleDetected,

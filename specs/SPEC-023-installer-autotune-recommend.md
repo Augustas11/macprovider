@@ -1,11 +1,17 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.9.3
+version: v0.9.4
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-08-02
+last-locked: 2026-08-29
 
 ## Change log
+
+- **v0.9.4 (2026-08-29)** — Thermal veto redefined as sustained throttle (#1269).
+  1. **`thermal_throttle_detected` now means sustained thermal throttle, not any single throttling sample.** Computed over the SAME ~250 ms interval series already sampled for `swap_detected` (§ v0.9.0.2): `thermal_throttle_detected == true` only when at least 2 readable thermal samples are throttling (`.serious`/`.critical`) AND throttling readings are ≥50% of the readable (non-Unknown) thermal samples. A genuinely thermally-throttled node (sustained majority) still fails paid eligibility, including short probes that collect only the two synchronous samples.
+  2. **Why.** The install-time recommendation probe runs while the Mac is hot from unpacking/verifying/signing, so a lone transient throttle amid a benign thermal fair/nominal oscillation flipped the old any-sample flag and hard-rejected otherwise-capable Macs at upgrade — the node was then rolled back to its prior release (the #1269 convergence blocker). The prior rule set the flag if ANY single sample throttled OR any sample's thermal state was unreadable.
+  3. **Fail-closed narrowed.** `thermal_throttle_detected` fails closed to true only when the thermal state could not be read for the ENTIRE series (every sample unreadable, or an empty series). A single transient unreadable or throttling sample MUST NOT veto the paid path. This mirrors the v0.9.0 `swap_detected` fail-closed narrowing.
+  4. **No wire/schema change.** The `thermal_throttle_detected` boolean field name, the candidate-benchmark shape, and the coordinator-facing evidence schema are unchanged; only the field's meaning tightens. The gate remains a hard block for paid recommendation.
 
 - **v0.9.3 (2026-08-02)** — oMLX activation-gate hardening (#687, r5 convergence).
   1. **Provenance-erasure laundering closed.** The §12.2 activation gate now bans deriving a catalog row from oMLX data in ANY form before activation — not only the `omlx_seeded` schema but any value laundered into a `policy` / `measured_single_host` / other provenance label with `gate_seed` stripped. Authoring-process prohibition (AC-OMLX-16), plus an immutable provenance-lineage Stage-2 prerequisite §12.2(b)(v) so post-activation detection is possible.
@@ -217,7 +223,7 @@ Required hardware fields:
 || `candidate_benchmarks[model_key].sustained_tps` | float | local autotune benchmark | Warm steady-state decode tokens/sec for each candidate. |
 || `candidate_benchmarks[model_key].ttft_ms` | integer | local autotune benchmark | Time to first token under the v0.1 benchmark prompt shape. |
 || `candidate_benchmarks[model_key].swap_detected` | boolean | local probe | **[amended v0.9 / #742]** True means sustained CRITICAL memory pressure across the probe (≥2 samples of `kern.memorystatus_vm_pressure_level` reading Critical AND ≥50% of the readable samples Critical); fails paid eligibility (hard block) and, when it leaves no paid row, emits `swap_observed_under_load`. Advisory Warning-majority is telemetry-only. Field name/type unchanged. Donor mode keeps swap advisory. |
-|| `candidate_benchmarks[model_key].thermal_throttle_detected` | boolean | local probe | Thermal throttle during probe fails eligibility. **[unchanged v0.2: hard block]** |
+|| `candidate_benchmarks[model_key].thermal_throttle_detected` | boolean | local probe | **[amended v0.9.4 / #1269]** True means SUSTAINED thermal throttle across the probe (≥2 readable thermal samples `.serious`/`.critical` AND ≥50% of the readable samples throttling); a hard block for paid recommendation. A lone transient throttle amid a benign fair/nominal oscillation does NOT set it. Fail closed to true only when the whole thermal series is unreadable. Field name/type unchanged. |
 
 HMAC identity rules:
 
@@ -637,7 +643,7 @@ Note: `bench_gate.min_sustained_tps` and `bench_gate.max_4k_ttft_ms` are advisor
 - `ttft_ms <= model.bench_gate.max_4k_ttft_ms` **[v0.2 amendment: advisory; missing emits `ttft_above_gate` warning but does not veto eligibility]**.
 - `swap_detected == false` **[amended v0.9 / #742: `swap_detected` == sustained CRITICAL memory pressure (≥2 samples Critical AND ≥50% of readable samples Critical) is a hard block for paid recommendation. When it causes no paid row to land, emit `swap_observed_under_load`. Advisory Warning-majority pressure does not set `swap_detected` and does not block (telemetry only). Fail closed to true only when the whole series is unreadable. Donor mode keeps swap advisory]**.
 - `buyer_ttft_ceiling_ms == 0 OR ttft_ms <= buyer_ttft_ceiling_ms` **[v0.8 / #744: hard block for paid recommendation only. The operator-set ceiling protects buyer UX and is independent of catalog `bench_gate.max_4k_ttft_ms`. Enabling donor mode does not bypass the paid-path ceiling; donor fallback remains local-only and may still name a compatible row separately]**.
-- `thermal_throttle_detected == false` **[unchanged from v0.1: hard block]**.
+- `thermal_throttle_detected == false` **[amended v0.9.4 / #1269: `thermal_throttle_detected` == SUSTAINED thermal throttle (≥2 readable thermal samples `.serious`/`.critical` AND ≥50% of readable samples throttling) is a hard block for paid recommendation. A lone transient throttle amid a benign fair/nominal oscillation does NOT set it. Fail closed to true only when the whole thermal series is unreadable. Donor mode remains unaffected]**.
 - The candidate benchmark must be from the current `benchmark_id` or from a cached run whose candidate catalog hash, binary version, model ID, and HMAC-derived hardware identity hash match and whose `generated_at` is no older than 7 days.
 - There is no default 60_000 ms TTFT feasibility ceiling on the paid `--recommend` path. Omitting `--gate-ttft-ms` with `--recommend` disables that probe feasibility ceiling. Classic non-recommend Stage 1/2 retains the SPEC-013 default. The paid buyer-facing ceiling is the separate `--buyer-ttft-ceiling-ms` policy knob above.
 
