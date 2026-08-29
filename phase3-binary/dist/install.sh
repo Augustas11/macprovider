@@ -7229,7 +7229,7 @@ require_tool() {
 # installer for the user (consumer/GUI only), and exit fast with a dedicated,
 # actionable code the app surfaces as a clear message. (#1285)
 ensure_python3_usable() {
-  local py
+  local py devdir
   py="$(command -v python3 2>/dev/null || true)"
   # Only /usr/bin/python3 is the CLT stub. A python3 anywhere else (Homebrew,
   # python.org, an active CLT/Xcode toolchain) is real and safe to use.
@@ -7237,9 +7237,15 @@ ensure_python3_usable() {
     [ -n "$py" ] || die 8 "This Mac is missing python3, which provider setup requires. Install Apple's Command Line Developer Tools (or Xcode), then try again."
     return 0
   fi
-  # /usr/bin/python3 present. If an active developer toolchain is selected, the
-  # stub resolves to a real python3 and works. If not, it is the bare stub.
-  if xcode-select -p >/dev/null 2>&1; then
+  # /usr/bin/python3 present. It resolves to a real python3 ONLY if a developer
+  # directory is selected AND that directory actually still contains a working
+  # python3. `xcode-select -p` alone is not enough: it just prints the selected
+  # path, which can be stale/removed, so its success would let a dangling stub
+  # through to the first real python3 call and hang. Verify the resolved tool
+  # exists and is executable — without invoking the stub (which is what triggers
+  # the CLT install dialog). (#1285/#1286)
+  devdir="$(xcode-select -p 2>/dev/null || true)"
+  if [ -n "$devdir" ] && [ -x "$devdir/usr/bin/python3" ]; then
     return 0
   fi
   if [ "${HEADLESS:-0}" != "1" ]; then
