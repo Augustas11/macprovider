@@ -12568,11 +12568,14 @@ main() {
   validate_repair_privilege_domain
   validate_headless_acceptance_source
   validate_port_value "$PORT"
-  for tool in curl tar shasum grep sed awk date hostname mktemp openssl find python3 lsof cmp diff readlink ps; do
+  for tool in curl tar shasum grep sed awk date hostname mktemp openssl find lsof cmp diff readlink ps; do
     require_tool "$tool"
   done
-  # python3 needs a functional check beyond command -v: on a stock Mac the CLT
-  # stub passes command -v but hangs the first real invocation. (#1285)
+  # python3 is intentionally NOT in the generic require_tool loop: on a stock Mac
+  # the only python3 is the CLT stub, which passes command -v but hangs the first
+  # real invocation, and a Mac with no python3 at all must surface the same
+  # actionable die 8 (not a generic "missing required tool: python3" exit 2).
+  # ensure_python3_usable is the sole authority for python3 presence+usability. (#1285)
   ensure_python3_usable
   validate_install_dir
   remediate_repair_home_write_acl

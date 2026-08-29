@@ -250,6 +250,25 @@ final class ReferralOnboardingTests: XCTestCase {
         XCTAssertNil(CLIInstallRunner.classifiedInstallError(exitCode: 0, repairExistingInstall: true))
     }
 
+    func testExit8MapsToDeveloperToolsRequiredNotInvite() {
+        // install.sh die 8 = missing/unusable Command Line Developer Tools (python3
+        // CLT stub). It must surface an actionable "install developer tools" message,
+        // never the invite-required copy, in both new-join and repair flows. (#1285/#1286)
+        for repair in [false, true] {
+            switch CLIInstallRunner.classifiedInstallError(exitCode: 8, repairExistingInstall: repair) {
+            case .developerToolsRequired?:
+                break
+            default:
+                XCTFail("exit 8 must map to developerToolsRequired (repair=\(repair))")
+            }
+        }
+        let description = CLIInstallRunner.Error.developerToolsRequired.errorDescription ?? ""
+        XCTAssertTrue(
+            description.localizedCaseInsensitiveContains("Developer Tools"),
+            "developerToolsRequired message must name the Command Line Developer Tools"
+        )
+    }
+
     func testInstallerEnvironmentCarriesManifestSelectedInstallDirectory() throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("installer-custom-home-\(UUID().uuidString)")
