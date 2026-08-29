@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "56c4c20a8d0b3a1944ff0539829d0f517097c5189f22d7f1453c8e491dff1720",
-  "generated_at": "2026-07-29T08:45:00Z",
+  "autotune_candidates_sha256": "849bb9394ec3e030f9e1f26acb6cd0954fce3fc55db20ca4d03eed3ec348f60d",
+  "generated_at": "2026-08-28T11:07:13Z",
   "models": [
     {
       "catalog_key": "google-gemma-4-26b-a4b-it",
@@ -67,6 +67,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-07-29-inband-provenance-v1",
+  "release_id": "published-2026-08-28-inband-provenance-v1",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

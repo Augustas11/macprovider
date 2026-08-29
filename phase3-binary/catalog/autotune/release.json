@@ -2,19 +2,19 @@
   "feeds": {
     "autotune-candidates.json": {
       "bytes": 6019,
-      "sha256": "56c4c20a8d0b3a1944ff0539829d0f517097c5189f22d7f1453c8e491dff1720",
+      "sha256": "849bb9394ec3e030f9e1f26acb6cd0954fce3fc55db20ca4d03eed3ec348f60d",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-07-29-inband-provenance-v1"
+      "version": "published-2026-08-28-inband-provenance-v1"
     },
     "demand-rank.json": {
       "bytes": 1188,
-      "sha256": "58360a4b93168346f0248b05bab3d81b3e28dd6f3549df871a1a7d207dfa31a9",
+      "sha256": "8244f55fb5460a2d9f8b3291fb7ee74916ece0f32eab9cca926fcfcee848ffb3",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-07-29-inband-provenance-v1"
+      "version": "published-2026-08-28-inband-provenance-v1"
     },
     "rate-card.json": {
       "bytes": 2235,
-      "sha256": "68eb8794a2388cd73727b23db7e13adee8ae2c8e30bc0eeef5ad887223398cd3",
+      "sha256": "1a270092a93d6140da0c679b7da880336e8477415aaff5eebeca41c4e2b02c64",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "51d4eb9d29024e759c8e41610ad3f13614253e52f47bc032c92f46adb599ad42"
     },
@@ -25,8 +25,8 @@
       "version": "macprovider-tier2-model-catalog-2026-07-07-p2-qwen3-8b"
     }
   },
-  "generated_at": "2026-07-29T08:45:00Z",
+  "generated_at": "2026-08-28T11:07:13Z",
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-07-29-inband-provenance-v1",
+  "release_id": "published-2026-08-28-inband-provenance-v1",
   "schema_version": "macprovider.autotune-release.v1"
 }

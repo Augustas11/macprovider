@@ -25,7 +25,12 @@ ARCHIVE = REPO / "docs" / "research" / "openrouter-snapshots"
 SNAPSHOT = ARCHIVE / "openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58ac6728ec.json"
 PROPOSAL = ARCHIVE / "openrouter-rate-card-proposal-2026-08-10T10-06-14Z-d60d0d8d828bbd5c.json"
 POLICY = REPO / "scripts" / "openrouter_pricing_policy.json"
-RATE_CARD = REPO / "phase3-binary" / "catalog" / "autotune" / "rate-card.json"
+# The archived 2026-08-10 proposal was computed against the rate-card as it stood
+# then. The live catalog rate-card (phase3-binary/catalog/autotune/rate-card.json)
+# is a renewed feed whose generated_at is re-stamped for freshness, so binding the
+# archived proposal's exact replay to the moving catalog file breaks provenance on
+# every renewal. Replay against an immutable, contemporaneous snapshot instead.
+RATE_CARD = ARCHIVE / "rate-card-2026-08-10.json"
 # The engine_commit bound in synthetic test receipts must be an ancestor of the
 # validator's HEAD whose committed engine bytes match the working tree. Derive it
 # from HEAD so the suite survives squash-merges (which discard branch commits) --

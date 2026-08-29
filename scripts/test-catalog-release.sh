@@ -228,6 +228,10 @@ expected_history = {
     "published-2026-07-06-mbase-lite",
     "published-2026-07-07-p1-gemma",
     "published-2026-07-10-catalog-recovery-v1",
+    # Prior inband-provenance release; retained because the release ledger is
+    # append-only (renewals mint a new dated release_id, superseding but never
+    # removing the previous one).
+    "published-2026-07-29-inband-provenance-v1",
     release_id,
 }
 if set(ledger["releases"]) != expected_history:
