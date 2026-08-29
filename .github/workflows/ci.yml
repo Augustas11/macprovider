@@ -445,6 +445,9 @@ jobs:
       - name: Verify macOS upgrade rollback and manual process recovery
         run: bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
 
+      - name: Verify #1189 repair reproduction (real ACLs, mocked launchd)
+        run: bash phase3-binary/dist/test/repair_1189_reproduction.test.sh
+
 
   spec-015-acceptance:
     name: spec-015-acceptance
