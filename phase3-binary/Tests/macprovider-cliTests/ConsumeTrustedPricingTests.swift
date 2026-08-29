@@ -86,7 +86,11 @@ final class ConsumeTrustedPricingTests: XCTestCase {
     }
 
     func testLoaderFetchesCanonicalEndpointsAndFailsClosedWithoutFallback() async throws {
-        let fixture = try SignedRateCardFixture(generatedAt: "2026-08-01T00:00:00Z")
+        // generatedAt must be >= the baked rate-card floor (restamped to
+        // 2026-08-28T11:07:13Z); the direct loader uses the production baked
+        // minimumGeneratedAt, so an older fixture would fail closed as
+        // olderThanBaked before the fetch path can be exercised.
+        let fixture = try SignedRateCardFixture(generatedAt: "2026-08-28T12:00:00Z")
         let loader = ConsumeTrustedPricingLoader(
             fetch: { url in
                 switch url.path {
@@ -100,7 +104,7 @@ final class ConsumeTrustedPricingTests: XCTestCase {
             },
             trustedPublicKeys: fixture.trustedPublicKeys,
             expectedPolicyVersion: fixture.policyVersion,
-            now: { SignedRateCardFixture.date("2026-08-10T00:00:00Z") }
+            now: { SignedRateCardFixture.date("2026-08-29T00:00:00Z") }
         )
 
         let loaded = await loader.load(from: "https://api.example.test")
@@ -110,7 +114,7 @@ final class ConsumeTrustedPricingTests: XCTestCase {
             fetch: { _ in throw ConsumeTrustedPricingError(.fetchFailed) },
             trustedPublicKeys: fixture.trustedPublicKeys,
             expectedPolicyVersion: fixture.policyVersion,
-            now: { SignedRateCardFixture.date("2026-08-10T00:00:00Z") }
+            now: { SignedRateCardFixture.date("2026-08-29T00:00:00Z") }
         )
         let failed = await failingLoader.load(from: "https://api.example.test")
         XCTAssertEqual(failed, .unavailable(reason: .fetchFailed))
