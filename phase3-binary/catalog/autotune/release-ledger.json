@@ -143,6 +143,36 @@
       },
       "generated_at": "2026-07-29T08:45:00Z",
       "policy_version": "autotune-policy-v1"
+    },
+    "published-2026-08-28-inband-provenance-v1": {
+      "feeds": {
+        "autotune-candidates.json": {
+          "bytes": 6019,
+          "sha256": "849bb9394ec3e030f9e1f26acb6cd0954fce3fc55db20ca4d03eed3ec348f60d",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-08-28-inband-provenance-v1"
+        },
+        "demand-rank.json": {
+          "bytes": 1188,
+          "sha256": "8244f55fb5460a2d9f8b3291fb7ee74916ece0f32eab9cca926fcfcee848ffb3",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-08-28-inband-provenance-v1"
+        },
+        "rate-card.json": {
+          "bytes": 2235,
+          "sha256": "1a270092a93d6140da0c679b7da880336e8477415aaff5eebeca41c4e2b02c64",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "51d4eb9d29024e759c8e41610ad3f13614253e52f47bc032c92f46adb599ad42"
+        },
+        "tier2-catalog.json": {
+          "bytes": 3449,
+          "sha256": "ec2a2b64ed3a00bb0b185840ea5d9edee6a07d4ecb551775db5f69316e463d92",
+          "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
+          "version": "macprovider-tier2-model-catalog-2026-07-07-p2-qwen3-8b"
+        }
+      },
+      "generated_at": "2026-08-28T11:07:13Z",
+      "policy_version": "autotune-policy-v1"
     }
   },
   "schema_version": "macprovider.autotune-release-ledger.v2",
