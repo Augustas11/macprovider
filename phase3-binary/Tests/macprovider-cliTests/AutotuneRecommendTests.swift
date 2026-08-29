@@ -3132,6 +3132,69 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(spike.swapDetected)
     }
 
+    func testProbeSafetyAssessmentTransientThermalThrottleDoesNotBlock() {
+        // #1269: the install-time probe runs while the Mac is hot from
+        // unpacking/verifying/signing, so a lone transient throttle amid a benign
+        // fair/nominal oscillation must NOT trip the hard thermal veto — otherwise
+        // a perfectly capable Mac is rolled back at upgrade. Requires >= 2 throttling
+        // AND a majority, so this single .serious blip stays paid-eligible.
+        let transient = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .fair),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+        ])
+        XCTAssertFalse(transient.thermalThrottleDetected)
+    }
+
+    func testProbeSafetyAssessmentSustainedThermalThrottleStillBlocks() {
+        // A genuinely thermally-throttled node (sustained .serious/.critical
+        // majority) must still hard-block the paid path — the veto is preserved,
+        // only the single-transient-sample trigger is removed.
+        let throttled = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .critical),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .fair),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .serious),
+        ])
+        XCTAssertTrue(throttled.thermalThrottleDetected)
+    }
+
+    func testProbeSafetyAssessmentShortProbeSustainedThermalStillBlocks() {
+        // Mirror the swap short-probe fix: two synchronous samples both throttling
+        // must still veto (no >= 3 total-sample floor).
+        let shortThrottle = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .serious),
+        ])
+        XCTAssertTrue(shortThrottle.thermalThrottleDetected)
+    }
+
+    func testProbeSafetyAssessmentUnknownThermalDoesNotDiluteThrottleMajority() {
+        // .unknown thermal readings must not dilute the denominator: two throttling
+        // among many unknown is a majority of the READABLE thermal samples => veto.
+        let throttled = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: nil),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: nil),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .critical),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: nil),
+        ])
+        XCTAssertTrue(throttled.thermalThrottleDetected)
+    }
+
+    func testProbeSafetyAssessmentLoneThermalSpikeAmidUnknownDoesNotBlock() {
+        // A single throttling sample among otherwise-unreadable thermal states is
+        // not sustained (needs >= 2), so it must not veto — and the lone readable
+        // throttle must not fail-closed just because the rest are unreadable.
+        let spike = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: nil),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: nil),
+        ])
+        XCTAssertFalse(spike.thermalThrottleDetected)
+    }
+
     func testProbeSafetyAssessmentUnknownDoesNotDiluteCriticalMajority() {
         // Round-1 audit fix (MEDIUM): .unknown readings must not dilute the
         // denominator. Two CRITICAL among many UNKNOWN is a critical majority of
