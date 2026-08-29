@@ -228,6 +228,9 @@ expected_history = {
     "published-2026-07-06-mbase-lite",
     "published-2026-07-07-p1-gemma",
     "published-2026-07-10-catalog-recovery-v1",
+    # The 2026-08-28 freshness re-stamp adds a new release while keeping its
+    # 2026-07-29 predecessor in the append-only ledger as prior history.
+    "published-2026-07-29-inband-provenance-v1",
     release_id,
 }
 if set(ledger["releases"]) != expected_history:
