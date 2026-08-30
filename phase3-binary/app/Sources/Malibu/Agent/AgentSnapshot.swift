@@ -583,6 +583,30 @@ enum AgentSnapshotPresenter {
             )
         }
         if !s.providerEarningsFresh && !s.hasObservedProviderEarnings {
+            // Reframe only when the provider is genuinely buyer-serving-admitted
+            // (isNetworkReady) AND has no fresh MALIBU projection that a later
+            // branch would report as held/withdrawable/locked. This keeps the
+            // forward-looking "No earnings yet" copy off not-yet-admitted,
+            // reconnecting, or reward-bearing states — those keep the
+            // conservative wording below. For such a clean fresh-provider state
+            // this is normal, not a fault: frame it forward and name the one real
+            // next step (bind a payout wallet, or the trust-unlock path).
+            if isNetworkReady(s) && !s.malibuProjectionFresh {
+                let action: String
+                if s.walletBound == false {
+                    action = "Add a payout wallet so your earnings can be paid out."
+                } else if let criteria = trustCriteriaAction(s) {
+                    action = criteria
+                } else {
+                    action = "Stay online — you'll start earning as customer jobs arrive."
+                }
+                return result(
+                    status: "No earnings yet",
+                    code: "reward_projection_unavailable",
+                    reason: "You're live and building trust. Earnings appear after your first paid job.",
+                    action: action
+                )
+            }
             return result(
                 status: "Reward status unavailable",
                 code: "reward_projection_unavailable",

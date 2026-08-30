@@ -294,6 +294,39 @@ final class DashboardViewTests: XCTestCase {
         missingWallet.walletBound = false
         XCTAssertEqual(AgentSnapshotPresenter.miningHealth(missingWallet).reasonCode, "wallet_missing")
 
+        // A live provider that has never earned is the normal fresh state, not a
+        // fault. Its headline must read forward-looking (not "unavailable") and
+        // its next action must be concrete, not "keep waiting".
+        var liveNoEarnings = AgentSnapshot.empty
+        liveNoEarnings.state = .serving
+        liveNoEarnings.networkState = "buyer_serving"
+        liveNoEarnings.walletBound = false
+        let liveNoEarningsHealth = AgentSnapshotPresenter.miningHealth(liveNoEarnings)
+        XCTAssertEqual(liveNoEarningsHealth.status, "No earnings yet")
+        XCTAssertEqual(liveNoEarningsHealth.reasonCode, "reward_projection_unavailable")
+        XCTAssertFalse(liveNoEarningsHealth.status.lowercased().contains("unavailable"))
+        XCTAssertTrue(liveNoEarningsHealth.nextAction.contains("wallet"))
+        XCTAssertFalse(liveNoEarningsHealth.nextAction.contains("reward status refreshes"))
+
+        // Guard regression 1: a reconnecting/local-only provider is NOT yet
+        // buyer-serving-admitted, so it must not claim "No earnings yet".
+        var reconnecting = AgentSnapshot.empty
+        reconnecting.state = .reconnecting
+        reconnecting.currentModelID = "meta-llama/llama-3.2-3b-instruct"
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.miningHealth(reconnecting).status, "No earnings yet")
+
+        // Guard regression 2: a fresh MALIBU projection must not be preempted by
+        // the reframe (it should keep the conservative wording, not "No earnings
+        // yet"), so held/withdrawable/locked reward state is never mislabeled.
+        var malibuFresh = AgentSnapshot.empty
+        malibuFresh.state = .serving
+        malibuFresh.networkState = "buyer_serving"
+        malibuFresh.malibuProjectionFresh = true
+        malibuFresh.trustTier = .provisional
+        XCTAssertNotEqual(
+            AgentSnapshotPresenter.miningHealth(malibuFresh).status, "No earnings yet")
+
         var provisional = miningBase()
         provisional.trustTier = .provisional
         provisional.malibuHoldReasons = ["trust_tier_provisional"]
