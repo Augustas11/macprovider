@@ -304,7 +304,7 @@ final class MalibuAgent: ObservableObject {
                     try await AutotuneRecommendationRunner.runHardwareAdmissionRecovery(cliURL: cliURL)
                 }
                 guard !Task.isCancelled, !self.isShuttingDown else {
-                    self.restoreLaunchdIfCorrectiveRecoveryOwned(attemptedCorrectiveRecovery)
+                    await self.restoreLaunchdIfCorrectiveRecoveryOwned(attemptedCorrectiveRecovery)
                     return
                 }
                 self.hardwareRecoveryOwnsLaunchdRestore = false
@@ -314,10 +314,10 @@ final class MalibuAgent: ObservableObject {
                     await self.applyProviderSnapshot(port: port)
                 }
             } catch is CancellationError {
-                self.restoreLaunchdIfCorrectiveRecoveryOwned(attemptedCorrectiveRecovery)
+                await self.restoreLaunchdIfCorrectiveRecoveryOwned(attemptedCorrectiveRecovery)
                 return
             } catch {
-                self.restoreLaunchdIfCorrectiveRecoveryOwned(attemptedCorrectiveRecovery)
+                await self.restoreLaunchdIfCorrectiveRecoveryOwned(attemptedCorrectiveRecovery)
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
                 self.snapshot.hardwareVerificationRetryLastError =
                     AgentSnapshotPresenter.publicErrorDetail(error.localizedDescription)
@@ -327,13 +327,13 @@ final class MalibuAgent: ObservableObject {
         await hardwareVerificationRetryTask?.value
     }
 
-    private func restoreLaunchdIfCorrectiveRecoveryOwned(_ attemptedCorrectiveRecovery: Bool) {
+    private func restoreLaunchdIfCorrectiveRecoveryOwned(_ attemptedCorrectiveRecovery: Bool) async {
         guard AutotuneRecommendationRunner.shouldBestEffortBootstrapLaunchd(
             attemptedCorrectiveRecovery: attemptedCorrectiveRecovery
         ) || hardwareRecoveryOwnsLaunchdRestore else {
             return
         }
-        AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
+        await AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
         hardwareRecoveryOwnsLaunchdRestore = false
     }
 
@@ -578,7 +578,7 @@ final class MalibuAgent: ObservableObject {
         // Only restore when corrective recovery may have drained launchd.
         // Ordinary quit must not re-bootstrap an intentionally unloaded job.
         if hardwareRecoveryOwnsLaunchdRestore {
-            AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
+            await AutotuneRecommendationRunner.bestEffortBootstrapLaunchdProvider()
             hardwareRecoveryOwnsLaunchdRestore = false
         }
         let admissionRecoveryTask = admissionIdentityRecoveryTask

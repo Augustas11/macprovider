@@ -163,19 +163,49 @@ enum AutotuneRecommendationRunner {
         launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl"),
         plistURL: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents/live.malibu.provider.plist")
-    ) {
-        let process = Process()
-        process.executableURL = launchctlURL
-        process.arguments = ["bootstrap", "gui/\(uid)", plistURL.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return
+    ) async {
+        // Async + off-main: the caller (MalibuAgent) is @MainActor, so the
+        // launchctl subprocess must never run on the main actor. The await
+        // suspends the caller's actor without blocking it.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                let process = Process()
+                process.executableURL = launchctlURL
+                process.arguments = ["bootstrap", "gui/\(uid)", plistURL.path]
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do {
+                    try process.run()
+                    // Bounded wait: this restore is awaited on the cancel/shutdown
+                    // path, so an unbounded waitUntilExit() would let a wedged
+                    // `launchctl bootstrap` hang app shutdown indefinitely. Cap the
+                    // wait and terminate a stuck launchctl; the restore is
+                    // best-effort so we resume regardless of the outcome. We do NOT
+                    // key off Task cancellation here: the restore must still run
+                    // during shutdown so a corrective-recovery bootout is not left
+                    // stranded — we only bound how long it may block.
+                    let deadline = Date().addingTimeInterval(bestEffortBootstrapTimeout)
+                    while process.isRunning && Date() < deadline {
+                        Thread.sleep(forTimeInterval: 0.05)
+                    }
+                    if process.isRunning {
+                        process.terminate()
+                        let terminateDeadline = Date().addingTimeInterval(1)
+                        while process.isRunning && Date() < terminateDeadline {
+                            Thread.sleep(forTimeInterval: 0.05)
+                        }
+                    }
+                } catch {
+                }
+                continuation.resume()
+            }
         }
     }
+
+    /// Upper bound on how long the best-effort launchd bootstrap may block the
+    /// awaiting caller (including the shutdown/cancel path) before the stuck
+    /// `launchctl` child is terminated and control returns.
+    static let bestEffortBootstrapTimeout: TimeInterval = 10
 
     private final class ProcessHold: @unchecked Sendable {
         private let lock = NSLock()

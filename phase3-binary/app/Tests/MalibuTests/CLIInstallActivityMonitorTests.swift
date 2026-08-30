@@ -77,4 +77,40 @@ final class CLIInstallActivityMonitorTests: XCTestCase {
         XCTAssertEqual(progress.detail, "Install in progress…")
         XCTAssertFalse(OnboardingCopy.installingFallback.contains("little visible progress"))
     }
+
+    // Regression for the beachball: `ps -ax` on a busy Mac can emit >64KB, more
+    // than the pipe buffer. Draining to EOF before waitUntilExit must not
+    // deadlock. This helper emits ~220KB (>128KB); if the old
+    // waitUntilExit-then-read ordering regressed, this test would hang and fail.
+    func testCapturedProcessOutputDrainsLargeOutputWithoutDeadlock() async {
+        let output = await CLIInstallRunner.ActivityMonitor.capturedProcessOutput(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "for i in $(seq 1 20000); do echo 0123456789; done"]
+        )
+        XCTAssertGreaterThan(
+            output.utf8.count, 128 * 1024,
+            "large subprocess output must be fully drained without deadlock"
+        )
+    }
+
+    // A launch failure returns empty rather than hanging or throwing.
+    func testCapturedProcessOutputReturnsEmptyOnLaunchFailure() async {
+        let output = await CLIInstallRunner.ActivityMonitor.capturedProcessOutput(
+            executableURL: URL(fileURLWithPath: "/nonexistent/definitely-not-a-binary"),
+            arguments: []
+        )
+        XCTAssertEqual(output, "")
+    }
+
+    // The progress poller path is async (runs its subprocess off the caller's
+    // actor) and still returns a usable InstallProgress. Driven from @MainActor
+    // to prove the await suspends rather than blocks the main actor.
+    @MainActor
+    func testSnapshotIsAsyncAndReturnsProgressFromMainActor() async {
+        let progress = await CLIInstallRunner.ActivityMonitor.snapshot(
+            logLines: ["Fetching model weights 42%"]
+        )
+        // With no macprovider-cli process running, the log lines drive the stage.
+        XCTAssertNotNil(progress.detail)
+    }
 }
