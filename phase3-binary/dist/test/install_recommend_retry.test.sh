@@ -57,6 +57,8 @@ run_case() {
     CONFIG_PATH="$root/config.yaml"
     AUTOTUNE_BENCHMARK_PORT=19080
     SKIP_PROVIDER_START=0
+    # App/non-interactive mode + donor opt-in are controlled per-case via NP/HL/DM.
+    NO_PROMPT="${NP:-0}"; HEADLESS="${HL:-0}"; MACPROVIDER_DONOR_MODE="${DM:-0}"
     model=""; recommended_model=""; artifact_path=""; artifact_sha=""
 
     log() { :; }
@@ -136,5 +138,28 @@ out="$(run_case 2 abc no)"
 [ "$out" = "0|2|0|1|0" ] \
   || fail "non-integer max-attempts expected clamp-to-default retry (rc0, 2 paid recs, creds, no-skip); got [$out]"
 echo "ok: non-integer max-attempts override is sanitized and still retries"
+
+# --- Case 5 (#1289): app/non-interactive mode + no paid model must FAIL LOUD ---
+# It must NOT silently SKIP (commit-without-start). Expect die 30, and crucially
+# NO donor recommendation was run and SKIP was never set.
+set +e
+out="$(NP=1 HL=0 run_case 99 2 no)"; rc=$?
+set -euo pipefail
+[ "$rc" = "30" ] \
+  || fail "app-mode no-paid expected die 30 (fail loud); got rc=$rc out=[$out]"
+echo "ok: app/non-interactive no-paid FAILS LOUD (die 30), never silent commit-without-start"
+
+# Case 5b: headless non-interactive is ALSO fail-loud (no silent idle).
+set +e
+out="$(NP=1 HL=1 run_case 99 2 no)"; rc=$?
+set -euo pipefail
+[ "$rc" = "30" ] || fail "headless no-paid expected die 30; got rc=$rc out=[$out]"
+echo "ok: headless non-interactive no-paid also fails loud (die 30)"
+
+# --- Case 6 (#1289): explicit MACPROVIDER_DONOR_MODE=1 opts into donor, no prompt ---
+out="$(NP=1 HL=0 DM=1 run_case 99 2 no)"
+[ "$out" = "0|2|1|0|1" ] \
+  || fail "explicit donor opt-in expected rc0, 2 paid recs, 1 donor rec, no creds, skip; got [$out]"
+echo "ok: MACPROVIDER_DONOR_MODE=1 opts into donor without a prompt (no die)"
 
 echo "PASS: install_recommend_retry"

@@ -683,7 +683,6 @@ struct StartupState: Equatable {
                   .trimmingCharacters(in: .whitespacesAndNewlines) == configuredProviderID,
               trusted(providerIDURL, maxBytes: 64 * 1024),
               trusted(manifest),
-              trusted(launchd),
               let manifestData = InstalledProviderMonitor.readOwnerPrivateRegularFile(
                   manifest,
                   maxBytes: 64 * 1024,
@@ -705,28 +704,44 @@ struct StartupState: Equatable {
                   under: homeDirectory
               ),
               binaryPath == expectedBinaryPath,
-              launchdLabels.contains(InstalledProviderMonitor.providerLaunchdLabel),
-              launchdPlists.contains(launchd.path),
-              let plistData = InstalledProviderMonitor.readOwnerPrivateRegularFile(
-                  launchd,
-                  maxBytes: 64 * 1024,
-                  fileManager: fm
-              ),
-              let plistObject = try? PropertyListSerialization.propertyList(
-                  from: plistData,
-                  options: [],
-                  format: nil
-              ),
-              let plistValues = plistObject as? [String: Any],
-              plistValues["Label"] as? String == InstalledProviderMonitor.providerLaunchdLabel else {
+              launchdLabels.isEmpty
+                  || launchdLabels.contains(InstalledProviderMonitor.providerLaunchdLabel),
+              launchdPlists.contains(launchd.path) else {
             return false
         }
-        let plistProgram = (plistValues["Program"] as? String)
-            ?? (plistValues["ProgramArguments"] as? [String])?.first
+        // #1289: a legitimate install can lose its LaunchAgent plist (and leave
+        // manifest launchd_labels empty) when a prior install stalled before the
+        // launchd layer was written. Ownership is still proven by the matching
+        // config/provider_id, the manifest (install_prefix / binary_path and the
+        // expected plist path listed in launchd_plists), and the installed
+        // binary; the repair transaction rebuilds the plist. So a genuinely
+        // absent plist is acceptable — but a plist that IS present must still be
+        // owner-trusted and valid. This mirrors repair_safe_incumbent_present in
+        // install.sh, which tolerates a missing plist but rejects an unsafe one.
         let legacyBinaryPath = homeDirectory
             .appendingPathComponent(".local/bin/macprovider-cli")
             .path
-        return plistProgram == binaryPath || plistProgram == legacyBinaryPath
+        if fm.fileExists(atPath: launchd.path) {
+            guard trusted(launchd),
+                  let plistData = InstalledProviderMonitor.readOwnerPrivateRegularFile(
+                      launchd,
+                      maxBytes: 64 * 1024,
+                      fileManager: fm
+                  ),
+                  let plistObject = try? PropertyListSerialization.propertyList(
+                      from: plistData,
+                      options: [],
+                      format: nil
+                  ),
+                  let plistValues = plistObject as? [String: Any],
+                  plistValues["Label"] as? String == InstalledProviderMonitor.providerLaunchdLabel,
+                  let plistProgram = (plistValues["Program"] as? String)
+                      ?? (plistValues["ProgramArguments"] as? [String])?.first,
+                  plistProgram == binaryPath || plistProgram == legacyBinaryPath else {
+                return false
+            }
+        }
+        return true
     }
 
     static func applyMigrationDecision(

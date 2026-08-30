@@ -7559,24 +7559,38 @@ if (
     or manifest.get("binary_path") != os.path.join(install_dir, "macprovider-cli")
     or not isinstance(labels, list)
     or not all(isinstance(value, str) for value in labels)
-    or label not in labels
+    or (labels and label not in labels)
     or not isinstance(plists, list)
     or not all(isinstance(value, str) for value in plists)
     or plist_path not in plists
 ):
     raise SystemExit(1)
 
-plist = plistlib.loads(read_owned(plist_path))
-if not isinstance(plist, dict) or plist.get("Label") != label:
-    raise SystemExit(1)
-program = plist.get("Program")
-arguments = plist.get("ProgramArguments")
-if program is None:
-    if not isinstance(arguments, list) or not arguments:
+# #1289: a legitimate install can lose its LaunchAgent plist (and leave its
+# manifest launchd_labels empty) when a prior install stalled before the
+# launchd layer was written. That is a degraded-but-recoverable incumbent, not
+# a non-incumbent attempting a referral bypass: ownership is still proven by
+# the owner-private config (provider_id matches), the provider_id file, the
+# installed binary, and the manifest (install_prefix / binary_path, and the
+# expected plist path listed in launchd_plists). The repair transaction
+# re-creates the plist, so validate its contents only when the file is present;
+# a genuinely-absent plist is acceptable and left for repair to rebuild.
+try:
+    plist_raw = read_owned(plist_path)
+except FileNotFoundError:
+    plist_raw = None
+if plist_raw is not None:
+    plist = plistlib.loads(plist_raw)
+    if not isinstance(plist, dict) or plist.get("Label") != label:
         raise SystemExit(1)
-    program = arguments[0]
-if program not in (os.path.join(install_dir, "macprovider-cli"), binary_path):
-    raise SystemExit(1)
+    program = plist.get("Program")
+    arguments = plist.get("ProgramArguments")
+    if program is None:
+        if not isinstance(arguments, list) or not arguments:
+            raise SystemExit(1)
+        program = arguments[0]
+    if program not in (os.path.join(install_dir, "macprovider-cli"), binary_path):
+        raise SystemExit(1)
 PY
 }
 
@@ -9979,7 +9993,25 @@ run_autotune_recommend_apply() {
     break
   done
   log "No paid model currently clears rate-card or hardware requirements on this Mac."
-  if prompt_yes_no "Enable donor mode? [y/N]" "N"; then
+  # #1289: the app / non-interactive install path must NOT silently commit a
+  # provider that will not start — that strands the app on a half-install it
+  # cannot recover (the "install_committed_without_start" wedge). Fail loudly
+  # here instead: the EXIT trap rolls the transaction back cleanly (nothing is
+  # committed), and the caller (Malibu) surfaces a real choice — retry, or
+  # explicitly opt into donor mode with MACPROVIDER_DONOR_MODE=1. Interactive
+  # installs keep the explicit donor prompt; every non-interactive install (app
+  # and headless) fails loudly unless donor mode was explicitly requested, so a
+  # fleet install can never silently idle as a false success either.
+  donor_requested=0
+  if [ "${MACPROVIDER_DONOR_MODE:-0}" = "1" ]; then
+    log "Donor mode explicitly requested (MACPROVIDER_DONOR_MODE=1)."
+    donor_requested=1
+  elif [ "${NO_PROMPT:-0}" = "1" ]; then
+    die 30 "no paid model recommendation cleared after ${recommend_max_attempts} attempts; provider not started and nothing committed (retry, or set MACPROVIDER_DONOR_MODE=1 to run as donor)"
+  elif prompt_yes_no "Enable donor mode? [y/N]" "N"; then
+    donor_requested=1
+  fi
+  if [ "$donor_requested" = "1" ]; then
     log "Applying donor-mode configuration."
     run_macprovider_cli_with_amfi_retry autotune --recommend --apply --donor-mode \
       ${autotune_candidate_args[@]+"${autotune_candidate_args[@]}"} \
