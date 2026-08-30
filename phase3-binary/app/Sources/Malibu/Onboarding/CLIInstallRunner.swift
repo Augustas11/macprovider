@@ -14,6 +14,7 @@ enum CLIInstallRunner {
         case developerToolsRequired
         case nonZeroExit(Int32)
         case launchFailed(String)
+        case noPaidModelAvailable
 
         enum ReferralFailure: Int32, Equatable {
             case required = 20
@@ -59,6 +60,8 @@ enum CLIInstallRunner {
                 return "Provider software install failed (exit \(code)). Your provider identity was not changed."
             case .launchFailed(_):
                 return "Provider software could not start the installer. Your provider identity was not changed."
+            case .noPaidModelAvailable:
+                return "Couldn't confirm a paid model on this Mac after several tries — nothing was changed. Try again, or you can run as a donor (helps the network, no earnings) instead."
             }
         }
     }
@@ -78,6 +81,12 @@ enum CLIInstallRunner {
         }
         if repairExistingInstall, exitCode == 20 || exitCode == 28 {
             return Error.repairEvidenceMissing
+        }
+        // #1289: install.sh exits 30 when no paid model cleared and it refused to
+        // silently commit a provider that would not start. Surface a clear
+        // retry/donor choice instead of a generic "install failed (exit 30)".
+        if exitCode == 30 {
+            return Error.noPaidModelAvailable
         }
         if let failure = Error.ReferralFailure(rawValue: exitCode) {
             return Error.referralFailure(failure)
