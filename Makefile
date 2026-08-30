@@ -159,6 +159,7 @@ test-dist:
 	bash scripts/test-install-autotune-recommend-config.sh
 	bash phase3-binary/dist/test/install_referral_handoff.test.sh
 	bash phase3-binary/dist/test/install_fresh_evidence.test.sh
+	bash phase3-binary/dist/test/install_recommend_retry.test.sh
 	bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
 	bash phase3-binary/dist/test/install_launchd_migration.test.sh
 	bash phase3-binary/dist/test/install_lifecycle_state.test.sh

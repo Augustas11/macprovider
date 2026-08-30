@@ -9922,10 +9922,34 @@ run_autotune_recommend_apply() {
       --prefetch-receipt "$AUTOTUNE_PREFETCH_RECEIPT_PATH"
     )
   fi
-  log "Running paid-yield recommendation before service start."
-  if run_macprovider_cli_with_amfi_retry autotune --recommend --apply \
-    ${autotune_candidate_args[@]+"${autotune_candidate_args[@]}"} \
-    --port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH" --no-submit-hardware-evidence; then
+  # A fresh Mac's very first benchmark can run cold or under thermal throttling
+  # and transiently under-report sustained TPS, sinking an otherwise-eligible
+  # paid model (#1269). Concluding "no paid model" from a single such sample
+  # strands a capable Mac in donor mode. Re-benchmark a bounded number of times,
+  # with a short cooldown, before falling back to donor. Overridable for tests.
+  recommend_max_attempts="${MACPROVIDER_RECOMMEND_MAX_ATTEMPTS:-3}"
+  recommend_retry_sleep="${MACPROVIDER_RECOMMEND_RETRY_SLEEP_SECONDS:-8}"
+  # Sanitize the overrides: a non-integer value must not break the numeric
+  # comparison or turn `sleep` into a set -e abort that skips the donor path.
+  # Fall back to defaults on anything non-integer, and clamp to sane bounds so
+  # a huge attempt count cannot pin the installer in the recommendation phase.
+  case "$recommend_max_attempts" in ''|*[!0-9]*) recommend_max_attempts=3 ;; esac
+  if [ "$recommend_max_attempts" -lt 1 ]; then recommend_max_attempts=3; fi
+  if [ "$recommend_max_attempts" -gt 10 ]; then recommend_max_attempts=10; fi
+  case "$recommend_retry_sleep" in ''|*[!0-9]*) recommend_retry_sleep=8 ;; esac
+  if [ "$recommend_retry_sleep" -gt 60 ]; then recommend_retry_sleep=60; fi
+  recommend_attempt=1
+  while : ; do
+    if [ "$recommend_attempt" -eq 1 ]; then
+      log "Running paid-yield recommendation before service start."
+    else
+      log "Re-running paid-yield recommendation (attempt $recommend_attempt of $recommend_max_attempts)."
+    fi
+    if ! run_macprovider_cli_with_amfi_retry autotune --recommend --apply \
+      ${autotune_candidate_args[@]+"${autotune_candidate_args[@]}"} \
+      --port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH" --no-submit-hardware-evidence; then
+      die 6 "autotune recommendation failed before service start"
+    fi
     recommended_model="$(read_config_model || true)"
     artifact_path="$(read_config_artifact_path || true)"
     artifact_sha="$(read_config_artifact_sha || true)"
@@ -9946,34 +9970,40 @@ run_autotune_recommend_apply() {
           ;;
       esac
     fi
-    log "No paid model currently clears rate-card or hardware requirements on this Mac."
-    if prompt_yes_no "Enable donor mode? [y/N]" "N"; then
-      log "Applying donor-mode configuration."
-      run_macprovider_cli_with_amfi_retry autotune --recommend --apply --donor-mode \
-        ${autotune_candidate_args[@]+"${autotune_candidate_args[@]}"} \
-        --port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH" --no-submit-hardware-evidence \
-        || die 6 "donor-mode recommendation failed before service start"
-      recommended_model="$(read_config_model || true)"
-      artifact_path="$(read_config_artifact_path || true)"
-      artifact_sha="$(read_config_artifact_sha || true)"
-      if [ -n "$recommended_model" ] && [ -n "$artifact_path" ] && [ -n "$artifact_sha" ]; then
-        case "$artifact_path" in
-          /*)
-            model="$recommended_model"
-            log "Donor mode selected verified model: $model (artifact: $artifact_path)"
-            SKIP_PROVIDER_START=1
-            log "Donor-mode configuration applied. Provider service will not be started automatically."
-            return 0
-            ;;
-        esac
-      fi
-      die 6 "donor mode did not apply a verified local model artifact before service start"
+    if [ "$recommend_attempt" -lt "$recommend_max_attempts" ]; then
+      log "No paid model cleared on attempt $recommend_attempt of $recommend_max_attempts; re-benchmarking after a short cooldown in case the first benchmark was cold or thermally throttled."
+      recommend_attempt=$((recommend_attempt + 1))
+      sleep "$recommend_retry_sleep"
+      continue
     fi
-    SKIP_PROVIDER_START=1
-    log "Donor mode declined. macprovider-cli is installed, but the provider service will not be started."
-    return 0
+    break
+  done
+  log "No paid model currently clears rate-card or hardware requirements on this Mac."
+  if prompt_yes_no "Enable donor mode? [y/N]" "N"; then
+    log "Applying donor-mode configuration."
+    run_macprovider_cli_with_amfi_retry autotune --recommend --apply --donor-mode \
+      ${autotune_candidate_args[@]+"${autotune_candidate_args[@]}"} \
+      --port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH" --no-submit-hardware-evidence \
+      || die 6 "donor-mode recommendation failed before service start"
+    recommended_model="$(read_config_model || true)"
+    artifact_path="$(read_config_artifact_path || true)"
+    artifact_sha="$(read_config_artifact_sha || true)"
+    if [ -n "$recommended_model" ] && [ -n "$artifact_path" ] && [ -n "$artifact_sha" ]; then
+      case "$artifact_path" in
+        /*)
+          model="$recommended_model"
+          log "Donor mode selected verified model: $model (artifact: $artifact_path)"
+          SKIP_PROVIDER_START=1
+          log "Donor-mode configuration applied. Provider service will not be started automatically."
+          return 0
+          ;;
+      esac
+    fi
+    die 6 "donor mode did not apply a verified local model artifact before service start"
   fi
-  die 6 "autotune recommendation failed before service start"
+  SKIP_PROVIDER_START=1
+  log "Donor mode declined. macprovider-cli is installed, but the provider service will not be started."
+  return 0
 }
 
 # Returns 0 when an owned macprovider-cli process is currently LISTENing on
