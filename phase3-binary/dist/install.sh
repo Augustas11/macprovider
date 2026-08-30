@@ -10006,7 +10006,7 @@ run_autotune_recommend_apply() {
   if [ "${MACPROVIDER_DONOR_MODE:-0}" = "1" ]; then
     log "Donor mode explicitly requested (MACPROVIDER_DONOR_MODE=1)."
     donor_requested=1
-  elif [ "$NO_PROMPT" = "1" ]; then
+  elif [ "${NO_PROMPT:-0}" = "1" ]; then
     die 30 "no paid model recommendation cleared after ${recommend_max_attempts} attempts; provider not started and nothing committed (retry, or set MACPROVIDER_DONOR_MODE=1 to run as donor)"
   elif prompt_yes_no "Enable donor mode? [y/N]" "N"; then
     donor_requested=1
