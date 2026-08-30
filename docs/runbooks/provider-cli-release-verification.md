@@ -138,6 +138,39 @@ Do not enable the strict gate while the fleet still contains providers that
 cannot produce v2 evidence. A coordinator deployment that has not yet
 accepted v2 must remain on the previous provider recommendation.
 
+## Curl-channel install.sh republish (MANDATORY on release)
+
+The Malibu app bundles its own signed `install.sh`, but the public one-liner
+`curl -fsSL https://get.malibu.tech/install.sh | bash` is served as a **static
+file on the coordinator host** (`/var/www/get/install.sh`). Cutting a release
+updates the app bundle and the release assets but does **not** republish this
+static file, so it drifts stale silently — it once lagged ~2 weeks, serving an
+installer without the python3-CLT guard or the donor-join fix.
+
+On every release that changes `phase3-binary/dist/install.sh`, after immutable
+publication:
+
+1. Back up the current served file, then copy the released `dist/install.sh`
+   into the webroot (preserve `root:root 0755`):
+
+   ```bash
+   ts=$(date -u +%Y%m%dT%H%M%SZ)
+   ssh pearl "cp -p /var/www/get/install.sh /var/www/get/install.sh.bak-$ts"
+   scp phase3-binary/dist/install.sh pearl:/tmp/install.sh.new
+   ssh pearl "install -o root -g root -m 0755 /tmp/install.sh.new /var/www/get/install.sh && rm -f /tmp/install.sh.new"
+   ```
+
+2. Verify parity from a clean checkout of the release tag:
+
+   ```bash
+   bash scripts/check-install-sh-parity.sh   # exits 0 only when served == released
+   ```
+
+The scheduled `.github/workflows/install-sh-parity-alarm.yml` runs this check
+every 6 hours against the latest release tag and FAILS (notifying) on drift, so
+a missed republish surfaces within a quarter day instead of stranding new
+installs. Treat a red parity alarm as a release step that did not complete.
+
 ## What not to count as release proof
 
 - matching `macprovider-cli --version`

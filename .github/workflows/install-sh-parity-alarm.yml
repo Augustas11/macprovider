@@ -1,0 +1,67 @@
+name: Install.sh curl-channel parity alarm
+
+# Read-only backstop for the public one-liner installer. The Malibu app bundles
+# its own signed install.sh, but `curl -fsSL https://get.malibu.tech/install.sh |
+# bash` is served as a static file on the coordinator host that nothing
+# republishes automatically on release. It has silently drifted stale before
+# (missing the python3-CLT guard and the donor-join fix). This alarm compares the
+# served bytes to the LATEST RELEASE's dist/install.sh every few hours and FAILS
+# (notifying) on drift, so a stale curl channel is caught here — not discovered
+# by a broken provider install. No secrets, no writes, no deploy.
+
+on:
+  schedule:
+    # Every 6 hours: frequent enough that a post-release republish miss is caught
+    # within a quarter day, long before it can strand a wave of new installs.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      install_url:
+        description: "Override the served install.sh URL (default get.malibu.tech)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-sh-parity-alarm
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Alarm on a stale curl-channel install.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Pin to latest release tag and compare served vs released install.sh
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALL_URL_INPUT: ${{ github.event.inputs.install_url }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --quiet || true
+          # The curl channel should serve the LATEST published release's
+          # install.sh. Comparing against main would false-alarm on install.sh
+          # changes that have merged but not yet shipped in a release.
+          latest_tag="$(
+            gh release list --repo "$GITHUB_REPOSITORY" --limit 50 \
+              --json tagName,isDraft,isPrerelease \
+              --jq '.[] | select(.isDraft==false and .isPrerelease==false) | .tagName' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+          )"
+          [ -n "$latest_tag" ] || { echo "::error::no published vX.Y.Z release tag found"; exit 1; }
+          echo "Latest release tag: $latest_tag"
+          git checkout "$latest_tag" -- phase3-binary/dist/install.sh
+          if [ -n "${INSTALL_URL_INPUT:-}" ]; then
+            export INSTALL_SH_URL="$INSTALL_URL_INPUT"
+          fi
+          bash scripts/check-install-sh-parity.sh
