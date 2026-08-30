@@ -376,13 +376,18 @@ enum CLIInstallRunner {
 
     /// Human-readable hint for onboarding UI while `install.sh` runs long silent phases.
     enum ActivityMonitor {
-        static func snapshot(logLines: [String] = []) -> InstallProgress {
-            progress(
-                processLines: macproviderProcessLines(),
+        /// Async so the progress poller never runs a subprocess on the caller's
+        /// actor. The subprocess + pipe drain happen on a background executor;
+        /// callers `await` this and assign the result on their own actor.
+        static func snapshot(logLines: [String] = []) async -> InstallProgress {
+            let processLines = await macproviderProcessLines()
+            let cliInstalled = FileManager.default.isExecutableFile(
+                atPath: NSHomeDirectory() + "/macprovider/macprovider-cli"
+            )
+            return progress(
+                processLines: processLines,
                 logLines: logLines,
-                cliInstalled: FileManager.default.isExecutableFile(
-                    atPath: NSHomeDirectory() + "/macprovider/macprovider-cli"
-                )
+                cliInstalled: cliInstalled
             )
         }
 
@@ -493,25 +498,61 @@ enum CLIInstallRunner {
             }
         }
 
-        private static func macproviderProcessLines() -> [String] {
-            let process = Process()
-            let pipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/bin/ps")
-            process.arguments = ["-ax", "-o", "command="]
-            process.standardOutput = pipe
-            process.standardError = Pipe()
-            do {
-                try process.run()
-            } catch {
-                return []
-            }
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let text = String(decoding: data, as: UTF8.self)
+        private static func macproviderProcessLines() async -> [String] {
+            let text = await capturedProcessOutput(
+                executableURL: URL(fileURLWithPath: "/bin/ps"),
+                arguments: ["-ax", "-o", "command="]
+            )
             return text
                 .split(whereSeparator: \.isNewline)
                 .map(String.init)
                 .filter { $0.contains("macprovider-cli") && !$0.contains("/bin/ps") }
+        }
+
+        /// Run a subprocess off the caller's actor and return its stdout.
+        ///
+        /// The pipe is drained to EOF BEFORE `waitUntilExit()`. Draining after
+        /// waiting is a classic deadlock: a child whose stdout exceeds the
+        /// ~64KB pipe buffer (e.g. `ps -ax` on a Mac with many processes) blocks
+        /// on write into the full, undrained pipe and never exits, so
+        /// `waitUntilExit()` hangs forever. Reading to EOF first keeps the pipe
+        /// draining so the child can finish; `waitUntilExit()` then returns
+        /// immediately. stderr is discarded (nullDevice) so it cannot fill and
+        /// wedge either. A watchdog bounds a stuck child. `internal` so tests
+        /// can prove the >64KB path does not deadlock.
+        static func capturedProcessOutput(
+            executableURL: URL,
+            arguments: [String],
+            timeout: TimeInterval = 5
+        ) async -> String {
+            await withCheckedContinuation { (continuation: CheckedContinuation<String, Never>) in
+                DispatchQueue.global(qos: .utility).async {
+                    let process = Process()
+                    let pipe = Pipe()
+                    process.executableURL = executableURL
+                    process.arguments = arguments
+                    process.standardOutput = pipe
+                    process.standardError = FileHandle.nullDevice
+                    let watchdog = DispatchWorkItem {
+                        if process.isRunning { process.terminate() }
+                    }
+                    DispatchQueue.global(qos: .utility)
+                        .asyncAfter(deadline: .now() + timeout, execute: watchdog)
+                    do {
+                        try process.run()
+                    } catch {
+                        watchdog.cancel()
+                        continuation.resume(returning: "")
+                        return
+                    }
+                    // Drain to EOF (returns when the child closes stdout on exit,
+                    // or when the watchdog terminates it) BEFORE waiting.
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    process.waitUntilExit()
+                    watchdog.cancel()
+                    continuation.resume(returning: String(decoding: data, as: UTF8.self))
+                }
+            }
         }
 
         private static func extractFlag(_ flag: String, from command: String) -> String? {

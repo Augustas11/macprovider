@@ -451,9 +451,13 @@ final class LaunchProviderController: ObservableObject {
         installProgressTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                self.installProgress = CLIInstallRunner.ActivityMonitor.snapshot(
-                    logLines: self.installLogLines
-                )
+                // snapshot() runs the `ps` subprocess off the main actor; the
+                // await suspends (never blocks) the main actor, and we hop back
+                // only to assign installProgress.
+                let logLines = self.installLogLines
+                let next = await CLIInstallRunner.ActivityMonitor.snapshot(logLines: logLines)
+                guard !Task.isCancelled else { return }
+                self.installProgress = next
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
