@@ -9435,19 +9435,44 @@ EOF
   fi
 }
 
+# Gatekeeper (`spctl -a -t install`) is the notarization/tamper gate and works
+# offline from a stapled ticket. `xcrun stapler validate` additionally hits
+# Apple's CloudKit ticket-delivery endpoint and fails closed on clock-skew or
+# TLS interception even when the package is genuinely notarized — that must not
+# strand a provider after Gatekeeper already accepted the asset (#1301).
+STAPLER_ONLINE_LOOKUP_HINT="Couldn't complete Apple's notarization-ticket lookup (TLS/CloudKit). Check this Mac's date & time (set automatically) and any VPN/proxy/content-filter"
+
 validate_package() {
   require_tool pkgutil
+  gatekeeper_passed=0
   if command -v spctl >/dev/null 2>&1; then
     spctl -a -vv -t install "$asset_path" || die 4 "package failed Gatekeeper assessment"
     log "Package Gatekeeper assessment passed."
+    gatekeeper_passed=1
   else
     log "spctl not found; package checksum was verified but Gatekeeper assessment was skipped."
   fi
   if command -v xcrun >/dev/null 2>&1 && xcrun --find stapler >/dev/null 2>&1; then
-    xcrun stapler validate "$asset_path" || die 4 "package stapler validation failed"
-    log "Package stapler validation passed."
+    stapler_output=""
+    if stapler_output="$(xcrun stapler validate "$asset_path" 2>&1)"; then
+      log "Package stapler validation passed."
+    elif [ "$gatekeeper_passed" -eq 1 ]; then
+      stapler_excerpt="$(
+        printf '%s' "$stapler_output" \
+          | tr '\n\r\t' '   ' \
+          | LC_ALL=C tr -cd '[:print:] ' \
+          | cut -c 1-512
+      )"
+      log "WARNING: stapler_validate=advisory_online_lookup_failed after Gatekeeper accepted the package; continuing. ${STAPLER_ONLINE_LOOKUP_HINT}. stapler: ${stapler_excerpt}"
+    else
+      die 4 "${STAPLER_ONLINE_LOOKUP_HINT}, then Retry."
+    fi
   else
-    log "stapler not found; local package stapler validation skipped."
+    if [ "$gatekeeper_passed" -eq 1 ]; then
+      log "stapler not found; local package stapler validation skipped."
+    else
+      die 4 "couldn't verify package notarization (spctl and stapler were not found). Ensure PATH includes /usr/bin and /usr/sbin, then Retry."
+    fi
   fi
 }
 

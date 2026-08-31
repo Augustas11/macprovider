@@ -126,6 +126,7 @@ test-dist:
 	bash phase3-binary/dist/test/install_python3_clt_guard.test.sh
 	bash phase3-binary/dist/test/install_1286_fresh_mac_e2e.test.sh
 	bash phase3-binary/dist/test/install_config_path_escape.test.sh
+	bash phase3-binary/dist/test/install_stapler_validate.test.sh
 	bash scripts/test-catalog-release.sh
 	bash scripts/test-autotune-gate-matrix.sh
 	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
