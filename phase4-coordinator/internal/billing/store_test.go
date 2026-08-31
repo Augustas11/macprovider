@@ -1084,6 +1084,22 @@ func TestRecoverLedger_QuarantinesOrphanLedgerRows(t *testing.T) {
 	}
 }
 
+func TestRecoverLedger_DoesNotQuarantineSettledOrphanRows(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	ts := time.Unix(200, 0).UTC()
+	insertCreditWithRequest(t, store.db, "settled-orphan", "provider-a", ts, 500)
+	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET settled = 1, settlement_id = 99 WHERE request_id = 'settled-orphan'`); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT quarantined FROM ledger_request_credits WHERE request_id = 'settled-orphan'`); got != 0 {
+		t.Fatalf("settled orphan quarantined=%d want 0", got)
+	}
+}
+
 func TestRecoverLedger_QuarantinesLedgerRowsWithoutMatchingAttemptProviderEvidence(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	ts := time.Unix(200, 0).UTC()
@@ -1159,6 +1175,60 @@ func TestRecoverLedger_InvalidUsageQuarantinesExistingActiveRows(t *testing.T) {
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'invalid-existing' AND provider_id LIKE '__unresolved__%'`); got != 0 {
 		t.Fatalf("unresolved placeholder rows=%d want 0", got)
+	}
+}
+
+func TestRecoverLedger_DoesNotQuarantineSettledRowsOnInvalidUsage(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	if _, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Unix(200, 0).UTC()
+	prompt, completion := int64(-1), int64(1000)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc: ts, RequestID: "settled-invalid", Model: "model-a", ProviderAssignedID: "assigned-a",
+		PromptTokens: &prompt, CompletionTokens: &completion, Status: 200, BuyerIP: "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO ledger_provider_identity_snapshots (request_id, attempt_n, provider_assigned_id, provider_id, resolved_from, created_at_utc) VALUES ('settled-invalid', 0, 'assigned-a', 'provider-a', 'pool_entry', ?)`, ts.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	insertCreditWithRequest(t, store.db, "settled-invalid", "provider-a", ts, 500)
+	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET settled = 1, settlement_id = 99 WHERE request_id = 'settled-invalid'`); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT quarantined FROM ledger_request_credits WHERE request_id = 'settled-invalid'`); got != 0 {
+		t.Fatalf("settled row quarantined=%d want 0", got)
+	}
+	if got := scalar(t, store.db, `SELECT settled FROM ledger_request_credits WHERE request_id = 'settled-invalid'`); got != 1 {
+		t.Fatalf("settled flag=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_QuarantinesUnparseableTSUtc(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	ts := time.Unix(200, 0).UTC()
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc: ts, RequestID: "bad-ts", Model: "model-a", ProviderAssignedID: "assigned-a",
+		Status: 200, BuyerIP: "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE request_log SET ts_utc = ? WHERE request_id = 'bad-ts'`, ts.UTC().Format(time.RFC3339Nano)+"bogus"); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'bad-ts' AND quarantined = 1 AND quarantine_reason = 'unparseable_ts_utc'`); got != 1 {
+		t.Fatalf("unparseable ts quarantine rows=%d want 1", got)
 	}
 }
 

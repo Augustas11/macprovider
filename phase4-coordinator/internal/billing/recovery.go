@@ -70,6 +70,8 @@ UPDATE ledger_request_credits
        quarantine_reason = COALESCE(quarantine_reason, 'missing_request_log'),
        updated_at_utc = ?
  WHERE quarantined = 0
+    AND settled = 0
+    AND settlement_id IS NULL
     AND `+sqliteTimeRange("ts_utc")+`
 	AND NOT EXISTS (
        SELECT 1
@@ -137,7 +139,26 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		scanned++
 		ts, err := time.Parse(time.RFC3339Nano, tsText)
 		if err != nil {
-			ts = time.Now().UTC()
+			// Unparseable ts_utc must not select a rate-card snapshot from
+			// wall-clock now — that is nondeterministic across recovery runs.
+			affected, qErr := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, "unparseable_ts_utc", now)
+			if qErr != nil {
+				return qErr
+			}
+			if affected == 0 {
+				exists, existsErr := ledgerRowExistsForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID)
+				if existsErr != nil {
+					return existsErr
+				}
+				if !exists {
+					if insErr := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, time.Unix(0, 0).UTC(), model, status, stream == 1, nil, nil, nil, errorCode.String, in.Source, "unparseable_ts_utc", now); insErr != nil {
+						return insErr
+					}
+					quarantined++
+				}
+			}
+			quarantined += affected
+			continue
 		}
 		invalidReason := ""
 		if invalidRecoveryToken(prompt) || invalidRecoveryEstimate(estimated) || invalidRecoveryCompletion(completion, estimated) {
@@ -424,7 +445,9 @@ func (s *Store) StartNightlyReconcile(ctx context.Context, cfg SettlementConfig)
 				}
 				to := time.Now().UTC().Add(-time.Duration(cfg.RecoveryGraceSeconds) * time.Second)
 				from := to.AddDate(0, 0, -cfg.NightlyReconcileWindowDays)
-				_ = s.RecoverLedger(ctx, RecoverInput{ScanFrom: from, ScanTo: to, Source: "nightly_reconcile"})
+				if err := s.RecoverLedger(ctx, RecoverInput{ScanFrom: from, ScanTo: to, Source: "nightly_reconcile"}); err != nil {
+					logBillingJobError("nightly_reconcile", err, from, to)
+				}
 			}
 		}
 	}()
@@ -719,6 +742,8 @@ UPDATE ledger_request_credits
  WHERE request_id = ?
    AND attempt_n = ?
    AND quarantined = 0
+   AND settled = 0
+   AND settlement_id IS NULL
    AND (
        provider_assigned_id = ?
        OR provider_id IN (

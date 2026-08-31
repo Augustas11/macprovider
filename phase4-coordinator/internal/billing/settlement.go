@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -258,7 +259,9 @@ func (s *Store) StartWeeklySettlement(ctx context.Context, cfg SettlementConfig)
 				}
 				end := next
 				start := end.AddDate(0, 0, -cfg.CadenceDays)
-				_ = s.RunSettlement(ctx, cfg, start, end)
+				if err := s.RunSettlement(ctx, cfg, start, end); err != nil {
+					logBillingJobError("weekly_settlement", err, start, end)
+				}
 			}
 		}
 	}()
@@ -287,4 +290,16 @@ func nullIntFromRow(row *sql.Row) (int64, error) {
 
 func idempotencyKey(providerID string, start, end time.Time) string {
 	return fmt.Sprintf("%s|%s|%s", providerID, sqliteTimeText(start), sqliteTimeText(end))
+}
+
+func logBillingJobError(job string, err error, windowStart, windowEnd time.Time) {
+	if err == nil {
+		return
+	}
+	slog.Error("billing background job failed",
+		"job", job,
+		"err", err,
+		"window_start", sqliteTimeText(windowStart),
+		"window_end", sqliteTimeText(windowEnd),
+	)
 }

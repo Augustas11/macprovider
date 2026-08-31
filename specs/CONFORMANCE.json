@@ -3901,10 +3901,10 @@
       ],
       "evidence": [
         {
-          "artifact": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
+          "artifact": "commit:f5a4e1d1ec9f42e0f718ad0e82f95e62e91b1e17",
           "source": null,
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
+          "captured_at": "2026-08-31",
+          "expires_at": "2026-09-30"
         },
         {
           "artifact": "sha256:553f8eb085674daa557277cf4aaf476ad8269e50e5c7f9b89dcf77bf5587706b",
@@ -4642,10 +4642,10 @@
       ],
       "evidence": [
         {
-          "artifact": "commit:caa6ae4aec712c5d6353a3d307aab551911bea65",
+          "artifact": "commit:f5a4e1d1ec9f42e0f718ad0e82f95e62e91b1e17",
           "source": null,
-          "captured_at": "2026-08-18",
-          "expires_at": "2026-09-17"
+          "captured_at": "2026-08-31",
+          "expires_at": "2026-09-30"
         },
         {
           "artifact": "sha256:5ede794fefc03470f1e3e5c0c401e95c8b9842c2c4aa0ac0fb7fcefd0ee39e14",
