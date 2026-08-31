@@ -102,4 +102,47 @@ assert renewal["signed"]["release_sequence"] > original["signed"]["release_seque
 assert renewal["signed"]["expires_at"] != original["signed"]["expires_at"]
 PY
 
+# --release-sequence mints an exact value (the freshness-only renewal path uses
+# this to emit ceiling+1) and is mutually exclusive with --sequence/--attempt.
+python3 "$root/scripts/build-release-discovery-head.py" \
+  --release-sequence 2176955688681474 \
+  --compatibility-manifest "$work/compatibility-set.json" \
+  --target-artifact-index "$work/compatibility-artifact-index.json" \
+  --issued-at 2026-07-18T00:00:00Z \
+  --expires-at 2026-07-19T00:00:00Z \
+  --private-key "$work/private.pem" \
+  --public-key "$work/public.pem" \
+  --output "$work/macprovider-release-discovery-explicit.json" \
+  --signature "$work/macprovider-release-discovery-explicit.json.sig"
+python3 - "$work" <<'PY'
+import json
+import pathlib
+import sys
+
+work = pathlib.Path(sys.argv[1])
+explicit = json.loads(work.joinpath("macprovider-release-discovery-explicit.json").read_bytes())
+assert explicit["signed"]["release_sequence"] == 2176955688681474
+PY
+if python3 "$root/scripts/build-release-discovery-head.py" \
+    --release-sequence 5 --sequence 1 --attempt 1 \
+    --compatibility-manifest "$work/compatibility-set.json" \
+    --target-artifact-index "$work/compatibility-artifact-index.json" \
+    --private-key "$work/private.pem" \
+    --public-key "$work/public.pem" \
+    --output "$work/mutex.json" \
+    --signature "$work/mutex.json.sig" >/dev/null 2>&1; then
+  printf '[test-release-discovery-head] ERROR: --release-sequence with --sequence was accepted\n' >&2
+  exit 1
+fi
+if python3 "$root/scripts/build-release-discovery-head.py" \
+    --compatibility-manifest "$work/compatibility-set.json" \
+    --target-artifact-index "$work/compatibility-artifact-index.json" \
+    --private-key "$work/private.pem" \
+    --public-key "$work/public.pem" \
+    --output "$work/noseq.json" \
+    --signature "$work/noseq.json.sig" >/dev/null 2>&1; then
+  printf '[test-release-discovery-head] ERROR: missing sequence arguments were accepted\n' >&2
+  exit 1
+fi
+
 printf '[test-release-discovery-head] PASS\n'

@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.14
+Version: v0.1.15
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -308,10 +308,16 @@ A head renewal MUST use a newly signed, strictly greater sequence and append a
 new immutable transport even when the numeric target is unchanged. No existing
 transport may be refreshed in place. The protected
 `renew-release-discovery-head.yml` workflow is the recurring signer for that
-append-only renewal path: it binds the current latest immutable stable target,
-requires the new sequence to exceed the greatest public transport sequence,
-publishes exactly one new immutable prerelease, and anonymously proves the
-same-target CLI still discovers the renewed head. The client MUST fail closed
+append-only renewal path. It is freshness-only: it binds the exact immutable
+stable target that the current signed head already points at — resolved from the
+live transport head, never from mutable GitHub `latest` ordering, which the
+separate coordinator-gated rollout (`verify-live-coordinator-release-rollout.yml`)
+advances — so a renewal keeps the head fresh without advancing the target. It
+mints the smallest sequence strictly greater than every existing append-only
+transport, so the renewal never leapfrogs a newer target's earlier-signed,
+lower-sequence discovery head and thereby blocks a later rollout. It publishes
+exactly one new immutable prerelease and anonymously proves the same-target CLI
+still discovers the renewed head. The client MUST fail closed
 when the greatest located transport is mutable, malformed, expired, incorrectly
 signed, or inconsistent with its sequence-bound tag; it MUST NOT silently fall
 back to an older located transport.
@@ -1411,6 +1417,16 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.15 (2026-08-31): Corrected the append-only head renewal description to
+  freshness-only. The `renew-release-discovery-head.yml` signer binds the target
+  the current signed head already points at (resolved from the live transport
+  head), never mutable GitHub `latest`; advancing to a newer stable target
+  remains the separate coordinator-gated rollout's job. The renewal mints the
+  smallest sequence strictly greater than every existing transport so it never
+  leapfrogs a newer target's earlier-signed, lower-sequence prebuilt head and
+  blocks a later rollout. This reconciles the renewal prose with SPEC-020-R001
+  (discovery MUST NOT derive its target from mutable `latest` ordering); no
+  requirement, conformance, or authority binding changed.
 - v0.1.14 (2026-08-28): Added SPEC-020-R005, accepted-but-stuck session recovery.
   v0.1.8 scoped coordinator-independent recovery to providers that cannot
   establish a session; R005 closes the residual gap where an admitted provider
