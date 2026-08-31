@@ -1,0 +1,57 @@
+name: Autotune feed freshness alarm
+
+# Read-only backstop for the SPEC-023 signed autotune feed (rate-card /
+# candidate / demand). The client 30-day generated_at horizon fails closed
+# with rate_card_update_required and strands any provider that restarts.
+# Operator-local launchd runs scripts/renew-autotune-static-feed.sh weekly
+# (signing stays off CI — see docs/runbooks/autotune-feed-renewal.md); if that
+# run is skipped/late, this alarm fails (and notifies) BEFORE the feed ages
+# past 30 days. No secrets, no production-release environment, no signing,
+# no Pearl SSH — it only reads the public /v1/rate-card generated_at.
+
+on:
+  schedule:
+    # Every 6 hours: far more often than the weekly renewal, so a stale feed
+    # is caught with well over a week of runway (alarm threshold is 20 days
+    # of a 30-day horizon).
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        description: "Alarm if generated_at is this many days old (default 20; must be < 30)"
+        required: false
+        default: "20"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autotune-feed-freshness-alarm
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Alarm on a stale autotune rate-card feed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout freshness check
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fetch live /v1/rate-card and check generated_at age
+        shell: bash
+        env:
+          MAX_AGE_DAYS: ${{ github.event.inputs.max_age_days || '20' }}
+        run: |
+          set -euo pipefail
+          url="https://coordinator.malibu.tech/v1/rate-card"
+          [[ "$MAX_AGE_DAYS" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+            echo "::error::max_age_days must be a positive number" >&2
+            exit 1
+          }
+          curl -fsS --proto '=https' --tlsv1.2 --max-time 20 -- "$url" \
+            | python3 scripts/check-autotune-feed-freshness.py --max-age-days "$MAX_AGE_DAYS"

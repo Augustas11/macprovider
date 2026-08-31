@@ -104,6 +104,8 @@ test-dist:
 	bash scripts/test-release-discovery-transport.sh
 	bash scripts/test-select-public-discovery-transport.sh
 	bash scripts/test-renew-release-discovery-head.sh
+	bash scripts/test-autotune-feed-freshness-alarm.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_feed_freshness
 	bash scripts/test-tier2-provider-artifact.sh
 	bash scripts/test-tier2-provider-release.sh
 	bash scripts/test-tier2-activation-safety.sh
