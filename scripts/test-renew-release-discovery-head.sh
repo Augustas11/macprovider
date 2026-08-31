@@ -46,11 +46,35 @@ for requirement in (
     "--latest=false",
     "scripts/verify-anonymous-release-discovery.sh",
     "Verify renewed discovery without protected credentials",
+    # Freshness-only renewal: the target is resolved from the CURRENT signed
+    # head (the live transport), never from GitHub "latest", so a legitimately
+    # diverged latest cannot fail the Monday renewal closed.
+    "scripts/resolve-discovery-renewal-target.py",
+    "releases/tags/$previous_transport",
+    "releases/tags/$tag",
+    "current head target release is not immutable",
+    "current head target release identity differs from the signed head",
+    # Minimal-increment sequencing: the ceiling folds git tag refs (collision
+    # proof) and the renewal fails closed unless the ceiling equals the public
+    # head, so it can never leapfrog a pending newer target's transport.
+    "git ls-remote --tags origin 'release-discovery-v1-*'",
+    "scripts/select-discovery-renewal-base.py",
+    '--release-sequence "$RENEWAL_SEQUENCE"',
 ):
     if requirement not in workflow:
         raise SystemExit(f"renewal workflow omits: {requirement}")
 if "--clobber" in workflow:
     raise SystemExit("renewal workflow must never overwrite discovery assets")
+if "releases/latest" in workflow:
+    raise SystemExit(
+        "renewal must not resolve its target from GitHub 'latest'; it renews the "
+        "current head's own target (advancing is the coordinator-gated rollout)"
+    )
+if "PREVIOUS_SEQUENCE + 1" in workflow or "renewal_sequence=$((" in workflow:
+    raise SystemExit(
+        "renewal must not compute the next sequence with signed Bash arithmetic; "
+        "ceiling+1 is computed and uint64-bounded in Python"
+    )
 for requirement in (
     "- name: Seal reviewed OpenSSL 3",
     "id: protected_openssl",

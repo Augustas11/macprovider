@@ -137,7 +137,16 @@ def release_sequence(run_id: int, run_attempt: int) -> int:
 
 
 def build(args: argparse.Namespace) -> None:
-    sequence = release_sequence(args.sequence, args.attempt)
+    if args.release_sequence is not None:
+        if args.sequence is not None or args.attempt is not None:
+            fail("--release-sequence is mutually exclusive with --sequence/--attempt")
+        sequence = args.release_sequence
+        if type(sequence) is not int or sequence <= 0 or sequence > UINT64_MAX:
+            fail("release sequence must be a positive uint64")
+    else:
+        if args.sequence is None or args.attempt is None:
+            fail("--sequence and --attempt are required unless --release-sequence is given")
+        sequence = release_sequence(args.sequence, args.attempt)
     set_id = compatibility_set_id(args.compatibility_manifest)
     artifact_index_sha = hashlib.sha256(args.target_artifact_index.read_bytes()).hexdigest()
     if not HEX64.fullmatch(artifact_index_sha):
@@ -170,8 +179,13 @@ def build(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sequence", type=int, required=True)
-    parser.add_argument("--attempt", type=int, required=True)
+    # Provenance sequencing (run_id<<16|attempt), used by release-build signing.
+    parser.add_argument("--sequence", type=int)
+    parser.add_argument("--attempt", type=int)
+    # Explicit sequence, used by the freshness-only renewal so it mints the
+    # smallest value greater than the existing ceiling and never leapfrogs a
+    # newer release's earlier-built (lower-sequence) prebuilt discovery head.
+    parser.add_argument("--release-sequence", type=int)
     parser.add_argument("--compatibility-manifest", type=pathlib.Path, required=True)
     parser.add_argument("--target-artifact-index", type=pathlib.Path, required=True)
     parser.add_argument("--signed-policy-minimum")
