@@ -1,0 +1,102 @@
+name: Renew signed autotune static feed
+
+# Protected weekly freshness re-stamp for the SPEC-023 signed autotune feed.
+# Signs on a macos-15-intel runner (Swift CryptoKit + sealed OpenSSL 3 verify),
+# then rsyncs only signed bytes to Pearl and SIGHUPs the coordinator.
+#
+# The feed key MUST NOT live on Pearl. It is a production-release secret
+# (AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64). Do not reuse the discovery-head
+# PEM or the download.malibu.tech SSH key. antfleet-ops approves each run.
+#
+# Tuesday watch (renew-autotune-static-feed.yml) and the 20-day alarm stay as
+# read-only backstops. A red Tuesday run means this Wednesday job missed or
+# is still waiting on production-release approval.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Wednesday 16:00 UTC: offset from Monday discovery-head and Tuesday watch.
+    - cron: "0 16 * * 3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    name: Re-stamp, sign, and hot-reload the autotune feed
+    runs-on: macos-15-intel
+    environment: production-release
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout reviewed renewal controls
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify protected GitHub release posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Seal reviewed OpenSSL 3
+        id: protected_openssl
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          sealed_bin="$(
+            bash scripts/install-sealed-release-openssl.sh \
+              /private/var/macprovider-openssl-autotune-renewal
+          )"
+          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'bin=%s\n' "$sealed_bin" >> "$GITHUB_OUTPUT"
+
+      - name: Sign a freshness restamp and deploy to Pearl
+        shell: bash
+        env:
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
+          AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64: ${{ secrets.AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64 }}
+          PEARL_AUTOTUNE_DEPLOY_SSH_KEY: ${{ secrets.PEARL_AUTOTUNE_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$OPENSSL_BIN" ] || {
+            echo "::error::sealed OPENSSL_BIN is required" >&2
+            exit 1
+          }
+          [ -x "$OPENSSL_BIN" ] || {
+            echo "::error::sealed OPENSSL_BIN is not executable" >&2
+            exit 1
+          }
+          "$OPENSSL_BIN" version | grep -E '^OpenSSL 3\.'
+          [ -n "$AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64" ] || {
+            echo "::error::AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64 is required (production-release secret)" >&2
+            exit 1
+          }
+          [ -n "$PEARL_AUTOTUNE_DEPLOY_SSH_KEY" ] || {
+            echo "::error::PEARL_AUTOTUNE_DEPLOY_SSH_KEY is required (production-release secret)" >&2
+            exit 1
+          }
+          key="$(mktemp "$RUNNER_TEMP/autotune-static.XXXXXX.b64")"
+          ssh_key="$(mktemp "$RUNNER_TEMP/pearl-autotune-deploy.XXXXXX")"
+          trap 'rm -f "$key" "$ssh_key"' EXIT
+          umask 077
+          printf '%s\n' "$AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64" > "$key"
+          printf '%s\n' "$PEARL_AUTOTUNE_DEPLOY_SSH_KEY" > "$ssh_key"
+          chmod 600 "$key" "$ssh_key"
+          unset AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64 PEARL_AUTOTUNE_DEPLOY_SSH_KEY
+          export AUTOTUNE_STATIC_PRIVATE_KEY_PATH="$key"
+          export PEARL_SSH_IDENTITY="$ssh_key"
+          export PEARL_SSH_KNOWN_HOSTS="$GITHUB_WORKSPACE/scripts/dist/malibu-download-known_hosts"
+          export PEARL_SSH="root@159.223.165.194"
+          bash scripts/renew-autotune-static-feed.sh --deploy
