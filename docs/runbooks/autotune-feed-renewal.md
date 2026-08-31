@@ -109,6 +109,33 @@ launchctl kickstart -p gui/$(id -u)/live.streamvc.autotune-feed-renewal   # opti
 Verify after a run: `curl -s https://coordinator.malibu.tech/v1/rate-card | python3 -c 'import sys,json;print(json.load(sys.stdin)["generated_at"])'`
 should show today; provider `pool_size` should be unchanged across the HUP.
 
+## GitHub Actions backstops (no signing, no Pearl SSH)
+
+GitHub-hosted runners cannot call `renew-autotune-static-feed.sh --deploy`:
+the Ed25519 feed key must not be a CI secret, and deploy is SSH to Pearl.
+Two read-only workflows make a missed launchd/manual run visible in Actions
+before the client 30-day horizon:
+
+1. **Weekly cadence** — `.github/workflows/renew-autotune-static-feed.yml`
+   (`cron: "0 16 * * 2"`, Tuesday 16:00 UTC — same hour as discovery-head
+   renewal, offset one day so it does not race Monday launchd). Fetches live
+   `/v1/rate-card` and fails if `generated_at` is ≥ 7 days old. A failure
+   means: run `--deploy` on the signing host this week.
+2. **20-day alarm** — `.github/workflows/autotune-feed-freshness-alarm.yml`
+   (every 6 hours). Fails if `generated_at` is ≥ 20 days old, leaving ~10
+   days of runway. Mirror of `discovery-head-freshness-alarm.yml`.
+
+Both call `scripts/check-autotune-feed-freshness.py` (stdin JSON, no
+network, no secrets). `workflow_dispatch` accepts a `max_age_days` override
+for a manual check after a local deploy. The live URL is pinned to
+`https://coordinator.malibu.tech/v1/rate-card` (no dispatch override).
+
+```bash
+curl -fsS --proto '=https' --tlsv1.2 --max-time 20 \
+  https://coordinator.malibu.tech/v1/rate-card \
+  | python3 scripts/check-autotune-feed-freshness.py --max-age-days 20
+```
+
 ## Rollback
 
 The prior release is retained as `.previous-target` and its directory is left in

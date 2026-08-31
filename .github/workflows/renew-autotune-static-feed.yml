@@ -1,0 +1,69 @@
+name: Renew autotune static feed
+
+# Weekly cadence gate for the SPEC-023 signed autotune feed.
+#
+# Signing stays on the operator machine (streamvc-autotune-static-v4 MUST NOT
+# be a CI secret and MUST NOT live on Pearl — see
+# docs/runbooks/autotune-feed-renewal.md). GitHub-hosted runners therefore
+# cannot call `scripts/renew-autotune-static-feed.sh --deploy`: that script
+# signs locally and rsyncs to Pearl over SSH. This workflow uses the same
+# 16:00 UTC weekly hour as renew-release-discovery-head.yml, offset to
+# Tuesday so it runs AFTER the Monday operator-local launchd renewal rather
+# than racing it. The 20-day autotune-feed-freshness-alarm.yml is the
+# last-line backstop.
+#
+# The job fetches the live /v1/rate-card and fails if generated_at is at
+# least 7 days old — the weekly SLA. On failure, run
+# `scripts/renew-autotune-static-feed.sh --deploy` on the signing host.
+# No secrets, no Pearl SSH, no --deploy from CI.
+
+on:
+  schedule:
+    # Tuesday 16:00 UTC: one day after the Monday operator-local renewal
+    # window, well inside the 30-day client freshness horizon. A missed
+    # Monday run then fails this check the next day rather than silently
+    # aging toward 30 days, and cannot false-fail while launchd is still
+    # deploying.
+    - cron: "0 16 * * 2"
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        description: "Fail if generated_at is this many days old (default 7; must be < 30)"
+        required: false
+        default: "7"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renew-autotune-static-feed
+  cancel-in-progress: false
+
+jobs:
+  cadence:
+    name: Confirm weekly autotune-feed renewal happened
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout cadence check
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fail if live /v1/rate-card is older than the weekly SLA
+        shell: bash
+        env:
+          MAX_AGE_DAYS: ${{ github.event.inputs.max_age_days || '7' }}
+        run: |
+          set -euo pipefail
+          url="https://coordinator.malibu.tech/v1/rate-card"
+          [[ "$MAX_AGE_DAYS" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+            echo "::error::max_age_days must be a positive number" >&2
+            exit 1
+          }
+          echo "Weekly SLA: live generated_at must be younger than ${MAX_AGE_DAYS}d."
+          echo "A failure means: run scripts/renew-autotune-static-feed.sh --deploy on the signing host."
+          curl -fsS --proto '=https' --tlsv1.2 --max-time 20 -- "$url" \
+            | python3 scripts/check-autotune-feed-freshness.py --max-age-days "$MAX_AGE_DAYS"
