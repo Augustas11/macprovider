@@ -1208,7 +1208,12 @@ struct ServeCommand: AsyncParsableCommand {
                 || [0x2D, 0x5F, 0x2E, 0x2F].contains(byte)
         }
         guard !value.isEmpty, plain else {
-            let data = try? JSONEncoder().encode(value)
+            // Keep forward slashes literal (see ConfigApplier.yamlScalar): an
+            // escaped "\/Users\/…" is valid JSON but breaks install.sh's YAML
+            // read-back absolute-path check, which then fails closed.
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .withoutEscapingSlashes
+            let data = try? encoder.encode(value)
             return data.map { String(decoding: $0, as: UTF8.self) } ?? "\"\""
         }
         return value
