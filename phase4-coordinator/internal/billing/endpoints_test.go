@@ -546,8 +546,38 @@ func TestReconcileEndpoint_CleanDelta(t *testing.T) {
 	}
 }
 
+func TestReconcileEndpoint_SnapshotAtErrorFailsRun(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	ts := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
+	prompt, completion := int64(1000), int64(2000)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc: ts, RequestID: "reconcile-missing-snapshot", Model: "model-a", ProviderAssignedID: "assigned-a",
+		PromptTokens: &prompt, CompletionTokens: &completion, Status: 200, BuyerIP: "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/reconcile?from=2026-06-01&to=2026-06-08", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s want 500 when snapshotAt fails", w.Code, w.Body.String())
+	}
+	var complete int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE run_type = 'admin_reconcile' AND status = 'complete'`).Scan(&complete); err != nil {
+		t.Fatal(err)
+	}
+	if complete != 0 {
+		t.Fatalf("complete reconcile runs=%d want 0", complete)
+	}
+}
+
 func TestReconcileEndpointCountsFractionalRFC3339TimestampChronologically(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	if _, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
 	ts := time.Date(2026, 6, 1, 0, 0, 0, 500*int(time.Millisecond), time.UTC)
 	if err := reqStore.Insert(context.Background(), requestlog.Row{
 		TSUtc: ts, RequestID: "fractional-rfc3339", Model: "model-a", ProviderAssignedID: "assigned-a",
@@ -717,6 +747,10 @@ func TestReconcileEndpoint_DetectsMissingOperatorSplit(t *testing.T) {
 
 func TestReconcileEndpoint_DuplicateByteEstimatedRowsDoNotHideDelta(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	if _, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
 	ts := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 	if err := reqStore.Insert(context.Background(), requestlog.Row{
 		TSUtc: ts, RequestID: "dup-byte", Model: "model-a", ProviderAssignedID: "assigned-a",

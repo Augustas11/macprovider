@@ -819,7 +819,9 @@ SELECT rl.request_id, rl.ts_utc, rl.model, COALESCE(rl.provider_assigned_id, '')
 			_, rewards, multiplier, share, err = h.store.snapshotAt(ctx, ts)
 		}
 		if err != nil {
-			continue
+			// Fail the reconcile run instead of skipping the row and still
+			// recording ledger_reconciliation_runs.status='complete'.
+			return 0, err
 		}
 		row := ComputeCreditsWithCache(pp, cachedP, cp, nil, usageFor(s.errorCode.String, nil), FaultNone, RateFor(rewards.RateCard, s.model), multiplier, share)
 		total += row.GrossCredits
