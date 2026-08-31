@@ -533,7 +533,15 @@ struct ConfigApplier {
                 || [0x2D, 0x5F, 0x2E, 0x2F].contains(byte)
         }
         guard !value.isEmpty, plain else {
-            let data = try? JSONEncoder().encode(value)
+            // Quote via JSON string encoding for values with spaces/specials
+            // (e.g. a model artifact path under "…/Application Support/…").
+            // withoutEscapingSlashes keeps forward slashes literal: an escaped
+            // "\/Users\/…" is valid JSON but breaks install.sh's YAML read-back,
+            // whose absolute-path check (`case "$p" in /*)`) then fails and the
+            // installer wrongly concludes "no paid model cleared".
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .withoutEscapingSlashes
+            let data = try? encoder.encode(value)
             return data.map { String(decoding: $0, as: UTF8.self) } ?? "\"\""
         }
         return value

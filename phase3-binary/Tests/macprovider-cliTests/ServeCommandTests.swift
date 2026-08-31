@@ -1221,6 +1221,29 @@ final class ServeCommandTests: XCTestCase {
         XCTAssertEqual(config.modelArtifactPath, fixture.durablePath)
     }
 
+    // Regression (both-sides sweep): the durable-store migration writer must
+    // also keep forward slashes literal. A migrated path under
+    // ".../Application Support/..." contains a space → quoted → must NOT be
+    // JSON slash-escaped, or install.sh's read-back absolute-path check fails
+    // exactly as in the fresh-install "no paid model cleared" bug.
+    func testPersistMigratedArtifactPathWritesSpacedPathWithoutEscapedSlashes() throws {
+        let dir = try tempDir()
+        let cfg = dir.appendingPathComponent("config.yaml")
+        try "model: m\nmodel_artifact_path: /old/snapshot\nmodel_artifact_sha256: abc\n"
+            .write(to: cfg, atomically: true, encoding: .utf8)
+        let spaced = dir.appendingPathComponent("Application Support/macprovider/models/x/y/z").path
+        try ServeCommand.persistMigratedArtifactPath(configPath: cfg.path, from: "/old/snapshot", to: spaced)
+        let post = try String(contentsOf: cfg, encoding: .utf8)
+        XCTAssertTrue(post.contains("model_artifact_path: \"\(spaced)\"\n"), post)
+        XCTAssertFalse(post.contains("\\/"), "migrated config must not contain escaped slashes: \(post)")
+        let line = post.split(separator: "\n").first { $0.hasPrefix("model_artifact_path:") }
+        let value = line
+            .map { $0.replacingOccurrences(of: "model_artifact_path: ", with: "") }
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
+        XCTAssertEqual(value, spaced)
+        XCTAssertTrue(value?.hasPrefix("/") == true, "read-back migrated path must start with /")
+    }
+
     func testCoordinatorJoinRewritesNonCanonicalDurablePathToCatalogIdentity() async throws {
         let fixture = try await makeCatalogBoundFixture()
         var config = fixture.config

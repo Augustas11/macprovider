@@ -1,0 +1,650 @@
+diff --git a/Makefile b/Makefile
+index dbcc5a28..0c1dd9db 100644
+--- a/Makefile
++++ b/Makefile
+@@ -120,6 +120,7 @@ test-dist:
+ 	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh
+ 	bash phase3-binary/dist/test/install_python3_clt_guard.test.sh
+ 	bash phase3-binary/dist/test/install_1286_fresh_mac_e2e.test.sh
++	bash phase3-binary/dist/test/install_config_path_escape.test.sh
+ 	bash scripts/test-catalog-release.sh
+ 	bash scripts/test-autotune-gate-matrix.sh
+ 	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
+diff --git a/audits/2026-08-31-install-path-escape/LANE_architect.md b/audits/2026-08-31-install-path-escape/LANE_architect.md
+new file mode 100644
+index 00000000..016b8d93
+--- /dev/null
++++ b/audits/2026-08-31-install-path-escape/LANE_architect.md
+@@ -0,0 +1,23 @@
++# Audit lane: ARCHITECTURE / COMPLETENESS — escaped-artifact-path fix (1.8.117)
++
++Independent architecture auditor. Review the COMPLETE diff at
++`audits/2026-08-31-install-path-escape/full-fix.diff` plus touched files.
++
++Focus:
++1. Right layer / completeness: the fix touches BOTH the writer (ConfigApplier)
++   and the reader (install.sh read-back). Are there OTHER serializers that write
++   config paths (e.g. semantic_merge_config, other CLI config writers) that
++   still slash-escape? Are there OTHER install.sh read-back sites of
++   model_artifact_path/model/catalog that were missed and would still fail?
++   Sweep both sides.
++2. Is `.withoutEscapingSlashes` the correct minimal root fix, or does the real
++   bug indicate the config should not be JSON-encoding YAML scalars at all?
++   Judge whether the chosen fix is durable vs a future regression.
++3. Back/forward compatibility across CLI/app versions and the fleet: an old CLI
++   (escaped) + new install.sh (unescapes) works; new CLI (plain) + old
++   install.sh — does that combination occur in any real path, and does it still
++   work? The app pins the pkg version; confirm the release story is coherent.
++4. Test adequacy for the fix.
++
++Per finding: SEVERITY, file:line, concrete scenario, remediation. End with
++`GATE: PASS` (0 C/H/M) or `GATE: FAIL`.
+diff --git a/audits/2026-08-31-install-path-escape/LANE_code.md b/audits/2026-08-31-install-path-escape/LANE_code.md
+new file mode 100644
+index 00000000..084a12f7
+--- /dev/null
++++ b/audits/2026-08-31-install-path-escape/LANE_code.md
+@@ -0,0 +1,29 @@
++# Audit lane: CODE CORRECTNESS — fresh-install escaped-artifact-path fix (1.8.117)
++
++Independent code auditor. Review the COMPLETE diff at
++`audits/2026-08-31-install-path-escape/full-fix.diff` plus the live files it
++touches. Context: fresh installs died 30 "no paid model cleared" because
++ConfigApplier.yamlScalar wrote `model_artifact_path: "\/Users\/..."` (JSON
++slash-escaping of a space-quoted path) and install.sh's read-back could not
++parse the escaped value (its `case "$p" in /*)` absolute-path check failed).
++
++Focus:
++1. ConfigApplier.swift `yamlScalar`: does `.withoutEscapingSlashes` correctly
++   stop slash-escaping while still safely quoting values with spaces/specials?
++   Are there inputs where the quoted output is now INVALID YAML or ambiguous
++   (backslashes, quotes, control chars, unicode, leading/trailing spaces, `#`,
++   `:`)? Confirm the CLI's own ConfigLoader still round-trips every case.
++2. install.sh read-back: the awk `gsub(/\\\//, "/", value)` on
++   read_config_{artifact_path,model,catalog_model_id}. Is the regex correct in
++   POSIX awk (matches only literal backslash-slash)? Could it corrupt a
++   legitimate value that contains a real backslash-then-slash that is NOT an
++   escape? Are model/sha/donor read-backs consistent (sha is hex, model has
++   plain slashes)? Any value that should be unescaped but is missed, or should
++   NOT be unescaped but is?
++3. Both-ends consistency: with the new CLI (plain slashes) AND an old CLI
++   (escaped slashes), does the install read-back now succeed in BOTH? Any case
++   where the fix flips a previously-passing install to failing?
++4. Version bump correctness (binaryVersion / project.yml / release-builds.tsv).
++
++Per finding: SEVERITY (CRITICAL/HIGH/MEDIUM/LOW/INFO), file:line, concrete
++failure scenario, fix. End with `GATE: PASS` (0 C/H/M) or `GATE: FAIL`.
+diff --git a/audits/2026-08-31-install-path-escape/LANE_security.md b/audits/2026-08-31-install-path-escape/LANE_security.md
+new file mode 100644
+index 00000000..8f28dd4a
+--- /dev/null
++++ b/audits/2026-08-31-install-path-escape/LANE_security.md
+@@ -0,0 +1,24 @@
++# Audit lane: SECURITY — fresh-install escaped-artifact-path fix (1.8.117)
++
++Independent security auditor. Review the COMPLETE diff at
++`audits/2026-08-31-install-path-escape/full-fix.diff` plus touched files.
++
++Focus:
++1. Injection: install.sh now unescapes `\/`→`/` in config values that are later
++   used as an absolute path (`case "$p" in /*)`) and passed onward. Can a
++   crafted config value (the config is written by the CLI, mode 0600, but assume
++   an attacker who can influence the model catalog / artifact path) inject a
++   path traversal, command substitution, or absolute-path bypass via the
++   unescape? Does unescaping WEAKEN any existing validation of the artifact path
++   (signature/sha pinning, path canonicalization) done later in install.sh?
++2. ConfigApplier `.withoutEscapingSlashes`: does emitting literal slashes in a
++   JSON-quoted YAML scalar allow YAML injection (breaking out of the quoted
++   string, injecting new keys)? Confirm quoting still escapes `"` and control
++   chars.
++3. Confirm the fix does not change trust/attestation, the artifact sha256
++   verification, or Gatekeeper/notarization checks — only the path string
++   serialization/parsing.
++4. No secrets/tokens exposed by the change.
++
++Per finding: SEVERITY, file:line, concrete exploit scenario, fix. End with
++`GATE: PASS` (0 C/H/M) or `GATE: FAIL`.
+diff --git a/audits/2026-08-31-install-path-escape/RESULT_architect.md b/audits/2026-08-31-install-path-escape/RESULT_architect.md
+new file mode 100644
+index 00000000..3d0038ed
+--- /dev/null
++++ b/audits/2026-08-31-install-path-escape/RESULT_architect.md
+@@ -0,0 +1 @@
++/Users/augstar/macprovider-installpath-escape/.omc/artifacts/ask/codex-you-are-an-independent-senior-auditor-read-the-audit-lane-sp-2026-08-31T02-49-41-013Z.md
+diff --git a/audits/2026-08-31-install-path-escape/RESULT_code.md b/audits/2026-08-31-install-path-escape/RESULT_code.md
+new file mode 100644
+index 00000000..54a52cfe
+--- /dev/null
++++ b/audits/2026-08-31-install-path-escape/RESULT_code.md
+@@ -0,0 +1 @@
++/Users/augstar/macprovider-installpath-escape/.omc/artifacts/ask/codex-you-are-an-independent-senior-auditor-read-the-audit-lane-sp-2026-08-31T02-50-29-488Z.md
+diff --git a/audits/2026-08-31-install-path-escape/RESULT_security.md b/audits/2026-08-31-install-path-escape/RESULT_security.md
+new file mode 100644
+index 00000000..d47e12d7
+--- /dev/null
++++ b/audits/2026-08-31-install-path-escape/RESULT_security.md
+@@ -0,0 +1 @@
++/Users/augstar/macprovider-installpath-escape/.omc/artifacts/ask/codex-you-are-an-independent-senior-auditor-read-the-audit-lane-sp-2026-08-31T02-49-32-854Z.md
+diff --git a/audits/2026-08-31-install-path-escape/full-fix.diff b/audits/2026-08-31-install-path-escape/full-fix.diff
+new file mode 100644
+index 00000000..b7840d97
+--- /dev/null
++++ b/audits/2026-08-31-install-path-escape/full-fix.diff
+@@ -0,0 +1,234 @@
++diff --git a/Makefile b/Makefile
++index dbcc5a28..0c1dd9db 100644
++--- a/Makefile
+++++ b/Makefile
++@@ -120,6 +120,7 @@ test-dist:
++ 	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh
++ 	bash phase3-binary/dist/test/install_python3_clt_guard.test.sh
++ 	bash phase3-binary/dist/test/install_1286_fresh_mac_e2e.test.sh
+++	bash phase3-binary/dist/test/install_config_path_escape.test.sh
++ 	bash scripts/test-catalog-release.sh
++ 	bash scripts/test-autotune-gate-matrix.sh
++ 	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
++diff --git a/phase3-binary/Sources/macprovider-cli/ConfigApplier.swift b/phase3-binary/Sources/macprovider-cli/ConfigApplier.swift
++index 271f47c9..2e54cb6c 100644
++--- a/phase3-binary/Sources/macprovider-cli/ConfigApplier.swift
+++++ b/phase3-binary/Sources/macprovider-cli/ConfigApplier.swift
++@@ -533,7 +533,15 @@ struct ConfigApplier {
++                 || [0x2D, 0x5F, 0x2E, 0x2F].contains(byte)
++         }
++         guard !value.isEmpty, plain else {
++-            let data = try? JSONEncoder().encode(value)
+++            // Quote via JSON string encoding for values with spaces/specials
+++            // (e.g. a model artifact path under "…/Application Support/…").
+++            // withoutEscapingSlashes keeps forward slashes literal: an escaped
+++            // "\/Users\/…" is valid JSON but breaks install.sh's YAML read-back,
+++            // whose absolute-path check (`case "$p" in /*)`) then fails and the
+++            // installer wrongly concludes "no paid model cleared".
+++            let encoder = JSONEncoder()
+++            encoder.outputFormatting = .withoutEscapingSlashes
+++            let data = try? encoder.encode(value)
++             return data.map { String(decoding: $0, as: UTF8.self) } ?? "\"\""
++         }
++         return value
++diff --git a/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift b/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
++index 308b0a1b..74431050 100644
++--- a/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
+++++ b/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
++@@ -146,7 +146,7 @@ actor CoordinatorClient {
++     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
++     typealias ReloadHelperFence = @Sendable () throws -> Void
++ 
++-    static let binaryVersion = "1.8.116"
+++    static let binaryVersion = "1.8.117"
++     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
++ 
++     private let coordinatorURL: URL
++diff --git a/phase3-binary/Tests/macprovider-cliTests/ConfigApplierTests.swift b/phase3-binary/Tests/macprovider-cliTests/ConfigApplierTests.swift
++index 0d8650ee..e33c5b63 100644
++--- a/phase3-binary/Tests/macprovider-cliTests/ConfigApplierTests.swift
+++++ b/phase3-binary/Tests/macprovider-cliTests/ConfigApplierTests.swift
++@@ -189,6 +189,51 @@ final class ConfigApplierTests: XCTestCase {
++         XCTAssertEqual(loaded.modelArtifactSHA256, artifactSHA)
++     }
++ 
+++    // Regression: a model artifact path under "…/Application Support/…" contains
+++    // a space, so yamlScalar quotes it. The quoted value MUST keep literal
+++    // forward slashes (no JSON "\/" escaping) — an escaped "\/Users\/…" is valid
+++    // JSON but breaks install.sh's read-back, whose absolute-path check
+++    // (`case "$p" in /*)`) then fails and the installer wrongly reports
+++    // "no paid model cleared".
+++    func testApplyWritesSpaceContainingArtifactPathWithUnescapedSlashes() throws {
+++        let fixture = try ConfigFixture()
+++        try fixture.writeConfig(sampleConfig())
+++        let artifactSHA = String(repeating: "a", count: 64)
+++        let spacedPath =
+++            "/Users/admin/Library/Application Support/macprovider/models/mlx-community--Llama-3.2-3B/rev/\(artifactSHA)"
+++        var recommendation = recommendation()
+++        recommendation.model = "meta-llama/llama-3.2-3b-instruct"
+++        recommendation.modelArtifactPath = spacedPath
+++        recommendation.modelArtifactSHA256 = artifactSHA
+++
+++        _ = try fixture.applier().apply(recommendation: recommendation, now: fixture.now)
+++
+++        let post = try String(contentsOf: fixture.configURL)
+++        // The path is quoted (has a space) but the slashes stay literal.
+++        XCTAssertTrue(
+++            post.contains("model_artifact_path: \"\(spacedPath)\"\n"),
+++            "artifact path should be quoted with literal slashes; got:\n\(post)"
+++        )
+++        // No JSON slash-escaping anywhere in the written config.
+++        XCTAssertFalse(post.contains("\\/"), "config must not contain escaped slashes")
+++        // What install.sh reads back (strip surrounding quotes) is a real
+++        // absolute path with a leading "/".
+++        let line = post.split(separator: "\n").first { $0.hasPrefix("model_artifact_path:") }
+++        let value = line
+++            .map { $0.replacingOccurrences(of: "model_artifact_path: ", with: "") }
+++            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
+++        XCTAssertEqual(value, spacedPath)
+++        XCTAssertTrue(value?.hasPrefix("/") == true, "read-back path must start with /")
+++        // The CLI's own loader round-trips the same path.
+++        let loaded = try ConfigLoader.load(
+++            cli: CLIOverrides(configPath: fixture.configURL.path),
+++            environment: [:],
+++            fileExists: { _ in true },
+++            readFile: { _ in post }
+++        )
+++        XCTAssertEqual(loaded.modelArtifactPath, spacedPath)
+++    }
+++
++     func testApplyWritesDonorCatalogBindingAndConfigLoaderReadsIt() throws {
++         let fixture = try ConfigFixture()
++         try fixture.writeConfig(sampleConfig())
++diff --git a/phase3-binary/app/project.yml b/phase3-binary/app/project.yml
++index 96e035d8..db3b3139 100644
++--- a/phase3-binary/app/project.yml
+++++ b/phase3-binary/app/project.yml
++@@ -23,8 +23,8 @@ settings:
++     SWIFT_VERSION: "5.9"
++     ENABLE_HARDENED_RUNTIME: YES
++     CODE_SIGN_STYLE: Manual
++-    MARKETING_VERSION: "1.8.116"
++-    CURRENT_PROJECT_VERSION: "116"
+++    MARKETING_VERSION: "1.8.117"
+++    CURRENT_PROJECT_VERSION: "117"
++     OTHER_SWIFT_FLAGS: "-strict-concurrency=complete"
++ 
++ targets:
++diff --git a/phase3-binary/app/release-builds.tsv b/phase3-binary/app/release-builds.tsv
++index 2341e13e..ec1750b6 100644
++--- a/phase3-binary/app/release-builds.tsv
+++++ b/phase3-binary/app/release-builds.tsv
++@@ -50,3 +50,4 @@
++ 1.8.114	114
++ 1.8.115	115
++ 1.8.116	116
+++1.8.117	117
++diff --git a/phase3-binary/dist/install.sh b/phase3-binary/dist/install.sh
++index 6b60221a..56fb5abd 100755
++--- a/phase3-binary/dist/install.sh
+++++ b/phase3-binary/dist/install.sh
++@@ -9677,6 +9677,7 @@ read_config_model() {
++       value=$0
++       sub(/^model:[[:space:]]*/, "", value)
++       gsub(/^"|"$/, "", value)
+++      gsub(/\\\//, "/", value)
++       print value
++       exit
++     }
++@@ -9728,6 +9729,10 @@ read_config_artifact_path() {
++       value=$0
++       sub(/^model_artifact_path:[[:space:]]*/, "", value)
++       gsub(/^"|"$/, "", value)
+++      # A quoted path (e.g. under ".../Application Support/...") may arrive with
+++      # JSON-escaped slashes ("\/Users\/..."). Unescape so the absolute-path
+++      # check (`case "$p" in /*)`) sees a real leading "/".
+++      gsub(/\\\//, "/", value)
++       print value
++       exit
++     }
++@@ -9741,6 +9746,7 @@ read_config_catalog_model_id() {
++       value=$0
++       sub(/^model_catalog_model_id:[[:space:]]*/, "", value)
++       gsub(/^"|"$/, "", value)
+++      gsub(/\\\//, "/", value)
++       print value
++       exit
++     }
++diff --git a/phase3-binary/dist/test/install_config_path_escape.test.sh b/phase3-binary/dist/test/install_config_path_escape.test.sh
++new file mode 100755
++index 00000000..f278465b
++--- /dev/null
+++++ b/phase3-binary/dist/test/install_config_path_escape.test.sh
++@@ -0,0 +1,71 @@
+++#!/usr/bin/env bash
+++# Regression: autotune --apply quotes a model artifact path that contains a
+++# space (e.g. under ".../Application Support/...") and, on some platforms, the
+++# quoting JSON-escapes the slashes ("\/Users\/..."). install.sh's config
+++# read-back MUST unescape those so the absolute-path check (`case "$p" in /*)`)
+++# sees a real leading "/". Otherwise the installer wrongly concludes "no paid
+++# model cleared" and dies 30 with nothing committed — on ANY Mac.
+++set -euo pipefail
+++
+++REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+++INSTALL_SH="$REPO_ROOT/phase3-binary/dist/install.sh"
+++TMP="$(mktemp -d)"
+++trap 'rm -rf "$TMP"' EXIT
+++
+++# Extract only the config read-back functions under test.
+++python3 - "$INSTALL_SH" > "$TMP/fn.sh" <<'PY'
+++import sys
+++names = {"read_config_artifact_path", "read_config_model", "read_config_catalog_model_id"}
+++lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+++i = 0
+++while i < len(lines):
+++    name = lines[i].split("()", 1)[0].strip() if "()" in lines[i] else ""
+++    if name not in names:
+++        i += 1
+++        continue
+++    depth = 0
+++    while i < len(lines):
+++        line = lines[i]
+++        print(line)
+++        depth += line.count("{") - line.count("}")
+++        i += 1
+++        if depth == 0:
+++            break
+++PY
+++
+++# shellcheck disable=SC1090
+++source "$TMP/fn.sh"
+++
+++fail() { echo "FAIL: $*" >&2; exit 1; }
+++
+++CONFIG_PATH="$TMP/config.yaml"
+++plain="/Users/admin/Library/Application Support/macprovider/models/mlx-community--Llama-3.2-3B/rev/abc"
+++
+++# 1) Escaped, quoted path (the bug): slashes are backslash-escaped.
+++printf 'model: meta-llama/llama-3.2-3b-instruct\n' > "$CONFIG_PATH"
+++printf 'model_artifact_path: "\\/Users\\/admin\\/Library\\/Application Support\\/macprovider\\/models\\/mlx-community--Llama-3.2-3B\\/rev\\/abc"\n' >> "$CONFIG_PATH"
+++
+++got="$(read_config_artifact_path)"
+++[ "$got" = "$plain" ] || fail "escaped path not unescaped: got [$got]"
+++case "$got" in /*) : ;; *) fail "unescaped path must start with / : [$got]" ;; esac
+++
+++# read_config_model round-trips a plain (unquoted) value untouched.
+++[ "$(read_config_model)" = "meta-llama/llama-3.2-3b-instruct" ] \
+++  || fail "read_config_model changed a plain value"
+++
+++# 2) Plain, unescaped, quoted path (post-ConfigApplier-fix output): unchanged.
+++printf 'model_artifact_path: "%s"\n' "$plain" > "$CONFIG_PATH"
+++got="$(read_config_artifact_path)"
+++[ "$got" = "$plain" ] || fail "plain quoted path altered: got [$got]"
+++
+++# 3) Unquoted, space-free path (legacy): unchanged.
+++printf 'model_artifact_path: /tmp/macprovider-test-snapshot\n' > "$CONFIG_PATH"
+++got="$(read_config_artifact_path)"
+++[ "$got" = "/tmp/macprovider-test-snapshot" ] || fail "unquoted path altered: got [$got]"
+++
+++# 4) Escaped catalog model id unescapes too (defensive).
+++printf 'model_catalog_model_id: "mlx-community\\/Llama-3.2-3B-Instruct-4bit"\n' > "$CONFIG_PATH"
+++[ "$(read_config_catalog_model_id)" = "mlx-community/Llama-3.2-3B-Instruct-4bit" ] \
+++  || fail "catalog model id not unescaped"
+++
+++echo "PASS: install.sh config read-back unescapes JSON-escaped slashes"
+diff --git a/audits/2026-08-31-install-path-escape/omc_architect.log b/audits/2026-08-31-install-path-escape/omc_architect.log
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/audits/2026-08-31-install-path-escape/omc_code.log b/audits/2026-08-31-install-path-escape/omc_code.log
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/audits/2026-08-31-install-path-escape/omc_security.log b/audits/2026-08-31-install-path-escape/omc_security.log
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/phase3-binary/Sources/macprovider-cli/ConfigApplier.swift b/phase3-binary/Sources/macprovider-cli/ConfigApplier.swift
+index 271f47c9..2e54cb6c 100644
+--- a/phase3-binary/Sources/macprovider-cli/ConfigApplier.swift
++++ b/phase3-binary/Sources/macprovider-cli/ConfigApplier.swift
+@@ -533,7 +533,15 @@ struct ConfigApplier {
+                 || [0x2D, 0x5F, 0x2E, 0x2F].contains(byte)
+         }
+         guard !value.isEmpty, plain else {
+-            let data = try? JSONEncoder().encode(value)
++            // Quote via JSON string encoding for values with spaces/specials
++            // (e.g. a model artifact path under "…/Application Support/…").
++            // withoutEscapingSlashes keeps forward slashes literal: an escaped
++            // "\/Users\/…" is valid JSON but breaks install.sh's YAML read-back,
++            // whose absolute-path check (`case "$p" in /*)`) then fails and the
++            // installer wrongly concludes "no paid model cleared".
++            let encoder = JSONEncoder()
++            encoder.outputFormatting = .withoutEscapingSlashes
++            let data = try? encoder.encode(value)
+             return data.map { String(decoding: $0, as: UTF8.self) } ?? "\"\""
+         }
+         return value
+diff --git a/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift b/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
+index 308b0a1b..74431050 100644
+--- a/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
++++ b/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
+@@ -146,7 +146,7 @@ actor CoordinatorClient {
+     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
+     typealias ReloadHelperFence = @Sendable () throws -> Void
+ 
+-    static let binaryVersion = "1.8.116"
++    static let binaryVersion = "1.8.117"
+     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
+ 
+     private let coordinatorURL: URL
+diff --git a/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift b/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift
+index bd08d356..f5355fec 100644
+--- a/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift
++++ b/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift
+@@ -1208,7 +1208,12 @@ struct ServeCommand: AsyncParsableCommand {
+                 || [0x2D, 0x5F, 0x2E, 0x2F].contains(byte)
+         }
+         guard !value.isEmpty, plain else {
+-            let data = try? JSONEncoder().encode(value)
++            // Keep forward slashes literal (see ConfigApplier.yamlScalar): an
++            // escaped "\/Users\/…" is valid JSON but breaks install.sh's YAML
++            // read-back absolute-path check, which then fails closed.
++            let encoder = JSONEncoder()
++            encoder.outputFormatting = .withoutEscapingSlashes
++            let data = try? encoder.encode(value)
+             return data.map { String(decoding: $0, as: UTF8.self) } ?? "\"\""
+         }
+         return value
+diff --git a/phase3-binary/Tests/macprovider-cliTests/ConfigApplierTests.swift b/phase3-binary/Tests/macprovider-cliTests/ConfigApplierTests.swift
+index 0d8650ee..e33c5b63 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/ConfigApplierTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/ConfigApplierTests.swift
+@@ -189,6 +189,51 @@ final class ConfigApplierTests: XCTestCase {
+         XCTAssertEqual(loaded.modelArtifactSHA256, artifactSHA)
+     }
+ 
++    // Regression: a model artifact path under "…/Application Support/…" contains
++    // a space, so yamlScalar quotes it. The quoted value MUST keep literal
++    // forward slashes (no JSON "\/" escaping) — an escaped "\/Users\/…" is valid
++    // JSON but breaks install.sh's read-back, whose absolute-path check
++    // (`case "$p" in /*)`) then fails and the installer wrongly reports
++    // "no paid model cleared".
++    func testApplyWritesSpaceContainingArtifactPathWithUnescapedSlashes() throws {
++        let fixture = try ConfigFixture()
++        try fixture.writeConfig(sampleConfig())
++        let artifactSHA = String(repeating: "a", count: 64)
++        let spacedPath =
++            "/Users/admin/Library/Application Support/macprovider/models/mlx-community--Llama-3.2-3B/rev/\(artifactSHA)"
++        var recommendation = recommendation()
++        recommendation.model = "meta-llama/llama-3.2-3b-instruct"
++        recommendation.modelArtifactPath = spacedPath
++        recommendation.modelArtifactSHA256 = artifactSHA
++
++        _ = try fixture.applier().apply(recommendation: recommendation, now: fixture.now)
++
++        let post = try String(contentsOf: fixture.configURL)
++        // The path is quoted (has a space) but the slashes stay literal.
++        XCTAssertTrue(
++            post.contains("model_artifact_path: \"\(spacedPath)\"\n"),
++            "artifact path should be quoted with literal slashes; got:\n\(post)"
++        )
++        // No JSON slash-escaping anywhere in the written config.
++        XCTAssertFalse(post.contains("\\/"), "config must not contain escaped slashes")
++        // What install.sh reads back (strip surrounding quotes) is a real
++        // absolute path with a leading "/".
++        let line = post.split(separator: "\n").first { $0.hasPrefix("model_artifact_path:") }
++        let value = line
++            .map { $0.replacingOccurrences(of: "model_artifact_path: ", with: "") }
++            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
++        XCTAssertEqual(value, spacedPath)
++        XCTAssertTrue(value?.hasPrefix("/") == true, "read-back path must start with /")
++        // The CLI's own loader round-trips the same path.
++        let loaded = try ConfigLoader.load(
++            cli: CLIOverrides(configPath: fixture.configURL.path),
++            environment: [:],
++            fileExists: { _ in true },
++            readFile: { _ in post }
++        )
++        XCTAssertEqual(loaded.modelArtifactPath, spacedPath)
++    }
++
+     func testApplyWritesDonorCatalogBindingAndConfigLoaderReadsIt() throws {
+         let fixture = try ConfigFixture()
+         try fixture.writeConfig(sampleConfig())
+diff --git a/phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift b/phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift
+index c6f23523..122e2b74 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift
+@@ -1221,6 +1221,29 @@ final class ServeCommandTests: XCTestCase {
+         XCTAssertEqual(config.modelArtifactPath, fixture.durablePath)
+     }
+ 
++    // Regression (both-sides sweep): the durable-store migration writer must
++    // also keep forward slashes literal. A migrated path under
++    // ".../Application Support/..." contains a space → quoted → must NOT be
++    // JSON slash-escaped, or install.sh's read-back absolute-path check fails
++    // exactly as in the fresh-install "no paid model cleared" bug.
++    func testPersistMigratedArtifactPathWritesSpacedPathWithoutEscapedSlashes() throws {
++        let dir = try tempDir()
++        let cfg = dir.appendingPathComponent("config.yaml")
++        try "model: m\nmodel_artifact_path: /old/snapshot\nmodel_artifact_sha256: abc\n"
++            .write(to: cfg, atomically: true, encoding: .utf8)
++        let spaced = dir.appendingPathComponent("Application Support/macprovider/models/x/y/z").path
++        try ServeCommand.persistMigratedArtifactPath(configPath: cfg.path, from: "/old/snapshot", to: spaced)
++        let post = try String(contentsOf: cfg, encoding: .utf8)
++        XCTAssertTrue(post.contains("model_artifact_path: \"\(spaced)\"\n"), post)
++        XCTAssertFalse(post.contains("\\/"), "migrated config must not contain escaped slashes: \(post)")
++        let line = post.split(separator: "\n").first { $0.hasPrefix("model_artifact_path:") }
++        let value = line
++            .map { $0.replacingOccurrences(of: "model_artifact_path: ", with: "") }
++            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
++        XCTAssertEqual(value, spaced)
++        XCTAssertTrue(value?.hasPrefix("/") == true, "read-back migrated path must start with /")
++    }
++
+     func testCoordinatorJoinRewritesNonCanonicalDurablePathToCatalogIdentity() async throws {
+         let fixture = try await makeCatalogBoundFixture()
+         var config = fixture.config
+diff --git a/phase3-binary/app/project.yml b/phase3-binary/app/project.yml
+index 96e035d8..db3b3139 100644
+--- a/phase3-binary/app/project.yml
++++ b/phase3-binary/app/project.yml
+@@ -23,8 +23,8 @@ settings:
+     SWIFT_VERSION: "5.9"
+     ENABLE_HARDENED_RUNTIME: YES
+     CODE_SIGN_STYLE: Manual
+-    MARKETING_VERSION: "1.8.116"
+-    CURRENT_PROJECT_VERSION: "116"
++    MARKETING_VERSION: "1.8.117"
++    CURRENT_PROJECT_VERSION: "117"
+     OTHER_SWIFT_FLAGS: "-strict-concurrency=complete"
+ 
+ targets:
+diff --git a/phase3-binary/app/release-builds.tsv b/phase3-binary/app/release-builds.tsv
+index 2341e13e..ec1750b6 100644
+--- a/phase3-binary/app/release-builds.tsv
++++ b/phase3-binary/app/release-builds.tsv
+@@ -50,3 +50,4 @@
+ 1.8.114	114
+ 1.8.115	115
+ 1.8.116	116
++1.8.117	117
+diff --git a/phase3-binary/dist/install.sh b/phase3-binary/dist/install.sh
+index 6b60221a..56fb5abd 100755
+--- a/phase3-binary/dist/install.sh
++++ b/phase3-binary/dist/install.sh
+@@ -9677,6 +9677,7 @@ read_config_model() {
+       value=$0
+       sub(/^model:[[:space:]]*/, "", value)
+       gsub(/^"|"$/, "", value)
++      gsub(/\\\//, "/", value)
+       print value
+       exit
+     }
+@@ -9728,6 +9729,10 @@ read_config_artifact_path() {
+       value=$0
+       sub(/^model_artifact_path:[[:space:]]*/, "", value)
+       gsub(/^"|"$/, "", value)
++      # A quoted path (e.g. under ".../Application Support/...") may arrive with
++      # JSON-escaped slashes ("\/Users\/..."). Unescape so the absolute-path
++      # check (`case "$p" in /*)`) sees a real leading "/".
++      gsub(/\\\//, "/", value)
+       print value
+       exit
+     }
+@@ -9741,6 +9746,7 @@ read_config_catalog_model_id() {
+       value=$0
+       sub(/^model_catalog_model_id:[[:space:]]*/, "", value)
+       gsub(/^"|"$/, "", value)
++      gsub(/\\\//, "/", value)
+       print value
+       exit
+     }
+diff --git a/phase3-binary/dist/test/install_config_path_escape.test.sh b/phase3-binary/dist/test/install_config_path_escape.test.sh
+new file mode 100755
+index 00000000..f278465b
+--- /dev/null
++++ b/phase3-binary/dist/test/install_config_path_escape.test.sh
+@@ -0,0 +1,71 @@
++#!/usr/bin/env bash
++# Regression: autotune --apply quotes a model artifact path that contains a
++# space (e.g. under ".../Application Support/...") and, on some platforms, the
++# quoting JSON-escapes the slashes ("\/Users\/..."). install.sh's config
++# read-back MUST unescape those so the absolute-path check (`case "$p" in /*)`)
++# sees a real leading "/". Otherwise the installer wrongly concludes "no paid
++# model cleared" and dies 30 with nothing committed — on ANY Mac.
++set -euo pipefail
++
++REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
++INSTALL_SH="$REPO_ROOT/phase3-binary/dist/install.sh"
++TMP="$(mktemp -d)"
++trap 'rm -rf "$TMP"' EXIT
++
++# Extract only the config read-back functions under test.
++python3 - "$INSTALL_SH" > "$TMP/fn.sh" <<'PY'
++import sys
++names = {"read_config_artifact_path", "read_config_model", "read_config_catalog_model_id"}
++lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
++i = 0
++while i < len(lines):
++    name = lines[i].split("()", 1)[0].strip() if "()" in lines[i] else ""
++    if name not in names:
++        i += 1
++        continue
++    depth = 0
++    while i < len(lines):
++        line = lines[i]
++        print(line)
++        depth += line.count("{") - line.count("}")
++        i += 1
++        if depth == 0:
++            break
++PY
++
++# shellcheck disable=SC1090
++source "$TMP/fn.sh"
++
++fail() { echo "FAIL: $*" >&2; exit 1; }
++
++CONFIG_PATH="$TMP/config.yaml"
++plain="/Users/admin/Library/Application Support/macprovider/models/mlx-community--Llama-3.2-3B/rev/abc"
++
++# 1) Escaped, quoted path (the bug): slashes are backslash-escaped.
++printf 'model: meta-llama/llama-3.2-3b-instruct\n' > "$CONFIG_PATH"
++printf 'model_artifact_path: "\\/Users\\/admin\\/Library\\/Application Support\\/macprovider\\/models\\/mlx-community--Llama-3.2-3B\\/rev\\/abc"\n' >> "$CONFIG_PATH"
++
++got="$(read_config_artifact_path)"
++[ "$got" = "$plain" ] || fail "escaped path not unescaped: got [$got]"
++case "$got" in /*) : ;; *) fail "unescaped path must start with / : [$got]" ;; esac
++
++# read_config_model round-trips a plain (unquoted) value untouched.
++[ "$(read_config_model)" = "meta-llama/llama-3.2-3b-instruct" ] \
++  || fail "read_config_model changed a plain value"
++
++# 2) Plain, unescaped, quoted path (post-ConfigApplier-fix output): unchanged.
++printf 'model_artifact_path: "%s"\n' "$plain" > "$CONFIG_PATH"
++got="$(read_config_artifact_path)"
++[ "$got" = "$plain" ] || fail "plain quoted path altered: got [$got]"
++
++# 3) Unquoted, space-free path (legacy): unchanged.
++printf 'model_artifact_path: /tmp/macprovider-test-snapshot\n' > "$CONFIG_PATH"
++got="$(read_config_artifact_path)"
++[ "$got" = "/tmp/macprovider-test-snapshot" ] || fail "unquoted path altered: got [$got]"
++
++# 4) Escaped catalog model id unescapes too (defensive).
++printf 'model_catalog_model_id: "mlx-community\\/Llama-3.2-3B-Instruct-4bit"\n' > "$CONFIG_PATH"
++[ "$(read_config_catalog_model_id)" = "mlx-community/Llama-3.2-3B-Instruct-4bit" ] \
++  || fail "catalog model id not unescaped"
++
++echo "PASS: install.sh config read-back unescapes JSON-escaped slashes"
