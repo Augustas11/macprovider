@@ -10,7 +10,7 @@ check is the read-only backstop that fires *before* that happens.
 
 Read-only: no secrets, no network, no signature trust decision (that is the
 client's job) — this only reads the self-asserted `generated_at`. Intended
-to run on a schedule far more often than the weekly operator-local renewal.
+to run on a schedule far more often than the weekly CI-signed renewal.
 
 Usage:
   curl -fsS --proto '=https' --tlsv1.2 --max-time 20 \\
@@ -77,15 +77,19 @@ def check_rate_card(
         fail(
             f"live /v1/rate-card generated_at is EXPIRED "
             f"({-remaining_days:.1f}d past the client 30-day horizon) — "
-            "providers that restart cannot rejoin; run "
-            "scripts/renew-autotune-static-feed.sh --deploy on the signing host now."
+            "providers that restart cannot rejoin; inspect "
+            "Actions workflow renew-autotune-static-feed-signed.yml "
+            "(production-release) or run "
+            "scripts/renew-autotune-static-feed.sh --deploy on a signing host now."
         )
     if age_days >= max_age_days:
         fail(
             f"live /v1/rate-card generated_at is {age_days:.1f}d old "
             f"(>= {max_age_days:.1f}d) — {remaining_days:.1f}d remain before the "
-            "client 30-day fail-closed. Run "
-            "scripts/renew-autotune-static-feed.sh --deploy on the signing host."
+            "client 30-day fail-closed. Inspect "
+            "Actions workflow renew-autotune-static-feed-signed.yml "
+            "(production-release) or run "
+            "scripts/renew-autotune-static-feed.sh --deploy on a signing host."
         )
     print("[autotune-feed-freshness] OK")
 

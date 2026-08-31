@@ -73,9 +73,11 @@ if "|| '20'" not in alarm:
     raise SystemExit("alarm default max-age must be 20 days")
 
 if 'cron: "0 16 * * 2"' not in renew:
-    raise SystemExit("weekly cadence must run Tuesday 16:00 UTC (after Monday launchd)")
+    raise SystemExit("weekly cadence must run Tuesday 16:00 UTC (after Wednesday signed renewal)")
 if 'cron: "0 16 * * 1"' in renew:
-    raise SystemExit("weekly cadence must not share Monday 16:00 UTC with operator launchd")
+    raise SystemExit("weekly cadence must not share Monday 16:00 UTC with discovery-head")
+if 'cron: "0 16 * * 3"' in renew:
+    raise SystemExit("weekly cadence must not share Wednesday 16:00 UTC with the signed renewal")
 if "RATE_CARD_URL" in alarm or "RATE_CARD_URL" in renew:
     raise SystemExit("workflows must pin coordinator.malibu.tech; no URL override")
 if "group: renew-autotune-static-feed" not in renew:

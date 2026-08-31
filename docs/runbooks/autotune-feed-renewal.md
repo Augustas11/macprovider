@@ -19,115 +19,111 @@ every provider WebSocket stays connected.
 ## Security model — signing stays off the production host
 
 The Ed25519 feed-signing key (`streamvc-autotune-static-v4`) is what protects
-clients from a compromised coordinator serving forged feeds. It MUST NOT live on
-Pearl. `renew-autotune-static-feed.sh` therefore:
+clients from a compromised coordinator serving forged feeds. It **MUST NOT**
+live on Pearl. A Pearl-root signer that mints client-trusted feeds and retargets
+`autotune/current` is the same mutation surface as `deploy-pearl-vps.sh`.
 
-- signs locally, on the operator machine where the key lives
-  (`~/.config/macprovider/keys/autotune-static-v4.private.base64`, `0600`),
-  deriving the public key in memory and comparing it to the committed trusted
-  keyring — **never printing private bytes**;
-- pushes only signed bytes to Pearl and does the symlink swap + `SIGHUP` over SSH.
+Primary always-on signer: GitHub Actions
+`.github/workflows/renew-autotune-static-feed-signed.yml` (Wednesday 16:00 UTC,
+`environment: production-release`, antfleet-ops approval). The runner signs with
+Swift CryptoKit, verifies with a sealed OpenSSL 3 bottle, and rsyncs **only
+signed bytes** to Pearl. The private key is a `production-release` secret, never
+a file on the coordinator host.
 
 A Pearl compromise therefore still cannot mint a validly-signed feed.
 
-## What the script does
+## Operator secrets (not in the repo)
 
-`scripts/renew-autotune-static-feed.sh` (default = dry-run, `--deploy` to publish):
+Place these on the `production-release` environment **before the first live
+`--deploy`**. Until they exist, the workflow is mergeable but a scheduled run
+fails closed on empty secrets. Do **not** commit key material.
 
-1. Builds an **ephemeral git worktree** off `origin/main` so it never dirties
-   your checkout (`generate`/`resign` rewrite tracked feed files + the ledger).
+| Secret | What it is |
+| --- | --- |
+| `AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64` | Raw 32-byte Ed25519 seed, same contents as `~/.config/macprovider/keys/autotune-static-v4.private.base64`. Do not reuse the discovery-head release-signing PEM. |
+| `PEARL_AUTOTUNE_DEPLOY_SSH_KEY` | OpenSSH private key for `root@159.223.165.194`. Do not reuse the download.malibu.tech upload key (different blast radius). Host key is pinned via `scripts/dist/malibu-download-known_hosts` with `StrictHostKeyChecking=yes`. |
+
+## What the signed job does
+
+`scripts/renew-autotune-static-feed.sh --deploy` (default without `--deploy` is
+dry-run):
+
+1. Builds an **ephemeral git worktree**. On Actions, restamps `GITHUB_SHA`
+   (the approved workflow commit), not a floating `origin/main`. Locally,
+   restamps `origin/main`.
 2. Re-stamps `version` + `generated_at` on candidate/demand and `generated_at`
    only on rate-card (its `version` is a rows-hash — a freshness renewal must not
    change it). Content is otherwise byte-identical.
 3. `catalog-release.py generate` → canonical bytes + manifest + ledger, then
-   `resign-autotune-static.sh` signs the three feeds.
+   `resign-autotune-static.sh` signs the three feeds (Swift). `verify-directory`
+   uses `OPENSSL_BIN` when set (CI sealed bottle).
 4. Assembles the 9-file release dir and gates it with
    `catalog-release.py verify-directory`.
 5. **Dry-run stops here.** With `--deploy`:
-   - reads the live `current` target,
+   - refuses to run if the signing-host clock is skewed >120s vs Pearl;
+   - takes `.renew.lock` (no concurrent autotune publishes);
    - **content-continuity guard**: compares the new feed (dates stripped) against
      the live feed and ABORTS on any model/gate/rate-card-row difference — a real
      catalog change must go through a reviewed release, never this cron;
-   - rsyncs the signed dir into `releases/`, records the outgoing release as
-     `.previous-target` (so nodes still on it are admitted as `previous`),
-     atomically retargets `current`, and `SIGHUP`s the coordinator;
-   - verifies the served `/v1/rate-card` `generated_at` refreshed within
-     `FRESHNESS_MAX_AGE_SEC` (default 900s); **rolls the symlink back and re-HUPs
-     on regression.**
+   - rsyncs the signed dir into `releases/`;
+   - holds the same Pearl deploy locks as `deploy-pearl-vps.sh`
+     (`/run/lock/macprovider-pearl-updater.lock` then
+     `/opt/macprovider/.coordinator-deploy.lock`, non-blocking). Lock files
+     are validated first (`scripts/pearl_autotune_deploy_lock.py`: regular
+     file, root:root, `0600`, nlink 1, `O_NOFOLLOW`) and never created;
+   - re-checks content continuity **under those locks** so a coordinator
+     catalog deploy cannot be overwritten by this restamp;
+   - resolves coordinator `MainPID` before mutating, records the outgoing
+     release as `.previous-target`, atomically retargets `current`, `SIGHUP`s;
+   - verifies served `/v1/rate-card` `generated_at` **exactly** equals this
+     run's stamp. Rollback of `current` / `.previous-target` runs **only if
+     this run already swapped `current`**, and only while holding the same
+     locks. A lock-held or pre-swap failure does not rollback (that would be
+     the first mutation and can clobber an in-flight coordinator deploy).
 
-## Manual run
+## Weekly schedule
+
+| When (UTC) | What |
+| --- | --- |
+| Monday 16:00 | discovery-head renewal (`renew-release-discovery-head.yml`) — different key, different artifact. Do not share this slot. |
+| Wednesday 16:00 | **signed autotune renew** (`renew-autotune-static-feed-signed.yml`, `production-release`) |
+| Tuesday 16:00 | **watch** (`renew-autotune-static-feed.yml`) — fails if live `generated_at` is ≥ 7 days old (~6 days after a successful Wednesday) |
+| every 6 hours | **20-day alarm** (`autotune-feed-freshness-alarm.yml`) |
+
+A red Tuesday watch means: inspect the Wednesday `production-release` run
+(missed schedule or approval still pending). Do **not** install a laptop
+LaunchAgent as the SLA — a closed laptop misses the week. Do **not** put the
+feed key on Pearl.
+
+## Laptop fallback (not the SLA)
+
+If the Actions signer cannot run, an operator at a machine that already holds
+the key can:
 
 ```bash
-# From any repo checkout (it uses its own ephemeral worktree):
 scripts/renew-autotune-static-feed.sh            # build + verify, no prod contact
 scripts/renew-autotune-static-feed.sh --deploy   # publish + hot-reload + verify
 ```
 
-Env overrides: `PEARL_SSH`, `REMOTE_AUTOTUNE_DIR`, `COORDINATOR_UNIT`,
-`COORDINATOR_HEALTH_URL`, `AUTOTUNE_STATIC_KEY_ID`.
+Env overrides: `PEARL_SSH` (default `pearl`), `PEARL_SSH_IDENTITY`,
+`PEARL_SSH_KNOWN_HOSTS`, `REMOTE_AUTOTUNE_DIR`, `COORDINATOR_UNIT`,
+`COORDINATOR_HEALTH_URL`, `AUTOTUNE_STATIC_KEY_ID`,
+`AUTOTUNE_STATIC_PRIVATE_KEY_PATH`, `OPENSSL_BIN`.
 
-Deploy is fail-closed and hardened: it takes an atomic remote lock (no concurrent
-publishes), guards against signing-host clock skew, verifies the served
-`generated_at` **exactly** equals this run's stamp (not a freshness window), and
-on any post-swap regression rolls back **both** `current` and `.previous-target`
-and re-HUPs.
-
-## Weekly schedule (operator-local, macOS launchd)
-
-Run weekly — `generated_at` is then never more than ~7 days old, leaving ~23
-days of slack, so a missed run (laptop asleep) is safe. Install as a **user
-LaunchAgent** on the machine that holds the signing key. This plist is
-operator-local (it names local paths + the key); keep it OUT of the repo.
-
-`~/Library/LaunchAgents/live.streamvc.autotune-feed-renewal.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>live.streamvc.autotune-feed-renewal</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string>
-    <string>-lc</string>
-    <string>cd "$HOME/macprovider-poc" &amp;&amp; scripts/renew-autotune-static-feed.sh --deploy &gt;&gt; "$HOME/Library/Logs/autotune-feed-renewal.log" 2>&amp;1</string>
-  </array>
-  <!-- Mondays 16:00 UTC-ish; launchd runs once on wake if the machine was asleep. -->
-  <key>StartCalendarInterval</key>
-  <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
-  <key>StandardErrorPath</key><string>/tmp/autotune-feed-renewal.err</string>
-  <key>RunAtLoad</key><false/>
-</dict></plist>
-```
+Verify after a run:
 
 ```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/live.streamvc.autotune-feed-renewal.plist
-launchctl kickstart -p gui/$(id -u)/live.streamvc.autotune-feed-renewal   # optional: run once now
+curl -s https://coordinator.malibu.tech/v1/rate-card \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["generated_at"])'
 ```
 
-Verify after a run: `curl -s https://coordinator.malibu.tech/v1/rate-card | python3 -c 'import sys,json;print(json.load(sys.stdin)["generated_at"])'`
-should show today; provider `pool_size` should be unchanged across the HUP.
+`pool_size` should be unchanged across the HUP.
 
 ## GitHub Actions backstops (no signing, no Pearl SSH)
 
-GitHub-hosted runners cannot call `renew-autotune-static-feed.sh --deploy`:
-the Ed25519 feed key must not be a CI secret, and deploy is SSH to Pearl.
-Two read-only workflows make a missed launchd/manual run visible in Actions
-before the client 30-day horizon:
-
-1. **Weekly cadence** — `.github/workflows/renew-autotune-static-feed.yml`
-   (`cron: "0 16 * * 2"`, Tuesday 16:00 UTC — same hour as discovery-head
-   renewal, offset one day so it does not race Monday launchd). Fetches live
-   `/v1/rate-card` and fails if `generated_at` is ≥ 7 days old. A failure
-   means: run `--deploy` on the signing host this week.
-2. **20-day alarm** — `.github/workflows/autotune-feed-freshness-alarm.yml`
-   (every 6 hours). Fails if `generated_at` is ≥ 20 days old, leaving ~10
-   days of runway. Mirror of `discovery-head-freshness-alarm.yml`.
-
-Both call `scripts/check-autotune-feed-freshness.py` (stdin JSON, no
-network, no secrets). `workflow_dispatch` accepts a `max_age_days` override
-for a manual check after a local deploy. The live URL is pinned to
+The Tuesday cadence and 20-day alarm remain **read-only**. They fetch live
+`/v1/rate-card` and call `scripts/check-autotune-feed-freshness.py` (stdin JSON,
+no network, no secrets). The live URL is pinned to
 `https://coordinator.malibu.tech/v1/rate-card` (no dispatch override).
 
 ```bash
@@ -139,10 +135,43 @@ curl -fsS --proto '=https' --tlsv1.2 --max-time 20 \
 ## Rollback
 
 The prior release is retained as `.previous-target` and its directory is left in
-`releases/`. To revert manually:
+`releases/`. Automated rollback holds the Pearl deploy locks, then:
+
+- restores `current` and `.previous-target` if `current` still points at the
+  failed renewal;
+- restores `.previous-target` only if `current` never moved;
+- does nothing if `current` already points at a newer release.
+
+Manual rollback must do the same. Replace `<failed-release-id>` with the
+renewal directory that should be undone:
 
 ```bash
-ssh pearl 'cd /opt/macprovider/autotune && ln -sfn "$(cat .previous-target)" .current.rb && mv -Tf .current.rb current && kill -HUP "$(systemctl show -p MainPID --value macprovider-coordinator)"'
+expected='releases/<failed-renewal-id>'
+orig_prev='releases/<pre-renewal-previous-id>'  # or __EMPTY__ if there was none
+ssh pearl bash -s -- "$expected" "$orig_prev" <<'RB'
+set -euo pipefail
+root=/opt/macprovider/autotune
+expected="$1"
+orig_prev="$2"
+[ "$orig_prev" = "__EMPTY__" ] && orig_prev=""
+exec 8</run/lock/macprovider-pearl-updater.lock
+flock -n 8 || { echo "Pearl updater lock held; not mutating" >&2; exit 1; }
+exec 9</opt/macprovider/.coordinator-deploy.lock
+flock -n 9 || { echo "coordinator deploy lock held; not mutating" >&2; exit 1; }
+live="$(readlink "$root/current")"
+live="${live#./}"
+[ "$live" = "$expected" ] || {
+  echo "current is $live, not $expected; not mutating" >&2
+  exit 0
+}
+prev="$(cat "$root/.previous-target")"
+ln -sfn "$prev" "$root/.current.rb"
+mv -Tf "$root/.current.rb" "$root/current"
+if [ -n "$orig_prev" ]; then printf '%s\n' "$orig_prev" > "$root/.previous-target"; else rm -f "$root/.previous-target"; fi
+pid="$(systemctl show -p MainPID --value macprovider-coordinator)"
+[ -n "$pid" ] && [ "$pid" != "0" ] && kill -HUP "$pid"
+echo "rolled back current away from $expected"
+RB
 ```
 
 See also `autotune-feed-30day-freshness-expiry-fleetwide` (incident + manual

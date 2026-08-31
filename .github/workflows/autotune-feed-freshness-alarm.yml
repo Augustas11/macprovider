@@ -3,11 +3,12 @@ name: Autotune feed freshness alarm
 # Read-only backstop for the SPEC-023 signed autotune feed (rate-card /
 # candidate / demand). The client 30-day generated_at horizon fails closed
 # with rate_card_update_required and strands any provider that restarts.
-# Operator-local launchd runs scripts/renew-autotune-static-feed.sh weekly
-# (signing stays off CI — see docs/runbooks/autotune-feed-renewal.md); if that
-# run is skipped/late, this alarm fails (and notifies) BEFORE the feed ages
-# past 30 days. No secrets, no production-release environment, no signing,
-# no Pearl SSH — it only reads the public /v1/rate-card generated_at.
+# The Wednesday production-release workflow
+# (renew-autotune-static-feed-signed.yml) is the always-on signer. If that
+# run is skipped, late, or waiting on approval, this alarm fails (and
+# notifies) BEFORE the feed ages past 30 days. No secrets, no
+# production-release environment, no signing, no Pearl SSH — it only reads
+# the public /v1/rate-card generated_at.
 
 on:
   schedule:

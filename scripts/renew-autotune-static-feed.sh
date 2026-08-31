@@ -9,8 +9,13 @@
 # SIGNING STAYS OFF THE PRODUCTION HOST. The Ed25519 feed-signing key is the
 # thing that protects clients from a compromised coordinator serving forged
 # feeds; putting it on Pearl would defeat that. This script signs locally (where
-# the key lives), pushes only signed bytes to Pearl, and does the symlink swap +
-# SIGHUP over SSH.
+# the key lives — operator laptop or a production-release GitHub Actions runner),
+# pushes only signed bytes to Pearl, and does the symlink swap + SIGHUP over SSH.
+#
+# Primary always-on signer: .github/workflows/renew-autotune-static-feed-signed.yml
+# (Wednesday 16:00 UTC, production-release). This script is that job's deploy
+# path and the laptop fallback. Do not install a Pearl systemd signer and do
+# not install a laptop LaunchAgent as the SLA.
 #
 # Default is DRY-RUN: build + verify a re-dated release locally and stop. Pass
 # --deploy to push to the coordinator host. --deploy is fail-closed and atomic,
@@ -23,13 +28,18 @@
 #
 # Env:
 #   PEARL_SSH                ssh target for the coordinator host (default: pearl)
+#   PEARL_SSH_IDENTITY       optional OpenSSH private-key file (CI deploy; 0600/0400)
+#   PEARL_SSH_KNOWN_HOSTS    pinned known_hosts when PEARL_SSH_IDENTITY is set
+#                            (default: scripts/dist/malibu-download-known_hosts)
 #   REMOTE_AUTOTUNE_DIR      remote autotune root (default: /opt/macprovider/autotune)
 #   COORDINATOR_UNIT         systemd unit name (default: macprovider-coordinator)
 #   COORDINATOR_HEALTH_URL   URL that returns the served rate-card (default: https://coordinator.malibu.tech/v1/rate-card)
 #   AUTOTUNE_STATIC_KEY_ID   signing key id (default: streamvc-autotune-static-v4)
 #   AUTOTUNE_STATIC_PRIVATE_KEY_PATH  override key path (default: ~/.config/macprovider/keys/autotune-static-<ver>.private.base64)
+#   OPENSSL_BIN              optional absolute OpenSSL 3 path (CI sealed bottle)
 #   RELEASE_ID_PREFIX        version prefix (default: published)
 #   RELEASE_ID_SUFFIX        version suffix (default: inband-provenance-v1)
+#   GITHUB_SHA               when set (Actions), restamp that commit instead of origin/main
 
 set -euo pipefail
 
@@ -50,16 +60,53 @@ DEPLOY=0
 WORKTREE=""
 STAGING=""
 LOCK_HELD=""
+LOCK_HELPER=""
+LOCK_HELPER_DIR=""
 
 log()   { printf '[renew-autotune] %s\n' "$*"; }
 fatal() { printf '[renew-autotune] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# SSH options: laptop uses the operator ssh config (alias `pearl`). CI passes
+# PEARL_SSH_IDENTITY + a pinned known_hosts file and must not fall back to
+# ssh-agent identities or TOFU.
+SSH_OPTS=(-o ConnectTimeout=15 -o BatchMode=yes)
+if [ -n "${PEARL_SSH_IDENTITY:-}" ]; then
+  case "$PEARL_SSH_IDENTITY" in ""|*[!A-Za-z0-9._/+=@-]*) fatal "unsafe PEARL_SSH_IDENTITY path" ;; esac
+  [ -f "$PEARL_SSH_IDENTITY" ] || fatal "PEARL_SSH_IDENTITY is not a file"
+  identity_mode="$(stat -f '%A' "$PEARL_SSH_IDENTITY" 2>/dev/null || stat -c '%a' "$PEARL_SSH_IDENTITY" 2>/dev/null || echo '')"
+  case "$identity_mode" in
+    600|400) ;;
+    *) fatal "PEARL_SSH_IDENTITY $PEARL_SSH_IDENTITY has permissions $identity_mode; expected 0600 or 0400" ;;
+  esac
+  PEARL_SSH_KNOWN_HOSTS="${PEARL_SSH_KNOWN_HOSTS:-$SCRIPT_DIR/dist/malibu-download-known_hosts}"
+  case "$PEARL_SSH_KNOWN_HOSTS" in ""|*[!A-Za-z0-9._/+=@-]*) fatal "unsafe PEARL_SSH_KNOWN_HOSTS path" ;; esac
+  [ -f "$PEARL_SSH_KNOWN_HOSTS" ] || fatal "PEARL_SSH_KNOWN_HOSTS is not a file"
+  SSH_OPTS+=(
+    -i "$PEARL_SSH_IDENTITY"
+    -o IdentitiesOnly=yes
+    -o "UserKnownHostsFile=$PEARL_SSH_KNOWN_HOSTS"
+    -o StrictHostKeyChecking=yes
+    -p 22
+  )
+fi
+case "$PEARL_SSH" in ""|*[!A-Za-z0-9._@-]*) fatal "unsafe PEARL_SSH: $PEARL_SSH" ;; esac
+
+SSH() { ssh "${SSH_OPTS[@]}" "$PEARL_SSH" "$@"; }
+RSYNC_RSH="ssh"
+for _ssh_opt in "${SSH_OPTS[@]}"; do
+  RSYNC_RSH="$RSYNC_RSH $_ssh_opt"
+done
 
 cleanup() {
   local rc=$?
   # Release the remote publish lock if this run acquired it (MED-3).
   if [ -n "$LOCK_HELD" ]; then
-    ssh -o ConnectTimeout=15 -o BatchMode=yes "$PEARL_SSH" \
-      "rmdir '$REMOTE_AUTOTUNE_DIR/.renew.lock'" >/dev/null 2>&1 || true
+    SSH "rmdir '$REMOTE_AUTOTUNE_DIR/.renew.lock'" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$LOCK_HELPER_DIR" ]; then
+    SSH "rm -rf '$LOCK_HELPER_DIR'" >/dev/null 2>&1 || true
+  elif [ -n "$LOCK_HELPER" ]; then
+    SSH "rm -f '$LOCK_HELPER'" >/dev/null 2>&1 || true
   fi
   [ -n "$STAGING" ] && [ -d "$STAGING" ] && rm -rf "$STAGING"
   if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
@@ -84,9 +131,21 @@ RELEASE_ID="${RELEASE_ID_PREFIX}-${TODAY}-${RELEASE_ID_SUFFIX}"
 
 WORKTREE="$(mktemp -d -t macprovider-feed-renew.XXXXXXXX)"
 rm -rf "$WORKTREE"
-git -C "$REPO_ROOT" fetch --quiet origin
-git -C "$REPO_ROOT" worktree add --quiet --detach "$WORKTREE" origin/main
-log "built ephemeral worktree at $WORKTREE (origin/main $(git -C "$WORKTREE" rev-parse --short HEAD))"
+if [ -n "${GITHUB_SHA:-}" ]; then
+  # Actions: restamp the approved workflow commit, not a floating origin/main.
+  case "$GITHUB_SHA" in
+    *[!0-9a-fA-F]*) fatal "unsafe GITHUB_SHA" ;;
+  esac
+  [ "${#GITHUB_SHA}" -eq 40 ] || fatal "GITHUB_SHA must be a 40-character commit"
+  git -C "$REPO_ROOT" cat-file -e "${GITHUB_SHA}^{commit}" \
+    || fatal "GITHUB_SHA $GITHUB_SHA is not in this checkout"
+  git -C "$REPO_ROOT" worktree add --quiet --detach "$WORKTREE" "$GITHUB_SHA"
+  log "built ephemeral worktree at $WORKTREE (GITHUB_SHA ${GITHUB_SHA:0:12})"
+else
+  git -C "$REPO_ROOT" fetch --quiet origin
+  git -C "$REPO_ROOT" worktree add --quiet --detach "$WORKTREE" origin/main
+  log "built ephemeral worktree at $WORKTREE (origin/main $(git -C "$WORKTREE" rev-parse --short HEAD))"
+fi
 
 CAT_DIR="$WORKTREE/phase3-binary/catalog/autotune"
 STATIC_DIR="$WORKTREE/phase3-binary/dist/static"
@@ -151,8 +210,6 @@ fi
 # 3. Deploy: push the signed dir, verify content continuity, atomically retarget
 #    `current`, keep the prior release as `.previous-target`, SIGHUP, verify.
 # ---------------------------------------------------------------------------
-SSH() { ssh -o ConnectTimeout=15 -o BatchMode=yes "$PEARL_SSH" "$@"; }
-
 # Allowlist every value interpolated into a remote shell string (MED-1). These are
 # operator-supplied, but a stray quote must never reach the remote shell.
 case "$REMOTE_AUTOTUNE_DIR" in ""|*[!A-Za-z0-9._/-]*) fatal "unsafe REMOTE_AUTOTUNE_DIR: $REMOTE_AUTOTUNE_DIR" ;; esac
@@ -236,42 +293,114 @@ done
 log "content continuity confirmed (dates-only delta)"
 
 # Rollback restores the EXACT prior state — current AND .previous-target — then
-# re-HUPs (HIGH-2, MED-2). Idempotent: if the deploy failed before mutating, this
-# just rewrites current/previous-target to the values they already hold.
+# re-HUPs. Only call this after this run has swapped `current` (remote exit 1).
+# Pre-mutation failures (remote exit 2) must not rollback: that would be the
+# first mutation and can clobber an in-flight coordinator deploy. Rollback
+# itself takes the same Pearl deploy locks; if they are held, skip mutation.
 rollback() {
   log "ROLLBACK: restoring current -> $CURRENT_TARGET, .previous-target -> ${ORIG_PREVIOUS_TARGET:-<none>}, re-HUPing"
-  SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$CURRENT_TARGET" "$ORIG_PREVIOUS_TARGET" "$COORDINATOR_UNIT" <<'RB' || true
+  PREV_ARG="${ORIG_PREVIOUS_TARGET:-__EMPTY__}"
+  SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$CURRENT_TARGET" "$PREV_ARG" "$COORDINATOR_UNIT" "$LOCK_HELPER" "releases/$RELEASE_DIRNAME" <<'RB' || true
 set -euo pipefail
-root="$1"; cur="$2"; prev="$3"; unit="$4"
-ln -sfn "$cur" "$root/.current.rollback"
-mv -Tf "$root/.current.rollback" "$root/current"
-if [ -n "$prev" ]; then printf '%s\n' "$prev" > "$root/.previous-target"; else rm -f "$root/.previous-target"; fi
-pid="$(systemctl show -p MainPID --value "$unit")"
-[ -n "$pid" ] && [ "$pid" != "0" ] && kill -HUP "$pid" || true
-echo "rolled back to $cur"
+root="$1"; cur="$2"; prev="$3"; unit="$4"; helper="$5"; expected="$6"
+[ "$prev" = "__EMPTY__" ] && prev=""
+python3 "$helper" validate || { echo "rollback: lock validation failed; not mutating" >&2; exit 1; }
+exec 8</run/lock/macprovider-pearl-updater.lock || { echo "rollback: cannot open updater lock; not mutating" >&2; exit 1; }
+flock -n 8 || { echo "rollback: Pearl updater lock held; not mutating" >&2; exit 1; }
+exec 9</opt/macprovider/.coordinator-deploy.lock || { echo "rollback: cannot open coordinator lock; not mutating" >&2; exit 1; }
+flock -n 9 || { echo "rollback: coordinator deploy lock held; not mutating" >&2; exit 1; }
+live="$(readlink "$root/current")" || { echo "rollback: cannot read current; not mutating" >&2; exit 1; }
+live="${live#./}"
+if [ "$live" = "$expected" ]; then
+  ln -sfn "$cur" "$root/.current.rollback"
+  mv -Tf "$root/.current.rollback" "$root/current"
+  if [ -n "$prev" ]; then printf '%s\n' "$prev" > "$root/.previous-target"; else rm -f "$root/.previous-target"; fi
+  pid="$(systemctl show -p MainPID --value "$unit")"
+  [ -n "$pid" ] && [ "$pid" != "0" ] && kill -HUP "$pid" || true
+  echo "rolled back to $cur"
+elif [ "$live" = "$cur" ]; then
+  if [ -n "$prev" ]; then printf '%s\n' "$prev" > "$root/.previous-target"; else rm -f "$root/.previous-target"; fi
+  echo "rollback: restored .previous-target only (current still $cur)"
+else
+  echo "rollback: current is $live, not $expected; not mutating"
+  exit 0
+fi
 RB
 }
 
 # Push the new release dir under a staging name first, then move into place.
 REMOTE_TMP=".incoming-$RELEASE_DIRNAME.$$"
+LOCK_HELPER_DIR="$(SSH 'umask 077 && mktemp -d /tmp/macprovider-autotune-lock.XXXXXXXX')" \
+  || fatal "cannot create remote lock-helper directory"
+LOCK_HELPER_DIR="${LOCK_HELPER_DIR//$'\n'/}"
+case "$LOCK_HELPER_DIR" in
+  /tmp/macprovider-autotune-lock.[A-Za-z0-9]*) ;;
+  *) fatal "unsafe LOCK_HELPER_DIR: $LOCK_HELPER_DIR" ;;
+esac
+case "$LOCK_HELPER_DIR" in *[!A-Za-z0-9._/-]*) fatal "unsafe LOCK_HELPER_DIR: $LOCK_HELPER_DIR" ;; esac
+LOCK_HELPER="$LOCK_HELPER_DIR/pearl_autotune_deploy_lock.py"
+log "installing Pearl lock validator"
+SSH "cat >'$LOCK_HELPER' && chown root:root '$LOCK_HELPER' && chmod 0700 '$LOCK_HELPER'" \
+  < "$SCRIPT_DIR/pearl_autotune_deploy_lock.py" \
+  || fatal "cannot install pearl_autotune_deploy_lock.py on $PEARL_SSH"
+
 log "uploading signed release bytes"
-rsync -e "ssh -o ConnectTimeout=15 -o BatchMode=yes" -a --delete \
+rsync -e "$RSYNC_RSH" -a --delete \
   "$RELEASE_STAGE/" "$PEARL_SSH:$REMOTE_AUTOTUNE_DIR/releases/$REMOTE_TMP/" \
   || fatal "rsync failed"
 
-# Remote publish. The coordinator PID is resolved FIRST so a missing daemon aborts
-# BEFORE any mutation (HIGH-2). .previous-target is written verbatim — CURRENT_TARGET
+# Remote publish. Exit 2 = aborted before swapping current (do not rollback).
+# Exit 1 = swapped current then failed (rollback under locks).
+# The coordinator PID is resolved FIRST so a missing daemon aborts BEFORE any
+# mutation (HIGH-2). .previous-target is written verbatim — CURRENT_TARGET
 # already carries the `releases/<id>` prefix, so it must NOT be re-prefixed (HIGH-1).
-if ! SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$REMOTE_TMP" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$COORDINATOR_UNIT" <<'REMOTE'
+# Hold deploy-pearl-vps.sh locks for the swap window so a coordinator deploy
+# cannot clobber `current`. Validate existing lock files; do not create them
+# (a 0644 create would fail the coordinator deploy's 0600 root:root check).
+set +e
+SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$REMOTE_TMP" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$COORDINATOR_UNIT" "$LOCK_HELPER" <<'REMOTE'
 set -euo pipefail
-root="$1"; incoming="$2"; final="$3"; prev="$4"; unit="$5"
+root="$1"; incoming="$2"; final="$3"; prev="$4"; unit="$5"; helper="$6"
+incoming_path="$root/releases/$incoming"
+mutated=0
+abort_pre_mutation() {
+  echo "$1" >&2
+  rm -rf "$incoming_path" >/dev/null 2>&1 || true
+  exit 2
+}
+trap 'if [ "$mutated" -eq 1 ]; then exit 1; else rm -rf "$incoming_path" >/dev/null 2>&1 || true; exit 2; fi' ERR
 # Resolve the reload target BEFORE mutating anything, so a dead daemon aborts clean.
 pid="$(systemctl show -p MainPID --value "$unit")"
-[ -n "$pid" ] && [ "$pid" != "0" ] || { echo "coordinator MainPID unavailable; not mutating" >&2; exit 1; }
+[ -n "$pid" ] && [ "$pid" != "0" ] || abort_pre_mutation "coordinator MainPID unavailable; not mutating"
+python3 "$helper" validate || abort_pre_mutation "Pearl deploy lock files failed validation; not mutating"
+exec 8</run/lock/macprovider-pearl-updater.lock || abort_pre_mutation "cannot open /run/lock/macprovider-pearl-updater.lock; not mutating"
+flock -n 8 || abort_pre_mutation "Pearl updater lock held; not mutating"
+exec 9</opt/macprovider/.coordinator-deploy.lock || abort_pre_mutation "cannot open /opt/macprovider/.coordinator-deploy.lock; not mutating"
+flock -n 9 || abort_pre_mutation "coordinator deploy lock held; not mutating"
+live_current="$(readlink "$root/current")" || abort_pre_mutation "cannot read current under lock"
+live_current="${live_current#./}"
+[ "$live_current" = "$prev" ] || abort_pre_mutation "current moved under lock ($live_current != $prev); not mutating"
+# Re-check dates-only continuity under the lock so a coordinator catalog deploy
+# that landed after the pre-lock read cannot be overwritten by this restamp.
+python3 - "$incoming_path" "$root/current" <<'PY'
+import json, pathlib, sys
+incoming, current = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+def norm(path):
+    obj = json.loads(path.read_text())
+    obj.pop("version", None)
+    obj.pop("generated_at", None)
+    return json.dumps(obj, sort_keys=True)
+for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json"):
+    if norm(incoming / name) != norm(current / name):
+        raise SystemExit(f"content drift under lock in {name}")
+PY
 cd "$root/releases"
 chown -R root:macprovider "$incoming"
 chmod 0750 "$incoming"; chmod 0640 "$incoming"/*
 mv "$incoming" "$final"
+# Persistent autotune metadata starts here. Set mutated before the first write so
+# a failure after .previous-target (and before current swap) still rollbacks.
+mutated=1
 # Record the outgoing release (verbatim; already prefixed) so the coordinator admits
 # it as `previous` and already-joined nodes on it stay routable across the swap.
 printf '%s\n' "$prev" > "$root/.previous-target"
@@ -283,9 +412,15 @@ echo "retargeted current -> releases/$final (previous-target=$prev)"
 kill -HUP "$pid"
 echo "sent SIGHUP to $unit (pid $pid)"
 REMOTE
-then
+publish_rc=$?
+set -e
+if [ "$publish_rc" -eq 0 ]; then
+  :
+elif [ "$publish_rc" -eq 1 ]; then
   rollback
-  fatal "remote publish failed"
+  fatal "remote publish failed after mutating current"
+else
+  fatal "remote publish aborted before mutating current (rc=$publish_rc)"
 fi
 
 log "waiting for hot-reload to apply"

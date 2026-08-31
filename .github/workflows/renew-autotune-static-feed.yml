@@ -2,28 +2,24 @@ name: Renew autotune static feed
 
 # Weekly cadence gate for the SPEC-023 signed autotune feed.
 #
-# Signing stays on the operator machine (streamvc-autotune-static-v4 MUST NOT
-# be a CI secret and MUST NOT live on Pearl — see
-# docs/runbooks/autotune-feed-renewal.md). GitHub-hosted runners therefore
-# cannot call `scripts/renew-autotune-static-feed.sh --deploy`: that script
-# signs locally and rsyncs to Pearl over SSH. This workflow uses the same
-# 16:00 UTC weekly hour as renew-release-discovery-head.yml, offset to
-# Tuesday so it runs AFTER the Monday operator-local launchd renewal rather
-# than racing it. The 20-day autotune-feed-freshness-alarm.yml is the
-# last-line backstop.
+# Signing is the Wednesday production-release workflow
+# (.github/workflows/renew-autotune-static-feed-signed.yml). This job is
+# watch-only: no secrets, no Pearl SSH, no --deploy. Tuesday 16:00 UTC is
+# one day after Wednesday's signed run would have landed the previous week
+# (~6 days old, inside the 7-day SLA). Offset from Monday 16:00 UTC
+# discovery-head renewal.
 #
 # The job fetches the live /v1/rate-card and fails if generated_at is at
-# least 7 days old — the weekly SLA. On failure, run
-# `scripts/renew-autotune-static-feed.sh --deploy` on the signing host.
-# No secrets, no Pearl SSH, no --deploy from CI.
+# least 7 days old — the weekly SLA. On failure, inspect the Wednesday
+# signed workflow (missed run or production-release approval still pending).
+# The 20-day autotune-feed-freshness-alarm.yml is the last-line backstop.
 
 on:
   schedule:
-    # Tuesday 16:00 UTC: one day after the Monday operator-local renewal
-    # window, well inside the 30-day client freshness horizon. A missed
-    # Monday run then fails this check the next day rather than silently
-    # aging toward 30 days, and cannot false-fail while launchd is still
-    # deploying.
+    # Tuesday 16:00 UTC: after last week's Wednesday signed renewal, well
+    # inside the 30-day client freshness horizon. A missed/unapproved
+    # Wednesday run then fails this check rather than silently aging
+    # toward 30 days.
     - cron: "0 16 * * 2"
   workflow_dispatch:
     inputs:
@@ -64,6 +60,6 @@ jobs:
             exit 1
           }
           echo "Weekly SLA: live generated_at must be younger than ${MAX_AGE_DAYS}d."
-          echo "A failure means: run scripts/renew-autotune-static-feed.sh --deploy on the signing host."
+          echo "A failure means: inspect the Wednesday production-release workflow renew-autotune-static-feed-signed.yml (missed run or approval pending)."
           curl -fsS --proto '=https' --tlsv1.2 --max-time 20 -- "$url" \
             | python3 scripts/check-autotune-feed-freshness.py --max-age-days "$MAX_AGE_DAYS"
