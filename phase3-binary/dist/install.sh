@@ -11750,50 +11750,8 @@ PY
       )" || die 7 "installed compatibility set returned invalid preflight identity"
       installed_tag="v$installed_version"
     else
-      installed_preflight_status="$?"
-      # Some pre-release headless smoke CLIs expose release-payload-preflight
-      # but fail inside that command because their legacy credentials parser
-      # rejects the modern --config argument. Acceptance upgrades may recover
-      # only from that exact exit/status shape and only for the one-shot
-      # v1.8.105 -> v1.8.108 acceptance bridge tracked by issue #1201. Remove
-      # this branch after that signed acceptance release has drained the smoke
-      # fleet. The
-      # common comparison below still requires the signed candidate to be
-      # strictly newer, and staged candidate signature/identity validation is
-      # unchanged and occurs before any live cutover.
-      if [ "${HEADLESS:-0}" != "1" ]; then
-        rm -f "$installed_preflight_error_file"
-        die 7 "legacy headless smoke compatibility fallback requires headless mode"
-      fi
-      if [ "$target" != "v1.8.108" ]; then
-        rm -f "$installed_preflight_error_file"
-        die 7 "legacy headless smoke compatibility fallback is limited to acceptance target v1.8.108"
-      fi
-      python3 - "$installed_preflight_error_file" "$installed_preflight_status" <<'PY' \
-        || {
-import sys
-
-expected = (
-    b"Error: Unknown option '--config'\n"
-    b"Usage: macprovider-cli credentials <subcommand>\n"
-    b"  See 'macprovider-cli credentials --help' for more information.\n"
-)
-if sys.argv[2] != "2" or open(sys.argv[1], "rb").read() != expected:
-    raise SystemExit(1)
-PY
-        rm -f "$installed_preflight_error_file"
-        die 7 "installed compatibility preflight failed outside the legacy headless smoke signature"
-      }
       rm -f "$installed_preflight_error_file"
-      installed_version="$(installed_provider_binary_version "$installed_binary")" \
-        || die 7 "installed provider CLI version fallback failed before acceptance upgrade"
-      case "$installed_version" in
-        v*) installed_tag="$installed_version" ;;
-        *) installed_tag="v$installed_version" ;;
-      esac
-      [ "$installed_tag" = "v1.8.105" ] \
-        || die 7 "legacy headless smoke compatibility fallback requires incumbent v1.8.105"
-      log "Installed compatibility preflight failed; using bounded legacy incumbent version check for acceptance upgrade."
+      die 7 "installed compatibility set failed preflight before acceptance upgrade"
     fi
   else
     installed_version="$(installed_provider_binary_version "$installed_binary")" \
