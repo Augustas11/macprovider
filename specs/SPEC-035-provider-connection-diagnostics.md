@@ -1,9 +1,22 @@
 # SPEC-035 — Provider connection diagnostics and failure history
 
-Version: v0.4.0
-Status: draft (Partial #535 coordinator journal + provider diagnostic snapshot + monitor alerts + admission-ceiling drift diagnostics)
+Version: v0.4.1
+Status: draft (Partial #535 coordinator journal + provider diagnostic snapshot + monitor alerts + admission-ceiling drift diagnostics; #1267 operator onboarding funnel join)
 Owner: coordinator operator observability
 Issue: https://github.com/Augustas11/macprovider/issues/535
+
+Changelog:
+
+- v0.4.1 (2026-08-31): adds the operator onboarding funnel join for
+  [#1267](https://github.com/Augustas11/macprovider/issues/1267). `GET /admin/onboarding`
+  and `coordinator-cli list-onboarding` project exclusive pending / confirmed /
+  live / failed_expired / failed_revoked states from referral redemptions,
+  bootstrap identities, last-known/events, and live pool presence. Redeemed is
+  not a success marker. Invite codes, code digests, tokens, and receipt keys
+  MUST NOT appear in the projection. The admin GET is page-capped with a
+  `next_after` / `next_after_ts` cursor. After bootstrap-identity collection,
+  a leftover redemption still projects as `failed_expired` with its redemption
+  timestamp; expiry MAY be omitted.
 
 ## 1. Purpose and scope
 
@@ -30,6 +43,10 @@ In scope for v0.2 (this Partial):
   coordinator admin endpoints.
 - Coordinator-observed proof-of-weights admission-ceiling drift diagnostics on
   heartbeat model changes.
+- Operator onboarding funnel join (`GET /admin/onboarding` and
+  `coordinator-cli list-onboarding`) that distinguishes pending, confirmed,
+  live, expired-unconfirmed, and revoked attempts without treating redemption
+  as a successful join.
 
 Out of scope (later Partials of #535):
 
@@ -64,11 +81,28 @@ the closed set: `invalid_token`, `invalid_auth_request`, `no_common_aead_suite`,
 `unrecognized_auth_message`, `pool_full`, `other`.
 
 **SPEC-035-R003 — Operator-only admin GETs.** The coordinator MUST expose
-`GET /admin/providers`, `GET /admin/providers/{provider_id}`, and
-`GET /admin/providers/{provider_id}/events` only to requests that pass the
-existing human-operator bearer check. Missing/invalid operator credentials MUST
-fail closed with `401`. These routes MUST NOT accept gateway service tokens and
-MUST NOT be reachable on buyer/gateway public APIs.
+`GET /admin/providers`, `GET /admin/providers/{provider_id}`,
+`GET /admin/providers/{provider_id}/events`, and `GET /admin/onboarding`
+only to requests that pass the existing human-operator bearer check.
+Missing/invalid operator credentials MUST fail closed with `401`. These
+routes MUST NOT accept gateway service tokens and MUST NOT be reachable on
+buyer/gateway public APIs. `GET /admin/onboarding` MUST join referral
+redemptions, bootstrap identities, last-known/events, and live pool presence
+into exclusive operator states `pending`, `confirmed`, `live`,
+`failed_expired`, and `failed_revoked`. A redeemed-but-unconfirmed identity
+that has passed bootstrap token expiry MUST surface as `failed_expired` with
+its redemption timestamp and, while the bootstrap identity row remains, its
+expiry timestamp. After identity collection removes the bootstrap row, the
+redemption MUST still appear as `failed_expired` with the redemption
+timestamp; expiry MAY be omitted because it is no longer durably present.
+The list MUST be page-capped and MUST emit a stable cursor (`next_after`,
+`next_after_ts`) when more matching rows remain. The projection MUST NOT
+include invite codes, code digests, provider tokens, or receipt public keys.
+The Pearl-local `coordinator-cli list-onboarding` command is the offline
+sibling of this GET and MUST apply the same exclusive states and redaction
+rules, except that `live` requires an in-process connected session and
+therefore remains `confirmed` on the CLI unless a later operator HTTP overlay
+supplies presence.
 
 **SPEC-035-R004 — Offline last-known representation.** A provider that is not
 currently connected MUST be represented as `presence=offline` with its last-known
@@ -140,5 +174,7 @@ Authorization values, local paths, or buyer-visible diagnostics.
 
 v0.4 ships coordinator-side journal/admin GETs, provider `status --json`,
 authenticated WSS `diagnostic_status` snapshots, Pearl monitor diagnostic
-alerts, and coordinator observe-only admission-ceiling drift events. CLI inspect
-wrappers and any HTTPS beacon remain deferred under #535.
+alerts, and coordinator observe-only admission-ceiling drift events. v0.4.1
+adds the operator onboarding funnel join (`GET /admin/onboarding` and
+`coordinator-cli list-onboarding`). CLI inspect wrappers and any HTTPS beacon
+remain deferred under #535.

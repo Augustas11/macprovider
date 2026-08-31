@@ -31,6 +31,8 @@ func main() {
 		err = revokeBootstrapIdentity(os.Args[2:])
 	case "list-bootstrap-identities":
 		err = listBootstrapIdentities(os.Args[2:])
+	case "list-onboarding":
+		err = listOnboarding(os.Args[2:])
 	case "list-tokens":
 		err = listTokens(os.Args[2:])
 	case "revoke-and-kick":
@@ -627,5 +629,5 @@ func preFlipAuditRun(args []string, stdout io.Writer) (stale bool, err error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit|create-seed-referral|adjust-seed-referral|replace-seed-referral|revoke-referral|trust-pool-admin|trust-pool-oncall|trust-pool-artifact-lifecycle> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-onboarding|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit|create-seed-referral|adjust-seed-referral|replace-seed-referral|revoke-referral|trust-pool-admin|trust-pool-oncall|trust-pool-artifact-lifecycle> [flags]")
 }

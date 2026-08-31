@@ -997,7 +997,7 @@
     {
       "spec_id": "SPEC-035",
       "title": "Provider connection diagnostics and failure history",
-      "version": "v0.4.0",
+      "version": "v0.4.1",
       "path": "specs/SPEC-035-provider-connection-diagnostics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2361,10 +2361,18 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/ws/admin_providers.go:func (s *Server) handleAdminProviders",
+        "phase4-coordinator/internal/ws/admin_onboarding.go:func (s *Server) handleAdminOnboarding",
+        "phase4-coordinator/cmd/coordinator-cli/onboarding.go:func listOnboarding",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) authorizedOperator"
       ],
       "tests": [
-        "phase4-coordinator/internal/ws/admin_providers_test.go:TestAdminProvidersRequireOperatorAuth"
+        "phase4-coordinator/internal/ws/admin_providers_test.go:TestAdminProvidersRequireOperatorAuth",
+        "phase4-coordinator/internal/ws/admin_onboarding_test.go:TestAdminOnboardingRequiresOperatorAuth",
+        "phase4-coordinator/internal/ws/admin_onboarding_test.go:TestAdminOnboardingJoinsInviteBootstrapAndLivePresence",
+        "phase4-coordinator/internal/ws/admin_onboarding_test.go:TestAdminOnboardingRejectsGatewayServiceToken",
+        "phase4-coordinator/cmd/coordinator-cli/onboarding_test.go:TestListOnboardingMarksExpiredUnconfirmedAsFailed",
+        "phase4-coordinator/internal/auth/onboarding_funnel_test.go:TestOnboardingFunnelStatesCoverExpiredConfirmedLiveAndRevoked",
+        "phase4-coordinator/internal/auth/onboarding_funnel_test.go:TestPageOnboardingAttemptsEmitsCursorWhenTruncated"
       ],
       "journeys": [],
       "evidence": [],
@@ -2372,7 +2380,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/535",
-        "rationale": "Operator-only admin GETs: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
+        "rationale": "Operator-only admin GETs including the #1267 onboarding funnel join: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
       }
     },
     {
