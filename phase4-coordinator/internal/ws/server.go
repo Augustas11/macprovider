@@ -1313,6 +1313,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/blacklist", s.handleBlacklist)
 	mux.HandleFunc("/admin/providers", s.handleAdminProviders)
 	mux.HandleFunc("/admin/providers/", s.handleAdminProviders)
+	mux.HandleFunc("/admin/onboarding", s.handleAdminOnboarding)
 	mux.HandleFunc("/admin/compute-integrity", s.handleAdminComputeIntegrity)
 	mux.HandleFunc("/admin/compute-integrity/", s.handleAdminComputeIntegrity)
 	mux.HandleFunc("/admin/provisional", s.handleAdminProvisional)
