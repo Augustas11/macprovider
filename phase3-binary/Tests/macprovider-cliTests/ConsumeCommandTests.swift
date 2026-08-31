@@ -1359,7 +1359,14 @@ final class ConsumeCommandTests: XCTestCase {
 
     func testPhase3BStatusReportsTrustedPricingAvailabilityAndWarnings() throws {
         let token = try ConsumeLocalToken.generate()
-        var trustedRateCard = phase3BTrustedRateCard(generatedAt: "2026-08-01T00:00:00Z")
+        // Use a RELATIVE generated-at inside the stale-but-not-expired window
+        // (staleAge 14d ≤ age ≤ maxAge 30d) so this test stays trusted+stale
+        // rather than silently expiring on a fixed calendar date: a hard-coded
+        // 2026-08-01 crossed the 30-day maxAge on 2026-08-31 and read
+        // "unavailable"/expired with no stale_pricing warning.
+        let staleButValidGeneratedAt = ISO8601DateFormatter()
+            .string(from: Date().addingTimeInterval(-21 * 24 * 3600))
+        var trustedRateCard = phase3BTrustedRateCard(generatedAt: staleButValidGeneratedAt)
         trustedRateCard = ConsumeTrustedRateCard(
             version: trustedRateCard.version,
             policyVersion: trustedRateCard.policyVersion,
