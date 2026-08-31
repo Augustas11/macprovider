@@ -9677,6 +9677,7 @@ read_config_model() {
       value=$0
       sub(/^model:[[:space:]]*/, "", value)
       gsub(/^"|"$/, "", value)
+      gsub(/\\\//, "/", value)
       print value
       exit
     }
@@ -9728,6 +9729,10 @@ read_config_artifact_path() {
       value=$0
       sub(/^model_artifact_path:[[:space:]]*/, "", value)
       gsub(/^"|"$/, "", value)
+      # A quoted path (e.g. under ".../Application Support/...") may arrive with
+      # JSON-escaped slashes ("\/Users\/..."). Unescape so the absolute-path
+      # check (`case "$p" in /*)`) sees a real leading "/".
+      gsub(/\\\//, "/", value)
       print value
       exit
     }
@@ -9741,6 +9746,7 @@ read_config_catalog_model_id() {
       value=$0
       sub(/^model_catalog_model_id:[[:space:]]*/, "", value)
       gsub(/^"|"$/, "", value)
+      gsub(/\\\//, "/", value)
       print value
       exit
     }

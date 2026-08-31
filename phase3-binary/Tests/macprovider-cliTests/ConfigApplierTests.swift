@@ -189,6 +189,51 @@ final class ConfigApplierTests: XCTestCase {
         XCTAssertEqual(loaded.modelArtifactSHA256, artifactSHA)
     }
 
+    // Regression: a model artifact path under "…/Application Support/…" contains
+    // a space, so yamlScalar quotes it. The quoted value MUST keep literal
+    // forward slashes (no JSON "\/" escaping) — an escaped "\/Users\/…" is valid
+    // JSON but breaks install.sh's read-back, whose absolute-path check
+    // (`case "$p" in /*)`) then fails and the installer wrongly reports
+    // "no paid model cleared".
+    func testApplyWritesSpaceContainingArtifactPathWithUnescapedSlashes() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+        let artifactSHA = String(repeating: "a", count: 64)
+        let spacedPath =
+            "/Users/admin/Library/Application Support/macprovider/models/mlx-community--Llama-3.2-3B/rev/\(artifactSHA)"
+        var recommendation = recommendation()
+        recommendation.model = "meta-llama/llama-3.2-3b-instruct"
+        recommendation.modelArtifactPath = spacedPath
+        recommendation.modelArtifactSHA256 = artifactSHA
+
+        _ = try fixture.applier().apply(recommendation: recommendation, now: fixture.now)
+
+        let post = try String(contentsOf: fixture.configURL)
+        // The path is quoted (has a space) but the slashes stay literal.
+        XCTAssertTrue(
+            post.contains("model_artifact_path: \"\(spacedPath)\"\n"),
+            "artifact path should be quoted with literal slashes; got:\n\(post)"
+        )
+        // No JSON slash-escaping anywhere in the written config.
+        XCTAssertFalse(post.contains("\\/"), "config must not contain escaped slashes")
+        // What install.sh reads back (strip surrounding quotes) is a real
+        // absolute path with a leading "/".
+        let line = post.split(separator: "\n").first { $0.hasPrefix("model_artifact_path:") }
+        let value = line
+            .map { $0.replacingOccurrences(of: "model_artifact_path: ", with: "") }
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
+        XCTAssertEqual(value, spacedPath)
+        XCTAssertTrue(value?.hasPrefix("/") == true, "read-back path must start with /")
+        // The CLI's own loader round-trips the same path.
+        let loaded = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: fixture.configURL.path),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in post }
+        )
+        XCTAssertEqual(loaded.modelArtifactPath, spacedPath)
+    }
+
     func testApplyWritesDonorCatalogBindingAndConfigLoaderReadsIt() throws {
         let fixture = try ConfigFixture()
         try fixture.writeConfig(sampleConfig())
