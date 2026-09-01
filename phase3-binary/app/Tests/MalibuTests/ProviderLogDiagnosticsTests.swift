@@ -85,6 +85,30 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
         XCTAssertEqual(finding?.id, "autoupdate_home_acl_rejected")
     }
 
+    func testIgnoresHomeAutoupdateACLRejectionBeforeFailedBundledRepairMarker() {
+        let finding = ProviderLogDiagnostics.homeAutoupdateACLRejection(
+            lines: [
+                "[2026-08-19T01:05:42Z] autoupdate recovery_error=acl_write_rejected:/Users/provider",
+                "[2026-08-19T01:08:20Z] \(ProviderLogDiagnostics.providerSoftwareInstallFailedAutoupdateACLMarker)",
+            ],
+            homeDirectory: URL(fileURLWithPath: "/Users/provider")
+        )
+
+        XCTAssertNil(finding)
+    }
+
+    func testDetectsHomeAutoupdateACLRejectionAfterFailedBundledRepairMarker() {
+        let finding = ProviderLogDiagnostics.homeAutoupdateACLRejection(
+            lines: [
+                "[2026-08-19T01:08:20Z] \(ProviderLogDiagnostics.providerSoftwareInstallFailedAutoupdateACLMarker)",
+                "[2026-08-19T01:09:42Z] autoupdate recovery_error=acl_write_rejected:/Users/provider",
+            ],
+            homeDirectory: URL(fileURLWithPath: "/Users/provider")
+        )
+
+        XCTAssertEqual(finding?.id, "autoupdate_home_acl_rejected")
+    }
+
     func testIgnoresHomeAutoupdateACLRejectionBeforeWatchdogRecoverySuccess() {
         let finding = ProviderLogDiagnostics.homeAutoupdateACLRejection(
             lines: [

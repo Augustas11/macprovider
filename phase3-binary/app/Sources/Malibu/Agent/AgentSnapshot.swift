@@ -168,6 +168,7 @@ struct AgentSnapshot: Equatable {
     var providerSoftwareRepairRecommended: Bool
     var providerSoftwareRepairInProgress: Bool
     var providerSoftwareRepairLastError: String?
+    var diagnosticFindings: [ProviderDiagnosticFinding] = []
     /// Dashboard-triggered online recommend/apply/submit for #582 hello-gate recovery.
     var hardwareVerificationRetryInProgress: Bool = false
     var hardwareVerificationRetryLastError: String? = nil
@@ -518,8 +519,18 @@ struct AgentSnapshot: Equatable {
         providerSoftwareRepairRecommended: false,
         providerSoftwareRepairInProgress: false,
         providerSoftwareRepairLastError: nil,
+        diagnosticFindings: [],
         pauseAcknowledged: false
     )
+}
+
+enum ProviderSoftwareRepairCapabilityGate {
+    static let repairFromProtectedSource = "provider_software_repair_from_protected_source_v1"
+
+    static func allowsProtectedSourceRepair(_ s: AgentSnapshot, at now: Date = Date()) -> Bool {
+        s.hasFreshContractValidatedStatusObservation(at: now)
+            && s.localStatusCapabilities.contains(repairFromProtectedSource)
+    }
 }
 
 enum AgentSnapshotPresenter {
@@ -851,6 +862,9 @@ enum AgentSnapshotPresenter {
                 detail: "Malibu is reinstalling the bundled provider software and watchdog. Keep Malibu open. Your identity, models, and payout stay on this Mac.",
                 safeNextAction: "Keep Malibu open. You do not need a new invite."
             )
+        }
+        if let diagnostic = publicStatusForTopDiagnosticFinding(s) {
+            return diagnostic
         }
         // A still-serving (or paused) CLI must keep earnings/traffic/USDC and
         // the ready/paused truth. HOME-ACL repair is a software update, not a
@@ -1796,8 +1810,186 @@ enum AgentSnapshotPresenter {
 
     static func canRepairProviderSoftware(_ s: AgentSnapshot) -> Bool {
         s.providerSoftwareRepairRecommended
+            && ProviderSoftwareRepairCapabilityGate.allowsProtectedSourceRepair(s)
             && !s.providerSoftwareRepairInProgress
             && !s.cliUpdateInProgress
+    }
+
+    static func diagnosticFindingLines(_ s: AgentSnapshot) -> [String] {
+        s.diagnosticFindings.map { finding in
+            let title = diagnosticTitle(finding)
+            let cause = diagnosticCause(finding)
+            let context = diagnosticContext(finding, snapshot: s)
+            return ([title, LogTailBuffer.redacted(finding.userMessage), "Cause: \(cause)"] + context)
+                .joined(separator: " · ")
+        }
+    }
+
+    private static func publicStatusForTopDiagnosticFinding(_ s: AgentSnapshot) -> PublicStatus? {
+        guard let finding = s.diagnosticFindings.first(where: { canUseAsPrimaryDiagnosticStatus($0, snapshot: s) }) else {
+            return nil
+        }
+        switch finding.signatureID {
+        case .credentialStoreUnavailable:
+            return PublicStatus(
+                title: "Provider access needs attention",
+                detail: LogTailBuffer.redacted(finding.userMessage),
+                safeNextAction: canRepairCredential(s)
+                    ? "Repair saved access."
+                    : "Unlock or authorize saved access, then retry. Your provider identity stays on this Mac.",
+                executableAction: canRepairCredential(s) ? .repairCredential : nil
+            )
+        case .admissionIdentityBlocked:
+            return PublicStatus(
+                title: "Network verification needs attention",
+                detail: LogTailBuffer.redacted(finding.userMessage),
+                safeNextAction: canRepairAdmissionIdentity(s)
+                    ? "\(admissionIdentityRepairButtonTitle(s))."
+                    : "Keep the current provider identity and export diagnostics for support.",
+                executableAction: canRepairAdmissionIdentity(s) ? .repairAdmissionIdentity : .exportDiagnostics
+            )
+        case .autoupdateInProgress:
+            return PublicStatus(
+                title: "Provider software update in progress",
+                detail: LogTailBuffer.redacted(finding.userMessage),
+                safeNextAction: "Keep Malibu open. You do not need a new invite."
+            )
+        case .serveUnresponsive:
+            return PublicStatus(
+                title: serveUnresponsiveTitle(finding),
+                detail: serveUnresponsiveDetail(finding),
+                safeNextAction: "Keep Malibu open while status updates. Export diagnostics if this persists.",
+                executableAction: .exportDiagnostics
+            )
+        case .autoupdateHomeACLRejected:
+            if canRepairProviderSoftware(s) {
+                return PublicStatus(
+                    title: "Provider software repair available",
+                    detail: "A permission on your home folder blocked automatic update recovery.",
+                    safeNextAction: "Repair provider software. Malibu will reinstall the bundled provider software and watchdog. Your provider identity and downloaded models will be kept.",
+                    executableAction: .repairProviderSoftware
+                )
+            }
+            return PublicStatus(
+                title: "Provider software repair pending",
+                detail: "A macOS folder permission blocked automatic update recovery.",
+                safeNextAction: "Repair is pending protected delivery. Export diagnostics for support; your provider identity and downloaded models stay on this Mac.",
+                executableAction: .exportDiagnostics
+            )
+        case .staleLaunchAgent:
+            return PublicStatus(
+                title: "Provider setup needs attention",
+                detail: LogTailBuffer.redacted(finding.userMessage),
+                safeNextAction: "Use Launch Provider or export diagnostics. Your provider identity and downloaded models stay on this Mac.",
+                executableAction: .exportDiagnostics
+            )
+        case .staleModelCatalog, .catalogAdmission, .rateCardAdmission, .catalogKeyMismatch,
+             .missingCatalogProvenance, .missingArtifactSHA, .snapshotPathMismatch:
+            return PublicStatus(
+                title: "Provider software update needed",
+                detail: LogTailBuffer.redacted(finding.userMessage),
+                safeNextAction: updateAvailable(s)
+                    ? "Install latest provider software. Your provider identity and downloaded models stay on this Mac."
+                    : "Export diagnostics for support. Your provider identity and downloaded models stay on this Mac.",
+                executableAction: updateAvailable(s) ? .updateProviderSoftware : .exportDiagnostics
+            )
+        case .artifactHashMismatch, .artifactVerificationFailed:
+            return PublicStatus(
+                title: "Model verification needs attention",
+                detail: LogTailBuffer.redacted(finding.userMessage),
+                safeNextAction: "Pick the recommended model again or export diagnostics. Your provider identity stays on this Mac.",
+                executableAction: .exportDiagnostics
+            )
+        case .autoupdateDisabled:
+            return PublicStatus(
+                title: "Provider automatic updates are disabled",
+                detail: LogTailBuffer.redacted(finding.userMessage),
+                safeNextAction: "Enable provider software updates, then retry. Your provider identity stays on this Mac.",
+                executableAction: .exportDiagnostics
+            )
+        }
+    }
+
+    private static func canUseAsPrimaryDiagnosticStatus(
+        _ finding: ProviderDiagnosticFinding,
+        snapshot s: AgentSnapshot
+    ) -> Bool {
+        switch finding.source {
+        case .status:
+            return true
+        case .credentialsStatus:
+            return !s.hasFreshServeOwnedCredentialState()
+        case .doctorReport, .appPollingHistory, .providerLogDiagnostics:
+            return !s.hasFreshContractValidatedStatusObservation()
+        }
+    }
+
+    private static func diagnosticTitle(_ finding: ProviderDiagnosticFinding) -> String {
+        switch finding.signatureID {
+        case .credentialStoreUnavailable: return "Provider access"
+        case .admissionIdentityBlocked: return "Network verification"
+        case .serveUnresponsive: return "Customer availability"
+        case .autoupdateInProgress: return "Provider software update"
+        case .autoupdateHomeACLRejected: return "Provider software repair pending"
+        case .staleLaunchAgent: return "Background service"
+        case .staleModelCatalog, .catalogAdmission, .rateCardAdmission, .catalogKeyMismatch,
+             .missingCatalogProvenance, .missingArtifactSHA, .snapshotPathMismatch:
+            return "Provider software"
+        case .artifactHashMismatch, .artifactVerificationFailed:
+            return "Model verification"
+        case .autoupdateDisabled:
+            return "Automatic updates"
+        }
+    }
+
+    private static func diagnosticCause(_ finding: ProviderDiagnosticFinding) -> String {
+        switch finding.signatureID {
+        case .serveUnresponsive:
+            return hasNetworkStateEvidence(finding) ? "status_context" : "unknown_cause"
+        case .autoupdateHomeACLRejected:
+            return "repair_delivery_pending"
+        default:
+            return finding.signatureID.rawValue
+        }
+    }
+
+    private static func diagnosticContext(
+        _ finding: ProviderDiagnosticFinding,
+        snapshot s: AgentSnapshot
+    ) -> [String] {
+        guard finding.signatureID == .serveUnresponsive,
+              hasNetworkStateEvidence(finding) else { return [] }
+        if let networkState = s.networkState {
+            return ["Network context: \(networkStateLabel(networkState))"]
+        }
+        return []
+    }
+
+    private static func serveUnresponsiveTitle(_ finding: ProviderDiagnosticFinding) -> String {
+        hasNetworkStateEvidence(finding)
+            ? "Customer availability is interrupted"
+            : "Provider status is unavailable"
+    }
+
+    private static func serveUnresponsiveDetail(_ finding: ProviderDiagnosticFinding) -> String {
+        if hasNetworkStateEvidence(finding) {
+            return "Provider local status is current, but customer availability is not confirmed. This is context, not a diagnosed root cause."
+        }
+        return "Malibu cannot confirm current provider status. Cause unknown."
+    }
+
+    private static func hasNetworkStateEvidence(_ finding: ProviderDiagnosticFinding) -> Bool {
+        finding.evidence?.hasPrefix("network_state=") == true
+    }
+
+    private static func networkStateLabel(_ state: String) -> String {
+        switch state {
+        case "not_buyer_serving": return "not receiving customer work"
+        case "buyer_serving_unknown": return "customer availability unknown"
+        case "network_offline": return "network offline"
+        case "coordinator_unavailable": return "network unavailable"
+        default: return state.replacingOccurrences(of: "_", with: " ")
+        }
     }
 
     private static func isLiveProviderVisibleDuringSoftwareRepair(_ s: AgentSnapshot) -> Bool {
@@ -1808,13 +2000,23 @@ enum AgentSnapshotPresenter {
         _ status: PublicStatus,
         _ s: AgentSnapshot
     ) -> PublicStatus {
-        guard canRepairProviderSoftware(s) else { return status }
+        if canRepairProviderSoftware(s) {
+            return PublicStatus(
+                title: status.title,
+                detail: status.detail,
+                safeNextAction:
+                    "Repair provider software. Malibu will reinstall the bundled provider software and watchdog. Your provider identity and downloaded models will be kept.",
+                executableAction: .repairProviderSoftware
+            )
+        }
+        guard s.diagnosticFindings.contains(where: { $0.signatureID == .autoupdateHomeACLRejected }) else {
+            return status
+        }
         return PublicStatus(
             title: status.title,
             detail: status.detail,
-            safeNextAction:
-                "Repair provider software. Malibu will reinstall the bundled provider software and watchdog. Your provider identity and downloaded models will be kept.",
-            executableAction: .repairProviderSoftware
+            safeNextAction: "Provider software repair pending. Export diagnostics for support; your provider identity and downloaded models stay on this Mac.",
+            executableAction: .exportDiagnostics
         )
     }
 

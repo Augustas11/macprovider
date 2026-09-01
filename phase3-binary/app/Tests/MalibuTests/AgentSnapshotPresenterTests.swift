@@ -1365,13 +1365,30 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         }
     }
 
-    func testProviderSoftwareRepairRecommendedTakesSoftwareUpdateAction() {
+    func testProviderSoftwareRepairRequiresFreshProtectedSourceCapability() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
         snapshot.networkState = "catalog_update_required"
         snapshot.cliVersion = "1.8.93"
         snapshot.coordinatorRecommendedVersion = "1.8.101"
         snapshot.providerSoftwareRepairRecommended = true
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+
+        XCTAssertEqual(status.title, "This Mac is not currently eligible")
+        XCTAssertEqual(status.safeNextAction, "Install latest provider software.")
+        XCTAssertEqual(status.executableAction, .updateProviderSoftware)
+        XCTAssertFalse(AgentSnapshotPresenter.canRepairProviderSoftware(snapshot))
+    }
+
+    func testProviderSoftwareRepairCapabilityTakesSoftwareUpdateAction() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "catalog_update_required"
+        snapshot.cliVersion = "1.8.93"
+        snapshot.coordinatorRecommendedVersion = "1.8.101"
+        snapshot.providerSoftwareRepairRecommended = true
+        enableProtectedProviderSoftwareRepair(&snapshot)
 
         let status = AgentSnapshotPresenter.publicStatus(snapshot)
 
@@ -1395,6 +1412,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.statusObservedAt = Date()
         snapshot.statusObservationValidForMS = 5_000
         snapshot.providerSoftwareRepairRecommended = true
+        enableProtectedProviderSoftwareRepair(&snapshot)
 
         let status = AgentSnapshotPresenter.publicStatus(snapshot)
 
@@ -1407,6 +1425,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .paused
         snapshot.providerSoftwareRepairRecommended = true
+        enableProtectedProviderSoftwareRepair(&snapshot)
 
         let status = AgentSnapshotPresenter.publicStatus(snapshot)
 
@@ -1414,7 +1433,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(status.executableAction, .repairProviderSoftware)
     }
 
-    func testProviderSoftwareRepairRecommendationSurvivesStatusInvalidation() {
+    func testProviderSoftwareRepairCapabilityDoesNotSurviveStatusInvalidation() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
         snapshot.networkState = "buyer_serving"
@@ -1423,13 +1442,13 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.statusObservedAt = Date()
         snapshot.statusObservationValidForMS = 5_000
         snapshot.providerSoftwareRepairRecommended = true
+        enableProtectedProviderSoftwareRepair(&snapshot)
 
         snapshot.invalidateLocalStatusObservation()
         let status = AgentSnapshotPresenter.publicStatus(snapshot)
 
-        XCTAssertEqual(status.title, "Provider software repair available")
-        XCTAssertEqual(status.executableAction, .repairProviderSoftware)
-        XCTAssertTrue(AgentSnapshotPresenter.canRepairProviderSoftware(snapshot))
+        XCTAssertNotEqual(status.executableAction, .repairProviderSoftware)
+        XCTAssertFalse(AgentSnapshotPresenter.canRepairProviderSoftware(snapshot))
     }
 
     func testProviderSoftwareUpdateInProgressSurvivesStatusInvalidation() {
@@ -1458,6 +1477,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.cliVersion = "1.8.93"
         snapshot.coordinatorRecommendedVersion = "1.8.101"
         snapshot.providerSoftwareRepairRecommended = true
+        enableProtectedProviderSoftwareRepair(&snapshot)
         snapshot.providerSoftwareRepairInProgress = true
 
         let status = AgentSnapshotPresenter.publicStatus(snapshot)
@@ -1481,6 +1501,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.statusObservedAt = Date()
         snapshot.statusObservationValidForMS = 5_000
         snapshot.providerSoftwareRepairRecommended = true
+        enableProtectedProviderSoftwareRepair(&snapshot)
         snapshot.providerSoftwareRepairInProgress = true
 
         let status = AgentSnapshotPresenter.publicStatus(snapshot)
@@ -1634,6 +1655,127 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertTrue(details.contains("watchdog recovery started"))
     }
 
+    func testHomeACLDiagnosticFindingShowsRepairPendingWithoutRepairCTA() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "buyer_serving"
+        snapshot.providerSoftwareRepairRecommended = true
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .autoupdateHomeACLRejected,
+                source: .providerLogDiagnostics,
+                userMessage: "Provider software repair is pending.",
+                evidence: "autoupdate recovery_error=acl_write_rejected:/Users/provider",
+                observedAt: Date()
+            )
+        ]
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+
+        XCTAssertEqual(status.title, "Provider software repair pending")
+        XCTAssertEqual(status.executableAction, .exportDiagnostics)
+        XCTAssertFalse(AgentSnapshotPresenter.canRepairProviderSoftware(snapshot))
+        XCTAssertFalse(status.safeNextAction?.contains("Repair provider software.") == true)
+    }
+
+    func testFreshReadyStatusKeepsPrimaryStateWhenLogFindingSupplementsDiagnostics() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "buyer_serving"
+        snapshot.localStatusContractCompatible = true
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationID = "ready-observation"
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.statusObservationFresh = true
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .staleModelCatalog,
+                source: .providerLogDiagnostics,
+                userMessage: "Model options changed since this Mac last picked a model.",
+                evidence: "model catalog provenance envelope is stale",
+                observedAt: Date()
+            )
+        ]
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+        let diagnosticLines = AgentSnapshotPresenter.diagnosticFindingLines(snapshot)
+
+        XCTAssertEqual(status.title, "Provider is ready")
+        XCTAssertNil(status.executableAction)
+        XCTAssertTrue(diagnosticLines.joined(separator: "\n").contains("Provider software"))
+    }
+
+    func testServeUnresponsiveUnknownCauseIsRenderedHonestly() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .error
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: "Provider local status is unavailable or stale.",
+                evidence: nil,
+                observedAt: Date()
+            )
+        ]
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+        let diagnosticLines = AgentSnapshotPresenter.diagnosticFindingLines(snapshot)
+
+        XCTAssertEqual(status.title, "Provider status is unavailable")
+        XCTAssertEqual(status.detail, "Malibu cannot confirm current provider status. Cause unknown.")
+        XCTAssertTrue(diagnosticLines.joined(separator: "\n").contains("Cause: unknown_cause"))
+    }
+
+    func testStaleObservationIDDoesNotFabricateNetworkContext() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .reconnecting
+        snapshot.networkState = "coordinator_unavailable"
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: "Provider local status is unavailable or stale.",
+                evidence: "observation.id=stale-observation",
+                observedAt: Date()
+            )
+        ]
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+        let diagnosticLines = AgentSnapshotPresenter.diagnosticFindingLines(snapshot).joined(separator: "\n")
+
+        XCTAssertEqual(status.title, "Provider status is unavailable")
+        XCTAssertEqual(status.detail, "Malibu cannot confirm current provider status. Cause unknown.")
+        XCTAssertTrue(diagnosticLines.contains("Cause: unknown_cause"))
+        XCTAssertFalse(diagnosticLines.contains("Network context:"))
+    }
+
+    func testCoordinatorUnavailableIsContextNotRootCause() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .reconnecting
+        snapshot.networkState = "coordinator_unavailable"
+        snapshot.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: "Provider is not confirmed available for customer work.",
+                evidence: "network_state=coordinator_unavailable",
+                observedAt: Date()
+            )
+        ]
+
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+        let diagnosticLines = AgentSnapshotPresenter.diagnosticFindingLines(snapshot)
+
+        XCTAssertEqual(status.title, "Customer availability is interrupted")
+        XCTAssertEqual(
+            status.detail,
+            "Provider local status is current, but customer availability is not confirmed. This is context, not a diagnosed root cause."
+        )
+        XCTAssertTrue(diagnosticLines.joined(separator: "\n").contains("Network context: network unavailable"))
+        XCTAssertFalse(status.detail?.lowercased().contains("coordinator") == true)
+    }
+
     private func buyerServingObservationSnapshot(observedAt: Date) -> AgentSnapshot {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
@@ -1646,5 +1788,17 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         snapshot.coordinatorConnected = true
         snapshot.serviceInstanceID = "instance-a"
         return snapshot
+    }
+
+    private func enableProtectedProviderSoftwareRepair(_ snapshot: inout AgentSnapshot) {
+        snapshot.localStatusContractCompatible = true
+        snapshot.localStatusCapabilities = [
+            "status_observation_v1",
+            ProviderSoftwareRepairCapabilityGate.repairFromProtectedSource,
+        ]
+        snapshot.statusObservationID = snapshot.statusObservationID ?? "repair-observation"
+        snapshot.statusObservedAt = snapshot.statusObservedAt ?? Date()
+        snapshot.statusObservationValidForMS = snapshot.statusObservationValidForMS ?? 5_000
+        snapshot.statusObservationFresh = true
     }
 }
