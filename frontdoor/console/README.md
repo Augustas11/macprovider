@@ -9,6 +9,11 @@ Static front-door for `console.malibu.tech`.
 - Demo-session minting is deferred until the first prompt input or send action
 - CORS is limited to operator-controlled first-party origins: `https://console.malibu.tech` and the reserved apex `https://malibu.tech`
 
+The production buyer console at `https://malibu.tech/console` is maintained in
+[`MalibuAI/malibu`](https://github.com/MalibuAI/malibu) (`console/`). This
+tree's `index.html` is the historical SPEC-009 static console, not the deployed
+API-key workspace.
+
 Deploy target:
 
 ```sh

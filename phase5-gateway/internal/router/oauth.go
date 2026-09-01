@@ -340,7 +340,15 @@ func (s *Server) handleAPIKeyAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "server_error", "api_key_revoke_failed", "Could not revoke API key")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "revoked", "key_id": keyID})
+	// revoked_current is derived from exact key IDs after a successful
+	// account-scoped revoke. It is a non-secret boolean so a console can
+	// drop the local bearer before any follow-up authenticated refresh.
+	setNoStoreHeaders(w.Header())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          "revoked",
+		"key_id":          keyID,
+		"revoked_current": keyID == validation.KeyID,
+	})
 }
 
 func (s *Server) callbackAllowed(callback string) bool {
