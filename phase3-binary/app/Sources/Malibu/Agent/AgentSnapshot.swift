@@ -706,7 +706,11 @@ enum AgentSnapshotPresenter {
                 action: "Nothing to do — this refreshes on its own."
             )
         }
-        if !s.providerEarningsFresh && !s.hasObservedProviderEarnings {
+        if !s.providerEarningsFresh && !s.hasObservedProviderEarnings && !s.malibuProjectionFresh {
+            // A fresh MALIBU verdict (malibuProjectionFresh) is an independent
+            // source from the provider-earnings projection: an accrual-only frame
+            // (MALIBU fresh, earnings not) must fall through to the authoritative
+            // reward-eligibility handling below, not be masked as "unavailable".
             // Reframe only when the provider is genuinely buyer-serving-admitted
             // (isNetworkReady) AND has no fresh MALIBU projection that a later
             // branch would report as held/withdrawable/locked. This keeps the
@@ -868,7 +872,12 @@ enum AgentSnapshotPresenter {
     }
 
     private static func hasMiningEarningsActivity(_ s: AgentSnapshot) -> Bool {
-        (s.requestsPerMinute ?? 0) > 0
+        // Never infer "earning" from stale amounts. When the provider-earnings
+        // projection is not fresh (e.g. after a legacy stub frame demoted it),
+        // preserved last-known amounts must not drive an Earning / withdrawals-
+        // unlocked status.
+        guard s.providerEarningsFresh else { return false }
+        return (s.requestsPerMinute ?? 0) > 0
             || (s.earningsUsdcToday ?? 0) > 0
             || (s.malibuAccruedToday ?? 0) > 0
     }
@@ -1215,6 +1224,19 @@ enum AgentSnapshotPresenter {
         let nextAction: String?
     }
 
+    /// The diagnostic finding, if any, that `publicStatus` actually surfaced as the
+    /// primary status. nil when a repair-in-progress override precedes diagnostics
+    /// in `publicStatus`, or when no finding qualifies as primary. Lets
+    /// `consolidatedStatus` classify diagnostic severity explicitly rather than
+    /// inferring it from whether a tappable action happens to exist.
+    private static func primaryDiagnosticFinding(_ s: AgentSnapshot) -> ProviderDiagnosticFinding? {
+        guard !s.providerSoftwareRepairInProgress,
+              publicStatusForTopDiagnosticFinding(s) != nil,
+              let finding = s.diagnosticFindings.first(where: { canUseAsPrimaryDiagnosticStatus($0, snapshot: s) })
+        else { return nil }
+        return finding
+    }
+
     static func consolidatedStatus(_ s: AgentSnapshot) -> ConsolidatedStatus {
         let publicS = publicStatus(s)
         // A repair-available CTA on an otherwise ready/live provider is a
@@ -1224,7 +1246,14 @@ enum AgentSnapshotPresenter {
         let isNonblockingRepairOnReady =
             publicS.executableAction == .repairProviderSoftware && isNetworkReady(s)
         let hasBlockingAction = publicS.executableAction != nil && !isNonblockingRepairOnReady
-        if s.state == .error || s.state == .idle || s.state == .paused || hasBlockingAction {
+        // A diagnostic finding owns the primary status. Only an in-progress software
+        // update is benign; every other surfaced diagnostic is a problem and reads
+        // needs-attention even when it carries no tappable action (e.g. a credential
+        // store that is unavailable without a repair path).
+        let primaryDiag = primaryDiagnosticFinding(s)
+        let hasBlockingDiagnostic = primaryDiag != nil && primaryDiag?.signatureID != .autoupdateInProgress
+        if s.state == .error || s.state == .idle || s.state == .paused
+            || hasBlockingAction || hasBlockingDiagnostic {
             let tone: ConsolidatedStatus.Tone =
                 (s.state == .paused || s.state == .idle) ? .neutral : .attention
             return ConsolidatedStatus(
@@ -1281,11 +1310,11 @@ enum AgentSnapshotPresenter {
                 nextAction: publicS.safeNextAction ?? "Keep Malibu open while it reconnects."
             )
         }
-        // A diagnostic finding that owns the primary status but carries no recovery
-        // action (e.g. a software update in progress) is the truthful status even on
-        // a network-ready provider: it must not be overwritten by the earning
-        // display. Blocking diagnostics (with an action) were already handled above.
-        if publicS.executableAction == nil, publicStatusForTopDiagnosticFinding(s) != nil {
+        // A benign in-progress diagnostic (software update) owns the truthful
+        // status even on a network-ready provider: surface it (.live/neutral)
+        // instead of letting the earning display overwrite it. Blocking diagnostics
+        // were already handled by the needs-attention gate above.
+        if primaryDiag?.signatureID == .autoupdateInProgress {
             return ConsolidatedStatus(
                 phase: .live,
                 tone: .neutral,
@@ -2032,11 +2061,12 @@ enum AgentSnapshotPresenter {
         guard s.malibuProjectionFresh, !holdReasons.isEmpty else { return nil }
         let reasons = holdReasons.map { malibuHoldReasonCopy($0) }
         let nextAction: String
-        if holdReasons.contains("trust_tier_provisional"),
-           let met = s.trustCriteriaMet,
-           let required = s.trustCriteriaRequired,
-           required > met {
-            nextAction = "Complete \(required - met) more trust criteria to unlock withdrawals."
+        let trustProgress = distinctPairProgress(s)
+        if holdReasons.contains("trust_tier_provisional"), trustProgress.required > trustProgress.met {
+            // Use the same distinct-pair progress as trustLine (SPEC-026 §5.2):
+            // overlapping E2/A3 or duplicate criteria must not read as complete via
+            // raw met/required counters.
+            nextAction = "Complete \(trustProgress.required - trustProgress.met) more trust criteria to unlock withdrawals."
         } else if holdReasons.contains("per_wallet_daily_cap") {
             nextAction = "The wallet cap resets at the next UTC day."
         } else if holdReasons.contains("demotion_cooldown") {

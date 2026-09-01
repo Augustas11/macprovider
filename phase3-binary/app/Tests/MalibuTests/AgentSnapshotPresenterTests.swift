@@ -2419,12 +2419,20 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         var s = AgentSnapshot.empty
         s.state = .serving
         s.trustTier = .provisional
+        s.malibuProjectionFresh = true
+        s.hasGranularTrustCriteria = true
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
         s.economicCriteria = ["provider_token=secret /Users/alice host=10.0.0.1"]
         s.additionalCriteria = ["A1"]
 
-        let rendered = (AgentSnapshotPresenter.trustCriteria(s) ?? [])
-            .map { $0.title }
-            .joined(separator: " · ")
+        let criteria = AgentSnapshotPresenter.trustCriteria(s) ?? []
+        XCTAssertFalse(criteria.isEmpty, "trustCriteria must render so the redaction check is real")
+        let rendered = criteria.map { "\($0.title) \($0.detail)" }.joined(separator: " · ")
         XCTAssertFalse(rendered.contains("provider_token"))
         XCTAssertFalse(rendered.contains("/Users/alice"))
         XCTAssertFalse(rendered.contains("10.0.0.1"))
@@ -2486,6 +2494,98 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.publicStatus(s).executableAction, .repairProviderSoftware)
         let status = AgentSnapshotPresenter.consolidatedStatus(s)
         XCTAssertNotEqual(status.phase, .needsAttention)
+    }
+
+    // Round-6 audit (security HIGH): after a freshness demotion, stale preserved
+    // amount fields must not drive an "Earning" status via hasMiningEarningsActivity.
+    func testStalePreservedAmountsDoNotDriveEarningAfterDemotion() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.trustTier = .trusted
+        s.walletBound = true
+        s.hasObservedProviderEarnings = true
+        s.providerEarningsFresh = false   // demoted (e.g. by a legacy stub frame)
+        s.malibuProjectionFresh = false
+        s.earningsUsdcToday = 4.2         // stale preserved amount
+        s.malibuAccruedToday = 10         // stale preserved amount
+
+        let mining = AgentSnapshotPresenter.miningHealth(s)
+        XCTAssertNotEqual(mining.reasonCode, "earning")
+        XCTAssertNotEqual(mining.reasonCode, "trusted_withdrawable")
+    }
+
+    // Round-6 audit (arch M(a)): a fresh MALIBU verdict is independent of the
+    // provider-earnings projection. An accrual-only frame (MALIBU fresh, earnings
+    // not, no observed earnings) must honor the reward verdict, not read as
+    // "reward status unavailable".
+    func testAccrualOnlyFreshVerdictIsNotMaskedAsUnavailable() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.trustTier = .trusted
+        s.walletBound = true
+        s.providerEarningsFresh = false
+        s.hasObservedProviderEarnings = false
+        s.malibuProjectionFresh = true
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "capped",
+            primaryReason: "held_provider_daily_cap",
+            reasons: ["held_provider_daily_cap"]
+        )
+
+        let mining = AgentSnapshotPresenter.miningHealth(s)
+        XCTAssertNotEqual(mining.reasonCode, "reward_projection_unavailable")
+        XCTAssertEqual(mining.reasonCode, "provider_daily_cap_held")
+    }
+
+    // Round-6 audit (arch M(b)): an action-less BLOCKING diagnostic (credential
+    // store unavailable with no repair path) must read needs-attention, never be
+    // muted as a benign .live status just because it lacks a tappable action.
+    func testActionlessBlockingDiagnosticIsNeedsAttentionNotLive() {
+        var s = buyerServingObservationSnapshot(observedAt: Date())
+        s.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .credentialStoreUnavailable,
+                source: .status,
+                userMessage: "Saved provider access is unavailable.",
+                evidence: "credential.state=permission_denied",
+                observedAt: Date()
+            )
+        ]
+
+        // Sanity: this finding carries no executable action in this state.
+        XCTAssertNil(AgentSnapshotPresenter.publicStatus(s).executableAction)
+        let status = AgentSnapshotPresenter.consolidatedStatus(s)
+        XCTAssertEqual(status.phase, .needsAttention)
+        XCTAssertNotEqual(status.phase, .live)
+    }
+
+    // Round-6 audit (arch M(c)): the hold-line trust action uses distinct-pair
+    // progress (SPEC-026 §5.2), so overlapping E2/A3 criteria still prompt one more.
+    func testHoldLineUsesDistinctPairProgressForOverlappingCriteria() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.trustTier = .provisional
+        s.malibuProjectionFresh = true
+        s.hasGranularTrustCriteria = true
+        // A withdrawable eligibility skips the eligibility-first hold line, so the
+        // hold-reason branch (which the audit flagged) is exercised.
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "earning",
+            withdrawalState: "withdrawable",
+            primaryReason: "earning_verified_work",
+            reasons: ["earning_verified_work"]
+        )
+        s.economicCriteria = ["E2"]
+        s.additionalCriteria = ["A3"]   // overlaps E2 -> only 1 distinct slot
+        s.trustCriteriaMet = 2          // raw counters would wrongly read complete
+        s.trustCriteriaRequired = 2
+        s.malibuHeld = 1
+        s.malibuHoldReasons = ["trust_tier_provisional"]
+
+        let holdLine = AgentSnapshotPresenter.malibuHoldLine(s)
+        XCTAssertNotNil(holdLine)
+        XCTAssertTrue(holdLine?.contains("Complete 1 more trust criteria") == true)
     }
 
     private func buyerServingObservationSnapshot(observedAt: Date) -> AgentSnapshot {
