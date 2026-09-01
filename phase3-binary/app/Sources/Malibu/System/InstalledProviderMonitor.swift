@@ -66,6 +66,13 @@ enum InstalledProviderMonitor {
         let lifecycleLeaseKind: String?
         let lifecycleLeaseOperationID: String?
         let lifecycleLeaseExpiresWallMS: Int64?
+        let modelStatusTrusted: Bool
+        let modelID: String?
+        let modelLoaded: Bool?
+        let modelHash: String?
+        let modelHashAlgorithm: String?
+        let weightsManifestSHA256: String?
+        let weightsManifestAlgorithm: String?
         let recommendedVersion: String?
         let coordinatorConnected: Bool
         let coordinatorTier: String?
@@ -764,6 +771,7 @@ enum InstalledProviderMonitor {
         let trustLifecycleEvents = capabilities.contains("lifecycle_significant_events_v1")
         let trustLifecycleLease = capabilities.contains("lifecycle_lease_v1")
         let trustCompatibilitySet = capabilities.contains("compatibility_set_v1")
+        let trustModel = capabilities.contains("model_status_v1")
         let decodedObservationID = stringValue(observation["id"])
         let decodedObservedAt = dateValue(observation["observed_at"])
         let decodedObservationValidity = intValue(observation["valid_for_ms"])
@@ -896,6 +904,17 @@ enum InstalledProviderMonitor {
             lifecycleLeaseKind: trustTypedFields && trustLifecycleLease ? stringValue(lifecycleLease["kind"]) : nil,
             lifecycleLeaseOperationID: trustTypedFields && trustLifecycleLease ? stringValue(lifecycleLease["operation_id"]) : nil,
             lifecycleLeaseExpiresWallMS: trustTypedFields && trustLifecycleLease ? int64Value(lifecycleLease["expires_wall_ms"]) : nil,
+            modelStatusTrusted: trustTypedFields && trustModel,
+            modelID: trustTypedFields && trustModel ? stringValue(object["model"]) : nil,
+            modelLoaded: trustTypedFields && trustModel ? object["model_loaded"] as? Bool : nil,
+            modelHash: trustTypedFields && trustModel ? stringValue(object["model_hash"]) : nil,
+            modelHashAlgorithm: trustTypedFields && trustModel ? stringValue(object["model_hash_algorithm"]) : nil,
+            weightsManifestSHA256: trustTypedFields && trustModel
+                ? stringValue(object["weights_manifest_sha256"])
+                : nil,
+            weightsManifestAlgorithm: trustTypedFields && trustModel
+                ? stringValue(object["weights_manifest_algorithm"])
+                : nil,
             recommendedVersion: trustTypedFields
                 ? stringValue(coordinator["recommended_binary_version"])
                 : nil,

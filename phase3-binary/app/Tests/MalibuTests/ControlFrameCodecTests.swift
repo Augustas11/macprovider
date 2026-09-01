@@ -200,6 +200,44 @@ final class ControlFrameCodecTests: XCTestCase {
     }
 
     @MainActor
+    func testControlStatusResponseCannotOverrideFreshServeOwnedModelStatus() {
+        var initial = AgentSnapshot.empty
+        initial.currentModelID = "status-owned-model"
+        initial.currentModelIDFromStatus = true
+        initial.localStatusContractCompatible = true
+        initial.localStatusCapabilities = ["status_observation_v1", "model_status_v1"]
+        initial.statusObservationID = "observation-a"
+        initial.statusObservedAt = Date()
+        initial.statusObservationValidForMS = 5_000
+        initial.statusObservationFresh = true
+
+        let agent = MalibuAgent(initialSnapshot: initial)
+        agent.consume(.statusResponse(currentModelID: "control-fallback-model", runtimeState: "ready"))
+
+        XCTAssertEqual(agent.snapshot.currentModelID, "status-owned-model")
+        XCTAssertTrue(agent.snapshot.currentModelIDFromStatus)
+    }
+
+    @MainActor
+    func testControlStatusResponseFillsModelWhenStatusObservationIsStale() {
+        var initial = AgentSnapshot.empty
+        initial.currentModelID = "stale-status-model"
+        initial.currentModelIDFromStatus = true
+        initial.localStatusContractCompatible = true
+        initial.localStatusCapabilities = ["status_observation_v1", "model_status_v1"]
+        initial.statusObservationID = "observation-a"
+        initial.statusObservedAt = Date(timeIntervalSinceNow: -60)
+        initial.statusObservationValidForMS = 5_000
+        initial.statusObservationFresh = true
+
+        let agent = MalibuAgent(initialSnapshot: initial)
+        agent.consume(.statusResponse(currentModelID: "control-fallback-model", runtimeState: "ready"))
+
+        XCTAssertEqual(agent.snapshot.currentModelID, "control-fallback-model")
+        XCTAssertFalse(agent.snapshot.currentModelIDFromStatus)
+    }
+
+    @MainActor
     func testPartialProviderProjectionsKeepFreshnessSourceSpecific() {
         let earningsOnly = ProviderEarnings(
             walletBound: false,

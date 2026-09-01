@@ -1584,7 +1584,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             AgentSnapshotPresenter.publicErrorDetail(raw),
             "Details are available in Advanced diagnostics."
         )
-        XCTAssertEqual(LogTailBuffer.redacted(raw), raw)
+        XCTAssertEqual(
+            LogTailBuffer.redacted(raw),
+            "coordinator join requires model_artifact_sha256 in [path]"
+        )
     }
 
     func testStaleLaunchAgentRecoveryMessageRemainsUserVisible() {
@@ -1625,7 +1628,8 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             providerLogLines: ["watchdog recovery started"]
         )
 
-        XCTAssertTrue(details.contains("coordinator join requires model_artifact_sha256 in /tmp/macprovider.err.log"))
+        XCTAssertTrue(details.contains("coordinator join requires model_artifact_sha256 in [path]"))
+        XCTAssertFalse(details.contains("/tmp/macprovider.err.log"))
         XCTAssertTrue(details.contains("[redacted]"))
         XCTAssertTrue(details.contains("watchdog recovery started"))
     }

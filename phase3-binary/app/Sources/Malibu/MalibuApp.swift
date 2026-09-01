@@ -296,7 +296,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 snapshot: agent.snapshot,
                 providerLogLines: agent.logLines,
                 watchdogLogURL: ProviderPaths.current.watchdogLog,
-                appVersion: appVersion
+                appVersion: appVersion,
+                launchdNeedsRepair: StartupState.launchdInstallEvidenceExists()
+                    && InstalledProviderMonitor.launchdServiceRepairState().needsRepair
             )
             try data.write(to: destination, options: [.atomic])
         } catch {
