@@ -18,6 +18,7 @@ names = [
     "publish_root_file_from_base64",
     "verify_published_launchd_payload",
     "publish_launchd_plist",
+    "headless_acceptance_repair_mode",
     "reclaim_launchd_service",
     "reclaim_legacy_launchd_service",
     "render_plist",
@@ -27,9 +28,12 @@ names = [
 ]
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 for name in names:
-    for index, line in enumerate(lines):
-        if line != f"{name}() {{":
-            continue
+    matches = [index for index, line in enumerate(lines) if line == f"{name}() {{"]
+    if not matches:
+        raise SystemExit(f"could not extract {name}")
+    # The installer embeds recovery helpers before the live runtime helpers.
+    # Port migration must exercise the live copy used by ensure_port_free.
+    for index in [matches[-1]]:
         depth = 0
         while index < len(lines):
             current = lines[index]
@@ -39,8 +43,6 @@ for name in names:
             if depth == 0:
                 break
         break
-    else:
-        raise SystemExit(f"could not extract {name}")
 PY
 printf '%s\n' 'PROVIDER_LABEL="${PROVIDER_LABEL:-live.malibu.provider}"' >> "$TMP/functions.sh"
 printf '%s\n' 'LEGACY_PROVIDER_LABEL="${LEGACY_PROVIDER_LABEL:-live.streamvc.macprovider}"' >> "$TMP/functions.sh"
@@ -51,6 +53,10 @@ printf '%s\n' 'LEGACY_WATCHDOG_PLIST_PATH="${LEGACY_WATCHDOG_PLIST_PATH:-$HOME/L
 printf '%s\n' 'HEADLESS="${HEADLESS:-0}"' >> "$TMP/functions.sh"
 printf '%s\n' 'HEADLESS_USER="${HEADLESS_USER:-}"' >> "$TMP/functions.sh"
 printf '%s\n' 'LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-gui/$UID}"' >> "$TMP/functions.sh"
+printf '%s\n' 'REPAIR_EXISTING_INSTALL="${REPAIR_EXISTING_INSTALL:-0}"' >> "$TMP/functions.sh"
+printf '%s\n' 'MACPROVIDER_ACCEPTANCE_ASSET_DIR="${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}"' >> "$TMP/functions.sh"
+printf '%s\n' 'BUNDLED_APP="${BUNDLED_APP:-}"' >> "$TMP/functions.sh"
+printf '%s\n' 'HEADLESS_REPAIR_INCUMBENT_BINARY="${HEADLESS_REPAIR_INCUMBENT_BINARY:-}"' >> "$TMP/functions.sh"
 printf '%s\n' 'PLIST_BOOTSTRAP_PATH="${PLIST_BOOTSTRAP_PATH:-${PLIST_PATH:-}}"' >> "$TMP/functions.sh"
 printf '%s\n' 'LEGACY_PLIST_BOOTSTRAP_PATH="${LEGACY_PLIST_BOOTSTRAP_PATH:-${LEGACY_PLIST_PATH:-}}"' >> "$TMP/functions.sh"
 printf '%s\n' 'WATCHDOG_PLIST_BOOTSTRAP_PATH="${WATCHDOG_PLIST_BOOTSTRAP_PATH:-${WATCHDOG_PLIST_PATH:-}}"' >> "$TMP/functions.sh"
@@ -113,6 +119,16 @@ case "${1:-}" in
 esac
 EOF
 chmod 0755 "$TMP/bin/launchctl"
+cat > "$TMP/bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${1:-}" = "-n" ]; then
+  shift
+fi
+exec "$@"
+EOF
+chmod 0755 "$TMP/bin/sudo"
 
 run_reclaim() {
   LAUNCHD_STATE="$TMP/launchd-state"
@@ -128,9 +144,17 @@ run_reclaim() {
     CONFIG_PATH="$TMP/home/.config/macprovider/config.yaml" \
     PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider.plist" \
     WATCHDOG_PLIST_PATH="$TMP/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist" \
-    PROVIDER_PROGRAM="$TMP/home/.local/bin/macprovider-cli" \
-    WATCHDOG_PROGRAM="$TMP/home/.local/share/macprovider-watchdog/watchdog.sh" \
+    PROVIDER_PROGRAM="${PROVIDER_PROGRAM:-$TMP/home/.local/bin/macprovider-cli}" \
+    WATCHDOG_PROGRAM="${WATCHDOG_PROGRAM:-$TMP/home/.local/share/macprovider-watchdog/watchdog.sh}" \
     PATH="$TMP/bin:$PATH" \
+    SUDO_BIN="$TMP/bin/sudo" \
+    LAUNCHCTL_BIN="$TMP/bin/launchctl" \
+    HEADLESS="${HEADLESS:-0}" \
+    LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-gui/$UID}" \
+    REPAIR_EXISTING_INSTALL="${REPAIR_EXISTING_INSTALL:-0}" \
+    MACPROVIDER_ACCEPTANCE_ASSET_DIR="${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" \
+    BUNDLED_APP="${BUNDLED_APP:-}" \
+    HEADLESS_REPAIR_INCUMBENT_BINARY="${HEADLESS_REPAIR_INCUMBENT_BINARY:-}" \
     LAUNCHD_STATE="$LAUNCHD_STATE" \
     LAUNCHD_LOG="$LAUNCHD_LOG" \
     PRINTED_PLIST_PATH="${PRINTED_PLIST_PATH:-}" \
@@ -262,6 +286,30 @@ set -e
 [ "$unexpected_rc" -ne 0 ]
 [ -f "$TMP/launchd-state" ]
 
+rm -f "$TMP/launchd.log"
+touch "$TMP/launchd-state"
+HEADLESS=1 \
+  LAUNCHD_DOMAIN=system \
+  REPAIR_EXISTING_INSTALL=1 \
+  MACPROVIDER_ACCEPTANCE_ASSET_DIR="$TMP/acceptance" \
+  HEADLESS_REPAIR_INCUMBENT_BINARY="$TMP/manual-stage/macprovider-cli" \
+  PROVIDER_PROGRAM="$TMP/manual-stage/macprovider-cli" \
+  run_reclaim
+grep -Fx "bootout system/live.malibu.provider" "$TMP/launchd.log" >/dev/null
+rm -f "$TMP/launchd-state" "$TMP/launchd.log"
+touch "$TMP/launchd-state"
+HEADLESS=0 \
+  LAUNCHD_DOMAIN=system \
+  REPAIR_EXISTING_INSTALL=0 \
+  MACPROVIDER_ACCEPTANCE_ASSET_DIR="$TMP/acceptance" \
+  HEADLESS_REPAIR_INCUMBENT_BINARY="$TMP/manual-stage/macprovider-cli" \
+  PROVIDER_PROGRAM="$TMP/manual-stage/macprovider-cli" \
+  run_reclaim && {
+    echo "normal launchd reclaim accepted a manual-stage provider binary" >&2
+    exit 1
+  }
+[ -f "$TMP/launchd-state" ]
+
 grep -F 'reclaim_launchd_service "$PROVIDER_LABEL"' "$INSTALL_SH" >/dev/null
 grep -F 'reclaim_launchd_service "$WATCHDOG_LABEL"' "$INSTALL_SH" >/dev/null
 grep -F 'service_identity_matches' "$INSTALL_SH" >/dev/null
@@ -277,6 +325,10 @@ import sys
 
 names = [
     "validate_port_value",
+    "headless_acceptance_repair_mode",
+    "provider_executable_owned_for_current_mode",
+    "pid_is_live_non_zombie",
+    "stop_owned_manual_provider",
     "ensure_port_free",
     "launchctl_service",
     "reclaim_launchd_service",
@@ -304,6 +356,10 @@ printf '%s\n' 'LEGACY_PROVIDER_LABEL="${LEGACY_PROVIDER_LABEL:-live.streamvc.mac
 printf '%s\n' 'LEGACY_PLIST_PATH="${LEGACY_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist}"' >> "$TMP/port-functions.sh"
 printf '%s\n' 'HEADLESS="${HEADLESS:-0}"' >> "$TMP/port-functions.sh"
 printf '%s\n' 'LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-gui/$UID}"' >> "$TMP/port-functions.sh"
+printf '%s\n' 'REPAIR_EXISTING_INSTALL="${REPAIR_EXISTING_INSTALL:-0}"' >> "$TMP/port-functions.sh"
+printf '%s\n' 'MACPROVIDER_ACCEPTANCE_ASSET_DIR="${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}"' >> "$TMP/port-functions.sh"
+printf '%s\n' 'BUNDLED_APP="${BUNDLED_APP:-}"' >> "$TMP/port-functions.sh"
+printf '%s\n' 'HEADLESS_REPAIR_INCUMBENT_BINARY="${HEADLESS_REPAIR_INCUMBENT_BINARY:-}"' >> "$TMP/port-functions.sh"
 printf '%s\n' 'PLIST_BOOTSTRAP_PATH="${PLIST_BOOTSTRAP_PATH:-${PLIST_PATH:-}}"' >> "$TMP/port-functions.sh"
 printf '%s\n' 'LEGACY_PLIST_BOOTSTRAP_PATH="${LEGACY_PLIST_BOOTSTRAP_PATH:-${LEGACY_PLIST_PATH:-}}"' >> "$TMP/port-functions.sh"
 
@@ -312,12 +368,18 @@ cat > "$TMP/port-bin/lsof" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-  *"-d txt"*) printf 'p4242\nn%s/macprovider/macprovider-cli\n' "$HOME" ;;
+  *"-d txt"*) printf 'p4242\nn%s\n' "${LSOF_EXECUTABLE:-$HOME/macprovider/macprovider-cli}" ;;
   *-t*)
+    count=0
     if [ -f "$LSOF_T_SEEN" ]; then
+      count="$(cat "$LSOF_T_SEEN")"
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$LSOF_T_SEEN"
+    limit="${LSOF_T_LIMIT:-1}"
+    if [ "$count" -gt "$limit" ]; then
       exit 0
     fi
-    : > "$LSOF_T_SEEN"
     printf '4242\n'
     ;;
   *) printf "COMMAND PID\nmacprovider-cli 4242\n" ;;
@@ -331,6 +393,7 @@ HOME="$TMP/home" \
   PATH="$TMP/port-bin:/usr/bin:/bin" \
   LEGACY_UPGRADE_LOG="$TMP/legacy-upgrade.log" \
   LSOF_T_SEEN="$TMP/lsof-t-seen" \
+  LSOF_T_LIMIT=1 \
   bash -c '
     set -euo pipefail
     die() { printf "ERR:%s\n" "$*" >&2; exit "$1"; }
@@ -358,3 +421,52 @@ if grep -Fx "captured" "$TMP/legacy-upgrade.log" >/dev/null; then
   exit 1
 fi
 echo "legacy launchd upgrade skips manual capture ok"
+
+mkdir -p "$TMP/manual-stage"
+printf 'manual\n' > "$TMP/manual-stage/macprovider-cli"
+chmod +x "$TMP/manual-stage/macprovider-cli"
+: > "$TMP/headless-upgrade.log"
+rm -f "$TMP/lsof-t-seen"
+HOME="$TMP/home" \
+  FUNCTION_PATH="$TMP/port-functions.sh" \
+  PATH="$TMP/port-bin:/usr/bin:/bin" \
+  LEGACY_UPGRADE_LOG="$TMP/headless-upgrade.log" \
+  LSOF_T_SEEN="$TMP/lsof-t-seen" \
+  LSOF_T_LIMIT=4 \
+  LSOF_EXECUTABLE="$TMP/manual-stage/macprovider-cli" \
+  bash -c '
+    set -euo pipefail
+    die() { printf "ERR:%s\n" "$*" >&2; exit "$1"; }
+    log() { printf "LOG:%s\n" "$*" >&2; }
+    assert_install_lock_ownership() { :; }
+    capture_manual_provider_for_recovery() {
+      printf "captured\n" >> "$LEGACY_UPGRADE_LOG"
+      die 70 "manual capture should not run for a loaded accepted headless LaunchDaemon"
+    }
+    DRY_RUN=0
+    PORT=18080
+    INSTALL_DIR="$HOME/macprovider"
+    BINARY_PATH="$HOME/.local/bin/macprovider-cli"
+    HEADLESS=1
+    LAUNCHD_DOMAIN=system
+    REPAIR_EXISTING_INSTALL=1
+    MACPROVIDER_ACCEPTANCE_ASSET_DIR="$HOME/acceptance"
+    BUNDLED_APP=""
+    HEADLESS_REPAIR_INCUMBENT_BINARY="'$TMP'/manual-stage/macprovider-cli"
+    INSTALL_TX_SERVICE_WAS_ACTIVE=1
+    INSTALL_TX_LEGACY_SERVICE_WAS_ACTIVE=0
+    INSTALL_TX_ACTIVE=1
+    source "$FUNCTION_PATH"
+    kill() { :; }
+    pid_is_live_non_zombie() { return 1; }
+    reclaim_launchd_service() { printf "reclaim-current\n" >> "$LEGACY_UPGRADE_LOG"; }
+    reclaim_legacy_launchd_service() { printf "reclaim-legacy\n" >> "$LEGACY_UPGRADE_LOG"; }
+    ensure_port_free 1
+  '
+grep -Fx "reclaim-current" "$TMP/headless-upgrade.log" >/dev/null
+[ "$(cat "$TMP/lsof-t-seen")" -ge 4 ]
+if grep -Fx "captured" "$TMP/headless-upgrade.log" >/dev/null; then
+  echo "accepted headless LaunchDaemon was treated as a manual provider capture" >&2
+  exit 1
+fi
+echo "accepted headless LaunchDaemon reclaim ok"
