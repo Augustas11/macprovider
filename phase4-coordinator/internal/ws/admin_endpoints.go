@@ -42,12 +42,14 @@ func (s *Server) handleAdminProvisional(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	connected := map[string]bool{}
+	live := map[string]pool.Provider{}
 	for _, p := range s.pool.Snapshot() {
-		if p.Tier == pool.TierProvisional {
+		live[p.ProviderID] = p
+		if s.isProviderTransportConnected(p) {
 			connected[p.ProviderID] = true
 		}
 	}
-	records := s.admission.Records(connected)
+	records := overlayLiveAdmissionRecords(s.admission.Records(connected), live, connected)
 	summary := struct {
 		TotalProvisional   int `json:"total_provisional"`
 		CurrentlyConnected int `json:"currently_connected"`
@@ -62,6 +64,40 @@ func (s *Server) handleAdminProvisional(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"provisional": records, "summary": summary})
+}
+
+// overlayLiveAdmissionRecords prefers live pool identity/last-seen for
+// connected providers so /admin/provisional does not serve a frozen
+// promotion-time snapshot (issue #1311). Durable admission records still
+// refresh on heartbeat/reconnect; this overlay covers the in-memory gap
+// before the next persist.
+func overlayLiveAdmissionRecords(records []ProvisionalRecord, live map[string]pool.Provider, connected map[string]bool) []ProvisionalRecord {
+	for i := range records {
+		p, ok := live[records[i].ProviderID]
+		if !ok || !connected[records[i].ProviderID] {
+			continue
+		}
+		if p.BinaryVersion != "" {
+			records[i].BinaryVersion = p.BinaryVersion
+		}
+		if p.Hostname != "" {
+			records[i].Hostname = p.Hostname
+		}
+		if p.ModelID != "" {
+			records[i].ModelID = p.ModelID
+		}
+		seen := p.LastHeartbeatAt
+		if p.LastActivityAt.After(seen) {
+			seen = p.LastActivityAt
+		}
+		if seen.IsZero() {
+			seen = p.ConnectedAt
+		}
+		if !seen.IsZero() && seen.After(records[i].LastSeenAt) {
+			records[i].LastSeenAt = seen.UTC()
+		}
+	}
+	return records
 }
 
 func (s *Server) handleAdminPromote(w http.ResponseWriter, r *http.Request) {
