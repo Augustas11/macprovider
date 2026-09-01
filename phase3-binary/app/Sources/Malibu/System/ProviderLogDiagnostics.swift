@@ -4,6 +4,8 @@ import Foundation
 enum ProviderLogDiagnostics {
     static let providerSoftwareInstallHandledAutoupdateACLMarker =
         "autoupdate acl_home_repair_handled=malibu_provider_software_install_success"
+    static let providerSoftwareInstallFailedAutoupdateACLMarker =
+        "autoupdate acl_home_repair_handled=malibu_provider_software_install_failed"
 
     static let staleLaunchAgentMessage =
         "Provider setup is blocked by a previous installation. "
@@ -106,6 +108,7 @@ enum ProviderLogDiagnostics {
         for line in lines.reversed() {
             let lower = line.lowercased()
             if lower.contains(providerSoftwareInstallHandledAutoupdateACLMarker)
+                || lower.contains(providerSoftwareInstallFailedAutoupdateACLMarker)
                 || lower.contains("autoupdate lifecycle_transition=watchdog_recovery ") {
                 return nil
             }
@@ -116,7 +119,7 @@ enum ProviderLogDiagnostics {
                 return Finding(
                     id: "autoupdate_home_acl_rejected",
                     userMessage:
-                        "Provider software repair is needed. A macOS folder permission is blocking automatic update recovery; Malibu can repair the provider software while keeping your provider identity and downloaded model files.",
+                        "Provider software repair is pending. A macOS folder permission is blocking automatic update recovery; protected repair delivery is not available yet. Your provider identity and downloaded model files stay on this Mac.",
                     matchedLine: line
                 )
             }
@@ -126,7 +129,7 @@ enum ProviderLogDiagnostics {
             return Finding(
                 id: "autoupdate_home_acl_rejected",
                 userMessage:
-                    "Provider software repair is needed. A macOS folder permission is blocking automatic update recovery; Malibu can repair the provider software while keeping your provider identity and downloaded model files.",
+                    "Provider software repair is pending. A macOS folder permission is blocking automatic update recovery; protected repair delivery is not available yet. Your provider identity and downloaded model files stay on this Mac.",
                 matchedLine: line
             )
         }

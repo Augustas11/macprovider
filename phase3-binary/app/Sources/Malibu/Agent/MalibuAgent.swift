@@ -49,6 +49,7 @@ final class MalibuAgent: ObservableObject {
     private var latestReleaseFetchedAt: Date?
     private var cliUpdateTask: Task<Void, Never>?
     private var providerSoftwareRepairTask: Task<Void, Never>?
+    private var suppressedProviderSoftwareRepairEvidenceLine: String?
     /// HOME-ACL stranded installs get one automatic repair attempt per session
     /// so a sideloaded Malibu.app actually lands the bundled watchdog/CLI.
     private var homeACLAutoRepairAttempted = false
@@ -67,6 +68,16 @@ final class MalibuAgent: ObservableObject {
         _ compatibilitySetID: String?,
         _ onLogLine: @escaping @Sendable @MainActor (String) -> Void
     ) async throws -> Void
+    private let providerSoftwareRepairRunner: @Sendable (
+        _ onLogLine: @escaping @Sendable @MainActor (String) -> Void
+    ) async throws -> Void
+    private let recoveryDiagnosticsBundleWriter: @Sendable @MainActor (
+        _ snapshot: AgentSnapshot,
+        _ providerLogLines: [String],
+        _ watchdogLogURL: URL?,
+        _ launchdNeedsRepair: Bool,
+        _ appVersion: String
+    ) throws -> URL
     private var lastReferralRefreshRequestedAt: Date?
     private let latestReleaseTTL: TimeInterval = 3600
 
@@ -83,11 +94,38 @@ final class MalibuAgent: ObservableObject {
                 compatibilitySetID: compatibilitySetID,
                 onLogLine: onLogLine
             )
+        },
+        providerSoftwareRepairRunner: @escaping @Sendable (
+            _ onLogLine: @escaping @Sendable @MainActor (String) -> Void
+        ) async throws -> Void = { onLogLine in
+            try await CLIInstallRunner.run(
+                referralCode: nil,
+                replacingIncumbentProvider: false,
+                repairExistingInstall: true,
+                onLogLine: onLogLine
+            )
+        },
+        recoveryDiagnosticsBundleWriter: @escaping @Sendable @MainActor (
+            _ snapshot: AgentSnapshot,
+            _ providerLogLines: [String],
+            _ watchdogLogURL: URL?,
+            _ launchdNeedsRepair: Bool,
+            _ appVersion: String
+        ) throws -> URL = { snapshot, providerLogLines, watchdogLogURL, launchdNeedsRepair, appVersion in
+            try ProviderRecoveryDiagnosticsBundle.write(
+                snapshot: snapshot,
+                providerLogLines: providerLogLines,
+                watchdogLogURL: watchdogLogURL,
+                launchdNeedsRepair: launchdNeedsRepair,
+                appVersion: appVersion
+            )
         }
     ) {
         snapshot = initialSnapshot
         providerProjectionEligible = projectionEligibleForMetrics
         self.cliUpdateRunner = cliUpdateRunner
+        self.providerSoftwareRepairRunner = providerSoftwareRepairRunner
+        self.recoveryDiagnosticsBundleWriter = recoveryDiagnosticsBundleWriter
         thermalMonitor.$state
             .sink { [weak self] state in
                 self?.snapshot.thermalState = state
@@ -322,6 +360,7 @@ final class MalibuAgent: ObservableObject {
                 self.snapshot.hardwareVerificationRetryLastError =
                     AgentSnapshotPresenter.publicErrorDetail(error.localizedDescription)
                     ?? "Provider setup could not be completed. Export diagnostics for support."
+                self.assembleRecoveryDiagnosticsBundle()
             }
         }
         await hardwareVerificationRetryTask?.value
@@ -376,6 +415,10 @@ final class MalibuAgent: ObservableObject {
             await previous.value
         }
         guard !isShuttingDown, !Task.isCancelled else { return }
+        let attemptedRepairEvidenceLine = providerSoftwareRepairEvidenceLine(
+            watchdogLogLines: watchdogLogLines,
+            watchdogLogURL: ProviderPaths.current.watchdogLog
+        )
         snapshot.providerSoftwareRepairInProgress = true
         snapshot.providerSoftwareRepairLastError = nil
         providerSoftwareRepairTask = Task { [weak self] in
@@ -383,23 +426,22 @@ final class MalibuAgent: ObservableObject {
             defer {
                 if !self.isShuttingDown {
                     self.snapshot.providerSoftwareRepairInProgress = false
+                    self.refreshDiagnosticFindings()
                 }
             }
             do {
-                try await CLIInstallRunner.run(
-                    referralCode: nil,
-                    replacingIncumbentProvider: false,
-                    repairExistingInstall: true
-                ) { line in
+                try await self.providerSoftwareRepairRunner { line in
                     self.logLines.append(LogTailBuffer.redacted(line))
                     if self.logLines.count > 400 {
                         self.logLines.removeFirst(self.logLines.count - 400)
                     }
+                    self.refreshDiagnosticFindings()
                 }
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
                 self.snapshot.providerSoftwareRepairLastError = nil
                 self.snapshot.providerSoftwareRepairRecommended = false
                 self.recordProviderSoftwareInstallHandledAutoupdateACL()
+                self.watchdogLogLines.append(ProviderLogDiagnostics.providerSoftwareInstallHandledAutoupdateACLMarker)
                 do {
                     try await ProviderConfig.importExistingCLIConfig()
                 } catch {
@@ -415,6 +457,12 @@ final class MalibuAgent: ObservableObject {
             } catch {
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
                 self.snapshot.providerSoftwareRepairLastError = error.localizedDescription
+                self.suppressedProviderSoftwareRepairEvidenceLine = attemptedRepairEvidenceLine
+                self.snapshot.providerSoftwareRepairRecommended = false
+                self.snapshot.providerSoftwareRepairInProgress = false
+                self.assembleRecoveryDiagnosticsBundle()
+                self.recordProviderSoftwareInstallFailedAutoupdateACL()
+                self.watchdogLogLines.append(ProviderLogDiagnostics.providerSoftwareInstallFailedAutoupdateACLMarker)
             }
         }
         await providerSoftwareRepairTask?.value
@@ -431,13 +479,30 @@ final class MalibuAgent: ObservableObject {
     }
 
     private func recordProviderSoftwareInstallHandledAutoupdateACL(paths: ProviderPaths = .current) {
+        recordProviderSoftwareInstallAutoupdateACLMarker(
+            ProviderLogDiagnostics.providerSoftwareInstallHandledAutoupdateACLMarker,
+            paths: paths
+        )
+    }
+
+    private func recordProviderSoftwareInstallFailedAutoupdateACL(paths: ProviderPaths = .current) {
+        recordProviderSoftwareInstallAutoupdateACLMarker(
+            ProviderLogDiagnostics.providerSoftwareInstallFailedAutoupdateACLMarker,
+            paths: paths
+        )
+    }
+
+    private func recordProviderSoftwareInstallAutoupdateACLMarker(
+        _ marker: String,
+        paths: ProviderPaths = .current
+    ) {
         do {
             try FileManager.default.createDirectory(
                 at: paths.watchdogLog.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
             let timestamp = ISO8601DateFormatter().string(from: Date())
-            let line = "[\(timestamp)] \(ProviderLogDiagnostics.providerSoftwareInstallHandledAutoupdateACLMarker)\n"
+            let line = "[\(timestamp)] \(marker)\n"
             let data = Data(line.utf8)
             if FileManager.default.fileExists(atPath: paths.watchdogLog.path) {
                 let handle = try FileHandle(forWritingTo: paths.watchdogLog)
@@ -483,6 +548,7 @@ final class MalibuAgent: ObservableObject {
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
                 self.snapshot.credentialRepairLastError = error.localizedDescription
                 await self.refreshCredentialDiagnosis()
+                self.assembleRecoveryDiagnosticsBundle()
             }
             if !self.isShuttingDown {
                 self.snapshot.credentialRepairInProgress = false
@@ -548,6 +614,7 @@ final class MalibuAgent: ObservableObject {
             } catch {
                 guard !Task.isCancelled, !self.isShuttingDown else { return }
                 self.snapshot.admissionIdentityRecoveryLastError = error.localizedDescription
+                self.assembleRecoveryDiagnosticsBundle()
             }
             if !self.isShuttingDown {
                 self.snapshot.admissionIdentityRecoveryInProgress = false
@@ -785,6 +852,7 @@ final class MalibuAgent: ObservableObject {
         }
         reconcileNetworkState(localReady: localReady)
         await refreshLatestReleaseIfNeeded()
+        refreshDiagnosticFindings()
     }
 
     private func refreshCredentialDiagnosis() async {
@@ -834,6 +902,7 @@ final class MalibuAgent: ObservableObject {
         snapshot.credentialRecoveryAction = credential.action
         snapshot.credentialStatusObservedAt = Date()
         snapshot.credentialStatusFromDiagnostic = true
+        refreshDiagnosticFindings()
     }
 
     /// Local /v1/health readiness only — coordinator session is reconciled separately.
@@ -1640,23 +1709,40 @@ final class MalibuAgent: ObservableObject {
         let tail = ProviderLogTail()
         providerLogTailCancellable = tail.$lines
             .sink { [weak self] lines in
-                self?.logLines = lines
+                self?.applyProviderLogLines(lines)
             }
         watchdogLogTailCancellable = tail.$watchdogLines
             .sink { [weak self] lines in
                 guard let self else { return }
-                self.watchdogLogLines = lines
-                self.snapshot.providerSoftwareRepairRecommended =
-                    ProviderLogDiagnostics.homeAutoupdateACLRejection(lines: lines) != nil
-                    || ProviderLogDiagnostics.homeAutoupdateACLRejection(logFile: paths.watchdogLog) != nil
+                self.applyWatchdogLogLines(lines, paths: paths)
                 self.scheduleHomeACLAutoRepairIfNeeded()
             }
         providerLogTail = tail
         tail.start(paths: paths)
         if ProviderLogDiagnostics.homeAutoupdateACLRejection(logFile: paths.watchdogLog) != nil {
             snapshot.providerSoftwareRepairRecommended = true
+            refreshDiagnosticFindings(watchdogLogURL: paths.watchdogLog)
             scheduleHomeACLAutoRepairIfNeeded()
         }
+    }
+
+    func applyProviderLogTailsForTest(
+        providerLogLines: [String],
+        watchdogLogLines: [String],
+        launchdNeedsRepair: Bool = false,
+        now: Date = Date()
+    ) {
+        applyProviderLogLines(providerLogLines, launchdNeedsRepair: launchdNeedsRepair, now: now)
+        applyWatchdogLogLines(watchdogLogLines, paths: nil, launchdNeedsRepair: launchdNeedsRepair, now: now)
+        scheduleHomeACLAutoRepairIfNeeded()
+    }
+
+    func allowHomeACLAutoRepairForTest() {
+        homeACLAutoRepairAllowed = true
+    }
+
+    var providerSoftwareRepairTaskScheduledForTest: Bool {
+        providerSoftwareRepairTask != nil
     }
 
     private func stopProviderLogTail() {
@@ -1667,6 +1753,87 @@ final class MalibuAgent: ObservableObject {
         providerLogTail?.stop()
         providerLogTail = nil
         watchdogLogLines = []
+        snapshot.diagnosticFindings = []
+    }
+
+    private func applyProviderLogLines(
+        _ lines: [String],
+        launchdNeedsRepair: Bool? = nil,
+        now: Date = Date()
+    ) {
+        logLines = lines
+        refreshDiagnosticFindings(launchdNeedsRepair: launchdNeedsRepair, now: now)
+    }
+
+    private func applyWatchdogLogLines(
+        _ lines: [String],
+        paths: ProviderPaths?,
+        launchdNeedsRepair: Bool? = nil,
+        now: Date = Date()
+    ) {
+        watchdogLogLines = lines
+        let evidenceLine = providerSoftwareRepairEvidenceLine(
+            watchdogLogLines: lines,
+            watchdogLogURL: paths?.watchdogLog
+        )
+        if evidenceLine != nil && evidenceLine != suppressedProviderSoftwareRepairEvidenceLine {
+            suppressedProviderSoftwareRepairEvidenceLine = nil
+        }
+        snapshot.providerSoftwareRepairRecommended = evidenceLine != nil
+            && evidenceLine != suppressedProviderSoftwareRepairEvidenceLine
+        refreshDiagnosticFindings(watchdogLogURL: paths?.watchdogLog, launchdNeedsRepair: launchdNeedsRepair, now: now)
+    }
+
+    private func refreshDiagnosticFindings(
+        watchdogLogURL: URL? = nil,
+        launchdNeedsRepair: Bool? = nil,
+        now: Date = Date()
+    ) {
+        var diagnosticWatchdogLines = watchdogLogLines
+        if let watchdogLogURL,
+           let fileFinding = ProviderLogDiagnostics.homeAutoupdateACLRejection(logFile: watchdogLogURL) {
+            diagnosticWatchdogLines.append(fileFinding.matchedLine)
+        }
+        snapshot.diagnosticFindings = ProviderDiagnosticFindingAggregator.aggregate(
+            snapshot: snapshot,
+            providerLogLines: logLines,
+            watchdogLogLines: diagnosticWatchdogLines,
+            launchdNeedsRepair: launchdNeedsRepair ?? currentLaunchdNeedsRepair(),
+            now: now
+        )
+    }
+
+    private func providerSoftwareRepairEvidenceLine(
+        watchdogLogLines: [String],
+        watchdogLogURL: URL?
+    ) -> String? {
+        ProviderLogDiagnostics.homeAutoupdateACLRejection(lines: watchdogLogLines)?.matchedLine
+            ?? watchdogLogURL.flatMap { ProviderLogDiagnostics.homeAutoupdateACLRejection(logFile: $0)?.matchedLine }
+    }
+
+    private func currentLaunchdNeedsRepair() -> Bool {
+        StartupState.launchdInstallEvidenceExists()
+            && InstalledProviderMonitor.launchdServiceRepairState().needsRepair
+    }
+
+    @discardableResult
+    private func assembleRecoveryDiagnosticsBundle() -> URL? {
+        refreshDiagnosticFindings(watchdogLogURL: ProviderPaths.current.watchdogLog)
+        do {
+            return try recoveryDiagnosticsBundleWriter(
+                snapshot,
+                logLines,
+                ProviderPaths.current.watchdogLog,
+                currentLaunchdNeedsRepair(),
+                ProviderRecoveryDiagnosticsBundle.appVersion()
+            )
+        } catch {
+            logLines.append("Recovery diagnostics bundle could not be assembled.")
+            if logLines.count > 400 {
+                logLines.removeFirst(logLines.count - 400)
+            }
+            return nil
+        }
     }
 
     private func diagnosedProviderFailure(includingLaunchdState: Bool = false) -> String? {

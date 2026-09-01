@@ -91,6 +91,7 @@ enum DashboardCopy {
 
     static func advancedDiagnosticsStrings(_ snapshot: AgentSnapshot, logLines: [String]) -> [String] {
         var strings = ["Advanced diagnostics"]
+        strings.append(contentsOf: AgentSnapshotPresenter.diagnosticFindingLines(snapshot))
         strings.append(contentsOf: logLines.map(LogTailBuffer.redacted))
         strings.append(AgentSnapshotPresenter.modelLine(snapshot))
         strings.append(AgentSnapshotPresenter.compatibilitySetLine(snapshot))
@@ -409,6 +410,16 @@ private struct DashboardView: View {
                                             ? Color.secondary
                                             : Color.red
                                     )
+                            }
+                            ForEach(
+                                Array(AgentSnapshotPresenter.diagnosticFindingLines(agent.snapshot).enumerated()),
+                                id: \.offset
+                            ) { _, line in
+                                Text(line)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
                             }
                             if !agent.logLines.isEmpty {
                                 LogTailView(lines: agent.logLines)

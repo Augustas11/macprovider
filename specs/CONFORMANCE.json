@@ -2545,11 +2545,21 @@
       "spec_id": "SPEC-035",
       "state": "pending",
       "implementation": [
+        "phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift:private static func publicStatusForTopDiagnosticFinding",
+        "phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift:private func refreshDiagnosticFindings",
+        "phase3-binary/app/Sources/Malibu/Dashboard/DashboardWindow.swift:static func advancedDiagnosticsStrings",
         "phase3-binary/app/Sources/Malibu/System/ProviderDiagnosticFinding.swift:enum ProviderDiagnosticFindingAggregator",
         "phase3-binary/Sources/macprovider-cli/DoctorCommand.swift:static func findings",
         "phase3-binary/Sources/macprovider-cli/DoctorCommand.swift:static func statusObservation"
       ],
       "tests": [
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testCoordinatorUnavailableIsContextNotRootCause",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testFreshReadyStatusKeepsPrimaryStateWhenLogFindingSupplementsDiagnostics",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testHomeACLDiagnosticFindingShowsRepairPendingWithoutRepairCTA",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testServeUnresponsiveUnknownCauseIsRenderedHonestly",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testStaleObservationIDDoesNotFabricateNetworkContext",
+        "phase3-binary/app/Tests/MalibuTests/MalibuAgentDiagnosticsTests.swift:testFailedProviderSoftwareRepairDoesNotResuggestRepairUntilFreshACLEvidence",
+        "phase3-binary/app/Tests/MalibuTests/MalibuAgentDiagnosticsTests.swift:testWatchdogHomeACLFindingDoesNotScheduleAutoRepairBeforeProtectedCapability",
         "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticFindingTests.swift:testFreshStatusFindingsPrecedeSupplementalLogFindings",
         "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticFindingTests.swift:testCredentialStatusSubprocessCannotOverrideFreshServeCredentialState",
         "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticFindingTests.swift:testStaleStatusAllowsDoctorServeDeadAndCredentialStatusFallbacks",
@@ -2565,8 +2575,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1315",
-        "rationale": "Local source precedence is implemented under aggregator unit tests; the CLI doctor report now suppresses doctor findings for fresh compatible /v1/status and contributes only serve_unresponsive when local status is unavailable, stale, or incompatible. Production support-bundle ingestion evidence remains deferred."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1316",
+        "rationale": "Local source precedence is implemented under aggregator unit tests; the CLI doctor report suppresses doctor findings for fresh compatible /v1/status and contributes only serve_unresponsive when local status is unavailable, stale, or incompatible. Malibu now wires aggregated findings into AgentSnapshot presentation and dashboard diagnostics while keeping coordinator state as context, rendering unknown_cause honestly, and fencing HOME-ACL repair evidence from auto-repair or executable Repair CTAs until protected repair delivery is explicitly capable. Production support-bundle ingestion evidence remains deferred."
       }
     },
     {
@@ -2576,6 +2586,7 @@
       "implementation": [
         "phase3-binary/app/Sources/Malibu/MalibuApp.swift:private func exportDiagnostics()",
         "phase3-binary/app/Sources/Malibu/System/ProviderDiagnosticsBundle.swift:enum ProviderDiagnosticsBundle",
+        "phase3-binary/app/Sources/Malibu/System/ProviderRecoveryDiagnosticsBundle.swift:enum ProviderRecoveryDiagnosticsBundle",
         "phase3-binary/app/Sources/Malibu/System/LogTailReader.swift:struct LogTailBuffer",
         "phase3-binary/Sources/macprovider-cli/DoctorCommand.swift:enum DoctorDiagnosticsReportPrinter",
         "phase3-binary/Sources/macprovider-cli/DoctorCommand.swift:enum DoctorReportRedactor",
@@ -2583,6 +2594,7 @@
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/LogTailReaderTests.swift:testV2RedactionScrubsPrivateContextWithoutDroppingNonSecretLine",
+        "phase3-binary/app/Tests/MalibuTests/MalibuAgentDiagnosticsTests.swift:testProviderSoftwareRepairFailureAutoAssemblesV2RedactedBundle",
         "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticsBundleTests.swift:testBundleIncludesLifecycleAndWatchdogEvidenceWithoutSecrets",
         "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticsBundleTests.swift:testBundleClassifiesRawWatchdogAndLaunchdRepairBeforeExportRedaction",
         "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testOnboardingAdvancedFailureDiagnosticsKeepsRedactedDetails",
@@ -2599,8 +2611,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1315",
-        "rationale": "Diagnostics bundle v2 and LogTailBuffer v2 redaction are implemented under Malibu app unit tests; the CLI doctor report emits schema_version/minimum_reader_version, redacts report tails by construction, omits config_path/provider_id, and verifies read-only collection under Doctor tests. Production bundle collection evidence remains deferred."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1316",
+        "rationale": "Diagnostics bundle v2 and LogTailBuffer v2 redaction are implemented under Malibu app unit tests; Malibu now auto-assembles the existing v2 redacted bundle on recovery failures without introducing a new diagnostics schema. The CLI doctor report emits schema_version/minimum_reader_version, redacts report tails by construction, omits config_path/provider_id, and verifies read-only collection under Doctor tests. Production bundle collection evidence remains deferred."
       }
     },
     {
