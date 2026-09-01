@@ -1,6 +1,7 @@
 import ArgumentParser
 import Darwin
 import Foundation
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
@@ -408,6 +409,78 @@ final class ModelsSubcommandTests: XCTestCase {
         )) { error in
             XCTAssertTrue(String(describing: error).contains("current signed catalog inputs"))
         }
+    }
+
+    func testAdoptRecommendationRAMFitUsesArtifactModelIDWhenSignedRowIsBypassed() throws {
+        let fixture = try AdoptionFixture(
+            current: "old-model",
+            target: "meta-llama/llama-3.1-8b-instruct",
+            catalogModelID: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
+        )
+        let recommendation = Self.parsedAdoption(
+            fixture: fixture,
+            maxContext: 4_000,
+            hardwareMemoryGB: 16
+        )
+
+        XCTAssertEqual(
+            ModelsAdoptRecommendationCommand.evaluateAdoptionRAMFit(
+                recommendation: recommendation,
+                signedCatalogRow: nil,
+                ramGB: 16
+            ),
+            .fits
+        )
+        XCTAssertEqual(
+            ModelFit.evaluate(modelID: recommendation.targetModelID, ramGB: 16),
+            .wontFit(estGB: 16, ramGB: 16)
+        )
+    }
+
+    func testAdoptRecommendationRAMFitUsesSignedCatalogMemoryFloor() throws {
+        let fixture = try AdoptionFixture(
+            current: "old-model",
+            target: "meta-llama/llama-3.1-8b-instruct",
+            catalogModelID: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
+        )
+        let recommendation = Self.parsedAdoption(
+            fixture: fixture,
+            maxContext: 4_000,
+            hardwareMemoryGB: 16
+        )
+        let row = fixture.catalogRow(minRAMGB: 12)
+
+        XCTAssertEqual(
+            ModelsAdoptRecommendationCommand.evaluateAdoptionRAMFit(
+                recommendation: recommendation,
+                signedCatalogRow: row,
+                ramGB: 16
+            ),
+            .fits
+        )
+    }
+
+    func testAdoptRecommendationRAMFitRejectsSignedCatalogFloorWithoutSafetyHeadroom() throws {
+        let fixture = try AdoptionFixture(
+            current: "old-model",
+            target: "meta-llama/llama-3.1-8b-instruct",
+            catalogModelID: "mlx-community/Meta-Llama-3.1-8B-Instruct-fp16"
+        )
+        let recommendation = Self.parsedAdoption(
+            fixture: fixture,
+            maxContext: 4_000,
+            hardwareMemoryGB: 16
+        )
+        let row = fixture.catalogRow(minRAMGB: 16)
+
+        XCTAssertEqual(
+            ModelsAdoptRecommendationCommand.evaluateAdoptionRAMFit(
+                recommendation: recommendation,
+                signedCatalogRow: row,
+                ramGB: 16
+            ),
+            .wontFit
+        )
     }
 
     func testAdoptRecommendationRollsBackOwnedConfigWhenSwitchFails() async throws {
@@ -1096,12 +1169,12 @@ private struct AdoptionFixture {
         )
     }
 
-    func catalogRow(modelID: String? = nil) -> CandidateCatalog.Row {
+    func catalogRow(modelID: String? = nil, minRAMGB: Int = 1) -> CandidateCatalog.Row {
         CandidateCatalog.Row(
             modelID: modelID ?? catalogModelID,
             modelRevision: String(repeating: "1", count: 40),
             modelSHA256: artifactSHA256,
-            minRAMGB: 1,
+            minRAMGB: minRAMGB,
             minBandwidthTier: .c,
             benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 1, max4KTTFTMS: 1_000),
             runtimeStatus: "recommendable",

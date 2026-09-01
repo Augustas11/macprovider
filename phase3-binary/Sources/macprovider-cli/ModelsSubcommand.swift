@@ -423,8 +423,9 @@ struct ModelsAdoptRecommendationCommand: AsyncParsableCommand {
         guard !Self.hasBlockingWarning(recommendation.warnings) else {
             try fail("blocked_warning", exitCode: 2)
         }
+        let signedAuthority: RecommendationAdoptionAuthority?
         do {
-            try await Self.validateSignedAuthority(recommendation, configPath: config)
+            signedAuthority = try await Self.validateSignedAuthority(recommendation, configPath: config)
         } catch {
             try fail("signed_authority_invalid", exitCode: 2)
         }
@@ -452,14 +453,16 @@ struct ModelsAdoptRecommendationCommand: AsyncParsableCommand {
         } catch {
             try fail("invalid_supported_models", exitCode: 2)
         }
-        switch ModelFit.evaluate(modelID: recommendation.targetModelID, ramGB: ModelFit.detectRAMGB()) {
+        switch Self.evaluateAdoptionRAMFit(
+            recommendation: recommendation,
+            signedCatalogRow: signedAuthority?.catalogRow,
+            ramGB: ModelFit.detectRAMGB()
+        ) {
         case .wontFit:
             try fail("ram_unfit", exitCode: 2)
-        case .unknown:
-            if recommendation.targetModelID.contains("/") {
-                try fail("fit_unknown", exitCode: 2)
-            }
-        case .fits, .tight:
+        case .unknown(_):
+            try fail("fit_unknown", exitCode: 2)
+        case .fits:
             break
         }
         let storePath = ControlSocketPaths.defaultSwitchStatePath(resolved.switchStatePath)
@@ -823,7 +826,17 @@ struct ParsedRecommendationAdoption {
     let hardwareBinaryVersion: String
 }
 
+fileprivate struct RecommendationAdoptionAuthority {
+    let catalogRow: CandidateCatalog.Row
+}
+
 extension ModelsAdoptRecommendationCommand {
+    enum AdoptionRAMFitDecision: Equatable {
+        case fits
+        case wontFit
+        case unknown(String)
+    }
+
     static func loadRecommendation(pathOrStdin: String) throws -> ParsedRecommendationAdoption {
         let data: Data
         if pathOrStdin == "-" {
@@ -973,11 +986,11 @@ extension ModelsAdoptRecommendationCommand {
     fileprivate static func validateSignedAuthority(
         _ recommendation: ParsedRecommendationAdoption,
         configPath: String? = nil
-    ) async throws {
+    ) async throws -> RecommendationAdoptionAuthority? {
         #if DEBUG
         if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
             || ProcessInfo.processInfo.processName.lowercased().contains("xctest") {
-            return
+            return nil
         }
         #endif
         let inputs = await AutotuneStaticInputs().loadRecommendationInputs()
@@ -1019,6 +1032,31 @@ extension ModelsAdoptRecommendationCommand {
             }
         }
         try validateSignedContextAuthority(recommendation: recommendation, row: row, artifact: artifact)
+        return RecommendationAdoptionAuthority(catalogRow: row)
+    }
+
+    static func evaluateAdoptionRAMFit(
+        recommendation: ParsedRecommendationAdoption,
+        signedCatalogRow: CandidateCatalog.Row?,
+        ramGB: Int
+    ) -> AdoptionRAMFitDecision {
+        if let signedCatalogRow {
+            return signedCatalogRow.minRAMGB <= ramGB - AutotuneRecommendEngine.safetyMarginGB
+                ? .fits
+                : .wontFit
+        }
+        guard let artifactModelID = recommendation.core.modelCatalogModelID,
+              !artifactModelID.isEmpty else {
+            return .unknown("missing signed catalog artifact model ID")
+        }
+        switch ModelFit.evaluate(modelID: artifactModelID, ramGB: ramGB) {
+        case .wontFit:
+            return .wontFit
+        case .unknown(let reason):
+            return artifactModelID.contains("/") ? .unknown(reason) : .fits
+        case .fits, .tight:
+            return .fits
+        }
     }
 
     static func validateSignedCatalogBinding(
