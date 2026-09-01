@@ -1,0 +1,1135 @@
+diff --git a/phase3-binary/Sources/macprovider-cli/ProviderEarningsClient.swift b/phase3-binary/Sources/macprovider-cli/ProviderEarningsClient.swift
+index b66e7b2a..0f91d0b3 100644
+--- a/phase3-binary/Sources/macprovider-cli/ProviderEarningsClient.swift
++++ b/phase3-binary/Sources/macprovider-cli/ProviderEarningsClient.swift
+@@ -45,6 +45,13 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
+     public let malibuAllTime: Double?
+     public let trustCriteriaMet: Int?
+     public let trustCriteriaRequired: Int?
++    /// Satisfied economic/additional trust-criterion IDs (SPEC-026 §5.2) and
++    /// supporting counters, sourced from the wallet-status eligibility inputs.
++    /// Forwarded so Malibu can name which Trusted criteria are done vs pending.
++    public let economicCriteria: [String]
++    public let additionalCriteria: [String]
++    public let verifiedReceiptCount: Int?
++    public let appAttested: Bool?
+     public let malibuWithdrawable: Double?
+     public let malibuHeld: Double?
+     public let malibuHoldReasons: [String]
+@@ -75,6 +82,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
+         case malibuAllTime = "malibu_all_time"
+         case trustCriteriaMet = "trust_criteria_met"
+         case trustCriteriaRequired = "trust_criteria_required"
++        case economicCriteria = "economic_criteria"
++        case additionalCriteria = "additional_criteria"
++        case verifiedReceiptCount = "verified_receipt_count"
++        case appAttested = "app_attested"
+         case malibuWithdrawable = "malibu_withdrawable"
+         case malibuHeld = "malibu_held"
+         case malibuHoldReasons = "malibu_hold_reasons"
+@@ -106,6 +117,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
+         malibuAllTime = try container.decodeIfPresent(Double.self, forKey: .malibuAllTime)
+         trustCriteriaMet = try container.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
+         trustCriteriaRequired = try container.decodeIfPresent(Int.self, forKey: .trustCriteriaRequired)
++        economicCriteria = try container.decodeIfPresent([String].self, forKey: .economicCriteria) ?? []
++        additionalCriteria = try container.decodeIfPresent([String].self, forKey: .additionalCriteria) ?? []
++        verifiedReceiptCount = try container.decodeIfPresent(Int.self, forKey: .verifiedReceiptCount)
++        appAttested = try container.decodeIfPresent(Bool.self, forKey: .appAttested)
+         malibuWithdrawable = try container.decodeIfPresent(Double.self, forKey: .malibuWithdrawable)
+         malibuHeld = try container.decodeIfPresent(Double.self, forKey: .malibuHeld)
+         malibuHoldReasons = try container.decodeIfPresent([String].self, forKey: .malibuHoldReasons) ?? []
+@@ -146,6 +161,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
+         malibuAllTime: Double?,
+         trustCriteriaMet: Int?,
+         trustCriteriaRequired: Int?,
++        economicCriteria: [String] = [],
++        additionalCriteria: [String] = [],
++        verifiedReceiptCount: Int? = nil,
++        appAttested: Bool? = nil,
+         malibuWithdrawable: Double? = nil,
+         malibuHeld: Double? = nil,
+         malibuHoldReasons: [String] = [],
+@@ -168,6 +187,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
+         self.malibuAllTime = malibuAllTime
+         self.trustCriteriaMet = trustCriteriaMet
+         self.trustCriteriaRequired = trustCriteriaRequired
++        self.economicCriteria = economicCriteria
++        self.additionalCriteria = additionalCriteria
++        self.verifiedReceiptCount = verifiedReceiptCount
++        self.appAttested = appAttested
+         self.malibuWithdrawable = malibuWithdrawable
+         self.malibuHeld = malibuHeld
+         self.malibuHoldReasons = malibuHoldReasons
+@@ -193,6 +216,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
+             malibuAllTime: malibuAllTime,
+             trustCriteriaMet: trustCriteriaMet,
+             trustCriteriaRequired: trustCriteriaRequired,
++            economicCriteria: economicCriteria,
++            additionalCriteria: additionalCriteria,
++            verifiedReceiptCount: verifiedReceiptCount,
++            appAttested: appAttested,
+             malibuWithdrawable: malibuWithdrawable,
+             malibuHeld: malibuHeld,
+             malibuHoldReasons: malibuHoldReasons,
+@@ -219,6 +246,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
+             malibuAllTime: accrual.accruedMALIBU,
+             trustCriteriaMet: accrual.trustCriteriaMet ?? trustCriteriaMet,
+             trustCriteriaRequired: accrual.trustCriteriaRequired ?? trustCriteriaRequired,
++            economicCriteria: economicCriteria,
++            additionalCriteria: additionalCriteria,
++            verifiedReceiptCount: verifiedReceiptCount,
++            appAttested: appAttested,
+             malibuWithdrawable: accrual.withdrawableMALIBU,
+             malibuHeld: accrual.heldMALIBU,
+             malibuHoldReasons: accrual.withdrawalHoldReasons,
+@@ -248,6 +279,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
+             malibuAllTime: walletStatus.rewardAmounts?.accruedMALIBU ?? malibuAllTime,
+             trustCriteriaMet: walletStatus.eligibilityInputs?.criteriaMet ?? trustCriteriaMet,
+             trustCriteriaRequired: walletStatus.eligibilityInputs?.criteriaRequired ?? trustCriteriaRequired,
++            economicCriteria: walletStatus.eligibilityInputs?.economicCriteria ?? economicCriteria,
++            additionalCriteria: walletStatus.eligibilityInputs?.additionalCriteria ?? additionalCriteria,
++            verifiedReceiptCount: walletStatus.eligibilityInputs?.verifiedReceiptCount ?? verifiedReceiptCount,
++            appAttested: walletStatus.eligibilityInputs?.appAttested ?? appAttested,
+             malibuWithdrawable: walletStatus.rewardAmounts?.withdrawableMALIBU ?? malibuWithdrawable,
+             malibuHeld: walletStatus.rewardAmounts?.heldMALIBU ?? malibuHeld,
+             malibuHoldReasons: malibuHoldReasons,
+diff --git a/phase3-binary/Tests/macprovider-cliTests/ProviderEarningsClientTests.swift b/phase3-binary/Tests/macprovider-cliTests/ProviderEarningsClientTests.swift
+index 81c7485b..1efb193a 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/ProviderEarningsClientTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/ProviderEarningsClientTests.swift
+@@ -175,6 +175,78 @@ final class ProviderEarningsClientTests: XCTestCase {
+         XCTAssertTrue(merged.malibuProjectionFresh)
+         XCTAssertFalse(merged.earningsProjectionFresh)
+     }
++
++    // P1.5: the wallet-status eligibility inputs carry the granular trust
++    // criteria; merging must forward them, and the control-frame JSON encode
++    // must round-trip the new keys so Malibu can render criteria by name.
++    func testWalletStatusMergeForwardsAndEncodesTrustCriteria() throws {
++        let walletStatus = try JSONDecoder().decode(
++            ProviderWalletStatusSummary.self,
++            from: Data("""
++            {
++              "schema_version": "provider_wallet_status.v1",
++              "provider_id": "mp-test",
++              "wallet_bound": true,
++              "wallet_mismatch": false,
++              "reward_wallet": {
++                "address": "0xReward",
++                "verification_source": "provider_emission_state",
++                "cap_replay_pending": false
++              },
++              "reward_amounts": {
++                "accrued_malibu": "10",
++                "withdrawable_malibu": "0",
++                "held_malibu": "10",
++                "provider_daily_cap_malibu": 25,
++                "provider_day_malibu": "10",
++                "provider_daily_capped": false,
++                "wallet_daily_cap_malibu": 100,
++                "wallet_day_malibu": "10",
++                "wallet_daily_capped": false
++              },
++              "eligibility_inputs": {
++                "trust_tier": "provisional",
++                "quarantined": false,
++                "receipt_quality": "sufficient_verified_receipts",
++                "verified_receipt_count": 137,
++                "required_receipt_count": 100,
++                "compute_integrity_state": "unknown",
++                "attestation_tier": "app_attested",
++                "app_attested": true,
++                "criteria_met": 1,
++                "criteria_required": 2,
++                "economic_criteria": ["E1"],
++                "additional_criteria": [],
++                "wallet_balance_ok": false,
++                "uptime_ok": false
++              },
++              "reward_eligibility": {
++                "schema_version": "malibu_reward_eligibility.v1",
++                "earning_state": "held",
++                "withdrawal_state": "held",
++                "primary_reason": "held_provisional_trust_tier",
++                "reasons": ["held_provisional_trust_tier"]
++              },
++              "audit": { "events": [] }
++            }
++            """.utf8)
++        )
++        let base = try JSONDecoder().decode(ProviderEarningsSummary.self, from: Data("{}".utf8))
++        let merged = base.merging(walletStatus: walletStatus)
++        XCTAssertEqual(merged.economicCriteria, ["E1"])
++        XCTAssertEqual(merged.additionalCriteria, [])
++        XCTAssertEqual(merged.verifiedReceiptCount, 137)
++        XCTAssertEqual(merged.appAttested, true)
++
++        let encoded = try JSONEncoder().encode(merged)
++        let obj = try XCTUnwrap(
++            try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
++        )
++        XCTAssertEqual(obj["economic_criteria"] as? [String], ["E1"])
++        XCTAssertEqual(obj["additional_criteria"] as? [String], [])
++        XCTAssertEqual(obj["verified_receipt_count"] as? Int, 137)
++        XCTAssertEqual(obj["app_attested"] as? Bool, true)
++    }
+ }
+ 
+ private final class ProviderEarningsMockURLProtocol: URLProtocol {
+diff --git a/phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift b/phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift
+index dc97c46e..6f12f6fd 100644
+--- a/phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift
++++ b/phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift
+@@ -71,6 +71,14 @@ struct AgentSnapshot: Equatable {
+     var weightsPath: String?
+     var trustCriteriaMet: Int?
+     var trustCriteriaRequired: Int?
++    /// Satisfied economic/additional trust-criterion IDs (SPEC-026 §5.2),
++    /// plus supporting counters. Coordinator-served, threaded through the CLI
++    /// earnings frame. Display-only — used to name which Trusted criteria are
++    /// done vs pending.
++    var economicCriteria: [String] = []
++    var additionalCriteria: [String] = []
++    var verifiedReceiptCount: Int? = nil
++    var appAttested: Bool? = nil
+     var thermalState: MalibuThermalState?
+     var lastError: String?
+ 
+@@ -602,7 +610,7 @@ enum AgentSnapshotPresenter {
+                 }
+                 return result(
+                     status: "No earnings yet",
+-                    code: "reward_projection_unavailable",
++                    code: "reward_projection_warming_up",
+                     reason: "You're live and building trust. Earnings appear after your first paid job.",
+                     action: action
+                 )
+@@ -616,10 +624,10 @@ enum AgentSnapshotPresenter {
+         }
+         if s.walletBound == false {
+             return result(
+-                status: "Missing wallet",
++                status: "No payout wallet yet",
+                 code: "wallet_missing",
+-                reason: "Rewards are visible, but no payout wallet is bound.",
+-                action: "Add a payout wallet."
++                reason: "You're set up to earn — you just need somewhere to be paid.",
++                action: "Add a payout wallet to receive earnings."
+             )
+         }
+         if s.malibuProjectionFresh {
+@@ -721,7 +729,9 @@ enum AgentSnapshotPresenter {
+             ? s.earningsUsdcToday.map { "\(formatUSDC($0)) USDC today" } ?? "n/a USDC today"
+             : "USDC unavailable"
+         let malibu: String
+-        if s.malibuProjectionFresh {
++        if isMalibuProjectionWarmingUp(s) {
++            malibu = "MALIBU rewards warming up"
++        } else if s.malibuProjectionFresh {
+             let withdrawable = s.malibuWithdrawable.map { String(format: "%.2f withdrawable", $0) }
+                 ?? "n/a withdrawable"
+             let held = s.malibuHeld.map { String(format: "%.2f held", $0) }
+@@ -776,6 +786,31 @@ enum AgentSnapshotPresenter {
+         s.state == .reconnecting && s.currentModelID != nil
+     }
+ 
++    /// True when the MALIBU reward projection frame arrived but the coordinator
++    /// has not yet computed an eligibility verdict for this live provider — the
++    /// normal warming-up state for a brand-new or low-volume provider that is
++    /// already buyer-serving. This is benign, so callers render it calm and do
++    /// not tell the provider to "try again". A provider that is NOT network
++    /// ready keeps the conservative "unavailable" wording instead.
++    static func isMalibuProjectionWarmingUp(_ s: AgentSnapshot) -> Bool {
++        guard s.malibuProjectionFresh, isNetworkReady(s) else { return false }
++        guard let eligibility = authoritativeRewardEligibility(s),
++              eligibility.withdrawalState == "unavailable" else { return false }
++        // Concrete MALIBU amounts mean the projection actually computed a
++        // verdict — that is a real reward state, not warming up.
++        return s.malibuWithdrawable == nil
++            && s.malibuHeld == nil
++            && s.malibuAccruedToday == nil
++            && (s.malibuAccruedAllTime ?? 0) == 0
++    }
++
++    /// Forward-looking caption for the MALIBU column while the projection is
++    /// warming up. `nil` outside the warming-up state.
++    static func malibuTodayCaption(_ s: AgentSnapshot) -> String? {
++        guard isMalibuProjectionWarmingUp(s) else { return nil }
++        return "MALIBU rewards are still warming up — nothing to do."
++    }
++
+     private static func authoritativeLifecycleLabel(_ s: AgentSnapshot) -> String? {
+         guard s.isLocalStatusObservationCurrent(), let state = s.lifecycleState else { return nil }
+         return lifecycleStateLabel(state)
+@@ -962,6 +997,82 @@ enum AgentSnapshotPresenter {
+         }
+     }
+ 
++    /// One authoritative first-run status following a three-state model
++    /// (Setting up / Live · Provisional / Earning · Trusted), each carrying at
++    /// most one next action. Fault, paused, and stopped states defer to the
++    /// specific `publicStatus` copy so recovery guidance is never softened.
++    struct ConsolidatedStatus: Equatable {
++        enum Phase: String { case settingUp, live, earning, needsAttention }
++        let phase: Phase
++        let label: String
++        let meaning: String
++        let nextAction: String?
++    }
++
++    static func consolidatedStatus(_ s: AgentSnapshot) -> ConsolidatedStatus {
++        let publicS = publicStatus(s)
++        if s.state == .error || s.state == .idle || s.state == .paused
++            || publicS.executableAction != nil {
++            return ConsolidatedStatus(
++                phase: .needsAttention,
++                label: publicS.title,
++                meaning: publicS.detail ?? "",
++                nextAction: publicS.safeNextAction
++            )
++        }
++        guard isNetworkReady(s) else {
++            return ConsolidatedStatus(
++                phase: .settingUp,
++                label: "Setting up",
++                meaning: publicS.detail ?? "Getting this Mac ready for customer work.",
++                nextAction: publicS.safeNextAction ?? "Keep Malibu open while setup finishes."
++            )
++        }
++        // Network-ready but a local condition is actively blocking earning
++        // (on battery, thermal throttle, model still loading) — surface that
++        // with its concrete action instead of a generic "live" headline.
++        let mining = miningHealth(s)
++        if localBlockReasonCodes.contains(mining.reasonCode) {
++            return ConsolidatedStatus(
++                phase: .needsAttention,
++                label: mining.status,
++                meaning: mining.reason,
++                nextAction: mining.nextAction
++            )
++        }
++        let action = liveNextAction(s)
++        if s.trustTier == .trusted {
++            return ConsolidatedStatus(
++                phase: .earning,
++                label: "Earning · Trusted",
++                meaning: "This Mac is approved and earning. MALIBU withdrawals are unlocked.",
++                nextAction: action
++            )
++        }
++        return ConsolidatedStatus(
++            phase: .live,
++            label: "Live · Provisional",
++            meaning: "This Mac is live and building trust. Earnings appear as customer jobs arrive.",
++            nextAction: action
++        )
++    }
++
++    private static let localBlockReasonCodes: Set<String> = [
++        "local_on_battery",
++        "local_thermal_pressure",
++        "local_model_preparing",
++    ]
++
++    private static func liveNextAction(_ s: AgentSnapshot) -> String? {
++        if s.walletBound == false {
++            return "Add a payout wallet to receive earnings."
++        }
++        if s.trustTier == .provisional {
++            return trustCriteriaAction(s) ?? "Stay online to reach Trusted and unlock withdrawals."
++        }
++        return nil
++    }
++
+     private static func isModelPreparing(_ s: AgentSnapshot) -> Bool {
+         switch s.lifecycleState {
+         case "installing", "importing_credentials", "starting_provider",
+@@ -1184,6 +1295,9 @@ enum AgentSnapshotPresenter {
+     /// counts. Gated by `providerEarningsFresh` since idle-prewarm data
+     /// arrives on the same projection as the other earnings fields.
+     static func eligibilityLine(_ s: AgentSnapshot) -> String? {
++        // The warming-up caption in the MALIBU column already explains this
++        // benign state; don't duplicate it here as "Reward status unavailable".
++        if isMalibuProjectionWarmingUp(s) { return nil }
+         if let eligibility = displayRewardEligibility(s) {
+             return rewardEligibilityLine(eligibility)
+         }
+@@ -1541,15 +1655,23 @@ enum AgentSnapshotPresenter {
+     }
+ 
+     static func usdcFullLine(_ s: AgentSnapshot) -> String {
++        // Genuine telemetry failure: keep it small and calm, not four "n/a"s.
+         if !canShowLastKnownUSDC(s) {
+-            let today = "n/a today"
+-            return "\(today) · n/a wk · n/a accrued · n/a life"
++            return "Earnings not available yet"
++        }
++        // A fresh frame with unreported sub-totals means "nothing yet" — render
++        // real $0.00 rather than "n/a". A stale/last-known frame must not
++        // fabricate zeros for fields it did not report.
++        let zerosWhenMissing = s.providerEarningsFresh
++        func field(_ value: Double?, _ suffix: String) -> String {
++            if let value { return "\(formatUSDC(value)) \(suffix)" }
++            return zerosWhenMissing ? "\(formatUSDC(0)) \(suffix)" : "n/a \(suffix)"
+         }
+         return [
+-            s.earningsUsdcToday.map { "\(formatUSDC($0)) today" } ?? "n/a today",
+-            s.earningsUsdcWeek.map { "\(formatUSDC($0)) wk" } ?? "n/a wk",
+-            s.earningsUsdcPending.map { "\(formatUSDC($0)) accrued" } ?? "n/a accrued",
+-            s.earningsUsdcLifetime.map { "\(formatUSDC($0)) life" } ?? "n/a life"
++            field(s.earningsUsdcToday, "today"),
++            field(s.earningsUsdcWeek, "wk"),
++            field(s.earningsUsdcPending, "accrued"),
++            field(s.earningsUsdcLifetime, "life")
+         ].joined(separator: " · ")
+     }
+ 
+@@ -1561,16 +1683,23 @@ enum AgentSnapshotPresenter {
+     }
+ 
+     static func usdcTodayDisplay(_ s: AgentSnapshot) -> String {
++        // Non-hero placeholder for genuine unavailability; the hero number must
++        // never fabricate an authoritative "$0.00" from missing telemetry.
+         guard canShowLastKnownUSDC(s) else {
+-            return "n/a"
++            return "—"
+         }
+-        return s.earningsUsdcToday.map { formatUSDC($0) } ?? "n/a"
++        // Fresh frame with no reported total means a real $0.00, not "n/a".
++        return formatUSDC(s.earningsUsdcToday ?? 0)
+     }
+ 
+     static func malibuFullLine(_ s: AgentSnapshot) -> String {
+         if !s.malibuProjectionFresh {
+-            let today = "n/a MALIBU today"
+-            return "\(today) · n/a all-time"
++            return "MALIBU rewards not available yet"
++        }
++        // A live provider whose MALIBU verdict has not computed yet is warming
++        // up, not broken: show a real zero and drop the "unavailable" jargon.
++        if isMalibuProjectionWarmingUp(s) {
++            return "0.00 MALIBU today · 0.00 all-time"
+         }
+         let today = malibuTodayLine(s, compact: true)
+         let allTime = s.malibuAccruedAllTime.map { String(format: "%.2f all-time", $0) }
+@@ -1632,9 +1761,12 @@ enum AgentSnapshotPresenter {
+     }
+ 
+     static func malibuHoldLine(_ s: AgentSnapshot) -> String? {
++        // A warming-up projection is benign; the forward-looking caption covers
++        // it. Do not emit a "reward status is unavailable" hold line here.
++        if isMalibuProjectionWarmingUp(s) { return nil }
+         if let eligibility = displayRewardEligibility(s),
+            eligibility.withdrawalState != "withdrawable" {
+-            return "MALIBU status: \(rewardReasonCopy(eligibility.primaryReason)) Next: \(rewardReasonNextAction(eligibility.primaryReason))"
++            return "MALIBU status: \(rewardReasonCopy(eligibility.primaryReason)). Next: \(rewardReasonNextAction(eligibility.primaryReason))"
+         }
+         let holdReasons = displayMalibuHoldReasons(s)
+         guard s.malibuProjectionFresh, !holdReasons.isEmpty else { return nil }
+@@ -1665,11 +1797,68 @@ enum AgentSnapshotPresenter {
+             return "Trusted"
+         }
+         if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
+-            return "\(tier) — \(met) of \(required) criteria met · Unlock Trusted →"
++            return "\(tier) — \(met) of \(required) criteria met"
+         }
+         return tier
+     }
+ 
++    /// What reaching Trusted grants, in plain language. Used by the trust-tier
++    /// disclosure so "Unlock Trusted" leads somewhere concrete.
++    static func trustUnlockSummary(_ s: AgentSnapshot) -> String {
++        if s.trustTier == .trusted {
++            return "Trusted — MALIBU withdrawals are unlocked."
++        }
++        return "Reaching Trusted unlocks MALIBU reward withdrawals. USDC earnings are unaffected."
++    }
++
++    /// A single trust criterion rendered by name with a done/pending state and
++    /// a plain next step. Kept view-agnostic so the disclosure and tests share
++    /// one source of truth.
++    struct TrustCriterion: Equatable {
++        let title: String
++        let done: Bool
++        let detail: String
++    }
++
++    /// The two Trusted criteria (one economic + one additional per SPEC-026
++    /// §5.2), named for a first-time provider. `nil` until a fresh MALIBU
++    /// projection is available. No granular uptime countdown exists end-to-end
++    /// yet, so the additional criterion says "just stay online" rather than
++    /// inventing an ETA.
++    // TODO: render an "Nh of 72h" countdown once the coordinator exposes a
++    // granular uptime-progress field on the reward projection.
++    static func trustCriteria(_ s: AgentSnapshot) -> [TrustCriterion]? {
++        guard s.malibuProjectionFresh else { return nil }
++        let economicDone = !s.economicCriteria.isEmpty
++        let additionalDone = !s.additionalCriteria.isEmpty
++
++        let economicDetail: String
++        if economicDone {
++            economicDetail = "Done — verified customer work recorded."
++        } else if let count = s.verifiedReceiptCount, count > 0 {
++            economicDetail = "Keep serving verified customer jobs (\(formatCount(count)) so far)."
++        } else {
++            economicDetail = "Serve verified customer jobs to complete this."
++        }
++
++        let additionalDetail = additionalDone
++            ? "Done."
++            : "Nothing to do — just stay online."
++
++        return [
++            TrustCriterion(
++                title: "Verified customer work",
++                done: economicDone,
++                detail: economicDetail
++            ),
++            TrustCriterion(
++                title: "Time online",
++                done: additionalDone,
++                detail: additionalDetail
++            ),
++        ]
++    }
++
+     static func uptimeLine(_ s: AgentSnapshot) -> String {
+         var parts: [String] = []
+         if let sec = s.uptimeSec, isActive(s) {
+@@ -2148,8 +2337,13 @@ enum AgentSnapshotPresenter {
+             return "Wait for verification to complete."
+         case "compute_integrity_blocked", "provider_token_untrusted":
+             return "Review Advanced diagnostics."
++        case "hardware_evidence_unavailable",
++             "hardware_evidence_missing_or_expired",
++             "compute_integrity_unavailable",
++             "telemetry_unavailable":
++            return "Nothing to do — this refreshes on its own."
+         default:
+-            return "Try again when reward status refreshes."
++            return "Nothing to do — this refreshes on its own."
+         }
+     }
+ 
+diff --git a/phase3-binary/app/Sources/Malibu/Agent/EarningsClient.swift b/phase3-binary/app/Sources/Malibu/Agent/EarningsClient.swift
+index d005bcba..2a6b9d8a 100644
+--- a/phase3-binary/app/Sources/Malibu/Agent/EarningsClient.swift
++++ b/phase3-binary/app/Sources/Malibu/Agent/EarningsClient.swift
+@@ -161,6 +161,13 @@ struct ProviderEarnings: Codable, Equatable {
+     let malibuAllTime: Double?
+     let trustCriteriaMet: Int?
+     let trustCriteriaRequired: Int?
++    /// Satisfied economic/additional trust-criterion IDs (SPEC-026 §5.2) and
++    /// supporting counters. Display-only; used to name which Trusted criteria
++    /// are done vs pending.
++    let economicCriteria: [String]
++    let additionalCriteria: [String]
++    let verifiedReceiptCount: Int?
++    let appAttested: Bool?
+     let malibuWithdrawable: Double?
+     let malibuHeld: Double?
+     let malibuHoldReasons: [String]
+@@ -189,6 +196,10 @@ struct ProviderEarnings: Codable, Equatable {
+         case malibuAllTime = "malibu_all_time"
+         case trustCriteriaMet = "trust_criteria_met"
+         case trustCriteriaRequired = "trust_criteria_required"
++        case economicCriteria = "economic_criteria"
++        case additionalCriteria = "additional_criteria"
++        case verifiedReceiptCount = "verified_receipt_count"
++        case appAttested = "app_attested"
+         case malibuWithdrawable = "malibu_withdrawable"
+         case malibuHeld = "malibu_held"
+         case malibuHoldReasons = "malibu_hold_reasons"
+@@ -214,6 +225,10 @@ struct ProviderEarnings: Codable, Equatable {
+         malibuAllTime = try c.decodeIfPresent(Double.self, forKey: .malibuAllTime)
+         trustCriteriaMet = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
+         trustCriteriaRequired = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaRequired)
++        economicCriteria = try c.decodeIfPresent([String].self, forKey: .economicCriteria) ?? []
++        additionalCriteria = try c.decodeIfPresent([String].self, forKey: .additionalCriteria) ?? []
++        verifiedReceiptCount = try c.decodeIfPresent(Int.self, forKey: .verifiedReceiptCount)
++        appAttested = try c.decodeIfPresent(Bool.self, forKey: .appAttested)
+         malibuWithdrawable = try c.decodeIfPresent(Double.self, forKey: .malibuWithdrawable)
+         malibuHeld = try c.decodeIfPresent(Double.self, forKey: .malibuHeld)
+         malibuHoldReasons = try c.decodeIfPresent([String].self, forKey: .malibuHoldReasons) ?? []
+@@ -248,6 +263,10 @@ struct ProviderEarnings: Codable, Equatable {
+         malibuAllTime: Double?,
+         trustCriteriaMet: Int?,
+         trustCriteriaRequired: Int?,
++        economicCriteria: [String] = [],
++        additionalCriteria: [String] = [],
++        verifiedReceiptCount: Int? = nil,
++        appAttested: Bool? = nil,
+         malibuWithdrawable: Double? = nil,
+         malibuHeld: Double? = nil,
+         malibuHoldReasons: [String] = [],
+@@ -270,6 +289,10 @@ struct ProviderEarnings: Codable, Equatable {
+         self.malibuAllTime = malibuAllTime
+         self.trustCriteriaMet = trustCriteriaMet
+         self.trustCriteriaRequired = trustCriteriaRequired
++        self.economicCriteria = economicCriteria
++        self.additionalCriteria = additionalCriteria
++        self.verifiedReceiptCount = verifiedReceiptCount
++        self.appAttested = appAttested
+         self.malibuWithdrawable = malibuWithdrawable
+         self.malibuHeld = malibuHeld
+         self.malibuHoldReasons = malibuHoldReasons
+diff --git a/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift b/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift
+index 5a68d731..62829fc6 100644
+--- a/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift
++++ b/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift
+@@ -1409,6 +1409,10 @@ final class MalibuAgent: ObservableObject {
+                 snapshot.malibuRewardEligibility = providerEarnings.malibuRewardEligibility
+                 snapshot.trustCriteriaMet = providerEarnings.trustCriteriaMet
+                 snapshot.trustCriteriaRequired = providerEarnings.trustCriteriaRequired
++                snapshot.economicCriteria = providerEarnings.economicCriteria
++                snapshot.additionalCriteria = providerEarnings.additionalCriteria
++                snapshot.verifiedReceiptCount = providerEarnings.verifiedReceiptCount
++                snapshot.appAttested = providerEarnings.appAttested
+                 snapshot.idlePrewarmSummary = providerEarnings.idlePrewarm
+                 if providerProjectionEligible && providerEarnings.earningsProjectionFresh {
+                     snapshot.hasObservedProviderEarnings = true
+diff --git a/phase3-binary/app/Sources/Malibu/Dashboard/DashboardWindow.swift b/phase3-binary/app/Sources/Malibu/Dashboard/DashboardWindow.swift
+index 943d5714..bc78b4b6 100644
+--- a/phase3-binary/app/Sources/Malibu/Dashboard/DashboardWindow.swift
++++ b/phase3-binary/app/Sources/Malibu/Dashboard/DashboardWindow.swift
+@@ -29,7 +29,10 @@ enum DashboardCopy {
+     static let currentStateTitle = "Current state"
+     static let meaningTitle = "What this means"
+     static let nextActionTitle = "Next safe action"
++    static let statusTitle = "Status"
+     static let miningHealthTitle = "Mining Health"
++    static let howEarningWorksTitle = "How earning works"
++    static let somethingWrongTitle = "Something wrong?"
+     static let miningReasonTitle = "Reason"
+     static let miningRewardsTitle = "Rewards"
+     static let miningEligibilityTitle = "Eligibility"
+@@ -106,7 +109,10 @@ private struct DashboardView: View {
+     @State private var showModelSheet = false
+     @ObservedObject private var modelStore = ModelManagementStore.shared
+ 
+-    @State private var advancedDiagnosticsExpanded = true
++    @State private var advancedDiagnosticsExpanded = false
++    @State private var trustDetailExpanded = false
++    @State private var howEarningWorksExpanded = false
++    @State private var somethingWrongExpanded = false
+ 
+     var body: some View {
+         ScrollView {
+@@ -251,11 +257,21 @@ private struct DashboardView: View {
+                     }
+                     Text(AgentSnapshotPresenter.malibuFullLine(agent.snapshot))
+                         .foregroundStyle(
+-                            agent.snapshot.malibuProjectionFresh && agent.snapshot.trustTier == .provisional
++                            // Reserve the coral emphasis for a genuine provisional
++                            // lock with accrued MALIBU — never for a fresh account
++                            // whose projection is still warming up.
++                            agent.snapshot.malibuProjectionFresh
++                                && agent.snapshot.trustTier == .provisional
++                                && !AgentSnapshotPresenter.isMalibuProjectionWarmingUp(agent.snapshot)
+                                 ? MalibuBrand.coral
+                                 : .secondary
+                         )
+                         .font(.callout)
++                    if let warming = AgentSnapshotPresenter.malibuTodayCaption(agent.snapshot) {
++                        Text(warming)
++                            .font(.caption2)
++                            .foregroundStyle(.secondary)
++                    }
+                     if let availability = AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot) {
+                         Text(availability)
+                             .font(.caption)
+@@ -311,16 +327,11 @@ private struct DashboardView: View {
+                 }
+ 
+                 statsPanel {
+-                    let publicStatus = AgentSnapshotPresenter.publicStatus(agent.snapshot)
+-                    MetricRow(title: DashboardCopy.currentStateTitle, value: publicStatus.title)
+-                    if let detail = publicStatus.detail {
+-                        MetricRow(title: DashboardCopy.meaningTitle, value: detail)
+-                    }
+-                    if let action = publicStatus.safeNextAction {
+-                        MetricRow(title: DashboardCopy.nextActionTitle, value: action)
+-                    }
++                    // Status now lives in the single consolidated card above; the
++                    // right column keeps the primary recovery action and the
++                    // trust-unlock / diagnostics detail.
+                     primaryActionButton
+-                    recoveryActions
++                    trustTierDisclosure
+                     DisclosureGroup("Advanced diagnostics", isExpanded: $advancedDiagnosticsExpanded) {
+                         VStack(alignment: .leading, spacing: 12) {
+                             MetricRow(title: "Running model", value: AgentSnapshotPresenter.modelLine(agent.snapshot))
+@@ -333,7 +344,6 @@ private struct DashboardView: View {
+                             } else if agent.snapshot.state == .serving || agent.snapshot.state == .paused {
+                                 MetricRow(title: "Weights path", value: "Managed by provider")
+                             }
+-                            MetricRow(title: "Trust tier", value: AgentSnapshotPresenter.trustLine(agent.snapshot))
+                             MetricRow(
+                                 title: "Malibu app",
+                                 value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Version unknown"
+@@ -430,9 +440,13 @@ private struct DashboardView: View {
+                 }
+             }
+ 
++            howEarningWorksSection
++
+             if agent.snapshot.localProviderID != nil {
+                 ReferralPanel(agent: agent)
+             }
++
++            somethingWrongSection
+         }
+         .padding(20)
+         .frame(maxWidth: .infinity, alignment: .leading)
+@@ -458,24 +472,35 @@ private struct DashboardView: View {
+         }
+     }
+ 
++    // Single authoritative status card (P2.7): the three-state model plus the
++    // reward/eligibility detail, replacing the former separate Mining Health
++    // panel and the "Current state / What this means / Next safe action" rows.
+     private var miningHealthPanel: some View {
++        let status = AgentSnapshotPresenter.consolidatedStatus(agent.snapshot)
+         let mining = AgentSnapshotPresenter.miningHealth(agent.snapshot)
+         return VStack(alignment: .leading, spacing: 10) {
+             HStack(alignment: .firstTextBaseline) {
+-                Text(DashboardCopy.miningHealthTitle)
++                Text(DashboardCopy.statusTitle)
+                     .font(.caption.weight(.semibold))
+                     .foregroundStyle(.secondary)
+                 Spacer()
+-                Text(mining.status)
++                Text(status.label)
+                     .font(.callout.weight(.semibold))
+-                    .foregroundStyle(miningTone(mining.reasonCode))
++                    .foregroundStyle(phaseTone(status.phase))
+                     .accessibilityIdentifier("malibu.dashboard.mining-status")
+             }
++            if !status.meaning.isEmpty {
++                Text(status.meaning)
++                    .font(.callout)
++                    .foregroundStyle(.secondary)
++                    .fixedSize(horizontal: false, vertical: true)
++            }
+             VStack(alignment: .leading, spacing: 8) {
+-                MetricRow(title: DashboardCopy.miningReasonTitle, value: mining.reason)
+                 MetricRow(title: DashboardCopy.miningRewardsTitle, value: mining.rewardSummary)
+                 MetricRow(title: DashboardCopy.miningEligibilityTitle, value: mining.trustSummary)
+-                MetricRow(title: DashboardCopy.nextActionTitle, value: mining.nextAction)
++                if let action = status.nextAction {
++                    MetricRow(title: DashboardCopy.nextActionTitle, value: action)
++                }
+             }
+         }
+         .padding(12)
+@@ -487,7 +512,9 @@ private struct DashboardView: View {
+         switch reasonCode {
+         case "earning", "trusted_withdrawable":
+             return .green
+-        case "idle_no_work", "eligible_waiting_settlement", "customer_availability_pending":
++        case "idle_no_work", "eligible_waiting_settlement", "customer_availability_pending",
++             // Benign new-account states: reserve alarm colors for real faults.
++             "reward_projection_warming_up", "wallet_missing":
+             return .secondary
+         case "not_running", "provider_paused", "reward_projection_unavailable":
+             return MalibuBrand.sunnyYellow
+@@ -496,6 +523,14 @@ private struct DashboardView: View {
+         }
+     }
+ 
++    private func phaseTone(_ phase: AgentSnapshotPresenter.ConsolidatedStatus.Phase) -> Color {
++        switch phase {
++        case .earning: return .green
++        case .live, .settingUp: return .secondary
++        case .needsAttention: return MalibuBrand.coral
++        }
++    }
++
+     @ViewBuilder
+     private var primaryActionButton: some View {
+         let status = AgentSnapshotPresenter.publicStatus(agent.snapshot)
+@@ -544,6 +579,92 @@ private struct DashboardView: View {
+         }
+     }
+ 
++    // P1.4/P1.5: the trust tier is a real disclosure that names the two
++    // Trusted criteria (done/pending) and what reaching Trusted grants — so
++    // "Unlock Trusted" leads somewhere instead of being a dead affordance.
++    @ViewBuilder
++    private var trustTierDisclosure: some View {
++        if let criteria = AgentSnapshotPresenter.trustCriteria(agent.snapshot) {
++            DisclosureGroup(isExpanded: $trustDetailExpanded) {
++                VStack(alignment: .leading, spacing: 8) {
++                    Text(AgentSnapshotPresenter.trustUnlockSummary(agent.snapshot))
++                        .font(.caption)
++                        .foregroundStyle(.secondary)
++                        .fixedSize(horizontal: false, vertical: true)
++                    ForEach(criteria, id: \.title) { criterion in
++                        HStack(alignment: .firstTextBaseline, spacing: 8) {
++                            Image(systemName: criterion.done ? "checkmark.circle.fill" : "circle")
++                                .foregroundStyle(criterion.done ? Color.green : Color.secondary)
++                            VStack(alignment: .leading, spacing: 2) {
++                                Text(criterion.title)
++                                    .font(.callout)
++                                Text(criterion.detail)
++                                    .font(.caption)
++                                    .foregroundStyle(.secondary)
++                                    .fixedSize(horizontal: false, vertical: true)
++                            }
++                        }
++                    }
++                }
++                .padding(.top, 6)
++            } label: {
++                MetricRow(title: "Trust tier", value: AgentSnapshotPresenter.trustLine(agent.snapshot))
++            }
++            .accessibilityIdentifier("malibu.dashboard.trust-tier")
++        } else {
++            MetricRow(title: "Trust tier", value: AgentSnapshotPresenter.trustLine(agent.snapshot))
++        }
++    }
++
++    // P3.8: lightweight "How earning works" explainer, collapsed by default,
++    // reusing the referral disclosure pattern.
++    @ViewBuilder
++    private var howEarningWorksSection: some View {
++        DisclosureGroup(isExpanded: $howEarningWorksExpanded) {
++            VStack(alignment: .leading, spacing: 8) {
++                Text("You earn two ways for the customer work this Mac serves:")
++                    .font(.caption)
++                    .foregroundStyle(.secondary)
++                    .fixedSize(horizontal: false, vertical: true)
++                Text("• USDC — cash earnings from paid jobs. Add a payout wallet to receive them.")
++                    .font(.caption)
++                    .foregroundStyle(.secondary)
++                    .fixedSize(horizontal: false, vertical: true)
++                Text("• MALIBU — reward tokens that accrue as you serve. Withdrawals unlock once this Mac reaches the Trusted tier.")
++                    .font(.caption)
++                    .foregroundStyle(.secondary)
++                    .fixedSize(horizontal: false, vertical: true)
++                Text("New providers start Provisional and become Trusted by serving verified work and staying online. Provisional → Trusted just takes time and traffic.")
++                    .font(.caption)
++                    .foregroundStyle(.secondary)
++                    .fixedSize(horizontal: false, vertical: true)
++            }
++            .padding(.top, 6)
++        } label: {
++            Text(DashboardCopy.howEarningWorksTitle)
++                .font(.callout.weight(.semibold))
++        }
++        .padding(12)
++        .background(panelBackground)
++        .accessibilityIdentifier("malibu.dashboard.how-earning-works")
++    }
++
++    // P2.6: recovery tools live behind a collapsed "Something wrong?"
++    // disclosure, out of the primary status card.
++    @ViewBuilder
++    private var somethingWrongSection: some View {
++        DisclosureGroup(isExpanded: $somethingWrongExpanded) {
++            recoveryActions
++                .padding(.top, 6)
++        } label: {
++            Text(DashboardCopy.somethingWrongTitle)
++                .font(.callout.weight(.semibold))
++        }
++        .padding(12)
++        .background(panelBackground)
++        .accessibilityIdentifier("malibu.dashboard.something-wrong")
++    }
++
+     @ViewBuilder
+     private var recoveryActions: some View {
+         VStack(alignment: .leading, spacing: 8) {
+diff --git a/phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift b/phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift
+index 6d33e38a..a462d8a4 100644
+--- a/phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift
++++ b/phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift
+@@ -1128,7 +1128,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
+         XCTAssertEqual(AgentSnapshotPresenter.malibuAvailabilityLine(snapshot), "MALIBU: not withdrawable · 12.50 held")
+         XCTAssertEqual(
+             AgentSnapshotPresenter.malibuHoldLine(snapshot),
+-            "MALIBU status: Trust verification is incomplete Next: Complete the remaining trust criteria to unlock withdrawals."
++            "MALIBU status: Trust verification is incomplete. Next: Complete the remaining trust criteria to unlock withdrawals."
+         )
+ 
+         snapshot.malibuHoldReasons = ["per_wallet_daily_cap"]
+@@ -1140,7 +1140,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
+         )
+         XCTAssertEqual(
+             AgentSnapshotPresenter.malibuHoldLine(snapshot),
+-            "MALIBU status: wallet daily limit reached Next: The wallet cap resets at the next UTC day."
++            "MALIBU status: wallet daily limit reached. Next: The wallet cap resets at the next UTC day."
+         )
+ 
+         snapshot.malibuHoldReasons = []
+@@ -1152,7 +1152,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
+         )
+         XCTAssertEqual(
+             AgentSnapshotPresenter.malibuHoldLine(snapshot),
+-            "MALIBU status: provider daily limit reached Next: The provider cap resets at the next UTC day."
++            "MALIBU status: provider daily limit reached. Next: The provider cap resets at the next UTC day."
+         )
+ 
+         snapshot.trustTier = .provisional
+@@ -1164,7 +1164,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
+         )
+         XCTAssertEqual(
+             AgentSnapshotPresenter.malibuHoldLine(snapshot),
+-            "MALIBU status: Trust verification is in progress Next: Keep Malibu online; withdrawals unlock automatically when Trusted."
++            "MALIBU status: Trust verification is in progress. Next: Keep Malibu online; withdrawals unlock automatically when Trusted."
+         )
+     }
+ 
+@@ -1330,6 +1330,170 @@ final class AgentSnapshotPresenterTests: XCTestCase {
+         XCTAssertFalse(fullLine.contains("locked"))
+     }
+ 
++    // P0.1/P0.2/P0.3: a live provider with USDC earnings but a not-yet-computed
++    // MALIBU projection is warming up — calm copy, real zeros, no "try again",
++    // and a missing wallet reads as a normal next step, not a red alarm.
++    func testMalibuProjectionWarmingUpReadsCalmForFreshLiveProvider() {
++        var s = AgentSnapshot.empty
++        s.state = .serving
++        s.networkState = "buyer_serving"
++        s.providerEarningsFresh = true
++        s.malibuProjectionFresh = true
++        s.walletBound = false
++        s.earningsUsdcToday = 0.03
++        // The MALIBU frame arrived but no verdict computed yet (fresh provider);
++        // no concrete MALIBU amounts are present.
++        s.malibuRewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
++
++        XCTAssertTrue(AgentSnapshotPresenter.isMalibuProjectionWarmingUp(s))
++        XCTAssertEqual(AgentSnapshotPresenter.malibuFullLine(s), "0.00 MALIBU today · 0.00 all-time")
++        XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(s))
++        XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(s))
++        XCTAssertEqual(
++            AgentSnapshotPresenter.malibuTodayCaption(s),
++            "MALIBU rewards are still warming up — nothing to do."
++        )
++        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(s), "$0.03")
++        XCTAssertFalse(AgentSnapshotPresenter.usdcFullLine(s).contains("n/a"))
++        XCTAssertFalse(AgentSnapshotPresenter.malibuFullLine(s).lowercased().contains("unavailable"))
++
++        let health = AgentSnapshotPresenter.miningHealth(s)
++        XCTAssertEqual(health.reasonCode, "wallet_missing")
++        XCTAssertEqual(health.status, "No payout wallet yet")
++        XCTAssertEqual(health.nextAction, "Add a payout wallet to receive earnings.")
++        XCTAssertTrue(health.rewardSummary.contains("MALIBU rewards warming up"))
++        XCTAssertTrue(health.rewardSummary.contains("$0.03 USDC today"))
++    }
++
++    // A genuine held verdict (concrete amounts / non-"unavailable" withdrawal
++    // state) is NOT warming up and keeps its specific hold copy.
++    func testConcreteRewardVerdictIsNotWarmingUp() {
++        var s = AgentSnapshot.empty
++        s.state = .serving
++        s.networkState = "buyer_serving"
++        s.providerEarningsFresh = true
++        s.malibuProjectionFresh = true
++        s.trustTier = .provisional
++        s.malibuHeld = 4
++        s.malibuWithdrawable = 0
++        s.malibuRewardEligibility = MalibuRewardEligibility(
++            earningState: "held",
++            withdrawalState: "held",
++            primaryReason: "held_provisional_trust_tier",
++            reasons: ["held_provisional_trust_tier"]
++        )
++        XCTAssertFalse(AgentSnapshotPresenter.isMalibuProjectionWarmingUp(s))
++        XCTAssertNil(AgentSnapshotPresenter.malibuTodayCaption(s))
++    }
++
++    // P1.5: the two Trusted criteria render by name with done/pending states.
++    func testTrustCriteriaRenderByNameWithDoneAndPending() throws {
++        var s = AgentSnapshot.empty
++        s.state = .serving
++        s.networkState = "buyer_serving"
++        s.malibuProjectionFresh = true
++        s.trustTier = .provisional
++        s.trustCriteriaMet = 1
++        s.trustCriteriaRequired = 2
++        s.economicCriteria = ["E1"]
++        s.additionalCriteria = []
++        s.verifiedReceiptCount = 100
++        s.malibuRewardEligibility = MalibuRewardEligibility(
++            earningState: "held",
++            withdrawalState: "held",
++            primaryReason: "held_provisional_trust_tier",
++            reasons: ["held_provisional_trust_tier"]
++        )
++
++        let criteria = try XCTUnwrap(AgentSnapshotPresenter.trustCriteria(s))
++        XCTAssertEqual(criteria.count, 2)
++        XCTAssertEqual(criteria[0].title, "Verified customer work")
++        XCTAssertTrue(criteria[0].done)
++        XCTAssertEqual(criteria[1].title, "Time online")
++        XCTAssertFalse(criteria[1].done)
++        XCTAssertEqual(criteria[1].detail, "Nothing to do — just stay online.")
++        XCTAssertTrue(AgentSnapshotPresenter.trustUnlockSummary(s).lowercased().contains("withdrawals"))
++        XCTAssertEqual(AgentSnapshotPresenter.trustLine(s), "Provisional — 1 of 2 criteria met")
++        XCTAssertFalse(AgentSnapshotPresenter.trustLine(s).contains("→"))
++
++        var notFresh = s
++        notFresh.malibuProjectionFresh = false
++        XCTAssertNil(AgentSnapshotPresenter.trustCriteria(notFresh))
++    }
++
++    // P2.7: one authoritative status following the three-state model.
++    func testConsolidatedStatusFollowsThreeStateModel() {
++        var setup = AgentSnapshot.empty
++        setup.state = .starting
++        let settingUp = AgentSnapshotPresenter.consolidatedStatus(setup)
++        XCTAssertEqual(settingUp.phase, .settingUp)
++        XCTAssertEqual(settingUp.label, "Setting up")
++
++        var live = AgentSnapshot.empty
++        live.state = .serving
++        live.networkState = "buyer_serving"
++        live.trustTier = .provisional
++        live.walletBound = false
++        let liveStatus = AgentSnapshotPresenter.consolidatedStatus(live)
++        XCTAssertEqual(liveStatus.phase, .live)
++        XCTAssertEqual(liveStatus.label, "Live · Provisional")
++        XCTAssertEqual(liveStatus.nextAction, "Add a payout wallet to receive earnings.")
++
++        var earning = live
++        earning.trustTier = .trusted
++        earning.walletBound = true
++        let earningStatus = AgentSnapshotPresenter.consolidatedStatus(earning)
++        XCTAssertEqual(earningStatus.phase, .earning)
++        XCTAssertEqual(earningStatus.label, "Earning · Trusted")
++        XCTAssertNil(earningStatus.nextAction)
++
++        var err = AgentSnapshot.empty
++        err.state = .error
++        err.lastError = "boom"
++        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(err).phase, .needsAttention)
++
++        // A network-ready provider blocked on battery surfaces that (with its
++        // concrete action) rather than a generic "live" headline.
++        var battery = live
++        battery.providerEarningsFresh = true
++        battery.idlePrewarmSummary = ProviderIdlePrewarmSummary(skipsByReasonLast1h: ["on_battery": 1])
++        let batteryStatus = AgentSnapshotPresenter.consolidatedStatus(battery)
++        XCTAssertEqual(batteryStatus.phase, .needsAttention)
++        XCTAssertEqual(batteryStatus.nextAction, "Plug in power to earn.")
++    }
++
++    // P1.5 wire: the granular trust-criterion fields decode from the earnings
++    // frame, and legacy frames without them default safely.
++    func testProviderEarningsDecodesTrustCriteriaArrays() throws {
++        let data = Data("""
++        {
++          "wallet_bound": true,
++          "trust_tier": "provisional",
++          "unpaid_ledger_backlog_usdc": 0,
++          "unpaid_ledger_backlog_malibu": 0,
++          "trust_criteria_met": 1,
++          "trust_criteria_required": 2,
++          "economic_criteria": ["E1"],
++          "additional_criteria": ["A1"],
++          "verified_receipt_count": 137,
++          "app_attested": true
++        }
++        """.utf8)
++        let decoded = try JSONDecoder().decode(ProviderEarnings.self, from: data)
++        XCTAssertEqual(decoded.economicCriteria, ["E1"])
++        XCTAssertEqual(decoded.additionalCriteria, ["A1"])
++        XCTAssertEqual(decoded.verifiedReceiptCount, 137)
++        XCTAssertEqual(decoded.appAttested, true)
++
++        let legacy = try JSONDecoder().decode(ProviderEarnings.self, from: Data("""
++        {"wallet_bound": false, "trust_tier": "provisional", "unpaid_ledger_backlog_usdc": 0, "unpaid_ledger_backlog_malibu": 0}
++        """.utf8))
++        XCTAssertEqual(legacy.economicCriteria, [])
++        XCTAssertEqual(legacy.additionalCriteria, [])
++        XCTAssertNil(legacy.verifiedReceiptCount)
++        XCTAssertNil(legacy.appAttested)
++    }
++
+     func testDefaultPresenterStringsDoNotExposeInternalTerms() {
+         var snapshot = AgentSnapshot.empty
+         snapshot.state = .reconnecting
+diff --git a/phase3-binary/app/Tests/MalibuTests/ControlFrameCodecTests.swift b/phase3-binary/app/Tests/MalibuTests/ControlFrameCodecTests.swift
+index ba66e35a..37403fa2 100644
+--- a/phase3-binary/app/Tests/MalibuTests/ControlFrameCodecTests.swift
++++ b/phase3-binary/app/Tests/MalibuTests/ControlFrameCodecTests.swift
+@@ -192,7 +192,7 @@ final class ControlFrameCodecTests: XCTestCase {
+         XCTAssertNil(AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot))
+         XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(agent.snapshot))
+         XCTAssertFalse(AgentSnapshotPresenter.usdcFullLine(agent.snapshot).contains("$18.40"))
+-        XCTAssertEqual(AgentSnapshotPresenter.malibuFullLine(agent.snapshot), "n/a MALIBU today · n/a all-time")
++        XCTAssertEqual(AgentSnapshotPresenter.malibuFullLine(agent.snapshot), "MALIBU rewards not available yet")
+         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("[locked]"))
+         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("Trusted"))
+         XCTAssertEqual(AgentSnapshotPresenter.trustLine(agent.snapshot), "MALIBU trust telemetry not published yet")
+@@ -290,7 +290,7 @@ final class ControlFrameCodecTests: XCTestCase {
+ 
+         XCTAssertFalse(agent.snapshot.providerEarningsFresh)
+         XCTAssertTrue(agent.snapshot.malibuProjectionFresh)
+-        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot), "n/a")
++        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot), "—")
+         XCTAssertEqual(
+             AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot),
+             "MALIBU: status unavailable · 8.00 held"
+diff --git a/phase3-binary/app/Tests/MalibuTests/DashboardViewTests.swift b/phase3-binary/app/Tests/MalibuTests/DashboardViewTests.swift
+index 4cf86da1..1ad9368b 100644
+--- a/phase3-binary/app/Tests/MalibuTests/DashboardViewTests.swift
++++ b/phase3-binary/app/Tests/MalibuTests/DashboardViewTests.swift
+@@ -42,8 +42,10 @@ final class DashboardViewTests: XCTestCase {
+         XCTAssertEqual(AgentSnapshotPresenter.modelLine(snapshot), "Connected")
+         XCTAssertTrue(AgentSnapshotPresenter.requestsLine(snapshot).contains("0 today"))
+         XCTAssertTrue(AgentSnapshotPresenter.tokenLine(snapshot).contains("0 in / 0 out today"))
+-        XCTAssertEqual(AgentSnapshotPresenter.usdcFullLine(snapshot), "n/a today · n/a wk · n/a accrued · n/a life")
+-        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "n/a")
++        // Not-fresh telemetry stays calm and small rather than four "n/a"s or a
++        // fabricated hero "$0.00" (P0.2).
++        XCTAssertEqual(AgentSnapshotPresenter.usdcFullLine(snapshot), "Earnings not available yet")
++        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "—")
+         XCTAssertEqual(AgentSnapshotPresenter.queueChip(snapshot), "0 queued")
+         XCTAssertEqual(AgentSnapshotPresenter.thermalChip(snapshot), "Thermal OK")
+         XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Provider is ready")
+@@ -287,7 +289,9 @@ final class DashboardViewTests: XCTestCase {
+         unavailable.earningsUsdcToday = 0
+         unavailable.malibuWithdrawable = 0
+         let unavailableHealth = AgentSnapshotPresenter.miningHealth(unavailable)
+-        XCTAssertEqual(unavailableHealth.reasonCode, "reward_projection_unavailable")
++        // A live, admitted provider with no fresh telemetry yet is the benign
++        // warming-up state (calm), not a fault (P0.1).
++        XCTAssertEqual(unavailableHealth.reasonCode, "reward_projection_warming_up")
+         XCTAssertEqual(unavailableHealth.rewardSummary, "USDC unavailable · MALIBU unavailable")
+ 
+         var missingWallet = miningBase()
+@@ -303,7 +307,8 @@ final class DashboardViewTests: XCTestCase {
+         liveNoEarnings.walletBound = false
+         let liveNoEarningsHealth = AgentSnapshotPresenter.miningHealth(liveNoEarnings)
+         XCTAssertEqual(liveNoEarningsHealth.status, "No earnings yet")
+-        XCTAssertEqual(liveNoEarningsHealth.reasonCode, "reward_projection_unavailable")
++        // Benign fresh-provider state reads calm, not as an outage (P0.1).
++        XCTAssertEqual(liveNoEarningsHealth.reasonCode, "reward_projection_warming_up")
+         XCTAssertFalse(liveNoEarningsHealth.status.lowercased().contains("unavailable"))
+         XCTAssertTrue(liveNoEarningsHealth.nextAction.contains("wallet"))
+         XCTAssertFalse(liveNoEarningsHealth.nextAction.contains("reward status refreshes"))
+@@ -376,7 +381,7 @@ final class DashboardViewTests: XCTestCase {
+         unlockTrusted.trustCriteriaRequired = 3
+         XCTAssertEqual(
+             AgentSnapshotPresenter.trustLine(unlockTrusted),
+-            "Provisional — 1 of 3 criteria met · Unlock Trusted →"
++            "Provisional — 1 of 3 criteria met"
+         )
+ 
+         var walletCap = miningBase()
+@@ -431,7 +436,11 @@ final class DashboardViewTests: XCTestCase {
+         XCTAssertEqual(partialIdleHealth.status, "Eligible, idle")
+         XCTAssertEqual(partialIdleHealth.trustSummary, "MALIBU trust telemetry not published yet")
+ 
++        // A provider that is NOT yet buyer-serving-admitted with no fresh
++        // telemetry keeps the genuine "unavailable" (amber) wording (P0.1).
+         var stale = miningBase()
++        stale.state = .reconnecting
++        stale.networkState = "buyer_serving_unknown"
+         stale.providerEarningsFresh = false
+         stale.malibuProjectionFresh = false
+         stale.earningsUsdcToday = 0

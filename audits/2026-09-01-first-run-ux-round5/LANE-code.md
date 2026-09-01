@@ -1,0 +1,2 @@
+You are a CODE-REVIEW auditor. Read audits/2026-09-01-first-run-ux-round5/CONTEXT.md and audits/2026-09-01-first-run-ux-round5/full-fix.diff in this repo.
+Focus: correctness/logic defects, state-machine edge cases in consolidatedStatus and the reward/blocker reason model, nil/stale handling of the reward-telemetry outage sticky bit, ordering/precedence bugs, and any place the P0-P3 model contradicts publicStatus. Verify tests actually assert the claimed behavior. Report C/H/M/L/I with file:line + failure scenario + fix.
