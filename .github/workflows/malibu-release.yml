@@ -74,7 +74,7 @@ jobs:
       artifact_name: ${{ steps.source.outputs.artifact_name }}
     steps:
       - name: Checkout reviewed main
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.source_commit }}
           fetch-depth: 1
@@ -186,7 +186,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout reviewed main signer
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.source_commit }}
           fetch-depth: 1
@@ -449,7 +449,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout exact release source
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.source_commit }}
           fetch-depth: 0
