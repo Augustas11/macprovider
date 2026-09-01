@@ -64,6 +64,18 @@ class SpecPRDeclarationTests(unittest.TestCase):
             ),
         )
 
+    def test_behavior_change_none_accepts_audit_prompt_relocations(self) -> None:
+        self.assertEqual(
+            [],
+            validate_body(
+                declaration(contract_change="yes"),
+                changed_paths=[
+                    "specs/CONFORMANCE.json",
+                    "audits/_prompts/AUDIT_RFC001_WATCHDOG_PROMPT.md",
+                ],
+            ),
+        )
+
     def test_behavior_change_none_accepts_agent_instruction_paths(self) -> None:
         self.assertEqual(
             [],
