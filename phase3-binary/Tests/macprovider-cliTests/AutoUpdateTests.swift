@@ -3254,6 +3254,106 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(outcome, .forwardProgressFailure)
     }
 
+    func testHeadlessRecommendationRequiresOperatorUpdateWithoutFailureCooldown() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        var config = AppConfig.defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path)
+        config.credentialStore = .protectedFile
+        config.autoUpdateEnabled = false
+        let updater = AutoUpdater(
+            config: config,
+            currentVersion: "1.8.109",
+            providerStatus: r005Status(),
+            markerStore: store,
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in
+                XCTFail("headless operator handoff must not drain")
+                return false
+            },
+            sendReady: {},
+            restartLaunchd: { XCTFail("headless operator handoff must not restart launchd") },
+            fenceReloadJobs: { XCTFail("headless operator handoff must not fence consumer reload jobs") },
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: {
+                XCTFail("headless operator handoff must run before consumer launchd topology probing")
+                return false
+            }
+        )
+
+        let outcome = await updater.handleCoordinatorRecommendation("1.8.117")
+
+        XCTAssertEqual(outcome, .notAttempted)
+        XCTAssertNil(store.activeCooldown(target: "1.8.117"))
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["target_version"] as? String, "1.8.117")
+        XCTAssertEqual(event?["phase"] as? String, "eligibility")
+        XCTAssertEqual(event?["outcome"] as? String, "skipped")
+        XCTAssertEqual(event?["reason"] as? String, "headless_operator_update_required")
+    }
+
+    func testHeadlessSignedDiscoveryPreservesR005AttributionAndDoesNotProbeConsumerTopology() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        var config = AppConfig.defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path)
+        config.credentialStore = .protectedFile
+        config.autoUpdateEnabled = false
+        let updater = AutoUpdater(
+            config: config,
+            currentVersion: "1.8.109",
+            providerStatus: r005Status(),
+            markerStore: store,
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in false },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: {
+                XCTFail("headless signed-discovery handoff must not probe consumer launchd topology")
+                return false
+            }
+        )
+
+        await updater.handleSignedReleaseDiscovery(attribution: [
+            "accepted_session_recovery": "true",
+            "recommendation_identity": "1.8.117|<none>",
+            "consecutive_failure_count": "3",
+        ])
+
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["target_version"] as? String, "<headless-operator-update>")
+        XCTAssertEqual(event?["outcome"] as? String, "skipped")
+        XCTAssertEqual(event?["reason"] as? String, "headless_operator_update_required")
+        let metadata = event?["extra_metadata"] as? [String: String]
+        XCTAssertEqual(metadata?["accepted_session_recovery"], "true")
+        XCTAssertEqual(metadata?["consecutive_failure_count"], "3")
+    }
+
+    func testHeadlessOperatorUpdateDetectionUsesExplicitProfileSignals() {
+        var protectedConfig = AppConfig.defaults(configPath: "/tmp/config.yaml")
+        protectedConfig.credentialStore = .protectedFile
+        XCTAssertTrue(AutoUpdater.requiresHeadlessOperatorUpdate(config: protectedConfig, environment: [:]))
+
+        let consumerConfig = AppConfig.defaults(configPath: "/tmp/config.yaml")
+        XCTAssertTrue(AutoUpdater.requiresHeadlessOperatorUpdate(
+            config: consumerConfig,
+            environment: ["MACPROVIDER_HEADLESS": "1"]
+        ))
+        XCTAssertTrue(AutoUpdater.requiresHeadlessOperatorUpdate(
+            config: consumerConfig,
+            environment: ["MACPROVIDER_LAUNCHD_DOMAIN": "system"]
+        ))
+        XCTAssertFalse(AutoUpdater.requiresHeadlessOperatorUpdate(config: consumerConfig, environment: [:]))
+    }
+
     func testHandleCoordinatorRecommendationReturnsCooldownActive() async throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)

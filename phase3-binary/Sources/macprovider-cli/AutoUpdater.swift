@@ -122,9 +122,10 @@ struct AutoUpdater: Sendable {
     /// Lightweight outcome of a single coordinator-recommendation cycle, used by
     /// the caller (CoordinatorClient) to drive SPEC-020-R005 accepted-session
     /// recovery. The mapping to exit points is:
-    /// - `.notAttempted`: trust-skip, autoupdate-disabled, an invalid/unparseable
-    ///   recommended version, or `target_not_newer`. Not counted, not reset — the
-    ///   recommendation never engaged a real target and recorded no failure.
+    /// - `.notAttempted`: trust-skip, autoupdate-disabled, a headless operator-update
+    ///   handoff, an invalid/unparseable recommended version, or `target_not_newer`.
+    ///   Not counted, not reset — the recommendation never engaged a real target
+    ///   and recorded no failure.
     /// - `.missingTarget`: the coordinator advertised a `recommended_binary_version`
     ///   with no installable compatibility-set target
     ///   (`coordinator_compatibility_target_missing`).
@@ -191,6 +192,18 @@ struct AutoUpdater: Sendable {
 
         guard SelfUpdate.compareSemver(currentVersion, target) == .orderedAscending else {
             await record(updateID: updateID, target: target, phase: .eligibility, outcome: .noop, reason: "target_not_newer", attempt: 1)
+            return .notAttempted
+        }
+        guard !Self.requiresHeadlessOperatorUpdate(config: config) else {
+            print("A newer version is available (v\(target)), but headless_fleet updates require the signed headless installer acceptance bundle.")
+            await record(
+                updateID: updateID,
+                target: target,
+                phase: .eligibility,
+                outcome: .skipped,
+                reason: "headless_operator_update_required",
+                attempt: 1
+            )
             return .notAttempted
         }
         guard AutoUpdateConfig.enabled(config) else {
@@ -390,6 +403,15 @@ struct AutoUpdater: Sendable {
         }
         guard !SessionAutoupdateGate.shared.isDisabled else {
             await recordR005(target: "<session-disabled>", phase: .eligibility, outcome: .skipped, reason: "signed_policy_persist_failed")
+            return
+        }
+        guard !Self.requiresHeadlessOperatorUpdate(config: config) else {
+            await recordR005(
+                target: "<headless-operator-update>",
+                phase: .eligibility,
+                outcome: .skipped,
+                reason: "headless_operator_update_required"
+            )
             return
         }
         guard AutoUpdateConfig.enabled(config) else {
@@ -1033,6 +1055,15 @@ struct AutoUpdater: Sendable {
             return true
         }
         return launchdProviderAvailable()
+    }
+
+    static func requiresHeadlessOperatorUpdate(
+        config: AppConfig,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        config.credentialStore == .protectedFile
+            || environment["MACPROVIDER_HEADLESS"] == "1"
+            || environment["MACPROVIDER_LAUNCHD_DOMAIN"] == "system"
     }
 
     static func defaultLaunchdProviderAvailable() -> Bool {

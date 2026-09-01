@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.15
+Version: v0.1.16
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -37,6 +37,11 @@ v0.1.13 removes watchdog rollback ownership. The companion watchdog remains a
 local liveness monitor only; installer, Malibu repair, and CLI startup recovery
 are the only transaction owners allowed to mutate pending markers, rollback
 backups, live release bytes, watchdog scripts, plists, or Malibu app artifacts.
+v0.1.16 makes the existing headless boundary operator-actionable: a
+`headless_fleet` provider records a stable skipped event instead of entering the
+consumer-user failure/cooldown or accepted-session recovery loops, while the
+signed headless installer acceptance path remains the sole update/migration
+authority for this profile.
 
 ## Goal
 
@@ -871,6 +876,16 @@ recovery supplies an allowed signed set.
 R-4.13. Reserved for future headless system-domain update and rollback
 semantics. Until that version lands, `headless_fleet` is outside the autoupdate
 convergence population and MUST NOT be driven by the consumer-user reload helper.
+When a newer coordinator recommendation or signed-discovery target is observed
+for a `headless_fleet` process, the provider MUST record an eligibility event
+with `outcome:"skipped"` and
+`reason:"headless_operator_update_required"`, MUST NOT create a cooldown or
+count the observation as accepted-session recovery failure progress, and MUST
+leave the running provider untouched. The operator handoff is the protected,
+provenance-pinned headless installer acceptance bundle. That installer flow
+MUST preserve the provider ID, protected-file credentials, model/config state,
+receipts, and earnings history, and MUST fail closed rather than infer a
+manifest or adopt an unvalidated system LaunchDaemon topology.
 
 ### R-5. Opt-out
 
@@ -1228,6 +1243,17 @@ executable. Missing, expired, cross-boot, malformed, path-mismatched,
 hash-mismatched, owner-mismatched, or launchd-PID-mismatched authority fails
 closed without fencing.
 
+AC-V0.1-31. Headless operator-update handoff: given a buyer-serving
+`headless_fleet` provider and a strictly newer coordinator recommendation, the
+provider remains running, performs no drain/download/swap/reload operation,
+creates no failure cooldown, and emits a redacted
+`headless_operator_update_required` skipped event. An accepted-session R005
+signed-discovery invocation produces the same terminal reason while preserving
+its attribution metadata and does not increment the stuck-failure counter.
+Physical acceptance then uses a strictly newer, signed, provenance-pinned
+headless installer bundle and proves the same provider ID and protected
+credential generations before and after the installer-owned migration.
+
 After an authorized launchd target adopts the startup handoff, it MUST retain
 that authority while the exact pending marker remains armed. A crash, logout,
 or reboot before commit MAY recover the adopted authority only when the same
@@ -1427,6 +1453,12 @@ Deferred to v0.3.0 or later:
   blocks a later rollout. This reconciles the renewal prose with SPEC-020-R001
   (discovery MUST NOT derive its target from mutable `latest` ordering); no
   requirement, conformance, or authority binding changed.
+- v0.1.16 (2026-09-02): Made the reserved headless autoupdate boundary
+  operator-actionable. Headless recommendations and signed-discovery attempts
+  now terminate as `headless_operator_update_required` skips without cooldown,
+  mutation, or R005 failure counting; signed headless installer acceptance
+  remains the only update/migration authority until system-domain rollback
+  semantics are specified.
 - v0.1.14 (2026-08-28): Added SPEC-020-R005, accepted-but-stuck session recovery.
   v0.1.8 scoped coordinator-independent recovery to providers that cannot
   establish a session; R005 closes the residual gap where an admitted provider

@@ -16,6 +16,8 @@ names = [
     "launchctl_service",
     "validate_headless_launchdaemon_plist",
     "snapshot_headless_launchdaemon_plist",
+    "snapshot_published_headless_incumbent_plist",
+    "adopt_headless_incumbent_metadata",
     "publish_root_file_from_base64",
     "verify_published_launchd_payload",
     "run_macprovider_cli_with_amfi_retry",
@@ -297,7 +299,7 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   LEGACY_PROVIDER_LABEL=live.streamvc.macprovider
   WATCHDOG_LABEL=live.malibu.provider-watchdog
   LEGACY_WATCHDOG_LABEL=live.streamvc.macprovider-watchdog
-  DRY_RUN=0 NO_LAUNCHD=0 NO_WATCHDOG=0
+  DRY_RUN=0 NO_LAUNCHD=0 NO_WATCHDOG=0 ADOPT_HEADLESS_INCUMBENT=0
   INSTALL_TX_ACTIVE=1 INSTALL_TX_BACKUP="$CONFIG_DIR/install-recovery-fixture"
   INSTALL_TX_HAD_PLIST=0 INSTALL_TX_HAD_WATCHDOG_PLIST=0
   LAUNCHD_INSTALLED=0 WATCHDOG_INSTALLED=0
@@ -311,6 +313,123 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
     echo "headless mode unexpectedly accepted MACPROVIDER_NO_WATCHDOG=1" >&2
     exit 1
   fi
+  if (ADOPT_HEADLESS_INCUMBENT=invalid validate_launchd_mode); then
+    echo "headless mode unexpectedly accepted an invalid incumbent-adoption flag" >&2
+    exit 1
+  fi
+  if (HEADLESS=0 ADOPT_HEADLESS_INCUMBENT=1 validate_launchd_mode); then
+    echo "consumer mode unexpectedly accepted headless incumbent adoption" >&2
+    exit 1
+  fi
+
+  # #1324: accept only the exact historical SSH-smoke LaunchDaemon as
+  # rollback input. The bridge copies its bytes into the user-owned managed
+  # path, does not touch the published service, and never invents a manifest.
+  mkdir -p "$INSTALL_DIR" "$LOG_DIR/$(basename "$INSTALL_DIR")"
+  python3 - "$PLIST_BOOTSTRAP_PATH" "$HEADLESS_USER" "$INSTALL_DIR/macprovider-cli" \
+    "$CONFIG_PATH" "$HOME" <<PY
+import os
+import plistlib
+import sys
+
+path, user, program, config, home = sys.argv[1:]
+payload = {
+    "Label": "live.malibu.provider",
+    "UserName": user,
+    "ProgramArguments": [program, "serve", "--config", config, "--log-level", "debug"],
+    "WorkingDirectory": os.path.dirname(program),
+    "RunAtLoad": True,
+    "KeepAlive": {"SuccessfulExit": False},
+    "StandardOutPath": os.path.join(home, "Library", "Logs", os.path.basename(os.path.dirname(program)), "macprovider.out.log"),
+    "StandardErrorPath": os.path.join(home, "Library", "Logs", os.path.basename(os.path.dirname(program)), "macprovider.err.log"),
+    "EnvironmentVariables": {
+        "HOME": home,
+        "PATH": f"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{home}/.local/bin",
+        "MACPROVIDER_CONFIG": config,
+        "MACPROVIDER_CREDENTIAL_STORE": "protected_file",
+        "MACPROVIDER_PROTECTED_CREDENTIAL_ROOT": os.path.join(os.path.dirname(config), "protected-credentials"),
+        "MACPROVIDER_HEADLESS": "1",
+        "MACPROVIDER_HEADLESS_USER": user,
+        "MACPROVIDER_LAUNCHD_DOMAIN": "system",
+    },
+}
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle, sort_keys=False)
+os.chmod(path, 0o644)
+PY
+  incumbent_bytes="$(snapshot_published_headless_incumbent_plist "$PLIST_BOOTSTRAP_PATH" "$(id -u)")"
+  [ -n "$incumbent_bytes" ]
+
+  cp "$PLIST_BOOTSTRAP_PATH" "$PLIST_BOOTSTRAP_PATH.valid"
+  python3 - "$PLIST_BOOTSTRAP_PATH" <<PY
+import plistlib
+import sys
+path = sys.argv[1]
+with open(path, "rb") as handle:
+    payload = plistlib.load(handle)
+payload["ProgramArguments"].extend(["--unexpected", "value"])
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle)
+PY
+  chmod 0644 "$PLIST_BOOTSTRAP_PATH"
+  if snapshot_published_headless_incumbent_plist "$PLIST_BOOTSTRAP_PATH" "$(id -u)" >/dev/null 2>&1; then
+    echo "incumbent adoption unexpectedly accepted altered arguments" >&2
+    exit 1
+  fi
+  mv "$PLIST_BOOTSTRAP_PATH.valid" "$PLIST_BOOTSTRAP_PATH"
+  chmod 0644 "$PLIST_BOOTSTRAP_PATH"
+
+  cp "$PLIST_BOOTSTRAP_PATH" "$PLIST_BOOTSTRAP_PATH.valid"
+  python3 - "$PLIST_BOOTSTRAP_PATH" <<PY
+import plistlib
+import sys
+path = sys.argv[1]
+with open(path, "rb") as handle:
+    payload = plistlib.load(handle)
+payload["EnvironmentVariables"]["MACPROVIDER_LAUNCHD_DOMAIN"] = "gui/501"
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle)
+PY
+  chmod 0644 "$PLIST_BOOTSTRAP_PATH"
+  if snapshot_published_headless_incumbent_plist "$PLIST_BOOTSTRAP_PATH" "$(id -u)" >/dev/null 2>&1; then
+    echo "incumbent adoption unexpectedly accepted a user-domain environment" >&2
+    exit 1
+  fi
+  mv "$PLIST_BOOTSTRAP_PATH.valid" "$PLIST_BOOTSTRAP_PATH"
+  chmod 0644 "$PLIST_BOOTSTRAP_PATH"
+
+  cp "$PLIST_BOOTSTRAP_PATH" "$PLIST_BOOTSTRAP_PATH.valid"
+  printf 'not a plist\n' > "$PLIST_BOOTSTRAP_PATH"
+  chmod 0644 "$PLIST_BOOTSTRAP_PATH"
+  if snapshot_published_headless_incumbent_plist "$PLIST_BOOTSTRAP_PATH" "$(id -u)" >/dev/null 2>&1; then
+    echo "incumbent adoption unexpectedly accepted malformed plist data" >&2
+    exit 1
+  fi
+  mv "$PLIST_BOOTSTRAP_PATH.valid" "$PLIST_BOOTSTRAP_PATH"
+  chmod 0644 "$PLIST_BOOTSTRAP_PATH"
+
+  ln "$PLIST_BOOTSTRAP_PATH" "$PLIST_BOOTSTRAP_PATH.hardlink"
+  if snapshot_published_headless_incumbent_plist "$PLIST_BOOTSTRAP_PATH" "$(id -u)" >/dev/null 2>&1; then
+    echo "incumbent adoption unexpectedly accepted a hard-linked plist" >&2
+    exit 1
+  fi
+  rm -f "$PLIST_BOOTSTRAP_PATH.hardlink"
+
+  if (ADOPT_HEADLESS_INCUMBENT=1 MACPROVIDER_ACCEPTANCE_ASSET_DIR= LAUNCHD_PRINT_STATUS=0 \
+      adopt_headless_incumbent_metadata "$(id -u)"); then
+    echo "incumbent adoption unexpectedly accepted a non-acceptance source" >&2
+    exit 1
+  fi
+  ADOPT_HEADLESS_INCUMBENT=1
+  MACPROVIDER_ACCEPTANCE_ASSET_DIR=/tmp/signed-acceptance-fixture
+  LAUNCHD_PRINT_STATUS=0
+  adopt_headless_incumbent_metadata "$(id -u)"
+  cmp -s "$PLIST_PATH" "$PLIST_BOOTSTRAP_PATH"
+  [ ! -e "$MANIFEST_PATH" ]
+  rm -f "$PLIST_PATH" "$PLIST_BOOTSTRAP_PATH"
+  ADOPT_HEADLESS_INCUMBENT=0
+  unset MACPROVIDER_ACCEPTANCE_ASSET_DIR
+  LAUNCHD_PRINT_STATUS=1
 
   mkdir -p "$INSTALL_TX_BACKUP"
   printf "state=fixture\n" > "$INSTALL_TX_BACKUP/state.sh"

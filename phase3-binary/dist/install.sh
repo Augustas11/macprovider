@@ -50,6 +50,8 @@ PROVIDER_MUTATION_PENDING_PATH="$PROVIDER_MUTATION_ROOT/pending.json"
 INSTALL_RECOVERY_LABEL="live.malibu.provider-install-recovery"
 HEADLESS="${MACPROVIDER_HEADLESS:-0}"
 HEADLESS_USER="${MACPROVIDER_HEADLESS_USER:-}"
+ADOPT_HEADLESS_INCUMBENT="${MACPROVIDER_ADOPT_HEADLESS_INCUMBENT:-0}"
+unset MACPROVIDER_ADOPT_HEADLESS_INCUMBENT
 if [ "$HEADLESS" = "1" ]; then
   LAUNCHD_DOMAIN="system"
   LAUNCHD_MANAGED_DIR="$CONFIG_DIR/launchd"
@@ -188,6 +190,12 @@ validate_provider_token_environment() {
 }
 
 validate_launchd_mode() {
+  case "$ADOPT_HEADLESS_INCUMBENT" in
+    0|1) ;;
+    *) die 7 "MACPROVIDER_ADOPT_HEADLESS_INCUMBENT must be 0 or 1" ;;
+  esac
+  [ "$ADOPT_HEADLESS_INCUMBENT" != "1" ] || [ "$HEADLESS" = "1" ] \
+    || die 7 "headless incumbent adoption requires MACPROVIDER_HEADLESS=1"
   case "$HEADLESS" in
     0) return 0 ;;
     1) ;;
@@ -466,6 +474,153 @@ if label == "live.malibu.provider-watchdog" and environment.get("MACPROVIDER_LAU
     raise SystemExit("unexpected watchdog launchctl path")
 sys.stdout.write(base64.b64encode(data).decode("ascii"))
 PY
+}
+
+# A small number of pre-release SSH smoke nodes were installed before the
+# headless installer kept a user-owned managed plist beside the root-published
+# LaunchDaemon.  A normal transaction cannot safely displace such a running
+# service because it has no rollback input.  This reader accepts only the exact
+# historical smoke shape, through a root descriptor, and returns its immutable
+# bytes for adoption into the managed path.  Production always requires uid 0;
+# the optional uid is solely for the unprivileged regression harness.
+snapshot_published_headless_incumbent_plist() {
+  bootstrap_path="$1"
+  expected_owner_uid="${2:-0}"
+  [ "$HEADLESS" = "1" ] || return 70
+  [ "$bootstrap_path" = "${SYSTEM_LAUNCHD_DIR:-/Library/LaunchDaemons}/live.malibu.provider.plist" ] || return 70
+  "${SUDO_BIN:-/usr/bin/sudo}" -n "${ROOT_PYTHON3_BIN:-/usr/bin/python3}" - \
+    "$bootstrap_path" "$expected_owner_uid" "$HEADLESS_USER" \
+    "$INSTALL_DIR/macprovider-cli" "$CONFIG_PATH" "$HOME" <<'PY'
+import base64
+import ctypes
+import errno
+import os
+import plistlib
+import stat
+import sys
+
+path, expected_uid, user, program, config, home = sys.argv[1:]
+expected_uid = int(expected_uid)
+max_bytes = 1024 * 1024
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+try:
+    before = os.fstat(fd)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != expected_uid
+        or before.st_nlink != 1
+        or stat.S_IMODE(before.st_mode) != 0o644
+        or before.st_size > max_bytes
+    ):
+        raise SystemExit("unsafe historical LaunchDaemon source")
+    if sys.platform == "darwin":
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            acl_get_fd_np = libc.acl_get_fd_np
+            acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+            acl_get_fd_np.restype = ctypes.c_void_p
+            acl_free = libc.acl_free
+            acl_free.argtypes = [ctypes.c_void_p]
+            acl_free.restype = ctypes.c_int
+        except (AttributeError, OSError):
+            raise SystemExit("historical LaunchDaemon ACL is uninspectable")
+        ctypes.set_errno(0)
+        acl = acl_get_fd_np(fd, 0x00000100)
+        if acl:
+            acl_free(acl)
+            raise SystemExit("historical LaunchDaemon has an extended ACL")
+        if ctypes.get_errno() != errno.ENOENT:
+            raise SystemExit("historical LaunchDaemon ACL is uninspectable")
+    data = os.read(fd, before.st_size + 1)
+    if len(data) != before.st_size:
+        raise SystemExit("historical LaunchDaemon changed while reading")
+    after = os.fstat(fd)
+    identity = lambda info: (
+        info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+    if identity(after) != identity(before):
+        raise SystemExit("historical LaunchDaemon metadata changed while reading")
+    path_info = os.lstat(path)
+    if stat.S_ISLNK(path_info.st_mode) or identity(path_info) != identity(before):
+        raise SystemExit("historical LaunchDaemon path was replaced")
+finally:
+    os.close(fd)
+
+try:
+    payload = plistlib.loads(data)
+except Exception:
+    raise SystemExit("historical LaunchDaemon is malformed")
+expected_keys = {
+    "Label", "UserName", "ProgramArguments", "WorkingDirectory", "RunAtLoad",
+    "KeepAlive", "StandardOutPath", "StandardErrorPath", "EnvironmentVariables",
+}
+if set(payload) != expected_keys:
+    raise SystemExit("historical LaunchDaemon contains unexpected fields")
+if payload.get("Label") != "live.malibu.provider" or payload.get("UserName") != user:
+    raise SystemExit("historical LaunchDaemon identity does not match")
+arguments = payload.get("ProgramArguments")
+allowed_arguments = (
+    [program, "serve", "--config", config],
+    [program, "serve", "--config", config, "--log-level", "debug"],
+)
+if arguments not in allowed_arguments:
+    raise SystemExit("historical LaunchDaemon arguments do not match")
+if payload.get("WorkingDirectory") != os.path.dirname(program) or payload.get("RunAtLoad") is not True:
+    raise SystemExit("historical LaunchDaemon working directory or RunAtLoad does not match")
+keep_alive = payload.get("KeepAlive")
+if keep_alive is not True and keep_alive != {"SuccessfulExit": False}:
+    raise SystemExit("historical LaunchDaemon KeepAlive does not match")
+log_dir = os.path.join(home, "Library", "Logs", os.path.basename(os.path.dirname(program)))
+if payload.get("StandardOutPath") != os.path.join(log_dir, "macprovider.out.log"):
+    raise SystemExit("historical LaunchDaemon stdout path does not match")
+if payload.get("StandardErrorPath") != os.path.join(log_dir, "macprovider.err.log"):
+    raise SystemExit("historical LaunchDaemon stderr path does not match")
+expected_environment = {
+    "HOME": home,
+    "PATH": f"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{home}/.local/bin",
+    "MACPROVIDER_CONFIG": config,
+    "MACPROVIDER_CREDENTIAL_STORE": "protected_file",
+    "MACPROVIDER_PROTECTED_CREDENTIAL_ROOT": os.path.join(os.path.dirname(config), "protected-credentials"),
+    "MACPROVIDER_HEADLESS": "1",
+    "MACPROVIDER_HEADLESS_USER": user,
+    "MACPROVIDER_LAUNCHD_DOMAIN": "system",
+}
+if payload.get("EnvironmentVariables") != expected_environment:
+    raise SystemExit("historical LaunchDaemon environment does not match")
+sys.stdout.write(base64.b64encode(data).decode("ascii"))
+PY
+}
+
+adopt_headless_incumbent_metadata() {
+  expected_owner_uid="${1:-0}"
+  case "$ADOPT_HEADLESS_INCUMBENT" in
+    0) return 0 ;;
+    1) ;;
+    *) die 7 "MACPROVIDER_ADOPT_HEADLESS_INCUMBENT must be 0 or 1" ;;
+  esac
+  [ "$HEADLESS" = "1" ] \
+    || die 7 "headless incumbent adoption requires MACPROVIDER_HEADLESS=1"
+  [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] \
+    || die 7 "headless incumbent adoption requires a signed acceptance asset bundle"
+  [ ! -e "$PLIST_PATH" ] && [ ! -L "$PLIST_PATH" ] \
+    || die 7 "headless incumbent adoption requires the managed provider plist to be absent"
+  [ ! -e "$MANIFEST_PATH" ] && [ ! -L "$MANIFEST_PATH" ] \
+    || die 7 "headless incumbent adoption refuses an installation that already has a manifest"
+  [ ! -e "$WATCHDOG_PLIST_BOOTSTRAP_PATH" ] && [ ! -L "$WATCHDOG_PLIST_BOOTSTRAP_PATH" ] \
+    || die 7 "headless incumbent adoption cannot infer an unmanaged root watchdog"
+  launchctl_service print "$LAUNCHD_DOMAIN/$PROVIDER_LABEL" >/dev/null 2>&1 \
+    || die 7 "headless incumbent adoption requires the historical system provider service to be loaded"
+  incumbent_plist_b64="$(snapshot_published_headless_incumbent_plist "$PLIST_BOOTSTRAP_PATH" "$expected_owner_uid")" \
+    || die 7 "published headless incumbent is not the exact supported historical smoke topology"
+  mkdir -p "$LAUNCHD_MANAGED_DIR" \
+    || die 70 "could not create the managed headless launchd directory"
+  printf '%s' "$incumbent_plist_b64" | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read(), validate=True))' \
+    | write_atomic_install_file "$PLIST_PATH" 0600 \
+    || die 70 "could not persist the verified historical LaunchDaemon rollback copy"
+  verify_published_launchd_plist "$PLIST_PATH" "$PLIST_BOOTSTRAP_PATH" \
+    || die 70 "adopted managed plist does not match the published historical LaunchDaemon"
+  log "Adopted the exact historical headless provider plist as rollback metadata; the live service and install manifest were not changed."
 }
 
 publish_root_file_from_base64() {
@@ -1127,6 +1282,11 @@ Environment overrides:
   MACPROVIDER_HEADLESS_USER      named non-root account that owns protected
                                  provider data and runs both LaunchDaemons;
                                  defaults to the invoking non-root account
+  MACPROVIDER_ADOPT_HEADLESS_INCUMBENT=1
+                                 signed-acceptance-only bridge for an exact
+                                 historical smoke LaunchDaemon that lacks its
+                                 user-owned managed plist; never creates an
+                                 install manifest or changes the live service
   MACPROVIDER_NO_LAUNCHD=1       expert/debug only: skip BOTH the provider
                                  launchd service and its companion watchdog
   MACPROVIDER_NO_WATCHDOG=1      expert/debug only: install the provider
@@ -12747,6 +12907,11 @@ main() {
     validate_release_payload
   fi
   check_install_dir_clean
+  # The adoption bridge is intentionally after signed candidate verification
+  # and before the transaction snapshot. It only supplies exact rollback bytes
+  # for the historical service; begin_install_transaction remains the sole
+  # authority that may arm recovery and begin live cutover.
+  adopt_headless_incumbent_metadata
   begin_install_transaction
   stage_release_payload
   validate_acceptance_staged_identity
