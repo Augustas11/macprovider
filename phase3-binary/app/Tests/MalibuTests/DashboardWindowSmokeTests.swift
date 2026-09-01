@@ -35,8 +35,7 @@ final class DashboardWindowSmokeTests: XCTestCase {
         snapshot.coordinatorConnected = true
         snapshot.networkState = "buyer_serving"
         snapshot.currentModelID = "qwen3-8b"
-        snapshot.providerEarningsFresh = true
-        snapshot.malibuProjectionFresh = false
+        snapshot.updateRewardInputs(providerEarningsFresh: true, malibuProjectionFresh: false)
         snapshot.walletBound = true
         snapshot.earningsUsdcToday = 0
         snapshot.earningsUsdcPending = 0.07

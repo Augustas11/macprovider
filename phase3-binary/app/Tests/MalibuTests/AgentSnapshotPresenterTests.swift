@@ -32,18 +32,20 @@ final class AgentSnapshotPresenterTests: XCTestCase {
     func testMalibuDailyMissingExplainsProjectionInsteadOfShowingNA() {
         var s = AgentSnapshot.empty
         s.state = .serving
-        s.providerEarningsFresh = true
-        s.malibuProjectionFresh = true
         s.earningsUsdcToday = 0.04
         s.malibuAccruedToday = nil
         s.malibuAccruedAllTime = 12.5
-        s.malibuHeld = 12.5
-        s.trustTier = .provisional
-        s.malibuRewardEligibility = MalibuRewardEligibility(
-            earningState: "held",
-            withdrawalState: "held",
-            primaryReason: "held_provisional_trust_tier",
-            reasons: ["held_provisional_trust_tier"]
+        s.updateRewardInputs(
+            trustTier: .provisional,
+            providerEarningsFresh: true,
+            malibuProjectionFresh: true,
+            malibuHeld: 12.5,
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "held",
+                withdrawalState: "held",
+                primaryReason: "held_provisional_trust_tier",
+                reasons: ["held_provisional_trust_tier"]
+            )
         )
 
         XCTAssertEqual(
@@ -488,14 +490,16 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         s.state = .serving
         s.earningsUsdcToday = 1
         s.malibuAccruedToday = 2
-        s.trustTier = .provisional
-        s.providerEarningsFresh = true
-        s.malibuProjectionFresh = true
-        s.malibuRewardEligibility = MalibuRewardEligibility(
-            earningState: "held",
-            withdrawalState: "held",
-            primaryReason: "held_provisional_trust_tier",
-            reasons: ["held_provisional_trust_tier"]
+        s.updateRewardInputs(
+            trustTier: .provisional,
+            providerEarningsFresh: true,
+            malibuProjectionFresh: true,
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "held",
+                withdrawalState: "held",
+                primaryReason: "held_provisional_trust_tier",
+                reasons: ["held_provisional_trust_tier"]
+            )
         )
         XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("[locked] 2.00 MALIBU"))
         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(s).contains("unlocks at Trusted"))
@@ -506,8 +510,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         s.unpaidLedgerBacklogUSDC = 10
         s.unpaidLedgerBacklogMALIBU = 5
         s.walletBound = false
-        s.providerEarningsFresh = true
-        s.malibuProjectionFresh = true
+        s.updateRewardInputs(providerEarningsFresh: true, malibuProjectionFresh: true)
         XCTAssertNotNil(AgentSnapshotPresenter.backlogLine(s))
         s.walletBound = true
         XCTAssertNil(AgentSnapshotPresenter.backlogLine(s))
@@ -1032,8 +1035,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         s.walletBound = false
         s.unpaidLedgerBacklogUSDC = 9
         s.unpaidLedgerBacklogMALIBU = 0
-        s.providerEarningsFresh = true
-        s.malibuProjectionFresh = true
+        s.updateRewardInputs(providerEarningsFresh: true, malibuProjectionFresh: true)
         XCTAssertEqual(AgentSnapshotPresenter.unclaimedBadge(s, dismissedThreshold: nil), "$1+")
         XCTAssertNil(AgentSnapshotPresenter.unclaimedBadge(s, dismissedThreshold: 10))
 
@@ -1110,82 +1112,93 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
     func testMalibuAvailabilityAndHoldCopyExplainWithdrawalState() {
         var snapshot = AgentSnapshot.empty
-        snapshot.trustTier = .provisional
-        snapshot.providerEarningsFresh = true
-        snapshot.malibuProjectionFresh = true
-        snapshot.malibuWithdrawable = 0
-        snapshot.malibuHeld = 12.5
-        snapshot.malibuHoldReasons = ["trust_tier_provisional"]
-        snapshot.trustCriteriaMet = 2
-        snapshot.trustCriteriaRequired = 4
-        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
-            earningState: "held",
-            withdrawalState: "held",
-            primaryReason: "held_provisional_trust_tier",
-            reasons: ["held_provisional_trust_tier"]
+        snapshot.updateRewardInputs(
+            trustTier: .provisional,
+            providerEarningsFresh: true,
+            malibuProjectionFresh: true,
+            malibuWithdrawable: 0,
+            malibuHeld: 12.5,
+            malibuHoldReasons: ["trust_tier_provisional"],
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "held",
+                withdrawalState: "held",
+                primaryReason: "held_provisional_trust_tier",
+                reasons: ["held_provisional_trust_tier"]
+            ),
+            trustCriteriaMet: 2,
+            trustCriteriaRequired: 4
         )
 
         XCTAssertEqual(AgentSnapshotPresenter.malibuAvailabilityLine(snapshot), "MALIBU: not withdrawable · 12.50 held")
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "MALIBU status: Trust verification is incomplete Next: Complete the remaining trust criteria to unlock withdrawals."
+            "MALIBU status: Trust verification is incomplete Next: Complete the remaining trust criteria for withdrawal eligibility."
         )
 
-        snapshot.malibuHoldReasons = ["per_wallet_daily_cap"]
-        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
-            earningState: "capped",
-            withdrawalState: "capped",
-            primaryReason: "held_wallet_daily_cap",
-            reasons: ["held_wallet_daily_cap"]
+        snapshot.updateRewardInputs(
+            malibuHoldReasons: ["per_wallet_daily_cap"],
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "capped",
+                withdrawalState: "capped",
+                primaryReason: "held_wallet_daily_cap",
+                reasons: ["held_wallet_daily_cap"]
+            )
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuHoldLine(snapshot),
             "MALIBU status: wallet daily limit reached Next: The wallet cap resets at the next UTC day."
         )
 
-        snapshot.malibuHoldReasons = []
-        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
-            earningState: "capped",
-            withdrawalState: "capped",
-            primaryReason: "held_provider_daily_cap",
-            reasons: ["held_provider_daily_cap"]
+        snapshot.updateRewardInputs(
+            malibuHoldReasons: [],
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "capped",
+                withdrawalState: "capped",
+                primaryReason: "held_provider_daily_cap",
+                reasons: ["held_provider_daily_cap"]
+            )
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuHoldLine(snapshot),
             "MALIBU status: provider daily limit reached Next: The provider cap resets at the next UTC day."
         )
 
-        snapshot.trustTier = .provisional
-        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
-            earningState: "held",
-            withdrawalState: "held",
-            primaryReason: "held_demotion_cooldown",
-            reasons: ["held_demotion_cooldown"]
+        snapshot.updateRewardInputs(
+            trustTier: .provisional,
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "held",
+                withdrawalState: "held",
+                primaryReason: "held_demotion_cooldown",
+                reasons: ["held_demotion_cooldown"]
+            )
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "MALIBU status: Trust verification is in progress Next: Keep Malibu online; withdrawals unlock automatically when Trusted."
+            "MALIBU status: Trust verification is in progress Next: Keep Malibu online while trust review completes."
         )
     }
 
     func testRewardEligibilityV1OverridesLegacyMalibuPresentation() {
         var snapshot = AgentSnapshot.empty
-        snapshot.trustTier = .trusted
-        snapshot.providerEarningsFresh = true
-        snapshot.malibuProjectionFresh = true
+        snapshot.walletBound = true
         snapshot.malibuAccruedToday = 2
         snapshot.malibuAccruedAllTime = 2
-        snapshot.malibuWithdrawable = 2
-        snapshot.malibuHeld = 0
-        snapshot.malibuHoldReasons = []
-        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
-            earningState: "held",
-            withdrawalState: "held",
-            primaryReason: "held_provisional_trust_tier",
-            reasons: ["held_provisional_trust_tier"]
+        snapshot.updateRewardInputs(
+            trustTier: .trusted,
+            providerEarningsFresh: true,
+            malibuProjectionFresh: true,
+            malibuWithdrawable: 2,
+            malibuHeld: 0,
+            malibuHoldReasons: [],
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "held",
+                withdrawalState: "held",
+                primaryReason: "held_provisional_trust_tier",
+                reasons: ["held_provisional_trust_tier"]
+            )
         )
 
-        XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(snapshot))
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "MALIBU withdrawals are available")
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuAvailabilityLine(snapshot),
             "MALIBU: 2.00 available · 0.00 held"
@@ -1201,20 +1214,22 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
         snapshot.networkState = "buyer_serving"
-        snapshot.trustTier = .trusted
-        snapshot.providerEarningsFresh = true
-        snapshot.malibuProjectionFresh = true
         snapshot.walletBound = true
         snapshot.malibuAccruedToday = 2
         snapshot.malibuAccruedAllTime = 2
-        snapshot.malibuWithdrawable = 2
-        snapshot.malibuHeld = 12.5
-        snapshot.malibuHoldReasons = ["trust_tier_provisional", "demotion_cooldown"]
-        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
-            earningState: "held",
-            withdrawalState: "held",
-            primaryReason: "held_provisional_trust_tier",
-            reasons: ["held_provisional_trust_tier"]
+        snapshot.updateRewardInputs(
+            trustTier: .trusted,
+            providerEarningsFresh: true,
+            malibuProjectionFresh: true,
+            malibuWithdrawable: 2,
+            malibuHeld: 12.5,
+            malibuHoldReasons: ["trust_tier_provisional", "demotion_cooldown"],
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "held",
+                withdrawalState: "held",
+                primaryReason: "held_provisional_trust_tier",
+                reasons: ["held_provisional_trust_tier"]
+            )
         )
 
         let health = AgentSnapshotPresenter.miningHealth(snapshot)
@@ -1237,16 +1252,19 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
     func testRewardEligibilityUsesFreshMalibuProjectionWithoutFreshUSDCProjection() {
         var snapshot = AgentSnapshot.empty
-        snapshot.trustTier = .trusted
-        snapshot.providerEarningsFresh = false
-        snapshot.malibuProjectionFresh = true
+        snapshot.walletBound = true
         snapshot.malibuAccruedToday = 2
         snapshot.malibuAccruedAllTime = 2
-        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
-            earningState: "held",
-            withdrawalState: "held",
-            primaryReason: "held_provisional_trust_tier",
-            reasons: ["held_provisional_trust_tier"]
+        snapshot.updateRewardInputs(
+            trustTier: .trusted,
+            providerEarningsFresh: false,
+            malibuProjectionFresh: true,
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "held",
+                withdrawalState: "held",
+                primaryReason: "held_provisional_trust_tier",
+                reasons: ["held_provisional_trust_tier"]
+            )
         )
 
         XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(snapshot))
@@ -1256,7 +1274,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
     }
 
-    func testProviderEarningsUnknownRewardEligibilityNormalizesUnavailable() throws {
+    func testProviderEarningsUnknownRewardEligibilityPreservesUnknownReason() throws {
         let data = Data("""
         {
           "wallet_bound": true,
@@ -1275,10 +1293,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         let decoded = try JSONDecoder().decode(ProviderEarnings.self, from: data)
         XCTAssertEqual(decoded.malibuRewardEligibility?.schemaVersion, "malibu_reward_eligibility.v1")
-        XCTAssertEqual(decoded.malibuRewardEligibility?.earningState, "unavailable")
-        XCTAssertEqual(decoded.malibuRewardEligibility?.withdrawalState, "unavailable")
-        XCTAssertEqual(decoded.malibuRewardEligibility?.primaryReason, "telemetry_unavailable")
-        XCTAssertEqual(decoded.malibuRewardEligibility?.reasons, ["telemetry_unavailable"])
+        XCTAssertEqual(decoded.malibuRewardEligibility?.earningState, "earning")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.withdrawalState, "withdrawable")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.primaryReason, "future_reason")
+        XCTAssertEqual(decoded.malibuRewardEligibility?.reasons, ["future_reason"])
     }
 
     func testFreshProviderEarningsWithoutRewardEligibilityFailsClosed() throws {
@@ -1300,13 +1318,15 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(decoded.malibuRewardEligibility?.withdrawalState, "unavailable")
 
         var snapshot = AgentSnapshot.empty
-        snapshot.walletBound = decoded.walletBound
-        snapshot.trustTier = decoded.trustTier
-        snapshot.providerEarningsFresh = decoded.earningsProjectionFresh
-        snapshot.malibuProjectionFresh = decoded.malibuProjectionFresh
-        snapshot.malibuWithdrawable = decoded.malibuWithdrawable
-        snapshot.malibuHeld = decoded.malibuHeld
-        snapshot.malibuRewardEligibility = decoded.malibuRewardEligibility
+        snapshot.updateRewardInputs(
+            walletBound: decoded.walletBound,
+            trustTier: decoded.trustTier,
+            providerEarningsFresh: decoded.earningsProjectionFresh,
+            malibuProjectionFresh: decoded.malibuProjectionFresh,
+            malibuWithdrawable: decoded.malibuWithdrawable,
+            malibuHeld: decoded.malibuHeld,
+            malibuRewardEligibility: decoded.malibuRewardEligibility
+        )
 
         XCTAssertEqual(AgentSnapshotPresenter.malibuAvailabilityLine(snapshot), "MALIBU: status unavailable · 0.00 held")
         XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Reward status unavailable")
@@ -1315,12 +1335,14 @@ final class AgentSnapshotPresenterTests: XCTestCase {
     func testUnavailableRewardEligibilityDoesNotRenderLockedAmount() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
-        snapshot.providerEarningsFresh = true
-        snapshot.malibuProjectionFresh = true
         snapshot.earningsUsdcToday = 0.04
         snapshot.malibuAccruedToday = 8
         snapshot.malibuAccruedAllTime = 8
-        snapshot.malibuRewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
+        snapshot.updateRewardInputs(
+            providerEarningsFresh: true,
+            malibuProjectionFresh: true,
+            malibuRewardEligibility: MalibuRewardEligibility.unavailableForMissingObject()
+        )
 
         let earningsLine = AgentSnapshotPresenter.earningsLine(snapshot)
         let fullLine = AgentSnapshotPresenter.malibuFullLine(snapshot)

@@ -1335,8 +1335,10 @@ final class MalibuAgent: ObservableObject {
     }
 
     private func invalidateProviderProjectionFreshness() {
-        snapshot.providerEarningsFresh = false
-        snapshot.malibuProjectionFresh = false
+        snapshot.updateRewardInputs(
+            providerEarningsFresh: false,
+            malibuProjectionFresh: false
+        )
         providerProjectionEligible = false
     }
 
@@ -1355,18 +1357,7 @@ final class MalibuAgent: ObservableObject {
         guard record.hasObservedProviderEarnings, !snapshot.hasObservedProviderEarnings else {
             return
         }
-        snapshot.hasObservedProviderEarnings = true
-        snapshot.earningsUsdcToday = record.earningsUsdcToday
-        snapshot.earningsUsdcWeek = record.earningsUsdcWeek
-        snapshot.earningsUsdcPending = record.earningsUsdcPending
-        snapshot.earningsUsdcLifetime = record.earningsUsdcLifetime
-        snapshot.malibuAccruedToday = record.malibuAccruedToday
-        snapshot.malibuAccruedAllTime = record.malibuAccruedAllTime
-        snapshot.malibuWithdrawable = record.malibuWithdrawable
-        snapshot.malibuHeld = record.malibuHeld
-        if let walletBound = record.walletBound {
-            snapshot.walletBound = walletBound
-        }
+        snapshot.applyDashboardObservation(record)
     }
 
     private func persistDashboardObservation() {
@@ -1375,33 +1366,27 @@ final class MalibuAgent: ObservableObject {
             return
         }
         let fileURL = DashboardObservationStore.fileURL()
-        var holdDate = snapshot.lastBuyerServingAt
-        if snapshot.shouldClearBuyerServingHold {
-            holdDate = nil
-        } else if holdDate == nil {
-            holdDate = DashboardObservationStore.load(
-                providerID: providerID,
-                fileURL: fileURL
-            )?.lastBuyerServingAt
+        var record = snapshot.dashboardObservationRecord(providerID: providerID)
+        if record.lastBuyerServingAt == nil,
+           !snapshot.shouldClearBuyerServingHold,
+           let held = DashboardObservationStore.load(providerID: providerID, fileURL: fileURL)?.lastBuyerServingAt {
+            record = DashboardObservationStore.Record(
+                providerID: record.providerID,
+                lastBuyerServingAt: held,
+                hasObservedProviderEarnings: record.hasObservedProviderEarnings,
+                earningsUsdcToday: record.earningsUsdcToday,
+                earningsUsdcWeek: record.earningsUsdcWeek,
+                earningsUsdcPending: record.earningsUsdcPending,
+                earningsUsdcLifetime: record.earningsUsdcLifetime,
+                malibuAccruedToday: record.malibuAccruedToday,
+                malibuAccruedAllTime: record.malibuAccruedAllTime,
+                malibuWithdrawable: record.malibuWithdrawable,
+                malibuHeld: record.malibuHeld,
+                walletBound: record.walletBound,
+                recordedAt: record.recordedAt
+            )
         }
-        DashboardObservationStore.save(
-            DashboardObservationStore.Record(
-                providerID: providerID,
-                lastBuyerServingAt: holdDate,
-                hasObservedProviderEarnings: snapshot.hasObservedProviderEarnings,
-                earningsUsdcToday: snapshot.earningsUsdcToday,
-                earningsUsdcWeek: snapshot.earningsUsdcWeek,
-                earningsUsdcPending: snapshot.earningsUsdcPending,
-                earningsUsdcLifetime: snapshot.earningsUsdcLifetime,
-                malibuAccruedToday: snapshot.malibuAccruedToday,
-                malibuAccruedAllTime: snapshot.malibuAccruedAllTime,
-                malibuWithdrawable: snapshot.malibuWithdrawable,
-                malibuHeld: snapshot.malibuHeld,
-                walletBound: snapshot.walletBound,
-                recordedAt: Date()
-            ),
-            fileURL: fileURL
-        )
+        DashboardObservationStore.save(record, fileURL: fileURL)
     }
 
     func consume(_ frame: ControlFrame) {
@@ -1458,6 +1443,7 @@ final class MalibuAgent: ObservableObject {
                                  && inputTokensAllTime == nil && outputTokensAllTime == nil
             if looksLikeStub {
                 if snapshot.hasObservedProviderEarnings {
+                    snapshot.demoteRewardInputsAfterLegacyStub()
                     persistDashboardObservation()
                     return
                 }
@@ -1480,33 +1466,15 @@ final class MalibuAgent: ObservableObject {
                 snapshot.inputTokensAllTime = inputTokensAllTime
                 snapshot.outputTokensAllTime = outputTokensAllTime
             }
-            snapshot.malibuProjectionFresh = providerProjectionEligible
-                && providerEarnings?.malibuProjectionFresh == true
-            snapshot.providerEarningsFresh = providerProjectionEligible
-                && providerEarnings?.earningsProjectionFresh == true
+            snapshot.updateRewardFreshness(
+                providerProjectionEligible: providerProjectionEligible,
+                providerEarnings: providerEarnings
+            )
             if let providerEarnings {
-                snapshot.walletBound = providerEarnings.walletBound
-                snapshot.trustTier = providerEarnings.trustTier
-                snapshot.unpaidLedgerBacklogUSDC = providerEarnings.unpaidLedgerBacklogUSDC
-                snapshot.unpaidLedgerBacklogMALIBU = providerEarnings.unpaidLedgerBacklogMALIBU
-                snapshot.earningsUsdcToday = providerEarnings.usdcToday
-                snapshot.earningsUsdcWeek = providerEarnings.usdcWeek
-                snapshot.earningsUsdcPending = providerEarnings.usdcPending
-                snapshot.earningsUsdcLifetime = providerEarnings.usdcLifetime
-                snapshot.malibuAccruedToday = providerEarnings.malibuToday
-                snapshot.malibuAccruedAllTime = providerEarnings.malibuAllTime
-                snapshot.malibuWithdrawable = providerEarnings.malibuWithdrawable
-                snapshot.malibuHeld = providerEarnings.malibuHeld
-                snapshot.malibuHoldReasons = providerEarnings.malibuHoldReasons
-                snapshot.malibuDailyCap = providerEarnings.malibuDailyCap
-                snapshot.malibuWalletDailyCap = providerEarnings.malibuWalletDailyCap
-                snapshot.malibuRewardEligibility = providerEarnings.malibuRewardEligibility
-                snapshot.trustCriteriaMet = providerEarnings.trustCriteriaMet
-                snapshot.trustCriteriaRequired = providerEarnings.trustCriteriaRequired
-                snapshot.idlePrewarmSummary = providerEarnings.idlePrewarm
-                if providerProjectionEligible && providerEarnings.earningsProjectionFresh {
-                    snapshot.hasObservedProviderEarnings = true
-                }
+                snapshot.applyProviderEarnings(
+                    providerEarnings,
+                    providerProjectionEligible: providerProjectionEligible
+                )
             }
             persistDashboardObservation()
         case let .pauseAck(accepted, reason):
@@ -1687,6 +1655,7 @@ final class MalibuAgent: ObservableObject {
     private func clearRuntimeMetrics() {
         snapshot.earningsUsdcToday = nil
         snapshot.malibuAccruedToday = nil
+        snapshot.clearRuntimeRewardInputs()
         snapshot.uptimeSec = nil
         snapshot.gpuTemperatureC = nil
         snapshot.gpuUtilizationPct = nil

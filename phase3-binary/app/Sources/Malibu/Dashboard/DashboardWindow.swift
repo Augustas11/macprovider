@@ -239,40 +239,43 @@ private struct DashboardView: View {
 
             HStack(alignment: .top, spacing: 16) {
                 panel {
-                    Text("Today").font(.caption).foregroundStyle(.secondary)
-                    Text(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot))
+                    let rewardVerdict = AgentSnapshotPresenter.rewardVerdict(agent.snapshot)
+                    Text(AgentSnapshotPresenter.usdcPeriodLabel(agent.snapshot, verdict: rewardVerdict))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot, verdict: rewardVerdict))
                         .font(.system(size: 28, weight: .semibold, design: .rounded))
-                    Text(AgentSnapshotPresenter.usdcFullLine(agent.snapshot))
+                    Text(AgentSnapshotPresenter.usdcFullLine(agent.snapshot, verdict: rewardVerdict))
                         .foregroundStyle(.secondary)
                         .font(.callout)
-                    if let caption = AgentSnapshotPresenter.usdcAccrualCaption(agent.snapshot) {
+                    if let caption = AgentSnapshotPresenter.usdcAccrualCaption(agent.snapshot, verdict: rewardVerdict) {
                         Text(caption)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
-                    Text(AgentSnapshotPresenter.malibuFullLine(agent.snapshot))
+                    Text(AgentSnapshotPresenter.malibuFullLine(agent.snapshot, verdict: rewardVerdict))
                         .foregroundStyle(
-                            agent.snapshot.malibuProjectionFresh && agent.snapshot.trustTier == .provisional
+                            AgentSnapshotPresenter.malibuRewardTextColorIsLocked(rewardVerdict)
                                 ? MalibuBrand.coral
                                 : .secondary
                         )
                         .font(.callout)
-                    if let availability = AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot) {
+                    if let availability = AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot, verdict: rewardVerdict) {
                         Text(availability)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    if let hold = AgentSnapshotPresenter.malibuHoldLine(agent.snapshot) {
+                    if let hold = AgentSnapshotPresenter.malibuHoldLine(agent.snapshot, verdict: rewardVerdict) {
                         Text(hold)
                             .font(.caption)
                             .foregroundStyle(MalibuBrand.coral)
                     }
-                    if let backlog = AgentSnapshotPresenter.backlogLine(agent.snapshot) {
+                    if let backlog = AgentSnapshotPresenter.backlogLine(agent.snapshot, verdict: rewardVerdict) {
                         Text(backlog)
                             .font(.caption)
                             .foregroundStyle(MalibuBrand.coral)
                     }
-                    if let eligibility = AgentSnapshotPresenter.eligibilityLine(agent.snapshot) {
+                    if let eligibility = AgentSnapshotPresenter.eligibilityLine(agent.snapshot, verdict: rewardVerdict) {
                         Text(eligibility)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -470,7 +473,8 @@ private struct DashboardView: View {
     }
 
     private var miningHealthPanel: some View {
-        let mining = AgentSnapshotPresenter.miningHealth(agent.snapshot)
+        let rewardVerdict = AgentSnapshotPresenter.rewardVerdict(agent.snapshot)
+        let mining = AgentSnapshotPresenter.miningHealth(agent.snapshot, verdict: rewardVerdict)
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text(DashboardCopy.miningHealthTitle)
