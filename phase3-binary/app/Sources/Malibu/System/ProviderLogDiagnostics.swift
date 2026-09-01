@@ -156,15 +156,34 @@ enum ProviderLogDiagnostics {
     }
 
     static func diagnose(lines: [String]) -> Finding? {
+        diagnoseAll(lines: lines).first
+    }
+
+    static func diagnoseAll(lines: [String]) -> [Finding] {
+        var findings: [Finding] = []
         for line in lines.reversed() {
             let normalized = line.lowercased()
             for rule in rules {
                 if normalized.contains(rule.needle) {
-                    return Finding(id: rule.id, userMessage: rule.userMessage, matchedLine: line)
+                    findings.append(Finding(id: rule.id, userMessage: rule.userMessage, matchedLine: line))
+                    break
                 }
             }
+            if autoupdateDisabledEvidence(in: line) {
+                findings.append(Finding(
+                    id: "autoupdate_disabled",
+                    userMessage:
+                        "Provider automatic updates are disabled. Enable provider software updates before relying on automatic repair.",
+                    matchedLine: line
+                ))
+            }
         }
-        return nil
+        return findings
+    }
+
+    private static func autoupdateDisabledEvidence(in line: String) -> Bool {
+        let pattern = #"(?i)(^|[\s,{\[])[\"']?(?:auto_update_enabled|autoupdate\.enabled)[\"']?\s*[:=]\s*false($|[\s,}\]"'])"#
+        return line.range(of: pattern, options: .regularExpression) != nil
     }
 
     /// Provider stdout/stderr and watchdog logs have independent tails, so
@@ -175,15 +194,36 @@ enum ProviderLogDiagnostics {
         watchdogLines: [String],
         launchdNeedsRepair: Bool = false
     ) -> Finding? {
+        diagnoseAll(
+            providerLines: providerLines,
+            watchdogLines: watchdogLines,
+            launchdNeedsRepair: launchdNeedsRepair
+        ).first
+    }
+
+    static func diagnoseAll(
+        providerLines: [String],
+        watchdogLines: [String],
+        launchdNeedsRepair: Bool = false,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [Finding] {
+        let allLines = providerLines + watchdogLines
+        let homeACLFinding = homeAutoupdateACLRejection(lines: allLines, homeDirectory: homeDirectory)
         if launchdNeedsRepair,
-           let staleFinding = diagnose(
-               lines: (providerLines + watchdogLines).filter {
+           let staleFinding = diagnoseAll(
+               lines: allLines.filter {
                    $0.lowercased().contains("provider process unhealthy: launchd service live.malibu.provider has no validated pid at")
                }
-           ) {
-            return staleFinding
+           ).first {
+            let supplementalFindings = diagnoseAll(lines: allLines)
+                .filter { $0.id != "stale_launch_agent" }
+            return [staleFinding] + optional(homeACLFinding) + supplementalFindings
         }
-        return diagnose(lines: providerLines) ?? diagnose(lines: watchdogLines)
+        return optional(homeACLFinding) + diagnoseAll(lines: providerLines) + diagnoseAll(lines: watchdogLines)
+    }
+
+    private static func optional(_ finding: Finding?) -> [Finding] {
+        finding.map { [$0] } ?? []
     }
 
     static func timeoutMessage(logHint: String) -> String {

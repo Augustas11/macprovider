@@ -165,6 +165,26 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
         XCTAssertTrue(ProviderLogDiagnostics.isActionable(finding, launchdNeedsRepair: true))
     }
 
+    func testAutoupdateDisabledRequiresCanonicalFalseValuedKey() {
+        XCTAssertEqual(
+            ProviderLogDiagnostics.diagnose(lines: ["auto_update_enabled: false"])?.id,
+            "autoupdate_disabled"
+        )
+        XCTAssertEqual(
+            ProviderLogDiagnostics.diagnose(lines: ["status autoupdate.enabled=false"])?.id,
+            "autoupdate_disabled"
+        )
+        XCTAssertEqual(
+            ProviderLogDiagnostics.diagnose(lines: [#"{"auto_update_enabled":false}"#])?.id,
+            "autoupdate_disabled"
+        )
+        XCTAssertNil(ProviderLogDiagnostics.diagnose(lines: ["autoupdate_disabled=false"]))
+        XCTAssertNil(ProviderLogDiagnostics.diagnose(lines: ["cleared autoupdate_disabled"]))
+        XCTAssertNil(ProviderLogDiagnostics.diagnose(lines: ["autoupdate_enabled: false"]))
+        XCTAssertNil(ProviderLogDiagnostics.diagnose(lines: ["auto_update_enabled: true"]))
+        XCTAssertNil(ProviderLogDiagnostics.diagnose(lines: ["prefix_auto_update_enabled=false"]))
+    }
+
     func testDiagnoseReturnsNilForUnrecognizedLines() {
         XCTAssertNil(ProviderLogDiagnostics.diagnose(lines: ["serve starting", "connected to coordinator"]))
     }

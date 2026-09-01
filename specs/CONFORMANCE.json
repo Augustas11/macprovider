@@ -997,7 +997,7 @@
     {
       "spec_id": "SPEC-035",
       "title": "Provider connection diagnostics and failure history",
-      "version": "v0.4.1",
+      "version": "v0.4.2",
       "path": "specs/SPEC-035-provider-connection-diagnostics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2514,6 +2514,72 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/535",
         "rationale": "Admission-ceiling drift diagnostics are implemented under coordinator unit tests; production Pearl deploy and operating-window alert evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R010",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/System/ProviderDiagnosticFinding.swift:enum ProviderDiagnosticSignatureID"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticFindingTests.swift:testClosedTaxonomyCoversProviderLogDiagnosticIDs",
+        "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticFindingTests.swift:testClosedTaxonomyCoversExistingProviderLogAggregateIDs",
+        "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticFindingTests.swift:testUnknownSignatureIDsAreSkippedWhenMinimumReaderVersionIsSupported"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1314",
+        "rationale": "Local closed diagnostic signature schema is implemented under Malibu app unit tests; production support-bundle collection and follow-up diagnostic sources remain deferred."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R011",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/System/ProviderDiagnosticFinding.swift:enum ProviderDiagnosticFindingAggregator"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticFindingTests.swift:testFreshStatusFindingsPrecedeSupplementalLogFindings",
+        "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticFindingTests.swift:testCredentialStatusSubprocessCannotOverrideFreshServeCredentialState",
+        "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticFindingTests.swift:testStaleStatusAllowsDoctorServeDeadAndCredentialStatusFallbacks"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1314",
+        "rationale": "Local source precedence is implemented under aggregator unit tests; slice-2 doctor report ingestion remains deferred."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R012",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/MalibuApp.swift:private func exportDiagnostics()",
+        "phase3-binary/app/Sources/Malibu/System/ProviderDiagnosticsBundle.swift:enum ProviderDiagnosticsBundle",
+        "phase3-binary/app/Sources/Malibu/System/LogTailReader.swift:struct LogTailBuffer"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/LogTailReaderTests.swift:testV2RedactionScrubsPrivateContextWithoutDroppingNonSecretLine",
+        "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticsBundleTests.swift:testBundleIncludesLifecycleAndWatchdogEvidenceWithoutSecrets",
+        "phase3-binary/app/Tests/MalibuTests/ProviderDiagnosticsBundleTests.swift:testBundleClassifiesRawWatchdogAndLaunchdRepairBeforeExportRedaction",
+        "phase3-binary/app/Tests/MalibuTests/AgentSnapshotPresenterTests.swift:testOnboardingAdvancedFailureDiagnosticsKeepsRedactedDetails"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1314",
+        "rationale": "Diagnostics bundle v2 and LogTailBuffer v2 redaction are implemented under Malibu app unit tests; production bundle collection evidence remains deferred."
       }
     },
     {

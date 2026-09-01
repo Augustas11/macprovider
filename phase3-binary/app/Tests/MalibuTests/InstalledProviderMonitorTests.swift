@@ -75,6 +75,7 @@ final class InstalledProviderMonitorTests: XCTestCase {
               "lifecycle_lease_v1",
               "lifecycle_significant_events_v1",
               "lifecycle_transition_v1",
+              "model_status_v1",
               "persisted_lifecycle_state_v1",
               "service_instance_v1",
               "status_observation_v1"
@@ -132,6 +133,12 @@ final class InstalledProviderMonitorTests: XCTestCase {
             "invalid_reason": null
           },
           "network_state": "buyer_serving",
+          "model": "status-owned-model",
+          "model_loaded": true,
+          "model_hash": "model-hash-a",
+          "model_hash_algorithm": "sha256",
+          "weights_manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "weights_manifest_algorithm": "safetensors-manifest-v1",
           "coordinator": {
             "connected": true,
             "tier": "trusted",
@@ -217,6 +224,13 @@ final class InstalledProviderMonitorTests: XCTestCase {
             "autoupdate:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
         )
         XCTAssertEqual(snapshot.lifecycleLeaseExpiresWallMS, 1_784_012_400_000)
+        XCTAssertTrue(snapshot.modelStatusTrusted)
+        XCTAssertEqual(snapshot.modelID, "status-owned-model")
+        XCTAssertEqual(snapshot.modelLoaded, true)
+        XCTAssertEqual(snapshot.modelHash, "model-hash-a")
+        XCTAssertEqual(snapshot.modelHashAlgorithm, "sha256")
+        XCTAssertEqual(snapshot.weightsManifestSHA256, String(repeating: "d", count: 64))
+        XCTAssertEqual(snapshot.weightsManifestAlgorithm, "safetensors-manifest-v1")
         XCTAssertTrue(snapshot.coordinatorConnected)
         XCTAssertEqual(snapshot.coordinatorIdentityAdmissionMode, "signature")
         XCTAssertEqual(snapshot.catalogState, "live_verified")

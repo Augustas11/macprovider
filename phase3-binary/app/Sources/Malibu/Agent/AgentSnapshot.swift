@@ -27,6 +27,12 @@ struct AgentSnapshot: Equatable {
     }
     var state: State
     var currentModelID: String?
+    var currentModelIDFromStatus: Bool = false
+    var currentModelLoaded: Bool?
+    var modelHash: String?
+    var modelHashAlgorithm: String?
+    var weightsManifestSHA256: String?
+    var weightsManifestAlgorithm: String?
     var earningsUsdcToday: Double?
     var malibuAccruedToday: Double?
     var unpaidLedgerBacklogUSDC: Double?
@@ -286,6 +292,37 @@ struct AgentSnapshot: Equatable {
         return isLocalStatusObservationCurrent(at: now)
     }
 
+    func hasFreshContractValidatedStatusObservation(at now: Date = Date()) -> Bool {
+        localStatusContractCompatible == true
+            && localStatusCapabilities.contains("status_observation_v1")
+            && rawStatusObservationFresh(at: now)
+    }
+
+    func hasFreshServeOwnedCredentialState(at now: Date = Date()) -> Bool {
+        hasFreshContractValidatedStatusObservation(at: now)
+            && !credentialStatusFromDiagnostic
+            && credentialState != nil
+    }
+
+    func hasFreshServeOwnedModelStatus(at now: Date = Date()) -> Bool {
+        hasFreshContractValidatedStatusObservation(at: now)
+            && localStatusCapabilities.contains("model_status_v1")
+            && currentModelIDFromStatus
+    }
+
+    private func rawStatusObservationFresh(at now: Date) -> Bool {
+        guard statusObservationFresh != false,
+              let observationID = statusObservationID,
+              !observationID.isEmpty,
+              let observedAt = statusObservedAt,
+              let validForMS = statusObservationValidForMS,
+              (1...60_000).contains(validForMS) else {
+            return false
+        }
+        return observedAt <= now.addingTimeInterval(1)
+            && observedAt.addingTimeInterval(Double(validForMS) / 1_000) >= now
+    }
+
     func hasTrustedReferralBoundary() -> Bool {
         localStatusContractCompatible == true
             && localStatusLifecycleOwner == "macprovider_cli"
@@ -324,6 +361,15 @@ struct AgentSnapshot: Equatable {
         lifecycleLeaseKind = nil
         lifecycleLeaseOperationID = nil
         lifecycleLeaseExpiresWallMS = nil
+        if currentModelIDFromStatus {
+            currentModelID = nil
+        }
+        currentModelIDFromStatus = false
+        currentModelLoaded = nil
+        modelHash = nil
+        modelHashAlgorithm = nil
+        weightsManifestSHA256 = nil
+        weightsManifestAlgorithm = nil
         credentialSource = nil
         credentialState = nil
         credentialRestartSafe = nil

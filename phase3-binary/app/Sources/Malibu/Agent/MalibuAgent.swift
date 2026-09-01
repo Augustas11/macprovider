@@ -719,6 +719,15 @@ final class MalibuAgent: ObservableObject {
             snapshot.lifecycleLeaseKind = status.lifecycleLeaseKind
             snapshot.lifecycleLeaseOperationID = status.lifecycleLeaseOperationID
             snapshot.lifecycleLeaseExpiresWallMS = status.lifecycleLeaseExpiresWallMS
+            if status.modelStatusTrusted {
+                snapshot.currentModelID = status.modelID
+                snapshot.currentModelIDFromStatus = true
+                snapshot.currentModelLoaded = status.modelLoaded
+                snapshot.modelHash = status.modelHash
+                snapshot.modelHashAlgorithm = status.modelHashAlgorithm
+                snapshot.weightsManifestSHA256 = status.weightsManifestSHA256
+                snapshot.weightsManifestAlgorithm = status.weightsManifestAlgorithm
+            }
             snapshot.credentialSource = status.credentialSource
             snapshot.credentialState = status.credentialState
             snapshot.credentialRestartSafe = status.credentialRestartSafe
@@ -786,7 +795,9 @@ final class MalibuAgent: ObservableObject {
                 configURL: ProviderPaths.current.configFile,
                 expectedProviderID: expectedProviderID
             )
-            applyCredentialSnapshot(result)
+            if !snapshot.hasFreshServeOwnedCredentialState() {
+                applyCredentialSnapshot(result)
+            }
         } catch {
             snapshot.credentialRepairLastError = snapshot.credentialRepairLastError
                 ?? error.localizedDescription
@@ -829,8 +840,14 @@ final class MalibuAgent: ObservableObject {
     @discardableResult
     private func applyHealthSnapshot(port: Int) async -> Bool {
         guard let health = await InstalledProviderMonitor.fetchHealth(port: port) else { return false }
-        if let model = health.model, !model.isEmpty {
+        if let model = health.model, !model.isEmpty, !snapshot.hasFreshServeOwnedModelStatus() {
             snapshot.currentModelID = model
+            snapshot.currentModelIDFromStatus = false
+            snapshot.currentModelLoaded = nil
+            snapshot.modelHash = nil
+            snapshot.modelHashAlgorithm = nil
+            snapshot.weightsManifestSHA256 = nil
+            snapshot.weightsManifestAlgorithm = nil
         }
         if let total = health.requestsTotal {
             snapshot.requestsServedAllTime = total
@@ -1321,7 +1338,15 @@ final class MalibuAgent: ObservableObject {
     func consume(_ frame: ControlFrame) {
         switch frame {
         case let .statusResponse(model, state):
-            snapshot.currentModelID = model
+            if !model.isEmpty, !snapshot.hasFreshServeOwnedModelStatus() {
+                snapshot.currentModelID = model
+                snapshot.currentModelIDFromStatus = false
+                snapshot.currentModelLoaded = nil
+                snapshot.modelHash = nil
+                snapshot.modelHashAlgorithm = nil
+                snapshot.weightsManifestSHA256 = nil
+                snapshot.weightsManifestAlgorithm = nil
+            }
             // CLI's `SwapState` (`RuntimeStateMachine.swift:public enum SwapState`)
             // has only `.loading` / `.ready` / `.draining`; there is no
             // `.serving`. `.ready` = model loaded + accepting requests, which

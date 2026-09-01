@@ -1,7 +1,7 @@
 # SPEC-035 — Provider connection diagnostics and failure history
 
-Version: v0.4.1
-Status: draft (Partial #535 coordinator journal + provider diagnostic snapshot + monitor alerts + admission-ceiling drift diagnostics; #1267 operator onboarding funnel join)
+Version: v0.4.2
+Status: draft (Partial #535 coordinator journal + provider diagnostic snapshot + monitor alerts + admission-ceiling drift diagnostics; #1267 operator onboarding funnel join; #1314 local diagnostic signature schema)
 Owner: coordinator operator observability
 Issue: https://github.com/Augustas11/macprovider/issues/535
 
@@ -17,6 +17,9 @@ Changelog:
   `next_after` / `next_after_ts` cursor. After bootstrap-identity collection,
   a leftover redemption still projects as `failed_expired` with its redemption
   timestamp; expiry MAY be omitted.
+- v0.4.2 (2026-09-01): adds the closed local diagnostic `signature_id`
+  taxonomy, source precedence, and redacted diagnostics bundle v2 contract for
+  [#1314](https://github.com/Augustas11/macprovider/issues/1314).
 
 ## 1. Purpose and scope
 
@@ -170,11 +173,63 @@ MAY act on the same heartbeat; that predicate is not authority granted by this
 diagnostic event. They MUST NOT expose raw protocol payloads, tokens,
 Authorization values, local paths, or buyer-visible diagnostics.
 
+**SPEC-035-R010 — Closed local diagnostic signature taxonomy.** Malibu local
+diagnostic reports MUST use the closed `signature_id` set below. Unknown
+`signature_id` values MUST be ignored by readers whose supported reader version
+is at least the report `minimum_reader_version`; they MUST NOT make the whole
+report unreadable.
+
+| `signature_id` | Owned source/predicate |
+| --- | --- |
+| `stale_launch_agent` | `ProviderLogDiagnostics` log line `provider process unhealthy: launchd service live.malibu.provider has no validated pid at` plus current launchd repair state. |
+| `stale_model_catalog` | `ProviderLogDiagnostics` log line `model catalog provenance envelope is stale`. |
+| `catalog_admission` | `ProviderLogDiagnostics` log line `model artifact is not admitted by the signed candidate catalog`. |
+| `rate_card_admission` | `ProviderLogDiagnostics` log line `model artifact is not admitted by the signed rate card`. |
+| `catalog_key_mismatch` | `ProviderLogDiagnostics` log line `model must match model_catalog_key`. |
+| `artifact_hash_mismatch` | `ProviderLogDiagnostics` log line `model artifact hash mismatch`. |
+| `artifact_verification_failed` | `ProviderLogDiagnostics` log line `model artifact verification failed`. |
+| `missing_catalog_provenance` | `ProviderLogDiagnostics` log line `model_artifact_sha256 requires model_catalog_* provenance`. |
+| `missing_artifact_sha` | `ProviderLogDiagnostics` log line `coordinator join requires model_artifact_sha256`. |
+| `snapshot_path_mismatch` | `ProviderLogDiagnostics` log line `model must be the catalog-pinned hugging face snapshot path`. |
+| `autoupdate_home_acl_rejected` | `ProviderLogDiagnostics` watchdog line `autoupdate recovery_error=acl_write_rejected:<home>` without a later handled marker. |
+| `credential_store_unavailable` | Fresh, contract-compatible `/v1/status` `credential.state` in `locked`, `not_logged_in`, `permission_denied`, `keychain_failure`, `incompatible`, or `unavailable`. |
+| `serve_unresponsive` | Missing, stale, or contract-incompatible `/v1/status`; or fresh `/v1/status` `network_state` in `not_buyer_serving`, `buyer_serving_unknown`, `network_offline`, or `coordinator_unavailable`; or slice-2 `doctor report` serve-dead evidence when `/v1/status` is not fresh. |
+| `admission_identity_blocked` | Fresh, contract-compatible `/v1/status` `admission_identity.state` in `missing`, `recovery_pending`, `degraded_previous_key`, or `recovery_required`. |
+| `autoupdate_in_progress` | Fresh, contract-compatible `/v1/status` `lifecycle.state` in `update_in_progress` or `rollback_in_progress`, or the Malibu-local update/repair in-progress flags. |
+| `autoupdate_disabled` | Config/log evidence from the canonical key `auto_update_enabled` or dotted status key `autoupdate.enabled` showing `false`; legacy `autoupdate_enabled` MUST NOT be emitted as the canonical key. |
+
+Coordinator-only `waiting_trust_429` and `benchmark_quarantined` evidence is
+outside the local signature catalog unless a later SPEC names a local verified
+emitter.
+
+**SPEC-035-R011 — Diagnostic finding precedence.** Local diagnostic aggregators
+MUST return every closed finding, ordered by source precedence. A fresh,
+contract-compatible `/v1/status` observation wins the fields owned by serve
+status: credential, lifecycle, model, admission identity, and network. Log
+findings MAY supplement but MUST NOT override a fresh status-owned field. A
+doctor report MAY contribute only `serve_unresponsive`, and only when
+`/v1/status` is unavailable, stale according to `observation.valid_for_ms`, or
+contract-incompatible. A subprocess `credentials status` result MUST NOT
+override a fresh serve-owned `credential.state`; it MAY contribute only when
+fresh status is absent or lacks credential state.
+
+**SPEC-035-R012 — Diagnostics bundle v2 allowlist and redaction.** Malibu
+diagnostic bundles MUST be allowlist-only and MUST NOT copy config files,
+Keychain values, environment variables, raw coordinator frames, provider tokens,
+Authorization values, bootstrap-token material, private keys, or arbitrary local
+filesystem contents. Bundle v2 MUST include `schema_version: 2`,
+`minimum_reader_version`, redacted `diagnostic_findings`, and bounded redacted
+provider/watchdog log tails. `LogTailBuffer` v2 redaction MUST scrub secret
+lines, absolute paths, usernames, hostnames, IP addresses, and C0/C1 control
+characters. Redaction is a no-secrets/no-private-path guarantee; it is not an
+anonymity guarantee.
+
 ## 4. Rollout
 
 v0.4 ships coordinator-side journal/admin GETs, provider `status --json`,
 authenticated WSS `diagnostic_status` snapshots, Pearl monitor diagnostic
 alerts, and coordinator observe-only admission-ceiling drift events. v0.4.1
 adds the operator onboarding funnel join (`GET /admin/onboarding` and
-`coordinator-cli list-onboarding`). CLI inspect wrappers and any HTTPS beacon
-remain deferred under #535.
+`coordinator-cli list-onboarding`). v0.4.2 adds the local diagnostic signature
+schema and redacted bundle v2. CLI inspect wrappers and any HTTPS beacon remain
+deferred under #535.

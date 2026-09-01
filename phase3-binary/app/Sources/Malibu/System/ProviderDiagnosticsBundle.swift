@@ -5,7 +5,10 @@ import Foundation
 /// Malibu never copies config, Keychain values, environment variables, or raw
 /// coordinator frames into diagnostics.
 enum ProviderDiagnosticsBundle {
-    static let schema = "malibu.provider-diagnostics.v1"
+    static let schema = "malibu.provider-diagnostics.v2"
+    static let schemaVersion = 2
+    static let minimumReaderVersion = 1
+    static let supportedReaderVersion = 1
     private static let maximumLogBytes = 256 * 1024
     private static let maximumLogLines = 400
     private static let maximumLineCharacters = 8 * 1024
@@ -15,6 +18,7 @@ enum ProviderDiagnosticsBundle {
         providerLogLines: [String],
         watchdogLogURL: URL?,
         appVersion: String,
+        launchdNeedsRepair: Bool = false,
         now: Date = Date()
     ) throws -> Data {
         let formatter = ISO8601DateFormatter()
@@ -84,15 +88,30 @@ enum ProviderDiagnosticsBundle {
             "lifecycle_owner": json(snapshot.localStatusLifecycleOwner),
             "capabilities": snapshot.localStatusCapabilities.sorted(),
         ]
-        let watchdogLines = watchdogLogURL.map(readRedactedTail) ?? []
+        let watchdogRawLines = watchdogLogURL.map(readTail) ?? []
+        let watchdogLines = redactedLines(watchdogRawLines)
+        let findings = ProviderDiagnosticFindingAggregator.aggregate(
+            snapshot: snapshot,
+            providerLogLines: providerLogLines,
+            watchdogLogLines: watchdogRawLines,
+            launchdNeedsRepair: launchdNeedsRepair,
+            now: now
+        )
         let root: [String: Any] = [
             "schema": schema,
+            "schema_version": schemaVersion,
+            "minimum_reader_version": minimumReaderVersion,
             "created_at": formatter.string(from: now),
             "malibu_version": appVersion,
             "provider": [
                 "id": json(snapshot.localProviderID),
                 "ui_state": snapshot.state.rawValue,
-                "model_id": json(snapshot.currentModelID),
+                "model_id": json(redacted(snapshot.currentModelID)),
+                "model_loaded": json(snapshot.currentModelLoaded),
+                "model_hash": json(redacted(snapshot.modelHash)),
+                "model_hash_algorithm": json(redacted(snapshot.modelHashAlgorithm)),
+                "weights_manifest_sha256": json(redacted(snapshot.weightsManifestSHA256)),
+                "weights_manifest_algorithm": json(redacted(snapshot.weightsManifestAlgorithm)),
                 "cli_version": json(snapshot.cliVersion),
                 "network_state": json(snapshot.networkState),
                 "coordinator_connected": json(snapshot.coordinatorConnected),
@@ -110,6 +129,7 @@ enum ProviderDiagnosticsBundle {
             "credential": credential,
             "admission_identity": admissionIdentity,
             "catalog": catalog,
+            "diagnostic_findings": findings.map(\.jsonObject),
             "logs": [
                 "provider": redactedLines(providerLogLines),
                 "watchdog": watchdogLines,
@@ -122,6 +142,10 @@ enum ProviderDiagnosticsBundle {
     }
 
     static func readRedactedTail(_ url: URL) -> [String] {
+        redactedLines(readTail(url))
+    }
+
+    private static func readTail(_ url: URL) -> [String] {
         let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
         guard descriptor >= 0 else { return [] }
         defer { close(descriptor) }
@@ -149,7 +173,7 @@ enum ProviderDiagnosticsBundle {
         if start > 0, let firstNewline = text.firstIndex(where: \.isNewline) {
             text = String(text[text.index(after: firstNewline)...])
         }
-        return redactedLines(text.components(separatedBy: .newlines).filter { !$0.isEmpty })
+        return text.components(separatedBy: .newlines).filter { !$0.isEmpty }
     }
 
     private static func hasNoExtendedACL(_ descriptor: Int32) -> Bool {

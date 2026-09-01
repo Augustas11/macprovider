@@ -14,14 +14,17 @@ final class LogTailReaderTests: XCTestCase {
 
     func testSensitiveLinesAreRedacted() {
         var buffer = LogTailBuffer(capacity: 20)
+        let privateKeyMarker = "-----BEGIN " + "PRIVATE KEY-----"
         buffer.append(contentsOf: [
             "normal line",
             "provider_token: secret",
             "identity_signature abc",
             "Authorization: Bearer secret",
+            #"{"Authorization":"Basic secret"}"#,
+            "Authorization = Basic secret",
             "Bearer eyJhbGciOiJIUzI1NiJ9.secret.payload",
             "token_sha256=abc123",
-            "-----BEGIN PRIVATE KEY-----",
+            privateKeyMarker,
             "signed_payload={\"provider_id\":\"p\"}",
             "providerToken: secret",
             "identitySignature abc",
@@ -45,8 +48,86 @@ final class LogTailReaderTests: XCTestCase {
             "[redacted]",
             "[redacted]",
             "[redacted]",
+            "[redacted]",
+            "[redacted]",
             "[redacted]"
         ])
+    }
+
+    func testSecretDetectionUsesOriginalLineBeforeIdentifierScrubbing() {
+        XCTAssertEqual(
+            LogTailBuffer.redactedForTest(
+                "provider_token: secret-value",
+                usernameCandidates: ["provider"]
+            ),
+            "[redacted]"
+        )
+        XCTAssertEqual(
+            LogTailBuffer.redactedForTest(
+                "api_key=secret-value",
+                usernameCandidates: ["api"]
+            ),
+            "[redacted]"
+        )
+        XCTAssertEqual(
+            LogTailBuffer.redactedForTest(
+                "password=secret-value",
+                usernameCandidates: ["word"]
+            ),
+            "[redacted]"
+        )
+    }
+
+    func testV2RedactionScrubsFreeTextHostnameCandidates() {
+        let redacted = LogTailBuffer.redactedForTest(
+            "watchdog running on provider-host.example.net and provider-host",
+            usernameCandidates: [],
+            hostnameCandidates: ["provider-host.example.net", "provider-host"]
+        )
+
+        XCTAssertEqual(redacted, "watchdog running on [host] and [host]")
+    }
+
+    func testV2RedactionScrubsPrivateContextWithoutDroppingNonSecretLine() {
+        let username = NSUserName().isEmpty ? "provider" : NSUserName()
+        var buffer = LogTailBuffer(capacity: 20)
+        buffer.append(contentsOf: [
+            "path=/Users/\(username)/Library/Application Support/Malibu/provider.log username=\(username) hostname=provider-mac.local ip=10.1.2.3 text=\u{001B}[31mred\u{009B}",
+            "key:/Users/\(username)/Library/Application Support/Malibu/provider.log",
+            "acl_write_rejected:/Users/\(username)",
+            "file:///Users/\(username)/Library/Application Support/Malibu/provider.log",
+            #"json path=\/Users\/\#(username)\/Library\/Application Support\/Malibu\/provider.log"#,
+            #"json private=\/private\/var\/folders\/malibu\/provider.log"#,
+            #"json file=file:\/\/\/Users\/\#(username)\/Library\/Application Support\/Malibu\/provider.log"#,
+            "listen [fd00:1234::1]:11435",
+            "mesh fd00::1 2001:db8::1 ::1 fe80::1234%en0",
+            "punctuated fd00::1. [fd00:1234::1]. [2001:db8::1]:11435,"
+        ])
+
+        let joined = buffer.lines.joined(separator: "\n")
+        XCTAssertTrue(joined.contains("[path]"), joined)
+        XCTAssertTrue(joined.contains("username=[user]"), joined)
+        XCTAssertTrue(joined.contains("hostname=[host]"), joined)
+        XCTAssertTrue(joined.contains("[ip]"), joined)
+        XCTAssertFalse(joined.contains("/Users"), joined)
+        XCTAssertFalse(joined.contains(username), joined)
+        XCTAssertFalse(joined.contains("provider-mac.local"), joined)
+        XCTAssertFalse(joined.contains("10.1.2.3"), joined)
+        XCTAssertFalse(joined.contains("fd00:1234::1"), joined)
+        XCTAssertFalse(joined.contains("fd00::1"), joined)
+        XCTAssertFalse(joined.contains("2001:db8::1"), joined)
+        XCTAssertFalse(joined.contains("::1"), joined)
+        XCTAssertFalse(joined.contains("fe80::1234%en0"), joined)
+        XCTAssertFalse(joined.contains("fd00::1."), joined)
+        XCTAssertFalse(joined.contains("[fd00:1234::1]."), joined)
+        XCTAssertFalse(joined.contains("[2001:db8::1]:11435,"), joined)
+        XCTAssertFalse(joined.contains(#"\/Users"#), joined)
+        XCTAssertFalse(joined.contains(#"\/private"#), joined)
+        XCTAssertTrue(buffer.lines.allSatisfy { line in
+            !line.unicodeScalars.contains { scalar in
+                scalar.value <= 0x1F || (0x7F...0x9F).contains(scalar.value)
+            }
+        }, joined)
     }
 
     @MainActor

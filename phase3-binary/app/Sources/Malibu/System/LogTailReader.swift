@@ -22,6 +22,14 @@ struct LogTailBuffer: Equatable {
     }
 
     static func redacted(_ line: String) -> String {
+        let sanitized = scrubNonSecretIdentifiers(line)
+        if containsSecret(line) || containsSecret(sanitized) {
+            return "[redacted]"
+        }
+        return sanitized
+    }
+
+    private static func containsSecret(_ line: String) -> Bool {
         let lower = line.lowercased()
         let normalizedIdentifierText = lower.filter { $0.isLetter || $0.isNumber }
         if lower.contains("provider_token")
@@ -49,14 +57,15 @@ struct LogTailBuffer: Equatable {
             || normalizedIdentifierText.contains("tokenhash")
             || (lower.contains("-----begin") && lower.contains("private key-----"))
             || Self.matchesSecretPattern(line) {
-            return "[redacted]"
+            return true
         }
-        return line
+        return false
     }
 
     private static func matchesSecretPattern(_ line: String) -> Bool {
         let patterns = [
             #"(?i)\bbearer\s+[A-Za-z0-9._~+/\-=]{12,}"#,
+            #"(?i)(^|[^A-Za-z0-9_-])["']?authorization["']?\s*[:=]\s*["']?\S+"#,
             #"(?i)\b(provider|identity|auth|access|refresh|session)[_-]?token\b\s*[:=]\s*\S+"#,
             #"(?i)\b(api[_-]?key|client[_-]?secret|password|cookie)\b\s*[:=]\s*\S+"#,
             #"(?i)https?://\S+\?\S+"#
@@ -64,6 +73,265 @@ struct LogTailBuffer: Equatable {
         return patterns.contains { pattern in
             line.range(of: pattern, options: .regularExpression) != nil
         }
+    }
+
+    private static func scrubNonSecretIdentifiers(_ line: String) -> String {
+        scrubNonSecretIdentifiers(
+            line,
+            usernameCandidates: [
+                NSUserName(),
+                FileManager.default.homeDirectoryForCurrentUser.lastPathComponent,
+            ],
+            hostnameCandidates: currentHostnameCandidates()
+        )
+    }
+
+    static func redactedForTest(
+        _ line: String,
+        usernameCandidates: [String],
+        hostnameCandidates: [String?] = []
+    ) -> String {
+        let sanitized = scrubNonSecretIdentifiers(
+            line,
+            usernameCandidates: usernameCandidates,
+            hostnameCandidates: hostnameCandidates
+        )
+        if containsSecret(line) || containsSecret(sanitized) {
+            return "[redacted]"
+        }
+        return sanitized
+    }
+
+    private static func currentHostnameCandidates() -> [String?] {
+        var candidates: [String?] = [
+            ProcessInfo.processInfo.hostName,
+            ProcessInfo.processInfo.hostName.components(separatedBy: ".").first,
+        ]
+        var buffer = [CChar](repeating: 0, count: Int(MAXHOSTNAMELEN) + 1)
+        if gethostname(&buffer, buffer.count) == 0 {
+            let hostname = String(cString: buffer)
+            candidates.append(hostname)
+            candidates.append(hostname.components(separatedBy: ".").first)
+        }
+        return candidates
+    }
+
+    private static func scrubNonSecretIdentifiers(
+        _ line: String,
+        usernameCandidates rawUsernameCandidates: [String],
+        hostnameCandidates rawHostnameCandidates: [String?]
+    ) -> String {
+        var output = String(line.unicodeScalars.filter { scalar in
+            let value = scalar.value
+            return !(value <= 0x1F || (0x7F...0x9F).contains(value))
+        })
+
+        let usernameCandidates = rawUsernameCandidates
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 2 }
+        for username in orderedIdentifierCandidates(usernameCandidates) {
+            output = output.replacingOccurrences(of: username, with: "[user]")
+        }
+
+        let hostnameCandidates = rawHostnameCandidates
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 2 }
+        for hostname in orderedIdentifierCandidates(hostnameCandidates) {
+            output = output.replacingOccurrences(of: hostname, with: "[host]")
+        }
+
+        let replacements: [(String, String)] = [
+            (#"(?i)\b(user(?:name)?|login|account)=([^\s,;]+)"#, "$1=[user]"),
+            (#"(?i)\b(host(?:name)?|computer[_-]?name|machine|nodename)=([^\s,;]+)"#, "$1=[host]"),
+            (#"\b[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9][A-Za-z0-9-]*)*\.local\b"#, "[host]"),
+            (#"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?::\d{1,5})?\b"#, "[ip]"),
+        ]
+        for (pattern, template) in replacements {
+            output = output.replacingOccurrences(
+                of: pattern,
+                with: template,
+                options: .regularExpression
+            )
+        }
+        return scrubAbsolutePaths(scrubIPAddresses(output))
+    }
+
+    private static func orderedIdentifierCandidates(_ candidates: [String]) -> [String] {
+        Array(Set(candidates)).sorted { lhs, rhs in
+            if lhs.count != rhs.count {
+                return lhs.count > rhs.count
+            }
+            return lhs < rhs
+        }
+    }
+
+    private static func scrubAbsolutePaths(_ line: String) -> String {
+        let line = line.replacingOccurrences(of: #"\/"#, with: "/")
+        var output = ""
+        var index = line.startIndex
+        while index < line.endIndex {
+            if line.lowercasedRange(from: index, hasPrefix: "file:///") {
+                let pathStart = line.index(index, offsetBy: "file://".count)
+                output += "file://[path]"
+                index = line.indexAfterAbsolutePath(startingAt: pathStart)
+                continue
+            }
+            let character = line[index]
+            if character == "/", isPathBoundary(before: index, in: line) {
+                output += "[path]"
+                index = line.indexAfterAbsolutePath(startingAt: index)
+            } else {
+                output.append(character)
+                index = line.index(after: index)
+            }
+        }
+        return output
+    }
+
+    private static func scrubIPAddresses(_ line: String) -> String {
+        var output = ""
+        var token = ""
+
+        func flushToken() {
+            guard !token.isEmpty else { return }
+            output += redactedIPToken(token) ?? token
+            token = ""
+        }
+
+        for character in line {
+            if isIPTokenCharacter(character) {
+                token.append(character)
+            } else {
+                flushToken()
+                output.append(character)
+            }
+        }
+        flushToken()
+        return output
+    }
+
+    private static func isIPTokenCharacter(_ character: Character) -> Bool {
+        character.isLetter
+            || character.isNumber
+            || character == "."
+            || character == ":"
+            || character == "%"
+            || character == "["
+            || character == "]"
+    }
+
+    private static func redactedIPToken(_ token: String) -> String? {
+        guard token.contains(".") || token.contains(":") else { return nil }
+        let split = splitTrailingPunctuation(from: token)
+        let candidate = split.candidate
+        if candidate.hasPrefix("["),
+           let closeBracket = candidate.firstIndex(of: "]") {
+            let addressStart = candidate.index(after: candidate.startIndex)
+            let address = String(candidate[addressStart..<closeBracket])
+            let suffix = candidate[candidate.index(after: closeBracket)...]
+            guard suffix.isEmpty || isPortSuffix(suffix),
+                  isIPAddress(address) else {
+                return nil
+            }
+            return "[ip]" + split.trailing
+        }
+        if isIPAddress(candidate) {
+            return "[ip]" + split.trailing
+        }
+        if let colon = candidate.lastIndex(of: ":") {
+            let suffix = candidate[colon...]
+            let prefix = String(candidate[..<colon])
+            if isPortSuffix(suffix), isIPAddress(prefix) {
+                return "[ip]" + split.trailing
+            }
+        }
+        return nil
+    }
+
+    private static func splitTrailingPunctuation(from token: String) -> (candidate: String, trailing: String) {
+        var candidate = token
+        var trailing = ""
+        while let last = candidate.last,
+              last == "." || last == "," || last == ";" {
+            trailing.insert(last, at: trailing.startIndex)
+            candidate.removeLast()
+        }
+        return (candidate, trailing)
+    }
+
+    private static func isPortSuffix(_ suffix: Substring) -> Bool {
+        guard suffix.first == ":" else { return false }
+        let digits = suffix.dropFirst()
+        return (1...5).contains(digits.count) && digits.allSatisfy(\.isNumber)
+    }
+
+    private static func isIPAddress(_ rawAddress: String) -> Bool {
+        let address = rawAddress.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false).first
+            .map(String.init) ?? rawAddress
+        guard !address.isEmpty else { return false }
+        var ipv4 = in_addr()
+        if address.withCString({ inet_pton(AF_INET, $0, &ipv4) }) == 1 {
+            return true
+        }
+        var ipv6 = in6_addr()
+        return address.withCString { inet_pton(AF_INET6, $0, &ipv6) } == 1
+    }
+
+    private static func isPathBoundary(before index: String.Index, in line: String) -> Bool {
+        guard index > line.startIndex else { return true }
+        let previous = line[line.index(before: index)]
+        if previous == ":" {
+            let next = line.index(after: index)
+            return next == line.endIndex || line[next] != "/"
+        }
+        return previous.isWhitespace || #""'(<[{="#.contains(previous)
+    }
+}
+
+private extension String {
+    func lowercasedRange(from index: String.Index, hasPrefix prefix: String) -> Bool {
+        let end = self.index(index, offsetBy: prefix.count, limitedBy: endIndex) ?? endIndex
+        guard distance(from: index, to: end) == prefix.count else { return false }
+        return self[index..<end].lowercased() == prefix
+    }
+
+    func indexAfterAbsolutePath(startingAt start: String.Index) -> String.Index {
+        var index = self.index(after: start)
+        while index < endIndex {
+            let character = self[index]
+            if #""'`<>|;,"#.contains(character) {
+                break
+            }
+            if character.isWhitespace {
+                let next = self.index(after: index)
+                if next == endIndex || tokenAfterWhitespaceStartsKeyValue(at: next) {
+                    break
+                }
+            }
+            index = self.index(after: index)
+        }
+        return index
+    }
+
+    private func tokenAfterWhitespaceStartsKeyValue(at start: String.Index) -> Bool {
+        var index = start
+        guard index < endIndex,
+              self[index].isLetter || self[index] == "_" else {
+            return false
+        }
+        index = self.index(after: index)
+        while index < endIndex {
+            let character = self[index]
+            if character == "=" || character == ":" {
+                return true
+            }
+            if character.isLetter || character.isNumber || character == "_" || character == "-" || character == "." {
+                index = self.index(after: index)
+            } else {
+                return false
+            }
+        }
+        return false
     }
 }
 
