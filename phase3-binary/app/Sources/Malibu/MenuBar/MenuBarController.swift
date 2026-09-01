@@ -167,9 +167,14 @@ final class MenuBarController {
     }
 
     private func updateMenu(_ menu: NSMenu, snapshot: AgentSnapshot) {
-        let badge = AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: dismissedUnclaimedThreshold)
+        let rewardVerdict = AgentSnapshotPresenter.rewardVerdict(snapshot)
+        let badge = AgentSnapshotPresenter.unclaimedBadge(
+            snapshot,
+            verdict: rewardVerdict,
+            dismissedThreshold: dismissedUnclaimedThreshold
+        )
         menu.item(withIdentifier: .statusRow)?.title = AgentSnapshotPresenter.stateLine(snapshot)
-        menu.item(withIdentifier: .earningsRow)?.title = AgentSnapshotPresenter.earningsLine(snapshot)
+        menu.item(withIdentifier: .earningsRow)?.title = AgentSnapshotPresenter.earningsLine(snapshot, verdict: rewardVerdict)
         if let cliLine = AgentSnapshotPresenter.cliVersionMenuLine(snapshot),
            let item = menu.item(withIdentifier: .cliVersionRow) {
             item.title = cliLine
@@ -195,7 +200,7 @@ final class MenuBarController {
                 updateItem.isEnabled = false
             }
         }
-        if let backlog = AgentSnapshotPresenter.backlogLine(snapshot),
+        if let backlog = AgentSnapshotPresenter.backlogLine(snapshot, verdict: rewardVerdict),
            let item = menu.item(withIdentifier: .backlogRow) {
             item.title = backlog
             item.isHidden = false
@@ -216,9 +221,10 @@ final class MenuBarController {
     }
 
     private func menuTooltip(_ snapshot: AgentSnapshot) -> String {
+        let rewardVerdict = AgentSnapshotPresenter.rewardVerdict(snapshot)
         var lines = [
             AgentSnapshotPresenter.stateLine(snapshot),
-            AgentSnapshotPresenter.earningsLine(snapshot),
+            AgentSnapshotPresenter.earningsLine(snapshot, verdict: rewardVerdict),
         ]
         if let cliLine = AgentSnapshotPresenter.cliVersionMenuLine(snapshot) {
             lines.append(cliLine)

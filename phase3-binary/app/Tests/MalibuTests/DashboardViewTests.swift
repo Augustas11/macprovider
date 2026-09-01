@@ -58,7 +58,7 @@ final class DashboardViewTests: XCTestCase {
         snapshot.state = .serving
         snapshot.coordinatorConnected = true
         snapshot.networkState = "buyer_serving"
-        snapshot.providerEarningsFresh = true
+        snapshot.updateRewardInputs(providerEarningsFresh: true)
 
         XCTAssertEqual(
             AgentSnapshotPresenter.dashboardSubtitle(snapshot),
@@ -71,7 +71,7 @@ final class DashboardViewTests: XCTestCase {
         snapshot.state = .serving
         snapshot.coordinatorConnected = true
         snapshot.networkState = "buyer_serving"
-        snapshot.providerEarningsFresh = true
+        snapshot.updateRewardInputs(providerEarningsFresh: true)
         snapshot.earningsUsdcToday = 0
         snapshot.currentModelID = "Qwen3-8B"
 
@@ -86,7 +86,7 @@ final class DashboardViewTests: XCTestCase {
         snapshot.state = .serving
         snapshot.coordinatorConnected = true
         snapshot.networkState = "buyer_serving"
-        snapshot.providerEarningsFresh = true
+        snapshot.updateRewardInputs(providerEarningsFresh: true)
         snapshot.earningsUsdcToday = 0
         snapshot.queueDepth = 2
 
@@ -105,7 +105,7 @@ final class DashboardViewTests: XCTestCase {
         snapshot.state = .serving
         snapshot.coordinatorConnected = true
         snapshot.networkState = "buyer_serving"
-        snapshot.providerEarningsFresh = true
+        snapshot.updateRewardInputs(providerEarningsFresh: true)
         snapshot.earningsUsdcToday = 0
         snapshot.requestsServedToday = 4
 
@@ -153,15 +153,17 @@ final class DashboardViewTests: XCTestCase {
         snapshot.earningsUsdcLifetime = 211
         snapshot.malibuAccruedToday = 12
         snapshot.malibuAccruedAllTime = 50
-        snapshot.trustTier = .provisional
-        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
-            earningState: "held",
-            withdrawalState: "held",
-            primaryReason: "held_provisional_trust_tier",
-            reasons: ["held_provisional_trust_tier"]
+        snapshot.updateRewardInputs(
+            trustTier: .provisional,
+            providerEarningsFresh: true,
+            malibuProjectionFresh: true,
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "held",
+                withdrawalState: "held",
+                primaryReason: "held_provisional_trust_tier",
+                reasons: ["held_provisional_trust_tier"]
+            )
         )
-        snapshot.providerEarningsFresh = true
-        snapshot.malibuProjectionFresh = true
         snapshot.gpuUtilizationPct = 62
         snapshot.latencyP50Ms = 42
         snapshot.latencyP99Ms = 180
@@ -183,7 +185,7 @@ final class DashboardViewTests: XCTestCase {
     func testUsdcAdaptivePrecisionShowsFourDecimalsUnderACentAndTwoOtherwise() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
-        snapshot.providerEarningsFresh = true
+        snapshot.updateRewardInputs(providerEarningsFresh: true)
 
         snapshot.earningsUsdcToday = 0.0047
         XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "$0.0047")
@@ -215,7 +217,7 @@ final class DashboardViewTests: XCTestCase {
         snapshot.state = .serving
         snapshot.coordinatorConnected = true
         snapshot.networkState = "buyer_serving"
-        snapshot.providerEarningsFresh = true
+        snapshot.updateRewardInputs(providerEarningsFresh: true)
 
         XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(AgentSnapshot.empty))
 
@@ -243,7 +245,7 @@ final class DashboardViewTests: XCTestCase {
         snapshot.idlePrewarmSummary = .empty
         XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Eligible · network is quiet")
 
-        snapshot.providerEarningsFresh = false
+        snapshot.updateRewardInputs(providerEarningsFresh: false)
         XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(snapshot))
     }
 
@@ -285,7 +287,7 @@ final class DashboardViewTests: XCTestCase {
         unavailable.state = .serving
         unavailable.networkState = "buyer_serving"
         unavailable.earningsUsdcToday = 0
-        unavailable.malibuWithdrawable = 0
+        unavailable.updateRewardInputs(malibuWithdrawable: 0)
         let unavailableHealth = AgentSnapshotPresenter.miningHealth(unavailable)
         XCTAssertEqual(unavailableHealth.reasonCode, "reward_projection_unavailable")
         XCTAssertEqual(unavailableHealth.rewardSummary, "USDC unavailable · MALIBU unavailable")
@@ -322,37 +324,40 @@ final class DashboardViewTests: XCTestCase {
         var malibuFresh = AgentSnapshot.empty
         malibuFresh.state = .serving
         malibuFresh.networkState = "buyer_serving"
-        malibuFresh.malibuProjectionFresh = true
-        malibuFresh.trustTier = .provisional
+        malibuFresh.updateRewardInputs(trustTier: .provisional, malibuProjectionFresh: true)
         XCTAssertNotEqual(
             AgentSnapshotPresenter.miningHealth(malibuFresh).status, "No earnings yet")
 
         var provisional = miningBase()
-        provisional.trustTier = .provisional
-        provisional.malibuHoldReasons = ["trust_tier_provisional"]
-        provisional.trustCriteriaMet = 1
-        provisional.trustCriteriaRequired = 3
+        provisional.updateRewardInputs(
+            trustTier: .provisional,
+            malibuHoldReasons: ["trust_tier_provisional"],
+            trustCriteriaMet: 1,
+            trustCriteriaRequired: 3
+        )
         let provisionalHealth = AgentSnapshotPresenter.miningHealth(provisional)
         XCTAssertEqual(provisionalHealth.reasonCode, "trust_tier_provisional")
-        XCTAssertEqual(provisionalHealth.nextAction, "Complete 2 more trust criteria to unlock withdrawals.")
+        XCTAssertEqual(provisionalHealth.nextAction, "Complete 2 more trust criteria for withdrawal eligibility.")
 
-        provisional.malibuHoldReasons = []
+        provisional.updateRewardInputs(malibuHoldReasons: [])
         XCTAssertEqual(AgentSnapshotPresenter.miningHealth(provisional).reasonCode, "trust_tier_provisional")
         XCTAssertEqual(
             AgentSnapshotPresenter.miningHealth(provisional).nextAction,
-            "Complete 2 more trust criteria to unlock withdrawals."
+            "Complete 2 more trust criteria for withdrawal eligibility."
         )
 
-        provisional.malibuHoldReasons = ["demotion_cooldown"]
-        provisional.trustCriteriaMet = 2
-        provisional.trustCriteriaRequired = 2
+        provisional.updateRewardInputs(
+            malibuHoldReasons: ["demotion_cooldown"],
+            trustCriteriaMet: 2,
+            trustCriteriaRequired: 2
+        )
         let cooldownHealth = AgentSnapshotPresenter.miningHealth(provisional)
         XCTAssertEqual(cooldownHealth.trustSummary, "Trust: Provisional · Trust review in progress")
-        XCTAssertEqual(cooldownHealth.nextAction, "Keep Malibu online; withdrawals unlock automatically when Trusted.")
+        XCTAssertEqual(cooldownHealth.nextAction, "Keep Malibu online while trust review completes.")
         XCTAssertEqual(AgentSnapshotPresenter.trustLine(provisional), "Provisional — Trust review in progress")
 
         var trustedWithHistoricalHold = provisional
-        trustedWithHistoricalHold.trustTier = .trusted
+        trustedWithHistoricalHold.updateRewardInputs(trustTier: .trusted)
         XCTAssertEqual(AgentSnapshotPresenter.trustLine(trustedWithHistoricalHold), "Trusted")
         XCTAssertNotEqual(
             AgentSnapshotPresenter.miningHealth(trustedWithHistoricalHold).reasonCode,
@@ -371,52 +376,61 @@ final class DashboardViewTests: XCTestCase {
         )
 
         var unlockTrusted = miningBase()
-        unlockTrusted.trustTier = .provisional
-        unlockTrusted.trustCriteriaMet = 1
-        unlockTrusted.trustCriteriaRequired = 3
+        unlockTrusted.updateRewardInputs(
+            trustTier: .provisional,
+            trustCriteriaMet: 1,
+            trustCriteriaRequired: 3
+        )
         XCTAssertEqual(
             AgentSnapshotPresenter.trustLine(unlockTrusted),
-            "Provisional — 1 of 3 criteria met · Unlock Trusted →"
+            "Provisional — 1 of 3 criteria met · Trust criteria →"
         )
 
         var walletCap = miningBase()
-        walletCap.malibuHeld = 2
-        walletCap.malibuHoldReasons = ["per_wallet_daily_cap"]
+        walletCap.updateRewardInputs(malibuHeld: 2, malibuHoldReasons: ["per_wallet_daily_cap"])
         XCTAssertEqual(AgentSnapshotPresenter.miningHealth(walletCap).reasonCode, "wallet_daily_cap_held")
 
         var providerCap = miningBase()
-        providerCap.malibuHeld = 2
-        providerCap.malibuRewardEligibility = MalibuRewardEligibility(
-            earningState: "capped",
-            withdrawalState: "capped",
-            primaryReason: "held_provider_daily_cap",
-            reasons: ["held_provider_daily_cap"]
+        providerCap.updateRewardInputs(
+            malibuHeld: 2,
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "capped",
+                withdrawalState: "capped",
+                primaryReason: "held_provider_daily_cap",
+                reasons: ["held_provider_daily_cap"]
+            )
         )
         let providerCapHealth = AgentSnapshotPresenter.miningHealth(providerCap)
         XCTAssertEqual(providerCapHealth.reasonCode, "provider_daily_cap_held")
         XCTAssertEqual(providerCapHealth.nextAction, "Wait for the next UTC day.")
 
         var genericHold = miningBase()
-        genericHold.malibuHeld = 2
-        genericHold.malibuHoldReasons = ["manual_review"]
+        genericHold.updateRewardInputs(malibuHeld: 2, malibuHoldReasons: ["manual_review"])
         XCTAssertEqual(AgentSnapshotPresenter.miningHealth(genericHold).reasonCode, "rewards_held")
 
         var withdrawable = miningBase()
-        withdrawable.malibuWithdrawable = 2
+        withdrawable.updateRewardInputs(
+            malibuWithdrawable: 2,
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "earning",
+                withdrawalState: "withdrawable",
+                primaryReason: "withdrawable_balance_available",
+                reasons: ["withdrawable_balance_available"]
+            )
+        )
         XCTAssertEqual(AgentSnapshotPresenter.miningHealth(withdrawable).reasonCode, "trusted_withdrawable")
     }
 
     func testMiningHealthDistinguishesFreshPartialAndUnavailableRewards() {
         var fresh = miningBase()
         fresh.earningsUsdcToday = nil
-        fresh.malibuWithdrawable = 0
-        fresh.malibuHeld = 0
+        fresh.updateRewardInputs(malibuWithdrawable: 0, malibuHeld: 0)
         let freshHealth = AgentSnapshotPresenter.miningHealth(fresh)
         XCTAssertEqual(freshHealth.reasonCode, "idle_no_work")
-        XCTAssertEqual(freshHealth.rewardSummary, "n/a USDC today · MALIBU 0.00 withdrawable / 0.00 held")
+        XCTAssertEqual(freshHealth.rewardSummary, "n/a USDC today · MALIBU not withdrawable / 0.00 held")
 
         var partial = miningBase()
-        partial.malibuProjectionFresh = false
+        partial.updateRewardInputs(malibuProjectionFresh: false)
         partial.earningsUsdcToday = 0.04
         let partialHealth = AgentSnapshotPresenter.miningHealth(partial)
         XCTAssertEqual(partialHealth.reasonCode, "earning")
@@ -424,7 +438,7 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertEqual(partialHealth.trustSummary, "MALIBU trust telemetry not published yet")
 
         var partialIdle = miningBase()
-        partialIdle.malibuProjectionFresh = false
+        partialIdle.updateRewardInputs(malibuProjectionFresh: false)
         partialIdle.earningsUsdcToday = 0
         let partialIdleHealth = AgentSnapshotPresenter.miningHealth(partialIdle)
         XCTAssertEqual(partialIdleHealth.reasonCode, "idle_no_work")
@@ -432,25 +446,22 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertEqual(partialIdleHealth.trustSummary, "MALIBU trust telemetry not published yet")
 
         var stale = miningBase()
-        stale.providerEarningsFresh = false
-        stale.malibuProjectionFresh = false
+        stale.updateRewardInputs(providerEarningsFresh: false, malibuProjectionFresh: false)
         stale.earningsUsdcToday = 0
-        stale.malibuWithdrawable = 0
+        stale.updateRewardInputs(malibuWithdrawable: 0)
         let staleHealth = AgentSnapshotPresenter.miningHealth(stale)
         XCTAssertEqual(staleHealth.reasonCode, "reward_projection_unavailable")
         XCTAssertFalse(staleHealth.rewardSummary.contains("$0.00"))
         XCTAssertFalse(staleHealth.rewardSummary.contains("0.00 MALIBU"))
 
         var lastKnown = miningBase()
-        lastKnown.providerEarningsFresh = false
-        lastKnown.malibuProjectionFresh = false
+        lastKnown.updateRewardInputs(providerEarningsFresh: false, malibuProjectionFresh: false)
         lastKnown.hasObservedProviderEarnings = true
         lastKnown.earningsUsdcToday = 0.04
-        lastKnown.malibuWithdrawable = 2
-        lastKnown.malibuHeld = 0
+        lastKnown.updateRewardInputs(malibuWithdrawable: 2, malibuHeld: 0)
         let lastKnownHealth = AgentSnapshotPresenter.miningHealth(lastKnown)
         XCTAssertNotEqual(lastKnownHealth.reasonCode, "reward_projection_unavailable")
-        XCTAssertTrue(lastKnownHealth.rewardSummary.contains("$0.04 USDC today"))
+        XCTAssertTrue(lastKnownHealth.rewardSummary.contains("$0.04 USDC last known"))
         XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(lastKnown), "$0.04")
         XCTAssertNotEqual(
             AgentSnapshotPresenter.dashboardSubtitle(lastKnown),
@@ -463,12 +474,20 @@ final class DashboardViewTests: XCTestCase {
         snapshot.state = .serving
         snapshot.coordinatorConnected = true
         snapshot.networkState = "buyer_serving"
-        snapshot.providerEarningsFresh = true
-        snapshot.malibuProjectionFresh = true
+        snapshot.updateRewardInputs(
+            trustTier: .trusted,
+            providerEarningsFresh: true,
+            malibuProjectionFresh: true,
+            malibuWithdrawable: 0,
+            malibuHeld: 0,
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "eligible_idle",
+                withdrawalState: "withdrawable",
+                primaryReason: "eligible_idle_no_work",
+                reasons: ["eligible_idle_no_work"]
+            )
+        )
         snapshot.walletBound = true
-        snapshot.trustTier = .trusted
-        snapshot.malibuWithdrawable = 0
-        snapshot.malibuHeld = 0
         return snapshot
     }
 

@@ -150,8 +150,6 @@ final class ControlFrameCodecTests: XCTestCase {
     @MainActor
     func testMetricsFrameWithoutProviderEarningsHidesPriorRewardProjection() {
         var initial = AgentSnapshot.empty
-        initial.providerEarningsFresh = true
-        initial.malibuProjectionFresh = true
         initial.earningsUsdcToday = 4.12
         initial.earningsUsdcWeek = 18.4
         initial.earningsUsdcPending = 6.9
@@ -160,12 +158,16 @@ final class ControlFrameCodecTests: XCTestCase {
         initial.malibuAccruedAllTime = 50
         initial.unpaidLedgerBacklogUSDC = 1
         initial.unpaidLedgerBacklogMALIBU = 2
-        initial.trustTier = .provisional
-        initial.trustCriteriaMet = 4
-        initial.trustCriteriaRequired = 4
-        initial.malibuWithdrawable = 3
-        initial.malibuHeld = 0.5
-        initial.malibuHoldReasons = ["per_wallet_daily_cap"]
+        initial.updateRewardInputs(
+            trustTier: .provisional,
+            providerEarningsFresh: true,
+            malibuProjectionFresh: true,
+            malibuWithdrawable: 3,
+            malibuHeld: 0.5,
+            malibuHoldReasons: ["per_wallet_daily_cap"],
+            trustCriteriaMet: 4,
+            trustCriteriaRequired: 4
+        )
 
         let agent = MalibuAgent(initialSnapshot: initial)
         agent.consume(.metricsResponse(
@@ -187,8 +189,7 @@ final class ControlFrameCodecTests: XCTestCase {
             uptimeSec: nil
         ))
 
-        XCTAssertFalse(agent.snapshot.providerEarningsFresh)
-        XCTAssertFalse(agent.snapshot.malibuProjectionFresh)
+        XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(agent.snapshot).malibuWithdrawal, .unknown)
         XCTAssertNil(AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot))
         XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(agent.snapshot))
         XCTAssertFalse(AgentSnapshotPresenter.usdcFullLine(agent.snapshot).contains("$18.40"))
@@ -282,8 +283,9 @@ final class ControlFrameCodecTests: XCTestCase {
             uptimeSec: 1
         ))
 
-        XCTAssertTrue(agent.snapshot.providerEarningsFresh)
-        XCTAssertFalse(agent.snapshot.malibuProjectionFresh)
+        let earningsOnlyVerdict = AgentSnapshotPresenter.rewardVerdict(agent.snapshot)
+        XCTAssertEqual(earningsOnlyVerdict.usdcActivity, .earning)
+        XCTAssertEqual(earningsOnlyVerdict.malibuWithdrawal, .unknown)
         XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot), "$4.00")
         XCTAssertNil(AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot))
         XCTAssertTrue(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("$4.00 USDC"))
@@ -326,14 +328,18 @@ final class ControlFrameCodecTests: XCTestCase {
             uptimeSec: 1
         ))
 
-        XCTAssertFalse(agent.snapshot.providerEarningsFresh)
-        XCTAssertTrue(agent.snapshot.malibuProjectionFresh)
+        let accrualOnlyVerdict = AgentSnapshotPresenter.rewardVerdict(agent.snapshot)
+        XCTAssertEqual(accrualOnlyVerdict.usdcActivity, .none)
+        XCTAssertEqual(accrualOnlyVerdict.malibuWithdrawal, .unavailable)
         XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot), "n/a")
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot),
             "MALIBU: status unavailable · 8.00 held"
         )
-        XCTAssertTrue(AgentSnapshotPresenter.malibuFullLine(agent.snapshot).contains("MALIBU daily not reported yet"))
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuFullLine(agent.snapshot),
+            "MALIBU today unavailable · 30.00 all-time · reward status unavailable"
+        )
         XCTAssertEqual(AgentSnapshotPresenter.earningsLine(agent.snapshot), "Today: reward status unavailable")
     }
 
@@ -381,7 +387,7 @@ final class ControlFrameCodecTests: XCTestCase {
             uptimeSec: 1
         ))
 
-        XCTAssertTrue(agent.snapshot.providerEarningsFresh)
+        XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(agent.snapshot).usdcActivity, .earning)
         XCTAssertEqual(agent.snapshot.idlePrewarmSummary.skipsByReasonLast1h["on_battery"], 1)
         XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(agent.snapshot), "On battery — plug in to earn")
     }
