@@ -618,6 +618,12 @@ enum AgentSnapshotPresenter {
             return health("Reward status unavailable", "reward_projection_unavailable")
         case "excluded_epoch_disposition", "burned_or_retired_epoch_disposition":
             return health("Reward epoch update", "reward_epoch_disposition")
+        case "held_epoch_disposition":
+            // An active epoch hold outranks raw tier/amount: SPEC-021 makes the
+            // authoritative reward_eligibility verdict win over raw withdrawable
+            // fields, so this must surface as held before the trusted-withdrawable
+            // branch can claim withdrawals are unlocked.
+            return health("Rewards held", "rewards_held")
         default:
             return nil
         }
@@ -801,6 +807,21 @@ enum AgentSnapshotPresenter {
                 )
             }
             if s.trustTier == .trusted, let withdrawable = s.malibuWithdrawable, withdrawable > 0 {
+                // Raw withdrawable amount never overrides an authoritative
+                // eligibility verdict (SPEC-021). If a display-relevant verdict
+                // exists and is not "withdrawable" (held/unavailable/etc.), surface
+                // that honestly instead of claiming withdrawals are unlocked from
+                // raw amount>0. displayRewardEligibility exempts leftover-provisional
+                // holds so a Trusted earner is not falsely shown as held.
+                if let eligibility = displayRewardEligibility(s),
+                   eligibility.withdrawalState != "withdrawable" {
+                    return result(
+                        status: "Rewards held",
+                        code: "rewards_held",
+                        reason: sentence(rewardReasonCopy(eligibility.primaryReason)),
+                        action: rewardReasonNextAction(eligibility.primaryReason)
+                    )
+                }
                 return result(
                     status: "Withdrawable",
                     code: "trusted_withdrawable",
@@ -1196,8 +1217,14 @@ enum AgentSnapshotPresenter {
 
     static func consolidatedStatus(_ s: AgentSnapshot) -> ConsolidatedStatus {
         let publicS = publicStatus(s)
-        if s.state == .error || s.state == .idle || s.state == .paused
-            || publicS.executableAction != nil {
+        // A repair-available CTA on an otherwise ready/live provider is a
+        // nonblocking capability, not a problem: it must not demote a live earner
+        // to needs-attention. A blocking recovery action (credential/admission/
+        // hardware/update/export) or a stopped/paused state still is.
+        let isNonblockingRepairOnReady =
+            publicS.executableAction == .repairProviderSoftware && isNetworkReady(s)
+        let hasBlockingAction = publicS.executableAction != nil && !isNonblockingRepairOnReady
+        if s.state == .error || s.state == .idle || s.state == .paused || hasBlockingAction {
             let tone: ConsolidatedStatus.Tone =
                 (s.state == .paused || s.state == .idle) ? .neutral : .attention
             return ConsolidatedStatus(
@@ -1223,10 +1250,7 @@ enum AgentSnapshotPresenter {
                     nextAction: publicS.safeNextAction
                 )
             }
-            // Only genuine first-run/startup reads "Setting up". A post-setup
-            // interruption (was serving, now not buyer-serving; reconnecting)
-            // keeps publicStatus's accurate copy so a real interruption does not
-            // masquerade as first-run setup.
+            // Only genuine first-run/startup reads "Setting up" (phase .settingUp).
             if s.state == .starting {
                 return ConsolidatedStatus(
                     phase: .settingUp,
@@ -1236,12 +1260,38 @@ enum AgentSnapshotPresenter {
                     nextAction: publicS.safeNextAction ?? "Keep Malibu open while setup finishes."
                 )
             }
+            // A post-setup interruption (was buyer-serving, now temporarily not)
+            // is NOT first-run setup — its phase must not read as .settingUp to any
+            // badge/analytics consumer. Genuine initial-admission / not-yet-connected
+            // states below remain .settingUp.
+            if isTemporarilyNotBuyerServing(s) {
+                return ConsolidatedStatus(
+                    phase: .needsAttention,
+                    tone: .neutral,
+                    label: publicS.title,
+                    meaning: publicS.detail ?? "Customer availability is temporarily interrupted.",
+                    nextAction: publicS.safeNextAction ?? "Keep Malibu open while status updates."
+                )
+            }
             return ConsolidatedStatus(
                 phase: .settingUp,
                 tone: .neutral,
                 label: publicS.title,
                 meaning: publicS.detail ?? "Reconnecting to the network.",
                 nextAction: publicS.safeNextAction ?? "Keep Malibu open while it reconnects."
+            )
+        }
+        // A diagnostic finding that owns the primary status but carries no recovery
+        // action (e.g. a software update in progress) is the truthful status even on
+        // a network-ready provider: it must not be overwritten by the earning
+        // display. Blocking diagnostics (with an action) were already handled above.
+        if publicS.executableAction == nil, publicStatusForTopDiagnosticFinding(s) != nil {
+            return ConsolidatedStatus(
+                phase: .live,
+                tone: .neutral,
+                label: publicS.title,
+                meaning: publicS.detail ?? "",
+                nextAction: publicS.safeNextAction
             )
         }
         // Network-ready: fold in the reward/blocker reason model so the card and
@@ -2015,6 +2065,14 @@ enum AgentSnapshotPresenter {
     /// disclosure so "Unlock Trusted" leads somewhere concrete.
     static func trustUnlockSummary(_ s: AgentSnapshot) -> String {
         if s.trustTier == .trusted {
+            // Trusted tier is reached, but withdrawals still follow the current
+            // authoritative reward status: a cap/hold/epoch disposition must not be
+            // hidden behind a blanket "unlocked". Only claim unlocked when the
+            // eligibility verdict is withdrawable (or absent).
+            if let eligibility = displayRewardEligibility(s),
+               eligibility.withdrawalState != "withdrawable" {
+                return "Trusted — withdrawals follow current reward status: \(sentence(rewardReasonCopy(eligibility.primaryReason)))"
+            }
             return "Trusted — MALIBU withdrawals are unlocked."
         }
         return "Reaching Trusted unlocks MALIBU reward withdrawals. USDC earnings are unaffected."
@@ -2041,7 +2099,9 @@ enum AgentSnapshotPresenter {
         case "A1": return "72 hours online"
         case "A3": return "wallet balance held 72h"
         case "A4": return "App Attest verification"
-        default: return id
+        // Never render an unknown/crafted criterion ID raw: a malformed control
+        // frame could smuggle a token/path/host string into dashboard text.
+        default: return "additional requirement"
         }
     }
 

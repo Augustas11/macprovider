@@ -2302,6 +2302,192 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertFalse(agent.snapshot.rewardTelemetryUnavailable)
     }
 
+    // Round-5 audit: a legacy all-zero stub frame arriving after a real Trusted
+    // withdrawable projection must demote freshness so the presenter cannot keep
+    // asserting "Earning · Trusted / withdrawals unlocked" from stale data.
+    @MainActor
+    func testLegacyStubFrameDemotesStaleTrustedWithdrawableFreshness() {
+        var initial = AgentSnapshot.empty
+        initial.state = .serving
+        initial.trustTier = .trusted
+        initial.walletBound = true
+        initial.hasObservedProviderEarnings = true
+        initial.malibuProjectionFresh = true
+        initial.providerEarningsFresh = true
+        initial.malibuWithdrawable = 5
+        let agent = MalibuAgent(initialSnapshot: initial)
+        XCTAssertTrue(agent.snapshot.malibuProjectionFresh)
+
+        // A legacy all-zero stub frame (all nil, zero usdc/malibu/uptime).
+        agent.consume(.metricsResponse(
+            earningsUsdc: 0,
+            malibuAccrued: 0,
+            providerEarnings: nil,
+            gpuC: nil,
+            gpuUtilizationPct: nil,
+            latencyP50Ms: nil,
+            latencyP99Ms: nil,
+            queueDepth: nil,
+            requestsServedToday: nil,
+            requestsServedAllTime: nil,
+            requestsPerMinute: nil,
+            inputTokensToday: nil,
+            outputTokensToday: nil,
+            inputTokensAllTime: nil,
+            outputTokensAllTime: nil,
+            uptimeSec: 0
+        ))
+
+        XCTAssertFalse(agent.snapshot.malibuProjectionFresh)
+        XCTAssertFalse(agent.snapshot.providerEarningsFresh)
+        XCTAssertNotEqual(AgentSnapshotPresenter.miningHealth(agent.snapshot).reasonCode, "trusted_withdrawable")
+    }
+
+    // Round-5 audit: an active epoch hold (SPEC-021 authoritative eligibility)
+    // outranks raw tier/amount. A Trusted snapshot with malibuWithdrawable > 0 but
+    // withdrawal_state=held / primary_reason=held_epoch_disposition must surface
+    // held, never trusted_withdrawable / "withdrawals unlocked".
+    func testTrustedHeldEpochDispositionDoesNotClaimWithdrawable() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.trustTier = .trusted
+        s.walletBound = true
+        s.hasObservedProviderEarnings = true
+        s.providerEarningsFresh = true
+        s.malibuProjectionFresh = true
+        s.malibuWithdrawable = 5
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_epoch_disposition",
+            reasons: ["held_epoch_disposition"]
+        )
+
+        let mining = AgentSnapshotPresenter.miningHealth(s)
+        XCTAssertNotEqual(mining.reasonCode, "trusted_withdrawable")
+        XCTAssertEqual(mining.reasonCode, "rewards_held")
+    }
+
+    // Round-5 audit: the raw trusted-withdrawable branch must be gated on the
+    // authoritative eligibility verdict. A held verdict that reaches that branch
+    // (not specially handled earlier) must not be promoted to withdrawable.
+    func testTrustedWithdrawableGatedOnAuthoritativeEligibility() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.trustTier = .trusted
+        s.walletBound = true
+        s.hasObservedProviderEarnings = true
+        s.providerEarningsFresh = true
+        s.malibuProjectionFresh = true
+        s.malibuWithdrawable = 9
+        s.malibuHeld = 0
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_manual_review",
+            reasons: ["held_manual_review"]
+        )
+
+        let mining = AgentSnapshotPresenter.miningHealth(s)
+        XCTAssertNotEqual(mining.reasonCode, "trusted_withdrawable")
+        XCTAssertEqual(mining.reasonCode, "rewards_held")
+    }
+
+    // Round-5 audit: Trust-tier disclosure must not assert "withdrawals unlocked"
+    // for a Trusted provider whose authoritative reward status is capped/held.
+    func testTrustUnlockSummaryNotUnlockedWhenTrustedButCapped() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.trustTier = .trusted
+        s.walletBound = true
+        s.malibuProjectionFresh = true
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "capped",
+            primaryReason: "held_wallet_daily_cap",
+            reasons: ["held_wallet_daily_cap"]
+        )
+
+        let summary = AgentSnapshotPresenter.trustUnlockSummary(s)
+        XCTAssertFalse(summary.contains("withdrawals are unlocked"))
+        XCTAssertTrue(summary.lowercased().contains("follow current reward status"))
+    }
+
+    // Round-5 audit (redaction): an unknown/crafted trust-criterion ID must never
+    // be rendered raw into dashboard text.
+    func testUnknownTrustCriterionIDIsNotRenderedRaw() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.trustTier = .provisional
+        s.economicCriteria = ["provider_token=secret /Users/alice host=10.0.0.1"]
+        s.additionalCriteria = ["A1"]
+
+        let rendered = (AgentSnapshotPresenter.trustCriteria(s) ?? [])
+            .map { $0.title }
+            .joined(separator: " · ")
+        XCTAssertFalse(rendered.contains("provider_token"))
+        XCTAssertFalse(rendered.contains("/Users/alice"))
+        XCTAssertFalse(rendered.contains("10.0.0.1"))
+    }
+
+    // Round-5 audit: a post-setup interruption (was serving, now not buyer-serving)
+    // is NOT first-run setup; the phase itself must not read as .settingUp.
+    func testPostSetupInterruptionIsNotSettingUpPhase() {
+        var s = AgentSnapshot.empty
+        s.state = .reconnecting
+        s.currentModelID = "llama"
+        s.networkState = "not_buyer_serving"
+
+        let status = AgentSnapshotPresenter.consolidatedStatus(s)
+        XCTAssertNotEqual(status.phase, .settingUp)
+        XCTAssertEqual(status.phase, .needsAttention)
+    }
+
+    // Round-5 audit: an action-less diagnostic that owns the primary status
+    // (software update in progress) must not be overwritten by the earning display
+    // on a network-ready provider.
+    func testAutoupdateInProgressOnBuyerServingIsNotEarning() {
+        var s = buyerServingObservationSnapshot(observedAt: Date())
+        s.trustTier = .trusted
+        s.diagnosticFindings = [
+            ProviderDiagnosticFinding(
+                signatureID: .autoupdateInProgress,
+                source: .status,
+                userMessage: "Provider software update in progress.",
+                evidence: "lifecycle.state=update_in_progress",
+                observedAt: Date()
+            )
+        ]
+
+        let status = AgentSnapshotPresenter.consolidatedStatus(s)
+        XCTAssertNotEqual(status.phase, .earning)
+        XCTAssertEqual(status.phase, .live)
+        XCTAssertTrue(status.label.lowercased().contains("update in progress"))
+    }
+
+    // Round-5 audit: a live buyer-serving provider that merely has a nonblocking
+    // repair-available CTA must not be demoted to needs-attention.
+    func testLiveProviderWithNonblockingRepairCTAIsNotNeedsAttention() {
+        var s = buyerServingObservationSnapshot(observedAt: Date())
+        s.trustTier = .trusted
+        s.walletBound = true
+        s.malibuProjectionFresh = true
+        s.malibuWithdrawable = 3
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "earning",
+            withdrawalState: "withdrawable",
+            primaryReason: "earning_verified_work",
+            reasons: ["earning_verified_work"]
+        )
+        enableProtectedProviderSoftwareRepair(&s)
+        s.providerSoftwareRepairRecommended = true
+
+        // Sanity: the repair CTA is present but nonblocking on a ready provider.
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(s).executableAction, .repairProviderSoftware)
+        let status = AgentSnapshotPresenter.consolidatedStatus(s)
+        XCTAssertNotEqual(status.phase, .needsAttention)
+    }
+
     private func buyerServingObservationSnapshot(observedAt: Date) -> AgentSnapshot {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving

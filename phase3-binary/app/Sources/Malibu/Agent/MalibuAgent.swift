@@ -1463,6 +1463,15 @@ final class MalibuAgent: ObservableObject {
                                  && inputTokensAllTime == nil && outputTokensAllTime == nil
             if looksLikeStub {
                 if snapshot.hasObservedProviderEarnings {
+                    // A legacy all-zero stub arriving after a real projection means
+                    // "not reported by this peer", not fresh truth. Preserve the
+                    // last-known amounts for display, but demote freshness so the
+                    // reward presenter cannot keep asserting withdrawable/earning
+                    // from stale data; clear the outage bit since an old peer is
+                    // benign absence, not a telemetry fault.
+                    snapshot.malibuProjectionFresh = false
+                    snapshot.providerEarningsFresh = false
+                    snapshot.rewardTelemetryUnavailable = false
                     persistDashboardObservation()
                     return
                 }
