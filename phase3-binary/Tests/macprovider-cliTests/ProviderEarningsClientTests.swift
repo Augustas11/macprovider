@@ -175,6 +175,199 @@ final class ProviderEarningsClientTests: XCTestCase {
         XCTAssertTrue(merged.malibuProjectionFresh)
         XCTAssertFalse(merged.earningsProjectionFresh)
     }
+
+    // P1.5: the wallet-status eligibility inputs carry the granular trust
+    // criteria; merging must forward them, and the control-frame JSON encode
+    // must round-trip the new keys so Malibu can render criteria by name.
+    func testWalletStatusMergeForwardsAndEncodesTrustCriteria() throws {
+        let walletStatus = try JSONDecoder().decode(
+            ProviderWalletStatusSummary.self,
+            from: Data("""
+            {
+              "schema_version": "provider_wallet_status.v1",
+              "provider_id": "mp-test",
+              "wallet_bound": true,
+              "wallet_mismatch": false,
+              "reward_wallet": {
+                "address": "0xReward",
+                "verification_source": "provider_emission_state",
+                "cap_replay_pending": false
+              },
+              "reward_amounts": {
+                "accrued_malibu": "10",
+                "withdrawable_malibu": "0",
+                "held_malibu": "10",
+                "provider_daily_cap_malibu": 25,
+                "provider_day_malibu": "10",
+                "provider_daily_capped": false,
+                "wallet_daily_cap_malibu": 100,
+                "wallet_day_malibu": "10",
+                "wallet_daily_capped": false
+              },
+              "eligibility_inputs": {
+                "trust_tier": "provisional",
+                "quarantined": false,
+                "receipt_quality": "sufficient_verified_receipts",
+                "verified_receipt_count": 137,
+                "required_receipt_count": 100,
+                "compute_integrity_state": "unknown",
+                "attestation_tier": "app_attested",
+                "app_attested": true,
+                "criteria_met": 1,
+                "criteria_required": 2,
+                "economic_criteria": ["E1"],
+                "additional_criteria": [],
+                "wallet_balance_ok": false,
+                "uptime_ok": false
+              },
+              "reward_eligibility": {
+                "schema_version": "malibu_reward_eligibility.v1",
+                "earning_state": "held",
+                "withdrawal_state": "held",
+                "primary_reason": "held_provisional_trust_tier",
+                "reasons": ["held_provisional_trust_tier"]
+              },
+              "audit": { "events": [] }
+            }
+            """.utf8)
+        )
+        let base = try JSONDecoder().decode(ProviderEarningsSummary.self, from: Data("{}".utf8))
+        let merged = base.merging(walletStatus: walletStatus)
+        XCTAssertEqual(merged.economicCriteria, ["E1"])
+        XCTAssertEqual(merged.additionalCriteria, [])
+        XCTAssertEqual(merged.verifiedReceiptCount, 137)
+        XCTAssertEqual(merged.appAttested, true)
+
+        let encoded = try JSONEncoder().encode(merged)
+        let obj = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        XCTAssertEqual(obj["economic_criteria"] as? [String], ["E1"])
+        XCTAssertEqual(obj["additional_criteria"] as? [String], [])
+        XCTAssertEqual(obj["verified_receipt_count"] as? Int, 137)
+        XCTAssertEqual(obj["app_attested"] as? Bool, true)
+    }
+
+    // MED-3: the accrual endpoint also emits the granular trust criteria; the
+    // accrual-only producer path must forward them, not erase them.
+    func testAccrualPathForwardsTrustCriteriaFields() throws {
+        let accrual = try JSONDecoder().decode(
+            MalibuAccrualSummary.self,
+            from: Data("""
+            {
+              "accrued_malibu": "3",
+              "withdrawable_malibu": "0",
+              "held_malibu": "3",
+              "trust_tier": "provisional",
+              "trust_criteria_met": 1,
+              "trust_criteria_required": 2,
+              "economic_criteria": ["E1"],
+              "additional_criteria": [],
+              "verified_receipt_count": 137,
+              "app_attested": false,
+              "wallet_bound": true,
+              "withdrawal_hold_reasons": ["trust_tier_provisional"],
+              "reward_eligibility": {
+                "schema_version": "malibu_reward_eligibility.v1",
+                "earning_state": "held",
+                "withdrawal_state": "held",
+                "primary_reason": "held_provisional_trust_tier",
+                "reasons": ["held_provisional_trust_tier"]
+              }
+            }
+            """.utf8)
+        )
+        XCTAssertEqual(accrual.economicCriteria, ["E1"])
+        XCTAssertEqual(accrual.additionalCriteria, [])
+        XCTAssertEqual(accrual.verifiedReceiptCount, 137)
+        XCTAssertEqual(accrual.appAttested, false)
+
+        let fromAccrual = ProviderEarningsSummary.from(accrual: accrual)
+        XCTAssertEqual(fromAccrual.economicCriteria, ["E1"])
+        XCTAssertEqual(fromAccrual.verifiedReceiptCount, 137)
+
+        let base = try JSONDecoder().decode(ProviderEarningsSummary.self, from: Data("{}".utf8))
+        let merged = base.merging(accrual: accrual)
+        XCTAssertEqual(merged.economicCriteria, ["E1"])
+        XCTAssertEqual(merged.verifiedReceiptCount, 137)
+        XCTAssertEqual(merged.appAttested, false)
+    }
+
+    // HIGH-2: a wallet-status telemetry failure preserves the earnings-frame
+    // walletBound and marks the MALIBU projection NOT fresh (no fabricated
+    // walletBound=false, no fresh telemetry_unavailable eligibility).
+    func testMarkingWalletStatusUnavailablePreservesWalletAndMarksNotFresh() throws {
+        let base = try JSONDecoder().decode(
+            ProviderEarningsSummary.self,
+            from: Data("""
+            {"wallet_bound": true, "trust_tier": "trusted",
+             "unpaid_ledger_backlog_usdc": 0, "unpaid_ledger_backlog_malibu": 0,
+             "usdc_today": 0.03}
+            """.utf8)
+        )
+        let unavailable = base.markingWalletStatusUnavailable()
+        XCTAssertTrue(unavailable.walletBound)
+        XCTAssertFalse(unavailable.malibuProjectionFresh)
+        XCTAssertNil(unavailable.malibuRewardEligibility)
+        XCTAssertNil(unavailable.malibuWithdrawable)
+        XCTAssertEqual(unavailable.usdcToday, 0.03)
+        // Re-audit HIGH: the outage is signalled explicitly (not left
+        // indistinguishable from a benign first-run absence) and survives the
+        // control-socket wire so the app can surface it honestly.
+        XCTAssertTrue(unavailable.rewardTelemetryUnavailable)
+        let roundTripped = try JSONDecoder().decode(
+            ProviderEarningsSummary.self,
+            from: JSONEncoder().encode(unavailable)
+        )
+        XCTAssertTrue(roundTripped.rewardTelemetryUnavailable)
+        // A normal fresh frame never sets the outage flag.
+        XCTAssertFalse(base.markingEarningsProjectionFresh().rewardTelemetryUnavailable)
+    }
+
+    // Re-audit HIGH: the no-base wallet-status outage factory (used when there
+    // is neither an earnings nor an accrual frame to preserve) must ALSO signal
+    // the outage, or the app softens it into calm first-run "warming up".
+    func testUnavailableWalletStatusFactorySignalsOutage() throws {
+        let outage = ProviderEarningsSummary.unavailableWalletStatus()
+        XCTAssertTrue(outage.rewardTelemetryUnavailable)
+        XCTAssertFalse(outage.malibuProjectionFresh)
+        let roundTripped = try JSONDecoder().decode(
+            ProviderEarningsSummary.self,
+            from: JSONEncoder().encode(outage)
+        )
+        XCTAssertTrue(roundTripped.rewardTelemetryUnavailable)
+    }
+
+    // LOW-7: every coordinator reward reason (incl. epoch-disposition) survives
+    // decode; an unknown future reason still fails closed to unavailable.
+    func testEveryCoordinatorRewardReasonRoundTrips() throws {
+        let reasons = [
+            "earning_verified_work", "eligible_idle_no_work", "held_provisional_trust_tier",
+            "held_provider_daily_cap", "held_wallet_daily_cap", "held_demotion_cooldown",
+            "held_epoch_disposition", "excluded_epoch_disposition",
+            "burned_or_retired_epoch_disposition", "withdrawable_balance_available",
+            "withdrawable_no_balance", "missing_wallet_binding", "insufficient_verified_receipts",
+            "app_attestation_missing", "hardware_evidence_unavailable",
+            "hardware_evidence_missing_or_expired", "compute_integrity_unavailable",
+            "compute_integrity_pending", "compute_integrity_blocked", "provider_token_untrusted",
+            "local_on_battery", "local_thermal_pressure", "model_not_ready", "telemetry_unavailable",
+        ]
+        for reason in reasons {
+            let json = """
+            {"schema_version":"malibu_reward_eligibility.v1","earning_state":"held",
+             "withdrawal_state":"held","primary_reason":"\(reason)","reasons":["\(reason)"]}
+            """
+            let decoded = try JSONDecoder().decode(MalibuRewardEligibility.self, from: Data(json.utf8))
+            XCTAssertEqual(decoded.primaryReason, reason, "reason \(reason) should round-trip")
+        }
+        let unknown = """
+        {"schema_version":"malibu_reward_eligibility.v1","earning_state":"held",
+         "withdrawal_state":"held","primary_reason":"future_unknown_reason","reasons":["future_unknown_reason"]}
+        """
+        let decoded = try JSONDecoder().decode(MalibuRewardEligibility.self, from: Data(unknown.utf8))
+        XCTAssertEqual(decoded.primaryReason, "telemetry_unavailable")
+        XCTAssertEqual(decoded.withdrawalState, "unavailable")
+    }
 }
 
 private final class ProviderEarningsMockURLProtocol: URLProtocol {

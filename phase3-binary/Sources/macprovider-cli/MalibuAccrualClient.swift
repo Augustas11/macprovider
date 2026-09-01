@@ -102,6 +102,9 @@ public struct MalibuRewardEligibility: Codable, Equatable, Sendable {
         "held_provider_daily_cap",
         "held_wallet_daily_cap",
         "held_demotion_cooldown",
+        "held_epoch_disposition",
+        "excluded_epoch_disposition",
+        "burned_or_retired_epoch_disposition",
         "withdrawable_balance_available",
         "withdrawable_no_balance",
         "missing_wallet_binding",
@@ -128,6 +131,10 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
     let trustTier: String
     let trustCriteriaMet: Int?
     let trustCriteriaRequired: Int?
+    let economicCriteria: [String]
+    let additionalCriteria: [String]
+    let verifiedReceiptCount: Int?
+    let appAttested: Bool?
     let walletBound: Bool?
     let dailyCapMALIBU: Double?
     let walletDailyCapMALIBU: Double?
@@ -141,6 +148,10 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
         case trustTier = "trust_tier"
         case trustCriteriaMet = "trust_criteria_met"
         case trustCriteriaRequired = "trust_criteria_required"
+        case economicCriteria = "economic_criteria"
+        case additionalCriteria = "additional_criteria"
+        case verifiedReceiptCount = "verified_receipt_count"
+        case appAttested = "app_attested"
         case walletBound = "wallet_bound"
         case dailyCapMALIBU = "daily_cap_malibu"
         case walletDailyCapMALIBU = "wallet_daily_cap_malibu"
@@ -164,6 +175,10 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
         trustTier = rawTrustTier
         trustCriteriaMet = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
         trustCriteriaRequired = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaRequired)
+        economicCriteria = try c.decodeIfPresent([String].self, forKey: .economicCriteria) ?? []
+        additionalCriteria = try c.decodeIfPresent([String].self, forKey: .additionalCriteria) ?? []
+        verifiedReceiptCount = try c.decodeIfPresent(Int.self, forKey: .verifiedReceiptCount)
+        appAttested = try c.decodeIfPresent(Bool.self, forKey: .appAttested)
         walletBound = try c.decodeIfPresent(Bool.self, forKey: .walletBound)
         dailyCapMALIBU = try Self.decodeOptionalDecimal(c, key: .dailyCapMALIBU)
         walletDailyCapMALIBU = try Self.decodeOptionalDecimal(c, key: .walletDailyCapMALIBU)

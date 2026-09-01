@@ -29,7 +29,10 @@ enum DashboardCopy {
     static let currentStateTitle = "Current state"
     static let meaningTitle = "What this means"
     static let nextActionTitle = "Next safe action"
+    static let statusTitle = "Status"
     static let miningHealthTitle = "Mining Health"
+    static let howEarningWorksTitle = "How earning works"
+    static let somethingWrongTitle = "Something wrong?"
     static let miningReasonTitle = "Reason"
     static let miningRewardsTitle = "Rewards"
     static let miningEligibilityTitle = "Eligibility"
@@ -107,7 +110,10 @@ private struct DashboardView: View {
     @State private var showModelSheet = false
     @ObservedObject private var modelStore = ModelManagementStore.shared
 
-    @State private var advancedDiagnosticsExpanded = true
+    @State private var advancedDiagnosticsExpanded = false
+    @State private var trustDetailExpanded = false
+    @State private var howEarningWorksExpanded = false
+    @State private var somethingWrongExpanded = false
 
     var body: some View {
         ScrollView {
@@ -118,17 +124,22 @@ private struct DashboardView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Malibu")
                         .font(.system(size: 15, weight: .semibold))
-                    if let subtitle = AgentSnapshotPresenter.dashboardSubtitle(agent.snapshot) {
-                        Text(subtitle)
+                    // Header carries pure identity (the model), never a status
+                    // verdict — the single status source is ConsolidatedStatus.
+                    if let model = agent.snapshot.currentModelID {
+                        Text(model)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
+                            .truncationMode(.middle)
                     }
                 }
                 Spacer()
-                Text(AgentSnapshotPresenter.dashboardHeadline(agent.snapshot))
+                // Badge derives from the SAME ConsolidatedStatus as the card, so
+                // header and card can never disagree (MED-4).
+                Text(consolidatedStatus.label)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(color(for: agent.snapshot.state))
+                    .foregroundStyle(statusColor(consolidatedStatus.tone))
             }
 
             HStack(alignment: .center, spacing: 12) {
@@ -252,7 +263,12 @@ private struct DashboardView: View {
                     }
                     Text(AgentSnapshotPresenter.malibuFullLine(agent.snapshot))
                         .foregroundStyle(
-                            agent.snapshot.malibuProjectionFresh && agent.snapshot.trustTier == .provisional
+                            // Coral flags a genuine provisional lock (accruing but
+                            // withdrawals locked); a telemetry-unavailable verdict
+                            // stays muted rather than alarm-colored.
+                            agent.snapshot.malibuProjectionFresh
+                                && agent.snapshot.trustTier == .provisional
+                                && !AgentSnapshotPresenter.isRewardTelemetryUnavailable(agent.snapshot)
                                 ? MalibuBrand.coral
                                 : .secondary
                         )
@@ -312,16 +328,11 @@ private struct DashboardView: View {
                 }
 
                 statsPanel {
-                    let publicStatus = AgentSnapshotPresenter.publicStatus(agent.snapshot)
-                    MetricRow(title: DashboardCopy.currentStateTitle, value: publicStatus.title)
-                    if let detail = publicStatus.detail {
-                        MetricRow(title: DashboardCopy.meaningTitle, value: detail)
-                    }
-                    if let action = publicStatus.safeNextAction {
-                        MetricRow(title: DashboardCopy.nextActionTitle, value: action)
-                    }
+                    // Status now lives in the single consolidated card above; the
+                    // right column keeps the primary recovery action and the
+                    // trust-unlock / diagnostics detail.
                     primaryActionButton
-                    recoveryActions
+                    trustTierDisclosure
                     DisclosureGroup("Advanced diagnostics", isExpanded: $advancedDiagnosticsExpanded) {
                         VStack(alignment: .leading, spacing: 12) {
                             MetricRow(title: "Running model", value: AgentSnapshotPresenter.modelLine(agent.snapshot))
@@ -334,7 +345,6 @@ private struct DashboardView: View {
                             } else if agent.snapshot.state == .serving || agent.snapshot.state == .paused {
                                 MetricRow(title: "Weights path", value: "Managed by provider")
                             }
-                            MetricRow(title: "Trust tier", value: AgentSnapshotPresenter.trustLine(agent.snapshot))
                             MetricRow(
                                 title: "Malibu app",
                                 value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Version unknown"
@@ -441,9 +451,13 @@ private struct DashboardView: View {
                 }
             }
 
+            howEarningWorksSection
+
             if agent.snapshot.localProviderID != nil {
                 ReferralPanel(agent: agent)
             }
+
+            somethingWrongSection
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -469,24 +483,39 @@ private struct DashboardView: View {
         }
     }
 
+    // Single authoritative status card (P2.7): the three-state model plus the
+    // reward/eligibility detail, replacing the former separate Mining Health
+    // panel and the "Current state / What this means / Next safe action" rows.
+    private var consolidatedStatus: AgentSnapshotPresenter.ConsolidatedStatus {
+        AgentSnapshotPresenter.consolidatedStatus(agent.snapshot)
+    }
+
     private var miningHealthPanel: some View {
+        let status = consolidatedStatus
         let mining = AgentSnapshotPresenter.miningHealth(agent.snapshot)
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                Text(DashboardCopy.miningHealthTitle)
+                Text(DashboardCopy.statusTitle)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(mining.status)
+                Text(status.label)
                     .font(.callout.weight(.semibold))
-                    .foregroundStyle(miningTone(mining.reasonCode))
+                    .foregroundStyle(statusColor(status.tone))
                     .accessibilityIdentifier("malibu.dashboard.mining-status")
             }
+            if !status.meaning.isEmpty {
+                Text(status.meaning)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             VStack(alignment: .leading, spacing: 8) {
-                MetricRow(title: DashboardCopy.miningReasonTitle, value: mining.reason)
                 MetricRow(title: DashboardCopy.miningRewardsTitle, value: mining.rewardSummary)
                 MetricRow(title: DashboardCopy.miningEligibilityTitle, value: mining.trustSummary)
-                MetricRow(title: DashboardCopy.nextActionTitle, value: mining.nextAction)
+                if let action = status.nextAction {
+                    MetricRow(title: DashboardCopy.nextActionTitle, value: action)
+                }
             }
         }
         .padding(12)
@@ -494,16 +523,13 @@ private struct DashboardView: View {
         .accessibilityElement(children: .contain)
     }
 
-    private func miningTone(_ reasonCode: String) -> Color {
-        switch reasonCode {
-        case "earning", "trusted_withdrawable":
-            return .green
-        case "idle_no_work", "eligible_waiting_settlement", "customer_availability_pending":
-            return .secondary
-        case "not_running", "provider_paused", "reward_projection_unavailable":
-            return MalibuBrand.sunnyYellow
-        default:
-            return MalibuBrand.coral
+    // Single tone mapping for the consolidated status, shared by the header
+    // badge and the status card so they never diverge.
+    private func statusColor(_ tone: AgentSnapshotPresenter.ConsolidatedStatus.Tone) -> Color {
+        switch tone {
+        case .positive: return .green
+        case .neutral: return .secondary
+        case .attention: return MalibuBrand.coral
         }
     }
 
@@ -553,6 +579,92 @@ private struct DashboardView: View {
         case nil:
             EmptyView()
         }
+    }
+
+    // P1.4/P1.5: the trust tier is a real disclosure that names the two
+    // Trusted criteria (done/pending) and what reaching Trusted grants — so
+    // "Unlock Trusted" leads somewhere instead of being a dead affordance.
+    @ViewBuilder
+    private var trustTierDisclosure: some View {
+        if let criteria = AgentSnapshotPresenter.trustCriteria(agent.snapshot) {
+            DisclosureGroup(isExpanded: $trustDetailExpanded) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(AgentSnapshotPresenter.trustUnlockSummary(agent.snapshot))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    ForEach(criteria, id: \.title) { criterion in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Image(systemName: criterion.done ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(criterion.done ? Color.green : Color.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(criterion.title)
+                                    .font(.callout)
+                                Text(criterion.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 6)
+            } label: {
+                MetricRow(title: "Trust tier", value: AgentSnapshotPresenter.trustLine(agent.snapshot))
+            }
+            .accessibilityIdentifier("malibu.dashboard.trust-tier")
+        } else {
+            MetricRow(title: "Trust tier", value: AgentSnapshotPresenter.trustLine(agent.snapshot))
+        }
+    }
+
+    // P3.8: lightweight "How earning works" explainer, collapsed by default,
+    // reusing the referral disclosure pattern.
+    @ViewBuilder
+    private var howEarningWorksSection: some View {
+        DisclosureGroup(isExpanded: $howEarningWorksExpanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("You earn two ways for the customer work this Mac serves:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("• USDC — cash earnings from paid jobs. Add a payout wallet to receive them.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("• MALIBU — reward tokens that accrue as you serve. Withdrawals unlock once this Mac reaches the Trusted tier.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("New providers start Provisional and become Trusted by serving verified work and staying online. Provisional → Trusted just takes time and traffic.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 6)
+        } label: {
+            Text(DashboardCopy.howEarningWorksTitle)
+                .font(.callout.weight(.semibold))
+        }
+        .padding(12)
+        .background(panelBackground)
+        .accessibilityIdentifier("malibu.dashboard.how-earning-works")
+    }
+
+    // P2.6: recovery tools live behind a collapsed "Something wrong?"
+    // disclosure, out of the primary status card.
+    @ViewBuilder
+    private var somethingWrongSection: some View {
+        DisclosureGroup(isExpanded: $somethingWrongExpanded) {
+            recoveryActions
+                .padding(.top, 6)
+        } label: {
+            Text(DashboardCopy.somethingWrongTitle)
+                .font(.callout.weight(.semibold))
+        }
+        .padding(12)
+        .background(panelBackground)
+        .accessibilityIdentifier("malibu.dashboard.something-wrong")
     }
 
     @ViewBuilder
@@ -619,16 +731,6 @@ private struct DashboardView: View {
         switch agent.snapshot.thermalState {
         case .serious, .critical: return .attention
         default: return .neutral
-        }
-    }
-
-    private func color(for state: AgentSnapshot.State) -> Color {
-        switch state {
-        case .serving: return .green
-        case .starting, .reconnecting: return MalibuBrand.coral
-        case .paused: return MalibuBrand.sunnyYellow
-        case .error: return .red
-        case .idle: return .secondary
         }
     }
 

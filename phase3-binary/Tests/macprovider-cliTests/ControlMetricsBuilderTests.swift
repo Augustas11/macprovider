@@ -34,22 +34,192 @@ final class ControlMetricsBuilderTests: XCTestCase {
         XCTAssertEqual(afterHeartbeat.requestsServedSinceLast, 0)
     }
 
-    func testMalformedWalletStatusFailsClosedInMetricsPath() async throws {
+    // Re-audit HIGH (reconciled): a malformed secondary /wallet response must NOT
+    // wipe an authoritative, fresh MALIBU projection that a valid /accrual fetch
+    // already provided — that would hide REAL earned rewards, the exact harm the
+    // HIGH flagged. When accrual is fresh, its real eligibility is honest, not a
+    // fabricated benign projection, so the malformed wallet-status is ignored and
+    // the accrual projection is preserved (no fail-closed, no fabricated outage).
+    func testMalformedWalletStatusPreservesFreshAccrualProjection() async throws {
         let snapshot = await buildSnapshot(walletJSON: Self.walletMalformedAuditJSON)
 
         let earnings = try XCTUnwrap(snapshot.providerEarnings)
-        XCTAssertFalse(earnings.walletBound)
-        XCTAssertNil(earnings.malibuWithdrawable)
-        XCTAssertEqual(earnings.malibuRewardEligibility?.primaryReason, "telemetry_unavailable")
+        XCTAssertTrue(earnings.malibuProjectionFresh)
+        let eligibility = try XCTUnwrap(earnings.malibuRewardEligibility)
+        XCTAssertEqual(eligibility.earningState, "eligible_idle")
+        XCTAssertEqual(eligibility.withdrawalState, "withdrawable")
+        XCTAssertEqual(earnings.malibuWithdrawable, 10)
+        XCTAssertTrue(earnings.walletBound)
+        XCTAssertFalse(earnings.rewardTelemetryUnavailable)
     }
 
-    func testMissingWalletRewardEligibilityFailsClosedInMetricsPath() async throws {
+    func testMissingWalletRewardEligibilityPreservesFreshAccrualProjection() async throws {
         let snapshot = await buildSnapshot(walletJSON: Self.walletMissingRewardEligibilityJSON)
 
         let earnings = try XCTUnwrap(snapshot.providerEarnings)
-        XCTAssertFalse(earnings.walletBound)
-        XCTAssertNil(earnings.malibuWithdrawable)
-        XCTAssertEqual(earnings.malibuRewardEligibility?.primaryReason, "telemetry_unavailable")
+        XCTAssertTrue(earnings.malibuProjectionFresh)
+        let eligibility = try XCTUnwrap(earnings.malibuRewardEligibility)
+        XCTAssertEqual(eligibility.earningState, "eligible_idle")
+        XCTAssertEqual(eligibility.withdrawalState, "withdrawable")
+        XCTAssertEqual(earnings.malibuWithdrawable, 10)
+        XCTAssertTrue(earnings.walletBound)
+        XCTAssertFalse(earnings.rewardTelemetryUnavailable)
+    }
+
+    // Re-audit HIGH (fail-closed side, schema-drift class): when the /wallet
+    // response is malformed AND there is NO authoritative accrual projection (the
+    // /accrual endpoint 5xx'd, so accrual == nil), there is nothing real to
+    // preserve — the frame must fail closed and signal the outage rather than
+    // fabricating a benign warming-up state.
+    func testMalformedWalletStatusWithoutAccrualFailsClosed() async throws {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ControlMetricsMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        ControlMetricsMockURLProtocol.requestHandler = { request in
+            let ok = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+                                     headerFields: ["Content-Type": "application/json"])!
+            let serverError = HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil,
+                                              headerFields: ["Content-Type": "application/json"])!
+            switch request.url?.path {
+            case "/v1/provider/malibu-accrual":
+                return (serverError, Data("{}".utf8))
+            case "/v1/provider/wallet":
+                return (ok, Data(Self.walletMalformedAuditJSON.utf8))
+            default:
+                return (ok, Data("{}".utf8))
+            }
+        }
+        defer { ControlMetricsMockURLProtocol.requestHandler = nil }
+
+        let snapshot = await ControlMetricsBuilder.build(
+            providerStatus: status,
+            providerEarningsClient: nil,
+            malibuAccrualClient: MalibuAccrualClient(
+                accrualURL: URL(string: "https://coordinator.test/v1/provider/malibu-accrual")!,
+                session: session
+            ),
+            providerWalletStatusClient: ProviderWalletStatusClient(
+                walletURL: URL(string: "https://coordinator.test/v1/provider/wallet")!,
+                session: session
+            ),
+            providerToken: "provider-token"
+        )
+        let earnings = try XCTUnwrap(snapshot.providerEarnings)
+        XCTAssertTrue(earnings.rewardTelemetryUnavailable)
+        XCTAssertFalse(earnings.malibuProjectionFresh)
+    }
+
+    // Re-audit HIGH: when accrual SUCCEEDS with real MALIBU amounts, a secondary
+    // wallet-status 5xx must NOT wipe the authoritative reward projection. The
+    // old behaviour marked the whole frame unavailable, hiding real earned
+    // rewards ("MALIBU rewards not available yet"). The accrual projection is
+    // authoritative, so it is preserved and no outage is fabricated.
+    func testAccrualPreservedWhenOnlyWalletStatus503() async throws {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ControlMetricsMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        ControlMetricsMockURLProtocol.requestHandler = { request in
+            let ok = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+                                     headerFields: ["Content-Type": "application/json"])!
+            let serverError = HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil,
+                                              headerFields: ["Content-Type": "application/json"])!
+            switch request.url?.path {
+            case "/v1/provider/malibu-accrual":
+                return (ok, Data(Self.accrualEligibleJSON.utf8))
+            case "/v1/provider/wallet":
+                return (serverError, Data("{}".utf8))
+            default:
+                return (ok, Data("{}".utf8))
+            }
+        }
+        defer { ControlMetricsMockURLProtocol.requestHandler = nil }
+
+        let snapshot = await ControlMetricsBuilder.build(
+            providerStatus: status,
+            providerEarningsClient: nil,
+            malibuAccrualClient: MalibuAccrualClient(
+                accrualURL: URL(string: "https://coordinator.test/v1/provider/malibu-accrual")!,
+                session: session
+            ),
+            providerWalletStatusClient: ProviderWalletStatusClient(
+                walletURL: URL(string: "https://coordinator.test/v1/provider/wallet")!,
+                session: session
+            ),
+            providerToken: "provider-token"
+        )
+        let earnings = try XCTUnwrap(snapshot.providerEarnings)
+        // Real accrual MALIBU is preserved, projection stays fresh, no false outage.
+        XCTAssertFalse(earnings.rewardTelemetryUnavailable)
+        XCTAssertTrue(earnings.malibuProjectionFresh)
+        XCTAssertEqual(earnings.malibuWithdrawable, 10)
+        XCTAssertEqual(earnings.malibuHeld, 0)
+    }
+
+    // Re-audit HIGH (fail-closed side): when there is NO authoritative reward
+    // projection (accrual AND wallet-status both 5xx), the built frame must carry
+    // rewardTelemetryUnavailable so the app never softens a genuine outage into
+    // calm "warming up".
+    func testOutageSignalledWhenNoAuthoritativeProjection() async throws {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ControlMetricsMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        ControlMetricsMockURLProtocol.requestHandler = { request in
+            let serverError = HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil,
+                                              headerFields: ["Content-Type": "application/json"])!
+            return (serverError, Data("{}".utf8))
+        }
+        defer { ControlMetricsMockURLProtocol.requestHandler = nil }
+
+        let snapshot = await ControlMetricsBuilder.build(
+            providerStatus: status,
+            providerEarningsClient: nil,
+            malibuAccrualClient: MalibuAccrualClient(
+                accrualURL: URL(string: "https://coordinator.test/v1/provider/malibu-accrual")!,
+                session: session
+            ),
+            providerWalletStatusClient: ProviderWalletStatusClient(
+                walletURL: URL(string: "https://coordinator.test/v1/provider/wallet")!,
+                session: session
+            ),
+            providerToken: "provider-token"
+        )
+        let earnings = try XCTUnwrap(snapshot.providerEarnings)
+        XCTAssertTrue(earnings.rewardTelemetryUnavailable)
+        XCTAssertFalse(earnings.malibuProjectionFresh)
+    }
+
+    // Re-audit MEDIUM: a 5xx on the /providers/{id}/earnings endpoint is a real
+    // telemetry outage, not a benign empty first-run frame. A bare `try?` let a
+    // 503 look identical to "no earnings yet"; the built frame must flag the
+    // outage so the presenter does not take the calm warming-up branch.
+    func testEarningsServerErrorSignalsRewardTelemetryOutage() async throws {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ControlMetricsMockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        ControlMetricsMockURLProtocol.requestHandler = { request in
+            let serverError = HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil,
+                                              headerFields: ["Content-Type": "application/json"])!
+            return (serverError, Data("{}".utf8))
+        }
+        defer { ControlMetricsMockURLProtocol.requestHandler = nil }
+
+        let snapshot = await ControlMetricsBuilder.build(
+            providerStatus: status,
+            providerEarningsClient: ProviderEarningsClient(
+                earningsURL: URL(string: "https://coordinator.test/v1/providers/mp-test/earnings")!,
+                session: session
+            ),
+            malibuAccrualClient: nil,
+            providerWalletStatusClient: nil,
+            providerToken: "provider-token"
+        )
+        let earnings = try XCTUnwrap(snapshot.providerEarnings)
+        XCTAssertTrue(earnings.rewardTelemetryUnavailable)
+        XCTAssertFalse(earnings.malibuProjectionFresh)
     }
 
     private func buildSnapshot(walletJSON: String) async -> ControlMetricsSnapshot {

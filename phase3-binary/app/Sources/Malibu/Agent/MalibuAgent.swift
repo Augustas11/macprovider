@@ -1337,6 +1337,11 @@ final class MalibuAgent: ObservableObject {
     private func invalidateProviderProjectionFreshness() {
         snapshot.providerEarningsFresh = false
         snapshot.malibuProjectionFresh = false
+        // The reward-telemetry outage bit is projection-scoped: clear it when the
+        // projection is invalidated so a stale outage flag can't outlive the
+        // frame that set it and keep showing "Reward status unavailable" after a
+        // reconnect. A genuine outage re-sets it on the next metrics frame.
+        snapshot.rewardTelemetryUnavailable = false
         providerProjectionEligible = false
     }
 
@@ -1503,10 +1508,24 @@ final class MalibuAgent: ObservableObject {
                 snapshot.malibuRewardEligibility = providerEarnings.malibuRewardEligibility
                 snapshot.trustCriteriaMet = providerEarnings.trustCriteriaMet
                 snapshot.trustCriteriaRequired = providerEarnings.trustCriteriaRequired
+                snapshot.economicCriteria = providerEarnings.economicCriteria
+                snapshot.additionalCriteria = providerEarnings.additionalCriteria
+                snapshot.verifiedReceiptCount = providerEarnings.verifiedReceiptCount
+                snapshot.appAttested = providerEarnings.appAttested
+                snapshot.rewardTelemetryUnavailable = providerEarnings.rewardTelemetryUnavailable
+                snapshot.hasGranularTrustCriteria = providerEarnings.hasGranularTrustCriteria
                 snapshot.idlePrewarmSummary = providerEarnings.idlePrewarm
                 if providerProjectionEligible && providerEarnings.earningsProjectionFresh {
                     snapshot.hasObservedProviderEarnings = true
                 }
+            } else {
+                // No provider_earnings object in this frame. A genuine telemetry
+                // outage now arrives as a non-nil frame with the flag set (see
+                // ControlMetricsBuilder), so a nil frame is benign absence: clear
+                // any stale outage bit instead of leaving it sticky, which would
+                // keep a recovered, warming-up snapshot reading "Reward status
+                // unavailable".
+                snapshot.rewardTelemetryUnavailable = false
             }
             persistDashboardObservation()
         case let .pauseAck(accepted, reason):

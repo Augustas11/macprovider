@@ -100,17 +100,49 @@ enum ControlMetricsBuilder {
 		var accrual: MalibuAccrualSummary?
 		var walletStatus: ProviderWalletStatusSummary?
 		var walletStatusSchemaFailed = false
+		// A genuine reward-telemetry OUTAGE on the accrual or wallet-status
+		// endpoint (5xx server error, transport failure, or schema/decode drift)
+		// must be signalled so the app never softens it into calm "warming up".
+		// A 4xx / unavailable / bad-URL is treated as endpoint-not-usable and
+		// tolerated (an older coordinator may not serve it), matching the
+		// pre-existing legacy tolerance.
+		var rewardTelemetryFailed = false
 		if let token = providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
 		   !token.isEmpty {
 			if let providerEarningsClient {
-				earnings = try? await providerEarningsClient.fetch(bearerToken: token)
+				do {
+					earnings = try await providerEarningsClient.fetch(bearerToken: token)
+				} catch ProviderEarningsClientError.httpStatus(let code) where (500...599).contains(code) {
+					rewardTelemetryFailed = true
+				} catch ProviderEarningsClientError.httpStatus {
+				} catch ProviderEarningsClientError.unavailable {
+				} catch ProviderEarningsClientError.invalidCoordinatorURL {
+				} catch {
+					// Transport or schema/decode failure on the earnings endpoint is
+					// a real telemetry outage, not a benign "no earnings yet". A bare
+					// try? here let a 5xx look identical to an empty first-run frame,
+					// so the presenter took the calm warming-up branch.
+					rewardTelemetryFailed = true
+				}
 			}
 			if let malibuAccrualClient {
-				accrual = try? await malibuAccrualClient.fetch(bearerToken: token)
+				do {
+					accrual = try await malibuAccrualClient.fetch(bearerToken: token)
+				} catch MalibuAccrualClientError.httpStatus(let code) where (500...599).contains(code) {
+					rewardTelemetryFailed = true
+				} catch MalibuAccrualClientError.httpStatus {
+				} catch MalibuAccrualClientError.unavailable {
+				} catch MalibuAccrualClientError.invalidCoordinatorURL {
+				} catch {
+					// Transport or schema/decode failure: a real outage.
+					rewardTelemetryFailed = true
+				}
 			}
 			if let providerWalletStatusClient {
 				do {
 					walletStatus = try await providerWalletStatusClient.fetch(bearerToken: token)
+				} catch ProviderWalletStatusClientError.httpStatus(let code) where (500...599).contains(code) {
+					rewardTelemetryFailed = true
 				} catch ProviderWalletStatusClientError.httpStatus {
 				} catch ProviderWalletStatusClientError.unavailable {
 				} catch ProviderWalletStatusClientError.invalidCoordinatorURL {
@@ -124,8 +156,17 @@ enum ControlMetricsBuilder {
 		}
 		if let walletStatus {
 			earnings = earnings?.merging(walletStatus: walletStatus) ?? ProviderEarningsSummary.unavailableWalletStatus().merging(walletStatus: walletStatus)
-		} else if walletStatusSchemaFailed {
-			earnings = earnings?.markingWalletStatusUnavailable() ?? .unavailableWalletStatus()
+		} else if walletStatusSchemaFailed || rewardTelemetryFailed {
+			// A wallet-status (or earnings) subprojection failed. If we already
+			// hold an authoritative, fresh MALIBU reward projection — from a
+			// successful accrual fetch or a fresh /earnings frame — preserve it.
+			// Wiping it via markingWalletStatusUnavailable() here hid REAL earned
+			// rewards ("MALIBU rewards not available yet") just because a secondary
+			// call 5xx'd. Only fail closed to the explicit unavailable frame when
+			// there is no authoritative reward projection to preserve.
+			if !(earnings?.malibuProjectionFresh ?? false) {
+				earnings = earnings?.markingWalletStatusUnavailable() ?? .unavailableWalletStatus()
+			}
 		}
 		return .from(
             provider: snapshot,

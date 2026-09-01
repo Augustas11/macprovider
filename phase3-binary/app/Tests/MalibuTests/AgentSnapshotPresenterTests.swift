@@ -86,9 +86,11 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(s))
         XCTAssertEqual(AgentSnapshotPresenter.short(s), "Connected")
-        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(s), "Checking customer availability")
+        // Not yet buyer-serving-admitted → consolidated status is "Setting up".
+        let checking = AgentSnapshotPresenter.consolidatedStatus(s)
+        XCTAssertEqual(checking.phase, .settingUp)
         XCTAssertEqual(
-            AgentSnapshotPresenter.dashboardSubtitle(s),
+            checking.meaning,
             "Malibu has not received a current network approval status yet."
         )
         XCTAssertEqual(AgentSnapshotPresenter.stateLine(s), "Checking customer availability")
@@ -1128,7 +1130,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.malibuAvailabilityLine(snapshot), "MALIBU: not withdrawable · 12.50 held")
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "MALIBU status: Trust verification is incomplete Next: Complete the remaining trust criteria to unlock withdrawals."
+            "MALIBU status: Trust verification is incomplete. Next: Complete the remaining trust criteria to unlock withdrawals."
         )
 
         snapshot.malibuHoldReasons = ["per_wallet_daily_cap"]
@@ -1140,7 +1142,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "MALIBU status: wallet daily limit reached Next: The wallet cap resets at the next UTC day."
+            "MALIBU status: wallet daily limit reached. Next: The wallet cap resets at the next UTC day."
         )
 
         snapshot.malibuHoldReasons = []
@@ -1152,7 +1154,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "MALIBU status: provider daily limit reached Next: The provider cap resets at the next UTC day."
+            "MALIBU status: provider daily limit reached. Next: The provider cap resets at the next UTC day."
         )
 
         snapshot.trustTier = .provisional
@@ -1164,7 +1166,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuHoldLine(snapshot),
-            "MALIBU status: Trust verification is in progress Next: Keep Malibu online; withdrawals unlock automatically when Trusted."
+            "MALIBU status: Trust verification is in progress. Next: Keep Malibu online; withdrawals unlock automatically when Trusted."
         )
     }
 
@@ -1330,6 +1332,460 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertFalse(fullLine.contains("locked"))
     }
 
+    // HIGH-2: a wallet-status telemetry failure (earnings fresh, MALIBU
+    // projection NOT fresh, wallet state preserved) must read as an honest
+    // "not available" — never a fake "No payout wallet yet" or "warming up".
+    func testTelemetryFailureReadsHonestNotBenign() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.networkState = "buyer_serving"
+        s.providerEarningsFresh = true
+        s.malibuProjectionFresh = false   // wallet-status telemetry failed
+        s.walletBound = true              // preserved from the earnings frame
+        s.earningsUsdcToday = 0.03
+
+        XCTAssertEqual(AgentSnapshotPresenter.malibuFullLine(s), "MALIBU rewards not available yet")
+        XCTAssertNil(AgentSnapshotPresenter.trustCriteria(s))
+        let health = AgentSnapshotPresenter.miningHealth(s)
+        XCTAssertNotEqual(health.reasonCode, "wallet_missing")
+        XCTAssertFalse(health.status.lowercased().contains("warming"))
+        XCTAssertFalse(health.status.contains("No payout wallet"))
+        XCTAssertTrue(health.rewardSummary.contains("MALIBU unavailable"), health.rewardSummary)
+    }
+
+    // HIGH-2: a fresh frame that could not compute a verdict (telemetry
+    // unavailable sentinel) reads as a problem, not "Locked until Trusted" or
+    // any all-good state, and shows no fabricated trust criteria.
+    func testFreshRewardTelemetryUnavailableReadsAsProblem() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.networkState = "buyer_serving"
+        s.providerEarningsFresh = true
+        s.malibuProjectionFresh = true
+        s.walletBound = true
+        s.malibuRewardEligibility = MalibuRewardEligibility.unavailableForMissingObject()
+
+        XCTAssertTrue(AgentSnapshotPresenter.isRewardTelemetryUnavailable(s))
+        XCTAssertNil(AgentSnapshotPresenter.trustCriteria(s))
+        XCTAssertEqual(AgentSnapshotPresenter.trustLine(s), "Trust status temporarily unavailable")
+        let health = AgentSnapshotPresenter.miningHealth(s)
+        XCTAssertEqual(health.reasonCode, "reward_telemetry_outage")
+        XCTAssertFalse(health.status.contains("Locked"))
+        let status = AgentSnapshotPresenter.consolidatedStatus(s)
+        // A GENUINE reward-telemetry outage is a fault: surfaced as needs-
+        // attention, never as calm "warming up" or a false-positive "earning".
+        XCTAssertEqual(status.tone, .attention)
+        XCTAssertEqual(status.label, "Reward status unavailable")
+        XCTAssertFalse(status.meaning.lowercased().contains("warming"))
+    }
+
+    // HIGH-1: criteria render by their ACTUAL IDs with distinct-pair truth.
+    // E1 satisfies the economic slot; an empty additional list leaves the
+    // distinct second slot pending → "1 of 2", not the raw unique-ID count.
+    func testTrustCriteriaRenderDistinctPairE1EconomicOnly() throws {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.networkState = "buyer_serving"
+        s.malibuProjectionFresh = true
+        s.trustTier = .provisional
+        s.trustCriteriaMet = 1
+        s.trustCriteriaRequired = 2
+        s.hasGranularTrustCriteria = true
+        s.economicCriteria = ["E1"]
+        s.additionalCriteria = ["E1"]   // coordinator adds E1 to both lists
+        s.verifiedReceiptCount = 137
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held",
+            withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
+
+        let criteria = try XCTUnwrap(AgentSnapshotPresenter.trustCriteria(s))
+        XCTAssertEqual(criteria.count, 2)
+        XCTAssertEqual(criteria[0].title, "Economic criterion")
+        XCTAssertTrue(criteria[0].done)
+        XCTAssertTrue(criteria[0].detail.contains("100 verified customer jobs"))
+        XCTAssertEqual(criteria[1].title, "Distinct additional criterion")
+        // Duplicate E1 overlaps itself → the second slot is still pending.
+        XCTAssertFalse(criteria[1].done)
+        XCTAssertEqual(AgentSnapshotPresenter.trustLine(s), "Provisional — 1 of 2 criteria met")
+        XCTAssertFalse(AgentSnapshotPresenter.trustLine(s).contains("→"))
+
+        var notFresh = s
+        notFresh.malibuProjectionFresh = false
+        XCTAssertNil(AgentSnapshotPresenter.trustCriteria(notFresh))
+    }
+
+    // HIGH-1: the four auditor-named cases for distinct-pair truth.
+    func testTrustDistinctPairTruthAcrossCriterionCombinations() {
+        func snap(_ econ: [String], _ add: [String]) -> AgentSnapshot {
+            var s = AgentSnapshot.empty
+            s.state = .serving
+            s.networkState = "buyer_serving"
+            s.malibuProjectionFresh = true
+            s.trustTier = .provisional
+            s.hasGranularTrustCriteria = true
+            s.economicCriteria = econ
+            s.additionalCriteria = add
+            s.malibuRewardEligibility = MalibuRewardEligibility(
+                earningState: "held", withdrawalState: "held",
+                primaryReason: "held_provisional_trust_tier",
+                reasons: ["held_provisional_trust_tier"]
+            )
+            return s
+        }
+        func slots(_ econ: [String], _ add: [String]) -> (Int, Bool, Bool) {
+            let s = snap(econ, add)
+            let c = AgentSnapshotPresenter.trustCriteria(s)!
+            return (AgentSnapshotPresenter.distinctPairProgress(s).met, c[0].done, c[1].done)
+        }
+        // E2 (economic) + A4 (additional): distinct → 2 of 2.
+        XCTAssertEqual(slots(["E2"], ["A4"]).0, 2)
+        // E3 (economic) + A3 (additional): distinct → 2 of 2.
+        XCTAssertEqual(slots(["E3"], ["A3"]).0, 2)
+        // E1 as additional only (both lists carry E1): economic done, second
+        // slot pending → 1 of 2.
+        let e1 = slots(["E1"], ["E1"])
+        XCTAssertEqual(e1.0, 1); XCTAssertTrue(e1.1); XCTAssertFalse(e1.2)
+        // E2 economic + A3 additional overlap (wallet balance) → 1 of 2, second
+        // slot pending even though two IDs are satisfied.
+        let overlap = slots(["E2"], ["A3"])
+        XCTAssertEqual(overlap.0, 1); XCTAssertTrue(overlap.1); XCTAssertFalse(overlap.2)
+    }
+
+    // Re-audit HIGH: an ADDITIONAL-only criterion (e.g. A4 App Attest with no
+    // economic criterion yet) counts its own row as done — the provider really
+    // completed one of the two displayed slots — while the overall progress
+    // still reflects that the distinct economic slot is pending.
+    func testAdditionalOnlyCriterionCountsItsRow() throws {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.networkState = "buyer_serving"
+        s.malibuProjectionFresh = true
+        s.trustTier = .provisional
+        s.hasGranularTrustCriteria = true
+        s.economicCriteria = []
+        s.additionalCriteria = ["A4"]
+        s.appAttested = true
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held", withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
+        let criteria = try XCTUnwrap(AgentSnapshotPresenter.trustCriteria(s))
+        XCTAssertFalse(criteria[0].done)                       // economic pending
+        XCTAssertTrue(criteria[1].done)                        // additional (A4) done
+        XCTAssertTrue(criteria[1].detail.contains("App Attest"))
+        XCTAssertEqual(AgentSnapshotPresenter.distinctPairProgress(s).met, 1)
+        XCTAssertEqual(AgentSnapshotPresenter.trustLine(s), "Provisional — 1 of 2 criteria met")
+    }
+
+    // Re-audit HIGH (back-compat): a legacy frame that predates the granular
+    // criterion IDs (hasGranularTrustCriteria == false) must fall back to the
+    // raw coordinator counters rather than rendering an empty-array "0 of 2",
+    // and must hide the by-name disclosure it cannot render faithfully.
+    func testLegacyFrameWithoutGranularCriteriaFallsBackToCounters() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.networkState = "buyer_serving"
+        s.malibuProjectionFresh = true
+        s.trustTier = .provisional
+        s.hasGranularTrustCriteria = false        // legacy CLI: no granular keys
+        s.trustCriteriaMet = 1
+        s.trustCriteriaRequired = 2
+        s.economicCriteria = []
+        s.additionalCriteria = []
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held", withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.distinctPairProgress(s).met, 1)
+        XCTAssertEqual(AgentSnapshotPresenter.trustLine(s), "Provisional — 1 of 2 criteria met")
+        // The per-criterion sheet is hidden for a legacy frame (cannot be named).
+        XCTAssertNil(AgentSnapshotPresenter.trustCriteria(s))
+    }
+
+    // Re-audit HIGH: an explicit CLI-signalled reward/wallet telemetry OUTAGE
+    // (rewardTelemetryUnavailable) — even with a fresh USDC earnings frame —
+    // reads as an honest "reward status unavailable", never the calm first-run
+    // "warming up" copy nor a false "earning". USDC stays truthful separately.
+    func testWalletStatusOutageSignalReadsAsUnavailableNotWarmingUp() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.networkState = "buyer_serving"
+        s.providerEarningsFresh = true
+        s.malibuProjectionFresh = false           // MALIBU projection failed
+        s.rewardTelemetryUnavailable = true       // CLI signalled the outage
+        s.walletBound = true
+        s.earningsUsdcToday = 0.05                // USDC unaffected
+        let health = AgentSnapshotPresenter.miningHealth(s)
+        XCTAssertEqual(health.reasonCode, "reward_telemetry_outage")
+        XCTAssertFalse(health.status.lowercased().contains("warming"))
+        XCTAssertFalse(health.status.contains("No payout wallet"))
+        let status = AgentSnapshotPresenter.consolidatedStatus(s)
+        // A genuine wallet-status outage is a fault → needs-attention, not the
+        // calm neutral reserved for benign warming-up / missing-wallet.
+        XCTAssertEqual(status.tone, .attention)
+        XCTAssertEqual(status.label, "Reward status unavailable")
+        XCTAssertFalse(status.meaning.lowercased().contains("warming"))
+        XCTAssertTrue(AgentSnapshotPresenter.isRewardTelemetryUnavailable(s))
+    }
+
+    // Re-audit HIGH (back-compat wire contract): the app derives
+    // hasGranularTrustCriteria from field PRESENCE on the wire — a legacy frame
+    // that never carried the granular keys decodes to false (→ counter
+    // fallback), while a modern frame that carries them (even empty) decodes to
+    // true. rewardTelemetryUnavailable defaults false when the key is absent.
+    func testGranularTrustCriteriaPresenceDecodesFromWire() throws {
+        let legacy = try JSONDecoder().decode(
+            ProviderEarnings.self,
+            from: Data("""
+            {"wallet_bound": true, "trust_tier": "provisional",
+             "trust_criteria_met": 1, "trust_criteria_required": 2,
+             "malibu_projection_fresh": true, "earnings_projection_fresh": true}
+            """.utf8)
+        )
+        XCTAssertFalse(legacy.hasGranularTrustCriteria)
+        XCTAssertFalse(legacy.rewardTelemetryUnavailable)
+
+        let modern = try JSONDecoder().decode(
+            ProviderEarnings.self,
+            from: Data("""
+            {"wallet_bound": true, "trust_tier": "provisional",
+             "trust_criteria_met": 1, "trust_criteria_required": 2,
+             "economic_criteria": [], "additional_criteria": [],
+             "malibu_projection_fresh": true, "earnings_projection_fresh": true}
+            """.utf8)
+        )
+        XCTAssertTrue(modern.hasGranularTrustCriteria)
+    }
+
+    // Re-audit HIGH: the additional slot uses the coordinator's distinct-pair
+    // EXISTENCE rule, not "additional distinct from every economic". A provider
+    // with E1,E2 economic + E1,A3 additional has a valid distinct pair (E1+A3),
+    // so both slots read done → 2 of 2, matching coordinator Trusted eligibility.
+    func testAdditionalSlotUsesDistinctPairExistence() throws {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.networkState = "buyer_serving"
+        s.malibuProjectionFresh = true
+        s.trustTier = .provisional
+        s.hasGranularTrustCriteria = true
+        s.economicCriteria = ["E1", "E2"]
+        s.additionalCriteria = ["E1", "A3"]
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "held", withdrawalState: "held",
+            primaryReason: "held_provisional_trust_tier",
+            reasons: ["held_provisional_trust_tier"]
+        )
+        let criteria = try XCTUnwrap(AgentSnapshotPresenter.trustCriteria(s))
+        XCTAssertTrue(criteria[0].done)
+        XCTAssertTrue(criteria[1].done)
+        XCTAssertEqual(AgentSnapshotPresenter.distinctPairProgress(s).met, 2)
+    }
+
+    // Re-audit HIGH: an authoritative BLOCKING reward reason (compute integrity
+    // block, untrusted token) surfaces its real reason as needs-attention,
+    // never the generic "Locked until Trusted / complete trust criteria".
+    func testBlockingRewardReasonSurfacesBeforeProvisionalLock() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.networkState = "buyer_serving"
+        s.walletBound = true
+        s.providerEarningsFresh = true
+        s.malibuProjectionFresh = true
+        s.trustTier = .provisional
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "ineligible", withdrawalState: "ineligible",
+            primaryReason: "compute_integrity_blocked",
+            reasons: ["compute_integrity_blocked"]
+        )
+        let health = AgentSnapshotPresenter.miningHealth(s)
+        XCTAssertEqual(health.reasonCode, "reward_eligibility_review")
+        XCTAssertFalse(health.status.contains("Locked until Trusted"))
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(s).tone, .attention)
+
+        // A past-epoch exclusion is informational (neutral), not a red alarm and
+        // not "Locked until Trusted".
+        var epoch = s
+        epoch.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "ineligible", withdrawalState: "ineligible",
+            primaryReason: "excluded_epoch_disposition",
+            reasons: ["excluded_epoch_disposition"]
+        )
+        let epochHealth = AgentSnapshotPresenter.miningHealth(epoch)
+        XCTAssertEqual(epochHealth.reasonCode, "reward_epoch_disposition")
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(epoch).tone, .neutral)
+    }
+
+    // Re-audit HIGH: a blocking reward verdict must beat the wallet-missing
+    // branch. A provider with no payout wallet AND a compute-integrity block
+    // must be told to resolve the block, not "add a payout wallet".
+    func testBlockingRewardReasonBeatsWalletMissing() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.networkState = "buyer_serving"
+        s.walletBound = false          // no payout wallet
+        s.providerEarningsFresh = true
+        s.malibuProjectionFresh = true
+        s.trustTier = .provisional
+        s.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "ineligible", withdrawalState: "ineligible",
+            primaryReason: "compute_integrity_blocked",
+            reasons: ["compute_integrity_blocked"]
+        )
+        let health = AgentSnapshotPresenter.miningHealth(s)
+        XCTAssertEqual(health.reasonCode, "reward_eligibility_review")
+        XCTAssertNotEqual(health.reasonCode, "wallet_missing")
+        XCTAssertFalse(health.nextAction.contains("payout wallet"))
+    }
+
+    // Re-audit MEDIUM: a post-setup interruption (reconnecting) is NOT collapsed
+    // into "Setting up" — it keeps its accurate status label.
+    func testInterruptionIsNotLabeledSettingUp() {
+        var s = AgentSnapshot.empty
+        s.state = .reconnecting
+        s.currentModelID = "meta-llama/llama-3.2-3b-instruct"
+        let status = AgentSnapshotPresenter.consolidatedStatus(s)
+        XCTAssertNotEqual(status.label, "Setting up")
+
+        // A genuine first-run startup still reads "Setting up".
+        var startup = AgentSnapshot.empty
+        startup.state = .starting
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(startup).label, "Setting up")
+    }
+
+    // Re-audit MEDIUM: the three USDC surfaces agree on a fresh PARTIAL frame.
+    // A frame reporting some totals but not usdc_today must not fabricate $0.00
+    // anywhere; hero, full line, and reward summary all use non-authoritative
+    // placeholders for the missing field.
+    func testPartialUSDCFrameNeverFabricatesTodayZero() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.networkState = "buyer_serving"
+        s.providerEarningsFresh = true
+        s.earningsUsdcToday = nil          // missing
+        s.earningsUsdcLifetime = 12.5      // but lifetime present → partial frame
+        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(s), "—")
+        XCTAssertTrue(AgentSnapshotPresenter.usdcFullLine(s).contains("not reported today"))
+        XCTAssertFalse(AgentSnapshotPresenter.usdcFullLine(s).contains("$0.00 today"))
+
+        // A brand-new all-absent fresh frame IS a real $0.00 across surfaces.
+        var allZero = AgentSnapshot.empty
+        allZero.state = .serving
+        allZero.networkState = "buyer_serving"
+        allZero.providerEarningsFresh = true
+        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(allZero), "$0.00")
+    }
+
+    // P2.7: one authoritative status following the three-state model.
+    func testConsolidatedStatusFollowsThreeStateModel() {
+        var setup = AgentSnapshot.empty
+        setup.state = .starting
+        let settingUp = AgentSnapshotPresenter.consolidatedStatus(setup)
+        XCTAssertEqual(settingUp.phase, .settingUp)
+        XCTAssertEqual(settingUp.label, "Setting up")
+
+        var live = AgentSnapshot.empty
+        live.state = .serving
+        live.networkState = "buyer_serving"
+        live.providerEarningsFresh = true
+        live.trustTier = .provisional
+        live.walletBound = false
+        let liveStatus = AgentSnapshotPresenter.consolidatedStatus(live)
+        XCTAssertEqual(liveStatus.phase, .live)
+        XCTAssertEqual(liveStatus.label, "Live · Provisional")
+        XCTAssertEqual(liveStatus.tone, .neutral)
+        XCTAssertEqual(liveStatus.nextAction, "Add a payout wallet to receive earnings.")
+
+        var earning = live
+        earning.trustTier = .trusted
+        earning.walletBound = true
+        let earningStatus = AgentSnapshotPresenter.consolidatedStatus(earning)
+        XCTAssertEqual(earningStatus.phase, .earning)
+        XCTAssertEqual(earningStatus.label, "Earning · Trusted")
+        XCTAssertNil(earningStatus.nextAction)
+
+        var err = AgentSnapshot.empty
+        err.state = .error
+        err.lastError = "boom"
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(err).phase, .needsAttention)
+
+        // A network-ready provider blocked on battery surfaces that (with its
+        // concrete action) rather than a generic "live" headline.
+        var battery = live
+        battery.providerEarningsFresh = true
+        battery.idlePrewarmSummary = ProviderIdlePrewarmSummary(skipsByReasonLast1h: ["on_battery": 1])
+        let batteryStatus = AgentSnapshotPresenter.consolidatedStatus(battery)
+        XCTAssertEqual(batteryStatus.phase, .needsAttention)
+        XCTAssertEqual(batteryStatus.nextAction, "Plug in power to earn.")
+    }
+
+    // P1.5 wire: the granular trust-criterion fields decode from the earnings
+    // frame, and legacy frames without them default safely.
+    func testProviderEarningsDecodesTrustCriteriaArrays() throws {
+        let data = Data("""
+        {
+          "wallet_bound": true,
+          "trust_tier": "provisional",
+          "unpaid_ledger_backlog_usdc": 0,
+          "unpaid_ledger_backlog_malibu": 0,
+          "trust_criteria_met": 1,
+          "trust_criteria_required": 2,
+          "economic_criteria": ["E1"],
+          "additional_criteria": ["A1"],
+          "verified_receipt_count": 137,
+          "app_attested": true
+        }
+        """.utf8)
+        let decoded = try JSONDecoder().decode(ProviderEarnings.self, from: data)
+        XCTAssertEqual(decoded.economicCriteria, ["E1"])
+        XCTAssertEqual(decoded.additionalCriteria, ["A1"])
+        XCTAssertEqual(decoded.verifiedReceiptCount, 137)
+        XCTAssertEqual(decoded.appAttested, true)
+
+        let legacy = try JSONDecoder().decode(ProviderEarnings.self, from: Data("""
+        {"wallet_bound": false, "trust_tier": "provisional", "unpaid_ledger_backlog_usdc": 0, "unpaid_ledger_backlog_malibu": 0}
+        """.utf8))
+        XCTAssertEqual(legacy.economicCriteria, [])
+        XCTAssertEqual(legacy.additionalCriteria, [])
+        XCTAssertNil(legacy.verifiedReceiptCount)
+        XCTAssertNil(legacy.appAttested)
+    }
+
+    // LOW-7: every coordinator reward reason (including the epoch-disposition
+    // reasons) survives decode on the app side instead of collapsing to the
+    // generic telemetry-drift sentinel; an unknown future reason fails closed.
+    func testAppRewardReasonAllowlistRoundTripsEveryCoordinatorReason() throws {
+        let reasons = [
+            "earning_verified_work", "eligible_idle_no_work", "held_provisional_trust_tier",
+            "held_provider_daily_cap", "held_wallet_daily_cap", "held_demotion_cooldown",
+            "held_epoch_disposition", "excluded_epoch_disposition",
+            "burned_or_retired_epoch_disposition", "withdrawable_balance_available",
+            "withdrawable_no_balance", "missing_wallet_binding", "insufficient_verified_receipts",
+            "app_attestation_missing", "hardware_evidence_unavailable",
+            "hardware_evidence_missing_or_expired", "compute_integrity_unavailable",
+            "compute_integrity_pending", "compute_integrity_blocked", "provider_token_untrusted",
+            "local_on_battery", "local_thermal_pressure", "model_not_ready", "telemetry_unavailable",
+        ]
+        for reason in reasons {
+            let json = """
+            {"schema_version":"malibu_reward_eligibility.v1","earning_state":"held",
+             "withdrawal_state":"held","primary_reason":"\(reason)","reasons":["\(reason)"]}
+            """
+            let decoded = try JSONDecoder().decode(MalibuRewardEligibility.self, from: Data(json.utf8))
+            XCTAssertEqual(decoded.primaryReason, reason, "reason \(reason) should round-trip")
+        }
+        let unknown = """
+        {"schema_version":"malibu_reward_eligibility.v1","earning_state":"held",
+         "withdrawal_state":"held","primary_reason":"future_unknown_reason","reasons":["future_unknown_reason"]}
+        """
+        let decoded = try JSONDecoder().decode(MalibuRewardEligibility.self, from: Data(unknown.utf8))
+        XCTAssertEqual(decoded.primaryReason, "telemetry_unavailable")
+    }
+
     func testDefaultPresenterStringsDoNotExposeInternalTerms() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .reconnecting
@@ -1348,8 +1804,9 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             AgentSnapshotPresenter.publicStatus(snapshot).title,
             AgentSnapshotPresenter.publicStatus(snapshot).detail,
             AgentSnapshotPresenter.publicStatus(snapshot).safeNextAction,
-            AgentSnapshotPresenter.dashboardHeadline(snapshot),
-            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
+            AgentSnapshotPresenter.consolidatedStatus(snapshot).label,
+            AgentSnapshotPresenter.consolidatedStatus(snapshot).meaning,
+            AgentSnapshotPresenter.consolidatedStatus(snapshot).nextAction,
             AgentSnapshotPresenter.stateLine(snapshot),
             AgentSnapshotPresenter.credentialLine(snapshot),
             AgentSnapshotPresenter.admissionIdentityLine(snapshot),
@@ -1774,6 +2231,75 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
         XCTAssertTrue(diagnosticLines.joined(separator: "\n").contains("Network context: network unavailable"))
         XCTAssertFalse(status.detail?.lowercased().contains("coordinator") == true)
+    }
+
+    // Re-audit: a post-setup connectivity OUTAGE (local link down) is not
+    // first-run setup. consolidatedStatus must classify a reconnecting snapshot
+    // whose networkState is "network_offline" as needs-attention (never
+    // .settingUp) and carry the honest "Network offline" copy.
+    func testConsolidatedStatusTreatsNetworkOfflineAsNeedsAttentionNotSettingUp() {
+        var s = AgentSnapshot.empty
+        s.state = .reconnecting
+        s.currentModelID = "llama"
+        s.networkState = "network_offline"
+
+        let status = AgentSnapshotPresenter.consolidatedStatus(s)
+        XCTAssertNotEqual(status.phase, .settingUp)
+        XCTAssertEqual(status.phase, .needsAttention)
+        XCTAssertEqual(status.tone, .attention)
+        XCTAssertEqual(status.label, "Network offline")
+    }
+
+    // Re-audit: a coordinator-side outage ("coordinator_unavailable") is also
+    // not first-run setup, but recovery is automatic — needs-attention with a
+    // neutral tone and the "Network unavailable" copy, never .settingUp.
+    func testConsolidatedStatusTreatsCoordinatorUnavailableAsNeedsAttentionNotSettingUp() {
+        var s = AgentSnapshot.empty
+        s.state = .reconnecting
+        s.currentModelID = "llama"
+        s.networkState = "coordinator_unavailable"
+
+        let status = AgentSnapshotPresenter.consolidatedStatus(s)
+        XCTAssertNotEqual(status.phase, .settingUp)
+        XCTAssertEqual(status.phase, .needsAttention)
+        XCTAssertEqual(status.tone, .neutral)
+        XCTAssertEqual(status.label, "Network unavailable")
+    }
+
+    // Re-audit: the reward-telemetry outage bit is projection-scoped. A genuine
+    // outage now arrives as a non-nil provider_earnings frame with the flag set;
+    // a later frame carrying no provider_earnings object is benign absence and
+    // must clear a stale sticky bit so a recovered snapshot stops reading
+    // "reward status unavailable".
+    @MainActor
+    func testNilEarningsMetricsFrameClearsStickyRewardTelemetryOutage() {
+        var initial = AgentSnapshot.empty
+        initial.rewardTelemetryUnavailable = true
+        let agent = MalibuAgent(initialSnapshot: initial)
+        XCTAssertTrue(agent.snapshot.rewardTelemetryUnavailable)
+
+        // A non-stub metrics frame (uptime reported) with no provider_earnings
+        // object: takes the nil-earnings branch that clears the outage bit.
+        agent.consume(.metricsResponse(
+            earningsUsdc: nil,
+            malibuAccrued: nil,
+            providerEarnings: nil,
+            gpuC: nil,
+            gpuUtilizationPct: nil,
+            latencyP50Ms: nil,
+            latencyP99Ms: nil,
+            queueDepth: nil,
+            requestsServedToday: nil,
+            requestsServedAllTime: nil,
+            requestsPerMinute: nil,
+            inputTokensToday: nil,
+            outputTokensToday: nil,
+            inputTokensAllTime: nil,
+            outputTokensAllTime: nil,
+            uptimeSec: 60
+        ))
+
+        XCTAssertFalse(agent.snapshot.rewardTelemetryUnavailable)
     }
 
     private func buyerServingObservationSnapshot(observedAt: Date) -> AgentSnapshot {

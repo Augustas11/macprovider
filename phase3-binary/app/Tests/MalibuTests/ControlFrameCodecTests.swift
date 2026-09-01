@@ -192,7 +192,7 @@ final class ControlFrameCodecTests: XCTestCase {
         XCTAssertNil(AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot))
         XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(agent.snapshot))
         XCTAssertFalse(AgentSnapshotPresenter.usdcFullLine(agent.snapshot).contains("$18.40"))
-        XCTAssertEqual(AgentSnapshotPresenter.malibuFullLine(agent.snapshot), "n/a MALIBU today · n/a all-time")
+        XCTAssertEqual(AgentSnapshotPresenter.malibuFullLine(agent.snapshot), "MALIBU rewards not available yet")
         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("[locked]"))
         XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("Trusted"))
         XCTAssertEqual(AgentSnapshotPresenter.trustLine(agent.snapshot), "MALIBU trust telemetry not published yet")
@@ -328,7 +328,7 @@ final class ControlFrameCodecTests: XCTestCase {
 
         XCTAssertFalse(agent.snapshot.providerEarningsFresh)
         XCTAssertTrue(agent.snapshot.malibuProjectionFresh)
-        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot), "n/a")
+        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot), "—")
         XCTAssertEqual(
             AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot),
             "MALIBU: status unavailable · 8.00 held"

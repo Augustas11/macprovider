@@ -77,6 +77,22 @@ struct AgentSnapshot: Equatable {
     var weightsPath: String?
     var trustCriteriaMet: Int?
     var trustCriteriaRequired: Int?
+    /// Satisfied economic/additional trust-criterion IDs (SPEC-026 §5.2),
+    /// plus supporting counters. Coordinator-served, threaded through the CLI
+    /// earnings frame. Display-only — used to name which Trusted criteria are
+    /// done vs pending.
+    var economicCriteria: [String] = []
+    var additionalCriteria: [String] = []
+    var verifiedReceiptCount: Int? = nil
+    var appAttested: Bool? = nil
+    /// True when reward/wallet telemetry was reached but FAILED (outage), as
+    /// distinct from a benign first-run absence. Keeps a genuine outage from
+    /// being softened into the calm "warming up" first-run status.
+    var rewardTelemetryUnavailable: Bool = false
+    /// True when the earnings frame actually carried granular trust-criteria
+    /// fields. False for legacy frames, where the app falls back to the raw
+    /// trust_criteria_met/required counters instead of an empty-array "0 of 2".
+    var hasGranularTrustCriteria: Bool = false
     var thermalState: MalibuThermalState?
     var lastError: String?
 
@@ -574,6 +590,39 @@ enum AgentSnapshotPresenter {
         let trustSummary: String
     }
 
+    /// A fresh authoritative reward verdict whose primary reason the generic
+    /// wallet-missing / provisional-tier branches would misrepresent — a compute
+    /// integrity block, untrusted provider token, missing/expired hardware
+    /// evidence, unavailable/pending integrity, or a past-epoch disposition.
+    /// Returns the honest MiningHealth for such a verdict, or nil to fall
+    /// through to the normal wallet/tier/cap logic.
+    private static func authoritativeBlockingRewardHealth(_ s: AgentSnapshot) -> MiningHealth? {
+        guard let eligibility = authoritativeRewardEligibility(s) else { return nil }
+        func health(_ status: String, _ code: String) -> MiningHealth {
+            MiningHealth(
+                status: status,
+                reasonCode: code,
+                reason: sentence(rewardReasonCopy(eligibility.primaryReason)),
+                nextAction: rewardReasonNextAction(eligibility.primaryReason),
+                rewardSummary: miningRewardSummary(s),
+                trustSummary: miningTrustSummary(s)
+            )
+        }
+        switch eligibility.primaryReason {
+        case "compute_integrity_blocked", "provider_token_untrusted":
+            return health("Reward eligibility needs review", "reward_eligibility_review")
+        case "hardware_evidence_unavailable",
+             "hardware_evidence_missing_or_expired",
+             "compute_integrity_unavailable",
+             "compute_integrity_pending":
+            return health("Reward status unavailable", "reward_projection_unavailable")
+        case "excluded_epoch_disposition", "burned_or_retired_epoch_disposition":
+            return health("Reward epoch update", "reward_epoch_disposition")
+        default:
+            return nil
+        }
+    }
+
     static func miningHealth(_ s: AgentSnapshot) -> MiningHealth {
         func result(
             status: String,
@@ -639,6 +688,18 @@ enum AgentSnapshotPresenter {
                 action: "Keep Malibu open while setup continues."
             )
         }
+        if s.rewardTelemetryUnavailable {
+            // The CLI reached reward/wallet telemetry but it FAILED (outage),
+            // which is NOT benign first-run absence. A genuine fault reads as
+            // needs-attention — never calm "warming up" or plain "earning".
+            // USDC earnings are shown separately and stay truthful.
+            return result(
+                status: "Reward status unavailable",
+                code: "reward_telemetry_outage",
+                reason: "MALIBU reward status can't be reached right now. Your USDC earnings are unaffected.",
+                action: "Nothing to do — this refreshes on its own."
+            )
+        }
         if !s.providerEarningsFresh && !s.hasObservedProviderEarnings {
             // Reframe only when the provider is genuinely buyer-serving-admitted
             // (isNetworkReady) AND has no fresh MALIBU projection that a later
@@ -659,7 +720,7 @@ enum AgentSnapshotPresenter {
                 }
                 return result(
                     status: "No earnings yet",
-                    code: "reward_projection_unavailable",
+                    code: "reward_projection_warming_up",
                     reason: "You're live and building trust. Earnings appear after your first paid job.",
                     action: action
                 )
@@ -671,15 +732,33 @@ enum AgentSnapshotPresenter {
                 action: isActive(s) ? "Keep Malibu open while reward status refreshes." : "Start the provider to refresh reward status."
             )
         }
+        // An authoritative BLOCKING/ineligible/excluded reward verdict must
+        // surface its real reason BEFORE the wallet-missing and provisional-tier
+        // branches, so a compute-integrity block, untrusted provider token,
+        // missing hardware evidence, or epoch exclusion is not mislabeled as
+        // "No payout wallet yet" or a routine "Locked until Trusted".
+        if let blocked = authoritativeBlockingRewardHealth(s) {
+            return blocked
+        }
         if s.walletBound == false {
             return result(
-                status: "Missing wallet",
+                status: "No payout wallet yet",
                 code: "wallet_missing",
-                reason: "Rewards are visible, but no payout wallet is bound.",
-                action: "Add a payout wallet."
+                reason: "You're set up to earn — you just need somewhere to be paid.",
+                action: "Add a payout wallet to receive earnings."
             )
         }
         if s.malibuProjectionFresh {
+            if isRewardTelemetryUnavailable(s) {
+                // A fresh frame that could not compute a verdict is a telemetry
+                // fault, not "accruing but locked" — surface it as needs-attention.
+                return result(
+                    status: "Reward status unavailable",
+                    code: "reward_telemetry_outage",
+                    reason: "MALIBU reward status could not be determined right now.",
+                    action: "Nothing to do — this refreshes on its own."
+                )
+            }
             if let eligibility = authoritativeRewardEligibility(s), eligibility.primaryReason == "held_provider_daily_cap" {
                 return result(
                     status: "Provider cap held",
@@ -774,16 +853,28 @@ enum AgentSnapshotPresenter {
     }
 
     private static func miningRewardSummary(_ s: AgentSnapshot) -> String {
-        let usdc = canShowLastKnownUSDC(s)
-            ? s.earningsUsdcToday.map { "\(formatUSDC($0)) USDC today" } ?? "n/a USDC today"
-            : "USDC unavailable"
+        let usdc: String
+        if !canShowLastKnownUSDC(s) {
+            usdc = "USDC unavailable"
+        } else if let today = s.earningsUsdcToday {
+            usdc = "\(formatUSDC(today)) USDC today"
+        } else {
+            // Missing today: real $0.00 only for a brand-new all-zero fresh
+            // frame; otherwise a non-authoritative placeholder, matching the
+            // hero number and full line rather than a bare "n/a".
+            usdc = usdcFreshZeroAllowed(s) ? "\(formatUSDC(0)) USDC today" : "USDC today not reported"
+        }
         let malibu: String
         if s.malibuProjectionFresh {
-            let withdrawable = s.malibuWithdrawable.map { String(format: "%.2f withdrawable", $0) }
-                ?? "n/a withdrawable"
-            let held = s.malibuHeld.map { String(format: "%.2f held", $0) }
-                ?? "n/a held"
-            malibu = "MALIBU \(withdrawable) / \(held)"
+            if isRewardTelemetryUnavailable(s) {
+                malibu = "MALIBU reward status unavailable"
+            } else {
+                let withdrawable = s.malibuWithdrawable.map { String(format: "%.2f withdrawable", $0) }
+                    ?? "n/a withdrawable"
+                let held = s.malibuHeld.map { String(format: "%.2f held", $0) }
+                    ?? "n/a held"
+                malibu = "MALIBU \(withdrawable) / \(held)"
+            }
         } else {
             malibu = "MALIBU unavailable"
         }
@@ -794,6 +885,9 @@ enum AgentSnapshotPresenter {
         guard s.malibuProjectionFresh else {
             return "MALIBU trust telemetry not published yet"
         }
+        if isRewardTelemetryUnavailable(s) {
+            return "Trust status temporarily unavailable"
+        }
         let tier = s.trustTier.rawValue.capitalized
         if hasDemotionCooldown(s) {
             return "Trust: \(tier) · Trust review in progress"
@@ -801,15 +895,21 @@ enum AgentSnapshotPresenter {
         if s.trustTier == .trusted {
             return "Trust: Trusted"
         }
-        if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
-            return "Trust: \(tier) · \(met) of \(required) criteria met"
-        }
-        return "Trust: \(tier)"
+        let progress = distinctPairProgress(s)
+        return "Trust: \(tier) · \(progress.met) of \(progress.required) criteria met"
     }
 
     private static func trustCriteriaAction(_ s: AgentSnapshot) -> String? {
         if hasDemotionCooldown(s) {
             return "Keep Malibu online; withdrawals unlock automatically when Trusted."
+        }
+        // Base the remaining-criteria count on distinct-pair truth when a fresh
+        // projection is available; fall back to the raw aggregate only when the
+        // granular arrays are not.
+        if s.malibuProjectionFresh, !isRewardTelemetryUnavailable(s) {
+            let progress = distinctPairProgress(s)
+            guard progress.required > progress.met else { return nil }
+            return "Complete \(progress.required - progress.met) more trust criteria to unlock withdrawals."
         }
         guard let met = s.trustCriteriaMet,
               let required = s.trustCriteriaRequired,
@@ -831,6 +931,43 @@ enum AgentSnapshotPresenter {
 
     private static func isLocalOnly(_ s: AgentSnapshot) -> Bool {
         s.state == .reconnecting && s.currentModelID != nil
+    }
+
+    /// A genuine post-setup connectivity OUTAGE (local internet down, or the
+    /// coordinator unreachable). This is NOT first-run setup: it must not read
+    /// "Setting up / keep Malibu open", but surface honestly with a
+    /// restore-connection (or auto-reconnect) action.
+    static func isNetworkOutage(_ s: AgentSnapshot) -> Bool {
+        s.networkState == "network_offline"
+            || s.networkState == "coordinator_unavailable"
+            || s.lifecycleState == "network_offline"
+            || s.lifecycleState == "coordinator_unavailable"
+    }
+
+    /// True when the outage is the local link being down (user can act), vs the
+    /// coordinator being unreachable (reconnect is automatic).
+    private static func isLocalLinkOffline(_ s: AgentSnapshot) -> Bool {
+        s.networkState == "network_offline" || s.lifecycleState == "network_offline"
+    }
+
+    /// True when a fresh MALIBU projection reports a genuine "cannot determine"
+    /// verdict — a telemetry outage or schema-drift sentinel — rather than a
+    /// real reward state. There is NO benign "warming up" unavailable state:
+    /// the coordinator emits a concrete verdict (held / withdrawable / …) for a
+    /// brand-new provider, so an "unavailable" withdrawal state is always a
+    /// problem and must read as one, not as first-run calm.
+    static func isRewardTelemetryUnavailable(_ s: AgentSnapshot) -> Bool {
+        // An explicit CLI-signalled telemetry outage (wallet-status decode
+        // failure) is authoritative even when the MALIBU projection is not
+        // fresh, so the fail-closed frame is never read as first-run calm.
+        if s.rewardTelemetryUnavailable { return true }
+        guard s.malibuProjectionFresh else { return false }
+        // A fresh verdict whose withdrawal state is "unavailable" is a genuine
+        // "cannot determine" telemetry sentinel and is authoritative regardless
+        // of any amount fields the frame may still carry — stale/partial
+        // amounts must not mask an unavailable verdict.
+        guard let eligibility = authoritativeRewardEligibility(s) else { return false }
+        return eligibility.withdrawalState == "unavailable"
     }
 
     private static func authoritativeLifecycleLabel(_ s: AgentSnapshot) -> String? {
@@ -948,6 +1085,25 @@ enum AgentSnapshotPresenter {
                 executableAction: .exportDiagnostics
             )
         }
+        // A connectivity OUTAGE (local link down or coordinator unreachable) is
+        // not benign setup and must be surfaced before the "waiting / preparing"
+        // copy, so a provider in a real outage is told to restore the connection
+        // (or that reconnect is automatic) rather than "keep Malibu open while
+        // setup continues".
+        if isNetworkOutage(s) {
+            if isLocalLinkOffline(s) {
+                return PublicStatus(
+                    title: "Network offline",
+                    detail: "This Mac lost its internet connection, so it can't reach the network.",
+                    safeNextAction: "Check this Mac's internet connection. Reconnect is automatic once it's back."
+                )
+            }
+            return PublicStatus(
+                title: "Network unavailable",
+                detail: "Malibu can't reach the network right now. This is on the network side, not your Mac.",
+                safeNextAction: "No action needed — reconnect is automatic. Keep Malibu open."
+            )
+        }
         if isWaitingForNetworkApproval(s) {
             return PublicStatus(
                 title: "Waiting for network approval",
@@ -1020,6 +1176,141 @@ enum AgentSnapshotPresenter {
                 safeNextAction: "Keep Malibu open while setup continues."
             )
         }
+    }
+
+    /// One authoritative status following a three-state model (Setting up /
+    /// Live · Provisional / Earning · Trusted) plus a needs-attention fallback.
+    /// The reward/blocker dimension (meaning, next action, tone) is derived from
+    /// the SAME `miningHealth` reason model the card and header both consume, so
+    /// caps/holds/telemetry/local-block states surface with their one concrete
+    /// action rather than a generic "Earning · Trusted / withdrawals unlocked".
+    struct ConsolidatedStatus: Equatable {
+        enum Phase: String { case settingUp, live, earning, needsAttention }
+        enum Tone: String { case positive, neutral, attention }
+        let phase: Phase
+        let tone: Tone
+        let label: String
+        let meaning: String
+        let nextAction: String?
+    }
+
+    static func consolidatedStatus(_ s: AgentSnapshot) -> ConsolidatedStatus {
+        let publicS = publicStatus(s)
+        if s.state == .error || s.state == .idle || s.state == .paused
+            || publicS.executableAction != nil {
+            let tone: ConsolidatedStatus.Tone =
+                (s.state == .paused || s.state == .idle) ? .neutral : .attention
+            return ConsolidatedStatus(
+                phase: .needsAttention,
+                tone: tone,
+                label: publicS.title,
+                meaning: publicS.detail ?? "",
+                nextAction: publicS.safeNextAction
+            )
+        }
+        guard isNetworkReady(s) else {
+            // A connectivity outage is not first-run setup. Classify it as
+            // needs-attention (never .settingUp) and carry publicStatus's honest
+            // outage copy + restore-connection action. A local-link outage is the
+            // user's to fix (attention tone); a coordinator-side outage recovers
+            // automatically (neutral tone), but neither is "Setting up".
+            if isNetworkOutage(s) {
+                return ConsolidatedStatus(
+                    phase: .needsAttention,
+                    tone: isLocalLinkOffline(s) ? .attention : .neutral,
+                    label: publicS.title,
+                    meaning: publicS.detail ?? "Malibu can't reach the network right now.",
+                    nextAction: publicS.safeNextAction
+                )
+            }
+            // Only genuine first-run/startup reads "Setting up". A post-setup
+            // interruption (was serving, now not buyer-serving; reconnecting)
+            // keeps publicStatus's accurate copy so a real interruption does not
+            // masquerade as first-run setup.
+            if s.state == .starting {
+                return ConsolidatedStatus(
+                    phase: .settingUp,
+                    tone: .neutral,
+                    label: "Setting up",
+                    meaning: publicS.detail ?? "Getting this Mac ready for customer work.",
+                    nextAction: publicS.safeNextAction ?? "Keep Malibu open while setup finishes."
+                )
+            }
+            return ConsolidatedStatus(
+                phase: .settingUp,
+                tone: .neutral,
+                label: publicS.title,
+                meaning: publicS.detail ?? "Reconnecting to the network.",
+                nextAction: publicS.safeNextAction ?? "Keep Malibu open while it reconnects."
+            )
+        }
+        // Network-ready: fold in the reward/blocker reason model so the card and
+        // header agree with the Mining/reward truth, not just the trust tier.
+        let mining = miningHealth(s)
+        let tierPhase: ConsolidatedStatus.Phase = s.trustTier == .trusted ? .earning : .live
+        let tierLabel = s.trustTier == .trusted ? "Earning · Trusted" : "Live · Provisional"
+
+        switch mining.reasonCode {
+        case "earning", "trusted_withdrawable":
+            // Only claim withdrawals unlocked for a Trusted provider with no
+            // blocking verdict (this branch); caps/holds fall through below.
+            let meaning = s.trustTier == .trusted
+                ? "This Mac is approved and earning. MALIBU withdrawals are unlocked."
+                : "This Mac is live and earning. MALIBU withdrawals unlock once you reach Trusted."
+            return ConsolidatedStatus(
+                phase: tierPhase, tone: .positive, label: tierLabel,
+                meaning: meaning, nextAction: liveNextAction(s)
+            )
+        case "idle_no_work", "eligible_waiting_settlement", "customer_availability_pending":
+            return ConsolidatedStatus(
+                phase: tierPhase, tone: .neutral, label: tierLabel,
+                meaning: mining.reason, nextAction: liveNextAction(s)
+            )
+        case "wallet_missing":
+            return ConsolidatedStatus(
+                phase: tierPhase, tone: .neutral, label: tierLabel,
+                meaning: mining.reason, nextAction: mining.nextAction
+            )
+        case "reward_projection_warming_up", "trust_tier_provisional":
+            return ConsolidatedStatus(
+                phase: .live, tone: .neutral, label: "Live · Provisional",
+                meaning: mining.reason, nextAction: mining.nextAction
+            )
+        case "wallet_daily_cap_held", "provider_daily_cap_held", "rewards_held":
+            // A hold/cap: keep the tier label but never claim "unlocked"; carry
+            // the specific reason and its one next action.
+            return ConsolidatedStatus(
+                phase: tierPhase, tone: .neutral, label: tierLabel,
+                meaning: mining.reason, nextAction: mining.nextAction
+            )
+        case "reward_projection_unavailable", "reward_epoch_disposition":
+            // A reward-telemetry outage or a past-epoch disposition is not the
+            // provider's fault and needs no action. Surface it honestly with a
+            // neutral tone — never a false-positive "earning", never a red
+            // alarm. The USDC earnings display stays truthful separately.
+            return ConsolidatedStatus(
+                phase: .live, tone: .neutral, label: mining.status,
+                meaning: mining.reason, nextAction: mining.nextAction
+            )
+        default:
+            // Local blocks (battery/thermal/preparing), telemetry unavailable,
+            // compute-integrity / untrusted-token, ineligible, and any future
+            // blocker read as needs-attention with the concrete recovery action.
+            return ConsolidatedStatus(
+                phase: .needsAttention, tone: .attention, label: mining.status,
+                meaning: mining.reason, nextAction: mining.nextAction
+            )
+        }
+    }
+
+    private static func liveNextAction(_ s: AgentSnapshot) -> String? {
+        if s.walletBound == false {
+            return "Add a payout wallet to receive earnings."
+        }
+        if s.trustTier == .provisional {
+            return trustCriteriaAction(s) ?? "Stay online to reach Trusted and unlock withdrawals."
+        }
+        return nil
     }
 
     private static func isModelPreparing(_ s: AgentSnapshot) -> Bool {
@@ -1129,56 +1420,6 @@ enum AgentSnapshotPresenter {
             default: return "Failed"
             }
         }
-    }
-
-    static func dashboardHeadline(_ s: AgentSnapshot) -> String {
-        switch s.state {
-        case .idle:         return publicStatus(s).title
-        case .starting:     return publicStatus(s).title
-        case .serving:
-            return publicStatus(s).title
-        case .paused:       return "Paused"
-        case .reconnecting:
-            return publicStatus(s).title
-        case .error:        return publicStatus(s).title
-        }
-    }
-
-    static func dashboardSubtitle(_ s: AgentSnapshot) -> String? {
-        let status = publicStatus(s)
-        switch s.state {
-        case .serving where !isNetworkReady(s):
-            return status.detail
-        case .serving where !s.providerEarningsFresh && !s.hasObservedProviderEarnings:
-            return "Ready for customer work · earnings unavailable"
-        case .serving where idleEarningsAreZero(s):
-            return idleHonestySubtitle(s)
-        case .serving:
-            return s.currentModelID
-        case .reconnecting where isLocalOnly(s):
-            return publicErrorDetail(s.lastError) ?? status.detail
-        case .reconnecting:
-            return publicErrorDetail(s.lastError) ?? status.detail
-        case .starting:
-            return publicErrorDetail(s.lastError) ?? status.detail
-        case .error:
-            return status.detail
-        default:
-            return nil
-        }
-    }
-
-    /// Ready + $0 is usually a quiet network, not a broken Mac. Queue depth
-    /// and today's request count distinguish those cases from work waiting
-    /// locally or unpaid work that has not settled.
-    private static func idleHonestySubtitle(_ s: AgentSnapshot) -> String {
-        if (s.queueDepth ?? 0) > 0 {
-            return "Ready · work is queued on this Mac"
-        }
-        if (s.requestsServedToday ?? 0) > 0 {
-            return "Ready · work ran; paid credits appear when a job settles"
-        }
-        return "Ready for customer work · network is quiet"
     }
 
     private static func idleEarningsAreZero(_ s: AgentSnapshot) -> Bool {
@@ -1600,16 +1841,36 @@ enum AgentSnapshotPresenter {
         return "\(today)\n\(allTime)"
     }
 
+    /// Whether a MISSING USDC sub-total may be rendered as an authoritative
+    /// $0.00. Only a brand-new fresh frame reporting NONE of the four totals is a
+    /// real all-zero state; a fresh frame reporting some-but-not-all is anomalous
+    /// (partial), and a stale/last-known frame did not report the field. In
+    /// those cases missing fields are shown as non-authoritative, never $0.00 —
+    /// so no surface prints a fabricated zero (or an impossible "life < today").
+    /// Shared by usdcFullLine, usdcTodayDisplay, and miningRewardSummary so the
+    /// three USDC surfaces always agree.
+    private static func usdcFreshZeroAllowed(_ s: AgentSnapshot) -> Bool {
+        guard s.providerEarningsFresh else { return false }
+        let totals = [s.earningsUsdcToday, s.earningsUsdcWeek, s.earningsUsdcPending, s.earningsUsdcLifetime]
+        let presentCount = totals.filter { $0 != nil }.count
+        return presentCount == 0 || presentCount == totals.count
+    }
+
     static func usdcFullLine(_ s: AgentSnapshot) -> String {
+        // Genuine telemetry failure: keep it small and calm, not four "n/a"s.
         if !canShowLastKnownUSDC(s) {
-            let today = "n/a today"
-            return "\(today) · n/a wk · n/a accrued · n/a life"
+            return "Earnings not available yet"
+        }
+        let zerosWhenMissing = usdcFreshZeroAllowed(s)
+        func field(_ value: Double?, _ suffix: String) -> String {
+            if let value { return "\(formatUSDC(value)) \(suffix)" }
+            return zerosWhenMissing ? "\(formatUSDC(0)) \(suffix)" : "not reported \(suffix)"
         }
         return [
-            s.earningsUsdcToday.map { "\(formatUSDC($0)) today" } ?? "n/a today",
-            s.earningsUsdcWeek.map { "\(formatUSDC($0)) wk" } ?? "n/a wk",
-            s.earningsUsdcPending.map { "\(formatUSDC($0)) accrued" } ?? "n/a accrued",
-            s.earningsUsdcLifetime.map { "\(formatUSDC($0)) life" } ?? "n/a life"
+            field(s.earningsUsdcToday, "today"),
+            field(s.earningsUsdcWeek, "wk"),
+            field(s.earningsUsdcPending, "accrued"),
+            field(s.earningsUsdcLifetime, "life")
         ].joined(separator: " · ")
     }
 
@@ -1621,16 +1882,37 @@ enum AgentSnapshotPresenter {
     }
 
     static func usdcTodayDisplay(_ s: AgentSnapshot) -> String {
+        // Non-hero placeholder for genuine unavailability; the hero number must
+        // never fabricate an authoritative "$0.00" from missing telemetry.
         guard canShowLastKnownUSDC(s) else {
-            return "n/a"
+            return "—"
         }
-        return s.earningsUsdcToday.map { formatUSDC($0) } ?? "n/a"
+        if let today = s.earningsUsdcToday {
+            return formatUSDC(today)
+        }
+        // Today missing: only a brand-new all-zero fresh frame is a real $0.00;
+        // a partial/stale frame shows the non-authoritative placeholder so the
+        // hero, full line, and reward summary agree.
+        return usdcFreshZeroAllowed(s) ? formatUSDC(0) : "—"
     }
 
     static func malibuFullLine(_ s: AgentSnapshot) -> String {
         if !s.malibuProjectionFresh {
-            let today = "n/a MALIBU today"
-            return "\(today) · n/a all-time"
+            return "MALIBU rewards not available yet"
+        }
+        // A fresh-but-unavailable verdict with NO concrete amounts must not
+        // render "n/a MALIBU today · n/a all-time · …" — that is the exact
+        // failure copy this rework removes. Collapse it to one calm line. When
+        // real amounts ARE present, keep showing them below with an honest
+        // "reward status unavailable" suffix rather than hiding known data.
+        if isRewardTelemetryUnavailable(s) {
+            let hasAmounts = s.malibuAccruedToday != nil
+                || (s.malibuAccruedAllTime ?? 0) != 0
+                || s.malibuWithdrawable != nil
+                || s.malibuHeld != nil
+            if !hasAmounts {
+                return "MALIBU reward status unavailable"
+            }
         }
         let today = malibuTodayLine(s, compact: true)
         let allTime = s.malibuAccruedAllTime.map { String(format: "%.2f all-time", $0) }
@@ -1694,7 +1976,7 @@ enum AgentSnapshotPresenter {
     static func malibuHoldLine(_ s: AgentSnapshot) -> String? {
         if let eligibility = displayRewardEligibility(s),
            eligibility.withdrawalState != "withdrawable" {
-            return "MALIBU status: \(rewardReasonCopy(eligibility.primaryReason)) Next: \(rewardReasonNextAction(eligibility.primaryReason))"
+            return "MALIBU status: \(rewardReasonCopy(eligibility.primaryReason)). Next: \(rewardReasonNextAction(eligibility.primaryReason))"
         }
         let holdReasons = displayMalibuHoldReasons(s)
         guard s.malibuProjectionFresh, !holdReasons.isEmpty else { return nil }
@@ -1717,6 +1999,7 @@ enum AgentSnapshotPresenter {
 
     static func trustLine(_ s: AgentSnapshot) -> String {
         guard s.malibuProjectionFresh else { return "MALIBU trust telemetry not published yet" }
+        if isRewardTelemetryUnavailable(s) { return "Trust status temporarily unavailable" }
         let tier = s.trustTier.rawValue.capitalized
         if hasDemotionCooldown(s) {
             return "\(tier) — Trust review in progress"
@@ -1724,10 +2007,149 @@ enum AgentSnapshotPresenter {
         if s.trustTier == .trusted {
             return "Trusted"
         }
-        if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
-            return "\(tier) — \(met) of \(required) criteria met · Unlock Trusted →"
+        let progress = distinctPairProgress(s)
+        return "\(tier) — \(progress.met) of \(progress.required) criteria met"
+    }
+
+    /// What reaching Trusted grants, in plain language. Used by the trust-tier
+    /// disclosure so "Unlock Trusted" leads somewhere concrete.
+    static func trustUnlockSummary(_ s: AgentSnapshot) -> String {
+        if s.trustTier == .trusted {
+            return "Trusted — MALIBU withdrawals are unlocked."
         }
-        return tier
+        return "Reaching Trusted unlocks MALIBU reward withdrawals. USDC earnings are unaffected."
+    }
+
+    /// A single trust criterion rendered with a done/pending state and a plain
+    /// next step. Kept view-agnostic so the disclosure and tests share one
+    /// source of truth.
+    struct TrustCriterion: Equatable {
+        let title: String
+        let done: Bool
+        let detail: String
+    }
+
+    // Criterion IDs mirror SPEC-026 §5.2 (see phase4-coordinator/internal/
+    // rewards/unlock.go). E1 verified receipts / E2 wallet balance 72h /
+    // E3 operator promotion are economic; A1 time online / A3 wallet balance
+    // 72h / A4 App Attest are additional.
+    private static func criterionName(_ id: String) -> String {
+        switch id {
+        case "E1": return "100 verified customer jobs"
+        case "E2": return "wallet balance held 72h"
+        case "E3": return "operator promotion"
+        case "A1": return "72 hours online"
+        case "A3": return "wallet balance held 72h"
+        case "A4": return "App Attest verification"
+        default: return id
+        }
+    }
+
+    // Port of the coordinator's overlap rule (unlock.go criteriaOverlap):
+    // identical IDs, or the E2/A3 wallet-balance pair, do NOT count as two
+    // distinct unlock slots.
+    private static func criteriaOverlap(_ economic: String, _ additional: String) -> Bool {
+        if economic == additional { return true }
+        if (economic == "E2" && additional == "A3") || (economic == "A3" && additional == "E2") {
+            return true
+        }
+        return false
+    }
+
+    // Port of unlock.go distinctUnlockPair: a valid Trusted unlock needs one
+    // economic and one additional criterion that do not overlap. This is an
+    // EXISTENCE check over pairs — not "additional distinct from every economic"
+    // — so E1,E2 economic + E1,A3 additional pairs E1+A3 (or E2+A?) and counts.
+    private static func hasDistinctUnlockPair(_ economic: [String], _ additional: [String]) -> Bool {
+        for e in economic {
+            for a in additional where !criteriaOverlap(e, a) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// True when the additional slot is satisfied in its own right. With at
+    /// least one economic criterion present, this mirrors the coordinator's
+    /// distinct-pair EXISTENCE rule (there exists an economic+additional pair
+    /// that does not overlap). With no economic criterion yet, any additional
+    /// criterion (e.g. A4 App Attest alone) counts as done for its row — the
+    /// provider genuinely completed one of the two displayed slots.
+    private static func additionalSlotDone(_ s: AgentSnapshot) -> Bool {
+        if s.economicCriteria.isEmpty { return !s.additionalCriteria.isEmpty }
+        return hasDistinctUnlockPair(s.economicCriteria, s.additionalCriteria)
+    }
+
+    /// Progress across the two displayed unlock slots (economic + distinct
+    /// additional). Deliberately ignores the raw `trust_criteria_met` unique-ID
+    /// count, which can read "2 of 2" for an overlapping E2/A3 or a duplicate E1
+    /// that does NOT satisfy two distinct slots. For a legacy frame that carried
+    /// no granular criterion IDs, the by-name model cannot be computed, so it
+    /// falls back to the raw coordinator counters rather than an empty "0 of 2".
+    static func distinctPairProgress(_ s: AgentSnapshot) -> (met: Int, required: Int) {
+        guard s.hasGranularTrustCriteria else {
+            let required = s.trustCriteriaRequired ?? 2
+            let met = min(max(s.trustCriteriaMet ?? 0, 0), required)
+            return (met, required)
+        }
+        let economicDone = !s.economicCriteria.isEmpty
+        return ((economicDone ? 1 : 0) + (additionalSlotDone(s) ? 1 : 0), 2)
+    }
+
+    private static func distinctAdditionalName(_ s: AgentSnapshot) -> String {
+        // Name the additional criterion that forms the distinct pair (pairs with
+        // some economic criterion), or, when no economic criterion is present
+        // yet, the first satisfied additional criterion.
+        for a in s.additionalCriteria
+        where s.economicCriteria.isEmpty
+            || s.economicCriteria.contains(where: { !criteriaOverlap($0, a) }) {
+            return criterionName(a)
+        }
+        return "an additional criterion"
+    }
+
+    /// The two Trusted unlock slots (one economic + one DISTINCT additional per
+    /// SPEC-026 §5.2), rendered by their real satisfied criteria. `nil` until a
+    /// fresh MALIBU projection with a real verdict is available. An overlapping
+    /// E2/A3 or a duplicate E1 leaves the second slot PENDING, matching the
+    /// coordinator's unlock rule. No granular uptime countdown exists
+    /// end-to-end yet, so the pending additional slot says "just stay online".
+    // TODO: render an "Nh of 72h" countdown once the coordinator exposes a
+    // granular uptime-progress field on the reward projection.
+    static func trustCriteria(_ s: AgentSnapshot) -> [TrustCriterion]? {
+        guard s.malibuProjectionFresh, !isRewardTelemetryUnavailable(s) else { return nil }
+        // The by-name disclosure needs the granular criterion IDs. A legacy
+        // frame that predates them cannot be rendered faithfully, so hide the
+        // per-criterion sheet; the aggregate "N of M" line (distinctPairProgress)
+        // still shows via the raw counters.
+        guard s.hasGranularTrustCriteria else { return nil }
+        let economicDone = !s.economicCriteria.isEmpty
+        let additionalDone = additionalSlotDone(s)
+
+        let economicDetail: String
+        if economicDone {
+            economicDetail = "Done — \(s.economicCriteria.map(criterionName).joined(separator: ", "))."
+        } else if let count = s.verifiedReceiptCount, count > 0 {
+            economicDetail = "Serve verified customer jobs (\(formatCount(count)) so far), keep a funded wallet 72h, or get operator promotion."
+        } else {
+            economicDetail = "Serve verified customer jobs, keep a funded wallet 72h, or get operator promotion."
+        }
+
+        let additionalDetail: String
+        if additionalDone {
+            additionalDetail = "Done — \(distinctAdditionalName(s))."
+        } else if !s.additionalCriteria.isEmpty {
+            // A criterion is satisfied but it overlaps the economic slot (E2/A3)
+            // or duplicates E1 — a distinct second criterion is still needed.
+            additionalDetail = "Add a criterion distinct from your economic one — stay online 72h or complete App Attest."
+        } else {
+            additionalDetail = "Nothing to do — just stay online (72h)."
+        }
+
+        return [
+            TrustCriterion(title: "Economic criterion", done: economicDone, detail: economicDetail),
+            TrustCriterion(title: "Distinct additional criterion", done: additionalDone, detail: additionalDetail),
+        ]
     }
 
     static func uptimeLine(_ s: AgentSnapshot) -> String {
@@ -2307,6 +2729,12 @@ enum AgentSnapshotPresenter {
             return "MALIBU is locked until Trusted"
         case "held_demotion_cooldown":
             return "MALIBU is locked until Trusted"
+        case "held_epoch_disposition":
+            return "MALIBU is held pending epoch settlement"
+        case "excluded_epoch_disposition":
+            return "MALIBU was excluded from this epoch"
+        case "burned_or_retired_epoch_disposition":
+            return "MALIBU was retired for this epoch"
         case "withdrawable_balance_available":
             return "MALIBU is available to withdraw"
         case "withdrawable_no_balance":
@@ -2348,6 +2776,14 @@ enum AgentSnapshotPresenter {
         }
     }
 
+    /// Capitalize the first character and end with a period, turning a lowercase
+    /// reason clause into a standalone sentence for status/reason copy.
+    private static func sentence(_ clause: String) -> String {
+        guard let first = clause.first else { return clause }
+        let capitalized = first.uppercased() + clause.dropFirst()
+        return capitalized.hasSuffix(".") ? capitalized : capitalized + "."
+    }
+
     private static func rewardReasonCopy(_ reason: String) -> String {
         switch reason {
         case "held_provider_daily_cap":
@@ -2358,6 +2794,12 @@ enum AgentSnapshotPresenter {
             return "Trust verification is incomplete"
         case "held_demotion_cooldown":
             return "Trust verification is in progress"
+        case "held_epoch_disposition":
+            return "MALIBU is held pending epoch settlement"
+        case "excluded_epoch_disposition":
+            return "MALIBU was excluded from this epoch"
+        case "burned_or_retired_epoch_disposition":
+            return "MALIBU was retired for this epoch"
         case "missing_wallet_binding":
             return "wallet binding is missing"
         case "insufficient_verified_receipts":
@@ -2388,6 +2830,10 @@ enum AgentSnapshotPresenter {
             return "Complete the remaining trust criteria to unlock withdrawals."
         case "held_demotion_cooldown":
             return "Keep Malibu online; withdrawals unlock automatically when Trusted."
+        case "held_epoch_disposition":
+            return "This settles at the next epoch."
+        case "excluded_epoch_disposition", "burned_or_retired_epoch_disposition":
+            return "Nothing to do — this reflects a past epoch."
         case "missing_wallet_binding":
             return "Add a payout wallet."
         case "insufficient_verified_receipts":
@@ -2396,8 +2842,13 @@ enum AgentSnapshotPresenter {
             return "Wait for verification to complete."
         case "compute_integrity_blocked", "provider_token_untrusted":
             return "Review Advanced diagnostics."
+        case "hardware_evidence_unavailable",
+             "hardware_evidence_missing_or_expired",
+             "compute_integrity_unavailable",
+             "telemetry_unavailable":
+            return "Nothing to do — this refreshes on its own."
         default:
-            return "Try again when reward status refreshes."
+            return "Nothing to do — this refreshes on its own."
         }
     }
 

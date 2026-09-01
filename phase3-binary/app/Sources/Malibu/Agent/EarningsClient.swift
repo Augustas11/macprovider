@@ -128,6 +128,9 @@ struct MalibuRewardEligibility: Codable, Equatable {
         "held_provider_daily_cap",
         "held_wallet_daily_cap",
         "held_demotion_cooldown",
+        "held_epoch_disposition",
+        "excluded_epoch_disposition",
+        "burned_or_retired_epoch_disposition",
         "withdrawable_balance_available",
         "withdrawable_no_balance",
         "missing_wallet_binding",
@@ -161,6 +164,13 @@ struct ProviderEarnings: Codable, Equatable {
     let malibuAllTime: Double?
     let trustCriteriaMet: Int?
     let trustCriteriaRequired: Int?
+    /// Satisfied economic/additional trust-criterion IDs (SPEC-026 §5.2) and
+    /// supporting counters. Display-only; used to name which Trusted criteria
+    /// are done vs pending.
+    let economicCriteria: [String]
+    let additionalCriteria: [String]
+    let verifiedReceiptCount: Int?
+    let appAttested: Bool?
     let malibuWithdrawable: Double?
     let malibuHeld: Double?
     let malibuHoldReasons: [String]
@@ -175,6 +185,16 @@ struct ProviderEarnings: Codable, Equatable {
     let malibuProjectionFresh: Bool
     /// True only when the CLI fetched the provider earnings endpoint.
     let earningsProjectionFresh: Bool
+    /// True when the CLI reached reward/wallet telemetry but it FAILED, as
+    /// distinct from benign first-run absence. Drives honest "reward status
+    /// unavailable" copy instead of calm "warming up". Default false.
+    let rewardTelemetryUnavailable: Bool
+    /// True when the frame carried at least one granular trust-criteria field
+    /// (economic/additional/verified-receipt/app-attest). A legacy frame that
+    /// predates these fields leaves this false, so the app falls back to the
+    /// raw `trust_criteria_met/required` counters instead of rendering an
+    /// empty-array "0 of 2" for a provider that actually has progress.
+    let hasGranularTrustCriteria: Bool
 
     enum CodingKeys: String, CodingKey {
         case walletBound = "wallet_bound"
@@ -189,6 +209,10 @@ struct ProviderEarnings: Codable, Equatable {
         case malibuAllTime = "malibu_all_time"
         case trustCriteriaMet = "trust_criteria_met"
         case trustCriteriaRequired = "trust_criteria_required"
+        case economicCriteria = "economic_criteria"
+        case additionalCriteria = "additional_criteria"
+        case verifiedReceiptCount = "verified_receipt_count"
+        case appAttested = "app_attested"
         case malibuWithdrawable = "malibu_withdrawable"
         case malibuHeld = "malibu_held"
         case malibuHoldReasons = "malibu_hold_reasons"
@@ -198,6 +222,7 @@ struct ProviderEarnings: Codable, Equatable {
         case idlePrewarm = "idle_prewarm"
         case malibuProjectionFresh = "malibu_projection_fresh"
         case earningsProjectionFresh = "earnings_projection_fresh"
+        case rewardTelemetryUnavailable = "reward_telemetry_unavailable"
     }
 
     init(from decoder: Decoder) throws {
@@ -214,6 +239,14 @@ struct ProviderEarnings: Codable, Equatable {
         malibuAllTime = try c.decodeIfPresent(Double.self, forKey: .malibuAllTime)
         trustCriteriaMet = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
         trustCriteriaRequired = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaRequired)
+        economicCriteria = try c.decodeIfPresent([String].self, forKey: .economicCriteria) ?? []
+        additionalCriteria = try c.decodeIfPresent([String].self, forKey: .additionalCriteria) ?? []
+        hasGranularTrustCriteria = c.contains(.economicCriteria)
+            || c.contains(.additionalCriteria)
+            || c.contains(.verifiedReceiptCount)
+            || c.contains(.appAttested)
+        verifiedReceiptCount = try c.decodeIfPresent(Int.self, forKey: .verifiedReceiptCount)
+        appAttested = try c.decodeIfPresent(Bool.self, forKey: .appAttested)
         malibuWithdrawable = try c.decodeIfPresent(Double.self, forKey: .malibuWithdrawable)
         malibuHeld = try c.decodeIfPresent(Double.self, forKey: .malibuHeld)
         malibuHoldReasons = try c.decodeIfPresent([String].self, forKey: .malibuHoldReasons) ?? []
@@ -233,6 +266,10 @@ struct ProviderEarnings: Codable, Equatable {
             malibuRewardEligibility = nil
         }
         earningsProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
+        rewardTelemetryUnavailable = try c.decodeIfPresent(
+            Bool.self,
+            forKey: .rewardTelemetryUnavailable
+        ) ?? false
     }
 
     init(
@@ -248,6 +285,10 @@ struct ProviderEarnings: Codable, Equatable {
         malibuAllTime: Double?,
         trustCriteriaMet: Int?,
         trustCriteriaRequired: Int?,
+        economicCriteria: [String] = [],
+        additionalCriteria: [String] = [],
+        verifiedReceiptCount: Int? = nil,
+        appAttested: Bool? = nil,
         malibuWithdrawable: Double? = nil,
         malibuHeld: Double? = nil,
         malibuHoldReasons: [String] = [],
@@ -256,7 +297,12 @@ struct ProviderEarnings: Codable, Equatable {
         malibuRewardEligibility: MalibuRewardEligibility? = nil,
         idlePrewarm: ProviderIdlePrewarmSummary = .empty,
         malibuProjectionFresh: Bool = false,
-        earningsProjectionFresh: Bool = false
+        earningsProjectionFresh: Bool = false,
+        rewardTelemetryUnavailable: Bool = false,
+        // A frame built in-code and serialized always carries the granular
+        // criteria keys, so it is a modern (granular) frame by default. Only a
+        // legacy wire frame that never had the keys decodes to false.
+        hasGranularTrustCriteria: Bool = true
     ) {
         self.walletBound = walletBound
         self.trustTier = trustTier
@@ -270,6 +316,10 @@ struct ProviderEarnings: Codable, Equatable {
         self.malibuAllTime = malibuAllTime
         self.trustCriteriaMet = trustCriteriaMet
         self.trustCriteriaRequired = trustCriteriaRequired
+        self.economicCriteria = economicCriteria
+        self.additionalCriteria = additionalCriteria
+        self.verifiedReceiptCount = verifiedReceiptCount
+        self.appAttested = appAttested
         self.malibuWithdrawable = malibuWithdrawable
         self.malibuHeld = malibuHeld
         self.malibuHoldReasons = malibuHoldReasons
@@ -279,6 +329,8 @@ struct ProviderEarnings: Codable, Equatable {
         self.idlePrewarm = idlePrewarm
         self.malibuProjectionFresh = malibuProjectionFresh
         self.earningsProjectionFresh = earningsProjectionFresh
+        self.rewardTelemetryUnavailable = rewardTelemetryUnavailable
+        self.hasGranularTrustCriteria = hasGranularTrustCriteria
     }
 }
 

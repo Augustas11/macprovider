@@ -45,6 +45,13 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
     public let malibuAllTime: Double?
     public let trustCriteriaMet: Int?
     public let trustCriteriaRequired: Int?
+    /// Satisfied economic/additional trust-criterion IDs (SPEC-026 §5.2) and
+    /// supporting counters, sourced from the wallet-status eligibility inputs.
+    /// Forwarded so Malibu can name which Trusted criteria are done vs pending.
+    public let economicCriteria: [String]
+    public let additionalCriteria: [String]
+    public let verifiedReceiptCount: Int?
+    public let appAttested: Bool?
     public let malibuWithdrawable: Double?
     public let malibuHeld: Double?
     public let malibuHoldReasons: [String]
@@ -61,6 +68,11 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
     /// the same metrics cycle. A provider-earnings response alone must not
     /// authorize reward availability or trust copy.
     public let malibuProjectionFresh: Bool
+    /// True when the CLI reached the reward/wallet telemetry but it FAILED
+    /// (schema/decode outage), as distinct from a benign first-run absence.
+    /// The app uses this to surface an honest "reward status unavailable"
+    /// instead of the calm "warming up" first-run copy. Default false.
+    public let rewardTelemetryUnavailable: Bool
 
     enum CodingKeys: String, CodingKey {
         case walletBound = "wallet_bound"
@@ -75,6 +87,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         case malibuAllTime = "malibu_all_time"
         case trustCriteriaMet = "trust_criteria_met"
         case trustCriteriaRequired = "trust_criteria_required"
+        case economicCriteria = "economic_criteria"
+        case additionalCriteria = "additional_criteria"
+        case verifiedReceiptCount = "verified_receipt_count"
+        case appAttested = "app_attested"
         case malibuWithdrawable = "malibu_withdrawable"
         case malibuHeld = "malibu_held"
         case malibuHoldReasons = "malibu_hold_reasons"
@@ -84,6 +100,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         case idlePrewarm = "idle_prewarm"
         case malibuProjectionFresh = "malibu_projection_fresh"
         case earningsProjectionFresh = "earnings_projection_fresh"
+        case rewardTelemetryUnavailable = "reward_telemetry_unavailable"
     }
 
     public init(from decoder: Decoder) throws {
@@ -106,6 +123,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         malibuAllTime = try container.decodeIfPresent(Double.self, forKey: .malibuAllTime)
         trustCriteriaMet = try container.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
         trustCriteriaRequired = try container.decodeIfPresent(Int.self, forKey: .trustCriteriaRequired)
+        economicCriteria = try container.decodeIfPresent([String].self, forKey: .economicCriteria) ?? []
+        additionalCriteria = try container.decodeIfPresent([String].self, forKey: .additionalCriteria) ?? []
+        verifiedReceiptCount = try container.decodeIfPresent(Int.self, forKey: .verifiedReceiptCount)
+        appAttested = try container.decodeIfPresent(Bool.self, forKey: .appAttested)
         malibuWithdrawable = try container.decodeIfPresent(Double.self, forKey: .malibuWithdrawable)
         malibuHeld = try container.decodeIfPresent(Double.self, forKey: .malibuHeld)
         malibuHoldReasons = try container.decodeIfPresent([String].self, forKey: .malibuHoldReasons) ?? []
@@ -131,6 +152,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuRewardEligibility = nil
         }
         earningsProjectionFresh = try container.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
+        rewardTelemetryUnavailable = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .rewardTelemetryUnavailable
+        ) ?? false
     }
 
     public init(
@@ -146,6 +171,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         malibuAllTime: Double?,
         trustCriteriaMet: Int?,
         trustCriteriaRequired: Int?,
+        economicCriteria: [String] = [],
+        additionalCriteria: [String] = [],
+        verifiedReceiptCount: Int? = nil,
+        appAttested: Bool? = nil,
         malibuWithdrawable: Double? = nil,
         malibuHeld: Double? = nil,
         malibuHoldReasons: [String] = [],
@@ -154,7 +183,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         malibuRewardEligibility: MalibuRewardEligibility? = nil,
         idlePrewarm: ProviderIdlePrewarmSummary = .empty,
         malibuProjectionFresh: Bool = false,
-        earningsProjectionFresh: Bool = false
+        earningsProjectionFresh: Bool = false,
+        rewardTelemetryUnavailable: Bool = false
     ) {
         self.walletBound = walletBound
         self.trustTier = trustTier
@@ -168,6 +198,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         self.malibuAllTime = malibuAllTime
         self.trustCriteriaMet = trustCriteriaMet
         self.trustCriteriaRequired = trustCriteriaRequired
+        self.economicCriteria = economicCriteria
+        self.additionalCriteria = additionalCriteria
+        self.verifiedReceiptCount = verifiedReceiptCount
+        self.appAttested = appAttested
         self.malibuWithdrawable = malibuWithdrawable
         self.malibuHeld = malibuHeld
         self.malibuHoldReasons = malibuHoldReasons
@@ -177,6 +211,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         self.idlePrewarm = idlePrewarm
         self.malibuProjectionFresh = malibuProjectionFresh
         self.earningsProjectionFresh = earningsProjectionFresh
+        self.rewardTelemetryUnavailable = rewardTelemetryUnavailable
     }
 
     func markingEarningsProjectionFresh() -> ProviderEarningsSummary {
@@ -193,6 +228,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuAllTime: malibuAllTime,
             trustCriteriaMet: trustCriteriaMet,
             trustCriteriaRequired: trustCriteriaRequired,
+            economicCriteria: economicCriteria,
+            additionalCriteria: additionalCriteria,
+            verifiedReceiptCount: verifiedReceiptCount,
+            appAttested: appAttested,
             malibuWithdrawable: malibuWithdrawable,
             malibuHeld: malibuHeld,
             malibuHoldReasons: malibuHoldReasons,
@@ -219,6 +258,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuAllTime: accrual.accruedMALIBU,
             trustCriteriaMet: accrual.trustCriteriaMet ?? trustCriteriaMet,
             trustCriteriaRequired: accrual.trustCriteriaRequired ?? trustCriteriaRequired,
+            economicCriteria: accrual.economicCriteria.isEmpty ? economicCriteria : accrual.economicCriteria,
+            additionalCriteria: accrual.additionalCriteria.isEmpty ? additionalCriteria : accrual.additionalCriteria,
+            verifiedReceiptCount: accrual.verifiedReceiptCount ?? verifiedReceiptCount,
+            appAttested: accrual.appAttested ?? appAttested,
             malibuWithdrawable: accrual.withdrawableMALIBU,
             malibuHeld: accrual.heldMALIBU,
             malibuHoldReasons: accrual.withdrawalHoldReasons,
@@ -248,6 +291,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuAllTime: walletStatus.rewardAmounts?.accruedMALIBU ?? malibuAllTime,
             trustCriteriaMet: walletStatus.eligibilityInputs?.criteriaMet ?? trustCriteriaMet,
             trustCriteriaRequired: walletStatus.eligibilityInputs?.criteriaRequired ?? trustCriteriaRequired,
+            economicCriteria: walletStatus.eligibilityInputs?.economicCriteria ?? economicCriteria,
+            additionalCriteria: walletStatus.eligibilityInputs?.additionalCriteria ?? additionalCriteria,
+            verifiedReceiptCount: walletStatus.eligibilityInputs?.verifiedReceiptCount ?? verifiedReceiptCount,
+            appAttested: walletStatus.eligibilityInputs?.appAttested ?? appAttested,
             malibuWithdrawable: walletStatus.rewardAmounts?.withdrawableMALIBU ?? malibuWithdrawable,
             malibuHeld: walletStatus.rewardAmounts?.heldMALIBU ?? malibuHeld,
             malibuHoldReasons: malibuHoldReasons,
@@ -261,8 +308,13 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
     }
 
     func markingWalletStatusUnavailable() -> ProviderEarningsSummary {
+        // A wallet-status schema/decode failure is a genuine telemetry outage,
+        // NOT a fresh benign projection. Preserve the earnings-frame walletBound
+        // (do not fabricate walletBound=false → false "No payout wallet yet"),
+        // and mark the MALIBU projection NOT fresh so the app reads it as
+        // "reward status not available", never first-run "warming up".
         ProviderEarningsSummary(
-            walletBound: false,
+            walletBound: walletBound,
             trustTier: trustTier,
             unpaidLedgerBacklogUSDC: unpaidLedgerBacklogUSDC,
             unpaidLedgerBacklogMALIBU: unpaidLedgerBacklogMALIBU,
@@ -272,17 +324,25 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             usdcLifetime: usdcLifetime,
             malibuToday: malibuToday,
             malibuAllTime: nil,
-            trustCriteriaMet: trustCriteriaMet,
-            trustCriteriaRequired: trustCriteriaRequired,
+            trustCriteriaMet: nil,
+            trustCriteriaRequired: nil,
+            economicCriteria: [],
+            additionalCriteria: [],
+            verifiedReceiptCount: nil,
+            appAttested: nil,
             malibuWithdrawable: nil,
             malibuHeld: nil,
             malibuHoldReasons: [],
             malibuDailyCap: nil,
             malibuWalletDailyCap: nil,
-            malibuRewardEligibility: MalibuRewardEligibility.unavailableForMissingObject(),
+            malibuRewardEligibility: nil,
             idlePrewarm: idlePrewarm,
-            malibuProjectionFresh: true,
-            earningsProjectionFresh: earningsProjectionFresh
+            malibuProjectionFresh: false,
+            earningsProjectionFresh: earningsProjectionFresh,
+            // A wallet-status decode/schema failure is a genuine telemetry
+            // outage, not benign first-run absence. Signal it explicitly so the
+            // app does not soften it into calm "warming up" copy.
+            rewardTelemetryUnavailable: true
         )
     }
 
@@ -300,6 +360,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuAllTime: accrual.accruedMALIBU,
             trustCriteriaMet: accrual.trustCriteriaMet,
             trustCriteriaRequired: accrual.trustCriteriaRequired,
+            economicCriteria: accrual.economicCriteria,
+            additionalCriteria: accrual.additionalCriteria,
+            verifiedReceiptCount: accrual.verifiedReceiptCount,
+            appAttested: accrual.appAttested,
             malibuWithdrawable: accrual.withdrawableMALIBU,
             malibuHeld: accrual.heldMALIBU,
             malibuHoldReasons: accrual.withdrawalHoldReasons,
@@ -313,6 +377,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
     }
 
     static func unavailableWalletStatus() -> ProviderEarningsSummary {
+        // No earnings frame and wallet-status unavailable: a telemetry outage,
+        // not a fresh benign projection. Keep the MALIBU projection NOT fresh
+        // and signal the outage explicitly so the app never softens this
+        // no-base wallet-status failure into calm first-run "warming up" copy.
         ProviderEarningsSummary(
             walletBound: false,
             trustTier: "provisional",
@@ -331,10 +399,11 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuHoldReasons: [],
             malibuDailyCap: nil,
             malibuWalletDailyCap: nil,
-            malibuRewardEligibility: MalibuRewardEligibility.unavailableForMissingObject(),
+            malibuRewardEligibility: nil,
             idlePrewarm: .empty,
-            malibuProjectionFresh: true,
-            earningsProjectionFresh: false
+            malibuProjectionFresh: false,
+            earningsProjectionFresh: false,
+            rewardTelemetryUnavailable: true
         )
     }
 }

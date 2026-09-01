@@ -42,15 +42,17 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.modelLine(snapshot), "Connected")
         XCTAssertTrue(AgentSnapshotPresenter.requestsLine(snapshot).contains("0 today"))
         XCTAssertTrue(AgentSnapshotPresenter.tokenLine(snapshot).contains("0 in / 0 out today"))
-        XCTAssertEqual(AgentSnapshotPresenter.usdcFullLine(snapshot), "n/a today · n/a wk · n/a accrued · n/a life")
-        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "n/a")
+        // Not-fresh telemetry stays calm and small rather than four "n/a"s or a
+        // fabricated hero "$0.00" (P0.2).
+        XCTAssertEqual(AgentSnapshotPresenter.usdcFullLine(snapshot), "Earnings not available yet")
+        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "—")
         XCTAssertEqual(AgentSnapshotPresenter.queueChip(snapshot), "0 queued")
         XCTAssertEqual(AgentSnapshotPresenter.thermalChip(snapshot), "Thermal OK")
-        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Provider is ready")
-        XCTAssertEqual(
-            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
-            "Ready for customer work · earnings unavailable"
-        )
+        // Header + card share one ConsolidatedStatus source (MED-4). No wallet
+        // + no fresh telemetry yet → benign Live · Provisional, calm tone.
+        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
+        XCTAssertEqual(status.label, "Live · Provisional")
+        XCTAssertEqual(status.tone, .neutral)
     }
 
     func testFreshServingWithoutEarningsShowsQuietNetwork() {
@@ -59,11 +61,11 @@ final class DashboardViewTests: XCTestCase {
         snapshot.coordinatorConnected = true
         snapshot.networkState = "buyer_serving"
         snapshot.providerEarningsFresh = true
+        snapshot.walletBound = true
 
-        XCTAssertEqual(
-            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
-            "Ready for customer work · network is quiet"
-        )
+        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
+        XCTAssertEqual(status.tone, .neutral)
+        XCTAssertTrue(status.meaning.contains("network is quiet"), status.meaning)
     }
 
     func testFreshServingWithZeroEarningsIsNetworkQuietNotBroken() {
@@ -72,13 +74,13 @@ final class DashboardViewTests: XCTestCase {
         snapshot.coordinatorConnected = true
         snapshot.networkState = "buyer_serving"
         snapshot.providerEarningsFresh = true
+        snapshot.walletBound = true
         snapshot.earningsUsdcToday = 0
         snapshot.currentModelID = "Qwen3-8B"
 
-        XCTAssertEqual(
-            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
-            "Ready for customer work · network is quiet"
-        )
+        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
+        XCTAssertEqual(status.tone, .neutral)
+        XCTAssertTrue(status.meaning.contains("network is quiet"), status.meaning)
     }
 
     func testQueuedWorkBeatsQuietNetworkCopy() {
@@ -90,10 +92,6 @@ final class DashboardViewTests: XCTestCase {
         snapshot.earningsUsdcToday = 0
         snapshot.queueDepth = 2
 
-        XCTAssertEqual(
-            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
-            "Ready · work is queued on this Mac"
-        )
         XCTAssertEqual(
             AgentSnapshotPresenter.eligibilityLine(snapshot),
             "Work is queued on this Mac"
@@ -110,10 +108,6 @@ final class DashboardViewTests: XCTestCase {
         snapshot.requestsServedToday = 4
 
         XCTAssertEqual(
-            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
-            "Ready · work ran; paid credits appear when a job settles"
-        )
-        XCTAssertEqual(
             AgentSnapshotPresenter.eligibilityLine(snapshot),
             "Work ran today · paid credits show when a job settles"
         )
@@ -126,11 +120,8 @@ final class DashboardViewTests: XCTestCase {
         snapshot.currentModelID = "qwen3-coder-30b-a3b-instruct"
         snapshot.lastError = "Model loaded locally · not connected to the network"
 
-        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Checking customer availability")
-        XCTAssertEqual(
-            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
-            "Details are available in Advanced diagnostics."
-        )
+        // Not yet buyer-serving-admitted → the consolidated status is "Setting up".
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(snapshot).phase, .settingUp)
         XCTAssertEqual(
             AgentSnapshotPresenter.stateLine(snapshot),
             "Checking customer availability · qwen3-coder-30b-a3b-instruct"
@@ -287,7 +278,9 @@ final class DashboardViewTests: XCTestCase {
         unavailable.earningsUsdcToday = 0
         unavailable.malibuWithdrawable = 0
         let unavailableHealth = AgentSnapshotPresenter.miningHealth(unavailable)
-        XCTAssertEqual(unavailableHealth.reasonCode, "reward_projection_unavailable")
+        // A live, admitted provider with no fresh telemetry yet is the benign
+        // warming-up state (calm), not a fault (P0.1).
+        XCTAssertEqual(unavailableHealth.reasonCode, "reward_projection_warming_up")
         XCTAssertEqual(unavailableHealth.rewardSummary, "USDC unavailable · MALIBU unavailable")
 
         var missingWallet = miningBase()
@@ -303,7 +296,8 @@ final class DashboardViewTests: XCTestCase {
         liveNoEarnings.walletBound = false
         let liveNoEarningsHealth = AgentSnapshotPresenter.miningHealth(liveNoEarnings)
         XCTAssertEqual(liveNoEarningsHealth.status, "No earnings yet")
-        XCTAssertEqual(liveNoEarningsHealth.reasonCode, "reward_projection_unavailable")
+        // Benign fresh-provider state reads calm, not as an outage (P0.1).
+        XCTAssertEqual(liveNoEarningsHealth.reasonCode, "reward_projection_warming_up")
         XCTAssertFalse(liveNoEarningsHealth.status.lowercased().contains("unavailable"))
         XCTAssertTrue(liveNoEarningsHealth.nextAction.contains("wallet"))
         XCTAssertFalse(liveNoEarningsHealth.nextAction.contains("reward status refreshes"))
@@ -372,11 +366,14 @@ final class DashboardViewTests: XCTestCase {
 
         var unlockTrusted = miningBase()
         unlockTrusted.trustTier = .provisional
-        unlockTrusted.trustCriteriaMet = 1
-        unlockTrusted.trustCriteriaRequired = 3
+        // Distinct-pair truth: an economic criterion satisfied, no distinct
+        // additional yet → 1 of 2 (not the raw unique-ID count).
+        unlockTrusted.hasGranularTrustCriteria = true
+        unlockTrusted.economicCriteria = ["E1"]
+        unlockTrusted.additionalCriteria = ["E1"]
         XCTAssertEqual(
             AgentSnapshotPresenter.trustLine(unlockTrusted),
-            "Provisional — 1 of 3 criteria met · Unlock Trusted →"
+            "Provisional — 1 of 2 criteria met"
         )
 
         var walletCap = miningBase()
@@ -413,7 +410,9 @@ final class DashboardViewTests: XCTestCase {
         fresh.malibuHeld = 0
         let freshHealth = AgentSnapshotPresenter.miningHealth(fresh)
         XCTAssertEqual(freshHealth.reasonCode, "idle_no_work")
-        XCTAssertEqual(freshHealth.rewardSummary, "n/a USDC today · MALIBU 0.00 withdrawable / 0.00 held")
+        // A brand-new all-zero fresh frame is a real $0.00 today, not "n/a"
+        // (consistent with the hero number and the full USDC line).
+        XCTAssertEqual(freshHealth.rewardSummary, "$0.00 USDC today · MALIBU 0.00 withdrawable / 0.00 held")
 
         var partial = miningBase()
         partial.malibuProjectionFresh = false
@@ -431,7 +430,11 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertEqual(partialIdleHealth.status, "Eligible, idle")
         XCTAssertEqual(partialIdleHealth.trustSummary, "MALIBU trust telemetry not published yet")
 
+        // A provider that is NOT yet buyer-serving-admitted with no fresh
+        // telemetry keeps the genuine "unavailable" (amber) wording (P0.1).
         var stale = miningBase()
+        stale.state = .reconnecting
+        stale.networkState = "buyer_serving_unknown"
         stale.providerEarningsFresh = false
         stale.malibuProjectionFresh = false
         stale.earningsUsdcToday = 0
@@ -452,10 +455,6 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertNotEqual(lastKnownHealth.reasonCode, "reward_projection_unavailable")
         XCTAssertTrue(lastKnownHealth.rewardSummary.contains("$0.04 USDC today"))
         XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(lastKnown), "$0.04")
-        XCTAssertNotEqual(
-            AgentSnapshotPresenter.dashboardSubtitle(lastKnown),
-            "Ready for customer work · earnings unavailable"
-        )
     }
 
     private func miningBase() -> AgentSnapshot {
@@ -469,6 +468,16 @@ final class DashboardViewTests: XCTestCase {
         snapshot.trustTier = .trusted
         snapshot.malibuWithdrawable = 0
         snapshot.malibuHeld = 0
+        // A real fresh frame carries a usable eligibility verdict; without one
+        // the projection is treated as a genuine telemetry outage. Give the
+        // base a concrete withdrawable verdict so these operational-state cases
+        // exercise earning/idle/hold logic rather than the unavailable path.
+        snapshot.malibuRewardEligibility = MalibuRewardEligibility(
+            earningState: "earning",
+            withdrawalState: "withdrawable",
+            primaryReason: "",
+            reasons: []
+        )
         return snapshot
     }
 
