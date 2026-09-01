@@ -48,6 +48,7 @@ GOVERNANCE_ONLY_PATHS = (
     "AGENTS.md",
     "beta/DECISION_CRITERIA.md",
     "CLAUDE.md",
+    "audits/",
     "docs/spec-governance-foundation.md",
     "docs/spec-history/",
     "schemas/journey-",
