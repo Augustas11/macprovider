@@ -254,3 +254,56 @@ func TestHeartbeatAutoupdateOutcomeRecordsDistinctEvents(t *testing.T) {
 		t.Fatalf("unexpected outcomes: %+v", calls)
 	}
 }
+
+func TestHeartbeatRefreshesPromotedAdmissionTelemetry(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	registry := pool.NewRegistry(nil)
+	server := NewServer(capacityTestConfig(0), registry, zerolog.Nop(),
+		WithNow(func() time.Time { return now }))
+
+	hello := capacityTestHello(4)
+	hello.BinaryVersion = "1.8.115"
+	if tier, code, reason := server.admission.Admit(hello, false, 0); tier != pool.TierProvisional || code != 0 {
+		t.Fatalf("admit = %s code=%d reason=%q", tier, code, reason)
+	}
+	if _, ok := server.admission.Promote("provider-a"); !ok {
+		t.Fatal("promote failed")
+	}
+
+	entry := &pool.Provider{
+		ProviderID:      "provider-a",
+		AssignedID:      "assigned-a",
+		Hostname:        hello.Hostname,
+		ModelID:         hello.ModelID,
+		BinaryVersion:   "1.8.117",
+		State:           pool.StateReady,
+		Tier:            pool.TierPinned,
+		MaxConcurrency:  4,
+		SlotsFree:       4,
+		SlotsTotal:      4,
+		ConnectedAt:     now,
+		LastHeartbeatAt: now,
+	}
+	if _, ok := registry.RegisterAt(entry, nil, now); !ok {
+		t.Fatal("register failed")
+	}
+
+	now = now.Add(2 * time.Minute)
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":32768,"max_concurrency":4,"slots_free":4,"slots_total":4,"throughput_tps_estimate":19.8,"requests_served_since_last":0,"avg_latency_ms_since_last":0.0,"throughput_tps_since_last":0.0}`)
+	server.handleHeartbeat(nil, "provider-a", "assigned-a", payload)
+
+	recs := server.admission.Records(nil)
+	if len(recs) != 1 {
+		t.Fatalf("records=%d want 1", len(recs))
+	}
+	if recs[0].BinaryVersion != "1.8.117" {
+		t.Fatalf("binary_version=%q want 1.8.117", recs[0].BinaryVersion)
+	}
+	if !recs[0].LastSeenAt.Equal(now) {
+		t.Fatalf("last_seen=%s want %s", recs[0].LastSeenAt, now)
+	}
+	if recs[0].PromotedAt == nil {
+		t.Fatal("promoted_at cleared")
+	}
+}

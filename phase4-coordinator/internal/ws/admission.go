@@ -10,6 +10,11 @@ import (
 	gobwas "github.com/gobwas/ws"
 )
 
+// admissionTelemetryPersistInterval throttles last-seen-only SQLite rewrites
+// of the provisional_admission blob. Identity changes (binary_version,
+// hostname, model_id) persist immediately so dashboards survive a restart.
+const admissionTelemetryPersistInterval = time.Minute
+
 type AdmissionManager struct {
 	mu             sync.Mutex
 	cfg            config.AdmissionConfig
@@ -19,8 +24,13 @@ type AdmissionManager struct {
 	records        map[string]*ProvisionalRecord
 	rejected       map[string]string
 	requestWindows map[string][]time.Time
-	store          AdmissionStateStore
-	onStoreError   func(error)
+	// lastTelemetryPersist is in-process only. Last-seen-only heartbeat
+	// refreshes coalesce to one full-blob SQLite rewrite per interval for the
+	// whole manager (not per provider), so a connected fleet cannot convoy
+	// admission/quota behind N persistLocked calls per minute.
+	lastTelemetryPersist time.Time
+	store                AdmissionStateStore
+	onStoreError         func(error)
 }
 
 type ProvisionalRecord struct {
@@ -144,15 +154,64 @@ func (a *AdmissionManager) CommitReservedAdmission(hello Hello, pinned bool) poo
 
 func (a *AdmissionManager) CommitReservedAdmissionAs(hello Hello, tier pool.Tier) pool.Tier {
 	if tier == pool.TierPinned {
+		a.RefreshTelemetry(hello.ProviderID, hello.Hostname, hello.ModelID, hello.BinaryVersion)
 		return pool.TierPinned
 	}
 	if tier != pool.TierProvisional {
+		a.RefreshTelemetry(hello.ProviderID, hello.Hostname, hello.ModelID, hello.BinaryVersion)
 		return tier
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.recordAdmissionLocked(hello, a.now())
 	return pool.TierProvisional
+}
+
+// RefreshTelemetry updates version/last-seen on an existing admission record
+// without creating a new hourly admission or changing promotion/rejection.
+// No-op when the provider has no provisional record (never-admitted pinned).
+// Issue #1311: promoted providers otherwise freeze binary_version/last_seen
+// at Promote() time because recordAdmissionLocked only runs for provisional.
+//
+// LastSeenAt is the FR-P17 retention/liveness clock used by Prune. Refreshing
+// it from heartbeat/reconnect is intentional: a still-connected provider is
+// not stale, and must not be dropped from the snapshot (or have its rejection
+// TTL elapse) merely because it was promoted. After heartbeats stop, the
+// existing ProvisionalRetentionDays cutoff still applies.
+func (a *AdmissionManager) RefreshTelemetry(providerID, hostname, modelID, binaryVersion string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.refreshTelemetryLocked(providerID, hostname, modelID, binaryVersion)
+}
+
+func (a *AdmissionManager) refreshTelemetryLocked(providerID, hostname, modelID, binaryVersion string) {
+	rec := a.records[providerID]
+	if rec == nil {
+		return
+	}
+	now := a.now()
+	identityChanged := false
+	if hostname != "" && rec.Hostname != hostname {
+		rec.Hostname = hostname
+		identityChanged = true
+	}
+	if modelID != "" && rec.ModelID != modelID {
+		rec.ModelID = modelID
+		identityChanged = true
+	}
+	if binaryVersion != "" && rec.BinaryVersion != binaryVersion {
+		rec.BinaryVersion = binaryVersion
+		identityChanged = true
+	}
+	rec.LastSeenAt = now
+	if !identityChanged && !a.lastTelemetryPersist.IsZero() && now.Sub(a.lastTelemetryPersist) < admissionTelemetryPersistInterval {
+		return
+	}
+	a.lastTelemetryPersist = now
+	a.persistLocked()
 }
 
 func requestedAdmissionTier(pinned bool) pool.Tier {
@@ -214,6 +273,7 @@ func (a *AdmissionManager) recordAdmissionLocked(hello Hello, now time.Time) {
 	rec.Hostname = hello.Hostname
 	rec.ModelID = hello.ModelID
 	rec.BinaryVersion = hello.BinaryVersion
+	a.lastTelemetryPersist = now
 	a.persistLocked()
 }
 

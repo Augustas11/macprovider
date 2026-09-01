@@ -5041,6 +5041,9 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	s.rememberProviderSnapshotCoalesced(*entry)
 	s.refreshHardwareProfileHeartbeatAsync(providerID, entry.BinaryVersion, s.now())
 	s.recordAutoupdateOutcomeIfChanged(providerID, hb.LastAutoupdateEvent, s.now())
+	if s.admission != nil {
+		s.admission.RefreshTelemetry(providerID, entry.Hostname, entry.ModelID, entry.BinaryVersion)
+	}
 	threshold := s.cfg.HeartbeatInterval() + s.cfg.HeartbeatInterval()/2
 	if gap > threshold {
 		s.log.Warn().Str("provider_id", providerID).Dur("gap", gap).Dur("threshold", threshold).Msg("provider heartbeat stale")

@@ -73,6 +73,233 @@ func TestAdmissionManagerTiersRateLimitAndQuota(t *testing.T) {
 	}
 }
 
+func TestAdmissionRefreshTelemetryAfterPromote(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	adm := NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 1,
+		ProvisionalPoolMax:              10,
+	}, func() time.Time { return now })
+
+	hello := Hello{ProviderID: "new-1", Hostname: "host", ModelID: "model", BinaryVersion: "1.8.115"}
+	if tier, code, reason := adm.Admit(hello, false, 0); tier != pool.TierProvisional || code != 0 || reason != "" {
+		t.Fatalf("admit = tier:%s code:%d reason:%q", tier, code, reason)
+	}
+	if _, ok := adm.Promote("new-1"); !ok {
+		t.Fatal("promote failed")
+	}
+
+	now = now.Add(2 * time.Minute)
+	adm.RefreshTelemetry("new-1", "host", "model", "1.8.117")
+	adm.RefreshTelemetry("unknown", "other", "model", "9.9.9")
+
+	recs := adm.Records(nil)
+	if len(recs) != 1 {
+		t.Fatalf("records=%d want 1 (unknown provider must not mint a row)", len(recs))
+	}
+	if recs[0].BinaryVersion != "1.8.117" {
+		t.Fatalf("binary_version=%q want 1.8.117", recs[0].BinaryVersion)
+	}
+	if !recs[0].LastSeenAt.Equal(now) {
+		t.Fatalf("last_seen=%s want %s", recs[0].LastSeenAt, now)
+	}
+	if recs[0].PromotedAt == nil {
+		t.Fatal("promoted_at cleared by telemetry refresh")
+	}
+
+	if _, code, _ := adm.Admit(Hello{ProviderID: "new-2"}, false, 0); code != CloseProvisionalRateLimited {
+		t.Fatalf("second provisional code = %d, want rate-limited %d (refresh must not consume a rate-limit slot)", code, CloseProvisionalRateLimited)
+	}
+}
+
+func TestCommitReservedAdmissionAsPinnedRefreshesExistingRecord(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	adm := NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 1,
+		ProvisionalPoolMax:              10,
+	}, func() time.Time { return now })
+
+	hello := Hello{ProviderID: "new-1", Hostname: "host", ModelID: "model", BinaryVersion: "1.8.115"}
+	if _, code, _ := adm.Admit(hello, false, 0); code != 0 {
+		t.Fatalf("admit code=%d", code)
+	}
+	if _, ok := adm.Promote("new-1"); !ok {
+		t.Fatal("promote failed")
+	}
+
+	now = now.Add(2 * time.Minute)
+	rehello := Hello{ProviderID: "new-1", Hostname: "host-2", ModelID: "model-b", BinaryVersion: "1.8.117"}
+	if got := adm.CommitReservedAdmissionAs(rehello, pool.TierPinned); got != pool.TierPinned {
+		t.Fatalf("commit pinned = %s", got)
+	}
+
+	recs := adm.Records(nil)
+	if len(recs) != 1 || recs[0].BinaryVersion != "1.8.117" || recs[0].Hostname != "host-2" || recs[0].ModelID != "model-b" {
+		t.Fatalf("pinned reconnect did not refresh snapshot: %#v", recs)
+	}
+	if !recs[0].LastSeenAt.Equal(now) {
+		t.Fatalf("last_seen=%s want %s", recs[0].LastSeenAt, now)
+	}
+	if _, code, _ := adm.Admit(Hello{ProviderID: "new-2"}, false, 0); code != CloseProvisionalRateLimited {
+		t.Fatalf("pinned reconnect consumed a rate-limit slot, code=%d", code)
+	}
+}
+
+func TestAdmissionRefreshTelemetryDoesNotCreateRecord(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	adm := NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 1,
+		ProvisionalPoolMax:              10,
+	}, func() time.Time { return now })
+
+	adm.RefreshTelemetry("never-admitted", "host", "model", "1.8.117")
+	if recs := adm.Records(nil); len(recs) != 0 {
+		t.Fatalf("records=%d want 0", len(recs))
+	}
+	if tier, code, _ := adm.Admit(Hello{ProviderID: "new-1", Hostname: "host", ModelID: "model", BinaryVersion: "1.8.115"}, false, 0); tier != pool.TierProvisional || code != 0 {
+		t.Fatalf("first real admit blocked after no-op refresh: tier=%s code=%d", tier, code)
+	}
+}
+
+func TestAdmissionRefreshTelemetryPersistsVersionImmediatelyAndThrottlesLastSeen(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	store := &countingAdmissionStore{}
+	adm := NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 1,
+		ProvisionalPoolMax:              10,
+	}, func() time.Time { return now })
+	adm.SetPersistence(store, nil)
+
+	hello := Hello{ProviderID: "new-1", Hostname: "host", ModelID: "model", BinaryVersion: "1.8.115"}
+	if _, code, _ := adm.Admit(hello, false, 0); code != 0 {
+		t.Fatalf("admit code=%d", code)
+	}
+	if _, ok := adm.Promote("new-1"); !ok {
+		t.Fatal("promote failed")
+	}
+	afterPromote := store.saves
+
+	now = now.Add(10 * time.Second)
+	adm.RefreshTelemetry("new-1", "host", "model", "1.8.115")
+	if store.saves != afterPromote {
+		t.Fatalf("last-seen-only refresh inside interval persisted, saves=%d want %d", store.saves, afterPromote)
+	}
+
+	adm.RefreshTelemetry("new-1", "host", "model", "1.8.117")
+	if store.saves != afterPromote+1 {
+		t.Fatalf("version change did not persist immediately, saves=%d want %d", store.saves, afterPromote+1)
+	}
+
+	now = now.Add(10 * time.Second)
+	adm.RefreshTelemetry("new-1", "host", "model", "1.8.117")
+	if store.saves != afterPromote+1 {
+		t.Fatalf("last-seen-only refresh after version persist wrote again, saves=%d", store.saves)
+	}
+
+	now = now.Add(admissionTelemetryPersistInterval + time.Second)
+	adm.RefreshTelemetry("new-1", "host", "model", "1.8.117")
+	if store.saves != afterPromote+2 {
+		t.Fatalf("last-seen refresh after interval did not persist, saves=%d want %d", store.saves, afterPromote+2)
+	}
+}
+
+func TestOverlayLiveAdmissionRecordsPrefersLivePool(t *testing.T) {
+	frozen := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	liveAt := frozen.Add(2 * time.Hour)
+	records := []ProvisionalRecord{{
+		ProviderID:    "provider-a",
+		BinaryVersion: "1.8.115",
+		LastSeenAt:    frozen,
+		Hostname:      "old-host",
+		ModelID:       "old-model",
+	}}
+	live := map[string]pool.Provider{
+		"provider-a": {
+			ProviderID:      "provider-a",
+			BinaryVersion:   "1.8.117",
+			Hostname:        "new-host",
+			ModelID:         "new-model",
+			LastHeartbeatAt: liveAt,
+			Tier:            pool.TierPinned,
+		},
+	}
+	connected := append([]ProvisionalRecord(nil), records...)
+	out := overlayLiveAdmissionRecords(connected, live, map[string]bool{"provider-a": true})
+	if out[0].BinaryVersion != "1.8.117" || out[0].Hostname != "new-host" || out[0].ModelID != "new-model" {
+		t.Fatalf("overlay identity: %+v", out[0])
+	}
+	if !out[0].LastSeenAt.Equal(liveAt) {
+		t.Fatalf("last_seen=%s want %s", out[0].LastSeenAt, liveAt)
+	}
+
+	offline := overlayLiveAdmissionRecords(append([]ProvisionalRecord(nil), records...), live, map[string]bool{})
+	if offline[0].BinaryVersion != "1.8.115" {
+		t.Fatalf("offline overlay mutated frozen snapshot: %q", offline[0].BinaryVersion)
+	}
+}
+
+func TestPromotedAdmissionTelemetryDoesNotBypassRetentionAfterDisconnect(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	adm := NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 1,
+		ProvisionalPoolMax:              10,
+		ProvisionalRetentionDays:        30,
+	}, func() time.Time { return now })
+
+	hello := Hello{ProviderID: "new-1", Hostname: "host", ModelID: "model", BinaryVersion: "1.8.115"}
+	if _, code, _ := adm.Admit(hello, false, 0); code != 0 {
+		t.Fatalf("admit code=%d", code)
+	}
+	if _, ok := adm.Promote("new-1"); !ok {
+		t.Fatal("promote failed")
+	}
+	now = now.Add(2 * time.Minute)
+	adm.RefreshTelemetry("new-1", "host", "model", "1.8.117")
+
+	if deleted, _, _ := adm.Prune(now.Add(-time.Second)); deleted != 0 {
+		t.Fatalf("fresh last_seen pruned immediately, deleted=%d", deleted)
+	}
+
+	now = now.Add(31 * 24 * time.Hour)
+	cutoff := now.Add(-30 * 24 * time.Hour)
+	deleted, _, _ := adm.Prune(cutoff)
+	if deleted != 1 {
+		t.Fatalf("disconnected promoted record survived retention, deleted=%d", deleted)
+	}
+	if recs := adm.Records(nil); len(recs) != 0 {
+		t.Fatalf("records after retention prune = %+v", recs)
+	}
+}
+
+func TestAdmissionRefreshTelemetryCoalescesPersistsAcrossProviders(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	store := &countingAdmissionStore{}
+	adm := NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 10,
+		ProvisionalPoolMax:              10,
+	}, func() time.Time { return now })
+	adm.SetPersistence(store, nil)
+
+	if _, code, _ := adm.Admit(Hello{ProviderID: "a", Hostname: "h", ModelID: "m", BinaryVersion: "1.8.115"}, false, 0); code != 0 {
+		t.Fatalf("admit a code=%d", code)
+	}
+	if _, code, _ := adm.Admit(Hello{ProviderID: "b", Hostname: "h", ModelID: "m", BinaryVersion: "1.8.115"}, false, 0); code != 0 {
+		t.Fatalf("admit b code=%d", code)
+	}
+	afterAdmit := store.saves
+
+	now = now.Add(10 * time.Second)
+	adm.RefreshTelemetry("a", "h", "m", "1.8.115")
+	adm.RefreshTelemetry("b", "h", "m", "1.8.115")
+	if store.saves != afterAdmit {
+		t.Fatalf("last-seen-only refreshes persisted per provider, saves=%d want %d", store.saves, afterAdmit)
+	}
+
+	recs := adm.Records(nil)
+	if len(recs) != 2 || recs[0].LastSeenAt.IsZero() {
+		t.Fatalf("in-memory last_seen not updated: %+v", recs)
+	}
+}
+
 func TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	adm := NewAdmissionManager(config.AdmissionConfig{
@@ -845,6 +1072,19 @@ func TestAdmissionManagerPruneShrinksStateBeyondCutoff(t *testing.T) {
 
 type failingAdmissionStateStore struct {
 	err error
+}
+
+type countingAdmissionStore struct {
+	saves int
+}
+
+func (c *countingAdmissionStore) LoadAdmissionState(context.Context) (AdmissionState, error) {
+	return AdmissionState{}, nil
+}
+
+func (c *countingAdmissionStore) SaveAdmissionState(context.Context, AdmissionState) error {
+	c.saves++
+	return nil
 }
 
 type fakeRewardsTrustStore struct {
