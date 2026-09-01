@@ -392,6 +392,45 @@ final class ControlFrameCodecTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(agent.snapshot), "On battery — plug in to earn")
     }
 
+    @MainActor
+    func testLegacyMetricsFrameWithoutGranularCriteriaUsesCounterFallback() throws {
+        let snapshot = try snapshotAfterControlFrameBridgeFixture("legacy-trust-counters.jsonl")
+
+        let trustLine = AgentSnapshotPresenter.trustLine(snapshot)
+        XCTAssertTrue(trustLine.contains("1 of 2"), trustLine)
+        XCTAssertFalse(trustLine.contains("0 of 2"), trustLine)
+        XCTAssertEqual(
+            AgentSnapshotPresenter.rewardVerdict(snapshot).trustProgress,
+            AgentSnapshotPresenter.RewardVerdict.TrustProgress(met: 1, required: 2)
+        )
+    }
+
+    @MainActor
+    func testEmptyGranularCriteriaFrameDoesNotUseLegacyCounterFallback() throws {
+        let snapshot = try snapshotAfterControlFrameBridgeFixture("empty-granular-criteria.jsonl")
+
+        let trustLine = AgentSnapshotPresenter.trustLine(snapshot)
+        XCTAssertTrue(trustLine.contains("0 of 2"), trustLine)
+        XCTAssertFalse(trustLine.contains("1 of 2"), trustLine)
+        XCTAssertEqual(
+            AgentSnapshotPresenter.rewardVerdict(snapshot).trustProgress,
+            AgentSnapshotPresenter.RewardVerdict.TrustProgress(met: 0, required: 2)
+        )
+    }
+
+    @MainActor
+    func testOverlappingGranularCriteriaFrameRequiresDistinctSecondSlot() throws {
+        let snapshot = try snapshotAfterControlFrameBridgeFixture("overlapping-granular-criteria.jsonl")
+
+        let trustLine = AgentSnapshotPresenter.trustLine(snapshot)
+        XCTAssertTrue(trustLine.contains("1 of 2"), trustLine)
+        XCTAssertFalse(trustLine.contains("2 of 2"), trustLine)
+        XCTAssertEqual(
+            AgentSnapshotPresenter.rewardVerdict(snapshot).trustProgress,
+            AgentSnapshotPresenter.RewardVerdict.TrustProgress(met: 1, required: 2)
+        )
+    }
+
     func testMetricsResponseDecodesGpuLatencyAndQueueDepth() throws {
         let data = Data("""
         {
@@ -428,6 +467,32 @@ final class ControlFrameCodecTests: XCTestCase {
         } else {
             XCTFail("expected metricsResponse")
         }
+    }
+
+    @MainActor
+    private func snapshotAfterControlFrameBridgeFixture(_ fixtureName: String) throws -> AgentSnapshot {
+        let frame = try ControlCodec.decode(try Self.controlFrameBridgeFixture(named: fixtureName))
+        var initialSnapshot = AgentSnapshot.empty
+        initialSnapshot.state = .serving
+        let agent = MalibuAgent(
+            initialSnapshot: initialSnapshot,
+            projectionEligibleForMetrics: true
+        )
+        agent.consume(frame)
+        return agent.snapshot
+    }
+
+    private static func controlFrameBridgeFixture(named name: String) throws -> Data {
+        let phase3Root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try Data(contentsOf: phase3Root
+            .appendingPathComponent("Tests")
+            .appendingPathComponent("Fixtures")
+            .appendingPathComponent("ControlFrameBridge")
+            .appendingPathComponent(name))
     }
 
     func testPauseAckAcceptedFalseCarriesReason() throws {

@@ -96,38 +96,40 @@ enum ControlMetricsBuilder {
         // here — the two share one ProviderStatus instance — truncated the next
         // heartbeat's window to the post-poll sliver. Read without resetting.
         let snapshot = await providerStatus.snapshot(resetWindow: false)
-		var earnings: ProviderEarningsSummary?
-		var accrual: MalibuAccrualSummary?
-		var walletStatus: ProviderWalletStatusSummary?
-		var walletStatusSchemaFailed = false
-		if let token = providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-		   !token.isEmpty {
-			if let providerEarningsClient {
-				earnings = try? await providerEarningsClient.fetch(bearerToken: token)
-			}
-			if let malibuAccrualClient {
-				accrual = try? await malibuAccrualClient.fetch(bearerToken: token)
-			}
-			if let providerWalletStatusClient {
-				do {
-					walletStatus = try await providerWalletStatusClient.fetch(bearerToken: token)
-				} catch ProviderWalletStatusClientError.httpStatus {
-				} catch ProviderWalletStatusClientError.unavailable {
-				} catch ProviderWalletStatusClientError.invalidCoordinatorURL {
-				} catch {
-					walletStatusSchemaFailed = true
-				}
-			}
-		}
-		if let accrual {
-			earnings = earnings?.merging(accrual: accrual) ?? .from(accrual: accrual)
-		}
-		if let walletStatus {
-			earnings = earnings?.merging(walletStatus: walletStatus) ?? ProviderEarningsSummary.unavailableWalletStatus().merging(walletStatus: walletStatus)
-		} else if walletStatusSchemaFailed {
-			earnings = earnings?.markingWalletStatusUnavailable() ?? .unavailableWalletStatus()
-		}
-		return .from(
+        var earnings: ProviderEarningsSummary?
+        var accrual: MalibuAccrualSummary?
+        var walletStatus: ProviderWalletStatusSummary?
+        var walletStatusSchemaFailed = false
+        if let token = providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            if let providerEarningsClient {
+                earnings = try? await providerEarningsClient.fetch(bearerToken: token)
+            }
+            if let malibuAccrualClient {
+                accrual = try? await malibuAccrualClient.fetch(bearerToken: token)
+            }
+            if let providerWalletStatusClient {
+                do {
+                    walletStatus = try await providerWalletStatusClient.fetch(bearerToken: token)
+                } catch ProviderWalletStatusClientError.httpStatus {
+                } catch ProviderWalletStatusClientError.unavailable {
+                } catch ProviderWalletStatusClientError.invalidCoordinatorURL {
+                } catch {
+                    walletStatusSchemaFailed = true
+                }
+            }
+        }
+        if let accrual {
+            earnings = earnings?.merging(accrual: accrual) ?? .from(accrual: accrual)
+        }
+        if let walletStatus {
+            earnings = earnings?.merging(walletStatus: walletStatus) ?? ProviderEarningsSummary.unavailableWalletStatus().merging(walletStatus: walletStatus)
+        } else if walletStatusSchemaFailed {
+            if earnings?.malibuProjectionFresh != true {
+                earnings = earnings?.markingWalletStatusUnavailable() ?? .unavailableWalletStatus()
+            }
+        }
+        return .from(
             provider: snapshot,
             providerEarnings: earnings
         )
