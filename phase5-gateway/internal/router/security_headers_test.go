@@ -1,6 +1,7 @@
 package router
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,6 +29,22 @@ func TestSensitiveIssuanceResponsesAreNoStore(t *testing.T) {
 		t.Fatalf("key status=%d body=%s", keyResp.Code, keyResp.Body.String())
 	}
 	assertNoStore(t, keyResp.Header())
+
+	var rotated struct {
+		APIKey string `json:"api_key"`
+		KeyID  string `json:"key_id"`
+	}
+	if err := json.Unmarshal(keyResp.Body.Bytes(), &rotated); err != nil {
+		t.Fatalf("rotate json: %v", err)
+	}
+	revokeReq := httptest.NewRequest(http.MethodPost, "/auth/api-keys/"+rotated.KeyID+"/revoke", nil)
+	revokeReq.Header.Set("Authorization", "Bearer "+rotated.APIKey)
+	revokeResp := httptest.NewRecorder()
+	h.ServeHTTP(revokeResp, revokeReq)
+	if revokeResp.Code != http.StatusOK {
+		t.Fatalf("revoke status=%d", revokeResp.Code)
+	}
+	assertNoStore(t, revokeResp.Header())
 }
 
 func TestHTMLRoutesSetBrowserSecurityHeaders(t *testing.T) {
