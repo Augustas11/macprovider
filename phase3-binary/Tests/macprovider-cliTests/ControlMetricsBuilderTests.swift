@@ -34,17 +34,26 @@ final class ControlMetricsBuilderTests: XCTestCase {
         XCTAssertEqual(afterHeartbeat.requestsServedSinceLast, 0)
     }
 
-    func testMalformedWalletStatusFailsClosedInMetricsPath() async throws {
+    func testMalformedWalletStatusPreservesFreshAccrualInMetricsPath() async throws {
         let snapshot = await buildSnapshot(walletJSON: Self.walletMalformedAuditJSON)
 
         let earnings = try XCTUnwrap(snapshot.providerEarnings)
-        XCTAssertFalse(earnings.walletBound)
-        XCTAssertNil(earnings.malibuWithdrawable)
-        XCTAssertEqual(earnings.malibuRewardEligibility?.primaryReason, "telemetry_unavailable")
+        XCTAssertTrue(earnings.walletBound)
+        XCTAssertEqual(earnings.trustTier, "trusted")
+        XCTAssertEqual(earnings.malibuAllTime, 10)
+        XCTAssertEqual(earnings.malibuWithdrawable, 10)
+        XCTAssertEqual(earnings.malibuHeld, 0)
+        XCTAssertEqual(earnings.economicCriteria, ["E2"])
+        XCTAssertEqual(earnings.additionalCriteria, ["A3"])
+        XCTAssertEqual(earnings.malibuRewardEligibility?.primaryReason, "withdrawable_balance_available")
+        XCTAssertTrue(earnings.malibuProjectionFresh)
     }
 
-    func testMissingWalletRewardEligibilityFailsClosedInMetricsPath() async throws {
-        let snapshot = await buildSnapshot(walletJSON: Self.walletMissingRewardEligibilityJSON)
+    func testMalformedWalletStatusWithoutFreshAccrualFailsClosedInMetricsPath() async throws {
+        let snapshot = await buildSnapshot(
+            walletJSON: Self.walletMalformedAuditJSON,
+            includeAccrualClient: false
+        )
 
         let earnings = try XCTUnwrap(snapshot.providerEarnings)
         XCTAssertFalse(earnings.walletBound)
@@ -52,7 +61,76 @@ final class ControlMetricsBuilderTests: XCTestCase {
         XCTAssertEqual(earnings.malibuRewardEligibility?.primaryReason, "telemetry_unavailable")
     }
 
-    private func buildSnapshot(walletJSON: String) async -> ControlMetricsSnapshot {
+    func testMissingWalletRewardEligibilityPreservesFreshAccrualInMetricsPath() async throws {
+        let snapshot = await buildSnapshot(walletJSON: Self.walletMissingRewardEligibilityJSON)
+
+        let earnings = try XCTUnwrap(snapshot.providerEarnings)
+        XCTAssertTrue(earnings.walletBound)
+        XCTAssertEqual(earnings.trustTier, "trusted")
+        XCTAssertEqual(earnings.malibuAllTime, 10)
+        XCTAssertEqual(earnings.malibuWithdrawable, 10)
+        XCTAssertEqual(earnings.malibuHeld, 0)
+        XCTAssertEqual(earnings.economicCriteria, ["E2"])
+        XCTAssertEqual(earnings.additionalCriteria, ["A3"])
+        XCTAssertEqual(earnings.malibuRewardEligibility?.primaryReason, "withdrawable_balance_available")
+        XCTAssertTrue(earnings.malibuProjectionFresh)
+    }
+
+    func testMissingWalletRewardEligibilityWithoutFreshAccrualFailsClosedInMetricsPath() async throws {
+        let snapshot = await buildSnapshot(
+            walletJSON: Self.walletMissingRewardEligibilityJSON,
+            includeAccrualClient: false
+        )
+
+        let earnings = try XCTUnwrap(snapshot.providerEarnings)
+        XCTAssertFalse(earnings.walletBound)
+        XCTAssertNil(earnings.malibuWithdrawable)
+        XCTAssertEqual(earnings.malibuRewardEligibility?.primaryReason, "telemetry_unavailable")
+    }
+
+    func testWalletSchemaDriftPreservesFreshAccrualInMetricsPath() async throws {
+        let snapshot = await buildSnapshot(
+            walletJSON: Self.walletSchemaDriftJSON,
+            includeAccrualClient: true
+        )
+
+        let earnings = try XCTUnwrap(snapshot.providerEarnings)
+        XCTAssertTrue(earnings.walletBound)
+        XCTAssertEqual(earnings.trustTier, "trusted")
+        XCTAssertEqual(earnings.malibuAllTime, 10)
+        XCTAssertEqual(earnings.malibuWithdrawable, 10)
+        XCTAssertEqual(earnings.malibuHeld, 0)
+        XCTAssertEqual(earnings.malibuDailyCap, 25)
+        XCTAssertEqual(earnings.malibuWalletDailyCap, 100)
+        XCTAssertEqual(earnings.trustCriteriaMet, 4)
+        XCTAssertEqual(earnings.trustCriteriaRequired, 4)
+        XCTAssertEqual(earnings.economicCriteria, ["E2"])
+        XCTAssertEqual(earnings.additionalCriteria, ["A3"])
+        XCTAssertEqual(earnings.malibuRewardEligibility?.primaryReason, "withdrawable_balance_available")
+        XCTAssertTrue(earnings.malibuProjectionFresh)
+    }
+
+    func testWalletSchemaDriftWithoutFreshAccrualFailsClosedInMetricsPath() async throws {
+        let snapshot = await buildSnapshot(
+            walletJSON: Self.walletSchemaDriftJSON,
+            includeAccrualClient: false
+        )
+
+        let earnings = try XCTUnwrap(snapshot.providerEarnings)
+        XCTAssertFalse(earnings.walletBound)
+        XCTAssertNil(earnings.malibuAllTime)
+        XCTAssertNil(earnings.malibuWithdrawable)
+        XCTAssertNil(earnings.malibuHeld)
+        XCTAssertNil(earnings.malibuDailyCap)
+        XCTAssertNil(earnings.malibuWalletDailyCap)
+        XCTAssertEqual(earnings.malibuRewardEligibility?.primaryReason, "telemetry_unavailable")
+        XCTAssertTrue(earnings.malibuProjectionFresh)
+    }
+
+    private func buildSnapshot(
+        walletJSON: String,
+        includeAccrualClient: Bool = true
+    ) async -> ControlMetricsSnapshot {
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [ControlMetricsMockURLProtocol.self]
@@ -80,10 +158,10 @@ final class ControlMetricsBuilderTests: XCTestCase {
         return await ControlMetricsBuilder.build(
             providerStatus: status,
             providerEarningsClient: nil,
-            malibuAccrualClient: MalibuAccrualClient(
+            malibuAccrualClient: includeAccrualClient ? MalibuAccrualClient(
                 accrualURL: URL(string: "https://coordinator.test/v1/provider/malibu-accrual")!,
                 session: session
-            ),
+            ) : nil,
             providerWalletStatusClient: ProviderWalletStatusClient(
                 walletURL: URL(string: "https://coordinator.test/v1/provider/wallet")!,
                 session: session
@@ -91,6 +169,14 @@ final class ControlMetricsBuilderTests: XCTestCase {
             providerToken: "provider-token"
         )
     }
+
+    private static let walletSchemaDriftJSON = """
+    {
+      "schema_version": "provider_wallet_status.v2",
+      "provider_id": "mp-test",
+      "wallet_bound": true
+    }
+    """
 
     private static let accrualEligibleJSON = """
     {
@@ -102,6 +188,8 @@ final class ControlMetricsBuilderTests: XCTestCase {
       "wallet_bound": true,
       "trust_criteria_met": 4,
       "trust_criteria_required": 4,
+      "economic_criteria": ["E2"],
+      "additional_criteria": ["A3"],
       "daily_cap_malibu": 25,
       "wallet_daily_cap_malibu": 100,
       "withdrawal_hold_reasons": [],

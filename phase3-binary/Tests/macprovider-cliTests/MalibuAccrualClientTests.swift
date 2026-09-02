@@ -22,6 +22,8 @@ final class MalibuAccrualClientTests: XCTestCase {
           "trust_tier": "provisional",
           "trust_criteria_met": 2,
           "trust_criteria_required": 4,
+          "economic_criteria": ["E2"],
+          "additional_criteria": [],
           "wallet_bound": true,
           "daily_cap_malibu": "25",
           "wallet_daily_cap_malibu": 100,
@@ -42,6 +44,8 @@ final class MalibuAccrualClientTests: XCTestCase {
         XCTAssertEqual(summary.trustTier, "provisional")
         XCTAssertEqual(summary.trustCriteriaMet, 2)
         XCTAssertEqual(summary.trustCriteriaRequired, 4)
+        XCTAssertEqual(summary.economicCriteria, ["E2"])
+        XCTAssertEqual(summary.additionalCriteria, [])
         XCTAssertEqual(summary.walletBound, true)
         XCTAssertEqual(summary.dailyCapMALIBU, 25)
         XCTAssertEqual(summary.walletDailyCapMALIBU, 100)

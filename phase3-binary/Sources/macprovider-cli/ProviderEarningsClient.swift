@@ -45,6 +45,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
     public let malibuAllTime: Double?
     public let trustCriteriaMet: Int?
     public let trustCriteriaRequired: Int?
+    public let economicCriteria: [String]?
+    public let additionalCriteria: [String]?
     public let malibuWithdrawable: Double?
     public let malibuHeld: Double?
     public let malibuHoldReasons: [String]
@@ -75,6 +77,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         case malibuAllTime = "malibu_all_time"
         case trustCriteriaMet = "trust_criteria_met"
         case trustCriteriaRequired = "trust_criteria_required"
+        case economicCriteria = "economic_criteria"
+        case additionalCriteria = "additional_criteria"
         case malibuWithdrawable = "malibu_withdrawable"
         case malibuHeld = "malibu_held"
         case malibuHoldReasons = "malibu_hold_reasons"
@@ -106,6 +110,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         malibuAllTime = try container.decodeIfPresent(Double.self, forKey: .malibuAllTime)
         trustCriteriaMet = try container.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
         trustCriteriaRequired = try container.decodeIfPresent(Int.self, forKey: .trustCriteriaRequired)
+        economicCriteria = try Self.decodePresencePreservingCriteria(container, forKey: .economicCriteria)
+        additionalCriteria = try Self.decodePresencePreservingCriteria(container, forKey: .additionalCriteria)
         malibuWithdrawable = try container.decodeIfPresent(Double.self, forKey: .malibuWithdrawable)
         malibuHeld = try container.decodeIfPresent(Double.self, forKey: .malibuHeld)
         malibuHoldReasons = try container.decodeIfPresent([String].self, forKey: .malibuHoldReasons) ?? []
@@ -133,6 +139,14 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         earningsProjectionFresh = try container.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
     }
 
+    private static func decodePresencePreservingCriteria(
+        _ container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) throws -> [String]? {
+        guard container.contains(key) else { return nil }
+        return try container.decodeIfPresent([String].self, forKey: key) ?? []
+    }
+
     public init(
         walletBound: Bool,
         trustTier: String,
@@ -146,6 +160,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         malibuAllTime: Double?,
         trustCriteriaMet: Int?,
         trustCriteriaRequired: Int?,
+        economicCriteria: [String]? = nil,
+        additionalCriteria: [String]? = nil,
         malibuWithdrawable: Double? = nil,
         malibuHeld: Double? = nil,
         malibuHoldReasons: [String] = [],
@@ -168,6 +184,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         self.malibuAllTime = malibuAllTime
         self.trustCriteriaMet = trustCriteriaMet
         self.trustCriteriaRequired = trustCriteriaRequired
+        self.economicCriteria = economicCriteria
+        self.additionalCriteria = additionalCriteria
         self.malibuWithdrawable = malibuWithdrawable
         self.malibuHeld = malibuHeld
         self.malibuHoldReasons = malibuHoldReasons
@@ -193,6 +211,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuAllTime: malibuAllTime,
             trustCriteriaMet: trustCriteriaMet,
             trustCriteriaRequired: trustCriteriaRequired,
+            economicCriteria: economicCriteria,
+            additionalCriteria: additionalCriteria,
             malibuWithdrawable: malibuWithdrawable,
             malibuHeld: malibuHeld,
             malibuHoldReasons: malibuHoldReasons,
@@ -219,6 +239,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuAllTime: accrual.accruedMALIBU,
             trustCriteriaMet: accrual.trustCriteriaMet ?? trustCriteriaMet,
             trustCriteriaRequired: accrual.trustCriteriaRequired ?? trustCriteriaRequired,
+            economicCriteria: accrual.economicCriteria ?? economicCriteria,
+            additionalCriteria: accrual.additionalCriteria ?? additionalCriteria,
             malibuWithdrawable: accrual.withdrawableMALIBU,
             malibuHeld: accrual.heldMALIBU,
             malibuHoldReasons: accrual.withdrawalHoldReasons,
@@ -233,7 +255,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
 
     func merging(walletStatus: ProviderWalletStatusSummary) -> ProviderEarningsSummary {
         if walletStatus.unavailable {
-            return markingWalletStatusUnavailable()
+            return malibuProjectionFresh ? self : markingWalletStatusUnavailable()
         }
         return ProviderEarningsSummary(
             walletBound: walletStatus.walletBound,
@@ -248,6 +270,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuAllTime: walletStatus.rewardAmounts?.accruedMALIBU ?? malibuAllTime,
             trustCriteriaMet: walletStatus.eligibilityInputs?.criteriaMet ?? trustCriteriaMet,
             trustCriteriaRequired: walletStatus.eligibilityInputs?.criteriaRequired ?? trustCriteriaRequired,
+            economicCriteria: walletStatus.eligibilityInputs?.economicCriteria ?? economicCriteria,
+            additionalCriteria: walletStatus.eligibilityInputs?.additionalCriteria ?? additionalCriteria,
             malibuWithdrawable: walletStatus.rewardAmounts?.withdrawableMALIBU ?? malibuWithdrawable,
             malibuHeld: walletStatus.rewardAmounts?.heldMALIBU ?? malibuHeld,
             malibuHoldReasons: malibuHoldReasons,
@@ -274,6 +298,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuAllTime: nil,
             trustCriteriaMet: trustCriteriaMet,
             trustCriteriaRequired: trustCriteriaRequired,
+            economicCriteria: economicCriteria,
+            additionalCriteria: additionalCriteria,
             malibuWithdrawable: nil,
             malibuHeld: nil,
             malibuHoldReasons: [],
@@ -300,6 +326,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuAllTime: accrual.accruedMALIBU,
             trustCriteriaMet: accrual.trustCriteriaMet,
             trustCriteriaRequired: accrual.trustCriteriaRequired,
+            economicCriteria: accrual.economicCriteria,
+            additionalCriteria: accrual.additionalCriteria,
             malibuWithdrawable: accrual.withdrawableMALIBU,
             malibuHeld: accrual.heldMALIBU,
             malibuHoldReasons: accrual.withdrawalHoldReasons,
@@ -326,6 +354,8 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuAllTime: nil,
             trustCriteriaMet: nil,
             trustCriteriaRequired: nil,
+            economicCriteria: nil,
+            additionalCriteria: nil,
             malibuWithdrawable: nil,
             malibuHeld: nil,
             malibuHoldReasons: [],

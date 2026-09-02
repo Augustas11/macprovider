@@ -128,6 +128,8 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
     let trustTier: String
     let trustCriteriaMet: Int?
     let trustCriteriaRequired: Int?
+    let economicCriteria: [String]?
+    let additionalCriteria: [String]?
     let walletBound: Bool?
     let dailyCapMALIBU: Double?
     let walletDailyCapMALIBU: Double?
@@ -141,6 +143,8 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
         case trustTier = "trust_tier"
         case trustCriteriaMet = "trust_criteria_met"
         case trustCriteriaRequired = "trust_criteria_required"
+        case economicCriteria = "economic_criteria"
+        case additionalCriteria = "additional_criteria"
         case walletBound = "wallet_bound"
         case dailyCapMALIBU = "daily_cap_malibu"
         case walletDailyCapMALIBU = "wallet_daily_cap_malibu"
@@ -164,6 +168,8 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
         trustTier = rawTrustTier
         trustCriteriaMet = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
         trustCriteriaRequired = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaRequired)
+        economicCriteria = try Self.decodePresencePreservingCriteria(c, forKey: .economicCriteria)
+        additionalCriteria = try Self.decodePresencePreservingCriteria(c, forKey: .additionalCriteria)
         walletBound = try c.decodeIfPresent(Bool.self, forKey: .walletBound)
         dailyCapMALIBU = try Self.decodeOptionalDecimal(c, key: .dailyCapMALIBU)
         walletDailyCapMALIBU = try Self.decodeOptionalDecimal(c, key: .walletDailyCapMALIBU)
@@ -201,6 +207,14 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
             in: c,
             debugDescription: "Invalid MALIBU amount"
         )
+    }
+
+    private static func decodePresencePreservingCriteria(
+        _ c: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) throws -> [String]? {
+        guard c.contains(key) else { return nil }
+        return try c.decodeIfPresent([String].self, forKey: key) ?? []
     }
 
     private static func decodeOptionalDecimal(
