@@ -696,6 +696,18 @@ enum AgentSnapshotPresenter {
         }
     }
 
+    struct ConsolidatedStatus: Equatable {
+        enum Phase: String { case settingUp, live, earning, needsAttention }
+        enum Tone: String { case positive, neutral, attention }
+
+        let phase: Phase
+        let tone: Tone
+        let label: String
+        let meaning: String
+        let nextAction: String?
+        let trustProgress: RewardVerdict.TrustProgress?
+    }
+
     struct MiningHealth: Equatable {
         let status: String
         let reasonCode: String
@@ -1414,6 +1426,16 @@ enum AgentSnapshotPresenter {
         return "Complete \(progress.required - progress.met) more trust criteria for withdrawal eligibility."
     }
 
+    private static func liveNextAction(_ verdict: RewardVerdict) -> String? {
+        if verdict.reasonCode == .walletMissing || !verdict.walletBound {
+            return "Add a payout wallet to receive earnings."
+        }
+        if verdict.trustDisplay == .provisional {
+            return trustCriteriaAction(verdict) ?? "Stay online to reach Trusted and unlock withdrawals."
+        }
+        return nil
+    }
+
     private static func isActive(_ s: AgentSnapshot) -> Bool {
         s.state == .serving || s.state == .paused || isLocalOnly(s)
     }
@@ -1430,9 +1452,207 @@ enum AgentSnapshotPresenter {
         s.state == .reconnecting && s.currentModelID != nil
     }
 
+    private static func isNetworkOutage(_ s: AgentSnapshot) -> Bool {
+        s.networkState == "network_offline"
+            || s.networkState == "coordinator_unavailable"
+            || s.lifecycleState == "network_offline"
+            || s.lifecycleState == "coordinator_unavailable"
+    }
+
+    private static func isLocalLinkOffline(_ s: AgentSnapshot) -> Bool {
+        s.networkState == "network_offline" || s.lifecycleState == "network_offline"
+    }
+
     private static func authoritativeLifecycleLabel(_ s: AgentSnapshot) -> String? {
         guard s.isLocalStatusObservationCurrent(), let state = s.lifecycleState else { return nil }
         return lifecycleStateLabel(state)
+    }
+
+    private static func primaryDiagnosticFinding(_ s: AgentSnapshot) -> ProviderDiagnosticFinding? {
+        guard !s.providerSoftwareRepairInProgress else { return nil }
+        return topDiagnosticFinding(s)
+    }
+
+    static func consolidatedStatus(_ s: AgentSnapshot) -> ConsolidatedStatus {
+        let publicS = publicStatus(s)
+
+        if s.state == .error || s.state == .idle || s.state == .paused {
+            return ConsolidatedStatus(
+                phase: .needsAttention,
+                tone: s.state == .error ? .attention : .neutral,
+                label: publicS.title,
+                meaning: publicS.detail ?? "",
+                nextAction: publicS.safeNextAction,
+                trustProgress: nil
+            )
+        }
+
+        let primaryDiagnostic = primaryDiagnosticFinding(s)
+        if let primaryDiagnostic, primaryDiagnostic.signatureID != .autoupdateInProgress {
+            let context = diagnosticContext(primaryDiagnostic, snapshot: s)
+            let meaning = ([publicS.detail ?? "Malibu found a provider issue that needs attention."] + context)
+                .joined(separator: " ")
+            return ConsolidatedStatus(
+                phase: .needsAttention,
+                tone: .attention,
+                label: publicS.title,
+                meaning: meaning,
+                nextAction: publicS.safeNextAction,
+                trustProgress: nil
+            )
+        }
+
+        if isNetworkOutage(s) {
+            let localOffline = isLocalLinkOffline(s)
+            return ConsolidatedStatus(
+                phase: .needsAttention,
+                tone: localOffline ? .attention : .neutral,
+                label: localOffline ? "Network is offline" : "Network unavailable",
+                meaning: localOffline
+                    ? "Malibu can't confirm customer availability because this Mac is offline."
+                    : "Malibu can't confirm customer availability because the network is unavailable.",
+                nextAction: localOffline
+                    ? "Reconnect this Mac to the internet."
+                    : "Keep Malibu open while status updates.",
+                trustProgress: nil
+            )
+        }
+
+        if isHardwareEvidenceRejected(s) || isUncataloguedModel(s)
+            || (isSoftwareUpdateRequired(s) && !isNetworkReady(s)) || isIneligibleForCustomerWork(s) {
+            return ConsolidatedStatus(
+                phase: .needsAttention,
+                tone: .attention,
+                label: publicS.title,
+                meaning: publicS.detail ?? "This Mac cannot receive customer work in its current state.",
+                nextAction: publicS.safeNextAction,
+                trustProgress: nil
+            )
+        }
+
+        guard isNetworkReady(s) else {
+            if isTemporarilyNotBuyerServing(s) {
+                return ConsolidatedStatus(
+                    phase: .needsAttention,
+                    tone: .neutral,
+                    label: publicS.title,
+                    meaning: publicS.detail ?? "Customer availability is temporarily interrupted.",
+                    nextAction: publicS.safeNextAction ?? "Keep Malibu open while status updates.",
+                    trustProgress: nil
+                )
+            }
+
+            return ConsolidatedStatus(
+                phase: .settingUp,
+                tone: .neutral,
+                label: s.state == .starting ? "Setting up" : publicS.title,
+                meaning: publicS.detail ?? "Getting this Mac ready for customer work.",
+                nextAction: publicS.safeNextAction ?? "Keep Malibu open while setup finishes.",
+                trustProgress: nil
+            )
+        }
+
+        if s.providerSoftwareRepairInProgress {
+            return ConsolidatedStatus(
+                phase: .live,
+                tone: .neutral,
+                label: publicS.title,
+                meaning: publicS.detail ?? "Provider software is updating in the background.",
+                nextAction: publicS.safeNextAction,
+                trustProgress: nil
+            )
+        }
+
+        if primaryDiagnostic?.signatureID == .autoupdateInProgress {
+            return ConsolidatedStatus(
+                phase: .live,
+                tone: .neutral,
+                label: publicS.title,
+                meaning: publicS.detail ?? "Provider software is updating in the background.",
+                nextAction: publicS.safeNextAction,
+                trustProgress: nil
+            )
+        }
+
+        let verdict = rewardVerdict(s)
+        let phase: ConsolidatedStatus.Phase
+        let label: String
+        switch verdict.trustDisplay {
+        case .trustedAuthoritative:
+            phase = .earning
+            label = "Earning · Trusted"
+        case .trustedStaleNeutral:
+            phase = .live
+            label = "Live"
+        case .provisional:
+            phase = .live
+            label = "Live · Provisional"
+        case .unknown:
+            phase = .live
+            label = "Live"
+        }
+
+        let meaning: String
+        let nextAction: String?
+        switch verdict.malibuWithdrawal {
+        case .unlocked where verdict.canClaimWithdrawable:
+            meaning = "This Mac is approved and earning. MALIBU withdrawals are unlocked."
+            nextAction = liveNextAction(verdict)
+        case .capped(let reason), .epochDisposition(let reason):
+            meaning = sentence(rewardReasonCopy(reason))
+            nextAction = rewardReasonNextAction(reason)
+        case .held(let reason):
+            meaning = sentence(rewardReasonCopy(reason))
+            nextAction = reason == .heldProvisionalTrustTier
+                ? trustCriteriaAction(verdict) ?? rewardReasonNextAction(reason)
+                : rewardReasonNextAction(reason)
+        case .lockedProvisional:
+            meaning = "MALIBU is accruing, but withdrawal eligibility requires Trusted status."
+            nextAction = trustCriteriaAction(verdict) ?? "Complete trust criteria for withdrawal eligibility."
+        case .unavailable:
+            meaning = "MALIBU reward status could not be determined right now."
+            nextAction = rewardReasonNextAction(verdict.reasonCode)
+        case .unknown:
+            meaning = verdict.usdcActivity == .earning
+                ? "USDC earning is active. MALIBU reward telemetry is not published yet."
+                : "MALIBU reward telemetry is not published yet."
+            nextAction = rewardReasonNextAction(verdict.reasonCode)
+        case .none where verdict.reasonCode == .walletMissing || !verdict.walletBound:
+            meaning = "You're set up to earn — you just need somewhere to be paid."
+            nextAction = "Add a payout wallet to receive earnings."
+        case .none:
+            switch verdict.usdcActivity {
+            case .earning:
+                meaning = verdict.trustDisplay == .trustedStaleNeutral
+                    ? "USDC earning is active. MALIBU trust telemetry is not published yet."
+                    : "Paid work or rewards have settled in the current window."
+                nextAction = liveNextAction(verdict)
+            case .idle:
+                meaning = "This Mac is eligible, but the network is quiet right now."
+                nextAction = liveNextAction(verdict) ?? "Keep Malibu online."
+            case .unavailable:
+                meaning = "Fresh earnings or MALIBU reward telemetry is not available yet."
+                nextAction = "Keep Malibu open while reward status refreshes."
+            case .none:
+                meaning = "This Mac is approved and available for customer work."
+                nextAction = liveNextAction(verdict)
+            }
+        case .unlocked:
+            meaning = "MALIBU withdrawal status is being verified."
+            nextAction = rewardReasonNextAction(verdict.reasonCode)
+        }
+
+        let tone: ConsolidatedStatus.Tone = phase == .earning && verdict.canClaimWithdrawable
+            ? .positive
+            : .neutral
+        return ConsolidatedStatus(
+            phase: phase,
+            tone: tone,
+            label: label,
+            meaning: meaning,
+            nextAction: publicS.safeNextAction ?? nextAction,
+            trustProgress: verdict.trustProgress
+        )
     }
 
     static func publicStatus(_ s: AgentSnapshot) -> PublicStatus {
@@ -2492,7 +2712,7 @@ enum AgentSnapshotPresenter {
     }
 
     private static func publicStatusForTopDiagnosticFinding(_ s: AgentSnapshot) -> PublicStatus? {
-        guard let finding = s.diagnosticFindings.first(where: { canUseAsPrimaryDiagnosticStatus($0, snapshot: s) }) else {
+        guard let finding = topDiagnosticFinding(s) else {
             return nil
         }
         switch finding.signatureID {
@@ -2574,6 +2794,26 @@ enum AgentSnapshotPresenter {
                 executableAction: .exportDiagnostics
             )
         }
+    }
+
+    private static func topDiagnosticFinding(_ s: AgentSnapshot) -> ProviderDiagnosticFinding? {
+        s.diagnosticFindings
+            .filter { canUseAsPrimaryDiagnosticStatus($0, snapshot: s) }
+            .sorted(by: diagnosticPrecedes)
+            .first
+    }
+
+    private static func diagnosticPrecedes(
+        _ lhs: ProviderDiagnosticFinding,
+        _ rhs: ProviderDiagnosticFinding
+    ) -> Bool {
+        if lhs.signatureID != rhs.signatureID {
+            return lhs.signatureID < rhs.signatureID
+        }
+        if lhs.source != rhs.source {
+            return lhs.source < rhs.source
+        }
+        return (lhs.observedAt ?? .distantPast) > (rhs.observedAt ?? .distantPast)
     }
 
     private static func canUseAsPrimaryDiagnosticStatus(
@@ -2932,6 +3172,12 @@ enum AgentSnapshotPresenter {
             return "Trust verification is incomplete"
         case "held_demotion_cooldown":
             return "Trust verification is in progress"
+        case "held_epoch_disposition":
+            return "MALIBU is held pending epoch settlement"
+        case "excluded_epoch_disposition":
+            return "MALIBU was excluded from this epoch"
+        case "burned_or_retired_epoch_disposition":
+            return "MALIBU was retired for this epoch"
         case "missing_wallet_binding":
             return "wallet binding is missing"
         case "insufficient_verified_receipts":
@@ -2993,6 +3239,10 @@ enum AgentSnapshotPresenter {
             return "Complete the remaining trust criteria for withdrawal eligibility."
         case "held_demotion_cooldown":
             return "Keep Malibu online while trust review completes."
+        case "held_epoch_disposition":
+            return "This settles at the next epoch."
+        case "excluded_epoch_disposition", "burned_or_retired_epoch_disposition":
+            return "Nothing to do — this reflects a past epoch."
         case "missing_wallet_binding":
             return "Add a payout wallet."
         case "insufficient_verified_receipts":
