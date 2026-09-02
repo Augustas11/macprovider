@@ -13,9 +13,9 @@ require (
 	github.com/rs/zerolog v1.35.1
 	github.com/testcontainers/testcontainers-go v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
-	golang.org/x/crypto v0.54.0
-	golang.org/x/net v0.56.0
-	golang.org/x/text v0.40.0
+	golang.org/x/crypto v0.55.0
+	golang.org/x/net v0.58.0
+	golang.org/x/text v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
 	howett.net/plist v1.0.1
 	modernc.org/sqlite v1.52.0
