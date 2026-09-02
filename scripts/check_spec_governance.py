@@ -950,6 +950,83 @@ def _provider_prebeta_normalized_redaction(value: Any, location: str, result: Va
     return output
 
 
+def _provider_prebeta_normalized_environment(value: Any, location: str, result: ValidationResult) -> dict[str, Any] | None:
+    if not _expect_object(value, location, result):
+        return None
+    base_fields = {"class", "hardware_profile", "candidate"}
+    provider_fields = {
+        "binary_version",
+        "compatibility_set",
+        "operating_system",
+        "production_equivalent_conditions",
+    }
+    evidence_only_fields = {
+        "coordinator_identity",
+        "production_target",
+    }
+    _expect_keys(value, base_fields, base_fields | provider_fields | evidence_only_fields, location, result)
+    output: dict[str, Any] = {}
+    for field in ("class", "hardware_profile", "candidate"):
+        text = _string(value.get(field), None, f"{location}.{field}", result)
+        if text is not None:
+            output[field] = text
+    for field in ("binary_version", "compatibility_set", "operating_system"):
+        if field in value:
+            text = _string(value.get(field), None, f"{location}.{field}", result)
+            if text is not None:
+                output[field] = text
+    for field in evidence_only_fields:
+        if field in value:
+            _string(value.get(field), None, f"{location}.{field}", result)
+    production_equivalent = value.get("production_equivalent_conditions")
+    if production_equivalent is not None and _expect_object(
+        production_equivalent,
+        f"{location}.production_equivalent_conditions",
+        result,
+    ):
+        string_fields = {
+            "provider_service",
+            "network_state_before",
+            "network_state_after",
+            "thermal_state",
+            "memory_pressure",
+        }
+        bool_fields = {
+            "coordinator_connected_before",
+            "coordinator_connected_after",
+            "model_loaded_before",
+            "model_loaded_after",
+            "thermally_throttled",
+        }
+        _expect_keys(
+            production_equivalent,
+            string_fields | bool_fields,
+            string_fields | bool_fields,
+            f"{location}.production_equivalent_conditions",
+            result,
+        )
+        normalized_production_equivalent: dict[str, Any] = {}
+        for field in sorted(string_fields):
+            text = _string(
+                production_equivalent.get(field),
+                None,
+                f"{location}.production_equivalent_conditions.{field}",
+                result,
+            )
+            if text is not None:
+                normalized_production_equivalent[field] = text
+        for field in sorted(bool_fields):
+            value_bool = _bool_value(
+                production_equivalent.get(field),
+                f"{location}.production_equivalent_conditions.{field}",
+                result,
+            )
+            if value_bool is not None:
+                normalized_production_equivalent[field] = value_bool
+        output["production_equivalent_conditions"] = normalized_production_equivalent
+    return output
+
+
 def _provider_prebeta_step_order(requirement_ids: list[str], location: str, result: ValidationResult) -> tuple[str, ...]:
     selected = set(requirement_ids)
     if selected & PROVIDER_PREBETA_STRICT_SPEC032_REQUIREMENT_IDS:
@@ -1099,7 +1176,9 @@ def _validate_provider_prebeta_artifact(
     repository = payload.get("repository")
     signed_repository = signed.get("repository")
     if _expect_object(repository, f"{location}.source.repository", result) and isinstance(signed_repository, dict):
-        _expect_keys(repository, {"name", "commit"}, {"name", "commit"}, f"{location}.source.repository", result)
+        _expect_keys(repository, {"name", "commit"}, {"name", "commit", "git_describe"}, f"{location}.source.repository", result)
+        if "git_describe" in repository:
+            _string(repository.get("git_describe"), None, f"{location}.source.repository.git_describe", result)
         if repository.get("name") != signed_repository.get("name"):
             result.error(f"{location}.source.repository.name", "must match signed.repository.name")
         if repository.get("commit") != signed_repository.get("commit"):
@@ -1109,7 +1188,11 @@ def _validate_provider_prebeta_artifact(
     if payload.get("expires_at") != signed.get("expires_at"):
         result.error(f"{location}.source.expires_at", "must match signed.expires_at")
     _provider_prebeta_compare_signed_source(payload.get("run_id"), signed.get("run_id"), f"{location}.source.run_id", result)
-    for field_name in ("operator", "environment", "result"):
+    _provider_prebeta_compare_signed_source(payload.get("operator"), signed.get("operator"), f"{location}.source.operator", result)
+    source_environment = _provider_prebeta_normalized_environment(payload.get("environment"), f"{location}.source.environment", result)
+    signed_environment = _provider_prebeta_normalized_environment(signed.get("environment"), f"{location}.signed.environment", result)
+    _provider_prebeta_compare_signed_source(source_environment, signed_environment, f"{location}.source.environment", result)
+    for field_name in ("result",):
         _provider_prebeta_compare_signed_source(
             payload.get(field_name),
             signed.get(field_name),
