@@ -20,8 +20,8 @@ final class AutotuneRecommendSimulateTests: XCTestCase {
         XCTAssertEqual(request.buyerTTFTCeilingMS, 1_800)
         XCTAssertEqual(request.benchmarks["qwen3-coder-30b-a3b-instruct"]?.modelKey, "qwen3-coder-30b-a3b-instruct")
         XCTAssertEqual(request.rateCard.version, Self.bakedRateCardVersion)
-        XCTAssertEqual(request.candidateCatalog.version, "published-2026-08-28-inband-provenance-v1")
-        XCTAssertEqual(request.demandRank.version, "published-2026-08-28-inband-provenance-v1")
+        XCTAssertEqual(request.candidateCatalog.version, "published-2026-09-02-gpt-oss-120b-v1")
+        XCTAssertEqual(request.demandRank.version, "published-2026-09-02-gpt-oss-120b-v1")
     }
 
     func testSimulateRecommendationMatchesDirectEngineCall() async throws {
@@ -61,8 +61,8 @@ final class AutotuneRecommendSimulateTests: XCTestCase {
 
         XCTAssertEqual(fetchedURL, AutotuneRecommendSimulator.liveRateCardURL)
         XCTAssertEqual(result.rateCardVersion, Self.bakedRateCardVersion)
-        XCTAssertEqual(result.candidateCatalogVersion, "published-2026-08-28-inband-provenance-v1")
-        XCTAssertEqual(result.demandRankVersion, "published-2026-08-28-inband-provenance-v1")
+        XCTAssertEqual(result.candidateCatalogVersion, "published-2026-09-02-gpt-oss-120b-v1")
+        XCTAssertEqual(result.demandRankVersion, "published-2026-09-02-gpt-oss-120b-v1")
     }
 
     private static var bakedRateCardVersion: String {

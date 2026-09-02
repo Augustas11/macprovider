@@ -232,6 +232,9 @@ expected_history = {
     # append-only (renewals mint a new dated release_id, superseding but never
     # removing the previous one).
     "published-2026-07-29-inband-provenance-v1",
+    # Superseded by published-2026-09-02-gpt-oss-120b-v1; retained by the
+    # append-only ledger (was the current release before gpt-oss-120b admission).
+    "published-2026-08-28-inband-provenance-v1",
     release_id,
 }
 if set(ledger["releases"]) != expected_history:
