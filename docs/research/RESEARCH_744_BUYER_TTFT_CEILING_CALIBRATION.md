@@ -7,6 +7,45 @@ Catalog baseline: `published-2026-07-29-inband-provenance-v1`
 Scope: decide whether `--buyer-ttft-ceiling-ms` can leave its shipped default of `0`  
 Non-goals: no catalog write, no CLI default change, no hello-gate flip, no ranking formula change
 
+## Closing refresh — 2026-09-02 (issue #744 closed)
+
+Re-ran the export against Pearl after #901 landed. The refresh confirms the
+2026-08-17 decision and, more importantly, establishes that the revisit gate's
+required data source **cannot be produced**. #744 is closed on this basis; the
+`--buyer-ttft-ceiling-ms` default stays `0` (disabled).
+
+**Two structural findings that make the written close condition unsatisfiable:**
+
+1. **No fleet-wide Stage-1 warm TTFT exists to export.** There is no autotune /
+   Stage-1 / warm-TTFT / bench telemetry table anywhere on Pearl (checked
+   `/var/lib/macprovider/coordinator.db`, `gateway.db`, and Postgres
+   `macprovider_stats`). The only TTFT column is `request_log.ttft_ms`, which has
+   no RAM/chip and, for the fast streaming rows, is short-prompt chat rather than
+   the padded 4k Stage-1 probe the installer ceiling actually gates. Stage-1 warm
+   `ttftMS` is measured locally on each provider Mac (`tune_runs`) and is never
+   reported to the coordinator. A calibrated default therefore needs **new
+   telemetry built first**, not a query.
+2. **The fleet is two orders of magnitude too small for n≥30 per cell.**
+   Non-operator `provider_hardware_profiles` by RAM class: 8 GB = 7 (6 active
+   ≤14d), 16 GB = 6 (4), 24 GB = 3 (0), 32 GB = 2 (1), 128 GB = 1 (1); 12 active
+   providers total. The close condition (n≥30 per recommendable cell across
+   8/16/24/32 GB) is unreachable even if the telemetry existed — the largest
+   class holds 7 machines.
+
+**Refreshed production read (post-B1 window through 2026-09-02T04:30Z):** streaming
+buyer first-byte remains fast and unchanged. 358 HTTP-200 streaming rows with
+non-null `ttft_ms` (325 in the last 30 days). Stream p95 = 336 ms
+(Llama-3.2-3B, n=188), 712 ms (Qwen3-8B, n=149), 597 ms (Coder-30B, n=21).
+**0/358 breach an 1800 ms ceiling** except a single Qwen3-8B outlier at 2599 ms.
+Non-streaming (98,768 timed rows) remains the buffered-whole-response 2026-07-09
+metric class and is never a ceiling input. No TTFT harm mode is materializing.
+
+**Disposition:** keep `--buyer-ttft-ceiling-ms` at `0`; the knob stays available
+to set reactively. Re-open (or file fresh) only if (a) a real streaming-TTFT
+regression appears in production, or (b) autotune Stage-1 warm TTFT telemetry
+(row + artifact SHA + binary version + chip-tier + RAM) is built and the fleet is
+large enough that a data-driven default becomes feasible for the first time.
+
 ## Executive summary
 
 1. **#744 ranking/provenance/drift already shipped** (SPEC-023 v0.8, PR #772, A4 in-band provenance). The remaining original item is a production buyer-TTFT default.
