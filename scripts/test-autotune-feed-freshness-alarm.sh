@@ -27,7 +27,7 @@ import sys
 alarm = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 renew = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 checker = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
-CHECKOUT = "uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10"
+CHECKOUT = "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
 CHECKER = "python3 scripts/check-autotune-feed-freshness.py"
 
 for name, workflow in (("alarm", alarm), ("renew", renew)):

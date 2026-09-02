@@ -55,7 +55,7 @@ for requirement in (
     "scripts/dist/malibu-download-known_hosts",
     "bash scripts/renew-autotune-static-feed.sh --deploy",
     "persist-credentials: false",
-    "uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+    "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
     "timeout-minutes: 20",
     "unset AUTOTUNE_STATIC_V4_PRIVATE_KEY_BASE64 PEARL_AUTOTUNE_DEPLOY_SSH_KEY",
     'chmod 600 "$key" "$ssh_key"',
