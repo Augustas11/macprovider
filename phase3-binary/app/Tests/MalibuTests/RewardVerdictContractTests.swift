@@ -406,6 +406,245 @@ final class RewardVerdictContractTests: XCTestCase {
         )
     }
 
+    func testConsolidatedStatusDemotesStaleTrustedToLive() {
+        var snapshot = trustedServing()
+        snapshot.updateRewardInputs(
+            providerEarningsFresh: false,
+            malibuProjectionFresh: false,
+            malibuWithdrawable: 8,
+            malibuHeld: 0
+        )
+
+        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
+
+        XCTAssertEqual(status.phase, .live)
+        XCTAssertEqual(status.label, "Live")
+        XCTAssertFalse(status.meaning.lowercased().contains("unlocked"))
+        XCTAssertFalse(AgentSnapshotPresenter.rewardVerdict(snapshot).canClaimWithdrawable)
+    }
+
+    func testConsolidatedStatusDoesNotUnlockFromFreshUsdcWithoutMalibuProjection() {
+        var snapshot = trustedServing()
+        snapshot.earningsUsdcToday = 0.04
+        snapshot.updateRewardInputs(malibuProjectionFresh: false)
+
+        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
+
+        XCTAssertEqual(status.phase, .live)
+        XCTAssertEqual(status.label, "Live")
+        XCTAssertTrue(status.meaning.contains("USDC earning is active"))
+        XCTAssertFalse(status.meaning.lowercased().contains("unlocked"))
+        XCTAssertFalse(AgentSnapshotPresenter.rewardVerdict(snapshot).canClaimWithdrawable)
+    }
+
+    func testConsolidatedStatusUsesNeutralHoldCopyForHeldCappedAndEpochVerdicts() {
+        let cases: [(name: String, eligibility: MalibuRewardEligibility, expected: String)] = [
+            (
+                "held",
+                MalibuRewardEligibility(
+                    earningState: "held",
+                    withdrawalState: "held",
+                    primaryReason: "insufficient_verified_receipts",
+                    reasons: ["insufficient_verified_receipts"]
+                ),
+                "More verified work is required."
+            ),
+            (
+                "capped",
+                MalibuRewardEligibility(
+                    earningState: "capped",
+                    withdrawalState: "capped",
+                    primaryReason: "held_wallet_daily_cap",
+                    reasons: ["held_wallet_daily_cap"]
+                ),
+                "Wallet daily limit reached."
+            ),
+            (
+                "epoch",
+                MalibuRewardEligibility(
+                    earningState: "held",
+                    withdrawalState: "held",
+                    primaryReason: "held_epoch_disposition",
+                    reasons: ["held_epoch_disposition"]
+                ),
+                "MALIBU is held pending epoch settlement."
+            ),
+        ]
+
+        for item in cases {
+            var snapshot = trustedServing()
+            snapshot.updateRewardInputs(
+                malibuWithdrawable: 3,
+                malibuHeld: 2,
+                malibuRewardEligibility: item.eligibility
+            )
+
+            let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
+
+            XCTAssertEqual(status.phase, .earning, item.name)
+            XCTAssertEqual(status.label, "Earning · Trusted", item.name)
+            XCTAssertEqual(status.tone, .neutral, item.name)
+            XCTAssertEqual(status.meaning, item.expected, item.name)
+            XCTAssertFalse(status.meaning.lowercased().contains("unlocked"), item.name)
+            XCTAssertFalse(AgentSnapshotPresenter.rewardVerdict(snapshot).canClaimWithdrawable, item.name)
+        }
+    }
+
+    func testConsolidatedStatusOnlyClaimsEarningForAuthoritativeTrustedVerdict() {
+        var authoritative = trustedServing()
+        authoritative.updateRewardInputs(
+            malibuWithdrawable: 1,
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "earning",
+                withdrawalState: "withdrawable",
+                primaryReason: "withdrawable_balance_available",
+                reasons: ["withdrawable_balance_available"]
+            )
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(authoritative).trustDisplay, .trustedAuthoritative)
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(authoritative).phase, .earning)
+
+        var stale = authoritative
+        stale.updateRewardInputs(providerEarningsFresh: false, malibuProjectionFresh: false)
+        XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(stale).trustDisplay, .trustedStaleNeutral)
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(stale).phase, .live)
+
+        var provisional = authoritative
+        provisional.updateRewardInputs(
+            trustTier: .provisional,
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "held",
+                withdrawalState: "held",
+                primaryReason: "held_provisional_trust_tier",
+                reasons: ["held_provisional_trust_tier"]
+            )
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.rewardVerdict(provisional).trustDisplay, .provisional)
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(provisional).phase, .live)
+    }
+
+    func testConsolidatedStatusCarriesTrustProgressFromVerdict() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "buyer_serving"
+        snapshot.updateRewardInputs(
+            walletBound: true,
+            trustTier: .provisional,
+            providerEarningsFresh: true,
+            malibuProjectionFresh: true,
+            malibuRewardEligibility: MalibuRewardEligibility(
+                earningState: "held",
+                withdrawalState: "held",
+                primaryReason: "held_provisional_trust_tier",
+                reasons: ["held_provisional_trust_tier"]
+            ),
+            trustCriteriaMet: 1,
+            trustCriteriaRequired: 2
+        )
+
+        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
+
+        XCTAssertEqual(status.phase, .live)
+        XCTAssertEqual(status.label, "Live · Provisional")
+        XCTAssertEqual(status.trustProgress, AgentSnapshotPresenter.rewardVerdict(snapshot).trustProgress)
+        XCTAssertEqual(status.nextAction, "Complete 1 more trust criteria for withdrawal eligibility.")
+    }
+
+    func testConsolidatedStatusClassifiesAvailabilityAndDiagnosticsBeforeRewards() {
+        var interrupted = trustedServing()
+        interrupted.networkState = "not_buyer_serving"
+        XCTAssertEqual(AgentSnapshotPresenter.consolidatedStatus(interrupted).phase, .needsAttention)
+
+        var autoupdate = trustedServing()
+        autoupdate.diagnosticFindings = [
+            diagnostic(.autoupdateInProgress, message: "Provider software update is in progress.")
+        ]
+        let autoupdateStatus = AgentSnapshotPresenter.consolidatedStatus(autoupdate)
+        XCTAssertEqual(autoupdateStatus.phase, .live)
+        XCTAssertEqual(autoupdateStatus.tone, .neutral)
+
+        var blocking = trustedServing()
+        blocking.diagnosticFindings = [
+            diagnostic(
+                .credentialStoreUnavailable,
+                message: "Saved provider access is unavailable.",
+                evidence: "credential.state=locked"
+            )
+        ]
+        let blockingStatus = AgentSnapshotPresenter.consolidatedStatus(blocking)
+        XCTAssertEqual(blockingStatus.phase, .needsAttention)
+        XCTAssertEqual(blockingStatus.label, "Provider access needs attention")
+
+        var unsortedDiagnostics = trustedServing()
+        unsortedDiagnostics.diagnosticFindings = [
+            diagnostic(
+                .autoupdateDisabled,
+                source: .status,
+                message: "Provider automatic updates are disabled."
+            ),
+            diagnostic(
+                .credentialStoreUnavailable,
+                source: .credentialsStatus,
+                message: "Saved provider access is unavailable."
+            ),
+        ]
+        let rankedStatus = AgentSnapshotPresenter.consolidatedStatus(unsortedDiagnostics)
+        XCTAssertEqual(rankedStatus.phase, .needsAttention)
+        XCTAssertEqual(rankedStatus.label, "Provider access needs attention")
+
+        var repairing = trustedServing()
+        repairing.providerSoftwareRepairInProgress = true
+        let repairingStatus = AgentSnapshotPresenter.consolidatedStatus(repairing)
+        XCTAssertEqual(repairingStatus.phase, .live)
+        XCTAssertEqual(repairingStatus.tone, .neutral)
+        XCTAssertEqual(repairingStatus.label, "Provider is ready")
+        XCTAssertTrue(repairingStatus.meaning.contains("Installing a software update"))
+        XCTAssertFalse(repairingStatus.label.contains("Earning"))
+
+        var repair = trustedServing()
+        repair.providerSoftwareRepairRecommended = true
+        enableProtectedProviderSoftwareRepair(&repair)
+        XCTAssertTrue(AgentSnapshotPresenter.canRepairProviderSoftware(repair))
+        let repairStatus = AgentSnapshotPresenter.consolidatedStatus(repair)
+        XCTAssertNotEqual(repairStatus.phase, .needsAttention)
+        XCTAssertTrue(repairStatus.nextAction?.hasPrefix("Repair provider software.") == true)
+    }
+
+    func testConsolidatedStatusP0P3PathDoesNotReadRawRewardInputs() throws {
+        let testsFile = URL(fileURLWithPath: #filePath)
+        let presenterURL = testsFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/Malibu/Agent/AgentSnapshot.swift")
+        let presenter = try String(contentsOf: presenterURL, encoding: .utf8)
+        let start = try XCTUnwrap(presenter.range(of: "private static func liveNextAction(_ verdict"))
+        let end = try XCTUnwrap(presenter.range(of: "static func publicStatus(_ s: AgentSnapshot)"))
+        let p0p3Path = String(presenter[start.lowerBound..<end.lowerBound])
+        let prohibited = [
+            ".trustTier",
+            ".malibuProjectionFresh",
+            ".providerEarningsFresh",
+            ".malibuWithdrawable",
+            ".malibuHeld",
+            ".malibuHoldReasons",
+            ".malibuRewardEligibility",
+            ".trustCriteriaMet",
+            ".trustCriteriaRequired",
+            ".rewardTelemetryUnavailable",
+            ".economicCriteria",
+            ".additionalCriteria",
+        ]
+
+        for token in prohibited {
+            XCTAssertFalse(
+                p0p3Path.contains(token),
+                "consolidated status path must consume RewardVerdict instead of \(token)"
+            )
+        }
+        XCTAssertTrue(p0p3Path.contains("rewardVerdict(s)"))
+    }
+
     func testSliceADoesNotExposeRawRewardInputsToMoneyPathViewsAndLegacyHelpers() throws {
         let testsFile = URL(fileURLWithPath: #filePath)
         let appRoot = testsFile
@@ -456,6 +695,34 @@ final class RewardVerdictContractTests: XCTestCase {
                 "AgentSnapshotPresenter must consume RewardVerdict instead of legacy raw helper \(legacyHelper)"
             )
         }
+    }
+
+    private func diagnostic(
+        _ signatureID: ProviderDiagnosticSignatureID,
+        source: ProviderDiagnosticFinding.Source = .status,
+        message: String,
+        evidence: String? = nil
+    ) -> ProviderDiagnosticFinding {
+        ProviderDiagnosticFinding(
+            signatureID: signatureID,
+            source: source,
+            userMessage: message,
+            evidence: evidence,
+            observedAt: Date()
+        )
+    }
+
+    private func enableProtectedProviderSoftwareRepair(_ snapshot: inout AgentSnapshot) {
+        snapshot.cliVersion = "1.8.93"
+        snapshot.localStatusContractCompatible = true
+        snapshot.localStatusCapabilities = [
+            "status_observation_v1",
+            ProviderSoftwareRepairCapabilityGate.repairFromProtectedSource,
+        ]
+        snapshot.statusObservationFresh = true
+        snapshot.statusObservationID = "obs-repair"
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
     }
 
     private func trustedServing() -> AgentSnapshot {

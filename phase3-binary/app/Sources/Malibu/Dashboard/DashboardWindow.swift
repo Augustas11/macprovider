@@ -68,15 +68,15 @@ enum DashboardCopy {
     }
 
     static func defaultPublicStrings(_ snapshot: AgentSnapshot) -> [String] {
-        let publicStatus = AgentSnapshotPresenter.publicStatus(snapshot)
+        let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
         let mining = AgentSnapshotPresenter.miningHealth(snapshot)
         return [
             currentStateTitle,
-            publicStatus.title,
+            status.label,
             meaningTitle,
-            publicStatus.detail,
+            status.meaning,
             nextActionTitle,
-            publicStatus.safeNextAction,
+            status.nextAction,
             miningHealthTitle,
             mining.status,
             miningReasonTitle,
@@ -126,9 +126,10 @@ private struct DashboardView: View {
                     }
                 }
                 Spacer()
-                Text(AgentSnapshotPresenter.dashboardHeadline(agent.snapshot))
+                let status = AgentSnapshotPresenter.consolidatedStatus(agent.snapshot)
+                Text(status.label)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(color(for: agent.snapshot.state))
+                    .foregroundStyle(color(for: status.tone))
             }
 
             HStack(alignment: .center, spacing: 12) {
@@ -315,12 +316,10 @@ private struct DashboardView: View {
                 }
 
                 statsPanel {
-                    let publicStatus = AgentSnapshotPresenter.publicStatus(agent.snapshot)
-                    MetricRow(title: DashboardCopy.currentStateTitle, value: publicStatus.title)
-                    if let detail = publicStatus.detail {
-                        MetricRow(title: DashboardCopy.meaningTitle, value: detail)
-                    }
-                    if let action = publicStatus.safeNextAction {
+                    let status = AgentSnapshotPresenter.consolidatedStatus(agent.snapshot)
+                    MetricRow(title: DashboardCopy.currentStateTitle, value: status.label)
+                    MetricRow(title: DashboardCopy.meaningTitle, value: status.meaning)
+                    if let action = status.nextAction {
                         MetricRow(title: DashboardCopy.nextActionTitle, value: action)
                     }
                     primaryActionButton
@@ -633,6 +632,14 @@ private struct DashboardView: View {
         case .paused: return MalibuBrand.sunnyYellow
         case .error: return .red
         case .idle: return .secondary
+        }
+    }
+
+    private func color(for tone: AgentSnapshotPresenter.ConsolidatedStatus.Tone) -> Color {
+        switch tone {
+        case .positive: return .green
+        case .neutral: return .secondary
+        case .attention: return MalibuBrand.coral
         }
     }
 
