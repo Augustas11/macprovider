@@ -338,6 +338,158 @@ final class Stage1IteratorTests: XCTestCase {
         XCTAssertTrue(reason.contains("prewarm") || reason.contains("exit"), reason)
     }
 
+    func testContextCalibrationDetectsProcessExitAfterWarmupResponse() async throws {
+        let port = try unusedPort()
+        let candidate = try CandidateProviderRunner(
+            providerBinaryPath: try sseProviderScript(responseText: "ok", delayBeforeFirstToken: 0).path,
+            logDirectory: try temporaryDirectory(name: "context-calibration-warmup-exit-logs")
+        )
+        let runner = SequencedReadyRunner(
+            underlying: candidate,
+            statuses: [nil, .processExited(rc: 23, stderrTail: "intentional warmup exit")]
+        )
+
+        let result = try await Stage1Prober(readyTimeoutSec: 5, stopGraceSeconds: 1)
+            .probeContextCalibration(
+                model: "model-a",
+                port: port,
+                runner: runner,
+                targetContext: 64,
+                replicates: 1,
+                artifactBinding: nil
+            )
+
+        guard case .infeasible(let reason, let nErr) = result else {
+            return XCTFail("expected infeasible after warmup response exit, got \(result)")
+        }
+        XCTAssertEqual(nErr, 1)
+        XCTAssertTrue(reason.contains("context calibration warmup"), reason)
+        XCTAssertTrue(reason.contains("rc=23"), reason)
+        XCTAssertTrue(reason.contains("intentional warmup exit"), reason)
+    }
+
+    func testContextCalibrationDetectsProcessExitAfterMeasuredResponse() async throws {
+        let port = try unusedPort()
+        let candidate = try CandidateProviderRunner(
+            providerBinaryPath: try sseProviderScript(responseText: "ok", delayBeforeFirstToken: 0).path,
+            logDirectory: try temporaryDirectory(name: "context-calibration-probe-exit-logs")
+        )
+        let runner = SequencedReadyRunner(
+            underlying: candidate,
+            statuses: [nil, .ready, .processExited(rc: 23, stderrTail: "intentional measured exit")]
+        )
+
+        let result = try await Stage1Prober(readyTimeoutSec: 5, stopGraceSeconds: 1)
+            .probeContextCalibration(
+                model: "model-a",
+                port: port,
+                runner: runner,
+                targetContext: 64,
+                replicates: 1,
+                artifactBinding: nil
+            )
+
+        guard case .infeasible(let reason, let nErr) = result else {
+            return XCTFail("expected infeasible after measured response exit, got \(result)")
+        }
+        XCTAssertEqual(nErr, 1)
+        XCTAssertTrue(reason.contains("context calibration probe"), reason)
+        XCTAssertTrue(reason.contains("rc=23"), reason)
+        XCTAssertTrue(reason.contains("intentional measured exit"), reason)
+    }
+
+    func testContextCalibrationRejectsReadinessTimeoutAfterMeasuredResponse() async throws {
+        let port = try unusedPort()
+        let candidate = try CandidateProviderRunner(
+            providerBinaryPath: try sseProviderScript(responseText: "ok", delayBeforeFirstToken: 0).path,
+            logDirectory: try temporaryDirectory(name: "context-calibration-probe-timeout-logs")
+        )
+        let runner = SequencedReadyRunner(
+            underlying: candidate,
+            statuses: [nil, .ready, .timeout(lastError: "readiness endpoint unavailable")]
+        )
+
+        let result = try await Stage1Prober(readyTimeoutSec: 5, stopGraceSeconds: 1)
+            .probeContextCalibration(
+                model: "model-a",
+                port: port,
+                runner: runner,
+                targetContext: 64,
+                replicates: 1,
+                artifactBinding: nil
+            )
+
+        guard case .infeasible(let reason, let nErr) = result else {
+            return XCTFail("expected infeasible after measured response readiness loss, got \(result)")
+        }
+        XCTAssertEqual(nErr, 1)
+        XCTAssertTrue(reason.contains("lost readiness during context calibration probe"), reason)
+        XCTAssertTrue(reason.contains("readiness endpoint unavailable"), reason)
+    }
+
+    func testContextCalibrationDeadlineCancelsInflightRequest() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try sseProviderScript(responseText: "ok", delayBeforeFirstToken: 2).path,
+            logDirectory: try temporaryDirectory(name: "context-calibration-deadline-logs")
+        )
+        let deadline = Date().addingTimeInterval(0.2)
+        let started = Date()
+
+        do {
+            let result = try await Stage1Prober(
+                readyTimeoutSec: 5,
+                stopGraceSeconds: 0.1,
+                probeIdleTimeoutSec: 5,
+                probeTotalTimeoutSec: 5
+            ).probeContextCalibration(
+                model: "model-a",
+                port: port,
+                runner: runner,
+                targetContext: 64,
+                replicates: 1,
+                artifactBinding: nil,
+                deadline: deadline
+            )
+            XCTFail("expected deadlineExceeded, got \(result)")
+        } catch {
+            XCTAssertEqual(error as? AutotuneContextCalibrationError, .deadlineExceeded)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.5)
+    }
+
+    func testStage1ProbeDeadlineCancelsInflightPrewarmRequest() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try sseProviderScript(responseText: "ok", delayBeforeFirstToken: 2).path,
+            logDirectory: try temporaryDirectory(name: "stage1-probe-deadline-logs")
+        )
+        let deadline = Date().addingTimeInterval(0.2)
+        let started = Date()
+
+        do {
+            let result = try await Stage1Prober(
+                readyTimeoutSec: 5,
+                stopGraceSeconds: 0.1,
+                probeIdleTimeoutSec: 5,
+                probeTotalTimeoutSec: 5
+            ).probe(
+                model: "model-a",
+                port: port,
+                runner: runner,
+                targetContext: 64,
+                gateTTFTMS: 3_000,
+                replicates: 1,
+                artifactBinding: nil,
+                deadline: deadline
+            )
+            XCTFail("expected deadlineExceeded, got \(result)")
+        } catch {
+            XCTAssertEqual(error as? AutotuneContextCalibrationError, .deadlineExceeded)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.5)
+    }
+
     // MARK: - v1.7.8 Track A4 — token-count + generation-only elapsed
 
     /// Pre-v1.7.8 code counted whitespace-separated words and divided by
@@ -1814,6 +1966,50 @@ private final class StubProviderRunner: Stage1ProviderRunning {
 
     func stop(graceSeconds: Double) -> StopResult {
         stopResult
+    }
+}
+
+/// Runs a real local provider fixture while deterministically overriding
+/// selected liveness checks. A `nil` entry delegates to the real runner.
+private final class SequencedReadyRunner: Stage1ProviderRunning {
+    private let underlying: CandidateProviderRunner
+    private let statuses: [ReadyStatus?]
+    private var waitIndex = 0
+
+    init(underlying: CandidateProviderRunner, statuses: [ReadyStatus?]) {
+        self.underlying = underlying
+        self.statuses = statuses
+    }
+
+    func start(
+        model: String,
+        port: Int,
+        kvBits: Int?,
+        maxContext: Int?,
+        maxBatch: Int?
+    ) throws {
+        try underlying.start(
+            model: model,
+            port: port,
+            kvBits: kvBits,
+            maxContext: maxContext,
+            maxBatch: maxBatch
+        )
+    }
+
+    func waitForReady(timeout: TimeInterval) async throws -> ReadyStatus {
+        defer { waitIndex += 1 }
+        if waitIndex < statuses.count, let status = statuses[waitIndex] {
+            if case .processExited = status {
+                _ = underlying.stop(graceSeconds: 1)
+            }
+            return status
+        }
+        return try await underlying.waitForReady(timeout: timeout)
+    }
+
+    func stop(graceSeconds: Double) -> StopResult {
+        underlying.stop(graceSeconds: graceSeconds)
     }
 }
 

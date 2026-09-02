@@ -24,7 +24,17 @@ protocol Stage1ProviderRunning: AnyObject {
         maxBatch: Int?,
         artifactBinding: CandidateArtifactBinding?
     ) throws
+    func start(
+        model: String,
+        port: Int,
+        kvBits: Int?,
+        maxContext: Int?,
+        maxBatch: Int?,
+        artifactBinding: CandidateArtifactBinding?,
+        deadline: Date?
+    ) throws
     func waitForReady(timeout: TimeInterval) async throws -> ReadyStatus
+    func waitForReady(timeout: TimeInterval, deadline: Date?) async throws -> ReadyStatus
     @discardableResult
     func stop(graceSeconds: Double) -> StopResult
 }
@@ -41,6 +51,29 @@ extension Stage1ProviderRunning {
         // Existing test/fallback runners do not need artifact binding; the
         // production runner supplies the stronger witness below.
         try start(model: model, port: port, kvBits: kvBits, maxContext: maxContext, maxBatch: maxBatch)
+    }
+
+    func start(
+        model: String,
+        port: Int,
+        kvBits: Int?,
+        maxContext: Int?,
+        maxBatch: Int?,
+        artifactBinding: CandidateArtifactBinding?,
+        deadline _: Date?
+    ) throws {
+        try start(
+            model: model,
+            port: port,
+            kvBits: kvBits,
+            maxContext: maxContext,
+            maxBatch: maxBatch,
+            artifactBinding: artifactBinding
+        )
+    }
+
+    func waitForReady(timeout: TimeInterval, deadline _: Date?) async throws -> ReadyStatus {
+        try await waitForReady(timeout: timeout)
     }
 }
 
@@ -110,6 +143,16 @@ protocol Stage1Probing {
         replicates: Int,
         artifactBinding: CandidateArtifactBinding?
     ) async throws -> Stage1ProbeResult
+    func probe(
+        model: String,
+        port: Int,
+        runner: Stage1ProviderRunning,
+        targetContext: Int,
+        gateTTFTMS: Int,
+        replicates: Int,
+        artifactBinding: CandidateArtifactBinding?,
+        deadline: Date?
+    ) async throws -> Stage1ProbeResult
 }
 
 extension Stage1Probing {
@@ -129,6 +172,27 @@ extension Stage1Probing {
             targetContext: targetContext,
             gateTTFTMS: gateTTFTMS,
             replicates: replicates
+        )
+    }
+
+    func probe(
+        model: String,
+        port: Int,
+        runner: Stage1ProviderRunning,
+        targetContext: Int,
+        gateTTFTMS: Int,
+        replicates: Int,
+        artifactBinding: CandidateArtifactBinding?,
+        deadline _: Date?
+    ) async throws -> Stage1ProbeResult {
+        try await probe(
+            model: model,
+            port: port,
+            runner: runner,
+            targetContext: targetContext,
+            gateTTFTMS: gateTTFTMS,
+            replicates: replicates,
+            artifactBinding: artifactBinding
         )
     }
 }
@@ -568,16 +632,40 @@ struct Stage1Prober: Stage1Probing {
         replicates: Int,
         artifactBinding: CandidateArtifactBinding?
     ) async throws -> Stage1ProbeResult {
+        try await probe(
+            model: model,
+            port: port,
+            runner: runner,
+            targetContext: targetContext,
+            gateTTFTMS: gateTTFTMS,
+            replicates: replicates,
+            artifactBinding: artifactBinding,
+            deadline: nil
+        )
+    }
+
+    func probe(
+        model: String,
+        port: Int,
+        runner: Stage1ProviderRunning,
+        targetContext: Int,
+        gateTTFTMS: Int,
+        replicates: Int,
+        artifactBinding: CandidateArtifactBinding?,
+        deadline: Date?
+    ) async throws -> Stage1ProbeResult {
+        try assertProbeDeadlineActive(deadline)
         try runner.start(
             model: model,
             port: port,
             kvBits: nil,
             maxContext: targetContext,
             maxBatch: nil,
-            artifactBinding: artifactBinding
+            artifactBinding: artifactBinding,
+            deadline: deadline
         )
         return try await withCandidateProviderCleanup(runner, graceSeconds: stopGraceSeconds) {
-        switch try await runner.waitForReady(timeout: readyTimeoutSec) {
+        switch try await runner.waitForReady(timeout: boundedTimeout(readyTimeoutSec, deadline: deadline), deadline: deadline) {
         case .ready:
             break
         case .processExited(let rc, let stderrTail):
@@ -586,6 +674,9 @@ struct Stage1Prober: Stage1Probing {
                 nErr: max(1, replicates)
             )
         case .timeout(let lastError):
+            if let deadline, clock() >= deadline {
+                throw AutotuneContextCalibrationError.deadlineExceeded
+            }
             return .infeasible(
                 reason: "provider readiness timeout before Stage 1 probe: \(lastError)",
                 nErr: max(1, replicates)
@@ -607,8 +698,16 @@ struct Stage1Prober: Stage1Probing {
         // then the real replicates loop measures warm-service latency.
         // Prewarm failure is NOT a probe failure — the subsequent real
         // probe iteration will observe whatever error state persists.
-        _ = try? await probeOnce(model: model, port: port, targetContext: targetContext)
-        if case .processExited(let rc, let stderrTail) = try await runner.waitForReady(timeout: 0.05) {
+        do {
+            _ = try await probeOnce(model: model, port: port, targetContext: targetContext, deadline: deadline)
+        } catch AutotuneContextCalibrationError.deadlineExceeded {
+            throw AutotuneContextCalibrationError.deadlineExceeded
+        } catch {
+            if let deadline, clock() >= deadline {
+                throw AutotuneContextCalibrationError.deadlineExceeded
+            }
+        }
+        if case .processExited(let rc, let stderrTail) = try await runner.waitForReady(timeout: boundedTimeout(0.05, deadline: deadline), deadline: deadline) {
             return .infeasible(
                 reason: "provider exited during Stage 1 prewarm rc=\(rc): \(stderrTail)",
                 nErr: max(1, replicates)
@@ -622,7 +721,8 @@ struct Stage1Prober: Stage1Probing {
 
         for _ in 0..<replicates {
             do {
-                let result = try await probeOnce(model: model, port: port, targetContext: targetContext)
+                try assertProbeDeadlineActive(deadline)
+                let result = try await probeOnce(model: model, port: port, targetContext: targetContext, deadline: deadline)
                 guard (200...299).contains(result.statusCode) else {
                     nErr += 1
                     firstFailure = firstFailure ?? "HTTP \(result.statusCode)"
@@ -634,16 +734,21 @@ struct Stage1Prober: Stage1Probing {
                 ttfts.append(result.ttftMS)
                 throughputs.append(result.throughputTPS)
 
-                if case .processExited(let rc, let stderrTail) = try await runner.waitForReady(timeout: 0.05) {
+                if case .processExited(let rc, let stderrTail) = try await runner.waitForReady(timeout: boundedTimeout(0.05, deadline: deadline), deadline: deadline) {
                     return .infeasible(
                         reason: "provider exited during Stage 1 probe rc=\(rc): \(stderrTail)",
                         nErr: max(1, nErr + 1)
                     )
                 }
+            } catch AutotuneContextCalibrationError.deadlineExceeded {
+                throw AutotuneContextCalibrationError.deadlineExceeded
             } catch {
+                if let deadline, clock() >= deadline {
+                    throw AutotuneContextCalibrationError.deadlineExceeded
+                }
                 nErr += 1
                 firstFailure = firstFailure ?? "probe request failed: \(error.localizedDescription)"
-                if case .processExited(let rc, let stderrTail) = try await runner.waitForReady(timeout: 0.05) {
+                if case .processExited(let rc, let stderrTail) = try await runner.waitForReady(timeout: boundedTimeout(0.05, deadline: deadline), deadline: deadline) {
                     return .infeasible(
                         reason: "provider exited during Stage 1 probe rc=\(rc): \(stderrTail)",
                         nErr: nErr
@@ -688,13 +793,176 @@ struct Stage1Prober: Stage1Probing {
         }
     }
 
+    /// Measures uncached prefill latency for one candidate context. Unlike the
+    /// model-selection probe, the measured prompts are unique and are not
+    /// prewarmed. A short unrelated request still warms model/JIT startup so
+    /// the result isolates context prefill rather than process cold start.
+    func probeContextCalibration(
+        model: String,
+        port: Int,
+        runner: Stage1ProviderRunning,
+        targetContext: Int,
+        replicates: Int,
+        artifactBinding: CandidateArtifactBinding?,
+        deadline: Date? = nil
+    ) async throws -> Stage1ProbeResult {
+        try assertProbeDeadlineActive(deadline)
+        try runner.start(
+            model: model,
+            port: port,
+            kvBits: nil,
+            maxContext: targetContext,
+            maxBatch: 1,
+            artifactBinding: artifactBinding,
+            deadline: deadline
+        )
+        return try await withCandidateProviderCleanup(runner, graceSeconds: stopGraceSeconds) {
+            switch try await runner.waitForReady(timeout: boundedTimeout(readyTimeoutSec, deadline: deadline), deadline: deadline) {
+            case .ready:
+                break
+            case .processExited(let rc, let stderrTail):
+                return .infeasible(
+                    reason: "provider exited before context calibration rc=\(rc): \(stderrTail)",
+                    nErr: max(1, replicates)
+                )
+            case .timeout(let lastError):
+                if let deadline, clock() >= deadline {
+                    throw AutotuneContextCalibrationError.deadlineExceeded
+                }
+                return .infeasible(
+                    reason: "provider readiness timeout before context calibration: \(lastError)",
+                    nErr: max(1, replicates)
+                )
+            }
+
+            do {
+                _ = try await probeOnce(
+                    model: model,
+                    port: port,
+                    targetContext: min(targetContext, 512),
+                    promptOverride: Self.contextCalibrationPrompt(
+                        targetContext: min(targetContext, 512),
+                        nonce: "warmup-\(UUID().uuidString)"
+                    ),
+                    maxTokensOverride: 1,
+                    deadline: deadline
+                )
+            } catch AutotuneContextCalibrationError.deadlineExceeded {
+                throw AutotuneContextCalibrationError.deadlineExceeded
+            } catch {
+                if let deadline, clock() >= deadline {
+                    throw AutotuneContextCalibrationError.deadlineExceeded
+                }
+            }
+            switch try await runner.waitForReady(timeout: boundedTimeout(0.05, deadline: deadline), deadline: deadline) {
+            case .ready:
+                break
+            case .processExited(let rc, let stderrTail):
+                return .infeasible(
+                    reason: "provider exited during context calibration warmup rc=\(rc): \(stderrTail)",
+                    nErr: max(1, replicates)
+                )
+            case .timeout(let lastError):
+                if let deadline, clock() >= deadline {
+                    throw AutotuneContextCalibrationError.deadlineExceeded
+                }
+                return .infeasible(
+                    reason: "provider lost readiness during context calibration warmup: \(lastError)",
+                    nErr: max(1, replicates)
+                )
+            }
+
+            var ttfts: [Double] = []
+            var throughputs: [Double] = []
+            for replicate in 0..<replicates {
+                do {
+                    try assertProbeDeadlineActive(deadline)
+                    let measurement = try await probeOnce(
+                        model: model,
+                        port: port,
+                        targetContext: targetContext,
+                        promptOverride: Self.contextCalibrationPrompt(
+                            targetContext: targetContext,
+                            nonce: "context-\(targetContext)-\(replicate)-\(UUID().uuidString)"
+                        ),
+                        maxTokensOverride: 1,
+                        deadline: deadline
+                    )
+                    guard (200...299).contains(measurement.statusCode) else {
+                        return .infeasible(reason: "HTTP \(measurement.statusCode)", nErr: 1)
+                    }
+                    ttfts.append(measurement.ttftMS)
+                    throughputs.append(measurement.throughputTPS)
+                    switch try await runner.waitForReady(timeout: boundedTimeout(0.05, deadline: deadline), deadline: deadline) {
+                    case .ready:
+                        break
+                    case .processExited(let rc, let stderrTail):
+                        return .infeasible(
+                            reason: "provider exited during context calibration probe rc=\(rc): \(stderrTail)",
+                            nErr: 1
+                        )
+                    case .timeout(let lastError):
+                        if let deadline, clock() >= deadline {
+                            throw AutotuneContextCalibrationError.deadlineExceeded
+                        }
+                        return .infeasible(
+                            reason: "provider lost readiness during context calibration probe: \(lastError)",
+                            nErr: 1
+                        )
+                    }
+                } catch AutotuneContextCalibrationError.deadlineExceeded {
+                    throw AutotuneContextCalibrationError.deadlineExceeded
+                } catch {
+                    if let deadline, clock() >= deadline {
+                        throw AutotuneContextCalibrationError.deadlineExceeded
+                    }
+                    return .infeasible(
+                        reason: "context calibration request failed: \(error.localizedDescription)",
+                        nErr: 1
+                    )
+                }
+            }
+            guard !ttfts.isEmpty,
+                  ttfts.allSatisfy({ $0.isFinite && $0 >= 0 }),
+                  throughputs.allSatisfy({ $0.isFinite && $0 > 0 })
+            else {
+                return .infeasible(reason: "context calibration produced invalid metrics", nErr: 1)
+            }
+            return .feasible(
+                medianTPS: median(throughputs),
+                p95TTFTMS: percentile95(ttfts)
+            )
+        }
+    }
+
     static func promptTokenEstimate(targetContext: Int) -> Int {
         max(1, Int((Double(targetContext) * 0.8).rounded(.down)))
     }
 
-    static func paddedPrompt(targetContext: Int) -> String {
-        Array(repeating: "probe", count: promptTokenEstimate(targetContext: targetContext))
-            .joined(separator: " ")
+    static func paddedPrompt(targetContext: Int, nonce: String? = nil) -> String {
+        var words = Array(repeating: "probe", count: promptTokenEstimate(targetContext: targetContext))
+        if let nonce, !words.isEmpty {
+            words[0] = "probe-\(nonce)"
+        }
+        return words.joined(separator: " ")
+    }
+
+    static func contextCalibrationPromptTokenEstimate(targetContext: Int) -> Int {
+        max(
+            1,
+            targetContext
+                - AutotuneContextCalibrationResult.promptReserveTokens
+                - AutotuneContextCalibrationResult.completionTokens
+        )
+    }
+
+    static func contextCalibrationPrompt(targetContext: Int, nonce: String) -> String {
+        var words = Array(
+            repeating: "probe",
+            count: contextCalibrationPromptTokenEstimate(targetContext: targetContext)
+        )
+        words[0] = "probe-\(nonce)"
+        return words.joined(separator: " ")
     }
 
     static func maxTokens(for targetContext: Int) -> Int {
@@ -704,26 +972,62 @@ struct Stage1Prober: Stage1Probing {
         return max(1, min(maxTokens, available))
     }
 
-    private func probeOnce(model: String, port: Int, targetContext: Int) async throws -> SingleProbeResult {
+    private func probeOnce(
+        model: String,
+        port: Int,
+        targetContext: Int,
+        nonce: String? = nil,
+        promptOverride: String? = nil,
+        maxTokensOverride: Int? = nil,
+        deadline: Date? = nil
+    ) async throws -> SingleProbeResult {
         try await withThrowingTaskGroup(of: SingleProbeResult.self) { group in
             group.addTask {
-                try await self.probeOnceWithoutDeadline(model: model, port: port, targetContext: targetContext)
+                try await self.probeOnceWithoutDeadline(
+                    model: model,
+                    port: port,
+                    targetContext: targetContext,
+                    nonce: nonce,
+                    promptOverride: promptOverride,
+                    maxTokensOverride: maxTokensOverride,
+                    deadline: deadline
+                )
             }
             group.addTask {
-                let nanoseconds = UInt64(self.probeTotalTimeoutSec * 1_000_000_000)
+                let timeout = try self.boundedTimeout(self.probeTotalTimeoutSec, deadline: deadline)
+                let nanoseconds = UInt64(timeout * 1_000_000_000)
                 try await Task.sleep(nanoseconds: nanoseconds)
+                if let deadline, self.clock() >= deadline {
+                    throw AutotuneContextCalibrationError.deadlineExceeded
+                }
                 throw URLError(.timedOut)
             }
             defer { group.cancelAll() }
-            return try await group.next()!
+            do {
+                return try await group.next()!
+            } catch {
+                if let deadline, clock() >= deadline {
+                    throw AutotuneContextCalibrationError.deadlineExceeded
+                }
+                throw error
+            }
         }
     }
 
-    private func probeOnceWithoutDeadline(model: String, port: Int, targetContext: Int) async throws -> SingleProbeResult {
-        let maxTokens = Self.maxTokens(for: targetContext)
+    private func probeOnceWithoutDeadline(
+        model: String,
+        port: Int,
+        targetContext: Int,
+        nonce: String? = nil,
+        promptOverride: String? = nil,
+        maxTokensOverride: Int? = nil,
+        deadline: Date? = nil
+    ) async throws -> SingleProbeResult {
+        try assertProbeDeadlineActive(deadline)
+        let maxTokens = maxTokensOverride ?? Self.maxTokens(for: targetContext)
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
         request.httpMethod = "POST"
-        request.timeoutInterval = probeIdleTimeoutSec
+        request.timeoutInterval = try boundedTimeout(probeIdleTimeoutSec, deadline: deadline)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": model,
@@ -733,7 +1037,7 @@ struct Stage1Prober: Stage1Probing {
             "messages": [
                 [
                     "role": "user",
-                    "content": Self.paddedPrompt(targetContext: targetContext),
+                    "content": promptOverride ?? Self.paddedPrompt(targetContext: targetContext, nonce: nonce),
                 ],
             ],
         ])
@@ -771,6 +1075,7 @@ struct Stage1Prober: Stage1Probing {
         var usageGenerationMS: Int?
 
         for try await rawLine in bytes.lines {
+            try assertProbeDeadlineActive(deadline)
             guard rawLine.hasPrefix("data:") else {
                 continue
             }
@@ -809,6 +1114,22 @@ struct Stage1Prober: Stage1Probing {
             generatedText: generatedText,
             throughputTPS: metrics.throughputTPS
         )
+    }
+
+    private func assertProbeDeadlineActive(_ deadline: Date?) throws {
+        guard let deadline else { return }
+        guard clock() < deadline else {
+            throw AutotuneContextCalibrationError.deadlineExceeded
+        }
+    }
+
+    private func boundedTimeout(_ timeout: TimeInterval, deadline: Date?) throws -> TimeInterval {
+        guard let deadline else { return timeout }
+        let remaining = deadline.timeIntervalSince(clock())
+        guard remaining > 0 else {
+            throw AutotuneContextCalibrationError.deadlineExceeded
+        }
+        return max(0.001, min(timeout, remaining))
     }
 
     /// Derives TTFT and decode throughput from a completed probe stream.

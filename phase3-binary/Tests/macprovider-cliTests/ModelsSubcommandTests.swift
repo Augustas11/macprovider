@@ -325,6 +325,38 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertEqual(parsed.core.modelCatalogModelID, "mlx-community/Qwen3-8B-4bit")
     }
 
+    func testLoadRecommendationAcceptsCalibratedLowerContextAuthority() throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        let calibrationJSON = Self.contextCalibration(recommendedContext: 8_000).jsonString
+        try mutateRecommendationFixture(fixture) { original in
+            original
+                .replacingOccurrences(
+                    of: "  \"serve_config\": {",
+                    with: "  \"context_calibration\": \(calibrationJSON),\n  \"serve_config\": {"
+                )
+                .replacingOccurrences(
+                    of: "\"max_context_override\": 4000",
+                    with: "\"max_context_override\": 8000"
+                )
+        }
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: fixture.artifact)
+        let artifact = VerifiedModelArtifact(
+            modelArgument: fixture.artifact.path,
+            sha256: fixture.artifactSHA256,
+            configJSONData: inspection.configJSONData,
+            configSHA256: inspection.configSHA256
+        )
+        let parsed = try ModelsAdoptRecommendationCommand.loadRecommendation(pathOrStdin: fixture.recommendation.path)
+
+        XCTAssertEqual(parsed.core.knobs.maxContext, 8_000)
+        XCTAssertEqual(parsed.contextCalibration?.recommendedContext, 8_000)
+        XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+            recommendation: parsed,
+            row: fixture.catalogRow(modelID: fixture.targetModelID),
+            artifact: artifact
+        ))
+    }
+
     func testAdoptRecommendationContextAuthorityRejectsInflatedContext() throws {
         let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
         let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: fixture.artifact)
@@ -366,6 +398,56 @@ final class ModelsSubcommandTests: XCTestCase {
             artifact: artifact
         )) { error in
             XCTAssertTrue(String(describing: error).contains("context authority"))
+        }
+    }
+
+    func testAdoptRecommendationContextAuthorityAcceptsCalibratedLowerContext() throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: fixture.artifact)
+        let artifact = VerifiedModelArtifact(
+            modelArgument: fixture.artifact.path,
+            sha256: fixture.artifactSHA256,
+            configJSONData: inspection.configJSONData,
+            configSHA256: inspection.configSHA256
+        )
+        let row = fixture.catalogRow(modelID: fixture.targetModelID)
+        let calibrated = Self.parsedAdoption(
+            fixture: fixture,
+            maxContext: 8_000,
+            hardwareMemoryGB: 64,
+            contextCalibration: Self.contextCalibration(recommendedContext: 8_000)
+        )
+
+        XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+            recommendation: calibrated,
+            row: row,
+            artifact: artifact
+        ))
+    }
+
+    func testAdoptRecommendationContextAuthorityRejectsCalibratedContextMismatch() throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: fixture.artifact)
+        let artifact = VerifiedModelArtifact(
+            modelArgument: fixture.artifact.path,
+            sha256: fixture.artifactSHA256,
+            configJSONData: inspection.configJSONData,
+            configSHA256: inspection.configSHA256
+        )
+        let row = fixture.catalogRow(modelID: fixture.targetModelID)
+        let mismatch = Self.parsedAdoption(
+            fixture: fixture,
+            maxContext: 9_000,
+            hardwareMemoryGB: 64,
+            contextCalibration: Self.contextCalibration(recommendedContext: 8_000)
+        )
+
+        XCTAssertThrowsError(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+            recommendation: mismatch,
+            row: row,
+            artifact: artifact
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("context"))
         }
     }
 
@@ -1108,7 +1190,8 @@ final class ModelsSubcommandTests: XCTestCase {
     private static func parsedAdoption(
         fixture: AdoptionFixture,
         maxContext: Int,
-        hardwareMemoryGB: Int
+        hardwareMemoryGB: Int,
+        contextCalibration: AutotuneContextCalibrationResult? = nil
     ) -> ParsedRecommendationAdoption {
         ParsedRecommendationAdoption(
             targetModelID: fixture.targetModelID,
@@ -1128,6 +1211,7 @@ final class ModelsSubcommandTests: XCTestCase {
                 modelCatalogVersion: "test-catalog",
                 modelCatalogHash: String(repeating: "2", count: 64)
             ),
+            contextCalibration: contextCalibration,
             donorMode: false,
             draftModel: nil,
             draftModelArtifactSHA256: nil,
@@ -1139,6 +1223,32 @@ final class ModelsSubcommandTests: XCTestCase {
             hardwareChip: "Apple M4 Max",
             hardwareMemoryGB: hardwareMemoryGB,
             hardwareBinaryVersion: "1.8.90"
+        )
+    }
+
+    private static func contextCalibration(recommendedContext: Int) -> AutotuneContextCalibrationResult {
+        AutotuneContextCalibrationResult(
+            recommendedContext: recommendedContext,
+            safeUpperBound: 32_000,
+            minimumContext: 4_000,
+            ttftCeilingMS: 8_000,
+            quantum: 1_000,
+            measurements: [
+                AutotuneContextCalibrationMeasurement(
+                    contextTokens: 4_000,
+                    ttftP95MS: 2_000,
+                    decodeTPS: 10,
+                    replicates: 1,
+                    passed: true
+                ),
+                AutotuneContextCalibrationMeasurement(
+                    contextTokens: recommendedContext,
+                    ttftP95MS: 7_500,
+                    decodeTPS: 10,
+                    replicates: 3,
+                    passed: true
+                ),
+            ]
         )
     }
 }

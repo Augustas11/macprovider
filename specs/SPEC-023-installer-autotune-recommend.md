@@ -1,11 +1,16 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.9.4
+version: v0.9.5
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-08-29
 
 ## Change log
+
+- **v0.9.5 (2026-08-30)** — Guarded interactive-context calibration (#1201).
+  1. Adds an explicit `--calibrate-context` post-selection probe that measures uncached prefill TTFT for the selected signed model artifact before config emission/application.
+  2. Keeps the RAM/model-derived context cap as a hard upper bound while selecting the largest 1,000-token cell whose three-sample final p95 TTFT is at most 8,000 ms, measured with a one-token completion and an explicit 256-token prompt/format overhead reserve.
+  3. The feature is operator opt-in in this revision. Installer activation remains blocked on signed physical journey evidence and owner approval; the pre-existing default path is unchanged.
 
 - **v0.9.4 (2026-08-29)** — Thermal veto redefined as sustained throttle (#1269).
   1. **`thermal_throttle_detected` now means sustained thermal throttle, not any single throttling sample.** Computed over the SAME ~250 ms interval series already sampled for `swap_detected` (§ v0.9.0.2): `thermal_throttle_detected == true` only when at least 2 readable thermal samples are throttling (`.serious`/`.critical`) AND throttling readings are ≥50% of the readable (non-Unknown) thermal samples. A genuinely thermally-throttled node (sustained majority) still fails paid eligibility, including short probes that collect only the two synchronous samples.
@@ -651,7 +656,7 @@ In v0.4, there is no paid financial gate. All eligible rows proceed to recommend
 
 ## 6. Output JSON contract (`autotune --recommend`)
 
-`autotune --recommend --json` MUST emit deterministic field order exactly as shown below. Unknown optional data uses `null`; fields are not reordered, renamed, or omitted. The explanation fields are additive `autotune_recommend.v1` extensions. Older v1 documents without them remain schema-decodable by Malibu for compatibility, but they are not valid recommendation display/adoption evidence for a non-null `recommended_model`; Malibu MUST reject recommended documents that lack selected/candidate explanation parity rather than rendering legacy free-text rationale as trusted recommendation evidence. Malibu treats this document family as advisory display evidence unless a later schema adds verifiable adoption authority; explanation parity alone is not one-click adoption authority.
+`autotune --recommend --json` MUST emit deterministic field order exactly as shown below. Unknown optional data uses `null`; fields are not reordered, renamed, or omitted, except for the opt-in `context_calibration` extension defined by SPEC-023-R003. That field appears immediately after `serve_config` only when `--calibrate-context` completes successfully and is absent otherwise, preserving the pre-v0.9.5 byte shape for ordinary runs. The explanation fields are additive `autotune_recommend.v1` extensions. Older v1 documents without them remain schema-decodable by Malibu for compatibility, but they are not valid recommendation display/adoption evidence for a non-null `recommended_model`; Malibu MUST reject recommended documents that lack selected/candidate explanation parity rather than rendering legacy free-text rationale as trusted recommendation evidence. Malibu treats this document family as advisory display evidence unless a later schema adds verifiable adoption authority; explanation parity alone is not one-click adoption authority.
 
 ```json
 {
@@ -675,6 +680,17 @@ In v0.4, there is no paid financial gate. All eligible rows proceed to recommend
   "prompt_rate_usd_per_million_tokens": null,
   "completion_rate_usd_per_million_tokens": null,
   "serve_config": null,
+  "context_calibration": {
+    "schema_version": "autotune_context_calibration.v1",
+    "recommended_context": 8000,
+    "safe_upper_bound": 50000,
+    "minimum_context": 4000,
+    "ttft_ceiling_ms": 8000,
+    "quantum": 1000,
+    "prompt_reserve_tokens": 256,
+    "completion_tokens": 1,
+    "measurements": []
+  },
   "candidates": [
     {
       "rank": 1,
@@ -938,6 +954,12 @@ Recommendation stale: recommendation inputs changed since {generated_at}.
 Run: macprovider-cli autotune --recommend
 ```
 
+### 9.1 Guarded interactive-context calibration
+
+**SPEC-023-R003:** When `autotune --recommend --calibrate-context` is explicitly requested, the CLI MUST calibrate only the selected, already-verified signed model artifact. It MUST keep the existing RAM/model context cap as a hard upper bound, use 4,000 tokens as the minimum, search in 1,000-token cells, and select the largest cell whose uncached-prefill p95 TTFT is no greater than 8,000 ms. Each measured request MUST use a one-token completion and fill the candidate context to its advertised boundary minus an explicit 256-token reserve for chat-template/token-estimation overhead. Search MAY use one sample per cell, but the final selected cell MUST pass three distinct uncached prompts. Prompt identity MUST differ between measured samples; the model/JIT MAY be warmed with a separate short prompt, but the measured long prompt MUST NOT be prewarmed. Sustained memory-pressure or thermal-throttle vetoes, malformed results, timeouts, interruption, a failing minimum, or a failing final validation MUST fail closed before recommendation state or config mutation. JSON and stored recommendation state MUST carry the calibration policy, prompt reserve, completion-token count, measurements, safe upper bound, and selected context. Without `--calibrate-context`, behavior and output shape MUST remain unchanged.
+
+Automatic installer use of this requirement is not authorized by v0.9.5. It remains pending a signed `JOURNEY-PROVIDER-PREBETA-ADMISSION` result covering the selected hardware/model/context and an owner decision under issue #1201.
+
 ## 10. Goodhart mitigations
 
 | ID | Mitigation | SPEC-023 implementation |
@@ -1035,6 +1057,8 @@ AC-37 **[amended v0.8.6]**: Unauthenticated `GET https://coordinator.malibu.tech
 AC-38: `rate_card_version` changes when the recommendation projection rows, provider share, global multiplier, or `usd_per_million_credits` change, and does not change when unrelated quarantine, request-log, operator, ledger runtime, or settlement runtime state changes.
 
 AC-39: `candidate_catalog_sha256` is computed over the exact selected catalog JSON bytes, so changing catalog whitespace changes the stored hash while preserving schema validation behavior.
+
+AC-40 (`SPEC-023-R003`): An explicit context-calibration run never exceeds the RAM/model upper bound, measures near the advertised boundary with one completion token and a 256-token overhead reserve, uses unique measured prompts, validates the final context with three samples, persists the evidence, and fails before state/config mutation when interrupted or when the minimum, safety checks, deadline, response validation, or final p95 TTFT ceiling fails. The same recommendation command without `--calibrate-context` preserves the pre-v0.9.5 output shape and emits/applies the pre-v0.9.5 RAM/model-derived cap unchanged.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 

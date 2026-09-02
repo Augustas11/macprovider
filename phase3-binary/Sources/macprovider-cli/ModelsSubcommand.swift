@@ -813,6 +813,7 @@ private func loadModelsConfig(
 struct ParsedRecommendationAdoption {
     let targetModelID: String
     let core: RecommendationCore
+    let contextCalibration: AutotuneContextCalibrationResult?
     let donorMode: Bool
     let draftModel: String?
     let draftModelArtifactSHA256: String?
@@ -925,6 +926,7 @@ extension ModelsAdoptRecommendationCommand {
             }
         }
         let kvBits = strictRecommendationInt(serveConfig["kv_bits"])
+        let contextCalibration = try parseContextCalibration(root["context_calibration"])
         let core = RecommendationCore(
             model: recommendedModel,
             targetContext: maxContext,
@@ -944,6 +946,7 @@ extension ModelsAdoptRecommendationCommand {
         return ParsedRecommendationAdoption(
             targetModelID: recommendedModel,
             core: core,
+            contextCalibration: contextCalibration,
             donorMode: donorMode,
             draftModel: serveConfig["draft_model"] as? String,
             draftModelArtifactSHA256: serveConfig["draft_model_artifact_sha256"] as? String,
@@ -977,6 +980,72 @@ extension ModelsAdoptRecommendationCommand {
             return exact
         }
         return nil
+    }
+
+    private static func strictRecommendationDouble(_ value: Any?) -> Double? {
+        guard let value, !(value is NSNull) else { return nil }
+        if type(of: value) == Bool.self {
+            return nil
+        }
+        if let number = value as? NSNumber,
+           CFGetTypeID(number) == CFBooleanGetTypeID() {
+            return nil
+        }
+        if let doubleValue = value as? Double, doubleValue.isFinite {
+            return doubleValue
+        }
+        if let number = value as? NSNumber {
+            let doubleValue = number.doubleValue
+            return doubleValue.isFinite ? doubleValue : nil
+        }
+        return nil
+    }
+
+    private static func parseContextCalibration(_ value: Any?) throws -> AutotuneContextCalibrationResult? {
+        guard let value, !(value is NSNull) else { return nil }
+        guard let object = value as? [String: Any],
+              object["schema_version"] as? String == AutotuneContextCalibrationResult.schemaVersion,
+              let recommendedContext = strictRecommendationInt(object["recommended_context"]),
+              let safeUpperBound = strictRecommendationInt(object["safe_upper_bound"]),
+              let minimumContext = strictRecommendationInt(object["minimum_context"]),
+              let ttftCeilingMS = strictRecommendationInt(object["ttft_ceiling_ms"]),
+              let quantum = strictRecommendationInt(object["quantum"]),
+              let promptReserveTokens = strictRecommendationInt(object["prompt_reserve_tokens"]),
+              let completionTokens = strictRecommendationInt(object["completion_tokens"]),
+              let rawMeasurements = object["measurements"] as? [[String: Any]]
+        else {
+            throw ValidationError("context_calibration is incomplete or invalid")
+        }
+        guard promptReserveTokens == AutotuneContextCalibrationResult.promptReserveTokens,
+              completionTokens == AutotuneContextCalibrationResult.completionTokens else {
+            throw ValidationError("context_calibration policy does not match this binary")
+        }
+        let measurements = try rawMeasurements.map { raw in
+            guard let contextTokens = strictRecommendationInt(raw["context_tokens"]),
+                  let decodeTPS = strictRecommendationDouble(raw["decode_tps"]),
+                  let replicates = strictRecommendationInt(raw["replicates"]),
+                  let passed = raw["passed"] as? Bool else {
+                throw ValidationError("context_calibration measurement is incomplete or invalid")
+            }
+            let ttftP95MS = strictRecommendationInt(raw["ttft_p95_ms"])
+            let failureReason = raw["failure_reason"] as? String
+            return AutotuneContextCalibrationMeasurement(
+                contextTokens: contextTokens,
+                ttftP95MS: ttftP95MS,
+                decodeTPS: decodeTPS,
+                replicates: replicates,
+                passed: passed,
+                failureReason: failureReason
+            )
+        }
+        return AutotuneContextCalibrationResult(
+            recommendedContext: recommendedContext,
+            safeUpperBound: safeUpperBound,
+            minimumContext: minimumContext,
+            ttftCeilingMS: ttftCeilingMS,
+            quantum: quantum,
+            measurements: measurements
+        )
     }
 
     private static func isSafeConfigString(_ value: String) -> Bool {
@@ -1096,8 +1165,65 @@ extension ModelsAdoptRecommendationCommand {
             verifiedConfigSHA256: artifact.configSHA256,
             catalogMinRAMGB: row.minRAMGB
         )
+        if let calibration = recommendation.contextCalibration {
+            try validateCalibratedContextAuthority(
+                calibration,
+                maxContext: recommendation.core.knobs.maxContext,
+                expectedMaxContext: expectedMaxContext
+            )
+            return
+        }
         guard recommendation.core.knobs.maxContext == expectedMaxContext else {
             throw ValidationError("recommendation context authority does not match the verified model config")
+        }
+    }
+
+    private static func validateCalibratedContextAuthority(
+        _ calibration: AutotuneContextCalibrationResult,
+        maxContext: Int,
+        expectedMaxContext: Int
+    ) throws {
+        guard calibration.schemaVersion == AutotuneContextCalibrationResult.schemaVersion,
+              calibration.minimumContext == AutotuneCommand.spec023RecommendationProbeContext,
+              calibration.ttftCeilingMS == 8_000,
+              calibration.quantum == 1_000,
+              calibration.promptReserveTokens == AutotuneContextCalibrationResult.promptReserveTokens,
+              calibration.completionTokens == AutotuneContextCalibrationResult.completionTokens else {
+            throw ValidationError("context_calibration policy does not match this binary")
+        }
+        let expectedSafeUpperBound = (expectedMaxContext / calibration.quantum) * calibration.quantum
+        guard calibration.safeUpperBound == expectedSafeUpperBound,
+              calibration.recommendedContext == maxContext,
+              calibration.recommendedContext >= calibration.minimumContext,
+              calibration.recommendedContext <= calibration.safeUpperBound,
+              calibration.recommendedContext % calibration.quantum == 0,
+              !calibration.measurements.isEmpty else {
+            throw ValidationError("recommendation context authority does not match context_calibration")
+        }
+        let final = calibration.measurements.last
+        guard final?.contextTokens == calibration.recommendedContext,
+              final?.replicates ?? 0 >= 3,
+              final?.passed == true,
+              let finalTTFT = final?.ttftP95MS,
+              finalTTFT <= calibration.ttftCeilingMS else {
+            throw ValidationError("context_calibration final validation is invalid")
+        }
+        for measurement in calibration.measurements {
+            guard measurement.contextTokens >= calibration.minimumContext,
+                  measurement.contextTokens <= calibration.safeUpperBound,
+                  measurement.contextTokens % calibration.quantum == 0,
+                  measurement.decodeTPS.isFinite,
+                  measurement.decodeTPS > 0,
+                  measurement.replicates > 0 else {
+                throw ValidationError("context_calibration measurement is invalid")
+            }
+            if measurement.passed {
+                guard let ttft = measurement.ttftP95MS,
+                      ttft <= calibration.ttftCeilingMS,
+                      measurement.failureReason == nil else {
+                    throw ValidationError("context_calibration passing measurement is invalid")
+                }
+            }
         }
     }
 

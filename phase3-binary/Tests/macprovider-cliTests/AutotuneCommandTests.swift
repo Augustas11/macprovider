@@ -323,4 +323,131 @@ final class AutotuneCommandTests: XCTestCase {
         ]))
     }
 
+    func testCalibratedRecommendationCommitRejectsPreCommitInterruptWithoutMutation() async throws {
+        let flag = AutotuneInterruptFlag()
+        flag.set()
+        var operations: [String] = []
+        var interruptMessages = 0
+
+        do {
+            _ = try await AutotuneCommand.commitCalibratedRecommendationMutation(
+                interruptFlag: flag,
+                writeInterrupted: { interruptMessages += 1 },
+                writeRecommendationState: { operations.append("state") },
+                submitHardwareEvidence: { operations.append("evidence") },
+                applyConfig: {
+                    operations.append("config")
+                    return Self.appliedConfig()
+                },
+                emitAppliedSummary: { _ in operations.append("summary") }
+            )
+            XCTFail("expected pre-commit interrupt to throw")
+        } catch let exit as ExitCode {
+            XCTAssertEqual(exit, ExitCode(130))
+        }
+
+        XCTAssertEqual(interruptMessages, 1)
+        XCTAssertEqual(operations, [])
+    }
+
+    func testCalibratedRecommendationCommitRejectsPreCommitDeadlineWithoutMutation() async throws {
+        var operations: [String] = []
+        var deadlineMessages = 0
+
+        do {
+            _ = try await AutotuneCommand.commitCalibratedRecommendationMutation(
+                interruptFlag: AutotuneInterruptFlag(),
+                writeInterrupted: { operations.append("interrupted") },
+                hasDeadlineExpired: { true },
+                writeDeadlineExceeded: { deadlineMessages += 1 },
+                writeRecommendationState: { operations.append("state") },
+                submitHardwareEvidence: { operations.append("evidence") },
+                applyConfig: {
+                    operations.append("config")
+                    return Self.appliedConfig()
+                },
+                emitAppliedSummary: { _ in operations.append("summary") }
+            )
+            XCTFail("expected pre-commit deadline to throw")
+        } catch let exit as ExitCode {
+            XCTAssertEqual(exit, ExitCode(1))
+        }
+
+        XCTAssertEqual(deadlineMessages, 1)
+        XCTAssertEqual(operations, [])
+    }
+
+    func testCalibratedRecommendationCommitFinishesWhenInterruptedAfterStateWrite() async throws {
+        let flag = AutotuneInterruptFlag()
+        var operations: [String] = []
+
+        let applied = try await AutotuneCommand.commitCalibratedRecommendationMutation(
+            interruptFlag: flag,
+            writeInterrupted: { operations.append("interrupted") },
+            writeRecommendationState: {
+                operations.append("state")
+                flag.set()
+            },
+            submitHardwareEvidence: { operations.append("evidence") },
+            applyConfig: {
+                operations.append("config")
+                return Self.appliedConfig()
+            },
+            emitAppliedSummary: { applied in operations.append("summary:\(applied.summary)") }
+        )
+
+        XCTAssertTrue(applied)
+        XCTAssertEqual(operations, ["state", "evidence", "config", "summary:applied test summary"])
+    }
+
+    func testCalibratedRecommendationCommitFinishesWhenInterruptedBeforeConfigWrite() async throws {
+        let flag = AutotuneInterruptFlag()
+        var operations: [String] = []
+
+        let applied = try await AutotuneCommand.commitCalibratedRecommendationMutation(
+            interruptFlag: flag,
+            writeInterrupted: { operations.append("interrupted") },
+            writeRecommendationState: { operations.append("state") },
+            submitHardwareEvidence: {
+                operations.append("evidence")
+                flag.set()
+            },
+            applyConfig: {
+                operations.append("config")
+                return Self.appliedConfig()
+            },
+            emitAppliedSummary: { applied in operations.append("summary:\(applied.summary)") }
+        )
+
+        XCTAssertTrue(applied)
+        XCTAssertEqual(operations, ["state", "evidence", "config", "summary:applied test summary"])
+    }
+
+    func testCalibratedRecommendationCommitFinishesSummaryWhenInterruptedDuringConfigWrite() async throws {
+        let flag = AutotuneInterruptFlag()
+        var operations: [String] = []
+
+        let applied = try await AutotuneCommand.commitCalibratedRecommendationMutation(
+            interruptFlag: flag,
+            writeInterrupted: { operations.append("interrupted") },
+            writeRecommendationState: { operations.append("state") },
+            submitHardwareEvidence: { operations.append("evidence") },
+            applyConfig: {
+                operations.append("config")
+                flag.set()
+                return Self.appliedConfig()
+            },
+            emitAppliedSummary: { applied in operations.append("summary:\(applied.summary)") }
+        )
+
+        XCTAssertTrue(applied)
+        XCTAssertEqual(operations, ["state", "evidence", "config", "summary:applied test summary"])
+    }
+
+    private static func appliedConfig() -> ConfigApplier.AppliedConfig {
+        ConfigApplier.AppliedConfig(
+            backupPath: URL(fileURLWithPath: "/tmp/config.yaml.bak"),
+            summary: "applied test summary"
+        )
+    }
 }
