@@ -131,6 +131,98 @@ def base_evidence(source_commit: str) -> dict:
     }
 
 
+def add_spec032_conformance(conformance: dict) -> None:
+    conformance["requirements"] = [
+        {
+            "requirement_id": requirement_id,
+            "spec_id": "SPEC-032",
+            "state": "pending",
+            "evidence": [],
+            "journeys": ["JOURNEY-PROVIDER-PREBETA-ADMISSION"],
+            "implementation": ["provider_prebeta_contract.txt:provider-prebeta-current-selector"],
+            "tests": ["provider_prebeta_contract.txt:provider-prebeta-current-selector"],
+            "gap": {
+                "verdict": "UNKNOWN",
+                "owner": "@Augustas11",
+                "issue": "https://github.com/Augustas11/macprovider/issues/959",
+                "rationale": "pending strict admission matrix evidence",
+            },
+        }
+        for requirement_id in ("SPEC-032-R001", "SPEC-032-R002", "SPEC-032-R003")
+    ]
+
+
+def strict_spec032_steps() -> list[dict]:
+    snap_ready = {
+        "admission_ceiling_excluded": False,
+        "admission_evidence_stale": False,
+        "admission_sandboxed": False,
+        "routing_eligible": True,
+        "serving_capable": True,
+    }
+    snap_excluded = {
+        "admission_ceiling_excluded": True,
+        "admission_evidence_stale": False,
+        "admission_sandboxed": False,
+        "routing_eligible": False,
+        "serving_capable": False,
+    }
+    snap_stale = {
+        "admission_ceiling_excluded": False,
+        "admission_evidence_stale": True,
+        "admission_sandboxed": False,
+        "routing_eligible": False,
+        "serving_capable": False,
+    }
+    snap_sandboxed = {
+        "admission_ceiling_excluded": False,
+        "admission_evidence_stale": False,
+        "admission_sandboxed": True,
+        "routing_eligible": False,
+        "serving_capable": False,
+    }
+    control = dict(snap_ready)
+    rows = [
+        ("r001-over-ceiling", "SPEC-032-R001", "over-ceiling heartbeat route-excludes subject", snap_ready, snap_excluded, "autotune_model_cap_exceeded"),
+        ("r001-uncatalogued", "SPEC-032-R001", "uncatalogued heartbeat route-excludes subject", snap_excluded, snap_excluded, "autotune_model_uncatalogued"),
+        ("r001-clears", "SPEC-032-R001", "in-ceiling heartbeat clears the route exclusion", snap_excluded, snap_ready, None),
+        ("r002-expired", "SPEC-032-R002", "expired evidence route-excludes subject", snap_ready, snap_stale, "autotune_evidence_stale_or_mismatched"),
+        ("r002-tuple-mismatch", "SPEC-032-R002", "tuple-mismatched evidence route-excludes subject", snap_ready, snap_stale, "autotune_evidence_stale_or_mismatched"),
+        ("r002-missing-tuple", "SPEC-032-R002", "missing admitted tuple route-excludes capped subject", snap_ready, snap_stale, "autotune_evidence_stale_or_mismatched"),
+        ("r003-sandbox-and-failclosed-reload", "SPEC-032-R003", "evidence-absent subject sandboxed; fail-closed hot-enable reload keeps the evidence-backed control routable", snap_ready, snap_sandboxed, "autotune_evidence_required"),
+        ("r003-recovery-sweep", "SPEC-032-R003", "recovery sweep restores healthy control; evidence-absent subject stays sandboxed", snap_sandboxed, snap_sandboxed, "autotune_evidence_required"),
+    ]
+    steps = []
+    for step_id, requirement, assertion, before, after, reason in rows:
+        step = {
+            "id": step_id,
+            "requirement": requirement,
+            "status": "pass",
+            "assertion": assertion,
+            "subject_fingerprint": hashlib.sha256(f"subject:{step_id}".encode()).hexdigest(),
+            "subject_before": before,
+            "subject_after": after,
+            "control_fingerprint": hashlib.sha256(b"control").hexdigest(),
+            "control_after": control,
+        }
+        if reason is not None:
+            step["non_admission_reason"] = reason
+        if requirement == "SPEC-032-R003":
+            step["durable_provider_credentials_minted"] = False
+        if step_id == "r003-sandbox-and-failclosed-reload":
+            step["fail_closed_reload_observed"] = True
+        steps.append(step)
+    return steps
+
+
+def make_spec032_evidence(evidence: dict) -> None:
+    evidence["run_id"] = "provider-prebeta-admission-spec032-strict-canary-20260902T120000Z"
+    evidence["requirement_ids"] = ["SPEC-032-R001", "SPEC-032-R002", "SPEC-032-R003"]
+    evidence["result"] = {"status": "pass", "summary": "Physical strict admission-gate matrix passed."}
+    evidence["environment"]["class"] = "physical-provider-prebeta-admission"
+    evidence["steps"] = strict_spec032_steps()
+
+
 class ProviderPrebetaJourneyResultTests(unittest.TestCase):
     def make_repo(self, evidence_mutation=None, conformance_mutation=None) -> tuple[tempfile.TemporaryDirectory[str], Path, str, str]:
         directory = tempfile.TemporaryDirectory()
@@ -940,6 +1032,463 @@ class ProviderPrebetaJourneyResultTests(unittest.TestCase):
 
         self.assertNotEqual(0, completed.returncode)
         self.assertIn("step-07-buyer-serving-smoke", completed.stderr)
+
+    def test_builder_emits_spec032_strict_matrix_payload(self) -> None:
+        directory, root, source_commit, evidence_commit = self.make_repo(
+            make_spec032_evidence,
+            add_spec032_conformance,
+        )
+        self.addCleanup(directory.cleanup)
+        output = root / "payload.json"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--output",
+                str(output),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(["SPEC-032-R001", "SPEC-032-R002", "SPEC-032-R003"], payload["requirement_ids"])
+        self.assertEqual("r001-over-ceiling", payload["steps"][0]["id"])
+        self.assertEqual("r003-recovery-sweep", payload["steps"][-1]["id"])
+        self.assertEqual("physical-provider-prebeta-admission", payload["execution_mode"])
+
+    def test_builder_allows_spec032_subset_from_full_matrix_evidence(self) -> None:
+        directory, root, source_commit, evidence_commit = self.make_repo(
+            make_spec032_evidence,
+            add_spec032_conformance,
+        )
+        self.addCleanup(directory.cleanup)
+        output = root / "payload.json"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--requirement-ids",
+                "SPEC-032-R002",
+                "--output",
+                str(output),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(["SPEC-032-R002"], payload["requirement_ids"])
+        self.assertEqual(
+            ["r002-expired", "r002-tuple-mismatch", "r002-missing-tuple"],
+            [step["id"] for step in payload["steps"]],
+        )
+
+    def test_validator_rejects_spec032_dry_run_promotion(self) -> None:
+        def dry_run(evidence: dict) -> None:
+            make_spec032_evidence(evidence)
+            evidence["result"]["class"] = "dry-run"
+            evidence["result"]["promote"] = False
+
+        directory, root, source_commit, _ = self.make_repo(dry_run, add_spec032_conformance)
+        self.addCleanup(directory.cleanup)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(VALIDATOR),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("dry-run provider-prebeta evidence cannot be promoted", completed.stderr)
+
+    def test_builder_rejects_spec032_non_physical_environment(self) -> None:
+        def non_physical(evidence: dict) -> None:
+            make_spec032_evidence(evidence)
+            evidence["environment"]["class"] = "isolated-in-process-acceptance-harness"
+
+        directory, root, source_commit, evidence_commit = self.make_repo(non_physical, add_spec032_conformance)
+        self.addCleanup(directory.cleanup)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--output",
+                str(root / "payload.json"),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("environment.class must equal 'physical-provider-prebeta-admission'", completed.stderr)
+
+    def test_builder_rejects_spec032_result_promotion_marker(self) -> None:
+        def promotion_marker(evidence: dict) -> None:
+            make_spec032_evidence(evidence)
+            evidence["result"]["promote"] = True
+
+        directory, root, source_commit, evidence_commit = self.make_repo(promotion_marker, add_spec032_conformance)
+        self.addCleanup(directory.cleanup)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--output",
+                str(root / "payload.json"),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("result contains unsupported promotion field(s): promote", completed.stderr)
+
+    def test_builder_rejects_spec032_collateral_control_failure(self) -> None:
+        def collateral_failure(evidence: dict) -> None:
+            make_spec032_evidence(evidence)
+            evidence["steps"][0]["control_after"]["routing_eligible"] = False
+
+        directory, root, source_commit, evidence_commit = self.make_repo(collateral_failure, add_spec032_conformance)
+        self.addCleanup(directory.cleanup)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--output",
+                str(root / "payload.json"),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("control_after must remain routing-eligible and serving-capable", completed.stderr)
+
+    def test_builder_rejects_spec032_raw_provider_fingerprint(self) -> None:
+        def raw_fingerprint(evidence: dict) -> None:
+            make_spec032_evidence(evidence)
+            evidence["steps"][0]["subject_fingerprint"] = "provider:raw-local-machine-id"
+
+        directory, root, source_commit, evidence_commit = self.make_repo(raw_fingerprint, add_spec032_conformance)
+        self.addCleanup(directory.cleanup)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--output",
+                str(root / "payload.json"),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("steps[0].subject_fingerprint has invalid format", completed.stderr)
+
+    def test_builder_rejects_spec032_r003_without_sandbox_or_no_credentials(self) -> None:
+        def missing_r003_proof(evidence: dict) -> None:
+            make_spec032_evidence(evidence)
+            evidence["steps"][6]["subject_after"]["admission_sandboxed"] = False
+            evidence["steps"][6]["durable_provider_credentials_minted"] = True
+
+        directory, root, source_commit, evidence_commit = self.make_repo(missing_r003_proof, add_spec032_conformance)
+        self.addCleanup(directory.cleanup)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--output",
+                str(root / "payload.json"),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("subject_after.admission_sandboxed must be true for R003", completed.stderr)
+
+    def test_builder_rejects_spec032_advisory_bench_gate_reason(self) -> None:
+        def advisory_reason(evidence: dict) -> None:
+            make_spec032_evidence(evidence)
+            evidence["steps"][0]["non_admission_reason"] = "bench_gate.min_sustained_tps"
+
+        directory, root, source_commit, evidence_commit = self.make_repo(advisory_reason, add_spec032_conformance)
+        self.addCleanup(directory.cleanup)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--output",
+                str(root / "payload.json"),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("must not cite advisory bench_gate values", completed.stderr)
+
+    def test_builder_rejects_spec032_wrong_reason_code(self) -> None:
+        def wrong_reason(evidence: dict) -> None:
+            make_spec032_evidence(evidence)
+            evidence["steps"][3]["non_admission_reason"] = "autotune_model_cap_exceeded"
+
+        directory, root, source_commit, evidence_commit = self.make_repo(wrong_reason, add_spec032_conformance)
+        self.addCleanup(directory.cleanup)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--output",
+                str(root / "payload.json"),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("non_admission_reason must equal 'autotune_evidence_stale_or_mismatched'", completed.stderr)
+
+    def test_signed_spec032_strict_matrix_payload_passes_canonical_validator(self) -> None:
+        directory, root, source_commit, evidence_commit = self.make_repo(
+            make_spec032_evidence,
+            add_spec032_conformance,
+        )
+        self.addCleanup(directory.cleanup)
+        private_key = generate_acceptance_key(root)
+        trusted_hash = hashlib.sha256((root / "security" / "acceptance-candidate-signing-public.pem").read_bytes()).hexdigest()
+        payload = root / "payload.json"
+        envelope = root / "journeys" / "evidence" / "provider-prebeta-admission-spec032-strict-canary-20260902T120000Z.spec-032-r001-spec-032-r002-spec-032-r003.journey-result.signed.json"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--output",
+                str(payload),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        env = os.environ.copy()
+        env["MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM"] = private_key
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            raise unittest.SkipTest("openssl is required")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SIGNER),
+                "--root",
+                str(root),
+                "--input",
+                str(payload),
+                "--output",
+                str(envelope.relative_to(root)),
+                "--verified-at",
+                "2026-08-05T06:05:00Z",
+                "--openssl-bin",
+                openssl,
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+        result = ValidationResult()
+        self.assertTrue(
+            _validate_signed_journey_result(
+                root,
+                str(envelope.relative_to(root)),
+                "SPEC-032-R002",
+                ["JOURNEY-PROVIDER-PREBETA-ADMISSION"],
+                {source_commit},
+                trusted_hash,
+                openssl,
+                "provider-prebeta-spec032",
+                result,
+            ),
+            result.errors,
+        )
+        self.assertEqual([], result.errors)
+
+    def test_signed_spec032_subset_from_full_matrix_passes_canonical_validator(self) -> None:
+        directory, root, source_commit, evidence_commit = self.make_repo(
+            make_spec032_evidence,
+            add_spec032_conformance,
+        )
+        self.addCleanup(directory.cleanup)
+        private_key = generate_acceptance_key(root)
+        trusted_hash = hashlib.sha256((root / "security" / "acceptance-candidate-signing-public.pem").read_bytes()).hexdigest()
+        payload = root / "payload.json"
+        envelope = root / "journeys" / "evidence" / "provider-prebeta-admission-spec032-strict-canary-20260902T120000Z.spec-032-r002.journey-result.signed.json"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--requirement-ids",
+                "SPEC-032-R002",
+                "--output",
+                str(payload),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        env = os.environ.copy()
+        env["MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM"] = private_key
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            raise unittest.SkipTest("openssl is required")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SIGNER),
+                "--root",
+                str(root),
+                "--input",
+                str(payload),
+                "--output",
+                str(envelope.relative_to(root)),
+                "--verified-at",
+                "2026-08-05T06:05:00Z",
+                "--openssl-bin",
+                openssl,
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+        result = ValidationResult()
+        self.assertTrue(
+            _validate_signed_journey_result(
+                root,
+                str(envelope.relative_to(root)),
+                "SPEC-032-R002",
+                ["JOURNEY-PROVIDER-PREBETA-ADMISSION"],
+                {source_commit},
+                trusted_hash,
+                openssl,
+                "provider-prebeta-spec032-subset",
+                result,
+            ),
+            result.errors,
+        )
+        self.assertEqual([], result.errors)
 
 
 if __name__ == "__main__":

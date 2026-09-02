@@ -106,6 +106,7 @@ def validate_redacted_evidence(
         if evidence_source_sha != source_sha:
             die("repository.commit must exactly match --source-sha")
 
+    evidence_requirements = builder.parse_requirement_id_values(evidence.get("requirement_ids"), "evidence.requirement_ids")
     selected_requirements = builder.parse_requirement_ids(requirement_ids, evidence)
     mapped = builder.load_mapped_provider_requirements(root)
     not_mapped = [item for item in selected_requirements if item not in mapped]
@@ -123,12 +124,10 @@ def validate_redacted_evidence(
     environment = builder.require_object(evidence.get("environment"), "environment")
     for field in ("class", "hardware_profile", "candidate"):
         builder.require_string(environment.get(field), None, f"environment.{field}")
-    result = builder.require_object(evidence.get("result"), "result")
-    if result.get("status") != "pass":
-        die("result.status must equal 'pass'")
-    if "summary" in result:
-        builder.require_string(result.get("summary"), None, "result.summary")
-    builder.require_steps(evidence.get("steps"))
+    if environment.get("class") != builder.EXECUTION_MODE:
+        die(f"environment.class must equal {builder.EXECUTION_MODE!r}")
+    builder.require_result(evidence.get("result"))
+    builder.require_steps(evidence.get("steps"), selected_requirements, evidence_requirements)
     builder.require_redaction(evidence.get("redaction"))
     run_id = builder.require_string(evidence.get("run_id"), None, "run_id")
 

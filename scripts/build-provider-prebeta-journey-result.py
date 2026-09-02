@@ -28,6 +28,7 @@ JOURNEY_ID = "JOURNEY-PROVIDER-PREBETA-ADMISSION"
 EVIDENCE_SCHEMA = "macprovider.provider-prebeta-admission-evidence.v1"
 REPOSITORY = "Augustas11/macprovider"
 ARTIFACT_ID = "redacted-provider-prebeta-admission"
+EXECUTION_MODE = "physical-provider-prebeta-admission"
 REQUIREMENT_RE = re.compile(r"^SPEC-[0-9]{3}-R[0-9]{3}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 DATETIME_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
@@ -42,6 +43,49 @@ STEP_IDS = (
     "step-06-provider-runtime-routing",
     "step-07-buyer-serving-smoke",
     "step-08-redaction-and-correlation",
+)
+STRICT_SPEC032_REQUIREMENT_IDS = {
+    "SPEC-032-R001",
+    "SPEC-032-R002",
+    "SPEC-032-R003",
+}
+STRICT_SPEC032_STEP_ID_ORDER = (
+    "r001-over-ceiling",
+    "r001-uncatalogued",
+    "r001-clears",
+    "r002-expired",
+    "r002-tuple-mismatch",
+    "r002-missing-tuple",
+    "r003-sandbox-and-failclosed-reload",
+    "r003-recovery-sweep",
+)
+STRICT_SPEC032_STEP_REQUIREMENTS = {
+    "r001-over-ceiling": "SPEC-032-R001",
+    "r001-uncatalogued": "SPEC-032-R001",
+    "r001-clears": "SPEC-032-R001",
+    "r002-expired": "SPEC-032-R002",
+    "r002-tuple-mismatch": "SPEC-032-R002",
+    "r002-missing-tuple": "SPEC-032-R002",
+    "r003-sandbox-and-failclosed-reload": "SPEC-032-R003",
+    "r003-recovery-sweep": "SPEC-032-R003",
+}
+STRICT_SPEC032_STEP_REASONS = {
+    "r001-over-ceiling": "autotune_model_cap_exceeded",
+    "r001-uncatalogued": "autotune_model_uncatalogued",
+    "r002-expired": "autotune_evidence_stale_or_mismatched",
+    "r002-tuple-mismatch": "autotune_evidence_stale_or_mismatched",
+    "r002-missing-tuple": "autotune_evidence_stale_or_mismatched",
+    "r003-sandbox-and-failclosed-reload": "autotune_evidence_required",
+    "r003-recovery-sweep": "autotune_evidence_required",
+}
+STRICT_SPEC032_REQUIRED_SNAP_FIELDS = (
+    "routing_eligible",
+    "serving_capable",
+)
+STRICT_SPEC032_FORBIDDEN_REASON_FRAGMENTS = (
+    "bench_gate",
+    "min_sustained_tps",
+    "max_4k_ttft_ms",
 )
 FORBIDDEN_KEY_FRAGMENTS = (
     "authorization_header",
@@ -175,6 +219,21 @@ def require_redaction(value: Any) -> dict[str, bool]:
     return {key: True for key in required}
 
 
+def require_result(value: Any) -> dict[str, Any]:
+    result = deepcopy(require_object(value, "result"))
+    if result.get("status") != "pass":
+        die("result.status must equal 'pass'")
+    if result.get("class") == "dry-run" or result.get("promote") is False:
+        die("dry-run provider-prebeta evidence cannot be promoted")
+    allowed = {"status", "summary"}
+    extra = sorted(set(result) - allowed)
+    if extra:
+        die(f"result contains unsupported promotion field(s): {', '.join(extra)}")
+    if "summary" in result:
+        require_string(result.get("summary"), None, "result.summary")
+    return result
+
+
 def parse_requirement_id_values(source: Any, location: str) -> list[str]:
     if isinstance(source, str):
         values = [item.strip() for item in source.split(",") if item.strip()]
@@ -239,9 +298,65 @@ def require_git_file_matches(root: Path, commit: str, source: str, expected: byt
         die("redacted evidence source bytes must match --evidence-sha")
 
 
-def require_steps(value: Any) -> list[dict[str, Any]]:
+def step_order_for_requirements(requirement_ids: list[str]) -> tuple[str, ...]:
+    selected = set(requirement_ids)
+    if selected & STRICT_SPEC032_REQUIREMENT_IDS:
+        if not selected <= STRICT_SPEC032_REQUIREMENT_IDS:
+            die("SPEC-032 strict matrix requirements must not be mixed with other provider-prebeta requirements")
+        return tuple(
+            step_id
+            for step_id in STRICT_SPEC032_STEP_ID_ORDER
+            if STRICT_SPEC032_STEP_REQUIREMENTS[step_id] in selected
+        )
+    return STEP_IDS
+
+
+def require_spec032_step_details(step: dict[str, Any], step_id: str, location: str) -> None:
+    if step.get("requirement") != STRICT_SPEC032_STEP_REQUIREMENTS[step_id]:
+        die(f"{location}.requirement must equal {STRICT_SPEC032_STEP_REQUIREMENTS[step_id]!r}")
+    for field in ("subject_fingerprint", "control_fingerprint"):
+        require_string(step.get(field), FINGERPRINT_RE, f"{location}.{field}")
+    for field in ("subject_before", "subject_after", "control_after"):
+        snap = require_object(step.get(field), f"{location}.{field}")
+        for snap_field in STRICT_SPEC032_REQUIRED_SNAP_FIELDS:
+            if not isinstance(snap.get(snap_field), bool):
+                die(f"{location}.{field}.{snap_field} must be boolean")
+    control_after = require_object(step.get("control_after"), f"{location}.control_after")
+    if control_after.get("routing_eligible") is not True or control_after.get("serving_capable") is not True:
+        die(f"{location}.control_after must remain routing-eligible and serving-capable")
+    subject_after = require_object(step.get("subject_after"), f"{location}.subject_after")
+    if step_id == "r001-clears":
+        if subject_after.get("routing_eligible") is not True or subject_after.get("serving_capable") is not True:
+            die(f"{location}.subject_after must be routing-eligible and serving-capable after the clear step")
+        return
+    if subject_after.get("routing_eligible") is not False or subject_after.get("serving_capable") is not False:
+        die(f"{location}.subject_after must be route-excluded or sandboxed")
+    if STRICT_SPEC032_STEP_REQUIREMENTS[step_id] == "SPEC-032-R003":
+        if subject_after.get("admission_sandboxed") is not True:
+            die(f"{location}.subject_after.admission_sandboxed must be true for R003")
+        if step.get("durable_provider_credentials_minted") is not False:
+            die(f"{location}.durable_provider_credentials_minted must be false for R003")
+        if step_id == "r003-sandbox-and-failclosed-reload" and step.get("fail_closed_reload_observed") is not True:
+            die(f"{location}.fail_closed_reload_observed must be true for R003 reload")
+    expected_reason = STRICT_SPEC032_STEP_REASONS.get(step_id)
+    if expected_reason is not None:
+        reason = require_string(step.get("non_admission_reason"), None, f"{location}.non_admission_reason")
+        lowered = reason.lower()
+        if any(fragment in lowered for fragment in STRICT_SPEC032_FORBIDDEN_REASON_FRAGMENTS):
+            die(f"{location}.non_admission_reason must not cite advisory bench_gate values")
+        if reason != expected_reason:
+            die(f"{location}.non_admission_reason must equal {expected_reason!r}")
+
+
+def require_steps(
+    value: Any,
+    requirement_ids: list[str] | None = None,
+    covered_requirement_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         die("steps must be an array")
+    expected_order = step_order_for_requirements(covered_requirement_ids or requirement_ids) if requirement_ids is not None else STEP_IDS
+    output_order = step_order_for_requirements(requirement_ids) if requirement_ids is not None else expected_order
     by_id: dict[str, dict[str, Any]] = {}
     for index, item in enumerate(value):
         step = require_object(item, f"steps[{index}]")
@@ -256,14 +371,16 @@ def require_steps(value: Any) -> list[dict[str, Any]]:
             artifacts = [ARTIFACT_ID]
         if not isinstance(artifacts, list) or not artifacts or any(item != ARTIFACT_ID for item in artifacts):
             die(f"{step_id}.artifacts must reference {ARTIFACT_ID}")
+        if step_id in STRICT_SPEC032_STEP_REQUIREMENTS:
+            require_spec032_step_details(step, step_id, f"steps[{index}]")
         by_id[step_id] = {"id": step_id, "status": "pass", "assertion": assertion, "artifacts": [ARTIFACT_ID]}
-    missing = [step_id for step_id in STEP_IDS if step_id not in by_id]
-    extra = [step_id for step_id in by_id if step_id not in STEP_IDS]
+    missing = [step_id for step_id in expected_order if step_id not in by_id]
+    extra = [step_id for step_id in by_id if step_id not in expected_order]
     if missing:
         die(f"missing provider-prebeta step(s): {', '.join(missing)}")
     if extra:
         die(f"unknown provider-prebeta step(s): {', '.join(extra)}")
-    return [by_id[step_id] for step_id in STEP_IDS]
+    return [by_id[step_id] for step_id in output_order]
 
 
 def reject_forbidden_secret_keys(value: Any, location: str = "$") -> None:
@@ -303,6 +420,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
         die("repository.commit must exactly match --source-sha")
     require_git_file_matches(root, evidence_sha, source, evidence_bytes)
 
+    evidence_ids = parse_requirement_id_values(evidence.get("requirement_ids"), "evidence.requirement_ids")
     selected_requirements = parse_requirement_ids(requirement_ids, evidence)
     mapped = load_mapped_provider_requirements(root)
     not_mapped = [item for item in selected_requirements if item not in mapped]
@@ -319,12 +437,10 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     environment = deepcopy(require_object(evidence.get("environment"), "environment"))
     for field in ("class", "hardware_profile", "candidate"):
         require_string(environment.get(field), None, f"environment.{field}")
-    result = deepcopy(require_object(evidence.get("result"), "result"))
-    if result.get("status") != "pass":
-        die("result.status must equal 'pass'")
-    if "summary" in result:
-        require_string(result.get("summary"), None, "result.summary")
-    steps = require_steps(evidence.get("steps"))
+    if environment.get("class") != EXECUTION_MODE:
+        die(f"environment.class must equal {EXECUTION_MODE!r}")
+    result = require_result(evidence.get("result"))
+    steps = require_steps(evidence.get("steps"), selected_requirements, evidence_ids)
     redaction = require_redaction(evidence.get("redaction"))
     artifact_sha = hashlib.sha256(evidence_bytes).hexdigest()
     run_id = require_string(evidence.get("run_id"), None, "run_id")
@@ -343,7 +459,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
         "steps": steps,
         "redaction": redaction,
         "run_id": run_id,
-        "execution_mode": "physical-provider-prebeta-admission",
+        "execution_mode": EXECUTION_MODE,
     }
 
 
