@@ -61,6 +61,7 @@ names = {
     "publish_launchd_plist", "verify_published_launchd_plist",
     "publish_headless_recovery_trust", "verify_headless_recovery_trust",
     "retire_headless_recovery_trust",
+    "headless_acceptance_repair_mode", "provider_executable_owned_for_current_mode",
     "write_install_recovery_artifacts", "begin_install_transaction",
     "mark_install_cutover_started", "discard_install_transaction_before_cutover",
     "rollback_install_transaction", "commit_install_transaction",

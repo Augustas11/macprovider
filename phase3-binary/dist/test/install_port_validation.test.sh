@@ -10,17 +10,21 @@ awk '/^validate_port_value\(\)/ { inside=1 } inside { print } inside && /^}/ { e
 python3 - "$INSTALL_SH" > "$TMP/ensure_port.sh" <<'PY'
 import sys
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
-inside = False
-depth = 0
-for line in lines:
-    if line.startswith("ensure_port_free()"):
-        inside = True
-    if not inside:
-        continue
-    print(line)
-    depth += line.count("{") - line.count("}")
-    if inside and depth == 0:
-        break
+names = ["headless_acceptance_repair_mode", "provider_executable_owned_for_current_mode", "ensure_port_free"]
+for name in names:
+    inside = False
+    depth = 0
+    for line in lines:
+        if line.startswith(f"{name}()"):
+            inside = True
+        if not inside:
+            continue
+        print(line)
+        depth += line.count("{") - line.count("}")
+        if inside and depth == 0:
+            break
+    else:
+        raise SystemExit(f"could not extract {name}")
 PY
 cat > "$TMP/harness.sh" <<'HARNESS'
 set -euo pipefail
@@ -29,6 +33,13 @@ log() { printf "LOG:%s\n" "$*" >&2; }
 DRY_RUN=0
 PORT=18080
 INSTALL_DIR="$HOME/macprovider"
+BINARY_PATH="$HOME/.local/bin/macprovider-cli"
+HEADLESS=0
+REPAIR_EXISTING_INSTALL=0
+LAUNCHD_DOMAIN="gui/$UID"
+MACPROVIDER_ACCEPTANCE_ASSET_DIR=""
+BUNDLED_APP=""
+HEADLESS_REPAIR_INCUMBENT_BINARY=""
 PLIST_PATH="/tmp/provider.plist"
 HARNESS
 cat "$TMP/validate_port.sh" >> "$TMP/harness.sh"

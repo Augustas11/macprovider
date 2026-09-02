@@ -12,6 +12,7 @@ names = {
     "read_config_provider_token_line", "read_config_model",
     "read_config_provider_id", "read_config_artifact_path", "read_config_artifact_sha",
     "is_bootstrap_principal",
+    "headless_acceptance_repair_mode",
     "ensure_provider_credentials", "submit_required_hardware_evidence",
     "run_autotune_recommend_apply",
 }
@@ -71,8 +72,18 @@ EOF
     DRY_RUN=0
     SKIP_PROVIDER_START=0
     HEADLESS=0
+    REPAIR_EXISTING_INSTALL=0
+    LAUNCHD_DOMAIN="gui/$UID"
+    BUNDLED_APP=""
+    MACPROVIDER_ACCEPTANCE_ASSET_DIR=""
     model="seed"
     REFERRAL_CODE_SOURCE_FILE=""
+    if [ "$CASE_MODE" = "headless-repair-credential-drift" ]; then
+      HEADLESS=1
+      REPAIR_EXISTING_INSTALL=1
+      LAUNCHD_DOMAIN=system
+      MACPROVIDER_ACCEPTANCE_ASSET_DIR="$CASE_ROOT/acceptance"
+    fi
     case "$CASE_MODE" in
       referral-success|referral-expired|existing-referral-retry|existing-referral-import) REFERRAL_CODE_SOURCE_FILE="$CASE_ROOT/referral-code" ;;
     esac
@@ -205,6 +216,18 @@ EOF
         exit 1
       fi
       ;;
+    headless-repair-credential-drift)
+      [ "$rc" -ne 0 ]
+      grep -F "credentials verify" "$root/calls" >/dev/null
+      if grep -F "bootstrap-auth" "$root/calls" >/dev/null; then
+        echo "$mode bootstrapped after protected-file credential custody drifted" >&2
+        exit 1
+      fi
+      if grep -F "service-start" "$root/calls" >/dev/null; then
+        echo "$mode started service after protected-file credential custody drifted" >&2
+        exit 1
+      fi
+      ;;
     receipt-probe-fails)
       [ "$rc" -ne 0 ]
       grep -F -- "--prefetch-receipt $root/prefetch-receipt.json" "$root/calls" >/dev/null
@@ -231,6 +254,7 @@ run_case existing-legacy
 run_case existing-referral-retry
 run_case existing-referral-import
 run_case store-unavailable
+run_case headless-repair-credential-drift
 run_case receipt-probe-fails
 
 # The durable upgrade transaction must remain live through every service-file
