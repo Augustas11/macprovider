@@ -55,7 +55,7 @@ jobs:
       - name: Checkout
         # Pinned to actions/checkout v6.0.3. Re-resolve deliberately
         # when upgrading the action rather than trusting a mutable tag.
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           # A promoted candidate is bound to the already-created signed tag.
           # Checkout that immutable source commit while the workflow itself
@@ -411,14 +411,14 @@ jobs:
       contents: read
     steps:
       - name: Checkout reviewed release commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.build.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Download unsigned build artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: unsigned-release-${{ needs.build.outputs.commit }}
           path: ${{ runner.temp }}/unsigned-release-inputs
@@ -477,14 +477,14 @@ jobs:
       contents: write
     steps:
       - name: Checkout reviewed release commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.build.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Download unsigned build artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: unsigned-release-${{ needs.build.outputs.commit }}
           path: ${{ runner.temp }}/unsigned-release-inputs
