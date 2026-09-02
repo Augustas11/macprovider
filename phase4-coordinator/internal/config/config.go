@@ -88,6 +88,7 @@ type Config struct {
 	MalibuEmission               MalibuEmissionConfig         `yaml:"malibu_emission"`
 	AutotuneFeeds                AutotuneFeedsConfig          `yaml:"autotune"`
 	ProofOfWeights               ProofOfWeightsConfig         `yaml:"proof_of_weights"`
+	AdmissionCanaryHarness       AdmissionCanaryHarnessConfig `yaml:"admission_canary_harness"`
 	Proxy                        ProxyConfig                  `yaml:"proxy"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
 	// Payout is the SPEC-016 payout-pipeline configuration.
@@ -240,6 +241,13 @@ type ProofOfWeightsConfig struct {
 	RequireAutotuneHelloGate bool                 `yaml:"require_autotune_hello_gate"`
 	AutotuneEvidenceTTLDays  int                  `yaml:"autotune_evidence_ttl_days"`
 	TelemetryDrift           TelemetryDriftConfig `yaml:"telemetry_drift"`
+}
+
+// AdmissionCanaryHarness exposes canary-only operator controls used to collect
+// SPEC-032 physical-run evidence. The default is disabled so production
+// coordinators do not mount the endpoints.
+type AdmissionCanaryHarnessConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // TelemetryDriftConfig enables observe-only operator alerts when live

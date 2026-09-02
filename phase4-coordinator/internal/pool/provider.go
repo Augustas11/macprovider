@@ -1970,6 +1970,27 @@ func (r *Registry) SetAdmissionGateFlags(providerID, assignedID string, flags Ad
 	return prior, changed, true
 }
 
+// ClearAdmittedTupleForCanary removes only the admitted hardware tuple for a
+// live session so an isolated SPEC-032 canary can prove the missing-tuple
+// revalidation path against a physical provider. It intentionally does not
+// change model, ceiling, health, or routing flags.
+func (r *Registry) ClearAdmittedTupleForCanary(providerID, assignedID string) (before Provider, after Provider, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || assignedID == "" || p.AssignedID != assignedID {
+		return Provider{}, Provider{}, false
+	}
+	before = *p
+	p.AdmittedHardwareIdentityHash = ""
+	p.AdmittedChipNormalized = ""
+	p.AdmittedUnifiedMemoryGB = 0
+	after = *p
+	before.conn = nil
+	after.conn = nil
+	return before, after, true
+}
+
 // QuarantineForProofOfWeightsReload marks every live session fail-closed before
 // a proof_of_weights hot reload is published. The post-publish revalidation pass
 // clears sessions that prove under the new generation.
