@@ -1,0 +1,121 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEUCIQCH5DyWoXWPz59D6nFnaF3nB3IW8aFsvRAoancSlvWyqwIgEJd8uLuxvpRVskUwTcfOflr7HRpzaG8qA2PoY94RlTo=",
+      "signed_sha256": "f3d48a9a2ad9d80e41ef0b452a011d87e454ab9ec236b521d3f011fbefccbed7",
+      "verified_at": "2026-09-02T15:04:15Z",
+      "verifier": ".github/workflows/promote-signed-provider-prebeta-journey.yml:33646078090:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+    "requirement_ids": [
+      "SPEC-032-R001",
+      "SPEC-032-R002",
+      "SPEC-032-R003"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "c3e8ef2f1e59f8ebf711cea4042967ecb410a769"
+    },
+    "captured_at": "2026-09-02T14:21:49Z",
+    "expires_at": "2026-12-02",
+    "operator": {
+      "identity_fingerprint": "4b5b0c550f52d4126d5ae8cabca0416a9355a6da95179d1d893097baccae2ee0",
+      "role": "canary-operator"
+    },
+    "environment": {
+      "candidate": "isolated loopback coordinator with disposable Postgres and SQLite state",
+      "class": "physical-provider-prebeta-admission",
+      "hardware_profile": "one subject canary plus one control canary over local WiFi SSH reverse tunnels"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-provider-prebeta-admission",
+        "sha256": "d273667b92dcb9899b585926c214dcf40ae897e0d760ccceb56e9fdcf6e99a13",
+        "source": "journeys/evidence/provider-prebeta-admission-spec032-strict-physical-20260902T141932Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "S1-S3 passed on isolated physical canary; P_control stayed routing-eligible and serving throughout."
+    },
+    "steps": [
+      {
+        "id": "r001-over-ceiling",
+        "status": "pass",
+        "assertion": "over-ceiling heartbeat route-excludes only P_subject",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "r001-uncatalogued",
+        "status": "pass",
+        "assertion": "uncatalogued heartbeat route-excludes only P_subject",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "r001-clears",
+        "status": "pass",
+        "assertion": "in-ceiling catalogued heartbeat clears P_subject exclusion",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "r002-expired",
+        "status": "pass",
+        "assertion": "expired admitted evidence route-excludes only P_subject on the 30s sweep",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "r002-tuple-mismatch",
+        "status": "pass",
+        "assertion": "tuple-mismatched verified evidence route-excludes only P_subject on the 30s sweep",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "r002-missing-tuple",
+        "status": "pass",
+        "assertion": "missing admitted tuple route-excludes only P_subject on the 30s sweep",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "r003-sandbox-and-failclosed-reload",
+        "status": "pass",
+        "assertion": "evidence-absent provider is sandboxed and proof-of-weights reload fails closed",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "r003-recovery-sweep",
+        "status": "pass",
+        "assertion": "revalidation sweep keeps evidence-absent P_subject sandboxed while P_control remains serving",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      }
+    ],
+    "redaction": {
+      "secrets_redacted": true,
+      "operator_identity_redacted": true,
+      "local_account_names_redacted": true
+    },
+    "run_id": "provider-prebeta-admission-spec032-strict-physical-20260902T141932Z",
+    "execution_mode": "physical-provider-prebeta-admission"
+  }
+}

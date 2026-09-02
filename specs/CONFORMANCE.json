@@ -2182,7 +2182,7 @@
     {
       "requirement_id": "SPEC-032-R001",
       "spec_id": "SPEC-032",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/pool/provider.go:func (p Provider) RoutingEligible",
         "phase4-coordinator/internal/pool/provider.go:func (p Provider) ServingCapable",
@@ -2202,18 +2202,26 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/959",
-        "rationale": "B2 implements coordinator route/capacity exclusion for over-ceiling and uncatalogued heartbeat model transitions under strict hello-gate unit tests. The normal admission journey passed under #895 without exercising the default-off strict matrix. Issue #959 owns a separately reviewed run that captures the active gate posture, admitted model ceiling, route exclusion, and unaffected healthy-provider state; production rollout remains pending unless explicitly enabled for the cohort."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:c3e8ef2f1e59f8ebf711cea4042967ecb410a769",
+          "source": null,
+          "captured_at": "2026-09-02",
+          "expires_at": "2026-12-02"
+        },
+        {
+          "artifact": "sha256:86fa6bc070ed1d257ef9de1efb95b564c7a274a3c5270ae6914dec93e46a1c35",
+          "source": "journeys/evidence/provider-prebeta-admission-spec032-strict-physical-20260902T141932Z.spec-032-r001-spec-032-r002-spec-032-r003.journey-result.signed.json",
+          "captured_at": "2026-09-02",
+          "expires_at": "2026-12-02"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-032-R002",
       "spec_id": "SPEC-032",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetAdmissionEvidenceStale",
         "phase4-coordinator/internal/ws/trust_revalidation.go:func (s *Server) runAdmissionEvidenceRevalidationSweep",
@@ -2231,18 +2239,26 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/959",
-        "rationale": "B2 adds the 30s session-time autotune evidence TTL route-exclusion sweep for capped strict hello-gate sessions. The normal admission journey passed under #895 without exercising stale or tuple-mismatched evidence. Issue #959 owns separately reviewed freshness and route-exclusion evidence; proactive refresh and broader production deployment remain outside this slice."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:c3e8ef2f1e59f8ebf711cea4042967ecb410a769",
+          "source": null,
+          "captured_at": "2026-09-02",
+          "expires_at": "2026-12-02"
+        },
+        {
+          "artifact": "sha256:86fa6bc070ed1d257ef9de1efb95b564c7a274a3c5270ae6914dec93e46a1c35",
+          "source": "journeys/evidence/provider-prebeta-admission-spec032-strict-physical-20260902T141932Z.spec-032-r001-spec-032-r002-spec-032-r003.journey-result.signed.json",
+          "captured_at": "2026-09-02",
+          "expires_at": "2026-12-02"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-032-R003",
       "spec_id": "SPEC-032",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/pool/provider.go:func (p Provider) RoutingEligible",
         "phase4-coordinator/internal/pool/provider.go:func (p Provider) ServingCapable",
@@ -2265,13 +2281,21 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/959",
-        "rationale": "B5 parks evidence-absent strict hello-gate providers in a non-buyer/admission-limited/no-credential sandbox, reloads proof_of_weights config without restart, pre-quarantines/revalidates existing sessions on gate enable, clears gate exclusions for credential-authorized sessions, leaves sandbox-only/no-credential sessions sandboxed on gate-disable reload, and clears disabled telemetry-drift benchmark quarantines on reload. The normal admission journey passed under #895 without exercising this default-off matrix. Issue #959 owns separately reviewed sandbox/reload evidence; FR-HG5 below-two alert and broader Pearl deployment remain pending outside this slice unless explicitly enabled."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:c3e8ef2f1e59f8ebf711cea4042967ecb410a769",
+          "source": null,
+          "captured_at": "2026-09-02",
+          "expires_at": "2026-12-02"
+        },
+        {
+          "artifact": "sha256:86fa6bc070ed1d257ef9de1efb95b564c7a274a3c5270ae6914dec93e46a1c35",
+          "source": "journeys/evidence/provider-prebeta-admission-spec032-strict-physical-20260902T141932Z.spec-032-r001-spec-032-r002-spec-032-r003.journey-result.signed.json",
+          "captured_at": "2026-09-02",
+          "expires_at": "2026-12-02"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-033-R001",
