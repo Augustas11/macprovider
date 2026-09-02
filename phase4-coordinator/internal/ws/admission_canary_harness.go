@@ -70,6 +70,10 @@ func (s *Server) handleAdmissionCanaryClearAdmittedTuple(w http.ResponseWriter, 
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "invalid provider_id", "code": "invalid_provider_id"}})
 		return
 	}
+	if req.AssignedID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "assigned_id required", "code": "missing_assigned_id"}})
+		return
+	}
 	before, after, ok := s.pool.ClearAdmittedTupleForCanary(req.ProviderID, req.AssignedID)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "provider session not found", "code": "provider_not_found"}})

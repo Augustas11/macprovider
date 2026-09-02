@@ -1978,7 +1978,7 @@ func (r *Registry) ClearAdmittedTupleForCanary(providerID, assignedID string) (b
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
-	if p == nil || (assignedID != "" && p.AssignedID != assignedID) {
+	if p == nil || assignedID == "" || p.AssignedID != assignedID {
 		return Provider{}, Provider{}, false
 	}
 	before = *p

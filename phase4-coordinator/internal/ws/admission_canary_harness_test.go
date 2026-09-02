@@ -75,6 +75,42 @@ func TestAdmissionCanaryClearAdmittedTupleMutatesOnlyTuple(t *testing.T) {
 	}
 }
 
+func TestAdmissionCanaryClearAdmittedTupleRequiresAssignedID(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Auth.OperatorKey = "test-operator-key"
+	cfg.AdmissionCanaryHarness.Enabled = true
+	s, provider, _ := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.Nop(), time.Now())
+	setAdmittedTupleValues(provider, "hashA", "apple m4 max", 64)
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp := postAdmissionCanaryJSON(t, ts.URL+"/admin/admission-canary/clear-admitted-tuple", "test-operator-key", map[string]any{
+		"provider_id": provider.ProviderID,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing assigned_id status=%d, want 400", resp.StatusCode)
+	}
+	snap, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok || !providerHasAdmittedTuple(snap) {
+		t.Fatalf("missing assigned_id mutated tuple: ok=%v snap=%+v", ok, snap)
+	}
+
+	resp = postAdmissionCanaryJSON(t, ts.URL+"/admin/admission-canary/clear-admitted-tuple", "test-operator-key", map[string]any{
+		"provider_id": provider.ProviderID,
+		"assigned_id": provider.AssignedID + "-stale",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("stale assigned_id status=%d, want 404", resp.StatusCode)
+	}
+	snap, ok = s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok || !providerHasAdmittedTuple(snap) {
+		t.Fatalf("stale assigned_id mutated tuple: ok=%v snap=%+v", ok, snap)
+	}
+}
+
 func TestAdmissionCanaryProofOfWeightsHotEnableReturnsFailClosedSnapshots(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)

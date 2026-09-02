@@ -26,10 +26,15 @@ final class CoordinatorClientTests: XCTestCase {
         ]
         let data = try JSONSerialization.data(withJSONObject: override, options: [.sortedKeys])
         try data.write(to: overrideURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: overrideURL.path)
         defer { try? FileManager.default.removeItem(at: overrideURL) }
 
         setenv("MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH", overrideURL.path, 1)
-        defer { unsetenv("MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH") }
+        setenv("MACPROVIDER_CANARY_COORDINATOR_HOST", "127.0.0.1", 1)
+        defer {
+            unsetenv("MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH")
+            unsetenv("MACPROVIDER_CANARY_COORDINATOR_HOST")
+        }
 
         let status = ProviderStatus(
             modelID: "model-a",
@@ -55,6 +60,91 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(heartbeat["slots_total"] as? Int, 2)
         let safetyTelemetry = try XCTUnwrap(heartbeat["safety_telemetry"] as? [String: Any])
         XCTAssertEqual(safetyTelemetry["model_id"] as? String, "spec032/uncatalogued-canary")
+    }
+
+    func testCanaryHeartbeatOverrideRequiresCoordinatorHostBinding() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let overrideURL = try writeMinimalCanaryHeartbeatOverride()
+        defer { try? FileManager.default.removeItem(at: overrideURL) }
+        setenv("MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH", overrideURL.path, 1)
+        defer {
+            unsetenv("MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH")
+            unsetenv("MACPROVIDER_CANARY_COORDINATOR_HOST")
+        }
+
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+
+        do {
+            try await client.sendHeartbeatForTest()
+            XCTFail("heartbeat override without host binding should fail")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("MACPROVIDER_CANARY_COORDINATOR_HOST"), "\(error)")
+        }
+    }
+
+    func testCanaryHeartbeatOverrideRejectsProductionCoordinatorHost() async throws {
+        try await assertCanaryHeartbeatOverrideRejectsProductionCoordinator(
+            coordinatorURL: "wss://coordinator.malibu.tech/ws/provider",
+            expectedHost: "coordinator.malibu.tech"
+        )
+    }
+
+    func testCanaryHeartbeatOverrideRejectsProductionCoordinatorTrailingDotHost() async throws {
+        try await assertCanaryHeartbeatOverrideRejectsProductionCoordinator(
+            coordinatorURL: "wss://coordinator.malibu.tech./ws/provider",
+            expectedHost: "coordinator.malibu.tech."
+        )
+    }
+
+    private func assertCanaryHeartbeatOverrideRejectsProductionCoordinator(
+        coordinatorURL: String,
+        expectedHost: String
+    ) async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let overrideURL = try writeMinimalCanaryHeartbeatOverride()
+        defer { try? FileManager.default.removeItem(at: overrideURL) }
+        setenv("MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH", overrideURL.path, 1)
+        setenv("MACPROVIDER_CANARY_COORDINATOR_HOST", expectedHost, 1)
+        defer {
+            unsetenv("MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH")
+            unsetenv("MACPROVIDER_CANARY_COORDINATOR_HOST")
+        }
+
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            coordinatorURL: coordinatorURL
+        )
+
+        do {
+            try await client.sendHeartbeatForTest()
+            XCTFail("heartbeat override against Pearl should fail")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("production coordinator host"), "\(error)")
+        }
+    }
+
+    private func writeMinimalCanaryHeartbeatOverride() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macprovider-canary-heartbeat-\(UUID().uuidString).json")
+        let object: [String: Any] = [
+            "model_id": "spec032/canary-small",
+            "model_hash": String(repeating: "a", count: 64),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        return url
     }
 
     func testDiagnosticStatusPayloadIsRedactedAndMatchesProviderSnapshot() async throws {
@@ -6006,11 +6096,12 @@ final class CoordinatorClientTests: XCTestCase {
         credentialStore: ProviderCredentialStoreKind = .keychain,
         providerCredentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
         credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
-        admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime()
+        admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(),
+        coordinatorURL: String = "wss://127.0.0.1:8444/ws/provider"
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: configPath)
         config.credentialStore = credentialStore
-        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.coordinatorURL = coordinatorURL
         config.providerID = "provider-test"
         config.providerToken = providerToken
         config.model = "model-a"

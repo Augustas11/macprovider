@@ -148,6 +148,9 @@ actor CoordinatorClient {
 
     static let binaryVersion = "1.8.117"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
+    private static let admissionCanaryHeartbeatOverridePathEnv = "MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH"
+    private static let admissionCanaryCoordinatorHostEnv = "MACPROVIDER_CANARY_COORDINATOR_HOST"
+    private static let productionCoordinatorHosts: Set<String> = ["coordinator.malibu.tech"]
 
     private let coordinatorURL: URL
     private let appConfig: AppConfig
@@ -5199,7 +5202,6 @@ actor CoordinatorClient {
         if let event = await AutoUpdateEventStore.shared.lastWireObject() {
             payload["last_autoupdate_event"] = event
         }
-        try applyAdmissionCanaryHeartbeatOverride(to: &payload)
         let observedAt = Date()
         payload["safety_telemetry"] = snapshot.safetyTelemetry(
             providerID: providerID,
@@ -5217,13 +5219,19 @@ actor CoordinatorClient {
     }
 
     private func applyAdmissionCanaryHeartbeatOverride(to payload: inout [String: Any]) throws {
-        guard let rawPath = Darwin.getenv("MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH") else {
+        guard payload["type"] as? String == "heartbeat" else {
             return
         }
+        guard let rawPath = Darwin.getenv(Self.admissionCanaryHeartbeatOverridePathEnv) else {
+            return
+        }
+        #if DEBUG || MACPROVIDER_ADMISSION_CANARY
+        try validateAdmissionCanaryOverrideCoordinator()
         let path = String(cString: rawPath).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty else {
             return
         }
+        try Self.validateAdmissionCanaryOverrideFile(path: path)
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw CoordinatorAuthError.invalidMessage("canary heartbeat override must be a JSON object")
@@ -5267,6 +5275,73 @@ actor CoordinatorClient {
             throw CoordinatorAuthError.invalidMessage("unsupported canary heartbeat override field \(key)")
         }
         payload["type"] = "heartbeat"
+        if var safetyTelemetry = payload["safety_telemetry"] as? [String: Any] {
+            safetyTelemetry["model_id"] = payload["model_id"]
+            if let modelHash = payload["model_hash"] {
+                safetyTelemetry["model_hash"] = modelHash
+            }
+            if let modelHashAlgorithm = payload["model_hash_algorithm"] {
+                safetyTelemetry["model_hash_algorithm"] = modelHashAlgorithm
+            }
+            if let weightsManifestSHA256 = payload["weights_manifest_sha256"] {
+                safetyTelemetry["weights_manifest_sha256"] = weightsManifestSHA256
+                safetyTelemetry["weights_manifest_algorithm"] = payload["weights_manifest_algorithm"] ?? ModelArtifactIdentity.safetensorsManifestV1
+            }
+            payload["safety_telemetry"] = safetyTelemetry
+        }
+        #else
+        _ = rawPath
+        throw CoordinatorAuthError.invalidMessage("canary heartbeat override is not available in production builds")
+        #endif
+    }
+
+    private func validateAdmissionCanaryOverrideCoordinator() throws {
+        guard let rawHost = coordinatorURL.host,
+              let host = Self.canonicalAdmissionCanaryCoordinatorHost(rawHost),
+              !host.isEmpty
+        else {
+            throw CoordinatorAuthError.invalidMessage("canary heartbeat override requires a coordinator host")
+        }
+        guard !Self.productionCoordinatorHosts.contains(host) else {
+            throw CoordinatorAuthError.invalidMessage("canary heartbeat override refuses production coordinator host")
+        }
+        guard let rawExpectedHost = Darwin.getenv(Self.admissionCanaryCoordinatorHostEnv) else {
+            throw CoordinatorAuthError.invalidMessage("canary heartbeat override requires \(Self.admissionCanaryCoordinatorHostEnv)")
+        }
+        guard let expectedHost = Self.canonicalAdmissionCanaryCoordinatorHost(String(cString: rawExpectedHost)),
+              expectedHost == host
+        else {
+            throw CoordinatorAuthError.invalidMessage("canary heartbeat override coordinator host mismatch")
+        }
+    }
+
+    private static func canonicalAdmissionCanaryCoordinatorHost(_ raw: String) -> String? {
+        let host = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        return host.isEmpty ? nil : host
+    }
+
+    private static func validateAdmissionCanaryOverrideFile(path: String) throws {
+        let attrs = try FileManager.default.attributesOfItem(atPath: path)
+        guard attrs[.type] as? FileAttributeType == .typeRegular else {
+            throw CoordinatorAuthError.invalidMessage("canary heartbeat override must be a regular file")
+        }
+        let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+        guard size <= 8_192 else {
+            throw CoordinatorAuthError.invalidMessage("canary heartbeat override file is too large")
+        }
+        #if os(macOS)
+        let owner = (attrs[.ownerAccountID] as? NSNumber)?.uint32Value
+        guard owner == Darwin.geteuid() else {
+            throw CoordinatorAuthError.invalidMessage("canary heartbeat override file must be owned by the current user")
+        }
+        let mode = (attrs[.posixPermissions] as? NSNumber)?.uint16Value ?? 0
+        guard mode & 0o077 == 0 else {
+            throw CoordinatorAuthError.invalidMessage("canary heartbeat override file must not be group/world accessible")
+        }
+        #endif
     }
 
     private func sendStateUpdate(state newState: ProviderHealthState?, reason: String) async throws {
@@ -5576,12 +5651,14 @@ actor CoordinatorClient {
     }
 
     private func send(_ payload: sending [String: Any]) async throws {
+        var outbound = payload
+        try applyAdmissionCanaryHeartbeatOverride(to: &outbound)
         if let sendOverride {
-            try await sendOverride(payload)
+            try await sendOverride(outbound)
             return
         }
         guard let webSocket else { throw CancellationError() }
-        try await Self.send(payload, to: webSocket)
+        try await Self.send(outbound, to: webSocket)
     }
 
     private func send(_ payload: [String: Any], to webSocket: ProviderWebSocketTask) async throws {
