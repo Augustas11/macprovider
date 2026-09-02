@@ -58,6 +58,49 @@ PROVIDER_PREBETA_STEP_ID_ORDER = (
     "step-08-redaction-and-correlation",
 )
 PROVIDER_PREBETA_STEP_IDS = set(PROVIDER_PREBETA_STEP_ID_ORDER)
+PROVIDER_PREBETA_STRICT_SPEC032_REQUIREMENT_IDS = {
+    "SPEC-032-R001",
+    "SPEC-032-R002",
+    "SPEC-032-R003",
+}
+PROVIDER_PREBETA_STRICT_SPEC032_STEP_ID_ORDER = (
+    "r001-over-ceiling",
+    "r001-uncatalogued",
+    "r001-clears",
+    "r002-expired",
+    "r002-tuple-mismatch",
+    "r002-missing-tuple",
+    "r003-sandbox-and-failclosed-reload",
+    "r003-recovery-sweep",
+)
+PROVIDER_PREBETA_STRICT_SPEC032_STEP_REQUIREMENTS = {
+    "r001-over-ceiling": "SPEC-032-R001",
+    "r001-uncatalogued": "SPEC-032-R001",
+    "r001-clears": "SPEC-032-R001",
+    "r002-expired": "SPEC-032-R002",
+    "r002-tuple-mismatch": "SPEC-032-R002",
+    "r002-missing-tuple": "SPEC-032-R002",
+    "r003-sandbox-and-failclosed-reload": "SPEC-032-R003",
+    "r003-recovery-sweep": "SPEC-032-R003",
+}
+PROVIDER_PREBETA_STRICT_SPEC032_STEP_REASONS = {
+    "r001-over-ceiling": "autotune_model_cap_exceeded",
+    "r001-uncatalogued": "autotune_model_uncatalogued",
+    "r002-expired": "autotune_evidence_stale_or_mismatched",
+    "r002-tuple-mismatch": "autotune_evidence_stale_or_mismatched",
+    "r002-missing-tuple": "autotune_evidence_stale_or_mismatched",
+    "r003-sandbox-and-failclosed-reload": "autotune_evidence_required",
+    "r003-recovery-sweep": "autotune_evidence_required",
+}
+PROVIDER_PREBETA_STRICT_SPEC032_SNAP_FIELDS = {
+    "routing_eligible",
+    "serving_capable",
+}
+PROVIDER_PREBETA_STRICT_SPEC032_FORBIDDEN_REASON_FRAGMENTS = {
+    "bench_gate",
+    "min_sustained_tps",
+    "max_4k_ttft_ms",
+}
 BUYER_PAID_PATH_JOURNEY_ID = "JOURNEY-BUYER-PAID-PATH"
 BUYER_PAID_PATH_EXECUTION_MODE = "isolated-candidate-paid-path"
 BUYER_PAID_PATH_STEP_ID_ORDER = (
@@ -907,10 +950,77 @@ def _provider_prebeta_normalized_redaction(value: Any, location: str, result: Va
     return output
 
 
-def _provider_prebeta_normalized_steps(value: Any, location: str, result: ValidationResult) -> list[dict[str, Any]]:
+def _provider_prebeta_step_order(requirement_ids: list[str], location: str, result: ValidationResult) -> tuple[str, ...]:
+    selected = set(requirement_ids)
+    if selected & PROVIDER_PREBETA_STRICT_SPEC032_REQUIREMENT_IDS:
+        if not selected <= PROVIDER_PREBETA_STRICT_SPEC032_REQUIREMENT_IDS:
+            result.error(location, "SPEC-032 strict matrix requirements must not be mixed with other provider-prebeta requirements")
+            return ()
+        return tuple(
+            step_id
+            for step_id in PROVIDER_PREBETA_STRICT_SPEC032_STEP_ID_ORDER
+            if PROVIDER_PREBETA_STRICT_SPEC032_STEP_REQUIREMENTS[step_id] in selected
+        )
+    return PROVIDER_PREBETA_STEP_ID_ORDER
+
+
+def _provider_prebeta_validate_spec032_step_details(
+    step: dict[str, Any],
+    step_id: str,
+    location: str,
+    result: ValidationResult,
+) -> None:
+    expected_requirement = PROVIDER_PREBETA_STRICT_SPEC032_STEP_REQUIREMENTS[step_id]
+    if step.get("requirement") != expected_requirement:
+        result.error(f"{location}.requirement", f"must equal {expected_requirement!r}")
+    _string(step.get("subject_fingerprint"), SHA256_HEX_RE, f"{location}.subject_fingerprint", result)
+    _string(step.get("control_fingerprint"), SHA256_HEX_RE, f"{location}.control_fingerprint", result)
+    for field in ("subject_before", "subject_after", "control_after"):
+        snap = step.get(field)
+        if not _expect_object(snap, f"{location}.{field}", result):
+            continue
+        for snap_field in sorted(PROVIDER_PREBETA_STRICT_SPEC032_SNAP_FIELDS):
+            _bool_value(snap.get(snap_field), f"{location}.{field}.{snap_field}", result)
+    control_after = step.get("control_after")
+    if isinstance(control_after, dict):
+        if control_after.get("routing_eligible") is not True or control_after.get("serving_capable") is not True:
+            result.error(f"{location}.control_after", "must remain routing-eligible and serving-capable")
+    subject_after = step.get("subject_after")
+    if isinstance(subject_after, dict):
+        if step_id == "r001-clears":
+            if subject_after.get("routing_eligible") is not True or subject_after.get("serving_capable") is not True:
+                result.error(f"{location}.subject_after", "must be routing-eligible and serving-capable after the clear step")
+        elif subject_after.get("routing_eligible") is not False or subject_after.get("serving_capable") is not False:
+            result.error(f"{location}.subject_after", "must be route-excluded or sandboxed")
+        if PROVIDER_PREBETA_STRICT_SPEC032_STEP_REQUIREMENTS[step_id] == "SPEC-032-R003":
+            if subject_after.get("admission_sandboxed") is not True:
+                result.error(f"{location}.subject_after.admission_sandboxed", "must be true for R003")
+            if step.get("durable_provider_credentials_minted") is not False:
+                result.error(f"{location}.durable_provider_credentials_minted", "must be false for R003")
+            if step_id == "r003-sandbox-and-failclosed-reload" and step.get("fail_closed_reload_observed") is not True:
+                result.error(f"{location}.fail_closed_reload_observed", "must be true for R003 reload")
+    expected_reason = PROVIDER_PREBETA_STRICT_SPEC032_STEP_REASONS.get(step_id)
+    if expected_reason is not None:
+        reason = _string(step.get("non_admission_reason"), None, f"{location}.non_admission_reason", result)
+        if reason and any(fragment in reason.lower() for fragment in PROVIDER_PREBETA_STRICT_SPEC032_FORBIDDEN_REASON_FRAGMENTS):
+            result.error(f"{location}.non_admission_reason", "must not cite advisory bench_gate values")
+        if reason and reason != expected_reason:
+            result.error(f"{location}.non_admission_reason", f"must equal {expected_reason!r}")
+
+
+def _provider_prebeta_normalized_steps(
+    value: Any,
+    expected_order: tuple[str, ...],
+    location: str,
+    result: ValidationResult,
+    *,
+    output_order: tuple[str, ...] | None = None,
+    require_strict_details: bool = False,
+) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         result.error(location, "field 'steps' must be an array")
         return []
+    expected_ids = set(expected_order)
     by_id: dict[str, dict[str, Any]] = {}
     for index, item in enumerate(value):
         loc = f"{location}[{index}]"
@@ -922,7 +1032,7 @@ def _provider_prebeta_normalized_steps(value: Any, location: str, result: Valida
         if step_id in by_id:
             result.error(f"{loc}.id", f"duplicate provider-prebeta physical step {step_id!r}")
             continue
-        if step_id not in PROVIDER_PREBETA_STEP_IDS:
+        if step_id not in expected_ids:
             result.error(f"{loc}.id", f"unexpected provider-prebeta physical step {step_id!r}")
         if item.get("status") != "pass":
             result.error(f"{loc}.status", "must equal 'pass'")
@@ -931,18 +1041,21 @@ def _provider_prebeta_normalized_steps(value: Any, location: str, result: Valida
         artifact_ids = _string_list(artifacts, f"{loc}.artifacts", result)
         if artifact_ids != [PROVIDER_PREBETA_ARTIFACT_ID]:
             result.error(f"{loc}.artifacts", f"must reference {PROVIDER_PREBETA_ARTIFACT_ID!r}")
+        if require_strict_details and step_id in PROVIDER_PREBETA_STRICT_SPEC032_STEP_REQUIREMENTS:
+            _provider_prebeta_validate_spec032_step_details(item, step_id, loc, result)
         by_id[step_id] = {
             "id": step_id,
             "status": "pass",
             "assertion": assertion,
             "artifacts": [PROVIDER_PREBETA_ARTIFACT_ID],
         }
-    missing_steps = PROVIDER_PREBETA_STEP_IDS - by_id.keys()
+    missing_steps = expected_ids - by_id.keys()
     if missing_steps:
         result.error(location, f"missing provider-prebeta physical steps: {sorted(missing_steps)}")
-    if len(by_id) != len(PROVIDER_PREBETA_STEP_IDS):
-        result.error(location, f"must contain exactly {len(PROVIDER_PREBETA_STEP_IDS)} provider-prebeta physical steps")
-    return [by_id[step_id] for step_id in PROVIDER_PREBETA_STEP_ID_ORDER if step_id in by_id]
+    if len(by_id) != len(expected_ids):
+        result.error(location, f"must contain exactly {len(expected_ids)} provider-prebeta physical steps")
+    selected_order = output_order or expected_order
+    return [by_id[step_id] for step_id in selected_order if step_id in by_id]
 
 
 def _provider_prebeta_compare_signed_source(source_value: Any, signed_value: Any, location: str, result: ValidationResult) -> None:
@@ -981,6 +1094,8 @@ def _validate_provider_prebeta_artifact(
     overclaimed = [item for item in signed_requirement_ids if item not in payload_requirement_ids]
     if overclaimed:
         result.error(f"{location}.source.requirement_ids", f"must cover every signed requirement ID: {overclaimed}")
+    source_step_order = _provider_prebeta_step_order(payload_requirement_ids, f"{location}.source.requirement_ids", result)
+    signed_step_order = _provider_prebeta_step_order(signed_requirement_ids, f"{location}.signed.requirement_ids", result)
     repository = payload.get("repository")
     signed_repository = signed.get("repository")
     if _expect_object(repository, f"{location}.source.repository", result) and isinstance(signed_repository, dict):
@@ -1002,10 +1117,20 @@ def _validate_provider_prebeta_artifact(
             result,
         )
     source_result = payload.get("result")
-    if _expect_object(source_result, f"{location}.source.result", result) and source_result.get("status") != "pass":
-        result.error(f"{location}.source.result.status", "must equal 'pass'")
-    source_steps = _provider_prebeta_normalized_steps(payload.get("steps"), f"{location}.source.steps", result)
-    signed_steps = _provider_prebeta_normalized_steps(signed.get("steps"), f"{location}.signed.steps", result)
+    if _expect_object(source_result, f"{location}.source.result", result):
+        if source_result.get("status") != "pass":
+            result.error(f"{location}.source.result.status", "must equal 'pass'")
+        if source_result.get("class") == "dry-run" or source_result.get("promote") is False:
+            result.error(f"{location}.source.result", "dry-run provider-prebeta evidence cannot be promoted")
+    source_steps = _provider_prebeta_normalized_steps(
+        payload.get("steps"),
+        source_step_order,
+        f"{location}.source.steps",
+        result,
+        output_order=signed_step_order,
+        require_strict_details=True,
+    )
+    signed_steps = _provider_prebeta_normalized_steps(signed.get("steps"), signed_step_order, f"{location}.signed.steps", result)
     _provider_prebeta_compare_signed_source(source_steps, signed_steps, f"{location}.source.steps", result)
     source_redaction = _provider_prebeta_normalized_redaction(payload.get("redaction"), f"{location}.source.redaction", result)
     signed_redaction = {
@@ -1031,6 +1156,12 @@ def _validate_provider_prebeta_journey_result(
         result.error(location, f"provider-prebeta requirement journeys must equal [{PROVIDER_PREBETA_JOURNEY_ID!r}]")
     if signed.get("execution_mode") != PROVIDER_PREBETA_EXECUTION_MODE:
         result.error(f"{location}.signed.execution_mode", f"must equal {PROVIDER_PREBETA_EXECUTION_MODE!r}")
+    environment = signed.get("environment")
+    if isinstance(environment, dict) and environment.get("class") != PROVIDER_PREBETA_EXECUTION_MODE:
+        result.error(f"{location}.signed.environment.class", f"must equal {PROVIDER_PREBETA_EXECUTION_MODE!r}")
+    requirement_ids = _string_list(signed.get("requirement_ids"), f"{location}.signed.requirement_ids", result, REQUIREMENT_ID_RE)
+    expected_step_order = _provider_prebeta_step_order(requirement_ids, f"{location}.signed.requirement_ids", result)
+    expected_step_ids = set(expected_step_order)
 
     observed_step_ids: set[str] = set()
     valid_step_count = 0
@@ -1042,14 +1173,14 @@ def _validate_provider_prebeta_journey_result(
         if step_id in observed_step_ids:
             result.error(f"{location}.signed.steps[{index}].id", f"duplicate provider-prebeta physical step {step_id!r}")
         observed_step_ids.add(step_id)
-    missing_steps = PROVIDER_PREBETA_STEP_IDS - observed_step_ids
-    unexpected_steps = observed_step_ids - PROVIDER_PREBETA_STEP_IDS
+    missing_steps = expected_step_ids - observed_step_ids
+    unexpected_steps = observed_step_ids - expected_step_ids
     if missing_steps:
         result.error(f"{location}.signed.steps", f"missing provider-prebeta physical steps: {sorted(missing_steps)}")
     if unexpected_steps:
         result.error(f"{location}.signed.steps", f"unexpected provider-prebeta physical steps: {sorted(unexpected_steps)}")
-    if valid_step_count != len(PROVIDER_PREBETA_STEP_IDS):
-        result.error(f"{location}.signed.steps", f"must contain exactly {len(PROVIDER_PREBETA_STEP_IDS)} provider-prebeta physical steps")
+    if valid_step_count != len(expected_step_ids):
+        result.error(f"{location}.signed.steps", f"must contain exactly {len(expected_step_ids)} provider-prebeta physical steps")
 
     valid_artifacts = [artifact for artifact in artifacts if isinstance(artifact, dict)]
     if len(valid_artifacts) != 1:
