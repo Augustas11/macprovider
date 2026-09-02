@@ -257,6 +257,10 @@ rewards:
       prompt_credits_per_mtok: 50000         # $0.050/M
       prompt_cache_hit_credits_per_mtok: 12500 # $0.0125/M prefix-cache hit
       completion_credits_per_mtok: 100000    # $0.100/M (Entry 92 v2 target, 23% undercut vs $0.13/M WandB)
+    openai/gpt-oss-120b:                      # 2026-09-02 — 128GB-class flagship MoE (needs 96GB+ RAM); 20% undercut vs $0.17/M OpenRouter
+      prompt_credits_per_mtok: 68000         # $0.068/M
+      prompt_cache_hit_credits_per_mtok: 17000 # $0.017/M prefix-cache hit
+      completion_credits_per_mtok: 136000    # $0.136/M
     qwen3-coder-30b-a3b-instruct:            # v3 expansion 2026-07-01 (Entry 97) — developer coding MoE lane
       prompt_credits_per_mtok: 117500        # $0.1175/M
       prompt_cache_hit_credits_per_mtok: 29375 # $0.029375/M prefix-cache hit

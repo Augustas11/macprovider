@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "849bb9394ec3e030f9e1f26acb6cd0954fce3fc55db20ca4d03eed3ec348f60d",
-  "generated_at": "2026-08-28T11:07:13Z",
+  "autotune_candidates_sha256": "10b792ad574042c22d8cbb555c67baf14d6357ea6727e56164f4d8b73c03fa4a",
+  "generated_at": "2026-09-02T00:00:00Z",
   "models": [
     {
       "catalog_key": "google-gemma-4-26b-a4b-it",
@@ -8,6 +8,13 @@
       "model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
       "model_revision": "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
       "sha256": "436ce68d2ac5a27dde3b54569736fb7a69dc3b7a175d2f633147c7802b3bc88a"
+    },
+    {
+      "catalog_key": "openai/gpt-oss-120b",
+      "min_ram_gb": 90,
+      "model_id": "mlx-community/gpt-oss-120b-4bit",
+      "model_revision": "08e7899579b5dd5e0364e4bcd32578134072e22d",
+      "sha256": "5003c9196bd6664b22227d687472ba2eb50c2c4daa224b36c230edbbe36b18fb"
     },
     {
       "catalog_key": "openai/gpt-oss-20b",
@@ -67,6 +74,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-08-28-inband-provenance-v1",
+  "release_id": "published-2026-09-02-gpt-oss-120b-v1",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

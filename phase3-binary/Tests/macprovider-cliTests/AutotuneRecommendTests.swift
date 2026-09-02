@@ -1629,8 +1629,8 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticFallbackAndStaleWarnings() async throws {
         let validFetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-08-28-inband-provenance-v1", with: "fetched-2026-09-09")
-            .replacingOccurrences(of: "2026-08-28T11:07:13Z", with: "2026-09-09T00:00:00Z")
+            .replacingOccurrences(of: "published-2026-09-02-gpt-oss-120b-v1", with: "fetched-2026-09-09")
+            .replacingOccurrences(of: "2026-09-02T00:00:00Z", with: "2026-09-09T00:00:00Z")
             .utf8)
         let signature = Data(repeating: 0, count: 64).base64EncodedString()
         let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
@@ -1658,7 +1658,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedRateCardAcceptsVerifiedLiveBytes() async throws {
         let payload = Data(AutotuneStaticInputs.bakedRateCardJSON
-            .replacingOccurrences(of: "\"generated_at\":\"2026-08-28T11:07:13Z\"", with: "\"generated_at\":\"2026-08-28T11:30:00Z\"")
+            .replacingOccurrences(of: "\"generated_at\":\"2026-09-02T00:00:00Z\"", with: "\"generated_at\":\"2026-09-02T00:30:00Z\"")
             .utf8)
         let privateKey = Curve25519.Signing.PrivateKey()
         let keyID = "streamvc-autotune-static-v4"
@@ -1669,7 +1669,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
             trustedPublicKeys: keyring,
-            now: { Self.date("2026-08-28T12:00:00Z") }
+            now: { Self.date("2026-09-02T01:00:00Z") }
         )
 
         let selection = await inputs.loadRateCard()
@@ -1677,7 +1677,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(selection.usedFallback)
         XCTAssertEqual(selection.signerKeyID, keyID)
         XCTAssertFalse(selection.warnings.contains(.rateCardIntegrityFailure))
-        XCTAssertEqual(selection.value.generatedAt, Self.date("2026-08-28T11:30:00Z"))
+        XCTAssertEqual(selection.value.generatedAt, Self.date("2026-09-02T00:30:00Z"))
     }
 
     func testSignedRateCardMissingSidecarFallsBackWithIntegrityWarning() async throws {
@@ -1726,7 +1726,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let demandPayload = Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
         let candidatePayload = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
         let rateCardPayload = Data(AutotuneStaticInputs.bakedRateCardJSON
-            .replacingOccurrences(of: "\"generated_at\":\"2026-08-28T11:07:13Z\"", with: "\"generated_at\":\"2026-08-28T11:30:00Z\"")
+            .replacingOccurrences(of: "\"generated_at\":\"2026-09-02T00:00:00Z\"", with: "\"generated_at\":\"2026-09-02T00:30:00Z\"")
             .utf8)
         let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(Data(repeating: 0, count: 64).base64EncodedString())\"}".utf8)
         let inputs = AutotuneStaticInputs(
@@ -1744,7 +1744,7 @@ final class AutotuneRecommendTests: XCTestCase {
                 }
             },
             verifySignature: { _, _ in true },
-            now: { Self.date("2026-08-28T12:00:00Z") }
+            now: { Self.date("2026-09-02T01:00:00Z") }
         )
 
         let loaded = await inputs.loadRecommendationInputs()
@@ -1756,8 +1756,8 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticRejectsSidecarWithExtraFields() async throws {
         let fetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-08-28-inband-provenance-v1", with: "fetched-2026-07-29")
-            .replacingOccurrences(of: "2026-08-28T11:07:13Z", with: "2026-07-29T09:00:00Z")
+            .replacingOccurrences(of: "published-2026-09-02-gpt-oss-120b-v1", with: "fetched-2026-07-29")
+            .replacingOccurrences(of: "2026-09-02T00:00:00Z", with: "2026-07-29T09:00:00Z")
             .utf8)
         let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA==","extra":true}"#.utf8)
         let inputs = AutotuneStaticInputs(
@@ -1945,7 +1945,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
             trustedPublicKeys: keyring,
-            now: { Self.date("2026-08-29T17:00:00Z") }
+            now: { Self.date("2026-09-03T17:00:00Z") }
         )
 
         let selection = await inputs.loadDemandRank()
