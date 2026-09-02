@@ -16,6 +16,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -130,22 +131,23 @@ type cancelRequest struct {
 }
 
 type config struct {
-	coordURL        string
-	providerID      string
-	model           string
-	ramGB           int
-	maxContext      int
-	maxConcurrency  int
-	slots           int
-	httpPort        int
-	streamDelayMS   int
-	rejectPreflight string
-	rejectNAK       bool
-	omitEndpointURL bool
-	endpointURL     string
-	drainDelayS     int
-	hbOverride      int
-	hbModelFile     string
+	coordURL          string
+	providerID        string
+	model             string
+	ramGB             int
+	maxContext        int
+	maxConcurrency    int
+	slots             int
+	httpPort          int
+	streamDelayMS     int
+	rejectPreflight   string
+	rejectNAK         bool
+	omitEndpointURL   bool
+	endpointURL       string
+	drainDelayS       int
+	hbOverride        int
+	hbModelFile       string
+	providerTokenFile string
 }
 
 func parseFlags() config {
@@ -166,6 +168,7 @@ func parseFlags() config {
 	flag.IntVar(&c.drainDelayS, "drain-delay-s", 2, "delay between drain phases in seconds")
 	flag.IntVar(&c.hbOverride, "hb", 0, "heartbeat interval override (seconds); 0 = use coordinator value")
 	flag.StringVar(&c.hbModelFile, "heartbeat-override-file", "", "optional JSON file read before each heartbeat; supports model_id and model_params_b")
+	flag.StringVar(&c.providerTokenFile, "provider-token-file", "", "optional file containing provider bearer token for the websocket handshake")
 	flag.Parse()
 	return c
 }
@@ -176,6 +179,7 @@ type heartbeatOverride struct {
 }
 
 const maxHeartbeatOverrideBytes = 8192
+const maxProviderTokenBytes = 8192
 
 func readHeartbeatOverride(path string) (heartbeatOverride, bool, error) {
 	if strings.TrimSpace(path) == "" {
@@ -212,6 +216,95 @@ func readHeartbeatOverride(path string) (heartbeatOverride, bool, error) {
 		return heartbeatOverride{}, false, fmt.Errorf("model_params_b out of range")
 	}
 	return override, true, nil
+}
+
+func readProviderToken(path string) (string, bool, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", false, nil
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return "", false, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", false, err
+	}
+	if !info.Mode().IsRegular() {
+		return "", false, fmt.Errorf("provider token path must be a regular file")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return "", false, fmt.Errorf("provider token file must not grant group or other permissions")
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Uid != uint32(os.Geteuid()) {
+		return "", false, fmt.Errorf("provider token file must be owned by the current user")
+	}
+	if info.Size() > maxProviderTokenBytes {
+		return "", false, fmt.Errorf("provider token file exceeds %d bytes", maxProviderTokenBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxProviderTokenBytes+1))
+	if err != nil {
+		return "", false, err
+	}
+	if len(data) > maxProviderTokenBytes {
+		return "", false, fmt.Errorf("provider token file exceeds %d bytes", maxProviderTokenBytes)
+	}
+	token, err := parseProviderToken(data)
+	if err != nil {
+		return "", false, err
+	}
+	return token, true, nil
+}
+
+func parseProviderToken(data []byte) (string, error) {
+	if len(data) > 0 && data[len(data)-1] == '\n' {
+		data = data[:len(data)-1]
+		if len(data) > 0 && data[len(data)-1] == '\r' {
+			data = data[:len(data)-1]
+		}
+	}
+	if len(data) == 0 {
+		return "", fmt.Errorf("provider token file is empty")
+	}
+	for _, b := range data {
+		if b < 0x21 || b == 0x7f {
+			return "", fmt.Errorf("provider token file must contain exactly one printable token line")
+		}
+	}
+	return string(data), nil
+}
+
+func providerAuthHeader(token string) gobwas.HandshakeHeader {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil
+	}
+	return gobwas.HandshakeHeaderHTTP(http.Header{
+		"Authorization": []string{"Bearer " + token},
+	})
+}
+
+func validateTokenTransport(coordURL string) error {
+	u, err := url.Parse(coordURL)
+	if err != nil {
+		return fmt.Errorf("parse coordinator URL: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "wss":
+		return nil
+	case "ws":
+		host := u.Hostname()
+		if host == "localhost" {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("provider bearer token over ws requires a loopback coordinator host")
+	default:
+		return fmt.Errorf("provider bearer token requires ws or wss coordinator URL")
+	}
 }
 
 func currentHeartbeat(cfg config, logger *log.Logger, drainer *drainController) heartbeat {
@@ -274,7 +367,16 @@ func (d *drainController) inflightCount() int {
 
 func main() {
 	cfg := parseFlags()
-	logger := log.New(os.Stdout, fmt.Sprintf("[mock %s] ", cfg.providerID), log.LstdFlags|log.Lmicroseconds)
+	os.Exit(run(cfg, os.Stdout))
+}
+
+func run(cfg config, output io.Writer) int {
+	logger := log.New(output, fmt.Sprintf("[mock %s] ", cfg.providerID), log.LstdFlags|log.Lmicroseconds)
+
+	if err := validateProviderCredentialConfig(cfg); err != nil {
+		logger.Printf("startup config error: %v", err)
+		return 1
+	}
 
 	drainer := &drainController{}
 
@@ -283,8 +385,10 @@ func main() {
 
 	// Connect to coordinator WS. If it fails, exit non-zero so the bootstrap
 	// script surfaces the problem.
+	exitCode := 0
 	if err := runWS(cfg, logger, drainer); err != nil {
 		logger.Printf("ws loop exited: %v", err)
+		exitCode = 1
 	}
 
 	// On WS exit (drain complete or coordinator gone), tear down HTTP too.
@@ -292,11 +396,34 @@ func main() {
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)
 	logger.Printf("mockprovider exiting cleanly")
+	return exitCode
+}
+
+func validateProviderCredentialConfig(cfg config) error {
+	_, hasToken, err := readProviderToken(cfg.providerTokenFile)
+	if err != nil {
+		return err
+	}
+	if hasToken {
+		return validateTokenTransport(cfg.coordURL)
+	}
+	return nil
 }
 
 func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 	ctx := context.Background()
-	conn, _, _, err := gobwas.Dial(ctx, cfg.coordURL)
+	token, hasToken, err := readProviderToken(cfg.providerTokenFile)
+	if err != nil {
+		return fmt.Errorf("read provider token: %w", err)
+	}
+	dialer := gobwas.Dialer{}
+	if hasToken {
+		if err := validateTokenTransport(cfg.coordURL); err != nil {
+			return fmt.Errorf("validate provider token transport: %w", err)
+		}
+		dialer.Header = providerAuthHeader(token)
+	}
+	conn, _, _, err := dialer.Dial(ctx, cfg.coordURL)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", cfg.coordURL, err)
 	}
@@ -394,6 +521,7 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 		return wsutil.WriteClientText(conn, b)
 	}
 	var active sync.Map
+	var cleanShutdown atomic.Bool
 	go func() {
 		t := time.NewTicker(hbInterval)
 		defer t.Stop()
@@ -423,6 +551,7 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 	go func() {
 		<-sigs
 		logger.Printf("signal received; emitting drain_status sequence")
+		cleanShutdown.Store(true)
 		runDrain(cfg, logger, drainer, writeText)
 		stopHeartbeat()
 		_ = conn.Close()
@@ -433,12 +562,17 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 		payload, op, err := wsutil.ReadServerData(conn)
 		if err != nil {
 			stopHeartbeat()
+			if cleanShutdown.Load() {
+				return nil
+			}
 			return fmt.Errorf("ws read: %w", err)
 		}
 		if op != gobwas.OpText {
 			continue
 		}
 		handleInbound(cfg, logger, drainer, writeText, &active, payload, func() {
+			cleanShutdown.Store(true)
+		}, func() {
 			stopHeartbeat()
 			_ = conn.Close()
 		})
@@ -446,7 +580,7 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 }
 
 func handleInbound(cfg config, logger *log.Logger, drainer *drainController,
-	writeText func([]byte) error, active *sync.Map, payload []byte, shutdown func()) {
+	writeText func([]byte) error, active *sync.Map, payload []byte, markClean func(), shutdown func()) {
 
 	var envelope struct {
 		Type      string `json:"type"`
@@ -483,6 +617,7 @@ func handleInbound(cfg config, logger *log.Logger, drainer *drainController,
 	case "drain":
 		logger.Printf("drain received from coordinator")
 		go func() {
+			markClean()
 			runDrain(cfg, logger, drainer, writeText)
 			shutdown()
 		}()
