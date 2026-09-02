@@ -71,6 +71,10 @@ type Server struct {
 	proofOfWeightsMu          sync.RWMutex
 	proofOfWeights            config.ProofOfWeightsConfig
 	proofOfWeightsGeneration  uint64
+	proofOfWeightsLastMu      sync.RWMutex
+	proofOfWeightsLastResult  ProofOfWeightsReloadResult
+	proofOfWeightsLastConfig  config.ProofOfWeightsConfig
+	proofOfWeightsLastAt      time.Time
 	tier2Mu                   sync.RWMutex
 	tier2                     config.Tier2Config
 	modelHashLegacyMu         sync.Mutex
@@ -1091,6 +1095,9 @@ func (s *Server) SetProofOfWeightsConfig(next config.ProofOfWeightsConfig) Proof
 	defer s.proofOfWeightsAdmissionMu.Unlock()
 
 	result := ProofOfWeightsReloadResult{}
+	defer func() {
+		s.recordProofOfWeightsReloadResult(next, result)
+	}()
 	if next.RequireAutotuneHelloGate && s.pool != nil {
 		result.PreQuarantined = s.pool.QuarantineForProofOfWeightsReload()
 	}
@@ -1119,7 +1126,25 @@ func (s *Server) SetProofOfWeightsConfig(next config.ProofOfWeightsConfig) Proof
 		return result
 	}
 
-	return s.revalidateProofOfWeightsAdmissions(next, result)
+	result = s.revalidateProofOfWeightsAdmissions(next, result)
+	return result
+}
+
+func (s *Server) recordProofOfWeightsReloadResult(cfg config.ProofOfWeightsConfig, result ProofOfWeightsReloadResult) {
+	s.proofOfWeightsLastMu.Lock()
+	defer s.proofOfWeightsLastMu.Unlock()
+	s.proofOfWeightsLastConfig = cfg
+	s.proofOfWeightsLastResult = result
+	s.proofOfWeightsLastAt = s.now()
+}
+
+func (s *Server) LastProofOfWeightsReloadResult() (config.ProofOfWeightsConfig, ProofOfWeightsReloadResult, time.Time, bool) {
+	s.proofOfWeightsLastMu.RLock()
+	defer s.proofOfWeightsLastMu.RUnlock()
+	if s.proofOfWeightsLastAt.IsZero() {
+		return config.ProofOfWeightsConfig{}, ProofOfWeightsReloadResult{}, time.Time{}, false
+	}
+	return s.proofOfWeightsLastConfig, s.proofOfWeightsLastResult, s.proofOfWeightsLastAt, true
 }
 
 func (s *Server) revalidateProofOfWeightsAdmissions(cfg config.ProofOfWeightsConfig, result ProofOfWeightsReloadResult) ProofOfWeightsReloadResult {

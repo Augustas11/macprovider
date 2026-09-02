@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -84,8 +85,8 @@ func (s *Server) handleAdmissionCanaryClearAdmittedTuple(w http.ResponseWriter, 
 }
 
 func (s *Server) handleAdmissionCanaryProofOfWeights(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -97,48 +98,43 @@ func (s *Server) handleAdmissionCanaryProofOfWeights(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": "unauthorized", "code": "invalid_operator_token"}})
 		return
 	}
-	var req struct {
-		RequireAutotuneHelloGate *bool `json:"require_autotune_hello_gate"`
-		AutotuneEvidenceTTLDays  *int  `json:"autotune_evidence_ttl_days,omitempty"`
+	current := s.proofOfWeightsConfig()
+	lastConfig, lastReload, lastAt, haveLastReload := s.LastProofOfWeightsReloadResult()
+	last := map[string]any{
+		"present": haveLastReload,
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "invalid json", "code": "invalid_request"}})
-		return
-	}
-	if req.RequireAutotuneHelloGate == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "require_autotune_hello_gate is required", "code": "invalid_request"}})
-		return
-	}
-	next := s.proofOfWeightsConfig()
-	next.RequireAutotuneHelloGate = *req.RequireAutotuneHelloGate
-	if req.AutotuneEvidenceTTLDays != nil {
-		if *req.AutotuneEvidenceTTLDays < 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "autotune_evidence_ttl_days must be non-negative", "code": "invalid_request"}})
-			return
+	if haveLastReload {
+		last = map[string]any{
+			"present":     true,
+			"observed_at": lastAt.UTC().Format(time.RFC3339Nano),
+			"config": map[string]any{
+				"require_autotune_hello_gate": lastConfig.RequireAutotuneHelloGate,
+				"autotune_evidence_ttl_days":  lastConfig.AutotuneEvidenceTTLDays,
+			},
+			"result": proofOfWeightsReloadResultJSON(lastReload),
 		}
-		next.AutotuneEvidenceTTLDays = *req.AutotuneEvidenceTTLDays
 	}
-	before := admissionCanaryPoolSnapshot(s.pool.Snapshot())
-	reload := s.SetProofOfWeightsConfig(next)
-	after := admissionCanaryPoolSnapshot(s.pool.Snapshot())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"config": map[string]any{
-			"require_autotune_hello_gate": next.RequireAutotuneHelloGate,
-			"autotune_evidence_ttl_days":  next.AutotuneEvidenceTTLDays,
+			"require_autotune_hello_gate": current.RequireAutotuneHelloGate,
+			"autotune_evidence_ttl_days":  current.AutotuneEvidenceTTLDays,
 		},
-		"reload": map[string]any{
-			"generation":              reload.Generation,
-			"pre_quarantined":         reload.PreQuarantined,
-			"revalidated":             reload.Revalidated,
-			"sandboxed":               reload.Sandboxed,
-			"route_excluded":          reload.RouteExcluded,
-			"still_evidence_stale":    reload.StillEvidenceStale,
-			"cleared_gate_exclusions": reload.ClearedGateExclusions,
-		},
-		"before": before,
-		"after":  after,
+		"last_reload": last,
+		"pool":        admissionCanaryPoolSnapshot(s.pool.Snapshot()),
 	})
+}
+
+func proofOfWeightsReloadResultJSON(reload ProofOfWeightsReloadResult) map[string]any {
+	return map[string]any{
+		"generation":              reload.Generation,
+		"pre_quarantined":         reload.PreQuarantined,
+		"revalidated":             reload.Revalidated,
+		"sandboxed":               reload.Sandboxed,
+		"route_excluded":          reload.RouteExcluded,
+		"still_evidence_stale":    reload.StillEvidenceStale,
+		"cleared_gate_exclusions": reload.ClearedGateExclusions,
+	}
 }
 
 func admissionCanaryPoolSnapshot(providers []pool.Provider) []admissionCanaryProviderSnapshot {
