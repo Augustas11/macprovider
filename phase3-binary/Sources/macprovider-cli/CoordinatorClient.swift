@@ -269,6 +269,10 @@ actor CoordinatorClient {
     // Test-only trust override, compiled out of release builds so it can never
     // bypass the real autoupdate trust gate in production.
     private var autoupdateTrustOverrideForTest: (@Sendable () -> AutoUpdateTrustState)?
+    // Test-only headless-topology override so consumer-path R005 re-observation
+    // tests do not depend on the host's real launchd/manifest state. Compiled out
+    // of release builds.
+    private var headlessTopologyOverrideForTest: (@Sendable () -> Bool)?
     #endif
     private var testSignedRecoveryInvocationCount = 0
     private var testLastSignedRecoveryWasAcceptedRecovery: Bool?
@@ -2368,6 +2372,10 @@ actor CoordinatorClient {
     #if DEBUG
     func setAutoupdateTrustOverrideForTest(_ override: (@Sendable () -> AutoUpdateTrustState)?) {
         autoupdateTrustOverrideForTest = override
+    }
+
+    func setHeadlessTopologyOverrideForTest(_ override: (@Sendable () -> Bool)?) {
+        headlessTopologyOverrideForTest = override
     }
     #endif
 
@@ -4495,12 +4503,31 @@ actor CoordinatorClient {
     /// `.cooldownActive` when a recorded cooldown/failure keeps the target
     /// unusable; `nil` (observe nothing) otherwise. NEVER mutates, NEVER acquires
     /// the mutation lock, NEVER runs the installer.
+    /// Whether this provider is a headless_fleet / system-domain node whose
+    /// updates are operator-managed (SPEC-020 R-4.13). Wraps the shared
+    /// determination so tests can pin it without depending on host launchd state.
+    private func isHeadlessOperatorManagedTopology() -> Bool {
+        #if DEBUG
+        if let headlessTopologyOverrideForTest {
+            return headlessTopologyOverrideForTest()
+        }
+        #endif
+        return AutoUpdater.defaultHeadlessOperatorManagedTopology(config: appConfig)
+    }
+
     private func observeAcceptedSessionRecoveryStuckState(
         normalizedVersion: String
     ) -> AutoUpdater.RecommendationOutcome? {
         // A disabled provider is intentionally not updating — not stuck — and the
         // signed rail would no-op anyway.
         guard AutoUpdateConfig.enabled(appConfig) else { return nil }
+        // A headless_fleet / system-domain provider is operator-managed (SPEC-020
+        // R-4.13): neither the consumer nor the signed-recovery rail can converge
+        // it, so it is not "stuck." Never let re-observation increment R005 for it
+        // — otherwise the counter climbs to threshold and pointlessly invokes the
+        // signed rail every interval even though the primary path already emitted
+        // the headless_operator_update_required skip.
+        guard !isHeadlessOperatorManagedTopology() else { return nil }
         // round-6 MEDIUM: R005 eligibility is for a CURRENT recommendation that
         // cannot make forward progress, NOT a not-newer / no-op target. A
         // recommendation that is not strictly newer than the running binary is a
