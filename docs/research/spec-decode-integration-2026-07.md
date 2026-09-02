@@ -10,7 +10,7 @@ MacProvider's current provider runtime calls `mlx-swift-lm` directly from Swift.
 
 The safe v0.1 shape is provider-side, opt-in, and buyer-invisible:
 
-- Add `macprovider-cli serve --draft-model <id-or-path>` and `--num-draft-tokens <N>`.
+- Add `malibu-cli serve --draft-model <id-or-path>` and `--num-draft-tokens <N>`.
 - Thread both through the flat config/env/CLI pattern used by `kv_bits`, `max_context_override`, and `max_concurrency_override`.
 - Load the draft model beside the target runtime container, fail loudly on tokenizer/cache incompatibility, and fall back only when the operator explicitly disables spec decode.
 - Report acceptance rate as aggregate provider telemetry on `/v1/status` and coordinator heartbeat, not in SPEC-015 v0.4 settlement receipts.
@@ -43,7 +43,7 @@ External upstream anchors:
 ### Current Call Graph
 
 ```text
-macprovider-cli serve
+malibu-cli serve
   -> ServeCommand options
      phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:19-84
   -> AppConfig resolution

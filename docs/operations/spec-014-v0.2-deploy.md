@@ -58,8 +58,8 @@ Expected behavior with the coordinator flag off:
 - Existing installs continue to connect and serve traffic.
 - Tokenless admission remains compatible with the prior deployment state.
 - `claim_url` handling is inert unless the coordinator sends pairing material.
-- `macprovider-cli status` continues to work for existing installs.
-- `macprovider-cli claim --no-browser` can refresh pairing material only when the coordinator exposes the pairing endpoint.
+- `malibu-cli status` continues to work for existing installs.
+- `malibu-cli claim --no-browser` can refresh pairing material only when the coordinator exposes the pairing endpoint.
 
 Do not tell users to pair yet. The portal flag is still off.
 
@@ -159,7 +159,7 @@ Post-smoke checks:
 
 ```bash
 coordinator-cli list-pair-ot-mints --provider-id=<provider-id>
-macprovider-cli status
+malibu-cli status
 ```
 
 Expected result:
@@ -229,7 +229,7 @@ Emergency operator sequence:
 - The coordinator does not revoke GitHub grants; operators revoke the OAuth app grant from GitHub if needed.
 - The `mp_session` cookie is host-only by default unless `MP_SESSION_COOKIE_DOMAIN` is deliberately configured.
 - The portal requires a same-origin proxy for `/v1/auth/*` and `/v1/install/pair/refresh` in GitHub mode.
-- Pairing one-time tokens are short-lived and burned on bind; users should refresh with `macprovider-cli claim` if a token expires.
+- Pairing one-time tokens are short-lived and burned on bind; users should refresh with `malibu-cli claim` if a token expires.
 
 ## Decision Entry Template
 

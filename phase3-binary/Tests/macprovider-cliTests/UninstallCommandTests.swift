@@ -427,4 +427,34 @@ final class UninstallCommandTests: XCTestCase {
             [".state-v1.json.lock", "state-v1.json"]
         )
     }
+
+    func testAliasIsOwnedSymlinkOnlyForCanonicalEntrypointTarget() throws {
+        // #1261: uninstall removes the malibu-cli alias only when it is our
+        // symlink (points exactly at ~/.local/bin/macprovider-cli), including
+        // when dangling; never a user's own file or a symlink to another target.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("alias-owned-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let entrypoint = dir.appendingPathComponent("macprovider-cli")
+        let alias = dir.appendingPathComponent("malibu-cli")
+
+        // Owned: symlink -> canonical entrypoint (even while the entrypoint is
+        // absent, i.e. dangling).
+        try FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: entrypoint.path)
+        XCTAssertTrue(UninstallCommand.aliasIsOwnedSymlink(alias, canonicalEntrypoint: entrypoint))
+
+        // Not owned: a symlink to a different target that merely shares the name.
+        try FileManager.default.removeItem(at: alias)
+        let other = dir.appendingPathComponent("other", isDirectory: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        let foreign = other.appendingPathComponent("macprovider-cli")
+        try FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: foreign.path)
+        XCTAssertFalse(UninstallCommand.aliasIsOwnedSymlink(alias, canonicalEntrypoint: entrypoint))
+
+        // Not owned: a user's own regular file at the alias path.
+        try FileManager.default.removeItem(at: alias)
+        try Data("mine".utf8).write(to: alias)
+        XCTAssertFalse(UninstallCommand.aliasIsOwnedSymlink(alias, canonicalEntrypoint: entrypoint))
+    }
 }

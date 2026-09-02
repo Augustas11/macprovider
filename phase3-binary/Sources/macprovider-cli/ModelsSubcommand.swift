@@ -89,7 +89,7 @@ struct ModelsListCommand: AsyncParsableCommand {
                 print("serve not running; warm-swap disabled")
                 printModelsTable(currentModelID: nil, supportedModels: models)
             }
-            writeStderr("macprovider-cli serve is not running on this host (no control socket at \(path))")
+            writeStderr("malibu-cli serve is not running on this host (no control socket at \(path))")
             return
         } catch ControlSocketConnectError.connectionRefused(let path) {
             writeStderr("stale control socket at \(path) (no listener); remove the file and restart serve")
@@ -235,7 +235,7 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
             switch reason {
             case .loadingInProgress:
                 let currentTarget = currentTarget ?? "<unknown>"
-                try reject("provider is already loading \(currentTarget); refusing to start a second swap. Wait for current switch to complete (macprovider-cli models status)", code: "loading_in_progress", exitCode: 3)
+                try reject("provider is already loading \(currentTarget); refusing to start a second swap. Wait for current switch to complete (malibu-cli models status)", code: "loading_in_progress", exitCode: 3)
             case .cooldown:
                 let seconds = secondsRemaining ?? 0
                 try reject("swap on cooldown for \(seconds)s. Re-issue with --force to bypass", code: "cooldown", exitCode: 6, cooldownSeconds: seconds)
@@ -1716,7 +1716,7 @@ private func connectAndReadStatusOrExit(socketPath: URL) async throws -> (Contro
     do {
         return try await connectAndReadStatus(socketPath: socketPath)
     } catch ControlSocketConnectError.socketAbsent(let path) {
-        writeStderr("macprovider-cli serve is not running on this host (no control socket at \(path))")
+        writeStderr("malibu-cli serve is not running on this host (no control socket at \(path))")
         throw ExitCode(4)
     } catch ControlSocketConnectError.connectionRefused(let path) {
         writeStderr("stale control socket at \(path) (no listener); remove the file and restart serve")

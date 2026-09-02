@@ -1005,7 +1005,7 @@ provider joining the coordinator MUST fail explicitly rather than silently conne
 bearerless. The deliberate exceptions are local/no-join or donor mode and a fresh
 high-entropy `mp-<32hex>` principal using the tokenless first-claim bootstrap protocol.
 
-`macprovider-cli credentials import --config <path>` MUST import the exact
+`malibu-cli credentials import --config <path>` MUST import the exact
 `provider_id`/top-level `provider_token` pair from the selected file only when the
 Keychain item is absent or already equal. An existing mismatch MUST fail without
 mutation. Both commands return only redacted result metadata.
@@ -1015,10 +1015,10 @@ value. Running `verify` as a second process is the compatibility transaction's
 fresh-process staging proof. It is not coordinator admission and never authorizes
 Malibu to delete the live migration source.
 
-`macprovider-cli credentials status --config <path>` MUST be non-mutating and emit
+`malibu-cli credentials status --config <path>` MUST be non-mutating and emit
 credential contract version 1 with `credential_store`, `operation`, `provider_id`,
 `source`, `condition`, `restart_safe`, `migration_pending`, `recoverable`, and
-`action`. `macprovider-cli credentials repair --config <path>` MUST require an
+`action`. `malibu-cli credentials repair --config <path>` MUST require an
 owner-owned regular file with mode no broader than 0600, reject symlinks, and verify
 the file's device/inode/size/mtime identity before using its token. Repair MAY add an
 absent item only through the absent-or-equal import primitive and MAY replace an item
@@ -1725,13 +1725,13 @@ fields are OPTIONAL and informational.
 
 `tier` is `"pinned"` or `"provisional"` (see SPEC-002 v1.1 § 7.5 for
 admission tier semantics). The provider uses this for display purposes
-(e.g., `macprovider-cli status` output) and MUST NOT change its
+(e.g., `malibu-cli status` output) and MUST NOT change its
 inference behavior based on tier.
 
 `recommended_binary_version` is a semver string. If the provider's
 `binary_version` (from hello) is older than this value, the provider
 SHOULD log a warning: "A newer version is available (vX.Y.Z). Run
-'macprovider-cli update' to upgrade." The coordinator does NOT enforce
+'malibu-cli update' to upgrade." The coordinator does NOT enforce
 the version — providers running older binaries continue to function.
 
 #### 6.5.1. `pair_ot` and `claim_url` on `hello_ack` (NEW in v1.5)
@@ -2759,7 +2759,7 @@ here as owner of last resort:
 
 R-6.9.5 The `models` CLI MUST use the SPEC-011 v0.5 R-3.1.5.x
 three-case detection precedence: ENOENT exits 4 with
-`"macprovider-cli serve is not running on this host (no control socket
+`"malibu-cli serve is not running on this host (no control socket
 at <socket_path>)"`; ECONNREFUSED exits 4 with `"stale control socket
 at <socket_path> (no listener); remove the file and restart serve"`;
 connect-success plus missing `status_response` within 2s exits 4 with
@@ -3001,7 +3001,7 @@ control-socket progress lines per §6.9.
 
 ### 6.14. `models browse` subcommand (NEW in v1.4)
 
-**R-6.14.1 Action.** `macprovider-cli models browse` performs an
+**R-6.14.1 Action.** `malibu-cli models browse` performs an
 unauthenticated GET against the HuggingFace API at
 `https://huggingface.co/api/models` with the following query params:
 
@@ -3569,7 +3569,7 @@ default.
 Point the binary at a nonexistent model path. Verify: exits with code 1,
 prints diagnostic to stderr, no HTTP server starts, no partial state.
 
-**Run by:** `macprovider-cli --model /nonexistent/path 2>&1; echo "exit: $?"`
+**Run by:** `malibu-cli --model /nonexistent/path 2>&1; echo "exit: $?"`
 
 **AC-11. WS-tunneled inference (non-streaming).**
 A mock coordinator sends `inference_request` with `stream: false` over
@@ -3695,9 +3695,9 @@ A v1.3 binary `serve` started with **neither** `--enable-warm-swap` **nor**
 receipt rotation enabled (i.e. not `--enable-receipts` with a provider ID +
 coordinator; see R-6.9.1 reconciled v1.7) MUST NOT
 create any file at `$TMPDIR/macprovider-cli/ctl.sock`. A
-`macprovider-cli models list` invocation against that binary MUST
+`malibu-cli models list` invocation against that binary MUST
 take the R-6.9.5 / R-3.1.5.x ENOENT case-1 path: exit code 4 with
-stderr containing `"macprovider-cli serve is not running on this
+stderr containing `"malibu-cli serve is not running on this
 host (no control socket at"` (followed by the resolved socket path).
 Traces to SPEC-011 v0.5 AC-18 case-1 and SPEC-001 v1.3 R-6.9.5. (Note: a
 receipts-only socket **does** exist and answers `status_request`; a
@@ -3790,7 +3790,7 @@ R-3.1.5.x case 2 and SPEC-001 v1.3 R-6.9.5.
 
 **AC-18.13. Control-socket detection precedence — handshake timeout.**
 If the binary connects to the control socket successfully but no
-`status_response` arrives within 2 seconds, `macprovider-cli models
+`status_response` arrives within 2 seconds, `malibu-cli models
 list` MUST take the R-6.9.5 / R-3.1.5.x case-3 path: exit code 4
 with stderr containing `"serve is running but warm-swap is not
 enabled (or serve is unresponsive)"`. Traces to SPEC-011 v0.5
@@ -3799,7 +3799,7 @@ R-3.1.5.x case 3 and SPEC-001 v1.3 R-6.9.5.
 **AC-18.14. Cooldown soft guard + `--force` bypass.**
 A v1.3 binary `serve --enable-warm-swap` that has successfully
 processed a `models switch <X>` within the last 10 seconds MUST cause
-the next `macprovider-cli models switch <Y>` to exit code 6 with
+the next `malibu-cli models switch <Y>` to exit code 6 with
 stderr containing `"swap on cooldown for"` and `"Re-issue with
 --force to bypass"` per SPEC-011 v0.5 R-3.1.4 / R-3.1.2 step 4. The
 same invocation with `--force` MUST bypass the cooldown soft guard
@@ -3914,7 +3914,7 @@ and compiles an empty main.
 **Step 2. CLI entry and config loader.**
 Implement argument parsing (FR-19) and YAML config loading. The binary
 accepts `--port`, `--model`, `--coordinator`, `--config`, `--log-level`.
-Deliverable: `macprovider-cli --help` prints usage.
+Deliverable: `malibu-cli --help` prints usage.
 
 **Step 3. Model loader.**
 Wrap `mlx-swift-lm` to load a model from a HuggingFace path. Read

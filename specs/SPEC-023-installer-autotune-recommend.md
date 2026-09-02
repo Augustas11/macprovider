@@ -195,7 +195,7 @@ last-locked: 2026-08-29
 
 ## 1. Mission
 
-`autotune --recommend` scores rate-card-eligible models against the operator's detected Mac hardware, local benchmark results, the current rate card, and an operator-curated demand/supply signal, then recommends the eligible model with the strongest expected operator earning opportunity while preferentially filling buyer-facing supply deficits. It serves every new provider installer and every operator who runs `macprovider-cli autotune --recommend` after install. Wave 0c lands now because beta launch readiness depends on a low-friction install path, a trustworthy catalog, and a first-model choice that improves both operator economics and buyer coverage.
+`autotune --recommend` scores rate-card-eligible models against the operator's detected Mac hardware, local benchmark results, the current rate card, and an operator-curated demand/supply signal, then recommends the eligible model with the strongest expected operator earning opportunity while preferentially filling buyer-facing supply deficits. It serves every new provider installer and every operator who runs `malibu-cli autotune --recommend` after install. Wave 0c lands now because beta launch readiness depends on a low-friction install path, a trustworthy catalog, and a first-model choice that improves both operator economics and buyer coverage.
 
 ## 2. Non-goals
 
@@ -814,7 +814,7 @@ The install transcript shows a per-token rate at recommendation time and instruc
 
 ### 7.1 Happy path (recommended model)
 
-For `macprovider-cli autotune --recommend`, use this text verbatim,
+For `malibu-cli autotune --recommend`, use this text verbatim,
 replacing braces with computed values:
 
 ```text
@@ -830,7 +830,7 @@ Bench gate drift: {bench_gate_drift}
 Real earnings scale with buyer demand and your uptime.
 
 To apply this recommendation, rerun with --apply. Then start the provider with:
-              macprovider-cli serve
+              malibu-cli serve
 ```
 
 Happy path applies only when at least one recommendable model is eligible and clears all §5 gates.
@@ -838,7 +838,7 @@ After the CLI applies the recommendation, it replaces the final two lines above 
 
 ```text
 Configuration applied. Start the provider with:
-              macprovider-cli serve
+              malibu-cli serve
 ```
 
 The public `install.sh` wrapper may ask a separate service-start
@@ -900,14 +900,14 @@ When `donor_mode == true`:
 DONOR MODE: {selected_model} does not meet rate-card or hardware requirements on this Mac.
 ```
 
-- `macprovider-cli status` must show a `DONOR MODE` badge alongside the configured model while `donor_mode: true`.
+- `malibu-cli status` must show a `DONOR MODE` badge alongside the configured model while `donor_mode: true`.
 
 ## 9. Re-tune cadence + UX
 
 `autotune --recommend` re-runs or prompts the operator in exactly these v0.4 cases:
 
-1. Manual invocation: `macprovider-cli autotune --recommend`.
-2. `macprovider-cli update` or installer rerun after install, when the live rate-card version, live demand-rank version, signed candidate-catalog version/hash, binary version, stable hardware identity hash, or benchmark age differs from stored recommendation state.
+1. Manual invocation: `malibu-cli autotune --recommend`.
+2. `malibu-cli update` or installer rerun after install, when the live rate-card version, live demand-rank version, signed candidate-catalog version/hash, binary version, stable hardware identity hash, or benchmark age differs from stored recommendation state.
 3. Installer rerun when no stored recommendation exists.
 
 v0.4 explicitly does not re-run automatically on coordinator SIGHUP or rate-card hot reload. Coordinator broadcast of recommendation changes is deferred to v0.2 follow-up.
@@ -939,7 +939,7 @@ Stored state MUST include at least:
 
 `hardware_identity_hash` is an HMAC-SHA256-derived local identity hash. It MUST NOT be a raw serial number, MAC address, device UUID, or unhashed hardware fingerprint.
 
-`recommended_bench_gate_provenance_source` is the selected row's `bench_gate.provenance.source`; `recommended_gate_seed_identity` records the selected row's seed identity (at minimum `gate_seed.omlx_snapshot_id` and `gate_seed.seeded_at`) when the selected row is `omlx_seeded`, and is `null` otherwise. These fields let `macprovider-cli status` render provisional oMLX provenance (AC-OMLX-6) without re-fetching the catalog. When `recommended_bench_gate_provenance_source == "omlx_seeded"`, `macprovider-cli status` MUST render the exact label `oMLX-seeded; not macprovider-verified` alongside the configured model.
+`recommended_bench_gate_provenance_source` is the selected row's `bench_gate.provenance.source`; `recommended_gate_seed_identity` records the selected row's seed identity (at minimum `gate_seed.omlx_snapshot_id` and `gate_seed.seeded_at`) when the selected row is `omlx_seeded`, and is `null` otherwise. These fields let `malibu-cli status` render provisional oMLX provenance (AC-OMLX-6) without re-fetching the catalog. When `recommended_bench_gate_provenance_source == "omlx_seeded"`, `malibu-cli status` MUST render the exact label `oMLX-seeded; not macprovider-verified` alongside the configured model.
 
 Stored hash/version derivation:
 
@@ -947,11 +947,11 @@ Stored hash/version derivation:
 - `rate_card_version` is the `/v1/rate-card.version` recommendation-projection hash from §3.3. It MUST NOT reuse broader coordinator config or billing snapshot hashes that include unrelated ledger, quarantine, request-log, operator, or settlement state.
 - `demand_rank_version` is the selected demand-rank JSON `version`; v0.4 does not require an additional stored demand-rank hash.
 
-`macprovider-cli status` MUST emit a stale-recommendation warning when the live rate-card version, demand-rank version, candidate-catalog version/hash, binary version, stable hardware identity hash, or benchmark freshness differs from this stored state:
+`malibu-cli status` MUST emit a stale-recommendation warning when the live rate-card version, demand-rank version, candidate-catalog version/hash, binary version, stable hardware identity hash, or benchmark freshness differs from this stored state:
 
 ```text
 Recommendation stale: recommendation inputs changed since {generated_at}.
-Run: macprovider-cli autotune --recommend
+Run: malibu-cli autotune --recommend
 ```
 
 ### 9.1 Guarded interactive-context calibration
@@ -976,7 +976,7 @@ Automatic installer use of this requirement is not authorized by v0.9.5. It rema
 
 ## 11. Acceptance criteria
 
-AC-1: `macprovider-cli autotune --recommend --json` output validates against `autotune_recommend.v1` for any Mac where `MachineFingerprinter.sample()` returns at least `ram_gb = 1`.
+AC-1: `malibu-cli autotune --recommend --json` output validates against `autotune_recommend.v1` for any Mac where `MachineFingerprinter.sample()` returns at least `ram_gb = 1`.
 
 AC-2: JSON field order is deterministic and matches §6 exactly for stable diffs and snapshot tests.
 
@@ -1016,11 +1016,11 @@ AC-22 **[amended v0.7 / #742]**: `--donor-mode` allows a non-recommendable model
 
 AC-23: Applying donor mode for a non-recommendable row does not auto-start or auto-register a network-connected paid provider. Any network-connected donor serving is blocked until a separate donor-routing/settlement prerequisite exists.
 
-AC-24: `macprovider-cli status` shows `DONOR MODE` when `donor_mode: true`.
+AC-24: `malibu-cli status` shows `DONOR MODE` when `donor_mode: true`.
 
-AC-25: `macprovider-cli update` and installer rerun compare stored `rate_card_version`, `demand_rank_version`, `candidate_catalog_version/hash`, `binary_version`, `hardware_identity_hash`, and benchmark age with live/current values and prompt re-tune when any changed or expired.
+AC-25: `malibu-cli update` and installer rerun compare stored `rate_card_version`, `demand_rank_version`, `candidate_catalog_version/hash`, `binary_version`, `hardware_identity_hash`, and benchmark age with live/current values and prompt re-tune when any changed or expired.
 
-AC-26: `macprovider-cli status` emits the stale-recommendation warning in §9 when stored recommendation metadata differs from live metadata.
+AC-26: `malibu-cli status` emits the stale-recommendation warning in §9 when stored recommendation metadata differs from live metadata.
 
 AC-27: The recommendation cache at `~/.config/macprovider/last-recommendation.json` is written after a successful recommendation and contains every field listed in §9 stored state.
 
@@ -1076,7 +1076,7 @@ AC-OMLX-5b (K rejection): An `omlx_seeded` row with `gate_seed.observations_used
 
 AC-OMLX-5c (cross-cell rejection): An `omlx_seeded` row whose `gate_seed` observations span more than one normalized cell — a mix of chips, RAM classes, models, quants, or context lengths not all within its declared `gate_seed.target_cell` — is rejected as a catalog-integrity failure, even when the aggregate `observations_used_n >= K`. `observations_used_n` is bound to the single `target_cell`.
 
-AC-OMLX-6: Recommendation JSON, human `autotune --recommend` output, and `macprovider-cli status` surface oMLX provenance as provisional and not macprovider-verified. `macprovider-cli status` reads the persisted recommendation state (§9), which retains the selected row's `bench_gate.provenance.source` and `gate_seed` identity, and MUST render the exact label `oMLX-seeded; not macprovider-verified` for a selected `omlx_seeded` row.
+AC-OMLX-6: Recommendation JSON, human `autotune --recommend` output, and `malibu-cli status` surface oMLX provenance as provisional and not macprovider-verified. `malibu-cli status` reads the persisted recommendation state (§9), which retains the selected row's `bench_gate.provenance.source` and `gate_seed` identity, and MUST render the exact label `oMLX-seeded; not macprovider-verified` for a selected `omlx_seeded` row.
 
 AC-OMLX-7 (no laundering): A catalog row whose `bench_gate.provenance.source != "omlx_seeded"` that carries a `bench_gate.gate_seed` is a catalog-integrity failure, rejected fail-closed at catalog authoring, lint, and signing, and at CLI catalog decode.
 

@@ -497,11 +497,11 @@ block, fail, or corrupt the request being served.
 
 - The provider binary MUST expose a local purge primitive **before** the
   disk tier can be enabled, with these canonical spellings: single-key
-  `macprovider-cli kv-cache purge --key <conversation_key>` (also
+  `malibu-cli kv-cache purge --key <conversation_key>` (also
   `--key-stdin`, preferred, to keep raw keys out of argv/shell history),
-  whole-namespace `macprovider-cli kv-cache purge --all`, uninstall
-  `macprovider-cli kv-cache purge --all --forget`, and inspection
-  `macprovider-cli kv-cache status` (FR-KVP12) — each backed by a
+  whole-namespace `malibu-cli kv-cache purge --all`, uninstall
+  `malibu-cli kv-cache purge --all --forget`, and inspection
+  `malibu-cli kv-cache status` (FR-KVP12) — each backed by a
   matching control-socket command. Single-key purge is addressed by raw
   key, canonicalized and HMAC-indexed inside the provider process;
   whole-namespace purge is key-epoch rotation (FR-KVP6).
@@ -732,7 +732,7 @@ Rollout gates:
   `macprovider-cli` subcommand report, per namespace: current bytes and
   entry count vs caps, free-space headroom, key epoch, tombstone count,
   Keychain item count, the reuse-eligibility TTL, and cumulative counters
-  per reason code (canonical spelling: `macprovider-cli kv-cache status`,
+  per reason code (canonical spelling: `malibu-cli kv-cache status`,
   FR-KVP8). No raw keys.
 - Telemetry is provider-local observability only: it MUST NOT feed
   billing, routing, settlement, or sanctions, and MUST NOT create a new

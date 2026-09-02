@@ -236,7 +236,7 @@ coordinator is a passive observer of the heartbeat-reported
 message; that surface (`set_model`) is SPEC-012's territory.
 
 The arm64golf operator gets:
-- A CLI: `macprovider-cli models switch <id>`
+- A CLI: `malibu-cli models switch <id>`
 - Async load in the binary runtime while in-flight requests
   drain on the old model
 - A new audit event the coordinator emits on observing the swap
@@ -287,10 +287,10 @@ SPEC-011 v0.3 adds a `models` subcommand with three actions,
 **gated on the `--enable-warm-swap` flag on `serve`**.
 
 ```
-macprovider-cli serve --enable-warm-swap [...other flags...]
-macprovider-cli models list
-macprovider-cli models switch <model-id> [--force]
-macprovider-cli models status
+malibu-cli serve --enable-warm-swap [...other flags...]
+malibu-cli models list
+malibu-cli models switch <model-id> [--force]
+malibu-cli models status
 ```
 
 #### Rules
@@ -307,7 +307,7 @@ macprovider-cli models status
     (legacy synchronous load path remains).
   - The serve process MUST NOT emit `loading` or `model_hash`
     heartbeat fields (§3.3 fields stay omitted from the wire).
-  - Any invocation of `macprovider-cli models <subcommand>`
+  - Any invocation of `malibu-cli models <subcommand>`
     MUST detect the disabled state (via control socket
     absence per R-3.1.5) and exit code 4 with stderr
     `"warm swap not enabled; restart serve with
@@ -318,7 +318,7 @@ macprovider-cli models status
   Operators who never enable warm swap see byte-identical
   pre-SPEC-011 behavior; this preserves L-1.
 
-- **R-3.1.1** `macprovider-cli models list` MUST print a table
+- **R-3.1.1** `malibu-cli models list` MUST print a table
   to stdout showing local model state. Each row:
   - `model_id` (HuggingFace ID or local path)
   - `state` ∈ {`warm`, `idle`}
@@ -332,7 +332,7 @@ macprovider-cli models status
   HF cache contents with all rows marked `idle`. Exit code 0 in
   both cases.
 
-- **R-3.1.2** `macprovider-cli models switch <model-id>` MUST
+- **R-3.1.2** `malibu-cli models switch <model-id>` MUST
   perform the following sequence in order:
   1. Resolve effective `supported_models` per SPEC-010 R-3.6.1
      priority (CLI flag > ENV > config file).
@@ -511,14 +511,14 @@ macprovider-cli models status
     enum: `ready`, `loading`, `draining`.
 
 - **R-3.1.5.x** **Disabled-vs-no-serve detection precedence
-  (R2-A2.1 round-2 fix).** When `macprovider-cli models
+  (R2-A2.1 round-2 fix).** When `malibu-cli models
   <subcommand>` attempts to connect to the control socket
   per R-3.1.5, the CLI MUST distinguish three failure modes
   using the existing Unix domain socket primitives — no new
   detection mechanism is required:
   1. **`stat(socket_path)` returns ENOENT** (socket file
      does not exist) → "serve not running on this host."
-     Exit code 4 with stderr `"macprovider-cli serve is not
+     Exit code 4 with stderr `"malibu-cli serve is not
      running on this host (no control socket at
      <socket_path>)"`.
   2. **`connect(socket_path)` returns ECONNREFUSED** (socket
@@ -546,7 +546,7 @@ macprovider-cli models status
   requiring a pid file, lock file, or separate health-probe
   mechanism.
 
-- **R-3.1.6** `macprovider-cli models status` MUST send a
+- **R-3.1.6** `malibu-cli models status` MUST send a
   `status_request` over the control socket and print the
   response to stdout. Exit code 0 on success, 4 if serve is
   not running.
@@ -969,7 +969,7 @@ Payload schema:
 
 - **R-3.7.2** The runtime MUST NOT queue the rejected switch.
   If the operator still wants the second switch after the
-  first completes, they MUST reissue `macprovider-cli models
+  first completes, they MUST reissue `malibu-cli models
   switch X`.
 
 - **R-3.7.3** When the runtime is in `ready` state but the
@@ -1176,19 +1176,19 @@ A SPEC-011 binary connecting to a pre-SPEC-011 coordinator:
 
 ### CLI behavior (4 ACs)
 
-- **AC-1** `macprovider-cli models list` with a running serve
+- **AC-1** `malibu-cli models list` with a running serve
   process outputs a table with the current loaded model
   marked `warm` and other HF-cached models marked `idle`.
   Exit code 0.
 
-- **AC-2** `macprovider-cli models switch <X>` happy path:
+- **AC-2** `malibu-cli models switch <X>` happy path:
   pre-flight validation passes (X is in
   `--supported-models`); CLI connects to serve via control
   socket; serve accepts; CLI streams progress events
   (`loading`, `draining`, `loaded`); CLI exits code 0.
 
 - **AC-3** Pre-flight validation fail: invoking
-  `macprovider-cli --model A --supported-models B,C models
+  `malibu-cli --model A --supported-models B,C models
   switch X` (where X is not in `[B, C]` and not equal to A
   since A is also not in [B, C] but that's a SPEC-010-side
   failure caught at serve startup). For the SPEC-011 case:
@@ -1196,7 +1196,7 @@ A SPEC-011 binary connecting to a pre-SPEC-011 coordinator:
   the set, exit code 2 with stderr `"switch target X not in
   --supported-models"` BEFORE control-socket contact.
 
-- **AC-4** `macprovider-cli models status` returns the
+- **AC-4** `malibu-cli models status` returns the
   current loaded model and runtime state. Exit code 0 if
   serve is running; exit code 4 if not.
 
@@ -1339,9 +1339,9 @@ A SPEC-011 binary connecting to a pre-SPEC-011 coordinator:
   - No control socket opened at the default path. Test
     asserts: `stat $TMPDIR/macprovider-cli/ctl.sock` returns
     "no such file" while serve is running.
-  - `macprovider-cli models list` MUST exit code 4 with
+  - `malibu-cli models list` MUST exit code 4 with
     stderr per R-3.1.5.x precedence rule (case 1: ENOENT →
-    `"macprovider-cli serve is not running on this host
+    `"malibu-cli serve is not running on this host
     (no control socket at ...)"`).
 
   **Coordinator-observable behavior:**

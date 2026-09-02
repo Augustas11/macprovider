@@ -90,10 +90,10 @@ bash scripts/verify-malibu-release-artifacts.sh \
 7. Verify local updater acceptance from the previous stable CLI:
 
 ```bash
-macprovider-cli update --check
-macprovider-cli update
-macprovider-cli --version
-macprovider-cli status --advanced
+malibu-cli update --check
+malibu-cli update
+malibu-cli --version
+malibu-cli status --advanced
 ```
 
 If the updater returns `embedded_cli_mismatch`, the release is not
@@ -173,7 +173,7 @@ installs. Treat a red parity alarm as a release step that did not complete.
 
 ## What not to count as release proof
 
-- matching `macprovider-cli --version`
+- matching `malibu-cli --version`
 - matching codesign designated-requirement text
 - Gatekeeper acceptance alone
 - notarization/stapling alone

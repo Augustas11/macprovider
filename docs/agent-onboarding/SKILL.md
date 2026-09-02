@@ -55,11 +55,11 @@ Use the installed CLI before changing files by hand. These commands are
 read-only diagnostics:
 
 ```bash
-macprovider-cli --version
-macprovider-cli status
-macprovider-cli status --json
-macprovider-cli status --advanced
-macprovider-cli update --check
+malibu-cli --version
+malibu-cli status
+malibu-cli status --json
+malibu-cli status --advanced
+malibu-cli update --check
 ```
 
 Run the mutating updater only when the operator explicitly asks to update this
@@ -67,9 +67,9 @@ provider, after `update --check` reports the target and after noting whether a
 launchd-managed service may restart:
 
 ```bash
-macprovider-cli update
-macprovider-cli --version
-macprovider-cli status --advanced
+malibu-cli update
+malibu-cli --version
+malibu-cli status --advanced
 ```
 
 If the CLI cannot reach the coordinator and reports an old public version,
@@ -153,8 +153,8 @@ Get a buyer API key at `https://api.malibu.tech/auth/github/start`.
 
 A non-production onboarding smoke is complete when:
 
-1. `macprovider-cli --version` prints the installed version.
-2. `macprovider-cli status` or `macprovider-cli status --json` reaches the local
+1. `malibu-cli --version` prints the installed version.
+2. `malibu-cli status` or `malibu-cli status --json` reaches the local
    status endpoint.
 3. The provider either appears connected or reports a specific recoverable
    coordinator/version/config error.

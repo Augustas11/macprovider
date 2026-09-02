@@ -388,7 +388,7 @@ From reading `phase3-binary/`:
      `MACPROVIDER_REFERRAL_CODE_FILE` to the sanitized install environment.
      `install.sh` captures and unsets that path before launching any child; it
      never reads, logs, copies, or persists the code. It invokes
-     `macprovider-cli bootstrap-auth --referral-code-file <source>`, and the CLI
+     `malibu-cli bootstrap-auth --referral-code-file <source>`, and the CLI
      reopens the source with no-follow identity checks before reading it. The
      durable CLI journal
      `~/.config/macprovider/onboarding/referral-attempt-v1.json` stores only the
@@ -528,7 +528,7 @@ time (60–240 s for the first model) in the background.
   authority only until a separately reviewed production release contract says
   otherwise.
 - The launchd CLI owns both scheduled and user-requested updates. Malibu's menu and
-  dashboard invoke `macprovider-cli update`; they do not download or replace artifacts.
+  dashboard invoke `malibu-cli update`; they do not download or replace artifacts.
   Removing the Sparkle dependency/runtime and feed settings eliminates the prior
   second update authority. Independent Malibu release publication still emits a signed
   public appcast and `latest.dmg` compatibility surface for already-installed Sparkle
@@ -692,7 +692,7 @@ What the app actually does around lifecycle:
 - **Quit:** `agent.shutdown(gracefulSeconds:)` stops only Malibu monitoring; it never
   drains or signals the launchd provider. Update/uninstall drain is owned by the CLI
   transaction.
-- **Uninstall:** delegate to `macprovider-cli uninstall --yes` (§3.4).
+- **Uninstall:** delegate to `malibu-cli uninstall --yes` (§3.4).
 
 ## 6. Signing & notarization
 
@@ -975,7 +975,7 @@ self-updates via its own coordinator-driven `AutoUpdater` (`CoordinatorClient.sw
 enabled by default — §3.3), NOT via `install.sh`/the watchdog. **Reconciled v0.3:**
 `CLIUpdateRunner` / `MalibuAgent.updateCLINow()` compile but have **no production caller**
 (§3.3) — the app
-does NOT invoke `macprovider-cli update` at runtime. **#5 portal deep-link
+does NOT invoke `malibu-cli update` at runtime. **#5 portal deep-link
 handshake** — MOOT: the `malibu://` scheme and portal token handoff were removed;
 registration happens inside `install.sh`. **#4/#3 (library validation / linking)** and
 **#6/#7 (weights path / login-item rejection)** remain as build details. The list

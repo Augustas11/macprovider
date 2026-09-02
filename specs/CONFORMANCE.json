@@ -339,7 +339,7 @@
     },
     {
       "spec_id": "SPEC-013",
-      "title": "`macprovider-cli autotune` subcommand",
+      "title": "`malibu-cli autotune` subcommand",
       "version": "0.3.1",
       "path": "specs/SPEC-013-cli-autotune.md",
       "status": "normative",

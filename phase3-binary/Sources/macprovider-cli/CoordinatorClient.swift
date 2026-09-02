@@ -986,7 +986,7 @@ actor CoordinatorClient {
         FileHandle.standardError.write(Data((
             "FATAL coordinator rejected this build: binary version " +
             "\(rejection.currentVersion) is below the required minimum \(target). " +
-            "Upgrade with 'macprovider-cli update', then restart the provider. " +
+            "Upgrade with 'malibu-cli update', then restart the provider. " +
             "Reconnect attempts stopped — a below-floor build must not hammer the coordinator.\n"
         ).utf8))
         var payload: [String: String] = [
@@ -2967,7 +2967,7 @@ actor CoordinatorClient {
                 if let parsed,
                    SelfUpdate.compareSemver(Self.binaryVersion, parsed.normalized) == .orderedAscending
                 {
-                    print("A newer version is available (v\(parsed.normalized)). Run 'macprovider-cli update' to upgrade.")
+                    print("A newer version is available (v\(parsed.normalized)). Run 'malibu-cli update' to upgrade.")
                 }
                 await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
                     updateID: UUID().uuidString.lowercased(),
@@ -3290,7 +3290,7 @@ actor CoordinatorClient {
         guard completedAutoupdate.targetVersion == Self.binaryVersion else {
             return .pendingRollback
         }
-        // The old `macprovider-cli update` process owns this transaction and
+        // The old `malibu-cli update` process owns this transaction and
         // may still roll back its child. The child must not clear either the
         // marker or the legacy YAML credential.
         guard completedAutoupdate.commitOwner != "self_update" else {

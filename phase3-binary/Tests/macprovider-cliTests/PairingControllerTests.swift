@@ -60,7 +60,7 @@ final class PairingControllerTests: XCTestCase {
 
         XCTAssertThrowsError(try controller.handlePairingMaterial(pairOT: pairOT, claimURL: claimURL))
 
-        XCTAssertTrue(output.get().contains("macprovider-cli claim"))
+        XCTAssertTrue(output.get().contains("malibu-cli claim"))
         XCTAssertTrue(output.get().contains(claimURL))
         XCTAssertTrue(FileManager.default.fileExists(atPath: URL(fileURLWithPath: dir.path).appendingPathComponent("claim_url").path))
     }

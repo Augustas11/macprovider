@@ -1,4 +1,4 @@
-# SPEC-013 — `macprovider-cli autotune` subcommand
+# SPEC-013 — `malibu-cli autotune` subcommand
 
 **Version:** 0.3.1 (A2 egress-drift reconciliation)
 **Status:** Implemented & shipped — the `autotune` subcommand has been
@@ -7,8 +7,8 @@ Core mechanics match this spec; the installer-integrated recommend surface
 (`--recommend`/`--donor-mode`/`--submit-hardware-evidence`) is owned by
 SPEC-023. The "pre round-3" audit status was never updated after ship.
 **Date drafted:** 2026-06-18
-**Depends on:** SPEC-001 v1.4 (`macprovider-cli serve` flags `--kv-bits`, `--max-context`, `--max-batch` per PR #105), SPEC-010 v1.5 (provider-advertised `supported_models[]` shape, model id semantics)
-**Companion to (LOCKED):** SPEC-002 v1.3.5 (no coordinator-side change required), SPEC-003 v0.9.2 (autotune is invoked before / between `macprovider-cli serve` lifetimes; not part of install flow; SPEC-013 v0.2 binds the launchd label and drain sequence to SPEC-003 §FR-C5)
+**Depends on:** SPEC-001 v1.4 (`malibu-cli serve` flags `--kv-bits`, `--max-context`, `--max-batch` per PR #105), SPEC-010 v1.5 (provider-advertised `supported_models[]` shape, model id semantics)
+**Companion to (LOCKED):** SPEC-002 v1.3.5 (no coordinator-side change required), SPEC-003 v0.9.2 (autotune is invoked before / between `malibu-cli serve` lifetimes; not part of install flow; SPEC-013 v0.2 binds the launchd label and drain sequence to SPEC-003 §FR-C5)
 **Related (future):** SPEC-011 v0.5 (warm-swap; opt-in coupling deferred to v2 — see §11)
 
 SPEC-013 is operator-facing CLI surface only. It MUST NOT modify any
@@ -48,7 +48,7 @@ closes all 4. No architecture change.
   inconsistency):** v0.2 permitted FR-D Shape B (rely on the
   runtime's online fallback during load + measurement
   isolation), but NFR-4's egress carve-out and AC-8 still
-  spoke only of `macprovider-cli models pull <id>` failures.
+  spoke only of `malibu-cli models pull <id>` failures.
   v0.3 reworords NFR-4's egress exception to "the
   HuggingFace pre-warm fetch path selected by FR-D.1, whether
   explicit `models pull` or runtime online fallback" and
@@ -267,7 +267,7 @@ the feasibility gate**.
 
 ### In scope
 
-- New `macprovider-cli autotune` subcommand.
+- New `malibu-cli autotune` subcommand.
 - Two-stage pipeline (§3): (1) largest-first feasibility iteration
   across a curated candidate model list; (2) knob hill-climb within
   the chosen model over the PR #105 axes (`--kv-bits`,
@@ -359,10 +359,10 @@ context.
 ### Provider lifecycle invariant
 
 At every moment during an `autotune` run, AT MOST ONE
-`macprovider-cli serve` process is alive holding the local port
+`malibu-cli serve` process is alive holding the local port
 (default 18080). Before evaluating the next candidate, `autotune`
 MUST stop the prior provider and wait for the port to free. The
-prototype enforces this with `pkill -f "macprovider-cli serve"` +
+prototype enforces this with `pkill -f "malibu-cli serve"` +
 poll; a Swift-native implementation MAY hold the subprocess handle
 directly. Either is acceptable. What is NOT acceptable is overlapping
 provider lifetimes.
@@ -383,7 +383,7 @@ DEFAULT and provides no flag to opt out.
 What should I serve?"**
 
 ```
-$ macprovider-cli autotune
+$ malibu-cli autotune
 autotune: target_context=2000 (use --target-context to change)
 autotune: candidates (largest-first):
   1. mlx-community/Qwen2.5-32B-Instruct-4bit
@@ -402,17 +402,17 @@ RECOMMENDATION
   alternates (smaller candidates from your input list, not probed):
     - mlx-community/Llama-3.2-1B-Instruct-4bit
   To try a smaller alternate instead:
-    macprovider-cli autotune --candidate-models mlx-community/Llama-3.2-1B-Instruct-4bit
+    malibu-cli autotune --candidate-models mlx-community/Llama-3.2-1B-Instruct-4bit
 
 To apply this to your config and restart serve:
-  macprovider-cli autotune --apply
+  malibu-cli autotune --apply
 ```
 
 **(b) Existing provider: "macOS / mlx-swift / binary changed. Is my
 config still optimal?"**
 
 ```
-$ macprovider-cli autotune --compare
+$ malibu-cli autotune --compare
 ... runs same pipeline, then prints:
 RECOMMENDATION (current run)
   model:           mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
@@ -425,7 +425,7 @@ RECOMMENDATION (current run)
 ctx=16000 — what's the biggest model I can serve?"**
 
 ```
-$ macprovider-cli autotune --target-context 16000
+$ malibu-cli autotune --target-context 16000
 ...
 RECOMMENDATION
   model:           mlx-community/Llama-3.2-1B-Instruct-4bit
@@ -463,7 +463,7 @@ For each model in the list, in order, `autotune` MUST:
 
 1. Stop any prior candidate provider (provider lifecycle invariant).
 2. Pre-download the candidate's weights per FR-D.
-3. Start `macprovider-cli serve --model <id> --no-join --port 18080`
+3. Start `malibu-cli serve --model <id> --no-join --port 18080`
    at the **default** knobs for this stage (kv-bits unset,
    max-batch=1, max-context unset — the binary defaults). The intent
    is to probe FIT cheaply; knob hill-climb is Stage 2's job.
@@ -664,7 +664,7 @@ contract:
 
 - **Shape A (preferred): explicit `models pull <id>`.**
   `autotune` invokes a sibling subcommand (e.g.
-  `macprovider-cli models pull <id>` if one is added or already
+  `malibu-cli models pull <id>` if one is added or already
   exists at implementation time) that fetches weights into the
   same HF cache the runtime reads from. The pull subcommand's
   contract — cache target, gated-repo handling, partial-download
@@ -733,7 +733,7 @@ violation in v0.2.
 
 **FR-E.1. Pre-flight: refuse if `serve` already running.**
 Before starting any candidate provider, `autotune` MUST check for
-an existing `macprovider-cli serve` process and an existing
+an existing `malibu-cli serve` process and an existing
 listener on the configured `--port` (default 18080). The check MUST
 cover BOTH install paths:
 
@@ -746,11 +746,11 @@ cover BOTH install paths:
     (matches the existing pattern in
     `phase3-binary/dist/install.sh` line ~923)
 - **foreground / manually-run process**: PID match on
-  `macprovider-cli serve` argv plus port-listener check on
+  `malibu-cli serve` argv plus port-listener check on
   `127.0.0.1:<--port>`. The argv-match grep MUST exclude the
   autotune process itself (an `autotune` invocation has
-  `macprovider-cli autotune ...` in its argv, not
-  `macprovider-cli serve ...`; the match SHOULD use
+  `malibu-cli autotune ...` in its argv, not
+  `malibu-cli serve ...`; the match SHOULD use
   whole-word `serve` to avoid false positives).
 
 On conflict, the behavior is:
@@ -817,7 +817,7 @@ process.
   coordinator (because no WS session existed).
 
 The `--no-join` flag is an implementation precondition of SPEC-013
-v1; if the `macprovider-cli serve` flag does not exist, the
+v1; if the `malibu-cli serve` flag does not exist, the
 implementing PR MUST add it. v1 of `autotune` ALWAYS passes it; no
 operator override.
 
@@ -847,7 +847,7 @@ able to `tee` it). The block MUST include:
   manually downsize via `autotune --candidate-models <id>`. If the
   chosen model is the smallest in the input list, the alternates
   list is empty.
-- The exact `macprovider-cli serve` command line that the
+- The exact `malibu-cli serve` command line that the
   recommendation reduces to, copy-pasteable. CLI flag names are
   used here (`--kv-bits`, `--max-context`, `--max-batch`) so the
   line is a literal shell command. The YAML config keys
@@ -904,7 +904,7 @@ additive fields):
     "ttft_p95_ms": 19500,
     "replicates": 3,
     "serve_command":
-      "macprovider-cli serve --model mlx-community/Qwen2.5-Coder-7B-Instruct-4bit --kv-bits 4 --max-batch 1 --max-context 4000"
+      "malibu-cli serve --model mlx-community/Qwen2.5-Coder-7B-Instruct-4bit --kv-bits 4 --max-batch 1 --max-context 4000"
   },
   "alternates": [
     "mlx-community/Llama-3.2-3B-Instruct-4bit",
@@ -1255,7 +1255,7 @@ These are **expectations**, not contracts. The binding contract is:
 **NFR-2. Resource impact during tuning.**
 `autotune` is single-slot: at any moment, exactly one provider
 process is alive at single-batch concurrency. CPU/RAM/thermal
-impact MUST be at most one `macprovider-cli serve` process's worth.
+impact MUST be at most one `malibu-cli serve` process's worth.
 No concurrent buyers (enforced by FR-E.2 `--no-join`), no
 background workers, no spawn of parallel probes.
 
@@ -1289,7 +1289,7 @@ operator chooses to share that JSON). A classic SPEC-013 benchmark/probe run
 performs no network egress except the **HuggingFace pre-warm fetch path selected
 by FR-D.1** — i.e. either:
 
-- **Shape A:** explicit `macprovider-cli models pull <id>` (or
+- **Shape A:** explicit `malibu-cli models pull <id>` (or
   equivalent operator-invoked fetch) per FR-D.1.
 - **Shape B:** the runtime's online fallback during model load
   (`LLMModelFactory.shared.configuration(id:)` reaches HuggingFace
@@ -1331,7 +1331,7 @@ This is reference, not normative — the normative surface is the FRs
 above. The actual flag set is:
 
 ```
-macprovider-cli autotune
+malibu-cli autotune
   --target-context <N>           target context in tokens (default 2000)
   --candidate-models <csv>       override default ordered list (operator order is contract)
   --max-model-size <Nb>          trim default list above this size
@@ -1390,7 +1390,7 @@ are preserved.
 
 Each AC names the specific behavior the test verifies. Tests MUST
 NOT use mock providers exclusively — the autotune subcommand's
-contract is "drives a real `macprovider-cli serve` process," so the
+contract is "drives a real `malibu-cli serve` process," so the
 critical-path ACs require an integration harness that exercises the
 real binary on at least one RAM tier (8 GB is the cheapest to
 maintain).
@@ -1434,7 +1434,7 @@ the run MUST select cell B (lower TTFT). With cell B's ttft=4500ms
 prototype's `_is_new_best` semantics verbatim.
 
 **AC-6. Provider-conflict pre-flight refuses by default.**
-With a `macprovider-cli serve` already running on the configured
+With a `malibu-cli serve` already running on the configured
 port, `autotune` (no `--drain`) MUST refuse with a clear error
 naming the existing install path (`launchd-managed` or
 `foreground-PID-<n>`) and the `--drain` opt-in. The
@@ -1447,7 +1447,7 @@ MUST cover BOTH install paths:
   `launchctl bootout gui/$UID/live.malibu.provider`,
   completes the tune, and either restarts the original config
   (no `--apply`) or applies + restarts (with `--apply`).
-- **foreground case:** with `macprovider-cli serve ...`
+- **foreground case:** with `malibu-cli serve ...`
   running in a separate shell as the operator's PID, autotune
   detects via argv-match-on-`serve` (not `autotune` — the
   argv-match grep MUST NOT match the autotune process itself);
@@ -1472,7 +1472,7 @@ forces a transient-class pre-warm failure for candidate 1
 without specifying HOW:
 
 - **Shape A variant** (the implementation invokes
-  `macprovider-cli models pull <id>` or equivalent): mock the
+  `malibu-cli models pull <id>` or equivalent): mock the
   pull subcommand to exit non-zero (e.g. simulated HTTP 503).
 - **Shape B variant** (the implementation relies on the runtime
   online-fallback): block egress to HuggingFace at the
@@ -1742,7 +1742,7 @@ shapes. The implementing PR makes the call. The trade-off:
   Swift, which is more work than its value).
 
 **Option B: Ship the Python prototype as the v1
-implementation, invoked as `macprovider-cli autotune` via a Swift
+implementation, invoked as `malibu-cli autotune` via a Swift
 shim that exec's `python3 beta/autotune.py`.**
 - Pro: lands faster (prototype is ~1000 lines and works today);
   reuses harness.py + sweep.py + sweep_report.py unchanged.
@@ -1769,7 +1769,7 @@ divergence from the spec's FRs that the choice introduces.
 | Coordinator-served candidate list (so the network can ship new entrants without a binary release) | FR-C.3 explicitly defers. Requires SPEC-014 (or a SPEC-010 extension) defining the wire surface for the coordinator-served list, plus a freshness / signature contract. Not blocking the v1 product strategy. |
 | Per-provider recipe attestation (the coordinator verifies "this provider really ran the recipe it claims") | Coupled to SPEC-008 v0.3 Pillar A. Useful for trust tiers; not load-bearing for "biggest-fit recommendation." |
 | Sticky-affinity from recipes (route buyer requests preferentially to providers whose recipe matches a buyer's pin) | Coupled to SPEC-004 routing. Useful for "stable buyer experience across reconnects"; SPEC-013 v1 stays out of routing. |
-| Automatic re-tune on hardware/binary changes (cron-style "autotune ran last on binary v1.4.0; you're now on v1.5.0; run again?") | SPEC-013 v2 can add a status check (`macprovider-cli autotune --check-stale`) that recommends a re-tune; v1 leaves this to the operator. |
+| Automatic re-tune on hardware/binary changes (cron-style "autotune ran last on binary v1.4.0; you're now on v1.5.0; run again?") | SPEC-013 v2 can add a status check (`malibu-cli autotune --check-stale`) that recommends a re-tune; v1 leaves this to the operator. |
 | Pareto-frontier UX ("here are 3 candidates: biggest, fastest, balanced") | v1 is opinionated and singular per the product framing in §1. v2 can add `--show-pareto` if operators ask for it. |
 | Multi-model serving on one Mac (warm-pool of multiple loaded models) | Architectural; out of scope for an autotune subcommand. |
 | SPEC-011 warm-swap-driven tuning (load one provider once, swap models via the warm-swap path to avoid load-per-candidate cost) | SPEC-011 v0.5 is opt-in via `--enable-warm-swap`. v1 of autotune stays on the prototype's process-restart model. v2 can opt-in. |
@@ -1814,7 +1814,7 @@ deferred from the binding contract):
    (recommended catalog, recipe attestation,
    sticky-affinity-from-recipes, warm-swap-driven tuning).
 2. Add a one-line note to SPEC-003 v0.9.2's onboarding flow:
-   "after install, consider running `macprovider-cli autotune`
+   "after install, consider running `malibu-cli autotune`
    to find the best model for your Mac." (SPEC-003 is locked,
    so this is a v0.10 candidate or a CLAUDE.md addition.)
 3. Patch the cross-spec renumber per the note above (SPEC-010,
@@ -1843,7 +1843,7 @@ survives, what changes, and what is rejected.
 
 - **Provider lifecycle.** `start_provider` /
   `wait_for_ready` / `stop_provider` semantics. Including the
-  `pkill -f "macprovider-cli serve"` settle pattern (Option B
+  `pkill -f "malibu-cli serve"` settle pattern (Option B
   implementation) or the equivalent Swift subprocess handle (Option
   A). The invariant "one provider at a time, port released before
   the next candidate" is unchanged.

@@ -97,13 +97,13 @@ public final class PairingController: @unchecked Sendable {
 
     public func handleNeedsClaim() throws {
         try claimURLFile.writeMigrationStub()
-        Self.logger.info("ownership status needs_claim; run macprovider-cli claim")
+        Self.logger.info("ownership status needs_claim; run malibu-cli claim")
     }
 
     private func emitUserFacingClaimLine(claimURL: String) {
         let line = """
         ✓ Provider registered. To link this Mac to your account:
-            macprovider-cli claim
+            malibu-cli claim
           (or open: \(claimURL))
         """
         output(line)
