@@ -292,6 +292,28 @@ UPDATE hardware_verification_trust SET expires_at = ?
 	}
 }
 
+func TestSessionsWithoutActiveTrustQueryAvoidsTrustAliasCollision(t *testing.T) {
+	query := sessionsWithoutActiveTrustQuery()
+	for _, want := range []string{
+		"admitted(pid, hash, chip, mem)",
+		"SELECT admitted.pid, admitted.hash, admitted.chip, admitted.mem",
+		"t.provider_id = admitted.pid",
+		"t.hardware_identity_hash = admitted.hash",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("sessionsWithoutActiveTrustQuery() missing %q:\n%s", want, query)
+		}
+	}
+	for _, rejected := range []string{"t.pid", "t.hash", "t.mem"} {
+		if strings.Contains(query, rejected) {
+			t.Fatalf("sessionsWithoutActiveTrustQuery() reuses trust alias %q for admitted tuple:\n%s", rejected, query)
+		}
+	}
+	if strings.Contains(query, "t.chip,") || strings.Contains(query, "t.chip)") || strings.Contains(query, "t.chip\n") {
+		t.Fatalf("sessionsWithoutActiveTrustQuery() reuses trust alias for admitted chip:\n%s", query)
+	}
+}
+
 func openTrustRevalidationTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", fmt.Sprintf("file:trust-reval-%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "-")))

@@ -265,8 +265,22 @@ func TestRunReturnsZeroForCoordinatorDrain(t *testing.T) {
 		}
 		defer conn.Close()
 
-		if _, _, err := wsutil.ReadClientData(conn); err != nil {
+		payload, _, err := wsutil.ReadClientData(conn)
+		if err != nil {
 			t.Errorf("read hello: %v", err)
+			return
+		}
+		var h hello
+		if err := json.Unmarshal(payload, &h); err != nil {
+			t.Errorf("decode hello: %v", err)
+			return
+		}
+		if h.CatalogReleaseID != "release-a" ||
+			h.CatalogPolicyVersion != "policy-a" ||
+			h.CatalogSHA256 != strings.Repeat("a", 64) ||
+			h.CatalogSignerKeyID != "signer-a" ||
+			h.CatalogRowIdentity != strings.Repeat("b", 64) {
+			t.Errorf("catalog hello metadata = %+v", h)
 			return
 		}
 		ack, _ := json.Marshal(helloAck{
@@ -309,13 +323,18 @@ func TestRunReturnsZeroForCoordinatorDrain(t *testing.T) {
 	var output bytes.Buffer
 
 	code := run(config{
-		coordURL:        coordURL,
-		providerID:      "mock-A",
-		httpPort:        0,
-		drainDelayS:     1,
-		maxContext:      8192,
-		slots:           1,
-		omitEndpointURL: true,
+		coordURL:             coordURL,
+		providerID:           "mock-A",
+		httpPort:             0,
+		drainDelayS:          1,
+		maxContext:           8192,
+		slots:                1,
+		omitEndpointURL:      true,
+		catalogReleaseID:     "release-a",
+		catalogPolicyVersion: "policy-a",
+		catalogSHA256:        strings.Repeat("a", 64),
+		catalogSignerKeyID:   "signer-a",
+		catalogRowIdentity:   strings.Repeat("b", 64),
 	}, &output)
 
 	if code != 0 {
