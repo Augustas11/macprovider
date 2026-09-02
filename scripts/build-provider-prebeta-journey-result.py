@@ -219,6 +219,58 @@ def require_redaction(value: Any) -> dict[str, bool]:
     return {key: True for key in required}
 
 
+def require_environment(value: Any) -> dict[str, Any]:
+    environment = require_object(value, "environment")
+    for field in ("class", "hardware_profile", "candidate"):
+        require_string(environment.get(field), None, f"environment.{field}")
+    if environment.get("class") != EXECUTION_MODE:
+        die(f"environment.class must equal {EXECUTION_MODE!r}")
+
+    allowed = {
+        "class",
+        "hardware_profile",
+        "candidate",
+        "binary_version",
+        "compatibility_set",
+        "operating_system",
+        "production_equivalent_conditions",
+    }
+    output = {key: deepcopy(environment[key]) for key in environment if key in allowed}
+    for field in ("binary_version", "compatibility_set", "operating_system"):
+        if field in output:
+            require_string(output.get(field), None, f"environment.{field}")
+    if "production_equivalent_conditions" in output:
+        production_equivalent = require_object(
+            output.get("production_equivalent_conditions"),
+            "environment.production_equivalent_conditions",
+        )
+        string_fields = {
+            "provider_service",
+            "network_state_before",
+            "network_state_after",
+            "thermal_state",
+            "memory_pressure",
+        }
+        bool_fields = {
+            "coordinator_connected_before",
+            "coordinator_connected_after",
+            "model_loaded_before",
+            "model_loaded_after",
+            "thermally_throttled",
+        }
+        for field in string_fields:
+            require_string(production_equivalent.get(field), None, f"environment.production_equivalent_conditions.{field}")
+        for field in bool_fields:
+            if not isinstance(production_equivalent.get(field), bool):
+                die(f"environment.production_equivalent_conditions.{field} must be boolean")
+        output["production_equivalent_conditions"] = {
+            key: deepcopy(production_equivalent[key])
+            for key in production_equivalent
+            if key in string_fields or key in bool_fields
+        }
+    return output
+
+
 def require_result(value: Any) -> dict[str, Any]:
     result = deepcopy(require_object(value, "result"))
     if result.get("status") != "pass":
@@ -434,11 +486,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     operator = deepcopy(require_object(evidence.get("operator"), "operator"))
     require_string(operator.get("role"), None, "operator.role")
     require_string(operator.get("identity_fingerprint"), FINGERPRINT_RE, "operator.identity_fingerprint")
-    environment = deepcopy(require_object(evidence.get("environment"), "environment"))
-    for field in ("class", "hardware_profile", "candidate"):
-        require_string(environment.get(field), None, f"environment.{field}")
-    if environment.get("class") != EXECUTION_MODE:
-        die(f"environment.class must equal {EXECUTION_MODE!r}")
+    environment = require_environment(evidence.get("environment"))
     result = require_result(evidence.get("result"))
     steps = require_steps(evidence.get("steps"), selected_requirements, evidence_ids)
     redaction = require_redaction(evidence.get("redaction"))

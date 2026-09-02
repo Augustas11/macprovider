@@ -218,8 +218,11 @@ def strict_spec032_steps() -> list[dict]:
 def make_spec032_evidence(evidence: dict) -> None:
     evidence["run_id"] = "provider-prebeta-admission-spec032-strict-canary-20260902T120000Z"
     evidence["requirement_ids"] = ["SPEC-032-R001", "SPEC-032-R002", "SPEC-032-R003"]
+    evidence["repository"]["git_describe"] = "v1.8.118-29-g00000000"
     evidence["result"] = {"status": "pass", "summary": "Physical strict admission-gate matrix passed."}
     evidence["environment"]["class"] = "physical-provider-prebeta-admission"
+    evidence["environment"]["coordinator_identity"] = hashlib.sha256(b"isolated-canary-coordinator").hexdigest()
+    evidence["environment"]["production_target"] = "not coordinator.malibu.tech"
     evidence["steps"] = strict_spec032_steps()
 
 
@@ -1063,6 +1066,9 @@ class ProviderPrebetaJourneyResultTests(unittest.TestCase):
         self.assertEqual(0, completed.returncode, completed.stderr)
         payload = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(["SPEC-032-R001", "SPEC-032-R002", "SPEC-032-R003"], payload["requirement_ids"])
+        self.assertEqual({"name": "Augustas11/macprovider", "commit": source_commit}, payload["repository"])
+        self.assertNotIn("coordinator_identity", payload["environment"])
+        self.assertNotIn("production_target", payload["environment"])
         self.assertEqual("r001-over-ceiling", payload["steps"][0]["id"])
         self.assertEqual("r003-recovery-sweep", payload["steps"][-1]["id"])
         self.assertEqual("physical-provider-prebeta-admission", payload["execution_mode"])
