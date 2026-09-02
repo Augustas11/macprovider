@@ -488,14 +488,23 @@ func (s *PGStore) RefreshProviderHardwareProfile(ctx context.Context, providerID
 	}
 	appVersion = trimForStorage(appVersion, 80)
 	// Observe-only: refresh ONLY the freshness (last_reported_at) and reported
-	// version (app_version). We deliberately do NOT touch chip_normalized or
-	// unified_memory_gb — the migration-019 trust trigger clears `verified` when
-	// provider_onboarding changes those, which would let a heartbeat demote a
-	// verified provider and affect admission/routing. Hardware identity is
-	// established at registration/verification, not on a heartbeat.
-	_, err := s.db.ExecContext(ctx, `
+	// version (app_version). Keep the SQL within provider_onboarding's
+	// column-limited grants: reading app_version in an ELSE branch requires SELECT
+	// on that column, so split the empty-version case instead of widening grants.
+	var err error
+	if strings.TrimSpace(appVersion) == "" {
+		_, err = s.db.ExecContext(ctx, `
 UPDATE provider_hardware_profiles
-   SET app_version = CASE WHEN $2 <> '' THEN $2 ELSE app_version END,
+   SET last_reported_at = $2
+ WHERE provider_id = $1
+   AND last_reported_at <= $2`,
+			providerID, observedAt.UTC(),
+		)
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+UPDATE provider_hardware_profiles
+   SET app_version = $2,
        last_reported_at = $3
  WHERE provider_id = $1
    AND last_reported_at <= $3`,
@@ -1085,9 +1094,9 @@ type AdmittedTuple struct {
 // to $5. Reuses trustRootActiveExists so its active-trust semantics match the
 // admission/re-check predicate exactly.
 func sessionsWithoutActiveTrustQuery() string {
-	return `SELECT t.pid, t.hash, t.chip, t.mem
-  FROM unnest($1::text[], $2::text[], $3::text[], $4::int[]) AS t(pid, hash, chip, mem)
- WHERE NOT ` + trustRootActiveExists("t.pid", "t.hash", "t.chip", "t.mem", "$5")
+	return `SELECT admitted.pid, admitted.hash, admitted.chip, admitted.mem
+  FROM unnest($1::text[], $2::text[], $3::text[], $4::int[]) AS admitted(pid, hash, chip, mem)
+ WHERE NOT ` + trustRootActiveExists("admitted.pid", "admitted.hash", "admitted.chip", "admitted.mem", "$5")
 }
 
 // SessionsWithoutActiveTrust returns the subset of admitted session tuples whose

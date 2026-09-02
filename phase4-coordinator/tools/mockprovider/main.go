@@ -46,6 +46,11 @@ type hello struct {
 	BinaryVersion         string          `json:"binary_version"`
 	Attestation           json.RawMessage `json:"attestation"`
 	EndpointURL           *string         `json:"endpoint_url,omitempty"`
+	CatalogReleaseID      string          `json:"catalog_release_id,omitempty"`
+	CatalogPolicyVersion  string          `json:"catalog_policy_version,omitempty"`
+	CatalogSHA256         string          `json:"catalog_candidate_sha256,omitempty"`
+	CatalogSignerKeyID    string          `json:"catalog_signer_key_id,omitempty"`
+	CatalogRowIdentity    string          `json:"catalog_row_identity,omitempty"`
 }
 
 type helloAck struct {
@@ -131,23 +136,28 @@ type cancelRequest struct {
 }
 
 type config struct {
-	coordURL          string
-	providerID        string
-	model             string
-	ramGB             int
-	maxContext        int
-	maxConcurrency    int
-	slots             int
-	httpPort          int
-	streamDelayMS     int
-	rejectPreflight   string
-	rejectNAK         bool
-	omitEndpointURL   bool
-	endpointURL       string
-	drainDelayS       int
-	hbOverride        int
-	hbModelFile       string
-	providerTokenFile string
+	coordURL             string
+	providerID           string
+	model                string
+	ramGB                int
+	maxContext           int
+	maxConcurrency       int
+	slots                int
+	httpPort             int
+	streamDelayMS        int
+	rejectPreflight      string
+	rejectNAK            bool
+	omitEndpointURL      bool
+	endpointURL          string
+	drainDelayS          int
+	hbOverride           int
+	hbModelFile          string
+	providerTokenFile    string
+	catalogReleaseID     string
+	catalogPolicyVersion string
+	catalogSHA256        string
+	catalogSignerKeyID   string
+	catalogRowIdentity   string
 }
 
 func parseFlags() config {
@@ -169,6 +179,11 @@ func parseFlags() config {
 	flag.IntVar(&c.hbOverride, "hb", 0, "heartbeat interval override (seconds); 0 = use coordinator value")
 	flag.StringVar(&c.hbModelFile, "heartbeat-override-file", "", "optional JSON file read before each heartbeat; supports model_id and model_params_b")
 	flag.StringVar(&c.providerTokenFile, "provider-token-file", "", "optional file containing provider bearer token for the websocket handshake")
+	flag.StringVar(&c.catalogReleaseID, "catalog-release-id", "", "optional autotune catalog release id to include in hello")
+	flag.StringVar(&c.catalogPolicyVersion, "catalog-policy-version", "", "optional autotune catalog policy version to include in hello")
+	flag.StringVar(&c.catalogSHA256, "catalog-candidate-sha256", "", "optional autotune catalog sha256 to include in hello")
+	flag.StringVar(&c.catalogSignerKeyID, "catalog-signer-key-id", "", "optional autotune catalog signer key id to include in hello")
+	flag.StringVar(&c.catalogRowIdentity, "catalog-row-identity", "", "optional autotune catalog row identity to include in hello")
 	flag.Parse()
 	return c
 }
@@ -444,6 +459,11 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 		ThroughputTPSEstimate: 30.0,
 		BinaryVersion:         "mockprovider-0.1.0",
 		Attestation:           json.RawMessage(`{}`),
+		CatalogReleaseID:      cfg.catalogReleaseID,
+		CatalogPolicyVersion:  cfg.catalogPolicyVersion,
+		CatalogSHA256:         cfg.catalogSHA256,
+		CatalogSignerKeyID:    cfg.catalogSignerKeyID,
+		CatalogRowIdentity:    cfg.catalogRowIdentity,
 	}
 	if !cfg.omitEndpointURL {
 		endpoint := cfg.endpointURL

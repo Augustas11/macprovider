@@ -1,0 +1,482 @@
+{
+  "captured_at": "2026-09-02T14:00:50Z",
+  "catalog": {
+    "candidate_catalog_sha256": "10b792ad574042c22d8cbb555c67baf14d6357ea6727e56164f4d8b73c03fa4a",
+    "large_model_id": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+    "large_model_key": "meta-llama/llama-3.1-8b-instruct",
+    "large_model_min_ram_gb": 12,
+    "small_model_advisory_bench_gate": {
+      "min_sustained_tps": 15,
+      "max_4k_ttft_ms": 2500
+    },
+    "small_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+    "small_model_key": "meta-llama/llama-3.2-3b-instruct",
+    "small_model_min_ram_gb": 4
+  },
+  "config_flags": {
+    "admission_canary_harness.enabled": true,
+    "autotune.autotune_evidence_ttl_days": 30,
+    "autotune.enforce_provider_admission": true,
+    "autotune.require_autotune_hello_gate": true,
+    "proof_of_weights.autotune_evidence_ttl_days": 30,
+    "proof_of_weights.require_autotune_hello_gate": true
+  },
+  "environment": {
+    "candidate": "isolated loopback coordinator with disposable Postgres and SQLite state",
+    "class": "physical-provider-prebeta-admission",
+    "coordinator_identity": "13efb61fce4e004dead370dbd41f1c08d772d160701c7df8774584ec0095ccbe",
+    "hardware_profile": "one subject canary plus one control canary over local WiFi SSH reverse tunnels",
+    "production_target": "not coordinator.malibu.tech"
+  },
+  "expires_at": "2026-12-02",
+  "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+  "operator": {
+    "identity_fingerprint": "7e6e681794360d6ffe0dfeca3a6a57c383102cc9cea1a1f037b59007f595275f",
+    "role": "canary-operator"
+  },
+  "redaction": {
+    "buyer_ips_omitted": true,
+    "local_account_names_redacted": true,
+    "operator_identity": "salted_sha256_fingerprint",
+    "operator_identity_redacted": true,
+    "provider_ids": "salted_sha256_fingerprint",
+    "raw_machine_identities_omitted": true,
+    "secrets_redacted": true
+  },
+  "repository": {
+    "commit": "a2dc2b1c4fb5fd9a27770c1b7b79d2232f75f445",
+    "git_describe": "v1.8.118-29-ga2dc2b1c",
+    "name": "Augustas11/macprovider"
+  },
+  "requirement_ids": [
+    "SPEC-032-R001",
+    "SPEC-032-R002",
+    "SPEC-032-R003"
+  ],
+  "result": {
+    "status": "pass",
+    "summary": "S1-S3 passed on isolated physical canary; P_control stayed routing-eligible and serving throughout."
+  },
+  "run_id": "provider-prebeta-admission-spec032-strict-physical-20260902T135835Z",
+  "schema_version": "macprovider.provider-prebeta-admission-evidence.v1",
+  "steps": [
+    {
+      "id": "r001-over-ceiling",
+      "status": "pass",
+      "assertion": "over-ceiling heartbeat route-excludes only P_subject",
+      "requirement": "SPEC-032-R001",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ],
+      "subject_fingerprint": "6628f9a176389e4c88c178204429684218e2eb9b43cb6b52cad5d86a175fef5e",
+      "control_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+      "subject_before": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "subject_after": {
+        "routing_eligible": false,
+        "serving_capable": false,
+        "model_id": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+        "admission_ceiling_excluded": true,
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "control_after": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "non_admission_reason": "autotune_model_cap_exceeded",
+      "internal_reason": "autotune_model_cap_exceeded",
+      "buyer_smoke": {
+        "control_served_small_model": true,
+        "expected_subject_closed": true,
+        "subject_route_closed": true,
+        "status_code": 503,
+        "error_code": "no_provider_available",
+        "control_probe_status_code": 200,
+        "control_probe_served_provider_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357"
+      },
+      "durable_provider_credentials_minted": false,
+      "raw_capture": {
+        "admitted_min_ram_gb": 4,
+        "admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "advisory_gate_ignored": true,
+        "catalog_claimed_min_ram_gb": 12,
+        "claimed_model_id": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
+      }
+    },
+    {
+      "id": "r001-uncatalogued",
+      "status": "pass",
+      "assertion": "uncatalogued heartbeat route-excludes only P_subject",
+      "requirement": "SPEC-032-R001",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ],
+      "subject_fingerprint": "6628f9a176389e4c88c178204429684218e2eb9b43cb6b52cad5d86a175fef5e",
+      "control_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+      "subject_before": {
+        "routing_eligible": false,
+        "serving_capable": false,
+        "model_id": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+        "admission_ceiling_excluded": true,
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "subject_after": {
+        "routing_eligible": false,
+        "serving_capable": false,
+        "model_id": "mlx-community/spec032-uncatalogued-model",
+        "admission_ceiling_excluded": true,
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "control_after": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "non_admission_reason": "autotune_model_uncatalogued",
+      "internal_reason": "autotune_model_uncatalogued",
+      "buyer_smoke": {
+        "control_served_small_model": true,
+        "expected_subject_closed": true,
+        "subject_route_closed": true,
+        "status_code": 503,
+        "error_code": "no_provider_available",
+        "control_probe_status_code": 200,
+        "control_probe_served_provider_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357"
+      },
+      "durable_provider_credentials_minted": false,
+      "raw_capture": {
+        "advisory_gate_ignored": true,
+        "claimed_model_id": "mlx-community/spec032-uncatalogued-model"
+      }
+    },
+    {
+      "id": "r001-clears",
+      "status": "pass",
+      "assertion": "in-ceiling catalogued heartbeat clears P_subject exclusion",
+      "requirement": "SPEC-032-R001",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ],
+      "subject_fingerprint": "6628f9a176389e4c88c178204429684218e2eb9b43cb6b52cad5d86a175fef5e",
+      "control_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+      "subject_before": {
+        "routing_eligible": false,
+        "serving_capable": false,
+        "model_id": "mlx-community/spec032-uncatalogued-model",
+        "admission_ceiling_excluded": true,
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "subject_after": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "control_after": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "buyer_smoke": {
+        "control_served_small_model": false,
+        "expected_subject_closed": false,
+        "subject_route_closed": false,
+        "status_code": 200,
+        "control_probe_status_code": 200,
+        "target_served_provider_fingerprint": "6628f9a176389e4c88c178204429684218e2eb9b43cb6b52cad5d86a175fef5e",
+        "control_probe_served_provider_fingerprint": "6628f9a176389e4c88c178204429684218e2eb9b43cb6b52cad5d86a175fef5e",
+        "control_probe_unexpected_reason": "small-model probe served non-control provider"
+      },
+      "durable_provider_credentials_minted": false,
+      "raw_capture": {
+        "advisory_gate_ignored": true,
+        "claimed_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit"
+      }
+    },
+    {
+      "id": "r002-expired",
+      "status": "pass",
+      "assertion": "expired admitted evidence route-excludes only P_subject on the 30s sweep",
+      "requirement": "SPEC-032-R002",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ],
+      "subject_fingerprint": "6628f9a176389e4c88c178204429684218e2eb9b43cb6b52cad5d86a175fef5e",
+      "control_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+      "subject_before": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "subject_after": {
+        "routing_eligible": false,
+        "serving_capable": false,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "admission_evidence_stale": true,
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "control_after": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "non_admission_reason": "autotune_evidence_stale_or_mismatched",
+      "internal_reason": "autotune_evidence_expired",
+      "buyer_smoke": {
+        "control_served_small_model": true,
+        "expected_subject_closed": true,
+        "subject_route_closed": true,
+        "status_code": 200,
+        "control_probe_status_code": 200,
+        "target_served_provider_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+        "control_probe_served_provider_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357"
+      },
+      "durable_provider_credentials_minted": false,
+      "raw_capture": {
+        "evidence_generated_at": "2026-08-02T13:59:09Z",
+        "ttl_days": 30
+      }
+    },
+    {
+      "id": "r002-tuple-mismatch",
+      "status": "pass",
+      "assertion": "tuple-mismatched verified evidence route-excludes only P_subject on the 30s sweep",
+      "requirement": "SPEC-032-R002",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ],
+      "subject_fingerprint": "6628f9a176389e4c88c178204429684218e2eb9b43cb6b52cad5d86a175fef5e",
+      "control_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+      "subject_before": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "subject_after": {
+        "routing_eligible": false,
+        "serving_capable": false,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "admission_evidence_stale": true,
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "control_after": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "non_admission_reason": "autotune_evidence_stale_or_mismatched",
+      "internal_reason": "autotune_evidence_tuple_mismatch",
+      "buyer_smoke": {
+        "control_served_small_model": true,
+        "expected_subject_closed": true,
+        "subject_route_closed": true,
+        "status_code": 200,
+        "control_probe_status_code": 200,
+        "target_served_provider_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+        "control_probe_served_provider_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357"
+      },
+      "durable_provider_credentials_minted": false,
+      "raw_capture": {
+        "tuple_fields": [
+          "hardware_identity_hash",
+          "chip_normalized",
+          "unified_memory_gb"
+        ]
+      }
+    },
+    {
+      "id": "r002-missing-tuple",
+      "status": "pass",
+      "assertion": "missing admitted tuple route-excludes only P_subject on the 30s sweep",
+      "requirement": "SPEC-032-R002",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ],
+      "subject_fingerprint": "6628f9a176389e4c88c178204429684218e2eb9b43cb6b52cad5d86a175fef5e",
+      "control_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+      "subject_before": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "subject_after": {
+        "routing_eligible": false,
+        "serving_capable": false,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "admission_evidence_stale": true,
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4
+      },
+      "control_after": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "non_admission_reason": "autotune_evidence_stale_or_mismatched",
+      "internal_reason": "autotune_admitted_tuple_missing",
+      "buyer_smoke": {
+        "control_served_small_model": true,
+        "expected_subject_closed": true,
+        "subject_route_closed": true,
+        "status_code": 200,
+        "control_probe_status_code": 200,
+        "target_served_provider_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+        "control_probe_served_provider_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357"
+      },
+      "durable_provider_credentials_minted": false,
+      "raw_capture": {
+        "admitted_tuple_cleared": true
+      }
+    },
+    {
+      "id": "r003-sandbox-and-failclosed-reload",
+      "status": "pass",
+      "assertion": "evidence-absent provider is sandboxed and proof-of-weights reload fails closed",
+      "requirement": "SPEC-032-R003",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ],
+      "subject_fingerprint": "6628f9a176389e4c88c178204429684218e2eb9b43cb6b52cad5d86a175fef5e",
+      "control_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+      "subject_before": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit"
+      },
+      "subject_after": {
+        "routing_eligible": false,
+        "serving_capable": false,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "admission_sandboxed": true
+      },
+      "control_after": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "non_admission_reason": "autotune_evidence_required",
+      "internal_reason": "autotune_evidence_required",
+      "buyer_smoke": {
+        "control_served_small_model": true,
+        "expected_subject_closed": true,
+        "subject_route_closed": true,
+        "status_code": 200,
+        "control_probe_status_code": 200,
+        "target_served_provider_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+        "control_probe_served_provider_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357"
+      },
+      "durable_provider_credentials_minted": false,
+      "fail_closed_reload_observed": true,
+      "raw_capture": {
+        "active_tokens_after": 1,
+        "active_tokens_before": 1,
+        "proof_of_weights_reload": {
+          "generation": 2,
+          "pre_quarantined": 2,
+          "revalidated": 2,
+          "sandboxed": 1,
+          "route_excluded": 0,
+          "still_evidence_stale": 0,
+          "cleared_gate_exclusions": 0
+        }
+      }
+    },
+    {
+      "id": "r003-recovery-sweep",
+      "status": "pass",
+      "assertion": "revalidation sweep keeps evidence-absent P_subject sandboxed while P_control remains serving",
+      "requirement": "SPEC-032-R003",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ],
+      "subject_fingerprint": "6628f9a176389e4c88c178204429684218e2eb9b43cb6b52cad5d86a175fef5e",
+      "control_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+      "subject_before": {
+        "routing_eligible": false,
+        "serving_capable": false,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "admission_sandboxed": true
+      },
+      "subject_after": {
+        "routing_eligible": false,
+        "serving_capable": false,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "admission_sandboxed": true
+      },
+      "control_after": {
+        "routing_eligible": true,
+        "serving_capable": true,
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "max_admitted_min_ram_gb": 4,
+        "has_admitted_tuple": true
+      },
+      "non_admission_reason": "autotune_evidence_required",
+      "internal_reason": "autotune_evidence_required",
+      "buyer_smoke": {
+        "control_served_small_model": true,
+        "expected_subject_closed": true,
+        "subject_route_closed": true,
+        "status_code": 200,
+        "control_probe_status_code": 200,
+        "target_served_provider_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357",
+        "control_probe_served_provider_fingerprint": "acd0b9308fe846d12769aae3dbea97d51a7d567d4fe2d40d6c3b55d19c657357"
+      },
+      "durable_provider_credentials_minted": false,
+      "raw_capture": {
+        "revalidation_sweep_wait_s": 35
+      }
+    }
+  ]
+}
