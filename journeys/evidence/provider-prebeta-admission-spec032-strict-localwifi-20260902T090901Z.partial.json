@@ -1,0 +1,215 @@
+{
+  "schema_version": "macprovider.journey-evidence.partial.v1",
+  "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+  "run_id": "provider-prebeta-admission-spec032-strict-localwifi-20260902T090901Z",
+  "requirement_ids": [
+    "SPEC-032-R001",
+    "SPEC-032-R002",
+    "SPEC-032-R003"
+  ],
+  "capture": {
+    "captured_at": "2026-09-02T10:10:28Z",
+    "captured_by": "provider-prebeta-operator",
+    "repository_commit": "47a682678d772f17b473b552176a56beca512f09",
+    "candidate_build_identity": "v1.8.118-24-g47a68267",
+    "artifact_scope": "partial-physical-evidence",
+    "status": "blocked-before-signed-conformance-promotion",
+    "blocking_verdict": "The isolated physical canary captured useful SPEC-032 strict-gate evidence for stale-evidence exclusion, tuple-mismatch exclusion, evidence-absent sandboxing, and reload revalidation. It did not complete the full promotable matrix: R001 over-ceiling/uncatalogued heartbeat transitions were not safely executable through the shipped physical CLI, R002 missing-admitted-tuple was not physically exercised, and R003 hot-enable fail-closed reload from gate-off to gate-on was not physically exercised.",
+    "conformance_promotion": "not-promoted; no specs/CONFORMANCE.json row is updated from this partial artifact.",
+    "redaction": {
+      "provider_ids": "stable sha256 fingerprints retained; raw provider IDs omitted",
+      "assigned_session_ids": "omitted",
+      "machine_identities": "stable sha256 fingerprints retained where needed",
+      "operator_credentials": "omitted",
+      "buyer_tokens": "omitted",
+      "hostnames": "omitted",
+      "lan_ips": "omitted",
+      "secrets": "omitted"
+    }
+  },
+  "environment": {
+    "class": "isolated-local-canary-coordinator",
+    "coordinator_fingerprint": "f5f40c72dff02be3ee2f75c7f422888f2bf2ea6bd8a7f05c672aae581d4c3542",
+    "production_surface": "not touched; Pearl production coordinator and production provider cohort were out of scope",
+    "provider_cohort": {
+      "subject_fingerprint": "010c16fae8c184b9d80c91911ef890838b54dd3a6873f9a9d7b23451d852d181",
+      "control_fingerprint": "af603ab15c3d5e1183dda42fed627c0d4d4e89cc137c7aabf7f3b581976fe704",
+      "sandbox_fingerprint": "dfd70bb11045c87e8cf596285203e328acfa6170e306b3abc1af1b68e4e698c1"
+    },
+    "config_under_test": {
+      "autotune.require_autotune_hello_gate": true,
+      "autotune.enforce_provider_admission": true,
+      "autotune.autotune_evidence_ttl_days": 30,
+      "proof_of_weights.reload_path": "SIGHUP reloadCoordinatorConfig to SetProofOfWeightsConfig and revalidation"
+    },
+    "rollback": {
+      "autotune.require_autotune_hello_gate": false,
+      "coordinator_config_validated_after_rollback": true,
+      "canary_pool_drained_after_run": true,
+      "final_pool_summary": {
+        "total_providers": 0,
+        "ready": 0,
+        "policy_ready": 0,
+        "total_slots": 0,
+        "free_slots": 0
+      }
+    }
+  },
+  "evidence_inputs": {
+    "capture_file_sha256": {
+      "baseline_pool": "eb7c88972c4be9c0beefe8b006a150b1596a2c844a4f73f6fb1ac44ae6891173",
+      "s2_expiry_after": "9c2281f2204b748f7d6aa21c9d1846ba2b29525ef66e4bbfb7270780446854cd",
+      "s2_recover_after": "ac9d328618a0c7b34ed76449be94b5ada6be64eb97c53f8b3a624aafcea5daa4",
+      "s2_tuple_after": "2d732655cde4c6c72b1a276859460c4e43d5c60dc877033f15bd424a7f77115f",
+      "s3_sandbox_after": "320d3e9fd661e61550b2f0a4f6d2dbfdeabbb69418e7010e3be17a5954acd93b",
+      "s3_reload_after": "bfe3bf1a02c8630ca00804dde882542d8f09f14bbd5db34bdc63e24227f85082",
+      "s2_expiry_buyer_smoke": "8848c13816ef9fb5ae2d1e2cda7ed8922750b7bb4aa9cdf69fe65f6118ecf7b3",
+      "s3_control_readiness": "f3a6d735d0ffe4c71377cb41c18f3b10e54ddbd17745be7653291e430f60f830",
+      "s3_sandbox_readiness": "b2ad3aa8d436b638098158d579798d6a2a470a43bf45192214e9ef5fa800b474"
+    },
+    "physical_verifier": {
+      "subject_status": "verified",
+      "control_status": "verified",
+      "decision_reason": "hardware-verifier.v2:verified_trusted_hardware",
+      "sandbox_evidence_rows": 0
+    },
+    "catalog_model": {
+      "model_key": "meta-llama/llama-3.2-3b-instruct",
+      "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "artifact_sha256": "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90",
+      "min_ram_gb": 4
+    }
+  },
+  "observations": {
+    "baseline": {
+      "summary": {
+        "total_providers": 2,
+        "ready": 2,
+        "policy_ready": 2,
+        "total_slots": 2,
+        "free_slots": 2
+      },
+      "subject": {
+        "routing_eligible": true,
+        "max_admitted_min_ram_gb": 4
+      },
+      "control": {
+        "routing_eligible": true,
+        "max_admitted_min_ram_gb": 4
+      }
+    },
+    "r002_expiry_subcase": {
+      "trigger": "isolated canary verifier timestamp aged past the configured 30 day TTL for the subject only",
+      "subject_after": {
+        "routing_eligible": false,
+        "admission_evidence_stale": true,
+        "non_admission_reason": "autotune_evidence_expired"
+      },
+      "control_after": {
+        "routing_eligible": true,
+        "buyer_serving": true
+      },
+      "buyer_smoke": {
+        "http_status": 200,
+        "route_excluded_subject_not_selected": true
+      }
+    },
+    "r002_recovery_subcase": {
+      "trigger": "subject verifier generated_at restored from its submitted physical evidence payload",
+      "subject_after": {
+        "routing_eligible": true,
+        "admission_evidence_stale": false
+      },
+      "control_after": {
+        "routing_eligible": true
+      }
+    },
+    "r002_tuple_mismatch_subcase": {
+      "trigger": "isolated canary verified tuple changed to a different unified-memory value for the subject only",
+      "subject_after": {
+        "routing_eligible": false,
+        "admission_evidence_stale": true,
+        "non_admission_reason": "autotune_evidence_tuple_mismatch"
+      },
+      "control_after": {
+        "routing_eligible": true,
+        "buyer_serving": true
+      }
+    },
+    "r003_evidence_absent_sandbox_subcase": {
+      "trigger": "sandbox provider connected under strict hello gate with no verified in-window evidence rows",
+      "sandbox_after": {
+        "routing_eligible": false,
+        "admission_sandboxed": true,
+        "buyer_serving": false,
+        "non_admission_reason": "autotune_evidence_required",
+        "durable_provider_credentials_minted": false
+      },
+      "control_after": {
+        "routing_eligible": true,
+        "buyer_serving": true
+      }
+    },
+    "r003_same_config_reload_subcase": {
+      "trigger": "proof-of-weights SIGHUP reload while the evidence-absent sandbox session was present and strict gate was already enabled",
+      "sandbox_after": {
+        "routing_eligible": false,
+        "admission_sandboxed": true,
+        "buyer_serving": false
+      },
+      "control_after": {
+        "routing_eligible": true
+      },
+      "fail_closed_window_observed": true
+    },
+    "advisory_bench_gate": {
+      "provider_apply_warnings_observed": [
+        "tps_below_gate",
+        "ttft_above_gate"
+      ],
+      "exclusion_or_sandbox_reason_cited_bench_gate": false,
+      "reason": "Captured exclusion/sandbox reasons were autotune_evidence_expired, autotune_evidence_tuple_mismatch, and autotune_evidence_required."
+    }
+  },
+  "requirement_gate_result": {
+    "SPEC-032-R001": {
+      "status": "not_promotable",
+      "missing_physical_subcases": [
+        "over-ceiling heartbeat route-exclusion",
+        "uncatalogued heartbeat route-exclusion",
+        "in-ceiling heartbeat clears exclusion"
+      ],
+      "blocker": "The shipped physical CLI model switch path requires local signed artifact authority and would attempt real model loading; no safe metadata-only heartbeat transition hook exists for the physical canary."
+    },
+    "SPEC-032-R002": {
+      "status": "partial-pass-not-promotable",
+      "passed_physical_subcases": [
+        "expired evidence route-excludes subject while control remains routable",
+        "tuple-mismatched evidence route-excludes subject while control remains routable",
+        "restored evidence clears stale exclusion"
+      ],
+      "missing_physical_subcases": [
+        "missing admitted tuple route-excludes capped subject"
+      ],
+      "blocker": "The missing admitted tuple is an in-memory live-session condition; the physical coordinator API has no safe canary-only mutation hook to clear it after admission."
+    },
+    "SPEC-032-R003": {
+      "status": "partial-pass-not-promotable",
+      "passed_physical_subcases": [
+        "evidence-absent strict-gate provider is sandboxed, unroutable, and not buyer-serving",
+        "sandbox provider did not mint a durable bootstrap identity",
+        "same-config proof-of-weights reload preserved fail-closed routing for the sandbox provider and kept the control routable"
+      ],
+      "missing_physical_subcases": [
+        "hot-enable reload from gate-off to gate-on with an existing unverified session present"
+      ],
+      "blocker": "The physical run did not execute the exact gate-off to gate-on reload sequence required by the promotable harness."
+    }
+  },
+  "promotion": {
+    "signed_journey_result_eligible": false,
+    "protected_acceptance_workflow_run": false,
+    "conformance_json_updated": false,
+    "issue_959_close_eligible": false
+  }
+}
