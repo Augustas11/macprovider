@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -17,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -143,6 +145,7 @@ type config struct {
 	endpointURL     string
 	drainDelayS     int
 	hbOverride      int
+	hbModelFile     string
 }
 
 func parseFlags() config {
@@ -162,8 +165,85 @@ func parseFlags() config {
 	flag.StringVar(&c.endpointURL, "endpoint-url", "", "endpoint_url to advertise in hello; default uses http-port unless omitted")
 	flag.IntVar(&c.drainDelayS, "drain-delay-s", 2, "delay between drain phases in seconds")
 	flag.IntVar(&c.hbOverride, "hb", 0, "heartbeat interval override (seconds); 0 = use coordinator value")
+	flag.StringVar(&c.hbModelFile, "heartbeat-override-file", "", "optional JSON file read before each heartbeat; supports model_id and model_params_b")
 	flag.Parse()
 	return c
+}
+
+type heartbeatOverride struct {
+	ModelID      string   `json:"model_id"`
+	ModelParamsB *float64 `json:"model_params_b"`
+}
+
+const maxHeartbeatOverrideBytes = 8192
+
+func readHeartbeatOverride(path string) (heartbeatOverride, bool, error) {
+	if strings.TrimSpace(path) == "" {
+		return heartbeatOverride{}, false, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return heartbeatOverride{}, false, err
+	}
+	if !info.Mode().IsRegular() {
+		return heartbeatOverride{}, false, fmt.Errorf("override path must be a regular file")
+	}
+	if info.Size() > maxHeartbeatOverrideBytes {
+		return heartbeatOverride{}, false, fmt.Errorf("override file exceeds %d bytes", maxHeartbeatOverrideBytes)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return heartbeatOverride{}, false, err
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return heartbeatOverride{}, false, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var override heartbeatOverride
+	if err := dec.Decode(&override); err != nil {
+		return heartbeatOverride{}, false, err
+	}
+	if strings.TrimSpace(override.ModelID) == "" && override.ModelParamsB == nil {
+		return heartbeatOverride{}, false, fmt.Errorf("override must set model_id or model_params_b")
+	}
+	override.ModelID = strings.TrimSpace(override.ModelID)
+	if override.ModelParamsB != nil && (*override.ModelParamsB < 0 || *override.ModelParamsB > 10000) {
+		return heartbeatOverride{}, false, fmt.Errorf("model_params_b out of range")
+	}
+	return override, true, nil
+}
+
+func currentHeartbeat(cfg config, logger *log.Logger, drainer *drainController) heartbeat {
+	modelID := cfg.model
+	modelParamsB := 7.0
+	if override, ok, err := readHeartbeatOverride(cfg.hbModelFile); err != nil {
+		logger.Printf("heartbeat override ignored: %v", err)
+	} else if ok {
+		if override.ModelID != "" {
+			modelID = override.ModelID
+		}
+		if override.ModelParamsB != nil {
+			modelParamsB = *override.ModelParamsB
+		}
+	}
+	hb := heartbeat{
+		Type:                  "heartbeat",
+		Status:                "ready",
+		ModelID:               modelID,
+		ModelParamsB:          modelParamsB,
+		RAMGB:                 cfg.ramGB,
+		MaxContextTokens:      cfg.maxContext,
+		MaxConcurrency:        cfg.maxConcurrency,
+		SlotsFree:             cfg.slots,
+		SlotsTotal:            cfg.slots,
+		ThroughputTPSEstimate: 30.0,
+	}
+	if drainer != nil && drainer.isDraining() {
+		hb.Status = "draining"
+		hb.SlotsFree = 0
+	}
+	return hb
 }
 
 // drainController shares drain state between the WS goroutine and the HTTP
@@ -322,22 +402,7 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 			case <-stopHB:
 				return
 			case <-t.C:
-				hb := heartbeat{
-					Type:                  "heartbeat",
-					Status:                "ready",
-					ModelID:               cfg.model,
-					ModelParamsB:          7.0,
-					RAMGB:                 cfg.ramGB,
-					MaxContextTokens:      cfg.maxContext,
-					MaxConcurrency:        cfg.maxConcurrency,
-					SlotsFree:             cfg.slots,
-					SlotsTotal:            cfg.slots,
-					ThroughputTPSEstimate: 30.0,
-				}
-				if drainer.isDraining() {
-					hb.Status = "draining"
-					hb.SlotsFree = 0
-				}
+				hb := currentHeartbeat(cfg, logger, drainer)
 				b, _ := json.Marshal(hb)
 				if err := writeText(b); err != nil {
 					logger.Printf("heartbeat write failed: %v", err)
@@ -348,18 +413,7 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 	}()
 
 	// Initial immediate heartbeat (don't wait for first tick).
-	hb0 := heartbeat{
-		Type:                  "heartbeat",
-		Status:                "ready",
-		ModelID:               cfg.model,
-		ModelParamsB:          7.0,
-		RAMGB:                 cfg.ramGB,
-		MaxContextTokens:      cfg.maxContext,
-		MaxConcurrency:        cfg.maxConcurrency,
-		SlotsFree:             cfg.slots,
-		SlotsTotal:            cfg.slots,
-		ThroughputTPSEstimate: 30.0,
-	}
+	hb0 := currentHeartbeat(cfg, logger, drainer)
 	hb0Bytes, _ := json.Marshal(hb0)
 	_ = writeText(hb0Bytes)
 
@@ -423,18 +477,7 @@ func handleInbound(cfg config, logger *log.Logger, drainer *drainController,
 		}
 	case "warm_up":
 		logger.Printf("warm_up received; sending fresh heartbeat")
-		hb := heartbeat{
-			Type:                  "heartbeat",
-			Status:                "ready",
-			ModelID:               cfg.model,
-			ModelParamsB:          7.0,
-			RAMGB:                 cfg.ramGB,
-			MaxContextTokens:      cfg.maxContext,
-			MaxConcurrency:        cfg.maxConcurrency,
-			SlotsFree:             cfg.slots,
-			SlotsTotal:            cfg.slots,
-			ThroughputTPSEstimate: 30.0,
-		}
+		hb := currentHeartbeat(cfg, logger, drainer)
 		b, _ := json.Marshal(hb)
 		_ = writeText(b)
 	case "drain":
