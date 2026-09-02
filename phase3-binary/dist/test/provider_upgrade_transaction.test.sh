@@ -22,10 +22,13 @@ extract_function() {
 for function_name in \
   validate_install_dir validate_port_value \
   release_install_lock acquire_install_lock \
-  validate_repair_privilege_domain \
+  launchctl_service verify_published_launchd_plist validate_repair_privilege_domain \
   read_config_provider_id read_config_provider_token_line \
   installed_provider_binary_path restart_safe_incumbent_present \
-  repair_safe_incumbent_present prepare_fresh_referral_code \
+  repair_safe_incumbent_present headless_acceptance_repair_mode \
+  provider_executable_owned_for_current_mode \
+  headless_acceptance_repair_safe_incumbent_present \
+  repair_incumbent_present_for_current_mode prepare_fresh_referral_code \
   quiesce_repair_watchdog_label_for_transaction quiesce_repair_watchdogs_for_transaction \
   remediate_repair_home_write_acl \
   repair_autoupdate_recovery_preflight autoupdate_recovery_supported autoupdate_recovery_tick \
@@ -61,20 +64,33 @@ snapshot = main.index("begin_install_transaction")
 stage = main.index("stage_release_payload", snapshot)
 prepare = main.index("prepare_staged_config", stage)
 freshness = main.index("use_fresh_recommendation_if_available", stage)
-recommend_gate = main.index('if [ "$AUTOTUNE_RECOMMENDATION_REQUIRED" -eq 1 ]', freshness)
 prefetch = main.index("prefetch_upgrade_autotune_model", freshness)
+headless_credentials = main.index("ensure_headless_acceptance_credentials_before_cutover", prefetch)
+recommend_gate = main.index('if [ "$AUTOTUNE_RECOMMENDATION_REQUIRED" -eq 1 ]', headless_credentials)
 cutover_marker = main.index("mark_install_cutover_started", recommend_gate)
 stop = main.index("ensure_port_free 1", recommend_gate)
 recommend = main.index("run_autotune_recommend_apply", stop)
 install = main.index("install_binary", recommend)
 activate = main.index("activate_staged_config", install)
-if not validate_dir < repair_home_acl < repair_recovery < acquire_lock < snapshot < stage < prepare < freshness < prefetch < recommend_gate < cutover_marker < stop < recommend < install < activate:
+if not validate_dir < repair_home_acl < repair_recovery < acquire_lock < snapshot < stage < prepare < freshness < prefetch < headless_credentials < recommend_gate < cutover_marker < stop < recommend < install < activate:
     raise SystemExit("benchmarks are not isolated from the live provider and staged cutover")
+credential_helper = source[source.index("ensure_headless_acceptance_credentials_before_cutover() {"):source.index("submit_required_hardware_evidence() {")]
+if "headless_acceptance_repair_mode || return 0" not in credential_helper or "ensure_provider_credentials" not in credential_helper:
+    raise SystemExit("headless acceptance repair credentials must be revalidated before cutover")
 transaction = source[source.index("begin_install_transaction() {"):source.index("mark_install_cutover_started() {")]
 strict = transaction.index("quiesce_repair_watchdog_label_for_transaction")
 generic = transaction.index("reclaim_launchd_service")
 if not strict < generic:
     raise SystemExit("repair watchdog shutdown must use strict liveness proof before generic reclaim")
+if 'provider_snapshot_alternate="${HEADLESS_REPAIR_INCUMBENT_BINARY:-}"' not in transaction:
+    raise SystemExit("headless acceptance repair must snapshot only the proven incumbent LaunchDaemon binary")
+recovery = source[source.index("write_install_recovery_artifacts() {"):source.index("recovery_log() {", source.index("write_install_recovery_artifacts() {"))]
+if "REC_HEADLESS_REPAIR_INCUMBENT_BINARY" not in recovery:
+    raise SystemExit("headless acceptance repair must persist the proven incumbent binary in recovery state")
+if "REC_HEADLESS_REPAIR_INCUMBENT_SHA256" not in recovery:
+    raise SystemExit("headless acceptance repair must persist the proven incumbent binary digest in recovery state")
+if '"$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY"' not in recovery:
+    raise SystemExit("headless recovery must validate plists against the persisted incumbent binary")
 helper = source[source.index("run_macprovider_cli_with_amfi_retry() {"):source.index("detect_existing_port() {")]
 if 'local cli_path="$MACPROVIDER_CLI_EXECUTABLE"' not in helper:
     raise SystemExit("recommendation helper is not routed to the staged CLI")
@@ -256,7 +272,330 @@ if (
   die() { exit "$1"; }
   validate_repair_privilege_domain
 ); then
-  echo "headless/system Malibu bundled repair did not fail closed explicitly" >&2
+  echo "headless/system repair without signed acceptance did not fail closed explicitly" >&2
+  exit 1
+fi
+(
+  REPAIR_EXISTING_INSTALL=1
+  HEADLESS=1
+  LAUNCHD_DOMAIN=system
+  BUNDLED_APP=""
+  MACPROVIDER_ACCEPTANCE_ASSET_DIR="$TMP/acceptance"
+  validate_repair_privilege_domain
+) || {
+  echo "signed headless acceptance repair was blocked by the Malibu.app repair domain gate" >&2
+  exit 1
+}
+HEADLESS_REPAIR_HOME="$TMP/headless-repair-home"
+HEADLESS_REPAIR_CONFIG_DIR="$HEADLESS_REPAIR_HOME/.config/macprovider"
+HEADLESS_REPAIR_INSTALL_DIR="$HEADLESS_REPAIR_HOME/macprovider"
+HEADLESS_REPAIR_MANAGED_DIR="$HEADLESS_REPAIR_CONFIG_DIR/launchd"
+HEADLESS_REPAIR_SYSTEM_DIR="$TMP/headless-system"
+HEADLESS_REPAIR_CONFIG_PATH="$HEADLESS_REPAIR_CONFIG_DIR/config.yaml"
+HEADLESS_REPAIR_PROVIDER_ID_PATH="$HEADLESS_REPAIR_CONFIG_DIR/provider_id"
+HEADLESS_REPAIR_PLIST_PATH="$HEADLESS_REPAIR_MANAGED_DIR/live.malibu.provider.plist"
+HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH="$HEADLESS_REPAIR_SYSTEM_DIR/live.malibu.provider.plist"
+HEADLESS_REPAIR_INCUMBENT_DIR="$HEADLESS_REPAIR_HOME/headless-acceptance-smoke"
+HEADLESS_REPAIR_INCUMBENT_BINARY="$HEADLESS_REPAIR_INCUMBENT_DIR/macprovider-cli"
+HEADLESS_REPAIR_PROVIDER_ID="mp-fedcba9876543210fedcba9876543210"
+mkdir -m 700 -p \
+  "$HEADLESS_REPAIR_CONFIG_DIR/protected-credentials" \
+  "$HEADLESS_REPAIR_MANAGED_DIR" \
+  "$HEADLESS_REPAIR_SYSTEM_DIR" \
+  "$HEADLESS_REPAIR_INCUMBENT_DIR"
+cat > "$HEADLESS_REPAIR_CONFIG_PATH" <<EOF
+model: "mlx-community/Qwen3-8B-4bit"
+provider_id: "$HEADLESS_REPAIR_PROVIDER_ID"
+credential_store: protected_file
+auto_update_enabled: false
+coordinator_url: "wss://coordinator.example/ws/provider"
+EOF
+printf '%s\n' "$HEADLESS_REPAIR_PROVIDER_ID" > "$HEADLESS_REPAIR_PROVIDER_ID_PATH"
+cat > "$HEADLESS_REPAIR_INCUMBENT_BINARY" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'v1.8.109\n'
+  exit 0
+fi
+if [ "${1:-}" = "credentials" ] && [ "${2:-}" = "verify" ]; then
+  shift 2
+  config=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --config)
+        config="$2"
+        shift 2
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  [ -n "$config" ] && [ -f "$config" ]
+  [ "${MACPROVIDER_CREDENTIAL_STORE:-}" = "protected_file" ]
+  [ "${MACPROVIDER_HEADLESS:-}" = "1" ]
+  [ "${MACPROVIDER_LAUNCHD_DOMAIN:-}" = "system" ]
+  exit "${MACPROVIDER_TEST_CREDENTIAL_VERIFY_RC:-0}"
+fi
+exit 64
+EOF
+chmod 700 "$HEADLESS_REPAIR_INCUMBENT_BINARY"
+python3 - "$HEADLESS_REPAIR_PLIST_PATH" "$HEADLESS_REPAIR_INCUMBENT_BINARY" "$HEADLESS_REPAIR_CONFIG_PATH" "$HEADLESS_REPAIR_CONFIG_DIR/protected-credentials" <<PY
+import plistlib
+import sys
+
+path, binary, config, credential_root = sys.argv[1:]
+payload = {
+    "Label": "live.malibu.provider",
+    "UserName": "$(id -un)",
+    "ProgramArguments": [binary, "serve", "--config", config],
+    "KeepAlive": True,
+    "EnvironmentVariables": {
+        "MACPROVIDER_CREDENTIAL_STORE": "protected_file",
+        "MACPROVIDER_PROTECTED_CREDENTIAL_ROOT": credential_root,
+        "MACPROVIDER_HEADLESS": "1",
+        "MACPROVIDER_HEADLESS_USER": "$(id -un)",
+        "MACPROVIDER_LAUNCHD_DOMAIN": "system",
+    },
+}
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle)
+PY
+chmod 600 "$HEADLESS_REPAIR_CONFIG_PATH" "$HEADLESS_REPAIR_PROVIDER_ID_PATH" "$HEADLESS_REPAIR_PLIST_PATH"
+cp "$HEADLESS_REPAIR_PLIST_PATH" "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+(
+  HOME="$HEADLESS_REPAIR_HOME"
+  INSTALL_DIR="$HEADLESS_REPAIR_INSTALL_DIR"
+  CONFIG_DIR="$HEADLESS_REPAIR_CONFIG_DIR"
+  CONFIG_PATH="$HEADLESS_REPAIR_CONFIG_PATH"
+  PROVIDER_ID_PATH="$HEADLESS_REPAIR_PROVIDER_ID_PATH"
+  PLIST_PATH="$HEADLESS_REPAIR_PLIST_PATH"
+  PLIST_BOOTSTRAP_PATH="$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+  PROVIDER_LABEL="live.malibu.provider"
+  HEADLESS=1
+  HEADLESS_USER="$(id -un)"
+  LAUNCHD_DOMAIN=system
+  BUNDLED_APP=""
+  MACPROVIDER_ACCEPTANCE_ASSET_DIR="$TMP/acceptance"
+  REPAIR_EXISTING_INSTALL=1
+  DRY_RUN=0
+  EMERGENCY_ROLLBACK=0
+  REFERRAL_REPLACE_INCUMBENT=0
+  REFERRAL_CODE_SOURCE_FILE=""
+  FRESH_REFERRAL_BOOTSTRAP=0
+  NO_PROMPT=1
+  SUDO_BIN="$TMP/sudo"
+  cat > "$SUDO_BIN" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" != "-n" ] || shift
+exec "$@"
+EOF
+  chmod 700 "$SUDO_BIN"
+  launchctl_service() {
+    [ "$1" = "print" ] && [ "$2" = "system/live.malibu.provider" ]
+  }
+  log() { :; }
+  die() { exit "$1"; }
+  prepare_fresh_referral_code
+  [ "$HEADLESS_REPAIR_INCUMBENT_BINARY" = "$HEADLESS_REPAIR_INCUMBENT_DIR/macprovider-cli" ]
+  [ -z "$REFERRAL_CODE_SOURCE_FILE" ]
+  [ "$FRESH_REFERRAL_BOOTSTRAP" -eq 0 ]
+) || {
+  echo "signed headless acceptance repair did not admit the validated incumbent without invite" >&2
+  exit 1
+}
+run_headless_acceptance_repair_prepare() {
+  (
+    HOME="$HEADLESS_REPAIR_HOME"
+    INSTALL_DIR="$HEADLESS_REPAIR_INSTALL_DIR"
+    CONFIG_DIR="$HEADLESS_REPAIR_CONFIG_DIR"
+    CONFIG_PATH="$HEADLESS_REPAIR_CONFIG_PATH"
+    PROVIDER_ID_PATH="$HEADLESS_REPAIR_PROVIDER_ID_PATH"
+    PLIST_PATH="$HEADLESS_REPAIR_PLIST_PATH"
+    PLIST_BOOTSTRAP_PATH="$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+    PROVIDER_LABEL="live.malibu.provider"
+    HEADLESS=1
+    HEADLESS_USER="$(id -un)"
+    LAUNCHD_DOMAIN=system
+    BUNDLED_APP=""
+    MACPROVIDER_ACCEPTANCE_ASSET_DIR="$TMP/acceptance"
+    REPAIR_EXISTING_INSTALL=1
+    DRY_RUN=0
+    EMERGENCY_ROLLBACK=0
+    REFERRAL_REPLACE_INCUMBENT=0
+    REFERRAL_CODE_SOURCE_FILE=""
+    FRESH_REFERRAL_BOOTSTRAP=0
+    NO_PROMPT=1
+    SUDO_BIN="$TMP/sudo"
+    launchctl_service() {
+      [ "$1" = "print" ] && [ "$2" = "system/live.malibu.provider" ]
+    }
+    log() { :; }
+    die() { exit "$1"; }
+    prepare_fresh_referral_code
+  )
+}
+if chmod +a "group:everyone allow write" "$HEADLESS_REPAIR_INCUMBENT_BINARY" 2>/dev/null; then
+  headless_repair_binary_acl_rc=0
+  run_headless_acceptance_repair_prepare || headless_repair_binary_acl_rc=$?
+  chmod -a "group:everyone allow write" "$HEADLESS_REPAIR_INCUMBENT_BINARY" 2>/dev/null || true
+  if [ "$headless_repair_binary_acl_rc" -ne 28 ]; then
+    echo "signed headless acceptance repair accepted incumbent binary with writable ACL (rc=$headless_repair_binary_acl_rc)" >&2
+    exit 1
+  fi
+fi
+if chmod +a "group:everyone allow add_file,add_subdirectory,writeattr" "$HEADLESS_REPAIR_INCUMBENT_DIR" 2>/dev/null; then
+  headless_repair_binary_parent_acl_rc=0
+  run_headless_acceptance_repair_prepare || headless_repair_binary_parent_acl_rc=$?
+  chmod -a "group:everyone allow add_file,add_subdirectory,writeattr" "$HEADLESS_REPAIR_INCUMBENT_DIR" 2>/dev/null || true
+  if [ "$headless_repair_binary_parent_acl_rc" -ne 28 ]; then
+    echo "signed headless acceptance repair accepted incumbent binary parent with writable ACL (rc=$headless_repair_binary_parent_acl_rc)" >&2
+    exit 1
+  fi
+fi
+ln -s "$HEADLESS_REPAIR_PLIST_PATH" "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH.symlink"
+mv "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH" "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH.real"
+mv "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH.symlink" "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+headless_repair_bootstrap_symlink_rc=0
+run_headless_acceptance_repair_prepare || headless_repair_bootstrap_symlink_rc=$?
+rm -f "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+mv "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH.real" "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+if [ "$headless_repair_bootstrap_symlink_rc" -ne 28 ]; then
+  echo "signed headless acceptance repair accepted symlinked published LaunchDaemon plist (rc=$headless_repair_bootstrap_symlink_rc)" >&2
+  exit 1
+fi
+rm -f "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+ln "$HEADLESS_REPAIR_PLIST_PATH" "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+headless_repair_bootstrap_hardlink_rc=0
+run_headless_acceptance_repair_prepare || headless_repair_bootstrap_hardlink_rc=$?
+rm -f "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+cp "$HEADLESS_REPAIR_PLIST_PATH" "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+if [ "$headless_repair_bootstrap_hardlink_rc" -ne 28 ]; then
+  echo "signed headless acceptance repair accepted hardlinked published LaunchDaemon plist (rc=$headless_repair_bootstrap_hardlink_rc)" >&2
+  exit 1
+fi
+chmod 664 "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+headless_repair_bootstrap_mode_rc=0
+run_headless_acceptance_repair_prepare || headless_repair_bootstrap_mode_rc=$?
+chmod 600 "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+if [ "$headless_repair_bootstrap_mode_rc" -ne 28 ]; then
+  echo "signed headless acceptance repair accepted group-writable published LaunchDaemon plist (rc=$headless_repair_bootstrap_mode_rc)" >&2
+  exit 1
+fi
+if chmod +a "group:everyone allow write" "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH" 2>/dev/null; then
+  headless_repair_bootstrap_acl_rc=0
+  run_headless_acceptance_repair_prepare || headless_repair_bootstrap_acl_rc=$?
+  chmod -a "group:everyone allow write" "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH" 2>/dev/null || true
+  if [ "$headless_repair_bootstrap_acl_rc" -ne 28 ]; then
+    echo "signed headless acceptance repair accepted ACL-bearing published LaunchDaemon plist (rc=$headless_repair_bootstrap_acl_rc)" >&2
+    exit 1
+  fi
+fi
+python3 - "$HEADLESS_REPAIR_PLIST_PATH" <<'PY'
+import plistlib
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as handle:
+    payload = plistlib.load(handle)
+payload["UserName"] = "some-other-user"
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle)
+PY
+cp "$HEADLESS_REPAIR_PLIST_PATH" "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+headless_repair_bad_user_rc=0
+(
+  HOME="$HEADLESS_REPAIR_HOME"
+  INSTALL_DIR="$HEADLESS_REPAIR_INSTALL_DIR"
+  CONFIG_DIR="$HEADLESS_REPAIR_CONFIG_DIR"
+  CONFIG_PATH="$HEADLESS_REPAIR_CONFIG_PATH"
+  PROVIDER_ID_PATH="$HEADLESS_REPAIR_PROVIDER_ID_PATH"
+  PLIST_PATH="$HEADLESS_REPAIR_PLIST_PATH"
+  PLIST_BOOTSTRAP_PATH="$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+  PROVIDER_LABEL="live.malibu.provider"
+  HEADLESS=1
+  HEADLESS_USER="$(id -un)"
+  LAUNCHD_DOMAIN=system
+  BUNDLED_APP=""
+  MACPROVIDER_ACCEPTANCE_ASSET_DIR="$TMP/acceptance"
+  REPAIR_EXISTING_INSTALL=1
+  DRY_RUN=0
+  EMERGENCY_ROLLBACK=0
+  REFERRAL_REPLACE_INCUMBENT=0
+  REFERRAL_CODE_SOURCE_FILE=""
+  FRESH_REFERRAL_BOOTSTRAP=0
+  NO_PROMPT=1
+  SUDO_BIN="$TMP/sudo"
+  launchctl_service() {
+    [ "$1" = "print" ] && [ "$2" = "system/live.malibu.provider" ]
+  }
+  log() { :; }
+  die() { exit "$1"; }
+  prepare_fresh_referral_code
+) || headless_repair_bad_user_rc=$?
+if [ "$headless_repair_bad_user_rc" -ne 28 ]; then
+  echo "signed headless acceptance repair accepted mismatched LaunchDaemon user (rc=$headless_repair_bad_user_rc)" >&2
+  exit 1
+fi
+python3 - "$HEADLESS_REPAIR_PLIST_PATH" "$HEADLESS_REPAIR_INCUMBENT_BINARY" "$HEADLESS_REPAIR_CONFIG_PATH" "$HEADLESS_REPAIR_CONFIG_DIR/protected-credentials" <<PY
+import plistlib
+import sys
+
+path, binary, config, credential_root = sys.argv[1:]
+payload = {
+    "Label": "live.malibu.provider",
+    "UserName": "$(id -un)",
+    "ProgramArguments": [binary, "serve", "--config", config],
+    "KeepAlive": True,
+    "EnvironmentVariables": {
+        "MACPROVIDER_CREDENTIAL_STORE": "protected_file",
+        "MACPROVIDER_PROTECTED_CREDENTIAL_ROOT": credential_root,
+        "MACPROVIDER_HEADLESS": "1",
+        "MACPROVIDER_HEADLESS_USER": "$(id -un)",
+        "MACPROVIDER_LAUNCHD_DOMAIN": "system",
+    },
+}
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle)
+PY
+chmod 600 "$HEADLESS_REPAIR_PLIST_PATH"
+cp "$HEADLESS_REPAIR_PLIST_PATH" "$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+mv "$HEADLESS_REPAIR_PLIST_PATH" "$HEADLESS_REPAIR_PLIST_PATH.unmanaged"
+headless_repair_unmanaged_rc=0
+(
+  HOME="$HEADLESS_REPAIR_HOME"
+  INSTALL_DIR="$HEADLESS_REPAIR_INSTALL_DIR"
+  CONFIG_DIR="$HEADLESS_REPAIR_CONFIG_DIR"
+  CONFIG_PATH="$HEADLESS_REPAIR_CONFIG_PATH"
+  PROVIDER_ID_PATH="$HEADLESS_REPAIR_PROVIDER_ID_PATH"
+  PLIST_PATH="$HEADLESS_REPAIR_PLIST_PATH"
+  PLIST_BOOTSTRAP_PATH="$HEADLESS_REPAIR_BOOTSTRAP_PLIST_PATH"
+  PROVIDER_LABEL="live.malibu.provider"
+  HEADLESS=1
+  HEADLESS_USER="$(id -un)"
+  LAUNCHD_DOMAIN=system
+  BUNDLED_APP=""
+  MACPROVIDER_ACCEPTANCE_ASSET_DIR="$TMP/acceptance"
+  REPAIR_EXISTING_INSTALL=1
+  DRY_RUN=0
+  EMERGENCY_ROLLBACK=0
+  REFERRAL_REPLACE_INCUMBENT=0
+  REFERRAL_CODE_SOURCE_FILE=""
+  FRESH_REFERRAL_BOOTSTRAP=0
+  NO_PROMPT=1
+  SUDO_BIN="$TMP/sudo"
+  launchctl_service() {
+    [ "$1" = "print" ] && [ "$2" = "system/live.malibu.provider" ]
+  }
+  log() { :; }
+  die() { exit "$1"; }
+  prepare_fresh_referral_code
+) || headless_repair_unmanaged_rc=$?
+mv "$HEADLESS_REPAIR_PLIST_PATH.unmanaged" "$HEADLESS_REPAIR_PLIST_PATH"
+if [ "$headless_repair_unmanaged_rc" -ne 28 ]; then
+  echo "signed headless acceptance repair accepted a published-only LaunchDaemon without managed recovery plist (rc=$headless_repair_unmanaged_rc)" >&2
   exit 1
 fi
 (

@@ -22,6 +22,8 @@ REPAIR_EXISTING_INSTALL="${MACPROVIDER_REPAIR_EXISTING_INSTALL:-0}"
 BUNDLED_CLI="${MACPROVIDER_BUNDLED_CLI:-}"
 BUNDLED_APP="${MACPROVIDER_BUNDLED_APP:-}"
 REFERRAL_BOOTSTRAP_COMPLETED=0
+HEADLESS_REPAIR_INCUMBENT_BINARY=""
+HEADLESS_REPAIR_INCUMBENT_SHA256=""
 unset MACPROVIDER_REFERRAL_CODE_FILE
 unset MACPROVIDER_REFERRAL_REPLACE_INCUMBENT
 unset MACPROVIDER_REPAIR_EXISTING_INSTALL
@@ -591,8 +593,89 @@ verify_published_launchd_plist() {
   source_path="$1"
   bootstrap_path="$2"
   [ "$HEADLESS" = "1" ] || return 0
-  "${SUDO_BIN:-/usr/bin/sudo}" -n /usr/bin/test -f "$bootstrap_path" \
-    && "${SUDO_BIN:-/usr/bin/sudo}" -n /usr/bin/cmp -s "$source_path" "$bootstrap_path"
+  "${SUDO_BIN:-/usr/bin/sudo}" -n /usr/bin/python3 - "$source_path" "$bootstrap_path" "$(id -u)" <<'PY'
+import ctypes
+import errno
+import os
+import stat
+import sys
+
+source_path, bootstrap_path, source_uid_text = sys.argv[1:]
+source_uid = int(source_uid_text)
+max_bytes = 1024 * 1024
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+
+
+def no_acl(fd):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = acl_get_fd_np(fd, 0x00000100)  # ACL_TYPE_EXTENDED
+    if acl:
+        acl_free(acl)
+        return False
+    return ctypes.get_errno() in (0, errno.ENOENT)
+
+
+def expected_bootstrap_uid(path):
+    if path.startswith("/Library/LaunchDaemons/"):
+        return 0
+    return source_uid
+
+
+def read_checked(path, expected_uid):
+    try:
+        fd = os.open(path, os.O_RDONLY | nonblock | nofollow)
+    except OSError:
+        raise SystemExit(1)
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != expected_uid
+            or before.st_nlink != 1
+            or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or before.st_size < 0
+            or before.st_size > max_bytes
+            or not no_acl(fd)
+        ):
+            raise SystemExit(1)
+        payload = bytearray()
+        while len(payload) < before.st_size:
+            chunk = os.read(fd, min(65536, before.st_size - len(payload)))
+            if not chunk:
+                raise SystemExit(1)
+            payload.extend(chunk)
+        after = os.fstat(fd)
+        path_info = os.lstat(path)
+        if (
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            or stat.S_ISLNK(path_info.st_mode)
+            or (path_info.st_dev, path_info.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise SystemExit(1)
+        return bytes(payload)
+    finally:
+        os.close(fd)
+
+
+source = read_checked(source_path, source_uid)
+bootstrap = read_checked(bootstrap_path, expected_bootstrap_uid(bootstrap_path))
+if source != bootstrap:
+    raise SystemExit(1)
+PY
 }
 
 record_lifecycle_state() {
@@ -2853,6 +2936,7 @@ write_install_recovery_artifacts() {
   recovery_dir="$1"
   state_path="$recovery_dir/state.sh"
   recovery_script="$recovery_dir/recover.sh"
+  recovery_headless_incumbent_sha256=""
   : "${LAUNCHD_DOMAIN:=gui/$UID}"
   : "${HEADLESS:=0}"
   : "${HEADLESS_USER:=}"
@@ -2860,6 +2944,14 @@ write_install_recovery_artifacts() {
   : "${LEGACY_PLIST_BOOTSTRAP_PATH:=$LEGACY_PLIST_PATH}"
   : "${WATCHDOG_PLIST_BOOTSTRAP_PATH:=$WATCHDOG_PLIST_PATH}"
   : "${LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH:=$LEGACY_WATCHDOG_PLIST_PATH}"
+  if headless_acceptance_repair_mode; then
+    [ -n "${HEADLESS_REPAIR_INCUMBENT_BINARY:-}" ] || return 1
+    recovery_headless_incumbent_sha256="${HEADLESS_REPAIR_INCUMBENT_SHA256:-}"
+    case "$recovery_headless_incumbent_sha256" in
+      [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+      *) return 1 ;;
+    esac
+  fi
 
   {
     printf 'REC_INSTALL_DIR=%q\n' "$INSTALL_DIR"
@@ -2886,6 +2978,13 @@ write_install_recovery_artifacts() {
     printf 'REC_LAUNCHD_DOMAIN=%q\n' "$LAUNCHD_DOMAIN"
     printf 'REC_HEADLESS=%q\n' "$HEADLESS"
     printf 'REC_HEADLESS_USER=%q\n' "$HEADLESS_USER"
+    if headless_acceptance_repair_mode; then
+      printf 'REC_HEADLESS_REPAIR_INCUMBENT_BINARY=%q\n' "${HEADLESS_REPAIR_INCUMBENT_BINARY:-}"
+      printf 'REC_HEADLESS_REPAIR_INCUMBENT_SHA256=%q\n' "$recovery_headless_incumbent_sha256"
+    else
+      printf 'REC_HEADLESS_REPAIR_INCUMBENT_BINARY=%q\n' ""
+      printf 'REC_HEADLESS_REPAIR_INCUMBENT_SHA256=%q\n' ""
+    fi
     printf 'REC_INSTALL_LOCK_PATH=%q\n' "$INSTALL_LOCK_PATH"
     printf 'REC_INSTALL_LOCK_TOKEN=%q\n' "$INSTALL_LOCK_TOKEN"
     printf 'REC_INSTALLER_PID=%q\n' "$$"
@@ -3012,6 +3111,9 @@ REC_LEGACY_WATCHDOG_WAS_ACTIVE="${REC_LEGACY_WATCHDOG_WAS_ACTIVE:-0}"
 REC_HAD_LEGACY_WATCHDOG_PLIST="${REC_HAD_LEGACY_WATCHDOG_PLIST:-0}"
 REC_LAUNCHD_DOMAIN="${REC_LAUNCHD_DOMAIN:-gui/$REC_UID}"
 REC_HEADLESS="${REC_HEADLESS:-0}"
+REC_BINARY_PATH="${REC_BINARY_PATH:-}"
+REC_HEADLESS_REPAIR_INCUMBENT_BINARY="${REC_HEADLESS_REPAIR_INCUMBENT_BINARY:-}"
+REC_HEADLESS_REPAIR_INCUMBENT_SHA256="${REC_HEADLESS_REPAIR_INCUMBENT_SHA256:-}"
 REC_PLIST_BOOTSTRAP_PATH="${REC_PLIST_BOOTSTRAP_PATH:-$REC_PLIST_PATH}"
 REC_LEGACY_PLIST_BOOTSTRAP_PATH="${REC_LEGACY_PLIST_BOOTSTRAP_PATH:-$REC_LEGACY_PLIST_PATH}"
 REC_WATCHDOG_PLIST_BOOTSTRAP_PATH="${REC_WATCHDOG_PLIST_BOOTSTRAP_PATH:-$REC_WATCHDOG_PLIST_PATH}"
@@ -3035,9 +3137,94 @@ validate_headless_recovery_targets() {
   [ "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" = "/Library/LaunchDaemons/live.streamvc.macprovider.plist" ] || return 70
   [ "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" = "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist" ] || return 70
   [ "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" = "/Library/LaunchDaemons/live.streamvc.macprovider-watchdog.plist" ] || return 70
+  if [ -n "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY" ]; then
+    [ "$REC_HEADLESS_REPAIR_INCUMBENT_SHA256" != "" ] || return 70
+    case "$REC_HEADLESS_REPAIR_INCUMBENT_SHA256" in
+      [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+      *) return 70 ;;
+    esac
+    case "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY" in
+      "$HOME"/*) ;;
+      *) return 70 ;;
+    esac
+  fi
 }
 validate_headless_recovery_targets || {
   printf '[macprovider-recovery] Headless recovery state contains an unsafe privileged launchd target.\n' >&2
+  exit 70
+}
+
+validate_recovery_incumbent_provider_binary() {
+  [ -n "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY" ] || return 0
+  [ "$REC_HEADLESS" = "1" ] || return 70
+  [ "$REC_LAUNCHD_DOMAIN" = "system" ] || return 70
+  python3 - "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY" "$REC_HEADLESS_REPAIR_INCUMBENT_SHA256" <<'PY'
+import ctypes
+import errno
+import hashlib
+import os
+import stat
+import sys
+
+path, expected_sha256 = sys.argv[1:]
+if not os.path.isabs(path):
+    raise SystemExit("incumbent binary path is not absolute")
+if len(expected_sha256) != 64 or any(character not in "0123456789abcdef" for character in expected_sha256):
+    raise SystemExit("incumbent binary digest is invalid")
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | nofollow)
+try:
+    info = os.fstat(fd)
+    path_info = os.lstat(path)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or path_info.st_dev != info.st_dev
+        or path_info.st_ino != info.st_ino
+        or stat.S_ISLNK(path_info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or not info.st_mode & stat.S_IXUSR
+    ):
+        raise SystemExit("unsafe incumbent binary")
+    if sys.platform == "darwin":
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            acl_get_fd_np = libc.acl_get_fd_np
+            acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+            acl_get_fd_np.restype = ctypes.c_void_p
+            acl_free = libc.acl_free
+            acl_free.argtypes = [ctypes.c_void_p]
+            acl_free.restype = ctypes.c_int
+        except (AttributeError, OSError):
+            raise SystemExit("incumbent binary ACL API is unavailable")
+        ctypes.set_errno(0)
+        acl = acl_get_fd_np(fd, 0x00000100)  # ACL_TYPE_EXTENDED
+        if acl:
+            acl_free(acl)
+            raise SystemExit("incumbent binary has an extended ACL")
+        if ctypes.get_errno() != errno.ENOENT:
+            raise SystemExit("incumbent binary ACL verification failed")
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        digest.update(chunk)
+    after = os.fstat(fd)
+    if (
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    ):
+        raise SystemExit("incumbent binary changed during verification")
+    if digest.hexdigest() != expected_sha256:
+        raise SystemExit("incumbent binary digest changed")
+finally:
+    os.close(fd)
+PY
+}
+validate_recovery_incumbent_provider_binary || {
+  printf '[macprovider-recovery] Headless recovery state contains an unsafe incumbent provider binary.\n' >&2
   exit 70
 }
 
@@ -3053,18 +3240,25 @@ validate_recovery_launchdaemon_plist() {
   managed_path="$1"
   bootstrap_path="$2"
   python3 - "$managed_path" "$bootstrap_path" "$REC_HEADLESS_USER" \
-    "$REC_INSTALL_DIR/macprovider-cli" "/Library/Application Support/macprovider/macprovider-health-monitor" \
-    "$REC_CONFIG_PATH" <<'PY'
+    "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY" \
+    "/Library/Application Support/macprovider/macprovider-health-monitor" "$REC_CONFIG_PATH" <<'PY'
 import os
 import plistlib
 import sys
 
-path, bootstrap_path, user, provider_program, watchdog_program, config_path = sys.argv[1:]
+path, bootstrap_path, user, provider_program, provider_alternate, provider_alternate_2, watchdog_program, config_path = sys.argv[1:]
+provider_programs = [provider_program]
+legacy_provider_programs = [provider_program]
+if provider_alternate:
+    provider_programs.append(provider_alternate)
+    legacy_provider_programs.append(provider_alternate)
+if provider_alternate_2:
+    provider_programs.append(provider_alternate_2)
 allowed = {
-    "/Library/LaunchDaemons/live.malibu.provider.plist": ("live.malibu.provider", provider_program),
-    "/Library/LaunchDaemons/live.streamvc.macprovider.plist": ("live.streamvc.macprovider", provider_program),
-    "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist": ("live.malibu.provider-watchdog", watchdog_program),
-    "/Library/LaunchDaemons/live.streamvc.macprovider-watchdog.plist": ("live.streamvc.macprovider-watchdog", watchdog_program),
+    "/Library/LaunchDaemons/live.malibu.provider.plist": ("live.malibu.provider", provider_programs),
+    "/Library/LaunchDaemons/live.streamvc.macprovider.plist": ("live.streamvc.macprovider", legacy_provider_programs),
+    "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist": ("live.malibu.provider-watchdog", [watchdog_program]),
+    "/Library/LaunchDaemons/live.streamvc.macprovider-watchdog.plist": ("live.streamvc.macprovider-watchdog", [watchdog_program]),
 }
 expected = allowed.get(bootstrap_path)
 if expected is None:
@@ -3075,7 +3269,7 @@ arguments = payload.get("ProgramArguments")
 environment = payload.get("EnvironmentVariables")
 if payload.get("Label") != expected[0]:
     raise SystemExit("unexpected LaunchDaemon identity")
-if not isinstance(arguments, list) or not arguments or arguments[0] != expected[1]:
+if not isinstance(arguments, list) or not arguments or arguments[0] not in expected[1]:
     raise SystemExit("unexpected LaunchDaemon program")
 if expected[0].endswith("-watchdog"):
     if "UserName" in payload:
@@ -3102,20 +3296,27 @@ snapshot_recovery_launchdaemon_plist() {
   managed_path="$1"
   bootstrap_path="$2"
   python3 - "$managed_path" "$bootstrap_path" "$REC_HEADLESS_USER" \
-    "$REC_INSTALL_DIR/macprovider-cli" "/Library/Application Support/macprovider/macprovider-health-monitor" \
-    "$REC_CONFIG_PATH" <<'PY'
+    "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY" \
+    "/Library/Application Support/macprovider/macprovider-health-monitor" "$REC_CONFIG_PATH" <<'PY'
 import base64
 import os
 import plistlib
 import stat
 import sys
 
-path, bootstrap_path, user, provider_program, watchdog_program, config_path = sys.argv[1:]
+path, bootstrap_path, user, provider_program, provider_alternate, provider_alternate_2, watchdog_program, config_path = sys.argv[1:]
+provider_programs = [provider_program]
+legacy_provider_programs = [provider_program]
+if provider_alternate:
+    provider_programs.append(provider_alternate)
+    legacy_provider_programs.append(provider_alternate)
+if provider_alternate_2:
+    provider_programs.append(provider_alternate_2)
 allowed = {
-    "/Library/LaunchDaemons/live.malibu.provider.plist": ("live.malibu.provider", provider_program),
-    "/Library/LaunchDaemons/live.streamvc.macprovider.plist": ("live.streamvc.macprovider", provider_program),
-    "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist": ("live.malibu.provider-watchdog", watchdog_program),
-    "/Library/LaunchDaemons/live.streamvc.macprovider-watchdog.plist": ("live.streamvc.macprovider-watchdog", watchdog_program),
+    "/Library/LaunchDaemons/live.malibu.provider.plist": ("live.malibu.provider", provider_programs),
+    "/Library/LaunchDaemons/live.streamvc.macprovider.plist": ("live.streamvc.macprovider", legacy_provider_programs),
+    "/Library/LaunchDaemons/live.malibu.provider-watchdog.plist": ("live.malibu.provider-watchdog", [watchdog_program]),
+    "/Library/LaunchDaemons/live.streamvc.macprovider-watchdog.plist": ("live.streamvc.macprovider-watchdog", [watchdog_program]),
 }
 expected = allowed.get(bootstrap_path)
 if expected is None:
@@ -3135,7 +3336,7 @@ arguments = payload.get("ProgramArguments")
 environment = payload.get("EnvironmentVariables")
 if payload.get("Label") != expected[0]:
     raise SystemExit("unexpected LaunchDaemon identity")
-if not isinstance(arguments, list) or not arguments or arguments[0] != expected[1]:
+if not isinstance(arguments, list) or not arguments or arguments[0] not in expected[1]:
     raise SystemExit("unexpected LaunchDaemon program")
 if expected[0].endswith("-watchdog"):
     if "UserName" in payload:
@@ -5819,7 +6020,7 @@ if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-sta
         || recovery_failed "could not start the unexpectedly inactive pre-cutover provider service"
     fi
     service_identity_matches "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
-      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY" \
       || recovery_failed "pre-cutover provider service has an unexpected identity"
   fi
   if [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
@@ -5886,13 +6087,20 @@ stop_owned_manual_provider() {
   candidate_pid="$1"
   expected_executable="$2"
   alternate_executable="${3:-}"
+  second_alternate_executable=""
   expected_port="${4:-}"
+  if [ "$#" -ge 5 ]; then
+    second_alternate_executable="${4:-}"
+    expected_port="${5:-}"
+  fi
   if [ -n "$expected_port" ]; then
     observed_port_pids="$(lsof -nP -iTCP:"$expected_port" -sTCP:LISTEN -t 2>/dev/null || true)"
     printf '%s\n' "$observed_port_pids" | grep -Fxq "$candidate_pid" || return 1
   fi
   observed_executable="$(lsof -nP -a -p "$candidate_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-  if [ "$observed_executable" != "$expected_executable" ] && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; }; then
+  if [ "$observed_executable" != "$expected_executable" ] \
+    && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; } \
+    && { [ -z "$second_alternate_executable" ] || [ "$observed_executable" != "$second_alternate_executable" ]; }; then
     return 1
   fi
   kill -TERM "$candidate_pid" >/dev/null 2>&1 || return 1
@@ -5903,7 +6111,9 @@ stop_owned_manual_provider() {
   done
   if pid_is_live_non_zombie "$candidate_pid"; then
     observed_executable="$(lsof -nP -a -p "$candidate_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-    if [ "$observed_executable" != "$expected_executable" ] && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; }; then
+    if [ "$observed_executable" != "$expected_executable" ] \
+      && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; } \
+      && { [ -z "$second_alternate_executable" ] || [ "$observed_executable" != "$second_alternate_executable" ]; }; then
       return 1
     fi
     kill -KILL "$candidate_pid" >/dev/null 2>&1 || return 1
@@ -6109,17 +6319,17 @@ if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_PLIST" -eq 1 ] || recovery_failed "the prior provider service was active but no recoverable plist was preserved"
   if [ -f "$RECOVERY_DIR/provider-service-created" ] && [ ! -L "$RECOVERY_DIR/provider-service-created" ]; then
     stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
-      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY" \
       "the transaction provider service"
   else
     stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
-      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY" \
       "the incumbent provider service"
   fi
 else
   if [ -f "$RECOVERY_DIR/provider-service-created" ] && [ ! -L "$RECOVERY_DIR/provider-service-created" ]; then
     stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
-      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY" \
       "the transaction provider service"
   fi
   service_loaded "$REC_PROVIDER_LABEL" && recovery_failed "provider service is active even though it was inactive before the failed install"
@@ -6227,7 +6437,7 @@ if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous provider service"
   recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous provider service"
   service_identity_matches "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
-    "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+    "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY" \
     || recovery_failed "previous provider service has an unexpected identity"
 elif [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_LEGACY_PLIST" -eq 1 ] || recovery_failed "previous legacy service was active but no previous plist was preserved"
@@ -6789,13 +6999,20 @@ stop_owned_manual_provider() {
   candidate_pid="$1"
   expected_executable="$2"
   alternate_executable="${3:-}"
+  second_alternate_executable=""
   expected_port="${4:-}"
+  if [ "$#" -ge 5 ]; then
+    second_alternate_executable="${4:-}"
+    expected_port="${5:-}"
+  fi
   if [ -n "$expected_port" ]; then
     observed_port_pids="$(lsof -nP -iTCP:"$expected_port" -sTCP:LISTEN -t 2>/dev/null || true)"
     printf '%s\n' "$observed_port_pids" | grep -Fxq "$candidate_pid" || return 1
   fi
   observed_executable="$(lsof -nP -a -p "$candidate_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-  if [ "$observed_executable" != "$expected_executable" ] && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; }; then
+  if [ "$observed_executable" != "$expected_executable" ] \
+    && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; } \
+    && { [ -z "$second_alternate_executable" ] || [ "$observed_executable" != "$second_alternate_executable" ]; }; then
     return 1
   fi
   kill -TERM "$candidate_pid" >/dev/null 2>&1 || return 1
@@ -6806,7 +7023,9 @@ stop_owned_manual_provider() {
   done
   if pid_is_live_non_zombie "$candidate_pid"; then
     observed_executable="$(lsof -nP -a -p "$candidate_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-    if [ "$observed_executable" != "$expected_executable" ] && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; }; then
+    if [ "$observed_executable" != "$expected_executable" ] \
+      && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; } \
+      && { [ -z "$second_alternate_executable" ] || [ "$observed_executable" != "$second_alternate_executable" ]; }; then
       return 1
     fi
     kill -KILL "$candidate_pid" >/dev/null 2>&1 || return 1
@@ -6828,7 +7047,7 @@ begin_install_transaction() {
   assert_install_lock_ownership
   validate_transaction_path_kinds
   if [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ]; then
-    repair_safe_incumbent_present \
+    repair_incumbent_present_for_current_mode \
       || die 28 "trusted existing-install evidence changed before the transaction snapshot"
   fi
   recovery_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -6875,8 +7094,12 @@ begin_install_transaction() {
   if [ -f "$PLIST_PATH" ]; then
     verify_published_launchd_plist "$PLIST_PATH" "$PLIST_BOOTSTRAP_PATH" \
       || die 70 "managed provider plist does not match the published LaunchDaemon plist; current install was not changed"
+    provider_snapshot_alternate=""
+    if headless_acceptance_repair_mode; then
+      provider_snapshot_alternate="${HEADLESS_REPAIR_INCUMBENT_BINARY:-}"
+    fi
     stage_install_tx_plist "$PLIST_PATH" "$recovery_staging/provider.plist" \
-      "$PROVIDER_LABEL" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" "${HEADLESS_USER:-}" \
+      "$PROVIDER_LABEL" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" "$provider_snapshot_alternate" "${HEADLESS_USER:-}" \
       || die 70 "could not stage and verify the previous launchd plist; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_PLIST=1
   fi
@@ -7594,6 +7817,330 @@ if plist_raw is not None:
 PY
 }
 
+headless_acceptance_repair_mode() {
+  [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ] || return 1
+  [ "${HEADLESS:-0}" = "1" ] || return 1
+  [ "${LAUNCHD_DOMAIN:-}" = "system" ] || return 1
+  [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] || return 1
+  [ -z "${BUNDLED_APP:-}" ] || return 1
+}
+
+provider_executable_owned_for_current_mode() {
+  local candidate="$1"
+  [ "$candidate" = "$INSTALL_DIR/macprovider-cli" ] && return 0
+  [ -n "${BINARY_PATH:-}" ] && [ "$candidate" = "$BINARY_PATH" ] && return 0
+  if headless_acceptance_repair_mode \
+    && [ -n "${HEADLESS_REPAIR_INCUMBENT_BINARY:-}" ] \
+    && [ "$candidate" = "$HEADLESS_REPAIR_INCUMBENT_BINARY" ]; then
+    return 0
+  fi
+  return 1
+}
+
+headless_acceptance_repair_safe_incumbent_present() {
+  local incumbent_binary
+  local incumbent_evidence
+  local incumbent_sha256
+  headless_acceptance_repair_mode || return 1
+  [ -f "$PLIST_PATH" ] || return 1
+  [ -f "$PLIST_BOOTSTRAP_PATH" ] || return 1
+  verify_published_launchd_plist "$PLIST_PATH" "$PLIST_BOOTSTRAP_PATH" || return 1
+  launchctl_service print "$LAUNCHD_DOMAIN/$PROVIDER_LABEL" >/dev/null 2>&1 || return 1
+  incumbent_evidence="$(python3 - \
+    "$CONFIG_PATH" \
+    "$PROVIDER_ID_PATH" \
+    "$PLIST_PATH" \
+    "$HEADLESS_USER" \
+    "$PROVIDER_LABEL" \
+    "$CONFIG_DIR" <<'PY' 2>/dev/null
+import ctypes
+import errno
+import grp
+import hashlib
+import os
+import plistlib
+import re
+import stat
+import sys
+
+config_path, provider_id_path, plist_path, headless_user, label, config_dir = sys.argv[1:]
+uid = os.getuid()
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+max_bytes = 1024 * 1024
+
+
+def no_acl(fd):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = acl_get_fd_np(fd, 0x00000100)
+    if acl:
+        acl_free(acl)
+        return False
+    return ctypes.get_errno() in (0, errno.ENOENT)
+
+
+def safe_directory_acl(fd):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_to_text = libc.acl_to_text
+        acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_long)]
+        acl_to_text.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = acl_get_fd_np(fd, 0x00000100)
+    if not acl:
+        return ctypes.get_errno() in (0, errno.ENOENT)
+    try:
+        text_length = ctypes.c_long()
+        text_pointer = acl_to_text(acl, ctypes.byref(text_length))
+        if not text_pointer:
+            return False
+        try:
+            lines = ctypes.string_at(text_pointer, text_length.value).decode(
+                "utf-8", errors="strict"
+            ).splitlines()
+        finally:
+            acl_free(text_pointer)
+        everyone_gid = grp.getgrnam("everyone").gr_gid
+        if len(lines) < 2 or lines[0] != "!#acl 1":
+            return False
+        uuid_pattern = re.compile(
+            r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+            r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+        )
+        return all(
+            (fields := line.split(":"))
+            and len(fields) == 6
+            and fields[0] == "group"
+            and bool(uuid_pattern.fullmatch(fields[1]))
+            and fields[2] == "everyone"
+            and fields[3] == str(everyone_gid)
+            and fields[4] == "deny"
+            and fields[5] == "delete"
+            for line in lines[1:]
+        )
+    finally:
+        acl_free(acl)
+
+
+def safe_parent_chain(path):
+    home = os.path.normpath(os.path.expanduser("~"))
+    parent = os.path.normpath(os.path.dirname(path))
+    try:
+        if os.path.commonpath([home, parent]) != home:
+            return False
+    except ValueError:
+        return False
+    home_fd = os.open(
+        home,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow,
+    )
+    try:
+        home_info = os.fstat(home_fd)
+        if (
+            not stat.S_ISDIR(home_info.st_mode)
+            or home_info.st_uid != uid
+            or home_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            return False
+    finally:
+        os.close(home_fd)
+    current = home
+    relative = os.path.relpath(parent, home)
+    components = [] if relative == "." else relative.split(os.sep)
+    for component in components:
+        current = os.path.join(current, component)
+        directory_fd = os.open(
+            current,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow,
+        )
+        try:
+            info = os.fstat(directory_fd)
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != uid
+                or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or not safe_directory_acl(directory_fd)
+            ):
+                return False
+        finally:
+            os.close(directory_fd)
+    return True
+
+
+def read_owned(path):
+    if not safe_parent_chain(path):
+        raise RuntimeError("unsafe headless repair evidence parent chain")
+    fd = os.open(path, os.O_RDONLY | nonblock | nofollow)
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != uid
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
+            or before.st_size < 0
+            or before.st_size > max_bytes
+            or not no_acl(fd)
+        ):
+            raise RuntimeError("unsafe headless repair evidence")
+        payload = bytearray()
+        while len(payload) < before.st_size:
+            chunk = os.read(fd, min(65536, before.st_size - len(payload)))
+            if not chunk:
+                raise RuntimeError("headless repair evidence truncated")
+            payload.extend(chunk)
+        after = os.fstat(fd)
+        path_info = os.lstat(path)
+        if (
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            or stat.S_ISLNK(path_info.st_mode)
+            or (path_info.st_dev, path_info.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise RuntimeError("headless repair evidence changed during read")
+        return bytes(payload)
+    finally:
+        os.close(fd)
+
+
+def simple_values(config, key):
+    pattern = re.compile(rf'^{re.escape(key)}:\s*"?([^"\s]+)"?\s*$')
+    values = []
+    for line in config.splitlines():
+        match = pattern.match(line)
+        if match:
+            values.append(match.group(1))
+    return values
+
+
+config = read_owned(config_path).decode("utf-8")
+provider_id = read_owned(provider_id_path).decode("utf-8").strip()
+if simple_values(config, "provider_id") != [provider_id]:
+    raise SystemExit(1)
+if simple_values(config, "credential_store") != ["protected_file"]:
+    raise SystemExit(1)
+if simple_values(config, "auto_update_enabled") != ["false"]:
+    raise SystemExit(1)
+provider_token_patterns = [
+    re.compile(r"^provider_token[ \t]*:"),
+    re.compile(r"^'provider_token'[ \t]*:"),
+    re.compile(r'^"provider_token"[ \t]*:'),
+    re.compile(r'^"provider\\u005ftoken"[ \t]*:'),
+]
+if any(any(pattern.match(line) for pattern in provider_token_patterns) for line in config.splitlines()):
+    raise SystemExit(1)
+
+plist = plistlib.loads(read_owned(plist_path))
+arguments = plist.get("ProgramArguments")
+environment = plist.get("EnvironmentVariables")
+if plist.get("Label") != label:
+    raise SystemExit(1)
+if plist.get("UserName") != headless_user:
+    raise SystemExit(1)
+if (
+    not isinstance(arguments, list)
+    or not arguments
+    or arguments != [arguments[0], "serve", "--config", config_path]
+):
+    raise SystemExit(1)
+program = plist.get("Program")
+if program is not None and program != arguments[0]:
+    raise SystemExit(1)
+incumbent_binary = arguments[0]
+if not os.path.isabs(incumbent_binary) or not safe_parent_chain(incumbent_binary):
+    raise SystemExit(1)
+if not isinstance(environment, dict):
+    raise SystemExit(1)
+if environment.get("MACPROVIDER_CREDENTIAL_STORE") != "protected_file":
+    raise SystemExit(1)
+if environment.get("MACPROVIDER_PROTECTED_CREDENTIAL_ROOT") != os.path.join(config_dir, "protected-credentials"):
+    raise SystemExit(1)
+if environment.get("MACPROVIDER_HEADLESS") != "1":
+    raise SystemExit(1)
+if environment.get("MACPROVIDER_HEADLESS_USER") != headless_user:
+    raise SystemExit(1)
+if environment.get("MACPROVIDER_LAUNCHD_DOMAIN") != "system":
+    raise SystemExit(1)
+binary_fd = os.open(incumbent_binary, os.O_RDONLY | nonblock | nofollow)
+try:
+    binary_info = os.fstat(binary_fd)
+    if (
+        not stat.S_ISREG(binary_info.st_mode)
+        or binary_info.st_uid != uid
+        or binary_info.st_nlink != 1
+        or stat.S_IMODE(binary_info.st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
+        or not no_acl(binary_fd)
+        or not (stat.S_IMODE(binary_info.st_mode) & stat.S_IXUSR)
+    ):
+        raise SystemExit(1)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(binary_fd, 65536)
+        if not chunk:
+            break
+        digest.update(chunk)
+    after_binary_info = os.fstat(binary_fd)
+    path_info = os.lstat(incumbent_binary)
+    if (
+        (after_binary_info.st_dev, after_binary_info.st_ino, after_binary_info.st_size, after_binary_info.st_mtime_ns, after_binary_info.st_ctime_ns)
+        != (binary_info.st_dev, binary_info.st_ino, binary_info.st_size, binary_info.st_mtime_ns, binary_info.st_ctime_ns)
+        or stat.S_ISLNK(path_info.st_mode)
+        or (path_info.st_dev, path_info.st_ino) != (binary_info.st_dev, binary_info.st_ino)
+    ):
+        raise SystemExit(1)
+finally:
+    os.close(binary_fd)
+print(incumbent_binary)
+print(digest.hexdigest())
+PY
+  )" || return 1
+  incumbent_binary="$(printf '%s\n' "$incumbent_evidence" | sed -n '1p')"
+  incumbent_sha256="$(printf '%s\n' "$incumbent_evidence" | sed -n '2p')"
+  [ -n "$incumbent_binary" ] || return 1
+  case "$incumbent_sha256" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) return 1 ;;
+  esac
+  MACPROVIDER_CREDENTIAL_STORE=protected_file \
+  MACPROVIDER_PROTECTED_CREDENTIAL_ROOT="$CONFIG_DIR/protected-credentials" \
+  MACPROVIDER_HEADLESS=1 \
+  MACPROVIDER_HEADLESS_USER="$HEADLESS_USER" \
+  MACPROVIDER_LAUNCHD_DOMAIN=system \
+    "$incumbent_binary" credentials verify --config "$CONFIG_PATH" >/dev/null 2>&1 || return 1
+  HEADLESS_REPAIR_INCUMBENT_BINARY="$incumbent_binary"
+  HEADLESS_REPAIR_INCUMBENT_SHA256="$incumbent_sha256"
+}
+
+repair_incumbent_present_for_current_mode() {
+  if headless_acceptance_repair_mode; then
+    headless_acceptance_repair_safe_incumbent_present
+  else
+    repair_safe_incumbent_present
+  fi
+}
+
 validate_supplied_referral_code_file() {
   referral_source_rc=0
   python3 - "$REFERRAL_CODE_SOURCE_FILE" <<'PY' || referral_source_rc=$?
@@ -7663,7 +8210,7 @@ prepare_fresh_referral_code() {
   case "$REPAIR_EXISTING_INSTALL" in
     0) ;;
     1)
-      repair_safe_incumbent_present \
+      repair_incumbent_present_for_current_mode \
         || die 28 "trusted existing-install evidence is required for Malibu repair"
       log "Trusted existing-install evidence found; repairing without a referral code."
       return 0
@@ -7755,7 +8302,7 @@ ensure_port_free() {
   own_provider_holds_port=0
   for holding_pid in $holding_pids; do
     holding_executable="$(lsof -a -p "$holding_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-    if [ "$holding_executable" = "$INSTALL_DIR/macprovider-cli" ]; then
+    if provider_executable_owned_for_current_mode "$holding_executable"; then
       own_provider_holds_port=1
       break
     fi
@@ -7781,7 +8328,7 @@ ensure_port_free() {
       log "Port $PORT still held after launchctl bootout; stopping each revalidated macprovider-cli PID."
       for holding_pid in $holding_pids; do
         if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -Fxq "$holding_pid"; then
-          stop_owned_manual_provider "$holding_pid" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" "$PORT" \
+          stop_owned_manual_provider "$holding_pid" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" "${HEADLESS_REPAIR_INCUMBENT_BINARY:-}" "$PORT" \
             || die 70 "could not safely stop macprovider-cli pid $holding_pid after revalidating executable and port ownership"
         fi
       done
@@ -7812,12 +8359,17 @@ reclaim_launchd_service() {
   local service_target="$LAUNCHD_DOMAIN/$label"
   local expected_program
   local legacy_program
+  local repair_program
   local expected_plist
   local had_plist
+  repair_program=""
   case "$label" in
     "$PROVIDER_LABEL")
       expected_program="$INSTALL_DIR/macprovider-cli"
       legacy_program="$BINARY_PATH"
+      if headless_acceptance_repair_mode; then
+        repair_program="${HEADLESS_REPAIR_INCUMBENT_BINARY:-}"
+      fi
       expected_plist="$PLIST_BOOTSTRAP_PATH"
       had_plist="${INSTALL_TX_HAD_PLIST:-0}"
       ;;
@@ -7871,7 +8423,9 @@ reclaim_launchd_service() {
     log "Refusing to reclaim $label because launchd plist identity is unexpected: ${plist_path:-<missing>}"
     return 1
   fi
-  if [ "$program_line" != "$expected_program" ] && [ "$program_line" != "$legacy_program" ]; then
+  if [ "$program_line" != "$expected_program" ] \
+    && [ "$program_line" != "$legacy_program" ] \
+    && { [ -z "$repair_program" ] || [ "$program_line" != "$repair_program" ]; }; then
     log "Refusing to reclaim $label with unexpected executable: $program_line"
     return 1
   fi
@@ -8810,6 +9364,9 @@ validate_headless_acceptance_source() {
 validate_repair_privilege_domain() {
   [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ] || return 0
   if [ "${HEADLESS:-0}" = "1" ] || [ "${LAUNCHD_DOMAIN:-}" = "system" ]; then
+    if headless_acceptance_repair_mode; then
+      return 0
+    fi
     die 7 "Malibu.app repair supports user-domain LaunchAgents only; headless/system LaunchDaemon repair requires the signed acceptance fallback"
   fi
 }
@@ -9848,7 +10405,11 @@ ensure_provider_credentials() {
         [ -n "${REFERRAL_CODE_SOURCE_FILE:-}" ] || return 0
         credential_already_present=1
         ;;
-      3) ;;
+      3)
+        if headless_acceptance_repair_mode; then
+          die 6 "headless acceptance repair credential custody changed after incumbent verification; refusing to bootstrap over protected-file state"
+        fi
+        ;;
       *) die 6 "existing CLI Keychain credential is unavailable or invalid; refusing unsafe bootstrap" ;;
     esac
   fi
@@ -9914,6 +10475,11 @@ ensure_replacement_referral_preflight_before_cutover() {
   persist_replacement_candidate_provider_id
   [ "${REFERRAL_BOOTSTRAP_COMPLETED:-0}" -eq 0 ] || return 0
   log "Validating the fresh-provider invite before stopping the incumbent provider."
+  ensure_provider_credentials
+}
+
+ensure_headless_acceptance_credentials_before_cutover() {
+  headless_acceptance_repair_mode || return 0
   ensure_provider_credentials
 }
 
@@ -10080,7 +10646,7 @@ own_macprovider_cli_holds_live_port() {
   [ -n "$holding_pids" ] || return 1
   for holding_pid in $holding_pids; do
     holding_executable="$(lsof -a -p "$holding_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-    if [ "$holding_executable" = "$INSTALL_DIR/macprovider-cli" ]; then
+    if provider_executable_owned_for_current_mode "$holding_executable"; then
       return 0
     fi
   done
@@ -11693,7 +12259,11 @@ print_autotune_handoff() {
 }
 
 installed_provider_binary_path() {
-  if [ -x "$INSTALL_DIR/macprovider-cli" ]; then
+  if headless_acceptance_repair_mode \
+      && [ -n "${HEADLESS_REPAIR_INCUMBENT_BINARY:-}" ] \
+      && [ -x "$HEADLESS_REPAIR_INCUMBENT_BINARY" ]; then
+    printf '%s\n' "$HEADLESS_REPAIR_INCUMBENT_BINARY"
+  elif [ -x "$INSTALL_DIR/macprovider-cli" ]; then
     printf '%s\n' "$INSTALL_DIR/macprovider-cli"
   elif [ -x "$BINARY_PATH" ]; then
     printf '%s\n' "$BINARY_PATH"
@@ -12740,7 +13310,7 @@ main() {
     asset_kind="bundled"
     log "Repairing from Malibu.app bundled provider CLI (no GitHub download)."
   else
-    [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 0 ] \
+    [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 0 ] || headless_acceptance_repair_mode \
       || die 7 "existing-install repair requires MACPROVIDER_BUNDLED_APP from Malibu.app"
     download_release "$tag"
     verify_sha256
@@ -12783,6 +13353,7 @@ main() {
       prefetch_upgrade_autotune_model
     fi
   fi
+  ensure_headless_acceptance_credentials_before_cutover
   if [ "$SKIP_PROVIDER_START" -eq 1 ]; then
     if restore_existing_provider_if_start_skipped; then
       log "Re-run macprovider-cli autotune --recommend --apply when you want to change the active provider model."

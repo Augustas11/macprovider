@@ -81,6 +81,12 @@ awk '
 ' "$INSTALL_SH" >> "$lib"
 
 awk '
+  /^headless_acceptance_repair_mode\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
   /^installed_provider_binary_path\(\)/ { emit = 1 }
   /^validate_non_emergency_pinned_target\(\)/ { emit = 0 }
   emit { print }
@@ -92,7 +98,7 @@ awk '
   emit && /^\}$/ { exit }
 ' "$INSTALL_SH" >> "$lib"
 
-for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag validated_acceptance_asset_dir download_release verify_sha256 validate_staged_entries installed_provider_binary_path validate_acceptance_upgrade_target validate_acceptance_provider_component_target validate_staged_acceptance_provider_component validate_non_emergency_pinned_target validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
+for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag validated_acceptance_asset_dir download_release verify_sha256 validate_staged_entries headless_acceptance_repair_mode installed_provider_binary_path validate_acceptance_upgrade_target validate_acceptance_provider_component_target validate_staged_acceptance_provider_component validate_non_emergency_pinned_target validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate verify_emergency_config_activation config_without_provider_token_sha256 preserve_failed_bootstrap_identity; do
   grep -q "^${symbol}()" "$lib" || fatal "could not extract $symbol from $INSTALL_SH"
 done
 
@@ -639,6 +645,26 @@ EMERGENCY_ROLLBACK=1
 rc=0
 ( validate_acceptance_upgrade_target v1.8.33 && validate_emergency_target v1.8.33 ) >/dev/null 2>&1 || rc=$?
 report "case20-emergency-downgrade-reaches-existing-gate" 0 "$rc"
+rm -f "$BINARY_PATH" "$INSTALL_DIR/macprovider-cli" "$INSTALL_DIR/compatibility-set.json"
+HEADLESS_REPAIR_INCUMBENT_DIR="$workdir/headless-acceptance-smoke"
+mkdir -p "$HEADLESS_REPAIR_INCUMBENT_DIR"
+HEADLESS_REPAIR_INCUMBENT_BINARY="$HEADLESS_REPAIR_INCUMBENT_DIR/macprovider-cli"
+printf '#!/usr/bin/env bash\nprintf "v1.8.109\\n"\n' > "$HEADLESS_REPAIR_INCUMBENT_BINARY"
+chmod +x "$HEADLESS_REPAIR_INCUMBENT_BINARY"
+REPAIR_EXISTING_INSTALL=1
+HEADLESS=1
+LAUNCHD_DOMAIN=system
+BUNDLED_APP=""
+MACPROVIDER_MIN_HEADLESS_VERSION=v1.8.108
+MACPROVIDER_ACCEPTANCE_ASSET_DIR="$acceptance_dir"
+EMERGENCY_ROLLBACK=0
+rc=0
+( validate_acceptance_upgrade_target v1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case20-headless-repair-downgrade-rejected" 7 "$rc"
+rc=0
+( validate_acceptance_provider_component_target 1.8.108 ) >/dev/null 2>&1 || rc=$?
+report "case20-headless-repair-component-downgrade-rejected" 7 "$rc"
+unset REPAIR_EXISTING_INSTALL HEADLESS LAUNCHD_DOMAIN BUNDLED_APP MACPROVIDER_MIN_HEADLESS_VERSION HEADLESS_REPAIR_INCUMBENT_BINARY
 
 ################################################################
 # Case 21 — validating the installed version must not overwrite

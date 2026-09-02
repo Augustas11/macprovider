@@ -48,7 +48,9 @@ names = [
     "write_install_manifest",
     "arm_install_recovery_agent",
     "recover_orphaned_install_transactions",
+    "validate_recovery_incumbent_provider_binary",
     "validate_recovery_launchdaemon_plist",
+    "snapshot_recovery_launchdaemon_plist",
 ]
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 for name in names:
@@ -405,9 +407,86 @@ FUNCTION_PATH="$TMP/functions.sh" SYSTEM_DIR="$TMP/system" USERS_DIR="$TMP/users
   REC_HEADLESS_USER="$HEADLESS_USER"
   REC_INSTALL_DIR="$INSTALL_DIR"
   REC_WATCHDOG_DIR="$WATCHDOG_DIR"
+  REC_BINARY_PATH="$BINARY_PATH"
+  REC_HEADLESS_REPAIR_INCUMBENT_BINARY=""
+  REC_HEADLESS_REPAIR_INCUMBENT_SHA256=""
   REC_CONFIG_PATH="$CONFIG_PATH"
   validate_recovery_launchdaemon_plist \
     "$PLIST_PATH" "/Library/LaunchDaemons/live.malibu.provider.plist"
+  recovery_alt_dir="$HOME/headless-recovery-alt"
+  recovery_alt_binary="$recovery_alt_dir/macprovider-cli"
+  mkdir -m 700 -p "$recovery_alt_dir"
+  printf "%s\n%s\n" "#!/usr/bin/env bash" "exit 0" > "$recovery_alt_binary"
+  chmod 700 "$recovery_alt_binary"
+  recovery_provider_alt_plist="$CONFIG_DIR/launchd/recovery-provider-alt.plist"
+  python3 - "$recovery_provider_alt_plist" "$recovery_alt_binary" "$CONFIG_PATH" "$CONFIG_DIR/protected-credentials" <<PY
+import plistlib
+import sys
+
+path, binary, config_path, credential_root = sys.argv[1:]
+payload = {
+    "Label": "live.malibu.provider",
+    "UserName": "$(id -un)",
+    "ProgramArguments": [binary, "serve", "--config", config_path],
+    "EnvironmentVariables": {
+        "MACPROVIDER_CONFIG": config_path,
+        "MACPROVIDER_HEADLESS": "1",
+        "MACPROVIDER_HEADLESS_USER": "$(id -un)",
+        "MACPROVIDER_LAUNCHD_DOMAIN": "system",
+        "MACPROVIDER_PROTECTED_CREDENTIAL_ROOT": credential_root,
+    },
+}
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle)
+PY
+  if (validate_recovery_launchdaemon_plist "$recovery_provider_alt_plist" "/Library/LaunchDaemons/live.malibu.provider.plist"); then
+    echo "headless recovery unexpectedly accepted alternate incumbent binary without persisted recovery state" >&2
+    exit 1
+  fi
+  REC_HEADLESS_REPAIR_INCUMBENT_BINARY="$recovery_alt_binary"
+  REC_HEADLESS_REPAIR_INCUMBENT_SHA256="$(shasum -a 256 "$recovery_alt_binary" | awk "{print \$1}")"
+  validate_recovery_incumbent_provider_binary
+  REC_HEADLESS_REPAIR_INCUMBENT_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+  if (validate_recovery_incumbent_provider_binary); then
+    echo "headless recovery unexpectedly accepted a changed incumbent binary digest" >&2
+    exit 1
+  fi
+  REC_HEADLESS_REPAIR_INCUMBENT_SHA256="$(shasum -a 256 "$recovery_alt_binary" | awk "{print \$1}")"
+  validate_recovery_launchdaemon_plist \
+    "$recovery_provider_alt_plist" "/Library/LaunchDaemons/live.malibu.provider.plist"
+  snapshot_recovery_launchdaemon_plist \
+    "$recovery_provider_alt_plist" "/Library/LaunchDaemons/live.malibu.provider.plist" >/dev/null
+  recovery_empty_program_plist="$CONFIG_DIR/launchd/recovery-empty-program.plist"
+  python3 - "$recovery_empty_program_plist" "$CONFIG_PATH" "$CONFIG_DIR/protected-credentials" <<PY
+import plistlib
+import sys
+
+path, config_path, credential_root = sys.argv[1:]
+payload = {
+    "Label": "live.streamvc.macprovider",
+    "UserName": "$(id -un)",
+    "ProgramArguments": [""],
+    "EnvironmentVariables": {
+        "MACPROVIDER_CONFIG": config_path,
+        "MACPROVIDER_HEADLESS": "1",
+        "MACPROVIDER_HEADLESS_USER": "$(id -un)",
+        "MACPROVIDER_LAUNCHD_DOMAIN": "system",
+        "MACPROVIDER_PROTECTED_CREDENTIAL_ROOT": credential_root,
+    },
+}
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle)
+PY
+  REC_BINARY_PATH=""
+  REC_HEADLESS_REPAIR_INCUMBENT_BINARY=""
+  REC_HEADLESS_REPAIR_INCUMBENT_SHA256=""
+  if (validate_recovery_launchdaemon_plist "$recovery_empty_program_plist" "/Library/LaunchDaemons/live.streamvc.macprovider.plist"); then
+    echo "headless recovery unexpectedly accepted an empty provider program alternate" >&2
+    exit 1
+  fi
+  REC_BINARY_PATH="$BINARY_PATH"
+  REC_HEADLESS_REPAIR_INCUMBENT_BINARY="$recovery_alt_binary"
+  REC_HEADLESS_REPAIR_INCUMBENT_SHA256="$(shasum -a 256 "$recovery_alt_binary" | awk "{print \$1}")"
   recovery_watchdog_plist="$CONFIG_DIR/launchd/recovery-watchdog.plist"
   python3 - "$recovery_watchdog_plist" "$CONFIG_PATH" "$CONFIG_DIR/protected-credentials" <<PY
 import plistlib
