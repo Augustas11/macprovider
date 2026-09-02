@@ -789,7 +789,7 @@ No compensation change in SPEC-006.
 Add provider contribution visibility only if the data already exists in
 the coordinator request log or can be derived cheaply.
 For the buyer API, do not expose individual provider earnings.
-For providers, a `macprovider-cli status` or future provider page can
+For providers, a `malibu-cli status` or future provider page can
 show contribution counters.
 Language to use:
 - "v1 is donation-based and capped."

@@ -59,6 +59,12 @@ struct ProviderConflictDetector {
         }
 
         for index in argv.indices {
+            // Match only the canonical binary name. The foreground provider is
+            // always launched as `macprovider-cli serve` (launchd uses the real
+            // binary path; every serve suggestion names macprovider-cli); the
+            // Malibu-branded `malibu-cli` alias (#1261) is for interactive
+            // commands, not serve. Matching `malibu-cli` by basename here would
+            // risk SIGTERM-ing an unrelated user process named `malibu-cli`.
             guard URL(fileURLWithPath: argv[index]).lastPathComponent == "macprovider-cli" else {
                 continue
             }

@@ -10,11 +10,11 @@ Last updated: 2026-08-08
 Providers can currently change the served model and ask for a better paid model
 only through Terminal workflows:
 
-- `macprovider-cli models list`
-- `macprovider-cli models browse`
-- `macprovider-cli models switch <hf-id>`
-- `macprovider-cli models status`
-- `macprovider-cli autotune --recommend --json`
+- `malibu-cli models list`
+- `malibu-cli models browse`
+- `malibu-cli models switch <hf-id>`
+- `malibu-cli models status`
+- `malibu-cli autotune --recommend --json`
 
 Malibu is the provider-facing app, but it currently behaves as a monitor and
 bounded local controller. This creates a sharp UX break: the provider can see
@@ -108,7 +108,7 @@ and CLI options are product-contract surfaces.
 `model_recommendation_check_v1` adapter. Its targeted command shape is:
 
   ```text
-  macprovider-cli autotune --recommend --json \
+  malibu-cli autotune --recommend --json \
     --candidate-models <exact-raw-model-id> \
     --check-only --progress-json \
     --isolated-cache-root <private-staging-root> \
@@ -384,7 +384,7 @@ Acceptance:
    current model, target model, fit status, any warnings, and expected phase
    labels.
 5. Provider clicks `Switch`.
-6. Malibu invokes the launchd-managed `macprovider-cli models switch --json`
+6. Malibu invokes the launchd-managed `malibu-cli models switch --json`
    transaction. The CLI performs the existing supported-model, RAM-fit, and
    cooldown preflight, sends the typed control-socket request, and returns
    authoritative progress/rejection events. Malibu must not send a raw
@@ -950,7 +950,7 @@ Malibu invokes the capability-gated signed check adapter with the exact raw
 browse ID:
 
 ```text
-macprovider-cli autotune --recommend --json \
+malibu-cli autotune --recommend --json \
   --candidate-models <exact-raw-model-id> \
   --check-only --progress-json \
   --isolated-cache-root <private-staging-root> \
@@ -1002,7 +1002,7 @@ Recommendation adoption is owned by one CLI/runtime transaction. The required
 CLI surface is:
 
 ```text
-macprovider-cli models adopt-recommendation \
+malibu-cli models adopt-recommendation \
   --json \
   --config <config.yaml> \
   --recommendation-json <path-or-stdin> \
@@ -1282,7 +1282,7 @@ recommendation has passed the BS953-R014 CLI/runtime transaction.
 Acceptance:
 
 - BS953-AC029: `Adopt` invokes
-  `macprovider-cli models adopt-recommendation --json` and consumes only
+  `malibu-cli models adopt-recommendation --json` and consumes only
   `model_adoption_event.v1` frames for recommendation adoption.
 - BS953-AC030: If recommendation validation, artifact preparation, or config
   apply fails, no live switch request is sent.

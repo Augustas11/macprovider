@@ -6,6 +6,9 @@ set -euo pipefail
 INSTALL_DIR="$HOME/macprovider"
 BIN_DIR="$HOME/.local/bin"
 BINARY_PATH="$BIN_DIR/macprovider-cli"
+# Malibu-branded PATH alias (#1261). Materialized by entrypoint convergence and
+# not recorded in older manifests, so it is removed by its fixed path.
+ALIAS_BINARY_PATH="$BIN_DIR/malibu-cli"
 PLIST_PATH="$HOME/Library/LaunchAgents/live.malibu.provider.plist"
 LEGACY_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
@@ -166,6 +169,16 @@ EOF
   symlink_path="$(manifest_json_value symlink_path 2>/dev/null | head -1 || true)"
   [ -n "$symlink_path" ] || symlink_path="$BINARY_PATH"
   remove_tree_if_allowed "binary symlink" "$symlink_path" "$BINARY_PATH"
+  # Remove the malibu-cli alias only when it is a symlink we own -- one pointing
+  # exactly at the canonical entrypoint ($BINARY_PATH) -- never an unrelated user
+  # file or a symlink to some other target at that path (#1261). readlink (not
+  # -e) so a dangling owned alias is still cleaned up.
+  if [ -L "$ALIAS_BINARY_PATH" ]; then
+    alias_target="$(readlink "$ALIAS_BINARY_PATH" 2>/dev/null || true)"
+    if [ "$alias_target" = "$BINARY_PATH" ]; then
+      remove_tree_if_allowed "malibu-cli alias symlink" "$ALIAS_BINARY_PATH" "$ALIAS_BINARY_PATH"
+    fi
+  fi
 
   data_dirs="$(manifest_json_value data_dirs 2>/dev/null || true)"
   if [ "$manifest_missing" -eq 1 ] || [ -z "$data_dirs" ]; then

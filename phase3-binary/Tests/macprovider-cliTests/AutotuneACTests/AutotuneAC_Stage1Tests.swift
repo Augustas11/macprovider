@@ -114,7 +114,7 @@ final class AutotuneACStage1Tests: XCTestCase {
     ///
     /// Shape A exclusion: SPEC-013 Step 6 selected Shape B (runtime online-fallback
     /// classification via `ProviderPreWarmer` + `HuggingFaceCacheChecker`). The AC-8
-    /// Shape A variant (invokes `macprovider-cli models pull <id>` or equivalent
+    /// Shape A variant (invokes `malibu-cli models pull <id>` or equivalent
     /// subcommand) is out of scope for the v1 implementation surface. This test
     /// exercises Shape B's transient classification only.
     func testAC8PreWarmTransientFailureAdvancesToNextCandidate() async throws {

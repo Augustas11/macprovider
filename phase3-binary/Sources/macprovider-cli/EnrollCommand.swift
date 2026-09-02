@@ -105,7 +105,7 @@ enum EnrollError: Error, CustomStringConvertible {
             return "This Mac is already managed by another MDM (server: \(serverURL)). "
                 + "macOS allows only one MDM enrollment per device. "
                 + "Remove the existing profile in System Settings → General → Device Management, "
-                + "then re-run `macprovider-cli enroll`."
+                + "then re-run `malibu-cli enroll`."
         }
     }
 }

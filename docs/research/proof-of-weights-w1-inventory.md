@@ -50,7 +50,7 @@
 
 1. Edit signed tier-2 catalog JSON + rate-card model rows in git (operator PR).
 2. Deploy coordinator with updated `tier2.catalog_path` / hot-reload (SIGHUP).
-3. Providers run `macprovider-cli autotune --recommend --apply` so `model_catalog_*` + `model_artifact_sha256` match the pinned row.
+3. Providers run `malibu-cli autotune --recommend --apply` so `model_catalog_*` + `model_artifact_sha256` match the pinned row.
 4. Hello carries `model_hash` from live manifest; coordinator verifies against catalog via `VerifyProviderHash`.
 5. Mismatch → no buyer traffic; settlement receipts quarantine if hash diverges at payout time.
 

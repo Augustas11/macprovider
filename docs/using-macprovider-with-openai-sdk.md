@@ -308,6 +308,6 @@ If you find a framework where the OpenAI SDK works but MacProvider doesn't, that
 Two things live outside the SDK because they don't fit its request/response shape:
 
 1. **Receipt verification** — one-way offline check, better as a separate tool (`macprovider-verify`).
-2. **Provider selection / autotune** — buyer-side (`macprovider-cli models browse`, `macprovider-cli autotune`) is separate from the API surface.
+2. **Provider selection / autotune** — buyer-side (`malibu-cli models browse`, `malibu-cli autotune`) is separate from the API surface.
 
 Everything else — routing, retries, billing, model catalog, model-hash verification, tool calling, structured output, streaming, sticky affinity, provider pinning — is transparent through the OpenAI SDK.

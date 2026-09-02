@@ -100,9 +100,9 @@ When coordinator reachability changes, a locally eligible candidate may move bet
 
 The intended implementation is a CLI-first projection:
 
-1. Add discovery adapter interfaces behind `macprovider-cli models discover --json`.
+1. Add discovery adapter interfaces behind `malibu-cli models discover --json`.
 2. Add the closed discovery envelope and schema tests.
-3. Add `macprovider-cli models evaluate <candidate> --json` with a bounded local harness.
+3. Add `malibu-cli models evaluate <candidate> --json` with a bounded local harness.
 4. Persist no long-lived state except optional redacted local evaluation cache records defined by the implementation.
 5. Let SPEC-047 own all coordinator submission and network state.
 6. Let SPEC-044 consume only network-eligible economics after admission.

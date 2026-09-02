@@ -4,8 +4,8 @@ import MacProviderCore
 
 /// SPEC-037 FR-KVP8/FR-KVP12 — operator control plane for the KV survival disk
 /// tier. Canonical spellings:
-///   macprovider-cli kv-cache purge --key <k> | --key-stdin | --all [--forget]
-///   macprovider-cli kv-cache status
+///   malibu-cli kv-cache purge --key <k> | --key-stdin | --all [--forget]
+///   malibu-cli kv-cache status
 ///
 /// These work while the tier is `enabled=false` (a disabled tier still has
 /// purgeable residue). Execution honors the FR-KVP7 flock model: a standalone

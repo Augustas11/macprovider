@@ -83,6 +83,15 @@ struct UninstallCommand: AsyncParsableCommand {
         } else {
             removeIfPresent(paths.binary, allowed: allowed.symlinks, label: "binary symlink", warnings: &warnings)
         }
+        // Malibu-branded alias (#1261) is materialized by entrypoint convergence,
+        // not recorded in older manifests, so remove it by its fixed path -- but
+        // only when it is a symlink we own (points exactly at the canonical
+        // `~/.local/bin/macprovider-cli` entrypoint), never an unrelated user
+        // file/dir/symlink at the `malibu-cli` path. lstat/unlink (not
+        // fileExists) so a dangling owned alias symlink is still cleaned up.
+        if Self.aliasIsOwnedSymlink(paths.aliasBinary, canonicalEntrypoint: paths.binary) {
+            removeOwnedSymlink(paths.aliasBinary, allowed: allowed.symlinks, label: "malibu-cli alias symlink", warnings: &warnings)
+        }
         if let binaryPath = manifest.binaryPath {
             removeIfPresent(URL(fileURLWithPath: binaryPath), allowed: allowed.binaries, label: "binary", warnings: &warnings)
         }
@@ -102,7 +111,7 @@ struct UninstallCommand: AsyncParsableCommand {
         for warning in warnings {
             print("warning: \(warning)")
         }
-        print("macprovider-cli has been uninstalled.")
+        print("malibu-cli has been uninstalled.")
     }
 
     /// FR-KVP8 — resolve the installed KV disk tier and purge --all --forget it,
@@ -116,7 +125,7 @@ struct UninstallCommand: AsyncParsableCommand {
             warnings.append(
                 "kv-cache cleanup skipped: could not resolve config/provider_id; encrypted KV "
                 + "survival data and Keychain DEKs may remain under the configured cache directory "
-                + "— run `macprovider-cli kv-cache purge --all --forget` after restoring config, or "
+                + "— run `malibu-cli kv-cache purge --all --forget` after restoring config, or "
                 + "remove the cache dir manually.")
             return
         }
@@ -146,6 +155,10 @@ struct UninstallCommand: AsyncParsableCommand {
 
     struct ArtifactPaths: Equatable {
         let binary: URL
+        /// Malibu-branded PATH alias (`~/.local/bin/malibu-cli`, #1261). Removed
+        /// alongside the canonical entrypoint so uninstall leaves no dangling
+        /// symlink behind.
+        let aliasBinary: URL
         let supportDirectory: URL
         let logsDirectory: URL
         let plist: URL
@@ -264,9 +277,32 @@ struct UninstallCommand: AsyncParsableCommand {
         status == 1 || status == 3 || status == 113
     }
 
+    /// True only when `url` is a symlink this tool owns: it points exactly at
+    /// the canonical `macprovider-cli` entrypoint (`~/.local/bin/macprovider-cli`,
+    /// = `canonicalEntrypoint`). A user's own file, or a symlink to any other
+    /// target, is not owned. Uses lstat/readlink (not fileExists) so a dangling
+    /// owned alias still counts. Guards uninstall against deleting an unrelated
+    /// user file at the alias path (#1261).
+    static func aliasIsOwnedSymlink(_ url: URL, canonicalEntrypoint: URL) -> Bool {
+        var info = stat()
+        guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFLNK else {
+            return false
+        }
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+        let length = readlink(url.path, &buffer, buffer.count - 1)
+        guard length > 0 else { return false }
+        buffer[length] = 0
+        let target = String(cString: buffer)
+        let resolved = target.hasPrefix("/")
+            ? URL(fileURLWithPath: target).standardizedFileURL.path
+            : url.deletingLastPathComponent().appendingPathComponent(target).standardizedFileURL.path
+        return resolved == canonicalEntrypoint.standardizedFileURL.path
+    }
+
     static func artifactPaths(home: URL) -> ArtifactPaths {
         ArtifactPaths(
             binary: home.appendingPathComponent(".local/bin/macprovider-cli"),
+            aliasBinary: home.appendingPathComponent(".local/bin/malibu-cli"),
             supportDirectory: home.appendingPathComponent("macprovider"),
             logsDirectory: home.appendingPathComponent("Library/Logs/macprovider"),
             plist: home.appendingPathComponent("Library/LaunchAgents/live.malibu.provider.plist"),
@@ -408,6 +444,7 @@ struct UninstallCommand: AsyncParsableCommand {
             ],
             symlinks: [
                 paths.binary.path,
+                paths.aliasBinary.path,
             ],
             binaries: [
                 installPrefix.appendingPathComponent("macprovider-cli").path,
@@ -437,6 +474,29 @@ struct UninstallCommand: AsyncParsableCommand {
             try FileManager.default.removeItem(at: url)
         } catch {
             warnings.append("failed to remove \(url.path): \(error)")
+        }
+    }
+
+    /// Removes a symlink at `url` that lstat confirms is present, without
+    /// following it -- so a dangling owned alias symlink is still cleaned up
+    /// (unlike `removeIfPresent`, which uses `fileExists` and skips dangling
+    /// links). The caller must have already established ownership. #1261
+    private func removeOwnedSymlink(_ url: URL, allowed: [String], label: String, warnings: inout [String]) {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else {
+            return
+        }
+        do {
+            guard try Self.path(url.path, isAllowedBy: allowed) else {
+                warnings.append("refusing unsafe \(label) path: \(url.path)")
+                return
+            }
+        } catch {
+            warnings.append("refusing unsafe \(label) path: \(url.path): \(error)")
+            return
+        }
+        if unlink(url.path) != 0 {
+            warnings.append("failed to remove \(label) at \(url.path)")
         }
     }
 

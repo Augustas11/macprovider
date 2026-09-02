@@ -5,7 +5,7 @@ import MacProviderCore
 
 /// Issue #767 — offline-first provider diagnostics.
 ///
-///     macprovider-cli doctor [--config PATH] [--json] [--offline]
+///     malibu-cli doctor [--config PATH] [--json] [--offline]
 ///
 /// The motivating failure: a build below the coordinator's
 /// `required_binary_version` is closed with 4004 and (before #767) silently
@@ -230,7 +230,7 @@ struct DoctorRunner: Sendable {
         var note: String?
         switch standing {
         case .belowFloor:
-            note = "this build is below the coordinator's required minimum; it will be closed with 4004 version_unsupported. Run 'macprovider-cli update'."
+            note = "this build is below the coordinator's required minimum; it will be closed with 4004 version_unsupported. Run 'malibu-cli update'."
         case .indeterminate:
             note = "could not compare this binary version against the coordinator's floor"
         default:
@@ -297,7 +297,7 @@ struct DoctorRunner: Sendable {
 enum DoctorReportPrinter {
     static func emitText(_ report: DoctorReport) {
         var lines: [String] = [
-            "macprovider-cli doctor",
+            "malibu-cli doctor",
             "  binary_version:              \(report.binaryVersion)",
             "  config_path:                 \(report.configPath)",
             "  provider_id:                 \(report.providerID ?? "(unset)")",

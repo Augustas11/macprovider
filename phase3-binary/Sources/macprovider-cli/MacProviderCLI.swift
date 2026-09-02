@@ -37,8 +37,8 @@ enum AdmissionIdentityStartupTopology: Equatable {
 @main
 struct MacProviderCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "macprovider-cli",
-        abstract: "OpenAI-compatible Mac Provider inference CLI.",
+        commandName: "malibu-cli",
+        abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
         subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self],
         defaultSubcommand: ServeCommand.self
@@ -1076,7 +1076,7 @@ struct ServeCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data(
                 ("model catalog provenance envelope is stale (stored \(version)/\(storedPrefix)…, "
                     + "current \(catalog.value.version)/\(currentPrefix)…); "
-                    + "row still admitted — run macprovider-cli autotune --recommend --apply to refresh config\n")
+                    + "row still admitted — run malibu-cli autotune --recommend --apply to refresh config\n")
                 .utf8
             ))
         }
@@ -1734,7 +1734,7 @@ struct ServeCommand: AsyncParsableCommand {
         // the model runtime (data path) and the control socket (in-process
         // purge/status). Fail-closed: activation failure leaves the tier off and
         // never blocks the serve loop. A disabled tier is not activated here, so a
-        // standalone `macprovider-cli kv-cache` invocation can acquire the free
+        // standalone `malibu-cli kv-cache` invocation can acquire the free
         // namespace lock itself.
         // LOW (FR-KVP11): surface resolver errors that force the tier off BEFORE the
         // effectiveEnabled guard. When effectiveEnabled is false because errors were
@@ -3026,7 +3026,7 @@ struct UpdateCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data("""
 
             Recommendation stale: recommendation inputs changed since \(ISO8601DateFormatter.autotuneInternet.string(from: staleSince)).
-            Run: macprovider-cli autotune --recommend
+            Run: malibu-cli autotune --recommend
 
             """.utf8))
         }
@@ -3043,7 +3043,7 @@ struct UpdateCommand: AsyncParsableCommand {
         runLaunchctl: (([String]) throws -> Int32)? = nil
     ) throws {
         if checkOnly, !hasAcceptanceOptions { return }
-        let rejectMessage = "headless_fleet does not support mutating macprovider-cli update yet; use the signed headless installer acceptance bundle"
+        let rejectMessage = "headless_fleet does not support mutating malibu-cli update yet; use the signed headless installer acceptance bundle"
         if config?.credentialStore == .protectedFile {
             throw ValidationError(rejectMessage)
         }
@@ -3150,7 +3150,7 @@ private func signalName(_ signalNumber: Int32) -> String {
 }
 
 private func printResolvedConfiguration(_ config: AppConfig) {
-    print("macprovider-cli config")
+    print("malibu-cli config")
     print("  port: \(config.port)")
     print("  model: \(config.model ?? "<unset>")")
     print("  draft_model: \(config.draftModel ?? "<unset>")")
