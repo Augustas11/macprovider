@@ -1593,6 +1593,40 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertLessThan(try XCTUnwrap(json.range(of: #""alternative_explanations":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""donor_fallback_explanation":"#)?.lowerBound))
     }
 
+    func testContextCalibrationJSONAndHumanApplyInstructionAreOptIn() throws {
+        var result = AutotuneRecommendEngine().recommend(try makeRequest())
+        XCTAssertFalse(result.jsonString().contains("\"context_calibration\""))
+        XCTAssertFalse(result.storedStateJSON().contains("\"context_calibration\""))
+
+        result.contextCalibration = AutotuneContextCalibrationResult(
+            recommendedContext: 8_000,
+            safeUpperBound: 50_000,
+            minimumContext: 4_000,
+            ttftCeilingMS: 8_000,
+            quantum: 1_000,
+            measurements: [
+                AutotuneContextCalibrationMeasurement(
+                    contextTokens: 8_000,
+                    ttftP95MS: 7_500,
+                    decodeTPS: 42.5,
+                    replicates: 3,
+                    passed: true
+                ),
+            ]
+        )
+
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.jsonString().utf8)) as? [String: Any]
+        )
+        XCTAssertNotNil(root["context_calibration"] as? [String: Any])
+        XCTAssertTrue(result.storedStateJSON().contains("\"context_calibration\""))
+        let stored = try JSONDecoder().decode(LastRecommendationState.self, from: Data(result.storedStateJSON().utf8))
+        XCTAssertEqual(stored.contextCalibration?.recommendedContext, 8_000)
+        let transcript = result.contextCalibrationHumanTranscript(configurationApplied: false)
+        XCTAssertTrue(transcript.contains("Interactive context: 8000 tokens"), transcript)
+        XCTAssertTrue(transcript.contains("--calibrate-context --apply"), transcript)
+    }
+
     func testSignedStaticFallbackAndStaleWarnings() async throws {
         let validFetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
             .replacingOccurrences(of: "published-2026-08-28-inband-provenance-v1", with: "fetched-2026-09-09")
@@ -2108,6 +2142,12 @@ final class AutotuneRecommendTests: XCTestCase {
         func snapshot() -> [UInt64] { invocations }
     }
 
+    private actor TimeoutRecorder {
+        var values: [TimeInterval] = []
+        func record(_ value: TimeInterval) { values.append(value) }
+        func snapshot() -> [TimeInterval] { values }
+    }
+
     private static let dummyOKResponse: HTTPURLResponse = HTTPURLResponse(
         url: URL(string: "https://huggingface.co/repo/resolve/main/file.safetensors")!,
         statusCode: 200,
@@ -2283,6 +2323,40 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(sleeps.isEmpty)
     }
 
+    func testDownloadWithResumeDeadlineCancelsProgressingInitialDownload() async throws {
+        let counter = SleepCounter()
+        let policy = Self.makeDownloadRetryPolicyNoDelay(maxAttempts: 1, sleepCalls: counter)
+        let request = URLRequest(url: URL(string: "https://huggingface.co/repo/resolve/main/file.safetensors")!)
+        let deadline = Date().addingTimeInterval(0.05)
+        let started = Date()
+
+        do {
+            _ = try await HuggingFaceSnapshotDownloader.downloadWithResume(
+                request: request,
+                policy: policy,
+                deadline: deadline,
+                initialDownload: { _ in
+                    while !Task.isCancelled {
+                        try await Task.sleep(nanoseconds: 5_000_000)
+                    }
+                    try Task.checkCancellation()
+                    throw URLError(.cancelled)
+                },
+                resumeDownload: { _ in
+                    XCTFail("resume must not run when the initial attempt is still progressing")
+                    return (URL(fileURLWithPath: "/tmp/x"), Self.dummyOKResponse)
+                }
+            )
+            XCTFail("expected deadline cancellation")
+        } catch {
+            XCTAssertEqual(error as? AutotuneContextCalibrationError, .deadlineExceeded)
+        }
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0)
+        let sleeps = await counter.snapshot()
+        XCTAssertTrue(sleeps.isEmpty)
+    }
+
     func testIsTransientDownloadErrorCoversExpectedSet() {
         let transient: [URLError.Code] = [
             .networkConnectionLost, .timedOut, .notConnectedToInternet,
@@ -2437,6 +2511,25 @@ final class AutotuneRecommendTests: XCTestCase {
         try Data("hidden".utf8).write(to: dir.appendingPathComponent(".weights.index"))
 
         XCTAssertNotEqual(withoutHidden, try ModelArtifactVerifier.canonicalArtifactHash(directory: dir))
+    }
+
+    func testModelArtifactHashDeadlineStopsLargeFileRead() throws {
+        let dir = try tempDir()
+        let largeFile = dir.appendingPathComponent("weights.bin")
+        XCTAssertTrue(FileManager.default.createFile(atPath: largeFile.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: largeFile)
+        let chunk = Data(repeating: 0x5a, count: 1024 * 1024)
+        for _ in 0..<64 {
+            try handle.write(contentsOf: chunk)
+        }
+        try handle.close()
+        let deadline = Date().addingTimeInterval(0.002)
+        let started = Date()
+
+        XCTAssertThrowsError(try ModelArtifactVerifier.canonicalArtifactHash(directory: dir, deadline: deadline)) { error in
+            XCTAssertEqual(error as? AutotuneContextCalibrationError, .deadlineExceeded)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0)
     }
 
     func testCachedArtifactResolverRequiresExactRevisionAndHash() throws {
@@ -3875,6 +3968,111 @@ final class AutotuneRecommendTests: XCTestCase {
         )
     }
 
+    func testBenchmarksPassesDeadlineToStage1Probe() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware.memoryGB = 64
+        request.hardware.bandwidthTier = .a
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = artifactSHA
+        request.benchmarks = [:]
+        let durablePath = try durableArtifactPath(
+            hubRoot: hub,
+            modelID: row.modelID,
+            revision: revision,
+            sha256: artifactSHA
+        )
+        let prober = RecordingStage1Prober(results: [
+            durablePath: .feasible(medianTPS: 42, p95TTFTMS: 900),
+        ])
+        let deadline = Date().addingTimeInterval(10)
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: prober,
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        _ = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18_080,
+            deadline: deadline,
+            candidateModelIDs: [row.modelID]
+        )
+
+        XCTAssertEqual(prober.probedDeadlines.count, 1)
+        XCTAssertEqual(prober.probedDeadlines.first!, deadline)
+    }
+
+    func testBenchmarksDeadlineExpiresDuringArtifactAcquisitionBeforeProbe() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware.memoryGB = 64
+        request.hardware.bandwidthTier = .a
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        request.benchmarks = [:]
+        let prober = RecordingStage1Prober(results: [:])
+        let capturedTimeouts = TimeoutRecorder()
+        let resolver = CachedModelArtifactResolver(
+            hubRoot: try tempDir(),
+            downloader: HuggingFaceSnapshotDownloader(
+                fetch: { request in
+                    await capturedTimeouts.record(request.timeoutInterval)
+                    try await Task.sleep(nanoseconds: 300_000_000)
+                    return (
+                        Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8),
+                        HTTPURLResponse(
+                            url: request.url!,
+                            statusCode: 200,
+                            httpVersion: nil,
+                            headerFields: nil
+                        )!
+                    )
+                },
+                download: { _ in
+                    throw AutotuneRecommendError.invalidArtifact("download must not start after deadline")
+                }
+            )
+        )
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: resolver,
+            runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("probe must not start after artifact deadline") },
+            prober: prober,
+            safetySampler: StaticProbeSafetySampler()
+        )
+        let deadline = Date().addingTimeInterval(0.1)
+
+        do {
+            _ = try await benchmarker.benchmarks(
+                request: request,
+                targetContext: 4_000,
+                gateTTFTMS: 3_000,
+                replicates: 1,
+                port: 18_080,
+                deadline: deadline,
+                candidateModelIDs: [row.modelID]
+            )
+            XCTFail("artifact acquisition deadline must fail before probing")
+        } catch {
+            XCTAssertEqual(error as? AutotuneContextCalibrationError, .deadlineExceeded)
+        }
+
+        let capturedTimeoutSample = await capturedTimeouts.snapshot().first
+        let capturedTimeout = try XCTUnwrap(capturedTimeoutSample)
+        XCTAssertLessThanOrEqual(capturedTimeout, 0.5)
+        XCTAssertTrue(prober.probedModels.isEmpty)
+    }
+
     func testBenchmarksDiagnosesInvalidFeasibleMeasurementsWithoutTrapping() async throws {
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         var request = try makeRequest(modelKey: modelKey)
@@ -4717,6 +4915,7 @@ private final class RecordingStage1Prober: Stage1Probing {
     private let results: [String: Stage1ProbeResult]
     private(set) var probedModels: [String] = []
     private(set) var probedArtifactBindings: [CandidateArtifactBinding?] = []
+    private(set) var probedDeadlines: [Date?] = []
 
     init(results: [String: Stage1ProbeResult]) {
         self.results = results
@@ -4750,8 +4949,31 @@ private final class RecordingStage1Prober: Stage1Probing {
         replicates: Int,
         artifactBinding: CandidateArtifactBinding?
     ) async throws -> Stage1ProbeResult {
+        try await probe(
+            model: model,
+            port: port,
+            runner: runner,
+            targetContext: targetContext,
+            gateTTFTMS: gateTTFTMS,
+            replicates: replicates,
+            artifactBinding: artifactBinding,
+            deadline: nil
+        )
+    }
+
+    func probe(
+        model: String,
+        port: Int,
+        runner: Stage1ProviderRunning,
+        targetContext: Int,
+        gateTTFTMS: Int,
+        replicates: Int,
+        artifactBinding: CandidateArtifactBinding?,
+        deadline: Date?
+    ) async throws -> Stage1ProbeResult {
         probedModels.append(model)
         probedArtifactBindings.append(artifactBinding)
+        probedDeadlines.append(deadline)
         return results[model] ?? .infeasible(reason: "missing stub probe result", nErr: 1)
     }
 }

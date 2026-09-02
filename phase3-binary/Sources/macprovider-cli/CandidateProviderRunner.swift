@@ -54,6 +54,10 @@ enum CandidateProviderRunnerError: Error, Equatable, CustomStringConvertible {
 }
 
 final class CandidateProviderRunner {
+    private struct ReadinessResponseBox: @unchecked Sendable {
+        var response: URLResponse
+    }
+
     private let providerBinaryPath: String
     private let configPath: String?
     private let ownedCandidateConfigRoot: URL?
@@ -104,7 +108,8 @@ final class CandidateProviderRunner {
             kvBits: kvBits,
             maxContext: maxContext,
             maxBatch: maxBatch,
-            artifactBinding: nil
+            artifactBinding: nil,
+            deadline: nil
         )
     }
 
@@ -116,7 +121,27 @@ final class CandidateProviderRunner {
         maxBatch: Int? = nil,
         artifactBinding: CandidateArtifactBinding?
     ) throws {
-        let artifactArguments = try Self.artifactArguments(for: model, binding: artifactBinding)
+        try start(
+            model: model,
+            port: port,
+            kvBits: kvBits,
+            maxContext: maxContext,
+            maxBatch: maxBatch,
+            artifactBinding: artifactBinding,
+            deadline: nil
+        )
+    }
+
+    func start(
+        model: String,
+        port: Int,
+        kvBits: Int? = nil,
+        maxContext: Int? = nil,
+        maxBatch: Int? = nil,
+        artifactBinding: CandidateArtifactBinding?,
+        deadline: Date?
+    ) throws {
+        let artifactArguments = try Self.artifactArguments(for: model, binding: artifactBinding, deadline: deadline)
         let arguments = try Self.serveArguments(
             model: model,
             port: port,
@@ -195,8 +220,13 @@ final class CandidateProviderRunner {
     }
 
     func waitForReady(timeout: TimeInterval) async throws -> ReadyStatus {
+        try await waitForReady(timeout: timeout, deadline: nil)
+    }
+
+    func waitForReady(timeout: TimeInterval, deadline externalDeadline: Date?) async throws -> ReadyStatus {
         let provider = try currentProvider()
-        let deadline = Date().addingTimeInterval(timeout)
+        let timeoutDeadline = Date().addingTimeInterval(timeout)
+        let deadline = Self.earliestDeadline(timeoutDeadline, externalDeadline)
         var lastError = "not checked yet"
 
         while Date() < deadline {
@@ -210,10 +240,16 @@ final class CandidateProviderRunner {
 
             var request = URLRequest(url: URL(string: "http://127.0.0.1:\(provider.port)/v1/models")!)
             request.httpMethod = "GET"
-            request.timeoutInterval = 1
+            request.timeoutInterval = Self.boundedInterval(1, deadline: deadline)
 
             do {
-                let (_, response) = try await session.data(for: request)
+                let readinessRequest = request
+                let session = self.session
+                let result = try await Self.withDeadline(deadline) {
+                    let (_, response) = try await session.data(for: readinessRequest)
+                    return ReadinessResponseBox(response: response)
+                }
+                let response = result.response
                 if let http = response as? HTTPURLResponse {
                     if http.statusCode == 200 {
                         // Closes round-1 audit C.1 (MAJOR): the prior code
@@ -232,9 +268,17 @@ final class CandidateProviderRunner {
                                 stderrTail: provider.stderrTail.snapshot()
                             )
                         }
-                        return .ready
+                        let ownerPIDs = Self.listenerOwnerPIDs(port: provider.port, deadline: deadline)
+                        if ownerPIDs == [provider.process.processIdentifier] {
+                            return .ready
+                        } else {
+                            lastError = ownerPIDs.isEmpty
+                                ? "listener ownership unavailable for port \(provider.port)"
+                                : "listener on port \(provider.port) owned by unexpected pid(s) \(ownerPIDs.map(String.init).joined(separator: ","))"
+                        }
+                    } else {
+                        lastError = "HTTP \(http.statusCode)"
                     }
-                    lastError = "HTTP \(http.statusCode)"
                 } else {
                     lastError = "non-HTTP response"
                 }
@@ -250,7 +294,8 @@ final class CandidateProviderRunner {
                 )
             }
 
-            try await Task.sleep(nanoseconds: 1_000_000_000)
+            let sleepSeconds = Self.boundedInterval(1, deadline: deadline)
+            try await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
         }
 
         return .timeout(lastError: lastError)
@@ -474,19 +519,20 @@ final class CandidateProviderRunner {
         }
     }
 
-    private static func artifactSHA256(for model: String) -> String? {
+    private static func artifactSHA256(for model: String, deadline: Date? = nil) -> String? {
         guard let artifactDirectory = artifactDirectory(for: model) else { return nil }
-        return try? ModelArtifactVerifier.canonicalArtifactHash(directory: artifactDirectory)
+        return try? ModelArtifactVerifier.canonicalArtifactHash(directory: artifactDirectory, deadline: deadline)
     }
 
     private static func artifactArguments(
         for model: String,
-        binding: CandidateArtifactBinding?
+        binding: CandidateArtifactBinding?,
+        deadline: Date? = nil
     ) throws -> (path: String?, sha256: String?) {
         guard let binding else {
             return (
                 path: artifactDirectory(for: model)?.path,
-                sha256: artifactSHA256(for: model)
+                sha256: artifactSHA256(for: model, deadline: deadline)
             )
         }
         guard binding.path.hasPrefix("/"),
@@ -498,8 +544,11 @@ final class CandidateProviderRunner {
         let actual: String
         do {
             actual = try ModelArtifactVerifier.canonicalArtifactHash(
-                directory: URL(fileURLWithPath: binding.path, isDirectory: true)
+                directory: URL(fileURLWithPath: binding.path, isDirectory: true),
+                deadline: deadline
             )
+        } catch AutotuneContextCalibrationError.deadlineExceeded {
+            throw AutotuneContextCalibrationError.deadlineExceeded
         } catch {
             throw CandidateProviderRunnerError.invalidArtifactBinding("artifact could not be verified")
         }
@@ -609,6 +658,143 @@ final class CandidateProviderRunner {
             .path
     }
 
+    static func listenerOwnerPIDsForTesting(port: Int, deadline: Date? = nil) -> Set<Int32> {
+        listenerOwnerPIDs(port: port, deadline: deadline)
+    }
+
+    private static func listenerOwnerPIDs(port: Int, deadline: Date?) -> Set<Int32> {
+        let lookupDeadline = earliestDeadline(
+            Date().addingTimeInterval(0.25),
+            deadline
+        )
+        guard Date() < lookupDeadline else { return [] }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        process.arguments = [
+            "-nP",
+            "-iTCP@127.0.0.1:\(port)",
+            "-sTCP:LISTEN",
+            "-Fp",
+        ]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+        let terminated = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in
+            terminated.signal()
+        }
+        let collector = LockedData(limitBytes: 64 * 1024)
+        output.fileHandleForReading.readabilityHandler = { handle in
+            collector.append(handle.availableData)
+        }
+        defer {
+            output.fileHandleForReading.readabilityHandler = nil
+        }
+        do {
+            try process.run()
+        } catch {
+            return []
+        }
+        if waitForTermination(terminated, until: lookupDeadline) == false {
+            if process.isRunning {
+                process.terminate()
+            }
+            let killDeadline = Date().addingTimeInterval(0.02)
+            if waitForTermination(terminated, until: earliestDeadline(killDeadline, lookupDeadline)) == false {
+                if process.isRunning {
+                    Darwin.kill(process.processIdentifier, SIGKILL)
+                }
+                guard waitForTermination(terminated, until: Date().addingTimeInterval(0.02)) else {
+                    return []
+                }
+            }
+        }
+        process.terminationHandler = nil
+        collector.append(output.fileHandleForReading.readDataToEndOfFile())
+        guard process.terminationStatus == 0 else {
+            return []
+        }
+        let data = collector.snapshot()
+        let text = String(decoding: data, as: UTF8.self)
+        return Set(text.split(whereSeparator: \.isNewline).compactMap { line in
+            guard line.first == "p" else { return nil }
+            return Int32(line.dropFirst())
+        })
+    }
+
+    private static func earliestDeadline(_ lhs: Date, _ rhs: Date?) -> Date {
+        guard let rhs else { return lhs }
+        return min(lhs, rhs)
+    }
+
+    private static func withDeadline<T: Sendable>(
+        _ deadline: Date,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        let remaining = deadline.timeIntervalSince(Date())
+        guard remaining > 0 else {
+            throw AutotuneContextCalibrationError.deadlineExceeded
+        }
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                let nanoseconds = UInt64(max(0.001, remaining) * 1_000_000_000)
+                try await Task.sleep(nanoseconds: nanoseconds)
+                throw AutotuneContextCalibrationError.deadlineExceeded
+            }
+            do {
+                guard let result = try await group.next() else {
+                    throw AutotuneContextCalibrationError.deadlineExceeded
+                }
+                group.cancelAll()
+                return result
+            } catch {
+                group.cancelAll()
+                if Date() >= deadline {
+                    throw AutotuneContextCalibrationError.deadlineExceeded
+                }
+                throw error
+            }
+        }
+    }
+
+    private static func boundedInterval(_ interval: TimeInterval, deadline: Date) -> TimeInterval {
+        max(0.001, min(interval, deadline.timeIntervalSince(Date())))
+    }
+
+    private static func waitForTermination(_ semaphore: DispatchSemaphore, until deadline: Date) -> Bool {
+        let remaining = deadline.timeIntervalSince(Date())
+        guard remaining > 0 else { return false }
+        return semaphore.wait(timeout: .now() + remaining) == .success
+    }
+
+}
+
+private final class LockedData: @unchecked Sendable {
+    private let lock = NSLock()
+    private let limitBytes: Int
+    private var data = Data()
+
+    init(limitBytes: Int) {
+        self.limitBytes = limitBytes
+    }
+
+    func append(_ newData: Data) {
+        guard !newData.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard data.count < limitBytes else { return }
+        data.append(newData.prefix(limitBytes - data.count))
+    }
+
+    func snapshot() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return data
+    }
 }
 
 private final class CandidateChildProcess: @unchecked Sendable {

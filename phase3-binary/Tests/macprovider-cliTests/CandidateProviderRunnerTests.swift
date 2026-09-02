@@ -105,6 +105,37 @@ final class CandidateProviderRunnerTests: XCTestCase {
         XCTAssertNil(runner.activeProcessIdentifierForTesting())
     }
 
+    func testStartArtifactBindingRehashHonorsDeadline() throws {
+        let artifact = try temporaryDirectory(name: "provider-runner-artifact-deadline")
+        let largeFile = artifact.appendingPathComponent("weights.bin")
+        XCTAssertTrue(FileManager.default.createFile(atPath: largeFile.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: largeFile)
+        let chunk = Data(repeating: 0x5a, count: 1024 * 1024)
+        for _ in 0..<64 {
+            try handle.write(contentsOf: chunk)
+        }
+        try handle.close()
+        let sha256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: artifact)
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: "/usr/bin/true",
+            logDirectory: try temporaryDirectory(name: "provider-runner-artifact-deadline-logs")
+        )
+        let started = Date()
+
+        XCTAssertThrowsError(
+            try runner.start(
+                model: "model-a",
+                port: 18_080,
+                artifactBinding: CandidateArtifactBinding(path: artifact.path, sha256: sha256),
+                deadline: Date().addingTimeInterval(0.002)
+            )
+        ) { error in
+            XCTAssertEqual(error as? AutotuneContextCalibrationError, .deadlineExceeded)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0)
+        XCTAssertNil(runner.activeProcessIdentifierForTesting())
+    }
+
     // MARK: - Round-1 audit fix tests
 
     /// Round-1 B.1 closure: `start()` with a missing binary path MUST
@@ -152,6 +183,50 @@ final class CandidateProviderRunnerTests: XCTestCase {
             break
         case .timeout(let last):
             XCTFail("expected .ready or .processExited, got .timeout(\(last))")
+        }
+    }
+
+    func testWaitForReadyRejectsReadinessFromUnexpectedListenerOwner() async throws {
+        let port = try unusedPort()
+        let spoof = try startSpoofModelsServer(port: port)
+        defer {
+            spoof.terminate()
+            spoof.waitUntilExit()
+        }
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try sleepingStubProvider().path,
+            logDirectory: try temporaryDirectory(name: "provider-runner-spoof-owner")
+        )
+        try runner.start(model: "model-a", port: port)
+        defer { _ = runner.stop(graceSeconds: 0.1) }
+
+        let status = try await runner.waitForReady(timeout: 0.5)
+        guard case .timeout(let lastError) = status else {
+            return XCTFail("expected timeout for forged readiness, got \(status)")
+        }
+        XCTAssertTrue(lastError.contains("unexpected pid") || lastError.contains("ownership"), lastError)
+    }
+
+    func testWaitForReadyDeadlineCancelsDrippingSpoofResponse() async throws {
+        let port = try unusedPort()
+        let spoof = try startDrippingSpoofModelsServer(port: port)
+        defer {
+            spoof.terminate()
+            spoof.waitUntilExit()
+        }
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try sleepingStubProvider().path,
+            logDirectory: try temporaryDirectory(name: "provider-runner-drip-spoof")
+        )
+        try runner.start(model: "model-a", port: port)
+        defer { _ = runner.stop(graceSeconds: 0.1) }
+        let started = Date()
+
+        let status = try await runner.waitForReady(timeout: 5, deadline: Date().addingTimeInterval(0.1))
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0)
+        guard case .timeout = status else {
+            return XCTFail("expected timeout for deadline-cancelled dripping spoof, got \(status)")
         }
     }
 
@@ -503,6 +578,117 @@ final class CandidateProviderRunnerTests: XCTestCase {
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
         return scriptURL
+    }
+
+    private func sleepingStubProvider() throws -> URL {
+        let directory = try temporaryDirectory(name: "provider-runner-sleeping-stub")
+        let scriptURL = directory.appendingPathComponent("sleeping-provider")
+        let script = """
+        #!/bin/sh
+        sleep 10
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    private func startSpoofModelsServer(port: Int) throws -> Process {
+        let directory = try temporaryDirectory(name: "provider-runner-spoof-server")
+        let scriptURL = directory.appendingPathComponent("spoof-models.py")
+        let script = """
+        import socket
+
+        port = \(port)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(16)
+        while True:
+            client, _ = server.accept()
+            client.recv(4096)
+            body = '{"object":"list","data":[{"id":"spoof","object":"model"}]}'
+            client.sendall((
+                "HTTP/1.1 200 OK\\r\\n"
+                "Content-Type: application/json\\r\\n"
+                f"Content-Length: {len(body)}\\r\\n"
+                "Connection: close\\r\\n"
+                "\\r\\n"
+                f"{body}"
+            ).encode())
+            client.close()
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["python3", scriptURL.path]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            if MacProviderPortProbe.isOpen(port) {
+                return process
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        process.terminate()
+        throw NSError(
+            domain: "CandidateProviderRunnerTests",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "spoof server did not bind port \(port)"]
+        )
+    }
+
+    private func startDrippingSpoofModelsServer(port: Int) throws -> Process {
+        let directory = try temporaryDirectory(name: "provider-runner-dripping-spoof-server")
+        let scriptURL = directory.appendingPathComponent("dripping-spoof-models.py")
+        let script = """
+        import socket
+        import time
+
+        port = \(port)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(16)
+        while True:
+            client, _ = server.accept()
+            client.recv(4096)
+            client.sendall((
+                "HTTP/1.1 200 OK\\r\\n"
+                "Content-Type: application/json\\r\\n"
+                "Content-Length: 1000000000\\r\\n"
+                "Connection: keep-alive\\r\\n"
+                "\\r\\n"
+            ).encode())
+            while True:
+                client.sendall(b"x")
+                time.sleep(0.02)
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["python3", scriptURL.path]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            if MacProviderPortProbe.isOpen(port) {
+                return process
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        process.terminate()
+        throw NSError(
+            domain: "CandidateProviderRunnerTests",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "dripping spoof server did not bind port \(port)"]
+        )
     }
 
     private func temporaryDirectory(name: String) throws -> URL {

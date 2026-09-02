@@ -1985,6 +1985,7 @@ struct AutotuneRecommendResult: Equatable {
     /// into last-recommendation.json so post-hoc diagnosis explains WHY
     /// benchmark_id is null / no eligible model was found.
     var probeDiagnostics: [String: String] = [:]
+    var contextCalibration: AutotuneContextCalibrationResult? = nil
 }
 
 struct AutotuneRecommendEngine {
@@ -2567,6 +2568,9 @@ extension AutotuneRecommendResult {
         let warningsJSON = warnings.map { "\"\($0.rawValue)\"" }.joined(separator: ",")
         let candidatesJSON = candidates.map(Self.candidateJSON).joined(separator: ",")
         let serveConfigJSON = serveConfig.map { Self.serveConfigJSON($0, donorMode: donorMode) } ?? "null"
+        let contextCalibrationField = contextCalibration.map {
+            ",\"context_calibration\":\($0.jsonString)"
+        } ?? ""
         let selectedExplanationJSON = selectedCandidate.map { Self.explanationJSON($0.explanation) } ?? "null"
         let alternativeExplanations = candidates
             .filter { candidate in
@@ -2577,7 +2581,7 @@ extension AutotuneRecommendResult {
             .joined(separator: ",")
         let donorFallbackExplanationJSON = donorFallbackCandidate.map { Self.explanationJSON($0.explanation) } ?? "null"
         return """
-        {"schema_version":"autotune_recommend.v1","generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"hardware":{"machine":\(hardware.machine?.jsonEscaped ?? "null"),"chip":\(hardware.chip.jsonEscaped),"memory_gb":\(hardware.memoryGB),"bandwidth_tier":\(hardware.bandwidthTier.rawValue.jsonEscaped),"detected":\(hardware.detected),"os_version":\(hardware.osVersion.jsonEscaped),"binary_version":\(hardware.binaryVersion.jsonEscaped)},"inputs":{"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped)},"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"prompt_rate_usd_per_million_tokens":\(promptRatePerMillionTokens?.jsonNumber ?? "null"),"completion_rate_usd_per_million_tokens":\(completionRatePerMillionTokens?.jsonNumber ?? "null"),"serve_config":\(serveConfigJSON),"candidates":[\(candidatesJSON)],"warnings":[\(warningsJSON)],"selected_explanation":\(selectedExplanationJSON),"alternative_explanations":[\(alternativeExplanations)],"donor_fallback_explanation":\(donorFallbackExplanationJSON)}
+        {"schema_version":"autotune_recommend.v1","generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"hardware":{"machine":\(hardware.machine?.jsonEscaped ?? "null"),"chip":\(hardware.chip.jsonEscaped),"memory_gb":\(hardware.memoryGB),"bandwidth_tier":\(hardware.bandwidthTier.rawValue.jsonEscaped),"detected":\(hardware.detected),"os_version":\(hardware.osVersion.jsonEscaped),"binary_version":\(hardware.binaryVersion.jsonEscaped)},"inputs":{"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped)},"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"prompt_rate_usd_per_million_tokens":\(promptRatePerMillionTokens?.jsonNumber ?? "null"),"completion_rate_usd_per_million_tokens":\(completionRatePerMillionTokens?.jsonNumber ?? "null"),"serve_config":\(serveConfigJSON)\(contextCalibrationField),"candidates":[\(candidatesJSON)],"warnings":[\(warningsJSON)],"selected_explanation":\(selectedExplanationJSON),"alternative_explanations":[\(alternativeExplanations)],"donor_fallback_explanation":\(donorFallbackExplanationJSON)}
         """
     }
 
@@ -2663,6 +2667,9 @@ extension AutotuneRecommendResult {
             "\(key.jsonEscaped):\(probeDiagnostics[key]!.jsonEscaped)"
         }.joined(separator: ",")
         let evidenceJSON: String
+        let contextCalibrationField = contextCalibration.map {
+            ",\"context_calibration\":\($0.jsonString)"
+        } ?? ""
         if let hardwareEvidence {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
@@ -2676,7 +2683,7 @@ extension AutotuneRecommendResult {
             evidenceJSON = "null"
         }
         return """
-        {"generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"candidate_catalog_sha256":\(candidateCatalogSHA256.jsonEscaped),"benchmark_id":\(benchmarkID?.jsonEscaped ?? "null"),"benchmark_generated_at":\(benchmarkGeneratedAt.map { ISO8601DateFormatter.autotuneInternet.string(from: $0).jsonEscaped } ?? "null"),"binary_version":\(hardware.binaryVersion.jsonEscaped),"hardware_identity_hash":\(hardware.hardwareIdentityHash.jsonEscaped),"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"probe_diagnostics":{\(diagnosticsJSON)},"hardware_evidence":\(evidenceJSON)}
+        {"generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"candidate_catalog_sha256":\(candidateCatalogSHA256.jsonEscaped),"benchmark_id":\(benchmarkID?.jsonEscaped ?? "null"),"benchmark_generated_at":\(benchmarkGeneratedAt.map { ISO8601DateFormatter.autotuneInternet.string(from: $0).jsonEscaped } ?? "null"),"binary_version":\(hardware.binaryVersion.jsonEscaped),"hardware_identity_hash":\(hardware.hardwareIdentityHash.jsonEscaped),"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"probe_diagnostics":{\(diagnosticsJSON)}\(contextCalibrationField),"hardware_evidence":\(evidenceJSON)}
         """
     }
 
@@ -2742,6 +2749,7 @@ struct LastRecommendationState: Decodable, Equatable {
     var hardwareIdentityHash: String
     var recommendedModel: String?
     var probeDiagnostics: [String: String]
+    var contextCalibration: AutotuneContextCalibrationResult?
     var hardwareEvidence: AutotuneHardwareEvidenceSnapshot?
 
     enum CodingKeys: String, CodingKey {
@@ -2756,6 +2764,7 @@ struct LastRecommendationState: Decodable, Equatable {
         case hardwareIdentityHash = "hardware_identity_hash"
         case recommendedModel = "recommended_model"
         case probeDiagnostics = "probe_diagnostics"
+        case contextCalibration = "context_calibration"
         case hardwareEvidence = "hardware_evidence"
     }
 
@@ -2771,6 +2780,7 @@ struct LastRecommendationState: Decodable, Equatable {
         hardwareIdentityHash: String,
         recommendedModel: String?,
         probeDiagnostics: [String: String] = [:],
+        contextCalibration: AutotuneContextCalibrationResult? = nil,
         hardwareEvidence: AutotuneHardwareEvidenceSnapshot? = nil
     ) {
         self.generatedAt = generatedAt
@@ -2784,6 +2794,7 @@ struct LastRecommendationState: Decodable, Equatable {
         self.hardwareIdentityHash = hardwareIdentityHash
         self.recommendedModel = recommendedModel
         self.probeDiagnostics = probeDiagnostics
+        self.contextCalibration = contextCalibration
         self.hardwareEvidence = hardwareEvidence
     }
 
@@ -2805,6 +2816,10 @@ struct LastRecommendationState: Decodable, Equatable {
         hardwareIdentityHash = try c.decode(String.self, forKey: .hardwareIdentityHash)
         recommendedModel = try c.decodeIfPresent(String.self, forKey: .recommendedModel)
         probeDiagnostics = try c.decodeIfPresent([String: String].self, forKey: .probeDiagnostics) ?? [:]
+        contextCalibration = try c.decodeIfPresent(
+            AutotuneContextCalibrationResult.self,
+            forKey: .contextCalibration
+        )
         hardwareEvidence = try c.decodeIfPresent(AutotuneHardwareEvidenceSnapshot.self, forKey: .hardwareEvidence)
     }
 }
@@ -3151,6 +3166,16 @@ struct HuggingFaceSnapshotDownloader {
         var rfilename: String
     }
 
+    private struct FetchResponseBox: @unchecked Sendable {
+        var data: Data
+        var response: URLResponse
+    }
+
+    private struct DownloadResponseBox: @unchecked Sendable {
+        var url: URL
+        var response: URLResponse
+    }
+
     private static let guardedSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         return URLSession(configuration: config)
@@ -3177,13 +3202,49 @@ struct HuggingFaceSnapshotDownloader {
         )
     }
 
-    var fetch: (URLRequest) async throws -> (Data, URLResponse) = { request in
+    var fetch: @Sendable (URLRequest) async throws -> (Data, URLResponse) = { request in
         try await HuggingFaceSnapshotDownloader.guardedSession.data(for: request, delegate: HFRedirectGuard())
     }
-    var download: (URLRequest) async throws -> (URL, URLResponse) = { request in
+    var download: @Sendable (URLRequest, Date?) async throws -> (URL, URLResponse)
+
+    init() {
+        fetch = {
+            try await HuggingFaceSnapshotDownloader.guardedSession.data(for: $0, delegate: HFRedirectGuard())
+        }
+        download = {
+            try await HuggingFaceSnapshotDownloader.defaultDownload($0, deadline: $1)
+        }
+    }
+
+    init(
+        fetch: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = {
+            try await HuggingFaceSnapshotDownloader.guardedSession.data(for: $0, delegate: HFRedirectGuard())
+        },
+        download: @escaping @Sendable (URLRequest) async throws -> (URL, URLResponse) = {
+            try await HuggingFaceSnapshotDownloader.defaultDownload($0, deadline: nil)
+        }
+    ) {
+        self.fetch = fetch
+        self.download = { request, _ in
+            try await download(request)
+        }
+    }
+
+    init(
+        fetch: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = {
+            try await HuggingFaceSnapshotDownloader.guardedSession.data(for: $0, delegate: HFRedirectGuard())
+        },
+        downloadWithDeadline: @escaping @Sendable (URLRequest, Date?) async throws -> (URL, URLResponse)
+    ) {
+        self.fetch = fetch
+        self.download = downloadWithDeadline
+    }
+
+    private static func defaultDownload(_ request: URLRequest, deadline: Date?) async throws -> (URL, URLResponse) {
         try await HuggingFaceSnapshotDownloader.downloadWithResume(
             request: request,
             policy: .production,
+            deadline: deadline,
             initialDownload: { req in
                 try await HuggingFaceSnapshotDownloader.guardedSession.download(
                     for: req, delegate: HFAssetRedirectGuard()
@@ -3214,17 +3275,27 @@ struct HuggingFaceSnapshotDownloader {
     static func downloadWithResume(
         request: URLRequest,
         policy: DownloadRetryPolicy,
-        initialDownload: @Sendable (URLRequest) async throws -> (URL, URLResponse),
-        resumeDownload: @Sendable (Data) async throws -> (URL, URLResponse)
+        deadline: Date? = nil,
+        initialDownload: @escaping @Sendable (URLRequest) async throws -> (URL, URLResponse),
+        resumeDownload: @escaping @Sendable (Data) async throws -> (URL, URLResponse)
     ) async throws -> (URL, URLResponse) {
         var lastError: Error?
         var resumeData: Data?
         for attempt in 0..<max(1, policy.maxAttempts) {
+            try Self.assertDeadlineActive(deadline)
             do {
                 if let data = resumeData {
-                    return try await resumeDownload(data)
+                    let result = try await Self.withDeadline(deadline) {
+                        let (url, response) = try await resumeDownload(data)
+                        return DownloadResponseBox(url: url, response: response)
+                    }
+                    return (result.url, result.response)
                 }
-                return try await initialDownload(request)
+                let result = try await Self.withDeadline(deadline) {
+                    let (url, response) = try await initialDownload(request)
+                    return DownloadResponseBox(url: url, response: response)
+                }
+                return (result.url, result.response)
             } catch let error as URLError where isTransientDownloadError(error) {
                 lastError = error
                 if let extracted = extractResumeData(from: error) {
@@ -3233,7 +3304,8 @@ struct HuggingFaceSnapshotDownloader {
                 if attempt + 1 < policy.maxAttempts {
                     let delaySeconds = policy.baseDelaySeconds
                         * pow(policy.backoffMultiplier, Double(attempt))
-                    let delayNanoseconds = UInt64(max(0, delaySeconds) * 1_000_000_000)
+                    let boundedDelay = try boundedInterval(delaySeconds, deadline: deadline)
+                    let delayNanoseconds = UInt64(boundedDelay * 1_000_000_000)
                     try await policy.sleep(delayNanoseconds)
                 }
             }
@@ -3260,8 +3332,10 @@ struct HuggingFaceSnapshotDownloader {
         error.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
     }
 
-    func downloadSnapshot(modelID: String, revision: String, to snapshot: URL) async throws {
-        let siblings = try await modelSiblings(modelID: modelID, revision: revision)
+    func downloadSnapshot(modelID: String, revision: String, to snapshot: URL, deadline: Date? = nil) async throws {
+        try Self.assertDeadlineActive(deadline)
+        let siblings = try await modelSiblings(modelID: modelID, revision: revision, deadline: deadline)
+        try Self.assertDeadlineActive(deadline)
         guard !siblings.isEmpty else {
             throw AutotuneRecommendError.invalidArtifact("empty HuggingFace snapshot \(modelID)@\(revision)")
         }
@@ -3270,17 +3344,25 @@ struct HuggingFaceSnapshotDownloader {
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         do {
             for sibling in siblings {
+                try Self.assertDeadlineActive(deadline)
                 try validateRelativeHFPath(sibling.rfilename)
                 let destination = staging.appendingPathComponent(sibling.rfilename, isDirectory: false)
                 try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                 var request = URLRequest(url: resolveURL(modelID: modelID, revision: revision, filename: sibling.rfilename))
+                request.timeoutInterval = try Self.boundedInterval(60, deadline: deadline)
                 addTokenHeader(&request)
-                let (temporary, response) = try await download(request)
-                guard (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true else {
+                let downloadRequest = request
+                let download = self.download
+                let result = try await Self.withDeadline(deadline) {
+                    let (temporary, response) = try await download(downloadRequest, deadline)
+                    return DownloadResponseBox(url: temporary, response: response)
+                }
+                try Self.assertDeadlineActive(deadline)
+                guard (result.response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true else {
                     throw AutotuneRecommendError.invalidArtifact("download failed \(sibling.rfilename)")
                 }
                 try? FileManager.default.removeItem(at: destination)
-                try FileManager.default.moveItem(at: temporary, to: destination)
+                try FileManager.default.moveItem(at: result.url, to: destination)
                 _ = chmod(destination.path, 0o600)
             }
             try FileManager.default.createDirectory(at: snapshot.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -3292,14 +3374,74 @@ struct HuggingFaceSnapshotDownloader {
         }
     }
 
-    private func modelSiblings(modelID: String, revision: String) async throws -> [Sibling] {
+    private func modelSiblings(modelID: String, revision: String, deadline: Date?) async throws -> [Sibling] {
+        try Self.assertDeadlineActive(deadline)
         var request = URLRequest(url: apiURL(modelID: modelID, revision: revision))
+        request.timeoutInterval = try Self.boundedInterval(30, deadline: deadline)
         addTokenHeader(&request)
-        let (data, response) = try await fetch(request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        let metadataRequest = request
+        let fetch = self.fetch
+        let result = try await Self.withDeadline(deadline) {
+            let (data, response) = try await fetch(metadataRequest)
+            return FetchResponseBox(data: data, response: response)
+        }
+        try Self.assertDeadlineActive(deadline)
+        guard let http = result.response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw AutotuneRecommendError.invalidArtifact("HuggingFace API failed \(modelID)@\(revision)")
         }
-        return try JSONDecoder.autotune.decode(ModelInfo.self, from: data).siblings
+        return try JSONDecoder.autotune.decode(ModelInfo.self, from: result.data).siblings
+    }
+
+    static func assertDeadlineActive(_ deadline: Date?) throws {
+        guard let deadline else { return }
+        guard Date() < deadline else {
+            throw AutotuneContextCalibrationError.deadlineExceeded
+        }
+    }
+
+    static func boundedInterval(_ interval: TimeInterval, deadline: Date?) throws -> TimeInterval {
+        guard let deadline else { return interval }
+        let remaining = deadline.timeIntervalSince(Date())
+        guard remaining > 0 else {
+            throw AutotuneContextCalibrationError.deadlineExceeded
+        }
+        return max(0.001, min(interval, remaining))
+    }
+
+    private static func withDeadline<T: Sendable>(
+        _ deadline: Date?,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        guard let deadline else {
+            return try await operation()
+        }
+        let remaining = deadline.timeIntervalSince(Date())
+        guard remaining > 0 else {
+            throw AutotuneContextCalibrationError.deadlineExceeded
+        }
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                let nanoseconds = UInt64(max(0.001, remaining) * 1_000_000_000)
+                try await Task.sleep(nanoseconds: nanoseconds)
+                throw AutotuneContextCalibrationError.deadlineExceeded
+            }
+            do {
+                guard let result = try await group.next() else {
+                    throw AutotuneContextCalibrationError.deadlineExceeded
+                }
+                group.cancelAll()
+                return result
+            } catch {
+                group.cancelAll()
+                if Date() >= deadline {
+                    throw AutotuneContextCalibrationError.deadlineExceeded
+                }
+                throw error
+            }
+        }
     }
 
     private func apiURL(modelID: String, revision: String) -> URL {
@@ -3417,7 +3559,8 @@ struct CachedModelArtifactResolver {
             .appendingPathComponent(".cache/huggingface/hub", isDirectory: true)
     }
 
-    func verifiedArtifact(for row: CandidateCatalog.Row) async throws -> VerifiedModelArtifact {
+    func verifiedArtifact(for row: CandidateCatalog.Row, deadline: Date? = nil) async throws -> VerifiedModelArtifact {
+        try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
         guard let revision = row.modelRevision, row.modelSHA256 != nil else {
             throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
         }
@@ -3425,9 +3568,10 @@ struct CachedModelArtifactResolver {
         var st = stat()
         if lstat(snapshot.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR {
             do {
-                return try verifiedExistingArtifact(for: row)
+                return try verifiedExistingArtifact(for: row, deadline: deadline)
             } catch let error as AutotuneRecommendError {
                 guard case .invalidArtifact(let message) = error else { throw error }
+                try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
 
                 // A snapshot directory can survive a catalog republish with
                 // an old manifest, or be left corrupted by an interrupted
@@ -3443,19 +3587,21 @@ struct CachedModelArtifactResolver {
                 }
 
                 do {
-                    try await downloader.downloadSnapshot(modelID: row.modelID, revision: revision, to: snapshot)
+                    try await downloader.downloadSnapshot(modelID: row.modelID, revision: revision, to: snapshot, deadline: deadline)
+                } catch AutotuneContextCalibrationError.deadlineExceeded {
+                    throw AutotuneContextCalibrationError.deadlineExceeded
                 } catch {
                     throw AutotuneRecommendError.invalidArtifact(
                         message + "; automatic repair failed: " + String(describing: error)
                     )
                 }
 
-                return try verifiedExistingArtifact(for: row)
+                return try verifiedExistingArtifact(for: row, deadline: deadline)
             }
         }
 
-        try await downloader.downloadSnapshot(modelID: row.modelID, revision: revision, to: snapshot)
-        return try verifiedExistingArtifact(for: row)
+        try await downloader.downloadSnapshot(modelID: row.modelID, revision: revision, to: snapshot, deadline: deadline)
+        return try verifiedExistingArtifact(for: row, deadline: deadline)
     }
 
     /// Acquire a signed artifact without deleting or replacing the incumbent
@@ -3504,7 +3650,8 @@ struct CachedModelArtifactResolver {
         return try verifiedExistingArtifact(for: row, at: prefetched)
     }
 
-    func verifiedExistingArtifact(for row: CandidateCatalog.Row) throws -> VerifiedModelArtifact {
+    func verifiedExistingArtifact(for row: CandidateCatalog.Row, deadline: Date? = nil) throws -> VerifiedModelArtifact {
+        try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
         guard let revision = row.modelRevision, let expected = row.modelSHA256 else {
             throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
         }
@@ -3517,7 +3664,7 @@ struct CachedModelArtifactResolver {
         if lstat(durable.path, &durableStat) == 0, (durableStat.st_mode & S_IFMT) == S_IFDIR {
             _ = try durableStore.validatedContainedDirectory(durable.path)
             do {
-                return try verifiedExistingArtifact(for: row, at: durable)
+                return try verifiedExistingArtifact(for: row, at: durable, deadline: deadline)
             } catch let error as AutotuneRecommendError {
                 guard case .invalidArtifact = error else { throw error }
                 // Stale durable bytes for a republished catalog hash: fall
@@ -3527,15 +3674,17 @@ struct CachedModelArtifactResolver {
         let staging = snapshotURL(modelID: row.modelID, revision: revision)
         var st = stat()
         if lstat(staging.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR {
-            return try verifiedExistingArtifact(for: row, at: staging)
+            return try verifiedExistingArtifact(for: row, at: staging, deadline: deadline)
         }
-        return try verifiedExistingArtifact(for: row, at: durable)
+        return try verifiedExistingArtifact(for: row, at: durable, deadline: deadline)
     }
 
     func verifiedExistingArtifact(
         for row: CandidateCatalog.Row,
-        at snapshot: URL
+        at snapshot: URL,
+        deadline: Date? = nil
     ) throws -> VerifiedModelArtifact {
+        try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
         guard let revision = row.modelRevision, let expected = row.modelSHA256 else {
             throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
         }
@@ -3545,7 +3694,8 @@ struct CachedModelArtifactResolver {
         else {
             throw AutotuneRecommendError.invalidArtifact("missing pinned snapshot \(row.modelID)@\(revision)")
         }
-        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: snapshot)
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: snapshot, deadline: deadline)
+        try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
         guard inspection.sha256 == expected else {
             throw AutotuneRecommendError.invalidArtifact(
                 "hash mismatch \(row.modelID)@\(revision) expected=\(expected) actual=\(inspection.sha256)"
@@ -3559,13 +3709,14 @@ struct CachedModelArtifactResolver {
                 configSHA256: inspection.configSHA256
             )
         }
+        try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
         let durable = try durableStore.adoptVerifiedStaging(
             staging: snapshot,
             modelID: row.modelID,
             revision: revision,
             sha256: inspection.sha256
         )
-        let durableInspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: durable)
+        let durableInspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: durable, deadline: deadline)
         return VerifiedModelArtifact(
             modelArgument: durable.path,
             sha256: durableInspection.sha256,
@@ -3794,6 +3945,7 @@ struct AutotuneRecommendationBenchmarker {
         replicates: Int,
         port: Int,
         interruptFlag: AutotuneInterruptFlag? = nil,
+        deadline: Date? = nil,
         candidateModelIDs: Set<String>? = nil,
         prefetchedArtifacts: [String: PrefetchedModelArtifact]? = nil
     ) async throws -> BenchmarkOutcomes {
@@ -3808,6 +3960,7 @@ struct AutotuneRecommendationBenchmarker {
                 diagnostics[modelKey] = "interrupted before probe"
                 break
             }
+            try Self.assertDeadlineActive(deadline)
             guard let row = request.candidateCatalog.rows[modelKey] else {
                 continue
             }
@@ -3828,7 +3981,8 @@ struct AutotuneRecommendationBenchmarker {
                     }
                     artifact = try artifactResolver.verifiedExistingArtifact(
                         for: row,
-                        at: URL(fileURLWithPath: prefetched.path)
+                        at: URL(fileURLWithPath: prefetched.path),
+                        deadline: deadline
                     )
                     guard artifact.sha256 == prefetched.sha256,
                           artifact.modelArgument == prefetched.path
@@ -3838,7 +3992,9 @@ struct AutotuneRecommendationBenchmarker {
                         )
                     }
                 } else {
-                    artifact = try await artifactResolver.verifiedArtifact(for: row)
+                    try Self.assertDeadlineActive(deadline)
+                    artifact = try await artifactResolver.verifiedArtifact(for: row, deadline: deadline)
+                    try Self.assertDeadlineActive(deadline)
                 }
                 let runner = try runnerFactory()
                 // #742 fix: sample the kernel memory-pressure verdict as a
@@ -3868,7 +4024,8 @@ struct AutotuneRecommendationBenchmarker {
                     artifactBinding: CandidateArtifactBinding(
                         path: artifact.modelArgument,
                         sha256: artifact.sha256
-                    )
+                    ),
+                    deadline: deadline
                 )
                 // Round-1 audit fix (MEDIUM): stop the sampler and WAIT for its
                 // loop to finish so no in-flight boundary sample races the
@@ -3951,6 +4108,13 @@ struct AutotuneRecommendationBenchmarker {
             }
         }
         return BenchmarkOutcomes(benchmarks: results, diagnostics: diagnostics)
+    }
+
+    private static func assertDeadlineActive(_ deadline: Date?) throws {
+        guard let deadline else { return }
+        guard Date() < deadline else {
+            throw AutotuneContextCalibrationError.deadlineExceeded
+        }
     }
 
     private static func ineligibilityReason(
@@ -4048,11 +4212,18 @@ enum ModelArtifactVerifier {
         var configSHA256: String?
     }
 
-    static func canonicalArtifactHash(directory: URL) throws -> String {
-        try inspectCanonicalArtifact(directory: directory).sha256
+    private struct FileHashResult {
+        var size: UInt64
+        var sha256: String
+        var capturedData: Data?
     }
 
-    static func inspectCanonicalArtifact(directory: URL) throws -> CanonicalArtifactInspection {
+    static func canonicalArtifactHash(directory: URL, deadline: Date? = nil) throws -> String {
+        try inspectCanonicalArtifact(directory: directory, deadline: deadline).sha256
+    }
+
+    static func inspectCanonicalArtifact(directory: URL, deadline: Date? = nil) throws -> CanonicalArtifactInspection {
+        try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
         let fm = FileManager.default
         var root = stat()
         guard lstat(directory.path, &root) == 0,
@@ -4068,6 +4239,7 @@ enum ModelArtifactVerifier {
         var configJSONData: Data?
         var configSHA256: String?
         for case let url as URL in enumerator {
+            try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
             let path = url.resolvingSymlinksInPath().path
             guard path.hasPrefix(basePath + "/") else {
                 throw AutotuneRecommendError.invalidArtifact("path escape \(url.lastPathComponent)")
@@ -4092,13 +4264,12 @@ enum ModelArtifactVerifier {
             guard statbuf.st_nlink <= 1 else {
                 throw AutotuneRecommendError.invalidArtifact("hardlink \(rel)")
             }
-            let data = try Data(contentsOf: url)
-            let fileSHA256 = Data(SHA256.hash(data: data)).hexLower
+            let fileHash = try hashFile(at: url, captureData: rel == "config.json", deadline: deadline)
             if rel == "config.json" {
-                configJSONData = data
-                configSHA256 = fileSHA256
+                configJSONData = fileHash.capturedData
+                configSHA256 = fileHash.sha256
             }
-            entries.append((rel, UInt64(data.count), fileSHA256))
+            entries.append((rel, fileHash.size, fileHash.sha256))
         }
         let manifest = entries.sorted { $0.path < $1.path }
             .map { "\($0.path)\n\($0.size)\n\($0.sha)\n" }
@@ -4107,6 +4278,33 @@ enum ModelArtifactVerifier {
             sha256: Data(SHA256.hash(data: Data(manifest.utf8))).hexLower,
             configJSONData: configJSONData,
             configSHA256: configSHA256
+        )
+    }
+
+    private static func hashFile(at url: URL, captureData: Bool, deadline: Date?) throws -> FileHashResult {
+        let chunkSize = 1024 * 1024
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        var size: UInt64 = 0
+        var capturedData = captureData ? Data() : nil
+        while true {
+            try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
+            let chunk = try handle.read(upToCount: chunkSize) ?? Data()
+            guard !chunk.isEmpty else {
+                break
+            }
+            hasher.update(data: chunk)
+            size += UInt64(chunk.count)
+            if captureData {
+                capturedData?.append(chunk)
+            }
+        }
+        try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
+        return FileHashResult(
+            size: size,
+            sha256: Data(hasher.finalize()).hexLower,
+            capturedData: capturedData
         )
     }
 }

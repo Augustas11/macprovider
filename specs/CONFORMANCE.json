@@ -659,7 +659,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.9.4",
+      "version": "v0.9.5",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2143,6 +2143,41 @@
         }
       ],
       "gap": null
+    },
+    {
+      "requirement_id": "SPEC-023-R003",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneContextCalibration.swift:struct AutotuneContextCalibrator",
+        "phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:func probeContextCalibration",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:var calibrateContext",
+        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:private static func parseContextCalibration",
+        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:private static func validateCalibratedContextAuthority"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneContextCalibrationTests.swift::testSearchFindsLargestPassingQuantumAndValidatesItThreeTimes",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneContextCalibrationTests.swift::testSafeUpperBoundIsNeverExceeded",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneContextCalibrationTests.swift::testMinimumFailureFailsClosed",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneContextCalibrationTests.swift::testFinalValidationFailureDoesNotReturnUnvalidatedContext",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneContextCalibrationTests.swift::testHigherContextTimeoutFailsClosedWithoutSelectingLowerContext",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneContextCalibrationTests.swift::testInterruptDuringHigherCellStopsBeforeLaterProbeOrFinalValidation",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneContextCalibrationTests.swift::testCalibrationPromptUsesAdvertisedBoundaryReserveAndOneCompletionToken",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testContextCalibrationJSONAndHumanApplyInstructionAreOptIn",
+        "phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift::testLoadRecommendationAcceptsCalibratedLowerContextAuthority",
+        "phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift::testAdoptRecommendationContextAuthorityAcceptsCalibratedLowerContext",
+        "phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift::testAdoptRecommendationContextAuthorityRejectsCalibratedContextMismatch"
+      ],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1201",
+        "rationale": "The guarded CLI implementation and deterministic tests exist, but automatic installer activation requires a signed physical journey proving selected-model context, uncached TTFT, restart-safe config application, and buyer-serving recovery across representative Mac tiers."
+      }
     },
     {
       "requirement_id": "SPEC-032-R001",

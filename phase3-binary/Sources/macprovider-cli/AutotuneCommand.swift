@@ -50,6 +50,9 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Option(name: .customLong("buyer-ttft-ceiling-ms"), help: "With --recommend, maximum measured p95 TTFT in milliseconds allowed for paid recommendation selection. 0 disables the paid selection ceiling.")
     var buyerTTFTCeilingMS = 0
 
+    @Flag(help: "With --recommend, measure the selected model's largest interactive context before emitting or applying config.")
+    var calibrateContext = false
+
     @Option(help: "Relative throughput tie band for TTFT tiebreak.")
     var tpsTieEpsilon = 0.02
 
@@ -738,6 +741,12 @@ struct AutotuneCommand: AsyncParsableCommand {
         if buyerTTFTCeilingMS > 0 && !recommend {
             throw ValidationError("--buyer-ttft-ceiling-ms requires --recommend")
         }
+        if calibrateContext && !recommend {
+            throw ValidationError("--calibrate-context requires --recommend")
+        }
+        if calibrateContext && (checkOnly || prefetch || freshnessCheck) {
+            throw ValidationError("--calibrate-context cannot be combined with --check-only, --prefetch, or --freshness-check")
+        }
         guard tpsTieEpsilon >= 0 else {
             throw ValidationError("--tps-tie-epsilon must be >= 0")
         }
@@ -839,6 +848,10 @@ struct AutotuneCommand: AsyncParsableCommand {
         let interruptFlag = AutotuneInterruptFlag()
         let signalSources = AutotuneSignalSources(flag: interruptFlag, cascadeToProcessGroup: true)
         defer { _ = signalSources }
+        let recommendationDeadline = Date().addingTimeInterval(TimeInterval(maxDuration))
+        func recommendationDeadlineExceeded() -> Bool {
+            Date() > recommendationDeadline
+        }
 
         let staticInputs = AutotuneStaticInputs()
         let inputs = await staticInputs.loadRecommendationInputs()
@@ -908,19 +921,28 @@ struct AutotuneCommand: AsyncParsableCommand {
             donorMode: donorMode,
             buyerTTFTCeilingMS: buyerTTFTCeilingMS
         )
-        let outcomes = try await AutotuneRecommendationBenchmarker(
-            artifactResolver: CachedModelArtifactResolver.forConfig(resolvedConfig),
-            runnerFactory: { try CandidateProviderRunner() }
-        ).benchmarks(
-            request: request,
-            targetContext: Self.spec023RecommendationProbeContext,
-            gateTTFTMS: resolvedGateTTFTMS(forRecommend: true),
-            replicates: stage1Replicates,
-            port: port,
-            interruptFlag: interruptFlag,
-            candidateModelIDs: candidateModelFilter,
-            prefetchedArtifacts: prefetchedArtifacts
-        )
+        let outcomes: BenchmarkOutcomes
+        do {
+            outcomes = try await AutotuneRecommendationBenchmarker(
+                artifactResolver: CachedModelArtifactResolver.forConfig(resolvedConfig),
+                runnerFactory: { try CandidateProviderRunner() }
+            ).benchmarks(
+                request: request,
+                targetContext: Self.spec023RecommendationProbeContext,
+                gateTTFTMS: resolvedGateTTFTMS(forRecommend: true),
+                replicates: stage1Replicates,
+                port: port,
+                interruptFlag: interruptFlag,
+                deadline: recommendationDeadline,
+                candidateModelIDs: candidateModelFilter,
+                prefetchedArtifacts: prefetchedArtifacts
+            )
+        } catch AutotuneContextCalibrationError.deadlineExceeded {
+            FileHandle.standardError.write(
+                Data("autotune --recommend exceeded --max-duration during benchmark calibration setup; no state or config was changed\n".utf8)
+            )
+            throw ExitCode(1)
+        }
         if interruptFlag.isSet() {
             FileHandle.standardError.write(Data("autotune --recommend interrupted; exiting after subtree cleanup\n".utf8))
             throw ExitCode(130)
@@ -935,7 +957,9 @@ struct AutotuneCommand: AsyncParsableCommand {
             result = Self.disclosingInstalledOnlyEstimate(result)
         }
         result.probeDiagnostics = outcomes.diagnostics
-        try RecommendationStateStore.write(result, benchmarks: request.benchmarks)
+        if !calibrateContext {
+            try RecommendationStateStore.write(result, benchmarks: request.benchmarks)
+        }
         if AutotuneRecommendEngine.networkSubmissionBlocks(Set(result.warnings)) {
             let message = AutotuneRecommendEngine.networkSubmissionBlockMessage(Set(result.warnings))
             if apply || submitHardwareEvidence || requireHardwareEvidence {
@@ -943,7 +967,8 @@ struct AutotuneCommand: AsyncParsableCommand {
             }
             FileHandle.standardError.write(Data("[warn] \(message)\n".utf8))
         }
-        if submitHardwareEvidence {
+        func submitHardwareEvidenceIfNeeded() async throws {
+            guard submitHardwareEvidence else { return }
             let submission = await AutotuneHardwareEvidenceSubmitter(config: resolvedConfig).submit(
                 result: result,
                 benchmarks: request.benchmarks
@@ -964,6 +989,9 @@ struct AutotuneCommand: AsyncParsableCommand {
                 FileHandle.standardError.write(Data("[warn] hardware evidence submission failed: \(reason)\n".utf8))
             }
         }
+        if !calibrateContext {
+            try await submitHardwareEvidenceIfNeeded()
+        }
         let paidSelected = result.recommendedModel.flatMap { recommendedModel in
             result.selectedCandidate.flatMap { $0.model == recommendedModel ? $0 : nil }
         }
@@ -976,7 +1004,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
         let selectedForConfig = paidSelected ?? donorSelected
         let applyingDonorFallback = paidSelected == nil && selectedForConfig == donorSelected
-        let serveConfig: RecommendationCore?
+        var serveConfig: RecommendationCore?
         var configurationApplied = false
         if let selected = selectedForConfig,
            let selectedBenchmark = request.benchmarks[selected.catalogKey],
@@ -992,7 +1020,111 @@ struct AutotuneCommand: AsyncParsableCommand {
         } else {
             serveConfig = nil
         }
-        if apply, let selected = selectedForConfig {
+        if calibrateContext {
+            guard let selected = selectedForConfig,
+                  let selectedBenchmark = request.benchmarks[selected.catalogKey],
+                  let selectedRow = catalog.value.rows[selected.catalogKey],
+                  let safeUpperBound = serveConfig?.knobs.maxContext
+            else {
+                throw ValidationError("context calibration requires a selected, benchmarked catalog model")
+            }
+            let calibration: AutotuneContextCalibrationResult
+            do {
+                calibration = try await AutotuneContextCalibrator(
+                    minimumContext: Self.spec023RecommendationProbeContext,
+                    ttftCeilingMS: 8_000,
+                    quantum: 1_000,
+                    finalReplicates: 3
+                ).calibrate(
+                    safeUpperBound: safeUpperBound,
+                    prober: Stage1ContextCalibrationAdapter(
+                        model: selectedBenchmark.modelArtifactPath,
+                        port: port,
+                        artifactBinding: CandidateArtifactBinding(
+                            path: selectedBenchmark.modelArtifactPath,
+                            sha256: selectedBenchmark.artifactSHA256
+                        )
+                    ),
+                    deadline: recommendationDeadline,
+                    isInterrupted: { interruptFlag.isSet() },
+                    hasDeadlineExpired: recommendationDeadlineExceeded
+                )
+            } catch AutotuneContextCalibrationError.interrupted {
+                FileHandle.standardError.write(
+                    Data("autotune --recommend interrupted during context calibration; no state or config was changed\n".utf8)
+                )
+                throw ExitCode(130)
+            } catch AutotuneContextCalibrationError.deadlineExceeded {
+                FileHandle.standardError.write(
+                    Data("autotune --recommend context calibration exceeded --max-duration; no state or config was changed\n".utf8)
+                )
+                throw ExitCode(1)
+            }
+            result.contextCalibration = calibration
+            serveConfig = Self.recommendationCoreForConfig(
+                selected: selected,
+                selectedBenchmark: selectedBenchmark,
+                selectedRow: selectedRow,
+                catalogVersion: catalog.value.version,
+                catalogHash: catalogSHA,
+                hardware: hardware,
+                maxContextOverride: calibration.recommendedContext
+            )
+        }
+        let calibratedApplyConfig: (() throws -> ConfigApplier.AppliedConfig)?
+        if calibrateContext, apply, let selected = selectedForConfig {
+            guard request.benchmarks[selected.catalogKey] != nil else {
+                throw ValidationError("selected recommendation lacks verified benchmark artifact")
+            }
+            guard catalog.value.rows[selected.catalogKey] != nil else {
+                throw ValidationError("selected recommendation lacks signed catalog row")
+            }
+            let rawPath = config ?? AppConfig.defaultConfigPath
+            let expanded = ConfigLoader.expandTilde(rawPath)
+            guard let core = serveConfig else {
+                throw ValidationError("selected recommendation lacks serve config")
+            }
+            calibratedApplyConfig = {
+                if applyingDonorFallback {
+                    FileHandle.standardError.write(Data("\(Self.donorModeApplyWarning(for: selected.model))\n".utf8))
+                }
+                return try ConfigApplier(configPath: URL(fileURLWithPath: expanded)).apply(
+                    recommendation: core,
+                    now: now,
+                    donorMode: applyingDonorFallback
+                )
+            }
+        } else {
+            calibratedApplyConfig = nil
+        }
+        if calibrateContext {
+            configurationApplied = try await Self.commitCalibratedRecommendationMutation(
+                interruptFlag: interruptFlag,
+                writeInterrupted: {
+                    FileHandle.standardError.write(
+                        Data("autotune --recommend interrupted before recommendation state/config mutation\n".utf8)
+                    )
+                },
+                hasDeadlineExpired: recommendationDeadlineExceeded,
+                writeDeadlineExceeded: {
+                    FileHandle.standardError.write(
+                        Data("autotune --recommend exceeded --max-duration before recommendation state/config mutation\n".utf8)
+                    )
+                },
+                writeRecommendationState: {
+                    try RecommendationStateStore.write(result, benchmarks: request.benchmarks)
+                },
+                submitHardwareEvidence: submitHardwareEvidenceIfNeeded,
+                applyConfig: calibratedApplyConfig,
+                emitAppliedSummary: { applied in
+                    if emitJSON {
+                        FileHandle.standardError.write(Data("\(applied.summary)\n".utf8))
+                    } else {
+                        print(applied.summary)
+                    }
+                }
+            )
+        } else if apply, let selected = selectedForConfig {
             guard request.benchmarks[selected.catalogKey] != nil else {
                 throw ValidationError("selected recommendation lacks verified benchmark artifact")
             }
@@ -1021,12 +1153,43 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
         if emitJSON {
             print(result.jsonString(serveConfig: serveConfig, donorMode: applyingDonorFallback))
+        } else if calibrateContext {
+            print(result.contextCalibrationHumanTranscript(configurationApplied: configurationApplied))
         } else {
             print(result.humanTranscript(configurationApplied: configurationApplied))
         }
         for warning in result.warnings {
             FileHandle.standardError.write(Data("\(warning.rawValue)\n".utf8))
         }
+    }
+
+    static func commitCalibratedRecommendationMutation(
+        interruptFlag: AutotuneInterruptFlag,
+        writeInterrupted: () -> Void,
+        hasDeadlineExpired: () -> Bool = { false },
+        writeDeadlineExceeded: () -> Void = {},
+        writeRecommendationState: () throws -> Void,
+        submitHardwareEvidence: () async throws -> Void,
+        applyConfig: (() throws -> ConfigApplier.AppliedConfig)?,
+        emitAppliedSummary: (ConfigApplier.AppliedConfig) -> Void
+    ) async throws -> Bool {
+        guard !interruptFlag.isSet() else {
+            writeInterrupted()
+            throw ExitCode(130)
+        }
+        guard !hasDeadlineExpired() else {
+            writeDeadlineExceeded()
+            throw ExitCode(1)
+        }
+        // Once the calibrated recommendation commit begins, finish the local
+        // state/evidence/config transaction instead of returning 130 halfway
+        // through with only some durable artifacts mutated.
+        try writeRecommendationState()
+        try await submitHardwareEvidence()
+        guard let applyConfig else { return false }
+        let applied = try applyConfig()
+        emitAppliedSummary(applied)
+        return true
     }
 
     private func runAutotuneRecommendCheckOnly() async throws {
@@ -1315,7 +1478,8 @@ struct AutotuneCommand: AsyncParsableCommand {
         selectedRow: CandidateCatalog.Row,
         catalogVersion: String,
         catalogHash: String,
-        hardware: AutotuneRecommendHardware
+        hardware: AutotuneRecommendHardware,
+        maxContextOverride: Int? = nil
     ) -> RecommendationCore {
         RecommendationCore(
             model: selected.model,
@@ -1323,7 +1487,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             knobs: WinningKnobs(
                 kvBits: nil,
                 maxBatch: hardware.recommendedMaxBatch,
-                maxContext: hardware.recommendedMaxContext(
+                maxContext: maxContextOverride ?? hardware.recommendedMaxContext(
                     modelID: selectedRow.modelID,
                     verifiedConfigJSONData: selectedBenchmark.modelConfigJSONData,
                     verifiedConfigSHA256: selectedBenchmark.modelConfigSHA256,
