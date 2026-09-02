@@ -1329,6 +1329,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/provider-admission-identity/recover", s.handleAdmissionIdentityRecoveryRequest)
 	mux.HandleFunc("/admin/provider-admission-identity/recover/", s.handleAdmissionIdentityRecoveryApprove)
 	mux.HandleFunc("/v1/provider/compute-integrity", s.handleProviderComputeIntegrity)
+	if s.cfg.AdmissionCanaryHarness.Enabled {
+		mux.HandleFunc("/admin/admission-canary/clear-admitted-tuple", s.handleAdmissionCanaryClearAdmittedTuple)
+		mux.HandleFunc("/admin/admission-canary/proof-of-weights", s.handleAdmissionCanaryProofOfWeights)
+	}
 	if s.cfg.Auth.GitHubOAuth.Enabled {
 		mux.HandleFunc("/v1/auth/github/start", s.handleGitHubStart)
 		mux.HandleFunc("/v1/auth/github/callback", s.handleGitHubCallback)

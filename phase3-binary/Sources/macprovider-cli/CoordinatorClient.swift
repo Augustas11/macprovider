@@ -5199,6 +5199,7 @@ actor CoordinatorClient {
         if let event = await AutoUpdateEventStore.shared.lastWireObject() {
             payload["last_autoupdate_event"] = event
         }
+        try applyAdmissionCanaryHeartbeatOverride(to: &payload)
         let observedAt = Date()
         payload["safety_telemetry"] = snapshot.safetyTelemetry(
             providerID: providerID,
@@ -5213,6 +5214,59 @@ actor CoordinatorClient {
             validForMS: 90_000
         )
         try await send(payload)
+    }
+
+    private func applyAdmissionCanaryHeartbeatOverride(to payload: inout [String: Any]) throws {
+        guard let rawPath = Darwin.getenv("MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH") else {
+            return
+        }
+        let path = String(cString: rawPath).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else {
+            return
+        }
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CoordinatorAuthError.invalidMessage("canary heartbeat override must be a JSON object")
+        }
+        let stringFields: Set<String> = [
+            "model_id",
+            "model_hash",
+            "model_hash_algorithm",
+            "weights_manifest_sha256",
+            "weights_manifest_algorithm",
+            "catalog_release_id",
+            "catalog_policy_version",
+            "catalog_candidate_sha256",
+            "catalog_signer_key_id",
+            "catalog_row_identity",
+        ]
+        for (key, value) in object {
+            if key == "type" {
+                continue
+            }
+            if stringFields.contains(key) {
+                guard let string = value as? String,
+                      !string.isEmpty,
+                      string.utf8.count <= 256
+                else {
+                    throw CoordinatorAuthError.invalidMessage("invalid canary heartbeat override string field \(key)")
+                }
+                payload[key] = string
+                continue
+            }
+            if key == "model_params_b" {
+                guard let number = value as? NSNumber,
+                      number.doubleValue >= 0,
+                      number.doubleValue <= 10_000
+                else {
+                    throw CoordinatorAuthError.invalidMessage("invalid canary heartbeat override model_params_b")
+                }
+                payload[key] = number.doubleValue
+                continue
+            }
+            throw CoordinatorAuthError.invalidMessage("unsupported canary heartbeat override field \(key)")
+        }
+        payload["type"] = "heartbeat"
     }
 
     private func sendStateUpdate(state newState: ProviderHealthState?, reason: String) async throws {

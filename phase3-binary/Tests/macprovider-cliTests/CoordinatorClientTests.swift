@@ -1,9 +1,62 @@
 import CryptoKit
+import Darwin
 import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
 final class CoordinatorClientTests: XCTestCase {
+    func testCanaryHeartbeatOverrideRewritesOnlyAdmissionMetadata() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let overrideURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macprovider-canary-heartbeat-\(UUID().uuidString).json")
+        let modelHash = String(repeating: "a", count: 64)
+        let override: [String: Any] = [
+            "type": "state_update",
+            "model_id": "spec032/uncatalogued-canary",
+            "model_hash": modelHash,
+            "model_hash_algorithm": ModelArtifactIdentity.snapshotManifestV1,
+            "weights_manifest_sha256": String(repeating: "b", count: 64),
+            "weights_manifest_algorithm": ModelArtifactIdentity.safetensorsManifestV1,
+            "catalog_release_id": "canary-release",
+            "catalog_policy_version": "canary-policy",
+            "catalog_candidate_sha256": String(repeating: "c", count: 64),
+            "catalog_signer_key_id": "canary-signer",
+            "catalog_row_identity": String(repeating: "d", count: 64),
+            "model_params_b": 120.5,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: override, options: [.sortedKeys])
+        try data.write(to: overrideURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: overrideURL) }
+
+        setenv("MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH", overrideURL.path, 1)
+        defer { unsetenv("MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH") }
+
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 2),
+            modelHash: String(repeating: "e", count: 64),
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+
+        try await client.sendHeartbeatForTest()
+
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.last)
+        XCTAssertEqual(heartbeat["type"] as? String, "heartbeat")
+        XCTAssertEqual(heartbeat["model_id"] as? String, "spec032/uncatalogued-canary")
+        XCTAssertEqual(heartbeat["model_hash"] as? String, modelHash)
+        XCTAssertEqual(heartbeat["weights_manifest_sha256"] as? String, String(repeating: "b", count: 64))
+        XCTAssertEqual(heartbeat["catalog_release_id"] as? String, "canary-release")
+        XCTAssertEqual(heartbeat["catalog_row_identity"] as? String, String(repeating: "d", count: 64))
+        XCTAssertEqual(heartbeat["model_params_b"] as? Double, 120.5)
+        XCTAssertEqual(heartbeat["status"] as? String, "ready")
+        XCTAssertEqual(heartbeat["slots_total"] as? Int, 2)
+        let safetyTelemetry = try XCTUnwrap(heartbeat["safety_telemetry"] as? [String: Any])
+        XCTAssertEqual(safetyTelemetry["model_id"] as? String, "spec032/uncatalogued-canary")
+    }
+
     func testDiagnosticStatusPayloadIsRedactedAndMatchesProviderSnapshot() async throws {
         let recorder = CoordinatorFrameRecorder()
         let modelHash = String(repeating: "a", count: 64)
