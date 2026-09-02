@@ -1323,7 +1323,8 @@ final class AutoUpdateTests: XCTestCase {
                 store.resolveCanonicalInstallBinary(launchedExecutableURL: entrypoint)
             },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { false }
+            launchdProviderAvailable: { false },
+            headlessOperatorManagedTopology: { false }
         )
 
         do {
@@ -2013,7 +2014,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         await updater.handleCoordinatorRecommendation("1.7.0")
@@ -2085,7 +2087,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         await updater.handleCoordinatorRecommendation("1.7.0")
@@ -2200,7 +2203,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         try await updater.preserveMarkerAndSwapForTest(
@@ -2314,7 +2318,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         do {
@@ -2446,7 +2451,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         do {
@@ -2512,7 +2518,8 @@ final class AutoUpdateTests: XCTestCase {
             },
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         let lock = try updater.acquireUpdateLockAndFenceReloadJobsForTest()
@@ -2574,7 +2581,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         await updater.handleSignedReleaseDiscovery()
@@ -2642,7 +2650,8 @@ final class AutoUpdateTests: XCTestCase {
             },
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
         let lock = try store.acquireRecoveryLock()
         defer { withExtendedLifetime(lock) {} }
@@ -2717,7 +2726,8 @@ final class AutoUpdateTests: XCTestCase {
             },
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
         let lock = try store.acquireRecoveryLock()
         defer { withExtendedLifetime(lock) {} }
@@ -2778,7 +2788,8 @@ final class AutoUpdateTests: XCTestCase {
             },
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
         let lock = try updater.acquireUpdateLockAndFenceReloadJobsForTest()
         defer { withExtendedLifetime(lock) {} }
@@ -2850,7 +2861,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         updater.rollbackCommittedSwapAfterRestartFailureForTest(marker)
@@ -2899,7 +2911,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         updater.rollbackCommittedSwapAfterRestartFailureForTest(marker)
@@ -2951,7 +2964,8 @@ final class AutoUpdateTests: XCTestCase {
             },
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         updater.rollbackCommittedSwapAfterRestartFailureForTest(marker)
@@ -3239,7 +3253,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { binary },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
@@ -3266,7 +3281,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
@@ -3303,7 +3319,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
@@ -3327,11 +3344,171 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { false }
+            launchdProviderAvailable: { false },
+            headlessOperatorManagedTopology: { false }
         )
 
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
         XCTAssertEqual(outcome, .forwardProgressFailure)
+    }
+
+    // A headless_fleet / system-domain provider has no consumer LaunchAgent, so
+    // it lands on the same topology gate — but it is healthy, not broken. It MUST
+    // report the actionable `headless_operator_update_required` skip (.notAttempted,
+    // NOT a forward-progress failure) so it never accrues R005 failures. SPEC-020
+    // R-4.13.
+    func testHandleCoordinatorRecommendationSkipsHeadlessOperatorUpdateWithoutForwardProgressFailure() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        var config = AppConfig.defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path)
+        config.credentialStore = .protectedFile
+        let updater = AutoUpdater(
+            config: config,
+            currentVersion: "1.6.0",
+            providerStatus: r005Status(),
+            markerStore: store,
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            // Safety boundary (SPEC-020 R-4.13): even with a stale/loaded consumer
+            // LaunchAgent present (launchdProviderAvailable == true), a headless
+            // provider MUST be diverted to the operator-handoff skip and never
+            // driven into consumer autoupdate mutation.
+            launchdProviderAvailable: { true }
+        )
+
+        // No injected topology closure: exercise the real determination via
+        // `credentialStore == .protectedFile`.
+        let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
+        XCTAssertEqual(outcome, .notAttempted)
+
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "headless_operator_update_required")
+        XCTAssertEqual(event?["outcome"] as? String, "skipped")
+    }
+
+    // The signed recovery rail (R005) also cannot converge a system-domain
+    // provider, so it must emit the same actionable skip rather than a topology
+    // failure — otherwise a stranded headless node loops failure→R005→failure.
+    // SPEC-020 R-4.13.
+    func testSignedReleaseDiscoverySkipsHeadlessOperatorUpdate() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        var config = AppConfig.defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path)
+        config.credentialStore = .protectedFile
+        let updater = AutoUpdater(
+            config: config,
+            currentVersion: "1.6.0",
+            providerStatus: r005Status(),
+            markerStore: store,
+            trustProvider: { self.r005PinnedTrust() },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            fenceReloadJobs: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            // Same safety boundary on the R005 signed-recovery path.
+            launchdProviderAvailable: { true }
+        )
+
+        await updater.handleSignedReleaseDiscovery(attribution: [:])
+
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "headless_operator_update_required")
+        XCTAssertEqual(event?["outcome"] as? String, "skipped")
+    }
+
+    func testDefaultHeadlessOperatorManagedTopologyDetermination() {
+        let config = AppConfig.defaults(configPath: "/tmp/does-not-exist/config.yaml")
+        let noManifest: () -> UninstallCommand.ManifestLoadResult? = { UninstallCommand.ManifestLoadResult.missing }
+        // launchctl "print" absent status (isLaunchdAbsentStatus): no system daemon.
+        let launchdAbsent: ([String]) throws -> Int32 = { _ in 113 }
+        func manifest(profile: String?, domain: String?) -> UninstallCommand.InstallManifest {
+            UninstallCommand.InstallManifest(
+                installPrefix: "/opt/macprovider",
+                launchdLabels: ["live.malibu.provider"],
+                dataDirs: [],
+                version: nil,
+                binaryPath: nil,
+                symlinkPath: nil,
+                launchdPlists: [],
+                installProfile: profile,
+                launchdDomain: domain
+            )
+        }
+
+        // protected_file custody is the canonical headless_fleet marker.
+        var headless = config
+        headless.credentialStore = .protectedFile
+        XCTAssertTrue(AutoUpdater.defaultHeadlessOperatorManagedTopology(
+            config: headless,
+            fileExists: { _ in false },
+            loadInstallManifest: noManifest,
+            runLaunchctl: launchdAbsent
+        ))
+        // consumer_user keychain custody, no manifest, no plist, no loaded daemon.
+        XCTAssertFalse(AutoUpdater.defaultHeadlessOperatorManagedTopology(
+            config: config,
+            fileExists: { _ in false },
+            loadInstallManifest: noManifest,
+            runLaunchctl: launchdAbsent
+        ))
+        // Manifest declaring the headless_fleet profile qualifies even without
+        // protected_file custody or a plist (parity with validateHeadlessUpdateMode).
+        XCTAssertTrue(AutoUpdater.defaultHeadlessOperatorManagedTopology(
+            config: config,
+            fileExists: { _ in false },
+            loadInstallManifest: { UninstallCommand.ManifestLoadResult.loaded(manifest(profile: "headless_fleet", domain: nil)) },
+            runLaunchctl: launchdAbsent
+        ))
+        // Manifest declaring the system launchd domain also qualifies.
+        XCTAssertTrue(AutoUpdater.defaultHeadlessOperatorManagedTopology(
+            config: config,
+            fileExists: { _ in false },
+            loadInstallManifest: { UninstallCommand.ManifestLoadResult.loaded(manifest(profile: nil, domain: "system")) },
+            runLaunchctl: launchdAbsent
+        ))
+        // An invalid/indeterminate manifest (load threw -> nil) fails closed.
+        XCTAssertTrue(AutoUpdater.defaultHeadlessOperatorManagedTopology(
+            config: config,
+            fileExists: { _ in false },
+            loadInstallManifest: { nil },
+            runLaunchctl: launchdAbsent
+        ))
+        // A managed system LaunchDaemon plist physically present also qualifies.
+        let firstManagedPlist = UninstallCommand.managedSystemLaunchDaemonPlists[0]
+        XCTAssertTrue(AutoUpdater.defaultHeadlessOperatorManagedTopology(
+            config: config,
+            fileExists: { $0 == firstManagedPlist },
+            loadInstallManifest: noManifest,
+            runLaunchctl: launchdAbsent
+        ))
+        // No plist on disk, but the system daemon is still LOADED (launchctl print
+        // returns 0): fail closed to headless (parity with the mutating gate).
+        XCTAssertTrue(AutoUpdater.defaultHeadlessOperatorManagedTopology(
+            config: config,
+            fileExists: { _ in false },
+            loadInstallManifest: noManifest,
+            runLaunchctl: { _ in 0 }
+        ))
+        // An indeterminate launchd status (not absent, not loaded) also fails closed.
+        XCTAssertTrue(AutoUpdater.defaultHeadlessOperatorManagedTopology(
+            config: config,
+            fileExists: { _ in false },
+            loadInstallManifest: noManifest,
+            runLaunchctl: { _ in 5 }
+        ))
     }
 
     func testHandleCoordinatorRecommendationReturnsCooldownActive() async throws {
@@ -3353,7 +3530,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
@@ -3381,7 +3559,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
 
         // Target 1.7.0 is below the persisted minimum 1.8.0.
@@ -3412,7 +3591,8 @@ final class AutoUpdateTests: XCTestCase {
             fenceReloadJobs: {},
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { false }
         )
         let attribution = [
             "accepted_session_recovery": "true",

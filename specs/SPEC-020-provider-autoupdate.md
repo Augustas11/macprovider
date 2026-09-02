@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.15
+Version: v0.1.16
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -102,8 +102,19 @@ The literal `$HOME/.config/macprovider` and
 selected `consumer_user` profile owner. A provider installed as
 `headless_fleet` MUST NOT be updated by the v0.1.12 consumer LaunchAgent
 autoupdate path, because that path cannot safely prove or recover a system-domain
-service. It MUST fail closed as `unsupported_install_topology` or require a
-separately specified operator update flow. A user-domain helper MUST NOT bootout,
+service. When the consumer autoupdate path recognizes such a provider (v0.1.16:
+`protected_file` credential custody, an install manifest declaring the
+`headless_fleet` profile or `system` launchd domain, or a managed system-domain
+provider LaunchDaemon present on disk / loaded / in an indeterminate launchd
+state — full parity with the mutating-update gate), it MUST report the
+actionable, terminal skip `reason:"headless_operator_update_required"` with
+`outcome:"skipped"`, directing the operator to the separately specified signed
+installer acceptance flow. This skip is NOT a forward-progress failure for
+SPEC-020-R005 accounting (see R-4.13).
+A proven consumer-user topology continues on the normal path; an invalid or
+indeterminate topology fails closed to the headless handoff (R-4.13), while a
+topology that is unrecognized and non-headless MUST still fail closed as
+`unsupported_install_topology`. A user-domain helper MUST NOT bootout,
 bootstrap, prove absence of, or authorize rollback for a system-domain provider.
 
 ## Cross-spec amendment and trust state
@@ -871,6 +882,30 @@ recovery supplies an allowed signed set.
 R-4.13. Reserved for future headless system-domain update and rollback
 semantics. Until that version lands, `headless_fleet` is outside the autoupdate
 convergence population and MUST NOT be driven by the consumer-user reload helper.
+v0.1.16: when the coordinator-recommendation path or the SPEC-020-R005
+signed-recovery path evaluates a recognized `headless_fleet` / system-domain
+provider, it MUST divert to `reason:"headless_operator_update_required"`
+(`outcome:"skipped"`) BEFORE the install-topology gate and every later mutating
+gate (cooldown, download, swap), so the consumer path never drives the node even
+when a stale or loaded consumer LaunchAgent would otherwise make it appear
+installable. The divert is placed AFTER the non-mutating `target_revoked` /
+below-minimum policy check, which still wins (a revoked or below-minimum target
+is refused for every profile). The diverted cycle MUST NOT record a
+forward-progress failure, and R005 accepted-session re-observation MUST NOT count
+such a provider as stuck (it never accrues toward the recovery threshold).
+Recognition MUST use the same authorities as the mutating-update gate
+(`MacProviderCLI.validateHeadlessUpdateMode`): `protected_file` credential
+custody; an install manifest declaring the `headless_fleet` profile or `system`
+launchd domain; or a managed system-domain provider LaunchDaemon that is present
+on disk, loaded in launchd, or in an indeterminate launchd state. An invalid or
+indeterminate topology MUST fail closed to the headless handoff rather than the
+consumer path. This keeps a healthy operator-managed node from looping
+`failure → R005 → failure` and gives the operator one stable, actionable reason
+instead of a repeated `unsupported_install_topology` failure. The determination
+MUST NOT relax any R-2 safety invariant, mutate the live service, or authorize
+rollback; it only changes eligibility diversion, the reported reason, and failure
+accounting. A proven consumer topology continues on the normal path; a genuinely
+unrecognized topology still fails closed as `unsupported_install_topology`.
 
 ### R-5. Opt-out
 
@@ -1417,6 +1452,28 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.16 (2026-09-02): Consumer and R005 autoupdate paths now divert a
+  recognized `headless_fleet` / system-domain provider to the actionable terminal
+  skip `reason:"headless_operator_update_required"` (`outcome:"skipped"`) before
+  the install-topology gate and every later mutating gate — but after the
+  non-mutating `target_revoked` / below-minimum check, which still wins — instead
+  of a bare `unsupported_install_topology` forward-progress failure. Recognition
+  matches the mutating-update gate `validateHeadlessUpdateMode` at full parity:
+  `protected_file` custody, an install manifest declaring the `headless_fleet`
+  profile or `system` launchd domain, or a managed system-domain provider
+  LaunchDaemon present on disk, loaded in launchd, or in an indeterminate launchd
+  state; an invalid/indeterminate topology fails closed to the headless handoff.
+  Diverting before the topology gate closes the R-4.13 safety hole where a
+  headless node with a stale/loaded consumer LaunchAgent could still be driven
+  into consumer autoupdate mutation. The skip is not counted for SPEC-020-R005
+  accounting, and accepted-session re-observation also treats such a provider as
+  not-stuck, so a healthy operator-managed node no longer loops
+  `failure → R005 → failure` into the signed-recovery rail that hits the same
+  operator boundary. A proven consumer topology continues normally; a genuinely
+  unrecognized topology still fails closed as `unsupported_install_topology`. No
+  R-2 safety invariant, live-service mutation, or rollback authority changed.
+  Addresses issue #1324 (updater actionable-reason gap left open by the
+  installer-side repair rail).
 - v0.1.15 (2026-08-31): Corrected the append-only head renewal description to
   freshness-only. The `renew-release-discovery-head.yml` signer binds the target
   the current signed head already points at (resolved from the live transport

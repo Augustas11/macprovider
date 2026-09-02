@@ -525,6 +525,9 @@ final class CoordinatorClientTests: XCTestCase {
         // .missingTarget without touching the installer.
         await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: nil)
         await client.setAutoupdateTrustOverrideForTest { CoordinatorClientTests.r005EligibleTrust() }
+        // consumer_user topology: pin off the headless divert so this exercises the
+        // real missing-target accrual regardless of host launchd/manifest state.
+        await client.setHeadlessTopologyOverrideForTest { false }
         await client.stubSignedRecoveryInvocationForTest()
 
         let base = Date()
@@ -551,6 +554,41 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertTrue(eligible)
         XCTAssertGreaterThanOrEqual(invocations, 1)
         XCTAssertEqual(lastWasAccepted, true)
+    }
+
+    // SPEC-020 R-4.13: a headless_fleet / system-domain provider is operator-managed,
+    // never "stuck." Its accepted-session re-observation MUST classify no stuck signal
+    // (even a newer missing-target recommendation that would otherwise count), so the
+    // R005 counter never increments and the signed rail is never pointlessly invoked —
+    // matching the primary path's headless_operator_update_required skip.
+    func testAcceptedSessionHeadlessProviderNeverAccruesR005() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            credentialStore: .protectedFile
+        )
+        // Same newer + missing-target shape that reaches eligibility for a
+        // consumer_user provider; the headless guard must suppress it entirely.
+        await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: nil)
+        await client.setAutoupdateTrustOverrideForTest { CoordinatorClientTests.r005EligibleTrust() }
+        await client.stubSignedRecoveryInvocationForTest()
+
+        let base = Date()
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base)
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(400))
+        await client.reobserveAcceptedSessionRecoveryForTest(now: base.addingTimeInterval(800))
+
+        let count = await client.acceptedSessionRecoveryFailureCountForTest()
+        let eligible = await client.acceptedSessionRecoveryEligibleForTest()
+        let invocations = await client.signedRecoveryInvocationCountForTest()
+        XCTAssertEqual(count, 0)
+        XCTAssertFalse(eligible)
+        XCTAssertEqual(invocations, 0)
     }
 
     // SPEC-020-R005: a recorded cooldown for the recommended target is also a pure
@@ -585,6 +623,7 @@ final class CoordinatorClientTests: XCTestCase {
         // cooldown keeps it unusable => .cooldownActive observation.
         await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: "set-x")
         await client.setRecordedCooldownForTest(target: "99.9.9", failureClass: .other)
+        await client.setHeadlessTopologyOverrideForTest { false }
         await client.stubSignedRecoveryInvocationForTest()
 
         let base = Date()
@@ -5911,11 +5950,13 @@ final class CoordinatorClientTests: XCTestCase {
         autoupdateReloadHelperFence: @escaping CoordinatorClient.ReloadHelperFence = {},
         configPath: String = "/tmp/macprovider-test.yaml",
         providerToken: String? = nil,
+        credentialStore: ProviderCredentialStoreKind = .keychain,
         providerCredentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
         credentialStatusRuntime: ProviderCredentialStatusRuntime = ProviderCredentialStatusRuntime(.unconfigured),
         admissionIdentityStatusRuntime: ProviderAdmissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime()
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: configPath)
+        config.credentialStore = credentialStore
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.providerToken = providerToken

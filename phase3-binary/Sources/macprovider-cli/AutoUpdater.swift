@@ -69,6 +69,12 @@ struct AutoUpdater: Sendable {
     let currentBinaryURL: @Sendable () -> URL?
     let rollbackObserverAvailable: Availability
     let launchdProviderAvailable: Availability
+    /// True when this node is a headless_fleet / system-domain provider whose
+    /// updates flow through the signed operator installer acceptance bundle
+    /// (SPEC-020 R-4.13), not the consumer autoupdate path. Used to report the
+    /// actionable `headless_operator_update_required` skip instead of a bare
+    /// `unsupported_install_topology` forward-progress failure.
+    let headlessOperatorManagedTopology: Availability
     let lifecycleLeaseStore: ProviderLifecycleLeaseStore
     let evictStaleLocalStatusOwner: EvictStaleLocalStatusOwner
 
@@ -92,6 +98,7 @@ struct AutoUpdater: Sendable {
         },
         rollbackObserverAvailable: @escaping Availability = { AutoUpdater.defaultRollbackObserverAvailable() },
         launchdProviderAvailable: @escaping Availability = { AutoUpdater.defaultLaunchdProviderAvailable() },
+        headlessOperatorManagedTopology: Availability? = nil,
         lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore(),
         evictStaleLocalStatusOwner: @escaping EvictStaleLocalStatusOwner = { targetVersion, expectedExecutablePath in
             await SelfUpdate.evictStaleLocalStatusOwnerIfManaged(
@@ -115,6 +122,8 @@ struct AutoUpdater: Sendable {
         self.currentBinaryURL = currentBinaryURL
         self.rollbackObserverAvailable = rollbackObserverAvailable
         self.launchdProviderAvailable = launchdProviderAvailable
+        self.headlessOperatorManagedTopology = headlessOperatorManagedTopology
+            ?? { AutoUpdater.defaultHeadlessOperatorManagedTopology(config: config) }
         self.lifecycleLeaseStore = lifecycleLeaseStore
         self.evictStaleLocalStatusOwner = evictStaleLocalStatusOwner
     }
@@ -122,7 +131,8 @@ struct AutoUpdater: Sendable {
     /// Lightweight outcome of a single coordinator-recommendation cycle, used by
     /// the caller (CoordinatorClient) to drive SPEC-020-R005 accepted-session
     /// recovery. The mapping to exit points is:
-    /// - `.notAttempted`: trust-skip, autoupdate-disabled, an invalid/unparseable
+    /// - `.notAttempted`: trust-skip, autoupdate-disabled, a headless operator-update
+    ///   handoff (`headless_operator_update_required`), an invalid/unparseable
     ///   recommended version, or `target_not_newer`. Not counted, not reset — the
     ///   recommendation never engaged a real target and recorded no failure.
     /// - `.missingTarget`: the coordinator advertised a `recommended_binary_version`
@@ -203,9 +213,25 @@ struct AutoUpdater: Sendable {
             if let minimum = policy.minimum, SelfUpdate.compareSemver(target, minimum) == .orderedAscending || policy.revoked.contains(target) {
                 // fail(...) records a cooldown/failure for this target, so per
                 // SPEC-020-R005 this is a recorded forward-progress failure cycle
-                // and MUST increment the counter (not .notAttempted).
+                // and MUST increment the counter (not .notAttempted). A revoked or
+                // below-minimum target is refused for every profile, so it wins
+                // ahead of the headless handoff.
                 await fail(updateID: updateID, target: target, phase: .eligibility, failure: .targetRevokedOrBelowMinimum, reason: "target_revoked_or_below_minimum")
                 return .forwardProgressFailure
+            }
+            // A headless_fleet / system-domain provider is operator-managed: SPEC-020
+            // R-4.13 forbids the consumer autoupdate path from driving it. Divert
+            // BEFORE the install-topology gate and every later mutating gate
+            // (cooldown/download/swap) so it is never driven even when a stale or
+            // loaded consumer LaunchAgent would make launchdProviderAvailable()
+            // true, and so it never records a topology forward-progress failure
+            // that would strand it into the R005 signed recovery rail (which hits
+            // the same operator boundary). Placed after the revoked/minimum policy
+            // check, which is non-mutating and still wins.
+            guard !headlessOperatorManagedTopology() else {
+                print("A newer version is available (v\(target)), but headless_fleet providers update through the signed operator installer acceptance bundle, not consumer autoupdate.")
+                await record(updateID: updateID, target: target, phase: .eligibility, outcome: .skipped, reason: "headless_operator_update_required", attempt: 1)
+                return .notAttempted
             }
             guard launchdProviderAvailable() else {
                 await fail(updateID: updateID, target: target, phase: .eligibility, failure: .other, reason: "unsupported_install_topology")
@@ -394,6 +420,14 @@ struct AutoUpdater: Sendable {
         }
         guard AutoUpdateConfig.enabled(config) else {
             await recordR005(target: "<disabled>", phase: .eligibility, outcome: .skipped, reason: "autoupdate_disabled")
+            return
+        }
+        // Same operator-managed boundary as the coordinator path: the signed
+        // recovery rail cannot converge a headless_fleet / system-domain provider
+        // either, so divert to the actionable skip before any mutating gate rather
+        // than emitting a topology failure. See SPEC-020 R-4.13.
+        guard !headlessOperatorManagedTopology() else {
+            await recordR005(target: "<headless-operator-update>", phase: .eligibility, outcome: .skipped, reason: "headless_operator_update_required")
             return
         }
         let commitTracker = AutoUpdateCommitTracker()
@@ -1047,6 +1081,69 @@ struct AutoUpdater: Sendable {
         ].contains { label, plist in
             FileManager.default.fileExists(atPath: plist.path)
                 && launchctlServiceLoaded(label: label)
+        }
+    }
+
+    /// Positive determination that this node is a headless_fleet / system-domain
+    /// provider whose updates are operator-managed through the signed installer
+    /// acceptance bundle rather than the consumer autoupdate path (SPEC-020
+    /// R-4.13). Grounded in the same authorities the mutating-update gate uses
+    /// (`MacProviderCLI.validateHeadlessUpdateMode`): `protected_file` credential
+    /// custody, an install manifest declaring the `headless_fleet` profile or
+    /// `system` launchd domain, or a managed system LaunchDaemon present on disk,
+    /// loaded in launchd, or in an indeterminate launchd state. Read-only and
+    /// non-mutating, but NOT free: reaching the system-artifact check runs
+    /// `launchctl print` (via `validateNoHeadlessSystemArtifactsPresent`), so keep
+    /// it off hot paths. The cheap `protected_file` and manifest signals
+    /// short-circuit before any `launchctl` call.
+    static func defaultHeadlessOperatorManagedTopology(
+        config: AppConfig,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        loadInstallManifest: () -> UninstallCommand.ManifestLoadResult? = {
+            try? UninstallCommand.loadManifest(home: FileManager.default.homeDirectoryForCurrentUser)
+        },
+        runLaunchctl: ([String]) throws -> Int32 = { arguments in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = arguments
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus
+        }
+    ) -> Bool {
+        // Canonical headless custody marker (same as validateHeadlessUpdateMode).
+        if config.credentialStore == .protectedFile {
+            return true
+        }
+        // Install manifest declaring the headless profile / system domain. A
+        // manifest that fails to load (nil) is invalid/indeterminate — fail closed
+        // to headless so an unprovable topology is never driven by the consumer
+        // path (SPEC-020 R-4.13).
+        switch loadInstallManifest() {
+        case .some(.loaded(let manifest)):
+            if manifest.installProfile == "headless_fleet" || manifest.launchdDomain == "system" {
+                return true
+            }
+        case .some(.missing):
+            break
+        case .none:
+            return true
+        }
+        // Managed system-domain LaunchDaemon present on disk, loaded in launchd, or
+        // in an indeterminate launchd state: validateNoHeadlessSystemArtifactsPresent
+        // throws for any of these (parity with validateHeadlessUpdateMode), so a
+        // throw means headless / fail closed and a clean return means a proven
+        // consumer topology.
+        do {
+            try UninstallCommand.validateNoHeadlessSystemArtifactsPresent(
+                fileExists: fileExists,
+                run: runLaunchctl
+            )
+            return false
+        } catch {
+            return true
         }
     }
 
