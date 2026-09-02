@@ -75,7 +75,7 @@ session lifecycle; it does not replace the cryptographic update mechanism.
 - Coordinator-side policy for choosing
   `coordinator_advertised_version.latest_binary_version`. The operator sets
   it; this SPEC defines only provider behavior after observing it.
-- Replacing the existing manual `macprovider-cli update` command.
+- Replacing the existing manual `malibu-cli update` command.
 
 Convergence boundary: SPEC-020 guarantees convergence to latest only for
 default-installed, launchd-managed providers with autoupdate enabled and CLI
@@ -325,7 +325,7 @@ back to an older located transport.
 **Frozen v1.8.55 bridge.** CLI v1.8.55 shipped with discovery fixed to the
 `release-discovery` tag. GitHub made that release immutable, so neither its
 assets nor tag can advance, and deletion would permanently tombstone the tag.
-Therefore ordinary coordinator-independent `macprovider-cli update` from
+Therefore ordinary coordinator-independent `malibu-cli update` from
 v1.8.55 cannot discover the first append-only transport release. Exactly one
 supported trust-preserving bridge is required: either an already-authenticated
 coordinator recommendation resolving the exact signed numeric release, or an
@@ -385,7 +385,7 @@ the same target version using
 v0.1.0.
 
 **SPEC-020-R002 — Keep manual recovery independent of coordinator state.** The
-manual `macprovider-cli update` command MUST work without a live, accepted, or
+manual `malibu-cli update` command MUST work without a live, accepted, or
 cached coordinator compatibility admission. It MAY ignore the automatic-update
 session-attempt throttle, but it MUST enforce every cryptographic, archive,
 signed compatibility-manifest, downgrade, revocation, mutation-lock, activation,
@@ -888,7 +888,7 @@ config file or environment disables autoupdate, the provider MUST NOT attempt
 autoupdate, even when the coordinator advertises a newer version. Explicit
 disabled wins over any enabled value from another source.
 
-R-5.4. Opt-out MUST NOT disable manual `macprovider-cli update`; manual update
+R-5.4. Opt-out MUST NOT disable manual `malibu-cli update`; manual update
 remains an explicit operator action.
 
 R-5.5. When autoupdate is disabled by opt-out, the provider MAY continue to log
@@ -1036,7 +1036,7 @@ the next heartbeat or state update includes `last_autoupdate_event` with a
 bounded structured object reflecting the latest phase and outcome.
 
 AC-V0.1-12. Manual update recovery: with the coordinator unreachable or
-rejecting the installed version, `macprovider-cli update` discovers and
+rejecting the installed version, `malibu-cli update` discovers and
 installs a strictly newer signed release using its signed compatibility
 manifest without fresh or cached coordinator admission. Opt-out configuration
 does not prevent the manual update.

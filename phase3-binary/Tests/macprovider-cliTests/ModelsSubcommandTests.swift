@@ -64,7 +64,7 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertNil(capture.error)
         XCTAssertTrue(capture.stdout.contains("serve not running; warm-swap disabled"))
         XCTAssertTrue(capture.stdout.contains("old-model\tidle"))
-        XCTAssertTrue(capture.stderr.contains("macprovider-cli serve is not running on this host"))
+        XCTAssertTrue(capture.stderr.contains("malibu-cli serve is not running on this host"))
     }
 
     func testModelsListJSONFallbackIsOneStrictObject() async throws {

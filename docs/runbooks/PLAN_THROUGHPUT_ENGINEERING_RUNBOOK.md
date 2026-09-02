@@ -102,7 +102,7 @@ beta/throughput-engineering/
 2. **Do not** wire `CompiledDecode` or bf16 cast in this task — harness only.
 3. CLI shape:
    ```bash
-   macprovider-cli decode-bench \
+   malibu-cli decode-bench \
      --model <mlx-repo-id> \
      --prefill-tokens 512 \
      --decode-tokens 256 \

@@ -2,7 +2,7 @@
 
 **Audience:** partner handling Apple org / certificate registration (no eng deploy required)  
 **Why:** macprovider is building its own MDM so enrolled Macs can receive Apple Managed Device Attestation (MDA). Without an MDM APNs push certificate, enrolled devices will not wake for MDM commands.  
-**Engineering status:** `POST /v1/enroll` and `macprovider-cli enroll` already ship on `main`. Your work unblocks live enroll → check-in → push.
+**Engineering status:** `POST /v1/enroll` and `malibu-cli enroll` already ship on `main`. Your work unblocks live enroll → check-in → push.
 
 ---
 
@@ -142,7 +142,7 @@ Also note any **Apple Developer Enterprise Program** status (yes/no). Needed onl
 - Install push cert + key on Pearl MicroMDM — see [`docs/runbooks/pearl-micromdm-install.md`](./pearl-micromdm-install.md)
 - Set `tier2.mdm.push_topic` (and enroll URLs) on the coordinator
 - Wire nginx `/v1/enroll` + MDM routes
-- Run `macprovider-cli enroll` on a test Mac and confirm check-in + push wake
+- Run `malibu-cli enroll` on a test Mac and confirm check-in + push wake
 - Later: DeviceInformation / MDA (Phase 3)
 
 ---

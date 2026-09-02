@@ -201,7 +201,7 @@ struct SelfUpdate {
         )
         try await persistSignedPolicyIfPresent(prepared.signedPolicy)
         print(
-            "Update complete. Restart macprovider-cli to use provider CLI "
+            "Update complete. Restart malibu-cli to use provider CLI "
                 + "v\(prepared.compatibilityManifest.providerCLIVersion)."
         )
     }
@@ -265,7 +265,7 @@ struct SelfUpdate {
         )
         print(
             "Acceptance candidate v\(target) applied with provider CLI "
-                + "v\(prepared.compatibilityManifest.providerCLIVersion). Restart macprovider-cli."
+                + "v\(prepared.compatibilityManifest.providerCLIVersion). Restart malibu-cli."
         )
     }
 
@@ -2967,20 +2967,20 @@ struct LocalStatusFormatter {
             nextStep = nil
         } else if lifecycleReason == "autotune_evidence_required" {
             title = "Pending hardware verification"
-            nextStep = "Run `macprovider-cli autotune --recommend --freshness-check --require-hardware-evidence` while online. Recently submitted evidence may still be awaiting operator approval."
+            nextStep = "Run `malibu-cli autotune --recommend --freshness-check --require-hardware-evidence` while online. Recently submitted evidence may still be awaiting operator approval."
         } else if lifecycleReason == "autotune_evidence_invalid"
             || lifecycleReason == "autotune_evidence_binary_version_mismatch"
             || lifecycleReason == "autotune_model_cap_exceeded"
         {
             title = "Not eligible: admission evidence failed"
-            nextStep = "Run `macprovider-cli autotune --recommend --recover-hardware-admission` while online."
+            nextStep = "Run `malibu-cli autotune --recommend --recover-hardware-admission` while online."
         } else if lifecycleState == "catalog_incompatible"
             || lifecycleReason == "autotune_model_uncatalogued"
             || ["catalog_update_required", "compatibility_update_required"].contains(networkState) {
             title = "This Mac is not currently eligible"
             nextStep = lifecycleReason == "autotune_model_uncatalogued"
-                ? "Run `macprovider-cli autotune --recommend --recover-hardware-admission` while online."
-                : "Run `macprovider-cli update`, or choose a catalog-supported model."
+                ? "Run `malibu-cli autotune --recommend --recover-hardware-admission` while online."
+                : "Run `malibu-cli update`, or choose a catalog-supported model."
         } else if networkState == "not_buyer_serving" {
             title = "Customer availability is temporarily interrupted"
             nextStep = "Keep Malibu open while the coordinator refreshes this Mac's routing status."
@@ -3007,7 +3007,7 @@ struct LocalStatusFormatter {
         }
         let recommendation = staleRecommendationSince == nil
             ? ""
-            : "\nRecommendation: Refresh with `macprovider-cli autotune --recommend`."
+            : "\nRecommendation: Refresh with `malibu-cli autotune --recommend`."
         let action = nextStep.map { "\nNext step: \($0)" } ?? ""
 
         return """
@@ -3020,7 +3020,7 @@ struct LocalStatusFormatter {
         Provider software: \(update)
         Requests: \(status["requests_total"] ?? 0) served, \(status["errors_total"] ?? 0) errors\(recommendation)\(action)
 
-        Advanced diagnostics: macprovider-cli status --advanced
+        Advanced diagnostics: malibu-cli status --advanced
         """
     }
 
@@ -3039,24 +3039,24 @@ struct LocalStatusFormatter {
         let version = status["binary_version"] as? String ?? CoordinatorClient.binaryVersion
         let uptime = humanDuration(status["uptime_s"] as? Int ?? 0)
         let connected = (coordinator["connected"] as? Bool) == true ? "yes" : "no"
-        let ownerLine = ownerLogin.map { "\($0) (github.com/\($0))" } ?? "(unclaimed — run `macprovider-cli claim`)"
+        let ownerLine = ownerLogin.map { "\($0) (github.com/\($0))" } ?? "(unclaimed — run `malibu-cli claim`)"
         let latestLine: String
         if let latestVersion {
             let comparison = SelfUpdate.compareSemver(version, latestVersion)
             latestLine = comparison == .orderedAscending
-                ? "v\(latestVersion) (run 'macprovider-cli update' to upgrade)"
+                ? "v\(latestVersion) (run 'malibu-cli update' to upgrade)"
                 : "v\(latestVersion)"
         } else {
-            latestLine = "unknown (run 'macprovider-cli update --check')"
+            latestLine = "unknown (run 'malibu-cli update --check')"
         }
         let donorBadge = donorMode ? " DONOR MODE" : ""
         let staleBlock = staleRecommendationSince.map {
-            "\nRecommendation stale: recommendation inputs changed since \(ISO8601DateFormatter.autotuneInternet.string(from: $0)).\nRun: macprovider-cli autotune --recommend\n"
+            "\nRecommendation stale: recommendation inputs changed since \(ISO8601DateFormatter.autotuneInternet.string(from: $0)).\nRun: malibu-cli autotune --recommend\n"
         } ?? ""
         let providerID = string(status["provider_id"])
         let recoveryCommand: String = {
-            guard let configPath else { return "macprovider-cli credentials recover-admission-identity --config <config> --expected-provider-id \(shellQuote(providerID))" }
-            return "macprovider-cli credentials recover-admission-identity --config \(shellQuote(configPath)) --expected-provider-id \(shellQuote(providerID))"
+            guard let configPath else { return "malibu-cli credentials recover-admission-identity --config <config> --expected-provider-id \(shellQuote(providerID))" }
+            return "malibu-cli credentials recover-admission-identity --config \(shellQuote(configPath)) --expected-provider-id \(shellQuote(providerID))"
         }()
         let admissionState = string(admissionIdentity["state"])
         let admissionAction: String

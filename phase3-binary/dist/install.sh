@@ -39,6 +39,9 @@ COORDINATOR_BASE_DEFAULT="https://coordinator.malibu.tech"
 INSTALL_DIR="${MACPROVIDER_INSTALL_DIR:-$HOME/macprovider}"
 BIN_DIR="$HOME/.local/bin"
 BINARY_PATH="$BIN_DIR/macprovider-cli"
+# Malibu-branded PATH alias (#1261): additive `malibu-cli` command. The shipped
+# binary and this canonical entrypoint keep the macprovider-cli name.
+ALIAS_BINARY_PATH="$BIN_DIR/malibu-cli"
 CONFIG_DIR="$HOME/.config/macprovider"
 CONFIG_PATH="$CONFIG_DIR/config.yaml"
 PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
@@ -10799,6 +10802,17 @@ install_binary() {
 
   [ -x "$real_binary" ] || die 5 "macprovider-cli was not installed at $real_binary"
   [ -L "$BINARY_PATH" ] || die 5 "symlink not created at $BINARY_PATH"
+
+  # Malibu-branded alias (#1261): additive `malibu-cli` symlink so the branded
+  # command works from first install -- before the provider ever serves, and
+  # even if admission recovery guidance is shown first. Points at the canonical
+  # entrypoint ($BINARY_PATH), which install/convergence keep current, so the
+  # alias never needs re-pointing. Create-only: only when the path is empty, so
+  # an unrelated user file/symlink at that path is never clobbered. Best-effort
+  # -- never fail the install on the alias.
+  if [ ! -e "$ALIAS_BINARY_PATH" ] && [ ! -L "$ALIAS_BINARY_PATH" ]; then
+    ln -s "$BINARY_PATH" "$ALIAS_BINARY_PATH" 2>/dev/null || true
+  fi
   MACPROVIDER_CLI_EXECUTABLE="$real_binary"
   if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ]; then
     record_lifecycle_state rollback_in_progress signed_emergency_rollback_activated \

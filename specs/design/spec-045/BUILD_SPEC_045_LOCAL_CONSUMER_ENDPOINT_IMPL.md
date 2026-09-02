@@ -4,7 +4,7 @@ Implement SPEC-045 local consumer endpoint mode as a staged set of small PRs. Do
 
 ## Target result
 
-Ship `macprovider-cli consume` as a local development adapter: a macOS loopback-only OpenAI-compatible endpoint that lets local tools use a generated local token and loopback base URL while the CLI keeps the upstream buyer credential, model allowlist, local exposure controls, redacted status, and restart behavior.
+Ship `malibu-cli consume` as a local development adapter: a macOS loopback-only OpenAI-compatible endpoint that lets local tools use a generated local token and loopback base URL while the CLI keeps the upstream buyer credential, model allowlist, local exposure controls, redacted status, and restart behavior.
 
 ## Slice order
 

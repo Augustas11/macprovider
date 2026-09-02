@@ -5,7 +5,7 @@ import XCTest
 import MacProviderCore
 @testable import macprovider_cli
 
-/// Issue #767 item 3 — `macprovider-cli doctor`. Offline-first: everything but
+/// Issue #767 item 3 — `malibu-cli doctor`. Offline-first: everything but
 /// the floor comparison is answerable with no network at all.
 final class DoctorCommandTests: XCTestCase {
     private func runner(

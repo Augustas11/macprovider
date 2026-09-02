@@ -60,7 +60,7 @@ external rollout evidence.
 **Change log v0.23 (2026-07-14, issue #585 admission-identity rotation).**
 The CLI-owned admission identity is now restart-safe but rotatable: the stable legacy
 Keychain service remains the current slot, with separate pending and bounded previous
-slots. `macprovider-cli credentials rotate-admission-identity` stages one idempotent
+slots. `malibu-cli credentials rotate-admission-identity` stages one idempotent
 candidate, takes the maintenance lease, restarts the launchd provider, and requires a
 fresh buyer-serving proof before reporting success. The current key signs the complete
 initial transcript containing `provider_admission_next_public_key`; the coordinator
@@ -74,7 +74,7 @@ This change log supersedes v0.18/v0.19 descriptions of the admission key as non-
 **Change log v0.22 (2026-07-14, issue #585 Option 2 credential-custody
 slice).** The shipped CLI-track onboarding now hands the bearer to CLI-owned Keychain
 storage while Malibu retains YAML. Import calls the installed
-`macprovider-cli credentials import --config` and then a separate
+`malibu-cli credentials import --config` and then a separate
 `credentials verify --config` against one immutable snapshot; the second process's
 exact-value proof permits the App marker/link transition but not YAML removal. A
 restarted launchd provider removes YAML only after authenticated coordinator admission.
@@ -233,7 +233,7 @@ the `macprovider-cli` the app monitors DOES sign `identity_signature` with its s
 bootstrap identity for `mp-*` admission — a LIVE §4.3 dependency; only the App-side
 `p_*` responder is dormant. See the §4 scope banner.) Instead,
 `install.sh` onboards a **standard CLI-track provider**: it generates a fresh
-`mp-<32-hex>` principal and runs `macprovider-cli bootstrap-auth`, which acquires a
+`mp-<32-hex>` principal and runs `malibu-cli bootstrap-auth`, which acquires a
 `provider_token` via the coordinator's **tokenless WebSocket admission** handshake
 (`install.sh:2484-2505,3112-3125`; `BootstrapAuthCommand.swift`;
 `CoordinatorClient.swift:569-575,1989-2056`). Bootstrap persists that bearer directly
@@ -700,7 +700,7 @@ v0.4's partial edits; SEC + ARCH HIGHs were real. v0.5 closes all:
   running CLI against it, but `config.yaml` is a file path, not
   a directory. v0.5 moves the file to
   `~/.config/macprovider/config.yaml.cli-backup-<timestamp>` and
-  documents `macprovider-cli --config <backup-file>` for
+  documents `malibu-cli --config <backup-file>` for
   reclaim.
 - **§10 step 7 rewritten** to use `provider_auth_policy.signature_exempt_until`,
   `migration_time + 7 days`, both App and CLI pre-cutover ids,
@@ -967,7 +967,7 @@ against v0.1. v0.2 closes each. Load-bearing changes:
   object replay across arbitrary identities.
 - **SPEC-023 autotune stays on-device.** v0.1 had the coordinator
   return `recommended_model` from `/register`. v0.2 removes it; the
-  App runs `macprovider-cli autotune --recommend --json` locally after
+  App runs `malibu-cli autotune --recommend --json` locally after
   identity is minted, preserving SPEC-023's signed-catalog + rate-card
   privacy invariants.
 - **"Coordinator escrow" renamed to "unpaid ledger backlog".** Aligns
@@ -1449,7 +1449,7 @@ input. The concrete v1 handoff is:
    process argument, child environment, or log. A noninteractive fresh install
    without a source file exits with typed status 20. A restart-safe incumbent
    bypasses this fresh-only intake. Both paths call the installed
-   `macprovider-cli bootstrap-auth --referral-code-file <source>`.
+   `malibu-cli bootstrap-auth --referral-code-file <source>`.
 4. `bootstrap-auth` opens the source with no-follow owner/mode/link/ACL and
    device/inode stability checks, reuses the durable provider/receipt identity,
    and sends the exact code in both signed bootstrap stages. Its owner-only
@@ -1648,7 +1648,7 @@ Coordinator MUST:
    ```
 
    `recommended_model` is NOT returned here. In the shipped flow
-   `install.sh` runs `macprovider-cli autotune --recommend` on-device
+   `install.sh` runs `malibu-cli autotune --recommend` on-device
    per SPEC-023 (§6.1 step 7b); the app does not mint via §4.1 (§4.1
    client note).
 
@@ -2821,7 +2821,7 @@ without the explicit import flow.
   earnings on the CLI-track provider_id continue to accrue but
   are no longer accessible via `Malibu.app`; they can be
   reclaimed via
-  `macprovider-cli --config <backup-file-path>` which
+  `malibu-cli --config <backup-file-path>` which
   supports pointing at an arbitrary config file. The dialog
   displays the exact reclaim command for copy.
 - Option C (secondary link): **Cancel** — closes the dialog and
@@ -3253,7 +3253,7 @@ criteria in §5.2 by 25%.
   - **Start fresh:** moves `config.yaml` to
     `~/.config/macprovider/config.yaml.cli-backup-<UTC-timestamp>`,
     proceeds to Fresh state, and displays the exact
-    `macprovider-cli --config <backup-file>` reclaim command.
+    `malibu-cli --config <backup-file>` reclaim command.
   - **Cancel:** closes the dialog and quits the App with no file
     changes.
 - **AC-026-16.** §4.1 duplicate-register bearer-proof mechanic

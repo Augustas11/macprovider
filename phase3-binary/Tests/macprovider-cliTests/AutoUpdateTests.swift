@@ -987,6 +987,86 @@ final class AutoUpdateTests: XCTestCase {
         )
     }
 
+    func testEnsurePathEntrypointMaterializesMalibuCliAlias() throws {
+        // #1261: the branded `malibu-cli` alias is created (not just repaired)
+        // alongside the canonical entrypoint, so self-updating providers gain
+        // the command without re-running install.sh.
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let install = fixture.url.appendingPathComponent("macprovider", isDirectory: true)
+        try FileManager.default.createDirectory(at: install, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let canonical = install.appendingPathComponent("macprovider-cli")
+        try Data("canonical-binary".utf8).write(to: canonical)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: canonical.path)
+
+        let localBin = fixture.url.appendingPathComponent(".local/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let entrypoint = localBin.appendingPathComponent("macprovider-cli")
+        try Data("stale-path-copy".utf8).write(to: entrypoint)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: entrypoint.path)
+        // Alias absent before convergence.
+        let alias = localBin.appendingPathComponent("malibu-cli")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: alias.path))
+
+        _ = try store.ensurePathEntrypointMatchesInstallAuthority(launchedExecutableURL: entrypoint)
+
+        // Alias created as a symlink to the canonical *entrypoint* (stable), and
+        // the chain resolves through to the canonical binary content.
+        var aliasInfo = stat()
+        XCTAssertEqual(lstat(alias.path, &aliasInfo), 0)
+        XCTAssertEqual(aliasInfo.st_mode & S_IFMT, S_IFLNK)
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: alias.path),
+            entrypoint.standardizedFileURL.path
+        )
+        XCTAssertTrue(store.aliasEntrypointIsOwnedSymlink(alias))
+        XCTAssertEqual(try String(contentsOf: alias), "canonical-binary")
+
+        // Idempotent: a converged alias is left untouched on a second pass.
+        XCTAssertFalse(try store.convergeAliasPathEntrypoint())
+    }
+
+    func testConvergeAliasDoesNotClobberUnrelatedUserFile() throws {
+        // #1261: malibu-cli is a newly introduced name; a user's own regular
+        // file or a symlink to some other target at ~/.local/bin/malibu-cli must
+        // be left untouched, and must not be treated as owned by uninstall.
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let localBin = fixture.url.appendingPathComponent(".local/bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        // Canonical entrypoint present, so alias convergence is not short-circuited
+        // by the damaged-install guard and actually exercises the leave-existing path.
+        let entrypoint = localBin.appendingPathComponent("macprovider-cli")
+        try Data("canonical-binary".utf8).write(to: entrypoint)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: entrypoint.path)
+
+        // Case 1: user's own regular file at malibu-cli is preserved.
+        let alias = localBin.appendingPathComponent("malibu-cli")
+        try Data("user-own-tool".utf8).write(to: alias)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: alias.path)
+        XCTAssertFalse(try store.convergeAliasPathEntrypoint())
+        XCTAssertEqual(try String(contentsOf: alias), "user-own-tool")
+        XCTAssertFalse(store.aliasEntrypointIsOwnedSymlink(alias))
+
+        // Case 2: a symlink to a *different* target -- even one whose basename is
+        // `macprovider-cli` but is not our entrypoint -- is not owned, and
+        // create-only convergence leaves it in place.
+        try FileManager.default.removeItem(at: alias)
+        let foreignTools = fixture.url.appendingPathComponent("tools", isDirectory: true)
+        try FileManager.default.createDirectory(at: foreignTools, withIntermediateDirectories: true)
+        let foreign = foreignTools.appendingPathComponent("macprovider-cli")
+        try Data("foreign".utf8).write(to: foreign)
+        try FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: foreign.path)
+        XCTAssertFalse(store.aliasEntrypointIsOwnedSymlink(alias))
+        XCTAssertFalse(try store.convergeAliasPathEntrypoint())
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: alias.path),
+            foreign.path
+        )
+    }
+
     func testLoadInstalledPreferringInstallAuthorityFallsBackFromPathRegularFile() throws {
         let fixture = try TempHome()
         let manifestSigningKey = P256.Signing.PrivateKey()

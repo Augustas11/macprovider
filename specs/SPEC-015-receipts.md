@@ -222,7 +222,7 @@ version-bump exception.
     rewritten to use the heartbeat-reported hash route (the
     existing observability surface visible at Pearl journald
     `model_hash_verified` events; SPEC-011 §3.3.1 wire) rather
-    than a non-existent `macprovider-cli models inspect`
+    than a non-existent `malibu-cli models inspect`
     subcommand. v0.3 does NOT demand a new introspection
     CLI; if implementations want one for ergonomics, that's
     a future SPEC-001 extension, not a v0.3 prereq.

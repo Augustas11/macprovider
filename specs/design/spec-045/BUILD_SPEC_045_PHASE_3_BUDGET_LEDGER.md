@@ -72,8 +72,8 @@ Chargeable `POST /v1/chat/completions` requests are admitted only when the model
    - streaming client disconnect cancels/closes upstream when possible, waits no more than one second for synchronous cancellation acknowledgement, and settles conservatively unless trusted partial evidence is bound to the request;
    - restart treats in-flight reservations as held;
    - graceful shutdown stops new requests, drains up to five seconds, settles terminal requests, cancels/closes remaining upstream work, marks remaining reservations held, removes descriptor when possible, and exits;
-   - implement `macprovider-cli consume budget status`;
-   - implement `macprovider-cli consume budget release-held --ledger <path>|default --run-id <id> --confirm-release-held`;
+   - implement `malibu-cli consume budget status`;
+   - implement `malibu-cli consume budget release-held --ledger <path>|default --run-id <id> --confirm-release-held`;
    - release-held modifies only matching held reservations, audits releases, refuses while another process holds the lock, and exits nonzero `local_no_held_reservations` when no eligible rows match.
 
 ## Acceptance tests

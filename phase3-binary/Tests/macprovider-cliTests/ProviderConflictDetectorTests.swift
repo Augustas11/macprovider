@@ -38,6 +38,20 @@ final class ProviderConflictDetectorTests: XCTestCase {
         XCTAssertEqual(try detector.detect(), ProviderConflict.foreground(pid: 77, argv: argv))
     }
 
+    func testMalibuCliAliasProcessIsNotTreatedAsForegroundServe() throws {
+        // #1261: a process named `malibu-cli serve` is NOT matched -- the
+        // foreground provider is always launched as `macprovider-cli serve`, and
+        // matching the alias basename would risk SIGTERM-ing an unrelated user
+        // process named `malibu-cli`.
+        let argv = ["/usr/local/bin/malibu-cli", "serve", "--model", "X"]
+        let detector = ProviderConflictDetector(
+            launchctlList: { "" },
+            processList: { [(pid: Int32(78), argv: argv)] }
+        )
+
+        XCTAssertEqual(try detector.detect(), .none)
+    }
+
     func testAutotuneProcessDoesNotMatchForegroundServe() throws {
         let detector = ProviderConflictDetector(
             launchctlList: { "" },

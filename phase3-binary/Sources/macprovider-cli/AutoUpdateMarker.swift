@@ -387,6 +387,17 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         homeDirectory.appendingPathComponent(".local/bin/macprovider-cli")
     }
 
+    /// Malibu-branded PATH alias (`~/.local/bin/malibu-cli`). After the Malibu
+    /// rebrand (#1261) `malibu-cli` is the user-facing command name, while the
+    /// shipped binary keeps its `macprovider-cli` name for fleet update
+    /// continuity. This alias is additive to `pathEntrypointURL`: it is
+    /// materialized and kept converged here so self-updating providers -- which
+    /// swap the binary in place and never re-run `install.sh` -- still gain the
+    /// branded command on the same update that introduces the branded strings.
+    var aliasPathEntrypointURL: URL {
+        homeDirectory.appendingPathComponent(".local/bin/malibu-cli")
+    }
+
     /// Installer-contract live binary (`install.sh` `INSTALL_DIR`).
     var installerContractBinaryURL: URL {
         homeDirectory.appendingPathComponent("macprovider/macprovider-cli")
@@ -1214,6 +1225,11 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             return nil
         }
         _ = try convergePathEntrypoint(to: canonical)
+        // Materialize/repair the Malibu-branded `malibu-cli` alias alongside the
+        // canonical entrypoint (#1261). Fail-open: the alias is a convenience,
+        // and an alias problem must never block canonical entrypoint repair or
+        // the surrounding update.
+        _ = try? convergeAliasPathEntrypoint()
         return canonical
     }
 
@@ -1280,6 +1296,72 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         guard rename(temporaryLink.path, entrypoint.path) == 0 else {
             unlink(temporaryLink.path)
             throw AutoUpdateMarkerError.pathEntrypointUnsafe("symlink_swap_failed")
+        }
+        fsyncDirectory(binDirectory)
+        return true
+    }
+
+    /// Absolute path the `malibu-cli` alias points at: the canonical
+    /// `macprovider-cli` PATH entrypoint. That entrypoint is itself kept
+    /// current by `install.sh` and `convergePathEntrypoint`, so the alias never
+    /// needs re-pointing -- which lets it be create-only, keeps ownership
+    /// provable, and avoids any repair-time race (#1261).
+    var aliasSymlinkTargetPath: String {
+        pathEntrypointURL.standardizedFileURL.path
+    }
+
+    /// True only when `~/.local/bin/malibu-cli` is a symlink WE created: it
+    /// points exactly at the canonical `macprovider-cli` entrypoint. A user's
+    /// own file, or a symlink to any other target (even one merely named
+    /// `macprovider-cli`), is not owned and is left alone. Uses lstat/readlink
+    /// (not fileExists) so a dangling owned alias still qualifies for cleanup.
+    func aliasEntrypointIsOwnedSymlink(_ entrypoint: URL) -> Bool {
+        var info = stat()
+        guard lstat(entrypoint.path, &info) == 0,
+              info.st_mode & S_IFMT == S_IFLNK else {
+            return false
+        }
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+        let length = readlink(entrypoint.path, &buffer, buffer.count - 1)
+        guard length > 0 else { return false }
+        buffer[length] = 0
+        let target = String(cString: buffer)
+        let resolved = target.hasPrefix("/")
+            ? URL(fileURLWithPath: target).standardizedFileURL.path
+            : entrypoint.deletingLastPathComponent().appendingPathComponent(target).standardizedFileURL.path
+        return resolved == aliasSymlinkTargetPath
+    }
+
+    /// Materializes the Malibu-branded `malibu-cli` alias (#1261) as a symlink
+    /// to the canonical entrypoint, creating it only when the path is empty.
+    /// `symlink(2)` is atomic and fails with `EEXIST`, so a file racing in is
+    /// never clobbered; anything already present (our own alias, or a user's
+    /// own file) is left untouched. Fail-open -- it never blocks canonical
+    /// entrypoint repair or the surrounding update.
+    @discardableResult
+    func convergeAliasPathEntrypoint() throws -> Bool {
+        let entrypoint = aliasPathEntrypointURL
+        let binDirectory = entrypoint.deletingLastPathComponent()
+        var binInfo = stat()
+        guard lstat(binDirectory.path, &binInfo) == 0 else {
+            return false
+        }
+        try validateTrustedBinaryDirectory(binDirectory)
+        // Do not create a dangling alias in a damaged install: only materialize
+        // it once the canonical entrypoint it points at actually exists.
+        var targetInfo = stat()
+        guard lstat(aliasSymlinkTargetPath, &targetInfo) == 0 else {
+            return false
+        }
+        // Anything already at the alias path is left as-is (our own alias, or a
+        // user file we must not touch); only create when the path is empty.
+        var info = stat()
+        if lstat(entrypoint.path, &info) == 0 {
+            return false
+        }
+        guard symlink(aliasSymlinkTargetPath, entrypoint.path) == 0 else {
+            // EEXIST (raced) or any other error: leave the path alone.
+            return false
         }
         fsyncDirectory(binDirectory)
         return true

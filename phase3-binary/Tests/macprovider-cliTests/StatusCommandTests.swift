@@ -33,7 +33,7 @@ final class StatusCommandTests: XCTestCase {
             advanced: true
         )
 
-        XCTAssertTrue(output.contains("Owner: (unclaimed — run `macprovider-cli claim`)"), output)
+        XCTAssertTrue(output.contains("Owner: (unclaimed — run `malibu-cli claim`)"), output)
     }
 
     func testStatus_WhenOwnerTxtMalformed_PrintsUnclaimedLine() throws {
@@ -48,7 +48,7 @@ final class StatusCommandTests: XCTestCase {
             advanced: true
         )
 
-        XCTAssertTrue(output.contains("Owner: (unclaimed — run `macprovider-cli claim`)"), output)
+        XCTAssertTrue(output.contains("Owner: (unclaimed — run `malibu-cli claim`)"), output)
     }
 
     func testStatus_WhenOwnerTxtContainsInvalidLogin_PrintsUnclaimedLine() throws {
@@ -63,7 +63,7 @@ final class StatusCommandTests: XCTestCase {
             advanced: true
         )
 
-        XCTAssertTrue(output.contains("Owner: (unclaimed — run `macprovider-cli claim`)"), output)
+        XCTAssertTrue(output.contains("Owner: (unclaimed — run `malibu-cli claim`)"), output)
     }
 
     func testStatusShowsDonorModeBadge() {
@@ -88,7 +88,7 @@ final class StatusCommandTests: XCTestCase {
         )
 
         XCTAssertTrue(output.contains("Recommendation stale: recommendation inputs changed since 2026-07-01T00:00:00Z."), output)
-        XCTAssertTrue(output.contains("Run: macprovider-cli autotune --recommend"), output)
+        XCTAssertTrue(output.contains("Run: malibu-cli autotune --recommend"), output)
     }
 
     func testLocalStatusJSONIncludesCredentialPresenceBooleans() async throws {
@@ -169,7 +169,7 @@ final class StatusCommandTests: XCTestCase {
             let output = LocalStatusFormatter.format(payload, latestVersion: "1.5.0")
 
             XCTAssertTrue(output.contains(expectedTitle), output)
-            XCTAssertTrue(output.contains("Advanced diagnostics: macprovider-cli status --advanced"), output)
+            XCTAssertTrue(output.contains("Advanced diagnostics: malibu-cli status --advanced"), output)
             for term in prohibited {
                 XCTAssertFalse(output.lowercased().contains(term), "\(term) leaked in:\n\(output)")
             }
