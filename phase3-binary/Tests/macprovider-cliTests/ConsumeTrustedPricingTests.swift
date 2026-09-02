@@ -86,7 +86,7 @@ final class ConsumeTrustedPricingTests: XCTestCase {
     }
 
     func testLoaderFetchesCanonicalEndpointsAndFailsClosedWithoutFallback() async throws {
-        let fixture = try SignedRateCardFixture(generatedAt: "2026-08-28T12:00:00Z")
+        let fixture = try SignedRateCardFixture(generatedAt: "2026-09-02T12:00:00Z")
         let loader = ConsumeTrustedPricingLoader(
             fetch: { url in
                 switch url.path {
@@ -100,7 +100,7 @@ final class ConsumeTrustedPricingTests: XCTestCase {
             },
             trustedPublicKeys: fixture.trustedPublicKeys,
             expectedPolicyVersion: fixture.policyVersion,
-            now: { SignedRateCardFixture.date("2026-08-29T00:00:00Z") }
+            now: { SignedRateCardFixture.date("2026-09-03T00:00:00Z") }
         )
 
         let loaded = await loader.load(from: "https://api.example.test")
