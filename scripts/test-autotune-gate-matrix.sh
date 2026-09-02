@@ -35,7 +35,7 @@ for policy_field in ("draft_candidates", "workload_profiles"):
         raise AssertionError("policy-bearing row identity must fail closed")
 
 providers = []
-for index, (chip, memory_gb, tier) in enumerate((("Apple M5 Ultra", 64, "S"), ("Apple M5 Max", 64, "A"), ("Apple M5 Max", 64, "A"))):
+for index, (chip, memory_gb, tier) in enumerate((("Apple M5 Ultra", 128, "S"), ("Apple M5 Max", 128, "A"), ("Apple M5 Max", 128, "A"))):
     provider_id = f"provider-{index + 1}"
     hardware_hash = f"{index + 1:064x}"
     benchmarks = []
