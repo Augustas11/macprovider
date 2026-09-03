@@ -23,6 +23,12 @@ class BYOMContractLockTests(unittest.TestCase):
             "model_catalog_json_v1",
             "models list.v1",
             "models browse.v1",
+            # Live runtime-mutation commands the oracle must also protect from
+            # silent BYOM redefinition (SPEC-001 v1.9.4 / BUILD_SPEC_953).
+            "models switch.v1",
+            "models adopt-recommendation.v1",
+            "model_switch_event.v1",
+            "model_adoption_event.v1",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, spec001)
@@ -38,6 +44,14 @@ class BYOMContractLockTests(unittest.TestCase):
         )
         self.assertIn("model_catalog_json_v1", catalog_tier["local_status_capabilities"])
 
+        # The switch / adopt-recommendation command-schema tokens the §6.14a
+        # oracle references MUST remain present in the Malibu capability manifest.
+        self.assertIn("models switch.v1", manifest["tiers"]["model_ready_switch_v1"]["command_schemas"])
+        self.assertIn(
+            "models adopt-recommendation.v1",
+            manifest["tiers"]["model_recommendation_apply_switch_v1"]["command_schemas"],
+        )
+
     def test_byom_command_taxonomy_uses_distinct_schema_owners(self):
         spec001 = read_text("specs/SPEC-001-phase3-binary.md")
         spec046 = read_text("specs/SPEC-046-provider-byom-discovery.md")
@@ -45,6 +59,8 @@ class BYOMContractLockTests(unittest.TestCase):
 
         expected_taxonomy = (
             "models list",
+            "models switch",
+            "models adopt-recommendation",
             "models browse",
             "models discover",
             "models evaluate",
@@ -63,6 +79,26 @@ class BYOMContractLockTests(unittest.TestCase):
         self.assertIn('schema: "model_admission_withdraw.v1"', spec001)
         self.assertIn("MUST NOT reuse", spec046)
         self.assertIn("model_admission_withdraw.v1", spec047)
+
+    def test_earning_verdict_first_human_output_contract(self):
+        spec001 = read_text("specs/SPEC-001-phase3-binary.md")
+
+        # The provider-facing human surface MUST lead with one earning-verdict
+        # line deterministically mapped from SPEC-047 earning_path_class.
+        for required in (
+            "Earning-verdict-first human output",
+            "provider_guidance.earning_path_class",
+            '"Earning now"',
+            '"Not earning yet — "',
+            '"Can\'t earn in this release"',
+            '"Local only — not offered to the network"',
+            "settlement_capable",
+            "not_earning_yet_catalog_or_receipt_path_exists",
+            "no_earning_path_in_v0_1",
+            "local_inventory_only",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, spec001)
 
     def test_offer_signing_and_catalog_binding_are_explicit(self):
         spec047 = read_text("specs/SPEC-047-network-model-admission.md")

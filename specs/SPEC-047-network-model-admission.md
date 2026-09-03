@@ -1,6 +1,6 @@
 # SPEC-047 - Network Model Admission
 
-**Version:** 0.1.1
+**Version:** 0.1.2
 
 ```json
 {
@@ -152,8 +152,28 @@ No implementation or production evidence exists yet.
 
 The route from local candidate to earning is intentionally multi-step: discovered locally, evaluated locally, offered to the network, admitted for limited network state, catalog-priced when a trusted rate-card source exists, and settlement-capable only when route-time verification and receipts satisfy SPEC-022. This makes model supply broad without letting arbitrary local endpoints mint provider credit.
 
+**v0.1 product-shape decision (recorded, #1240).** The v0.1 product shape is
+settled per issue #1240: BYOM offers may exist in non-settlement network states
+before they are catalog-priced or settlement-capable, and a genuinely
+non-catalog model has **no earning path in v0.1** — provider surfaces disclose
+this honestly (`earning_path_class` = `no_earning_path_in_v0_1`), and an earning
+path for non-catalog models is deferred to a later billing-owner (SPEC-005)
+pricing-conversion spec per SPEC-047-R004. This decision is the arbitration
+basis for the §5 `DECISION_REQUIRED` gaps; the gaps' verdicts remain **open**
+because their "Evidence needed" column requires a signed admission journey
+(SPEC-047-R008) and production evidence that do not exist until the admission
+implementation slices land. This amendment does not flip those verdicts.
+
 ## 8. Changelog and history
 
+- v0.1.2 - BYOM slice-1 rework for issue #1259 (#1240). Records the v0.1
+  product-shape decision (#1240) as the arbitration basis for the §5
+  `DECISION_REQUIRED` gaps without flipping their still-open verdicts (signed
+  admission journey / production evidence still required). Rebased onto the
+  shipped `malibu-cli` rebrand (#1343) and folded the sole-v0.1-dry-run-schema
+  clarification into SPEC-047-R002. Complemented by SPEC-001 v1.9.4 which adds
+  the earning-verdict-first human-output contract mapped from
+  `provider_guidance.earning_path_class`.
 - v0.1.1 - Narrow contract-lock amendment for issue #1249. Pins
   `model_admission_offer_dry_run.v1` as the sole v0.1 offer dry-run envelope,
   defines `model_admission_withdraw.v1`, binds offer signing to the CLI-owned
