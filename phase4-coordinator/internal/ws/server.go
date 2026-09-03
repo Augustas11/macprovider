@@ -4024,6 +4024,14 @@ func (s *Server) Preflight(provider pool.Provider, requestID string, estimatedTo
 	}
 }
 
+// startWarmupGate records a per-session marker and launches the observe-only
+// probe. Since SPEC-002 v1.6.0 the marker (`warmups` / warmupGatePending) is NOT
+// a routing gate — the provider is already `ready`. It survives only to (a)
+// de-duplicate concurrent probes for the same session and (b) avoid overlapping
+// an OPoI canary probe with the admission probe (canaryProbeEligible). The
+// marker clears when the probe finishes (bounded by DegradedMaxRetries ×
+// backoff), so any canary suppression is a short, bounded window on an
+// already-routable provider, not an eligibility hold.
 func (s *Server) startWarmupGate(provider pool.Provider) {
 	s.warmups.Store(provider.ProviderID, provider.AssignedID)
 	go s.runWarmupGate(provider)
@@ -5101,7 +5109,13 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Diagnostic:    "heartbeat_gap",
 		})
 	}
-	if gap > s.wakeGapThreshold() && !s.warmupGatePending(providerID) {
+	// #1354 / SPEC-002 v1.6.0: the admission warm-up probe is now observe-only and
+	// never blocks routing, so it must not suppress the independent wake-from-sleep
+	// (FR-P8) fallback. Previously `!warmupGatePending` deferred wake handling to the
+	// blocking admission gate; with fail-open there is no gate to defer to, and
+	// leaving the guard here would route a cold first request to a provider that
+	// woke mid-probe. Wake detection now runs independently of the admission probe.
+	if gap > s.wakeGapThreshold() {
 		s.log.Info().Str("provider_id", providerID).Dur("gap", gap).Msg("provider wake detected")
 		s.markDegradedForWarmup(providerID, assignedID)
 		session, ok := s.sessionFor(providerID, assignedID)
@@ -5520,10 +5534,11 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 		timer.(*time.Timer).Stop()
 	}
 	timer := time.AfterFunc(s.warmupFallback(), func() {
-		if s.warmupGatePending(providerID) {
-			s.timers.Delete(providerID)
-			return
-		}
+		// #1354 / SPEC-002 v1.6.0: the wake fallback promotes independently of the
+		// admission observe-probe. The former `warmupGatePending` early-return here
+		// deferred promotion to the (now-removed) blocking admission gate; keeping it
+		// would strand a wake-degraded provider in `degraded` whenever an observe
+		// probe was still in flight when the fallback fired.
 		if s.pool.MarkState(providerID, assignedID, pool.StateReady) {
 			s.log.Warn().Str("provider_id", providerID).Dur("timeout", s.warmupFallback()).Msg("warm_up timed out; allowing routing")
 		}

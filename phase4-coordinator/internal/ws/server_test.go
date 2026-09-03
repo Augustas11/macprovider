@@ -1377,9 +1377,17 @@ func TestWarmupProbeTimeoutLeavesProviderRoutable(t *testing.T) {
 		t.Fatal("warmup request_id is empty")
 	}
 
-	// Never answer the probe. It exhausts and times out, but the provider stays
-	// ready and routable throughout — it is never parked unavailable.
-	eventuallyWithin(t, 4*time.Second, func() bool {
+	// Provider is routable immediately.
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateReady
+	})
+	// Never answer the probe. It must exhaust and time out — but the provider stays
+	// ready and routable across the entire timeout + exhaustion window. This span
+	// (2s) deliberately exceeds WarmupGateTimeoutS (1s) so that a regression which
+	// re-introduced MarkState(StateUnavailable) after the timeout would flip the
+	// state mid-window and fail this assertion, instead of passing at admission.
+	consistently(t, 2*time.Second, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
 		return ok && provider.State == pool.StateReady
 	})

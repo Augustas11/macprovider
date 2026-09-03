@@ -1110,22 +1110,32 @@ The probe records a **fitness verdict** — `pass` when it observes non-empty
 assistant output and positive token usage (`usage.completion_tokens > 0`)
 within `pool.warmup_gate_timeout_s` (default 90s) with a terminal
 `inference_response_end` `status: "complete"` (WS) or an OpenAI-compatible
-HTTP 200 (HTTP-forwarding); otherwise `fail`/`timeout`. The verdict is written
-to connection-event history and telemetry (`reason = "warmup_failed"` on a
-negative verdict) for observability and reward/fitness signals only. Because
-the probe is observe-only:
+HTTP 200 (HTTP-forwarding); otherwise `fail`/`timeout`. A negative verdict is
+recorded to connection-event history and telemetry (`reason = "warmup_failed"`,
+`KindWarmupFailed`) for observability and reward/fitness signals; a positive
+verdict is logged. Because the probe is observe-only:
 
 - The provider stays `ready` and buyer-routable regardless of the verdict.
 - Heartbeat and `state_update` `ready` reports are **not** clamped to
   `degraded` while a probe is in flight.
-- A negative verdict is logged but never transitions the provider to
+- A negative verdict is recorded but never transitions the provider to
   `degraded` or `unavailable`; retries, if any, are for observation quality
   and never gate routing.
 
-A provider that genuinely cannot serve is removed by the in-flight circuit
-breaker (FR-P11a) when it fails real buyer traffic — that remains the
-authoritative fitness gate. The admission probe is advisory and never blocks
-onboarding.
+Providers that fail real buyer traffic with *abnormal* in-flight faults (WS
+disconnect mid-inference, relay timeout, or a qualified abnormal
+zero-token completion) are removed by the in-flight circuit breaker
+(FR-P11a). The breaker is the network's primary runtime fitness signal, but it
+is deliberately **not** a universal one: by FR-P11a a clean empty completion
+(`finish_reason: "stop"` with zero tokens) is a valid response and does not
+count as a fault. A provider that only ever returns well-formed empty
+completions therefore passes trust admission, fails the observe-only warm-up
+probe, and can remain routable. This is an accepted consequence of the
+fail-open posture chosen for #1354 (never block onboarding on a fitness
+signal); a future bounded quality path — e.g. counting repeated clean-empty
+real completions only for providers whose warm-up verdict was negative — may
+close it without re-introducing an admission block. The admission probe itself
+is advisory and never blocks onboarding.
 
 **Scope guard.** This fail-open posture applies ONLY to the warm-up *fitness*
 verdict. Trust and identity admission gates are unaffected and continue to
@@ -1306,9 +1316,11 @@ degradation in WS-tunneled mode** and supersedes FR-P20's former
   `inference_response_chunk` count) all already exist in SPEC-001 v1.2.4. The
   provider binary needs no change.
 
-This is the runtime (reactive) half of provider fitness. The proactive half is
-FR-P8a's admission-time warm-up capability gate, which withholds `ready` until
-a provider proves it can produce a token.
+This is the runtime (reactive) half of provider fitness, and — subject to the
+FR-P11a fault qualification above — the primary one. The proactive half is
+FR-P8a's admission-time warm-up capability probe, which since v1.6.0 is
+fail-open and observe-only: it records a fitness verdict but never withholds
+`ready`, so it advises rather than gates.
 
 **FR-P12. Identify provider; configurable bearer-token check.**
 

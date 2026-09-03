@@ -2248,6 +2248,10 @@ final class CoordinatorClientTests: XCTestCase {
         base.model = "model-a"
 
         // ws:// to a loopback coordinator is now accepted (isolated-coordinator onboarding).
+        // NOTE: bracketed IPv6 `ws://[::1]` is intentionally NOT accepted — URLComponents
+        // reports its host as "[::1]", and CoordinatorReadinessClient uses the identical
+        // unbracketed "::1" loopback check, so accepting it only here would reintroduce the
+        // WS-vs-readiness asymmetry S2 fixes. Loopback coordinators use 127.0.0.1/localhost.
         for loopback in ["ws://127.0.0.1:8444/ws/provider", "ws://localhost:8444/ws/provider"] {
             var cfg = base
             cfg.coordinatorURL = loopback
@@ -2256,15 +2260,31 @@ final class CoordinatorClientTests: XCTestCase {
                 "expected ws:// loopback URL \(loopback) to be accepted")
         }
 
-        // ws:// to a non-loopback host is still rejected.
-        var remote = base
-        remote.coordinatorURL = "ws://coordinator.malibu.tech/ws/provider"
-        XCTAssertNil(CoordinatorClient(config: remote, modelRuntime: runtime, providerStatus: status))
-
-        // wss:// is always accepted.
+        // wss:// with a host is always accepted.
         var secure = base
         secure.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         XCTAssertNotNil(CoordinatorClient(config: secure, modelRuntime: runtime, providerStatus: status))
+
+        // Every rejection case returns nil (with an explicit stderr diagnostic).
+        let rejected = [
+            "ws://coordinator.malibu.tech/ws/provider", // remote plaintext downgrade
+            "wss:///ws/provider",                        // missing host
+            "http://127.0.0.1:8444/ws/provider",         // unsupported scheme
+            "ws://user@localhost:8444/ws/provider",      // userinfo smuggle on loopback
+            "wss://user:pw@coordinator.malibu.tech/ws",  // userinfo smuggle on wss
+        ]
+        for bad in rejected {
+            var cfg = base
+            cfg.coordinatorURL = bad
+            XCTAssertNil(
+                CoordinatorClient(config: cfg, modelRuntime: runtime, providerStatus: status),
+                "expected coordinator URL \(bad) to be rejected")
+        }
+
+        // A nil coordinator URL is rejected.
+        var missing = base
+        missing.coordinatorURL = nil
+        XCTAssertNil(CoordinatorClient(config: missing, modelRuntime: runtime, providerStatus: status))
     }
 
     func testRequestPairOT_NeverEmitted_OnAdmissionFrames() async throws {

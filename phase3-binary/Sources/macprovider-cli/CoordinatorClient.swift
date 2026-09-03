@@ -461,8 +461,22 @@ actor CoordinatorClient {
         // other rejection is reported explicitly instead of a silent nil, which
         // previously surfaced as a misleading "check this Mac's internet
         // connection" status with no log line.
-        let scheme = url.scheme?.lowercased()
-        let host = url.host?.lowercased()
+        //
+        // Parse with URLComponents so we can reject embedded userinfo and a
+        // missing host, matching CoordinatorReadinessClient.readinessURL — a bare
+        // `wss:///path` (no host) or a `ws://user@localhost` credential smuggle
+        // must not slip through to fail later on the socket.
+        guard let components = URLComponents(string: rawURL),
+              components.user == nil,
+              components.password == nil,
+              let host = components.host?.lowercased(),
+              !host.isEmpty
+        else {
+            FileHandle.standardError.write(Data(
+                "FATAL coordinator URL is missing a host or embeds userinfo; expected wss://host[:port]/path (or ws://<loopback> for an isolated coordinator)\n".utf8))
+            return nil
+        }
+        let scheme = components.scheme?.lowercased()
         let isLoopback = host == "localhost" || host == "127.0.0.1" || host == "::1"
         switch scheme {
         case "wss":
@@ -471,7 +485,7 @@ actor CoordinatorClient {
             break
         case "ws":
             FileHandle.standardError.write(Data(
-                "FATAL coordinator URL uses insecure ws:// for non-loopback host \(host ?? "?"); use wss:// (ws:// is permitted only for localhost/127.0.0.1/::1)\n".utf8))
+                "FATAL coordinator URL uses insecure ws:// for non-loopback host \(host); use wss:// (ws:// is permitted only for localhost/127.0.0.1/::1)\n".utf8))
             return nil
         default:
             FileHandle.standardError.write(Data(
