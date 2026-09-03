@@ -15,8 +15,9 @@ import (
 func capacityTestConfig(ceiling int) config.Config {
 	cfg := config.Default()
 	cfg.Pool.MaxConcurrencyCeiling = ceiling
-	// The warm-up gate would admit the provider as degraded, which is
-	// orthogonal to the capacity clamp under test.
+	// The warm-up probe (observe-only since SPEC-002 v1.6.0) would dispatch a
+	// background inference that is orthogonal to the capacity clamp under test;
+	// disable it so the clamp assertions are not perturbed.
 	cfg.Pool.WarmupGateEnabled = false
 	return cfg
 }

@@ -1,7 +1,7 @@
 # SPEC-004 — Smart Router
 
-**Version:** 0.3.3 (2026-07-28, #784 SPEC-002 routing-eligibility composition reconciliation)
-**Extends:** SPEC-002 v1.5.5 § 5 (routing algorithm)
+**Version:** 0.3.4 (2026-09-03, #1354 FR-P8a fail-open observe-only reconciliation)
+**Extends:** SPEC-002 v1.6.0 § 5 (routing algorithm)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked), SPEC-003 v0.7, SPEC-006 v0.9.8 (Pillar A gated on SPEC-006 v0.8; the v0.3.2 FR-SR-2 provider-visibility carve-out is coordinated with SPEC-006 v0.9.8 / SPEC-008 v0.4.1)
 
 SPEC-004 is additive. With every new `routing.*` key at its default value,
@@ -11,12 +11,28 @@ model ID routing, and no sticky affinity.
 
 ## Changelog
 
+### v0.3.4 (2026-09-03)
+
+- **#1354 FR-P8a fail-open reconciliation.** SPEC-002 v1.6.0 made the FR-P8a
+  admission warm-up gate fail-open and observe-only: a newly connected provider
+  is admitted `ready` and immediately routable, and the warm-up probe no longer
+  withholds routing. SPEC-004 no longer lists FR-P8a admission warm-up as a
+  routing-eligibility gate. The substantive rule is unchanged — SPEC-004 still
+  routes only to providers SPEC-002 considers eligible — but FR-P5 `state must
+  be ready` (which still excludes wake-from-sleep `warm_up` degraded providers,
+  FR-P8) and FR-P11a breaker/recovery holds are the fitness-related exclusions,
+  not the admission warm-up probe. No routing-key or provider-wire change.
+
 ### v0.3.3 (2026-07-28)
 
 - **#784 SPEC-002 composition reconciliation.** Tightens FR-SR-18 so SPEC-004
   routing features compose only after every current SPEC-002 eligibility gate
   has passed, including FR-P8a warm-up admission, capacity, quota, context, and
   FR-P11a breaker/recovery holds. No routing-key or provider-wire change.
+  *(Superseded by v0.3.4: SPEC-002 v1.6.0 made FR-P8a admission warm-up
+  fail-open and observe-only, so it is no longer an eligibility gate — see
+  #1354. The FR-P5 `ready` state check, which still excludes wake-from-sleep
+  `warm_up` degraded providers, and the FR-P11a holds remain the gates.)*
 
 ### v0.3.2 (2026-07-12)
 
@@ -179,9 +195,12 @@ Ordered pipeline:
    selected objective, promote it to position 0 as a soft preference. If not,
    continue with normal selection and log `sticky_miss`.
 5. Build candidates from the pool using SPEC-002 filters:
-   - FR-P5 state must be `ready`.
+   - FR-P5 state must be `ready` (this excludes wake-from-sleep `warm_up`
+     degraded providers, FR-P8).
    - `slots_free > 0`.
-   - FR-P8a admission warm-up gate must have passed.
+   - The FR-P8a admission warm-up probe is observe-only (SPEC-002 v1.6.0) and
+     is NOT a candidate filter — a provider is routable regardless of its
+     warm-up verdict.
    - FR-P11a breaker/recovery holds must exclude held providers.
    - context capacity must fit the estimated token count.
    - provisional quota and admission-tier weighting still apply.
@@ -263,8 +282,9 @@ independently from SPEC-004 v0.2.
 A sticky entry points to a stable `provider_id`, not an `assigned_id`. The
 coordinator MAY route to the provider's current active session after reconnect,
 but only if the provider passes the full SPEC-002 eligibility filter. If the
-sticky provider is absent, `busy`, `degraded`, `draining`, `unavailable`,
-warming, breaker-held, quota-blocked, context-too-small, or serving a model
+sticky provider is absent, `busy`, `degraded` (including wake-from-sleep
+`warm_up`), `draining`, `unavailable`, breaker-held, quota-blocked,
+context-too-small, or serving a model
 outside the requested class, the coordinator MUST ignore the sticky entry for
 that request, log `reason = "sticky_miss"` with a specific miss cause, and
 fall back to normal selection. Sticky affinity MUST NOT trap a session on a
@@ -418,7 +438,8 @@ Objective semantics:
 
 **FR-SR-9. Model-class no-provider behavior.**
 If a class exists but no eligible provider remains after SPEC-002 filters,
-quota checks, context capacity, warm-up, and breaker holds, the coordinator
+quota checks, context capacity, wake-from-sleep `warm_up` degradation, and
+breaker holds, the coordinator
 MUST return HTTP 503 using the same OpenAI-compatible error shape as
 FR-B4/no_provider_available. The error message SHOULD name the requested class
 and MAY include the count of configured concrete models. It MUST NOT expose
@@ -568,11 +589,14 @@ The coordinator MAY use cryptographic randomness or a per-process PRNG, but the
 chosen provider MUST be explainable from the recorded candidate set and recorded
 draw/seed. Randomization MUST NOT be enabled by default.
 
-**FR-SR-18. Composition with FR-P5, FR-P8a, and FR-P11a.**
+**FR-SR-18. Composition with FR-P5 and FR-P11a.**
 No SPEC-004 feature may route to a provider that SPEC-002 considers
 ineligible. Sticky affinity, class expansion, retry, and randomized tiebreak
-operate only after FR-P5 state eligibility, FR-P8a warm-up admission, capacity,
-quota, context, and FR-P11a breaker/recovery-hold checks.
+operate only after FR-P5 state eligibility, capacity, quota, context, and
+FR-P11a breaker/recovery-hold checks. The FR-P8a admission warm-up probe is
+observe-only (SPEC-002 v1.6.0) and is not an eligibility gate; a provider is
+routable irrespective of its warm-up verdict (wake-from-sleep `warm_up`
+degradation, FR-P8, is covered by FR-P5 state eligibility).
 
 **FR-SR-19. Composition with F-4.**
 F-4 remains the base dead-WS failover rule. SPEC-004 retry is opt-in and
@@ -732,8 +756,10 @@ Required fields where applicable:
 - `sticky_miss_reason`
 - `candidate_count_before_filters`
 - `candidate_count_after_filters`
-- `filtered_counts` by reason (`model_mismatch`, `not_ready`, `warming`,
-  `breaker_held`, `busy`, `context_too_small`, `quota_blocked`, `excluded_retry`)
+- `filtered_counts` by reason (`model_mismatch`, `not_ready`, `breaker_held`,
+  `busy`, `context_too_small`, `quota_blocked`, `excluded_retry`). FR-P8a
+  admission warm-up is observe-only (SPEC-002 v1.6.0) and is not a filter
+  reason; a wake-from-sleep `warm_up` degraded provider surfaces as `not_ready`.
 - `candidate_set` for randomized decisions and SHOULD for class decisions
 - `tiebreak_mode`: `deterministic` or `random_epsilon`
 - `tiebreak_epsilon`
@@ -788,13 +814,14 @@ With sticky enabled and SPEC-006 v0.8 supplying
 `routing_internal.conversation_key: conv:S`, a first successful request routes
 normally and records provider `A`. A follow-up request with the same internal
 key, same concrete model or compatible class, routes to `A` while `A` remains
-ready, not breaker-held, not warming, has free slots, and is inside the
+ready (FR-P5), not breaker-held, has free slots, and is inside the
 objective's epsilon cohort. Logs include `sticky_hit`.
 
 **AC-SR-3. Sticky miss falls back gracefully.**
-After `conv:S` sticks to provider `A`, mark `A` `degraded`, breaker-held,
-warming, unavailable, full, context-too-small, outside the requested class, or
-outside the objective's epsilon cohort. The next request for `conv:S` does not
+After `conv:S` sticks to provider `A`, mark `A` `degraded` (e.g. wake-from-sleep
+`warm_up`), breaker-held, unavailable, full, context-too-small, outside the
+requested class, or outside the objective's epsilon cohort. The next request for
+`conv:S` does not
 fail solely because of affinity; it selects eligible provider `B` or returns
 the normal no-provider error if no provider exists. Logs include `sticky_miss`
 and the specific miss reason.
@@ -820,8 +847,9 @@ count, context, and slot ratios. The test MUST compute the v0.2 normalized
 balanced formula and assert the selected provider and logged component scores.
 
 **AC-SR-6. Empty class returns clean 503.**
-Configure a class whose concrete providers are all absent, warming, degraded,
-breaker-held, busy, or context-too-small. A class request returns HTTP 503 with
+Configure a class whose concrete providers are all absent, `degraded`
+(including wake-from-sleep `warm_up`), breaker-held, busy, or
+context-too-small. A class request returns HTTP 503 with
 OpenAI-compatible `no_provider_available` shape and logs the class resolution
 plus filter counts.
 
@@ -870,10 +898,12 @@ metric values, epsilon, random seed/draw, and chosen provider. A test can replay
 or explain the selected provider from the log record without hidden state.
 
 **AC-SR-14. Composition gates hold.**
-For sticky, class, retry, and randomization paths, providers in `degraded`,
-`draining`, `unavailable`, warming, breaker-held, full, quota-blocked, or
-context-too-small states are never selected. Tests include at least one
-FR-P8a warming exclusion and one FR-P11a breaker-held exclusion.
+For sticky, class, retry, and randomization paths, providers in `degraded`
+(including wake-from-sleep `warm_up`), `draining`, `unavailable`, breaker-held,
+full, quota-blocked, or context-too-small states are never selected. Tests
+include at least one wake-from-sleep `warm_up` degraded exclusion and one
+FR-P11a breaker-held exclusion. (A provider whose observe-only FR-P8a warm-up
+verdict was negative is NOT excluded — it stays routable per SPEC-002 v1.6.0.)
 
 **AC-SR-15. Session hard-pin is never sticky.**
 With sticky enabled and no `routing_internal.conversation_key`, send
@@ -899,9 +929,13 @@ attempted provider.
   committed. Buyers still receive one coherent response or one clean error.
 - **FR-P5 is not weakened.** Only `ready` providers with free slots are
   routable. Sticky and class aliases never override state eligibility.
-- **FR-P8a is not weakened.** Warming providers are not buyer-routable for
-  sticky hits, class requests, retry attempts, or randomized cohorts until the
-  token-producing warm-up gate passes.
+- **FR-P8a is observe-only (SPEC-002 v1.6.0), not weakened.** The admission
+  warm-up probe never gated SPEC-004 routing and now formally does not: a
+  provider is buyer-routable for sticky hits, class requests, retry attempts,
+  and randomized cohorts regardless of its warm-up verdict. Providers that are
+  degraded by the wake-from-sleep `warm_up` fallback (FR-P8) remain excluded by
+  FR-P5 state eligibility, and genuinely faulty providers are excluded by the
+  FR-P11a breaker on real buyer traffic.
 - **FR-P11a is not weakened.** Breaker-held and recovery-held providers remain
   non-routable, provider-originated state updates cannot clear coordinator
   holds, and retries charge faults to the provider whose relay produced them.
@@ -976,8 +1010,8 @@ Primary files:
 - Inline fault doubles in `phase4-coordinator/internal/buyer/server_test.go`
   (see `deadMidInferenceRelay` and neighbors; wired via `WithRelay`)
   - Add deterministic provider-disconnect, 502, 504, pre-commit stream failure,
-    post-commit stream failure, buyer cancel, warm-up-held, and breaker-held
-    scenarios alongside the existing dead-WS/failover doubles.
+    post-commit stream failure, buyer cancel, wake-from-sleep `warm_up` degraded,
+    and breaker-held scenarios alongside the existing dead-WS/failover doubles.
 - `phase4-coordinator/tools/mockprovider/`
   - Reuse mock providers for multi-provider routing, class, retry, and
     randomized-distribution acceptance tests.
@@ -1009,8 +1043,9 @@ Test plan:
 5. Randomized tiebreak tests: default deterministic behavior unchanged;
    randomization distributes over an epsilon cohort; every randomized decision
    log is replay/explanation-ready.
-6. Composition tests: each smart feature excludes FR-P5-ineligible,
-   FR-P8a-warming, and FR-P11a-held providers.
+6. Composition tests: each smart feature excludes FR-P5-ineligible (including
+   wake-from-sleep `warm_up` degraded) and FR-P11a-held providers. FR-P8a
+   admission warm-up is observe-only and does not exclude (SPEC-002 v1.6.0).
 7. Slowest-realistic-provider audit: each timeout/window acceptance test names
    the slowest-realistic-provider margin required by SPEC-002 audit category
    J.1.

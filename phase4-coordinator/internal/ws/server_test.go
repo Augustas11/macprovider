@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1291,7 +1292,11 @@ func TestProviderWebSocketRejectsOversizeInitialFrame(t *testing.T) {
 	}
 }
 
-func TestWarmupGateHoldsProviderUntilTokenProducingProbe(t *testing.T) {
+// #1354 / SPEC-002 v1.6.0: the warm-up gate is now fail-open and observe-only.
+// A fresh provider is admitted `ready` and immediately routable; the probe still
+// runs (for a fitness verdict) but never withholds routing. This test replaces
+// the old blocking-gate test (TestWarmupGateHoldsProviderUntilTokenProducingProbe).
+func TestWarmupProbeAdmitsProviderReadyAndObservesOnly(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Pool.WarmupGateEnabled = true
 		cfg.Pool.WarmupGateTimeoutS = 2
@@ -1308,11 +1313,14 @@ func TestWarmupGateHoldsProviderUntilTokenProducingProbe(t *testing.T) {
 	defer conn.Close()
 	assignedID := assertHelloAck(t, conn)
 
+	// Fail-open: the provider is routable the moment it is admitted, before the
+	// probe is answered — it is NEVER parked in degraded by the warm-up gate.
 	eventually(t, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
-		return ok && provider.State == pool.StateDegraded
+		return ok && provider.State == pool.StateReady
 	})
 
+	// The observe-only probe is still dispatched over the WS.
 	req := readInferenceRequest(t, conn)
 	if !strings.HasPrefix(req.RequestID, "req-warmup-gate-"+assignedID+"-1") {
 		t.Fatalf("request_id = %q, want warmup gate prefix for assigned_id %q", req.RequestID, assignedID)
@@ -1338,14 +1346,18 @@ func TestWarmupGateHoldsProviderUntilTokenProducingProbe(t *testing.T) {
 		t.Fatal("warmup body stream = true, want false")
 	}
 
+	// Answering the probe leaves the provider ready (it already was).
 	writeWarmupCompletion(t, conn, req.RequestID, 1)
-	eventually(t, func() bool {
+	consistently(t, 300*time.Millisecond, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
 		return ok && provider.State == pool.StateReady
 	})
 }
 
-func TestWarmupGateTimeoutMarksProviderUnavailable(t *testing.T) {
+// #1354: a probe that times out with no token production must NOT mark the
+// provider unavailable — fail-open leaves it routable (replaces the old
+// TestWarmupGateTimeoutMarksProviderUnavailable).
+func TestWarmupProbeTimeoutLeavesProviderRoutable(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Pool.WarmupGateEnabled = true
 		cfg.Pool.WarmupGateTimeoutS = 1
@@ -1365,23 +1377,35 @@ func TestWarmupGateTimeoutMarksProviderUnavailable(t *testing.T) {
 		t.Fatal("warmup request_id is empty")
 	}
 
-	eventuallyWithin(t, 4*time.Second, func() bool {
+	// Provider is routable immediately.
+	eventually(t, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
-		return ok && provider.State == pool.StateUnavailable
+		return ok && provider.State == pool.StateReady
+	})
+	// Never answer the probe. It must exhaust and time out — but the provider stays
+	// ready and routable across the entire timeout + exhaustion window. This span
+	// (2s) deliberately exceeds WarmupGateTimeoutS (1s) so that a regression which
+	// re-introduced MarkState(StateUnavailable) after the timeout would flip the
+	// state mid-window and fail this assertion, instead of passing at admission.
+	consistently(t, 2*time.Second, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateReady
 	})
 	hb := heartbeat()
 	hb["status"] = "ready"
 	hb["slots_free"] = 0
 	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
-		t.Fatalf("write ready heartbeat after warmup failure: %v", err)
+		t.Fatalf("write ready heartbeat after warmup timeout: %v", err)
 	}
 	eventually(t, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
-		return ok && provider.State == pool.StateUnavailable && provider.SlotsFree == 0
+		return ok && provider.State == pool.StateReady && provider.SlotsFree == 0
 	})
 }
 
-func TestWarmupGateRejectsZeroTokenCompletion(t *testing.T) {
+// #1354: a zero-token completion records a negative fitness verdict but must not
+// change routing state (replaces TestWarmupGateRejectsZeroTokenCompletion).
+func TestWarmupProbeZeroTokenLeavesProviderRoutable(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Pool.WarmupGateEnabled = true
 		cfg.Pool.WarmupGateTimeoutS = 2
@@ -1396,16 +1420,24 @@ func TestWarmupGateRejectsZeroTokenCompletion(t *testing.T) {
 	}
 	defer conn.Close()
 	assignedID := assertHelloAck(t, conn)
+	// Provider is admitted ready before the probe is even answered.
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateReady
+	})
 	req := readInferenceRequest(t, conn)
 
 	writeWarmupCompletion(t, conn, req.RequestID, 0)
-	eventually(t, func() bool {
+	consistently(t, 300*time.Millisecond, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
-		return ok && provider.State == pool.StateUnavailable
+		return ok && provider.State == pool.StateReady
 	})
 }
 
-func TestWarmupGateRejectsUsageWithoutObservedOutput(t *testing.T) {
+// #1354: usage metadata without observed output records a negative verdict but
+// must not change routing state (replaces
+// TestWarmupGateRejectsUsageWithoutObservedOutput).
+func TestWarmupProbeUsageWithoutOutputLeavesProviderRoutable(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Pool.WarmupGateEnabled = true
 		cfg.Pool.WarmupGateTimeoutS = 2
@@ -1420,6 +1452,10 @@ func TestWarmupGateRejectsUsageWithoutObservedOutput(t *testing.T) {
 	}
 	defer conn.Close()
 	assignedID := assertHelloAck(t, conn)
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateReady
+	})
 	req := readInferenceRequest(t, conn)
 
 	if err := wsutil.WriteClientText(conn, mustJSON(providerws.InferenceResponseEnd{
@@ -1435,9 +1471,9 @@ func TestWarmupGateRejectsUsageWithoutObservedOutput(t *testing.T) {
 	})); err != nil {
 		t.Fatalf("write warmup end: %v", err)
 	}
-	eventually(t, func() bool {
+	consistently(t, 300*time.Millisecond, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
-		return ok && provider.State == pool.StateUnavailable
+		return ok && provider.State == pool.StateReady
 	})
 }
 
@@ -1494,8 +1530,16 @@ func TestWarmupGateUsesHTTPForHTTPForwardingProvider(t *testing.T) {
 	})
 }
 
-func TestWarmupGateDoesNotFollowHTTPForwardingRedirects(t *testing.T) {
+// #1354 / SPEC-002 v1.6.0: the coordinator still MUST NOT follow HTTP-forwarding
+// redirects during the warm-up probe (the security property is unchanged), but
+// under fail-open the resulting negative verdict no longer parks the provider
+// unavailable — it stays routable and a real buyer request would be governed by
+// the circuit breaker. Replaces TestWarmupGateDoesNotFollowHTTPForwardingRedirects'
+// unavailable assertion.
+func TestWarmupProbeDoesNotFollowHTTPForwardingRedirectsAndStaysRoutable(t *testing.T) {
+	var targetHits int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&targetHits, 1)
 		_, _ = w.Write([]byte(`{"id":"redirected","choices":[{"message":{"content":"ok"}}],"usage":{"completion_tokens":1}}`))
 	}))
 	defer target.Close()
@@ -1519,13 +1563,26 @@ func TestWarmupGateDoesNotFollowHTTPForwardingRedirects(t *testing.T) {
 	defer conn.Close()
 	assignedID := assertHelloAck(t, conn)
 
+	// The provider is admitted ready and stays ready across the probe window.
 	eventually(t, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
-		return ok && provider.State == pool.StateUnavailable
+		return ok && provider.State == pool.StateReady
 	})
+	consistently(t, 400*time.Millisecond, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateReady
+	})
+	// Security property preserved: the redirect target was never followed.
+	if got := atomic.LoadInt32(&targetHits); got != 0 {
+		t.Fatalf("redirect target hit %d times; coordinator must not follow provider redirects", got)
+	}
 }
 
-func TestWarmupGateSuppressesReadyProviderUpdates(t *testing.T) {
+// #1354 / SPEC-002 v1.6.0: under fail-open observe-only, heartbeat and
+// state_update `ready` reports are NO LONGER clamped to degraded while the probe
+// is in flight (that clamp was part of the blocking gate). Replaces
+// TestWarmupGateSuppressesReadyProviderUpdates, which asserted the opposite.
+func TestWarmupProbeDoesNotClampReadyProviderUpdates(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Pool.WarmupGateEnabled = true
 		cfg.Pool.WarmupGateTimeoutS = 2
@@ -1543,6 +1600,7 @@ func TestWarmupGateSuppressesReadyProviderUpdates(t *testing.T) {
 	assignedID := assertHelloAck(t, conn)
 	req := readInferenceRequest(t, conn)
 
+	// A ready heartbeat mid-probe is honored, not clamped to degraded.
 	hb := heartbeat()
 	hb["status"] = "ready"
 	hb["slots_free"] = 0
@@ -1551,13 +1609,14 @@ func TestWarmupGateSuppressesReadyProviderUpdates(t *testing.T) {
 	}
 	eventually(t, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
-		return ok && provider.State == pool.StateDegraded && provider.SlotsFree == 0
+		return ok && provider.State == pool.StateReady && provider.SlotsFree == 0
 	})
 
+	// A ready state_update mid-probe is likewise honored.
 	if err := wsutil.WriteClientText(conn, mustJSON(map[string]any{
 		"type":   "state_update",
 		"state":  "ready",
-		"reason": "provider says ready while gate is pending",
+		"reason": "provider reports ready while the observe-only probe is in flight",
 		"since":  "2026-05-30T00:00:00Z",
 		"metrics_snapshot": map[string]any{
 			"slots_free":  1,
@@ -1568,11 +1627,11 @@ func TestWarmupGateSuppressesReadyProviderUpdates(t *testing.T) {
 	}
 	eventually(t, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
-		return ok && provider.State == pool.StateDegraded && provider.SlotsFree == 1
+		return ok && provider.State == pool.StateReady && provider.SlotsFree == 1
 	})
 
 	writeWarmupCompletion(t, conn, req.RequestID, 1)
-	eventually(t, func() bool {
+	consistently(t, 300*time.Millisecond, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
 		return ok && provider.State == pool.StateReady
 	})
@@ -4580,6 +4639,23 @@ func eventuallyWithin(t *testing.T, timeout time.Duration, f func() bool) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("condition did not become true before deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// consistently asserts f() holds true continuously across the window. Used to
+// prove the observe-only warm-up probe (#1354) never transitions a routable
+// provider out of ready as a delayed side effect.
+func consistently(t *testing.T, window time.Duration, f func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(window)
+	for {
+		if !f() {
+			t.Fatal("condition did not hold for the full window")
+		}
+		if time.Now().After(deadline) {
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.5.8",
+      "version": "1.6.0",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -90,7 +90,7 @@
     {
       "spec_id": "SPEC-004",
       "title": "Smart Router",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "path": "specs/SPEC-004-smart-router.md",
       "status": "normative",
       "owner": "@Augustas11",

@@ -2231,23 +2231,60 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNil(acceptedKeyID)
     }
 
-    func testWSScheme_MustBeWSS_NotWS() async throws {
+    // #1354 S2: `wss` is required for production, but an insecure `ws` scheme is
+    // allowed for loopback hosts only so isolated test/staging coordinators can be
+    // reached (matching CoordinatorReadinessClient's loopback exemption). Any
+    // other scheme is rejected — now with an explicit stderr diagnostic rather
+    // than the previous misleading "check this Mac's internet connection".
+    func testWSScheme_AllowsWSForLoopback_RejectsWSForRemote() async throws {
         let status = ProviderStatus(
             modelID: "model-a",
             modelLoaded: true,
             capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
         )
         let runtime = try await ModelRuntime(modelID: nil)
-        var insecure = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        insecure.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
-        insecure.providerID = "provider-test"
-        insecure.model = "model-a"
+        var base = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        base.providerID = "provider-test"
+        base.model = "model-a"
 
-        XCTAssertNil(CoordinatorClient(config: insecure, modelRuntime: runtime, providerStatus: status))
+        // ws:// to a loopback coordinator is now accepted (isolated-coordinator onboarding).
+        // NOTE: bracketed IPv6 `ws://[::1]` is intentionally NOT accepted — URLComponents
+        // reports its host as "[::1]", and CoordinatorReadinessClient uses the identical
+        // unbracketed "::1" loopback check, so accepting it only here would reintroduce the
+        // WS-vs-readiness asymmetry S2 fixes. Loopback coordinators use 127.0.0.1/localhost.
+        for loopback in ["ws://127.0.0.1:8444/ws/provider", "ws://localhost:8444/ws/provider"] {
+            var cfg = base
+            cfg.coordinatorURL = loopback
+            XCTAssertNotNil(
+                CoordinatorClient(config: cfg, modelRuntime: runtime, providerStatus: status),
+                "expected ws:// loopback URL \(loopback) to be accepted")
+        }
 
-        var secure = insecure
+        // wss:// with a host is always accepted.
+        var secure = base
         secure.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         XCTAssertNotNil(CoordinatorClient(config: secure, modelRuntime: runtime, providerStatus: status))
+
+        // Every rejection case returns nil (with an explicit stderr diagnostic).
+        let rejected = [
+            "ws://coordinator.malibu.tech/ws/provider", // remote plaintext downgrade
+            "wss:///ws/provider",                        // missing host
+            "http://127.0.0.1:8444/ws/provider",         // unsupported scheme
+            "ws://user@localhost:8444/ws/provider",      // userinfo smuggle on loopback
+            "wss://user:pw@coordinator.malibu.tech/ws",  // userinfo smuggle on wss
+        ]
+        for bad in rejected {
+            var cfg = base
+            cfg.coordinatorURL = bad
+            XCTAssertNil(
+                CoordinatorClient(config: cfg, modelRuntime: runtime, providerStatus: status),
+                "expected coordinator URL \(bad) to be rejected")
+        }
+
+        // A nil coordinator URL is rejected.
+        var missing = base
+        missing.coordinatorURL = nil
+        XCTAssertNil(CoordinatorClient(config: missing, modelRuntime: runtime, providerStatus: status))
     }
 
     func testRequestPairOT_NeverEmitted_OnAdmissionFrames() async throws {
