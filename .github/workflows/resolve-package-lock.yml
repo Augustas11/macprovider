@@ -1,0 +1,47 @@
+name: Resolve CLI Package.resolved (release toolchain)
+
+# Regenerate phase3-binary/Package.resolved under the pinned release toolchain
+# (Xcode 16.4), so the lock matches what the locked candidate/release build
+# (`-onlyUsePackageVersionsFromResolvedFile`) requires. Newer local toolchains
+# (Xcode 26.x) resolve the graph differently and cannot reproduce the correct
+# lock. See issue #1360 (async-http-client unpinned after #1336). Manual only;
+# uploads the corrected Package.resolved as an artifact — it does not commit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch/ref to regenerate phase3-binary/Package.resolved on"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve under the pinned release toolchain
+    runs-on: macos-15
+    steps:
+      - name: Checkout target ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.inputs.ref }}
+      - name: Select Xcode 16.4 (match acceptance-candidate / release toolchain)
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+      - name: Regenerate phase3-binary/Package.resolved
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd phase3-binary
+          xcodebuild -version
+          cp Package.resolved /tmp/Package.resolved.before
+          xcodebuild -resolvePackageDependencies -scheme macprovider-cli -configuration Release || true
+          swift package resolve
+          echo "=== Package.resolved diff (committed -> regenerated) ==="
+          diff -u /tmp/Package.resolved.before Package.resolved || true
+      - name: Upload corrected Package.resolved
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase3-package-resolved
+          path: phase3-binary/Package.resolved
+          if-no-files-found: error
