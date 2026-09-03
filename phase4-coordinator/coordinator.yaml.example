@@ -31,6 +31,7 @@ pool:
   heartbeat_miss_threshold_s: 90
   wake_gap_threshold_s: 120
   warmup_fallback_s: 60
+  # FR-P8a (SPEC-002 v1.6.0): observe-only fitness probe; fail-open, never blocks onboarding.
   warmup_gate_enabled: false
   warmup_gate_timeout_s: 90
   warmup_gate_max_tokens: 2

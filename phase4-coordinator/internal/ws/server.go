@@ -2815,10 +2815,15 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 		admittedTuple = admissionObservation.AdmittedTuple
 		admissionSandboxed = admissionObservation.Sandboxed
 	}
+	// #1354 / SPEC-002 v1.6.0: the warm-up capability gate is now fail-open and
+	// observe-only. A provider that clears the trust/identity admission gates is
+	// admitted `ready` and immediately routable; the warm-up probe (started by
+	// the caller when WarmupGateEnabled) runs in the background purely for a
+	// fitness verdict and never withholds routing. Admitting `degraded` here was
+	// the onboarding deadlock: the released CLI awaits buyer-serving readiness
+	// before it starts reading the WS, so the probe frame was never answered and
+	// the provider could never leave `degraded`.
 	initialState := pool.StateReady
-	if s.cfg.Pool.WarmupGateEnabled {
-		initialState = pool.StateDegraded
-	}
 	// Issue #764: clamp the reported capacity BEFORE it enters the registry, so
 	// no downstream consumer ever sees the raw claim. A fresh session starts
 	// fully free, so the reported triple is (max, max, max).
@@ -4024,6 +4029,13 @@ func (s *Server) startWarmupGate(provider pool.Provider) {
 	go s.runWarmupGate(provider)
 }
 
+// runWarmupGate runs the FR-P8a warm-up capability probe as a fail-open,
+// observe-only background observation (SPEC-002 v1.6.0, issue #1354). The
+// provider is already admitted `ready` and buyer-routable; this probe records a
+// fitness verdict for telemetry/connection-event history but MUST NOT change
+// routing state. It never marks the provider `ready` (it already is) and never
+// marks it `degraded`/`unavailable`. A provider that genuinely cannot serve is
+// removed by the in-flight circuit breaker (FR-P11a) on real buyer traffic.
 func (s *Server) runWarmupGate(provider pool.Provider) {
 	defer s.clearWarmupGate(provider.ProviderID, provider.AssignedID)
 	attempts := s.cfg.Pool.DegradedMaxRetries
@@ -4040,13 +4052,12 @@ func (s *Server) runWarmupGate(provider pool.Provider) {
 			return
 		}
 		if s.runWarmupGateAttempt(provider, attempt) {
-			s.clearWarmupGate(provider.ProviderID, provider.AssignedID)
-			if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateReady) {
-				s.log.Info().Str("provider_id", provider.ProviderID).Int("attempt", attempt).Msg("warmup gate passed")
-			}
+			// Observe-only: no state transition — the provider is already
+			// `ready`. Record the positive fitness verdict for observability.
+			s.log.Info().Str("provider_id", provider.ProviderID).Int("attempt", attempt).Msg("warmup probe observed token production (advisory)")
 			return
 		}
-		s.log.Warn().Str("provider_id", provider.ProviderID).Int("attempt", attempt).Str("reason", "warmup_failed").Msg("warmup gate attempt failed")
+		s.log.Warn().Str("provider_id", provider.ProviderID).Int("attempt", attempt).Str("reason", "warmup_failed").Msg("warmup probe attempt observed no token production (advisory)")
 		s.recordConnectionEvent(providerevents.Event{
 			ProviderID:    provider.ProviderID,
 			SessionID:     provider.AssignedID,
@@ -4059,20 +4070,21 @@ func (s *Server) runWarmupGate(provider pool.Provider) {
 			Diagnostic:    "warmup_attempt_failed",
 		})
 	}
-	if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable) {
-		s.log.Warn().Str("provider_id", provider.ProviderID).Str("reason", "warmup_failed").Msg("provider marked unavailable after warmup gate failures")
-		s.recordConnectionEvent(providerevents.Event{
-			ProviderID:    provider.ProviderID,
-			SessionID:     provider.AssignedID,
-			Kind:          providerevents.KindWarmupFailed,
-			Outcome:       providerevents.OutcomeFailure,
-			FailureReason: providerevents.ReasonWarmupFailed,
-			AuthStage:     providerevents.AuthStageWarmup,
-			MessageFamily: providerevents.MessageFamilyNone,
-			BinaryVersion: provider.BinaryVersion,
-			Diagnostic:    "warmup_gate_exhausted",
-		})
-	}
+	// Fail-open: the probe never observed token production, but this is advisory
+	// only — the provider stays `ready` and buyer-routable. Record the exhausted
+	// verdict for telemetry; do NOT mark the provider unavailable.
+	s.log.Warn().Str("provider_id", provider.ProviderID).Str("reason", "warmup_failed").Msg("warmup probe exhausted without observed token production; provider remains routable (advisory only)")
+	s.recordConnectionEvent(providerevents.Event{
+		ProviderID:    provider.ProviderID,
+		SessionID:     provider.AssignedID,
+		Kind:          providerevents.KindWarmupFailed,
+		Outcome:       providerevents.OutcomeFailure,
+		FailureReason: providerevents.ReasonWarmupFailed,
+		AuthStage:     providerevents.AuthStageWarmup,
+		MessageFamily: providerevents.MessageFamilyNone,
+		BinaryVersion: provider.BinaryVersion,
+		Diagnostic:    "warmup_gate_exhausted_observe_only",
+	})
 }
 
 func (s *Server) runWarmupGateAttempt(provider pool.Provider, attempt int) bool {
@@ -4993,9 +5005,10 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		s.log.Warn().Str("state", hb.Status).Str("provider_id", providerID).Msg("invalid heartbeat state")
 		return
 	}
-	if state == pool.StateReady && s.warmupGatePending(providerID) {
-		state = pool.StateDegraded
-	}
+	// #1354 / SPEC-002 v1.6.0: the warm-up probe is observe-only and fail-open,
+	// so a heartbeat `ready` is no longer clamped to `degraded` while a probe is
+	// in flight — that clamp was part of the blocking gate that deadlocked
+	// onboarding. Trust/identity gates still constrain routing independently.
 	if hb.SafetyTelemetry != nil && hb.SafetyTelemetry.ProviderID != providerID {
 		s.log.Warn().Str("provider_id", providerID).Msg("heartbeat safety telemetry provider_id mismatch")
 		return
@@ -5467,9 +5480,9 @@ func (s *Server) handleStateUpdate(providerID, assignedID string, payload []byte
 		s.log.Warn().Str("state", update.State).Str("provider_id", providerID).Msg("invalid provider state")
 		return
 	}
-	if state == pool.StateReady && s.warmupGatePending(providerID) {
-		state = pool.StateDegraded
-	}
+	// #1354 / SPEC-002 v1.6.0: observe-only warm-up probe — a state_update
+	// `ready` is no longer clamped to `degraded` while a probe is in flight.
+	// Trust/identity gates still constrain routing independently.
 	// Issue #764: state_update is the THIRD provider-controlled capacity ingest
 	// (after hello and heartbeat) — it writes SlotsFree/SlotsTotal straight onto
 	// the pool entry. Leaving it unclamped would let a provider restore an

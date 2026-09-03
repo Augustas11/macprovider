@@ -44,6 +44,9 @@ pool:
   # 2026-07-28 / #784: align the checked-in Pearl template with the live
   # overlay's resolved posture. Re-enable only through a fresh live-pool
   # survey + normal deploy path.
+  # 2026-09-03 / #1354: FR-P8a is now fail-open observe-only (SPEC-002 v1.6.0),
+  # so `true` no longer blocks onboarding — it only runs an advisory probe.
+  # Kept `false` here to match the live overlay; flip via the normal deploy path.
   warmup_gate_enabled: false
   warmup_gate_timeout_s: 90
   warmup_gate_max_tokens: 2

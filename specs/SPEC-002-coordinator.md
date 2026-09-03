@@ -1,7 +1,44 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.5.8 (2026-08-13, rewards-trusted routing quota custody proof)
+**Version:** 1.6.0 (2026-09-03, warm-up capability gate becomes fail-open observe-only)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.6.0 (2026-09-03, warm-up capability gate becomes fail-open observe-only):**
+- Reverses the **FR-P8a** admission posture after the #1346 candidate E2E
+  surfaced a fresh-provider onboarding deadlock (issue #1354). The warm-up
+  capability gate was a *blocking* admission gate: a newly connected provider
+  was registered `degraded` and withheld from buyer routing until a
+  token-producing probe passed. Combined with the released provider CLI, which
+  waits on coordinator buyer-serving readiness (`/v1/pool/check`) **before** it
+  installs its inference relay and starts reading the WebSocket, the probe frame
+  was never read — the provider could never leave `degraded`, readiness never
+  confirmed, and the CLI reconnect-looped forever. The deadlock only reproduced
+  with `pool.warmup_gate_enabled: true` (production runs it `false`), but the
+  binary default ships it on, so any coordinator stood up from `config.Default()`
+  bricked fresh providers.
+- **New posture (fail-open, observe-only):** when `pool.warmup_gate_enabled` is
+  true the coordinator now admits a valid-`hello` provider as `ready` and
+  immediately buyer-routable, then runs the warm-up probe as a **non-blocking
+  background observation**. The probe records a fitness verdict (pass / fail /
+  timeout) for connection-event history and telemetry, but a warm-up outcome
+  **MUST NOT** by itself withhold, degrade, or mark `unavailable` a provider,
+  and heartbeat/`state_update` `ready` reports are **no longer** clamped to
+  `degraded` while a probe is in flight. Onboarding is therefore never blocked
+  by the fitness probe. A provider that genuinely cannot serve is still removed
+  by the in-flight circuit breaker (FR-P11a) on real buyer traffic, which is the
+  authoritative fitness signal; the admission probe is now advisory only.
+- **Scope guard:** this reversal applies ONLY to the warm-up *fitness* verdict.
+  Trust and identity admission gates are unchanged and continue to gate routing
+  per their own requirements — catalog/autotune hello admission, model-hash
+  verification and `require_hash_verified`, attestation, encrypted-leg, and the
+  model-version floor still exclude a provider from routing independently of the
+  warm-up probe. The wake-from-sleep `warm_up` fallback (FR-P8, `warmup_fallback_s`)
+  is likewise unchanged.
+- **Default is now safe.** Because the gate can no longer block onboarding,
+  `config.Default().Pool.WarmupGateEnabled` remains `true` without the footgun;
+  a coordinator stood up from defaults no longer bricks fresh providers. No
+  SPEC-001 / phase3-binary wire change (WS-tunneled probing still reuses
+  `inference_request` / `inference_response_chunk` / `inference_response_end`).
 
 **Change log v1.5.8 (2026-08-13, rewards-trusted routing quota custody proof):**
 - Tightens rewards-trusted routing custody continuity: matching bearer auth and
@@ -1043,12 +1080,17 @@ before routing. If no `state_update` arrives within
 `pool.warmup_fallback_s` (default 60s), log a warning and allow routing
 anyway.
 
-**FR-P8a. Admission warm-up capability gate.**
-If `pool.warmup_gate_enabled` is true (default), a newly connected
-provider MUST NOT be buyer-routable immediately after `hello`. The
-coordinator registers it as `degraded`, sends `hello_ack`, then starts a
-capability probe. Probe transport follows the provider's forwarding
-mode:
+**FR-P8a. Admission warm-up capability probe (fail-open, observe-only).**
+*(v1.6.0 reverses the blocking posture this requirement carried from v1.3.0
+through v1.5.x; see the v1.6.0 change log and issue #1354.)*
+
+If `pool.warmup_gate_enabled` is true (default), a newly connected provider
+that passes all trust/identity admission gates is registered `ready` and is
+immediately buyer-routable after `hello_ack`. The coordinator then runs a
+capability probe as a **non-blocking background observation**. The probe MUST
+NOT delay admission, and its outcome MUST NOT by itself withhold, degrade, or
+mark `unavailable` the provider. Probe transport follows the provider's
+forwarding mode:
 
 - WS-tunneled providers: send a minimal SPEC-001 `inference_request`
   over the provider WebSocket.
@@ -1064,29 +1106,38 @@ Probe payload:
 - `max_tokens`: `pool.warmup_gate_max_tokens` (default 2).
 - non-streaming mode.
 
-The provider passes only if the probe observes non-empty assistant
-output and positive token usage (`usage.completion_tokens > 0`) within
-`pool.warmup_gate_timeout_s` (default 90s). For WS-tunneled providers,
-the terminal frame must be `inference_response_end` with
-`status: "complete"`; for HTTP-forwarding providers, the HTTP response
-must be 200 with an OpenAI-compatible response body. A self-reported
-`throughput_tps_estimate`, a `ready` heartbeat/state update, or usage
-metadata without observed output is never sufficient. A provider that
-reports `ready` through heartbeat or `state_update` while the gate is
-pending MUST remain non-routable until the token-producing probe passes.
+The probe records a **fitness verdict** — `pass` when it observes non-empty
+assistant output and positive token usage (`usage.completion_tokens > 0`)
+within `pool.warmup_gate_timeout_s` (default 90s) with a terminal
+`inference_response_end` `status: "complete"` (WS) or an OpenAI-compatible
+HTTP 200 (HTTP-forwarding); otherwise `fail`/`timeout`. The verdict is written
+to connection-event history and telemetry (`reason = "warmup_failed"` on a
+negative verdict) for observability and reward/fitness signals only. Because
+the probe is observe-only:
 
-On pass, coordinator marks the provider `ready` and buyer routing may
-select it. On failure, timeout, provider disconnect, or zero-token
-completion, coordinator logs `reason = "warmup_failed"`, leaves the
-provider non-routable, and retries after `pool.degraded_backoff_s`,
-doubling backoff between attempts up to `pool.degraded_max_retries`.
-After all attempts fail, coordinator marks the provider `unavailable`.
+- The provider stays `ready` and buyer-routable regardless of the verdict.
+- Heartbeat and `state_update` `ready` reports are **not** clamped to
+  `degraded` while a probe is in flight.
+- A negative verdict is logged but never transitions the provider to
+  `degraded` or `unavailable`; retries, if any, are for observation quality
+  and never gate routing.
 
-If `pool.warmup_gate_enabled` is false, the coordinator preserves the
-pre-v1.3.0 behavior: valid `hello` registers the provider as `ready`.
-Operators MAY disable the gate only for trusted/pinned providers or
-debug sessions where admission latency is more harmful than a false
-ready signal.
+A provider that genuinely cannot serve is removed by the in-flight circuit
+breaker (FR-P11a) when it fails real buyer traffic — that remains the
+authoritative fitness gate. The admission probe is advisory and never blocks
+onboarding.
+
+**Scope guard.** This fail-open posture applies ONLY to the warm-up *fitness*
+verdict. Trust and identity admission gates are unaffected and continue to
+withhold routing independently: catalog/autotune `hello` admission (FR-P8),
+model-hash verification and `require_hash_verified`, attestation and
+encrypted-leg requirements, and the model-version floor still exclude a
+provider that fails them, irrespective of the warm-up probe. The
+wake-from-sleep `warm_up` fallback (`pool.warmup_fallback_s`) is likewise
+unchanged.
+
+If `pool.warmup_gate_enabled` is false, no probe is sent: a valid `hello`
+(subject to the trust/identity gates above) registers the provider as `ready`.
 
 **FR-P9. Send drain command on shutdown / blacklisting.**
 The coordinator sends `{"type": "drain"}` when: (1) coordinator SIGTERM
@@ -4846,7 +4897,8 @@ pool:
                                     # in-flight response chunks count as activity (F-4 liveness)
   wake_gap_threshold_s: 120
   warmup_fallback_s: 60          # Wake warm_up fallback before allowing routing if provider sends no ready state_update
-  warmup_gate_enabled: true      # (v1.3.0 FR-P8a) Gate new connections on a token-producing self-test
+  warmup_gate_enabled: true      # (v1.6.0 FR-P8a) Run an observe-only token-producing probe on new connections;
+                                    # fail-open — never blocks onboarding or routing (was blocking v1.3.0–v1.5.x)
   warmup_gate_timeout_s: 90      # Max seconds for each warm-up gate inference attempt
   warmup_gate_max_tokens: 2      # Max tokens requested by the warm-up gate self-test
   degraded_backoff_s: 30      # Initial recovery backoff after 502/504 OR a breaker trip (FR-P11a)
