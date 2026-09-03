@@ -1986,6 +1986,38 @@ jobs:
             compatibility-artifact-index.json checksums.txt checksums.txt.sig \
             release-provenance.json macprovider-release-discovery.json
 
+      - name: Republish curl-channel install.sh to Pearl
+        if: needs.build.outputs.prerelease == 'false'
+        # sign_publish is not reentrant (it created the immutable release earlier
+        # in the job), so this post-publication Pearl step must not be able to
+        # fail an otherwise-good, already-published release. If the republish
+        # flakes, the install-sh-parity-alarm catches the drift and the
+        # idempotent scripts/publish-install-sh.sh reruns it standalone.
+        continue-on-error: true
+        env:
+          MALIBU_DOWNLOAD_VPS_HOST: ${{ secrets.MALIBU_DOWNLOAD_VPS_HOST }}
+          MALIBU_DOWNLOAD_SSH_KEY: ${{ secrets.MALIBU_DOWNLOAD_SSH_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The public `curl -fsSL https://get.malibu.tech/install.sh | bash`
+          # channel is a static file on Pearl that nothing republishes on a
+          # release; it has silently lagged behind (e.g. missing the #1296
+          # escaped-path fix at v1.8.117, so a fresh install could hit die 30).
+          # Republish the released copy so the curl channel matches this release
+          # and the install-sh-parity-alarm stays green.
+          [ -n "$MALIBU_DOWNLOAD_SSH_KEY" ] || {
+            echo "::error::MALIBU_DOWNLOAD_SSH_KEY is required to republish install.sh" >&2
+            exit 1
+          }
+          key_file="$(mktemp "$RUNNER_TEMP/install-sh-publish-key.XXXXXX")"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$MALIBU_DOWNLOAD_SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          export MALIBU_DOWNLOAD_SSH_KEY="$key_file"
+          bash scripts/publish-install-sh.sh --tag "${{ needs.build.outputs.tag }}"
+
       - name: Verify published Tier-2 Release assets
         shell: bash
         run: |
