@@ -454,7 +454,28 @@ actor CoordinatorClient {
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
             return nil
         }
-        guard url.scheme == "wss" else {
+        // #1354 S2: production coordinators require `wss`, but an insecure `ws`
+        // scheme is allowed for loopback hosts only (localhost/127.0.0.1/::1) so
+        // isolated test/staging coordinators can be reached — matching the
+        // loopback exemption already honored by CoordinatorReadinessClient. Any
+        // other rejection is reported explicitly instead of a silent nil, which
+        // previously surfaced as a misleading "check this Mac's internet
+        // connection" status with no log line.
+        let scheme = url.scheme?.lowercased()
+        let host = url.host?.lowercased()
+        let isLoopback = host == "localhost" || host == "127.0.0.1" || host == "::1"
+        switch scheme {
+        case "wss":
+            break
+        case "ws" where isLoopback:
+            break
+        case "ws":
+            FileHandle.standardError.write(Data(
+                "FATAL coordinator URL uses insecure ws:// for non-loopback host \(host ?? "?"); use wss:// (ws:// is permitted only for localhost/127.0.0.1/::1)\n".utf8))
+            return nil
+        default:
+            FileHandle.standardError.write(Data(
+                "FATAL coordinator URL scheme \(scheme ?? "nil") is not supported; expected wss:// (or ws:// for a loopback coordinator)\n".utf8))
             return nil
         }
         self.coordinatorURL = url

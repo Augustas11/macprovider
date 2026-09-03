@@ -2231,21 +2231,38 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNil(acceptedKeyID)
     }
 
-    func testWSScheme_MustBeWSS_NotWS() async throws {
+    // #1354 S2: `wss` is required for production, but an insecure `ws` scheme is
+    // allowed for loopback hosts only so isolated test/staging coordinators can be
+    // reached (matching CoordinatorReadinessClient's loopback exemption). Any
+    // other scheme is rejected — now with an explicit stderr diagnostic rather
+    // than the previous misleading "check this Mac's internet connection".
+    func testWSScheme_AllowsWSForLoopback_RejectsWSForRemote() async throws {
         let status = ProviderStatus(
             modelID: "model-a",
             modelLoaded: true,
             capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
         )
         let runtime = try await ModelRuntime(modelID: nil)
-        var insecure = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        insecure.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
-        insecure.providerID = "provider-test"
-        insecure.model = "model-a"
+        var base = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        base.providerID = "provider-test"
+        base.model = "model-a"
 
-        XCTAssertNil(CoordinatorClient(config: insecure, modelRuntime: runtime, providerStatus: status))
+        // ws:// to a loopback coordinator is now accepted (isolated-coordinator onboarding).
+        for loopback in ["ws://127.0.0.1:8444/ws/provider", "ws://localhost:8444/ws/provider"] {
+            var cfg = base
+            cfg.coordinatorURL = loopback
+            XCTAssertNotNil(
+                CoordinatorClient(config: cfg, modelRuntime: runtime, providerStatus: status),
+                "expected ws:// loopback URL \(loopback) to be accepted")
+        }
 
-        var secure = insecure
+        // ws:// to a non-loopback host is still rejected.
+        var remote = base
+        remote.coordinatorURL = "ws://coordinator.malibu.tech/ws/provider"
+        XCTAssertNil(CoordinatorClient(config: remote, modelRuntime: runtime, providerStatus: status))
+
+        // wss:// is always accepted.
+        var secure = base
         secure.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         XCTAssertNotNil(CoordinatorClient(config: secure, modelRuntime: runtime, providerStatus: status))
     }
