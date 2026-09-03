@@ -448,6 +448,30 @@ jobs:
       - name: Verify #1189 repair reproduction (real ACLs, mocked launchd)
         run: bash phase3-binary/dist/test/repair_1189_reproduction.test.sh
 
+  swift-package-lock:
+    name: phase3-binary (locked SwiftPM resolve)
+    runs-on: macos-15
+    timeout-minutes: 15
+    needs: changes
+    # Same path gate as swift-tests: Package.resolved lives under
+    # phase3-binary/, and a Go-only PR cannot drift the Swift lock.
+    # ci-required treats a skip as a pass only when the detector is false.
+    # Must use Xcode 16.4 — the default Xcode.app on macos-15 can resolve a
+    # different graph and would hide the #1360 incomplete-lock failure.
+    if: ${{ needs.changes.outputs.swift == 'true' }}
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 16.4 (match acceptance-candidate / release toolchain)
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+
+      - name: Verify locked Package.resolved under the release toolchain
+        run: bash scripts/verify-swift-package-lock.sh
 
   spec-015-acceptance:
     name: spec-015-acceptance
@@ -493,6 +517,7 @@ jobs:
       - spec-014-v0-2-gate
       - dist-tooling
       - swift-tests
+      - swift-package-lock
       - spec-015-acceptance
     if: always()
     steps:
@@ -513,6 +538,7 @@ jobs:
           SPEC_014_RESULT: ${{ needs.spec-014-v0-2-gate.result }}
           DIST_TOOLING_RESULT: ${{ needs.dist-tooling.result }}
           SWIFT_TESTS_RESULT: ${{ needs.swift-tests.result }}
+          SWIFT_PACKAGE_LOCK_RESULT: ${{ needs.swift-package-lock.result }}
           SPEC_015_RESULT: ${{ needs.spec-015-acceptance.result }}
         run: |
           set -euo pipefail
@@ -564,6 +590,7 @@ jobs:
           require_success "spec-014-v0-2-gate" "$SPEC_014_RESULT"
           require_success "deploy tooling (check-deploy-config gate)" "$DIST_TOOLING_RESULT"
           allow_skip "phase3-binary (swift test)" "$SWIFT_TESTS_RESULT" "$SWIFT_GATE"
+          allow_skip "phase3-binary (locked SwiftPM resolve)" "$SWIFT_PACKAGE_LOCK_RESULT" "$SWIFT_GATE"
           allow_skip "spec-015-acceptance" "$SPEC_015_RESULT" "$CODE_GATE"
 
           exit "$failed"
