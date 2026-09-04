@@ -6,7 +6,7 @@
 {
   "spec_id": "SPEC-047",
   "title": "Network Model Admission",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "path": "specs/SPEC-047-network-model-admission.md",
   "status": "draft",
   "owner": "@Augustas11",

@@ -3119,9 +3119,14 @@ The exact v1 taxonomy is:
 BYOM commands `models discover`, `models evaluate`, `models offer` (including
 `--dry-run`), and `models admission status`, the provider-facing human
 (non-`--json`) rendering of each candidate MUST lead with exactly one plain
-earning-verdict line, deterministically mapped from the SPEC-047-R002
+earning-verdict line, deterministically mapped from the
 `provider_guidance.earning_path_class` of that candidate, before any
-machine-state, capability, or price detail:
+machine-state, capability, or price detail. The `provider_guidance` object
+shape and its closed `earning_path_class` enum are defined by SPEC-046-R003 and
+carried through the SPEC-047-R002 offer/status envelopes; `models discover` and
+`models evaluate` MUST render the verdict from that same `earning_path_class`
+(for a purely local candidate that is `local_inventory_only`) and MUST NOT defer
+the verdict line until admission or dry-run logic exists:
 
 - `settlement_capable` -> **"Earning now"**.
 - `not_earning_yet_catalog_or_receipt_path_exists` -> **"Not earning yet — "**

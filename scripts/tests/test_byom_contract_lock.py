@@ -47,10 +47,11 @@ class BYOMContractLockTests(unittest.TestCase):
         # The switch / adopt-recommendation command-schema tokens the §6.14a
         # oracle references MUST remain present in the Malibu capability manifest.
         self.assertIn("models switch.v1", manifest["tiers"]["model_ready_switch_v1"]["command_schemas"])
-        self.assertIn(
-            "models adopt-recommendation.v1",
-            manifest["tiers"]["model_recommendation_apply_switch_v1"]["command_schemas"],
-        )
+        adopt_schemas = manifest["tiers"]["model_recommendation_apply_switch_v1"]["command_schemas"]
+        self.assertIn("models adopt-recommendation.v1", adopt_schemas)
+        # The adoption-event command-schema token is live-advertised alongside
+        # the command token; lock it so a manifest edit cannot silently drop it.
+        self.assertIn("model_adoption_event.v1", adopt_schemas)
 
     def test_byom_command_taxonomy_uses_distinct_schema_owners(self):
         spec001 = read_text("specs/SPEC-001-phase3-binary.md")
@@ -83,22 +84,23 @@ class BYOMContractLockTests(unittest.TestCase):
     def test_earning_verdict_first_human_output_contract(self):
         spec001 = read_text("specs/SPEC-001-phase3-binary.md")
 
-        # The provider-facing human surface MUST lead with one earning-verdict
-        # line deterministically mapped from SPEC-047 earning_path_class.
-        for required in (
-            "Earning-verdict-first human output",
-            "provider_guidance.earning_path_class",
-            '"Earning now"',
-            '"Not earning yet — "',
-            '"Can\'t earn in this release"',
-            '"Local only — not offered to the network"',
-            "settlement_capable",
-            "not_earning_yet_catalog_or_receipt_path_exists",
-            "no_earning_path_in_v0_1",
-            "local_inventory_only",
-        ):
-            with self.subTest(required=required):
-                self.assertIn(required, spec001)
+        self.assertIn("Earning-verdict-first human output", spec001)
+        self.assertIn("provider_guidance.earning_path_class", spec001)
+
+        # Lock the EXACT enum -> verdict mapping as contiguous substrings, so a
+        # future edit that reassigns a verdict (e.g. settlement_capable ->
+        # "Can't earn in this release") fails the lock even though every enum
+        # value and verdict string still appears somewhere in the spec.
+        expected_mapping = {
+            "settlement_capable": '"Earning now"',
+            "not_earning_yet_catalog_or_receipt_path_exists": '"Not earning yet — "',
+            "no_earning_path_in_v0_1": '"Can\'t earn in this release"',
+            "local_inventory_only": '"Local only — not offered to the network"',
+        }
+        for enum_value, verdict in expected_mapping.items():
+            pairing = f"`{enum_value}` -> **{verdict}**"
+            with self.subTest(mapping=pairing):
+                self.assertIn(pairing, spec001)
 
     def test_offer_signing_and_catalog_binding_are_explicit(self):
         spec047 = read_text("specs/SPEC-047-network-model-admission.md")
