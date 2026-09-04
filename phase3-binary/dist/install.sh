@@ -3239,6 +3239,35 @@ recovery_launchctl() {
   fi
 }
 
+# Sanitize an operator-supplied integer override to a positive decimal (or a
+# non-negative one when allow_zero is passed), falling back to the default for
+# empty, non-numeric, leading-zero-octal, zero (unless allowed), or oversized
+# values, and clamping to `maximum` when one is supplied. Without this a
+# malformed override (e.g. `abc`) makes a later `[ -ge ]` comparison error with
+# status 2, which — inside the retry loop below — would skip the give-up check
+# and spin forever; without the clamp a valid-but-huge override (e.g. 999999)
+# would schedule a practically non-terminating loop or multi-day sleeps.
+recovery_positive_int() {
+  candidate="$1"
+  fallback="$2"
+  allow_zero="${3:-}"
+  maximum="${4:-}"
+  case "$candidate" in
+    ''|*[!0-9]*) printf '%s\n' "$fallback"; return 0 ;;
+  esac
+  if [ "${#candidate}" -gt 9 ]; then
+    printf '%s\n' "$fallback"; return 0
+  fi
+  candidate=$((10#$candidate))
+  if [ "$candidate" -eq 0 ] && [ "$allow_zero" != "allow_zero" ]; then
+    printf '%s\n' "$fallback"; return 0
+  fi
+  if [ -n "$maximum" ] && [ "$candidate" -gt "$maximum" ]; then
+    candidate="$maximum"
+  fi
+  printf '%s\n' "$candidate"
+}
+
 # F6 (#1364): `launchctl bootstrap` can transiently return "Input/output error"
 # on a launchd domain that is briefly refusing new services (observed 6/6 on an
 # isolated GUI domain during acceptance; it cleared only after a re-login). A
@@ -3246,21 +3275,27 @@ recovery_launchctl() {
 # leaving the provider down AND a preserved bundle that hard-blocked the next
 # install. Retry with a short linear backoff, booting out any half-loaded label
 # between attempts, so a transient domain I/O error clears in place instead of
-# wedging recovery. A label that is already loaded (a prior partial bootstrap)
-# is treated as success; the caller still verifies the launchd identity.
+# wedging recovery.
+#
+# Only an actual successful bootstrap of the EXPECTED plist path counts as
+# success. An already-loaded label is NOT trusted: a same-user process could
+# have bootstrapped a foreign plist under it, and the caller kickstarts before
+# it verifies identity. So we always bootout and re-bootstrap the expected
+# plist rather than accepting whatever happens to be loaded; the caller then
+# still verifies the launchd identity of what we bootstrapped.
 recovery_bootstrap_service() {
   bootstrap_domain="$1"
   bootstrap_plist_path="$2"
   bootstrap_label="$3"
   bootstrap_attempt=0
-  bootstrap_max_attempts="${MACPROVIDER_RECOVERY_BOOTSTRAP_ATTEMPTS:-5}"
-  bootstrap_backoff_unit="${MACPROVIDER_RECOVERY_BOOTSTRAP_BACKOFF_SECONDS:-2}"
+  # Clamp to sane maxima so a fat-fingered override cannot schedule a
+  # practically non-terminating retry loop (attempts) or multi-day sleeps
+  # (backoff): at most 20 attempts and a 10s backoff unit.
+  bootstrap_max_attempts="$(recovery_positive_int "${MACPROVIDER_RECOVERY_BOOTSTRAP_ATTEMPTS:-}" 5 '' 20)"
+  bootstrap_backoff_unit="$(recovery_positive_int "${MACPROVIDER_RECOVERY_BOOTSTRAP_BACKOFF_SECONDS:-}" 2 allow_zero 10)"
   while :; do
     bootstrap_attempt=$((bootstrap_attempt + 1))
     if recovery_launchctl bootstrap "$bootstrap_domain" "$bootstrap_plist_path" >/dev/null 2>&1; then
-      return 0
-    fi
-    if recovery_launchctl print "$bootstrap_domain/$bootstrap_label" >/dev/null 2>&1; then
       return 0
     fi
     if [ "$bootstrap_attempt" -ge "$bootstrap_max_attempts" ]; then
@@ -12181,8 +12216,25 @@ wait_for_coordinator() {
   # buyer_serving. Give coordinator admission a generous deadline aligned with
   # the model-load reality (the local /v1/models waits above use 300s/1200s).
   # The exact catalog-identity / legacy_bridge admission proofs below are
-  # unchanged; only the timeout widens. Overridable for tests.
+  # unchanged; only the timeout widens. Overridable for tests; a malformed
+  # override (empty, non-numeric, leading-zero octal, zero, or oversized) falls
+  # back to 300 rather than aborting the arithmetic under `set -u` or making the
+  # gate fail immediately, and a valid-but-huge value is clamped to 1800s (30
+  # min, well beyond any legitimate cold model load) so a fat-fingered override
+  # cannot hang a failing install for days.
   coordinator_ready_timeout="${MACPROVIDER_COORDINATOR_READY_TIMEOUT_SECONDS:-300}"
+  case "$coordinator_ready_timeout" in
+    ''|*[!0-9]*) coordinator_ready_timeout=300 ;;
+    *)
+      if [ "${#coordinator_ready_timeout}" -gt 6 ]; then
+        coordinator_ready_timeout=300
+      else
+        coordinator_ready_timeout=$((10#$coordinator_ready_timeout))
+        [ "$coordinator_ready_timeout" -ge 1 ] || coordinator_ready_timeout=300
+        [ "$coordinator_ready_timeout" -le 1800 ] || coordinator_ready_timeout=1800
+      fi
+      ;;
+  esac
   deadline=$(( $(date +%s) + coordinator_ready_timeout ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     local_status="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/status" 2>/dev/null || true)"
@@ -13493,7 +13545,7 @@ main() {
   # exact current/previous catalog identity for normal upgrades, or exact
   # session-bound buyer-serving legacy_bridge proof for an explicit signed
   # emergency downgrade.
-  log "Waiting up to $(( ${MACPROVIDER_COORDINATOR_READY_TIMEOUT_SECONDS:-300} / 60 )) min for exact coordinator admission and buyer-serving readiness (cold model load on low-RAM Macs can take minutes)."
+  log "Waiting for exact coordinator admission and buyer-serving readiness (cold model load on low-RAM Macs can take minutes)."
   if ! wait_for_coordinator "$provider_id" "$coordinator_base"; then
     if [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ]; then
       log "Coordinator did not admit the repaired provider yet; committing local repair and leaving coordinator rejoin as telemetry."
