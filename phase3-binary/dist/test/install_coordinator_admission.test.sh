@@ -313,3 +313,55 @@ disarm = commit_body.index("disarm_install_recovery_agent")
 if not retire < mark < disarm:
     raise SystemExit("recovery observer is disarmed before the atomic no-rollback boundary")
 PY
+
+# F5 (#1365): the coordinator-admission deadline must be generous (a cold model
+# load on a low-RAM Mac can take minutes) and driven by
+# MACPROVIDER_COORDINATOR_READY_TIMEOUT_SECONDS, not a flat 30s. A healthy
+# install that reaches buyer_serving inside the window must never be rolled back.
+python3 - "$TMP/function.sh" <<'PY'
+import re
+import sys
+
+body = open(sys.argv[1], encoding="utf-8").read()
+if ":-300" not in body:
+    raise SystemExit("wait_for_coordinator no longer defaults the readiness timeout to 300s")
+if re.search(r"date \+%s\)\s*\)?\s*\+\s*30\s*\)\)", body):
+    raise SystemExit("wait_for_coordinator still hardcodes a 30s readiness deadline")
+if "MACPROVIDER_COORDINATOR_READY_TIMEOUT_SECONDS" not in body:
+    raise SystemExit("wait_for_coordinator ignores the readiness timeout override")
+PY
+
+# The readiness loop length must scale with the configured timeout: a
+# coordinator that stays connected but never admits should iterate more under a
+# larger deadline. The mock date increments 10 per call, so deadline is
+# start(100) + timeout, and each iteration emits one details=readiness curl.
+run_wait_timeout() {
+  timeout_seconds="$1"
+  coordinator_response="$2"
+  printf '100\n' > "$TMP/date-state"
+  : > "$TMP/curl.log"
+  PATH="$TMP/bin:/usr/bin:/bin" DATE_STATE="$TMP/date-state" CURL_LOG="$TMP/curl.log" \
+    LOCAL_RESPONSE="$TMP/local.json" COORDINATOR_RESPONSE="$coordinator_response" \
+    EMERGENCY_ROLLBACK=0 MACPROVIDER_COORDINATOR_READY_TIMEOUT_SECONDS="$timeout_seconds" \
+    FUNCTION_PATH="$TMP/function.sh" INSTALL_ROOT="$TMP/install" bash -c '
+      set -euo pipefail
+      PORT=18080
+      INSTALL_DIR="$INSTALL_ROOT"
+      urlencode() { printf "%s" "$1"; }
+      source "$FUNCTION_PATH"
+      wait_for_coordinator provider-test https://coordinator.example || true
+    '
+  grep -Fc 'details=readiness' "$TMP/curl.log" || printf 0
+}
+
+short_iterations="$(run_wait_timeout 20 "$TMP/mismatch.json")"
+long_iterations="$(run_wait_timeout 300 "$TMP/mismatch.json")"
+if [ "$long_iterations" -le "$short_iterations" ]; then
+  echo "readiness deadline did not scale with the configured timeout ($short_iterations vs $long_iterations)" >&2
+  exit 1
+fi
+
+# A coordinator that admits buyer-serving traffic is accepted (not rolled back)
+# even though several poll iterations elapse first — the healthy-install case
+# from F5 where the model was still finishing its cold load.
+run_wait "$TMP/coordinator.json"
