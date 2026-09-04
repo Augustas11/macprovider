@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -131,6 +131,75 @@ struct LifecycleStateTransitionCommand: ParsableCommand {
         )
 
         try LifecycleStateStatusCommand.writeJSON(LifecycleStateStatusCommand.jsonObject(record))
+    }
+}
+
+/// F3 (#1363): a first-class, serve-independent escape from a wedged,
+/// abandoned auto-update transaction. A failed self-update can leave
+/// `pending.json` in `restoring_previous` and an updater-owned
+/// `rollback_in_progress` lifecycle record, which fences both `serve` and
+/// `update`. This command recovers the expired transaction in place — restoring
+/// the previous release and translating the dead updater-owned record into an
+/// installer-owned one that `serve` may leave — without needing `serve` to be
+/// up. It never un-fences a genuinely in-progress update/rollback (see
+/// `WedgedUpdateRecovery`).
+struct RecoverUpdateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "recover-update",
+        abstract: "Clear a wedged, abandoned auto-update transaction (expired restoring_previous / rollback_in_progress) so the provider can serve again. Safe to run from a fresh CLI while serve is down; a genuinely in-progress update/rollback is left untouched."
+    )
+
+    func run() throws {
+        let recovery = WedgedUpdateRecovery(
+            markerStore: AutoUpdateMarkerStore(),
+            lifecycleStore: ProviderLifecycleStateStore()
+        )
+        let outcome = recovery.recover()
+        var payload: [String: Any] = ["command": "recover-update"]
+        var failureExit: Int32?
+        switch outcome {
+        case .noWedge:
+            payload["outcome"] = "no_wedge"
+            payload["recovered"] = false
+            payload["message"] = "no abandoned auto-update transaction was found; nothing to recover"
+        case .ownerLive:
+            payload["outcome"] = "owner_live"
+            payload["recovered"] = false
+            payload["message"] = "a live installer or updater holds the provider mutation lock; retry after it exits"
+            failureExit = 4
+        case .transactionActive:
+            payload["outcome"] = "transaction_active"
+            payload["recovered"] = false
+            payload["message"] = "a pending update/rollback deadline is still in the future; this is not an abandoned wedge"
+            failureExit = 4
+        case let .recovered(markerOutcome, lifecycleUnfenced):
+            payload["outcome"] = "recovered"
+            payload["recovered"] = true
+            payload["marker_recovered"] = markerOutcome != nil
+            payload["lifecycle_unfenced"] = lifecycleUnfenced
+            payload["marker_result"] = Self.describe(markerOutcome)
+            payload["message"] = "recovered the abandoned transaction; run `serve` (or let launchd restart it) to return to serving"
+        }
+        try LifecycleStateStatusCommand.writeJSON(payload)
+        if let failureExit {
+            throw ExitCode(failureExit)
+        }
+    }
+
+    private static func describe(_ outcome: AutoUpdateOrphanRecoveryOutcome?) -> String {
+        guard let outcome else { return "none" }
+        switch outcome {
+        case .restored:
+            return "restored_previous"
+        case .restoredAwaitingReadiness:
+            return "restored_previous_awaiting_readiness"
+        case .markerInvalid:
+            return "marker_invalid_quarantined"
+        case .backupCorrupt:
+            return "backup_corrupt_quarantined"
+        case .rollbackTargetDisallowed:
+            return "rollback_target_disallowed"
+        }
     }
 }
 
@@ -1478,14 +1547,47 @@ struct ServeCommand: AsyncParsableCommand {
         } else {
             startupReason = "launchd_service_started"
         }
-        _ = try lifecycleStateStore.transition(
-            to: .startingProvider,
-            reasonCode: startupReason,
-            writer: .serve,
-            providerID: resolved.providerID,
-            modelID: resolved.model,
-            operationID: lifecycleOperationID
-        )
+        do {
+            _ = try lifecycleStateStore.transition(
+                to: .startingProvider,
+                reasonCode: startupReason,
+                writer: .serve,
+                providerID: resolved.providerID,
+                modelID: resolved.model,
+                operationID: lifecycleOperationID
+            )
+        } catch let fence as ProviderLifecycleStateError {
+            // F3 (#1363): a fresh launchd serve child that inherits an ABANDONED
+            // updater-owned rollback/update state (a failed self-update with no
+            // handoff lease) is fenced here forever, so launchd respawns in a
+            // loop with no in-CLI escape. When the transaction is genuinely
+            // abandoned — expired marker deadline, no live installer/updater
+            // owner — recover it in place and retry the transition once so the
+            // respawn loop self-heals. A legitimate in-flight self-update never
+            // reaches this catch (its matching handoff operation id lets the
+            // transition through above); WedgedUpdateRecovery additionally
+            // refuses to touch a still-live or not-yet-expired transaction.
+            guard case .operationFenced = fence,
+                  !autotuneCandidate,
+                  candidateIsolationRoot == nil,
+                  resolved.credentialStore != .protectedFile
+            else { throw fence }
+            let recovery = WedgedUpdateRecovery(
+                markerStore: AutoUpdateMarkerStore(),
+                lifecycleStore: lifecycleStateStore
+            )
+            guard case .recovered(_, let lifecycleUnfenced) = recovery.recover(),
+                  lifecycleUnfenced
+            else { throw fence }
+            _ = try lifecycleStateStore.transition(
+                to: .startingProvider,
+                reasonCode: startupReason,
+                writer: .serve,
+                providerID: resolved.providerID,
+                modelID: resolved.model,
+                operationID: lifecycleOperationID
+            )
+        }
 
         // AUDIT R1 SECURITY S2 fix (PR #334): drop MACPROVIDER_PROVIDER_TOKEN
         // from the process env immediately after we've resolved it. Under
