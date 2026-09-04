@@ -1092,8 +1092,24 @@ enum BYOMDiscoveryPrivacy {
     }
 
     static func isSafeRuntimeModelReference(_ value: String) -> Bool {
-        guard isSafeModelReference(value) else { return false }
-        return !value.contains("/")
+        guard isSafeModelReference(value), !value.contains("/") else { return false }
+        // Structural IP guard: reject when the authority (the part before an
+        // optional `:<tag>`/`:<port>`) is an all-numeric or 0x-hex dotted
+        // address. This closes every IPv4 shorthand at once — 127.1, 127.0.1,
+        // 0177.1, 0x7f.1, 017700000001, 2130706433, 0x7f000001 — where an
+        // encoding-by-encoding blocklist cannot. A legitimate model name's
+        // pre-tag part always carries a non-hex letter or hyphen, so it is
+        // unaffected (llama3.2:3b, qwen2.5-coder:7b, mistral-7b-instruct-v0.2).
+        let authority = value.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            .first.map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? value
+        if authority.range(
+            of: #"^(0[xX][0-9A-Fa-f]+|[0-9]+)(\.(0[xX][0-9A-Fa-f]+|[0-9]+))*$"#,
+            options: .regularExpression
+        ) != nil {
+            return false
+        }
+        return true
     }
 
     static func displayName(from value: String) -> String {

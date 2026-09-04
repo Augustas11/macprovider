@@ -142,6 +142,11 @@ final class BYOMDiscoveryTests: XCTestCase {
             "model-0x7f000001",
             "model-::1",
             "2001:db8:85a3:0:0:8a2e:370:7334",  // uncompressed IPv6
+            "127.1",                         // legacy IPv4 shorthand (authority)
+            "127.0.1:11434",
+            "0177.1:11434",                  // octal shorthand + port
+            "0x7f.1:11434",                  // hex shorthand + port
+            "017700000001:11434",            // one-piece octal + port
         ] {
             XCTAssertFalse(BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(leak), "must reject \(leak)")
         }
