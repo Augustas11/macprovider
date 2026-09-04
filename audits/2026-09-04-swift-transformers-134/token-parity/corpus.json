@@ -1,0 +1,22 @@
+[
+  { "name": "ascii_plain", "category": "ascii", "text": "The quick brown fox jumps over the lazy dog." },
+  { "name": "ascii_punct", "category": "ascii", "text": "Hello, world! It's 12:30pm -- 100% done (really?)." },
+  { "name": "ascii_ws", "category": "ascii", "text": "tab\tand\nnewline   and   spaces" },
+  { "name": "emoji_basic", "category": "emoji", "text": "I love pizza 🍕 and coffee ☕ so much!" },
+  { "name": "emoji_zwj_family", "category": "emoji", "text": "family: 👨‍👩‍👧‍👦 and flag: 🏴‍☠️ done" },
+  { "name": "emoji_skin_tone", "category": "emoji", "text": "wave 👋🏽 thumbs 👍🏿 ok 👌🏻" },
+  { "name": "combining_marks", "category": "combining", "text": "café vs café — naïve, résumé, Å vs Å" },
+  { "name": "combining_stacked", "category": "combining", "text": "ẹ́̄ zalgo à́̂̃ stack" },
+  { "name": "cjk_chinese", "category": "cjk", "text": "快速的棕色狐狸跳过了懒狗。中文测试。" },
+  { "name": "cjk_japanese_kana", "category": "cjk", "text": "こんにちは世界。カタカナとひらがな、漢字。" },
+  { "name": "cjk_japanese_voiced", "category": "cjk", "text": "がぎぐげご ざじずぜぞ だぢづでど ばびぶべぼ ぱぴぷぺぽ ヴ" },
+  { "name": "cjk_japanese_halfwidth", "category": "cjk", "text": "ｶﾞｷﾞｸﾞ ﾊﾟﾋﾟﾌﾟ ﾞ ﾟ combining voiced" },
+  { "name": "code_python", "category": "code", "text": "def f(x: int) -> int:\n    return x ** 2 + [i for i in range(x)][0]" },
+  { "name": "code_rust", "category": "code", "text": "fn main() { let v: Vec<u32> = (0..10).filter(|x| x % 2 == 0).collect(); }" },
+  { "name": "json_payload", "category": "json", "text": "{\"model\":\"qwen\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"temperature\":0.0}" },
+  { "name": "json_nested_unicode", "category": "json", "text": "{\"名前\":\"太郎\",\"emoji\":\"🎌\",\"n\":123.45,\"ok\":true,\"nil\":null}" },
+  { "name": "special_qwen_chat", "category": "special", "text": "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n" },
+  { "name": "special_llama_header", "category": "special", "text": "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nhi<|eot_id|>" },
+  { "name": "special_endoftext", "category": "special", "text": "before<|endoftext|>after<|fim_prefix|>mid<|fim_suffix|>end" },
+  { "name": "mixed_long", "category": "mixed", "text": "Order #42: 「寿司」 🍣 x3, café ☕, code `x=1`, JSON {\"ok\":true}. Total: 100% 完了!" }
+]

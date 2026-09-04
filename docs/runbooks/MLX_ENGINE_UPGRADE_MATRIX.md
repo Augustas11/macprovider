@@ -92,4 +92,11 @@ Measure TTFT, decode tok/s, peak RSS, Metal memory, energy/thermal state, and co
 - **RED:** any correctness, ownership, rollback, accounting, tool parsing, cold-cache ABI, artifact-parity, or unexplained performance-budget failure. Revert the pin candidate.
 - **BLOCKED:** required upstream release/package/toolchain condition is absent. Keep production pins unchanged.
 
-Current protected baseline (2026-08-09): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.0.0`, `swift-jinja 2.4.2`.
+Current protected baseline (2026-09-04): `mlx-swift-lm 3.31.4`, `mlx-swift 0.31.4`, `swift-transformers 1.3.4`, `swift-jinja 2.4.2`.
+
+`swift-transformers` was moved `1.0.0 → 1.3.3` by Dependabot #1336 without the
+#966 token-exact gate, then to `1.3.4` under that gate (2026-09-04). The gate is
+recorded in `audits/2026-09-04-swift-transformers-134/GATE.md`: token-exact for
+all byte-level/BPE catalog families (Qwen, Llama, GPT-OSS); Gemma carries five
+intended Unicode corrections (invalidate Gemma Unicode-heavy KV caches);
+Nemotron is newly loadable. `mlx-swift-lm` / `mlx-swift` were frozen throughout.
