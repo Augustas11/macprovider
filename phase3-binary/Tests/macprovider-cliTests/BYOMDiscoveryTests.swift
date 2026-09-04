@@ -162,6 +162,14 @@ final class BYOMDiscoveryTests: XCTestCase {
         XCTAssertTrue(BYOMDiscoveryPrivacy.isSafeModelReference("mlx-community/Llama-3.2-3B-Instruct-4bit"))
     }
 
+    func testContextWindowParsingRejectsOutOfRangeNumberWithoutCrashing() {
+        // A hostile config.json must degrade to nil, never trap the process.
+        XCTAssertNil(BYOMDiscoveryJSON.contextWindowTokens(from: Data(#"{"max_position_embeddings":1e20}"#.utf8)))
+        XCTAssertNil(BYOMDiscoveryJSON.contextWindowTokens(from: Data(#"{"max_position_embeddings":-1e20}"#.utf8)))
+        XCTAssertNil(BYOMDiscoveryJSON.contextWindowTokens(from: Data(#"{"max_position_embeddings":1.5}"#.utf8)))
+        XCTAssertEqual(BYOMDiscoveryJSON.contextWindowTokens(from: Data(#"{"max_position_embeddings":4096}"#.utf8)), 4096)
+    }
+
     func testDiscoverCommandMirrorsWarningsToStderrInJSONMode() async throws {
         let root = try temporaryDirectory("byom-stderr")
         let command = try ModelsDiscoverCommand.parse([

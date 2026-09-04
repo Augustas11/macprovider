@@ -1043,8 +1043,11 @@ enum BYOMDiscoveryJSON {
         switch object[key] {
         case .int(let value)?:
             return value
-        case .double(let value)? where value.rounded(.towardZero) == value:
-            return Int(value)
+        case .double(let value)?:
+            // Int(exactly:) rejects non-integral, out-of-range, NaN and infinite
+            // values (e.g. a hostile config.json with 1e20), where Int(_:) would
+            // trap and abort discovery.
+            return Int(exactly: value)
         default:
             return nil
         }
