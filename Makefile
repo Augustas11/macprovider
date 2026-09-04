@@ -153,6 +153,8 @@ test-dist:
 	bash phase4-coordinator/dist/test/coordinator_release_tag_guard.test.sh
 	bash phase4-coordinator/dist/test/check_deploy_static_feed_access.test.sh
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
+	bash phase4-coordinator/dist/test/coordinator_archive_rotate.test.sh
+	bash phase4-coordinator/dist/test/coordinator_sqlite_relief.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_smoke_probe.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_drift_redact.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_tier2_migration_gate.test.sh
