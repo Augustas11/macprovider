@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -24,16 +25,22 @@ import (
 )
 
 const (
-	modelAdmissionOfferSubmitSchema = "model_admission_offer_submit.v1"
-	modelAdmissionStatusSchema      = "model_admission_status.v1"
-	modelAdmissionSignedDomain      = "macprovider.model_admission.offer.v1"
-	modelAdmissionOfferSubmitted    = "offer_submitted"
-	modelAdmissionNotOffered        = "not_offered"
-	modelAdmissionActorProvider     = "provider"
-	modelAdmissionMaxBodyBytes      = 64 * 1024
-	modelAdmissionMaxEvents         = 256
-	modelAdmissionMaxCandidates     = 64
-	modelAdmissionMaxClockSkew      = 5 * time.Minute
+	modelAdmissionOfferSubmitSchema      = "model_admission_offer_submit.v1"
+	modelAdmissionStatusSchema           = "model_admission_status.v1"
+	modelAdmissionWithdrawRequestSchema  = "model_admission_withdraw_request.v1"
+	modelAdmissionWithdrawResponseSchema = "model_admission_withdraw.v1"
+	modelAdmissionOfferDomain            = "macprovider.model_admission.offer.v1"
+	modelAdmissionWithdrawDomain         = "macprovider.model_admission.withdraw.v1"
+	modelAdmissionOfferSubmitted         = "offer_submitted"
+	modelAdmissionNotOffered             = "not_offered"
+	modelAdmissionWithdrawn              = "withdrawn"
+	modelAdmissionRevoked                = "revoked"
+	modelAdmissionActorProvider          = "provider"
+	modelAdmissionActorCoordinator       = "coordinator"
+	modelAdmissionMaxBodyBytes           = 64 * 1024
+	modelAdmissionMaxEvents              = 256
+	modelAdmissionMaxCandidates          = 64
+	modelAdmissionMaxClockSkew           = 5 * time.Minute
 )
 
 var (
@@ -47,6 +54,8 @@ var (
 
 type ModelAdmissionStore interface {
 	AppendModelAdmissionOffer(context.Context, ModelAdmissionEvent) (ModelAdmissionEvent, bool, error)
+	AppendModelAdmissionWithdrawal(context.Context, ModelAdmissionEvent) (ModelAdmissionEvent, bool, error)
+	AppendModelAdmissionDecision(context.Context, ModelAdmissionEvent) (ModelAdmissionEvent, error)
 	LatestModelAdmissionStatus(context.Context, string, string) (ModelAdmissionEvent, bool, error)
 }
 
@@ -92,6 +101,19 @@ func NewMemoryModelAdmissionStore() ModelAdmissionStore {
 }
 
 func (s *memoryModelAdmissionStore) AppendModelAdmissionOffer(_ context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
+	return s.appendProviderModelAdmissionEvent(event, modelAdmissionOfferSubmitted)
+}
+
+func (s *memoryModelAdmissionStore) AppendModelAdmissionWithdrawal(_ context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
+	return s.appendProviderModelAdmissionEvent(event, modelAdmissionWithdrawn)
+}
+
+func (s *memoryModelAdmissionStore) AppendModelAdmissionDecision(_ context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, error) {
+	stored, _, err := s.appendCoordinatorModelAdmissionEvent(event)
+	return stored, err
+}
+
+func (s *memoryModelAdmissionStore) appendProviderModelAdmissionEvent(event ModelAdmissionEvent, nextState string) (ModelAdmissionEvent, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := event.CreatedAt
@@ -99,17 +121,10 @@ func (s *memoryModelAdmissionStore) AppendModelAdmissionOffer(_ context.Context,
 		now = time.Now().UTC()
 	}
 	event.CreatedAt = now.UTC()
-	if existing, ok := s.requestIDs[event.ProviderID+"|"+event.RequestID]; ok {
-		if existing.PayloadDigestSHA256 == event.PayloadDigestSHA256 {
-			return existing, true, nil
-		}
+	if replayed, matched, conflict := s.resolveModelAdmissionReplay(event); conflict {
 		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
-	}
-	if existing, ok := s.nonces[event.ProviderID+"|"+event.Nonce]; ok {
-		if existing.PayloadDigestSHA256 == event.PayloadDigestSHA256 {
-			return existing, true, nil
-		}
-		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
+	} else if matched {
+		return replayed, true, nil
 	}
 	window := pruneModelAdmissionWindow(s.providerEvent[event.ProviderID], now)
 	if len(window) >= modelAdmissionMaxEvents {
@@ -129,16 +144,106 @@ func (s *memoryModelAdmissionStore) AppendModelAdmissionOffer(_ context.Context,
 		if !sameModelAdmissionTuple(previous, event) {
 			return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
 		}
+		if nextState == modelAdmissionWithdrawn {
+			event = modelAdmissionEventWithPriorEvidence(event, previous)
+		}
 		if modelAdmissionRequiresRefreshedEvidence(previousState) && !modelAdmissionEvidenceRefreshed(previous, event) {
 			return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
 		}
 	}
-	if !modelAdmissionCanSubmitOffer(previousState) {
+	if !modelAdmissionProviderTransitionAllowed(previousState, nextState) {
 		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
 	}
-	event = prepareModelAdmissionTransition(event, previousState)
+	event = prepareModelAdmissionTransition(event, previousState, modelAdmissionActorProvider, nextState)
 	candidateSet[event.CandidateID] = struct{}{}
 	s.providerEvent[event.ProviderID] = append(window, now)
+	s.events = append(s.events, event)
+	s.latest[event.ProviderID+"|"+event.CandidateID] = event
+	s.requestIDs[event.ProviderID+"|"+event.RequestID] = event
+	s.nonces[event.ProviderID+"|"+event.Nonce] = event
+	return event, false, nil
+}
+
+// resolveModelAdmissionReplay resolves an event's replay keys against prior
+// events. It inspects EVERY supplied non-empty key (request_id and nonce) before
+// deciding, so a split-key event — one key bound to event A, the other to event
+// B — is never mistaken for a replay: conflict=true if any supplied key is bound
+// to a prior event with a different payload digest, or if two supplied keys map
+// to different stored events. matched=true (with the stored event) is returned
+// only when every supplied key agrees on the same event and payload — a true
+// idempotent replay. Empty keys never match. Caller must hold s.mu. Used by both
+// provider and coordinator memory appends for identical replay semantics.
+func (s *memoryModelAdmissionStore) resolveModelAdmissionReplay(event ModelAdmissionEvent) (ModelAdmissionEvent, bool, bool) {
+	var matched *ModelAdmissionEvent
+	// consider folds one key's binding into the decision, returning conflict.
+	consider := func(existing ModelAdmissionEvent, found bool) bool {
+		if !found {
+			return false
+		}
+		if existing.PayloadDigestSHA256 != event.PayloadDigestSHA256 {
+			return true
+		}
+		if matched == nil {
+			bound := existing
+			matched = &bound
+		} else if matched.CoordinatorEventID != existing.CoordinatorEventID {
+			return true
+		}
+		return false
+	}
+	if event.RequestID != "" {
+		existing, ok := s.requestIDs[event.ProviderID+"|"+event.RequestID]
+		if consider(existing, ok) {
+			return ModelAdmissionEvent{}, false, true
+		}
+	}
+	if event.Nonce != "" {
+		existing, ok := s.nonces[event.ProviderID+"|"+event.Nonce]
+		if consider(existing, ok) {
+			return ModelAdmissionEvent{}, false, true
+		}
+	}
+	if matched != nil {
+		return *matched, true, false
+	}
+	return ModelAdmissionEvent{}, false, false
+}
+
+func (s *memoryModelAdmissionStore) appendCoordinatorModelAdmissionEvent(event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := event.CreatedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	event.CreatedAt = now.UTC()
+	// Generate any missing replay keys up front. fillCoordinatorModelAdmissionReplayKeys
+	// is deterministic and state-independent, so keyless decisions get the same
+	// keys on every retry. The replay resolution then runs before latest-state
+	// transition validation so an idempotent retry — explicit-key OR generated-key
+	// — stays state-order independent: a decision replayed after the admission has
+	// advanced to a later state (or already equals the target state) resolves as a
+	// replay, not a transition conflict. Mirrors the provider append ordering.
+	event = fillCoordinatorModelAdmissionReplayKeys(event)
+	if replayed, matched, conflict := s.resolveModelAdmissionReplay(event); conflict {
+		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
+	} else if matched {
+		return replayed, true, nil
+	}
+	previous, ok := s.latest[event.ProviderID+"|"+event.CandidateID]
+	if !ok || !sameModelAdmissionTuple(previous, event) {
+		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
+	}
+	if !modelAdmissionCoordinatorTransitionAllowed(previous.State, event.State) {
+		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
+	}
+	if modelAdmissionTransitionRequiresCatalogKey(event.State) && strings.TrimSpace(event.CatalogModelKey) == "" {
+		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
+	}
+	if modelAdmissionTransitionReasonRequired(previous.State, event.State) && strings.TrimSpace(event.ReasonCode) == "" {
+		return ModelAdmissionEvent{}, false, errModelAdmissionReplayConflict
+	}
+	event = prepareModelAdmissionTransition(event, previous.State, modelAdmissionActorCoordinator, event.State)
 	s.events = append(s.events, event)
 	s.latest[event.ProviderID+"|"+event.CandidateID] = event
 	s.requestIDs[event.ProviderID+"|"+event.RequestID] = event
@@ -199,6 +304,19 @@ ON model_admission_events(provider_id, nonce)`); err != nil {
 }
 
 func (s *SQLiteModelAdmissionStore) AppendModelAdmissionOffer(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
+	return s.appendProviderModelAdmissionEvent(ctx, event, modelAdmissionOfferSubmitted)
+}
+
+func (s *SQLiteModelAdmissionStore) AppendModelAdmissionWithdrawal(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
+	return s.appendProviderModelAdmissionEvent(ctx, event, modelAdmissionWithdrawn)
+}
+
+func (s *SQLiteModelAdmissionStore) AppendModelAdmissionDecision(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, error) {
+	stored, _, err := s.appendCoordinatorModelAdmissionEvent(ctx, event)
+	return stored, err
+}
+
+func (s *SQLiteModelAdmissionStore) appendProviderModelAdmissionEvent(ctx context.Context, event ModelAdmissionEvent, nextState string) (ModelAdmissionEvent, bool, error) {
 	now := event.CreatedAt
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -207,21 +325,17 @@ func (s *SQLiteModelAdmissionStore) AppendModelAdmissionOffer(ctx context.Contex
 	var stored ModelAdmissionEvent
 	var replay bool
 	err := sqliteutil.Transact(ctx, s.db, func(txCtx context.Context, conn *sql.Conn) error {
-		existing, found, err := scanModelAdmissionEvent(txCtx, conn, modelAdmissionEventSelect(`
-  FROM model_admission_events
- WHERE provider_id = ? AND (request_id = ? OR nonce = ?)
- ORDER BY id DESC
- LIMIT 1`), event.ProviderID, event.RequestID, event.Nonce)
+		replayed, matched, conflict, err := scanSQLiteModelAdmissionReplay(txCtx, conn, event)
 		if err != nil {
 			return err
 		}
-		if found {
-			if existing.PayloadDigestSHA256 == event.PayloadDigestSHA256 {
-				stored = existing
-				replay = true
-				return nil
-			}
+		if conflict {
 			return errModelAdmissionReplayConflict
+		}
+		if matched {
+			stored = replayed
+			replay = true
+			return nil
 		}
 		windowStart := now.Add(-time.Hour).UTC().Format(time.RFC3339Nano)
 		var eventsInWindow int
@@ -256,14 +370,156 @@ SELECT COUNT(DISTINCT candidate_id) FROM model_admission_events WHERE provider_i
 			if !sameModelAdmissionTuple(previous, event) {
 				return errModelAdmissionReplayConflict
 			}
+			if nextState == modelAdmissionWithdrawn {
+				event = modelAdmissionEventWithPriorEvidence(event, previous)
+			}
 			if modelAdmissionRequiresRefreshedEvidence(previousState) && !modelAdmissionEvidenceRefreshed(previous, event) {
 				return errModelAdmissionReplayConflict
 			}
 		}
-		if !modelAdmissionCanSubmitOffer(previousState) {
+		if !modelAdmissionProviderTransitionAllowed(previousState, nextState) {
 			return errModelAdmissionReplayConflict
 		}
-		event = prepareModelAdmissionTransition(event, previousState)
+		event = prepareModelAdmissionTransition(event, previousState, modelAdmissionActorProvider, nextState)
+		if _, err := conn.ExecContext(txCtx, `
+INSERT INTO model_admission_events(
+    provider_id, candidate_id, served_model_ref, catalog_model_key,
+    discovery_digest_sha256, evaluation_digest_sha256, requested_disclosure_class,
+    previous_state, state, next_state, actor, coordinator_event_id,
+    reason_code, request_id, nonce, payload_digest_sha256,
+    signature_digest_sha256, created_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			event.ProviderID,
+			event.CandidateID,
+			event.ServedModelRef,
+			event.CatalogModelKey,
+			event.DiscoveryDigestSHA256,
+			event.EvaluationDigestSHA256,
+			event.RequestedDisclosureClass,
+			event.PreviousState,
+			event.State,
+			event.NextState,
+			event.Actor,
+			event.CoordinatorEventID,
+			event.ReasonCode,
+			event.RequestID,
+			event.Nonce,
+			event.PayloadDigestSHA256,
+			event.SignatureDigestSHA256,
+			event.CreatedAt.Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+		stored = event
+		return nil
+	})
+	return stored, replay, err
+}
+
+// scanSQLiteModelAdmissionReplay is the durable-store counterpart of the memory
+// store's resolveModelAdmissionReplay. It checks request_id and nonce
+// INDEPENDENTLY (not a single `OR ... LIMIT 1` row) and inspects EVERY supplied
+// non-empty key before deciding, so a split-key event — one key bound to event
+// A, the other to event B — never passes as a replay in either orientation:
+// conflict if any supplied key is bound to a different payload, or if two keys
+// map to different stored events; matched only when every supplied key agrees on
+// the same event and payload. The unique (provider_id, request_id) and
+// (provider_id, nonce) indexes guarantee each query returns at most one row.
+// Used by both provider and coordinator SQLite appends for parity with memory.
+func scanSQLiteModelAdmissionReplay(ctx context.Context, conn *sql.Conn, event ModelAdmissionEvent) (ModelAdmissionEvent, bool, bool, error) {
+	var matched *ModelAdmissionEvent
+	consider := func(existing ModelAdmissionEvent, found bool) bool {
+		if !found {
+			return false
+		}
+		if existing.PayloadDigestSHA256 != event.PayloadDigestSHA256 {
+			return true
+		}
+		if matched == nil {
+			bound := existing
+			matched = &bound
+		} else if matched.CoordinatorEventID != existing.CoordinatorEventID {
+			return true
+		}
+		return false
+	}
+	if event.RequestID != "" {
+		existing, found, err := scanModelAdmissionEvent(ctx, conn, modelAdmissionEventSelect(`
+  FROM model_admission_events
+ WHERE provider_id = ? AND request_id = ?
+ LIMIT 1`), event.ProviderID, event.RequestID)
+		if err != nil {
+			return ModelAdmissionEvent{}, false, false, err
+		}
+		if consider(existing, found) {
+			return ModelAdmissionEvent{}, false, true, nil
+		}
+	}
+	if event.Nonce != "" {
+		existing, found, err := scanModelAdmissionEvent(ctx, conn, modelAdmissionEventSelect(`
+  FROM model_admission_events
+ WHERE provider_id = ? AND nonce = ?
+ LIMIT 1`), event.ProviderID, event.Nonce)
+		if err != nil {
+			return ModelAdmissionEvent{}, false, false, err
+		}
+		if consider(existing, found) {
+			return ModelAdmissionEvent{}, false, true, nil
+		}
+	}
+	if matched != nil {
+		return *matched, true, false, nil
+	}
+	return ModelAdmissionEvent{}, false, false, nil
+}
+
+func (s *SQLiteModelAdmissionStore) appendCoordinatorModelAdmissionEvent(ctx context.Context, event ModelAdmissionEvent) (ModelAdmissionEvent, bool, error) {
+	now := event.CreatedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	event.CreatedAt = now.UTC()
+	var stored ModelAdmissionEvent
+	var replay bool
+	err := sqliteutil.Transact(ctx, s.db, func(txCtx context.Context, conn *sql.Conn) error {
+		// Generate any missing replay keys up front (deterministic, state-
+		// independent) so keyless decisions are also idempotent, then resolve the
+		// replay before latest-state transition validation so an idempotent retry
+		// stays state-order independent. Mirrors the memory store.
+		event = fillCoordinatorModelAdmissionReplayKeys(event)
+		replayed, matched, conflict, err := scanSQLiteModelAdmissionReplay(txCtx, conn, event)
+		if err != nil {
+			return err
+		}
+		if conflict {
+			return errModelAdmissionReplayConflict
+		}
+		if matched {
+			stored = replayed
+			replay = true
+			return nil
+		}
+		previous, found, err := scanModelAdmissionEvent(txCtx, conn, modelAdmissionEventSelect(`
+  FROM model_admission_events
+ WHERE provider_id = ? AND candidate_id = ?
+ ORDER BY id DESC
+ LIMIT 1`), event.ProviderID, event.CandidateID)
+		if err != nil {
+			return err
+		}
+		if !found || !sameModelAdmissionTuple(previous, event) {
+			return errModelAdmissionReplayConflict
+		}
+		if !modelAdmissionCoordinatorTransitionAllowed(previous.State, event.State) {
+			return errModelAdmissionReplayConflict
+		}
+		if modelAdmissionTransitionRequiresCatalogKey(event.State) && strings.TrimSpace(event.CatalogModelKey) == "" {
+			return errModelAdmissionReplayConflict
+		}
+		if modelAdmissionTransitionReasonRequired(previous.State, event.State) && strings.TrimSpace(event.ReasonCode) == "" {
+			return errModelAdmissionReplayConflict
+		}
+		event = prepareModelAdmissionTransition(event, previous.State, modelAdmissionActorCoordinator, event.State)
 		if _, err := conn.ExecContext(txCtx, `
 INSERT INTO model_admission_events(
     provider_id, candidate_id, served_model_ref, catalog_model_key,
@@ -355,13 +611,52 @@ func modelAdmissionEventSelect(tail string) string {
        signature_digest_sha256, created_at_utc` + tail
 }
 
-func modelAdmissionCanSubmitOffer(previousState string) bool {
-	switch previousState {
-	case modelAdmissionNotOffered, "offer_rejected", "withdrawn", "revoked":
-		return true
+func modelAdmissionProviderTransitionAllowed(previousState, nextState string) bool {
+	switch nextState {
+	case modelAdmissionOfferSubmitted:
+		switch previousState {
+		case modelAdmissionNotOffered, "offer_rejected", modelAdmissionWithdrawn, modelAdmissionRevoked:
+			return true
+		default:
+			return false
+		}
+	case modelAdmissionWithdrawn:
+		return modelAdmissionAllowedNextState(previousState, modelAdmissionWithdrawn)
 	default:
 		return false
 	}
+}
+
+func modelAdmissionCoordinatorTransitionAllowed(previousState, nextState string) bool {
+	if nextState == modelAdmissionWithdrawn || nextState == modelAdmissionOfferSubmitted {
+		return false
+	}
+	return modelAdmissionAllowedNextState(previousState, nextState)
+}
+
+func modelAdmissionAllowedNextState(previousState, nextState string) bool {
+	for _, allowed := range modelAdmissionAllowedNextStates(previousState) {
+		if allowed == nextState {
+			return true
+		}
+	}
+	return false
+}
+
+func modelAdmissionTransitionReasonRequired(previousState, nextState string) bool {
+	switch nextState {
+	case "offer_rejected", modelAdmissionWithdrawn, modelAdmissionRevoked:
+		return true
+	default:
+		return modelAdmissionDemotionRequiresReason(ModelAdmissionEvent{
+			PreviousState: previousState,
+			State:         nextState,
+		})
+	}
+}
+
+func modelAdmissionTransitionRequiresCatalogKey(nextState string) bool {
+	return nextState == "catalog_priced" || nextState == "settlement_capable"
 }
 
 func sameModelAdmissionTuple(previous, next ModelAdmissionEvent) bool {
@@ -373,6 +668,13 @@ func sameModelAdmissionTuple(previous, next ModelAdmissionEvent) bool {
 	// stays a provider claim until verified against exact catalog-body evidence.
 	return previous.CandidateID == next.CandidateID &&
 		previous.ServedModelRef == next.ServedModelRef
+}
+
+func modelAdmissionEventWithPriorEvidence(event, previous ModelAdmissionEvent) ModelAdmissionEvent {
+	event.DiscoveryDigestSHA256 = previous.DiscoveryDigestSHA256
+	event.EvaluationDigestSHA256 = previous.EvaluationDigestSHA256
+	event.RequestedDisclosureClass = previous.RequestedDisclosureClass
+	return event
 }
 
 func modelAdmissionRequiresRefreshedEvidence(previousState string) bool {
@@ -389,11 +691,13 @@ func modelAdmissionEvidenceRefreshed(previous, next ModelAdmissionEvent) bool {
 		previous.EvaluationDigestSHA256 != next.EvaluationDigestSHA256
 }
 
-func prepareModelAdmissionTransition(event ModelAdmissionEvent, previousState string) ModelAdmissionEvent {
-	event.Actor = modelAdmissionActorProvider
+func prepareModelAdmissionTransition(event ModelAdmissionEvent, previousState, actor, nextState string) ModelAdmissionEvent {
+	event.Actor = actor
 	event.PreviousState = previousState
-	event.NextState = modelAdmissionOfferSubmitted
+	event.State = nextState
+	event.NextState = nextState
 	sum := sha256.Sum256([]byte(strings.Join([]string{
+		event.Actor,
 		event.ProviderID,
 		event.CandidateID,
 		event.RequestID,
@@ -404,6 +708,117 @@ func prepareModelAdmissionTransition(event ModelAdmissionEvent, previousState st
 	}, "\x00")))
 	event.CoordinatorEventID = hex.EncodeToString(sum[:])
 	return event
+}
+
+// fillCoordinatorModelAdmissionReplayKeys derives stable replay keys for a
+// coordinator decision that did not supply its own. The digest is built only
+// from inputs intrinsic to the decision (identity tuple, target state, reason,
+// payload digest) and deliberately excludes the current latest state and the
+// event timestamp, so a retry of the same decision produces the same keys and
+// resolves idempotently regardless of when it is retried or how far the
+// admission has since advanced.
+func fillCoordinatorModelAdmissionReplayKeys(event ModelAdmissionEvent) ModelAdmissionEvent {
+	if event.RequestID != "" && event.Nonce != "" {
+		return event
+	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		event.ProviderID,
+		event.CandidateID,
+		event.ServedModelRef,
+		event.CatalogModelKey,
+		event.State,
+		event.ReasonCode,
+		event.PayloadDigestSHA256,
+	}, "\x00")))
+	digest := hex.EncodeToString(sum[:32])
+	if event.RequestID == "" {
+		event.RequestID = "coordinator_" + event.State + "_" + digest[:32]
+	}
+	if event.Nonce == "" {
+		event.Nonce = "coordinator_nonce_" + event.State + "_" + digest[:32]
+	}
+	return event
+}
+
+func ModelAdmissionSettlementStateCandidate(event ModelAdmissionEvent) bool {
+	return event.State == "settlement_capable" &&
+		event.ProviderID != "" &&
+		event.CandidateID != "" &&
+		event.ServedModelRef != "" &&
+		event.CatalogModelKey != "" &&
+		event.CoordinatorEventID != ""
+}
+
+type ModelAdmissionPaidRoutingPredicate struct {
+	ProviderID             string
+	CandidateID            string
+	ServedModelRef         string
+	CatalogModelKey        string
+	DiscoveryDigestSHA256  string
+	EvaluationDigestSHA256 string
+}
+
+func ModelAdmissionDefaultPaidRoutingEligible(ModelAdmissionEvent, ModelAdmissionPaidRoutingPredicate) bool {
+	// SPEC-047 #1254 is the withdrawal/revocation gate, not the positive
+	// economics gate. Until the SPEC-022 route-snapshot and signed-catalog
+	// authority are wired by the later settlement slices, BYOM remains excluded
+	// from default paid routing even if the coordinator records a
+	// settlement_capable admission state.
+	return false
+}
+
+func ModelAdmissionRevocationForRuntimeDrift(current ModelAdmissionEvent, predicate ModelAdmissionPaidRoutingPredicate, reasonCode string, now time.Time) (ModelAdmissionEvent, bool) {
+	// Runtime-drift revocation only applies to a settlement-capable candidate —
+	// the only state that could ever have been paid-routing eligible. For every
+	// other state (offer_submitted, catalog_priced, and terminal withdrawn/
+	// revoked) there is nothing to revoke: manufacturing a `revoked` event would
+	// either be spurious or be rejected by the store's transition guard. Keeping
+	// this decision here avoids pushing state-specific knowledge into callers.
+	if !ModelAdmissionSettlementStateCandidate(current) {
+		return ModelAdmissionEvent{}, false
+	}
+	if modelAdmissionRuntimePredicateMatches(current, predicate) {
+		return ModelAdmissionEvent{}, false
+	}
+	reasonCode = strings.TrimSpace(reasonCode)
+	if reasonCode == "" {
+		return ModelAdmissionEvent{}, false
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		current.ProviderID,
+		current.CandidateID,
+		current.State,
+		predicate.ProviderID,
+		predicate.CandidateID,
+		predicate.ServedModelRef,
+		predicate.CatalogModelKey,
+		predicate.DiscoveryDigestSHA256,
+		predicate.EvaluationDigestSHA256,
+		reasonCode,
+		now.UTC().Format(time.RFC3339Nano),
+	}, "\x00")))
+	digest := hex.EncodeToString(sum[:])
+	event := current
+	event.State = modelAdmissionRevoked
+	event.ReasonCode = reasonCode
+	event.RequestID = "coordinator_revoke_" + digest[:32]
+	event.Nonce = "coordinator_revoke_nonce_" + digest[:32]
+	event.PayloadDigestSHA256 = digest
+	event.SignatureDigestSHA256 = ""
+	event.CreatedAt = now.UTC()
+	return event, true
+}
+
+func modelAdmissionRuntimePredicateMatches(event ModelAdmissionEvent, predicate ModelAdmissionPaidRoutingPredicate) bool {
+	return event.ProviderID == predicate.ProviderID &&
+		event.CandidateID == predicate.CandidateID &&
+		event.ServedModelRef == predicate.ServedModelRef &&
+		event.CatalogModelKey == predicate.CatalogModelKey &&
+		event.DiscoveryDigestSHA256 == predicate.DiscoveryDigestSHA256 &&
+		event.EvaluationDigestSHA256 == predicate.EvaluationDigestSHA256
 }
 
 func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *http.Request) {
@@ -459,6 +874,57 @@ func (s *Server) handleProviderModelAdmissionOffer(w http.ResponseWriter, r *htt
 		return
 	}
 	writeJSON(w, http.StatusOK, s.modelAdmissionStatusResponseFromEvent(stored, replay))
+}
+
+func (s *Server) handleProviderModelAdmissionWithdrawal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	providerID, ok := s.authenticateProviderReadOnly(w, r)
+	if !ok {
+		return
+	}
+	if !s.allowModelAdmissionAttempt(providerID) {
+		writeJSON(w, http.StatusTooManyRequests, modelAdmissionError("rate_limited", "model admission withdrawal rejected"))
+		return
+	}
+	var body modelAdmissionWithdrawRequest
+	r.Body = http.MaxBytesReader(w, r.Body, modelAdmissionMaxBodyBytes+1)
+	if err := decodeStrictJSON(r.Body, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, modelAdmissionError("invalid_json", "invalid model admission withdrawal package"))
+		return
+	}
+	event, err := s.verifyModelAdmissionWithdrawal(r.Context(), providerID, body)
+	if err != nil {
+		status := http.StatusBadRequest
+		code := "invalid_withdrawal"
+		switch {
+		case errors.Is(err, errModelAdmissionRateLimited):
+			status, code = http.StatusTooManyRequests, "rate_limited"
+		case errors.Is(err, errModelAdmissionReplayConflict):
+			status, code = http.StatusConflict, "replay_conflict"
+		case errors.Is(err, errModelAdmissionUnauthorized):
+			status, code = http.StatusUnauthorized, "unauthorized"
+		}
+		writeJSON(w, status, modelAdmissionError(code, "model admission withdrawal rejected"))
+		return
+	}
+	stored, replay, err := s.modelAdmissions.AppendModelAdmissionWithdrawal(r.Context(), event)
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := "model_admission_store_error"
+		switch {
+		case errors.Is(err, errModelAdmissionRateLimited):
+			status, code = http.StatusTooManyRequests, "rate_limited"
+		case errors.Is(err, errModelAdmissionReplayConflict):
+			status, code = http.StatusConflict, "replay_conflict"
+		}
+		writeJSON(w, status, modelAdmissionError(code, "model admission withdrawal rejected"))
+		return
+	}
+	writeJSON(w, http.StatusOK, s.modelAdmissionWithdrawalResponseFromEvent(stored, replay))
 }
 
 func (s *Server) handleProviderModelAdmissionStatus(w http.ResponseWriter, r *http.Request) {
@@ -532,7 +998,7 @@ func (s *Server) verifyModelAdmissionOffer(ctx context.Context, authenticatedPro
 	if body.Schema != modelAdmissionOfferSubmitSchema {
 		return ModelAdmissionEvent{}, fmt.Errorf("invalid schema")
 	}
-	if body.SignatureDomain != modelAdmissionSignedDomain || body.ProviderID != authenticatedProviderID {
+	if body.SignatureDomain != modelAdmissionOfferDomain || body.ProviderID != authenticatedProviderID {
 		return ModelAdmissionEvent{}, errModelAdmissionUnauthorized
 	}
 	if err := validateModelAdmissionPayload(body); err != nil {
@@ -585,6 +1051,66 @@ func (s *Server) verifyModelAdmissionOffer(ctx context.Context, authenticatedPro
 		PayloadDigestSHA256:      hex.EncodeToString(payloadDigest[:]),
 		SignatureDigestSHA256:    hex.EncodeToString(signatureDigest[:]),
 		CreatedAt:                now,
+	}, nil
+}
+
+func (s *Server) verifyModelAdmissionWithdrawal(ctx context.Context, authenticatedProviderID string, body modelAdmissionWithdrawRequest) (ModelAdmissionEvent, error) {
+	if s.providerModelAdmissionSanctioned(authenticatedProviderID) {
+		return ModelAdmissionEvent{}, errModelAdmissionUnauthorized
+	}
+	if body.Schema != modelAdmissionWithdrawRequestSchema {
+		return ModelAdmissionEvent{}, fmt.Errorf("invalid schema")
+	}
+	if body.SignatureDomain != modelAdmissionWithdrawDomain || body.ProviderID != authenticatedProviderID {
+		return ModelAdmissionEvent{}, errModelAdmissionUnauthorized
+	}
+	if err := validateModelAdmissionWithdrawalPayload(body); err != nil {
+		return ModelAdmissionEvent{}, err
+	}
+	if body.SignatureAlgorithm != "ed25519" {
+		return ModelAdmissionEvent{}, fmt.Errorf("invalid signature algorithm")
+	}
+	signature, err := base64.StdEncoding.DecodeString(body.ProviderSignature)
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return ModelAdmissionEvent{}, fmt.Errorf("invalid signature")
+	}
+	activePubkey, found, blocked := s.durableIdentitySignaturePubkey(ctx, authenticatedProviderID)
+	if blocked || !found {
+		return ModelAdmissionEvent{}, errModelAdmissionUnauthorized
+	}
+	pubkeyDigest := sha256.Sum256(activePubkey)
+	if body.SigningKeyDigest != hex.EncodeToString(pubkeyDigest[:]) {
+		return ModelAdmissionEvent{}, errModelAdmissionUnauthorized
+	}
+	canonical, err := jcs.CanonicalJSON(body.canonicalMap())
+	if err != nil {
+		return ModelAdmissionEvent{}, err
+	}
+	if !ed25519.Verify(ed25519.PublicKey(activePubkey), canonical, signature) {
+		return ModelAdmissionEvent{}, errModelAdmissionUnauthorized
+	}
+	payloadDigest := sha256.Sum256(canonical)
+	signatureDigest := sha256.Sum256(signature)
+	signedAt, err := time.Parse(time.RFC3339Nano, body.Timestamp)
+	if err != nil {
+		return ModelAdmissionEvent{}, fmt.Errorf("invalid timestamp")
+	}
+	now := s.now().UTC()
+	if signedAt.Before(now.Add(-modelAdmissionMaxClockSkew)) || signedAt.After(now.Add(modelAdmissionMaxClockSkew)) {
+		return ModelAdmissionEvent{}, fmt.Errorf("invalid timestamp")
+	}
+	return ModelAdmissionEvent{
+		ProviderID:            body.ProviderID,
+		CandidateID:           body.CandidateID,
+		ServedModelRef:        body.ServedModelRef,
+		CatalogModelKey:       modelAdmissionNullableStringValue(body.CatalogModelKey.Value),
+		State:                 modelAdmissionWithdrawn,
+		ReasonCode:            body.ReasonCode,
+		RequestID:             body.IdempotencyKey,
+		Nonce:                 body.Nonce,
+		PayloadDigestSHA256:   hex.EncodeToString(payloadDigest[:]),
+		SignatureDigestSHA256: hex.EncodeToString(signatureDigest[:]),
+		CreatedAt:             now,
 	}, nil
 }
 
@@ -641,6 +1167,60 @@ type modelAdmissionOfferSubmitRequest struct {
 	SignatureAlgorithm       string                              `json:"signature_algorithm"`
 	ProviderSignature        string                              `json:"provider_signature"`
 	CLIVersion               string                              `json:"cli_version"`
+}
+
+type modelAdmissionWithdrawRequest struct {
+	Schema             string                       `json:"schema"`
+	GeneratedAt        string                       `json:"generated_at"`
+	CLIVersion         string                       `json:"cli_version"`
+	SignatureDomain    string                       `json:"signature_domain"`
+	ProviderID         string                       `json:"provider_id"`
+	CandidateID        string                       `json:"candidate_id"`
+	ServedModelRef     string                       `json:"served_model_ref"`
+	CatalogModelKey    modelAdmissionNullableString `json:"catalog_model_key"`
+	IdempotencyKey     string                       `json:"idempotency_key"`
+	Nonce              string                       `json:"nonce"`
+	Timestamp          string                       `json:"timestamp"`
+	ReasonCode         string                       `json:"reason_code"`
+	SigningKeyDigest   string                       `json:"signing_key_digest"`
+	SignatureAlgorithm string                       `json:"signature_algorithm"`
+	ProviderSignature  string                       `json:"provider_signature"`
+}
+
+func (p modelAdmissionWithdrawRequest) canonicalMap() map[string]any {
+	return map[string]any{
+		"signature_domain":   p.SignatureDomain,
+		"provider_id":        p.ProviderID,
+		"candidate_id":       p.CandidateID,
+		"served_model_ref":   p.ServedModelRef,
+		"catalog_model_key":  modelAdmissionStringOrNull(p.CatalogModelKey.Value),
+		"idempotency_key":    p.IdempotencyKey,
+		"nonce":              p.Nonce,
+		"timestamp":          p.Timestamp,
+		"reason_code":        p.ReasonCode,
+		"signing_key_digest": p.SigningKeyDigest,
+		"cli_version":        p.CLIVersion,
+	}
+}
+
+type modelAdmissionNullableString struct {
+	Value   *string
+	Present bool
+}
+
+func (v *modelAdmissionNullableString) UnmarshalJSON(data []byte) error {
+	v.Present = true
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "null" {
+		v.Value = nil
+		return nil
+	}
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	v.Value = &value
+	return nil
 }
 
 func (p modelAdmissionOfferSubmitRequest) canonicalMap() map[string]any {
@@ -814,6 +1394,54 @@ func validateModelAdmissionPayload(payload modelAdmissionOfferSubmitRequest) err
 	return nil
 }
 
+func validateModelAdmissionWithdrawalPayload(payload modelAdmissionWithdrawRequest) error {
+	if err := config.ValidateProviderID(payload.ProviderID); err != nil {
+		return err
+	}
+	if !validModelAdmissionCandidateID(payload.CandidateID) {
+		return fmt.Errorf("invalid candidate_id")
+	}
+	values := []string{
+		payload.Nonce,
+		payload.IdempotencyKey,
+		payload.ReasonCode,
+		payload.SigningKeyDigest,
+	}
+	for _, value := range values {
+		if unsafeModelAdmissionMaterial(value) {
+			return fmt.Errorf("unsafe model admission material")
+		}
+	}
+	if !validModelAdmissionServedModelRef(payload.ServedModelRef) {
+		return fmt.Errorf("invalid served_model_ref")
+	}
+	if !payload.CatalogModelKey.Present {
+		return fmt.Errorf("missing catalog_model_key")
+	}
+	if payload.CatalogModelKey.Value != nil && (len(*payload.CatalogModelKey.Value) > 128 || unsafeModelAdmissionMaterial(*payload.CatalogModelKey.Value)) {
+		return fmt.Errorf("invalid catalog_model_key")
+	}
+	if !validModelAdmissionWithdrawReason(payload.ReasonCode) {
+		return fmt.Errorf("invalid reason_code")
+	}
+	if !validModelAdmissionToken(payload.Nonce) || !validModelAdmissionToken(payload.IdempotencyKey) {
+		return fmt.Errorf("invalid replay key")
+	}
+	if !validModelAdmissionSHA256Hex(payload.SigningKeyDigest) {
+		return fmt.Errorf("invalid signing key digest")
+	}
+	if !validModelAdmissionCLIVersion(payload.CLIVersion) {
+		return fmt.Errorf("invalid cli_version")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, payload.GeneratedAt); err != nil {
+		return fmt.Errorf("invalid generated_at")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, payload.Timestamp); err != nil {
+		return fmt.Errorf("invalid timestamp")
+	}
+	return nil
+}
+
 func (s *Server) modelAdmissionStatusResponseFromEvent(event ModelAdmissionEvent, _ bool) map[string]any {
 	return map[string]any{
 		"schema":                 modelAdmissionStatusSchema,
@@ -830,6 +1458,26 @@ func (s *Server) modelAdmissionStatusResponseFromEvent(event ModelAdmissionEvent
 		"provider_guidance":      modelAdmissionProviderGuidance(event),
 		"allowed_next_states":    modelAdmissionAllowedNextStates(event.State),
 		"warnings":               []string{},
+	}
+}
+
+func (s *Server) modelAdmissionWithdrawalResponseFromEvent(event ModelAdmissionEvent, _ bool) map[string]any {
+	return map[string]any{
+		"schema":                    modelAdmissionWithdrawResponseSchema,
+		"generated_at":              s.now().UTC().Format(time.RFC3339Nano),
+		"cli_version":               s.version,
+		"provider_id":               event.ProviderID,
+		"candidate_id":              event.CandidateID,
+		"served_model_ref":          event.ServedModelRef,
+		"catalog_model_key":         nullString(event.CatalogModelKey),
+		"idempotency_key":           event.RequestID,
+		"reason_code":               event.ReasonCode,
+		"previous_admission_state":  event.PreviousState,
+		"coordinator_event_id":      event.CoordinatorEventID,
+		"accepted_at":               event.CreatedAt.UTC().Format(time.RFC3339Nano),
+		"resulting_admission_state": event.State,
+		"provider_guidance":         modelAdmissionProviderGuidance(event),
+		"warnings":                  []string{},
 	}
 }
 
@@ -941,6 +1589,15 @@ func validModelAdmissionToken(value string) bool {
 func validModelAdmissionRuntimeSource(value string) bool {
 	switch value {
 	case "mlx_cache", "ollama_loopback":
+		return true
+	default:
+		return false
+	}
+}
+
+func validModelAdmissionWithdrawReason(value string) bool {
+	switch value {
+	case "provider_requested", "wrong_model", "runtime_unavailable", "identity_mismatch", "policy_uncertain", "other_operator_reason":
 		return true
 	default:
 		return false
@@ -1121,4 +1778,11 @@ func nullString(value string) any {
 		return nil
 	}
 	return value
+}
+
+func modelAdmissionNullableStringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
