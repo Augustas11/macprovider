@@ -8,7 +8,13 @@ final class BYOMDiscoveryTests: XCTestCase {
     func testDiscoverCommandEmitsClosedSchemaWithNullableAdvisoryFields() async throws {
         let root = try temporaryDirectory("byom-schema")
         let cache = root.appendingPathComponent("hf", isDirectory: true)
-        let namespace = root.appendingPathComponent("ns")
+        let namespaceDir = root.appendingPathComponent("nsdir", isDirectory: true)
+        try FileManager.default.createDirectory(at: namespaceDir, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: namespaceDir.path)
+        let namespace = namespaceDir.appendingPathComponent("ns")
+        try Data(repeating: 0x37, count: 32).write(to: namespace)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: namespace.path)
+        let namespaceBefore = try Data(contentsOf: namespace)
         try createMLXSnapshot(
             cacheRoot: cache,
             modelID: "mlx-community/Tiny-1B-4bit",
@@ -50,7 +56,81 @@ final class BYOMDiscoveryTests: XCTestCase {
         XCTAssertEqual(capabilities["max_context_tokens"] as? Int, 4096)
         let guidance = try XCTUnwrap(candidate["provider_guidance"] as? [String: Any])
         XCTAssertEqual(guidance["earning_path_class"] as? String, "local_inventory_only")
-        XCTAssertNotNil(try? Data(contentsOf: namespace))
+        // Discovery is read-only: a pre-existing salt is read, never rewritten.
+        XCTAssertEqual(try Data(contentsOf: namespace), namespaceBefore)
+    }
+
+    func testDiscoverIsReadOnlyWhenNamespaceMissing() async throws {
+        let root = try temporaryDirectory("byom-readonly")
+        let cache = root.appendingPathComponent("hf", isDirectory: true)
+        let namespace = root.appendingPathComponent("missing-ns")
+        try createMLXSnapshot(cacheRoot: cache, modelID: "mlx-community/Tiny-1B-4bit")
+
+        let document = await BYOMDiscoveryRunner(
+            environment: BYOMDiscoveryEnvironment(namespaceURL: namespace, mlxCacheRoot: cache, ollamaOrigin: nil)
+        ).discover()
+
+        // SPEC-046-R001: discovery MUST NOT provision the salt (no write).
+        XCTAssertFalse(FileManager.default.fileExists(atPath: namespace.path))
+        let candidate = try XCTUnwrap(document.candidates.first)
+        XCTAssertTrue(candidate.candidateID.hasPrefix("byom_unstable_"))
+        XCTAssertEqual(candidate.admissionState, "local_only")
+        XCTAssertTrue(candidate.warningCodes.contains("candidate_id_unstable"))
+    }
+
+    func testMLXWeightSymlinkIntoBlobsIsResolvedAndCounted() async throws {
+        let root = try temporaryDirectory("byom-symlink")
+        let cache = root.appendingPathComponent("hf", isDirectory: true)
+        // Mimic a real HF cache: weights live in blobs/ and the snapshot holds
+        // relative symlinks into them (the shape H1 must handle).
+        let repo = cache.appendingPathComponent("models--mlx-community--Tiny-1B-4bit", isDirectory: true)
+        let blobs = repo.appendingPathComponent("blobs", isDirectory: true)
+        let snapshot = repo.appendingPathComponent("snapshots", isDirectory: true)
+            .appendingPathComponent("0123456789abcdef0123456789abcdef01234567", isDirectory: true)
+        try FileManager.default.createDirectory(at: blobs, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data(#"{"max_position_embeddings":4096}"#.utf8).write(to: blobs.appendingPathComponent("config-blob"))
+        try Data(repeating: 0x7a, count: 4096).write(to: blobs.appendingPathComponent("weights-blob"))
+        // Use the path/string API so the destination stays a genuine RELATIVE
+        // symlink (the URL API would resolve it against the cwd).
+        try FileManager.default.createSymbolicLink(
+            atPath: snapshot.appendingPathComponent("config.json").path,
+            withDestinationPath: "../../blobs/config-blob"
+        )
+        try FileManager.default.createSymbolicLink(
+            atPath: snapshot.appendingPathComponent("model.safetensors").path,
+            withDestinationPath: "../../blobs/weights-blob"
+        )
+        // An escaping symlink must be ignored, never followed out of the cache.
+        try FileManager.default.createSymbolicLink(
+            atPath: snapshot.appendingPathComponent("escape.safetensors").path,
+            withDestinationPath: "/etc/hosts"
+        )
+
+        let document = await BYOMDiscoveryRunner(
+            environment: BYOMDiscoveryEnvironment(namespaceURL: root.appendingPathComponent("ns"), mlxCacheRoot: cache, ollamaOrigin: nil)
+        ).discover()
+
+        let candidate = try XCTUnwrap(document.candidates.first)
+        // Symlinked config + weights are resolved, so the model reads as ready.
+        XCTAssertEqual(candidate.readinessState, "ready")
+    }
+
+    func testRuntimeModelReferenceRejectsHostnameAndHostPortShapes() {
+        for leak in [
+            "coordinator.malibu.tech:443",
+            "prod.internal:11434",
+            "example.com:8080",
+            "macbook.local",
+            "gateway.corp",
+            "::ffff:127.0.0.1",
+            "0x7f.0.0.1",
+        ] {
+            XCTAssertFalse(BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(leak), "must reject \(leak)")
+        }
+        for ok in ["llama3.2:3b", "mistral:latest", "qwen2.5:7b", "gemma2:9b", "deepseek-r1:14b"] {
+            XCTAssertTrue(BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(ok), "must allow \(ok)")
+        }
     }
 
     func testDiscoverCommandMirrorsWarningsToStderrInJSONMode() async throws {

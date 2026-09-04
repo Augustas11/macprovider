@@ -368,7 +368,7 @@ struct BYOMDiscoveryRunner {
 
     func discover() async -> BYOMDiscoveryWire {
         let namespace = BYOMDiscoveryNamespaceStore(fileManager: fileManager)
-            .readOrCreateNamespace(at: environment.namespaceURL)
+            .readNamespace(at: environment.namespaceURL)
         let catalog = BYOMCatalogMatcher()
         var adapters: [BYOMDiscoveryWire.Adapter] = []
         var candidates: [BYOMDiscoveryWire.Candidate] = []
@@ -433,35 +433,22 @@ struct BYOMDiscoveryNamespaceStore {
         self.fileManager = fileManager
     }
 
-    func readOrCreateNamespace(at url: URL) -> Result {
-        do {
-            let parent = url.deletingLastPathComponent()
-            if fileManager.fileExists(atPath: url.path) {
-                guard namespaceDirectoryPermissionsArePrivate(parent), namespaceFilePermissionsArePrivate(url) else {
-                    return Result(bytes: nil, warnings: [.namespacePermissionInvalid, .candidateIDUnstable])
-                }
-                let data = try Data(contentsOf: url)
-                guard data.count == 32 else {
-                    return Result(bytes: nil, warnings: [.namespacePermissionInvalid, .candidateIDUnstable])
-                }
-                return Result(bytes: data, warnings: [])
-            }
-
-            try fileManager.createDirectory(
-                at: parent,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
-            let data = try secureRandomBytes(count: 32)
-            guard fileManager.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
-                return Result(bytes: nil, warnings: [.candidateIDUnstable])
-            }
-            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-            return Result(bytes: data, warnings: [])
-        } catch {
+    /// Read-only namespace lookup. `models discover` MUST NOT mutate local state
+    /// (SPEC-046-R001), so an absent salt yields unstable candidate IDs rather
+    /// than provisioning the salt here; salt creation belongs to a later
+    /// mutating command (e.g. offer), never to discovery.
+    func readNamespace(at url: URL) -> Result {
+        let parent = url.deletingLastPathComponent()
+        guard fileManager.fileExists(atPath: url.path) else {
             return Result(bytes: nil, warnings: [.candidateIDUnstable])
         }
+        guard namespaceDirectoryPermissionsArePrivate(parent), namespaceFilePermissionsArePrivate(url) else {
+            return Result(bytes: nil, warnings: [.namespacePermissionInvalid, .candidateIDUnstable])
+        }
+        guard let data = try? Data(contentsOf: url), data.count == 32 else {
+            return Result(bytes: nil, warnings: [.namespacePermissionInvalid, .candidateIDUnstable])
+        }
+        return Result(bytes: data, warnings: [])
     }
 
     private func namespaceDirectoryPermissionsArePrivate(_ url: URL) -> Bool {
@@ -482,15 +469,6 @@ struct BYOMDiscoveryNamespaceStore {
             return false
         }
         return permissions.intValue & 0o077 == 0
-    }
-
-    private func secureRandomBytes(count: Int) throws -> Data {
-        var bytes = [UInt8](repeating: 0, count: count)
-        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        guard status == errSecSuccess else {
-            throw BYOMDiscoveryAdapterError.malformed
-        }
-        return Data(bytes)
     }
 }
 
@@ -574,12 +552,62 @@ struct BYOMMLXCacheDiscovery {
         self.fileManager = fileManager
     }
 
-    func discover() -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
-        guard let entries = try? fileManager.contentsOfDirectory(
-            at: cacheRoot,
+    /// Enumerate at most `cap` immediate children of `root`, then sort by name.
+    /// Uses a streaming enumerator with an early cutoff so a cache root holding
+    /// millions of entries cannot exhaust memory/time before the caller's
+    /// `.prefix(...)` cap applies (bulk `contentsOfDirectory` materializes the
+    /// whole listing first). `cap` is set well above the caller's prefix so
+    /// normal caches enumerate fully and deterministically.
+    private func boundedDirectoryEntries(at root: URL, cap: Int) -> [URL]? {
+        // Treat a missing or non-directory path as unreadable (nil), matching
+        // the throwing `contentsOfDirectory` this replaced — an `enumerator`
+        // over a missing path yields an empty, non-nil sequence otherwise.
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return nil
+        }
+        guard let enumerator = fileManager.enumerator(
+            at: root,
             includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants, .skipsPackageDescendants]
         ) else {
+            return nil
+        }
+        var collected: [URL] = []
+        collected.reserveCapacity(min(cap, 1024))
+        for case let url as URL in enumerator {
+            collected.append(url)
+            if collected.count >= cap { break }
+        }
+        return collected.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+    }
+
+    /// True when `url`, after symlink resolution, is `root` itself or lives
+    /// under it — used to reject symlinks that escape the cache root.
+    private func pathIsContained(_ url: URL, in root: URL) -> Bool {
+        let target = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let base = root.resolvingSymlinksInPath().standardizedFileURL.path
+        if target == base { return true }
+        return target.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+    }
+
+    /// Read a file only after confirming (via the resolved target's stat) that
+    /// it is a regular file inside `root` and no larger than `maxBytes`. The
+    /// size gate runs BEFORE any bytes are read, so a multi-GB or symlinked
+    /// file cannot force an unbounded `Data(contentsOf:)` allocation.
+    private func boundedFileContents(at url: URL, within root: URL, maxBytes: Int) -> Data? {
+        let resolved = url.resolvingSymlinksInPath()
+        guard pathIsContained(resolved, in: root),
+              let values = try? resolved.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true,
+              let size = values.fileSize, size >= 0, size <= maxBytes else {
+            return nil
+        }
+        return try? Data(contentsOf: resolved)
+    }
+
+    func discover() -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
+        guard let entries = boundedDirectoryEntries(at: cacheRoot, cap: 4096) else {
             return (
                 BYOMDiscoveryWire.Adapter(
                     runtimeSource: "mlx_cache",
@@ -592,7 +620,7 @@ struct BYOMMLXCacheDiscovery {
         }
 
         var candidates: [BYOMDiscoveryWire.Candidate] = []
-        for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }).prefix(200) {
+        for entry in entries.prefix(200) {
             guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
                   let modelID = modelID(fromHFCacheDirectoryName: entry.lastPathComponent) else {
                 continue
@@ -633,11 +661,7 @@ struct BYOMMLXCacheDiscovery {
 
     private func summarizeSnapshots(repoDirectory: URL) -> (ready: Bool, weightBytes: UInt64, contextWindowTokens: Int?) {
         let snapshots = repoDirectory.appendingPathComponent("snapshots", isDirectory: true)
-        guard let snapshotDirs = try? fileManager.contentsOfDirectory(
-            at: snapshots,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else {
+        guard let snapshotDirs = boundedDirectoryEntries(at: snapshots, cap: 256) else {
             return (false, 0, nil)
         }
         var sawConfig = false
@@ -646,8 +670,11 @@ struct BYOMMLXCacheDiscovery {
         var inspected = 0
         for snapshot in snapshotDirs.prefix(20) {
             guard (try? snapshot.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
-            if let config = try? Data(contentsOf: snapshot.appendingPathComponent("config.json")),
-               config.count <= 128 * 1024 {
+            if let config = boundedFileContents(
+                at: snapshot.appendingPathComponent("config.json"),
+                within: cacheRoot,
+                maxBytes: 128 * 1024
+            ) {
                 sawConfig = true
                 context = context ?? BYOMDiscoveryJSON.contextWindowTokens(from: config)
             }
@@ -661,8 +688,16 @@ struct BYOMMLXCacheDiscovery {
             for case let fileURL as URL in enumerator {
                 inspected += 1
                 if inspected > 2048 { break }
-                guard BYOMMLXCacheDiscovery.isModelWeightFile(fileURL.lastPathComponent),
-                      let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                guard BYOMMLXCacheDiscovery.isModelWeightFile(fileURL.lastPathComponent) else {
+                    continue
+                }
+                // HF snapshots store weights as symlinks into the sibling
+                // `blobs/` dir, so resolve the target (an unresolved symlink is
+                // not `isRegularFile` and would be miscounted as missing) and
+                // require it to stay under the cache root to block symlink escape.
+                let resolved = fileURL.resolvingSymlinksInPath()
+                guard pathIsContained(resolved, in: cacheRoot),
+                      let values = try? resolved.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
                       values.isRegularFile == true else {
                     continue
                 }
@@ -1135,6 +1170,34 @@ enum BYOMDiscoveryPrivacy {
             return true
         }
         if trimmed.range(of: #"^[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,}$"#, options: .regularExpression) != nil {
+            return true
+        }
+        // IPv4-mapped / IPv4-embedded IPv6 (e.g. ::ffff:127.0.0.1, ::127.0.0.1)
+        // that the bracketless-IPv6 pattern above misses because of the dots.
+        if lower.contains("::ffff:") {
+            return true
+        }
+        if trimmed.contains("::"),
+           trimmed.range(of: #"[0-9]{1,3}(\.[0-9]{1,3}){3}"#, options: .regularExpression) != nil {
+            return true
+        }
+        // Hex/octal-encoded IPv4 octets (e.g. 0x7f.0.0.1, 0177.0.0.1).
+        if trimmed.range(
+            of: #"(^|[^A-Za-z0-9._-])(0[xX][0-9A-Fa-f]+)(\.[0-9A-Fa-fxX]+){1,3}($|[^A-Za-z0-9._-])"#,
+            options: .regularExpression
+        ) != nil {
+            return true
+        }
+        // mDNS / private-network bare hostnames.
+        for suffix in [".local", ".internal", ".lan", ".home", ".corp", ".localdomain", ".intranet"] where lower.hasSuffix(suffix) {
+            return true
+        }
+        // DNS hostname with an explicit numeric port. A legitimate runtime
+        // model tag (e.g. `llama3.2:3b`) is not `:<digits>`, so it is unaffected.
+        if trimmed.range(
+            of: #"(^|[^A-Za-z0-9._-])([A-Za-z0-9-]+\.)+[A-Za-z0-9-]+:[0-9]{1,5}($|[^A-Za-z0-9._-])"#,
+            options: .regularExpression
+        ) != nil {
             return true
         }
         return trimmed.range(
