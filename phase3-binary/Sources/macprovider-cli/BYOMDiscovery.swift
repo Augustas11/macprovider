@@ -1160,40 +1160,33 @@ enum BYOMDiscoveryPrivacy {
     private static func looksLikeEndpoint(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = trimmed.lowercased()
-        if lower == "localhost" || lower == "[::1]" || lower == "::1" {
+        // Loopback names and ANY IPv6 form — `localhost` and the `::` / bracket
+        // notations never appear in a legitimate model reference, so match them
+        // anywhere in the string (embedded, with a port, etc.).
+        if lower.contains("localhost") || trimmed.contains("::") {
             return true
         }
-        if trimmed.range(of: #"^[0-9]{1,3}(\.[0-9]{1,3}){3}$"#, options: .regularExpression) != nil {
+        if trimmed.range(of: #"\[[0-9A-Fa-f:]+\]"#, options: .regularExpression) != nil {
             return true
         }
-        if trimmed.range(of: #"^\[[0-9A-Fa-f:]+\]$"#, options: .regularExpression) != nil {
+        // Uncompressed IPv6 (>=4 colon-separated hex groups).
+        if trimmed.range(of: #"(^|[^0-9A-Za-z:])([0-9A-Fa-f]{1,4}:){3,}[0-9A-Fa-f]{1,4}"#, options: .regularExpression) != nil {
             return true
         }
-        if trimmed.range(of: #"^[0-9A-Fa-f]{0,4}(:[0-9A-Fa-f]{0,4}){2,}$"#, options: .regularExpression) != nil {
-            return true
-        }
-        // IPv4-mapped / IPv4-embedded IPv6 (e.g. ::ffff:127.0.0.1, ::127.0.0.1)
-        // that the bracketless-IPv6 pattern above misses because of the dots.
-        if lower.contains("::ffff:") {
-            return true
-        }
-        if trimmed.contains("::"),
-           trimmed.range(of: #"[0-9]{1,3}(\.[0-9]{1,3}){3}"#, options: .regularExpression) != nil {
-            return true
-        }
-        // Encoded dotted IPv4 forms the plain dotted-quad above misses: octal
-        // (0177.0.0.1) and hex (0x7f.0.0.1) octets.
+        // Dotted IPv4 (four octets: decimal, octal 0177, or hex 0x7f), matched
+        // when embedded or carrying a :port — not just as the whole value.
         if trimmed.range(
-            of: #"^(0?[0-9]{1,4}|0[xX][0-9A-Fa-f]{1,4})(\.(0?[0-9]{1,4}|0[xX][0-9A-Fa-f]{1,4})){1,3}$"#,
+            of: #"(^|[^0-9A-Za-z])(0?[0-9]{1,3}|0[xX][0-9A-Fa-f]{1,2})(\.(0?[0-9]{1,4}|0[xX][0-9A-Fa-f]{1,4})){3}($|[^0-9A-Za-z.])"#,
             options: .regularExpression
         ) != nil {
             return true
         }
-        // One-piece encoded IPv4: a hex dword (0x7f000001) or a bare 32-bit decimal.
-        if trimmed.range(of: #"^0[xX][0-9A-Fa-f]{5,8}$"#, options: .regularExpression) != nil {
+        // One-piece encoded IPv4: a hex dword (0x7f000001) or a bare 32-bit
+        // decimal (2130706433), boundary-delimited so a :port suffix is caught.
+        if trimmed.range(of: #"(^|[^0-9A-Za-z])0[xX][0-9A-Fa-f]{5,8}($|[^0-9A-Za-z])"#, options: .regularExpression) != nil {
             return true
         }
-        if trimmed.range(of: #"^[0-9]{8,10}$"#, options: .regularExpression) != nil {
+        if trimmed.range(of: #"(^|[^0-9A-Za-z])[0-9]{8,10}($|[^0-9A-Za-z])"#, options: .regularExpression) != nil {
             return true
         }
         // Any DNS hostname: one or more dotted labels ending in an alphabetic
@@ -1201,14 +1194,8 @@ enum BYOMDiscoveryPrivacy {
         // with or without a port or scheme/path). Legitimate model refs put only
         // numeric version tokens after a dot (e.g. `llama3.2`, `mistral-7b-v0.2`),
         // so their final label is never a bare alpha TLD and they are unaffected.
-        if trimmed.range(
-            of: #"(^|[^A-Za-z0-9_-])([A-Za-z0-9-]+\.)+[A-Za-z]{2,}\.?($|[^A-Za-z0-9-])"#,
-            options: .regularExpression
-        ) != nil {
-            return true
-        }
         return trimmed.range(
-            of: #"(^|[^A-Za-z0-9._-])(localhost|[0-9]{1,3}(\.[0-9]{1,3}){3}|\[[0-9A-Fa-f:]+\]):[0-9]{1,5}($|[^A-Za-z0-9._-])"#,
+            of: #"(^|[^A-Za-z0-9_-])([A-Za-z0-9-]+\.)+[A-Za-z]{2,}\.?($|[^A-Za-z0-9-])"#,
             options: .regularExpression
         ) != nil
     }

@@ -134,6 +134,14 @@ final class BYOMDiscoveryTests: XCTestCase {
             "0177.0.0.1",                    // octal dotted IPv4
             "0x7f000001",                    // one-piece hex IPv4
             "2130706433",                    // one-piece decimal IPv4
+            "127.0.0.1:11434",               // encoded/plain IPv4 with :port
+            "0x7f000001:11434",
+            "2130706433:11434",
+            "0177.0.0.1:11434",
+            "model-127.0.0.1",               // IP literal embedded in a name
+            "model-0x7f000001",
+            "model-::1",
+            "2001:db8:85a3:0:0:8a2e:370:7334",  // uncompressed IPv6
         ] {
             XCTAssertFalse(BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(leak), "must reject \(leak)")
         }
