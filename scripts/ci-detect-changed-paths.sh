@@ -2,9 +2,9 @@
 #
 # CI macOS path-gate detector.
 #
-# Emits two booleans that gate the two per-PR macOS jobs in
+# Emits two booleans that gate the per-PR macOS jobs in
 # .github/workflows/ci.yml:
-#   swift -> phase3-binary (swift test) job
+#   swift -> phase3-binary (swift test) + locked SwiftPM resolve jobs
 #   code  -> spec-015-acceptance (cross-service money-path acceptance) job
 #
 # Usage: ci-detect-changed-paths.sh <base_sha> <head_sha>
@@ -100,7 +100,7 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo ""
     echo "- diff resolved: ${resolved}"
     echo "- changed files: ${total}"
-    echo "- swift-tests: **$([ "$swift" = true ] && echo run || echo skip)** (matched ${matched_swift})"
+    echo "- swift-tests / locked SwiftPM resolve: **$([ "$swift" = true ] && echo run || echo skip)** (matched ${matched_swift})"
     echo "- spec-015-acceptance: **$([ "$code" = true ] && echo run || echo skip)** (matched ${matched_code})"
   } >>"$GITHUB_STEP_SUMMARY"
 fi

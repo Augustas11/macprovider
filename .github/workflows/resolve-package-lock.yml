@@ -6,6 +6,7 @@ name: Resolve CLI Package.resolved (release toolchain)
 # (Xcode 26.x) resolve the graph differently and cannot reproduce the correct
 # lock. See issue #1360 (async-http-client unpinned after #1336). Manual only;
 # uploads the corrected Package.resolved as an artifact — it does not commit.
+# PR CI verifies the committed lock via the swift-package-lock job in ci.yml.
 
 on:
   workflow_dispatch:

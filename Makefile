@@ -66,6 +66,7 @@ test-dist:
 	bash scripts/test-malibu-bootstrap-bridge.sh
 	bash scripts/test-recover-malibu-publication.sh
 	bash scripts/test-acceptance-candidate-security.sh
+	bash scripts/test-swift-package-lock.sh
 	bash scripts/test-signed-payout-journey-workflow.sh
 	bash scripts/test-signed-provider-prebeta-journey-workflow.sh
 	bash scripts/test-signed-buyer-paid-path-journey-workflow.sh
