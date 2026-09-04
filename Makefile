@@ -184,6 +184,7 @@ test-dist:
 	bash scripts/test-watchdog-inline-drift.sh
 	bash phase3-binary/dist/test/watchdog_health_scope.test.sh
 	bash phase3-binary/dist/test/watchdog_rollback_paths.test.sh
+	bash phase3-binary/dist/test/install_recovery_bootstrap_retry.test.sh
 	bash phase3-binary/dist/test/repair_1189_reproduction.test.sh
 	bash ops/macprovider-watchdog/Scripts/test-ac-19-20-watchdog-recovery.sh
 	node --test test/e2e/canary-buyer/probe.test.mjs test/e2e/canary-buyer/safety.test.mjs

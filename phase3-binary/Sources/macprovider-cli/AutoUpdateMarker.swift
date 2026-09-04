@@ -2205,9 +2205,40 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
               let environment = plist["EnvironmentVariables"] as? [String: Any],
               let host = environment["MACPROVIDER_COORDINATOR_HOST"] as? String,
-              host.range(of: #"^[A-Za-z0-9.-]{1,253}$"#, options: .regularExpression) != nil
+              Self.isTrustedCoordinatorHostValue(host)
         else { throw AutoUpdateMarkerError.trustedRootInvalid("installed_watchdog_plist_invalid") }
         return host
+    }
+
+    /// The installed watchdog coordinator host may carry an optional `:port`
+    /// suffix (a self-hosted coordinator on a non-default port, e.g.
+    /// `127.0.0.1:18445`). Validate the host and port parts separately: the
+    /// host keeps the original length/charset guard, and a present port must be
+    /// a decimal in `1...65535`. Production uses a portless host, so this only
+    /// widens acceptance for custom-port deployments and never loosens the host
+    /// guard itself. The returned value is compared like-for-like against the
+    /// freshly rendered watchdog plist in `validateWatchdogPlist`, so the full
+    /// `host[:port]` string round-trips unchanged.
+    static func isTrustedCoordinatorHostValue(_ value: String) -> Bool {
+        let hostPart: Substring
+        let portPart: Substring?
+        if let colonIndex = value.lastIndex(of: ":") {
+            hostPart = value[value.startIndex ..< colonIndex]
+            portPart = value[value.index(after: colonIndex)...]
+        } else {
+            hostPart = value[...]
+            portPart = nil
+        }
+        guard hostPart.range(of: #"^[A-Za-z0-9.-]{1,253}$"#, options: .regularExpression) != nil else {
+            return false
+        }
+        guard let portPart else { return true }
+        guard portPart.range(of: #"^[0-9]{1,5}$"#, options: .regularExpression) != nil,
+              let port = Int(portPart), (1 ... 65535).contains(port)
+        else {
+            return false
+        }
+        return true
     }
 
     private func validateProviderPlist(_ data: Data, installDirectory: URL) throws {

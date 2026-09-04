@@ -3239,6 +3239,86 @@ recovery_launchctl() {
   fi
 }
 
+# Sanitize an operator-supplied integer override to a positive decimal (or a
+# non-negative one when allow_zero is passed), falling back to the default for
+# empty, non-numeric, leading-zero-octal, zero (unless allowed), or oversized
+# values, and clamping to `maximum` when one is supplied. Without this a
+# malformed override (e.g. `abc`) makes a later `[ -ge ]` comparison error with
+# status 2, which — inside the retry loop below — would skip the give-up check
+# and spin forever; without the clamp a valid-but-huge override (e.g. 999999)
+# would schedule a practically non-terminating loop or multi-day sleeps.
+recovery_positive_int() {
+  candidate="$1"
+  fallback="$2"
+  allow_zero="${3:-}"
+  maximum="${4:-}"
+  case "$candidate" in
+    ''|*[!0-9]*) printf '%s\n' "$fallback"; return 0 ;;
+  esac
+  if [ "${#candidate}" -gt 9 ]; then
+    printf '%s\n' "$fallback"; return 0
+  fi
+  candidate=$((10#$candidate))
+  if [ "$candidate" -eq 0 ] && [ "$allow_zero" != "allow_zero" ]; then
+    printf '%s\n' "$fallback"; return 0
+  fi
+  if [ -n "$maximum" ] && [ "$candidate" -gt "$maximum" ]; then
+    candidate="$maximum"
+  fi
+  printf '%s\n' "$candidate"
+}
+
+# F6 (#1364): `launchctl bootstrap` can transiently return "Input/output error"
+# on a launchd domain that is briefly refusing new services (observed 6/6 on an
+# isolated GUI domain during acceptance; it cleared only after a re-login). A
+# single failed bootstrap previously tripped `recovery_failed` -> exit 70,
+# leaving the provider down AND a preserved bundle that hard-blocked the next
+# install. Retry with a short linear backoff, booting out any half-loaded label
+# between attempts, so a transient domain I/O error clears in place instead of
+# wedging recovery.
+#
+# Only an actual successful bootstrap of the EXPECTED plist path counts as
+# success. An already-loaded label is NOT trusted: a same-user process could
+# have bootstrapped a foreign plist under it, and the caller kickstarts before
+# it verifies identity. So we always bootout and re-bootstrap the expected
+# plist rather than accepting whatever happens to be loaded; the caller then
+# still verifies the launchd identity of what we bootstrapped.
+recovery_bootstrap_service() {
+  bootstrap_domain="$1"
+  bootstrap_plist_path="$2"
+  bootstrap_label="$3"
+  bootstrap_attempt=0
+  # Clamp to sane maxima so a fat-fingered override cannot schedule a
+  # practically non-terminating retry loop (attempts) or multi-day sleeps
+  # (backoff): at most 20 attempts and a 10s backoff unit.
+  bootstrap_max_attempts="$(recovery_positive_int "${MACPROVIDER_RECOVERY_BOOTSTRAP_ATTEMPTS:-}" 5 '' 20)"
+  bootstrap_backoff_unit="$(recovery_positive_int "${MACPROVIDER_RECOVERY_BOOTSTRAP_BACKOFF_SECONDS:-}" 2 allow_zero 10)"
+  while :; do
+    bootstrap_attempt=$((bootstrap_attempt + 1))
+    if recovery_launchctl bootstrap "$bootstrap_domain" "$bootstrap_plist_path" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ "$bootstrap_attempt" -ge "$bootstrap_max_attempts" ]; then
+      return 1
+    fi
+    recovery_log "launchctl bootstrap of $bootstrap_label was refused (attempt ${bootstrap_attempt}/${bootstrap_max_attempts}); booting out any partial load and retrying."
+    recovery_launchctl bootout "$bootstrap_domain/$bootstrap_label" >/dev/null 2>&1 || true
+    sleep "$(( bootstrap_attempt * bootstrap_backoff_unit ))"
+  done
+}
+
+# Same failure as recovery_failed but with the concrete, non-folklore
+# remediation for a launchd domain that keeps refusing a (re)start: the
+# previous provider files are restored on disk, only the service is not
+# running, and a re-login / reboot recreates the domain so the preserved
+# recover.sh can finish.
+recovery_bootstrap_failed() {
+  recovery_log "$1"
+  recovery_log "The previous provider files are restored on disk, but launchd refused to (re)start the service after retries — usually a transient launchd domain I/O error."
+  recovery_log "Log out and back in (or reboot) to recreate the launchd session, then retry exactly: bash '$RECOVERY_DIR/recover.sh'"
+  exit 70
+}
+
 validate_recovery_launchdaemon_plist() {
   managed_path="$1"
   bootstrap_path="$2"
@@ -6017,8 +6097,8 @@ if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-sta
         || recovery_failed "the prior provider service disappeared before cutover and no launchd plist was preserved"
       paths_match "$RECOVERY_DIR/provider.plist" "$REC_PLIST_PATH" file \
         || recovery_failed "the pre-cutover provider plist changed after the recovery snapshot"
-      recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 \
-        || recovery_failed "could not restore the unexpectedly inactive pre-cutover provider service"
+      recovery_bootstrap_service "$REC_LAUNCHD_DOMAIN" "$REC_PLIST_BOOTSTRAP_PATH" "$REC_PROVIDER_LABEL" \
+        || recovery_bootstrap_failed "could not restore the unexpectedly inactive pre-cutover provider service"
       recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_PROVIDER_LABEL" >/dev/null 2>&1 \
         || recovery_failed "could not start the unexpectedly inactive pre-cutover provider service"
     fi
@@ -6032,8 +6112,8 @@ if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-sta
         || recovery_failed "the prior legacy provider service disappeared before cutover and no launchd plist was preserved"
       paths_match "$RECOVERY_DIR/legacy-provider.plist" "$REC_LEGACY_PLIST_PATH" file \
         || recovery_failed "the pre-cutover legacy provider plist changed after the recovery snapshot"
-      recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 \
-        || recovery_failed "could not restore the unexpectedly inactive pre-cutover legacy provider service"
+      recovery_bootstrap_service "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" "$REC_LEGACY_PROVIDER_LABEL" \
+        || recovery_bootstrap_failed "could not restore the unexpectedly inactive pre-cutover legacy provider service"
       recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1 \
         || recovery_failed "could not start the unexpectedly inactive pre-cutover legacy provider service"
     fi
@@ -6047,8 +6127,8 @@ if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-sta
         || recovery_failed "the prior watchdog was active but no launchd plist was preserved"
       paths_match "$RECOVERY_DIR/watchdog.plist" "$REC_WATCHDOG_PLIST_PATH" file \
         || recovery_failed "the pre-cutover watchdog plist changed after the recovery snapshot"
-      recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 \
-        || recovery_failed "could not restore the pre-cutover watchdog service"
+      recovery_bootstrap_service "$REC_LAUNCHD_DOMAIN" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" "$REC_WATCHDOG_LABEL" \
+        || recovery_bootstrap_failed "could not restore the pre-cutover watchdog service"
     fi
     recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 \
       || recovery_failed "could not start the pre-cutover watchdog service"
@@ -6062,8 +6142,8 @@ if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-sta
         || recovery_failed "the prior legacy watchdog was active but no launchd plist was preserved"
       paths_match "$RECOVERY_DIR/legacy-watchdog.plist" "$REC_LEGACY_WATCHDOG_PLIST_PATH" file \
         || recovery_failed "the pre-cutover legacy watchdog plist changed after the recovery snapshot"
-      recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 \
-        || recovery_failed "could not restore the pre-cutover legacy watchdog service"
+      recovery_bootstrap_service "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" "$REC_LEGACY_WATCHDOG_LABEL" \
+        || recovery_bootstrap_failed "could not restore the pre-cutover legacy watchdog service"
     fi
     recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1 \
       || recovery_failed "could not start the pre-cutover legacy watchdog service"
@@ -6437,14 +6517,14 @@ else
 fi
 if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_PLIST" -eq 1 ] || recovery_failed "previous service was active but no previous plist was preserved"
-  recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous provider service"
+  recovery_bootstrap_service "$REC_LAUNCHD_DOMAIN" "$REC_PLIST_BOOTSTRAP_PATH" "$REC_PROVIDER_LABEL" || recovery_bootstrap_failed "could not bootstrap the previous provider service"
   recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous provider service"
   service_identity_matches "$REC_PROVIDER_LABEL" "$REC_PLIST_BOOTSTRAP_PATH" \
     "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" "$REC_HEADLESS_REPAIR_INCUMBENT_BINARY" \
     || recovery_failed "previous provider service has an unexpected identity"
 elif [ "$REC_LEGACY_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_LEGACY_PLIST" -eq 1 ] || recovery_failed "previous legacy service was active but no previous plist was preserved"
-  recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous legacy provider service"
+  recovery_bootstrap_service "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" "$REC_LEGACY_PROVIDER_LABEL" || recovery_bootstrap_failed "could not bootstrap the previous legacy provider service"
   recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous legacy provider service"
   service_identity_matches "$REC_LEGACY_PROVIDER_LABEL" "$REC_LEGACY_PLIST_BOOTSTRAP_PATH" \
     "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
@@ -6465,14 +6545,14 @@ else
 fi
 if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "previous watchdog was active but no previous plist was preserved"
-  recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous watchdog service"
+  recovery_bootstrap_service "$REC_LAUNCHD_DOMAIN" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" "$REC_WATCHDOG_LABEL" || recovery_bootstrap_failed "could not bootstrap the previous watchdog service"
   recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous watchdog service"
   service_identity_matches "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
     "/Library/Application Support/macprovider/macprovider-health-monitor" "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
     || recovery_failed "previous watchdog service has an unexpected identity"
 elif [ "$REC_LEGACY_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_LEGACY_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "previous legacy watchdog was active but no previous plist was preserved"
-  recovery_launchctl bootstrap "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous legacy watchdog service"
+  recovery_bootstrap_service "$REC_LAUNCHD_DOMAIN" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" "$REC_LEGACY_WATCHDOG_LABEL" || recovery_bootstrap_failed "could not bootstrap the previous legacy watchdog service"
   recovery_launchctl kickstart -k "$REC_LAUNCHD_DOMAIN/$REC_LEGACY_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous legacy watchdog service"
   service_identity_matches "$REC_LEGACY_WATCHDOG_LABEL" "$REC_LEGACY_WATCHDOG_PLIST_BOOTSTRAP_PATH" \
     "/Library/Application Support/macprovider/macprovider-health-monitor" "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
@@ -12130,7 +12210,32 @@ print_local_self_test_diagnostics() {
 wait_for_coordinator() {
   provider_id="$1"
   coordinator_base="$2"
-  deadline=$(( $(date +%s) + 30 ))
+  # F5 (#1365): a cold model load on a low-RAM Mac can push first
+  # buyer-serving readiness well past 30s (observed 97s/114s/296s on an 8GB
+  # Tier C M2). A flat 30s gate rolled back installs that had genuinely reached
+  # buyer_serving. Give coordinator admission a generous deadline aligned with
+  # the model-load reality (the local /v1/models waits above use 300s/1200s).
+  # The exact catalog-identity / legacy_bridge admission proofs below are
+  # unchanged; only the timeout widens. Overridable for tests; a malformed
+  # override (empty, non-numeric, leading-zero octal, zero, or oversized) falls
+  # back to 300 rather than aborting the arithmetic under `set -u` or making the
+  # gate fail immediately, and a valid-but-huge value is clamped to 1800s (30
+  # min, well beyond any legitimate cold model load) so a fat-fingered override
+  # cannot hang a failing install for days.
+  coordinator_ready_timeout="${MACPROVIDER_COORDINATOR_READY_TIMEOUT_SECONDS:-300}"
+  case "$coordinator_ready_timeout" in
+    ''|*[!0-9]*) coordinator_ready_timeout=300 ;;
+    *)
+      if [ "${#coordinator_ready_timeout}" -gt 6 ]; then
+        coordinator_ready_timeout=300
+      else
+        coordinator_ready_timeout=$((10#$coordinator_ready_timeout))
+        [ "$coordinator_ready_timeout" -ge 1 ] || coordinator_ready_timeout=300
+        [ "$coordinator_ready_timeout" -le 1800 ] || coordinator_ready_timeout=1800
+      fi
+      ;;
+  esac
+  deadline=$(( $(date +%s) + coordinator_ready_timeout ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     local_status="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/status" 2>/dev/null || true)"
     assigned_id="$(python3 - "$provider_id" "$local_status" <<'PY' 2>/dev/null || true
@@ -13440,7 +13545,7 @@ main() {
   # exact current/previous catalog identity for normal upgrades, or exact
   # session-bound buyer-serving legacy_bridge proof for an explicit signed
   # emergency downgrade.
-  log "Waiting up to 30s for exact coordinator admission and buyer-serving readiness."
+  log "Waiting for exact coordinator admission and buyer-serving readiness (cold model load on low-RAM Macs can take minutes)."
   if ! wait_for_coordinator "$provider_id" "$coordinator_base"; then
     if [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ]; then
       log "Coordinator did not admit the repaired provider yet; committing local repair and leaving coordinator rejoin as telemetry."

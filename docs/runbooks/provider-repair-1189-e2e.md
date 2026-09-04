@@ -124,6 +124,18 @@ that is NOT the real #1189 provider**.
 
 - A spare Mac (any Apple Silicon Mac not currently in the #1189 provider's
   hands) that you can freely wipe and reinstall.
+- **Use a dedicated spare Mac — never a second macOS user account on a machine
+  that has a live earner.** The updater targets the **global**
+  `/Applications/Malibu.app` first (per
+  `AutoUpdateMarker.malibuAppCandidates()`), which on a shared machine is the
+  *live earner's* app, regardless of which user runs the test. During #1358
+  acceptance (F1) a test run reached the live earner's `/Applications/Malibu.app`
+  and was stopped **only** by POSIX permissions because the test account was
+  Standard; an Administrator test account would have overwritten the live
+  earner. A second user also cannot isolate unified-memory / thermal pressure:
+  sustained cold model loads on an 8 GB box tripped the earner's own liveness
+  watchdog. Tier-C acceptance (deliberate breakage + downgrade) must therefore
+  run on separate hardware, not a second login.
 - The new, notarized provider DMG build that includes both #1208
   (`aee7d157`) and #1228 (`16b0fa4d`).
 - Network access to the live coordinator (`coordinator.malibu.tech`).
