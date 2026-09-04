@@ -296,6 +296,14 @@ func TestModelAdmissionOfferRejectsClosedSchemaAndUnsafeMaterial(t *testing.T) {
 		"ollama:model.example.com",
 		"ollama:model.example.com:11434",
 		"ollama:model.example.com.",
+		// Endpoint material embedded in a path segment (H1): localhost or a
+		// host:port must be rejected wherever it appears, not just leading.
+		"ollama:localhost/model",
+		"ollama:model/localhost",
+		"inference:8080/model",
+		"model/inference:8080",
+		"ollama:hf.co/user/repo",
+		"ollama:model/registry.example.com/x",
 	} {
 		request := signedModelAdmissionOffer(t, "provider-byom-a", stableModelAdmissionCandidateID("k"), servedModelRef, priv, map[string]any{
 			"nonce":           "nonce_unsafe_" + strings.NewReplacer(":", "_", ".", "_", "[", "_", "]", "_").Replace(servedModelRef),

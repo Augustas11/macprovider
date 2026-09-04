@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/jcs"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
@@ -365,9 +365,14 @@ func modelAdmissionCanSubmitOffer(previousState string) bool {
 }
 
 func sameModelAdmissionTuple(previous, next ModelAdmissionEvent) bool {
+	// CandidateID + ServedModelRef are the stable candidate identity. The
+	// catalog binding is dynamic (looked up from the signed catalog, which can
+	// change between offers), so it is NOT part of the identity tuple — a fresh
+	// re-offer (from offer_rejected/withdrawn/revoked, with refreshed evidence)
+	// is allowed to carry a newly discovered or dropped catalog_model_key. It
+	// stays a provider claim until verified against exact catalog-body evidence.
 	return previous.CandidateID == next.CandidateID &&
-		previous.ServedModelRef == next.ServedModelRef &&
-		previous.CatalogModelKey == next.CatalogModelKey
+		previous.ServedModelRef == next.ServedModelRef
 }
 
 func modelAdmissionRequiresRefreshedEvidence(previousState string) bool {
@@ -548,7 +553,7 @@ func (s *Server) verifyModelAdmissionOffer(ctx context.Context, authenticatedPro
 	if body.SigningKeyDigest != hex.EncodeToString(pubkeyDigest[:]) {
 		return ModelAdmissionEvent{}, errModelAdmissionUnauthorized
 	}
-	canonical, err := billing.CanonicalJSON(body.canonicalMap())
+	canonical, err := jcs.CanonicalJSON(body.canonicalMap())
 	if err != nil {
 		return ModelAdmissionEvent{}, err
 	}
@@ -840,15 +845,13 @@ func modelAdmissionProviderGuidance(event ModelAdmissionEvent) map[string]any {
 		earningPath = "local_inventory_only"
 	case modelAdmissionOfferSubmitted:
 		nextAction = "wait_for_coordinator"
-		if event.CatalogModelKey != "" {
-			earningPath = "not_earning_yet_catalog_or_receipt_path_exists"
-		}
+		earningPath = modelAdmissionNonSettlementEarningPath(event.CatalogModelKey)
 	case "offer_rejected":
 		nextAction = "revise_and_reoffer"
 		transitionReason = event.ReasonCode
 	case "sandbox_probe_only", "network_visible_unpriced", "network_admitted_unsettled", "catalog_priced":
 		nextAction = "withdraw"
-		earningPath = "not_earning_yet_catalog_or_receipt_path_exists"
+		earningPath = modelAdmissionNonSettlementEarningPath(event.CatalogModelKey)
 		if modelAdmissionDemotionRequiresReason(event) {
 			transitionReason = event.ReasonCode
 		}
@@ -866,6 +869,17 @@ func modelAdmissionProviderGuidance(event ModelAdmissionEvent) map[string]any {
 		"transition_reason_code": transitionReason,
 		"earning_path_class":     earningPath,
 	}
+}
+
+// modelAdmissionNonSettlementEarningPath returns the honest v0.1 earning-path
+// disclosure for a non-settlement admitted state: a catalog-matched candidate
+// still has a catalog/receipt path, but a genuinely non-catalog candidate has
+// NO earning path in v0.1 (SPEC-047-R004) and must not be shown otherwise.
+func modelAdmissionNonSettlementEarningPath(catalogModelKey string) string {
+	if catalogModelKey != "" {
+		return "not_earning_yet_catalog_or_receipt_path_exists"
+	}
+	return "no_earning_path_in_v0_1"
 }
 
 func modelAdmissionAllowedNextStates(state string) []string {
@@ -949,39 +963,29 @@ func validModelAdmissionServedModelRef(value string) bool {
 		return false
 	}
 	if strings.HasPrefix(lower, "ollama:") {
-		name := value[len("ollama:"):]
-		return name != "" &&
-			!strings.HasPrefix(name, "/") &&
-			!strings.Contains(name, "//") &&
-			!strings.Contains(name, "../") &&
-			!strings.Contains(name, `..\`) &&
-			!looksLikeOllamaModelAdmissionNetworkLocation(name)
+		return modelAdmissionRefSegmentsSafe(value[len("ollama:"):])
 	}
-	if strings.Contains(value, "/") {
-		firstSegment := strings.SplitN(value, "/", 2)[0]
-		return firstSegment != "" && !looksLikeModelAdmissionNetworkLocation(firstSegment)
-	}
-	return !looksLikeModelAdmissionNetworkLocation(value)
+	return modelAdmissionRefSegmentsSafe(value)
 }
 
-func looksLikeOllamaModelAdmissionNetworkLocation(value string) bool {
-	lower := strings.ToLower(value)
-	if strings.HasPrefix(value, ":") {
-		return true
+// modelAdmissionRefSegmentsSafe rejects a served-model reference whose ANY
+// path segment looks like a network location (SPEC-047-R007 privacy). Every
+// "/"-delimited segment is checked, not just the first, so endpoint material
+// cannot hide after the leading segment (e.g. "model/inference:8080").
+func modelAdmissionRefSegmentsSafe(name string) bool {
+	if name == "" ||
+		strings.HasPrefix(name, "/") ||
+		strings.Contains(name, "//") ||
+		strings.Contains(name, "../") ||
+		strings.Contains(name, `..\`) {
+		return false
 	}
-	if lower == "localhost" || strings.HasPrefix(lower, "localhost:") || strings.Contains(lower, ".localhost") {
-		return true
-	}
-	if host, port, err := net.SplitHostPort(value); err == nil {
-		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
-			return looksLikeModelAdmissionNetworkLocation(host)
+	for _, seg := range strings.Split(name, "/") {
+		if seg == "" || looksLikeModelAdmissionNetworkLocation(seg) {
+			return false
 		}
-		return true
 	}
-	if host, _, found := strings.Cut(value, ":"); found {
-		return looksLikeModelAdmissionNetworkLocation(host)
-	}
-	return looksLikeModelAdmissionNetworkLocation(value)
+	return true
 }
 
 func modelAdmissionDemotionRequiresReason(event ModelAdmissionEvent) bool {
@@ -1051,10 +1055,16 @@ func looksLikeModelAdmissionNetworkLocation(value string) bool {
 	if strings.HasSuffix(trimmed, ".") && strings.Contains(trimmed, ".") {
 		return true
 	}
-	if lower == "localhost" || strings.HasPrefix(lower, "localhost:") {
+	if strings.Contains(lower, "localhost") {
 		return true
 	}
-	if host, _, err := net.SplitHostPort(value); err == nil {
+	if host, port, err := net.SplitHostPort(value); err == nil {
+		// A host:port shape is itself an endpoint signal when the port is
+		// numeric, regardless of whether the host looks like a network location
+		// (e.g. "inference:8080" must be rejected, not accepted).
+		if _, perr := strconv.ParseUint(port, 10, 16); perr == nil {
+			return true
+		}
 		return looksLikeModelAdmissionNetworkLocation(host)
 	}
 	if strings.HasPrefix(value, "[") && strings.Contains(value, "]:") {
@@ -1084,11 +1094,26 @@ func looksLikeModelAdmissionNetworkLocation(value string) bool {
 				allNumeric = false
 			}
 		}
-		if allNumeric || len(labels[len(labels)-1]) >= 2 {
+		// A DNS hostname ends in a pure-alpha TLD (com, co, tech, local...).
+		// A model version token ends in an alphanumeric label (e.g.
+		// "Llama-3.2-3B-Instruct-4bit"), which must NOT be treated as a host.
+		if allNumeric || isPureAlphaTLD(labels[len(labels)-1]) {
 			return true
 		}
 	}
 	return false
+}
+
+func isPureAlphaTLD(label string) bool {
+	if len(label) < 2 {
+		return false
+	}
+	for _, r := range label {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 func nullString(value string) any {
