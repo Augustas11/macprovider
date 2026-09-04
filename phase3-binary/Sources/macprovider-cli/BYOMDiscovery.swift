@@ -1266,10 +1266,14 @@ struct BYOMModelAdmissionRuntime: Sendable {
         evaluationDigestSHA256: String?,
         requestedDisclosureClass: String
     ) async throws -> BYOMAdmissionStatusWire {
+        // Submitting an offer is a deliberate mutating command: the coordinator
+        // records the admission event keyed by candidate_id, so the id must be
+        // stable. Provision the local identity salt first (idempotent, local CLI
+        // state only), matching `models evaluate`; discovery itself stays read-only.
+        BYOMDiscoveryNamespaceStore().provisionNamespaceIfMissing(at: environment.namespaceURL)
         let discovery = await BYOMDiscoveryRunner(
             environment: environment,
-            httpClient: httpClient,
-            namespaceMode: .readOnly
+            httpClient: httpClient
         ).discover()
         guard let candidate = Self.selectCandidate(target: target, candidates: discovery.candidates) else {
             throw BYOMModelAdmissionError.candidateNotFound
@@ -1301,10 +1305,10 @@ struct BYOMModelAdmissionRuntime: Sendable {
     }
 
     private func resolveCandidate(_ target: String) async -> BYOMDiscoveryWire.Candidate? {
+        // Status is a read-only readback: never provision the salt here.
         let discovery = await BYOMDiscoveryRunner(
             environment: environment,
-            httpClient: httpClient,
-            namespaceMode: .readOnly
+            httpClient: httpClient
         ).discover()
         return Self.selectCandidate(target: target, candidates: discovery.candidates)
     }
