@@ -119,18 +119,34 @@ final class BYOMDiscoveryTests: XCTestCase {
     func testRuntimeModelReferenceRejectsHostnameAndHostPortShapes() {
         for leak in [
             "coordinator.malibu.tech:443",
-            "prod.internal:11434",
+            "coordinator.malibu.tech",       // bare public hostname, no port
+            "coordinator.malibu.tech.",      // trailing-dot hostname
             "example.com:8080",
+            "host.io",
+            "hf.co/library/x",
+            "prod.internal:11434",
+            "prod.internal",
             "macbook.local",
             "gateway.corp",
             "::ffff:127.0.0.1",
+            "127.0.0.1",
             "0x7f.0.0.1",
+            "0177.0.0.1",                    // octal dotted IPv4
+            "0x7f000001",                    // one-piece hex IPv4
+            "2130706433",                    // one-piece decimal IPv4
         ] {
             XCTAssertFalse(BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(leak), "must reject \(leak)")
         }
-        for ok in ["llama3.2:3b", "mistral:latest", "qwen2.5:7b", "gemma2:9b", "deepseek-r1:14b"] {
+        for ok in [
+            "llama3.2:3b", "mistral:latest", "qwen2.5:7b", "qwen2.5-coder:7b",
+            "gemma2:9b", "deepseek-r1:14b", "phi-3.5-mini", "mistral-7b-instruct-v0.2",
+        ] {
             XCTAssertTrue(BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(ok), "must allow \(ok)")
         }
+        // The slash-bearing HF cache id form is a valid model reference (the
+        // runtime-ref gate additionally bans "/", but the shared sanitizer must
+        // not reject a legitimate cache id on hostname/TLD grounds).
+        XCTAssertTrue(BYOMDiscoveryPrivacy.isSafeModelReference("mlx-community/Llama-3.2-3B-Instruct-4bit"))
     }
 
     func testDiscoverCommandMirrorsWarningsToStderrInJSONMode() async throws {

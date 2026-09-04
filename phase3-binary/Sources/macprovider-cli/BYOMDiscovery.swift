@@ -1181,21 +1181,28 @@ enum BYOMDiscoveryPrivacy {
            trimmed.range(of: #"[0-9]{1,3}(\.[0-9]{1,3}){3}"#, options: .regularExpression) != nil {
             return true
         }
-        // Hex/octal-encoded IPv4 octets (e.g. 0x7f.0.0.1, 0177.0.0.1).
+        // Encoded dotted IPv4 forms the plain dotted-quad above misses: octal
+        // (0177.0.0.1) and hex (0x7f.0.0.1) octets.
         if trimmed.range(
-            of: #"(^|[^A-Za-z0-9._-])(0[xX][0-9A-Fa-f]+)(\.[0-9A-Fa-fxX]+){1,3}($|[^A-Za-z0-9._-])"#,
+            of: #"^(0?[0-9]{1,4}|0[xX][0-9A-Fa-f]{1,4})(\.(0?[0-9]{1,4}|0[xX][0-9A-Fa-f]{1,4})){1,3}$"#,
             options: .regularExpression
         ) != nil {
             return true
         }
-        // mDNS / private-network bare hostnames.
-        for suffix in [".local", ".internal", ".lan", ".home", ".corp", ".localdomain", ".intranet"] where lower.hasSuffix(suffix) {
+        // One-piece encoded IPv4: a hex dword (0x7f000001) or a bare 32-bit decimal.
+        if trimmed.range(of: #"^0[xX][0-9A-Fa-f]{5,8}$"#, options: .regularExpression) != nil {
             return true
         }
-        // DNS hostname with an explicit numeric port. A legitimate runtime
-        // model tag (e.g. `llama3.2:3b`) is not `:<digits>`, so it is unaffected.
+        if trimmed.range(of: #"^[0-9]{8,10}$"#, options: .regularExpression) != nil {
+            return true
+        }
+        // Any DNS hostname: one or more dotted labels ending in an alphabetic
+        // TLD (public OR private like .local/.internal, optional trailing dot,
+        // with or without a port or scheme/path). Legitimate model refs put only
+        // numeric version tokens after a dot (e.g. `llama3.2`, `mistral-7b-v0.2`),
+        // so their final label is never a bare alpha TLD and they are unaffected.
         if trimmed.range(
-            of: #"(^|[^A-Za-z0-9._-])([A-Za-z0-9-]+\.)+[A-Za-z0-9-]+:[0-9]{1,5}($|[^A-Za-z0-9._-])"#,
+            of: #"(^|[^A-Za-z0-9_-])([A-Za-z0-9-]+\.)+[A-Za-z]{2,}\.?($|[^A-Za-z0-9-])"#,
             options: .regularExpression
         ) != nil {
             return true
