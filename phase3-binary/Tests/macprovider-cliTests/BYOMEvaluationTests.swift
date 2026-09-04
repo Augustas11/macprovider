@@ -114,6 +114,36 @@ final class BYOMEvaluationTests: XCTestCase {
         XCTAssertEqual(document.mutationSummary.coordinatorStateMutated, false)
     }
 
+    func testProvisioningDoesNotChmodExistingParentDirectory() throws {
+        let root = try temporaryBYOMEvaluationDirectory("byom-provision-parent")
+        let parent = root.appendingPathComponent("operator-supplied", isDirectory: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: parent.path)
+
+        _ = BYOMDiscoveryNamespaceStore().provisionNamespaceIfMissing(at: parent.appendingPathComponent("ns"))
+
+        let perms = (try FileManager.default.attributesOfItem(atPath: parent.path)[.posixPermissions] as? NSNumber)?.intValue
+        XCTAssertEqual(perms.map { $0 & 0o777 }, 0o755, "provisioning must not alter an existing parent directory's permissions")
+    }
+
+    func testProvisioningCreatesPrivateSaltAndIsIdempotent() throws {
+        let root = try temporaryBYOMEvaluationDirectory("byom-provision-idem")
+        let ns = root.appendingPathComponent("nsdir", isDirectory: true).appendingPathComponent("ns")
+        let store = BYOMDiscoveryNamespaceStore()
+
+        let first = store.provisionNamespaceIfMissing(at: ns)
+        XCTAssertEqual(first.bytes?.count, 32)
+        XCTAssertTrue(first.warnings.isEmpty)
+        let dirPerms = (try FileManager.default.attributesOfItem(atPath: ns.deletingLastPathComponent().path)[.posixPermissions] as? NSNumber)?.intValue
+        let filePerms = (try FileManager.default.attributesOfItem(atPath: ns.path)[.posixPermissions] as? NSNumber)?.intValue
+        XCTAssertEqual(dirPerms.map { $0 & 0o077 }, 0)   // no group/other bits
+        XCTAssertEqual(filePerms.map { $0 & 0o077 }, 0)
+
+        // Idempotent: a second call reads the same salt, never rewriting it.
+        let second = store.provisionNamespaceIfMissing(at: ns)
+        XCTAssertEqual(second.bytes, first.bytes)
+    }
+
     func testEvaluateMalformedRuntimeResponseFailsClosedAndHashesBody() async throws {
         let root = try temporaryBYOMEvaluationDirectory("byom-eval-malformed")
         let client = BYOMEvaluationStubHTTPClient(
@@ -308,6 +338,9 @@ final class BYOMEvaluationTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(name)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        // Private (0700) so a salt provisioned directly under it has a private
+        // parent, mirroring the dedicated 0700 dir the production default uses.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
         return url
     }
 

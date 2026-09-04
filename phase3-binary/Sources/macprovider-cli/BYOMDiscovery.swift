@@ -566,8 +566,13 @@ struct BYOMDiscoveryEnvironment: Sendable {
     }
 
     static func defaultNamespaceURL(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
+        // The salt lives in a dedicated `byom` subdirectory that provisioning
+        // creates and owns at 0700, so the shared `~/.config/macprovider` config
+        // dir (which may be group/other-readable) is never chmod'd and the salt's
+        // immediate parent is always private without touching operator state.
         homeDirectory
             .appendingPathComponent(".config/macprovider", isDirectory: true)
+            .appendingPathComponent("byom", isDirectory: true)
             .appendingPathComponent("local_discovery_namespace")
     }
 
@@ -1176,12 +1181,28 @@ struct BYOMEvaluationRunner: Sendable {
         ]
     }
 
+    /// Warnings that genuinely block progressing to an offer. Informational
+    /// warnings that survive a successful probe (e.g. `catalog_match_unverified`)
+    /// are NOT blockers, so a passed evaluation must not steer the operator to
+    /// `fix_local_blocker` merely because such a warning is present.
+    private static let evaluationBlockingWarningCodes: Set<String> = [
+        BYOMDiscoveryWarning.candidateIDUnstable.rawValue,
+        BYOMDiscoveryWarning.namespacePermissionInvalid.rawValue,
+        BYOMDiscoveryWarning.adapterRejectedNonLoopback.rawValue,
+        BYOMDiscoveryWarning.adapterMalformedResponse.rawValue,
+        BYOMDiscoveryWarning.adapterResponseTruncated.rawValue,
+        BYOMDiscoveryWarning.adapterTimeout.rawValue,
+        BYOMDiscoveryWarning.evaluationFailed.rawValue,
+        BYOMDiscoveryWarning.requiresPreparation.rawValue,
+    ]
+
     private func evaluationGuidance(health: String, warnings: Set<String>) -> BYOMDiscoveryWire.Guidance {
         if health == "passed" {
+            let hasBlocker = !warnings.isDisjoint(with: Self.evaluationBlockingWarningCodes)
             return BYOMDiscoveryWire.Guidance(
                 stateLabelKey: "byom.evaluation.passed",
                 stateMeaningKey: "byom.evaluation.passed_not_earning",
-                nextAction: warnings.isEmpty ? "offer_dry_run" : "fix_local_blocker",
+                nextAction: hasBlocker ? "fix_local_blocker" : "offer_dry_run",
                 transitionReasonCode: warnings.sorted().first,
                 earningPathClass: "local_inventory_only"
             )
@@ -1274,26 +1295,43 @@ struct BYOMDiscoveryNamespaceStore {
             return readNamespace(at: url)
         }
         let parent = url.deletingLastPathComponent()
-        do {
-            try fileManager.createDirectory(
-                at: parent,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
-            var bytes = [UInt8](repeating: 0, count: 32)
-            guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
-                return Result(bytes: nil, warnings: [.candidateIDUnstable])
-            }
-            let data = Data(bytes)
-            guard fileManager.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
-                return Result(bytes: nil, warnings: [.candidateIDUnstable])
-            }
-            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-            return Result(bytes: data, warnings: [])
-        } catch {
+        // Create the parent dir only if missing (0700 is applied at creation).
+        // Do NOT chmod an already-existing parent: the namespace path may be
+        // operator-supplied, so rewriting an unrelated directory's permissions is
+        // out of scope. An existing non-private parent just yields an unstable id
+        // via readNamespace rather than a silent perms change on the user's dir.
+        try? fileManager.createDirectory(
+            at: parent,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
             return Result(bytes: nil, warnings: [.candidateIDUnstable])
         }
+        let data = Data(bytes)
+        // Atomic exclusive create (O_EXCL): if a concurrent first-run provisioner
+        // wins the race, read its salt instead of overwriting, so every command
+        // converges on a single identity rather than diverging.
+        let fd = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return open(path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+        }
+        if fd < 0 {
+            return errno == EEXIST
+                ? readNamespace(at: url)
+                : Result(bytes: nil, warnings: [.candidateIDUnstable])
+        }
+        defer { close(fd) }
+        _ = fchmod(fd, 0o600)
+        let written = data.withUnsafeBytes { raw -> Int in
+            guard let base = raw.baseAddress else { return -1 }
+            return write(fd, base, raw.count)
+        }
+        guard written == data.count else {
+            return Result(bytes: nil, warnings: [.candidateIDUnstable])
+        }
+        return Result(bytes: data, warnings: [])
     }
 
     private func namespaceDirectoryPermissionsArePrivate(_ url: URL) -> Bool {
