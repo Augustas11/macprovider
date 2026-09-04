@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.2 (2026-07-19, fragment referral capability)
+**Version:** 1.9.4 (2026-09-04, BYOM slice-1 rework: earning-verdict-first human output + `models switch` / `models adopt-recommendation` in the §6.14a oracle)
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -14,6 +14,15 @@ handshake starts. Backwards-compatible: a v1.3.1 binary with no
 behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
+
+**Change log v1.9.3 (2026-08-28, BYOM model command taxonomy):** The live
+model-management commands are registered as the compatibility oracle for BYOM
+follow-on work. `models list` and `models browse` retain the
+`model_catalog_json_v1` capability and exact JSON schema strings
+`models_list.v1`, `models_browse.v1`, and `model_catalog_error.v1`; the
+checked-in Malibu manifest tokens remain `models list.v1` and
+`models browse.v1`. New BYOM commands are reserved to SPEC-046/SPEC-047 and
+MUST NOT reuse the legacy browse/list schemas or make browse rows actionable.
 
 **Change log v1.9.2 (2026-07-19, fragment referral capability):** A
 fragment-aware CLI advertises `referral_fragment_links_v1` in addition to the
@@ -3067,6 +3076,89 @@ sizing (via `/api/models/<id>` per-id metadata), multi-model
 at switch time. The catalog target is named here so reviewers of
 future PRs can refer to a stable concept, but the boundary is not
 yet enforced at the package level.
+
+### 6.14a. Model command taxonomy and legacy JSON compatibility oracle (BYOM preflight)
+
+SPEC-001 owns the provider CLI command taxonomy and the legacy Malibu
+model-management compatibility surface. SPEC-046 and SPEC-047 may reserve new
+BYOM behavior, but they MUST NOT silently redefine these live commands,
+capabilities, manifest tokens, or fallback assumptions.
+
+For compatibility with shipped CLI/Malibu model management, the accepted
+compatibility oracle is:
+
+- `specs/design/BUILD_SPEC_953_MALIBU_MODEL_SWITCHING.md` sections
+  BS953-DC001A through BS953-DC001C for the legacy JSON command envelopes.
+- The checked-in Swift CLI wire tests for `models_list.v1`,
+  `models_browse.v1`, `model_catalog_error.v1`, `model_switch_event.v1`, and
+  `model_adoption_event.v1`.
+- The checked-in Malibu capability manifest for `model_catalog_json_v1` and
+  the command-schema tokens `models list.v1`, `models browse.v1`,
+  `model_catalog_error.v1`, `models switch.v1`, and
+  `models adopt-recommendation.v1`.
+- The BYOM contract-lock regression test that asserts the exact strings above
+  remain present before `models discover`, `models evaluate`, `models offer`,
+  or `models admission` ships provider-visible behavior.
+
+The exact v1 taxonomy is:
+
+| Command | Authority | Output / behavior boundary |
+|---|---|---|
+| `models list` | SPEC-001 plus BUILD_SPEC_953 BS953-DC001B | Current MacProvider runtime / installed serving model management. `--json` emits `schema_version: "models_list.v1"` under capability `model_catalog_json_v1`. Rows may carry an `action_model_id` only when the model is a real CLI action target. |
+| `models switch` | SPEC-001 plus BUILD_SPEC_953 BS953-DC001B / BS953-R014 | Launchd-managed switch of the installed serving model with CLI-owned RAM/cooldown preflight. `--json` emits `schema_version: "model_switch_event.v1"` under capability tier `model_ready_switch_v1` (command-schema token `models switch.v1`). A live runtime-mutation command; SPEC-046/047 MUST NOT redefine it or reuse its schema token for BYOM discovery/admission. |
+| `models adopt-recommendation` | SPEC-001 plus BUILD_SPEC_953 BS953-R015 | One-tap adoption of a signed autotune recommendation into a launchd-managed switch transaction. `--json` emits `schema_version: "model_adoption_event.v1"` under capability tier `model_recommendation_apply_switch_v1` (command-schema token `models adopt-recommendation.v1`). A live runtime-mutation command; SPEC-046/047 MUST NOT redefine it or reuse its schema token for BYOM discovery/admission. |
+| `models browse` | SPEC-001 plus BUILD_SPEC_953 BS953-DC001C | Signed MacProvider/HuggingFace MLX catalog browsing and fit annotation. `--json` emits `schema_version: "models_browse.v1"` under capability `model_catalog_json_v1`. Browse rows are advisory and MUST keep `action_model_id: null` and `actionable: false`. |
+| `models discover` | SPEC-046 | Provider-local BYOM inventory across supported adapters. JSON MUST use `schema: "provider_byom_discovery.v1"` and MUST NOT be decoded as `models_browse.v1` or as a signed catalog row. |
+| `models evaluate` | SPEC-046 | Bounded local evaluation for a discovered candidate. JSON MUST use the SPEC-046 evaluation envelope and MUST NOT mutate production serving config or coordinator state. |
+| `models offer --dry-run` | SPEC-047 | Local/coordinator preflight explanation without submitting state. JSON MUST use `schema: "model_admission_offer_dry_run.v1"`. |
+| `models offer` | SPEC-047 | Provider-signed offer submission to the coordinator. Submission authority requires SPEC-047 signing, replay, privacy, and state-machine checks. |
+| `models admission status` | SPEC-047 | Coordinator-backed admission readback. JSON MUST use `schema: "model_admission_status.v1"` and consume, not infer, coordinator admission state. |
+| `models admission withdraw` | SPEC-047 | Provider-initiated withdrawal of a previously offered or admitted candidate. JSON MUST use `schema: "model_admission_withdraw.v1"` and append a SPEC-047 withdrawal event without deleting local artifacts. |
+
+**Earning-verdict-first human output (BYOM provider surface).** For the
+BYOM commands `models discover`, `models evaluate`, `models offer` (including
+`--dry-run`), and `models admission status`, the provider-facing human
+(non-`--json`) rendering of each candidate MUST lead with exactly one plain
+earning-verdict line, deterministically mapped from the
+`provider_guidance.earning_path_class` of that candidate, before any
+machine-state, capability, or price detail. The `provider_guidance` object
+shape and its closed `earning_path_class` enum are defined by SPEC-046-R003 and
+carried through the SPEC-047-R002 offer/status envelopes; `models discover` and
+`models evaluate` MUST render the verdict from that same `earning_path_class`
+(for a purely local candidate that is `local_inventory_only`) and MUST NOT defer
+the verdict line until admission or dry-run logic exists:
+
+- `settlement_capable` -> **"Earning now"**.
+- `not_earning_yet_catalog_or_receipt_path_exists` -> **"Not earning yet — "**
+  followed by the single concrete next action from
+  `provider_guidance.next_action`.
+- `no_earning_path_in_v0_1` -> **"Can't earn in this release"**.
+- `local_inventory_only` -> **"Local only — not offered to the network"**.
+
+The verdict line is a v0.1 slice-1 contract requirement, not a later Malibu
+surface concern; the 13 machine admission states remain in `--json` unchanged.
+Provider-facing human output MUST NOT imply earning from a candidate whose
+`earning_path_class` is `no_earning_path_in_v0_1` or `local_inventory_only`,
+consistent with SPEC-047-R004. Malibu and the CLI human surface MUST source the
+verdict from `earning_path_class`; they MUST NOT re-derive an earning claim from
+runtime-reported model names, provider-proposed prices, or admission state alone.
+
+Malibu MUST continue to treat absence of `model_catalog_json_v1`, malformed
+legacy envelopes, missing command-schema manifest tokens, or stale local-status
+capabilities as a fallback condition for the legacy static/current-model UI.
+Malibu MUST NOT inspect local runtime files, model caches, or BYOM adapter
+endpoints directly to bridge a missing CLI capability.
+
+New provider-visible model-command PRs MUST include tests proving that:
+
+- `models list` and `models browse` keep their existing JSON schema values,
+  manifest tokens, and non-actionability/actionability boundaries.
+- Browse/catalog rows cannot be confused with SPEC-046 BYOM candidates.
+- `provider_byom_discovery.v1`, `model_admission_offer_dry_run.v1`,
+  `model_admission_status.v1`, and `model_admission_withdraw.v1` remain
+  separate schema values owned by their respective specs.
+- Old Malibu/current-model fallback behavior remains available when capability
+  negotiation does not prove the exact required tier.
 
 ### 6.15. Additive coordinator-wire surface reconciled in v1.7 and extended in v1.8
 
