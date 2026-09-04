@@ -1278,6 +1278,26 @@ func TestRelayRequestBufferCapReleasesDeliveredChunks(t *testing.T) {
 	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
 		t.Fatalf("read inference_request: %v", err)
 	}
+	waitForBufferedBytes := func(want int64) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for {
+			active, ok := session.activeFor("req-cap-release")
+			if !ok {
+				t.Fatalf("active request retired before buffer counter reached %d", want)
+			}
+			active.bufferMu.Lock()
+			got := active.bufferedBytes
+			active.bufferMu.Unlock()
+			if got == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("bufferedBytes=%d, want %d", got, want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
 
 	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-cap-release", Seq: 0, Data: "1234"}))
 	select {
@@ -1290,6 +1310,7 @@ func TestRelayRequestBufferCapReleasesDeliveredChunks(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first chunk timeout")
 	}
+	waitForBufferedBytes(0)
 
 	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-cap-release", Seq: 1, Data: "abcd"}))
 	select {

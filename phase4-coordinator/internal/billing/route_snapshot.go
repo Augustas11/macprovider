@@ -36,33 +36,39 @@ var (
 )
 
 type RouteSnapshot struct {
-	AccountScope                       string  `json:"account_scope"`
-	RequestID                          string  `json:"request_id"`
-	AttemptN                           int64   `json:"attempt_n"`
-	ProviderID                         string  `json:"provider_id"`
-	ProviderSessionID                  *string `json:"provider_session_id"`
-	ProviderGenerationID               *string `json:"provider_generation_id"`
-	PaidEntrypoint                     string  `json:"paid_entrypoint"`
-	ProviderReceiptKeyID               string  `json:"provider_receipt_key_id"`
-	ProviderReceiptKeySource           string  `json:"provider_receipt_key_source"`
-	ModelID                            string  `json:"model_id"`
-	ProviderReportedModelHash          string  `json:"provider_reported_model_hash"`
-	ProviderReportedModelHashAlgorithm string  `json:"provider_reported_model_hash_algorithm"`
-	ExpectedCatalogModelHash           string  `json:"expected_catalog_model_hash"`
-	ExpectedCatalogModelHashAlgorithm  string  `json:"expected_catalog_model_hash_algorithm"`
-	CatalogID                          string  `json:"catalog_id"`
-	CatalogBodyDigest                  string  `json:"catalog_body_digest"`
-	CatalogSignatureKeyID              string  `json:"catalog_signature_key_id"`
-	CatalogSignaturePubkeyFingerprint  string  `json:"catalog_signature_pubkey_fingerprint"`
-	CatalogExpiresAtUnixMS             int64   `json:"catalog_expires_at_unix_ms"`
-	Spec008HashStatus                  string  `json:"spec008_hash_status"`
-	RouteSnapshotPolicyVersion         string  `json:"route_snapshot_policy_version"`
-	RouteSnapshotMode                  string  `json:"route_snapshot_mode"`
-	RouteDecisionTSUnixMS              int64   `json:"route_decision_ts_unix_ms"`
-	RequestStartTSUnixMS               int64   `json:"request_start_ts_unix_ms"`
-	PendingDeadlineSeconds             int64   `json:"pending_deadline_seconds"`
-	PromptHashBasis                    string  `json:"prompt_hash_basis"`
-	PromptHash                         string  `json:"prompt_hash"`
+	AccountScope                         string  `json:"account_scope"`
+	RequestID                            string  `json:"request_id"`
+	AttemptN                             int64   `json:"attempt_n"`
+	ProviderID                           string  `json:"provider_id"`
+	ProviderSessionID                    *string `json:"provider_session_id"`
+	ProviderGenerationID                 *string `json:"provider_generation_id"`
+	PaidEntrypoint                       string  `json:"paid_entrypoint"`
+	ProviderReceiptKeyID                 string  `json:"provider_receipt_key_id"`
+	ProviderReceiptKeySource             string  `json:"provider_receipt_key_source"`
+	ModelID                              string  `json:"model_id"`
+	ProviderReportedModelHash            string  `json:"provider_reported_model_hash"`
+	ProviderReportedModelHashAlgorithm   string  `json:"provider_reported_model_hash_algorithm"`
+	ExpectedCatalogModelHash             string  `json:"expected_catalog_model_hash"`
+	ExpectedCatalogModelHashAlgorithm    string  `json:"expected_catalog_model_hash_algorithm"`
+	CatalogID                            string  `json:"catalog_id"`
+	CatalogBodyDigest                    string  `json:"catalog_body_digest"`
+	CatalogSignatureKeyID                string  `json:"catalog_signature_key_id"`
+	CatalogSignaturePubkeyFingerprint    string  `json:"catalog_signature_pubkey_fingerprint"`
+	CatalogExpiresAtUnixMS               int64   `json:"catalog_expires_at_unix_ms"`
+	Spec008HashStatus                    string  `json:"spec008_hash_status"`
+	RouteSnapshotPolicyVersion           string  `json:"route_snapshot_policy_version"`
+	RouteSnapshotMode                    string  `json:"route_snapshot_mode"`
+	RouteDecisionTSUnixMS                int64   `json:"route_decision_ts_unix_ms"`
+	RequestStartTSUnixMS                 int64   `json:"request_start_ts_unix_ms"`
+	PendingDeadlineSeconds               int64   `json:"pending_deadline_seconds"`
+	PromptHashBasis                      string  `json:"prompt_hash_basis"`
+	PromptHash                           string  `json:"prompt_hash"`
+	ModelAdmissionCandidateID            string  `json:"model_admission_candidate_id,omitempty"`
+	ModelAdmissionCoordinatorEventID     string  `json:"model_admission_coordinator_event_id,omitempty"`
+	ModelAdmissionServedModelRef         string  `json:"model_admission_served_model_ref,omitempty"`
+	ModelAdmissionCatalogModelKey        string  `json:"model_admission_catalog_model_key,omitempty"`
+	ModelAdmissionDiscoveryDigestSHA256  string  `json:"model_admission_discovery_digest_sha256,omitempty"`
+	ModelAdmissionEvaluationDigestSHA256 string  `json:"model_admission_evaluation_digest_sha256,omitempty"`
 	// PoolID is the SPEC-042 Trusted Pool that served this request ("" for
 	// global). It binds into the canonical route-snapshot digest / settlement
 	// context (SPEC-042 R006) but ONLY when non-empty, so poolless snapshots
@@ -120,6 +126,14 @@ func (r RouteSnapshot) Value() map[string]any {
 	// and keeps a byte-identical digest to pre-SPEC-042.
 	if r.PoolID != "" {
 		value["pool_id"] = r.PoolID
+	}
+	if r.ModelAdmissionCandidateID != "" {
+		value["model_admission_candidate_id"] = r.ModelAdmissionCandidateID
+		value["model_admission_coordinator_event_id"] = r.ModelAdmissionCoordinatorEventID
+		value["model_admission_served_model_ref"] = r.ModelAdmissionServedModelRef
+		value["model_admission_catalog_model_key"] = r.ModelAdmissionCatalogModelKey
+		value["model_admission_discovery_digest_sha256"] = r.ModelAdmissionDiscoveryDigestSHA256
+		value["model_admission_evaluation_digest_sha256"] = r.ModelAdmissionEvaluationDigestSHA256
 	}
 	return value
 }
@@ -199,6 +213,28 @@ func (r RouteSnapshot) Validate() error {
 		}
 		if !computeIntegrityDigestPattern.MatchString(r.ComputeIntegrityHardwareDigest) {
 			return fmt.Errorf("compute integrity hardware runtime class digest invalid")
+		}
+	}
+	if r.ModelAdmissionCandidateID != "" {
+		for field, value := range map[string]string{
+			"model_admission_coordinator_event_id":     r.ModelAdmissionCoordinatorEventID,
+			"model_admission_served_model_ref":         r.ModelAdmissionServedModelRef,
+			"model_admission_catalog_model_key":        r.ModelAdmissionCatalogModelKey,
+			"model_admission_discovery_digest_sha256":  r.ModelAdmissionDiscoveryDigestSHA256,
+			"model_admission_evaluation_digest_sha256": r.ModelAdmissionEvaluationDigestSHA256,
+		} {
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("route snapshot missing %s", field)
+			}
+		}
+		for field, value := range map[string]string{
+			"model_admission_coordinator_event_id":     r.ModelAdmissionCoordinatorEventID,
+			"model_admission_discovery_digest_sha256":  r.ModelAdmissionDiscoveryDigestSHA256,
+			"model_admission_evaluation_digest_sha256": r.ModelAdmissionEvaluationDigestSHA256,
+		} {
+			if !hex64Pattern.MatchString(value) {
+				return fmt.Errorf("route snapshot %s must be 64 lowercase hex chars", field)
+			}
 		}
 	}
 	return nil

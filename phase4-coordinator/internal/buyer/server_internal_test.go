@@ -687,6 +687,7 @@ func TestRetryableByCodeClassification(t *testing.T) {
 		"session_ended", "tier2_hash_verified_required", "tier2_encrypted_leg_required",
 		"tier2_attestation_required", "tier2_hard_pin_predicate_failed",
 		"tier2_hash_mismatch", "tier2_aead_decrypt_failed", "tier2_output_encoding_invalid",
+		"byom_non_settlement_unavailable",
 		// Round-3 sweep additions: reviewed and confirmed permanent.
 		"autotune_feed_not_found", "invalid_tools",
 	}
@@ -740,6 +741,7 @@ var coordinatorEmittedErrorCodes = []string{
 	"tool_call_id_not_found", "tool_call_result_out_of_order", "tool_result_too_large",
 	"tool_results_aggregate_too_large", "unauthorized", "unsupported_content_shape",
 	"unsupported_modelID_for_multi_turn",
+	"byom_non_settlement_unavailable",
 	// SPEC-042 R005/R010 tenant isolation.
 	"pool_no_eligible_member", "pool_state_stale", "pool_unavailable", "pool_binary_too_old",
 	"pool_policy_stale", "pool_model_not_allowed", "pool_attestation_unsatisfied", "pool_encrypted_leg_unsatisfied",

@@ -113,6 +113,18 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertEqual(rows.map { $0["action_model_id"] as? String }, ["Org/Model", "Other/Model"])
     }
 
+    func testModelsCatalogEconomicsRequiresJSON() async throws {
+        let command = try ModelsCatalogEconomicsCommand.parse([
+            "--skip-coordinator-status",
+            "--skip-ollama",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("models catalog-economics is JSON-only"))
+    }
+
     func testModelsListConnectedPreservesSupportedModelWithoutRuntimeAuthority() async throws {
         let socketPath = try makeSocketPath()
         let server = ControlSocketServer(

@@ -1313,7 +1313,8 @@ var gatewayRetryableByCode = map[string]bool{
 var gatewayPermanentCodes = map[string]bool{
 	"method_not_allowed": true, "invalid_window": true, "invalid_kill_switch": true,
 	"invalid_kill_switch_version": true, "invalid_capacity_signal": true,
-	"invalid_operator_token": true, "invalid_demo_token": true, "missing_bearer_token": true,
+	"byom_non_settlement_unavailable": true,
+	"invalid_operator_token":          true, "invalid_demo_token": true, "missing_bearer_token": true,
 	"invalid_api_key": true, "api_key_revoked": true, "account_blocked": true,
 	"not_found": true, "session_id_untyped": true, "query_timeout": true,
 	"oauth_callback_not_allowed": true, "oauth_action_unknown": true,

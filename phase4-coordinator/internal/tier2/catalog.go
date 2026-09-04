@@ -58,7 +58,9 @@ type ParsedCatalog struct {
 
 type RouteSnapshotMaterial struct {
 	CatalogID                         string
+	CatalogModelKey                   string
 	ExpectedModelHash                 string
+	ExpectedModelHashAlgorithm        string
 	CatalogBodyDigest                 string
 	CatalogSignatureKeyID             string
 	CatalogSignaturePubkeyFingerprint string
@@ -456,7 +458,9 @@ func (c *Catalog) RouteSnapshotMaterial(modelID, reportedHash string) (RouteSnap
 	}
 	return RouteSnapshotMaterial{
 		CatalogID:                         parsed.CatalogID,
+		CatalogModelKey:                   catalogModelKey(model.ModelID),
 		ExpectedModelHash:                 model.SHA256,
+		ExpectedModelHashAlgorithm:        modelidentity.SnapshotManifestV1,
 		CatalogBodyDigest:                 parsed.CatalogBodyDigest,
 		CatalogSignatureKeyID:             parsed.CatalogSignatureKeyID,
 		CatalogSignaturePubkeyFingerprint: parsed.CatalogSignaturePubkeyFingerprint,

@@ -27,6 +27,7 @@ struct MalibuModelCapabilityManifest: Decodable, Sendable {
 
     static let schemaVersion = "malibu_model_capabilities.v1"
     static let catalogJSON = "model_catalog_json_v1"
+    static let catalogEconomics = "model_catalog_economics_v1"
     static let readySwitch = "model_ready_switch_v1"
     static let recommendationCheck = "model_recommendation_check_v1"
     static let recommendationAdoption = "model_recommendation_apply_switch_v1"

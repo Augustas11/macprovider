@@ -202,6 +202,7 @@ final class ModelManagementTests: XCTestCase {
     func testCapabilityManifestRequiresRecommendationAndAdoptionContracts() throws {
         let manifest = MalibuModelCapabilityManifest.checkedIn
         for capability in [
+            MalibuModelCapabilityManifest.catalogEconomics,
             MalibuModelCapabilityManifest.recommendationCheck,
             MalibuModelCapabilityManifest.recommendationAdoption,
         ] {

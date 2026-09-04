@@ -833,8 +833,14 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 		r.ProviderGenerationID = &providerGeneration.String
 	}
 	var recovered struct {
-		ProviderReported string `json:"provider_reported_model_hash_algorithm"`
-		ExpectedCatalog  string `json:"expected_catalog_model_hash_algorithm"`
+		ProviderReported                     string `json:"provider_reported_model_hash_algorithm"`
+		ExpectedCatalog                      string `json:"expected_catalog_model_hash_algorithm"`
+		ModelAdmissionCandidateID            string `json:"model_admission_candidate_id"`
+		ModelAdmissionCoordinatorEventID     string `json:"model_admission_coordinator_event_id"`
+		ModelAdmissionServedModelRef         string `json:"model_admission_served_model_ref"`
+		ModelAdmissionCatalogModelKey        string `json:"model_admission_catalog_model_key"`
+		ModelAdmissionDiscoveryDigestSHA256  string `json:"model_admission_discovery_digest_sha256"`
+		ModelAdmissionEvaluationDigestSHA256 string `json:"model_admission_evaluation_digest_sha256"`
 		// SPEC-042 R006: pool_id is carried in route_snapshot_json (not a
 		// column), so it MUST be recovered here before the digest recompute
 		// below, or a pool snapshot's recompute-digest would omit pool_id and
@@ -846,6 +852,12 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	}
 	r.ProviderReportedModelHashAlgorithm = recovered.ProviderReported
 	r.ExpectedCatalogModelHashAlgorithm = recovered.ExpectedCatalog
+	r.ModelAdmissionCandidateID = recovered.ModelAdmissionCandidateID
+	r.ModelAdmissionCoordinatorEventID = recovered.ModelAdmissionCoordinatorEventID
+	r.ModelAdmissionServedModelRef = recovered.ModelAdmissionServedModelRef
+	r.ModelAdmissionCatalogModelKey = recovered.ModelAdmissionCatalogModelKey
+	r.ModelAdmissionDiscoveryDigestSHA256 = recovered.ModelAdmissionDiscoveryDigestSHA256
+	r.ModelAdmissionEvaluationDigestSHA256 = recovered.ModelAdmissionEvaluationDigestSHA256
 	r.PoolID = recovered.PoolID
 	r.ComputeIntegrityCaptureRequired = computeIntegrityCaptureRequired == 1
 	r.ComputeIntegritySamplingCovered = computeIntegritySamplingCovered == 1
