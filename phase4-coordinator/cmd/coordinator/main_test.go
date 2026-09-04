@@ -210,8 +210,9 @@ func TestRetentionPrunersDefaultToStartupDelete(t *testing.T) {
 	assertImmediatePrune(t, auditPruner.called, "audit_log")
 }
 
-func TestMoneySQLiteWALCheckpointerWaitsForIdle(t *testing.T) {
-	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(filepath.Join(t.TempDir(), "checkpoint.db")))
+func TestMoneySQLiteWALCheckpointerRunsWhileBusy(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "checkpoint.db")
+	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(dbPath))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -225,18 +226,22 @@ func TestMoneySQLiteWALCheckpointerWaitsForIdle(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	observer := &walObserverStub{called: make(chan string, 3)}
-	startMoneySQLiteWALCheckpointerWithConfig(ctx, db, observer, zerolog.Nop(), fixedIdleTracker{idleFor: 0}, 10*time.Millisecond, time.Second)
+	observer := &walObserverStub{called: make(chan string, 16), durations: make(chan struct{}, 4)}
+	startMoneySQLiteWALCheckpointerWithConfig(ctx, db, observer, zerolog.Nop(), fixedIdleTracker{idleFor: 0}, moneySQLiteWALCheckpointerConfig{
+		PollInterval:   10 * time.Millisecond,
+		IdleInterval:   time.Hour,
+		MinTimeout:     time.Second,
+		MaxTimeout:     time.Second,
+		BytesPerSecond: moneySQLiteCheckpointBytesPerSecond,
+		DBPath:         dbPath,
+	})
 
-	select {
-	case pageClass := <-observer.called:
-		t.Fatalf("checkpoint ran while buyer activity was not idle: %s", pageClass)
-	case <-time.After(50 * time.Millisecond):
-	}
+	assertWALCheckpointObservations(t, observer)
 }
 
 func TestMoneySQLiteWALCheckpointerRunsAfterIdle(t *testing.T) {
-	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(filepath.Join(t.TempDir(), "checkpoint.db")))
+	dbPath := filepath.Join(t.TempDir(), "checkpoint.db")
+	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(dbPath))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -250,9 +255,76 @@ func TestMoneySQLiteWALCheckpointerRunsAfterIdle(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	observer := &walObserverStub{called: make(chan string, 3), durations: make(chan struct{}, 1)}
-	startMoneySQLiteWALCheckpointerWithConfig(ctx, db, observer, zerolog.Nop(), fixedIdleTracker{idleFor: time.Hour}, 10*time.Millisecond, time.Second)
+	observer := &walObserverStub{called: make(chan string, 16), durations: make(chan struct{}, 4)}
+	startMoneySQLiteWALCheckpointerWithConfig(ctx, db, observer, zerolog.Nop(), fixedIdleTracker{idleFor: time.Hour}, moneySQLiteWALCheckpointerConfig{
+		PollInterval:   10 * time.Millisecond,
+		IdleInterval:   10 * time.Millisecond,
+		MinTimeout:     time.Second,
+		MaxTimeout:     time.Second,
+		BytesPerSecond: moneySQLiteCheckpointBytesPerSecond,
+		DBPath:         dbPath,
+	})
 
+	assertWALCheckpointObservations(t, observer)
+}
+
+func TestMoneySQLiteCheckpointTimeoutScalesWithWALSize(t *testing.T) {
+	cfg := defaultMoneySQLiteWALCheckpointerConfig("")
+	if got := moneySQLiteCheckpointTimeout(0, cfg); got != cfg.MinTimeout {
+		t.Fatalf("0-byte timeout=%s want min %s", got, cfg.MinTimeout)
+	}
+	if got := moneySQLiteCheckpointTimeout(1<<62, cfg); got != cfg.MaxTimeout {
+		t.Fatalf("huge WAL timeout=%s want max %s", got, cfg.MaxTimeout)
+	}
+	midBytes := int64(1 << 30) // 1 GiB at 32 MiB/s = 32s
+	got := moneySQLiteCheckpointTimeout(midBytes, cfg)
+	if got <= cfg.MinTimeout || got >= cfg.MaxTimeout {
+		t.Fatalf("1GiB timeout=%s want between min=%s and max=%s", got, cfg.MinTimeout, cfg.MaxTimeout)
+	}
+	wantMid := time.Duration(midBytes) * time.Second / time.Duration(cfg.BytesPerSecond)
+	if got != wantMid {
+		t.Fatalf("1GiB timeout=%s want %s", got, wantMid)
+	}
+}
+
+func TestMoneySQLiteCheckpointDecision(t *testing.T) {
+	cfg := defaultMoneySQLiteWALCheckpointerConfig("")
+	mode, timeout := moneySQLiteCheckpointDecision(time.Hour, moneySQLiteCheckpointIdleInterval, 0, cfg)
+	if mode != sqliteutil.WALCheckpointTruncate {
+		t.Fatalf("idle mode=%s want TRUNCATE", mode)
+	}
+	if timeout != cfg.MinTimeout {
+		t.Fatalf("idle 0-byte timeout=%s want min %s", timeout, cfg.MinTimeout)
+	}
+	mode, timeout = moneySQLiteCheckpointDecision(0, moneySQLiteCheckpointIdleInterval, 0, cfg)
+	if mode != sqliteutil.WALCheckpointPassive {
+		t.Fatalf("busy mode=%s want PASSIVE", mode)
+	}
+	if timeout != cfg.MinTimeout {
+		t.Fatalf("busy 0-byte timeout=%s want min %s", timeout, cfg.MinTimeout)
+	}
+}
+
+func TestMoneySQLiteShouldFollowUpTruncate(t *testing.T) {
+	if !moneySQLiteShouldFollowUpTruncate(sqliteutil.WALCheckpointPassive, 0, time.Second) {
+		t.Fatal("PASSIVE busy=0 with remaining budget should follow up TRUNCATE")
+	}
+	if moneySQLiteShouldFollowUpTruncate(sqliteutil.WALCheckpointPassive, 1, time.Second) {
+		t.Fatal("PASSIVE busy!=0 must not follow up TRUNCATE")
+	}
+	if moneySQLiteShouldFollowUpTruncate(sqliteutil.WALCheckpointPassive, 0, 0) {
+		t.Fatal("PASSIVE with no remaining budget must not follow up TRUNCATE")
+	}
+	if moneySQLiteShouldFollowUpTruncate(sqliteutil.WALCheckpointTruncate, 0, time.Second) {
+		t.Fatal("idle TRUNCATE must not follow up with another TRUNCATE")
+	}
+	if moneySQLiteShouldFollowUpTruncate(sqliteutil.WALCheckpointMode("RESTART"), 0, time.Second) {
+		t.Fatal("unsupported RESTART must not follow up")
+	}
+}
+
+func assertWALCheckpointObservations(t *testing.T, observer *walObserverStub) {
+	t.Helper()
 	seen := map[string]bool{}
 	deadline := time.After(time.Second)
 	for len(seen) < 3 {
@@ -382,7 +454,10 @@ type walObserverStub struct {
 
 func (s *walObserverStub) ObserveSQLiteWALCheckpoint(component, pageClass, outcome string, _ int64) {
 	if component == "wal_checkpoint" && outcome == "success" {
-		s.called <- pageClass
+		select {
+		case s.called <- pageClass:
+		default:
+		}
 	}
 }
 

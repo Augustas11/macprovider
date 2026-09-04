@@ -363,7 +363,7 @@ func main() {
 	shutdownCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
 	moneySQLiteActivity := newMoneySQLiteActivity(time.Now())
-	startMoneySQLiteWALCheckpointer(shutdownCtx, moneyCheckpointDB, metricsHandle, logger, moneySQLiteActivity)
+	startMoneySQLiteWALCheckpointer(shutdownCtx, moneyCheckpointDB, metricsHandle, logger, moneySQLiteActivity, cfg.Storage.DBPath)
 	// SPEC-017 v0.1.8 Step 2 — rollup runner. Reads OLTP source
 	// tables via `statsPools.Rollup`, writes the seven
 	// stats_* + stats_components_health + stats_rewards_populated
@@ -1474,9 +1474,32 @@ type settlementReceiptAuditOutboxObserver interface {
 }
 
 const (
-	moneySQLiteCheckpointIdleInterval = 30 * time.Second
-	moneySQLiteCheckpointTimeout      = time.Second
+	moneySQLiteCheckpointPollInterval   = 30 * time.Second
+	moneySQLiteCheckpointIdleInterval   = 30 * time.Second
+	moneySQLiteCheckpointMinTimeout     = 15 * time.Second
+	moneySQLiteCheckpointMaxTimeout     = 5 * time.Minute
+	moneySQLiteCheckpointBytesPerSecond = 32 << 20
 )
+
+type moneySQLiteWALCheckpointerConfig struct {
+	PollInterval   time.Duration
+	IdleInterval   time.Duration
+	MinTimeout     time.Duration
+	MaxTimeout     time.Duration
+	BytesPerSecond int64
+	DBPath         string
+}
+
+func defaultMoneySQLiteWALCheckpointerConfig(dbPath string) moneySQLiteWALCheckpointerConfig {
+	return moneySQLiteWALCheckpointerConfig{
+		PollInterval:   moneySQLiteCheckpointPollInterval,
+		IdleInterval:   moneySQLiteCheckpointIdleInterval,
+		MinTimeout:     moneySQLiteCheckpointMinTimeout,
+		MaxTimeout:     moneySQLiteCheckpointMaxTimeout,
+		BytesPerSecond: moneySQLiteCheckpointBytesPerSecond,
+		DBPath:         dbPath,
+	}
+}
 
 type moneySQLiteActivity struct {
 	lastUnixNano atomic.Int64
@@ -1520,39 +1543,109 @@ type moneySQLiteIdleTracker interface {
 	IdleFor(time.Time) time.Duration
 }
 
-func startMoneySQLiteWALCheckpointer(ctx context.Context, db *sql.DB, observer sqliteutil.WALObserver, logger zerolog.Logger, idle moneySQLiteIdleTracker) {
-	startMoneySQLiteWALCheckpointerWithConfig(ctx, db, observer, logger, idle, moneySQLiteCheckpointIdleInterval, moneySQLiteCheckpointTimeout)
+func startMoneySQLiteWALCheckpointer(ctx context.Context, db *sql.DB, observer sqliteutil.WALObserver, logger zerolog.Logger, idle moneySQLiteIdleTracker, dbPath string) {
+	startMoneySQLiteWALCheckpointerWithConfig(ctx, db, observer, logger, idle, defaultMoneySQLiteWALCheckpointerConfig(dbPath))
 }
 
-func startMoneySQLiteWALCheckpointerWithConfig(ctx context.Context, db *sql.DB, observer sqliteutil.WALObserver, logger zerolog.Logger, idle moneySQLiteIdleTracker, idleInterval, checkpointTimeout time.Duration) {
+func startMoneySQLiteWALCheckpointerWithConfig(ctx context.Context, db *sql.DB, observer sqliteutil.WALObserver, logger zerolog.Logger, idle moneySQLiteIdleTracker, cfg moneySQLiteWALCheckpointerConfig) {
 	if db == nil {
 		return
 	}
-	if idleInterval <= 0 || checkpointTimeout <= 0 {
+	if cfg.PollInterval <= 0 || cfg.IdleInterval <= 0 || cfg.MinTimeout <= 0 || cfg.MaxTimeout <= 0 || cfg.BytesPerSecond <= 0 {
 		return
 	}
-	run := func() {
-		checkpointCtx, cancel := context.WithTimeout(ctx, checkpointTimeout)
-		defer cancel()
-		if err := sqliteutil.RunWALCheckpoint(checkpointCtx, db, "wal_checkpoint", observer); err != nil {
-			logger.Warn().Err(err).Msg("money sqlite WAL checkpoint failed")
-		}
-	}
 	go func() {
-		ticker := time.NewTicker(idleInterval)
+		ticker := time.NewTicker(cfg.PollInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if idle != nil && idle.IdleFor(time.Now()) < idleInterval {
-					continue
-				}
-				run()
+				runMoneySQLiteWALCheckpoint(ctx, db, observer, logger, idle, cfg)
 			}
 		}
 	}()
+}
+
+func moneySQLiteCheckpointTimeout(walBytes int64, cfg moneySQLiteWALCheckpointerConfig) time.Duration {
+	minTimeout := cfg.MinTimeout
+	maxTimeout := cfg.MaxTimeout
+	if maxTimeout < minTimeout {
+		maxTimeout = minTimeout
+	}
+	if walBytes <= 0 || cfg.BytesPerSecond <= 0 {
+		return minTimeout
+	}
+	maxSeconds := int64(maxTimeout / time.Second)
+	if maxSeconds <= 0 {
+		return minTimeout
+	}
+	if walBytes/cfg.BytesPerSecond >= maxSeconds {
+		return maxTimeout
+	}
+	timeout := time.Duration(walBytes/cfg.BytesPerSecond)*time.Second +
+		time.Duration(walBytes%cfg.BytesPerSecond)*time.Second/time.Duration(cfg.BytesPerSecond)
+	if timeout < minTimeout {
+		return minTimeout
+	}
+	if timeout > maxTimeout {
+		return maxTimeout
+	}
+	return timeout
+}
+
+func moneySQLiteCheckpointDecision(idle, idleInterval time.Duration, walBytes int64, cfg moneySQLiteWALCheckpointerConfig) (sqliteutil.WALCheckpointMode, time.Duration) {
+	mode := sqliteutil.WALCheckpointPassive
+	if idleInterval > 0 && idle >= idleInterval {
+		mode = sqliteutil.WALCheckpointTruncate
+	}
+	return mode, moneySQLiteCheckpointTimeout(walBytes, cfg)
+}
+
+// moneySQLiteShouldFollowUpTruncate is the #1374 live-soak shrink path:
+// PASSIVE copies frames without waiting; busy==0 means that copy finished.
+// A timeout-bounded TRUNCATE then shrinks the sidecar file. RESTART is never
+// used. The remaining deadline is the only wait bound if a reader still holds
+// the WAL. Idle tracking stays the existing buyer-HTTP activity signal from
+// #1211; expanding it is out of this slice.
+func moneySQLiteShouldFollowUpTruncate(mode sqliteutil.WALCheckpointMode, busy int64, remaining time.Duration) bool {
+	return mode == sqliteutil.WALCheckpointPassive && busy == 0 && remaining > 0
+}
+
+func runMoneySQLiteWALCheckpoint(ctx context.Context, db *sql.DB, observer sqliteutil.WALObserver, logger zerolog.Logger, idle moneySQLiteIdleTracker, cfg moneySQLiteWALCheckpointerConfig) {
+	idleFor := time.Duration(0)
+	if idle != nil {
+		idleFor = idle.IdleFor(time.Now())
+	}
+	walBytes := sqliteutil.WALFileSize(cfg.DBPath)
+	mode, timeout := moneySQLiteCheckpointDecision(idleFor, cfg.IdleInterval, walBytes, cfg)
+	if timeout <= 0 {
+		return
+	}
+	if err := sqliteutil.SetBusyTimeout(ctx, db, timeout); err != nil {
+		logger.Warn().Err(err).Int64("wal_bytes", walBytes).Msg("money sqlite WAL busy_timeout failed")
+	}
+	deadline := time.Now().Add(timeout)
+	checkpointCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	result, err := sqliteutil.RunWALCheckpointMode(checkpointCtx, db, "wal_checkpoint", observer, mode)
+	if err != nil {
+		logger.Warn().Err(err).Str("mode", string(mode)).Int64("wal_bytes", walBytes).Msg("money sqlite WAL checkpoint failed")
+		return
+	}
+	remaining := time.Until(deadline)
+	if !moneySQLiteShouldFollowUpTruncate(mode, result.Busy, remaining) {
+		return
+	}
+	if err := sqliteutil.SetBusyTimeout(ctx, db, remaining); err != nil {
+		logger.Warn().Err(err).Int64("wal_bytes", walBytes).Msg("money sqlite WAL busy_timeout failed")
+	}
+	truncateCtx, truncateCancel := context.WithTimeout(ctx, remaining)
+	defer truncateCancel()
+	if _, err := sqliteutil.RunWALCheckpointMode(truncateCtx, db, "wal_checkpoint", observer, sqliteutil.WALCheckpointTruncate); err != nil {
+		logger.Warn().Err(err).Str("mode", string(sqliteutil.WALCheckpointTruncate)).Int64("wal_bytes", walBytes).Msg("money sqlite WAL checkpoint failed")
+	}
 }
 
 func startSettlementStartupScan(ctx context.Context, scanner settlementStartupScanner, settlement config.SettlementConfig, now time.Time, logger zerolog.Logger) {
