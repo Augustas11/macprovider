@@ -77,6 +77,785 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(MalibuModelsListDocument.self, from: Data(json.utf8)))
     }
 
+    func testCatalogEconomicsValidationAcceptsTrustedCoordinatorRows() throws {
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [trustedEconomicsRowJSON()]).utf8)
+        )
+
+        XCTAssertNoThrow(try document.validated(now: ModelTestTimestamp.date))
+        let mapped = try XCTUnwrap(MalibuModelRow(
+            economics: document.rows[0],
+            currentModelID: "other/model",
+            warmSwapAvailable: true
+        ))
+        XCTAssertEqual(mapped.category, .networkCatalog)
+        XCTAssertEqual(mapped.providerCompletionPayoutUSDPerMillionTokens, 0.36)
+        XCTAssertEqual(mapped.demandRank, 7)
+        XCTAssertEqual(mapped.action, .none)
+    }
+
+    func testCatalogEconomicsHidesLocalDefaultBYOMRowsForThisRelease() throws {
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [localOnlyBYOMRowJSON()]).utf8)
+        )
+        let validated = try document.validated(now: ModelTestTimestamp.date)
+
+        XCTAssertNil(MalibuModelRow(
+            economics: validated.rows[0],
+            currentModelID: "other/model",
+            warmSwapAvailable: true
+        ))
+    }
+
+    func testCatalogEconomicsDecodeRejectsUnsupportedEnvelopeKeys() throws {
+        let json = catalogEconomicsJSON(rows: [trustedEconomicsRowJSON()])
+            .replacingOccurrences(of: #""schema":"model_catalog_economics.v1""#, with: #""schema":"model_catalog_economics.v1","provider_secret_path":"/private/tmp/key""#)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(json.utf8)
+        ))
+    }
+
+    func testCatalogEconomicsFailsClosedOnAnyMalformedRow() throws {
+        // A projection containing ANY malformed row must fail the WHOLE decode
+        // (fail-closed / closed-schema), never quarantine the bad row and still
+        // render trusted rates from the rest.
+        let missingNullable = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: #","disabled_reason":null"#, with: "")
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [
+                missingNullable,
+                trustedEconomicsRowJSON(),
+            ]).utf8)
+        ))
+
+        let unknownKey = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: #""model_key":"qwen3-8b""#, with: #""model_key":"qwen3-8b","provider_secret_path":"/private/tmp/key""#)
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [
+                unknownKey,
+                trustedEconomicsRowJSON(),
+            ]).utf8)
+        ))
+    }
+
+    // A row that fails row-level validation is demoted to a non-economics
+    // (blocked) row by rowsForMalibu — no provider payout is shown — rather than
+    // rendering trusted rates. Returns the rendered provider payout for the row
+    // (nil when the row was demoted / shows no economics).
+    private func renderedProviderPayout(forRow rowJSON: String) throws -> Double? {
+        let rows = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [rowJSON]).utf8)
+        )
+        .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        return rows.first?.providerCompletionPayoutUSDPerMillionTokens ?? nil
+    }
+
+    func testCatalogEconomicsRequiresNonEarningDisclosureForNonSettlementTrustedRow() throws {
+        // A catalog_priced (non-settlement) trusted row that OMITS the non-earning
+        // warning is demoted (no rates shown) — the "No provider credit yet"
+        // disclosure must not depend on a possibly-omitted CLI warning.
+        XCTAssertNil(try renderedProviderPayout(forRow: trustedEconomicsRowJSON(warningCodesJSON: "[]")))
+        // With the warning present, the non-settlement row shows economics.
+        XCTAssertNotNil(try renderedProviderPayout(forRow: trustedEconomicsRowJSON()))
+        // A settlement_capable row that CONTRADICTORILY carries the non-settlement
+        // warning is demoted; without it, it shows economics.
+        XCTAssertNil(try renderedProviderPayout(
+            forRow: trustedEconomicsRowJSON(admissionState: "settlement_capable", settlementCapable: true)
+        ))
+        XCTAssertNotNil(try renderedProviderPayout(
+            forRow: trustedEconomicsRowJSON(admissionState: "settlement_capable", settlementCapable: true, warningCodesJSON: "[]")
+        ))
+    }
+
+    func testCatalogEconomicsRejectsActionDescriptorReasonMismatch() throws {
+        // An unavailable action with no reason demotes the row (no economics).
+        let unavailableNoReason = #"{"available":false,"requires_confirmation":false,"transaction_kind":null,"transaction_id":null,"action_timeout_seconds":null,"estimated_bytes":null,"unavailable_reason":null}"#
+        XCTAssertNil(try renderedProviderPayout(forRow: trustedEconomicsRowJSON(switchAction: unavailableNoReason)))
+        // An available action carrying an unavailable reason likewise demotes it.
+        let availableWithReason = #"{"available":true,"requires_confirmation":true,"transaction_kind":"switch_model","transaction_id":"c23c5d4c-3e4f-47ac-b72d-7f8f172747a0","action_timeout_seconds":20,"estimated_bytes":null,"unavailable_reason":"action_unavailable"}"#
+        XCTAssertNil(try renderedProviderPayout(forRow: trustedEconomicsRowJSON(switchAction: availableWithReason)))
+    }
+
+    @MainActor
+    func testCatalogProjectionRejectsStaleReplyFromOlderProcess() async throws {
+        let switchAction = availableActionJSON(kind: "switch_model", timeout: 20)
+        let newer = catalogEconomicsJSON(
+            rows: [trustedEconomicsRowJSON(switchAction: switchAction)],
+            generatedAt: Self.timestamp(offset: -10)
+        )
+        // A late reply from an OLDER CLI process: different process_launch_id and
+        // an earlier generated_at, carrying no rows.
+        let olderProcess = catalogEconomicsJSON(rows: [], generatedAt: Self.timestamp(offset: -120))
+            .replacingOccurrences(
+                of: "c13c5d4c-3e4f-47ac-b72d-7f8f172747a0",
+                with: "a1111111-2222-3333-4444-555555555555"
+            )
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(exitCode: 0, stdout: newer, stderr: ""),
+            ModelCLIResult(exitCode: 0, stdout: olderProcess, stderr: ""),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.staleProcess.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: [
+            MalibuModelCapabilityManifest.catalogEconomics,
+            MalibuModelCapabilityManifest.readySwitch,
+        ])
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        let firstRows = store.rows.map(\.id)
+        XCTAssertFalse(firstRows.isEmpty)
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        // The older-process reply must be rejected; the newer accepted rows stay,
+        // rather than being cleared by the stale empty projection.
+        XCTAssertEqual(store.rows.map(\.id), firstRows)
+    }
+
+    func testCatalogEconomicsRejectsDuplicateJSONKeys() throws {
+        XCTAssertThrowsError(try MalibuStrictJSON.rejectDuplicateKeys(Data(#"{"a":1,"a":2}"#.utf8)))
+        XCTAssertThrowsError(try MalibuStrictJSON.rejectDuplicateKeys(Data(#"{"x":{"k":1,"k":2}}"#.utf8)))
+        XCTAssertNoThrow(try MalibuStrictJSON.rejectDuplicateKeys(Data(#"{"a":1,"b":2}"#.utf8)))
+    }
+
+    func testCatalogEconomicsRowCarriesVerifiedCatalogIdentity() throws {
+        let rows = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [trustedEconomicsRowJSON()]).utf8)
+        )
+        .validated(now: ModelTestTimestamp.date)
+        .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        // The coordinator-verified catalog identity (model_key) is carried
+        // separately from the provider-reported display name.
+        XCTAssertEqual(rows.first?.catalogVerifiedModelKey, "qwen3-8b")
+        XCTAssertEqual(rows.first?.displayID, "mlx-community/Qwen3-8B-4bit")
+    }
+
+    func testSwitchableCatalogPricedRowStillShowsNonEarningDisclosure() throws {
+        // A switchable catalog_priced (non-settlement) row shows rates AND is
+        // actionable, but must ALSO carry the non-earning disclosure — the caveat
+        // cannot be dropped just because the row is .switchModel / not blocked.
+        let switchAction = availableActionJSON(kind: "switch_model", timeout: 20)
+        let switchable = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [trustedEconomicsRowJSON(switchAction: switchAction)]).utf8)
+        )
+        .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        let row = try XCTUnwrap(switchable.first)
+        XCTAssertEqual(row.action, .switchModel)
+        XCTAssertNotNil(row.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertNotNil(row.nonEarningDisclosure)
+
+        // A settlement_capable row shows rates but carries NO non-earning caveat.
+        let settlement = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [
+                trustedEconomicsRowJSON(admissionState: "settlement_capable", settlementCapable: true, warningCodesJSON: "[]")
+            ]).utf8)
+        )
+        .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        XCTAssertNotNil(settlement.first?.providerCompletionPayoutUSDPerMillionTokens)
+        XCTAssertNil(settlement.first?.nonEarningDisclosure)
+    }
+
+    func testCatalogEconomicsDegradesUnsafeActionDescriptor() throws {
+        let unsafeAction = availableActionJSON(kind: "switch_model", timeout: 20, requiresConfirmation: false)
+        let json = trustedEconomicsRowJSON(switchAction: unsafeAction)
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [json]).utf8)
+        )
+
+        let row = try XCTUnwrap(document.validated(now: ModelTestTimestamp.date)
+            .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+            .first)
+        XCTAssertEqual(row.category, .blocked)
+        XCTAssertEqual(row.action, .none)
+        XCTAssertNil(row.providerCompletionPayoutUSDPerMillionTokens)
+    }
+
+    func testCatalogEconomicsDegradesRowsWithStrongerRateSourceThanProjection() throws {
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(
+                rows: [trustedEconomicsRowJSON()],
+                rateCardSource: "static_signed"
+            ).utf8)
+        )
+
+        let row = try XCTUnwrap(document.validated(now: ModelTestTimestamp.date)
+            .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+            .first)
+        XCTAssertEqual(row.category, .blocked)
+        XCTAssertEqual(row.action, .none)
+        XCTAssertNil(row.providerCompletionPayoutUSDPerMillionTokens)
+    }
+
+    func testCatalogEconomicsDegradesTrustedRowsWithBlockingWarningsOrStaleAdmission() throws {
+        let staleAdmission = "2026-08-01T00:00:00Z"
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [
+                trustedEconomicsRowJSON(warningCodesJSON: #"["feed_stale"]"#),
+                trustedEconomicsRowJSON(stateObservedAt: staleAdmission),
+            ]).utf8)
+        )
+
+        let rows = try document.validated(now: ModelTestTimestamp.date)
+            .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertTrue(rows.allSatisfy { $0.category == .blocked })
+        XCTAssertTrue(rows.allSatisfy { $0.action == .none })
+        XCTAssertTrue(rows.allSatisfy { $0.providerCompletionPayoutUSDPerMillionTokens == nil })
+    }
+
+    func testCatalogEconomicsDegradesProjectionLevelTrustWarnings() throws {
+        let action = availableActionJSON(kind: "switch_model", timeout: 20)
+        let json = catalogEconomicsJSON(rows: [
+            trustedEconomicsRowJSON(switchAction: action),
+        ])
+            .replacingOccurrences(of: #""warnings":[]"#, with: #""warnings":["projection_unavailable"]"#)
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(json.utf8)
+        )
+
+        let row = try XCTUnwrap(document.validated(now: ModelTestTimestamp.date)
+            .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+            .first)
+        XCTAssertEqual(row.category, .blocked)
+        XCTAssertEqual(row.action, .none)
+        XCTAssertNil(row.providerCompletionPayoutUSDPerMillionTokens)
+    }
+
+    func testCatalogEconomicsDegradesContradictorySwitchableRows() throws {
+        let action = availableActionJSON(kind: "switch_model", timeout: 20)
+        let blockedRuntime = trustedEconomicsRowJSON(switchAction: action)
+            .replacingOccurrences(of: #""runtime_state":"catalog""#, with: #""runtime_state":"blocked""#)
+        let blockingWarning = trustedEconomicsRowJSON(
+            switchAction: action,
+            warningCodesJSON: #"["model_not_supported"]"#
+        )
+            .replacingOccurrences(of: "mlx-community/Qwen3-8B-4bit", with: "mlx-community/Warning-Blocked-4bit")
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"warning-blocked""#)
+        let disabledReason = trustedEconomicsRowJSON(switchAction: action)
+            .replacingOccurrences(of: "mlx-community/Qwen3-8B-4bit", with: "mlx-community/Disabled-Blocked-4bit")
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"disabled-blocked""#)
+            .replacingOccurrences(of: #""disabled_reason":null"#, with: #""disabled_reason":"model_not_supported""#)
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [
+                blockedRuntime,
+                blockingWarning,
+                disabledReason,
+            ]).utf8)
+        )
+
+        let rows = try document.validated(now: ModelTestTimestamp.date)
+            .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertTrue(rows.allSatisfy { $0.category == .blocked })
+        XCTAssertTrue(rows.allSatisfy { $0.action == .none })
+        XCTAssertTrue(rows.allSatisfy { $0.providerCompletionPayoutUSDPerMillionTokens == nil })
+    }
+
+    func testCatalogEconomicsRejectsUnsafeProviderVisibleModelText() throws {
+        let pathDisplay = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: #""display_model_id":"mlx-community/Qwen3-8B-4bit""#, with: #""display_model_id":"/private/tmp/will pay daily""#)
+        let bidiModel = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: #""served_model_id":"mlx-community/Qwen3-8B-4bit""#, with: #""served_model_id":"mlx-community/\u202Eevil""#)
+        let formatControlDisplay = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: "mlx-community/Qwen3-8B-4bit", with: "mlx-community/Hidden\\u200EText-4bit")
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"format-control""#)
+        let rewardClaim = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: "mlx-community/Qwen3-8B-4bit", with: "mlx-community/up to higher-paying model")
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"reward-claim""#)
+        let monthlyPayoutClaim = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: "mlx-community/Qwen3-8B-4bit", with: "mlx-community/potential earnings $20/month")
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"monthly-payout-claim""#)
+        let dailyPayoutClaim = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: "mlx-community/Qwen3-8B-4bit", with: "mlx-community/$20/day")
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"daily-payout-claim""#)
+        let usdHourlyClaim = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: "mlx-community/Qwen3-8B-4bit", with: "mlx-community/USD 20 per hour")
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"usd-hourly-claim""#)
+        let dollarsWeeklyClaim = trustedEconomicsRowJSON()
+            .replacingOccurrences(of: "mlx-community/Qwen3-8B-4bit", with: "mlx-community/earn 20 dollars every week")
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"dollars-weekly-claim""#)
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [
+                pathDisplay,
+                bidiModel,
+                formatControlDisplay,
+                rewardClaim,
+                monthlyPayoutClaim,
+                dailyPayoutClaim,
+                usdHourlyClaim,
+                dollarsWeeklyClaim,
+            ]).utf8)
+        )
+
+        let rows = try document.validated(now: ModelTestTimestamp.date)
+            .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+        XCTAssertTrue(rows.isEmpty)
+    }
+
+    func testCatalogEconomicsSuppressesNonTrustedSwitchActionsAndRawDisabledReasons() throws {
+        let action = availableActionJSON(kind: "switch_model", timeout: 20)
+        let json = trustedEconomicsRowJSON(switchAction: action, economicsState: "fallback")
+            .replacingOccurrences(of: #""disabled_reason":null"#, with: #""disabled_reason":"/private/tmp/provider-token will pay daily""#)
+        let document = try JSONDecoder().decode(
+            MalibuModelCatalogEconomicsDocument.self,
+            from: Data(catalogEconomicsJSON(rows: [json]).utf8)
+        )
+
+        let row = try XCTUnwrap(document.validated(now: ModelTestTimestamp.date)
+            .rowsForMalibu(currentModelID: "other/model", warmSwapAvailable: true)
+            .first)
+        XCTAssertEqual(row.category, .blocked)
+        XCTAssertEqual(row.action, .none)
+        XCTAssertFalse((row.blockReason ?? "").contains("/private"))
+        XCTAssertFalse((row.blockReason ?? "").localizedCaseInsensitiveContains("will pay"))
+    }
+
+    @MainActor
+    func testRefreshUsesCatalogEconomicsProjectionWhenAdvertised() async throws {
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: {
+                    let timestamp = Self.recentTimestamp()
+                    return catalogEconomicsJSON(rows: [
+                        localOnlyBYOMRowJSON(),
+                        trustedEconomicsRowJSON(
+                            rateCardGeneratedAt: timestamp,
+                            stateObservedAt: timestamp
+                        ),
+                    ], generatedAt: timestamp)
+                }(),
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.catalog.\(UUID().uuidString)")!
+        )
+
+        await store.refresh(currentModelID: "other/model", peer: peer(for: MalibuModelCapabilityManifest.catalogEconomics))
+
+        XCTAssertEqual(cli.invocations.first?.prefix(3), ["models", "catalog-economics", "--json"])
+        XCTAssertEqual(store.rows.map(\.displayID), ["mlx-community/Qwen3-8B-4bit"])
+        XCTAssertEqual(store.rows.first?.category, .networkCatalog)
+        XCTAssertFalse(store.statusLine.localizedCaseInsensitiveContains("discovery failure"))
+    }
+
+    @MainActor
+    func testRefreshFallsBackToLegacyListWhenCatalogEconomicsCapabilityMissing() async throws {
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: """
+                {"schema_version":"models_list.v1","generated_at":"2026-08-08T00:00:00Z","source":"control_socket","warm_swap_available":true,"current_model_id":"org/current","rows":[{"model_id":"org/current","display_id":"org/current","action_model_id":"org/current","state":"warm","weights_present_locally":true,"source":"status_response","fit":"fits","estimated_gb":4.0}]}
+                """,
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.legacy.\(UUID().uuidString)")!
+        )
+
+        await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.readySwitch))
+
+        XCTAssertEqual(cli.invocations.first?.prefix(3), ["models", "list", "--json"])
+        XCTAssertEqual(store.rows.first?.category, .current)
+        XCTAssertEqual(store.listState, .ready)
+    }
+
+    @MainActor
+    func testLegacyFallbackCancelsPreviousCatalogProjectionExpiry() async throws {
+        let expiringAt = Self.timestamp(offset: -299.8)
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(
+                        rateCardGeneratedAt: expiringAt,
+                        stateObservedAt: expiringAt
+                    )],
+                    generatedAt: expiringAt
+                ),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: """
+                {"schema_version":"models_list.v1","generated_at":"2026-08-08T00:00:00Z","source":"control_socket","warm_swap_available":true,"current_model_id":"org/current","rows":[{"model_id":"org/current","display_id":"org/current","action_model_id":"org/current","state":"warm","weights_present_locally":true,"source":"status_response","fit":"fits","estimated_gb":4.0}]}
+                """,
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.expiry.\(UUID().uuidString)")!
+        )
+
+        await store.refresh(currentModelID: "other/model", peer: peer(for: MalibuModelCapabilityManifest.catalogEconomics))
+        XCTAssertFalse(store.rows.isEmpty)
+        await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.readySwitch))
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertEqual(store.rows.map(\.displayID), ["org/current"])
+        XCTAssertEqual(store.listState, .ready)
+        XCTAssertFalse(store.catalogProjectionRetryAvailable)
+    }
+
+    @MainActor
+    func testEqualCatalogProjectionSequenceIsIgnored() async throws {
+        let firstTimestamp = Self.recentTimestamp()
+        let secondTimestamp = Self.recentTimestamp()
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(
+                        rateCardGeneratedAt: firstTimestamp,
+                        stateObservedAt: firstTimestamp
+                    )],
+                    generatedAt: firstTimestamp,
+                    projectionSequence: 1
+                ),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [
+                        trustedEconomicsRowJSON(
+                            rateCardGeneratedAt: secondTimestamp,
+                            stateObservedAt: secondTimestamp
+                        )
+                            .replacingOccurrences(of: "mlx-community/Qwen3-8B-4bit", with: "mlx-community/Other-Trusted-4bit")
+                    ],
+                    generatedAt: secondTimestamp,
+                    projectionSequence: 1
+                ),
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.equalSequence.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: MalibuModelCapabilityManifest.catalogEconomics)
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        await store.refresh(currentModelID: "other/model", peer: peer)
+
+        XCTAssertEqual(store.rows.map(\.displayID), ["mlx-community/Qwen3-8B-4bit"])
+        XCTAssertEqual(store.listState, .viewOnly)
+    }
+
+    @MainActor
+    func testRefreshFallsBackToStaticCurrentStateWhenProjectionFails() async throws {
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(exitCode: 1, stdout: "", stderr: "boom"),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.failure.\(UUID().uuidString)")!
+        )
+
+        await store.refresh(currentModelID: "org/current", peer: peer(for: MalibuModelCapabilityManifest.catalogEconomics))
+
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(store.currentModelID, "org/current")
+        XCTAssertEqual(store.listState, .unavailable)
+        XCTAssertTrue(store.catalogProjectionRetryAvailable)
+        XCTAssertTrue(store.statusLine.contains("projection_unavailable"))
+    }
+
+    @MainActor
+    func testCatalogProjectionExpiryClearsRowsDuringRuntimeConflict() async throws {
+        let expiringAt = Self.timestamp(offset: -299.8)
+        let action = availableActionJSON(kind: "switch_model", timeout: 20)
+        let transactionID = "c23c5d4c-3e4f-47ac-b72d-7f8f172747a0"
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(
+                        switchAction: action,
+                        rateCardGeneratedAt: expiringAt,
+                        stateObservedAt: expiringAt
+                    )],
+                    generatedAt: expiringAt
+                ),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: """
+                {"schema_version":"model_switch_event.v1","type":"accepted","transaction_id":"\(transactionID)","from_model_id":"other/model","target_model_id":"candidate-qwen","phase":"requested","elapsed_ms":1,"cancellable":false,"reason":null,"cooldown_seconds_remaining":null}
+                {"schema_version":"model_switch_event.v1","type":"terminal","transaction_id":"\(transactionID)","from_model_id":"other/model","target_model_id":"candidate-qwen","phase":"loaded","elapsed_ms":2,"cancellable":false,"reason":null,"cooldown_seconds_remaining":null}
+                """,
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.expiryConflict.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: [
+            MalibuModelCapabilityManifest.catalogEconomics,
+            MalibuModelCapabilityManifest.readySwitch,
+        ])
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        let row = try XCTUnwrap(store.rows.first)
+        await store.switchTo(row)
+        await store.refresh(currentModelID: "unexpected/model", peer: peer)
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(store.listState, .unavailable)
+        if case .runtimeConflict(expected: "candidate-qwen", observed: "unexpected/model") = store.operation {
+        } else {
+            XCTFail("Expected runtime conflict to remain after projection expiry, got \(store.operation)")
+        }
+        XCTAssertTrue(store.statusLine.contains("projection_unavailable"))
+    }
+
+    @MainActor
+    func testCatalogProjectionExpiryClearsRowsDuringReconciliation() async throws {
+        let expiringAt = Self.timestamp(offset: -299.8)
+        let action = availableActionJSON(kind: "switch_model", timeout: 20)
+        let transactionID = "d575f262-7252-449a-bfda-a16fa7f1ac7d"
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(
+                        switchAction: action,
+                        rateCardGeneratedAt: expiringAt,
+                        stateObservedAt: expiringAt
+                    )],
+                    generatedAt: expiringAt
+                ),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: """
+                {"schema_version":"model_switch_event.v1","type":"accepted","transaction_id":"\(transactionID)","from_model_id":"other/model","target_model_id":"candidate-qwen","phase":"requested","elapsed_ms":1,"cancellable":false,"reason":null,"cooldown_seconds_remaining":null}
+                {"schema_version":"model_switch_event.v1","type":"terminal","transaction_id":"\(transactionID)","from_model_id":"other/model","target_model_id":"candidate-qwen","phase":"loaded","elapsed_ms":2,"cancellable":false,"reason":null,"cooldown_seconds_remaining":null}
+                """,
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.expiryReconciling.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: [
+            MalibuModelCapabilityManifest.catalogEconomics,
+            MalibuModelCapabilityManifest.readySwitch,
+        ])
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        let row = try XCTUnwrap(store.rows.first)
+        XCTAssertEqual(row.action, .switchModel)
+        await store.switchTo(row)
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(store.listState, .unavailable)
+        if case .reconciling(target: "candidate-qwen") = store.operation {
+        } else {
+            XCTFail("Expected reconciliation to remain after projection expiry, got \(store.operation)")
+        }
+        XCTAssertTrue(store.statusLine.contains("projection_unavailable"))
+    }
+
+    @MainActor
+    func testCatalogProjectionExpiryClearsRowsDuringStalledSwitch() async throws {
+        let expiringAt = Self.timestamp(offset: -299.8)
+        let action = availableActionJSON(kind: "switch_model", timeout: 20)
+        let cli = FakeModelCLI(
+            results: [
+                ModelCLIResult(
+                    exitCode: 0,
+                    stdout: catalogEconomicsJSON(
+                        rows: [trustedEconomicsRowJSON(
+                            switchAction: action,
+                            rateCardGeneratedAt: expiringAt,
+                            stateObservedAt: expiringAt
+                        )],
+                        generatedAt: expiringAt
+                    ),
+                    stderr: ""
+                ),
+                ModelCLIResult(exitCode: 0, stdout: "", stderr: ""),
+            ],
+            returnDelaysNanoseconds: [nil, 2_000_000_000]
+        )
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.expirySwitching.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: [
+            MalibuModelCapabilityManifest.catalogEconomics,
+            MalibuModelCapabilityManifest.readySwitch,
+        ])
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        let row = try XCTUnwrap(store.rows.first)
+        XCTAssertEqual(row.action, .switchModel)
+        let switchTask = Task { await store.switchTo(row) }
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(store.listState, .unavailable)
+        if case .switching(target: "candidate-qwen", phase: "requested", elapsedMS: 0) = store.operation {
+        } else {
+            XCTFail("Expected switching operation to remain after projection expiry, got \(store.operation)")
+        }
+        XCTAssertTrue(store.statusLine.contains("projection_unavailable"))
+
+        switchTask.cancel()
+        await switchTask.value
+    }
+
+    @MainActor
+    func testCatalogProjectionExpiryClearsRowsAfterOperationFailure() async throws {
+        let expiringAt = Self.timestamp(offset: -299.8)
+        let action = availableActionJSON(kind: "switch_model", timeout: 20)
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [trustedEconomicsRowJSON(
+                        switchAction: action,
+                        rateCardGeneratedAt: expiringAt,
+                        stateObservedAt: expiringAt
+                    )],
+                    generatedAt: expiringAt
+                ),
+                stderr: ""
+            ),
+            ModelCLIResult(exitCode: 1, stdout: "", stderr: "switch failed"),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.expiryFailure.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: [
+            MalibuModelCapabilityManifest.catalogEconomics,
+            MalibuModelCapabilityManifest.readySwitch,
+        ])
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        let row = try XCTUnwrap(store.rows.first)
+        XCTAssertEqual(row.action, .switchModel)
+        await store.switchTo(row)
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertTrue(store.rows.isEmpty)
+        XCTAssertEqual(store.listState, .unavailable)
+        XCTAssertTrue(store.catalogProjectionRetryAvailable)
+        XCTAssertTrue(store.statusLine.contains("projection_unavailable"))
+    }
+
+    @MainActor
+    func testCatalogEconomicsSwitchReconciliationSuspendsCatalogActionsUntilRefresh() async throws {
+        let action = availableActionJSON(kind: "switch_model", timeout: 20)
+        let transactionID = "c23c5d4c-3e4f-47ac-b72d-7f8f172747a0"
+        let timestamp = Self.recentTimestamp()
+        let unsupportedRow = trustedEconomicsRowJSON(
+            rateCardGeneratedAt: timestamp,
+            stateObservedAt: timestamp
+        )
+            .replacingOccurrences(of: #""runtime_state":"catalog""#, with: #""runtime_state":"future_ready""#)
+            .replacingOccurrences(of: "mlx-community/Qwen3-8B-4bit", with: "mlx-community/Unsupported-4bit")
+            .replacingOccurrences(of: #""action_model_id":"candidate-qwen""#, with: #""action_model_id":"unsupported-candidate""#)
+        let cli = FakeModelCLI(results: [
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: catalogEconomicsJSON(
+                    rows: [
+                        trustedEconomicsRowJSON(
+                            switchAction: action,
+                            rateCardGeneratedAt: timestamp,
+                            stateObservedAt: timestamp
+                        ),
+                        unsupportedRow,
+                    ],
+                    generatedAt: timestamp
+                ),
+                stderr: ""
+            ),
+            ModelCLIResult(
+                exitCode: 0,
+                stdout: """
+                {"schema_version":"model_switch_event.v1","type":"accepted","transaction_id":"\(transactionID)","from_model_id":"other/model","target_model_id":"candidate-qwen","phase":"requested","elapsed_ms":1,"cancellable":false,"reason":null,"cooldown_seconds_remaining":null}
+                {"schema_version":"model_switch_event.v1","type":"terminal","transaction_id":"\(transactionID)","from_model_id":"other/model","target_model_id":"candidate-qwen","phase":"loaded","elapsed_ms":2,"cancellable":false,"reason":null,"cooldown_seconds_remaining":null}
+                """,
+                stderr: ""
+            ),
+        ])
+        let store = ModelManagementStore(
+            cli: cli,
+            paths: testProviderPaths(),
+            defaults: UserDefaults(suiteName: "ModelManagementTests.switch.\(UUID().uuidString)")!
+        )
+        let peer = peer(for: [
+            MalibuModelCapabilityManifest.catalogEconomics,
+            MalibuModelCapabilityManifest.readySwitch,
+        ])
+
+        await store.refresh(currentModelID: "other/model", peer: peer)
+        let row = try XCTUnwrap(store.rows.first)
+        XCTAssertEqual(row.action, .switchModel)
+        await store.switchTo(row)
+        await store.refresh(currentModelID: "candidate-qwen", peer: peer)
+
+        XCTAssertEqual(store.rows.first?.category, .current)
+        XCTAssertEqual(store.rows.first?.action, MalibuModelRow.Action.none)
+        let unsupported = try XCTUnwrap(store.rows.first(where: { $0.displayID == "mlx-community/Unsupported-4bit" }))
+        XCTAssertEqual(unsupported.category, .blocked)
+        XCTAssertEqual(unsupported.action, MalibuModelRow.Action.none)
+    }
+
+    func testCatalogEconomicsDisplayCopyAvoidsForbiddenRewardClaims() {
+        let strings = [
+            "Catalog rates are informational. Final provider credit depends on eligible demand, uptime, accepted requests, trust state, routing, token mix, settlement, and active policy status.",
+            "Provider share rate: completion $0.36 per 1M tokens.",
+            "Provider share rate: prompt $0.18 per 1M tokens.",
+            "No provider credit yet; catalog and receipt checks are still required.",
+        ].joined(separator: "\n").lowercased()
+        for forbidden in ["guaranteed", "daily revenue", "hourly pay", "will pay", "estimated daily", "up to", "higher-paying"] {
+            XCTAssertFalse(strings.contains(forbidden), forbidden)
+        }
+    }
+
     func testCatalogValidationRejectsCaseVariantDuplicateActionIDs() throws {
         let document = MalibuModelsListDocument(
             schemaVersion: "models_list.v1",
@@ -970,6 +1749,119 @@ final class ModelManagementTests: XCTestCase {
         XCTAssertFalse(ModelManagementStore.Operation.idle.blocksRefresh)
     }
 
+    private func catalogEconomicsJSON(
+        rows: [String],
+        generatedAt: String = "2026-08-09T00:00:00Z",
+        rateCardSource: String = "live_signed",
+        projectionSequence: UInt64 = 1
+    ) -> String {
+        """
+        {"schema":"model_catalog_economics.v1","generated_at":"\(generatedAt)","projection_sequence":\(projectionSequence),"source":{"cli_version":"1.8.90","cli_build_commit":"test","process_launch_id":"c13c5d4c-3e4f-47ac-b72d-7f8f172747a0","process_started_at":"\(generatedAt)","projection_protocol_version":"1","rate_card_source":"\(rateCardSource)","rate_card_digest":"\(String(repeating: "a", count: 64))","rate_card_signature_digest":null,"demand_feed_digest":"\(String(repeating: "b", count: 64))","candidate_feed_digest":"\(String(repeating: "c", count: 64))","rate_card_max_age_seconds":604800},"rows":[\(rows.joined(separator: ","))],"warnings":[]}
+        """
+    }
+
+    private func trustedEconomicsRowJSON(
+        switchAction: String? = nil,
+        economicsState: String = "trusted",
+        admissionState: String = "catalog_priced",
+        settlementCapable: Bool = false,
+        rateCardGeneratedAt: String = "2026-08-09T00:00:00Z",
+        stateObservedAt: String = "2026-08-09T00:00:00Z",
+        warningCodesJSON: String = #"["admission_state_not_settlement_capable"]"#
+    ) -> String {
+        let switchAction = switchAction ?? Self.unavailableActionJSON()
+        return """
+        {"model_key":"qwen3-8b","served_model_id":"mlx-community/Qwen3-8B-4bit","display_model_id":"mlx-community/Qwen3-8B-4bit","action_model_id":"candidate-qwen","is_current":false,"weights_present_locally":true,"runtime_state":"catalog","estimated_gb":4.0,"fit":"fits","disabled_reason":null,"warning_codes":\(warningCodesJSON),"admission":{"state":"\(admissionState)","source":"coordinator","coordinator_event_id":"event-1","state_observed_at":"\(stateObservedAt)","catalog_economics_permitted":true,"settlement_capable":\(settlementCapable)},"rate_card_version":"rates-v1","rate_card_generated_at":"\(rateCardGeneratedAt)","rate_card_key":"qwen3-8b","rate_source":"live_signed","prompt_rate_usd_per_million_tokens":0.2,"completion_rate_usd_per_million_tokens":0.4,"provider_share_bps":9000,"provider_prompt_payout_usd_per_million_tokens":0.18,"provider_completion_payout_usd_per_million_tokens":0.36,"economics_state":"\(economicsState)","demand_rank":7,"demand_weight":0.65,"ready_provider_count":4,"supply_deficit_score":1.5,"switch":\(switchAction),"prepare":\(Self.unavailableActionJSON()),"evaluate":\(Self.unavailableActionJSON()),"adopt_recommendation":\(Self.unavailableActionJSON()),"cleanup_staging":\(Self.unavailableActionJSON())}
+        """
+    }
+
+    private func localOnlyBYOMRowJSON() -> String {
+        """
+        {"model_key":"local-candidate","served_model_id":"local/byom","display_model_id":"local/byom","action_model_id":"local-candidate","is_current":false,"weights_present_locally":true,"runtime_state":"ready","estimated_gb":3.0,"fit":"fits","disabled_reason":"local_inventory_only","warning_codes":["admission_state_missing"],"admission":{"state":"local_only","source":"local_default","coordinator_event_id":null,"state_observed_at":null,"catalog_economics_permitted":false,"settlement_capable":false},"rate_card_version":null,"rate_card_generated_at":null,"rate_card_key":null,"rate_source":"none","prompt_rate_usd_per_million_tokens":null,"completion_rate_usd_per_million_tokens":null,"provider_share_bps":null,"provider_prompt_payout_usd_per_million_tokens":null,"provider_completion_payout_usd_per_million_tokens":null,"economics_state":"blocked","demand_rank":null,"demand_weight":null,"ready_provider_count":null,"supply_deficit_score":null,"switch":\(Self.unavailableActionJSON()),"prepare":\(Self.unavailableActionJSON()),"evaluate":\(Self.unavailableActionJSON()),"adopt_recommendation":\(Self.unavailableActionJSON()),"cleanup_staging":\(Self.unavailableActionJSON())}
+        """
+    }
+
+    private static func unavailableActionJSON() -> String {
+        """
+        {"available":false,"requires_confirmation":false,"transaction_kind":null,"transaction_id":null,"action_timeout_seconds":null,"estimated_bytes":null,"unavailable_reason":"action_unavailable"}
+        """
+    }
+
+    private func availableActionJSON(
+        kind: String,
+        timeout: Int,
+        requiresConfirmation: Bool = true
+    ) -> String {
+        """
+        {"available":true,"requires_confirmation":\(requiresConfirmation),"transaction_kind":"\(kind)","transaction_id":"c23c5d4c-3e4f-47ac-b72d-7f8f172747a0","action_timeout_seconds":\(timeout),"estimated_bytes":null,"unavailable_reason":null}
+        """
+    }
+
+    private func peer(for capability: String) -> MalibuModelPeerEvidence {
+        let manifest = MalibuModelCapabilityManifest.checkedIn
+        let tier = manifest.tiers[capability]!
+        return peer(capabilities: tier.localStatusCapabilities
+            .union(tier.commandSchemas)
+            .union(tier.controlFrameSchemas), binaryVersion: tier.firstSupportingBinaryVersion)
+    }
+
+    private func peer(for capabilities: [String]) -> MalibuModelPeerEvidence {
+        let manifest = MalibuModelCapabilityManifest.checkedIn
+        var declaredCapabilities = Set<String>()
+        var binaryVersion: String?
+        for capability in capabilities {
+            let tier = manifest.tiers[capability]!
+            declaredCapabilities.formUnion(tier.localStatusCapabilities)
+            declaredCapabilities.formUnion(tier.commandSchemas)
+            declaredCapabilities.formUnion(tier.controlFrameSchemas)
+            if binaryVersion == nil
+                || ProviderCLIVersion.compare(tier.firstSupportingBinaryVersion, binaryVersion!) == .descending {
+                binaryVersion = tier.firstSupportingBinaryVersion
+            }
+        }
+        return peer(capabilities: declaredCapabilities, binaryVersion: binaryVersion!)
+    }
+
+    private func peer(capabilities: Set<String>, binaryVersion: String) -> MalibuModelPeerEvidence {
+        return MalibuModelPeerEvidence(
+            binaryVersion: binaryVersion,
+            capabilities: capabilities,
+            contractCompatible: true,
+            lifecycleOwner: "macprovider_cli",
+            serviceInstanceID: "instance",
+            servicePID: Int(getpid()),
+            observedAt: Date(),
+            observationValidForMS: 5_000,
+            observationFresh: true
+        )
+    }
+
+    private func testProviderPaths() -> ProviderPaths {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("malibu-model-management-tests-\(UUID().uuidString)", isDirectory: true)
+        return ProviderPaths(
+            configFile: root.appendingPathComponent("config.yaml"),
+            controlSocket: root.appendingPathComponent("ctl.sock"),
+            cliLogFile: root.appendingPathComponent("cli.log"),
+            launchdStdoutLog: root.appendingPathComponent("out.log"),
+            launchdStderrLog: root.appendingPathComponent("err.log"),
+            appSupport: root,
+            appMarkerFile: root.appendingPathComponent(".installed-by-app"),
+            onboardingStateFile: root.appendingPathComponent("onboarding.json"),
+            downloadsDirectory: root.appendingPathComponent("Downloads", isDirectory: true)
+        )
+    }
+
+    private static func recentTimestamp() -> String {
+        timestamp(offset: 0)
+    }
+
+    private static func timestamp(offset: TimeInterval) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: Date().addingTimeInterval(offset))
+    }
+
     private func recommendationJSON() -> String {
         let hashA = String(repeating: "a", count: 64)
         let hashB = String(repeating: "b", count: 64)
@@ -1027,4 +1919,39 @@ final class ModelManagementTests: XCTestCase {
 private enum ModelTestTimestamp {
     static let fractional = "2026-08-08T00:00:00.123Z"
     static let date = ISO8601DateFormatter().date(from: "2026-08-09T00:00:00Z")!
+}
+
+@MainActor
+private final class FakeModelCLI: MalibuModelCLIRunning {
+    var invocations: [[String]] = []
+    private var results: [ModelCLIResult]
+    private let returnDelaysNanoseconds: [UInt64?]
+
+    init(results: [ModelCLIResult], returnDelaysNanoseconds: [UInt64?] = []) {
+        self.results = results
+        self.returnDelaysNanoseconds = returnDelaysNanoseconds
+    }
+
+    func run(
+        arguments: [String],
+        peer: MalibuModelPeerEvidence?,
+        stdinData: Data?,
+        priority: ModelCLIWorkPriority,
+        onLine: @escaping @MainActor @Sendable (String) -> Void
+    ) async throws -> ModelCLIResult {
+        let invocationIndex = invocations.count
+        invocations.append(arguments)
+        guard !results.isEmpty else {
+            return ModelCLIResult(exitCode: 1, stdout: "", stderr: "missing fake result")
+        }
+        let result = results.removeFirst()
+        if invocationIndex < returnDelaysNanoseconds.count,
+           let delay = returnDelaysNanoseconds[invocationIndex] {
+            try await Task.sleep(nanoseconds: delay)
+        }
+        for line in result.stdout.split(whereSeparator: \.isNewline) {
+            onLine(String(line))
+        }
+        return result
+    }
 }

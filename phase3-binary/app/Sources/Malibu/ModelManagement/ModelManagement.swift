@@ -303,6 +303,608 @@ struct MalibuModelsListDocument: Decodable, Equatable, Sendable {
     }
 }
 
+struct MalibuModelCatalogEconomicsDocument: Decodable, Equatable, Sendable {
+    struct Source: Decodable, Equatable, Sendable {
+        let cliVersion: String
+        let cliBuildCommit: String
+        let processLaunchID: String
+        let processStartedAt: String
+        let projectionProtocolVersion: String
+        let rateCardSource: String
+        let rateCardDigest: String?
+        let rateCardSignatureDigest: String?
+        let demandFeedDigest: String?
+        let candidateFeedDigest: String?
+        let rateCardMaxAgeSeconds: Int
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case cliVersion = "cli_version"
+            case cliBuildCommit = "cli_build_commit"
+            case processLaunchID = "process_launch_id"
+            case processStartedAt = "process_started_at"
+            case projectionProtocolVersion = "projection_protocol_version"
+            case rateCardSource = "rate_card_source"
+            case rateCardDigest = "rate_card_digest"
+            case rateCardSignatureDigest = "rate_card_signature_digest"
+            case demandFeedDigest = "demand_feed_digest"
+            case candidateFeedDigest = "candidate_feed_digest"
+            case rateCardMaxAgeSeconds = "rate_card_max_age_seconds"
+        }
+
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            cliVersion = try container.decode(String.self, forKey: .cliVersion)
+            cliBuildCommit = try container.decode(String.self, forKey: .cliBuildCommit)
+            processLaunchID = try container.decode(String.self, forKey: .processLaunchID)
+            processStartedAt = try container.decode(String.self, forKey: .processStartedAt)
+            projectionProtocolVersion = try container.decode(String.self, forKey: .projectionProtocolVersion)
+            rateCardSource = try container.decode(String.self, forKey: .rateCardSource)
+            rateCardDigest = try decodeExplicitNullableString(container, .rateCardDigest)
+            rateCardSignatureDigest = try decodeExplicitNullableString(container, .rateCardSignatureDigest)
+            demandFeedDigest = try decodeExplicitNullableString(container, .demandFeedDigest)
+            candidateFeedDigest = try decodeExplicitNullableString(container, .candidateFeedDigest)
+            rateCardMaxAgeSeconds = try container.decode(Int.self, forKey: .rateCardMaxAgeSeconds)
+        }
+    }
+
+    struct Admission: Decodable, Equatable, Sendable {
+        let state: String
+        let source: String
+        let coordinatorEventID: String?
+        let stateObservedAt: String?
+        let catalogEconomicsPermitted: Bool
+        let settlementCapable: Bool
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case state
+            case source
+            case coordinatorEventID = "coordinator_event_id"
+            case stateObservedAt = "state_observed_at"
+            case catalogEconomicsPermitted = "catalog_economics_permitted"
+            case settlementCapable = "settlement_capable"
+        }
+
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            state = try container.decode(String.self, forKey: .state)
+            source = try container.decode(String.self, forKey: .source)
+            coordinatorEventID = try decodeExplicitNullableString(container, .coordinatorEventID)
+            stateObservedAt = try decodeExplicitNullableString(container, .stateObservedAt)
+            catalogEconomicsPermitted = try container.decode(Bool.self, forKey: .catalogEconomicsPermitted)
+            settlementCapable = try container.decode(Bool.self, forKey: .settlementCapable)
+        }
+    }
+
+    struct Action: Decodable, Equatable, Sendable {
+        let available: Bool
+        let requiresConfirmation: Bool
+        let transactionKind: String?
+        let transactionID: String?
+        let actionTimeoutSeconds: Int?
+        let estimatedBytes: Int64?
+        let unavailableReason: String?
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case available
+            case requiresConfirmation = "requires_confirmation"
+            case transactionKind = "transaction_kind"
+            case transactionID = "transaction_id"
+            case actionTimeoutSeconds = "action_timeout_seconds"
+            case estimatedBytes = "estimated_bytes"
+            case unavailableReason = "unavailable_reason"
+        }
+
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            available = try container.decode(Bool.self, forKey: .available)
+            requiresConfirmation = try container.decode(Bool.self, forKey: .requiresConfirmation)
+            transactionKind = try decodeExplicitNullableString(container, .transactionKind)
+            transactionID = try decodeExplicitNullableString(container, .transactionID)
+            actionTimeoutSeconds = try decodeExplicitNullableInt(container, .actionTimeoutSeconds)
+            estimatedBytes = try decodeExplicitNullableInt64(container, .estimatedBytes)
+            unavailableReason = try decodeExplicitNullableString(container, .unavailableReason)
+        }
+    }
+
+    struct Row: Decodable, Equatable, Sendable {
+        let modelKey: String
+        let servedModelID: String
+        let displayModelID: String
+        let actionModelID: String?
+        let isCurrent: Bool
+        let weightsPresentLocally: Bool
+        let runtimeState: String
+        let estimatedGB: Double?
+        let fit: String
+        let disabledReason: String?
+        let warningCodes: [String]
+        let admission: Admission
+        let rateCardVersion: String?
+        let rateCardGeneratedAt: String?
+        let rateCardKey: String?
+        let rateSource: String
+        let promptRateUSDPerMillionTokens: Double?
+        let completionRateUSDPerMillionTokens: Double?
+        let providerShareBPS: Int?
+        let providerPromptPayoutUSDPerMillionTokens: Double?
+        let providerCompletionPayoutUSDPerMillionTokens: Double?
+        let economicsState: String
+        let demandRank: Int?
+        let demandWeight: Double?
+        let readyProviderCount: Int?
+        let supplyDeficitScore: Double?
+        let switchAction: Action
+        let prepareAction: Action
+        let evaluateAction: Action
+        let adoptRecommendationAction: Action
+        let cleanupStagingAction: Action
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case modelKey = "model_key"
+            case servedModelID = "served_model_id"
+            case displayModelID = "display_model_id"
+            case actionModelID = "action_model_id"
+            case isCurrent = "is_current"
+            case weightsPresentLocally = "weights_present_locally"
+            case runtimeState = "runtime_state"
+            case estimatedGB = "estimated_gb"
+            case fit
+            case disabledReason = "disabled_reason"
+            case warningCodes = "warning_codes"
+            case admission
+            case rateCardVersion = "rate_card_version"
+            case rateCardGeneratedAt = "rate_card_generated_at"
+            case rateCardKey = "rate_card_key"
+            case rateSource = "rate_source"
+            case promptRateUSDPerMillionTokens = "prompt_rate_usd_per_million_tokens"
+            case completionRateUSDPerMillionTokens = "completion_rate_usd_per_million_tokens"
+            case providerShareBPS = "provider_share_bps"
+            case providerPromptPayoutUSDPerMillionTokens = "provider_prompt_payout_usd_per_million_tokens"
+            case providerCompletionPayoutUSDPerMillionTokens = "provider_completion_payout_usd_per_million_tokens"
+            case economicsState = "economics_state"
+            case demandRank = "demand_rank"
+            case demandWeight = "demand_weight"
+            case readyProviderCount = "ready_provider_count"
+            case supplyDeficitScore = "supply_deficit_score"
+            case switchAction = "switch"
+            case prepareAction = "prepare"
+            case evaluateAction = "evaluate"
+            case adoptRecommendationAction = "adopt_recommendation"
+            case cleanupStagingAction = "cleanup_staging"
+        }
+
+        init(from decoder: Decoder) throws {
+            try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            modelKey = try container.decode(String.self, forKey: .modelKey)
+            servedModelID = try container.decode(String.self, forKey: .servedModelID)
+            displayModelID = try container.decode(String.self, forKey: .displayModelID)
+            actionModelID = try decodeExplicitNullableString(container, .actionModelID)
+            isCurrent = try container.decode(Bool.self, forKey: .isCurrent)
+            weightsPresentLocally = try container.decode(Bool.self, forKey: .weightsPresentLocally)
+            runtimeState = try container.decode(String.self, forKey: .runtimeState)
+            estimatedGB = try decodeExplicitNullableDouble(container, .estimatedGB)
+            fit = try container.decode(String.self, forKey: .fit)
+            disabledReason = try decodeExplicitNullableString(container, .disabledReason)
+            warningCodes = try container.decode([String].self, forKey: .warningCodes)
+            admission = try container.decode(Admission.self, forKey: .admission)
+            rateCardVersion = try decodeExplicitNullableString(container, .rateCardVersion)
+            rateCardGeneratedAt = try decodeExplicitNullableString(container, .rateCardGeneratedAt)
+            rateCardKey = try decodeExplicitNullableString(container, .rateCardKey)
+            rateSource = try container.decode(String.self, forKey: .rateSource)
+            promptRateUSDPerMillionTokens = try decodeExplicitNullableDouble(container, .promptRateUSDPerMillionTokens)
+            completionRateUSDPerMillionTokens = try decodeExplicitNullableDouble(container, .completionRateUSDPerMillionTokens)
+            providerShareBPS = try decodeExplicitNullableInt(container, .providerShareBPS)
+            providerPromptPayoutUSDPerMillionTokens = try decodeExplicitNullableDouble(container, .providerPromptPayoutUSDPerMillionTokens)
+            providerCompletionPayoutUSDPerMillionTokens = try decodeExplicitNullableDouble(container, .providerCompletionPayoutUSDPerMillionTokens)
+            economicsState = try container.decode(String.self, forKey: .economicsState)
+            demandRank = try decodeExplicitNullableInt(container, .demandRank)
+            demandWeight = try decodeExplicitNullableDouble(container, .demandWeight)
+            readyProviderCount = try decodeExplicitNullableInt(container, .readyProviderCount)
+            supplyDeficitScore = try decodeExplicitNullableDouble(container, .supplyDeficitScore)
+            switchAction = try container.decode(Action.self, forKey: .switchAction)
+            prepareAction = try container.decode(Action.self, forKey: .prepareAction)
+            evaluateAction = try container.decode(Action.self, forKey: .evaluateAction)
+            adoptRecommendationAction = try container.decode(Action.self, forKey: .adoptRecommendationAction)
+            cleanupStagingAction = try container.decode(Action.self, forKey: .cleanupStagingAction)
+        }
+    }
+
+    let schema: String
+    let generatedAt: String
+    let projectionSequence: UInt64
+    let source: Source
+    let rows: [Row]
+    let warnings: [String]
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case schema
+        case generatedAt = "generated_at"
+        case projectionSequence = "projection_sequence"
+        case source
+        case rows
+        case warnings
+    }
+
+    init(from decoder: Decoder) throws {
+        try rejectUnknownKeys(decoder, allowed: CodingKeys.allCases.map(\.stringValue))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try container.decode(String.self, forKey: .schema)
+        generatedAt = try container.decode(String.self, forKey: .generatedAt)
+        projectionSequence = try container.decode(UInt64.self, forKey: .projectionSequence)
+        source = try container.decode(Source.self, forKey: .source)
+        // Strict, closed-schema decode: any malformed / unknown-field row fails
+        // the WHOLE projection (fail-closed) rather than being quarantined and the
+        // rest of the trusted rows still rendered. A malformed row can indicate a
+        // tampered or incompatible projection, so none of it is trustworthy.
+        rows = try container.decode([Row].self, forKey: .rows)
+        warnings = try container.decode([String].self, forKey: .warnings)
+    }
+
+    func validated(now: Date = Date()) throws -> MalibuModelCatalogEconomicsDocument {
+        guard schema == "model_catalog_economics.v1",
+              Self.isValidGeneratedAt(generatedAt),
+              Self.isValidGeneratedAt(source.processStartedAt),
+              UUID(uuidString: source.processLaunchID) != nil,
+              source.processLaunchID == source.processLaunchID.lowercased(with: nil),
+              source.projectionProtocolVersion == "1",
+              ["live_signed", "static_signed", "none"].contains(source.rateCardSource),
+              (300...604_800).contains(source.rateCardMaxAgeSeconds),
+              generatedAtIsCurrent(now: now) else {
+            throw ModelManagementError.invalidCatalog
+        }
+        for warning in warnings {
+            guard Self.closedWarnings.contains(warning) else { throw ModelManagementError.invalidCatalog }
+        }
+        return self
+    }
+
+    func rowsForMalibu(currentModelID: String?, warmSwapAvailable: Bool) -> [MalibuModelRow] {
+        rows.compactMap { row in
+            if Self.shouldHideLocalDefaultBYOM(row) { return nil }
+            if (try? validate(row: row)) != nil {
+                return MalibuModelRow(
+                    economics: row,
+                    currentModelID: currentModelID,
+                    warmSwapAvailable: warmSwapAvailable
+                )
+            }
+            return MalibuModelRow(
+                unsupportedEconomics: row,
+                currentModelID: currentModelID
+            )
+        }
+    }
+
+    var generatedAtDate: Date? {
+        Self.date(from: generatedAt)
+    }
+
+    var freshnessDeadline: Date? {
+        guard let generated = Self.date(from: generatedAt) else { return nil }
+        let maxAge = min(300, source.rateCardMaxAgeSeconds)
+        return generated.addingTimeInterval(TimeInterval(maxAge))
+    }
+
+    private func generatedAtIsCurrent(now: Date) -> Bool {
+        guard let generated = Self.date(from: generatedAt),
+              let deadline = freshnessDeadline else { return false }
+        return generated <= now.addingTimeInterval(30)
+            && deadline >= now
+    }
+
+    private func validate(row: Row) throws {
+        guard isSafeModelID(row.modelKey),
+              isSafeModelID(row.servedModelID),
+              isSafeDisplayID(row.displayModelID),
+              row.actionModelID == nil || isSafeModelID(row.actionModelID),
+              ["current", "ready", "catalog", "needs_preparation", "blocked"].contains(row.runtimeState),
+              ["fits", "does_not_fit", "unknown"].contains(row.fit),
+              ["live_signed", "static_signed", "none"].contains(row.rateSource),
+              rowRateSourceIsNoLessConservativeThanProjection(row.rateSource),
+              ["trusted", "fallback", "stale", "blocked", "unavailable"].contains(row.economicsState),
+              row.warningCodes.allSatisfy(Self.closedWarnings.contains),
+              admissionIsValid(row.admission),
+              row.estimatedGB == nil || row.estimatedGB! >= 0,
+              row.providerShareBPS == nil || (0...10_000).contains(row.providerShareBPS!),
+              nonNegative(row.promptRateUSDPerMillionTokens),
+              nonNegative(row.completionRateUSDPerMillionTokens),
+              nonNegative(row.providerPromptPayoutUSDPerMillionTokens),
+              nonNegative(row.providerCompletionPayoutUSDPerMillionTokens),
+              nonNegative(row.demandWeight),
+              nonNegative(row.supplyDeficitScore),
+              row.readyProviderCount == nil || row.readyProviderCount! >= 0,
+              row.demandRank == nil || row.demandRank! >= 0 else {
+            throw ModelManagementError.invalidCatalog
+        }
+        if row.economicsState == "trusted" {
+            guard row.admission.catalogEconomicsPermitted,
+                  source.rateCardSource == "live_signed",
+                  row.rateSource == "live_signed",
+                  Set(warnings).isDisjoint(with: Self.trustedEconomicsBlockingWarnings),
+                  Set(row.warningCodes).isDisjoint(with: Self.trustedEconomicsBlockingWarnings),
+                  row.rateCardVersion != nil,
+                  row.rateCardGeneratedAt != nil,
+                  trustedRateTimestampIsCurrent(row.rateCardGeneratedAt),
+                  admissionStateObservationIsCurrent(row.admission.stateObservedAt),
+                  row.rateCardKey != nil,
+                  row.promptRateUSDPerMillionTokens != nil,
+                  row.completionRateUSDPerMillionTokens != nil,
+                  row.providerShareBPS != nil,
+                  row.providerPromptPayoutUSDPerMillionTokens != nil,
+                  row.providerCompletionPayoutUSDPerMillionTokens != nil else {
+                throw ModelManagementError.invalidCatalog
+            }
+            // A trusted-economics row that is NOT settlement_capable (e.g.
+            // catalog_priced) may display signed catalog rates, but the provider
+            // is not earning yet. It MUST carry the non-earning disclosure warning
+            // so Malibu always shows "No provider credit yet" alongside the rates.
+            // Reject a projection that shows catalog economics for a
+            // non-settlement row without it — the disclosure must not depend on a
+            // possibly-omitted warning, and a settlement_capable row must not
+            // carry it.
+            if row.admission.settlementCapable {
+                guard !row.warningCodes.contains("admission_state_not_settlement_capable") else {
+                    throw ModelManagementError.invalidCatalog
+                }
+            } else {
+                guard row.warningCodes.contains("admission_state_not_settlement_capable") else {
+                    throw ModelManagementError.invalidCatalog
+                }
+            }
+        }
+        if row.switchAction.available {
+            guard ["ready", "catalog"].contains(row.runtimeState),
+                  row.disabledReason == nil,
+                  row.weightsPresentLocally,
+                  row.fit == "fits",
+                  row.actionModelID != nil,
+                  Set(warnings).isDisjoint(with: Self.switchActionBlockingWarnings),
+                  Set(row.warningCodes).isDisjoint(with: Self.switchActionBlockingWarnings) else {
+                throw ModelManagementError.invalidCatalog
+            }
+        }
+        if let stateObservedAt = row.admission.stateObservedAt,
+           Self.date(from: stateObservedAt) == nil {
+            throw ModelManagementError.invalidCatalog
+        }
+        if row.rateSource == "none" || row.economicsState == "unavailable" {
+            guard row.rateCardVersion == nil,
+                  row.rateCardGeneratedAt == nil,
+                  row.rateCardKey == nil,
+                  row.promptRateUSDPerMillionTokens == nil,
+                  row.completionRateUSDPerMillionTokens == nil,
+                  row.providerShareBPS == nil,
+                  row.providerPromptPayoutUSDPerMillionTokens == nil,
+                  row.providerCompletionPayoutUSDPerMillionTokens == nil else {
+                throw ModelManagementError.invalidCatalog
+            }
+        }
+        if row.economicsState != "trusted" {
+            guard !row.switchAction.available,
+                  !row.prepareAction.available,
+                  !row.adoptRecommendationAction.available,
+                  !row.cleanupStagingAction.available else {
+                throw ModelManagementError.invalidCatalog
+            }
+            if row.evaluateAction.available {
+                guard row.evaluateAction.transactionKind == "evaluate_model",
+                      row.evaluateAction.estimatedBytes == nil,
+                      (row.evaluateAction.actionTimeoutSeconds ?? 1_801) <= 10 else {
+                    throw ModelManagementError.invalidCatalog
+                }
+            }
+        }
+        if let disabledReason = row.disabledReason,
+           !Self.closedDisabledReasons.contains(disabledReason) {
+            throw ModelManagementError.invalidCatalog
+        }
+        try [
+            row.switchAction,
+            row.prepareAction,
+            row.evaluateAction,
+            row.adoptRecommendationAction,
+            row.cleanupStagingAction,
+        ].forEach(validate(action:))
+    }
+
+    private func admissionIsValid(_ admission: Admission) -> Bool {
+        switch admission.source {
+        case "local_default":
+            return ["local_only", "not_offered", "offerable"].contains(admission.state)
+                && !admission.catalogEconomicsPermitted
+                && !admission.settlementCapable
+        case "coordinator":
+            let states = [
+                "not_offered",
+                "offer_submitted",
+                "offer_rejected",
+                "sandbox_probe_only",
+                "network_visible_unpriced",
+                "network_admitted_unsettled",
+                "catalog_priced",
+                "settlement_capable",
+                "withdrawn",
+                "revoked",
+            ]
+            guard states.contains(admission.state) else { return false }
+            guard !admission.catalogEconomicsPermitted || ["catalog_priced", "settlement_capable"].contains(admission.state) else { return false }
+            guard !admission.settlementCapable || admission.state == "settlement_capable" else { return false }
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func trustedRateTimestampIsCurrent(_ value: String?) -> Bool {
+        guard let value,
+              let rateGeneratedAt = Self.date(from: value),
+              let projectionGeneratedAt = Self.date(from: generatedAt) else { return false }
+        return rateGeneratedAt <= projectionGeneratedAt.addingTimeInterval(30)
+            && rateGeneratedAt.addingTimeInterval(TimeInterval(source.rateCardMaxAgeSeconds)) >= projectionGeneratedAt
+    }
+
+    private func admissionStateObservationIsCurrent(_ value: String?) -> Bool {
+        guard let value,
+              let observedAt = Self.date(from: value),
+              let projectionGeneratedAt = Self.date(from: generatedAt) else { return false }
+        let maxAge = min(300, source.rateCardMaxAgeSeconds)
+        return observedAt <= projectionGeneratedAt.addingTimeInterval(30)
+            && observedAt.addingTimeInterval(TimeInterval(maxAge)) >= projectionGeneratedAt
+    }
+
+    private func rowRateSourceIsNoLessConservativeThanProjection(_ rowRateSource: String) -> Bool {
+        guard let rowRank = Self.rateSourceTrustRank(rowRateSource),
+              let projectionRank = Self.rateSourceTrustRank(source.rateCardSource) else {
+            return false
+        }
+        return rowRank <= projectionRank
+    }
+
+    private static func rateSourceTrustRank(_ value: String) -> Int? {
+        switch value {
+        case "none": return 0
+        case "static_signed": return 1
+        case "live_signed": return 2
+        default: return nil
+        }
+    }
+
+    private static func shouldHideLocalDefaultBYOM(_ row: Row) -> Bool {
+        row.admission.source == "local_default"
+            && row.admission.catalogEconomicsPermitted == false
+            && row.economicsState != "trusted"
+    }
+
+    private func validate(action: Action) throws {
+        if action.available {
+            guard let kind = action.transactionKind,
+                  let transactionID = action.transactionID,
+                  let timeout = action.actionTimeoutSeconds,
+                  Self.closedTransactionKinds.contains(kind),
+                  UUID(uuidString: transactionID) != nil,
+                  (1...1_800).contains(timeout),
+                  // An available action must not carry an unavailable reason.
+                  action.unavailableReason == nil else {
+                throw ModelManagementError.invalidCatalog
+            }
+            if ["switch_model", "switch_model_deferred", "prepare_model", "cleanup_staging", "adopt_recommendation"].contains(kind)
+                || kind == "evaluate_model" && ((action.estimatedBytes ?? 0) > 0 || timeout > 10) {
+                guard action.requiresConfirmation else { throw ModelManagementError.invalidCatalog }
+            }
+        } else {
+            guard action.transactionKind == nil,
+                  action.transactionID == nil,
+                  action.actionTimeoutSeconds == nil,
+                  // An unavailable action must carry a non-empty reason so the UI
+                  // never renders a disabled action with no explanation. The reason
+                  // is mapped to localized copy through a closed switch at display
+                  // time, so unknown values degrade safely rather than showing raw
+                  // text.
+                  let reason = action.unavailableReason,
+                  !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ModelManagementError.invalidCatalog
+            }
+        }
+        if let estimatedBytes = action.estimatedBytes, estimatedBytes < 0 {
+            throw ModelManagementError.invalidCatalog
+        }
+    }
+
+    private func nonNegative(_ value: Double?) -> Bool {
+        guard let value else { return true }
+        return value.isFinite && value >= 0
+    }
+
+    private static func isValidGeneratedAt(_ value: String) -> Bool {
+        date(from: value) != nil
+    }
+
+    private static func date(from value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions.insert(.withFractionalSeconds)
+        return formatter.date(from: value)
+    }
+
+    private static let closedWarnings: Set<String> = [
+        "feed_fallback",
+        "feed_stale",
+        "feed_signature_invalid",
+        "feed_generation_mismatch",
+        "rate_multiplier_unknown",
+        "model_not_local",
+        "model_not_supported",
+        "hardware_fit_unknown",
+        "hardware_does_not_fit",
+        "admission_state_missing",
+        "admission_state_not_settlement_capable",
+        "warm_swap_unavailable",
+        "action_unavailable",
+        "old_cli_fallback",
+        "projection_unavailable",
+        "projection_timeout",
+        "staging_cleanup_required",
+    ]
+
+    private static let closedDisabledReasons: Set<String> = [
+        "action_unavailable",
+        "local_inventory_only",
+        "model_not_local",
+        "model_not_supported",
+        "hardware_fit_unknown",
+        "hardware_does_not_fit",
+        "catalog_rate_unavailable",
+        "admission_state_missing",
+        "admission_state_not_settlement_capable",
+        "projection_unsupported",
+        "staging_cleanup_required",
+    ]
+
+    private static let trustedEconomicsBlockingWarnings: Set<String> = [
+        "feed_fallback",
+        "feed_stale",
+        "feed_signature_invalid",
+        "feed_generation_mismatch",
+        "rate_multiplier_unknown",
+        "admission_state_missing",
+        "old_cli_fallback",
+        "projection_unavailable",
+        "projection_timeout",
+    ]
+
+    private static let switchActionBlockingWarnings: Set<String> = [
+        "feed_fallback",
+        "feed_stale",
+        "feed_signature_invalid",
+        "feed_generation_mismatch",
+        "rate_multiplier_unknown",
+        "model_not_local",
+        "model_not_supported",
+        "hardware_fit_unknown",
+        "hardware_does_not_fit",
+        "admission_state_missing",
+        "warm_swap_unavailable",
+        "action_unavailable",
+        "old_cli_fallback",
+        "projection_unavailable",
+        "projection_timeout",
+        "staging_cleanup_required",
+    ]
+
+    private static let closedTransactionKinds: Set<String> = [
+        "switch_model",
+        "switch_model_deferred",
+        "prepare_model",
+        "evaluate_model",
+        "adopt_recommendation",
+        "cleanup_staging",
+    ]
+}
+
 struct MalibuModelSwitchEvent: Decodable, Equatable, Sendable {
     let schemaVersion: String
     let type: String
@@ -331,16 +933,140 @@ struct MalibuModelSwitchEvent: Decodable, Equatable, Sendable {
 
 private func isSafeModelID(_ value: String?) -> Bool {
     guard let value, !value.isEmpty, value.utf8.count <= 256 else { return false }
-    return value.unicodeScalars.allSatisfy { scalar in
-        scalar.value >= 0x20 && scalar.value != 0x7F && !(0x80...0x9F).contains(scalar.value)
-    }
+    return isSafeProviderVisibleText(value)
 }
 
 private func isSafeDisplayID(_ value: String) -> Bool {
     guard !value.isEmpty, value.utf8.count <= 256 else { return false }
+    return isSafeProviderVisibleText(value)
+}
+
+private func isSafeProviderVisibleText(_ value: String) -> Bool {
+    guard !looksLikeLocalPathOrURL(value),
+          !containsProhibitedMoneyClaim(value) else { return false }
     return value.unicodeScalars.allSatisfy { scalar in
         scalar.value >= 0x20 && scalar.value != 0x7F && !(0x80...0x9F).contains(scalar.value)
+            && scalar.properties.generalCategory != .format
     }
+}
+
+private func looksLikeLocalPathOrURL(_ value: String) -> Bool {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(with: nil)
+    return trimmed.hasPrefix("/")
+        || trimmed.hasPrefix("~/")
+        || trimmed.hasPrefix("file:")
+        || trimmed.contains("://")
+        || trimmed.contains("/private/")
+        || trimmed.contains("/users/")
+        || trimmed.contains("\\")
+}
+
+private func containsProhibitedMoneyClaim(_ value: String) -> Bool {
+    let lowercased = value.lowercased(with: nil)
+    let prohibited = [
+        "guaranteed",
+        "will pay",
+        "daily revenue",
+        "hourly pay",
+        "estimated daily",
+        "up to",
+        "up to $",
+        "earns",
+        "earn $",
+        "pays daily",
+        "potential earnings",
+        "average payout",
+        "projected return",
+        "higher-paying",
+        "higher paying",
+    ]
+    if prohibited.contains(where: { lowercased.contains($0) }) {
+        return true
+    }
+    if lowercased.contains("$")
+        || lowercased.contains("usd")
+        || lowercased.contains("dollar") {
+        return true
+    }
+    return false
+}
+
+private struct DynamicCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = "\(intValue)"
+        self.intValue = intValue
+    }
+}
+
+private func rejectUnknownKeys(_ decoder: Decoder, allowed: [String]) throws {
+    let container = try decoder.container(keyedBy: DynamicCodingKey.self)
+    let allowed = Set(allowed)
+    if let extra = container.allKeys.first(where: { !allowed.contains($0.stringValue) }) {
+        throw DecodingError.dataCorrupted(DecodingError.Context(
+            codingPath: decoder.codingPath + [extra],
+            debugDescription: "unsupported key \(extra.stringValue)"
+        ))
+    }
+}
+
+private func decodeExplicitNullableString<Key: CodingKey>(
+    _ container: KeyedDecodingContainer<Key>,
+    _ key: Key
+) throws -> String? {
+    guard container.contains(key) else {
+        throw DecodingError.keyNotFound(key, DecodingError.Context(
+            codingPath: container.codingPath,
+            debugDescription: "required nullable field missing"
+        ))
+    }
+    return try container.decodeIfPresent(String.self, forKey: key)
+}
+
+private func decodeExplicitNullableInt<Key: CodingKey>(
+    _ container: KeyedDecodingContainer<Key>,
+    _ key: Key
+) throws -> Int? {
+    guard container.contains(key) else {
+        throw DecodingError.keyNotFound(key, DecodingError.Context(
+            codingPath: container.codingPath,
+            debugDescription: "required nullable field missing"
+        ))
+    }
+    return try container.decodeIfPresent(Int.self, forKey: key)
+}
+
+private func decodeExplicitNullableInt64<Key: CodingKey>(
+    _ container: KeyedDecodingContainer<Key>,
+    _ key: Key
+) throws -> Int64? {
+    guard container.contains(key) else {
+        throw DecodingError.keyNotFound(key, DecodingError.Context(
+            codingPath: container.codingPath,
+            debugDescription: "required nullable field missing"
+        ))
+    }
+    return try container.decodeIfPresent(Int64.self, forKey: key)
+}
+
+private func decodeExplicitNullableDouble<Key: CodingKey>(
+    _ container: KeyedDecodingContainer<Key>,
+    _ key: Key
+) throws -> Double? {
+    guard container.contains(key) else {
+        throw DecodingError.keyNotFound(key, DecodingError.Context(
+            codingPath: container.codingPath,
+            debugDescription: "required nullable field missing"
+        ))
+    }
+    return try container.decodeIfPresent(Double.self, forKey: key)
 }
 
 // MARK: - Managed CLI invocation
@@ -778,6 +1504,7 @@ final class ModelManagementStore: ObservableObject {
                 return false
             }
         }
+
     }
 
     private struct PendingSwitch: Equatable {
@@ -816,6 +1543,10 @@ final class ModelManagementStore: ObservableObject {
     private var recommendationSchedule = MalibuRecommendationSchedule()
     private var recommendationJSON: Data?
     private var backgroundCheckSafetyCancelled = false
+    private var catalogProjectionProcessLaunchID: String?
+    private var catalogProjectionSequence: UInt64?
+    private var catalogProjectionAcceptedGeneratedAt: Date?
+    private var catalogProjectionExpiryTask: Task<Void, Never>?
 
     init(
         cli: any MalibuModelCLIRunning = MalibuModelCLI.shared,
@@ -959,6 +1690,17 @@ final class ModelManagementStore: ObservableObject {
         )
     }
 
+    var catalogEconomicsCapabilityAvailable: Bool {
+        MalibuModelCapabilityManifest.checkedIn.supports(
+            MalibuModelCapabilityManifest.catalogEconomics,
+            peer: peerEvidence
+        )
+    }
+
+    var catalogProjectionRetryAvailable: Bool {
+        listState == .unavailable && catalogEconomicsCapabilityAvailable
+    }
+
     var canPerformModelAction: Bool {
         guard readySwitchCapabilityAvailable, peerObservationFresh, peerEvidence.isFresh() else { return false }
         if let cooldownUntil { return cooldownUntil <= Date() }
@@ -1050,11 +1792,13 @@ final class ModelManagementStore: ObservableObject {
         }
         let configuredModel = currentModelID ?? ProviderConfig.readModel(paths: paths)
         self.currentModelID = configuredModel
-        guard readySwitchCapabilityAvailable,
-              MalibuModelCapabilityManifest.checkedIn.supports(
-                MalibuModelCapabilityManifest.catalogJSON,
-                peer: peer
-              ) else {
+        let supportsLegacyList = readySwitchCapabilityAvailable
+        if catalogEconomicsCapabilityAvailable {
+            await refreshCatalogEconomics(configuredModel: configuredModel)
+            return
+        }
+        clearCatalogProjectionTracking()
+        guard supportsLegacyList else {
             listState = .viewOnly
             operation = .idle
             statusLine = configuredModel == nil
@@ -1087,6 +1831,113 @@ final class ModelManagementStore: ObservableObject {
             self.listState = .unavailable
             self.operation = .failed(error.localizedDescription)
             self.statusLine = String(localized: "Model controls unavailable. The current model remains visible from provider status.", comment: "Model activity status")
+        }
+    }
+
+    private func clearCatalogProjectionTracking() {
+        catalogProjectionExpiryTask?.cancel()
+        catalogProjectionExpiryTask = nil
+        catalogProjectionProcessLaunchID = nil
+        catalogProjectionSequence = nil
+        catalogProjectionAcceptedGeneratedAt = nil
+    }
+
+    private func refreshCatalogEconomics(configuredModel: String?) async {
+        let previousListState = listState
+        listState = .checking
+        operation = .loadingList
+        do {
+            let result = try await cli.run(
+                arguments: [
+                    "models", "catalog-economics", "--json",
+                    "--config", paths.configFile.path,
+                    "--ctl-socket-path", paths.controlSocket.path,
+                ],
+                peer: peerEvidence,
+                onLine: { _ in }
+            )
+            guard result.exitCode == 0 else { throw ModelManagementError.invalidCatalog }
+            let document = try decodeCatalogEconomics(result.stdout).validated()
+            guard acceptCatalogProjection(document) else {
+                self.listState = previousListState
+                self.operation = .idle
+                return
+            }
+            self.rows = document.rowsForMalibu(
+                currentModelID: configuredModel,
+                warmSwapAvailable: readySwitchCapabilityAvailable
+            ).sortedForDisplay()
+            self.currentModelID = configuredModel ?? rows.first(where: { $0.category == .current })?.id
+            self.listState = rows.contains(where: { $0.action == .switchModel }) ? .ready : .viewOnly
+            self.operation = .idle
+            if rows.isEmpty {
+                self.statusLine = String(localized: "Network catalog has no admitted economics rows yet. Local BYOM discovery remains CLI-only in this release.", comment: "Catalog economics empty")
+            } else if rows.contains(where: { $0.providerCompletionPayoutUSDPerMillionTokens != nil }) {
+                self.statusLine = String(localized: "Network catalog rates loaded from the provider CLI projection.", comment: "Catalog economics loaded")
+            } else {
+                self.statusLine = String(localized: "Network catalog loaded with no trusted rate rows available.", comment: "Catalog economics no trusted rates")
+            }
+            scheduleCatalogProjectionExpiry(document)
+        } catch {
+            self.rows = []
+            self.listState = .unavailable
+            self.operation = .failed("projection_unavailable")
+            catalogProjectionExpiryTask?.cancel()
+            self.statusLine = String(localized: "Model catalog unavailable. Warning: projection_unavailable. The current model remains visible from provider status.", comment: "Catalog economics unavailable")
+        }
+    }
+
+    private func acceptCatalogProjection(_ document: MalibuModelCatalogEconomicsDocument) -> Bool {
+        guard let incomingGeneratedAt = document.generatedAtDate else {
+            return false
+        }
+        // Never accept a projection older than the one currently displayed, even
+        // when it carries a different process_launch_id. A slow reply from an
+        // OLDER CLI process (before a restart) must not overwrite newer accepted
+        // state and reintroduce stale rates/actions. Cross-process ordering is by
+        // generated_at; within a process, projection_sequence is the tiebreaker.
+        if let acceptedGeneratedAt = catalogProjectionAcceptedGeneratedAt,
+           incomingGeneratedAt < acceptedGeneratedAt {
+            return false
+        }
+        if catalogProjectionProcessLaunchID == document.source.processLaunchID,
+           let previousSequence = catalogProjectionSequence {
+            guard document.projectionSequence > previousSequence else { return false }
+        }
+        catalogProjectionProcessLaunchID = document.source.processLaunchID
+        catalogProjectionSequence = document.projectionSequence
+        catalogProjectionAcceptedGeneratedAt = incomingGeneratedAt
+        return true
+    }
+
+    private func scheduleCatalogProjectionExpiry(_ document: MalibuModelCatalogEconomicsDocument) {
+        catalogProjectionExpiryTask?.cancel()
+        guard let deadline = document.freshnessDeadline else { return }
+        scheduleCatalogProjectionExpiryCheck(
+            processLaunchID: document.source.processLaunchID,
+            sequence: document.projectionSequence,
+            delay: max(0, deadline.timeIntervalSinceNow)
+        )
+    }
+
+    private func scheduleCatalogProjectionExpiryCheck(processLaunchID: String, sequence: UInt64, delay: TimeInterval) {
+        catalogProjectionExpiryTask?.cancel()
+        catalogProjectionExpiryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                return
+            }
+            guard let self,
+                  self.catalogProjectionProcessLaunchID == processLaunchID,
+                  self.catalogProjectionSequence == sequence else { return }
+            self.catalogProjectionExpiryTask = nil
+            self.rows = []
+            self.listState = .unavailable
+            if !self.operation.blocksRefresh {
+                self.operation = .failed("projection_unavailable")
+            }
+            self.statusLine = String(localized: "Model catalog unavailable. Warning: projection_unavailable. The current model remains visible from provider status.", comment: "Catalog economics unavailable")
         }
     }
 
@@ -1563,6 +2414,20 @@ final class ModelManagementStore: ObservableObject {
         return try JSONDecoder().decode(MalibuModelsListDocument.self, from: data)
     }
 
+    private func decodeCatalogEconomics(_ stdout: String) throws -> MalibuModelCatalogEconomicsDocument {
+        let lines = stdout.split(whereSeparator: \.isNewline).filter { !$0.isEmpty }
+        guard lines.count == 1,
+              let data = lines[0].data(using: .utf8) else {
+            throw ModelManagementError.invalidCatalog
+        }
+        // Reject ambiguous input with duplicate object keys before decoding: the
+        // closed-schema decoder rejects unknown keys but Foundation silently keeps
+        // one value for a duplicated known key, which could smuggle conflicting
+        // trusted-economics values into a rendered row.
+        try MalibuStrictJSON.rejectDuplicateKeys(data)
+        return try JSONDecoder().decode(MalibuModelCatalogEconomicsDocument.self, from: data)
+    }
+
     private func operationFailureReason(from result: ModelCLIResult) -> String {
         if let lastSwitchEventReason, !lastSwitchEventReason.isEmpty {
             return localizedSwitchReason(lastSwitchEventReason)
@@ -1668,6 +2533,7 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
     enum Category: String, Sendable {
         case current
         case ready
+        case networkCatalog
         case needsPreparation
         case blocked
     }
@@ -1680,21 +2546,48 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
 
     let id: String
     let displayID: String
+    // The coordinator-verified catalog identity (catalog model key) for a
+    // trusted-economics network-catalog row. displayID is the provider-REPORTED
+    // name and must never be presented as catalog-verified; when this is set the
+    // UI shows it as the authoritative catalog identity so provider-reported text
+    // cannot masquerade as verified. nil for rows without trusted catalog
+    // economics.
+    let catalogVerifiedModelKey: String?
+    // Non-blocking "no provider credit yet" disclosure for a trusted-economics
+    // row that is not settlement_capable (e.g. catalog_priced). It is rendered
+    // beside the rates regardless of whether the row is switchable / actionable,
+    // so a switchable catalog_priced row can never show rates without the
+    // non-earning caveat. nil for settlement_capable and non-economics rows.
+    let nonEarningDisclosure: String?
     var category: Category
     let state: String
     let weightsPresentLocally: Bool
     let fit: String
     let estimatedGB: Double?
+    let economicsState: String?
+    let admissionState: String?
+    let providerPromptPayoutUSDPerMillionTokens: Double?
+    let providerCompletionPayoutUSDPerMillionTokens: Double?
+    let demandRank: Int?
+    let warningCodes: [String]
     var action: Action
     var blockReason: String?
 
     init(row: MalibuModelsListDocument.Row, currentModelID: String?, warmSwapAvailable: Bool) {
         id = row.actionModelID
         displayID = row.displayID
+        catalogVerifiedModelKey = nil
+        nonEarningDisclosure = nil
         state = row.state
         weightsPresentLocally = row.weightsPresentLocally
         fit = row.fit ?? "unknown"
         estimatedGB = row.estimatedGB
+        economicsState = nil
+        admissionState = nil
+        providerPromptPayoutUSDPerMillionTokens = nil
+        providerCompletionPayoutUSDPerMillionTokens = nil
+        demandRank = nil
+        warningCodes = []
         if row.modelID == currentModelID || row.state == "warm" {
             category = .current
             action = .none
@@ -1718,16 +2611,130 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
         }
     }
 
+    init?(
+        economics row: MalibuModelCatalogEconomicsDocument.Row,
+        currentModelID: String?,
+        warmSwapAvailable: Bool
+    ) {
+        let hidesLocalDefaultBYOM = row.admission.source == "local_default"
+            && row.admission.catalogEconomicsPermitted == false
+            && row.economicsState != "trusted"
+        guard !hidesLocalDefaultBYOM else { return nil }
+
+        let projectedID = row.actionModelID ?? row.modelKey
+        id = projectedID
+        displayID = row.displayModelID
+        catalogVerifiedModelKey = (row.economicsState == "trusted" && row.admission.catalogEconomicsPermitted)
+            ? row.modelKey
+            : nil
+        nonEarningDisclosure = (row.economicsState == "trusted" && !row.admission.settlementCapable)
+            ? String(localized: "No provider credit yet; catalog and receipt checks are still required.", comment: "Non-earning disclosure beside catalog rates for a non-settlement row")
+            : nil
+        state = row.runtimeState
+        weightsPresentLocally = row.weightsPresentLocally
+        fit = Self.displayFit(row.fit)
+        estimatedGB = row.estimatedGB
+        economicsState = row.economicsState
+        admissionState = row.admission.state
+        warningCodes = row.warningCodes
+        demandRank = row.economicsState == "trusted" ? row.demandRank : nil
+        providerPromptPayoutUSDPerMillionTokens = row.economicsState == "trusted"
+            ? row.providerPromptPayoutUSDPerMillionTokens
+            : nil
+        providerCompletionPayoutUSDPerMillionTokens = row.economicsState == "trusted"
+            ? row.providerCompletionPayoutUSDPerMillionTokens
+            : nil
+
+        let hasTrustedEconomics = row.economicsState == "trusted" && row.admission.catalogEconomicsPermitted
+        let switchAvailable = hasTrustedEconomics && Self.actionIsAvailable(
+            row.switchAction,
+            kind: "switch_model",
+            actionModelID: row.actionModelID
+        )
+        let evaluateAvailable = Self.actionIsAvailable(
+            row.evaluateAction,
+            kind: "evaluate_model",
+            actionModelID: row.actionModelID
+        )
+        let isCurrent = row.isCurrent || currentModelID.map { modelIdentityKey($0) == modelIdentityKey(projectedID) } == true
+
+        if isCurrent || row.runtimeState == "current" {
+            category = .current
+            action = .none
+            blockReason = nil
+        } else if switchAvailable, warmSwapAvailable, row.weightsPresentLocally, row.fit == "fits" {
+            category = .ready
+            action = .switchModel
+            blockReason = nil
+        } else if row.runtimeState == "needs_preparation" || !row.weightsPresentLocally {
+            category = .needsPreparation
+            action = evaluateAvailable ? .evaluate : .none
+            blockReason = Self.rowReason(row) ?? String(localized: "Needs preparation through the provider CLI before it can be used here.", comment: "Model row guard")
+        } else if hasTrustedEconomics, row.fit != "does_not_fit" {
+            category = .networkCatalog
+            action = .none
+            blockReason = row.admission.settlementCapable
+                ? nil
+                : String(localized: "Catalog rate only. Final provider credit still requires settlement-capable route and receipt checks.", comment: "Catalog row settlement guard")
+        } else {
+            category = .blocked
+            action = evaluateAvailable ? .evaluate : .none
+            blockReason = Self.rowReason(row) ?? String(localized: "Network catalog rate unavailable for this row.", comment: "Catalog row unavailable")
+        }
+    }
+
+    fileprivate init?(
+        unsupportedEconomics row: MalibuModelCatalogEconomicsDocument.Row,
+        currentModelID: String?
+    ) {
+        let hidesLocalDefaultBYOM = row.admission.source == "local_default"
+            && row.admission.catalogEconomicsPermitted == false
+            && row.economicsState != "trusted"
+        guard !hidesLocalDefaultBYOM else { return nil }
+        let projectedID = row.actionModelID.flatMap { isSafeModelID($0) ? $0 : nil } ?? row.modelKey
+        guard isSafeModelID(row.modelKey),
+              isSafeModelID(row.servedModelID),
+              isSafeModelID(projectedID),
+              isSafeDisplayID(row.displayModelID) else { return nil }
+
+        id = projectedID
+        displayID = row.displayModelID
+        catalogVerifiedModelKey = nil
+        nonEarningDisclosure = nil
+        state = row.runtimeState
+        weightsPresentLocally = row.weightsPresentLocally
+        fit = Self.displayFit(row.fit)
+        estimatedGB = row.estimatedGB
+        economicsState = "blocked"
+        admissionState = row.admission.state
+        providerPromptPayoutUSDPerMillionTokens = nil
+        providerCompletionPayoutUSDPerMillionTokens = nil
+        demandRank = nil
+        warningCodes = ["projection_unsupported"]
+        action = .none
+        if currentModelID.map({ modelIdentityKey($0) == modelIdentityKey(projectedID) }) == true || row.isCurrent {
+            category = .current
+            blockReason = String(localized: "Current model details are using a newer catalog contract than this Malibu release understands.", comment: "Unsupported current catalog row")
+        } else {
+            category = .blocked
+            blockReason = String(localized: "Model catalog row unavailable because the provider CLI returned an unsupported catalog contract.", comment: "Unsupported catalog row")
+        }
+    }
+
     var categoryLabel: String {
         switch category {
         case .current: return String(localized: "Current", comment: "Model category")
         case .ready: return String(localized: "Ready to switch", comment: "Model category")
+        case .networkCatalog: return String(localized: "Network catalog", comment: "Model category")
         case .needsPreparation: return String(localized: "Needs preparation", comment: "Model category")
         case .blocked: return String(localized: "Blocked", comment: "Model category")
         }
     }
 
     func reclassified(currentModelID: String?, warmSwapAvailable: Bool) -> MalibuModelRow {
+        if isCatalogEconomicsProjectionRow {
+            return catalogActionSuspendedAfterSwitch(currentModelID: currentModelID)
+        }
         var copy = self
         if currentModelID.map({ modelIdentityKey(id) == modelIdentityKey($0) }) == true {
             copy.category = .current
@@ -1751,5 +2758,122 @@ struct MalibuModelRow: Identifiable, Equatable, Sendable {
             copy.blockReason = String(localized: "This model does not pass the current memory fit check.", comment: "Model row guard")
         }
         return copy
+    }
+
+    private var isCatalogEconomicsProjectionRow: Bool {
+        economicsState != nil
+            || admissionState != nil
+            || providerPromptPayoutUSDPerMillionTokens != nil
+            || providerCompletionPayoutUSDPerMillionTokens != nil
+            || demandRank != nil
+            || !warningCodes.isEmpty
+    }
+
+    private func catalogActionSuspendedAfterSwitch(currentModelID: String?) -> MalibuModelRow {
+        var copy = self
+        copy.action = .none
+        if currentModelID.map({ modelIdentityKey(id) == modelIdentityKey($0) }) == true {
+            copy.category = .current
+            copy.blockReason = nil
+        } else if category == .ready {
+            copy.category = .blocked
+            copy.blockReason = String(localized: "Refresh the model catalog before starting another model action.", comment: "Catalog action refresh guard")
+        }
+        return copy
+    }
+
+    private static func displayFit(_ value: String) -> String {
+        switch value {
+        case "fits": return "fits"
+        case "does_not_fit": return "wont_fit"
+        default: return "unknown"
+        }
+    }
+
+    private static func actionIsAvailable(
+        _ action: MalibuModelCatalogEconomicsDocument.Action,
+        kind: String,
+        actionModelID: String?
+    ) -> Bool {
+        action.available
+            && action.transactionKind == kind
+            && action.transactionID != nil
+            && action.actionTimeoutSeconds != nil
+            && actionModelID != nil
+    }
+
+    private static func rowReason(_ row: MalibuModelCatalogEconomicsDocument.Row) -> String? {
+        if row.warningCodes.contains("feed_stale") {
+            return String(localized: "Network catalog rate unavailable because the signed rate feed is stale.", comment: "Catalog row stale")
+        }
+        if row.warningCodes.contains("feed_fallback") {
+            return String(localized: "Network catalog rate unavailable because only fallback feed data is available.", comment: "Catalog row fallback")
+        }
+        if row.warningCodes.contains("feed_signature_invalid") {
+            return String(localized: "Network catalog rate unavailable because feed trust could not be verified.", comment: "Catalog row feed trust")
+        }
+        if row.warningCodes.contains("model_not_supported") {
+            return String(localized: "Model cannot be served by this provider release.", comment: "Catalog row unsupported")
+        }
+        if row.warningCodes.contains("model_not_local") {
+            return String(localized: "Model needs preparation before local use.", comment: "Catalog row preparation")
+        }
+        if row.warningCodes.contains("admission_state_not_settlement_capable") {
+            return String(localized: "No provider credit yet; catalog and receipt checks are still required.", comment: "Catalog row non-settlement")
+        }
+        return disabledReasonCopy(row.disabledReason)
+    }
+
+    private static func disabledReasonCopy(_ reason: String?) -> String? {
+        guard let reason else { return nil }
+        switch reason {
+        case "local_inventory_only":
+            return String(localized: "Local BYOM inventory remains CLI-only in this release.", comment: "Catalog row local inventory")
+        case "model_not_local":
+            return String(localized: "Model needs preparation before local use.", comment: "Catalog row preparation")
+        case "model_not_supported":
+            return String(localized: "Model cannot be served by this provider release.", comment: "Catalog row unsupported")
+        case "hardware_fit_unknown":
+            return String(localized: "Hardware fit is not known for this model.", comment: "Catalog row unknown fit")
+        case "hardware_does_not_fit":
+            return String(localized: "Model does not pass the current memory fit check.", comment: "Catalog row blocked fit")
+        case "admission_state_missing":
+            return String(localized: "Network admission state is not available for this row.", comment: "Catalog row admission missing")
+        case "admission_state_not_settlement_capable":
+            return String(localized: "No provider credit yet; catalog and receipt checks are still required.", comment: "Catalog row non-settlement")
+        case "staging_cleanup_required":
+            return String(localized: "Model staging cleanup is required through the provider CLI.", comment: "Catalog row cleanup")
+        case "action_unavailable", "catalog_rate_unavailable", "projection_unsupported":
+            return String(localized: "Network catalog rate unavailable for this row.", comment: "Catalog row unavailable")
+        default:
+            return nil
+        }
+    }
+}
+
+private extension Array where Element == MalibuModelRow {
+    func sortedForDisplay() -> [MalibuModelRow] {
+        sorted { lhs, rhs in
+            let leftCategory = categoryRank(lhs.category)
+            let rightCategory = categoryRank(rhs.category)
+            if leftCategory != rightCategory { return leftCategory < rightCategory }
+            let leftRate = lhs.providerCompletionPayoutUSDPerMillionTokens ?? -1
+            let rightRate = rhs.providerCompletionPayoutUSDPerMillionTokens ?? -1
+            if leftRate != rightRate { return leftRate > rightRate }
+            let leftDemand = lhs.demandRank ?? Int.max
+            let rightDemand = rhs.demandRank ?? Int.max
+            if leftDemand != rightDemand { return leftDemand < rightDemand }
+            return lhs.displayID.localizedStandardCompare(rhs.displayID) == .orderedAscending
+        }
+    }
+
+    private func categoryRank(_ category: MalibuModelRow.Category) -> Int {
+        switch category {
+        case .current: return 0
+        case .ready: return 1
+        case .networkCatalog: return 2
+        case .needsPreparation: return 3
+        case .blocked: return 4
+        }
     }
 }

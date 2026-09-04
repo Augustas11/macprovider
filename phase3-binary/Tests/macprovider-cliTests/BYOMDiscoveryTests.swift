@@ -280,6 +280,51 @@ final class BYOMDiscoveryTests: XCTestCase {
         XCTAssertNil(BYOMLoopbackOriginValidator.validatedHTTPOrigin("unix:///tmp/ollama.sock"))
     }
 
+    func testAdmissionClientAllowsInsecureHTTPOnlyForExplicitLoopbackTesting() {
+        XCTAssertNil(BYOMModelAdmissionClient.httpBaseURL(
+            from: "http://127.0.0.1:11434",
+            allowInsecureLoopbackHTTP: false
+        ))
+        XCTAssertEqual(
+            BYOMModelAdmissionClient.httpBaseURL(
+                from: "http://127.0.0.1:11434",
+                allowInsecureLoopbackHTTP: true
+            )?.absoluteString,
+            "http://127.0.0.1:11434"
+        )
+
+        XCTAssertNil(BYOMModelAdmissionClient.httpBaseURL(
+            from: "http://localhost:11434",
+            allowInsecureLoopbackHTTP: true
+        ))
+        XCTAssertNil(BYOMModelAdmissionClient.httpBaseURL(
+            from: "http://192.168.1.10:11434",
+            allowInsecureLoopbackHTTP: true
+        ))
+        XCTAssertNil(BYOMModelAdmissionClient.httpBaseURL(
+            from: "http://user:pass@127.0.0.1:11434",
+            allowInsecureLoopbackHTTP: true
+        ))
+        XCTAssertNil(BYOMModelAdmissionClient.httpBaseURL(
+            from: "http://127.0.0.1:11434/ws/provider",
+            allowInsecureLoopbackHTTP: true
+        ))
+    }
+
+    func testAdmissionClientUsesDirectNoProxyConfigurationForInsecureLoopbackTesting() throws {
+        let baseURL = try XCTUnwrap(BYOMModelAdmissionClient.httpBaseURL(
+            from: "http://127.0.0.1:11434",
+            allowInsecureLoopbackHTTP: true
+        ))
+        let configuration = BYOMModelAdmissionClient.urlSessionConfiguration(for: baseURL)
+
+        XCTAssertEqual(configuration.connectionProxyDictionary?.isEmpty, true)
+        XCTAssertNil(configuration.urlCache)
+        XCTAssertNil(configuration.httpCookieStorage)
+        XCTAssertEqual(configuration.httpCookieAcceptPolicy, .never)
+        XCTAssertFalse(configuration.waitsForConnectivity)
+    }
+
     func testOllamaDiscoveryUsesHermeticLoopbackResponseAndRedactsUnsafeFields() async throws {
         let root = try temporaryDirectory("byom-ollama")
         let namespace = root.appendingPathComponent("ns")

@@ -8,10 +8,12 @@ private enum ModelFeatureUI {
     static let currentModel = String(localized: "Current model", comment: "Model feature header")
     static let current = String(localized: "Current", comment: "Model feature section")
     static let ready = String(localized: "Ready to switch", comment: "Model feature section")
+    static let networkCatalog = String(localized: "Network catalog", comment: "Model feature section")
     static let needsPreparation = String(localized: "Needs preparation", comment: "Model feature section")
     static let blocked = String(localized: "Blocked", comment: "Model feature section")
     static let history = String(localized: "Model activity", comment: "Model feature section")
     static let close = String(localized: "Close", comment: "Model feature dismiss button")
+    static let retry = String(localized: "Retry", comment: "Model feature retry button")
     static let switchModel = String(localized: "Switch", comment: "Model feature action")
     static let evaluate = String(localized: "Evaluate this model", comment: "Model feature action")
     static let revert = String(localized: "Revert", comment: "Model feature action")
@@ -82,17 +84,34 @@ struct ModelSwitcherSheet: View {
             if store.listState == .checking {
                 ProgressView(ModelFeatureUI.checking)
                     .accessibilityLabel(Text(ModelFeatureUI.checking))
+            } else if store.catalogProjectionRetryAvailable {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(String(localized: "Model catalog unavailable. Warning: projection_unavailable.", comment: "Catalog projection unavailable"))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(ModelFeatureUI.retry) {
+                        Task { await refreshFromSnapshot() }
+                    }
+                    .accessibilityLabel(Text(String(localized: "Retry model catalog refresh", comment: "Catalog retry accessibility label")))
+                }
             } else if store.rows.isEmpty {
                 Text(String(localized: "No supported models were returned by the provider.", comment: "Empty model catalog"))
                     .foregroundStyle(.secondary)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
+                        if store.rows.contains(where: { $0.providerCompletionPayoutUSDPerMillionTokens != nil }) {
+                            Text(String(localized: "Catalog rates are informational. Final provider credit depends on eligible demand, uptime, accepted requests, trust state, routing, token mix, settlement, and active policy status.", comment: "Catalog economics disclosure"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         section(ModelFeatureUI.current, category: .current)
                         section(ModelFeatureUI.ready, category: .ready)
+                        section(ModelFeatureUI.networkCatalog, category: .networkCatalog)
                         section(ModelFeatureUI.needsPreparation, category: .needsPreparation)
                         section(ModelFeatureUI.blocked, category: .blocked)
-                    if let previous = store.previousModelID {
+                        if let previous = store.previousModelID {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(String(localized: "Previous confirmed model", comment: "Revert section"))
                                     .font(.headline)
@@ -143,16 +162,20 @@ struct ModelSwitcherSheet: View {
             Text(confirmationMessage(for: pendingSwitch))
         }
         .task(id: "\(agent.snapshot.localProviderID ?? "unknown"):\(agent.snapshot.statusObservationID ?? "unknown")") {
-            await store.refresh(
-                currentModelID: agent.snapshot.currentModelID,
-                peer: MalibuModelPeerEvidence(snapshot: agent.snapshot)
-            )
-            await store.startBackgroundCheckIfEligible(thermalState: agent.snapshot.thermalState)
+            await refreshFromSnapshot()
         }
     }
 
     private var canAct: Bool {
         store.canPerformModelAction
+    }
+
+    private func refreshFromSnapshot() async {
+        await store.refresh(
+            currentModelID: agent.snapshot.currentModelID,
+            peer: MalibuModelPeerEvidence(snapshot: agent.snapshot)
+        )
+        await store.startBackgroundCheckIfEligible(thermalState: agent.snapshot.thermalState)
     }
 
     private func recommendationCallout(_ recommendation: MalibuRecommendationDocument) -> some View {
@@ -279,21 +302,65 @@ private struct ModelRowView: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(row.displayID)
-                    .font(.body.monospaced())
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
+                if let catalogVerifiedModelKey = row.catalogVerifiedModelKey {
+                    // Present the coordinator-verified catalog identity as the
+                    // authoritative name; the provider-reported display name is
+                    // shown as clearly-labelled secondary text so it can never be
+                    // mistaken for a catalog-verified identity.
+                    Text(catalogVerifiedModelKey)
+                        .font(.body.monospaced())
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    Text(String(localized: "Provider-reported: \(row.displayID)", comment: "Provider-reported model name shown under the catalog-verified identity"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                } else {
+                    Text(row.displayID)
+                        .font(.body.monospaced())
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
                 HStack(spacing: 8) {
                     Text(row.categoryLabel)
-                        Text(String(localized: "Fit: \(fitLabel(row.fit))", comment: "Model fit status"))
+                    Text(String(localized: "Fit: \(fitLabel(row.fit))", comment: "Model fit status"))
                     if let estimatedGB = row.estimatedGB {
                         let formattedSize = estimatedGB.formatted(.number.precision(.fractionLength(1)))
                         Text(String(localized: "Approximately \(formattedSize) GB", comment: "Model size"))
                     }
+                    if let demandRank = row.demandRank {
+                        Text(String(localized: "Network demand signal: rank \(demandRank)", comment: "Network demand signal"))
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                if let completion = row.providerCompletionPayoutUSDPerMillionTokens {
+                    let formattedCompletion = completion.formatted(.number.precision(.significantDigits(2...4)))
+                    Text(String(localized: "Provider share rate: completion $\(formattedCompletion) per 1M tokens.", comment: "Provider completion payout rate"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let prompt = row.providerPromptPayoutUSDPerMillionTokens {
+                    let formattedPrompt = prompt.formatted(.number.precision(.significantDigits(2...4)))
+                    Text(String(localized: "Provider share rate: prompt $\(formattedPrompt) per 1M tokens.", comment: "Provider prompt payout rate"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let nonEarningDisclosure = row.nonEarningDisclosure {
+                    // Shown beside the rates regardless of whether the row is
+                    // switchable/actionable, so catalog_priced (non-settlement)
+                    // rates are never presented without the non-earning caveat.
+                    Text(nonEarningDisclosure)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let blockReason = row.blockReason {
                     Text(blockReason)
                         .font(.caption2)

@@ -1452,6 +1452,8 @@ struct BYOMWithdrawalBuilder {
 }
 
 struct BYOMModelAdmissionClient: Sendable {
+    private static let allowInsecureLoopbackCoordinatorEnvironmentKey =
+        "MACPROVIDER_BYOM_ALLOW_INSECURE_LOOPBACK_COORDINATOR"
     private static let maxStatusResponseBytes = 64 * 1024
 
     let baseURL: URL
@@ -1471,6 +1473,18 @@ struct BYOMModelAdmissionClient: Sendable {
     }
 
     static func httpBaseURL(from coordinatorURL: String?) -> URL? {
+        httpBaseURL(
+            from: coordinatorURL,
+            allowInsecureLoopbackHTTP: ProcessInfo.processInfo.environment[
+                allowInsecureLoopbackCoordinatorEnvironmentKey
+            ] == "1"
+        )
+    }
+
+    static func httpBaseURL(
+        from coordinatorURL: String?,
+        allowInsecureLoopbackHTTP: Bool
+    ) -> URL? {
         guard let coordinatorURL,
               var components = URLComponents(string: coordinatorURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             return nil
@@ -1485,6 +1499,12 @@ struct BYOMModelAdmissionClient: Sendable {
             components.scheme = "https"
         case "https":
             break
+        case "http":
+            guard allowInsecureLoopbackHTTP,
+                  let loopbackURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(coordinatorURL) else {
+                return nil
+            }
+            return loopbackURL
         default:
             return nil
         }
@@ -1492,6 +1512,13 @@ struct BYOMModelAdmissionClient: Sendable {
         components.query = nil
         components.fragment = nil
         return components.url
+    }
+
+    static func urlSessionConfiguration(for baseURL: URL) -> URLSessionConfiguration {
+        if baseURL.scheme == "http" {
+            return BYOMURLSessionHTTPClient.directLoopbackConfiguration()
+        }
+        return .ephemeral
     }
 
     func submitOffer(_ package: BYOMOfferSubmissionPackage, bearerToken: String) async throws -> BYOMAdmissionStatusWire {
@@ -1553,7 +1580,11 @@ struct BYOMModelAdmissionClient: Sendable {
         if let session {
             (data, response) = try await session.data(for: request)
         } else {
-            let ephemeral = URLSession(configuration: .ephemeral, delegate: NoRedirectURLSessionDelegate(), delegateQueue: nil)
+            let ephemeral = URLSession(
+                configuration: Self.urlSessionConfiguration(for: baseURL),
+                delegate: NoRedirectURLSessionDelegate(),
+                delegateQueue: nil
+            )
             defer { ephemeral.finishTasksAndInvalidate() }
             (data, response) = try await ephemeral.data(for: request)
         }
@@ -1587,7 +1618,11 @@ struct BYOMModelAdmissionClient: Sendable {
         if let session {
             (data, response) = try await session.data(for: request)
         } else {
-            let ephemeral = URLSession(configuration: .ephemeral, delegate: NoRedirectURLSessionDelegate(), delegateQueue: nil)
+            let ephemeral = URLSession(
+                configuration: Self.urlSessionConfiguration(for: baseURL),
+                delegate: NoRedirectURLSessionDelegate(),
+                delegateQueue: nil
+            )
             defer { ephemeral.finishTasksAndInvalidate() }
             (data, response) = try await ephemeral.data(for: request)
         }
