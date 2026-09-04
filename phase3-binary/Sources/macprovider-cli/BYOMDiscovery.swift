@@ -1587,25 +1587,6 @@ struct BYOMDiscoveryNamespaceStore {
         return Result(bytes: data, warnings: [])
     }
 
-    func readNamespace(at url: URL) -> Result {
-        do {
-            let parent = url.deletingLastPathComponent()
-            guard fileManager.fileExists(atPath: url.path) else {
-                return Result(bytes: nil, warnings: [.candidateIDUnstable])
-            }
-            guard namespaceDirectoryPermissionsArePrivate(parent), namespaceFilePermissionsArePrivate(url) else {
-                return Result(bytes: nil, warnings: [.namespacePermissionInvalid, .candidateIDUnstable])
-            }
-            let data = try Data(contentsOf: url)
-            guard data.count == 32 else {
-                return Result(bytes: nil, warnings: [.namespacePermissionInvalid, .candidateIDUnstable])
-            }
-            return Result(bytes: data, warnings: [])
-        } catch {
-            return Result(bytes: nil, warnings: [.candidateIDUnstable])
-        }
-    }
-
     private func namespaceDirectoryPermissionsArePrivate(_ url: URL) -> Bool {
         guard let attrs = try? fileManager.attributesOfItem(atPath: url.path),
               let type = attrs[.type] as? FileAttributeType,
