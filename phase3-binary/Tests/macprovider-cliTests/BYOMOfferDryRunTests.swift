@@ -83,15 +83,18 @@ final class BYOMOfferDryRunTests: XCTestCase {
         XCTAssertEqual(document.schema, "model_admission_offer_dry_run.v1")
         XCTAssertEqual(document.servedModelRef, "ollama:tiny-offer-1b-q4")
         XCTAssertNil(document.catalogModelKey)
-        XCTAssertEqual(document.wouldSubmit, false)
+        // A discoverable, offerable, non-catalog candidate WOULD submit a v0.1
+        // non-earning offer (SPEC-047-R002 permits omitting the evaluation
+        // digest for offers confined to non-earning states). It is never
+        // settlement-capable and never earns.
+        XCTAssertEqual(document.wouldSubmit, true)
         XCTAssertEqual(document.likelyAdmissionState, "offerable")
         XCTAssertEqual(document.likelyAdmissionStateSource, "local_default")
-        XCTAssertEqual(document.reasonCode, "evaluation_required")
-        XCTAssertEqual(document.providerGuidance.nextAction, "evaluate")
+        XCTAssertEqual(document.reasonCode, "no_trusted_catalog_match")
+        XCTAssertEqual(document.providerGuidance.nextAction, "submit_offer")
         XCTAssertEqual(document.providerGuidance.stateMeaningKey, "byom.offer_dry_run.no_earning_path_v0_1")
         XCTAssertEqual(document.providerGuidance.earningPathClass, "no_earning_path_in_v0_1")
-        XCTAssertEqual(client.getCount, 1)
-        XCTAssertEqual(client.postCount, 0)
+        XCTAssertEqual(client.postCount, 0)   // dry-run NEVER submits, regardless of would_submit
 
         let encoded = try ModelSwitchingWireCodec.encode(document)
         XCTAssertFalse(encoded.contains("prompt_rate"))
@@ -99,6 +102,37 @@ final class BYOMOfferDryRunTests: XCTestCase {
         XCTAssertFalse(encoded.contains("provider_share"))
         XCTAssertFalse(encoded.contains("payout"))
         XCTAssertFalse(encoded.contains("usd_per"))
+    }
+
+    func testOfferDryRunEmitsExactClosedTopLevelSchema() async throws {
+        let root = try temporaryBYOMOfferDirectory("byom-offer-schema")
+        let namespace = root.appendingPathComponent("ns")
+        try writeBYOMOfferNamespace(at: namespace)
+        let client = BYOMOfferStubHTTPClient(tagsBody: #"{"models":[{"name":"tiny-offer-1b-q4"}]}"#)
+
+        let document = await BYOMOfferDryRunRunner(
+            target: "ollama:tiny-offer-1b-q4",
+            environment: BYOMDiscoveryEnvironment(
+                namespaceURL: namespace,
+                mlxCacheRoot: root.appendingPathComponent("hf", isDirectory: true),
+                ollamaOrigin: "http://127.0.0.1:11434"
+            ),
+            httpClient: client
+        ).dryRun()
+
+        let encoded = try ModelSwitchingWireCodec.encode(document)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+        XCTAssertEqual(
+            Set(object.keys),
+            [
+                "schema", "generated_at", "cli_version", "candidate_id", "served_model_ref",
+                "catalog_model_key", "would_submit", "likely_admission_state",
+                "likely_admission_state_source", "provider_guidance", "reason_code", "warnings",
+            ],
+            "model_admission_offer_dry_run.v1 must be a closed top-level schema (SPEC-047-R002)"
+        )
+        XCTAssertEqual(object["schema"] as? String, "model_admission_offer_dry_run.v1")
+        XCTAssertEqual(object["would_submit"] as? Bool, true)
     }
 
     func testOfferDryRunForCatalogCandidateReportsMissingTrustedBindingWithoutRates() async throws {
@@ -117,15 +151,16 @@ final class BYOMOfferDryRunTests: XCTestCase {
             httpClient: client
         ).dryRun()
 
-        XCTAssertEqual(document.wouldSubmit, false)
+        // A catalog-matched candidate with an unverified binding WOULD submit,
+        // but is not settlement-capable until the binding is trusted-verified.
+        XCTAssertEqual(document.wouldSubmit, true)
         XCTAssertEqual(document.catalogModelKey, "qwen3-8b")
-        XCTAssertEqual(document.reasonCode, "evaluation_required")
+        XCTAssertEqual(document.reasonCode, "catalog_binding_unverified")
         XCTAssertTrue(document.warnings.contains("catalog_match_unverified"))
-        XCTAssertTrue(document.warnings.contains("evaluation_required"))
-        XCTAssertEqual(document.providerGuidance.nextAction, "evaluate")
+        XCTAssertEqual(document.providerGuidance.nextAction, "submit_offer")
         XCTAssertEqual(document.providerGuidance.earningPathClass, "not_earning_yet_catalog_or_receipt_path_exists")
         XCTAssertEqual(document.providerGuidance.stateMeaningKey, "byom.offer_dry_run.catalog_path_missing_trusted_binding")
-        XCTAssertEqual(client.postCount, 0)
+        XCTAssertEqual(client.postCount, 0)   // dry-run NEVER submits
 
         let encoded = try ModelSwitchingWireCodec.encode(document)
         XCTAssertFalse(encoded.contains("prompt_rate"))

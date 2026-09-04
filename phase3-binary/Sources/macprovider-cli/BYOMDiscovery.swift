@@ -1413,9 +1413,14 @@ struct BYOMOfferDryRunRunner: Sendable {
               candidate.fitState != "does_not_fit" else {
             return false
         }
+        // `evaluation_required` is advisory, NOT a hard blocker: SPEC-047-R002
+        // permits submitting an offer without the evaluation digest when the
+        // dry-run labels it more likely to be rejected or confined to
+        // non-earning states (which every v0.1 local_inventory_only candidate
+        // is). Treating it as a hard block made would_submit unreachable, since
+        // a freshly discovered candidate always carries evaluation_required.
         return !Set(candidate.warningCodes).contains(BYOMDiscoveryWarning.candidateIDUnstable.rawValue)
             && !Set(candidate.warningCodes).contains(BYOMDiscoveryWarning.namespacePermissionInvalid.rawValue)
-            && reasonCode != BYOMDiscoveryWarning.evaluationRequired.rawValue
             && reasonCode != BYOMDiscoveryWarning.requiresPreparation.rawValue
     }
 
@@ -1429,6 +1434,9 @@ struct BYOMOfferDryRunRunner: Sendable {
     }
 
     private func reasonCode(for candidate: BYOMDiscoveryWire.Candidate, warnings: Set<String>) -> String? {
+        // evaluation_required is intentionally NOT a hard blocker here (it is
+        // advisory per SPEC-047-R002); it remains available as a lower-priority
+        // fallback reason below when nothing harder applies.
         let blockingReasons = [
             BYOMDiscoveryWarning.candidateIDUnstable.rawValue,
             BYOMDiscoveryWarning.namespacePermissionInvalid.rawValue,
@@ -1436,7 +1444,6 @@ struct BYOMOfferDryRunRunner: Sendable {
             BYOMDiscoveryWarning.adapterMalformedResponse.rawValue,
             BYOMDiscoveryWarning.adapterResponseTruncated.rawValue,
             BYOMDiscoveryWarning.requiresPreparation.rawValue,
-            BYOMDiscoveryWarning.evaluationRequired.rawValue,
         ]
         if let blocker = blockingReasons.first(where: warnings.contains) {
             return blocker
