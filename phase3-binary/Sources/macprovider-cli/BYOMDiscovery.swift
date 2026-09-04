@@ -661,6 +661,115 @@ struct BYOMAdmissionStatusWire: Codable, Equatable, Sendable {
     }
 }
 
+struct BYOMAdmissionWithdrawWire: Codable, Equatable, Sendable {
+    let schema: String
+    let generatedAt: String
+    let cliVersion: String
+    let providerID: String
+    let candidateID: String
+    let servedModelRef: String
+    let catalogModelKey: String?
+    let idempotencyKey: String
+    let reasonCode: String
+    let previousAdmissionState: String
+    let coordinatorEventID: String
+    let acceptedAt: String
+    let resultingAdmissionState: String
+    let providerGuidance: BYOMDiscoveryWire.Guidance
+    let warnings: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case generatedAt = "generated_at"
+        case cliVersion = "cli_version"
+        case providerID = "provider_id"
+        case candidateID = "candidate_id"
+        case servedModelRef = "served_model_ref"
+        case catalogModelKey = "catalog_model_key"
+        case idempotencyKey = "idempotency_key"
+        case reasonCode = "reason_code"
+        case previousAdmissionState = "previous_admission_state"
+        case coordinatorEventID = "coordinator_event_id"
+        case acceptedAt = "accepted_at"
+        case resultingAdmissionState = "resulting_admission_state"
+        case providerGuidance = "provider_guidance"
+        case warnings
+    }
+}
+
+extension BYOMAdmissionWithdrawWire {
+    private static let topLevelKeys: Set<String> = [
+        "schema",
+        "generated_at",
+        "cli_version",
+        "provider_id",
+        "candidate_id",
+        "served_model_ref",
+        "catalog_model_key",
+        "idempotency_key",
+        "reason_code",
+        "previous_admission_state",
+        "coordinator_event_id",
+        "accepted_at",
+        "resulting_admission_state",
+        "provider_guidance",
+        "warnings",
+    ]
+    private static let guidanceKeys: Set<String> = [
+        "state_label_key",
+        "state_meaning_key",
+        "next_action",
+        "transition_reason_code",
+        "earning_path_class",
+    ]
+    private static let reasonCodes: Set<String> = [
+        "provider_requested",
+        "wrong_model",
+        "runtime_unavailable",
+        "identity_mismatch",
+        "policy_uncertain",
+        "other_operator_reason",
+    ]
+
+    static func decodeStrictWithdrawal(
+        from data: Data,
+        expectedProviderID: String,
+        expectedCandidateID: String,
+        expectedServedModelRef: String,
+        expectedCatalogModelKey: String?,
+        expectedIdempotencyKey: String,
+        expectedReasonCode: String
+    ) throws -> BYOMAdmissionWithdrawWire {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(object.keys) == topLevelKeys,
+              let guidance = object["provider_guidance"] as? [String: Any],
+              Set(guidance.keys) == guidanceKeys else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        let withdrawal = try JSONDecoder().decode(BYOMAdmissionWithdrawWire.self, from: data)
+        // Bind the full submitted tuple, not just provider+candidate, so a
+        // coordinator/proxy regression cannot substitute a different successful
+        // withdrawal envelope (different served ref, catalog key, idempotency
+        // key, or reason) for the same provider/candidate.
+        guard withdrawal.schema == "model_admission_withdraw.v1",
+              withdrawal.providerID == expectedProviderID,
+              withdrawal.candidateID == expectedCandidateID,
+              withdrawal.servedModelRef == expectedServedModelRef,
+              withdrawal.catalogModelKey == expectedCatalogModelKey,
+              withdrawal.idempotencyKey == expectedIdempotencyKey,
+              withdrawal.reasonCode == expectedReasonCode,
+              withdrawal.resultingAdmissionState == "withdrawn",
+              !withdrawal.coordinatorEventID.isEmpty,
+              reasonCodes.contains(withdrawal.reasonCode),
+              withdrawal.providerGuidance.nextAction == "submit_offer",
+              withdrawal.providerGuidance.earningPathClass == "no_earning_path_in_v0_1",
+              withdrawal.providerGuidance.transitionReasonCode == withdrawal.reasonCode else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        return withdrawal
+    }
+}
+
 extension BYOMAdmissionStatusWire {
     private static let topLevelKeys: Set<String> = [
         "schema",
@@ -814,8 +923,19 @@ extension BYOMAdmissionStatusWire {
         case "offer_rejected":
             return guidance.nextAction == "revise_and_reoffer" &&
                 guidance.earningPathClass == "no_earning_path_in_v0_1"
-        case "sandbox_probe_only", "network_visible_unpriced", "network_admitted_unsettled", "catalog_priced":
+        case "sandbox_probe_only", "network_visible_unpriced", "network_admitted_unsettled":
+            // A non-catalog candidate advanced to a pre-settlement admitted state
+            // has no earning path in v0.1; a catalog-bound one still has the
+            // catalog/receipt path. Mirror the coordinator's honest disclosure
+            // (modelAdmissionNonSettlementEarningPath) exactly, which keys off
+            // whether a catalog_model_key is present.
             return guidance.nextAction == "withdraw" &&
+                guidance.earningPathClass == Self.nonSettlementEarningPathClass(catalogModelKey: status.catalogModelKey)
+        case "catalog_priced":
+            // catalog_priced requires a catalog binding, so it always carries the
+            // catalog/receipt earning-path disclosure.
+            return guidance.nextAction == "withdraw" &&
+                !(status.catalogModelKey?.isEmpty ?? true) &&
                 guidance.earningPathClass == "not_earning_yet_catalog_or_receipt_path_exists"
         case "settlement_capable":
             return guidance.nextAction == "maintain_runtime" &&
@@ -826,6 +946,12 @@ extension BYOMAdmissionStatusWire {
         default:
             return false
         }
+    }
+
+    private static func nonSettlementEarningPathClass(catalogModelKey: String?) -> String {
+        (catalogModelKey?.isEmpty ?? true)
+            ? "no_earning_path_in_v0_1"
+            : "not_earning_yet_catalog_or_receipt_path_exists"
     }
 }
 
@@ -984,6 +1110,81 @@ extension BYOMOfferSubmitRequestWire.AdvisoryCapabilities {
     }
 }
 
+struct BYOMWithdrawRequestWire: Codable, Equatable, Sendable {
+    let schema: String
+    let generatedAt: String
+    let cliVersion: String
+    let signatureDomain: String
+    let providerID: String
+    let candidateID: String
+    let servedModelRef: String
+    let catalogModelKey: String?
+    let idempotencyKey: String
+    let nonce: String
+    let timestamp: String
+    let reasonCode: String
+    let signingKeyDigest: String
+    let signatureAlgorithm: String
+    var providerSignature: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case generatedAt = "generated_at"
+        case cliVersion = "cli_version"
+        case signatureDomain = "signature_domain"
+        case providerID = "provider_id"
+        case candidateID = "candidate_id"
+        case servedModelRef = "served_model_ref"
+        case catalogModelKey = "catalog_model_key"
+        case idempotencyKey = "idempotency_key"
+        case nonce
+        case timestamp
+        case reasonCode = "reason_code"
+        case signingKeyDigest = "signing_key_digest"
+        case signatureAlgorithm = "signature_algorithm"
+        case providerSignature = "provider_signature"
+    }
+
+    func canonicalValue() -> RFC8785JCS.Value {
+        .object([
+            "signature_domain": .string(signatureDomain),
+            "provider_id": .string(providerID),
+            "candidate_id": .string(candidateID),
+            "served_model_ref": .string(servedModelRef),
+            "catalog_model_key": catalogModelKey.map(RFC8785JCS.Value.string) ?? .null,
+            "idempotency_key": .string(idempotencyKey),
+            "nonce": .string(nonce),
+            "timestamp": .string(timestamp),
+            "reason_code": .string(reasonCode),
+            "signing_key_digest": .string(signingKeyDigest),
+            "cli_version": .string(cliVersion),
+        ])
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schema, forKey: .schema)
+        try container.encode(generatedAt, forKey: .generatedAt)
+        try container.encode(cliVersion, forKey: .cliVersion)
+        try container.encode(signatureDomain, forKey: .signatureDomain)
+        try container.encode(providerID, forKey: .providerID)
+        try container.encode(candidateID, forKey: .candidateID)
+        try container.encode(servedModelRef, forKey: .servedModelRef)
+        if let catalogModelKey {
+            try container.encode(catalogModelKey, forKey: .catalogModelKey)
+        } else {
+            try container.encodeNil(forKey: .catalogModelKey)
+        }
+        try container.encode(idempotencyKey, forKey: .idempotencyKey)
+        try container.encode(nonce, forKey: .nonce)
+        try container.encode(timestamp, forKey: .timestamp)
+        try container.encode(reasonCode, forKey: .reasonCode)
+        try container.encode(signingKeyDigest, forKey: .signingKeyDigest)
+        try container.encode(signatureAlgorithm, forKey: .signatureAlgorithm)
+        try container.encode(providerSignature, forKey: .providerSignature)
+    }
+}
+
 enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
     case missingProviderID
     case missingCoordinatorURL
@@ -993,6 +1194,8 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
     case candidateUnstable
     case candidateNotOfferable
     case invalidEvaluationDigest
+    case invalidWithdrawalReason
+    case missingWithdrawalTuple
     case invalidCoordinatorURL
     case httpStatus(Int)
     case invalidStatusSchema
@@ -1015,6 +1218,10 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
             return "BYOM candidate is not offerable; run models evaluate and models offer --dry-run --json before submitting"
         case .invalidEvaluationDigest:
             return "evaluation digest must be a 64-character lowercase SHA-256 hex value"
+        case .invalidWithdrawalReason:
+            return "withdrawal reason must be one of provider_requested, wrong_model, runtime_unavailable, identity_mismatch, policy_uncertain, or other_operator_reason"
+        case .missingWithdrawalTuple:
+            return "coordinator status does not contain a withdrawable BYOM admission tuple"
         case .invalidCoordinatorURL:
             return "invalid coordinator URL; use wss:// or https://"
         case .httpStatus(let status):
@@ -1027,6 +1234,12 @@ enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
 
 struct BYOMOfferSubmissionPackage: Equatable, Sendable {
     let request: BYOMOfferSubmitRequestWire
+    let encodedRequest: Data
+    let payloadDigestSHA256: String
+}
+
+struct BYOMWithdrawalPackage: Equatable, Sendable {
+    let request: BYOMWithdrawRequestWire
     let encodedRequest: Data
     let payloadDigestSHA256: String
 }
@@ -1134,6 +1347,110 @@ struct BYOMOfferSubmissionBuilder {
     }
 }
 
+struct BYOMWithdrawalBuilder {
+    private static let stableCandidatePattern = #"^byom_[a-z2-7]{52}$"#
+    private static let reasonCodes: Set<String> = [
+        "provider_requested",
+        "wrong_model",
+        "runtime_unavailable",
+        "identity_mismatch",
+        "policy_uncertain",
+        "other_operator_reason",
+    ]
+
+    static func isStableCandidateID(_ value: String) -> Bool {
+        value.range(of: stableCandidatePattern, options: .regularExpression) != nil
+    }
+
+    static func makePackage(
+        providerID: String,
+        candidate: BYOMDiscoveryWire.Candidate,
+        admissionIdentity: Curve25519.Signing.PrivateKey,
+        reasonCode: String,
+        now: Date = Date(),
+        nonce: String = UUID().uuidString.lowercased(),
+        idempotencyKey: String = UUID().uuidString.lowercased(),
+        cliVersion: String = CoordinatorClient.binaryVersion
+    ) throws -> BYOMWithdrawalPackage {
+        guard isStableCandidateID(candidate.candidateID),
+              !candidate.warningCodes.contains(BYOMDiscoveryWarning.candidateIDUnstable.rawValue),
+              !candidate.warningCodes.contains(BYOMDiscoveryWarning.namespacePermissionInvalid.rawValue) else {
+            throw BYOMModelAdmissionError.candidateUnstable
+        }
+        return try makePackage(
+            providerID: providerID,
+            candidateID: candidate.candidateID,
+            servedModelRef: candidate.servedModelRef,
+            catalogModelKey: candidate.catalogModelKey,
+            admissionIdentity: admissionIdentity,
+            reasonCode: reasonCode,
+            now: now,
+            nonce: nonce,
+            idempotencyKey: idempotencyKey,
+            cliVersion: cliVersion
+        )
+    }
+
+    static func makePackage(
+        providerID: String,
+        candidateID: String,
+        servedModelRef: String,
+        catalogModelKey: String?,
+        admissionIdentity: Curve25519.Signing.PrivateKey,
+        reasonCode: String,
+        now: Date = Date(),
+        nonce: String = UUID().uuidString.lowercased(),
+        idempotencyKey: String = UUID().uuidString.lowercased(),
+        cliVersion: String = CoordinatorClient.binaryVersion
+    ) throws -> BYOMWithdrawalPackage {
+        let candidateID = candidateID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let servedModelRef = servedModelRef.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isStableCandidateID(candidateID) else {
+            throw BYOMModelAdmissionError.candidateUnstable
+        }
+        guard !servedModelRef.isEmpty else {
+            throw BYOMModelAdmissionError.missingWithdrawalTuple
+        }
+        let reason = reasonCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard reasonCodes.contains(reason) else {
+            throw BYOMModelAdmissionError.invalidWithdrawalReason
+        }
+        let publicKey = admissionIdentity.publicKey.rawRepresentation
+        let signingKeyDigest = sha256Hex(publicKey)
+        let timestamp = ModelSwitchingWireCodec.timestamp(now)
+        var request = BYOMWithdrawRequestWire(
+            schema: "model_admission_withdraw_request.v1",
+            generatedAt: timestamp,
+            cliVersion: cliVersion,
+            signatureDomain: "macprovider.model_admission.withdraw.v1",
+            providerID: providerID,
+            candidateID: candidateID,
+            servedModelRef: servedModelRef,
+            catalogModelKey: catalogModelKey,
+            idempotencyKey: idempotencyKey,
+            nonce: nonce,
+            timestamp: timestamp,
+            reasonCode: reason,
+            signingKeyDigest: signingKeyDigest,
+            signatureAlgorithm: "ed25519",
+            providerSignature: ""
+        )
+        let canonical = try RFC8785JCS.canonicalString(request.canonicalValue())
+        let canonicalData = Data(canonical.utf8)
+        let signatureData = try admissionIdentity.signature(for: canonicalData)
+        request.providerSignature = signatureData.base64EncodedString()
+        return BYOMWithdrawalPackage(
+            request: request,
+            encodedRequest: Data(try ModelSwitchingWireCodec.encode(request).utf8),
+            payloadDigestSHA256: sha256Hex(canonicalData)
+        )
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
 struct BYOMModelAdmissionClient: Sendable {
     private static let maxStatusResponseBytes = 64 * 1024
 
@@ -1191,6 +1508,24 @@ struct BYOMModelAdmissionClient: Sendable {
         )
     }
 
+    func withdraw(_ package: BYOMWithdrawalPackage, bearerToken: String) async throws -> BYOMAdmissionWithdrawWire {
+        var request = URLRequest(url: baseURL.appendingPathComponent("v1/provider/model-admission/withdrawals"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("application/json", forHTTPHeaderField: "accept")
+        request.httpBody = package.encodedRequest
+        return try await performWithdrawal(
+            request,
+            expectedProviderID: package.request.providerID,
+            expectedCandidateID: package.request.candidateID,
+            expectedServedModelRef: package.request.servedModelRef,
+            expectedCatalogModelKey: package.request.catalogModelKey,
+            expectedIdempotencyKey: package.request.idempotencyKey,
+            expectedReasonCode: package.request.reasonCode
+        )
+    }
+
     func status(candidateID: String, providerID: String? = nil, bearerToken: String) async throws -> BYOMAdmissionStatusWire {
         var components = URLComponents(url: baseURL.appendingPathComponent("v1/provider/model-admission/status"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "candidate_id", value: candidateID)]
@@ -1202,6 +1537,44 @@ struct BYOMModelAdmissionClient: Sendable {
         request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "accept")
         return try await perform(request, expectedProviderID: providerID, expectedCandidateID: candidateID)
+    }
+
+    private func performWithdrawal(
+        _ request: URLRequest,
+        expectedProviderID: String,
+        expectedCandidateID: String,
+        expectedServedModelRef: String,
+        expectedCatalogModelKey: String?,
+        expectedIdempotencyKey: String,
+        expectedReasonCode: String
+    ) async throws -> BYOMAdmissionWithdrawWire {
+        let data: Data
+        let response: URLResponse
+        if let session {
+            (data, response) = try await session.data(for: request)
+        } else {
+            let ephemeral = URLSession(configuration: .ephemeral, delegate: NoRedirectURLSessionDelegate(), delegateQueue: nil)
+            defer { ephemeral.finishTasksAndInvalidate() }
+            (data, response) = try await ephemeral.data(for: request)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw BYOMModelAdmissionError.httpStatus(http.statusCode)
+        }
+        guard data.count <= Self.maxStatusResponseBytes else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        return try BYOMAdmissionWithdrawWire.decodeStrictWithdrawal(
+            from: data,
+            expectedProviderID: expectedProviderID,
+            expectedCandidateID: expectedCandidateID,
+            expectedServedModelRef: expectedServedModelRef,
+            expectedCatalogModelKey: expectedCatalogModelKey,
+            expectedIdempotencyKey: expectedIdempotencyKey,
+            expectedReasonCode: expectedReasonCode
+        )
     }
 
     private func perform(
@@ -1302,6 +1675,48 @@ struct BYOMModelAdmissionRuntime: Sendable {
         }
         let status = try await client.status(candidateID: candidateID, providerID: providerID, bearerToken: bearer)
         return status.withLocalCandidateIdentityIfCoordinatorHasNoOffer(candidate)
+    }
+
+    func withdraw(providerID: String, target: String, reasonCode: String) async throws -> BYOMAdmissionWithdrawWire {
+        let candidate = await resolveCandidate(target)
+        let candidateID = candidate?.candidateID ?? target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard candidate != nil || BYOMWithdrawalBuilder.isStableCandidateID(candidateID) else {
+            throw BYOMModelAdmissionError.candidateNotFound
+        }
+        guard let bearer = try credentialStore.load(providerID: providerID) else {
+            throw BYOMModelAdmissionError.missingBearer(providerID: providerID)
+        }
+        guard let identity = try identityStore.loadAdmissionIdentity(providerId: providerID) else {
+            throw BYOMModelAdmissionError.missingAdmissionIdentity(providerID: providerID)
+        }
+        let package: BYOMWithdrawalPackage
+        if let candidate {
+            package = try BYOMWithdrawalBuilder.makePackage(
+                providerID: providerID,
+                candidate: candidate,
+                admissionIdentity: identity,
+                reasonCode: reasonCode
+            )
+        } else {
+            let status = try await client.status(candidateID: candidateID, providerID: providerID, bearerToken: bearer)
+            // Only sign+post a withdrawal when the coordinator's own state machine
+            // says `withdrawn` is a legal next transition. This rejects not_offered
+            // as well as already-withdrawn/revoked states, which would otherwise
+            // produce a guaranteed-reject round trip.
+            guard status.admissionStateSource == "coordinator",
+                  status.allowedNextStates.contains("withdrawn") else {
+                throw BYOMModelAdmissionError.missingWithdrawalTuple
+            }
+            package = try BYOMWithdrawalBuilder.makePackage(
+                providerID: providerID,
+                candidateID: status.candidateID,
+                servedModelRef: status.servedModelRef,
+                catalogModelKey: status.catalogModelKey,
+                admissionIdentity: identity,
+                reasonCode: reasonCode
+            )
+        }
+        return try await client.withdraw(package, bearerToken: bearer)
     }
 
     private func resolveCandidate(_ target: String) async -> BYOMDiscoveryWire.Candidate? {

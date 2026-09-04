@@ -1372,6 +1372,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/admin/admission-canary/proof-of-weights", s.handleAdmissionCanaryProofOfWeights)
 	}
 	mux.HandleFunc("/v1/provider/model-admission/offers", s.handleProviderModelAdmissionOffer)
+	mux.HandleFunc("/v1/provider/model-admission/withdrawals", s.handleProviderModelAdmissionWithdrawal)
 	mux.HandleFunc("/v1/provider/model-admission/status", s.handleProviderModelAdmissionStatus)
 	if s.cfg.Auth.GitHubOAuth.Enabled {
 		mux.HandleFunc("/v1/auth/github/start", s.handleGitHubStart)
