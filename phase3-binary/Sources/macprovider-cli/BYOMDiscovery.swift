@@ -804,6 +804,10 @@ struct BYOMEvaluationRunner: Sendable {
     }
 
     func evaluate() async -> BYOMEvaluationWire {
+        // Evaluate is a deliberate command: establish a stable provider identity
+        // (idempotent salt provisioning) before discovery so the evaluated
+        // candidate has a stable id. Discovery itself stays read-only.
+        BYOMDiscoveryNamespaceStore().provisionNamespaceIfMissing(at: environment.namespaceURL)
         let discovery = await BYOMDiscoveryRunner(environment: environment, httpClient: httpClient).discover()
         guard let candidate = selectLocalEvaluationCandidate(from: discovery.candidates) else {
             let warnings = [BYOMDiscoveryWarning.evaluationFailed.rawValue]
@@ -1255,6 +1259,41 @@ struct BYOMDiscoveryNamespaceStore {
             return Result(bytes: nil, warnings: [.namespacePermissionInvalid, .candidateIDUnstable])
         }
         return Result(bytes: data, warnings: [])
+    }
+
+    /// Provision the per-provider identity salt if absent, so that a DELIBERATE
+    /// command (`models evaluate` / `models offer`) yields stable candidate IDs.
+    /// This is the "later mutating command" the read-only discovery path defers
+    /// to — the workflow is discover -> evaluate -> offer, so a stable identity
+    /// must exist by evaluate. Idempotent: an existing salt is read unchanged, so
+    /// this never rewrites it. The salt is local CLI identity state only (0700
+    /// dir / 0600 file), never serving config or coordinator state.
+    @discardableResult
+    func provisionNamespaceIfMissing(at url: URL) -> Result {
+        if fileManager.fileExists(atPath: url.path) {
+            return readNamespace(at: url)
+        }
+        let parent = url.deletingLastPathComponent()
+        do {
+            try fileManager.createDirectory(
+                at: parent,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+            var bytes = [UInt8](repeating: 0, count: 32)
+            guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+                return Result(bytes: nil, warnings: [.candidateIDUnstable])
+            }
+            let data = Data(bytes)
+            guard fileManager.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+                return Result(bytes: nil, warnings: [.candidateIDUnstable])
+            }
+            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return Result(bytes: data, warnings: [])
+        } catch {
+            return Result(bytes: nil, warnings: [.candidateIDUnstable])
+        }
     }
 
     private func namespaceDirectoryPermissionsArePrivate(_ url: URL) -> Bool {
