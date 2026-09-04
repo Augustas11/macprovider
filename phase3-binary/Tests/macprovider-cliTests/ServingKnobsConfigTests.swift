@@ -388,8 +388,8 @@ final class ServingKnobsConfigTests: XCTestCase {
         let proof = PagedKVHardwareSizingProof(
             modelID: "mlx-community/Qwen-Test",
             modelSHA256: String(repeating: "a", count: 64),
-            tokenizerSHA256: nil,
-            chatTemplateSHA256: nil,
+            tokenizerSHA256: String(repeating: "c", count: 64),
+            chatTemplateSHA256: String(repeating: "d", count: 64),
             modelFamily: "qwen",
             hardwareClass: "apple-silicon-test",
             metallibSHA256: String(repeating: "b", count: 64),
@@ -397,6 +397,14 @@ final class ServingKnobsConfigTests: XCTestCase {
             blockSizeTokens: 32,
             maxPhysicalBlocks: 64,
             maxResidentTokens: 2048,
+            sizingModelClass: PagedKVHardwareSizingProof.requiredSizingModelClass,
+            unifiedMemoryGB: 32,
+            modelWeightsGB: 20,
+            perRequestActivationGB: 4,
+            pagedBlockPoolGB: 4,
+            kvBytesPerToken: 1_024,
+            measuredGatherOverheadPercent: 2,
+            gatherOverheadCeilingPercent: 10,
             parityLabel: "sdpa-parity-v1"
         )
         let decision = PagedKVAttachGate.decide(
@@ -405,8 +413,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             kvBits: nil,
             modelID: proof.modelID,
             modelSHA256: proof.modelSHA256,
-            tokenizerSHA256: nil,
-            chatTemplateSHA256: nil,
+            tokenizerSHA256: String(repeating: "c", count: 64),
+            chatTemplateSHA256: String(repeating: "d", count: 64),
             modelFamily: "qwen",
             requiresMoEDispatch: false,
             gates: PagedKVGates(
@@ -419,6 +427,7 @@ final class ServingKnobsConfigTests: XCTestCase {
                 observedMetallibSHA256: proof.metallibSHA256,
                 observedKernelIdentifier: proof.kernelIdentifier,
                 observedParityLabel: proof.parityLabel,
+                observedPoolEpoch: proof.poolEpoch,
                 engineBridgeAvailable: true
             )
         )
@@ -942,7 +951,7 @@ final class ServingKnobsConfigTests: XCTestCase {
             loader: { _ in throw TestRuntimeError.notExpected }
         )
         let decision = await runtime.pagedKVDecisionForTest()
-        XCTAssertEqual(decision, .fallback(.metallib))
+        XCTAssertEqual(decision, .fallback(.identity))
     }
 
     func testRuntimeStrictPagedKVRejectsBeforeCompletionRuns() async throws {

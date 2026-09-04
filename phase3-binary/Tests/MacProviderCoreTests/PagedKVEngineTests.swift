@@ -30,6 +30,14 @@ final class PagedKVEngineTests: XCTestCase {
             blockSizeTokens: blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks,
             maxResidentTokens: blockSizeTokens * maxPhysicalBlocks,
+            sizingModelClass: PagedKVHardwareSizingProof.requiredSizingModelClass,
+            unifiedMemoryGB: 32,
+            modelWeightsGB: 20,
+            perRequestActivationGB: 4,
+            pagedBlockPoolGB: 4,
+            kvBytesPerToken: 1_024,
+            measuredGatherOverheadPercent: 2,
+            gatherOverheadCeilingPercent: 10,
             poolEpoch: poolEpoch,
             parityLabel: "sdpa-parity-v1"
         )
@@ -193,6 +201,7 @@ final class PagedKVEngineTests: XCTestCase {
                 observedMetallibSHA256: proof.metallibSHA256,
                 observedKernelIdentifier: proof.kernelIdentifier,
                 observedParityLabel: proof.parityLabel,
+                observedPoolEpoch: proof.poolEpoch,
                 moeDispatchProven: true
             )
         )
@@ -218,6 +227,7 @@ final class PagedKVEngineTests: XCTestCase {
                 observedMetallibSHA256: proof.metallibSHA256,
                 observedKernelIdentifier: proof.kernelIdentifier,
                 observedParityLabel: proof.parityLabel,
+                observedPoolEpoch: proof.poolEpoch,
                 moeDispatchProven: true,
                 engineBridgeAvailable: true
             )
@@ -236,6 +246,60 @@ final class PagedKVEngineTests: XCTestCase {
             kernelIdentifier: proof.kernelIdentifier,
             parityLabel: proof.parityLabel,
             poolEpoch: proof.poolEpoch
+        ))
+    }
+
+    func testAttachGateRequiresLiveObservedPoolEpoch() {
+        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+        let proof = sizingProof(modelFamily: "qwen", blockSizeTokens: 32, maxPhysicalBlocks: 64)
+        let decision = decide(
+            config: config,
+            runtimeCacheClass: "KVCacheSimple",
+            kvBits: nil,
+            modelFamily: "qwen",
+            requiresMoEDispatch: false,
+            gates: PagedKVGates(
+                identityAvailable: true,
+                observedHardwareClass: "apple-silicon-test",
+                metallibAvailable: true,
+                kernelRegistered: true,
+                parityEstablished: true,
+                hardwareSizingProof: proof,
+                observedMetallibSHA256: proof.metallibSHA256,
+                observedKernelIdentifier: proof.kernelIdentifier,
+                observedParityLabel: proof.parityLabel,
+                engineBridgeAvailable: true
+            )
+        )
+        XCTAssertEqual(decision, .fallback(.allocator))
+    }
+
+    func testDescriptorRejectsBlankIndependentIdentity() {
+        let descriptor = PagedKVDescriptor(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 4,
+            modelID: "model",
+            modelSHA256: "hash",
+            supportedModelFamilies: ["qwen"],
+            supportsMoEDispatch: false,
+            hardwareClass: "hardware",
+            metallibSHA256: "metallib",
+            kernelIdentifier: "kernel",
+            parityLabel: "parity"
+        )
+        XCTAssertFalse(descriptor.admits(
+            modelID: "model",
+            modelSHA256: "hash",
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: false,
+            hardwareClass: "",
+            metallibSHA256: "metallib",
+            kernelIdentifier: "kernel",
+            parityLabel: "parity",
+            poolEpoch: 1
         ))
     }
 
@@ -335,6 +399,7 @@ final class PagedKVEngineTests: XCTestCase {
                 observedMetallibSHA256: proof.metallibSHA256,
                 observedKernelIdentifier: proof.kernelIdentifier,
                 observedParityLabel: proof.parityLabel,
+                observedPoolEpoch: proof.poolEpoch,
                 moeDispatchProven: false
             )
         )
@@ -560,6 +625,33 @@ final class PagedKVEngineTests: XCTestCase {
         )
         XCTAssertEqual(ordered.layers[0].keyBytes, materialized.layers[0].keyBytes)
         XCTAssertEqual(ordered.layers[0].valueBytes, materialized.layers[0].valueBytes)
+    }
+
+    func testAllocatorBindingCarriesReservedPhysicalOrderForRuntimeCaches() async throws {
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 6,
+            physicalBlockOrder: [3, 1, 4, 0, 2, 5]
+        )
+        let handle = try await allocator.allocate(conversationKey: "conv:binding", maxTokens: 12)
+        let binding = try await allocator.binding(for: handle)
+        XCTAssertEqual(binding.currentTable.physicalBlocks, [])
+        XCTAssertEqual(binding.reservedPhysicalBlocks, [3, 1, 4])
+    }
+
+    func testRetainedByteLifecycleCanTrimAfterSameConversationReattach() async throws {
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 4,
+            physicalBlockOrder: [2, 0, 3, 1]
+        )
+        let handle = try await allocator.allocate(conversationKey: "conv:bytes", maxTokens: 12, initialTokens: 7)
+        let retained = try await allocator.retain(handle)
+        let reattached = try await allocator.reattach(retained, conversationKey: "conv:bytes")
+        let trimmed = try await allocator.trim(reattached, toLogicalTokens: 5)
+        XCTAssertEqual(trimmed.logicalTokenCount, 5)
+        XCTAssertEqual(trimmed.physicalBlocks, [2, 0])
+        XCTAssertEqual(trimmed.tailValidTokenCount, 1)
     }
 
     func testContiguousBridgeMaterializesValidEmptySequence() async throws {

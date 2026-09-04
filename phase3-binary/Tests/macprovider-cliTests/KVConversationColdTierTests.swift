@@ -774,7 +774,7 @@ final class KVConversationColdTierTests: XCTestCase {
             "non-eligible params must select RotatingKVCache")
     }
 
-    func testPagedKVCacheClassProbeUsesUnforcedServeParameters() {
+    func testPagedKVCacheClassProbeUsesPagedCacheParameters() {
         let model = FakeDimensionModel(layers: 3)
         let base = GenerateParameters(
             maxTokens: 128, maxKVSize: 4096, kvBits: nil,
@@ -784,7 +784,8 @@ final class KVConversationColdTierTests: XCTestCase {
         XCTAssertNotNil(forced as? [KVCacheSimple])
 
         let observed = ModelRuntime.pagedKVRuntimeCacheClass(model: model, baseParameters: base)
-        XCTAssertEqual(observed, "RotatingKVCache")
+        XCTAssertEqual(observed, "KVCacheSimple",
+            "paged capability probing must use the actual paged KV cache contract")
     }
 
     func testPagedKVCacheSeamRegistersKernelWithoutExecutingMetal() async throws {
@@ -804,6 +805,14 @@ final class KVConversationColdTierTests: XCTestCase {
             blockSizeTokens: 2,
             maxPhysicalBlocks: 4,
             maxResidentTokens: 8,
+            sizingModelClass: PagedKVHardwareSizingProof.requiredSizingModelClass,
+            unifiedMemoryGB: 32,
+            modelWeightsGB: 20,
+            perRequestActivationGB: 4,
+            pagedBlockPoolGB: 4,
+            kvBytesPerToken: 1_024,
+            measuredGatherOverheadPercent: 2,
+            gatherOverheadCeilingPercent: 10,
             parityLabel: "sdpa-parity-v1"
         )
         let decision = PagedKVAttachGate.decide(
@@ -826,10 +835,15 @@ final class KVConversationColdTierTests: XCTestCase {
                 observedMetallibSHA256: proof.metallibSHA256,
                 observedKernelIdentifier: proof.kernelIdentifier,
                 observedParityLabel: proof.parityLabel,
+                observedPoolEpoch: proof.poolEpoch,
                 engineBridgeAvailable: true
             )
         )
         let descriptor = try XCTUnwrap(decision.descriptor)
+        let diagnostic = ModelRuntime.pagedKVAttachDiagnosticLine(decision, sizingProof: proof)
+        XCTAssertTrue(diagnostic.contains("unified_memory_gb=32"))
+        XCTAssertTrue(diagnostic.contains("paged_block_pool_gb=4.0"))
+        XCTAssertTrue(diagnostic.contains("measured_gather_overhead_percent=2.0"))
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 2, maxPhysicalBlocks: 4)
         let handle = try await allocator.allocate(conversationKey: "conv:paged", maxTokens: 8, initialTokens: 0)
         let binding = try await allocator.binding(for: handle)
