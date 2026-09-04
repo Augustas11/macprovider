@@ -627,6 +627,731 @@ struct BYOMOfferDryRunWire: Codable, Equatable, Sendable {
     }
 }
 
+struct BYOMAdmissionStatusWire: Codable, Equatable, Sendable {
+    let schema: String
+    let generatedAt: String
+    let cliVersion: String
+    let providerID: String
+    let candidateID: String
+    let servedModelRef: String
+    let catalogModelKey: String?
+    let admissionState: String
+    let admissionStateSource: String
+    let coordinatorEventID: String?
+    let stateObservedAt: String?
+    let providerGuidance: BYOMDiscoveryWire.Guidance
+    let allowedNextStates: [String]
+    let warnings: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case generatedAt = "generated_at"
+        case cliVersion = "cli_version"
+        case providerID = "provider_id"
+        case candidateID = "candidate_id"
+        case servedModelRef = "served_model_ref"
+        case catalogModelKey = "catalog_model_key"
+        case admissionState = "admission_state"
+        case admissionStateSource = "admission_state_source"
+        case coordinatorEventID = "coordinator_event_id"
+        case stateObservedAt = "state_observed_at"
+        case providerGuidance = "provider_guidance"
+        case allowedNextStates = "allowed_next_states"
+        case warnings
+    }
+}
+
+extension BYOMAdmissionStatusWire {
+    private static let topLevelKeys: Set<String> = [
+        "schema",
+        "generated_at",
+        "cli_version",
+        "provider_id",
+        "candidate_id",
+        "served_model_ref",
+        "catalog_model_key",
+        "admission_state",
+        "admission_state_source",
+        "coordinator_event_id",
+        "state_observed_at",
+        "provider_guidance",
+        "allowed_next_states",
+        "warnings",
+    ]
+    private static let guidanceKeys: Set<String> = [
+        "state_label_key",
+        "state_meaning_key",
+        "next_action",
+        "transition_reason_code",
+        "earning_path_class",
+    ]
+    private static let localDefaultStates: Set<String> = ["local_only", "not_offered", "offerable"]
+    private static let coordinatorStates: Set<String> = [
+        "not_offered",
+        "offer_submitted",
+        "offer_rejected",
+        "sandbox_probe_only",
+        "network_visible_unpriced",
+        "network_admitted_unsettled",
+        "catalog_priced",
+        "settlement_capable",
+        "withdrawn",
+        "revoked",
+    ]
+    private static let nextActions: Set<String> = [
+        "fix_local_blocker",
+        "evaluate",
+        "offer_dry_run",
+        "submit_offer",
+        "revise_and_reoffer",
+        "check_status",
+        "withdraw",
+        "wait_for_coordinator",
+        "maintain_runtime",
+        "none",
+    ]
+    private static let earningPathClasses: Set<String> = [
+        "local_inventory_only",
+        "not_earning_yet_catalog_or_receipt_path_exists",
+        "no_earning_path_in_v0_1",
+        "settlement_capable",
+    ]
+    private static let reasonRequiredStates: Set<String> = [
+        "offer_rejected",
+        "withdrawn",
+        "revoked",
+    ]
+
+    static func decodeStrictStatus(
+        from data: Data,
+        expectedProviderID: String? = nil,
+        expectedCandidateID: String? = nil
+    ) throws -> BYOMAdmissionStatusWire {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(object.keys) == topLevelKeys,
+              let guidance = object["provider_guidance"] as? [String: Any],
+              Set(guidance.keys) == guidanceKeys else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        let status = try JSONDecoder().decode(BYOMAdmissionStatusWire.self, from: data)
+        try validate(status, expectedProviderID: expectedProviderID, expectedCandidateID: expectedCandidateID)
+        return status
+    }
+
+    private static func validate(
+        _ status: BYOMAdmissionStatusWire,
+        expectedProviderID: String?,
+        expectedCandidateID: String?
+    ) throws {
+        guard status.schema == "model_admission_status.v1",
+              status.admissionStateSource == "local_default" || status.admissionStateSource == "coordinator",
+              nextActions.contains(status.providerGuidance.nextAction),
+              earningPathClasses.contains(status.providerGuidance.earningPathClass) else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        if let expectedProviderID, status.providerID != expectedProviderID {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        if let expectedCandidateID, status.candidateID != expectedCandidateID {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        if status.admissionStateSource == "local_default" {
+            guard localDefaultStates.contains(status.admissionState),
+                  status.allowedNextStates.isEmpty else {
+                throw BYOMModelAdmissionError.invalidStatusSchema
+            }
+            return
+        }
+        guard coordinatorStates.contains(status.admissionState) else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        let allowed = Set(Self.allowedNextStates(for: status.admissionState))
+        guard status.allowedNextStates.allSatisfy({ allowed.contains($0) }) else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        if reasonRequiredStates.contains(status.admissionState),
+           status.providerGuidance.transitionReasonCode?.isEmpty ?? true {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        guard Self.guidanceMatches(status) else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+    }
+
+    private static func allowedNextStates(for state: String) -> [String] {
+        switch state {
+        case "not_offered", "withdrawn", "revoked":
+            return ["offer_submitted"]
+        case "offer_rejected":
+            return ["offer_submitted", "revoked"]
+        case "offer_submitted":
+            return ["offer_rejected", "sandbox_probe_only", "network_visible_unpriced", "network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked"]
+        case "sandbox_probe_only":
+            return ["network_visible_unpriced", "network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked"]
+        case "network_visible_unpriced":
+            return ["network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked"]
+        case "network_admitted_unsettled":
+            return ["catalog_priced", "settlement_capable", "withdrawn", "revoked"]
+        case "catalog_priced":
+            return ["network_admitted_unsettled", "settlement_capable", "withdrawn", "revoked"]
+        case "settlement_capable":
+            return ["network_admitted_unsettled", "catalog_priced", "withdrawn", "revoked"]
+        default:
+            return []
+        }
+    }
+
+    private static func guidanceMatches(_ status: BYOMAdmissionStatusWire) -> Bool {
+        let guidance = status.providerGuidance
+        switch status.admissionState {
+        case "not_offered":
+            return guidance.nextAction == "submit_offer" &&
+                guidance.earningPathClass == "local_inventory_only"
+        case "offer_submitted":
+            return guidance.nextAction == "wait_for_coordinator" &&
+                (guidance.earningPathClass == "no_earning_path_in_v0_1" ||
+                 guidance.earningPathClass == "not_earning_yet_catalog_or_receipt_path_exists")
+        case "offer_rejected":
+            return guidance.nextAction == "revise_and_reoffer" &&
+                guidance.earningPathClass == "no_earning_path_in_v0_1"
+        case "sandbox_probe_only", "network_visible_unpriced", "network_admitted_unsettled", "catalog_priced":
+            return guidance.nextAction == "withdraw" &&
+                guidance.earningPathClass == "not_earning_yet_catalog_or_receipt_path_exists"
+        case "settlement_capable":
+            return guidance.nextAction == "maintain_runtime" &&
+                guidance.earningPathClass == "settlement_capable"
+        case "withdrawn", "revoked":
+            return guidance.nextAction == "submit_offer" &&
+                guidance.earningPathClass == "no_earning_path_in_v0_1"
+        default:
+            return false
+        }
+    }
+}
+
+struct BYOMOfferSubmitRequestWire: Codable, Equatable, Sendable {
+    let schema: String
+    let signatureDomain: String
+    let providerID: String
+    let candidateID: String
+    let runtimeSource: String
+    let servedModelRef: String
+    let catalogModelKey: String
+    let discoveryDigestSHA256: String
+    let evaluationDigestSHA256: String
+    let artifactHashes: [String: String]
+    let advisoryCapabilities: AdvisoryCapabilities
+    let fitEvidenceSource: String
+    let localReadiness: String
+    let requestedDisclosureClass: String
+    let timestamp: String
+    let nonce: String
+    let idempotencyKey: String
+    let signingKeyDigest: String
+    let signatureAlgorithm: String
+    var providerSignature: String
+    let cliVersion: String
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case signatureDomain = "signature_domain"
+        case providerID = "provider_id"
+        case candidateID = "candidate_id"
+        case runtimeSource = "runtime_source"
+        case servedModelRef = "served_model_ref"
+        case catalogModelKey = "catalog_model_key"
+        case discoveryDigestSHA256 = "discovery_digest_sha256"
+        case evaluationDigestSHA256 = "evaluation_digest_sha256"
+        case artifactHashes = "artifact_hashes"
+        case advisoryCapabilities = "advisory_capabilities"
+        case fitEvidenceSource = "fit_evidence_source"
+        case localReadiness = "local_readiness"
+        case requestedDisclosureClass = "requested_disclosure_class"
+        case timestamp
+        case nonce
+        case idempotencyKey = "idempotency_key"
+        case signingKeyDigest = "signing_key_digest"
+        case signatureAlgorithm = "signature_algorithm"
+        case providerSignature = "provider_signature"
+        case cliVersion = "cli_version"
+    }
+
+    struct AdvisoryCapabilities: Codable, Equatable, Sendable {
+        let chatCompletions: Bool?
+        let streaming: Bool?
+        let toolCallPassthrough: Bool?
+        let structuredOutputPassthrough: Bool?
+        let jsonMode: Bool?
+        let usageReporting: Bool?
+        let maxContextTokens: Int?
+        let quantization: String?
+        let family: String?
+        let runtimeVersion: String?
+
+        enum CodingKeys: String, CodingKey {
+            case chatCompletions = "chat_completions"
+            case streaming
+            case toolCallPassthrough = "tool_call_passthrough"
+            case structuredOutputPassthrough = "structured_output_passthrough"
+            case jsonMode = "json_mode"
+            case usageReporting = "usage_reporting"
+            case maxContextTokens = "max_context_tokens"
+            case quantization
+            case family
+            case runtimeVersion = "runtime_version"
+        }
+    }
+
+    func canonicalValue() -> RFC8785JCS.Value {
+        .object([
+            "signature_domain": .string(signatureDomain),
+            "provider_id": .string(providerID),
+            "candidate_id": .string(candidateID),
+            "runtime_source": .string(runtimeSource),
+            "served_model_ref": .string(servedModelRef),
+            "catalog_model_key": .string(catalogModelKey),
+            "discovery_digest_sha256": .string(discoveryDigestSHA256),
+            "evaluation_digest_sha256": .string(evaluationDigestSHA256),
+            "artifact_hashes": .object(artifactHashes.mapValues(RFC8785JCS.Value.string)),
+            "advisory_capabilities": advisoryCapabilities.canonicalValue(),
+            "fit_evidence_source": .string(fitEvidenceSource),
+            "local_readiness": .string(localReadiness),
+            "requested_disclosure_class": .string(requestedDisclosureClass),
+            "timestamp": .string(timestamp),
+            "nonce": .string(nonce),
+            "idempotency_key": .string(idempotencyKey),
+            "signing_key_digest": .string(signingKeyDigest),
+            "cli_version": .string(cliVersion),
+        ])
+    }
+}
+
+extension BYOMOfferSubmitRequestWire.AdvisoryCapabilities {
+    init(_ capabilities: BYOMDiscoveryWire.Capabilities) {
+        self.init(
+            chatCompletions: capabilities.chatCompletions,
+            streaming: capabilities.streaming,
+            toolCallPassthrough: capabilities.toolCallPassthrough,
+            structuredOutputPassthrough: capabilities.structuredOutputPassthrough,
+            jsonMode: capabilities.jsonMode,
+            usageReporting: capabilities.usageReporting,
+            maxContextTokens: capabilities.maxContextTokens,
+            quantization: capabilities.quantization,
+            family: capabilities.family,
+            runtimeVersion: capabilities.runtimeVersion
+        )
+    }
+
+    func canonicalValue() -> RFC8785JCS.Value {
+        .object([
+            "chat_completions": chatCompletions.map(RFC8785JCS.Value.bool) ?? .null,
+            "streaming": streaming.map(RFC8785JCS.Value.bool) ?? .null,
+            "tool_call_passthrough": toolCallPassthrough.map(RFC8785JCS.Value.bool) ?? .null,
+            "structured_output_passthrough": structuredOutputPassthrough.map(RFC8785JCS.Value.bool) ?? .null,
+            "json_mode": jsonMode.map(RFC8785JCS.Value.bool) ?? .null,
+            "usage_reporting": usageReporting.map(RFC8785JCS.Value.bool) ?? .null,
+            "max_context_tokens": maxContextTokens.map(RFC8785JCS.Value.int) ?? .null,
+            "quantization": quantization.map(RFC8785JCS.Value.string) ?? .null,
+            "family": family.map(RFC8785JCS.Value.string) ?? .null,
+            "runtime_version": runtimeVersion.map(RFC8785JCS.Value.string) ?? .null,
+        ])
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try encodeNullable(chatCompletions, forKey: .chatCompletions, into: &container)
+        try encodeNullable(streaming, forKey: .streaming, into: &container)
+        try encodeNullable(toolCallPassthrough, forKey: .toolCallPassthrough, into: &container)
+        try encodeNullable(structuredOutputPassthrough, forKey: .structuredOutputPassthrough, into: &container)
+        try encodeNullable(jsonMode, forKey: .jsonMode, into: &container)
+        try encodeNullable(usageReporting, forKey: .usageReporting, into: &container)
+        try encodeNullable(maxContextTokens, forKey: .maxContextTokens, into: &container)
+        try encodeNullable(quantization, forKey: .quantization, into: &container)
+        try encodeNullable(family, forKey: .family, into: &container)
+        try encodeNullable(runtimeVersion, forKey: .runtimeVersion, into: &container)
+    }
+
+    private func encodeNullable<T: Encodable>(
+        _ value: T?,
+        forKey key: CodingKeys,
+        into container: inout KeyedEncodingContainer<CodingKeys>
+    ) throws {
+        if let value {
+            try container.encode(value, forKey: key)
+        } else {
+            try container.encodeNil(forKey: key)
+        }
+    }
+}
+
+enum BYOMModelAdmissionError: Error, Equatable, CustomStringConvertible {
+    case missingProviderID
+    case missingCoordinatorURL
+    case missingBearer(providerID: String)
+    case missingAdmissionIdentity(providerID: String)
+    case candidateNotFound
+    case candidateUnstable
+    case candidateNotOfferable
+    case invalidEvaluationDigest
+    case invalidCoordinatorURL
+    case httpStatus(Int)
+    case invalidStatusSchema
+
+    var description: String {
+        switch self {
+        case .missingProviderID:
+            return "models offer requires provider_id from --provider-id, config, or MACPROVIDER_PROVIDER_ID"
+        case .missingCoordinatorURL:
+            return "models offer requires coordinator_url from --coordinator-url, config, or MACPROVIDER_COORDINATOR_URL"
+        case .missingBearer(let providerID):
+            return "provider bearer token is missing for \(providerID); run macprovider-cli credentials import first"
+        case .missingAdmissionIdentity(let providerID):
+            return "provider admission signing identity is missing for \(providerID); start provider enrollment before offering BYOM models"
+        case .candidateNotFound:
+            return "BYOM candidate was not found in local discovery"
+        case .candidateUnstable:
+            return "BYOM candidate id is unstable; run models discover --json to initialize the local namespace"
+        case .candidateNotOfferable:
+            return "BYOM candidate is not offerable; run models evaluate and models offer --dry-run --json before submitting"
+        case .invalidEvaluationDigest:
+            return "evaluation digest must be a 64-character lowercase SHA-256 hex value"
+        case .invalidCoordinatorURL:
+            return "invalid coordinator URL; use wss:// or https://"
+        case .httpStatus(let status):
+            return "coordinator model admission request failed with HTTP \(status)"
+        case .invalidStatusSchema:
+            return "coordinator returned an invalid model admission status schema"
+        }
+    }
+}
+
+struct BYOMOfferSubmissionPackage: Equatable, Sendable {
+    let request: BYOMOfferSubmitRequestWire
+    let encodedRequest: Data
+    let payloadDigestSHA256: String
+}
+
+struct BYOMOfferSubmissionBuilder {
+    private static let stableCandidatePattern = #"^byom_[a-z2-7]{52}$"#
+
+    static func makePackage(
+        providerID: String,
+        candidate: BYOMDiscoveryWire.Candidate,
+        admissionIdentity: Curve25519.Signing.PrivateKey,
+        evaluationDigestSHA256: String?,
+        requestedDisclosureClass: String,
+        now: Date = Date(),
+        nonce: String = UUID().uuidString.lowercased(),
+        idempotencyKey: String = UUID().uuidString.lowercased(),
+        cliVersion: String = CoordinatorClient.binaryVersion
+    ) throws -> BYOMOfferSubmissionPackage {
+        guard candidate.candidateID.range(of: stableCandidatePattern, options: .regularExpression) != nil,
+              !candidate.warningCodes.contains(BYOMDiscoveryWarning.candidateIDUnstable.rawValue),
+              !candidate.warningCodes.contains(BYOMDiscoveryWarning.namespacePermissionInvalid.rawValue) else {
+            throw BYOMModelAdmissionError.candidateUnstable
+        }
+        let evaluationDigest = evaluationDigestSHA256?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !evaluationDigest.isEmpty, !Self.isLowercaseSHA256(evaluationDigest) {
+            throw BYOMModelAdmissionError.invalidEvaluationDigest
+        }
+        guard Self.canSubmit(candidate: candidate, evaluationDigestSHA256: evaluationDigest) else {
+            throw BYOMModelAdmissionError.candidateNotOfferable
+        }
+        let publicKey = admissionIdentity.publicKey.rawRepresentation
+        let signingKeyDigest = Self.sha256Hex(publicKey)
+        var request = BYOMOfferSubmitRequestWire(
+            schema: "model_admission_offer_submit.v1",
+            signatureDomain: "macprovider.model_admission.offer.v1",
+            providerID: providerID,
+            candidateID: candidate.candidateID,
+            runtimeSource: candidate.runtimeSource,
+            servedModelRef: candidate.servedModelRef,
+            catalogModelKey: candidate.catalogModelKey ?? "",
+            discoveryDigestSHA256: try discoveryDigest(candidate),
+            evaluationDigestSHA256: evaluationDigest,
+            artifactHashes: [:],
+            advisoryCapabilities: BYOMOfferSubmitRequestWire.AdvisoryCapabilities(candidate.capabilities),
+            fitEvidenceSource: "local_discovery",
+            localReadiness: candidate.readinessState,
+            requestedDisclosureClass: requestedDisclosureClass,
+            timestamp: ModelSwitchingWireCodec.timestamp(now),
+            nonce: nonce,
+            idempotencyKey: idempotencyKey,
+            signingKeyDigest: signingKeyDigest,
+            signatureAlgorithm: "ed25519",
+            providerSignature: "",
+            cliVersion: cliVersion
+        )
+        let canonical = try RFC8785JCS.canonicalString(request.canonicalValue())
+        let canonicalData = Data(canonical.utf8)
+        let signatureData = try admissionIdentity.signature(for: canonicalData)
+        request.providerSignature = signatureData.base64EncodedString()
+        return BYOMOfferSubmissionPackage(
+            request: request,
+            encodedRequest: Data(try ModelSwitchingWireCodec.encode(request).utf8),
+            payloadDigestSHA256: Self.sha256Hex(canonicalData)
+        )
+    }
+
+    static func discoveryDigest(_ candidate: BYOMDiscoveryWire.Candidate) throws -> String {
+        try RFC8785JCS.sha256Hex(of: .object([
+            "candidate_id": .string(candidate.candidateID),
+            "runtime_source": .string(candidate.runtimeSource),
+            "served_model_ref": .string(candidate.servedModelRef),
+            "catalog_model_key": candidate.catalogModelKey.map(RFC8785JCS.Value.string) ?? .null,
+            "identity_state": .string(candidate.identityState),
+            "readiness_state": .string(candidate.readinessState),
+            "fit_state": .string(candidate.fitState),
+            "evaluation_state": .string(candidate.evaluationState),
+            "admission_state": .string(candidate.admissionState),
+            "warning_codes": .array(candidate.warningCodes.sorted().map(RFC8785JCS.Value.string)),
+        ]))
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func isLowercaseSHA256(_ value: String) -> Bool {
+        value.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+    }
+
+    private static func canSubmit(candidate: BYOMDiscoveryWire.Candidate, evaluationDigestSHA256: String) -> Bool {
+        guard candidate.admissionStateSource == "local_default",
+              candidate.admissionState == "offerable",
+              candidate.readinessState == "ready",
+              candidate.fitState != "does_not_fit" else {
+            return false
+        }
+        let warnings = Set(candidate.warningCodes)
+        if warnings.contains(BYOMDiscoveryWarning.adapterRejectedNonLoopback.rawValue) ||
+            warnings.contains(BYOMDiscoveryWarning.adapterMalformedResponse.rawValue) ||
+            warnings.contains(BYOMDiscoveryWarning.adapterResponseTruncated.rawValue) ||
+            warnings.contains(BYOMDiscoveryWarning.requiresPreparation.rawValue) {
+            return false
+        }
+        return !evaluationDigestSHA256.isEmpty || !warnings.contains(BYOMDiscoveryWarning.evaluationRequired.rawValue)
+    }
+}
+
+struct BYOMModelAdmissionClient: Sendable {
+    private static let maxStatusResponseBytes = 64 * 1024
+
+    let baseURL: URL
+    private let session: URLSession?
+
+    init(coordinatorURL: String?, session: URLSession? = nil) throws {
+        guard let baseURL = Self.httpBaseURL(from: coordinatorURL) else {
+            throw BYOMModelAdmissionError.invalidCoordinatorURL
+        }
+        self.baseURL = baseURL
+        self.session = session
+    }
+
+    init(baseURL: URL, session: URLSession? = nil) {
+        self.baseURL = baseURL
+        self.session = session
+    }
+
+    static func httpBaseURL(from coordinatorURL: String?) -> URL? {
+        guard let coordinatorURL,
+              var components = URLComponents(string: coordinatorURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return nil
+        }
+        guard components.user == nil,
+              components.password == nil,
+              components.host != nil else {
+            return nil
+        }
+        switch components.scheme {
+        case "wss":
+            components.scheme = "https"
+        case "https":
+            break
+        default:
+            return nil
+        }
+        components.path = ""
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
+    func submitOffer(_ package: BYOMOfferSubmissionPackage, bearerToken: String) async throws -> BYOMAdmissionStatusWire {
+        var request = URLRequest(url: baseURL.appendingPathComponent("v1/provider/model-admission/offers"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("application/json", forHTTPHeaderField: "accept")
+        request.httpBody = package.encodedRequest
+        return try await perform(
+            request,
+            expectedProviderID: package.request.providerID,
+            expectedCandidateID: package.request.candidateID
+        )
+    }
+
+    func status(candidateID: String, providerID: String? = nil, bearerToken: String) async throws -> BYOMAdmissionStatusWire {
+        var components = URLComponents(url: baseURL.appendingPathComponent("v1/provider/model-admission/status"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "candidate_id", value: candidateID)]
+        guard let url = components?.url else {
+            throw BYOMModelAdmissionError.invalidCoordinatorURL
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "accept")
+        return try await perform(request, expectedProviderID: providerID, expectedCandidateID: candidateID)
+    }
+
+    private func perform(
+        _ request: URLRequest,
+        expectedProviderID: String?,
+        expectedCandidateID: String?
+    ) async throws -> BYOMAdmissionStatusWire {
+        let data: Data
+        let response: URLResponse
+        if let session {
+            (data, response) = try await session.data(for: request)
+        } else {
+            let ephemeral = URLSession(configuration: .ephemeral, delegate: NoRedirectURLSessionDelegate(), delegateQueue: nil)
+            defer { ephemeral.finishTasksAndInvalidate() }
+            (data, response) = try await ephemeral.data(for: request)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw BYOMModelAdmissionError.httpStatus(http.statusCode)
+        }
+        guard data.count <= Self.maxStatusResponseBytes else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        let status = try BYOMAdmissionStatusWire.decodeStrictStatus(
+            from: data,
+            expectedProviderID: expectedProviderID,
+            expectedCandidateID: expectedCandidateID
+        )
+        guard status.admissionStateSource == "coordinator" else {
+            throw BYOMModelAdmissionError.invalidStatusSchema
+        }
+        return status
+    }
+}
+
+struct BYOMModelAdmissionRuntime: Sendable {
+    let environment: BYOMDiscoveryEnvironment
+    let credentialStore: any ProviderCredentialStoring
+    let identityStore: any ProviderIdentityKeyStoring
+    let client: BYOMModelAdmissionClient
+    let httpClient: any BYOMDiscoveryHTTPClient
+
+    init(
+        environment: BYOMDiscoveryEnvironment,
+        credentialStore: any ProviderCredentialStoring = KeychainProviderCredentialStore(),
+        identityStore: any ProviderIdentityKeyStoring = KeychainReceiptKeyStore(),
+        client: BYOMModelAdmissionClient,
+        httpClient: any BYOMDiscoveryHTTPClient = BYOMURLSessionHTTPClient()
+    ) {
+        self.environment = environment
+        self.credentialStore = credentialStore
+        self.identityStore = identityStore
+        self.client = client
+        self.httpClient = httpClient
+    }
+
+    func submitOffer(
+        providerID: String,
+        target: String,
+        evaluationDigestSHA256: String?,
+        requestedDisclosureClass: String
+    ) async throws -> BYOMAdmissionStatusWire {
+        // Submitting an offer is a deliberate mutating command: the coordinator
+        // records the admission event keyed by candidate_id, so the id must be
+        // stable. Provision the local identity salt first (idempotent, local CLI
+        // state only), matching `models evaluate`; discovery itself stays read-only.
+        BYOMDiscoveryNamespaceStore().provisionNamespaceIfMissing(at: environment.namespaceURL)
+        let discovery = await BYOMDiscoveryRunner(
+            environment: environment,
+            httpClient: httpClient
+        ).discover()
+        guard let candidate = Self.selectCandidate(target: target, candidates: discovery.candidates) else {
+            throw BYOMModelAdmissionError.candidateNotFound
+        }
+        guard let bearer = try credentialStore.load(providerID: providerID) else {
+            throw BYOMModelAdmissionError.missingBearer(providerID: providerID)
+        }
+        guard let identity = try identityStore.loadAdmissionIdentity(providerId: providerID) else {
+            throw BYOMModelAdmissionError.missingAdmissionIdentity(providerID: providerID)
+        }
+        let package = try BYOMOfferSubmissionBuilder.makePackage(
+            providerID: providerID,
+            candidate: candidate,
+            admissionIdentity: identity,
+            evaluationDigestSHA256: evaluationDigestSHA256,
+            requestedDisclosureClass: requestedDisclosureClass
+        )
+        return try await client.submitOffer(package, bearerToken: bearer)
+    }
+
+    func status(providerID: String, target: String) async throws -> BYOMAdmissionStatusWire {
+        let candidate = await resolveCandidate(target)
+        let candidateID = candidate?.candidateID ?? target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let bearer = try credentialStore.load(providerID: providerID) else {
+            throw BYOMModelAdmissionError.missingBearer(providerID: providerID)
+        }
+        let status = try await client.status(candidateID: candidateID, providerID: providerID, bearerToken: bearer)
+        return status.withLocalCandidateIdentityIfCoordinatorHasNoOffer(candidate)
+    }
+
+    private func resolveCandidate(_ target: String) async -> BYOMDiscoveryWire.Candidate? {
+        // Status is a read-only readback: never provision the salt here.
+        let discovery = await BYOMDiscoveryRunner(
+            environment: environment,
+            httpClient: httpClient
+        ).discover()
+        return Self.selectCandidate(target: target, candidates: discovery.candidates)
+    }
+
+    static func selectCandidate(target: String, candidates: [BYOMDiscoveryWire.Candidate]) -> BYOMDiscoveryWire.Candidate? {
+        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        return candidates.first { candidate in
+            candidate.candidateID == trimmed ||
+                candidate.servedModelRef == trimmed ||
+                candidate.displayName == trimmed
+        }
+    }
+}
+
+private extension BYOMAdmissionStatusWire {
+    func withLocalCandidateIdentityIfCoordinatorHasNoOffer(_ candidate: BYOMDiscoveryWire.Candidate?) -> BYOMAdmissionStatusWire {
+        guard let candidate,
+              candidate.candidateID == candidateID,
+              admissionStateSource == "coordinator",
+              admissionState == "not_offered",
+              servedModelRef.isEmpty
+        else {
+            return self
+        }
+        return BYOMAdmissionStatusWire(
+            schema: schema,
+            generatedAt: generatedAt,
+            cliVersion: cliVersion,
+            providerID: providerID,
+            candidateID: candidateID,
+            servedModelRef: candidate.servedModelRef,
+            catalogModelKey: catalogModelKey ?? candidate.catalogModelKey,
+            admissionState: admissionState,
+            admissionStateSource: admissionStateSource,
+            coordinatorEventID: coordinatorEventID,
+            stateObservedAt: stateObservedAt,
+            providerGuidance: providerGuidance,
+            allowedNextStates: allowedNextStates,
+            warnings: warnings
+        )
+    }
+}
+
 struct BYOMDiscoveryEnvironment: Sendable {
     let namespaceURL: URL
     let mlxCacheRoot: URL
