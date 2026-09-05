@@ -221,15 +221,17 @@ enum SupervisorBeaconReader {
     /// `UInt64(d)`. A malformed beacon must always resolve to nil, never crash
     /// the heartbeat.
     private static func strictUInt(_ value: Any?) -> UInt64? {
-        if let n = value as? UInt64 { return n }
-        if let i = value as? Int, i >= 0 { return UInt64(i) }
+        // Check NSNumber FIRST and reject bools: JSONSerialization bridges JSON
+        // true/false to NSNumber, and `as? UInt64`/`as? Int` would otherwise
+        // coerce them to 1/0 (a bool must never be read as a count/seq).
         if let n = value as? NSNumber {
-            // Reject bools (NSNumber bridges true/false) and non-integers.
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return nil }
             let d = n.doubleValue
             guard d.isFinite, d >= 0, d.rounded() == d, d <= Double(UInt64.max) else { return nil }
             return UInt64(exactly: d)
         }
+        if let n = value as? UInt64 { return n }
+        if let i = value as? Int, i >= 0 { return UInt64(i) }
         return nil
     }
 

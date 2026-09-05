@@ -217,4 +217,44 @@ SELECT last_seq, last_deferral_seq, deferrals_total FROM provider_supervisor_eve
 	if p5Seq != 1 || p5DefSeq != 1 || p5Deferrals != 1 {
 		t.Fatalf("inconsistent deferral adopted: last_seq=%d last_deferral_seq=%d deferrals_total=%d", p5Seq, p5DefSeq, p5Deferrals)
 	}
+
+	topo := func(provider, boot string, seq, restarts int64, at time.Time) SupervisorEventRecord {
+		return SupervisorEventRecord{
+			ProviderID: provider, BootID: boot, Schema: "macprovider.supervisor-event.v1",
+			Kind: "beacon", Seq: seq, SupervisorLabel: "provider-watchdog", SupervisorVersion: "1.0",
+			RestartsTotal: restarts, ServingEligible: true, ObservedAt: at, DwellThreshold: time.Second,
+		}
+	}
+
+	// --- H1: same-boot state reset (watchdog state wiped) is adopted, not dropped.
+	if err := store.RecordSupervisorEvent(ctx, topo("prov-6", "BOOT-F", 5000, 2, t0)); err != nil {
+		t.Fatalf("record p6 high: %v", err)
+	}
+	// Fresh state: seq restarts at 1, counters at 0 under the SAME boot_id.
+	if err := store.RecordSupervisorEvent(ctx, topo("prov-6", "BOOT-F", 1, 0, t0.Add(time.Second))); err != nil {
+		t.Fatalf("record p6 reset: %v", err)
+	}
+	var p6Seq, p6Restarts int64
+	if err := db.QueryRowContext(ctx, `
+SELECT last_seq, restarts_total FROM provider_supervisor_events
+ WHERE provider_id='prov-6' AND boot_id='BOOT-F'`).Scan(&p6Seq, &p6Restarts); err != nil {
+		t.Fatalf("read p6: %v", err)
+	}
+	if p6Seq != 1 || p6Restarts != 0 {
+		t.Fatalf("state reset not adopted: last_seq=%d restarts_total=%d (want 1, 0)", p6Seq, p6Restarts)
+	}
+
+	// --- M-3: first insert with a large seq (long-uptime first contact) is NOT
+	// rejected by the step ceiling (only the absolute cap + consistency apply).
+	if err := store.RecordSupervisorEvent(ctx, topo("prov-7", "BOOT-G", 200000, 1, t0)); err != nil {
+		t.Fatalf("record p7 first-large: %v", err)
+	}
+	var p7Seq int64
+	if err := db.QueryRowContext(ctx, `
+SELECT last_seq FROM provider_supervisor_events WHERE provider_id='prov-7' AND boot_id='BOOT-G'`).Scan(&p7Seq); err != nil {
+		t.Fatalf("read p7: %v", err)
+	}
+	if p7Seq != 200000 {
+		t.Fatalf("large first-insert seq rejected: last_seq=%d (want 200000)", p7Seq)
+	}
 }

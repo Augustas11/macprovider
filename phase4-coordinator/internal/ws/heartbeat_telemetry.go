@@ -285,6 +285,15 @@ func normalizeSupervisorWire(w *supervisorEventWire, now time.Time) bool {
 		w.DeferralsTotal < 0 || w.DeferralsTotal > maxSupervisorScalar {
 		return false
 	}
+	// Internal consistency: the watchdog bumps seq once per tick and each restart/
+	// deferral is one tick, so restarts_total + deferrals_total <= seq always
+	// holds for a legitimate beacon. This is a strong, forgery-resistant check
+	// that also lets the store accept a large first-insert seq (long-uptime first
+	// contact) without a step ceiling — the seq is bounded only by the absolute
+	// cap above and this ratio.
+	if w.RestartsTotal+w.DeferralsTotal > w.Seq {
+		return false
+	}
 	switch w.SupervisorLabel {
 	case "provider-watchdog", "legacy-watchdog":
 	default:
@@ -378,7 +387,14 @@ func (s *Server) recordSupervisorEventIfChanged(providerID string, raw json.RawM
 	if !isSupervisorUUID(serviceInstanceID) {
 		serviceInstanceID = ""
 	}
-	fingerprint := serviceInstanceID + "\x00" + string(raw)
+	servingTag := "0"
+	if servingEligible {
+		servingTag = "1"
+	}
+	// Include serviceInstanceID and the serving verdict in the fingerprint so a
+	// pool-view serving flip (or a new instance) is not hidden by beacon-content
+	// dedup — dwell continuity depends on observing those transitions.
+	fingerprint := servingTag + "\x00" + serviceInstanceID + "\x00" + string(raw)
 	if seen, ok := s.supervisorEventSeen.Load(providerID); ok && seen.(string) == fingerprint {
 		return
 	}
@@ -464,8 +480,26 @@ func (s *Server) resetSupervisorDwellOnDisconnect(providerID string) {
 	if s == nil || s.supervisorEvents == nil || providerID == "" {
 		return
 	}
+	// Only providers that actually reported supervisor telemetry this session have
+	// dwell state to reset; skipping the rest keeps a mass-disconnect (e.g. a
+	// coordinator restart) from fanning out a DB UPDATE per connected provider.
+	if _, seen := s.supervisorEventSeen.Load(providerID); !seen {
+		return
+	}
+	slots := s.supervisorEventSlots
+	if slots == nil {
+		slots = defaultSupervisorEventSlots
+	}
+	select {
+	case slots <- struct{}{}:
+	default:
+		// Busy: skip. The next accepted beacon's staleness check still breaks
+		// continuity, so a dropped reset is safe for this best-effort lane.
+		return
+	}
 	sink := s.supervisorEvents
 	go func() {
+		defer func() { <-slots }()
 		ctx, cancel := context.WithTimeout(context.Background(), supervisorEventPersistTimeout)
 		defer cancel()
 		if err := sink.ResetSupervisorDwell(ctx, providerID); err != nil {

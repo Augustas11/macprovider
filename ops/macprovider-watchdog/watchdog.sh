@@ -499,10 +499,14 @@ SUP_ACTIVE_INF_AGE=""
 # Map the launchd label to the SPEC-025 §5.4 public allowlist so the raw label
 # (which can encode operator/host naming) never reaches the wire. Redaction is
 # non-negotiable: unrecognized labels collapse to "unknown".
+# $LABEL is the supervised provider service label (MACPROVIDER_WATCHDOG_LABEL):
+# live.malibu.provider (current) or live.streamvc.macprovider (legacy). Map it to
+# the SPEC-025 §5.4 public class so the raw label never reaches the wire and a
+# stale legacy install is visible fleet-wide as "legacy-watchdog".
 supervisor_label_class() {
   case "$LABEL" in
     live.malibu.provider|live.malibu.provider-watchdog) printf 'provider-watchdog' ;;
-    live.streamvc.macprovider-watchdog) printf 'legacy-watchdog' ;;
+    live.streamvc.macprovider|live.streamvc.macprovider-watchdog) printf 'legacy-watchdog' ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -575,10 +579,14 @@ acta = ml.get("active_inference_age_ms")
 act_s = "" if not isinstance(act, bool) else ("true" if act else "false")
 tok_s = str(tok) if isinstance(tok, int) and not isinstance(tok, bool) else ""
 acta_s = str(acta) if isinstance(acta, int) and not isinstance(acta, bool) else ""
-print("\t".join([s(inst), tok_s, act_s, acta_s]))
+# Join with ASCII Unit Separator (0x1f), NOT tab: tab is IFS-whitespace, so shell
+# `read` would collapse consecutive tabs and drop empty middle fields, shifting
+# columns (e.g. a null token_age_ms would push active_inference into the wrong
+# slot). 0x1f is not IFS-whitespace, so empty fields are preserved.
+print("\x1f".join([s(inst), tok_s, act_s, acta_s]))
 PY
 )"
-  IFS="$(printf '\t')" read -r SUP_INSTANCE SUP_TOKEN_AGE SUP_ACTIVE_INF SUP_ACTIVE_INF_AGE \
+  IFS="$(printf '\037')" read -r SUP_INSTANCE SUP_TOKEN_AGE SUP_ACTIVE_INF SUP_ACTIVE_INF_AGE \
     <<EOF2 || true
 $fields
 EOF2
@@ -628,30 +636,45 @@ emit_supervisor_beacon() {
   deferrals="$(_beacon_uint "$BEACON_DEFERRALS_FILE")"
   now_ts="$(ts)"
 
+  write_restart_sticky=0
+  write_deferral_sticky=0
   case "$kind" in
     restart)
       restarts=$(( restarts + 1 ))
       case "$cooldown_state" in armed|cooldown_active) : ;; *) cooldown_state='armed' ;; esac
-      # Record sticky last_restart atomically: seq \t ts \t cooldown \t instance \t model_liveness_json
-      printf '%s\t%s\t%s\t%s\t%s' \
-        "$seq" "$now_ts" "$cooldown_state" "$SUP_INSTANCE" "$(_beacon_model_liveness_json)" \
-        | _beacon_atomic_write "$BEACON_LAST_RESTART_FILE" || true
+      write_restart_sticky=1
       ;;
     deferral)
       deferrals=$(( deferrals + 1 ))
-      printf '%s\t%s' "$seq" "$now_ts" | _beacon_atomic_write "$BEACON_LAST_DEFERRAL_FILE" || true
+      write_deferral_sticky=1
       ;;
     beacon) : ;;
     *) return 0 ;;
   esac
 
+  # Persist seq + counters BEFORE the sticky sidecars. If interrupted between the
+  # two writes the counters LEAD (never trail) the sticky action seq, so the
+  # coordinator never sees an advanced last_restart.seq without an advanced
+  # restarts_total (which it would drop). The beacon file itself is written last.
   printf '%s' "$seq" | _beacon_atomic_write "$BEACON_SEQ_FILE" || true
   printf '%s' "$restarts" | _beacon_atomic_write "$BEACON_RESTARTS_FILE" || true
   printf '%s' "$deferrals" | _beacon_atomic_write "$BEACON_DEFERRALS_FILE" || true
+  # Sticky detail is 0x1f-delimited (NOT tab): tab is IFS-whitespace, so `read`
+  # would collapse consecutive tabs and drop empty middle fields, shifting columns
+  # (e.g. a null token_age_ms would misplace active_inference). 0x1f is not
+  # IFS-whitespace, so empty fields are preserved exactly.
+  if [ "$write_restart_sticky" = 1 ]; then
+    printf '%s\037%s\037%s\037%s\037%s' \
+      "$seq" "$now_ts" "$cooldown_state" "$SUP_INSTANCE" "$(_beacon_model_liveness_json)" \
+      | _beacon_atomic_write "$BEACON_LAST_RESTART_FILE" || true
+  fi
+  if [ "$write_deferral_sticky" = 1 ]; then
+    printf '%s\037%s' "$seq" "$now_ts" | _beacon_atomic_write "$BEACON_LAST_DEFERRAL_FILE" || true
+  fi
 
   last_restart_json='null'
   if [ -f "$BEACON_LAST_RESTART_FILE" ]; then
-    IFS="$(printf '\t')" read -r lr_seq lr_ts lr_cooldown lr_instance lr_ml \
+    IFS="$(printf '\037')" read -r lr_seq lr_ts lr_cooldown lr_instance lr_ml \
       < "$BEACON_LAST_RESTART_FILE" 2>/dev/null || true
     case "${lr_seq:-}" in ''|*[!0-9]*) lr_seq='' ;; esac
     if [ -n "$lr_seq" ]; then
@@ -674,7 +697,7 @@ emit_supervisor_beacon() {
 
   last_deferral_json='null'
   if [ -f "$BEACON_LAST_DEFERRAL_FILE" ]; then
-    IFS="$(printf '\t')" read -r ld_seq ld_ts < "$BEACON_LAST_DEFERRAL_FILE" 2>/dev/null || true
+    IFS="$(printf '\037')" read -r ld_seq ld_ts < "$BEACON_LAST_DEFERRAL_FILE" 2>/dev/null || true
     case "${ld_seq:-}" in ''|*[!0-9]*) ld_seq='' ;; esac
     if [ -n "$ld_seq" ]; then
       last_deferral_json="{\"seq\":${ld_seq},\"ts\":\"$(_beacon_json_escape "${ld_ts:-}")\",\"deferral_reason\":\"pending_autoupdate_marker\"}"
@@ -750,6 +773,10 @@ run_tick() {
     return 0
   fi
   boot_id="$(current_boot_id)"
+  # Fail-closed: never proceed through the arming/restart gate with an empty
+  # boot id (a failed sysctl). The arming check compares against boot_id, so an
+  # empty value could spuriously satisfy it.
+  [ -n "$boot_id" ] || return 0
   if ! local_provider_health_ok "$provider_pid"; then
     if valid_lifecycle_lease "$provider_pid"; then
       log "provider process $provider_pid is inside a validated startup/maintenance lease; watchdog grants bounded grace"
@@ -777,6 +804,8 @@ run_tick() {
     capture_supervisor_status_fields "$provider_pid" || true
     if kickstart_provider "local_health_failed_after_arming"; then
       TICK_RESTART=1
+      # The kick starts the restart cooldown, so the watchdog is now rate-limited.
+      TICK_COOLDOWN=cooldown_active
     fi
     return 0
   fi
@@ -805,24 +834,30 @@ run_tick() {
   return 0
 }
 
+# SPEC-025 §5.4: emit EXACTLY ONE supervisor beacon per tick. run_tick records at
+# most one intended action (restart > deferral); any tick that saw an installed
+# provider otherwise writes a topology kind=beacon so seq/counters stay fresh.
+# Emitted from an EXIT trap so it runs even if run_tick aborts under `set -e` (a
+# failed health command must still keep the pre-F5 fail-closed behavior — calling
+# run_tick in a `|| ...` list would silently disable errexit for its whole body).
+# Telemetry is best-effort and never gates the tick.
+emit_tick_beacon() {
+  if [ "${TICK_RESTART:-0}" = 1 ]; then
+    emit_supervisor_beacon restart "${TICK_COOLDOWN:-armed}" || true
+  elif [ "${TICK_DEFERRAL:-0}" = 1 ] && [ "${PROVIDER_ID_SEEN:-0}" = 1 ]; then
+    emit_supervisor_beacon deferral || true
+  elif [ "${PROVIDER_ID_SEEN:-0}" = 1 ]; then
+    emit_supervisor_beacon beacon || true
+  fi
+}
+
 main() {
-  # SPEC-025 §5.4: emit EXACTLY ONE supervisor beacon per tick. run_tick records
-  # at most one intended action (restart takes priority over deferral); any tick
-  # that saw an installed provider otherwise writes a topology kind=beacon so
-  # seq/counters stay fresh. Telemetry is best-effort and never gates the tick.
   PROVIDER_ID_SEEN=0
   TICK_RESTART=0
   TICK_DEFERRAL=0
-  rc=0
-  run_tick || rc=$?
-  if [ "$TICK_RESTART" = 1 ]; then
-    emit_supervisor_beacon restart armed || true
-  elif [ "$TICK_DEFERRAL" = 1 ]; then
-    emit_supervisor_beacon deferral || true
-  elif [ "$PROVIDER_ID_SEEN" = 1 ]; then
-    emit_supervisor_beacon beacon || true
-  fi
-  exit "$rc"
+  TICK_COOLDOWN=armed
+  trap 'emit_tick_beacon' EXIT
+  run_tick
 }
 
 main "$@"

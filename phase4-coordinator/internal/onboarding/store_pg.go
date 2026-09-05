@@ -620,11 +620,16 @@ type SupervisorEventRecord struct {
 // (SPEC-025 §5.4 leaves the concrete value to the coordinator).
 const DefaultSupervisorDwellThreshold = 5 * time.Minute
 
-// DefaultSupervisorStalenessThreshold bounds the gap between two accepted
-// beacons before dwell continuity is considered broken. Providers heartbeat far
-// more often than this; a longer gap means the coordinator did not continuously
-// observe the instance, so an in-flight dwell timer is reset (never back-filled).
-const DefaultSupervisorStalenessThreshold = 90 * time.Second
+// DefaultSupervisorStalenessThreshold bounds the gap between two ACCEPTED beacons
+// before dwell continuity is considered broken (an in-flight dwell timer is reset,
+// never back-filled across the gap). It must be comfortably larger than the
+// beacon cadence, or normal jitter would cause spurious resets / false flaps:
+// the beacon changes (and is thus persisted) only once per watchdog tick
+// (launchd StartInterval = 60s), picked up on the next provider heartbeat
+// (~30s) and possibly deferred one cycle by the persist slot/in-flight guard.
+// 240s ≈ 4× the tick leaves ample margin for that jitter while still detecting a
+// genuine multi-minute silence/disconnect.
+const DefaultSupervisorStalenessThreshold = 240 * time.Second
 
 // maxSupervisorSeqStep / maxSupervisorCounterStep bound how far a single beacon
 // may advance seq or a counter beyond the stored high-water within a boot. A
@@ -634,6 +639,10 @@ const DefaultSupervisorStalenessThreshold = 90 * time.Second
 const (
 	maxSupervisorSeqStep     = int64(100_000)
 	maxSupervisorCounterStep = int64(100_000)
+	// supervisorFreshStateSeqMax bounds the seq at which a regressing beacon is
+	// treated as a legitimate same-boot state reset (watchdog state wiped) rather
+	// than dropped: a real reset restarts seq at 1 and climbs.
+	supervisorFreshStateSeqMax = int64(3)
 )
 
 // RecordSupervisorEvent upserts the ONE row per (provider_id, boot_id) supervisor
@@ -719,13 +728,17 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 		exStored = true
 	}
 
-	// Anti-pinning sanity ceiling applies to BOTH first insert (treat stored
-	// high-water as 0) and subsequent beacons: a forged/corrupt beacon that jumps
-	// seq or a counter absurdly far cannot pin the row and blind later telemetry.
-	// A legitimate first F5 beacon always starts at a small seq (the per-boot
-	// counters are F5-owned state that begins at 0), so this never false-rejects.
-	baseSeq, baseRestarts, baseDeferrals := int64(0), int64(0), int64(0)
-	if exStored {
+	// Same-boot STATE RESET: the watchdog's state dir was wiped mid-boot (the
+	// uninstall→reinstall repair flow, or an operator rm), so it now emits a low
+	// seq with counters restarted at 0 under the SAME boot_id. Without this the
+	// latest-wins no-op would drop every beacon for the rest of the boot — a
+	// coordinator blind spot exactly during repair (SPEC-025 §5.4). Adopt the
+	// fresh baseline (keep flaps_total + first_seen_at). If it was actually a stale
+	// replay rather than a real reset, the real watchdog's next higher-seq beacon
+	// re-advances the row, so adopting it is self-correcting.
+	freshReset := exStored && rec.Seq <= exLastSeq && rec.Seq <= supervisorFreshStateSeqMax &&
+		rec.RestartsTotal <= exRestarts && rec.DeferralsTotal <= exDeferral
+	if exStored && !freshReset {
 		// Latest-wins: a stale or duplicate (seq <= stored) beacon is a full no-op.
 		if rec.Seq <= exLastSeq {
 			return tx.Commit()
@@ -735,12 +748,31 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 		if rec.RestartsTotal < exRestarts || rec.DeferralsTotal < exDeferral {
 			return tx.Commit()
 		}
-		baseSeq, baseRestarts, baseDeferrals = exLastSeq, exRestarts, exDeferral
+		// Anti-pinning step ceiling — SUBSEQUENT beacons only. A forged/corrupt
+		// beacon that jumps seq or a counter far beyond the stored high-water is
+		// quarantined. NOT applied to a first insert or a reset: a long-uptime
+		// first contact (or post-prune re-insert) can legitimately carry a large
+		// seq, bounded only by the absolute cap and the restarts+deferrals<=seq
+		// invariant (both enforced in normalizeSupervisorWire).
+		if rec.Seq-exLastSeq > maxSupervisorSeqStep ||
+			rec.RestartsTotal-exRestarts > maxSupervisorCounterStep ||
+			rec.DeferralsTotal-exDeferral > maxSupervisorCounterStep {
+			return tx.Commit()
+		}
 	}
-	if rec.Seq-baseSeq > maxSupervisorSeqStep ||
-		rec.RestartsTotal-baseRestarts > maxSupervisorCounterStep ||
-		rec.DeferralsTotal-baseDeferrals > maxSupervisorCounterStep {
-		return tx.Commit()
+	// flaps_total + last_flap_observed_at are row-level history and survive a
+	// reset; every other derived value adopts the fresh baseline. Treat a reset
+	// as a first insert for the rest of the derivation.
+	preservedFlaps := int64(0)
+	var preservedLastFlap sql.NullTime
+	if exStored {
+		preservedFlaps = exFlaps
+		preservedLastFlap = exLastFlap
+	}
+	if freshReset {
+		exStored = false
+		exLastRestartSeq = 0
+		exLastDeferralSeq = 0
 	}
 
 	newRestartObserved := rec.LastRestartSeq > 0 && rec.LastRestartSeq > exLastRestartSeq
@@ -794,9 +826,9 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 		prevDeferrals   = int64(0)
 		prevObserved    sql.NullTime
 	)
+	flapsTotal = preservedFlaps
+	lastFlap = preservedLastFlap
 	if exStored {
-		flapsTotal = exFlaps
-		lastFlap = exLastFlap
 		dwellState = exDwellState
 		restartObserved = exRestartObserved
 		dwellInstance = exDwellInstance

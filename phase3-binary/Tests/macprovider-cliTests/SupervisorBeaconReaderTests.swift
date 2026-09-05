@@ -117,6 +117,39 @@ final class SupervisorBeaconReaderTests: XCTestCase {
         XCTAssertNil(SupervisorBeaconReader.lastWireObject(url: beacon, currentBootSession: "BOOT-A"))
     }
 
+    /// A JSON bool must never be read as a count/seq (JSONSerialization bridges
+    /// true/false to NSNumber; strictUInt must reject it, not coerce to 1/0).
+    func testBoolSeqIsRejected() throws {
+        let raw = """
+        {"schema":"macprovider.supervisor-event.v1","kind":"beacon","boot_id":"BOOT-A",\
+        "seq":true,"supervisor_label":"provider-watchdog","supervisor_version":"1.0",\
+        "restarts_total":0,"deferrals_total":0,"last_restart":null,"last_deferral":null}
+        """
+        try Data(raw.utf8).write(to: beacon)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: beacon.path)
+        XCTAssertNil(SupervisorBeaconReader.lastWireObject(url: beacon, currentBootSession: "BOOT-A"),
+                     "seq:true must drop the beacon (bool is not a valid uint)")
+    }
+
+    /// A symlink at the beacon path must be refused (O_NOFOLLOW).
+    func testSymlinkIsRefused() throws {
+        let target = dir.appendingPathComponent("real-beacon.json", isDirectory: false)
+        try JSONSerialization.data(withJSONObject: restartBeacon()).write(to: target)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+        try FileManager.default.createSymbolicLink(at: beacon, withDestinationURL: target)
+        XCTAssertNil(SupervisorBeaconReader.lastWireObject(url: beacon, currentBootSession: "BOOT-A"),
+                     "a symlinked beacon must be refused by O_NOFOLLOW")
+    }
+
+    /// A beacon larger than the wire cap is refused.
+    func testOversizedFileIsRefused() throws {
+        var obj = restartBeacon()
+        obj["padding"] = String(repeating: "x", count: 5000) // unknown key, pushes size > 4096
+        try write(obj)
+        XCTAssertNil(SupervisorBeaconReader.lastWireObject(url: beacon, currentBootSession: "BOOT-A"),
+                     "a beacon exceeding the 4096-byte wire cap must be refused")
+    }
+
     /// Fail-safe: an out-of-range/non-finite numeric field must resolve to nil,
     /// never TRAP while building the heartbeat.
     func testOversizedNumericFieldFailsClosed() throws {

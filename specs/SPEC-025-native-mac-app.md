@@ -1,6 +1,19 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.26 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.27 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.27 (2026-09-05, F5 §5.4 hardening reconciliation from the
+adversarial pre-merge review).** Reconciles §5.4 with the IMPL hardening: the
+beacon file/dir ownership rule now defines BOTH topologies (consumer
+provider-UID `0700`/`0600`; headless root-owned `0755` dir / `0644` file — root
+stays sole writer, never chowned to the provider) and the reader enforces
+"owned by reader-uid or root, not group/other-writable" in place of the old
+uid-`0600`-only text; adds the internal-consistency rule
+(`restarts_total + deferrals_total ≤ seq`), scopes the anti-pinning step ceiling
+to subsequent beacons (a first insert / long-uptime first contact is bounded only
+by the absolute cap + the ratio), and adds the state-reset carve-out (the one
+permitted `seq` regression, for a mid-boot watchdog-state wipe). No behavior added
+beyond the F5 IMPL; observability-only and redaction non-negotiables unchanged.
 
 **Change log v0.26 (2026-09-05, supervisor telemetry contract — RFC-001 §7 / F5,
 #1386).** Adds §5.4: a **separate** supervisor telemetry contract
@@ -920,14 +933,24 @@ autoupdate event uses; `service_instance` is an opaque CLI instance identifier a
 `supervisor_label` is the allowlisted class above — never a path or PII.
 
 **Watchdog → CLI bridge — storage & ownership.** The companion watchdog is the
-**sole writer** of exactly one telemetry file, kept in a supervisor-telemetry
-directory under the trusted provider state root, created/validated/repaired with
-the same ancestry rules SPEC-020 R-4.9 applies to autoupdate state: the directory
-is provider-UID-owned `0700`, symlink-free with no non-owner-write ACLs, and
-access is `openat`/`O_NOFOLLOW` from the validated directory; a failed ancestry
-check is fail-closed (the telemetry is skipped, never the heartbeat). The file is
-`0600`, written exclusive-create-temp + `rename`, then the file and its parent are
-`fsync`ed:
+**sole writer** of the published beacon and its private supervisor-telemetry
+state files (the sticky/counter sidecars from which the beacon is regenerated),
+kept in a supervisor-telemetry directory under the watchdog's provider state root
+with the ancestry hardening SPEC-020 R-4.9 applies to autoupdate state. Ownership
+depends on the install topology, and both are enforced by the reader:
+- **Consumer (GUI):** the watchdog and provider share the uid, so the directory
+  is provider-UID-owned `0700` (symlink-free, no non-owner-write ACLs) and the
+  beacon file is `0600`.
+- **Headless (system LaunchDaemon):** the watchdog runs as root (it needs
+  `/bin/launchctl` in the system domain) while the provider runs as the fleet
+  user, so the directory is root-owned `0755` (world-traversable but
+  not-others-writable) and the beacon is root-owned `0644` (world-readable so the
+  provider can read it; **never chowned to the provider** — root stays the sole
+  writer). The beacon carries only redacted/allowlisted, non-sensitive fields.
+The invariant the reader enforces (below) is that the containing directory and
+the file are owned by the reader's uid or root and are not group/other-writable;
+a failed ancestry check is fail-closed (the telemetry is skipped, never the
+heartbeat). Writes are exclusive-create-temp + `rename` + `sync`:
 - `$STATE_DIR/supervisor-beacon.json` — the single latest beacon object
   (**overwrite-OK**). On every tick, and immediately after any wedge restart or
   deferral, the watchdog bumps `seq`, updates the counters and `kind`/detail
@@ -940,10 +963,13 @@ check is fail-closed (the telemetry is skipped, never the heartbeat). The file i
 supervisor telemetry; it owns no cursor or ack file (the earlier ack-cursor design
 is removed — it could not be honest without a coordinator ack, and it forced the
 watchdog into an unbounded append-log). When the CLI builds a heartbeat it reads
-`supervisor-beacon.json` with hardened I/O (`O_NOFOLLOW`, `fstat` requires a
-regular file owned by the current uid, mode `0600`, no group/other write, size ≤
-the wire cap — well-defined because the file is exactly one bounded object) and
-parses fail-closed. The CLI does **not** forward raw JSON: it **projects the parsed
+`supervisor-beacon.json` with hardened I/O: it first `stat`s the containing
+directory and requires it be a directory owned by the reader's uid or root with
+no group/other write; then opens the file `O_NOFOLLOW` and `fstat`s it, requiring
+a single-link regular file, size ≤ the wire cap, and **either** owner = the
+reader's uid with mode `0600` (consumer) **or** owner = root with no group/other
+write bit (headless root-owned `0644`) — so the file is never writable by a
+non-owner in either topology. It then parses fail-closed. The CLI does **not** forward raw JSON: it **projects the parsed
 object to the allowlisted `macprovider.supervisor-event.v1` schema before uplink**
 — unknown keys are dropped **locally**, string lengths are capped, and
 `supervisor_label` is mapped to the allowlisted class — and carries only that
@@ -1020,17 +1046,35 @@ and suppress exactly the counter advance the contract relies on. A `ts` (or nest
 action `ts`) more than `5m` in the future is not used to reject the beacon; the
 offending timestamp field is nulled/flagged, the rest of the beacon is still
 ingested by `seq`. A beacon is discarded (frame still accepted) only if a required
-field is malformed. A `seq` **≤** the stored `seq` is a **full no-op** — it neither
-replaces detail nor advances counters. For a `seq` **>** the stored `seq`, the
-counters MUST be **≥** the stored counters (monotonic within a boot); a higher-`seq`
-beacon that regresses a counter, or whose `seq`/counters jump beyond a
-coordinator-owned per-boot sanity ceiling, is treated as malformed and is
-**quarantined/discarded non-blockingly** rather than adopted as the new high-water,
-so a single corrupt or forged same-uid write cannot pin state and blind the boot.
-The concrete ceiling (a per-boot max `seq`/counter step) is an **implementation-
-owned constant** set by the follow-up coordinator PR, not fixed here; the normative
-contract is only that such a ceiling exists, is applied non-blockingly, and never
-adopts an over-ceiling beacon as high-water state.
+field is malformed. Every accepted beacon MUST be internally consistent:
+`restarts_total + deferrals_total ≤ seq` and each nested action `seq ≤` the top
+`seq` (the watchdog bumps `seq` once per tick and once per event), else it is
+dropped non-blockingly. A `seq` **≤** the stored `seq` is a **full no-op** — it
+neither replaces detail nor advances counters — **except** the state-reset
+carve-out below. For a `seq` **>** the stored `seq`, the counters MUST be **≥** the
+stored counters (monotonic within a boot); a higher-`seq` beacon that regresses a
+counter, or whose `seq`/counters jump beyond a coordinator-owned per-boot sanity
+ceiling, is treated as malformed and is **quarantined/discarded non-blockingly**
+rather than adopted, so a single corrupt/forged write cannot pin state. The step
+ceiling applies to **subsequent** beacons only, **not** to a first insert or a
+reset: a legitimate first contact (a long-uptime Mac, or a row pruned while still
+up) can carry a large `seq`, bounded only by an absolute cap and the
+internal-consistency ratio. The ceiling and cap are **implementation-owned
+constants**; the normative contract is only that they exist, apply non-blockingly,
+and never adopt an over-limit beacon as high-water.
+
+*State-reset carve-out (the one permitted `seq` regression).* If the watchdog's
+state directory is wiped mid-boot (the `uninstall.sh`→`install.sh` repair flow, or
+an operator `rm`), it re-emits a low `seq` with counters restarted at 0 under the
+**same** `boot_id`. Without a carve-out the latest-wins no-op would discard every
+beacon for the rest of the boot — a blind spot exactly during repair. So a
+regressing beacon that is a **plausible fresh state** — `seq` at or below a small
+implementation-owned bound AND internally consistent (`restarts_total +
+deferrals_total ≤ seq`) AND both counters at or below the stored high-water — is
+**adopted** as a new baseline (resetting `seq`/counters/sticky/dwell) while
+`flaps_total` and `first_seen_at` are preserved. This is safe against a stale
+replay: if it was not a genuine reset, the real watchdog's next higher-`seq`
+beacon re-advances the row.
 
 *Store.* Valid beacons upsert into a **separate** `provider_supervisor_events`
 table (never merged into `provider_autoupdate_events`), **one row per

@@ -936,9 +936,9 @@ pre-first-token / process-wide hard-freeze cases before they may authorize a
 restart.
 
 Beyond its own boot-arm and cooldown markers, and its own private
-supervisor-telemetry state (the single `supervisor-beacon.json` — a
-non-executable, non-config diagnostic marker; SPEC-025 §5.4), the watchdog MUST
-NOT write, restore, rename, or delete any
+supervisor-telemetry state files (`supervisor-beacon.json` plus its seq/counter/
+sticky sidecars — non-executable, non-config diagnostic markers; SPEC-025 §5.4),
+the watchdog MUST NOT write, restore, rename, or delete any
 provider **or supervisor** artifact — provider binary, resources, config, or
 plist, or the watchdog script, its plist/LaunchAgent/LaunchDaemon, or any current
 or legacy supervisor label (including `live.streamvc.macprovider-watchdog`) — MUST
