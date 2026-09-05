@@ -1,0 +1,9 @@
+{
+  "schema_version": "spec-043-launch-keyring-v1",
+  "purpose": "oncall-readiness-operations-authority",
+  "allowed_environment_classes": [
+    "production"
+  ],
+  "keys": [],
+  "note": "SPEC-043-R008/R011 on-call readiness operations-authority Ed25519 keys are registered here. An empty keys array is fail-closed: no on-call readiness record can be signed or accepted until an operator registers a public key with scripts/register-spec043-oncall-authority-key.py. Only the public half is committed; the private half lives solely in the GitHub production-release environment secret MACPROVIDER_SPEC043_ONCALL_AUTHORITY_SIGNING_KEY_PEM (provision it the same way scripts/provision-spec043-production-release-key.sh handles the production-release key). The coordinator allowlists the key by SHA-256 of the raw 32-byte public key via MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256; register-spec043-oncall-authority-key.py prints that digest for the deploy environment."
+}
