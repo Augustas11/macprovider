@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.4 (2026-09-04, BYOM slice-1 rework: earning-verdict-first human output + `models switch` / `models adopt-recommendation` in the §6.14a oracle)
+**Version:** 1.9.5 (2026-09-05, RFC-001 F1/F2: FR-12 exit-code gating for unsolicited SIGTERM + `model_liveness_token_v1` local-status capability)
 **Revision note (historical, superseded by v1.7):** v1.3.1 added the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -14,6 +14,19 @@ handshake starts. Backwards-compatible: a v1.3.1 binary with no
 behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
+
+**Change log v1.9.5 (2026-09-05, RFC-001 F1/F2 — #1203/#1382/#1383):** Two
+watchdog-architecture surfaces. (1) **FR-12** now gates the exit code: a
+`consumer_user` serve process exits 0 only under a validated local stop intent
+(uninstall/operator-disable/local stop or maintenance; a coordinator drain is
+registration-only and never exits); an unsolicited SIGTERM/SIGINT drains
+then exits **nonzero** so a launchd `KeepAlive{SuccessfulExit:false}` service
+restarts it — the property that lets the companion watchdog's exit-restart be
+removed with no clean-exit gap (SPEC-020 R-4.14). (2) Adds the
+`model_liveness_token_v1` local-status capability gating a `model_liveness`
+object (monotonic model-thread progress token + monotonic age; SPEC-025 §5.2), an
+advisory observability signal with no buyer-serving authority. Behavior lands via
+the cited code follow-ups.
 
 **Change log v1.9.3 (2026-08-28, BYOM model command taxonomy):** The live
 model-management commands are registered as the compatibility oracle for BYOM
@@ -755,10 +768,33 @@ On receiving SIGTERM, the binary:
    timeout (default: 30 seconds).
 4. Force-cancels any remaining requests after the timeout.
 5. Closes the coordinator WebSocket.
-6. Exits with code 0.
+6. Exits with code 0 **only when the SIGTERM/SIGINT accompanies a validated
+   local stop intent** — an uninstall, a launchd/operator-disable, or a local
+   `stop`/maintenance stop transaction. An unsolicited SIGTERM/SIGINT carrying no
+   such stop intent (e.g. a stray `kill -TERM` or a macOS memory-pressure/jetsam
+   SIGTERM) MUST perform the same drain (steps 1–5) and then exit **nonzero**, so a
+   launchd `KeepAlive{SuccessfulExit:false}` provider service restarts it rather
+   than leaving the node down. This is the property that lets the companion
+   watchdog's exit-restart be removed with no clean-exit gap (SPEC-020 R-4.14).
+
+**A coordinator `drain` message is NOT a stop intent and MUST NOT cause process
+exit.** Per FR-13/§6.5, a coordinator→provider `drain` drops coordinator
+registration only and keeps the local buyer HTTP server serving; it never
+reaches step 6. Only a local termination signal enters this SIGTERM path.
+
+**Validated stop intent.** The stop intent MUST be recorded by a bounded on-disk
+marker (or equivalent in-process control state) that only an authorized local
+stop transaction — uninstall, operator-disable, or local `stop`/maintenance —
+may write. It MUST be bound to the current PID and boot session and be
+short-lived (cleared on consumption / expiry). Evaluation is **fail-closed**: if
+no marker is present, or it is expired, or its PID/boot binding does not match,
+the signal is treated as unsolicited and the process exits nonzero. This
+prevents any SIGTERM from being silently reclassified as an intentional stop,
+which would defeat the `SuccessfulExit:false` restart property.
 
 On SIGINT (Ctrl-C), same behavior with a shorter default timeout
-(5 seconds). Double SIGINT forces immediate exit.
+(5 seconds), including the same validated-stop-intent gating on the exit code.
+Double SIGINT forces immediate exit.
 
 ### Coordinator protocol
 
@@ -1066,17 +1102,35 @@ only fields a reader may trust through these capabilities:
 `buyer_serving_authority_v1`, `catalog_status_v1`, `credential_status_v1`,
 `status_observation_v1`, `service_instance_v1`, `lifecycle_transition_v1`,
 `referral_bootstrap_v1`, `referral_status_v1`, `referral_advocacy_v1`,
-`referral_fragment_links_v1`, and
-`legacy_reader_fallback_v1`. A reader MUST suppress a typed field when its capability
+`referral_fragment_links_v1`, `model_liveness_token_v1`, and
+`legacy_reader_fallback_v1`. `model_liveness_token_v1` gates the `model_liveness`
+object (a monotonic model-thread progress token + monotonic age; SPEC-025 §5.2), an
+advisory observability signal that carries no buyer-serving authority. A reader MUST suppress a typed field when its capability
 is absent and MUST suppress all typed fields when the minimum reader exceeds its
 supported version. An absent envelope is the legacy-reader path.
+
+The capability names enumerated in this paragraph are only the subset owned by
+this section; a build also advertises other local-status and command capability
+tokens defined in later SPEC-001 sections or companion specs (the authoritative
+runtime set is `HTTPServer.localStatusCapabilities`), and readers MUST NOT treat
+this paragraph's list as the exhaustive valid universe. The `capabilities` array
+below is therefore **illustrative, non-exhaustive**. When a build advertises
+`model_liveness_token_v1`, the response additionally carries the `model_liveness`
+object defined in SPEC-025 §5.2.
 
 ```json
 "local_status_contract": {
   "version": 1,
   "minimum_reader_version": 1,
   "lifecycle_owner": "macprovider_cli",
-  "capabilities": ["status_observation_v1", "service_instance_v1", "lifecycle_transition_v1", "referral_bootstrap_v1", "referral_status_v1", "referral_advocacy_v1", "referral_fragment_links_v1"]
+  "capabilities": ["status_observation_v1", "service_instance_v1", "lifecycle_transition_v1", "referral_bootstrap_v1", "referral_status_v1", "referral_advocacy_v1", "referral_fragment_links_v1", "model_liveness_token_v1"]
+},
+"model_liveness": {
+  "token": 148213,
+  "token_age_ms": 42,
+  "active_inference": true,
+  "active_inference_age_ms": 42,
+  "last_advanced_at": "RFC 3339 timestamp or null"
 },
 "observation": {
   "id": "per-response UUID",
@@ -3615,14 +3669,21 @@ would instead run the v2 `auth_request` handshake — R-6.7.8) and successfully:
 the build session. Spins up a mock WebSocket server that exchanges
 handshake, 5 heartbeats, a preflight check, and a drain command.
 
-**AC-6. Graceful SIGTERM drain.**
-With 3 in-flight streaming requests, sending SIGTERM causes the binary
-to drain all requests to completion within 30 seconds. `drain_status`
-messages are logged. Zero mid-stream response truncations. The binary
-exits with code 0.
+**AC-6. Graceful SIGTERM drain (with FR-12 exit-code gating).**
+With 3 in-flight streaming requests, sending SIGTERM causes the binary to drain
+all requests to completion within 30 seconds. `drain_status` messages are logged.
+Zero mid-stream response truncations. The **exit code** depends on stop intent
+(FR-12): (a) under a **validated local stop intent** (uninstall /
+operator-disable / local `stop`) the binary exits **0**; (b) an **unsolicited**
+SIGTERM/SIGINT (a stray `kill -TERM` with no stop-intent marker) drains
+identically but exits **nonzero**, so a launchd `KeepAlive{SuccessfulExit:false}`
+service restarts it. A coordinator `drain` message never triggers this path
+(registration-only, no process exit).
 
-**Run by:** Manual test during build. Start 3 concurrent streaming
-requests, send `kill -TERM <pid>`, verify all 3 complete and binary exits 0.
+**Run by:** Manual test during build. (a) With a stop-intent marker set, start 3
+concurrent streaming requests, `kill -TERM <pid>`, verify all 3 complete and the
+binary exits 0. (b) Without a marker, `kill -TERM <pid>` and verify the binary
+drains then exits nonzero (and launchd relaunches the consumer service).
 
 **AC-7. Warm-up command + idle prewarm (reconciled v1.7).**
 Two independent checks, since `warm_up` no longer performs inference:
@@ -4056,9 +4117,11 @@ in HTTP-forwarding mode, v2 `auth_request` in WS-tunneled / credential-bootstrap
 mode — R-6.7.8), heartbeats, responds to preflight and drain.
 
 **Step 10. Graceful shutdown and self-test.**
-Implement FR-12 (SIGTERM drain with drain_status messages) and FR-20
-(startup self-test). Deliverable: binary passes self-test on start;
-SIGTERM drains and exits cleanly.
+Implement FR-12 (SIGTERM drain with drain_status messages, including the
+validated-stop-intent exit-code gating — exit 0 only under a validated local stop
+intent, else drain then exit nonzero) and FR-20 (startup self-test).
+Deliverable: binary passes self-test on start; SIGTERM drains, and exits 0 under a
+validated stop intent or nonzero for an unsolicited signal.
 
 **Step 11. Acceptance testing.**
 Run AC-1 through AC-10. Fix issues. Deliver a binary that passes all

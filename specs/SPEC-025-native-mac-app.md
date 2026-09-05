@@ -1,6 +1,23 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.24 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.25 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.25 (2026-09-05, watchdog exit-restart fence + model-liveness token).**
+Locks in RFC-001 §5.1/§3 (#1203; follow-ups #1382/#1383). Aligns with SPEC-020
+v0.1.17: the companion watchdog is normatively **wedge-restart-only** — the launchd
+provider-service `KeepAlive` is the single exit-restart owner, and the watchdog
+MUST NOT restart on process exit or a missing/unvalidated launchd PID, MUST NOT
+write provider **or supervisor** artifacts, and MUST be
+installer-owned/non-self-restoring (§5.3, §8). To close the clean-exit gap that
+removing the watchdog exit-restart would otherwise open, a `consumer_user` serve
+process reaches exit 0 only under a validated stop intent; an unsolicited
+SIGTERM/SIGINT exits nonzero so launchd restarts it (SPEC-001 FR-12). Adds a
+schema-complete **model-thread liveness token** to the `/v1/status` contract
+(§5.2, capability `model_liveness_token_v1`; monotonic-clock age, idle-safe via
+`active_inference`) as an **observability signal only** — the watchdog wedge
+predicate is unchanged, and wiring the token into a wedge-prober restart decision
+(plus a domain-aware headless wedge target and coordinator telemetry export) is a
+deferred follow-up. Behavior lands only via the cited code follow-ups.
 
 **Change log v0.24 (2026-08-27, watchdog authority reduction).** Aligns with
 SPEC-020 v0.1.13: the companion watchdog is a current-boot-gated local liveness
@@ -657,6 +674,56 @@ launchd-managed CLI (`InstalledProviderMonitor.swift`; port from `config.yaml`).
 Health readiness = `status ∈ {ready, busy}`; "serving" additionally requires
 `/v1/status.network_state == "buyer_serving"`.
 
+**Model-thread liveness token (capability `model_liveness_token_v1`).** A bare
+`/v1/health` 200 does not prove the model thread is alive: the HTTP listener can
+answer while the inference/model thread is dead (the listener-alive / model-dead
+wedge). To make this **observable**, when the CLI advertises
+`model_liveness_token_v1` in `local_status_contract.capabilities`, `/v1/status`
+MUST surface a `model_liveness` object with exactly this shape (this extends the
+SPEC-001 local-status contract capability set, which SPEC-001 enumerates):
+
+```
+"model_liveness": {
+  "token": <uint64>,                  // monotonically non-decreasing; advances ONLY on model/inference
+                                      // forward progress (per generated token / generation step). Scoped
+                                      // to service_instance.instance_id: resets to 0 on process/service-
+                                      // instance restart; MUST NOT be compared across differing instance_id.
+  "token_age_ms": <uint64|null>,      // elapsed since the token last advanced, measured on a process-local
+                                      // MONOTONIC clock (immune to wall-clock jumps); null before first advance.
+  "active_inference": <bool>,         // true iff accepted/in-flight model work SHOULD be advancing the token
+                                      // now (e.g. requests_in_flight > 0).
+  "active_inference_age_ms": <uint64|null>,  // monotonic elapsed since active_inference last became true with no
+                                      // subsequent token advance; null when active_inference is false.
+  "last_advanced_at": <RFC3339|null>  // diagnostic wall-clock time of last advance; null before first advance.
+                                      // Diagnostic ONLY — MUST NOT be used for staleness math.
+}
+```
+
+The token MUST be readable without blocking on or synchronizing with the model
+thread — a reader observes the last-published values, never a live call into the
+model — so a wedged model thread cannot wedge the status endpoint.
+**Interpretation:** a rising `token_age_ms` is a liveness concern **only while
+`active_inference` is true** (tracked continuously from when active inference
+begins via `active_inference_age_ms`, so a wedge that occurs before the first
+token still shows a rising age); a healthy *idle* provider legitimately has a
+non-advancing token and MUST NOT be read as wedged. All staleness math MUST use
+the monotonic `*_age_ms` fields, never `last_advanced_at`. The token carries no
+buyer-serving authority and does not gate admission. Readers older than
+`model_liveness_token_v1` degrade without false failure (legacy-reader fallback),
+treating an absent `model_liveness` object as "unknown", never as unhealthy.
+
+**Scope of this version.** The token is a **local `/v1/status` observability
+signal only**. It is NOT yet an input to the watchdog restart predicate (§5.3),
+which is unchanged. Wiring the token into an out-of-process wedge-prober restart
+decision (the listener-alive/model-dead recovery path) is an explicit deferred
+follow-up that must first define the stall threshold and its owner, a persisted
+operator-pause signal readable without the HTTP surface, and the
+pre-first-token / process-wide hard-freeze cases before it may authorize a
+restart. Coordinator export of the signal (heartbeat action events, dwell,
+token-age, topology beacon) is the separate supervisor telemetry contract
+deferred to RFC-001 §7 / follow-up F5, and MUST NOT be smuggled into
+`last_autoupdate_event`.
+
 Malibu also attaches to the launchd-owned CLI's owner-only control socket when
 the CLI advertises compatible typed capabilities. That socket supplies bounded
 status, metrics, earnings, and referral projections and accepts supported
@@ -673,6 +740,39 @@ The launchd **provider service** `live.malibu.provider` (`KeepAlive`) that
 `install.sh` installs owns the CLI's lifecycle and routine restarts. The companion
 watchdog remains a current-boot-gated local liveness monitor and does not own
 auto-update rollback or recovery mutation (§8).
+
+**Exit-restart is launchd's alone; the watchdog is wedge-restart-only (SPEC-020
+R-4.14).** launchd is the **single** exit-restart owner. For `consumer_user`,
+`KeepAlive{SuccessfulExit:false}` + `ThrottleInterval` restarts **crash/nonzero**
+exits; for `headless_fleet`, `KeepAlive{true}` restarts every exit. Because
+`KeepAlive{SuccessfulExit:false}` does not restart a clean (exit 0) termination, a
+`consumer_user` serve process MUST reach exit 0 only under a validated **local**
+stop intent (uninstall, launchd/operator-disable, or a local `stop`/maintenance
+transaction); an unsolicited SIGTERM/SIGINT with no such stop intent (a stray or
+memory-pressure/jetsam SIGTERM) MUST exit **nonzero** so launchd restarts it
+(SPEC-001 FR-12). A coordinator `drain` message is registration-only and never
+causes process exit, so it is not a stop intent. This leaves no accidental
+clean-exit gap when the watchdog's exit-restart is removed. The companion watchdog MUST NOT restart the provider on
+process exit or on a missing/unvalidated launchd PID.
+
+The watchdog's only permitted mutating action is its existing bounded,
+current-boot-gated **wedge** restart (unchanged by this version): a
+`launchctl kickstart` when, after observing local health in the current boot, a
+later local `/v1/health` failure is paired with a restart-worthy `/v1/status`
+state, outside cooldown, with no valid lifecycle lease and not operator-paused. It
+writes only its own boot-arm and cooldown markers. Consuming the new §5.2
+`model_liveness_token_v1` to also catch the listener-alive/model-dead wedge is a
+deferred follow-up, not part of this version.
+
+The watchdog is **installer-owned and non-self-restoring** (RFC-001 §5.1): beyond
+its boot-arm/cooldown markers it MUST NOT write, restore, rename, or delete any
+provider **or supervisor** artifact — provider binary/resources/config/plist, or
+the watchdog script, its plist/LaunchAgent/LaunchDaemon, or any current or legacy
+supervisor label (including `live.streamvc.macprovider-watchdog`) — and MUST NOT
+own or perform update or rollback. Only the installer/Malibu-repair/CLI
+transaction owner writes the supervisor. This removes the second, mutable
+exit-restart authority whose stale, self-restoring form caused the #1189
+stranding, so a stale watchdog can no longer resurrect or fight the provider.
 `MalibuAgent` holds a `var child: CLIChildProcess?` but **never instantiates it** in
 shipped code — `CLIChildProcess(` has no call site in `Sources` or `Tests`; the field
 is only read to defensively release a child left by an *older* build
@@ -860,7 +960,12 @@ conflated them; v0.6 splits the provider service from its watchdog):
    restart-worthy `/v1/status` state. It may log that an autoupdate `pending.json`
    exists, but it MUST NOT restore CLI bytes, release resources, launchd plists, the
    watchdog script, or Malibu.app; it also MUST NOT bootstrap/kickstart the provider as
-   update recovery. Auto-update rollback and stale-marker quarantine are owned by
+   update recovery. **Reconciled v0.25 (SPEC-020 R-4.14):** the watchdog also MUST NOT
+   restart the provider on process exit or on a missing/unvalidated launchd PID —
+   launchd `KeepAlive` is the single exit-restart owner — and MUST NOT write or restore
+   any supervisor artifact (its own script, plist/LaunchAgent/LaunchDaemon, or any
+   current/legacy label); it is installer-owned and non-self-restoring.
+   Auto-update rollback and stale-marker quarantine are owned by
    installer/Malibu repair and CLI startup/install recovery under SPEC-020 v0.1.13.
    `install.sh` (run by the app during onboarding) installs **both** the provider
    service and this watchdog — v0.1's claim that the App track does NOT install the
