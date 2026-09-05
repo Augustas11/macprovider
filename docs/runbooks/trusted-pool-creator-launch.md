@@ -113,6 +113,56 @@ coordinator allowlists that key as SHA-256 of the 32-byte public key via
 rejects longer intervals. Missing or expired rows are launch blockers; they are
 not yet a `PromotePool` production-gate check.
 
+### On-call operations-authority signing path
+
+The on-call authority key follows the same custody model as the production-release
+key: only the public half is committed, and the private half lives solely in the
+GitHub `production-release` environment secret
+`MACPROVIDER_SPEC043_ONCALL_AUTHORITY_SIGNING_KEY_PEM`. The committed keyring
+`security/spec-043-oncall-authority-ed25519-keyring.json` ships **empty and
+fail-closed**: nothing can be signed or accepted until an operator registers a
+key.
+
+Provision (operator only; do not run from an automated agent session):
+
+1. Generate an Ed25519 key with a tool you control, or mirror
+   `scripts/provision-spec043-production-release-key.sh` for the generate →
+   pipe-private-into-env-secret → register-public flow. Store the private half
+   only in the `production-release` environment secret above; never commit or log
+   it.
+2. Register the public half and read back the deploy digest:
+
+   ```bash
+   python3 scripts/register-spec043-oncall-authority-key.py \
+     --public-key <operator-public-key.pem> \
+     --valid-from 2026-09-05T00:00:00Z \
+     --valid-until 2027-09-05T00:00:00Z
+   # prints MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256=<digest>
+   ```
+
+   Commit `security/spec-043-oncall-authority-ed25519-v1.pem` and the updated
+   keyring. `--check` re-derives the digest and fail-closes if no key is
+   registered.
+3. Set `MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256=<digest>` in the
+   coordinator launch environment (Pearl `/etc/macprovider/coordinator.env`), then
+   restart the coordinator so it allowlists the key.
+
+Sign a record (dispatch the workflow — the private key never leaves the
+`production-release` environment):
+
+- `.github/workflows/build-signed-oncall-readiness.yml` (manual dispatch from
+  `main`) builds an unsigned record from the record fields, signs it with the
+  environment secret via `coordinator-cli trust-pool-oncall sign`, verifies the
+  signed record binds the registered key digest, and uploads the signed JSON as a
+  workflow artifact.
+- Then apply it with the operator admin key:
+  `coordinator-cli trust-pool-oncall upsert --json-file <signed-oncall.json>`.
+
+`coordinator-cli trust-pool-oncall sign` is an offline signer (no HTTP, no
+operator key). It reuses `trustpool.SignOnCallReadiness`, so the signed preimage
+is byte-identical to what the coordinator verifies. It reads the key from
+`--key-file` or `MACPROVIDER_SPEC043_ONCALL_AUTHORITY_SIGNING_KEY_PEM`.
+
 Reviewed-artifact lifecycle ownership is a separate durable row from
 `review-distribution-artifact`. Assign an owner and `environment_class` of
 `candidate` or `production` before treating a pool as live-ready. Operator
