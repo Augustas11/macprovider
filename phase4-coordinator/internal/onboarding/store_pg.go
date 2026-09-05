@@ -647,8 +647,11 @@ const (
 
 // RecordSupervisorEvent upserts the ONE row per (provider_id, boot_id) supervisor
 // telemetry state, ordered by `seq` alone (latest-wins; provider timestamps never
-// gate). A seq <= the stored seq is a full no-op. A higher-seq beacon that
-// regresses a monotonic counter is treated as malformed and skipped
+// gate). A seq <= the stored seq is a full no-op EXCEPT for the same-boot
+// state-reset carve-out (a low seq / regressed counter under the stored boot_id is
+// adopted as a mid-boot watchdog-state wipe — see freshReset below) and a same-seq
+// non-serving observation (which still breaks dwell continuity). A higher-seq
+// beacon that regresses a monotonic counter is treated as malformed and skipped
 // non-blockingly. When a new last_restart_seq advances, the coordinator finalizes
 // the prior restart (flap if the correlated instance had not cleared the dwell
 // threshold, else held) and anchors last_restart_observed_at to coordinator
@@ -737,16 +740,44 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 	// replay rather than a real reset, the real watchdog's next higher-seq beacon
 	// re-advances the row, so adopting it is self-correcting.
 	//
-	// A genuine wipe drops seq strictly BELOW the stored high-water; use strict `<`
-	// (not `<=`) so a same-seq duplicate beacon that is not deduped (a flipped
-	// serving tag / service_instance_id between two heartbeats in one watchdog tick)
-	// falls through to the latest-wins no-op below and preserves dwell state, rather
-	// than being misclassified as a reset that re-anchors dwell_started_at.
-	freshReset := exStored && rec.Seq < exLastSeq && rec.Seq <= supervisorFreshStateSeqMax &&
-		rec.RestartsTotal <= exRestarts && rec.DeferralsTotal <= exDeferral
+	// A genuine wipe drops seq strictly BELOW the stored high-water OR (if the wipe
+	// lands on the same tick number) re-emits the SAME seq with a REGRESSED counter.
+	// Either is a reset. A same-seq beacon whose counters did NOT regress is just a
+	// non-deduped duplicate (a flipped serving tag / service_instance_id between two
+	// heartbeats in one watchdog tick): it must fall through to the latest-wins no-op
+	// below and preserve dwell state, never be misclassified as a reset that
+	// re-anchors dwell_started_at. Testing the counter-regression on the same-seq
+	// case (rather than a blanket `<=`) keeps that duplicate protection while still
+	// recovering a mid-boot wipe that happens to reuse the stored seq (a wipe within
+	// the first few ticks, which strict `<` alone left unrecoverable).
+	freshReset := exStored && rec.Seq <= supervisorFreshStateSeqMax &&
+		rec.RestartsTotal <= exRestarts && rec.DeferralsTotal <= exDeferral &&
+		(rec.Seq < exLastSeq ||
+			(rec.Seq == exLastSeq && (rec.RestartsTotal < exRestarts || rec.DeferralsTotal < exDeferral)))
 	if exStored && !freshReset {
-		// Latest-wins: a stale or duplicate (seq <= stored) beacon is a full no-op.
+		// Latest-wins: a stale or duplicate (seq <= stored) beacon does not advance
+		// seq/counters/sticky detail. But a SAME-seq observation that is non-serving,
+		// carries no service_instance_id, or reports a DIFFERENT instance than the one
+		// being timed still BREAKS dwell continuity per SPEC-025 §5.4 ("resets to
+		// zero ... on ... any non-serving state"). The upstream dedup fingerprint
+		// deliberately carries the serving verdict + service_instance_id through so a
+		// sub-tick serving flip (heartbeat cadence < watchdog tick) reaches us; if we
+		// swallowed it whole, the next seq-advancing serving beacon would promote a
+		// pending restart to a FALSE held. Reset only the dwell timer here — never the
+		// seq/counters/detail/anchor (that would re-anchor dwell, the strict-reset
+		// case this same-seq path exists to avoid).
 		if rec.Seq <= exLastSeq {
+			if rec.Seq == exLastSeq && exDwellState == supervisorDwellPending && exDwellStarted.Valid {
+				currentInstance := strings.TrimSpace(rec.CurrentServiceInstance)
+				if !rec.ServingEligible || currentInstance == "" || currentInstance != exDwellInstance {
+					if _, err := tx.ExecContext(ctx, `
+UPDATE provider_supervisor_events
+   SET dwell_instance = '', dwell_started_at = NULL
+ WHERE provider_id = $1 AND boot_id = $2`, providerID, bootID); err != nil {
+						return err
+					}
+				}
+			}
 			return tx.Commit()
 		}
 		// Monotonic counters within a boot: a higher-seq beacon that regresses a
@@ -775,20 +806,31 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 		preservedFlaps = exFlaps
 		preservedLastFlap = exLastFlap
 	}
+	// Preserve the pre-reset nested action seqs. A reset zeroes exLast*Seq so the
+	// reset beacon's own detail is adopted as the new baseline, but a restart/deferral
+	// whose seq the coordinator ALREADY observed before the reset is not genuinely
+	// new: re-anchoring a pending window for it would let the next real beacon
+	// finalize it as a phantom flap and double-count flaps_total. Gate "new" on the
+	// pre-reset high-water too, so only an action seq beyond what was already seen
+	// starts a fresh window.
+	preResetLastRestartSeq := exLastRestartSeq
+	preResetLastDeferralSeq := exLastDeferralSeq
 	if freshReset {
 		exStored = false
 		exLastRestartSeq = 0
 		exLastDeferralSeq = 0
 	}
 
-	newRestartObserved := rec.LastRestartSeq > 0 && rec.LastRestartSeq > exLastRestartSeq
+	newRestartObserved := rec.LastRestartSeq > 0 && rec.LastRestartSeq > exLastRestartSeq &&
+		rec.LastRestartSeq > preResetLastRestartSeq
 	// A new restart (advanced last_restart.seq) is only credible if restarts_total
 	// also advanced past the stored high-water; otherwise the counter/action detail
 	// is inconsistent (forged/corrupt) — skip non-blockingly rather than adopt it.
 	if newRestartObserved && exStored && rec.RestartsTotal <= exRestarts {
 		return tx.Commit()
 	}
-	newDeferralObserved := rec.LastDeferralSeq > 0 && rec.LastDeferralSeq > exLastDeferralSeq
+	newDeferralObserved := rec.LastDeferralSeq > 0 && rec.LastDeferralSeq > exLastDeferralSeq &&
+		rec.LastDeferralSeq > preResetLastDeferralSeq
 	// Symmetric consistency: a new deferral (advanced last_deferral.seq) requires
 	// deferrals_total to have advanced too, else it is inconsistent/forged.
 	if newDeferralObserved && exStored && rec.DeferralsTotal <= exDeferral {

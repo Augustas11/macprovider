@@ -171,15 +171,6 @@ VALUES ('prov-3', $1, 'swap', 'success')`, t0.Add(300*time.Millisecond)); err !=
 		t.Fatalf("expected artifact_confounded, got: %+v", r)
 	}
 
-	// --- stale seq is a full no-op.
-	stale := restart("prov-2", "BOOT-B", 1, 1, 1, "inst-A", "inst-A", t0.Add(time.Second))
-	if err := store.RecordSupervisorEvent(ctx, stale); err != nil {
-		t.Fatalf("record stale: %v", err)
-	}
-	if r := read("prov-2", "BOOT-B"); r.lastSeq != 2 || r.restarts != 2 || r.flaps != 1 {
-		t.Fatalf("stale seq mutated state: %+v", r)
-	}
-
 	// --- counter regression on a higher seq is skipped non-blockingly.
 	regress := restart("prov-2", "BOOT-B", 3, 2, 1 /* < stored 2 */, "inst-B", "inst-C", t0.Add(2*time.Second))
 	if err := store.RecordSupervisorEvent(ctx, regress); err != nil {
@@ -256,5 +247,78 @@ SELECT last_seq FROM provider_supervisor_events WHERE provider_id='prov-7' AND b
 	}
 	if p7Seq != 200000 {
 		t.Fatalf("large first-insert seq rejected: last_seq=%d (want 200000)", p7Seq)
+	}
+
+	// --- carve-out is INTENTIONAL and does NOT double-count a flap. A replay at
+	// seq <= supervisorFreshStateSeqMax whose counters do not exceed the stored
+	// high-water is a mid-boot state reset (adopted per SPEC-025 §5.4), not a stale
+	// no-op; flaps_total is preserved, and a restart the coordinator ALREADY observed
+	// before the reset must not be re-counted as a new flap by the next real beacon.
+	if err := store.RecordSupervisorEvent(ctx, restart("prov-8", "BOOT-H", 1, 1, 1, "inst-A", "inst-A", t0)); err != nil {
+		t.Fatalf("record p8 r1: %v", err)
+	}
+	if err := store.RecordSupervisorEvent(ctx, restart("prov-8", "BOOT-H", 2, 2, 2, "inst-B", "inst-B", t0.Add(200*time.Millisecond))); err != nil {
+		t.Fatalf("record p8 r2 (flap): %v", err)
+	}
+	// advance above the carve-out bound so the replay below is unambiguously a reset.
+	if err := store.RecordSupervisorEvent(ctx, beacon("prov-8", "BOOT-H", 5, 2, 2, "inst-C", true, t0.Add(400*time.Millisecond))); err != nil {
+		t.Fatalf("record p8 advance: %v", err)
+	}
+	if err := store.RecordSupervisorEvent(ctx, restart("prov-8", "BOOT-H", 1, 1, 1, "inst-A", "inst-B", t0.Add(time.Second))); err != nil {
+		t.Fatalf("record p8 reset replay: %v", err)
+	}
+	if r := read("prov-8", "BOOT-H"); r.lastSeq != 1 || r.restarts != 1 || r.flaps != 1 {
+		t.Fatalf("carve-out replay not adopted (or flaps not preserved): %+v", r)
+	}
+	// The next real restart must NOT finalize the already-known restart#1 as a flap.
+	if err := store.RecordSupervisorEvent(ctx, restart("prov-8", "BOOT-H", 6, 3, 2, "inst-D", "inst-E", t0.Add(2*time.Second))); err != nil {
+		t.Fatalf("record p8 next: %v", err)
+	}
+	if r := read("prov-8", "BOOT-H"); r.flaps != 1 {
+		t.Fatalf("flap double-counted after carve-out replay: flaps=%d (want 1)", r.flaps)
+	}
+
+	// --- stale seq ABOVE the carve-out bound is a full no-op (never a reset).
+	if err := store.RecordSupervisorEvent(ctx, restart("prov-9", "BOOT-I", 5, 1, 1, "inst-A", "inst-A", t0)); err != nil {
+		t.Fatalf("record p9 base: %v", err)
+	}
+	if err := store.RecordSupervisorEvent(ctx, restart("prov-9", "BOOT-I", 4, 1, 1, "inst-A", "inst-A", t0.Add(time.Second))); err != nil {
+		t.Fatalf("record p9 stale: %v", err)
+	}
+	if r := read("prov-9", "BOOT-I"); r.lastSeq != 5 || r.restarts != 1 {
+		t.Fatalf("stale seq above carve-out bound mutated state: %+v", r)
+	}
+
+	// --- a SAME-seq NON-serving observation (a sub-tick serving flip: heartbeat
+	// cadence < watchdog tick) breaks dwell continuity and must not be swallowed into
+	// a false held (SPEC-025 §5.4: reset dwell on any non-serving state).
+	if err := store.RecordSupervisorEvent(ctx, restart("prov-10", "BOOT-J", 1, 1, 1, "inst-A", "inst-A", t0)); err != nil {
+		t.Fatalf("record p10 r1: %v", err)
+	}
+	if err := store.RecordSupervisorEvent(ctx, beacon("prov-10", "BOOT-J", 2, 1, 1, "inst-B", true, t0.Add(500*time.Millisecond))); err != nil {
+		t.Fatalf("record p10 timing-start: %v", err)
+	}
+	// SAME seq 2, now NON-serving: resets the dwell timer, stays pending.
+	if err := store.RecordSupervisorEvent(ctx, beacon("prov-10", "BOOT-J", 2, 1, 1, "inst-B", false, t0.Add(time.Second))); err != nil {
+		t.Fatalf("record p10 non-serving: %v", err)
+	}
+	// seq 3 serving past the dwell threshold begins timing FRESH (not held here).
+	if err := store.RecordSupervisorEvent(ctx, beacon("prov-10", "BOOT-J", 3, 1, 1, "inst-B", true, t0.Add(3*time.Second))); err != nil {
+		t.Fatalf("record p10 resume: %v", err)
+	}
+	if r := read("prov-10", "BOOT-J"); r.dwellState != "correlated_pending" {
+		t.Fatalf("same-seq non-serving did not break dwell (false held risk): %+v", r)
+	}
+
+	// --- a SAME-seq wipe (seq unchanged but a counter REGRESSED) is adopted as a
+	// mid-boot state reset; strict `<` alone left this same-seq case unrecoverable.
+	if err := store.RecordSupervisorEvent(ctx, topo("prov-11", "BOOT-K", 2, 2, t0)); err != nil {
+		t.Fatalf("record p11 base: %v", err)
+	}
+	if err := store.RecordSupervisorEvent(ctx, topo("prov-11", "BOOT-K", 2, 1, t0.Add(time.Second))); err != nil {
+		t.Fatalf("record p11 same-seq wipe: %v", err)
+	}
+	if r := read("prov-11", "BOOT-K"); r.lastSeq != 2 || r.restarts != 1 {
+		t.Fatalf("same-seq wipe not adopted as reset: %+v", r)
 	}
 }
