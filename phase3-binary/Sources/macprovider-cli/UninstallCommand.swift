@@ -45,9 +45,34 @@ struct UninstallCommand: AsyncParsableCommand {
         }
         try Self.validateUninstallProfile(manifest)
 
-        try Self.stopLaunchdServices(labels: manifest.launchdLabels, uid: getuid()) { arguments in
-            try runProcess("/bin/launchctl", arguments: arguments)
+        // SPEC-001 FR-12 / SPEC-020 R-4.14: an uninstall is a validated local
+        // stop intent. Resolve the running provider PID now, and record the
+        // intent (PID+boot+process-start-bound, short-lived, consumed-once) at
+        // the exact moment its launchd job is booted out — so the serve process
+        // exits 0 for that SIGTERM rather than treating it as unsolicited. The
+        // marker is written inside `stopLaunchdServices` right before the
+        // provider bootout (after restart-capable watchdog jobs are gone), so it
+        // opens no fail-open window. Best-effort: if the PID is unresolvable or
+        // the write fails the serve simply exits nonzero, and `bootout` removes
+        // the job either way (no relaunch).
+        let providerStopPID: Int32?
+        if case .launchdManaged(let pid?) = ((try? ProviderConflictDetector().detect()) ?? .none) {
+            providerStopPID = pid
+        } else {
+            providerStopPID = nil
+            warnings.append("could not resolve running provider PID; stop-intent marker not recorded (serve will exit nonzero, launchd job still booted out)")
         }
+        try Self.stopLaunchdServices(
+            labels: manifest.launchdLabels,
+            uid: getuid(),
+            run: { arguments in try runProcess("/bin/launchctl", arguments: arguments) },
+            beforeBootout: { label in
+                guard label == ProviderConflictDetector.launchdLabel, let pid = providerStopPID else { return }
+                if !StopIntentMarker.record(targetPID: pid, reason: "uninstall", home: home) {
+                    warnings.append("failed to record stop-intent marker for provider uninstall (serve may exit nonzero)")
+                }
+            }
+        )
         // The signed CLI remains the sole lifecycle author. Publish the
         // uninstall tombstone only after both launchd jobs are proven absent,
         // and before removing the executable that can author it.
@@ -208,7 +233,8 @@ struct UninstallCommand: AsyncParsableCommand {
     static func stopLaunchdServices(
         labels: [String],
         uid: uid_t,
-        run: ([String]) throws -> Int32
+        run: ([String]) throws -> Int32,
+        beforeBootout: (String) -> Void = { _ in }
     ) throws {
         let managedLabels = Set(managedLaunchdStopOrder)
         for label in Set(labels) where !managedLabels.contains(label) {
@@ -217,6 +243,13 @@ struct UninstallCommand: AsyncParsableCommand {
 
         for label in managedLaunchdStopOrder {
             let target = "gui/\(uid)/\(label)"
+            // Hook fires immediately before this label's bootout. The stop order
+            // stops restart-capable watchdog jobs first, so by the time the
+            // provider label is booted out no watchdog remains to fight it — and
+            // a validated stop-intent marker recorded here (SPEC-001 FR-12) has no
+            // fail-open window: if an earlier bootout failed we throw before ever
+            // reaching the provider label.
+            beforeBootout(label)
             _ = try run(["bootout", target])
             // `bootout` returns nonzero both for an absent job and for real
             // failures. A follow-up `print` is the stop proof: only a missing

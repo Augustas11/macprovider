@@ -11437,13 +11437,6 @@ valid_lifecycle_lease() {
   valid_lifecycle_lease_record maintenance ""
 }
 
-valid_unbound_lifecycle_lease() {
-  if valid_lifecycle_lease_record startup ""; then
-    return 0
-  fi
-  valid_lifecycle_lease_record maintenance ""
-}
-
 valid_lifecycle_lease_record() {
   expected_kind="$1"
   expected_pid="${2:-}"
@@ -11715,14 +11708,13 @@ main() {
   fi
   provider_pid="$(provider_process_pid || true)"
   if [ -z "$provider_pid" ]; then
-    log "provider process unhealthy: launchd service $LABEL has no validated PID at $BINARY_PATH"
-    if valid_unbound_lifecycle_lease; then
-      log "launchd service $LABEL has no validated PID but is inside a validated startup/maintenance lease; watchdog grants bounded grace"
-      exit 0
-    fi
-    if ! provider_restart_cooldown_active; then
-      kickstart_provider "missing_validated_pid" || true
-    fi
+    # No validated launchd PID: the provider service is not running. Per
+    # SPEC-020 R-4.14 the launchd provider-service KeepAlive is the SINGLE
+    # exit-restart owner; the watchdog no longer kickstarts here. This removes
+    # the second, mutable exit-restart authority behind #1189. launchd restarts
+    # a crashed/nonzero exit, and an unsolicited clean exit now exits nonzero
+    # (SPEC-001 FR-12) so KeepAlive relaunches it — the watchdog only observes.
+    log "provider process not running: launchd service $LABEL has no validated PID at $BINARY_PATH; exit-restart owned by launchd KeepAlive (watchdog does not kick)"
     exit 0
   fi
   boot_id="$(current_boot_id)"
