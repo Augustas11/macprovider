@@ -50,6 +50,13 @@ CREATE TABLE IF NOT EXISTS provider_supervisor_events (
     flaps_total                   BIGINT NOT NULL DEFAULT 0,
     last_flap_observed_at         TIMESTAMPTZ,
     last_restart_dwell_state      TEXT NOT NULL DEFAULT '',
+    -- Dwell CONTINUITY tracking (SPEC-025 §5.4): the correlated new instance
+    -- currently being timed and when the coordinator first observed it
+    -- serving-eligible. Reset on a heartbeat gap, non-serving observation,
+    -- instance change, or disconnect so a silent-then-return provider is never
+    -- back-filled as held.
+    dwell_instance                TEXT NOT NULL DEFAULT '',
+    dwell_started_at              TIMESTAMPTZ,
     recorded_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (provider_id, boot_id)
 );

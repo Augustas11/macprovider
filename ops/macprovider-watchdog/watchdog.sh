@@ -62,6 +62,14 @@ if [ "$KICK_GRACE_SECONDS" -lt 60 ] || [ "$KICK_GRACE_SECONDS" -gt 3600 ]; then
 fi
 
 mkdir -p "$LOG_DIR" "$STATE_DIR"
+# Consumer topology (watchdog == provider uid): tighten the beacon state dir to
+# 0700 so only the owner can write/read it (SPEC-025 §5.4 / SPEC-020 R-4.9). In
+# headless the root watchdog writes a beacon the HEADLESS_USER provider must
+# still traverse to, so the installer owns that dir's (root, world-traversable,
+# not-others-writable) perms — do not clamp it to 0700 here.
+if [ -z "${MACPROVIDER_HEADLESS_USER:-}" ]; then
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
+fi
 
 # Boot id: per-boot identifier sourced from kern.bootsessionuuid.
 # Apple-provided UUID is immutable for the lifetime of a single
@@ -594,10 +602,10 @@ emit_supervisor_beacon() {
 
   stored_boot="$(cat "$BEACON_BOOT_FILE" 2>/dev/null || printf '')"
   if [ "$stored_boot" != "$cur_boot" ]; then
-    printf '%s' "$cur_boot" > "$BEACON_BOOT_FILE" 2>/dev/null || return 0
-    printf '0' > "$BEACON_SEQ_FILE" 2>/dev/null || true
-    printf '0' > "$BEACON_RESTARTS_FILE" 2>/dev/null || true
-    printf '0' > "$BEACON_DEFERRALS_FILE" 2>/dev/null || true
+    printf '%s' "$cur_boot" | _beacon_atomic_write "$BEACON_BOOT_FILE" || return 0
+    printf '0' | _beacon_atomic_write "$BEACON_SEQ_FILE" || true
+    printf '0' | _beacon_atomic_write "$BEACON_RESTARTS_FILE" || true
+    printf '0' | _beacon_atomic_write "$BEACON_DEFERRALS_FILE" || true
     rm -f "$BEACON_LAST_RESTART_FILE" "$BEACON_LAST_DEFERRAL_FILE" 2>/dev/null || true
   fi
 
@@ -623,9 +631,9 @@ emit_supervisor_beacon() {
     *) return 0 ;;
   esac
 
-  printf '%s' "$seq" > "$BEACON_SEQ_FILE" 2>/dev/null || true
-  printf '%s' "$restarts" > "$BEACON_RESTARTS_FILE" 2>/dev/null || true
-  printf '%s' "$deferrals" > "$BEACON_DEFERRALS_FILE" 2>/dev/null || true
+  printf '%s' "$seq" | _beacon_atomic_write "$BEACON_SEQ_FILE" || true
+  printf '%s' "$restarts" | _beacon_atomic_write "$BEACON_RESTARTS_FILE" || true
+  printf '%s' "$deferrals" | _beacon_atomic_write "$BEACON_DEFERRALS_FILE" || true
 
   last_restart_json='null'
   if [ -f "$BEACON_LAST_RESTART_FILE" ]; then

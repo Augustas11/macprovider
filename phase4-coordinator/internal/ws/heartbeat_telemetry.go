@@ -198,14 +198,25 @@ type supervisorEventWire struct {
 type supervisorRestartWire struct {
 	Seq             int64           `json:"seq"`
 	TS              string          `json:"ts"`
+	Reason          string          `json:"reason"`
 	CooldownState   string          `json:"cooldown_state"`
 	ServiceInstance *string         `json:"service_instance"`
 	ModelLiveness   json.RawMessage `json:"model_liveness"`
 }
 
 type supervisorDeferralWire struct {
-	Seq int64  `json:"seq"`
-	TS  string `json:"ts"`
+	Seq            int64  `json:"seq"`
+	TS             string `json:"ts"`
+	DeferralReason string `json:"deferral_reason"`
+}
+
+// supervisorModelLiveness is the EXACT allowlisted model_liveness shape. The
+// coordinator re-projects to this before persisting so no extra/redaction-
+// forbidden keys a modified provider might inject survive into the JSONB column.
+type supervisorModelLiveness struct {
+	TokenAgeMS           *int64 `json:"token_age_ms"`
+	ActiveInference      bool   `json:"active_inference"`
+	ActiveInferenceAgeMS *int64 `json:"active_inference_age_ms"`
 }
 
 const (
@@ -253,29 +264,62 @@ func normalizeSupervisorWire(w *supervisorEventWire) bool {
 	}
 	if w.LastRestart != nil {
 		lr := w.LastRestart
-		if lr.Seq < 0 || lr.Seq > w.Seq {
-			return false
-		}
-		switch lr.CooldownState {
-		case "armed", "cooldown_active":
-		default:
-			lr.CooldownState = "armed"
-		}
-		if lr.ServiceInstance != nil && (len(*lr.ServiceInstance) > 128 || containsControlChar(*lr.ServiceInstance)) {
-			lr.ServiceInstance = nil
-		}
-		// model_liveness must be a JSON object or null; anything else is dropped.
-		if ml := lr.ModelLiveness; len(ml) > 0 && string(ml) != "null" {
-			var probe map[string]json.RawMessage
-			if err := json.Unmarshal(ml, &probe); err != nil {
-				lr.ModelLiveness = nil
+		// reason is the only watchdog-owned restart reason (SPEC-020 R-4.14); a
+		// missing/other reason means this is not a valid supervisor restart —
+		// drop the sticky detail rather than fabricate one.
+		if lr.Reason != "wedge" || lr.Seq < 0 || lr.Seq > w.Seq {
+			w.LastRestart = nil
+		} else {
+			switch lr.CooldownState {
+			case "armed", "cooldown_active":
+			default:
+				lr.CooldownState = "armed"
 			}
+			if lr.ServiceInstance != nil && (len(*lr.ServiceInstance) > 128 || containsControlChar(*lr.ServiceInstance)) {
+				lr.ServiceInstance = nil
+			}
+			// Re-project model_liveness to EXACTLY the allowlisted shape so no
+			// extra/redaction-forbidden keys reach the store. Invalid → null.
+			lr.ModelLiveness = projectSupervisorModelLiveness(lr.ModelLiveness)
 		}
 	}
-	if w.LastDeferral != nil && (w.LastDeferral.Seq < 0 || w.LastDeferral.Seq > w.Seq) {
-		return false
+	if w.LastDeferral != nil {
+		if w.LastDeferral.DeferralReason != "pending_autoupdate_marker" ||
+			w.LastDeferral.Seq < 0 || w.LastDeferral.Seq > w.Seq {
+			w.LastDeferral = nil
+		}
 	}
 	return true
+}
+
+// projectSupervisorModelLiveness returns model_liveness re-marshaled to exactly
+// {token_age_ms, active_inference, active_inference_age_ms} with nonnegative +
+// sanity-capped ages, or nil (null) if absent/invalid. Any other keys a modified
+// provider injected are dropped before the value can reach the JSONB store.
+func projectSupervisorModelLiveness(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var ml supervisorModelLiveness
+	if err := json.Unmarshal(raw, &ml); err != nil {
+		return nil
+	}
+	clamp := func(v *int64) *int64 {
+		if v == nil || *v < 0 || *v > maxSupervisorScalar {
+			return nil
+		}
+		return v
+	}
+	projected := supervisorModelLiveness{
+		TokenAgeMS:           clamp(ml.TokenAgeMS),
+		ActiveInference:      ml.ActiveInference,
+		ActiveInferenceAgeMS: clamp(ml.ActiveInferenceAgeMS),
+	}
+	out, err := json.Marshal(projected)
+	if err != nil {
+		return nil
+	}
+	return out
 }
 
 // recordSupervisorEventIfChanged durably upserts the SEPARATE supervisor

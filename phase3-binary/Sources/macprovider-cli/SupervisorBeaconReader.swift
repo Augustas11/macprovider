@@ -50,6 +50,21 @@ enum SupervisorBeaconReader {
         url: URL = beaconURL(),
         currentBootSession: String? = bootSessionUUID()
     ) -> [String: Any]? {
+        // Ancestry guard (SPEC-025 §5.4 / SPEC-020 R-4.9): the containing directory
+        // must not be writable by other users, so no non-owner can replace or
+        // symlink-swap the beacon. Owner must be us (consumer: provider-uid 0700)
+        // or root (headless: root-owned 0755 — world-traversable but only root
+        // writes; a root-owned 0700 dir would be untraversable by the HEADLESS_USER
+        // reader, so ownership, not a fixed mode, is the invariant), and no
+        // group/other write bit may be set.
+        let dirPath = url.deletingLastPathComponent().path
+        var dst = stat()
+        guard stat(dirPath, &dst) == 0,
+              (dst.st_mode & S_IFMT) == S_IFDIR,
+              dst.st_uid == getuid() || dst.st_uid == 0,
+              (dst.st_mode & 0o022) == 0 else {
+            return nil
+        }
         // Hardened open: never follow a symlink; require a private, single-link
         // regular file owned by us, no larger than the wire cap.
         let fd = open(url.path, O_RDONLY | O_NOFOLLOW)
@@ -106,7 +121,10 @@ enum SupervisorBeaconReader {
     // MARK: - Projection helpers
 
     private static func projectLastRestart(_ raw: Any?) -> [String: Any]? {
+        // Require the exact watchdog-owned reason and a valid seq; a missing/other
+        // reason is not a valid supervisor restart — drop it rather than fabricate.
         guard let obj = raw as? [String: Any],
+              obj["reason"] as? String == "wedge",
               let seq = strictUInt(obj["seq"]) else {
             return nil
         }
@@ -133,6 +151,7 @@ enum SupervisorBeaconReader {
 
     private static func projectLastDeferral(_ raw: Any?) -> [String: Any]? {
         guard let obj = raw as? [String: Any],
+              obj["deferral_reason"] as? String == "pending_autoupdate_marker",
               let seq = strictUInt(obj["seq"]) else {
             return nil
         }

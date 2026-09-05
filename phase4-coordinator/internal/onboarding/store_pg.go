@@ -607,6 +607,11 @@ type SupervisorEventRecord struct {
 	// DwellThreshold is the coordinator-owned sustained-serving window used to
 	// finalize a prior restart as held vs flap. Zero falls back to the default.
 	DwellThreshold time.Duration
+	// StalenessThreshold bounds the gap between two accepted observations before
+	// the coordinator treats dwell continuity as broken (a heartbeat-miss/gap),
+	// resetting the timer so a silent-then-return provider is never back-filled
+	// as held. Zero falls back to the default.
+	StalenessThreshold time.Duration
 }
 
 // DefaultSupervisorDwellThreshold is the coordinator-owned sustained-serving
@@ -614,6 +619,12 @@ type SupervisorEventRecord struct {
 // Below it, a subsequent restart is a flap. This is an implementation constant
 // (SPEC-025 §5.4 leaves the concrete value to the coordinator).
 const DefaultSupervisorDwellThreshold = 5 * time.Minute
+
+// DefaultSupervisorStalenessThreshold bounds the gap between two accepted
+// beacons before dwell continuity is considered broken. Providers heartbeat far
+// more often than this; a longer gap means the coordinator did not continuously
+// observe the instance, so an in-flight dwell timer is reset (never back-filled).
+const DefaultSupervisorStalenessThreshold = 90 * time.Second
 
 // maxSupervisorSeqStep / maxSupervisorCounterStep bound how far a single beacon
 // may advance seq or a counter beyond the stored high-water within a boot. A
@@ -655,6 +666,10 @@ func (s *PGStore) RecordSupervisorEvent(ctx context.Context, rec SupervisorEvent
 	if threshold <= 0 {
 		threshold = DefaultSupervisorDwellThreshold
 	}
+	staleness := rec.StalenessThreshold
+	if staleness <= 0 {
+		staleness = DefaultSupervisorStalenessThreshold
+	}
 	observedAt := rec.ObservedAt.UTC()
 
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -674,17 +689,27 @@ func (s *PGStore) RecordSupervisorEvent(ctx context.Context, rec SupervisorEvent
 		exLastFlap             sql.NullTime
 		exDwellState           string
 		exLastRestartInstance  string
+		exLastRestartTS        string
+		exLastRestartCooldown  string
+		exLastRestartML        sql.NullString
+		exLastDeferralSeq      int64
+		exLastDeferralTS       string
+		exDwellInstance        string
+		exDwellStarted         sql.NullTime
 	)
 	err = tx.QueryRowContext(ctx, `
 SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
        last_observed_at, last_restart_observed_at, flaps_total, last_flap_observed_at,
-       last_restart_dwell_state, last_restart_service_instance
+       last_restart_dwell_state, last_restart_service_instance,
+       last_restart_ts, last_restart_cooldown_state, last_restart_model_liveness,
+       last_deferral_seq, last_deferral_ts, dwell_instance, dwell_started_at
   FROM provider_supervisor_events
  WHERE provider_id = $1 AND boot_id = $2
    FOR UPDATE`, providerID, bootID).Scan(
 		&exLastSeq, &exRestarts, &exDeferral, &exLastRestartSeq,
 		&exLastObserved, &exRestartObserved, &exFlaps, &exLastFlap, &exDwellState,
-		&exLastRestartInstance)
+		&exLastRestartInstance, &exLastRestartTS, &exLastRestartCooldown, &exLastRestartML,
+		&exLastDeferralSeq, &exLastDeferralTS, &exDwellInstance, &exDwellStarted)
 	switch {
 	case err == sql.ErrNoRows:
 		exStored = false
@@ -694,6 +719,12 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 		exStored = true
 	}
 
+	// Anti-pinning sanity ceiling applies to BOTH first insert (treat stored
+	// high-water as 0) and subsequent beacons: a forged/corrupt beacon that jumps
+	// seq or a counter absurdly far cannot pin the row and blind later telemetry.
+	// A legitimate first F5 beacon always starts at a small seq (the per-boot
+	// counters are F5-owned state that begins at 0), so this never false-rejects.
+	baseSeq, baseRestarts, baseDeferrals := int64(0), int64(0), int64(0)
 	if exStored {
 		// Latest-wins: a stale or duplicate (seq <= stored) beacon is a full no-op.
 		if rec.Seq <= exLastSeq {
@@ -704,52 +735,74 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 		if rec.RestartsTotal < exRestarts || rec.DeferralsTotal < exDeferral {
 			return tx.Commit()
 		}
-		// Per-boot sanity ceiling: a forged/corrupt beacon that jumps seq or a
-		// counter absurdly far beyond the stored high-water is quarantined
-		// (not adopted), so it cannot pin the row and blind later legitimate
-		// telemetry for the boot.
-		if rec.Seq-exLastSeq > maxSupervisorSeqStep ||
-			rec.RestartsTotal-exRestarts > maxSupervisorCounterStep ||
-			rec.DeferralsTotal-exDeferral > maxSupervisorCounterStep {
-			return tx.Commit()
+		baseSeq, baseRestarts, baseDeferrals = exLastSeq, exRestarts, exDeferral
+	}
+	if rec.Seq-baseSeq > maxSupervisorSeqStep ||
+		rec.RestartsTotal-baseRestarts > maxSupervisorCounterStep ||
+		rec.DeferralsTotal-baseDeferrals > maxSupervisorCounterStep {
+		return tx.Commit()
+	}
+
+	// Sticky detail is preserved on regression: a higher top-level seq beacon that
+	// carries a lower/missing nested action seq must NOT erase the previously
+	// observed restart/deferral detail (the watchdog always re-carries it; a
+	// regressed value is corrupt/forged).
+	lastRestartSeq, lastRestartTS := rec.LastRestartSeq, rec.LastRestartTS
+	lastRestartCooldown, lastRestartInstance := rec.LastRestartCooldown, rec.LastRestartInstance
+	lastRestartML := rec.LastRestartModelLiveness
+	newRestartObserved := rec.LastRestartSeq > 0 && rec.LastRestartSeq > exLastRestartSeq
+	if exStored && rec.LastRestartSeq < exLastRestartSeq {
+		lastRestartSeq, lastRestartTS = exLastRestartSeq, exLastRestartTS
+		lastRestartCooldown, lastRestartInstance = exLastRestartCooldown, exLastRestartInstance
+		lastRestartML = ""
+		if exLastRestartML.Valid {
+			lastRestartML = exLastRestartML.String
 		}
+	}
+	lastDeferralSeq, lastDeferralTS := rec.LastDeferralSeq, rec.LastDeferralTS
+	if exStored && rec.LastDeferralSeq < exLastDeferralSeq {
+		lastDeferralSeq, lastDeferralTS = exLastDeferralSeq, exLastDeferralTS
 	}
 
 	modelLiveness := sql.NullString{}
-	if ml := strings.TrimSpace(rec.LastRestartModelLiveness); ml != "" {
+	if ml := strings.TrimSpace(lastRestartML); ml != "" {
 		modelLiveness = sql.NullString{String: ml, Valid: true}
 	}
-	instance := trimForStorage(rec.LastRestartInstance, 128)
+	instance := trimForStorage(lastRestartInstance, 128)
 
-	// Compute rollup / flap-history state.
+	// Rollup / dwell-continuity state.
 	var (
 		flapsTotal      = int64(0)
 		lastFlap        sql.NullTime
 		dwellState      = ""
 		restartObserved sql.NullTime
+		dwellInstance   = ""
+		dwellStarted    sql.NullTime
 		prevRestarts    = int64(0)
 		prevDeferrals   = int64(0)
 		prevObserved    sql.NullTime
 	)
 	if exStored {
 		flapsTotal = exFlaps
-		lastFlap = exLastFlap // preserve prior flap timestamp unless a new flap fires
+		lastFlap = exLastFlap
 		dwellState = exDwellState
 		restartObserved = exRestartObserved
+		dwellInstance = exDwellInstance
+		dwellStarted = exDwellStarted
 		prevRestarts = exRestarts
 		prevDeferrals = exDeferral
 		prevObserved = sql.NullTime{Time: exLastObserved, Valid: true}
 	}
+	currentInstance := strings.TrimSpace(rec.CurrentServiceInstance)
+	// Continuity is broken by a heartbeat gap larger than the staleness window.
+	staleGap := exStored && observedAt.Sub(exLastObserved.UTC()) > staleness
 
-	newRestartObserved := rec.LastRestartSeq > 0 && rec.LastRestartSeq > exLastRestartSeq
 	if newRestartObserved {
-		// Finalize the PRIOR restart, if one was pending correlation.
-		if exStored && exDwellState == supervisorDwellPending && exRestartObserved.Valid &&
-			observedAt.Sub(exRestartObserved.Time.UTC()) < threshold {
-			// The prior instance never cleared the dwell threshold before this next
-			// restart. Distinguish a genuine supervisor flap from an
-			// update/rollback-confounded window: if an artifact-write event landed
-			// in the prior restart's window, it was update-related, NOT a wedge flap.
+		// Finalize the PRIOR restart on the record's own dwell_state: it is a flap
+		// ONLY if it was still correlated_pending (never reached held) and no
+		// artifact-write confounded its window. A prior already-held restart, or an
+		// artifact_confounded/unknown one, is not counted as a supervisor flap.
+		if exStored && exDwellState == supervisorDwellPending && exRestartObserved.Valid {
 			confounded, err := supervisorArtifactWriteInWindow(ctx, tx, providerID,
 				exRestartObserved.Time.UTC(), exRestartObserved.Time.UTC().Add(threshold))
 			if err != nil {
@@ -760,26 +813,34 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 				lastFlap = sql.NullTime{Time: observedAt, Valid: true}
 			}
 		}
-		// Else (>= threshold elapsed) the prior effectively held: no flap.
+		// Start a fresh pending window for the NEW restart; dwell timing has not
+		// begun until a correlated new instance is observed serving-eligible.
 		restartObserved = sql.NullTime{Time: observedAt, Valid: true}
-		if instance != "" {
+		dwellInstance = ""
+		dwellStarted = sql.NullTime{}
+		if lastRestartInstance != "" {
 			dwellState = supervisorDwellPending
 		} else {
-			// Old targeted instance unknown: correlation cannot be asserted.
 			dwellState = supervisorDwellUnknown
 		}
 	} else if exStored && exDwellState == supervisorDwellPending && exRestartObserved.Valid {
-		// No new restart this beacon: try to finalize the pending restart. Promote
-		// to held only from a coordinator-serving-eligible observation of a
-		// genuinely NEW instance (non-empty service_instance_id differing from the
-		// restart's old targeted instance, SPEC-025 §5.4) that has cleared the
-		// dwell threshold — UNLESS an artifact-write event confounds the window.
-		currentInstance := strings.TrimSpace(rec.CurrentServiceInstance)
-		correlatedNewInstance := currentInstance != "" &&
-			exLastRestartInstance != "" &&
+		// No new restart: advance dwell CONTINUITY. Held is reached only after the
+		// coordinator observes a genuinely new correlated instance stay
+		// serving-eligible, without a heartbeat gap, for the full dwell threshold.
+		correlated := currentInstance != "" && exLastRestartInstance != "" &&
 			currentInstance != exLastRestartInstance
-		if rec.ServingEligible && correlatedNewInstance &&
-			observedAt.Sub(exRestartObserved.Time.UTC()) >= threshold {
+		if !rec.ServingEligible || !correlated || staleGap {
+			// Continuity broken (non-serving / uncorrelated / gap): reset the timer
+			// but stay pending — a later clean run can still establish held.
+			dwellInstance = ""
+			dwellStarted = sql.NullTime{}
+		} else if exDwellInstance != currentInstance || !exDwellStarted.Valid {
+			// Begin (or restart) timing this correlated instance now.
+			dwellInstance = currentInstance
+			dwellStarted = sql.NullTime{Time: observedAt, Valid: true}
+		} else if observedAt.Sub(exDwellStarted.Time.UTC()) >= threshold {
+			// Continuously observed serving-eligible for the full window: held,
+			// unless an artifact-write confounds the restart window.
 			confounded, err := supervisorArtifactWriteInWindow(ctx, tx, providerID,
 				exRestartObserved.Time.UTC(), exRestartObserved.Time.UTC().Add(threshold))
 			if err != nil {
@@ -801,8 +862,9 @@ INSERT INTO provider_supervisor_events (
     last_restart_seq, last_restart_ts, last_restart_cooldown_state,
     last_restart_service_instance, last_restart_model_liveness, last_restart_observed_at,
     last_deferral_seq, last_deferral_ts,
-    flaps_total, last_flap_observed_at, last_restart_dwell_state
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+    flaps_total, last_flap_observed_at, last_restart_dwell_state,
+    dwell_instance, dwell_started_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 ON CONFLICT (provider_id, boot_id) DO UPDATE SET
     schema = excluded.schema,
     last_observed_at = excluded.last_observed_at,
@@ -825,7 +887,9 @@ ON CONFLICT (provider_id, boot_id) DO UPDATE SET
     last_deferral_ts = excluded.last_deferral_ts,
     flaps_total = excluded.flaps_total,
     last_flap_observed_at = excluded.last_flap_observed_at,
-    last_restart_dwell_state = excluded.last_restart_dwell_state`,
+    last_restart_dwell_state = excluded.last_restart_dwell_state,
+    dwell_instance = excluded.dwell_instance,
+    dwell_started_at = excluded.dwell_started_at`,
 		providerID,
 		bootID,
 		trimForStorage(rec.Schema, 64),
@@ -840,17 +904,19 @@ ON CONFLICT (provider_id, boot_id) DO UPDATE SET
 		rec.DeferralsTotal,
 		prevRestarts,
 		prevDeferrals,
-		rec.LastRestartSeq,
-		trimForStorage(rec.LastRestartTS, 64),
-		trimForStorage(rec.LastRestartCooldown, 32),
+		lastRestartSeq,
+		trimForStorage(lastRestartTS, 64),
+		trimForStorage(lastRestartCooldown, 32),
 		instance,
 		modelLiveness,
 		restartObserved,
-		rec.LastDeferralSeq,
-		trimForStorage(rec.LastDeferralTS, 64),
+		lastDeferralSeq,
+		trimForStorage(lastDeferralTS, 64),
 		flapsTotal,
 		lastFlap,
 		trimForStorage(dwellState, 32),
+		trimForStorage(dwellInstance, 128),
+		dwellStarted,
 	); err != nil {
 		return err
 	}

@@ -86,26 +86,56 @@ SELECT last_seq, restarts_total, prev_restarts_total, last_restart_seq, flaps_to
 		}
 	}
 
-	// --- held path: restart, then a later beacon from a NEW instance past dwell.
+	// beacon builds a topology beacon (no new restart) from a correlated new
+	// instance, for advancing dwell continuity.
+	beacon := func(provider, boot string, seq, restartSeq, restarts int64, current string, serving bool, at time.Time) SupervisorEventRecord {
+		return SupervisorEventRecord{
+			ProviderID: provider, BootID: boot, Schema: "macprovider.supervisor-event.v1",
+			Kind: "beacon", Seq: seq, SupervisorLabel: "provider-watchdog", SupervisorVersion: "1.0",
+			RestartsTotal: restarts, LastRestartSeq: restartSeq, LastRestartInstance: "inst-A",
+			CurrentServiceInstance: current, ServingEligible: serving,
+			ObservedAt: at, DwellThreshold: time.Second, StalenessThreshold: 30 * time.Second,
+		}
+	}
+
+	// --- held path: restart, then CONTINUOUS serving observation of a new
+	// correlated instance spanning the dwell threshold (two beacons: start timing,
+	// then clear the threshold). A single later beacon must NOT back-fill held.
 	if err := store.RecordSupervisorEvent(ctx, restart("prov-1", "BOOT-A", 1, 1, 1, "inst-A", "inst-A", t0)); err != nil {
 		t.Fatalf("record r1: %v", err)
 	}
 	if r := read("prov-1", "BOOT-A"); r.dwellState != "correlated_pending" || r.restarts != 1 || r.lastRestartSeq != 1 || !r.restartObserved.Valid {
 		t.Fatalf("after first restart: %+v", r)
 	}
-	// Topology beacon seq=2, same last_restart_seq, NEW current instance, > threshold later.
-	held := SupervisorEventRecord{
-		ProviderID: "prov-1", BootID: "BOOT-A", Schema: "macprovider.supervisor-event.v1",
-		Kind: "beacon", Seq: 2, SupervisorLabel: "provider-watchdog", SupervisorVersion: "1.0",
-		RestartsTotal: 1, LastRestartSeq: 1, LastRestartInstance: "inst-A",
-		CurrentServiceInstance: "inst-B", ServingEligible: true,
-		ObservedAt: t0.Add(2 * time.Second), DwellThreshold: time.Second,
+	// beacon@+0.5s begins timing the correlated inst-B (not held yet).
+	if err := store.RecordSupervisorEvent(ctx, beacon("prov-1", "BOOT-A", 2, 1, 1, "inst-B", true, t0.Add(500*time.Millisecond))); err != nil {
+		t.Fatalf("record held-start: %v", err)
 	}
-	if err := store.RecordSupervisorEvent(ctx, held); err != nil {
+	if r := read("prov-1", "BOOT-A"); r.dwellState != "correlated_pending" {
+		t.Fatalf("dwell should still be pending after first serving beacon: %+v", r)
+	}
+	// beacon@+2s: continuously serving-eligible for >= threshold -> held.
+	if err := store.RecordSupervisorEvent(ctx, beacon("prov-1", "BOOT-A", 3, 1, 1, "inst-B", true, t0.Add(2*time.Second))); err != nil {
 		t.Fatalf("record held: %v", err)
 	}
-	if r := read("prov-1", "BOOT-A"); r.dwellState != "held" || r.lastSeq != 2 || r.prevRestarts != 1 || !r.prevObserved.Valid {
+	if r := read("prov-1", "BOOT-A"); r.dwellState != "held" || r.lastSeq != 3 || r.prevRestarts != 1 || !r.prevObserved.Valid {
 		t.Fatalf("after held promotion: %+v", r)
+	}
+
+	// --- staleness gap must NOT back-fill held: begin timing, then a beacon after
+	// a > staleness gap resets continuity even though elapsed >= dwell threshold.
+	if err := store.RecordSupervisorEvent(ctx, restart("prov-4", "BOOT-D", 1, 1, 1, "inst-A", "inst-A", t0)); err != nil {
+		t.Fatalf("record p4 r1: %v", err)
+	}
+	if err := store.RecordSupervisorEvent(ctx, beacon("prov-4", "BOOT-D", 2, 1, 1, "inst-B", true, t0.Add(500*time.Millisecond))); err != nil {
+		t.Fatalf("record p4 start: %v", err)
+	}
+	// 45s gap > 30s staleness threshold: continuity broken, stays pending.
+	if err := store.RecordSupervisorEvent(ctx, beacon("prov-4", "BOOT-D", 3, 1, 1, "inst-B", true, t0.Add(45*time.Second))); err != nil {
+		t.Fatalf("record p4 gap: %v", err)
+	}
+	if r := read("prov-4", "BOOT-D"); r.dwellState != "correlated_pending" {
+		t.Fatalf("staleness gap back-filled held: %+v", r)
 	}
 
 	// --- flap path: two restarts within the dwell threshold.
@@ -129,14 +159,12 @@ INSERT INTO provider_autoupdate_events (provider_id, observed_at, phase, outcome
 VALUES ('prov-3', $1, 'swap', 'success')`, t0.Add(300*time.Millisecond)); err != nil {
 		t.Fatalf("insert autoupdate event: %v", err)
 	}
-	confound := SupervisorEventRecord{
-		ProviderID: "prov-3", BootID: "BOOT-C", Schema: "macprovider.supervisor-event.v1",
-		Kind: "beacon", Seq: 2, SupervisorLabel: "provider-watchdog", SupervisorVersion: "1.0",
-		RestartsTotal: 1, LastRestartSeq: 1, LastRestartInstance: "inst-A",
-		CurrentServiceInstance: "inst-B", ServingEligible: true,
-		ObservedAt: t0.Add(2 * time.Second), DwellThreshold: time.Second,
+	// Begin timing, then clear the threshold; the held-check finds the swap in the
+	// restart window and classifies artifact_confounded instead of held.
+	if err := store.RecordSupervisorEvent(ctx, beacon("prov-3", "BOOT-C", 2, 1, 1, "inst-B", true, t0.Add(500*time.Millisecond))); err != nil {
+		t.Fatalf("record confound-start: %v", err)
 	}
-	if err := store.RecordSupervisorEvent(ctx, confound); err != nil {
+	if err := store.RecordSupervisorEvent(ctx, beacon("prov-3", "BOOT-C", 3, 1, 1, "inst-B", true, t0.Add(2*time.Second))); err != nil {
 		t.Fatalf("record confound: %v", err)
 	}
 	if r := read("prov-3", "BOOT-C"); r.dwellState != "artifact_confounded" {
