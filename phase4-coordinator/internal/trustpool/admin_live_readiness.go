@@ -2,7 +2,6 @@ package trustpool
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -14,7 +13,18 @@ func (h *adminHandler) handlePromotePoolGuarded(w http.ResponseWriter, r *http.R
 	if r.Method == http.MethodPost {
 		poolID := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(r.URL.Path, "/promote"), "/admin/trust-pools/pools/"))
 		if poolID != "" && !strings.Contains(poolID, "/") {
-			if err := h.deps.Store.RequireOnCallReadinessForPromotion(r.Context(), poolID); errors.Is(err, ErrOnCallReadiness) {
+			// Both live-readiness gates fail closed on ANY non-nil error, not
+			// only their sentinel: a lifecycle/on-call read that fails (missing
+			// table, malformed row, storage error) must block production
+			// promote rather than fall through to the mapped handler, which
+			// does not re-check these rows. writeMutationError maps the
+			// sentinels to their rejection codes and unexpected errors to a
+			// closed response.
+			if err := h.deps.Store.RequireOnCallReadinessForPromotion(r.Context(), poolID); err != nil {
+				h.writeMutationError(w, err)
+				return
+			}
+			if err := h.deps.Store.RequireReviewedArtifactLifecycleForPromotion(r.Context(), poolID); err != nil {
 				h.writeMutationError(w, err)
 				return
 			}

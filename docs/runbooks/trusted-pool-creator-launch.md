@@ -76,7 +76,12 @@ Also still missing before any live announcement:
 - a reviewed-artifact lifecycle owner for the live pool
   (`POST /admin/trust-pools/pools/{id}/reviewed-artifact-lifecycle`, CLI
   `coordinator-cli trust-pool-artifact-lifecycle`). This is separate from the
-  digest-bound reviewed-artifact upsert.
+  digest-bound reviewed-artifact upsert. Operator HTTP/CLI production promote
+  now fail-closes without a current production lifecycle owner (missing,
+  candidate-class, or overdue), the same unmapped-wrapper gate as on-call.
+  In-process `Store.PromotePool` still does not consult it; wiring
+  `validatePromotion` needs a recapture window because that function is
+  evidence-mapped.
 - a production timing-floor remeasure. Isolated-candidate oracle proof is not
   that remeasure. Use `scripts/measure-pool-rejection-timing-floor.py`; it
   refuses production hosts unless `--environment production --allow-production`
@@ -110,7 +115,11 @@ not yet a `PromotePool` production-gate check.
 
 Reviewed-artifact lifecycle ownership is a separate durable row from
 `review-distribution-artifact`. Assign an owner and `environment_class` of
-`candidate` or `production` before treating a pool as live-ready.
+`candidate` or `production` before treating a pool as live-ready. Operator
+HTTP/CLI production promote fail-closes (`reviewed_artifact_lifecycle_rejected`,
+409) unless the pool has a current production lifecycle owner whose
+`next_review_due_utc` is still in the future. This is not yet a
+`Store.PromotePool` production-gate check.
 
 Offline timing-floor check (does **not** count as production remeasure):
 

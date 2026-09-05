@@ -246,6 +246,12 @@ func TestAdminHandler_PromoteProductionRequiresOnCallReadiness(t *testing.T) {
 	assertAdminErrorCode(t, missing, "on_call_readiness_rejected")
 
 	upsertSignedOnCall(t, store, "op-oncall-http", "production")
+	// On-call is satisfied, but the reviewed-artifact lifecycle gate now blocks
+	// production promote until a current production lifecycle owner exists.
+	blockedOnLifecycle := postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote-oncall-no-lifecycle", http.StatusConflict)
+	assertAdminErrorCode(t, blockedOnLifecycle, "reviewed_artifact_lifecycle_rejected")
+
+	upsertProductionArtifactLifecycle(t, handler, "operator-secret", root.poolID, "op-lifecycle-http")
 	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote-with-oncall", http.StatusAccepted)
 }
 
@@ -263,6 +269,127 @@ func TestAdminHandler_PromoteProductionRejectsExpiredOnCallReadiness(t *testing.
 	expireStoredOnCall(t, db, "production")
 	expired := postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote-expired-oncall", http.StatusConflict)
 	assertAdminErrorCode(t, expired, "on_call_readiness_rejected")
+}
+
+func TestRequireReviewedArtifactLifecycleForPromotion(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("candidate skips", func(t *testing.T) {
+		t.Parallel()
+		store, err := trustpool.NewStore(openTrustPoolDB(t))
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		root := seedCandidatePool(t, store)
+		if err := store.RequireReviewedArtifactLifecycleForPromotion(ctx, root.poolID); err != nil {
+			t.Fatalf("candidate RequireReviewedArtifactLifecycleForPromotion: %v", err)
+		}
+	})
+
+	t.Run("missing production owner fails closed and PromotePool still succeeds", func(t *testing.T) {
+		t.Parallel()
+		db := openTrustPoolDB(t)
+		store := newProductionActivationStore(t, db)
+		root := seedProductionPromotablePool(t, store)
+		if err := store.RequireReviewedArtifactLifecycleForPromotion(ctx, root.poolID); err == nil || !errors.Is(err, trustpool.ErrReviewedArtifactLifecycle) {
+			t.Fatalf("missing lifecycle err=%v, want ErrReviewedArtifactLifecycle", err)
+		}
+		state, _, _, err := store.PromotePool(ctx, trustpool.DurableEvent{
+			OperationID: "op-promote-store-bypass-lifecycle",
+			PoolID:      root.poolID,
+		})
+		if err != nil {
+			t.Fatalf("PromotePool without lifecycle owner: %v", err)
+		}
+		if got := state.Pools[root.poolID].Lifecycle; got != trustpool.LifecycleActive {
+			t.Fatalf("in-process PromotePool lifecycle=%q, want active", got)
+		}
+	})
+
+	t.Run("candidate-class owner on production pool fails closed", func(t *testing.T) {
+		t.Parallel()
+		db := openTrustPoolDB(t)
+		store := newProductionActivationStore(t, db)
+		root := seedProductionPromotablePool(t, store)
+		upsertArtifactLifecycleStore(t, store, root.poolID, "op-lifecycle-candidate-class", trustpool.ReviewedArtifactEnvironmentCandidate)
+		if err := store.RequireReviewedArtifactLifecycleForPromotion(ctx, root.poolID); err == nil || !errors.Is(err, trustpool.ErrReviewedArtifactLifecycle) {
+			t.Fatalf("candidate-class lifecycle err=%v, want ErrReviewedArtifactLifecycle", err)
+		}
+	})
+
+	t.Run("current production owner allows", func(t *testing.T) {
+		t.Parallel()
+		db := openTrustPoolDB(t)
+		store := newProductionActivationStore(t, db)
+		root := seedProductionPromotablePool(t, store)
+		upsertArtifactLifecycleStore(t, store, root.poolID, "op-lifecycle-prod", trustpool.ReviewedArtifactEnvironmentProduction)
+		if err := store.RequireReviewedArtifactLifecycleForPromotion(ctx, root.poolID); err != nil {
+			t.Fatalf("current lifecycle owner: %v", err)
+		}
+	})
+
+	t.Run("overdue production owner fails closed", func(t *testing.T) {
+		t.Parallel()
+		db := openTrustPoolDB(t)
+		store := newProductionActivationStore(t, db)
+		root := seedProductionPromotablePool(t, store)
+		upsertArtifactLifecycleStore(t, store, root.poolID, "op-lifecycle-overdue", trustpool.ReviewedArtifactEnvironmentProduction)
+		expireStoredArtifactLifecycle(t, db, root.poolID)
+		if err := store.RequireReviewedArtifactLifecycleForPromotion(ctx, root.poolID); err == nil || !errors.Is(err, trustpool.ErrReviewedArtifactLifecycle) {
+			t.Fatalf("overdue lifecycle err=%v, want ErrReviewedArtifactLifecycle", err)
+		}
+	})
+
+	t.Run("unknown pool is left to PromotePool", func(t *testing.T) {
+		t.Parallel()
+		store, err := trustpool.NewStore(openTrustPoolDB(t))
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if err := store.RequireReviewedArtifactLifecycleForPromotion(ctx, "pool-missing"); err != nil {
+			t.Fatalf("missing pool: %v", err)
+		}
+	})
+}
+
+func TestAdminHandler_PromoteProductionRejectsOverdueReviewedArtifactLifecycle(t *testing.T) {
+	t.Parallel()
+	db := openTrustPoolDB(t)
+	store := newProductionActivationStore(t, db)
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    trustpool.NewRegistry(),
+		OperatorKey: "operator-secret",
+	})
+	root := seedProductionPromotablePool(t, store)
+	upsertSignedOnCall(t, store, "op-oncall-overdue-lifecycle", "production")
+	upsertProductionArtifactLifecycle(t, handler, "operator-secret", root.poolID, "op-lifecycle-overdue-http")
+	expireStoredArtifactLifecycle(t, db, root.poolID)
+	overdue := postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote-overdue-lifecycle", http.StatusConflict)
+	assertAdminErrorCode(t, overdue, "reviewed_artifact_lifecycle_rejected")
+}
+
+func TestAdminHandler_PromoteProductionFailsClosedOnUnreadableLifecycle(t *testing.T) {
+	t.Parallel()
+	db := openTrustPoolDB(t)
+	store := newProductionActivationStore(t, db)
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    trustpool.NewRegistry(),
+		OperatorKey: "operator-secret",
+	})
+	root := seedProductionPromotablePool(t, store)
+	upsertSignedOnCall(t, store, "op-oncall-corrupt-lifecycle", "production")
+	upsertProductionArtifactLifecycle(t, handler, "operator-secret", root.poolID, "op-lifecycle-corrupt-http")
+	// Corrupt the stored row so the lifecycle read returns a non-sentinel parse
+	// error. The wrapper must still fail closed (not fall through to promote).
+	if _, err := db.Exec(`UPDATE trustpool_reviewed_artifact_lifecycle SET next_review_due_utc = 'not-a-timestamp' WHERE pool_id = ?`, root.poolID); err != nil {
+		t.Fatalf("corrupt lifecycle row: %v", err)
+	}
+	// A non-sentinel read error maps through writeMutationError's default to a
+	// closed 400 response; the request must not reach the mapped promote.
+	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote-corrupt-lifecycle", http.StatusBadRequest)
 }
 
 func TestOnCallReadiness_ExpiredMethod(t *testing.T) {
@@ -644,6 +771,48 @@ func expireStoredOnCall(t *testing.T, db *sql.DB, envID string) {
 	n, err := res.RowsAffected()
 	if err != nil || n != 1 {
 		t.Fatalf("expire on-call rows=%d err=%v, want 1", n, err)
+	}
+}
+
+func upsertArtifactLifecycleStore(t *testing.T, store *trustpool.Store, poolID, operationID, environmentClass string) trustpool.ReviewedArtifactLifecycle {
+	t.Helper()
+	rec, err := store.UpsertReviewedArtifactLifecycle(context.Background(), trustpool.ReviewedArtifactLifecycle{
+		OperationID:      operationID,
+		PoolID:           poolID,
+		Owner:            "ops-oncall",
+		EnvironmentClass: environmentClass,
+		NextReviewDueUTC: time.Now().UTC().Add(30 * 24 * time.Hour),
+		Notes:            "lifecycle owner for promote gate",
+	})
+	if err != nil {
+		t.Fatalf("UpsertReviewedArtifactLifecycle: %v", err)
+	}
+	return rec
+}
+
+func upsertProductionArtifactLifecycle(t *testing.T, handler http.Handler, operatorKey, poolID, operationID string) {
+	t.Helper()
+	rec := trustpool.ReviewedArtifactLifecycle{
+		OperationID:      operationID,
+		PoolID:           poolID,
+		Owner:            "ops-oncall",
+		EnvironmentClass: trustpool.ReviewedArtifactEnvironmentProduction,
+		NextReviewDueUTC: time.Now().UTC().Add(30 * 24 * time.Hour),
+		Notes:            "production lifecycle owner for promote gate",
+	}
+	postAdminReviewedArtifactLifecycle(t, handler, operatorKey, poolID, rec, http.StatusOK)
+}
+
+func expireStoredArtifactLifecycle(t *testing.T, db *sql.DB, poolID string) {
+	t.Helper()
+	overdue := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+	res, err := db.Exec(`UPDATE trustpool_reviewed_artifact_lifecycle SET next_review_due_utc = ? WHERE pool_id = ?`, overdue, poolID)
+	if err != nil {
+		t.Fatalf("expire lifecycle: %v", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n != 1 {
+		t.Fatalf("expire lifecycle rows=%d err=%v, want 1", n, err)
 	}
 }
 
