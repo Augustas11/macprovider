@@ -171,3 +171,116 @@ func (s *Server) recordAutoupdateOutcomeIfChanged(providerID string, raw json.Ra
 		}
 	}()
 }
+
+const (
+	supervisorEventPersistTimeout = 2 * time.Second
+	supervisorEventPersistSlots   = 2
+)
+
+var defaultSupervisorEventSlots = make(chan struct{}, supervisorEventPersistSlots)
+
+// supervisorEventWire is the projected `last_supervisor_event` beacon the CLI
+// already validated/allowlisted before uplink (SPEC-025 §5.4). The coordinator
+// re-parses only the fields it persists; unknown keys are ignored.
+type supervisorEventWire struct {
+	Schema            string                  `json:"schema"`
+	Kind              string                  `json:"kind"`
+	BootID            string                  `json:"boot_id"`
+	Seq               int64                   `json:"seq"`
+	SupervisorLabel   string                  `json:"supervisor_label"`
+	SupervisorVersion string                  `json:"supervisor_version"`
+	RestartsTotal     int64                   `json:"restarts_total"`
+	DeferralsTotal    int64                   `json:"deferrals_total"`
+	LastRestart       *supervisorRestartWire  `json:"last_restart"`
+	LastDeferral      *supervisorDeferralWire `json:"last_deferral"`
+}
+
+type supervisorRestartWire struct {
+	Seq             int64           `json:"seq"`
+	TS              string          `json:"ts"`
+	CooldownState   string          `json:"cooldown_state"`
+	ServiceInstance *string         `json:"service_instance"`
+	ModelLiveness   json.RawMessage `json:"model_liveness"`
+}
+
+type supervisorDeferralWire struct {
+	Seq int64  `json:"seq"`
+	TS  string `json:"ts"`
+}
+
+// recordSupervisorEventIfChanged durably upserts the SEPARATE supervisor
+// telemetry beacon (RFC-001 §7 / F5; SPEC-025 §5.4). raw is the heartbeat/
+// state_update `last_supervisor_event` object (already validated as a JSON
+// object <=4096 bytes, or nil, and NON-rejecting — a bad value never blocked the
+// frame). serviceInstanceID is the current heartbeat's instance id (the NEW
+// post-restart instance, for dwell correlation). Like the autoupdate lane this
+// is OFF the heartbeat hot path and best-effort; a dropped slot or failed write
+// is logged and never stalls or fails heartbeat processing. De-dupes repeated
+// identical echoes per provider so one beacon is not re-upserted every heartbeat.
+func (s *Server) recordSupervisorEventIfChanged(providerID string, raw json.RawMessage, serviceInstanceID string, observedAt time.Time) {
+	if s == nil || s.supervisorEvents == nil || len(raw) == 0 {
+		return
+	}
+	fingerprint := serviceInstanceID + "\x00" + string(raw)
+	if seen, ok := s.supervisorEventSeen.Load(providerID); ok && seen.(string) == fingerprint {
+		return
+	}
+	var wire supervisorEventWire
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return
+	}
+	// boot_id and a positive seq are required to key/order the row; without them
+	// the beacon is unusable and is dropped (frame already accepted upstream).
+	if wire.BootID == "" || wire.Seq <= 0 {
+		return
+	}
+	slots := s.supervisorEventSlots
+	if slots == nil {
+		slots = defaultSupervisorEventSlots
+	}
+	select {
+	case slots <- struct{}{}:
+	default:
+		// Both persist slots busy: drop WITHOUT advancing the dedup cache so a
+		// later heartbeat echo is retried rather than permanently suppressed.
+		return
+	}
+	s.supervisorEventSeen.Store(providerID, fingerprint)
+	sink := s.supervisorEvents
+	rec := onboarding.SupervisorEventRecord{
+		ProviderID:             providerID,
+		ObservedAt:             observedAt,
+		BootID:                 wire.BootID,
+		Schema:                 wire.Schema,
+		Kind:                   wire.Kind,
+		Seq:                    wire.Seq,
+		SupervisorLabel:        wire.SupervisorLabel,
+		SupervisorVersion:      wire.SupervisorVersion,
+		RestartsTotal:          wire.RestartsTotal,
+		DeferralsTotal:         wire.DeferralsTotal,
+		CurrentServiceInstance: serviceInstanceID,
+	}
+	if wire.LastRestart != nil {
+		rec.LastRestartSeq = wire.LastRestart.Seq
+		rec.LastRestartTS = wire.LastRestart.TS
+		rec.LastRestartCooldown = wire.LastRestart.CooldownState
+		if wire.LastRestart.ServiceInstance != nil {
+			rec.LastRestartInstance = *wire.LastRestart.ServiceInstance
+		}
+		if ml := wire.LastRestart.ModelLiveness; len(ml) > 0 && string(ml) != "null" {
+			rec.LastRestartModelLiveness = string(ml)
+		}
+	}
+	if wire.LastDeferral != nil {
+		rec.LastDeferralSeq = wire.LastDeferral.Seq
+		rec.LastDeferralTS = wire.LastDeferral.TS
+	}
+	go func() {
+		defer func() { <-slots }()
+		ctx, cancel := context.WithTimeout(context.Background(), supervisorEventPersistTimeout)
+		defer cancel()
+		if err := sink.RecordSupervisorEvent(ctx, rec); err != nil {
+			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("supervisor event persist failed")
+		}
+	}()
+}

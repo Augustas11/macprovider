@@ -212,6 +212,9 @@ type Server struct {
 	autoupdateOutcomes            AutoupdateOutcomeSink
 	autoupdateOutcomeSeen         sync.Map
 	autoupdateOutcomeSlots        chan struct{}
+	supervisorEvents              SupervisorEventSink
+	supervisorEventSeen           sync.Map
+	supervisorEventSlots          chan struct{}
 
 	// SE liveness (Phase 1, Track P1-C).
 	// seLivenessChans maps sessionKey → chan SELivenessResponse for in-flight probes.
@@ -396,6 +399,17 @@ type HardwareProfileRefresher interface {
 // (see recordAutoupdateOutcomeIfChanged) — this sink always inserts.
 type AutoupdateOutcomeSink interface {
 	RecordAutoupdateOutcome(ctx context.Context, rec onboarding.AutoupdateOutcomeRecord) error
+}
+
+// SupervisorEventSink backs RFC-001 §7 / F5 (#1386): durably ingesting the
+// SEPARATE supervisor-telemetry beacon a provider carries as
+// `last_supervisor_event` (SPEC-025 §5.4) so coordinator-side liveness-recovery
+// observability (restart/deferral counters, flap history, correlation) is
+// queryable. Observability-only; never merged into provider_autoupdate_events.
+// Callers de-duplicate identical heartbeat echoes upstream
+// (see recordSupervisorEventIfChanged); the sink upserts latest-wins by seq.
+type SupervisorEventSink interface {
+	RecordSupervisorEvent(ctx context.Context, rec onboarding.SupervisorEventRecord) error
 }
 
 type IdlePrewarmMetrics interface {
@@ -707,6 +721,15 @@ func WithHardwareProfileRefresher(refresher HardwareProfileRefresher) Option {
 func WithAutoupdateOutcomeSink(sink AutoupdateOutcomeSink) Option {
 	return func(s *Server) {
 		s.autoupdateOutcomes = sink
+	}
+}
+
+// WithSupervisorEventSink installs the RFC-001 §7 / F5 durable supervisor-
+// telemetry ingest backend (SPEC-025 §5.4). Nil (unset) keeps heartbeat/
+// state_update handling exactly as before: no Postgres write is attempted.
+func WithSupervisorEventSink(sink SupervisorEventSink) Option {
+	return func(s *Server) {
+		s.supervisorEvents = sink
 	}
 }
 
@@ -5107,6 +5130,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	s.rememberProviderSnapshotCoalesced(*entry)
 	s.refreshHardwareProfileHeartbeatAsync(providerID, entry.BinaryVersion, s.now())
 	s.recordAutoupdateOutcomeIfChanged(providerID, hb.LastAutoupdateEvent, s.now())
+	s.recordSupervisorEventIfChanged(providerID, hb.LastSupervisorEvent, hb.ServiceInstanceID, s.now())
 	if s.admission != nil {
 		s.admission.RefreshTelemetry(providerID, entry.Hostname, entry.ModelID, entry.BinaryVersion)
 	}
@@ -5531,6 +5555,7 @@ func (s *Server) handleStateUpdate(providerID, assignedID string, payload []byte
 		return
 	}
 	s.recordAutoupdateOutcomeIfChanged(providerID, update.LastAutoupdateEvent, s.now())
+	s.recordSupervisorEventIfChanged(providerID, update.LastSupervisorEvent, update.ServiceInstanceID, s.now())
 	if state == pool.StateReady {
 		if timer, ok := s.timers.LoadAndDelete(providerID); ok {
 			timer.(*time.Timer).Stop()

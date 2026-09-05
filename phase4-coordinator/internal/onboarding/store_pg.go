@@ -191,6 +191,9 @@ SELECT j.generated_at, j.evidence
 	if _, err := s.db.ExecContext(timeout, `SELECT provider_id, observed_at, outcome FROM provider_autoupdate_events LIMIT 0`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_autoupdate_events read: %w", err)
 	}
+	if _, err := s.db.ExecContext(timeout, `SELECT provider_id, boot_id, last_seq FROM provider_supervisor_events LIMIT 0`); err != nil {
+		return fmt.Errorf("provider_onboarding smoke provider_supervisor_events read: %w", err)
+	}
 	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_auth_policy LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_auth_policy read: %w", err)
 	}
@@ -562,6 +565,258 @@ INSERT INTO provider_autoupdate_events (
 	)
 	return err
 }
+
+// SupervisorEventRecord is one coordinator-observed supervisor telemetry beacon
+// projected from a provider's heartbeat/state_update `last_supervisor_event`
+// field (RFC-001 §7 / F5, #1386; SPEC-025 §5.4). It is SEPARATE from
+// AutoupdateOutcomeRecord and never merged into provider_autoupdate_events.
+// Observability-only: persisting it changes no admission/routing/serving/trust
+// authority. Free-form text fields carry no enum CHECK; the client taxonomy
+// evolves independently.
+type SupervisorEventRecord struct {
+	ProviderID        string
+	ObservedAt        time.Time
+	BootID            string
+	Schema            string
+	Kind              string
+	Seq               int64
+	SupervisorLabel   string
+	SupervisorVersion string
+	RestartsTotal     int64
+	DeferralsTotal    int64
+	// Sticky last_restart detail (LastRestartSeq == 0 means no restart yet).
+	LastRestartSeq           int64
+	LastRestartTS            string
+	LastRestartCooldown      string
+	LastRestartInstance      string // "" == null
+	LastRestartModelLiveness string // JSON object text, "" == null
+	// Sticky last_deferral detail (LastDeferralSeq == 0 means none yet).
+	LastDeferralSeq int64
+	LastDeferralTS  string
+	// CurrentServiceInstance is THIS heartbeat's service_instance_id (the NEW
+	// post-restart instance). A restart is promoted to "held" only once the
+	// coordinator observes a new instance whose id differs from the restart's
+	// old targeted instance for the full dwell threshold (SPEC-025 §5.4
+	// correlation rule); "" leaves correlation unproven.
+	CurrentServiceInstance string
+	// DwellThreshold is the coordinator-owned sustained-serving window used to
+	// finalize a prior restart as held vs flap. Zero falls back to the default.
+	DwellThreshold time.Duration
+}
+
+// DefaultSupervisorDwellThreshold is the coordinator-owned sustained-serving
+// window a post-restart instance must clear before a restart counts as "held".
+// Below it, a subsequent restart is a flap. This is an implementation constant
+// (SPEC-025 §5.4 leaves the concrete value to the coordinator).
+const DefaultSupervisorDwellThreshold = 5 * time.Minute
+
+// RecordSupervisorEvent upserts the ONE row per (provider_id, boot_id) supervisor
+// telemetry state, ordered by `seq` alone (latest-wins; provider timestamps never
+// gate). A seq <= the stored seq is a full no-op. A higher-seq beacon that
+// regresses a monotonic counter is treated as malformed and skipped
+// non-blockingly. When a new last_restart_seq advances, the coordinator finalizes
+// the prior restart (flap if the correlated instance had not cleared the dwell
+// threshold, else held) and anchors last_restart_observed_at to coordinator
+// wall-clock; a non-advancing beacon promotes a pending restart to held once the
+// threshold elapses. Callers de-duplicate identical heartbeat echoes upstream.
+func (s *PGStore) RecordSupervisorEvent(ctx context.Context, rec SupervisorEventRecord) error {
+	if s == nil || s.db == nil {
+		return errors.New("onboarding postgres store is nil")
+	}
+	providerID := strings.TrimSpace(rec.ProviderID)
+	bootID := strings.TrimSpace(rec.BootID)
+	if providerID == "" || bootID == "" {
+		return errors.New("supervisor event provider_id and boot_id are required")
+	}
+	if rec.Seq <= 0 {
+		return nil
+	}
+	threshold := rec.DwellThreshold
+	if threshold <= 0 {
+		threshold = DefaultSupervisorDwellThreshold
+	}
+	observedAt := rec.ObservedAt.UTC()
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var (
+		exStored               bool
+		exLastSeq              int64
+		exRestarts, exDeferral int64
+		exLastRestartSeq       int64
+		exLastObserved         time.Time
+		exRestartObserved      sql.NullTime
+		exFlaps                int64
+		exLastFlap             sql.NullTime
+		exDwellState           string
+		exLastRestartInstance  string
+	)
+	err = tx.QueryRowContext(ctx, `
+SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
+       last_observed_at, last_restart_observed_at, flaps_total, last_flap_observed_at,
+       last_restart_dwell_state, last_restart_service_instance
+  FROM provider_supervisor_events
+ WHERE provider_id = $1 AND boot_id = $2
+   FOR UPDATE`, providerID, bootID).Scan(
+		&exLastSeq, &exRestarts, &exDeferral, &exLastRestartSeq,
+		&exLastObserved, &exRestartObserved, &exFlaps, &exLastFlap, &exDwellState,
+		&exLastRestartInstance)
+	switch {
+	case err == sql.ErrNoRows:
+		exStored = false
+	case err != nil:
+		return err
+	default:
+		exStored = true
+	}
+
+	if exStored {
+		// Latest-wins: a stale or duplicate (seq <= stored) beacon is a full no-op.
+		if rec.Seq <= exLastSeq {
+			return tx.Commit()
+		}
+		// Monotonic counters within a boot: a higher-seq beacon that regresses a
+		// counter is malformed — skip non-blockingly rather than adopt it.
+		if rec.RestartsTotal < exRestarts || rec.DeferralsTotal < exDeferral {
+			return tx.Commit()
+		}
+	}
+
+	modelLiveness := sql.NullString{}
+	if ml := strings.TrimSpace(rec.LastRestartModelLiveness); ml != "" {
+		modelLiveness = sql.NullString{String: ml, Valid: true}
+	}
+	instance := trimForStorage(rec.LastRestartInstance, 128)
+
+	// Compute rollup / flap-history state.
+	var (
+		flapsTotal      = int64(0)
+		lastFlap        sql.NullTime
+		dwellState      = ""
+		restartObserved sql.NullTime
+		prevRestarts    = int64(0)
+		prevDeferrals   = int64(0)
+		prevObserved    sql.NullTime
+	)
+	if exStored {
+		flapsTotal = exFlaps
+		lastFlap = exLastFlap // preserve prior flap timestamp unless a new flap fires
+		dwellState = exDwellState
+		restartObserved = exRestartObserved
+		prevRestarts = exRestarts
+		prevDeferrals = exDeferral
+		prevObserved = sql.NullTime{Time: exLastObserved, Valid: true}
+	}
+
+	newRestartObserved := rec.LastRestartSeq > 0 && rec.LastRestartSeq > exLastRestartSeq
+	if newRestartObserved {
+		// Finalize the PRIOR restart, if one was pending correlation.
+		if exStored && exDwellState == supervisorDwellPending && exRestartObserved.Valid {
+			if observedAt.Sub(exRestartObserved.Time.UTC()) < threshold {
+				// Prior instance never cleared the dwell threshold before this
+				// next restart: a flap.
+				flapsTotal++
+				lastFlap = sql.NullTime{Time: observedAt, Valid: true}
+			}
+			// Else the prior effectively held (>= threshold elapsed): no flap.
+		}
+		restartObserved = sql.NullTime{Time: observedAt, Valid: true}
+		if instance != "" {
+			dwellState = supervisorDwellPending
+		} else {
+			// Old targeted instance unknown: correlation cannot be asserted.
+			dwellState = supervisorDwellUnknown
+		}
+	} else if exStored {
+		// No new restart this beacon: promote a pending restart to held once the
+		// coordinator has observed a genuinely NEW instance (a non-empty
+		// service_instance_id differing from the restart's old targeted instance,
+		// SPEC-025 §5.4 correlation) for the full dwell threshold.
+		currentInstance := strings.TrimSpace(rec.CurrentServiceInstance)
+		correlatedNewInstance := currentInstance != "" &&
+			exLastRestartInstance != "" &&
+			currentInstance != exLastRestartInstance
+		if exDwellState == supervisorDwellPending && exRestartObserved.Valid &&
+			correlatedNewInstance &&
+			observedAt.Sub(exRestartObserved.Time.UTC()) >= threshold {
+			dwellState = supervisorDwellHeld
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO provider_supervisor_events (
+    provider_id, boot_id, schema, first_seen_at, last_observed_at, prev_observed_at,
+    last_seq, kind, supervisor_label, supervisor_version,
+    restarts_total, deferrals_total, prev_restarts_total, prev_deferrals_total,
+    last_restart_seq, last_restart_ts, last_restart_cooldown_state,
+    last_restart_service_instance, last_restart_model_liveness, last_restart_observed_at,
+    last_deferral_seq, last_deferral_ts,
+    flaps_total, last_flap_observed_at, last_restart_dwell_state
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+ON CONFLICT (provider_id, boot_id) DO UPDATE SET
+    schema = excluded.schema,
+    last_observed_at = excluded.last_observed_at,
+    prev_observed_at = excluded.prev_observed_at,
+    last_seq = excluded.last_seq,
+    kind = excluded.kind,
+    supervisor_label = excluded.supervisor_label,
+    supervisor_version = excluded.supervisor_version,
+    restarts_total = excluded.restarts_total,
+    deferrals_total = excluded.deferrals_total,
+    prev_restarts_total = excluded.prev_restarts_total,
+    prev_deferrals_total = excluded.prev_deferrals_total,
+    last_restart_seq = excluded.last_restart_seq,
+    last_restart_ts = excluded.last_restart_ts,
+    last_restart_cooldown_state = excluded.last_restart_cooldown_state,
+    last_restart_service_instance = excluded.last_restart_service_instance,
+    last_restart_model_liveness = excluded.last_restart_model_liveness,
+    last_restart_observed_at = excluded.last_restart_observed_at,
+    last_deferral_seq = excluded.last_deferral_seq,
+    last_deferral_ts = excluded.last_deferral_ts,
+    flaps_total = excluded.flaps_total,
+    last_flap_observed_at = excluded.last_flap_observed_at,
+    last_restart_dwell_state = excluded.last_restart_dwell_state`,
+		providerID,
+		bootID,
+		trimForStorage(rec.Schema, 64),
+		observedAt, // first_seen_at (ignored on conflict update)
+		observedAt, // last_observed_at
+		prevObserved,
+		rec.Seq,
+		trimForStorage(rec.Kind, 32),
+		trimForStorage(rec.SupervisorLabel, 64),
+		trimForStorage(rec.SupervisorVersion, 64),
+		rec.RestartsTotal,
+		rec.DeferralsTotal,
+		prevRestarts,
+		prevDeferrals,
+		rec.LastRestartSeq,
+		trimForStorage(rec.LastRestartTS, 64),
+		trimForStorage(rec.LastRestartCooldown, 32),
+		instance,
+		modelLiveness,
+		restartObserved,
+		rec.LastDeferralSeq,
+		trimForStorage(rec.LastDeferralTS, 64),
+		flapsTotal,
+		lastFlap,
+		trimForStorage(dwellState, 32),
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// supervisorDwell* are the coordinator-derived dwell-state values (SPEC-025 §5.4).
+const (
+	supervisorDwellUnknown = "unknown"
+	supervisorDwellPending = "correlated_pending"
+	supervisorDwellHeld    = "held"
+)
 
 func (s *PGStore) InsertRegisterNonce(ctx context.Context, providerID, sourceIP, nonce string, observedAt time.Time) error {
 	if s == nil || s.db == nil {
