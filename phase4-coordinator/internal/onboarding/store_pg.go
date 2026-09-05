@@ -750,6 +750,12 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 	if newRestartObserved && exStored && rec.RestartsTotal <= exRestarts {
 		return tx.Commit()
 	}
+	newDeferralObserved := rec.LastDeferralSeq > 0 && rec.LastDeferralSeq > exLastDeferralSeq
+	// Symmetric consistency: a new deferral (advanced last_deferral.seq) requires
+	// deferrals_total to have advanced too, else it is inconsistent/forged.
+	if newDeferralObserved && exStored && rec.DeferralsTotal <= exDeferral {
+		return tx.Commit()
+	}
 	// Sticky detail is preserved UNLESS the nested action seq strictly advances: a
 	// higher top-level seq beacon carrying a lower/equal/missing nested action seq
 	// must NOT erase or degrade the previously observed restart/deferral detail
@@ -765,7 +771,6 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 			lastRestartML = exLastRestartML.String
 		}
 	}
-	newDeferralObserved := rec.LastDeferralSeq > 0 && rec.LastDeferralSeq > exLastDeferralSeq
 	lastDeferralSeq, lastDeferralTS := rec.LastDeferralSeq, rec.LastDeferralTS
 	if exStored && !newDeferralObserved && exLastDeferralSeq > 0 {
 		lastDeferralSeq, lastDeferralTS = exLastDeferralSeq, exLastDeferralTS

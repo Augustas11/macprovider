@@ -64,8 +64,14 @@ CREATE TABLE IF NOT EXISTS provider_supervisor_events (
 CREATE INDEX IF NOT EXISTS idx_provider_supervisor_events_observed
     ON provider_supervisor_events(provider_id, last_observed_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_provider_supervisor_events_recorded_at
-    ON provider_supervisor_events(recorded_at);
+-- Prune keys off last_observed_at (this is a latest-state UPSERT table, not an
+-- append-only log): an actively-observed (provider_id, boot_id) row must survive
+-- retention as long as fresh beacons keep arriving, or a long-running Mac's row
+-- would be pruned mid-boot and its later high-seq beacons rejected by the
+-- anti-pinning ceiling — a coordinator blind spot. recorded_at stays as the
+-- insert timestamp for audit.
+CREATE INDEX IF NOT EXISTS idx_provider_supervisor_events_last_observed
+    ON provider_supervisor_events(last_observed_at);
 
 -- Operator/analytics only. The runtime role upserts (SELECT/INSERT/UPDATE); no
 -- buyer- or provider-portal-facing role may read supervisor telemetry.
@@ -87,7 +93,7 @@ BEGIN
     END IF;
 
     DELETE FROM provider_supervisor_events
-     WHERE recorded_at < NOW() - retain_for;
+     WHERE last_observed_at < NOW() - retain_for;
     GET DIAGNOSTICS deleted_count = ROW_COUNT;
     RETURN deleted_count;
 END;

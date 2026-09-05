@@ -188,4 +188,33 @@ VALUES ('prov-3', $1, 'swap', 'success')`, t0.Add(300*time.Millisecond)); err !=
 	if r := read("prov-2", "BOOT-B"); r.lastSeq != 2 || r.restarts != 2 {
 		t.Fatalf("counter regression adopted: %+v", r)
 	}
+
+	// --- deferral counter/detail consistency: a new last_deferral.seq without an
+	// advanced deferrals_total is inconsistent and must be dropped non-blockingly.
+	deferral := func(seq, deferralSeq, deferrals int64, at time.Time) SupervisorEventRecord {
+		return SupervisorEventRecord{
+			ProviderID: "prov-5", BootID: "BOOT-E", Schema: "macprovider.supervisor-event.v1",
+			Kind: "deferral", Seq: seq, SupervisorLabel: "provider-watchdog", SupervisorVersion: "1.0",
+			DeferralsTotal: deferrals, LastDeferralSeq: deferralSeq, LastDeferralTS: at.Format(time.RFC3339),
+			ObservedAt: at, DwellThreshold: time.Second,
+		}
+	}
+	if err := store.RecordSupervisorEvent(ctx, deferral(1, 1, 1, t0)); err != nil {
+		t.Fatalf("record p5 d1: %v", err)
+	}
+	// seq advances, last_deferral.seq advances, but deferrals_total does NOT -> drop.
+	if err := store.RecordSupervisorEvent(ctx, deferral(2, 2, 1, t0.Add(time.Second))); err != nil {
+		t.Fatalf("record p5 inconsistent: %v", err)
+	}
+	var (
+		p5Seq, p5DefSeq, p5Deferrals int64
+	)
+	if err := db.QueryRowContext(ctx, `
+SELECT last_seq, last_deferral_seq, deferrals_total FROM provider_supervisor_events
+ WHERE provider_id='prov-5' AND boot_id='BOOT-E'`).Scan(&p5Seq, &p5DefSeq, &p5Deferrals); err != nil {
+		t.Fatalf("read p5: %v", err)
+	}
+	if p5Seq != 1 || p5DefSeq != 1 || p5Deferrals != 1 {
+		t.Fatalf("inconsistent deferral adopted: last_seq=%d last_deferral_seq=%d deferrals_total=%d", p5Seq, p5DefSeq, p5Deferrals)
+	}
 }

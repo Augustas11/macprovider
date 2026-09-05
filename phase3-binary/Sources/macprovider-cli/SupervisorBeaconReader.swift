@@ -73,10 +73,20 @@ enum SupervisorBeaconReader {
         var st = stat()
         guard fstat(fd, &st) == 0,
               (st.st_mode & S_IFMT) == S_IFREG,
-              st.st_uid == getuid(),
-              (st.st_mode & 0o777) == 0o600,
               st.st_nlink == 1,
               st.st_size > 0, st.st_size <= maxBeaconBytes else {
+            return nil
+        }
+        // The file must not be writable by anyone other than its owner-writer:
+        //   - consumer: owned by us (== watchdog uid), mode 0600; OR
+        //   - headless: owned by root (the root watchdog is the sole writer),
+        //     world-readable but with no group/other WRITE bit (e.g. 0644).
+        // This keeps the watchdog the sole writer in both topologies — a
+        // provider-uid-owned non-0600 file (or any group/other-writable file) is
+        // rejected so a modified provider cannot forge the beacon in place.
+        let ownedByUs = st.st_uid == getuid() && (st.st_mode & 0o777) == 0o600
+        let rootOwnedNotOthersWritable = st.st_uid == 0 && (st.st_mode & 0o022) == 0
+        guard ownedByUs || rootOwnedNotOthersWritable else {
             return nil
         }
         var buffer = [UInt8](repeating: 0, count: Int(st.st_size))

@@ -11912,13 +11912,15 @@ emit_supervisor_beacon() {
   if printf '%s\n' "$beacon_json" > "$tmp" 2>/dev/null; then
     chmod 600 "$tmp" 2>/dev/null || true
     # Headless installs run the watchdog as a root LaunchDaemon but the provider
-    # (and its CLI reader) as MACPROVIDER_HEADLESS_USER. The reader requires the
-    # beacon be owned by its own uid, so hand ownership to that user; otherwise
-    # F5 telemetry would be silently absent for the headless fleet. In the
-    # consumer (GUI) topology MACPROVIDER_HEADLESS_USER is unset and the beacon
-    # stays watchdog-uid-owned (== provider uid), so no chown happens.
+    # (and its CLI reader) as MACPROVIDER_HEADLESS_USER. Keep the beacon
+    # ROOT-OWNED (the watchdog stays the sole writer) but world-readable so the
+    # non-root provider can read it — the beacon is non-sensitive (redacted /
+    # allowlisted). Do NOT chown it to the provider: that would let a modified
+    # provider forge its own beacon in place. In the consumer (GUI) topology
+    # MACPROVIDER_HEADLESS_USER is unset and the beacon stays 0600
+    # watchdog-uid-owned (== provider uid).
     if [ -n "${MACPROVIDER_HEADLESS_USER:-}" ]; then
-      chown "$MACPROVIDER_HEADLESS_USER" "$tmp" 2>/dev/null || true
+      chmod 644 "$tmp" 2>/dev/null || true
     fi
     sync 2>/dev/null || true
     mv -f "$tmp" "$BEACON_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true

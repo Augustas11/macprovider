@@ -231,10 +231,15 @@ const (
 	supervisorMaxFutureSkew = 5 * time.Minute
 )
 
-// supervisorUUIDRE matches the canonical UUID shape of RouterHandler.serviceInstanceID.
+// supervisorUUIDRE matches the canonical UUID shape of RouterHandler.serviceInstanceID
+// and of boot_id (kern.bootsessionuuid).
 var supervisorUUIDRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 func isSupervisorUUID(s string) bool { return supervisorUUIDRE.MatchString(s) }
+
+// supervisorVersionRE constrains supervisor_version to a narrow public version
+// charset so a modified provider cannot smuggle a hostname/path/PII into it.
+var supervisorVersionRE = regexp.MustCompile(`^[A-Za-z0-9._+-]{1,64}$`)
 
 // normalizeSupervisorTS returns ts if it is a valid RFC3339 timestamp no more
 // than supervisorMaxFutureSkew ahead of now; otherwise "" (diagnostic-only field
@@ -267,7 +272,10 @@ func normalizeSupervisorWire(w *supervisorEventWire, now time.Time) bool {
 	default:
 		return false
 	}
-	if w.BootID == "" || len(w.BootID) > 128 || containsControlChar(w.BootID) {
+	// boot_id is the coordinator's row partition key and is stored; require the
+	// canonical bootsession UUID shape so a modified provider cannot smuggle a
+	// hostname/path/PII into it or choose an arbitrary partition key.
+	if !isSupervisorUUID(w.BootID) {
 		return false
 	}
 	if w.Seq <= 0 || w.Seq > maxSupervisorScalar {
@@ -282,7 +290,7 @@ func normalizeSupervisorWire(w *supervisorEventWire, now time.Time) bool {
 	default:
 		w.SupervisorLabel = "unknown"
 	}
-	if len(w.SupervisorVersion) > 64 || containsControlChar(w.SupervisorVersion) {
+	if !supervisorVersionRE.MatchString(w.SupervisorVersion) {
 		w.SupervisorVersion = "unknown"
 	}
 	if w.LastRestart != nil {
