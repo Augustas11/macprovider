@@ -256,3 +256,46 @@ func sameReviewedArtifactLifecycleExceptRevision(a, b ReviewedArtifactLifecycle)
 		a.NextReviewDueUTC.Equal(b.NextReviewDueUTC) &&
 		a.Notes == b.Notes
 }
+
+// RequireReviewedArtifactLifecycleForPromotion fail-closes operator HTTP/CLI
+// production promote when the reconstructed pool is non-candidate and it has no
+// current production reviewed-artifact lifecycle owner. Candidate pools skip
+// this check so the isolated-candidate journey stays valid. Missing pools and
+// pools without a root issuer are left to PromotePool preconditions. Mirrors
+// RequireOnCallReadinessForPromotion: an unmapped wrapper gate that is not
+// inside the evidence-mapped PromotePool transaction.
+func (s *Store) RequireReviewedArtifactLifecycleForPromotion(ctx context.Context, poolID string) error {
+	poolID = strings.TrimSpace(poolID)
+	if poolID == "" {
+		return nil
+	}
+	state, err := s.Reconstruct(ctx)
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		return nil
+	}
+	p := state.Pools[poolID]
+	if p == nil || p.RootIssuer == nil {
+		return nil
+	}
+	environment := strings.TrimSpace(p.RootIssuer.LaunchEnvironment)
+	if environment == "" || environment == promotionLaunchEnvironmentCandidate {
+		return nil
+	}
+	rec, ok, err := s.ReviewedArtifactLifecycle(ctx, poolID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: production promotion requires a reviewed-artifact lifecycle owner for %s", ErrReviewedArtifactLifecycle, poolID)
+	}
+	if rec.EnvironmentClass != ReviewedArtifactEnvironmentProduction {
+		return fmt.Errorf("%w: production promotion requires a production reviewed-artifact lifecycle owner for %s", ErrReviewedArtifactLifecycle, poolID)
+	}
+	if rec.Overdue(time.Now().UTC()) {
+		return fmt.Errorf("%w: reviewed-artifact lifecycle review overdue for %s", ErrReviewedArtifactLifecycle, poolID)
+	}
+	return nil
+}
