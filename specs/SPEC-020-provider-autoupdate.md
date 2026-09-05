@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.17
+Version: v0.1.18
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -935,13 +935,15 @@ a persisted operator-pause signal readable without the HTTP surface, and the
 pre-first-token / process-wide hard-freeze cases before they may authorize a
 restart.
 
-Beyond its own boot-arm and cooldown markers the watchdog MUST NOT write,
-restore, rename, or delete any provider **or supervisor** artifact — provider
-binary, resources, config, or plist, or the watchdog script, its
-plist/LaunchAgent/LaunchDaemon, or any current or legacy supervisor label
-(including `live.streamvc.macprovider-watchdog`) — MUST be installer-owned and
-non-self-restoring (RFC-001 §5.1), and MUST NOT own or perform update or rollback
-(R-4.4, R-4.5). This makes launchd the single exit-restart owner and removes the
+Beyond its own boot-arm and cooldown markers, and its own private
+supervisor-telemetry state (the single `supervisor-beacon.json` — a
+non-executable, non-config diagnostic marker; SPEC-025 §5.4), the watchdog MUST
+NOT write, restore, rename, or delete any
+provider **or supervisor** artifact — provider binary, resources, config, or
+plist, or the watchdog script, its plist/LaunchAgent/LaunchDaemon, or any current
+or legacy supervisor label (including `live.streamvc.macprovider-watchdog`) — MUST
+be installer-owned and non-self-restoring (RFC-001 §5.1), and MUST NOT own or
+perform update or rollback (R-4.4, R-4.5). This makes launchd the single exit-restart owner and removes the
 second, mutable exit-restart authority whose stale form caused the #1189
 stranding (the removed code path is the CLI watchdog `missing_validated_pid`
 kickstart). For the avoidance of doubt this supersedes any residual wording (e.g.
@@ -1502,6 +1504,11 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.18 (2026-09-05): R-4.14 write-fence carve-out for supervisor telemetry
+  (RFC-001 §7 / F5, #1386). The watchdog may additionally write its own private
+  single `supervisor-beacon.json` (a non-executable, non-config diagnostic
+  marker; SPEC-025 §5.4) — not a provider/supervisor artifact and carrying no
+  update/rollback authority. No other fence weakened.
 - v0.1.17 (2026-09-05): Added R-4.14 fencing provider exit-restart to the
   launchd provider-service `KeepAlive` as the single exit-restart owner; the
   companion watchdog is now normatively wedge-restart-only and MUST NOT restart
