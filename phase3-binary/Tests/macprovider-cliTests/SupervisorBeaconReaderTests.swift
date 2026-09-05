@@ -39,7 +39,7 @@ final class SupervisorBeaconReaderTests: XCTestCase {
                 "ts": "2026-09-05T00:00:00Z",
                 "reason": "wedge",
                 "cooldown_state": "armed",
-                "service_instance": "old-inst",
+                "service_instance": "11111111-1111-1111-1111-111111111111",
                 "model_liveness": [
                     "token_age_ms": 1500,
                     "active_inference": true,
@@ -62,10 +62,21 @@ final class SupervisorBeaconReaderTests: XCTestCase {
         let lr = try XCTUnwrap(obj["last_restart"] as? [String: Any])
         XCTAssertEqual(lr["reason"] as? String, "wedge")
         XCTAssertEqual(lr["cooldown_state"] as? String, "armed")
-        XCTAssertEqual(lr["service_instance"] as? String, "old-inst")
+        XCTAssertEqual(lr["service_instance"] as? String, "11111111-1111-1111-1111-111111111111")
         let ml = try XCTUnwrap(lr["model_liveness"] as? [String: Any])
         XCTAssertEqual(ml["token_age_ms"] as? UInt64, 1500)
         XCTAssertEqual(ml["active_inference"] as? Bool, true)
+    }
+
+    func testNonUUIDServiceInstanceIsNulled() throws {
+        var obj = restartBeacon()
+        var lr = obj["last_restart"] as! [String: Any]
+        lr["service_instance"] = "/Users/someone/private-host"
+        obj["last_restart"] = lr
+        try write(obj)
+        let out = try XCTUnwrap(SupervisorBeaconReader.lastWireObject(url: beacon, currentBootSession: "BOOT-A"))
+        let lrOut = try XCTUnwrap(out["last_restart"] as? [String: Any])
+        XCTAssertTrue(lrOut["service_instance"] is NSNull, "non-UUID service_instance must be dropped")
     }
 
     func testWrongBootIsDropped() throws {

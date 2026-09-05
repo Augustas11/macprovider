@@ -11730,9 +11730,14 @@ supervisor_label_class() {
 }
 
 # Read a persisted unsigned counter, defaulting to 0 on absence/corruption.
+# Output is canonical decimal (no leading zeros) so callers can use it directly
+# in `$(( ... ))` without bash interpreting e.g. "08" as invalid octal (which
+# would abort the tick under `set -e`). Over-long values fail safe to 0.
 _beacon_uint() {
   _v="$(cat "$1" 2>/dev/null || printf 0)"
-  case "$_v" in ''|*[!0-9]*) printf 0 ;; *) printf '%s' "$_v" ;; esac
+  case "$_v" in ''|*[!0-9]*) printf 0; return ;; esac
+  if [ "${#_v}" -gt 18 ]; then printf 0; return; fi
+  printf '%s' "$(( 10#$_v ))"
 }
 
 # Minimal JSON string escaping for bounded, watchdog-controlled values.
@@ -11771,7 +11776,7 @@ capture_supervisor_status_fields() {
   curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
   body="$("$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/status" 2>/dev/null)" || return 0
   fields="$(STATUS_BODY="$body" python3 <<'PY' 2>/dev/null || true
-import json, os
+import json, os, re
 try:
     b = json.loads(os.environ.get("STATUS_BODY", ""))
 except Exception:
@@ -11780,7 +11785,12 @@ si = b.get("service_instance") or {}
 ml = b.get("model_liveness") or {}
 def s(v):
     return "" if v is None else str(v)
+# instance_id must be a canonical UUID (RouterHandler.serviceInstanceID shape);
+# anything else (a path, hostname, PII) is dropped so it never reaches the beacon.
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 inst = si.get("instance_id")
+if not (isinstance(inst, str) and _UUID.match(inst)):
+    inst = None
 tok = ml.get("token_age_ms")
 act = ml.get("active_inference")
 acta = ml.get("active_inference_age_ms")
@@ -11824,11 +11834,15 @@ emit_supervisor_beacon() {
 
   stored_boot="$(cat "$BEACON_BOOT_FILE" 2>/dev/null || printf '')"
   if [ "$stored_boot" != "$cur_boot" ]; then
-    printf '%s' "$cur_boot" | _beacon_atomic_write "$BEACON_BOOT_FILE" || return 0
+    # Reset counters/sidecars FIRST and commit the new boot marker LAST. If the
+    # watchdog is interrupted mid-reset, the next tick still sees the old boot id
+    # (marker not yet updated) and repeats the reset — so prior-boot seq/counters
+    # can never be emitted under the new boot id (boot-scope fail-safe).
     printf '0' | _beacon_atomic_write "$BEACON_SEQ_FILE" || true
     printf '0' | _beacon_atomic_write "$BEACON_RESTARTS_FILE" || true
     printf '0' | _beacon_atomic_write "$BEACON_DEFERRALS_FILE" || true
     rm -f "$BEACON_LAST_RESTART_FILE" "$BEACON_LAST_DEFERRAL_FILE" 2>/dev/null || true
+    printf '%s' "$cur_boot" | _beacon_atomic_write "$BEACON_BOOT_FILE" || return 0
   fi
 
   seq=$(( $(_beacon_uint "$BEACON_SEQ_FILE") + 1 ))

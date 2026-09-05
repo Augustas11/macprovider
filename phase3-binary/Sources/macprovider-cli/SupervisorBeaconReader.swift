@@ -87,7 +87,11 @@ enum SupervisorBeaconReader {
               object["schema"] as? String == schema,
               let kind = object["kind"] as? String, allowedKinds.contains(kind),
               let bootID = boundedString(object["boot_id"], max: 128), !bootID.isEmpty,
-              let seq = strictUInt(object["seq"]) else {
+              let seq = strictUInt(object["seq"]),
+              // Required common fields must be PRESENT (not defaulted): a beacon
+              // missing its counters is malformed and drops rather than becoming 0.
+              let restartsTotal = strictUInt(object["restarts_total"]),
+              let deferralsTotal = strictUInt(object["deferrals_total"]) else {
             return nil
         }
         // Wrong-boot drop is CLI-side: a beacon file left over from a previous
@@ -107,8 +111,8 @@ enum SupervisorBeaconReader {
             "seq": seq,
             "supervisor_label": labelClass(object["supervisor_label"]),
             "supervisor_version": boundedString(object["supervisor_version"], max: 64) ?? "unknown",
-            "restarts_total": strictUInt(object["restarts_total"]) ?? 0,
-            "deferrals_total": strictUInt(object["deferrals_total"]) ?? 0,
+            "restarts_total": restartsTotal,
+            "deferrals_total": deferralsTotal,
         ]
         if let ts = boundedString(object["ts"], max: 64) {
             projected["ts"] = ts
@@ -140,7 +144,10 @@ enum SupervisorBeaconReader {
         } else {
             out["cooldown_state"] = "armed"
         }
-        if let instance = boundedString(obj["service_instance"], max: 128), !instance.isEmpty {
+        // service_instance is the opaque UUID instance id; anything not
+        // UUID-shaped (a path, hostname, PII) is dropped so it never reaches the
+        // wire (redaction non-negotiable, SPEC-025 §5.4).
+        if let instance = obj["service_instance"] as? String, isUUID(instance) {
             out["service_instance"] = instance
         } else {
             out["service_instance"] = NSNull()
@@ -186,6 +193,11 @@ enum SupervisorBeaconReader {
         default:
             return "unknown"
         }
+    }
+
+    /// Canonical UUID shape (8-4-4-4-12 hex), matching RouterHandler.serviceInstanceID.
+    private static func isUUID(_ value: String) -> Bool {
+        UUID(uuidString: value) != nil
     }
 
     private static func boundedString(_ value: Any?, max: Int) -> String? {

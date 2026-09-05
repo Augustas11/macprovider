@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
@@ -225,7 +226,29 @@ const (
 	// forged/corrupt beacon cannot store an absurd high-water value that pins the
 	// (provider_id, boot_id) row and blinds later legitimate telemetry.
 	maxSupervisorScalar = int64(1) << 40
+	// supervisorMaxFutureSkew: a ts more than this in the future is nulled at the
+	// field level (never rejects the beacon; ordering is by seq alone).
+	supervisorMaxFutureSkew = 5 * time.Minute
 )
+
+// supervisorUUIDRE matches the canonical UUID shape of RouterHandler.serviceInstanceID.
+var supervisorUUIDRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+func isSupervisorUUID(s string) bool { return supervisorUUIDRE.MatchString(s) }
+
+// normalizeSupervisorTS returns ts if it is a valid RFC3339 timestamp no more
+// than supervisorMaxFutureSkew ahead of now; otherwise "" (diagnostic-only field
+// nulled, never rejecting the beacon).
+func normalizeSupervisorTS(ts string, now time.Time) string {
+	if ts == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil || t.After(now.Add(supervisorMaxFutureSkew)) {
+		return ""
+	}
+	return ts
+}
 
 // normalizeSupervisorWire validates and coerces a parsed beacon in place,
 // returning false if it is too malformed/inconsistent to persist. It is
@@ -235,7 +258,7 @@ const (
 // action seq greater than the top seq. Soft-coerced: supervisor_label to the
 // public allowlist (else "unknown"), cooldown_state to the enum (else "armed"),
 // and an invalid/non-object model_liveness or wrong action reason is dropped.
-func normalizeSupervisorWire(w *supervisorEventWire) bool {
+func normalizeSupervisorWire(w *supervisorEventWire, now time.Time) bool {
 	if w.Schema != supervisorEventSchema {
 		return false
 	}
@@ -265,9 +288,10 @@ func normalizeSupervisorWire(w *supervisorEventWire) bool {
 	if w.LastRestart != nil {
 		lr := w.LastRestart
 		// reason is the only watchdog-owned restart reason (SPEC-020 R-4.14); a
-		// missing/other reason means this is not a valid supervisor restart —
-		// drop the sticky detail rather than fabricate one.
-		if lr.Reason != "wedge" || lr.Seq < 0 || lr.Seq > w.Seq {
+		// missing/other reason means this is not a valid supervisor restart. Also
+		// require counter consistency: a restart detail (seq>0) is only credible
+		// if restarts_total has advanced past zero — otherwise it is forged/corrupt.
+		if lr.Reason != "wedge" || lr.Seq <= 0 || lr.Seq > w.Seq || w.RestartsTotal <= 0 {
 			w.LastRestart = nil
 		} else {
 			switch lr.CooldownState {
@@ -275,9 +299,12 @@ func normalizeSupervisorWire(w *supervisorEventWire) bool {
 			default:
 				lr.CooldownState = "armed"
 			}
-			if lr.ServiceInstance != nil && (len(*lr.ServiceInstance) > 128 || containsControlChar(*lr.ServiceInstance)) {
+			// service_instance is the opaque UUID instance id; drop anything not
+			// UUID-shaped so a path/hostname/PII never reaches the store.
+			if lr.ServiceInstance != nil && !isSupervisorUUID(*lr.ServiceInstance) {
 				lr.ServiceInstance = nil
 			}
+			lr.TS = normalizeSupervisorTS(lr.TS, now)
 			// Re-project model_liveness to EXACTLY the allowlisted shape so no
 			// extra/redaction-forbidden keys reach the store. Invalid → null.
 			lr.ModelLiveness = projectSupervisorModelLiveness(lr.ModelLiveness)
@@ -285,8 +312,10 @@ func normalizeSupervisorWire(w *supervisorEventWire) bool {
 	}
 	if w.LastDeferral != nil {
 		if w.LastDeferral.DeferralReason != "pending_autoupdate_marker" ||
-			w.LastDeferral.Seq < 0 || w.LastDeferral.Seq > w.Seq {
+			w.LastDeferral.Seq <= 0 || w.LastDeferral.Seq > w.Seq || w.DeferralsTotal <= 0 {
 			w.LastDeferral = nil
+		} else {
+			w.LastDeferral.TS = normalizeSupervisorTS(w.LastDeferral.TS, now)
 		}
 	}
 	return true
@@ -335,6 +364,12 @@ func (s *Server) recordSupervisorEventIfChanged(providerID string, raw json.RawM
 	if s == nil || s.supervisorEvents == nil || len(raw) == 0 {
 		return
 	}
+	// The current instance id (NEW post-restart instance) is an opaque UUID; a
+	// non-UUID value cannot correlate (and must not reach the store), so treat it
+	// as unknown.
+	if !isSupervisorUUID(serviceInstanceID) {
+		serviceInstanceID = ""
+	}
 	fingerprint := serviceInstanceID + "\x00" + string(raw)
 	if seen, ok := s.supervisorEventSeen.Load(providerID); ok && seen.(string) == fingerprint {
 		return
@@ -348,7 +383,15 @@ func (s *Server) recordSupervisorEventIfChanged(providerID string, raw json.RawM
 	// wrong-schema/out-of-range/inconsistent beacon NON-blockingly (the frame was
 	// already accepted upstream); coerce soft fields to the allowlist. Nothing
 	// wrong-shaped reaches provider_supervisor_events or the rollups.
-	if !normalizeSupervisorWire(&wire) {
+	if !normalizeSupervisorWire(&wire, observedAt) {
+		return
+	}
+	// Per-provider ordering: the flap/dwell rollup is history-sensitive, so at
+	// most ONE persist per provider may be in flight — otherwise two beacons for
+	// the same provider could commit out of seq order and lose flap accounting.
+	// Heartbeats for a provider arrive in order, so dropping (without advancing
+	// dedup) while one is in flight simply defers to the next heartbeat.
+	if _, busy := s.supervisorEventInFlight.LoadOrStore(providerID, struct{}{}); busy {
 		return
 	}
 	slots := s.supervisorEventSlots
@@ -360,6 +403,7 @@ func (s *Server) recordSupervisorEventIfChanged(providerID string, raw json.RawM
 	default:
 		// Both persist slots busy: drop WITHOUT advancing the dedup cache so a
 		// later heartbeat echo is retried rather than permanently suppressed.
+		s.supervisorEventInFlight.Delete(providerID)
 		return
 	}
 	s.supervisorEventSeen.Store(providerID, fingerprint)
@@ -394,11 +438,30 @@ func (s *Server) recordSupervisorEventIfChanged(providerID string, raw json.RawM
 		rec.LastDeferralTS = wire.LastDeferral.TS
 	}
 	go func() {
+		defer s.supervisorEventInFlight.Delete(providerID)
 		defer func() { <-slots }()
 		ctx, cancel := context.WithTimeout(context.Background(), supervisorEventPersistTimeout)
 		defer cancel()
 		if err := sink.RecordSupervisorEvent(ctx, rec); err != nil {
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("supervisor event persist failed")
+		}
+	}()
+}
+
+// resetSupervisorDwellOnDisconnect breaks dwell continuity for a provider when
+// its session disconnects/is replaced (SPEC-025 §5.4). Best-effort and off the
+// disconnect hot path: a pending restart's in-flight dwell timer is cleared so a
+// reconnect within the staleness window cannot bridge the silent gap into held.
+func (s *Server) resetSupervisorDwellOnDisconnect(providerID string) {
+	if s == nil || s.supervisorEvents == nil || providerID == "" {
+		return
+	}
+	sink := s.supervisorEvents
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), supervisorEventPersistTimeout)
+		defer cancel()
+		if err := sink.ResetSupervisorDwell(ctx, providerID); err != nil {
+			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("supervisor dwell reset failed")
 		}
 	}()
 }

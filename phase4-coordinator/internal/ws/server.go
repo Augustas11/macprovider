@@ -215,6 +215,7 @@ type Server struct {
 	supervisorEvents              SupervisorEventSink
 	supervisorEventSeen           sync.Map
 	supervisorEventSlots          chan struct{}
+	supervisorEventInFlight       sync.Map
 
 	// SE liveness (Phase 1, Track P1-C).
 	// seLivenessChans maps sessionKey → chan SELivenessResponse for in-flight probes.
@@ -410,6 +411,11 @@ type AutoupdateOutcomeSink interface {
 // (see recordSupervisorEventIfChanged); the sink upserts latest-wins by seq.
 type SupervisorEventSink interface {
 	RecordSupervisorEvent(ctx context.Context, rec onboarding.SupervisorEventRecord) error
+	// ResetSupervisorDwell breaks dwell continuity for a provider on disconnect/
+	// session replacement (SPEC-025 §5.4): a pending restart's in-flight dwell
+	// timer is cleared so a reconnect within the staleness window cannot bridge a
+	// silent gap into a false "held".
+	ResetSupervisorDwell(ctx context.Context, providerID string) error
 }
 
 type IdlePrewarmMetrics interface {
@@ -5592,6 +5598,7 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 func (s *Server) handleDisconnect(providerID, assignedID string) {
 	s.clearWarmupGate(providerID, assignedID)
 	s.clearRewardsTrustLookupFailure(providerID, assignedID)
+	s.resetSupervisorDwellOnDisconnect(providerID)
 	s.pruneIdlePrewarmLimits(s.now())
 	binaryVersion := ""
 	var conn net.Conn

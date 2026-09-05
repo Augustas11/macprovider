@@ -743,15 +743,21 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 		return tx.Commit()
 	}
 
-	// Sticky detail is preserved on regression: a higher top-level seq beacon that
-	// carries a lower/missing nested action seq must NOT erase the previously
-	// observed restart/deferral detail (the watchdog always re-carries it; a
-	// regressed value is corrupt/forged).
+	newRestartObserved := rec.LastRestartSeq > 0 && rec.LastRestartSeq > exLastRestartSeq
+	// A new restart (advanced last_restart.seq) is only credible if restarts_total
+	// also advanced past the stored high-water; otherwise the counter/action detail
+	// is inconsistent (forged/corrupt) — skip non-blockingly rather than adopt it.
+	if newRestartObserved && exStored && rec.RestartsTotal <= exRestarts {
+		return tx.Commit()
+	}
+	// Sticky detail is preserved UNLESS the nested action seq strictly advances: a
+	// higher top-level seq beacon carrying a lower/equal/missing nested action seq
+	// must NOT erase or degrade the previously observed restart/deferral detail
+	// (the watchdog always re-carries it; a regressed/blanked value is corrupt).
 	lastRestartSeq, lastRestartTS := rec.LastRestartSeq, rec.LastRestartTS
 	lastRestartCooldown, lastRestartInstance := rec.LastRestartCooldown, rec.LastRestartInstance
 	lastRestartML := rec.LastRestartModelLiveness
-	newRestartObserved := rec.LastRestartSeq > 0 && rec.LastRestartSeq > exLastRestartSeq
-	if exStored && rec.LastRestartSeq < exLastRestartSeq {
+	if exStored && !newRestartObserved && exLastRestartSeq > 0 {
 		lastRestartSeq, lastRestartTS = exLastRestartSeq, exLastRestartTS
 		lastRestartCooldown, lastRestartInstance = exLastRestartCooldown, exLastRestartInstance
 		lastRestartML = ""
@@ -759,8 +765,9 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 			lastRestartML = exLastRestartML.String
 		}
 	}
+	newDeferralObserved := rec.LastDeferralSeq > 0 && rec.LastDeferralSeq > exLastDeferralSeq
 	lastDeferralSeq, lastDeferralTS := rec.LastDeferralSeq, rec.LastDeferralTS
-	if exStored && rec.LastDeferralSeq < exLastDeferralSeq {
+	if exStored && !newDeferralObserved && exLastDeferralSeq > 0 {
 		lastDeferralSeq, lastDeferralTS = exLastDeferralSeq, exLastDeferralTS
 	}
 
@@ -930,6 +937,26 @@ const (
 	supervisorDwellHeld               = "held"
 	supervisorDwellArtifactConfounded = "artifact_confounded"
 )
+
+// ResetSupervisorDwell clears the in-flight dwell timer for a provider's pending
+// restarts (SPEC-025 §5.4 disconnect/session-replacement continuity break), so a
+// reconnect within the staleness window re-starts timing rather than bridging a
+// silent gap into "held". Only correlated_pending rows are touched — already
+// held/flap/artifact_confounded outcomes are final.
+func (s *PGStore) ResetSupervisorDwell(ctx context.Context, providerID string) error {
+	if s == nil || s.db == nil {
+		return errors.New("onboarding postgres store is nil")
+	}
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+UPDATE provider_supervisor_events
+   SET dwell_instance = '', dwell_started_at = NULL
+ WHERE provider_id = $1 AND last_restart_dwell_state = 'correlated_pending'`, providerID)
+	return err
+}
 
 // supervisorArtifactWriteInWindow reports whether the coordinator observed an
 // artifact-mutating autoupdate event for providerID in [from, to). The predicate
