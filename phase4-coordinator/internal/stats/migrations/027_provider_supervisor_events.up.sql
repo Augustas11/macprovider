@@ -45,8 +45,11 @@ CREATE TABLE IF NOT EXISTS provider_supervisor_events (
     last_deferral_seq             BIGINT NOT NULL DEFAULT 0,
     last_deferral_ts              TEXT NOT NULL DEFAULT '',
     -- Coordinator-derived flap rollup (RFC-001 §7: flap loops must be observable,
-    -- not just total restart frequency). dwell_state is one of
-    -- {unknown, correlated_pending, held, flap, artifact_confounded}.
+    -- not just total restart frequency). last_restart_dwell_state is one of
+    -- {unknown, correlated_pending, held, artifact_confounded}. A flap is NOT a
+    -- dwell_state value: it is surfaced via flaps_total + last_flap_observed_at
+    -- (a superseded pending restart increments the counter and the same beacon
+    -- starts the new restart's dwell state), so query flap loops on those columns.
     flaps_total                   BIGINT NOT NULL DEFAULT 0,
     last_flap_observed_at         TIMESTAMPTZ,
     last_restart_dwell_state      TEXT NOT NULL DEFAULT '',

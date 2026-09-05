@@ -1,6 +1,16 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.27 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.28 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.28 (2026-09-05, F5 §5.4 dwell-state enumeration correction from
+the Opus pre-merge review).** Corrects the `last_restart_dwell_state` enumeration
+to match the IMPL: `flap` is **not** a persisted dwell-state value. In the
+single-row model the beacon that supersedes a prior pending restart is the same
+beacon that starts the next restart, so the column always reflects the current
+restart; a flap is recorded by incrementing `flaps_total` and setting
+`last_flap_observed_at`. The enum is {`unknown`, `correlated_pending`, `held`,
+`artifact_confounded`}; flap-loop queries use the two flap counter columns.
+Documentation-only clarification; no behavior change.
 
 **Change log v0.27 (2026-09-05, F5 §5.4 hardening reconciliation from the
 adversarial pre-merge review).** Reconciles §5.4 with the IMPL hardening: the
@@ -1103,14 +1113,20 @@ held past the dwell threshold before the next restart) — and RFC-001 §7 requi
 restart-loop flaps to be observable, not just total restart frequency. The row
 therefore also carries coordinator-derived rollup columns: `flaps_total` (uint64),
 `last_flap_observed_at`, and `last_restart_dwell_state` ∈ {`unknown`,
-`correlated_pending`, `held`, `flap`, `artifact_confounded`}. Update rule: when a
-new `last_restart.seq` advances, the coordinator finalizes the **prior** restart's
-`last_restart_dwell_state` — `held` if its correlated new instance reached the
-dwell threshold with no artifact-write event, `flap` if it did not before this next
-restart (increment `flaps_total`, set `last_flap_observed_at`),
-`artifact_confounded` if an artifact-write event fell in its window (so a flap is
-not misattributed to a wedge loop when an update/rollback was actually in play), or
-`unknown` if correlation was never established (null old/new instance id). This
+`correlated_pending`, `held`, `artifact_confounded`}. Note that `flap` is **not** a
+`last_restart_dwell_state` value: in the single-row model the beacon that supersedes
+a prior pending restart is the same beacon that starts the next restart, so the
+column always reflects the current restart's state; a flap is recorded instead by
+incrementing `flaps_total` and setting `last_flap_observed_at`. Query flap loops on
+those two columns, not on `last_restart_dwell_state`. Update rule: when a new
+`last_restart.seq` advances, the coordinator finalizes the **prior** restart — if
+its correlated new instance reached the dwell threshold with no artifact-write event
+the prior restart was `held`; if it did not, that is a flap (increment `flaps_total`,
+set `last_flap_observed_at`); if an artifact-write event fell in its window the prior
+restart is `artifact_confounded` (so a flap is not misattributed to a wedge loop when
+an update/rollback was actually in play); correlation that was never established
+(null old/new instance id) stays `unknown`. The new restart's own
+`last_restart_dwell_state` then begins at `correlated_pending` (or `unknown`). This
 preserves flap observability durably without reintroducing an event queue.
 
 **Acceptance signal.** The signal keys on the **sticky `last_restart` state, not on

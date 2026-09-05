@@ -736,7 +736,13 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 	// fresh baseline (keep flaps_total + first_seen_at). If it was actually a stale
 	// replay rather than a real reset, the real watchdog's next higher-seq beacon
 	// re-advances the row, so adopting it is self-correcting.
-	freshReset := exStored && rec.Seq <= exLastSeq && rec.Seq <= supervisorFreshStateSeqMax &&
+	//
+	// A genuine wipe drops seq strictly BELOW the stored high-water; use strict `<`
+	// (not `<=`) so a same-seq duplicate beacon that is not deduped (a flipped
+	// serving tag / service_instance_id between two heartbeats in one watchdog tick)
+	// falls through to the latest-wins no-op below and preserves dwell state, rather
+	// than being misclassified as a reset that re-anchors dwell_started_at.
+	freshReset := exStored && rec.Seq < exLastSeq && rec.Seq <= supervisorFreshStateSeqMax &&
 		rec.RestartsTotal <= exRestarts && rec.DeferralsTotal <= exDeferral
 	if exStored && !freshReset {
 		// Latest-wins: a stale or duplicate (seq <= stored) beacon is a full no-op.
