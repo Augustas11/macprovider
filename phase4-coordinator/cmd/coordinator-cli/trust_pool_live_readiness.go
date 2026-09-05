@@ -17,6 +17,8 @@ func trustPoolOnCall(args []string, getenv func(string) string, stdin io.Reader,
 		return fmt.Errorf("trust-pool-oncall subcommand required")
 	}
 	switch args[0] {
+	case "sign":
+		return trustPoolOnCallSign(args[1:], getenv, stdin, stdout)
 	case "upsert":
 		return trustPoolOnCallUpsert(args[1:], getenv, stdin, stdout)
 	case "get":

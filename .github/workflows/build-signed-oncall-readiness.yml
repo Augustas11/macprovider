@@ -1,0 +1,208 @@
+name: Build signed SPEC-043 on-call readiness record
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation_id:
+        description: "Idempotency key for the on-call upsert"
+        required: true
+        type: string
+      launch_environment_id:
+        description: "Launch environment id (e.g. production)"
+        required: true
+        type: string
+      record_version:
+        description: "On-call record version label"
+        required: true
+        type: string
+      primary_operator_contact:
+        required: true
+        type: string
+      secondary_operator_contact:
+        required: true
+        type: string
+      break_glass_escalation_path:
+        required: true
+        type: string
+      compromise_notification_channel:
+        required: true
+        type: string
+      creator_agreement_notification_commitment_ack:
+        required: true
+        type: string
+      creator_emergency_notification_mechanism:
+        required: true
+        type: string
+      confirmation_ttl_seconds:
+        description: "TTL in seconds, 0 < ttl <= 7776000 (90 days)"
+        required: true
+        default: "7776000"
+        type: string
+      signing_confirmed:
+        description: "Confirm an on-call readiness record should be signed"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-oncall-readiness-${{ github.event.inputs.launch_environment_id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and sign an on-call readiness record
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache: false
+
+      - name: Validate exact main source and fail-closed keyring
+        id: request
+        shell: bash
+        env:
+          OPERATION_ID_INPUT: ${{ github.event.inputs.operation_id }}
+          LAUNCH_ENV_INPUT: ${{ github.event.inputs.launch_environment_id }}
+          RECORD_VERSION_INPUT: ${{ github.event.inputs.record_version }}
+          TTL_INPUT: ${{ github.event.inputs.confirmation_ttl_seconds }}
+          SIGNING_CONFIRMED_INPUT: ${{ github.event.inputs.signing_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SIGNING_CONFIRMED_INPUT" == true ]] || { echo "::error::signing confirmation is required" >&2; exit 1; }
+          [[ "$OPERATION_ID_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid operation id" >&2; exit 1; }
+          [[ "$LAUNCH_ENV_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid launch environment id" >&2; exit 1; }
+          [[ "$RECORD_VERSION_INPUT" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] || { echo "::error::invalid record version" >&2; exit 1; }
+          [[ "$TTL_INPUT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::invalid confirmation ttl" >&2; exit 1; }
+          (( TTL_INPUT <= 7776000 )) || { echo "::error::confirmation ttl exceeds 90 days" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          registered_digest="$(python3 scripts/register-spec043-oncall-authority-key.py --check | sed -n 's/^MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256=//p')"
+          [[ "$registered_digest" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::keyring is fail-closed or digest unavailable" >&2; exit 1; }
+          printf 'registered_digest=%s\n' "$registered_digest" >> "$GITHUB_OUTPUT"
+          printf 'short_sha=%s\n' "${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned on-call readiness payload
+        id: payload
+        shell: bash
+        env:
+          OPERATION_ID: ${{ github.event.inputs.operation_id }}
+          LAUNCH_ENV: ${{ github.event.inputs.launch_environment_id }}
+          RECORD_VERSION: ${{ github.event.inputs.record_version }}
+          PRIMARY: ${{ github.event.inputs.primary_operator_contact }}
+          SECONDARY: ${{ github.event.inputs.secondary_operator_contact }}
+          BREAK_GLASS: ${{ github.event.inputs.break_glass_escalation_path }}
+          COMPROMISE: ${{ github.event.inputs.compromise_notification_channel }}
+          AGREEMENT_ACK: ${{ github.event.inputs.creator_agreement_notification_commitment_ack }}
+          EMERGENCY: ${{ github.event.inputs.creator_emergency_notification_mechanism }}
+          TTL: ${{ github.event.inputs.confirmation_ttl_seconds }}
+        run: |
+          set -euo pipefail
+          unsigned="$RUNNER_TEMP/oncall-unsigned.json"
+          python3 - "$unsigned" <<'PY'
+          import datetime
+          import json
+          import os
+          import sys
+
+          now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+          record = {
+              "operation_id": os.environ["OPERATION_ID"],
+              "launch_environment_id": os.environ["LAUNCH_ENV"],
+              "record_version": os.environ["RECORD_VERSION"],
+              "primary_operator_contact": os.environ["PRIMARY"],
+              "secondary_operator_contact": os.environ["SECONDARY"],
+              "break_glass_escalation_path": os.environ["BREAK_GLASS"],
+              "compromise_notification_channel": os.environ["COMPROMISE"],
+              "creator_agreement_notification_commitment_ack": os.environ["AGREEMENT_ACK"],
+              "creator_emergency_notification_mechanism": os.environ["EMERGENCY"],
+              "last_confirmed_at_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "confirmation_ttl_seconds": int(os.environ["TTL"]),
+          }
+          for key, value in record.items():
+              if isinstance(value, str) and not value.strip():
+                  raise SystemExit(f"empty field: {key}")
+          with open(sys.argv[1], "w", encoding="utf-8") as handle:
+              json.dump(record, handle, indent=2)
+              handle.write("\n")
+          PY
+          printf 'unsigned=%s\n' "$unsigned" >> "$GITHUB_OUTPUT"
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign on-call readiness record
+        id: sign
+        shell: bash
+        env:
+          MACPROVIDER_SPEC043_ONCALL_AUTHORITY_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_SPEC043_ONCALL_AUTHORITY_SIGNING_KEY_PEM }}
+          UNSIGNED: ${{ steps.payload.outputs.unsigned }}
+        run: |
+          set -euo pipefail
+          [[ -n "${MACPROVIDER_SPEC043_ONCALL_AUTHORITY_SIGNING_KEY_PEM:-}" ]] || { echo "::error::on-call signing key secret is not set" >&2; exit 1; }
+          signed="$RUNNER_TEMP/oncall-signed.json"
+          ( cd phase4-coordinator && go run ./cmd/coordinator-cli trust-pool-oncall sign --in "$UNSIGNED" --out "$signed" )
+          printf 'signed=%s\n' "$signed" >> "$GITHUB_OUTPUT"
+
+      - name: Validate signed record binds the registered authority key
+        shell: bash
+        env:
+          SIGNED: ${{ steps.sign.outputs.signed }}
+          REGISTERED_DIGEST: ${{ steps.request.outputs.registered_digest }}
+        run: |
+          set -euo pipefail
+          python3 - "$SIGNED" "$REGISTERED_DIGEST" <<'PY'
+          import base64
+          import hashlib
+          import json
+          import sys
+
+          signed = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          for field in ("operations_authority_public_key", "operations_authority_signature", "operation_id"):
+              if not signed.get(field):
+                  raise SystemExit(f"signed record missing {field}")
+          pub = base64.b64decode(signed["operations_authority_public_key"])
+          if len(pub) != 32:
+              raise SystemExit("operations authority public key is not a raw Ed25519 key")
+          digest = hashlib.sha256(pub).hexdigest()
+          if digest != sys.argv[2]:
+              raise SystemExit(f"signed record key digest {digest} != registered {sys.argv[2]}")
+          print("signed on-call record binds the registered operations-authority key")
+          PY
+
+      - name: Export signed on-call readiness artifact
+        shell: bash
+        env:
+          SIGNED: ${{ steps.sign.outputs.signed }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-oncall-readiness"
+          mkdir -p "$export_dir"
+          cp "$SIGNED" "$export_dir/oncall-readiness.signed.json"
+
+      - name: Upload signed on-call readiness artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: signed-oncall-readiness-${{ steps.request.outputs.short_sha }}
+          path: ${{ runner.temp }}/signed-oncall-readiness/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
