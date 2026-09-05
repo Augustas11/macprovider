@@ -171,112 +171,33 @@ PY
   chmod 600 "$TMP/home/Library/Application Support/macprovider/lifecycle/lease.json"
 }
 
+# F1 (RFC-001 #1382, SPEC-020 R-4.14): with no validated launchd PID the
+# watchdog MUST only observe — launchd KeepAlive is the single exit-restart
+# owner, so the watchdog no longer kickstarts a missing provider (this removes
+# the second, mutable exit-restart authority behind #1189).
 make_fake_common
 : > "$TMP/launchctl.log"
 run_watchdog
-grep -F 'kickstart -k gui/' "$TMP/launchctl.log" >/dev/null
-grep -F 'provider restart requested for live.malibu.provider via launchctl kickstart -k reason=missing_validated_pid' "$TMP/logs/watchdog.log" >/dev/null
+grep -F 'has no validated PID' "$TMP/logs/watchdog.log" >/dev/null
+grep -F 'watchdog does not kick' "$TMP/logs/watchdog.log" >/dev/null
+if grep -F 'kickstart' "$TMP/launchctl.log" >/dev/null; then
+  echo "missing validated PID must not trigger any watchdog kickstart (launchd KeepAlive owns exit-restart)" >&2
+  exit 1
+fi
 
+# The kickstart failure status is now irrelevant on the missing-PID path: the
+# watchdog never issues a kickstart there, so no restart is attempted.
 rm -rf "$TMP/bin" "$TMP/logs" "$TMP/launchctl.log" "$TMP/home/.local/share/macprovider-watchdog/state"
 make_fake_common
 WATCHDOG_TEST_KICKSTART_STATUS=73
 export WATCHDOG_TEST_KICKSTART_STATUS
 : > "$TMP/launchctl.log"
 run_watchdog
-grep -F 'provider restart request failed for live.malibu.provider via launchctl kickstart -k reason=missing_validated_pid exit_status=73' "$TMP/logs/watchdog.log" >/dev/null
-if [ -f "$TMP/home/.local/share/macprovider-watchdog/state/last_kick" ]; then
-  echo "failed kickstart must not consume restart cooldown" >&2
+if grep -F 'kickstart' "$TMP/launchctl.log" >/dev/null; then
+  echo "missing validated PID must not kick regardless of kickstart status" >&2
   exit 1
 fi
 unset WATCHDOG_TEST_KICKSTART_STATUS
-
-rm -rf "$TMP/bin" "$TMP/logs" "$TMP/launchctl.log" "$TMP/home/.local/share/macprovider-watchdog/state"
-make_fake_common
-MACPROVIDER_WATCHDOG_KICK_GRACE_SECONDS=nonnumeric
-export MACPROVIDER_WATCHDOG_KICK_GRACE_SECONDS
-: > "$TMP/launchctl.log"
-run_watchdog
-run_watchdog
-if [ "$(grep -c -F 'kickstart -k gui/' "$TMP/launchctl.log")" -ne 1 ]; then
-  echo "invalid cooldown override must fall back to bounded default" >&2
-  exit 1
-fi
-unset MACPROVIDER_WATCHDOG_KICK_GRACE_SECONDS
-
-if [ "$(uname -s)" != "Darwin" ]; then
-  echo "SKIP: Darwin-only lifecycle lease process-identity cases require libproc.dylib"
-  echo "watchdog health scope ok"
-  exit 0
-fi
-
-rm -rf "$TMP/bin" "$TMP/logs" "$TMP/launchctl.log" "$TMP/home/.local/share/macprovider-watchdog/state"
-make_fake_common
-WATCHDOG_TEST_BINARY_PATH="/bin/sleep"
-export WATCHDOG_TEST_BINARY_PATH
-/bin/sleep 300 &
-provider_owner_pid=$!
-/usr/bin/tail -f /dev/null &
-forged_owner_pid=$!
-WATCHDOG_TEST_LEASE_LOG="$TMP/lease.log"
-export WATCHDOG_TEST_LEASE_LOG
-MACPROVIDER_HEADLESS=1
-export MACPROVIDER_HEADLESS
-for lease_mode in startup maintenance; do
-  : > "$TMP/logs/watchdog.log"
-  : > "$TMP/launchctl.log"
-  : > "$TMP/lease.log"
-  WATCHDOG_TEST_LEASE_MODE="$lease_mode"
-  export WATCHDOG_TEST_LEASE_MODE
-  write_watchdog_lease "$lease_mode" "$provider_owner_pid"
-  run_watchdog
-  grep -F 'has no validated PID but is inside a validated startup/maintenance lease; watchdog grants bounded grace' "$TMP/logs/watchdog.log" >/dev/null
-  if [ -s "$TMP/lease.log" ]; then
-    echo "watchdog must not execute the provider binary to validate $lease_mode lease grace" >&2
-    exit 1
-  fi
-  if grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null; then
-    echo "valid $lease_mode lease must suppress missing-PID kickstart" >&2
-    exit 1
-  fi
-  rm -f "$TMP/home/Library/Application Support/macprovider/lifecycle/lease.json"
-done
-for lease_mode in startup maintenance; do
-  rm -rf "$TMP/home/.local/share/macprovider-watchdog/state"
-  : > "$TMP/logs/watchdog.log"
-  : > "$TMP/launchctl.log"
-  WATCHDOG_TEST_LEASE_MODE="$lease_mode"
-  export WATCHDOG_TEST_LEASE_MODE
-  write_watchdog_lease "$lease_mode" "$provider_owner_pid" valid 1
-  run_watchdog
-  if grep -F 'inside a validated startup/maintenance lease' "$TMP/logs/watchdog.log" >/dev/null; then
-    echo "stale process_start_us must not validate $lease_mode lease grace" >&2
-    exit 1
-  fi
-  grep -F 'kickstart -k gui/' "$TMP/launchctl.log" >/dev/null
-  rm -f "$TMP/home/Library/Application Support/macprovider/lifecycle/lease.json"
-done
-for lease_mode in startup maintenance; do
-  rm -rf "$TMP/home/.local/share/macprovider-watchdog/state"
-  : > "$TMP/logs/watchdog.log"
-  : > "$TMP/launchctl.log"
-  WATCHDOG_TEST_LEASE_MODE="$lease_mode"
-  export WATCHDOG_TEST_LEASE_MODE
-  write_watchdog_lease "$lease_mode" "$forged_owner_pid"
-  run_watchdog
-  if grep -F 'inside a validated startup/maintenance lease' "$TMP/logs/watchdog.log" >/dev/null; then
-    echo "foreign live PID must not validate $lease_mode lease grace" >&2
-    exit 1
-  fi
-  grep -F 'kickstart -k gui/' "$TMP/launchctl.log" >/dev/null
-  rm -f "$TMP/home/Library/Application Support/macprovider/lifecycle/lease.json"
-done
-kill "$provider_owner_pid"
-wait "$provider_owner_pid" >/dev/null 2>&1 || true
-provider_owner_pid=""
-kill "$forged_owner_pid"
-wait "$forged_owner_pid" >/dev/null 2>&1 || true
-forged_owner_pid=""
-unset WATCHDOG_TEST_LEASE_LOG WATCHDOG_TEST_LEASE_MODE MACPROVIDER_HEADLESS WATCHDOG_TEST_BINARY_PATH
 
 rm -rf "$TMP/bin" "$TMP/logs" "$TMP/launchctl.log" "$TMP/home/.local/share/macprovider-watchdog/state"
 make_fake_common
@@ -417,6 +338,19 @@ run_watchdog
 grep -F 'provider process 4242 failed local /v1/health after arming; requesting launchd restart' "$TMP/logs/watchdog.log" >/dev/null
 grep -F 'provider restart requested for live.malibu.provider via launchctl kickstart -k reason=local_health_failed_after_arming' "$TMP/logs/watchdog.log" >/dev/null
 unset WATCHDOG_TEST_HEALTH_STATUS WATCHDOG_TEST_STATUS_BODY
+
+# Darwin-only below: the lifecycle-lease process-identity cases use
+# /usr/lib/libproc.dylib (proc_pidinfo) via write_watchdog_lease, which is absent
+# on Linux CI runners. Everything above — observe-only missing-PID (J2 removed)
+# and the J1 health-wedge kick / pause / drain / malformed-status cases — is
+# platform-independent and has already run. (This guard was previously higher in
+# the file; the F1 rewrite of the missing-PID scenarios must keep it before the
+# libproc-dependent lease block.)
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "SKIP: Darwin-only lifecycle-lease process-identity cases require libproc.dylib"
+  echo "watchdog health scope ok"
+  exit 0
+fi
 
 rm -rf "$TMP/bin" "$TMP/logs" "$TMP/launchctl.log" "$TMP/home/.local/share/macprovider-watchdog/state"
 make_fake_common

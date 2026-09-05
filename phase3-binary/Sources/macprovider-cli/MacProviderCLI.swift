@@ -3215,24 +3215,63 @@ private func execCanonicalInstall(_ canonical: URL) throws -> Never {
     )
 }
 
+/// Ensures only the first SIGTERM/SIGINT drives shutdown. A second signal during
+/// the bounded drain must NOT re-evaluate the (already consumed, consume-once)
+/// stop-intent marker, which would reclassify a legitimate local stop as
+/// unsolicited and change the exit code.
+private final class TerminationLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var started = false
+    func beginIfFirst() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if started { return false }
+        started = true
+        return true
+    }
+}
+
 private func installTerminationHandlers(
     coordinatorClient: CoordinatorClient?,
     controlSocket: ControlSocketServer?,
     idlePrewarmer: IdlePrewarmer?,
     kvDiskTier: KVDiskTier?
 ) -> [DispatchSourceSignal] {
-    [SIGTERM, SIGINT].map { signalNumber in
+    let latch = TerminationLatch()
+    return [SIGTERM, SIGINT].map { signalNumber in
         signal(signalNumber, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global(qos: .userInitiated))
         source.setEventHandler {
             Task {
+                // Only the first signal decides and consumes the marker; a second
+                // signal during drain is ignored so it cannot reclassify the stop.
+                guard latch.beginIfFirst() else { return }
+                // SPEC-001 FR-12 / SPEC-020 R-4.14: decide the exit code BEFORE
+                // draining. `drainAndExit` calls Darwin.exit itself for the normal
+                // coordinator-joined provider, so the decision and the exit code
+                // must be computed up front and threaded through it — otherwise the
+                // gate is unreachable on the common path. Exit 0 only under a
+                // validated local stop intent (uninstall/operator-disable/local
+                // stop, which records a PID+boot+process-start-bound marker). An
+                // unsolicited SIGTERM/SIGINT — a stray kill or a macOS
+                // memory-pressure/jetsam SIGTERM while the launchd job is still
+                // loaded — exits nonzero so launchd KeepAlive{SuccessfulExit:false}
+                // relaunches the provider instead of leaving the node down
+                // (removing the watchdog exit-restart is safe only because of this).
+                // A coordinator drain drops registration only and never reaches here.
+                let exitCode: Int32 = StopIntentMarker.consumeIfValid(currentPID: getpid())
+                    ? 0
+                    : (128 + signalNumber)
                 await idlePrewarmer?.stop()
                 await controlSocket?.stop()
-                await coordinatorClient?.drainAndExit(reason: "\(signalName(signalNumber)) received")
+                await coordinatorClient?.drainAndExit(
+                    reason: "\(signalName(signalNumber)) received",
+                    exitCode: exitCode
+                )
                 // M-A: drain queued cold writes (bounded by shutdownDrainSeconds) and
                 // release the namespace lock BEFORE exit, on the signal path too.
+                // (Reached only when there is no coordinator client, e.g. --no-join.)
                 await kvDiskTier?.shutdown()
-                Darwin.exit(0)
+                Darwin.exit(exitCode)
             }
         }
         source.resume()
