@@ -2218,6 +2218,12 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        // SPEC-025 §5.2: the streaming path runs preflight (prompt prepare inside
+        // container.perform — real model-thread work) before stream() brackets
+        // active inference. Bracket it here too so a pre-first-token wedge during
+        // preflight is observable (active_inference true) rather than reading idle.
+        ModelLivenessTracker.shared.beginInference()
+        defer { ModelLivenessTracker.shared.endInference() }
         try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try handle.drainCancelled.check()
@@ -2346,6 +2352,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     BlockingGenerateResult(generate(input: lmInput, context: context, iterator: iterator) { tokens in
                         if !tokens.isEmpty {
                             firstToken.recordIfMissing()
+                            ModelLivenessTracker.shared.recordProgress()
                         }
                         if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() {
                             cancellation.record()
@@ -2387,6 +2394,10 @@ actor ModelRuntime: ModelRuntimeServing {
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        // SPEC-025 §5.2 model-liveness: mark active buyer inference so a stalled
+        // progress token is interpretable as a wedge (observability only).
+        ModelLivenessTracker.shared.beginInference()
+        defer { ModelLivenessTracker.shared.endInference() }
         let completionStartedAt = Date()
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
@@ -2535,6 +2546,7 @@ actor ModelRuntime: ModelRuntimeServing {
                                 BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                     if !tokens.isEmpty {
                                         firstToken.recordIfMissing()
+                                        ModelLivenessTracker.shared.recordProgress()
                                     }
                                     if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired {
                                         return GenerateDisposition.stop
@@ -2762,6 +2774,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             break
                         }
                         firstToken.recordIfMissing()
+                        ModelLivenessTracker.shared.recordProgress()
                         tokenIDs.append(token)
                         detokenizer.append(token: token)
                         if let chunk = detokenizer.next() {
@@ -2819,6 +2832,10 @@ actor ModelRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
+        // SPEC-025 §5.2 model-liveness: mark active buyer inference so a stalled
+        // progress token is interpretable as a wedge (observability only).
+        ModelLivenessTracker.shared.beginInference()
+        defer { ModelLivenessTracker.shared.endInference() }
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
         try applyContinuousBatchingPolicy(request: request, snapshot: snapshot, emitTelemetry: false)
@@ -3100,6 +3117,7 @@ actor ModelRuntime: ModelRuntimeServing {
                                 // guards elsewhere in this file.
                                 if !tokens.isEmpty {
                                     decodeTimer.recordIfMissing()
+                                    ModelLivenessTracker.shared.recordProgress()
                                 }
                                 if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
                                     return .stop

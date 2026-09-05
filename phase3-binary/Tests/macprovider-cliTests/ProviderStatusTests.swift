@@ -60,6 +60,28 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertFalse(String(describing: body).contains("provider_token"))
     }
 
+    func testStatusResponseSurfacesModelLivenessTokenAndCapability() async throws {
+        // SPEC-025 §5.2: /v1/status exposes the model_liveness object and advertises
+        // model_liveness_token_v1. Assert structure/types (the shared tracker's
+        // numeric values are process-global and not fixed across tests).
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let snap = await status.snapshot()
+        let body = RouterHandler.statusResponse(snap, providerID: "provider-a", coordinatorURL: nil)
+
+        let contract = try XCTUnwrap(body["local_status_contract"] as? [String: Any])
+        let capabilities = try XCTUnwrap(contract["capabilities"] as? [String])
+        XCTAssertTrue(capabilities.contains("model_liveness_token_v1"))
+
+        let liveness = try XCTUnwrap(body["model_liveness"] as? [String: Any])
+        XCTAssertNotNil(liveness["token"] as? NSNumber, "token must be a number")
+        XCTAssertNotNil(liveness["active_inference"] as? Bool, "active_inference must be a bool")
+        // Age fields and last_advanced_at are present but may be JSON null before
+        // any progress; assert the keys exist.
+        XCTAssertTrue(liveness.keys.contains("token_age_ms"))
+        XCTAssertTrue(liveness.keys.contains("active_inference_age_ms"))
+        XCTAssertTrue(liveness.keys.contains("last_advanced_at"))
+    }
+
     func testStatusResponsePublishesVersionedLocalCapabilityContract() async throws {
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
         let snapshot = await status.snapshot()
