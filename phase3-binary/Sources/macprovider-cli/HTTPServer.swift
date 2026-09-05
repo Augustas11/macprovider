@@ -226,6 +226,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "lifecycle_lease_v1",
         "legacy_reader_fallback_v1",
         "service_instance_v1",
+        "model_liveness_token_v1",
         "status_observation_v1",
         "provider_safety_telemetry_v1",
         "referral_bootstrap_v1",
@@ -1531,6 +1532,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     ) -> [String: Any] {
         let observedAt = Date()
         let observationID = UUID().uuidString.lowercased()
+        // SPEC-025 §5.2 (capability model_liveness_token_v1): read the last-published
+        // model-thread progress values without blocking on the model thread.
+        let modelLiveness = ModelLivenessTracker.shared.snapshot()
         let effectiveModelID = runtimeSnapshot?.modelID ?? snapshot.modelID
         let effectiveModelLoaded = runtimeSnapshot.map { $0.container != nil || $0.modelID != nil } ?? snapshot.modelLoaded
         var body: [String: Any] = [
@@ -1554,6 +1558,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "boot_session": jsonNullable(serviceBootSession),
                 "started_at": iso8601(serviceStartedAt),
                 "role": "serve",
+            ],
+            // SPEC-025 §5.2: model-thread liveness (observability only; no
+            // buyer-serving authority). token advances on model forward progress;
+            // ages use a monotonic clock; token resets per service_instance.
+            "model_liveness": [
+                "token": NSNumber(value: modelLiveness.token),
+                "token_age_ms": nullableNumber(modelLiveness.tokenAgeMs.map(Double.init)),
+                "active_inference": modelLiveness.activeInference,
+                "active_inference_age_ms": nullableNumber(modelLiveness.activeInferenceAgeMs.map(Double.init)),
+                "last_advanced_at": jsonNullable(modelLiveness.lastAdvancedAt.map { iso8601($0) }),
             ],
             "lifecycle": lifecycleStateStatus(lifecycleStateInspection),
             "lifecycle_lease": lifecycleLeaseStatus(lifecycleLeaseInspection),
