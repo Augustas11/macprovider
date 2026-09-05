@@ -91,6 +91,37 @@ if bad:
     raise SystemExit("hardcoded GUI launchd reference in watchdog script:\n" + "\n".join(bad))
 PY
 
+# RFC-001 F3 (#1384): the static check above rejects a hardcoded gui/ target;
+# this RUNTIME check exercises the deployed watchdog's launchd target selection
+# to prove it is domain-aware — system/<label> under MACPROVIDER_LAUNCHD_DOMAIN=
+# system (headless_fleet), gui/<uid>/<label> otherwise (consumer_user).
+ADAPTER_SNIPPET="$TMP/watchdog-launchd-adapter.sh"
+python3 - "$INSTALL_SH" "$ADAPTER_SNIPPET" <<'PY'
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+marker = "write_atomic_install_file \"$WATCHDOG_PATH\" 0755 <<'WATCHDOG_EOF'"
+start = text.index(marker) + len(marker)
+end = text.index("\nWATCHDOG_EOF", start)
+watchdog = text[start:end]
+begin = watchdog.index('LAUNCHD_DOMAIN="${MACPROVIDER_LAUNCHD_DOMAIN')
+fn = watchdog.index("launchd_service_target()", begin)
+close = watchdog.index("\n}", fn) + 2
+open(sys.argv[2], "w", encoding="utf-8").write(watchdog[begin:close] + "\n")
+PY
+
+consumer_target="$(unset MACPROVIDER_LAUNCHD_DOMAIN; LABEL=live.malibu.provider; . "$ADAPTER_SNIPPET"; launchd_service_target)"
+if [ "$consumer_target" != "gui/$(id -u)/live.malibu.provider" ]; then
+  echo "consumer_user watchdog target is not GUI-domain: $consumer_target" >&2
+  exit 1
+fi
+system_target="$(MACPROVIDER_LAUNCHD_DOMAIN=system; LABEL=live.malibu.provider; . "$ADAPTER_SNIPPET"; launchd_service_target)"
+if [ "$system_target" != "system/live.malibu.provider" ]; then
+  echo "headless_fleet watchdog target is not system-domain: $system_target" >&2
+  exit 1
+fi
+echo "[install-headless-fleet-test] watchdog launchd target is domain-aware (consumer=$consumer_target headless=$system_target)"
+
 mkdir -p "$TMP/bin" "$TMP/home/.config/macprovider/launchd" "$TMP/system" "$TMP/users/other/Library/LaunchAgents"
 
 cat > "$TMP/bin/sudo" <<'EOF'
