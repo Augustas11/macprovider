@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.16
+Version: v0.1.17
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -907,6 +907,56 @@ rollback; it only changes eligibility diversion, the reported reason, and failur
 accounting. A proven consumer topology continues on the normal path; a genuinely
 unrecognized topology still fails closed as `unsupported_install_topology`.
 
+R-4.14. The companion watchdog MUST NOT restart the provider on process exit or
+on a missing/unvalidated launchd PID. Exit and crash restart of the provider
+service is owned solely by the launchd **provider service** `KeepAlive`, the
+single exit-restart owner: `consumer_user` uses `KeepAlive{SuccessfulExit:false}`
+plus `ThrottleInterval` (restarting **crash/nonzero** exits), and `headless_fleet`
+uses `KeepAlive{true}`. Because `KeepAlive{SuccessfulExit:false}` does not restart
+a clean (exit 0) termination, a `consumer_user` serve process MUST reach exit 0
+only under a validated **local** stop intent (uninstall, launchd/operator-disable,
+or a local `stop`/maintenance transaction — SPEC-001 FR-12); an unsolicited
+SIGTERM/SIGINT with no such stop intent (a stray or memory-pressure/jetsam
+SIGTERM) MUST exit **nonzero** so launchd restarts it. A coordinator `drain`
+message is registration-only and never causes process exit, so it is not a stop
+intent. This leaves no accidental clean-exit gap when the watchdog exit-restart is
+removed.
+
+The watchdog's only permitted mutating action is its existing bounded,
+current-boot-gated **wedge** restart (unchanged by this version): a
+`launchctl kickstart` only after current-boot local health has been observed, a
+later local `/v1/health` failure is paired with a restart-worthy `/v1/status`
+state, it is outside cooldown, the provider is not operator-paused, and no valid
+startup/maintenance lifecycle lease grants grace. Consuming the SPEC-025 §5.2
+`model_liveness_token_v1` to additionally catch the listener-alive/model-dead
+wedge — and a domain-aware wedge target for headless/system-domain (RFC-001 F3) —
+are deferred follow-ups that must first define the stall threshold and its owner,
+a persisted operator-pause signal readable without the HTTP surface, and the
+pre-first-token / process-wide hard-freeze cases before they may authorize a
+restart.
+
+Beyond its own boot-arm and cooldown markers the watchdog MUST NOT write,
+restore, rename, or delete any provider **or supervisor** artifact — provider
+binary, resources, config, or plist, or the watchdog script, its
+plist/LaunchAgent/LaunchDaemon, or any current or legacy supervisor label
+(including `live.streamvc.macprovider-watchdog`) — MUST be installer-owned and
+non-self-restoring (RFC-001 §5.1), and MUST NOT own or perform update or rollback
+(R-4.4, R-4.5). This makes launchd the single exit-restart owner and removes the
+second, mutable exit-restart authority whose stale form caused the #1189
+stranding (the removed code path is the CLI watchdog `missing_validated_pid`
+kickstart). For the avoidance of doubt this supersedes any residual wording (e.g.
+SPEC-026) that the companion watchdog "force-restarts" the provider during
+auto-update rollback recovery: rollback authority was removed in v0.1.13 and the
+watchdog performs no rollback-driven restart.
+
+Headless liveness is separate from headless updates: **headless system-domain
+autoupdate and rollback remain gated by R-4.13's reserved boundary**, while
+**headless system-domain wedge/liveness restart is governed by SPEC-026** and,
+once RFC-001 follow-up F3 lands, MUST target the correct launchd domain
+(`system/live.malibu.provider`) rather than a hardcoded GUI-domain service.
+Headless liveness supervision MUST NOT be deferred merely because headless
+autoupdate is unsupported.
+
 ### R-5. Opt-out
 
 R-5.1. Autoupdate is enabled by default in v0.1.0.
@@ -1452,6 +1502,22 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.17 (2026-09-05): Added R-4.14 fencing provider exit-restart to the
+  launchd provider-service `KeepAlive` as the single exit-restart owner; the
+  companion watchdog is now normatively wedge-restart-only and MUST NOT restart
+  on process exit or a missing/unvalidated launchd PID, nor mutate provider or
+  supervisor artifacts, and MUST be installer-owned/non-self-restoring. To close
+  the clean-exit gap that removing the watchdog exit-restart would otherwise open,
+  a `consumer_user` serve process reaches exit 0 only under a validated stop
+  intent; an unsolicited SIGTERM/SIGINT exits nonzero so launchd restarts it
+  (SPEC-001 FR-12). The existing wedge predicate is unchanged; consuming the new
+  SPEC-025 §5.2 `model_liveness_token_v1` in the wedge-prober restart decision and
+  a domain-aware headless wedge target (RFC-001 F3) are deferred follow-ups.
+  Explicitly supersedes stale SPEC-026 wording that the watchdog "force-restarts"
+  during rollback (rollback authority was removed in v0.1.13). Locks in RFC-001
+  §5.1/§3 (#1203 / follow-ups #1382/#1383) and removes the second, mutable
+  exit-restart authority behind #1189. No existing requirement weakened; behavior
+  lands via the cited code follow-ups.
 - v0.1.16 (2026-09-02): Consumer and R005 autoupdate paths now divert a
   recognized `headless_fleet` / system-domain provider to the actionable terminal
   skip `reason:"headless_operator_update_required"` (`outcome:"skipped"`) before

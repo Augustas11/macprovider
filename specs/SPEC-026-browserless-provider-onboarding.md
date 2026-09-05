@@ -1,6 +1,14 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.28 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.29 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.29 (2026-09-05, watchdog rollback/exit-restart wording reconciled
+— RFC-001 F1, #1203).** Removes the stale §2.1.1 grounding claim that the
+companion watchdog "force-restarts the provider service during auto-update
+rollback recovery." Per SPEC-020 v0.1.13 / R-4.14 the watchdog performs no
+rollback-driven restart and no exit-restart; its only mutating action is the
+current-boot-gated wedge kickstart, and launchd `KeepAlive` owns exit-restart.
+Docs/normative-wording reconciliation only; no headless behavior change.
 
 **Change log v0.28 (2026-08-26, headless root watchdog custody boundary).**
 `headless_fleet` keeps provider execution and all provider credentials bound to
@@ -1131,9 +1139,12 @@ and without entering a wallet address unless they want to.
   child with `MACPROVIDER_PROVIDER_TOKEN`; the launchd **provider service**
   `live.malibu.provider` (KeepAlive) runs AND performs routine restarts of the CLI; a
   separate companion watchdog `live.malibu.provider-watchdog` only health-observes on
-  routine ticks (its restart request is a no-op — `install.sh:3575`), except it force-restarts
-  the provider service during auto-update rollback recovery (`install.sh:4086,4113`; SPEC-025
-  §8) — both installed by `install.sh` — and the app monitors it over HTTP (SPEC-025 §5).
+  routine ticks (its routine restart request is a no-op — `install.sh:3575`) and, per
+  SPEC-020 v0.1.13 / R-4.14, performs **no** rollback-driven restart and **no**
+  exit-restart — its only mutating action is the current-boot-gated wedge kickstart, while
+  launchd `KeepAlive` owns exit-restart (the earlier "force-restarts during rollback
+  recovery" wording is superseded) — both installed by `install.sh` — and the app
+  monitors it over HTTP (SPEC-025 §5).
 - Landing page marketing copy at `/Users/augstar/projects/malibu/host/index.html`
   promises "One line in your terminal. … Your Mac picks up jobs
   whenever it's idle and online." This spec makes the App track
@@ -1162,7 +1173,9 @@ ordinary installation.
 
 #### 2.1.1 System-domain lifecycle
 
-`headless_fleet` MUST install the canonical provider and rollback observer as
+`headless_fleet` MUST install the canonical provider and its companion liveness
+watchdog (per SPEC-020 R-4.13/R-4.14 the watchdog is a liveness monitor only —
+not a rollback observer; the rollback observer is CLI startup recovery, R-4.4) as
 `/Library/LaunchDaemons/live.malibu.provider.plist` and
 `/Library/LaunchDaemons/live.malibu.provider-watchdog.plist`, bootstrap them as
 `system/live.malibu.provider` and
