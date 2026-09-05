@@ -82,7 +82,7 @@ SELECT last_seq, restarts_total, prev_restarts_total, last_restart_seq, flaps_to
 			Kind: "restart", Seq: seq, SupervisorLabel: "provider-watchdog", SupervisorVersion: "1.0",
 			RestartsTotal: restarts, LastRestartSeq: restartSeq, LastRestartTS: at.Format(time.RFC3339),
 			LastRestartCooldown: "armed", LastRestartInstance: oldInstance,
-			CurrentServiceInstance: current, ObservedAt: at, DwellThreshold: time.Second,
+			CurrentServiceInstance: current, ServingEligible: true, ObservedAt: at, DwellThreshold: time.Second,
 		}
 	}
 
@@ -98,7 +98,8 @@ SELECT last_seq, restarts_total, prev_restarts_total, last_restart_seq, flaps_to
 		ProviderID: "prov-1", BootID: "BOOT-A", Schema: "macprovider.supervisor-event.v1",
 		Kind: "beacon", Seq: 2, SupervisorLabel: "provider-watchdog", SupervisorVersion: "1.0",
 		RestartsTotal: 1, LastRestartSeq: 1, LastRestartInstance: "inst-A",
-		CurrentServiceInstance: "inst-B", ObservedAt: t0.Add(2 * time.Second), DwellThreshold: time.Second,
+		CurrentServiceInstance: "inst-B", ServingEligible: true,
+		ObservedAt: t0.Add(2 * time.Second), DwellThreshold: time.Second,
 	}
 	if err := store.RecordSupervisorEvent(ctx, held); err != nil {
 		t.Fatalf("record held: %v", err)
@@ -116,6 +117,30 @@ SELECT last_seq, restarts_total, prev_restarts_total, last_restart_seq, flaps_to
 	}
 	if r := read("prov-2", "BOOT-B"); r.flaps != 1 || r.dwellState != "correlated_pending" || r.restarts != 2 || r.lastRestartSeq != 2 {
 		t.Fatalf("after flap: %+v", r)
+	}
+
+	// --- artifact_confounded: an artifact-write autoupdate event in the restart
+	// window makes the recovery non-clean (not held/flap).
+	if err := store.RecordSupervisorEvent(ctx, restart("prov-3", "BOOT-C", 1, 1, 1, "inst-A", "inst-A", t0)); err != nil {
+		t.Fatalf("record p3 r1: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO provider_autoupdate_events (provider_id, observed_at, phase, outcome)
+VALUES ('prov-3', $1, 'swap', 'success')`, t0.Add(300*time.Millisecond)); err != nil {
+		t.Fatalf("insert autoupdate event: %v", err)
+	}
+	confound := SupervisorEventRecord{
+		ProviderID: "prov-3", BootID: "BOOT-C", Schema: "macprovider.supervisor-event.v1",
+		Kind: "beacon", Seq: 2, SupervisorLabel: "provider-watchdog", SupervisorVersion: "1.0",
+		RestartsTotal: 1, LastRestartSeq: 1, LastRestartInstance: "inst-A",
+		CurrentServiceInstance: "inst-B", ServingEligible: true,
+		ObservedAt: t0.Add(2 * time.Second), DwellThreshold: time.Second,
+	}
+	if err := store.RecordSupervisorEvent(ctx, confound); err != nil {
+		t.Fatalf("record confound: %v", err)
+	}
+	if r := read("prov-3", "BOOT-C"); r.dwellState != "artifact_confounded" {
+		t.Fatalf("expected artifact_confounded, got: %+v", r)
 	}
 
 	// --- stale seq is a full no-op.

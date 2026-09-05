@@ -106,6 +106,39 @@ final class SupervisorBeaconReaderTests: XCTestCase {
         XCTAssertNil(SupervisorBeaconReader.lastWireObject(url: beacon, currentBootSession: "BOOT-A"))
     }
 
+    /// Fail-safe: an out-of-range/non-finite numeric field must resolve to nil,
+    /// never TRAP while building the heartbeat.
+    func testOversizedNumericFieldFailsClosed() throws {
+        // seq far beyond UInt64.max (and an over-range model_liveness age).
+        let raw = """
+        {"schema":"macprovider.supervisor-event.v1","kind":"beacon","boot_id":"BOOT-A",\
+        "seq":1e400,"supervisor_label":"provider-watchdog","supervisor_version":"1.0",\
+        "restarts_total":0,"deferrals_total":0,"last_restart":null,"last_deferral":null}
+        """
+        try Data(raw.utf8).write(to: beacon)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: beacon.path)
+        // seq is required; an unparseable seq drops the whole beacon to nil.
+        XCTAssertNil(SupervisorBeaconReader.lastWireObject(url: beacon, currentBootSession: "BOOT-A"))
+    }
+
+    func testOversizedModelLivenessAgeFailsClosedToNull() throws {
+        // A large but FINITE number (1e30) is valid JSON yet overflows UInt64:
+        // the field must project to null (not trap, not drop the whole beacon).
+        let raw = """
+        {"schema":"macprovider.supervisor-event.v1","kind":"restart","boot_id":"BOOT-A","seq":3,\
+        "supervisor_label":"provider-watchdog","supervisor_version":"1.0","restarts_total":1,"deferrals_total":0,\
+        "last_restart":{"seq":3,"ts":"t","reason":"wedge","cooldown_state":"armed","service_instance":"old",\
+        "model_liveness":{"token_age_ms":1e30,"active_inference":true,"active_inference_age_ms":5}},"last_deferral":null}
+        """
+        try Data(raw.utf8).write(to: beacon)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: beacon.path)
+        let out = try XCTUnwrap(SupervisorBeaconReader.lastWireObject(url: beacon, currentBootSession: "BOOT-A"))
+        let lrOut = try XCTUnwrap(out["last_restart"] as? [String: Any])
+        let ml = try XCTUnwrap(lrOut["model_liveness"] as? [String: Any])
+        XCTAssertTrue(ml["token_age_ms"] is NSNull, "out-of-range token_age_ms must project to null, not crash")
+        XCTAssertEqual(ml["active_inference_age_ms"] as? UInt64, 5)
+    }
+
     func testBeaconKindHasNullRestart() throws {
         let obj: [String: Any] = [
             "schema": "macprovider.supervisor-event.v1",

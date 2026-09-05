@@ -119,3 +119,24 @@ func TestHeartbeatMalformedSupervisorEventDoesNotReject(t *testing.T) {
 		t.Fatalf("supervisor calls = %d, want 0 (malformed dropped)", len(calls))
 	}
 }
+
+// Coordinator-side validation: a well-formed JSON object with the WRONG schema
+// is dropped (not persisted) while the heartbeat is still accepted — the
+// coordinator does not trust a modified provider blindly.
+func TestHeartbeatWrongSchemaSupervisorEventDropped(t *testing.T) {
+	t.Parallel()
+	registry := pool.NewRegistry(nil)
+	sink := &fakeSupervisorEventSink{doneCh: make(chan struct{}, 1)}
+	server := NewServer(capacityTestConfig(0), registry, zerolog.Nop(),
+		WithSupervisorEventSink(sink))
+	server.supervisorEventSlots = make(chan struct{}, 2)
+	registerCapacityTestProvider(t, server, registry, 4)
+
+	badSchema := `{"schema":"evil.v9","kind":"restart","boot_id":"BOOT-A","seq":3,"supervisor_label":"provider-watchdog","supervisor_version":"1.0","restarts_total":1,"deferrals_total":0,"last_restart":null,"last_deferral":null}`
+	server.handleHeartbeat(nil, "provider-a", "assigned-a", supervisorHeartbeatPayload(badSchema, "new-inst"))
+
+	time.Sleep(50 * time.Millisecond)
+	if calls := sink.snapshot(); len(calls) != 0 {
+		t.Fatalf("supervisor calls = %d, want 0 (wrong schema dropped by coordinator validator)", len(calls))
+	}
+}

@@ -510,13 +510,34 @@ _beacon_json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'
 }
 
+# Atomically replace a small beacon state file from stdin (temp+rename within
+# STATE_DIR), so a partial/interrupted write can never leave a truncated sidecar
+# that would poison later beacon JSON.
+_beacon_atomic_write() {
+  _bw_tmp="$(mktemp "${STATE_DIR}/.beacon-state.XXXXXX" 2>/dev/null)" || return 1
+  if cat > "$_bw_tmp" 2>/dev/null; then
+    mv -f "$_bw_tmp" "$1" 2>/dev/null || { rm -f "$_bw_tmp" 2>/dev/null; return 1; }
+  else
+    rm -f "$_bw_tmp" 2>/dev/null
+    return 1
+  fi
+}
+
 # Populate SUP_* from /v1/status of the provider about to be kicked. Best-effort:
 # on any failure the fields stay empty and the restart beacon emits them as null
 # (spec-conformant). Only service_instance is required for dwell correlation.
 capture_supervisor_status_fields() {
   SUP_INSTANCE=""; SUP_TOKEN_AGE=""; SUP_ACTIVE_INF=""; SUP_ACTIVE_INF_AGE=""
+  capture_pid="${1:-}"
   port="$(read_config_port || true)"
   case "$port" in ''|*[!0-9]*) return 0 ;; esac
+  # Re-confirm the local listener is still owned by the validated provider PID
+  # before trusting /v1/status: otherwise, if the provider lost the listener and
+  # another same-host process answered on the port, we could copy a foreign
+  # service_instance.instance_id into the beacon.
+  if [ -n "$capture_pid" ] && ! local_health_listener_owned_by_provider "$capture_pid" "$port"; then
+    return 0
+  fi
   curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
   body="$("$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/status" 2>/dev/null)" || return 0
   fields="$(STATUS_BODY="$body" python3 <<'PY' 2>/dev/null || true
@@ -570,7 +591,6 @@ emit_supervisor_beacon() {
 
   cur_boot="$(current_boot_id)"
   [ -n "$cur_boot" ] || return 0
-  BEACON_EMITTED=1
 
   stored_boot="$(cat "$BEACON_BOOT_FILE" 2>/dev/null || printf '')"
   if [ "$stored_boot" != "$cur_boot" ]; then
@@ -590,14 +610,14 @@ emit_supervisor_beacon() {
     restart)
       restarts=$(( restarts + 1 ))
       case "$cooldown_state" in armed|cooldown_active) : ;; *) cooldown_state='armed' ;; esac
-      # Record sticky last_restart: seq \t ts \t cooldown \t instance \t model_liveness_json
+      # Record sticky last_restart atomically: seq \t ts \t cooldown \t instance \t model_liveness_json
       printf '%s\t%s\t%s\t%s\t%s' \
         "$seq" "$now_ts" "$cooldown_state" "$SUP_INSTANCE" "$(_beacon_model_liveness_json)" \
-        > "$BEACON_LAST_RESTART_FILE" 2>/dev/null || true
+        | _beacon_atomic_write "$BEACON_LAST_RESTART_FILE" || true
       ;;
     deferral)
       deferrals=$(( deferrals + 1 ))
-      printf '%s\t%s' "$seq" "$now_ts" > "$BEACON_LAST_DEFERRAL_FILE" 2>/dev/null || true
+      printf '%s\t%s' "$seq" "$now_ts" | _beacon_atomic_write "$BEACON_LAST_DEFERRAL_FILE" || true
       ;;
     beacon) : ;;
     *) return 0 ;;
@@ -614,7 +634,13 @@ emit_supervisor_beacon() {
     case "${lr_seq:-}" in ''|*[!0-9]*) lr_seq='' ;; esac
     if [ -n "$lr_seq" ]; then
       case "${lr_cooldown:-}" in armed|cooldown_active) : ;; *) lr_cooldown='armed' ;; esac
-      case "${lr_ml:-}" in ''|null) lr_ml='null' ;; esac
+      # Accept only a well-formed object or null; a truncated/garbled sidecar
+      # (e.g. from a partial write on a pre-atomic-write file) falls back to null
+      # so it can never make the whole beacon JSON malformed.
+      case "${lr_ml:-}" in
+        '{'*'}') : ;;
+        *) lr_ml='null' ;;
+      esac
       if [ -n "${lr_instance:-}" ]; then
         lr_instance_json="\"$(_beacon_json_escape "$lr_instance")\""
       else
@@ -641,6 +667,15 @@ emit_supervisor_beacon() {
   tmp="$(mktemp "${STATE_DIR}/.supervisor-beacon.XXXXXX" 2>/dev/null)" || return 0
   if printf '%s\n' "$beacon_json" > "$tmp" 2>/dev/null; then
     chmod 600 "$tmp" 2>/dev/null || true
+    # Headless installs run the watchdog as a root LaunchDaemon but the provider
+    # (and its CLI reader) as MACPROVIDER_HEADLESS_USER. The reader requires the
+    # beacon be owned by its own uid, so hand ownership to that user; otherwise
+    # F5 telemetry would be silently absent for the headless fleet. In the
+    # consumer (GUI) topology MACPROVIDER_HEADLESS_USER is unset and the beacon
+    # stays watchdog-uid-owned (== provider uid), so no chown happens.
+    if [ -n "${MACPROVIDER_HEADLESS_USER:-}" ]; then
+      chown "$MACPROVIDER_HEADLESS_USER" "$tmp" 2>/dev/null || true
+    fi
     sync 2>/dev/null || true
     mv -f "$tmp" "$BEACON_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
   else
@@ -655,7 +690,9 @@ autoupdate_recovery_tick() {
     return 0
   fi
   log "autoupdate recovery deferred: pending marker exists; transaction owner must resolve update/rollback state"
-  emit_supervisor_beacon deferral || true
+  # Record the intended kind; main() emits exactly one beacon per tick (a restart
+  # this tick, if any, takes priority over a deferral).
+  TICK_DEFERRAL=1
 }
 
 autoupdate_recovery_supported() {
@@ -713,9 +750,9 @@ run_tick() {
     # Capture the OLD instance's /v1/status (service_instance + model_liveness)
     # BEFORE the kick so the coordinator can correlate the restart with the new
     # post-restart instance (SPEC-025 §5.4). Observability-only.
-    capture_supervisor_status_fields || true
+    capture_supervisor_status_fields "$provider_pid" || true
     if kickstart_provider "local_health_failed_after_arming"; then
-      emit_supervisor_beacon restart armed || true
+      TICK_RESTART=1
     fi
     return 0
   fi
@@ -745,15 +782,20 @@ run_tick() {
 }
 
 main() {
-  # SPEC-025 §5.4: emit exactly one supervisor beacon per tick. A restart or
-  # deferral writes its own (kind=restart|deferral) with advanced counters; any
-  # other tick that saw an installed provider writes a topology kind=beacon so
+  # SPEC-025 §5.4: emit EXACTLY ONE supervisor beacon per tick. run_tick records
+  # at most one intended action (restart takes priority over deferral); any tick
+  # that saw an installed provider otherwise writes a topology kind=beacon so
   # seq/counters stay fresh. Telemetry is best-effort and never gates the tick.
-  BEACON_EMITTED=0
   PROVIDER_ID_SEEN=0
+  TICK_RESTART=0
+  TICK_DEFERRAL=0
   rc=0
   run_tick || rc=$?
-  if [ "$BEACON_EMITTED" = 0 ] && [ "$PROVIDER_ID_SEEN" = 1 ]; then
+  if [ "$TICK_RESTART" = 1 ]; then
+    emit_supervisor_beacon restart armed || true
+  elif [ "$TICK_DEFERRAL" = 1 ]; then
+    emit_supervisor_beacon deferral || true
+  elif [ "$PROVIDER_ID_SEEN" = 1 ]; then
     emit_supervisor_beacon beacon || true
   fi
   exit "$rc"

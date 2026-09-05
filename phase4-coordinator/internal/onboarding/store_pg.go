@@ -599,6 +599,11 @@ type SupervisorEventRecord struct {
 	// old targeted instance for the full dwell threshold (SPEC-025 §5.4
 	// correlation rule); "" leaves correlation unproven.
 	CurrentServiceInstance string
+	// ServingEligible is the coordinator's own pool-view verdict that the provider
+	// is serving-eligible (ready/busy) at this observation. A restart is promoted
+	// to "held" only from serving-eligible observations, so a degraded/draining
+	// frame can never accrue a false recovery-held signal (SPEC-025 §5.4 dwell).
+	ServingEligible bool
 	// DwellThreshold is the coordinator-owned sustained-serving window used to
 	// finalize a prior restart as held vs flap. Zero falls back to the default.
 	DwellThreshold time.Duration
@@ -609,6 +614,16 @@ type SupervisorEventRecord struct {
 // Below it, a subsequent restart is a flap. This is an implementation constant
 // (SPEC-025 §5.4 leaves the concrete value to the coordinator).
 const DefaultSupervisorDwellThreshold = 5 * time.Minute
+
+// maxSupervisorSeqStep / maxSupervisorCounterStep bound how far a single beacon
+// may advance seq or a counter beyond the stored high-water within a boot. A
+// legitimate watchdog advances seq once per tick and counters by one per event,
+// so these are generous; a beacon exceeding them is a forged/corrupt jump and is
+// quarantined rather than adopted as the new high-water (anti-pinning).
+const (
+	maxSupervisorSeqStep     = int64(100_000)
+	maxSupervisorCounterStep = int64(100_000)
+)
 
 // RecordSupervisorEvent upserts the ONE row per (provider_id, boot_id) supervisor
 // telemetry state, ordered by `seq` alone (latest-wins; provider timestamps never
@@ -628,7 +643,12 @@ func (s *PGStore) RecordSupervisorEvent(ctx context.Context, rec SupervisorEvent
 	if providerID == "" || bootID == "" {
 		return errors.New("supervisor event provider_id and boot_id are required")
 	}
-	if rec.Seq <= 0 {
+	// Defense in depth (the ws ingest validator is the first gate): never store a
+	// non-positive/negative-counter/inconsistent beacon. A nested action seq must
+	// not exceed the top seq. Drop non-blockingly.
+	if rec.Seq <= 0 || rec.RestartsTotal < 0 || rec.DeferralsTotal < 0 ||
+		rec.LastRestartSeq < 0 || rec.LastRestartSeq > rec.Seq ||
+		rec.LastDeferralSeq < 0 || rec.LastDeferralSeq > rec.Seq {
 		return nil
 	}
 	threshold := rec.DwellThreshold
@@ -684,6 +704,15 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 		if rec.RestartsTotal < exRestarts || rec.DeferralsTotal < exDeferral {
 			return tx.Commit()
 		}
+		// Per-boot sanity ceiling: a forged/corrupt beacon that jumps seq or a
+		// counter absurdly far beyond the stored high-water is quarantined
+		// (not adopted), so it cannot pin the row and blind later legitimate
+		// telemetry for the boot.
+		if rec.Seq-exLastSeq > maxSupervisorSeqStep ||
+			rec.RestartsTotal-exRestarts > maxSupervisorCounterStep ||
+			rec.DeferralsTotal-exDeferral > maxSupervisorCounterStep {
+			return tx.Commit()
+		}
 	}
 
 	modelLiveness := sql.NullString{}
@@ -715,15 +744,23 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 	newRestartObserved := rec.LastRestartSeq > 0 && rec.LastRestartSeq > exLastRestartSeq
 	if newRestartObserved {
 		// Finalize the PRIOR restart, if one was pending correlation.
-		if exStored && exDwellState == supervisorDwellPending && exRestartObserved.Valid {
-			if observedAt.Sub(exRestartObserved.Time.UTC()) < threshold {
-				// Prior instance never cleared the dwell threshold before this
-				// next restart: a flap.
+		if exStored && exDwellState == supervisorDwellPending && exRestartObserved.Valid &&
+			observedAt.Sub(exRestartObserved.Time.UTC()) < threshold {
+			// The prior instance never cleared the dwell threshold before this next
+			// restart. Distinguish a genuine supervisor flap from an
+			// update/rollback-confounded window: if an artifact-write event landed
+			// in the prior restart's window, it was update-related, NOT a wedge flap.
+			confounded, err := supervisorArtifactWriteInWindow(ctx, tx, providerID,
+				exRestartObserved.Time.UTC(), exRestartObserved.Time.UTC().Add(threshold))
+			if err != nil {
+				return err
+			}
+			if !confounded {
 				flapsTotal++
 				lastFlap = sql.NullTime{Time: observedAt, Valid: true}
 			}
-			// Else the prior effectively held (>= threshold elapsed): no flap.
 		}
+		// Else (>= threshold elapsed) the prior effectively held: no flap.
 		restartObserved = sql.NullTime{Time: observedAt, Valid: true}
 		if instance != "" {
 			dwellState = supervisorDwellPending
@@ -731,19 +768,28 @@ SELECT last_seq, restarts_total, deferrals_total, last_restart_seq,
 			// Old targeted instance unknown: correlation cannot be asserted.
 			dwellState = supervisorDwellUnknown
 		}
-	} else if exStored {
-		// No new restart this beacon: promote a pending restart to held once the
-		// coordinator has observed a genuinely NEW instance (a non-empty
-		// service_instance_id differing from the restart's old targeted instance,
-		// SPEC-025 §5.4 correlation) for the full dwell threshold.
+	} else if exStored && exDwellState == supervisorDwellPending && exRestartObserved.Valid {
+		// No new restart this beacon: try to finalize the pending restart. Promote
+		// to held only from a coordinator-serving-eligible observation of a
+		// genuinely NEW instance (non-empty service_instance_id differing from the
+		// restart's old targeted instance, SPEC-025 §5.4) that has cleared the
+		// dwell threshold — UNLESS an artifact-write event confounds the window.
 		currentInstance := strings.TrimSpace(rec.CurrentServiceInstance)
 		correlatedNewInstance := currentInstance != "" &&
 			exLastRestartInstance != "" &&
 			currentInstance != exLastRestartInstance
-		if exDwellState == supervisorDwellPending && exRestartObserved.Valid &&
-			correlatedNewInstance &&
+		if rec.ServingEligible && correlatedNewInstance &&
 			observedAt.Sub(exRestartObserved.Time.UTC()) >= threshold {
-			dwellState = supervisorDwellHeld
+			confounded, err := supervisorArtifactWriteInWindow(ctx, tx, providerID,
+				exRestartObserved.Time.UTC(), exRestartObserved.Time.UTC().Add(threshold))
+			if err != nil {
+				return err
+			}
+			if confounded {
+				dwellState = supervisorDwellArtifactConfounded
+			} else {
+				dwellState = supervisorDwellHeld
+			}
 		}
 	}
 
@@ -813,10 +859,34 @@ ON CONFLICT (provider_id, boot_id) DO UPDATE SET
 
 // supervisorDwell* are the coordinator-derived dwell-state values (SPEC-025 §5.4).
 const (
-	supervisorDwellUnknown = "unknown"
-	supervisorDwellPending = "correlated_pending"
-	supervisorDwellHeld    = "held"
+	supervisorDwellUnknown            = "unknown"
+	supervisorDwellPending            = "correlated_pending"
+	supervisorDwellHeld               = "held"
+	supervisorDwellArtifactConfounded = "artifact_confounded"
 )
+
+// supervisorArtifactWriteInWindow reports whether the coordinator observed an
+// artifact-mutating autoupdate event for providerID in [from, to). The predicate
+// mirrors SPEC-025 §5.4 exactly: a provider_autoupdate_events row (migration 026)
+// whose phase is backup/swap/rollback with outcome success/in_progress, keyed on
+// the coordinator-observation timestamp observed_at (never a provider-reported
+// time). Used to mark a restart window artifact_confounded rather than falsely
+// attributing recovery to the watchdog.
+func supervisorArtifactWriteInWindow(ctx context.Context, tx *sql.Tx, providerID string, from, to time.Time) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM provider_autoupdate_events
+     WHERE provider_id = $1
+       AND observed_at >= $2 AND observed_at < $3
+       AND phase IN ('backup', 'swap', 'rollback')
+       AND outcome IN ('success', 'in_progress')
+)`, providerID, from, to).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
 
 func (s *PGStore) InsertRegisterNonce(ctx context.Context, providerID, sourceIP, nonce string, observedAt time.Time) error {
 	if s == nil || s.db == nil {

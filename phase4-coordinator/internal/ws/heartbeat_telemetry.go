@@ -208,6 +208,76 @@ type supervisorDeferralWire struct {
 	TS  string `json:"ts"`
 }
 
+const (
+	supervisorEventSchema = "macprovider.supervisor-event.v1"
+	// maxSupervisorScalar is an absolute sanity cap on seq/counter values so a
+	// forged/corrupt beacon cannot store an absurd high-water value that pins the
+	// (provider_id, boot_id) row and blinds later legitimate telemetry.
+	maxSupervisorScalar = int64(1) << 40
+)
+
+// normalizeSupervisorWire validates and coerces a parsed beacon in place,
+// returning false if it is too malformed/inconsistent to persist. It is
+// NON-rejecting at the frame level (the caller already accepted the heartbeat);
+// a false result just means no supervisor row is written. Hard-drops: wrong
+// schema, unknown kind, missing boot_id, out-of-range seq/counters, or a nested
+// action seq greater than the top seq. Soft-coerced: supervisor_label to the
+// public allowlist (else "unknown"), cooldown_state to the enum (else "armed"),
+// and an invalid/non-object model_liveness or wrong action reason is dropped.
+func normalizeSupervisorWire(w *supervisorEventWire) bool {
+	if w.Schema != supervisorEventSchema {
+		return false
+	}
+	switch w.Kind {
+	case "restart", "deferral", "beacon":
+	default:
+		return false
+	}
+	if w.BootID == "" || len(w.BootID) > 128 || containsControlChar(w.BootID) {
+		return false
+	}
+	if w.Seq <= 0 || w.Seq > maxSupervisorScalar {
+		return false
+	}
+	if w.RestartsTotal < 0 || w.RestartsTotal > maxSupervisorScalar ||
+		w.DeferralsTotal < 0 || w.DeferralsTotal > maxSupervisorScalar {
+		return false
+	}
+	switch w.SupervisorLabel {
+	case "provider-watchdog", "legacy-watchdog":
+	default:
+		w.SupervisorLabel = "unknown"
+	}
+	if len(w.SupervisorVersion) > 64 || containsControlChar(w.SupervisorVersion) {
+		w.SupervisorVersion = "unknown"
+	}
+	if w.LastRestart != nil {
+		lr := w.LastRestart
+		if lr.Seq < 0 || lr.Seq > w.Seq {
+			return false
+		}
+		switch lr.CooldownState {
+		case "armed", "cooldown_active":
+		default:
+			lr.CooldownState = "armed"
+		}
+		if lr.ServiceInstance != nil && (len(*lr.ServiceInstance) > 128 || containsControlChar(*lr.ServiceInstance)) {
+			lr.ServiceInstance = nil
+		}
+		// model_liveness must be a JSON object or null; anything else is dropped.
+		if ml := lr.ModelLiveness; len(ml) > 0 && string(ml) != "null" {
+			var probe map[string]json.RawMessage
+			if err := json.Unmarshal(ml, &probe); err != nil {
+				lr.ModelLiveness = nil
+			}
+		}
+	}
+	if w.LastDeferral != nil && (w.LastDeferral.Seq < 0 || w.LastDeferral.Seq > w.Seq) {
+		return false
+	}
+	return true
+}
+
 // recordSupervisorEventIfChanged durably upserts the SEPARATE supervisor
 // telemetry beacon (RFC-001 §7 / F5; SPEC-025 §5.4). raw is the heartbeat/
 // state_update `last_supervisor_event` object (already validated as a JSON
@@ -217,7 +287,7 @@ type supervisorDeferralWire struct {
 // is OFF the heartbeat hot path and best-effort; a dropped slot or failed write
 // is logged and never stalls or fails heartbeat processing. De-dupes repeated
 // identical echoes per provider so one beacon is not re-upserted every heartbeat.
-func (s *Server) recordSupervisorEventIfChanged(providerID string, raw json.RawMessage, serviceInstanceID string, observedAt time.Time) {
+func (s *Server) recordSupervisorEventIfChanged(providerID string, raw json.RawMessage, serviceInstanceID string, servingEligible bool, observedAt time.Time) {
 	if s == nil || s.supervisorEvents == nil || len(raw) == 0 {
 		return
 	}
@@ -229,9 +299,12 @@ func (s *Server) recordSupervisorEventIfChanged(providerID string, raw json.RawM
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return
 	}
-	// boot_id and a positive seq are required to key/order the row; without them
-	// the beacon is unusable and is dropped (frame already accepted upstream).
-	if wire.BootID == "" || wire.Seq <= 0 {
+	// Coordinator-side validation: the CLI already projects/allowlists, but the
+	// coordinator MUST NOT trust a (possibly modified) provider blindly. Drop a
+	// wrong-schema/out-of-range/inconsistent beacon NON-blockingly (the frame was
+	// already accepted upstream); coerce soft fields to the allowlist. Nothing
+	// wrong-shaped reaches provider_supervisor_events or the rollups.
+	if !normalizeSupervisorWire(&wire) {
 		return
 	}
 	slots := s.supervisorEventSlots
@@ -259,6 +332,7 @@ func (s *Server) recordSupervisorEventIfChanged(providerID string, raw json.RawM
 		RestartsTotal:          wire.RestartsTotal,
 		DeferralsTotal:         wire.DeferralsTotal,
 		CurrentServiceInstance: serviceInstanceID,
+		ServingEligible:        servingEligible,
 	}
 	if wire.LastRestart != nil {
 		rec.LastRestartSeq = wire.LastRestart.Seq

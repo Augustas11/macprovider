@@ -5130,7 +5130,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	s.rememberProviderSnapshotCoalesced(*entry)
 	s.refreshHardwareProfileHeartbeatAsync(providerID, entry.BinaryVersion, s.now())
 	s.recordAutoupdateOutcomeIfChanged(providerID, hb.LastAutoupdateEvent, s.now())
-	s.recordSupervisorEventIfChanged(providerID, hb.LastSupervisorEvent, hb.ServiceInstanceID, s.now())
+	s.recordSupervisorEventIfChanged(providerID, hb.LastSupervisorEvent, hb.ServiceInstanceID, entry.RoutingEligible(), s.now())
 	if s.admission != nil {
 		s.admission.RefreshTelemetry(providerID, entry.Hostname, entry.ModelID, entry.BinaryVersion)
 	}
@@ -5555,7 +5555,8 @@ func (s *Server) handleStateUpdate(providerID, assignedID string, payload []byte
 		return
 	}
 	s.recordAutoupdateOutcomeIfChanged(providerID, update.LastAutoupdateEvent, s.now())
-	s.recordSupervisorEventIfChanged(providerID, update.LastSupervisorEvent, update.ServiceInstanceID, s.now())
+	s.recordSupervisorEventIfChanged(providerID, update.LastSupervisorEvent, update.ServiceInstanceID,
+		state == pool.StateReady || state == pool.StateBusy, s.now())
 	if state == pool.StateReady {
 		if timer, ok := s.timers.LoadAndDelete(providerID); ok {
 			timer.(*time.Timer).Stop()

@@ -175,7 +175,10 @@ enum SupervisorBeaconReader {
         return String(string.prefix(max))
     }
 
-    /// Strict non-negative integer: rejects bools, floats, and negatives.
+    /// Strict non-negative integer: rejects bools, floats, negatives, and — the
+    /// fail-safe requirement — out-of-range/non-finite values that would TRAP on
+    /// `UInt64(d)`. A malformed beacon must always resolve to nil, never crash
+    /// the heartbeat.
     private static func strictUInt(_ value: Any?) -> UInt64? {
         if let n = value as? UInt64 { return n }
         if let i = value as? Int, i >= 0 { return UInt64(i) }
@@ -183,8 +186,8 @@ enum SupervisorBeaconReader {
             // Reject bools (NSNumber bridges true/false) and non-integers.
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return nil }
             let d = n.doubleValue
-            if d < 0 || d.rounded() != d { return nil }
-            return UInt64(d)
+            guard d.isFinite, d >= 0, d.rounded() == d, d <= Double(UInt64.max) else { return nil }
+            return UInt64(exactly: d)
         }
         return nil
     }
