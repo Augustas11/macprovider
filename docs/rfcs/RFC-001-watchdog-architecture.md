@@ -1,13 +1,22 @@
 # RFC-001: Long-term watchdog architecture
 
-- Status: **Draft (for adversarial review)**
+- Status: **Accepted**
 - Issue: #1203 (design child of #1200; epic #1184)
 - Author: provider-platform
-- Date: 2026-08-29
+- Date: 2026-08-29 (accepted 2026-09-05)
+- Review: adversarial architect + codex audit lane folded via PR #1282 (merged
+  2026-08-29); verdict — the recommendation stands unchanged (Option A: reduced
+  split supervisor). No open Critical/High/Medium findings remain.
 - Supersedes design intent of: none
 - Depends on landed work: #1204 / PR #1208 (`aee7d157`, Repair recovers stale
   watchdog + HOME ACL barrier), #1202 / PR #1228 (`16b0fa4d`, watchdog no longer
   owns update/rollback authority)
+- Implementation backlog (behavior lands only via these cited follow-ups):
+  **F1** remove watchdog J2 exit-restart + normative no-artifact-writes fence
+  (§5.1); **F2** model-thread-advanced liveness token in `/v1/status` (§3, Open
+  Q#1); **F3** domain-aware restart target for headless/system-domain (§5
+  `[^domain]`); **F4** reboot-resumable migration hand-off lease + per-profile
+  delivery (§6); **F5** separate supervisor telemetry contract (§7).
 
 > This RFC decides the **long-term** shape of provider liveness supervision. It
 > proposes no executable change. Any behavior change lands only via an explicit
