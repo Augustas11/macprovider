@@ -12,15 +12,18 @@ provider state**. "Rollback exists" is not enough — each row names the switch.
 There is **no** single BYOM feature flag, by design. v0.1 ships discovery +
 evaluation + honest non-earning disclosure + a coordinator settlement-evidence
 gate, and **earning is impossible regardless of state**. The money-path
-backstops are hardcoded/fail-closed, so the disablement points below are
-defense-in-depth for individual surfaces, not the thing standing between BYOM
-and provider payouts (nothing here can pay a provider in v0.1).
+backstops are fail-closed **by construction** — paid routing is gated on a
+settlement-binding predicate that no BYOM v0.1 admission row can satisfy (not a
+single hardcoded return that a later change might flip) — so the disablement
+points below are defense-in-depth for individual surfaces, not the thing
+standing between BYOM and provider payouts (nothing here can pay a provider in
+v0.1).
 
 ## Surface-by-surface disablement
 
 | Surface | Slice / PR | Disable switch (no state loss) | Default |
 |---|---|---|---|
-| Paid routing for BYOM | #1254 / #1377 | `ModelAdmissionDefaultPaidRoutingEligible` returns hardcoded `false` (`phase4-coordinator/internal/ws/model_admission.go`). No BYOM state can reach default paid routing until a later settlement slice flips it. | fail-closed (false) |
+| Paid routing for BYOM | #1254 / #1377 | `ModelAdmissionDefaultPaidRoutingEligible` (`phase4-coordinator/internal/ws/model_admission.go`) is a **settlement-binding predicate**, not a hardcoded return: it delegates to `ModelAdmissionSettlementBindingForRouteSnapshot` and is true only when the admission event carries a full settlement binding (`settlement_capable` state + non-empty `catalog_model_key` + `coordinator_event_id`, matched across every predicate field). BYOM v0.1 rows never acquire catalog identity (`catalog_model_key` stays empty), so the predicate is false for them by construction — no flag to flip. | fail-closed (no BYOM v0.1 row can satisfy the predicate) |
 | Settlement side effects (credit/debit/ledger) | #1256 / #1379 | `Server.settlementEnforceMode()` (`phase4-coordinator/internal/buyer/server.go:7571`) reads billing `verified_model_settlement_mode`. `observe` or a nil billing store ⇒ no settlement side effects. Set/keep the mode non-`enforce` to disable. | observe (no enforce) unless configured |
 | Coordinator admission endpoints (`/v1/provider/model-admission/{offers,withdrawals,status}`) | #1253/#1254 / #1375/#1377 | Endpoints are wired via `providerws.WithModelAdmissionStore(byomOfferStore)` (`phase4-coordinator/cmd/coordinator/main.go`). Hard-off = deploy a coordinator build that does not pass `WithModelAdmissionStore` (store becomes the in-memory default; provider offer/withdraw calls no-op against durable state). Provider tokens and existing admission rows are untouched. | on (fail-closed) |
 | Provider CLI BYOM commands (`models discover/evaluate/offer/admission ...`) | #1249–#1254 | Client-side; harmless without a coordinator that accepts admission. Production coordinator URLs are HTTPS/WSS-only; `MACPROVIDER_BYOM_ALLOW_INSECURE_LOOPBACK_COORDINATOR` (default off) is E2E-only. To withhold from the fleet, do not cut a CLI release containing them (they stay merged-but-unreleased). | HTTPS/WSS-only |
