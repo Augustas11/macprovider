@@ -2665,6 +2665,27 @@ final class CoordinatorClientTests: XCTestCase {
     }
 
     func testHeartbeatDisabledModeOmitsBothFields() async throws {
+        // RFC-001 §7 / F5: make the golden-frame check hermetic. sendHeartbeat reads
+        // SupervisorBeaconReader.lastWireObject() at the default beacon path
+        // (MACPROVIDER_WATCHDOG_STATE_DIR, else ~/.local/share/macprovider-watchdog/state),
+        // so on a dev Mac running a live watchdog a real supervisor-beacon.json would make
+        // the heartbeat carry last_supervisor_event and break the exact-frame equality.
+        // Point the reader at an empty temp dir for this test so the omitted-beacon
+        // assertion is isolated, not dependent on ambient absence.
+        let beaconStateDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("f5-hermetic-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: beaconStateDir, withIntermediateDirectories: true)
+        let priorBeaconStateDir = ProcessInfo.processInfo.environment["MACPROVIDER_WATCHDOG_STATE_DIR"]
+        setenv("MACPROVIDER_WATCHDOG_STATE_DIR", beaconStateDir.path, 1)
+        defer {
+            if let priorBeaconStateDir {
+                setenv("MACPROVIDER_WATCHDOG_STATE_DIR", priorBeaconStateDir, 1)
+            } else {
+                unsetenv("MACPROVIDER_WATCHDOG_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: beaconStateDir)
+        }
+
         let recorder = CoordinatorFrameRecorder()
         let capacity = ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
         let status = ProviderStatus(
